@@ -687,7 +687,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `AGENT-GATE *SUMMARY` blocks so neither can be pasted as the other), never the transcript — that goes
   to the `log:` path named in the block. Exit `0` PASS / `1` FAIL / `3` NOTHING-TO-REVIEW / `2` usage
   error; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and
-  a blocked merge, never "roborev clean". Four rules: **(1)** the NON-SANCTIONED direct forms are
+  a blocked merge, never "roborev clean". **"ROBOREV CLEAN" MEANS NO UNADDRESSED FINDINGS, NOT "THE TOOL
+  PRINTED ZERO" (#3626)** — a LEAD-DEFERRED finding is re-reported by every later round, so the (correct,
+  unwaivable) affirmative-`NONE` rule below blocked such a merge FOREVER; the route past it is a
+  `roborev-defer: findings` authorization reported as `findings: DEFERRED (…)`, never `NONE`, and every
+  OTHER non-PASS verdict still blocks exactly as before. Four rules: **(1)** the NON-SANCTIONED direct forms are
   `--branch` **WITHOUT** an explicit `--repo` (from a worktree it resolves against the ROOT checkout),
   the two-positional commit-range form (its range base is git's EMPTY TREE), and a SINGLE-SHA review (it
   covers ONE COMMIT, certifying a multi-commit branch from its last commit alone). `--repo` is what makes
@@ -1006,7 +1010,133 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   original argument holds unchanged. An intermediate version of this fix DID add a separate
   `block_measured` flag; it went away with the prose reconstruction it guarded, and this sentence
   described it for one round after it was deleted — caught by the C audit. **A doctrine line naming a
-  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.** So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.**
+  **AND THE UNWAIVABLE RULE MADE ONE MERGE UNOBTAINABLE, WHICH IS ITS OWN DEFECT CLASS (#3626).** #3586's
+  requirement is right, and it interacted with a fact nobody designed for: **roborev re-reports a
+  LEAD-DEFERRED finding on every later round.** So once a lead defers a finding — as a nit, as a batched
+  follow-up, or by explicit ruling — `findings: PRESENT (n)` persists, `RESULT` stays `FAIL`, and *"any
+  non-PASS terminal RESULT is a blocked merge"* blocks that merge **forever**: neither escape hatch applies
+  (the absence waiver excuses `prompt-content` ABSENCE only, by design, and a correct `--recheck-job` of a
+  findings-bearing job re-reports the same `FAIL`). Measured on PR #3572 job 262: two findings, **ZERO
+  new** — both already filed (#3602, #3613) and both already lead-deferred — 5.9M input / 5.7M cached
+  tokens, every deterministic key PASS, and the merge required an out-of-band lead comment. The lane the
+  fix protects is the one that behaved CORRECTLY: it refused to arm `--auto` over a `FAIL`, refused to fix
+  the deferrals to manufacture a green, refused a waiver that does not apply, and asked the owner instead.
+  **A rule that punishes the correct behaviour will not survive contact.** So *"roborev clean"* is
+  redefined as **NO UNADDRESSED FINDINGS**, and the distinction is made MECHANICAL rather than a matter of
+  lead memory: a **second marker**, `roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex>
+  head=<40-hex> job=<id> reason=<why>`, travels the **absence waiver's channel** (top-level PR comment,
+  column-zero, **sole nonblank content**, hard-coded `ROBOREV_WAIVER_AUTHORS` allowlist, structured
+  `gh --json` author parsing, applied via `--recheck-job`, placeholder reasons refused, no part of the
+  marker in any diagnostic) and inherits those rules **BY CALL** — the same scanner, kind selected
+  explicitly — never by copy, because a second implementation of a channel rule is a second place for it
+  to diverge and a divergence there is an authorization bypass. **There is deliberately NO flag, NO file
+  in the worktree and NO env var**, each of which would hand the constrained party the power to satisfy
+  its own constraint (#3312's corollary). **The match is AFFIRMATIVE, which is what makes this a match
+  and not a mute button**: `count=` must EQUAL the observed findings count and `issues=` must be
+  non-empty, so a PRE-AUTHORIZATION written before the findings were read fails on a mismatch, and **any
+  new finding at the same head raises the observed count and fails** — that is how the UNDEFERRED set is
+  computed without a per-finding identity roborev's prose does not provide, and **no such identity is
+  reconstructed from that prose** (the class #3564 closed by REMOVING prose reconstruction stays closed).
+  `issues=` records that the finding is **TRACKED**, and THE ISSUE-STATE LEG is what enforces it:
+  each number must be an **OPEN** GitHub issue, asked **FOUR-VALUED** — only a payload affirmatively
+  naming that number **and an OPEN state** is `present` and may grant; an issue GitHub answers does not
+  exist is `ISSUE-ABSENT`; an issue GitHub answers is CLOSED is `ISSUE-CLOSED`; an issue whose existence
+  could NOT BE ASKED (no `gh`, no auth, a network/API failure, an unparseable payload, or any diagnostic
+  that does not say the issue is missing) is `ISSUE-UNVERIFIABLE`. They are **textually distinct**
+  because they are different operator actions ("that issue number is wrong" / "that issue is closed" /
+  "this box cannot reach GitHub"), and **`gh issue view` EXITS 1 FOR BOTH THE FIRST AND THE LAST**
+  (measured, gh 2.98.0) — so an exit-code-only test is the two-valued predicate that always picks
+  the permissive answer and would grant over issues nobody confirmed exist. Unrecognised ⇒ could-not-ask,
+  and a could-not-ask is NEVER read as verified.
+  **AND "RETRIEVABLE" WAS NOT ENOUGH, WHICH IS WHY THE CHECK IS STRONGER THAN THE CONDITION THAT ASKED
+  FOR IT (#3626 round 3).** `gh issue view` returns the number and **exits 0 for a CLOSED issue**, so a
+  number-only test made "the finding is tracked" satisfiable by an issue closed as a duplicate three
+  weeks ago: `present` ⇒ `GRANTED` ⇒ `RESULT: PASS`, the finding permanently untracked while the block
+  asserted it was filed. The condition said *retrievable* and closed-is-retrievable satisfies the letter
+  — but three separate statements of this leg claim it enforces **not-dropped**, so the claim was made
+  TRUE rather than weakened to match a weaker implementation. **The generalisable ruling: when the
+  implementation satisfies the LETTER of a condition and contradicts the PROPERTY every statement of it
+  claims, strengthen the implementation — do not narrow three claims.** A false refusal here is
+  recoverable (reopen it, or file a fresh tracking issue) and is the fail-closed direction.
+  **The disposition backstop COUNTS VERIFICATIONS PERFORMED; it does not test the string.** It was
+  `[ -z "$ISSUES" ]` — a non-emptiness test standing in for a verification test — and `ISSUES=","`
+  passes it, splits into ZERO words, runs the loop body never, and returns with the state still
+  `granted`: a `DEFERRED` ⇒ `PASS` with not one `gh issue view` executed. Unreachable only because the
+  `issues=` PATTERN forbade that value, i.e. **exactly the upstream dependency a backstop must not
+  have**. Now the count of verifications must EQUAL the count of declared comma-separated fields.
+  **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG IS DELETED — DO NOT REINSTATE IT (#3626, lead
+  ruling).** An earlier revision demanded each number also appear as a local, visible `#N` in the PR
+  BODY (`PR-UNLINKED` otherwise), with recognisers for `owner/repo#N`, `#Nsuffix`, fences, code spans and
+  HTML comments. **The reason it is gone is NOT the bypasses: a PR body is EDITABLE AT ANY TIME BY ANYONE
+  WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a top-level comment is PERMANENT AND
+  ATTRIBUTABLE.** So it was the WEAKER artifact and would stay weaker **even if Markdown parsed
+  trivially** — an authorization the constrained party can silently rewrite after it is granted evidences
+  nothing; the recogniser problem was a SYMPTOM. The requirement's own wording invited it, too: "name
+  where the finding went" invited a PROSE SCAN when the property wanted is that the finding is TRACKED.
+  The census, kept because it is the evidence the class does not close (Markdown-handling references in
+  that one predicate went **0 → 11** over two rounds): round 1 closed five shapes (cross-repository,
+  `#Nsuffix`, fenced block, HTML comment, single-backtick span); round 2 found **two more** — a
+  multi-backtick span and an explicit `[#N](url)` link — with GFM autolinks, reference-style links, raw
+  HTML, entity refs and nested emphasis unhandled by any generation and the 4-space indent already a
+  declared residual. #3312 (*remove the shared channel, do not pick a rarer delimiter*) and #3229's owner
+  ruling (*a guard with known documented false-PASSes is worse than no guard*) both apply, and
+  **subtraction cannot introduce a false PASS**: with nothing predicted about the body, nothing is
+  excused by it. Any future strengthening must come from an **immutable or attributed** artifact (a
+  structured GitHub relation, or the authorization comment itself), never from parsing the mutable body
+  of the PR under review. It reports
+  a **distinct token** — `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`, **NEVER
+  `NONE`** (which stays reachable only from the record's structured verdict letter, so nobody grepping
+  `findings: NONE` reads a deferred run as clean) — beside a `deferral:` key that speaks even when
+  nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAUTHORIZED`/`COUNT-MISMATCH`/`ISSUE-ABSENT`/
+  `ISSUE-CLOSED`/`ISSUE-UNVERIFIABLE`/`UNAVAILABLE`, each leaving the FAIL). A marker **attempt** is the
+  stem plus whitespace **or end-of-line**, so a marker-only comment that is exactly the stem is
+  `MALFORMED`, never a fail-quiet `NONE`. Three field rules, both kinds, one parser: `base=`/`head=` are
+  **exactly 40 hex** (an abbreviated sha is `MALFORMED`, never `STALE` — it names THIS review in a
+  spelling the form forbids, and an authorizer sent to re-check *which review* finds nothing wrong); a
+  recorded `reason` keeps its internal whitespace **VERBATIM** (only the BLOCK boundary renders a
+  control character as a visible escape, because the property required is one line per value, not
+  collapsed whitespace); and a `reason` may **not contain either marker stem** — refused, not escaped,
+  since **the structural assert covers the CODE while a RUNTIME value can inject what no source scan
+  sees, so an invariant over OUTPUT needs a check on the OUTPUT PATH**. **AND THAT RULE IS OVER EVERY
+  EMITTED VALUE, NOT OVER THE `reason` — fixing the field and not the class cost a review round
+  (roborev job 230).** The reason is the field an authorizer CHOOSES, so refusing it removes that class;
+  a keyword also arrives through fields nobody chooses — an unauthorized commenter's **GitHub login**
+  (which `UNAUTHORIZED` must report to say who was refused), **`gh issue view`'s stdout/stderr** (which
+  reach `deferral:` as an `ISSUE-UNVERIFIABLE` cause), the allowlist, and whatever a future key
+  interpolates. So each process neutralises the keywords at its **ONE emit boundary** (`safe_value` in
+  the scanner; `roborev_safe_line` in the wrapper, already the gate for every block value and every
+  DETAILS line), never per interpolation site — a per-site escape is a list to keep complete. There the
+  value is **REDACTED, not refused**: it is an identity or a diagnostic the run must still report.
+  Only where the keyword is **not continued by another letter** — a longer word is a different word,
+  exactly as `roborev-defer: findingsfoo` is — because the scanner's own FILE NAME embeds a keyword and
+  is printed by the fail-closed `waiver: UNAVAILABLE (… tool: <path>)` cause an operator has to read.
+  It is **display-only, which is the whole safety argument**: every authorization decision is made on
+  the RAW value before any renderer runs, so two boundaries can only redact differently, never grant —
+  acceptable where two marker PARSERS would not be, since a parser decides and a renderer does not.
+  Deliberately **not** a security layer: a login admits letters, digits and hyphens and NOT colons or
+  spaces, so it cannot hold a full stem, and an emitted line begins `deferral: UNAUTHORIZED (`, which
+  the sole-content rule refuses. **`findings: UNKNOWN` and `SKIP` are NOT
+  deferrable in any mode**: those states were never ESTABLISHED, and a pass may not rest on a state that
+  could not be read. **The two authorizations stay SEPARATELY SCOPED and neither falls back to the
+  other** — an absence waiver confers no authority over `findings:`, a findings deferral none over
+  `prompt-content:` — because collapsing them would let a delivery-artifact waiver excuse a real defect;
+  a run may legitimately carry both, each under its own key. `DEFERRED` is a value of the **closed**
+  verdict grammar, non-failing **only** on the single coupled granted state that the grammar scan and the
+  findings gate both read — one state, not two, so they cannot drift into two opinions about whether one
+  authorization was granted. **AND THAT ADMISSION IS CONFINED TO ONE KEY, `findings:`, BY CONSTRUCTION**
+  (roborev job 225): the scan carries each key's NAME beside its value and admits the token for
+  `findings` alone, and the deterministic-key affirmation backstop carries **no** `DEFERRED` arm and
+  reads the state not at all. The confinement was first left resting on an ABSENCE — no other key
+  happened to emit the token — which is #3564's lesson verbatim, so ask of every key *what fails the run
+  if THIS key alone goes bad*. The contrast with the absence waiver is the reason: **a waiver authorizes a
+  PROPERTY** (an absence) that only one key can ever report, so its provenance IS the whole test and it is
+  correctly not key-scoped; **a deferral authorizes a NAMED SET OF FINDINGS** and says nothing about
+  whether the reviewer's diff arrived or the reviewed range matched, so an unconfined admission would let
+  ONE authorization excuse a check NOBODY authorized. Relatedly, **no emitted diagnostic reproduces any
+  part of either marker — not even its prefix**: the MALFORMED detail used to quote the whole required
+  form and is interpolated into the summary key, so the block printed a fillable authorization beside a
+  live base/head/job while a comment beside the interpolation asserted it never did. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
@@ -1143,6 +1273,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   target) → re-review` (#2087). **Nits** never trigger
   a re-verify round: batch all of a PR's nits into ONE linked follow-up issue at merge time. When in
   doubt, blocker. Every pre-roborev self-check class below is BLOCKER by definition.
+  **A DEFERRED finding still has to get PAST roborev, and since #3626 that is mechanical rather than a
+  matter of lead memory**: roborev re-reports a deferred finding on every later round, so batching nits
+  into a follow-up issue does not by itself make `findings:` read `NONE`. The lead records the deferral
+  with a `roborev-defer: findings` PR comment naming the filed issue numbers and the observed count, and
+  applies it with `--recheck-job`; the run then reports `findings: DEFERRED (…)` (never `NONE`) and may
+  reach `PASS`. See the roborev-invocation bullet above for the marker and its constraints.
 - **Post-gate polish (#1892)**: after a full PASS at `X`, a test/docs-only diff `X..Y` re-certifies
   with `--delta` (fail-closed; see gate table above), never a repeat full gate. The nightly
   `gate.yml` deep-check re-runs the FULL gate on `main` as the standing backstop.

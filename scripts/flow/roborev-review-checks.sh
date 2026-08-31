@@ -202,6 +202,15 @@ roborev_check_prompt_content() {
         case "$ROBOREV_WAIVER_STATE" in
           # NOT EVEN THE MARKER PREFIX IS PRINTED (layer 3, job 23): no emitted diagnostic may carry any
           # part of the marker, so no pasted block can be mistaken for one, and the rule is assertable.
+          # THIS COMMENT WAS FALSE UNTIL #3626 (roborev job 225). The `*)` branch below interpolates
+          # `ROBOREV_WAIVER_DETAIL`, which comes from the scanner — and for a MALFORMED marker the
+          # scanner's detail QUOTED THE WHOLE REQUIRED FORM. So this block printed a complete, fillable
+          # marker beside a live base/head/job while the comment two lines up asserted it never did. A
+          # comment asserting a property the code violates is worse than no comment: it is what stops
+          # the next reader checking. The form now lives ONLY in `--help`; the scanner's
+          # `MALFORMED_FORM_DETAIL` is what makes that true for BOTH kinds, and the guard suite asserts
+          # the absence against every diagnostic-emitting case rather than only the one where it holds
+          # trivially.
           # THE CAUSE TEACHES BOTH RULES, not just the absence (#3312 jobs 27/29): the marker must be the
           # SOLE NONBLANK CONTENT of the comment, and the comment must be TOP-LEVEL. An authorizer told
           # merely "no waiver line exists" re-checks their SYNTAX — not the shape of the comment or the
@@ -536,3 +545,107 @@ roborev_check_tier2() {
   esac
 }
 
+
+roborev_check_findings_deferral() {
+  # --- step 6f: is a findings state that IS present an AUTHORIZED, MATCHED deferral? -----------
+  # (Issue #3626.) "roborev clean" means NO UNADDRESSED FINDINGS, not "the tool printed zero". A
+  # lead-deferred finding is re-reported by every later round, so before this existed
+  # `findings: PRESENT (n)` persisted, `RESULT` stayed FAIL, and the doctrine rule "any non-PASS
+  # terminal RESULT is a blocked merge" blocked the merge FOREVER (measured on PR #3572 job 262: two
+  # findings, ZERO new, both filed and both already lead-deferred). This is the mechanical route past
+  # it, and it is deliberately narrow.
+  #
+  # RUN AFTER BOTH VACUITY TIERS, not before: `vacuity-tier1` GATES on `findings:` reading `PRESENT*`
+  # (a findings-bearing review that mentions "no code changes" is discussion, not a vacuity claim), so
+  # rewriting the value first would silently move a correct advisory NOTICE to a HARD FAIL. The
+  # deferral changes what the verdict DOES with an established findings state; it must not change what
+  # any other check SAW.
+  #
+  # RECHECK-ONLY, and that is a property of the mechanism rather than a convenience: the authorizer
+  # learns the job id AND the findings only from the FINISHED run, and re-running the wrapper to apply
+  # a fresh authorization enqueues a DIFFERENT job, which would stale the marker instantly (#3312 job
+  # 24 — the absence waiver was a dead letter for exactly this reason until `--recheck-job` existed).
+  # `--recheck-job` enqueues nothing and the block declares `MODE: recheck`, so a deferred PASS can
+  # never be pasted as evidence of a fresh clean review.
+  DEFERRAL_REPORT=""
+  # RESET EVERY FIELD THE VERDICT READS. The wrapper's coupled admission test reads these by name, so
+  # a value surviving from an earlier lookup — or from the environment — must never be able to stand in
+  # for one this run established.
+  ROBOREV_DEFERRAL_STATE=""
+  ROBOREV_DEFERRAL_AUTHOR=""
+  ROBOREV_DEFERRAL_SCOPE=""
+  ROBOREV_DEFERRAL_REASON=""
+  ROBOREV_DEFERRAL_DETAIL=""
+  ROBOREV_DEFERRAL_ISSUES=""
+  ROBOREV_DEFERRAL_COUNT=""
+  ROBOREV_DEFERRAL_OBSERVED_COUNT=""
+  # OUTSIDE RECHECK MODE THERE IS NOTHING TO LOOK FOR, so no key is emitted — the same reason
+  # `waiver:` is absent on a run whose prompt content was present: a placeholder would imply a lookup
+  # that never happened.
+  [ -n "${RECHECK_JOB:-}" ] || return 0
+  local observed=""
+  case "${FINDINGS%% *}" in
+    PRESENT) ;;
+    UNKNOWN|SKIP)
+      # ===== `UNKNOWN` AND `SKIP` ARE NOT DEFERRABLE, IN ANY MODE =====
+      # Those values mean the findings state was never ESTABLISHED. We cannot count what we cannot
+      # see, so a deferral over one would be precisely "a pass resting on a state we could not read" —
+      # the shape #3586 exists to forbid. Reported rather than silent: an authorizer whose marker was
+      # correct needs to know the run never had a countable findings state, not merely that their
+      # authorization "did not work".
+      DEFERRAL_REPORT="UNAVAILABLE (findings: $FINDINGS — the findings state was never ESTABLISHED, so there is no measured count for an authorization to match; UNKNOWN and SKIP are NOT deferrable in any mode, because a pass may not rest on a state that could not be read)"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+  # ONLY AN AFFIRMATIVELY MEASURED `PRESENT (n)` IS DEFERRABLE. A bare `PRESENT` carries no count, so
+  # there is nothing for the marker's `count=` to be matched against and the affirmative half of the
+  # binding would be unenforceable. Reported as UNAVAILABLE rather than COUNT-MISMATCH: no comparison
+  # happened, and a cause that names a comparison nobody made sends the operator to fix the wrong field.
+  case "$FINDINGS" in
+    'PRESENT ('*')')
+      observed="${FINDINGS#PRESENT (}"
+      observed="${observed%)}"
+      ;;
+  esac
+  case "$observed" in
+    ''|*[!0-9]*)
+      DEFERRAL_REPORT="UNAVAILABLE (findings: $FINDINGS carries no measured count, and only an affirmatively measured 'PRESENT (n)' is deferrable — with no observed count there is nothing for an authorization to be matched against)"
+      return 0
+      ;;
+  esac
+  ROBOREV_DEFERRAL_OBSERVED_COUNT="$observed"
+  # BOUND TO THE MERGE-BASE, THE SAME BASE `sha-assert` AND THE ABSENCE WAIVER COMPARE AGAINST
+  # (#3392): the scope is the REVIEWED RANGE, and that range is `merge-base..HEAD`. Binding to the base
+  # ref's TIP is what made the waiver go spuriously STALE the moment the base ref advanced, which
+  # dead-lettered that break-glass under fleet load; the same mistake here would dead-letter this one.
+  roborev_findings_deferral_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}" "$observed"
+  if [ "$ROBOREV_DEFERRAL_STATE" = "granted" ]; then
+    # A DISTINCT VERDICT TOKEN, and it is NEVER `NONE`. `NONE` stays reachable only from the job
+    # record's structured `verdict` letter, so nobody grepping `findings: NONE` — or any PASS-shaped
+    # text — reads a deferred run as a clean review. Everything a reader needs to judge the deferral is
+    # in the value: how many findings, which issues they went to, who authorized it, and for which job.
+    FINDINGS="DEFERRED ($observed, issues=#${ROBOREV_DEFERRAL_ISSUES//,/,#}, authorized @${ROBOREV_DEFERRAL_AUTHOR}, job ${JOB})"
+    DEFERRAL_REPORT="GRANTED (author=@${ROBOREV_DEFERRAL_AUTHOR} issues=${ROBOREV_DEFERRAL_ISSUES} count=${ROBOREV_DEFERRAL_COUNT} scope=${ROBOREV_DEFERRAL_SCOPE} reason=${ROBOREV_DEFERRAL_REASON})"
+    DETAILS+=("NOTICE: findings: this review reported $observed finding(s) and ALL of them are DEFERRED by a PR comment naming THIS review — ${ROBOREV_DEFERRAL_SCOPE}. Authorizer as recorded by GitHub: @${ROBOREV_DEFERRAL_AUTHOR}. Deferred to issue(s): ${ROBOREV_DEFERRAL_ISSUES}. Reason as given: ${ROBOREV_DEFERRAL_REASON}. THE MATCH IS AFFIRMATIVE: the authorized count equals the observed count, every named issue is an OPEN issue GitHub confirms, and the authorization is bound to base AND head AND job — so a push, a different base, a re-run or ONE NEW FINDING all require a fresh authorization. THE AUTHOR IS AUTHORIZED AGAINST AN EXPLICIT ALLOWLIST, and beyond that authorship is PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: a comment from anyone outside the allowlist cannot grant, but on this fleet the worker, the closer and the owner all post through the SAME login, so this wrapper cannot tell WHICH ALLOWLISTED HUMAN posted this comment — the ruling that only the owner or the coordination lead may defer rests on process, and on this comment being permanently attributable. This is NOT a clean review: 'findings:' reports DEFERRED and never NONE, so no reader grepping for a clean run counts it as one.")
+  else
+    case "$ROBOREV_DEFERRAL_STATE" in
+      # THE `NONE` CAUSE TEACHES BOTH CHANNEL RULES, not just the absence: the marker must be the SOLE
+      # NONBLANK CONTENT of the comment, and the comment must be TOP-LEVEL. An authorizer told merely
+      # "no authorization exists" re-checks their SYNTAX — not the shape of the comment or the channel
+      # — and concludes the mechanism is broken. Both rules are load-bearing and both are invisible
+      # from a syntactically perfect marker, so the diagnostic states them.
+      none) DEFERRAL_REPORT="NONE (no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read)" ;;
+      *) DEFERRAL_REPORT="$(printf '%s' "$ROBOREV_DEFERRAL_STATE" | tr '[:lower:]' '[:upper:]') (${ROBOREV_DEFERRAL_DETAIL:-cause not established})" ;;
+    esac
+    # THE EXACT MARKER FORM IS NOT PRINTED HERE, and not even its prefix — summary blocks are pasted
+    # into PR comments as a matter of course in this repository, and an artifact that DESCRIBED the
+    # escape hatch became it once already (#3312 job 23). The form lives ONLY in `--help`.
+    # AND THAT WAS FALSE FOR THE MALFORMED STATE UNTIL roborev job 225: the `*)` branch above
+    # interpolates `ROBOREV_DEFERRAL_DETAIL`, and the scanner's MALFORMED detail quoted the whole
+    # required form — so this key printed a fillable marker while the sentence above denied it. The
+    # deferral inherited the leak from the waiver, and one fix (the scanner's MALFORMED_FORM_DETAIL)
+    # closed both, because both kinds get their detail from the same structured parse.
+    DETAILS+=("NOTICE: findings: $observed finding(s) are reported for job ${JOB:-<unknown>} and NONE of them is covered by an authorized deferral (deferral: ${DEFERRAL_REPORT}). Triage and fix them, or — if a lead has DEFERRED them to filed issues — that lead may authorize the deferral for THIS review only (base ${RANGE_BASE_SHA:-<unknown>} — the merge-base of ${BASE} and HEAD, which is the base of the reviewed range and NOT the tip of ${BASE}, head ${HEAD_SHA:-<unknown>}, job ${JOB:-<unknown>}, count $observed) with a dedicated PR-comment line naming the filed issue numbers. THE EXACT FORM IS DELIBERATELY NOT PRINTED HERE — run 'bash scripts/flow/roborev-review.sh --help' for it — because a summary block gets pasted into PR comments as a matter of course, and a block that carried a complete authorization would authorize the next run by being quoted. A deferral covers ONLY the findings of the job it names, only when the authorized count equals the observed count, and only when every named issue is an OPEN issue GitHub confirms — a CLOSED one tracks nothing, so it is refused too. The PR BODY is not consulted for any of this: it is editable at any time by anyone with write access with no per-edit attribution, so it evidences nothing (#3626).")
+  fi
+}
