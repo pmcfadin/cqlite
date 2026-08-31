@@ -870,9 +870,19 @@ async fn tuple_keys_are_identical_across_spellings_unpeeled() {
         }
         shape_checked += 1;
 
-        // VALUE parity only where the fixture stores the same logical key in both
-        // columns. Measured: that is id=3 (`solo`, 99, 42) alone; ids 1 and 2 hold
-        // deliberately different data in the two columns.
+        // VALUE parity ONLY at id=3, AND DO NOT "FIX" THIS ONTO id=1.
+        //
+        // The two columns deliberately hold DIFFERENT data in the other partitions —
+        // measured from the golden: id=1 is `charlie`/`delta` in `m_tuple_udt`
+        // against `mkey-a`/`mkey-b` in `f_map_tuple_udt`, and id=2 is a
+        // null-both-fields / empty-label pair against `nullrank3`/`rank=5`. id=3
+        // (`solo`, 99, 42) is the ONE partition storing the same logical key in both
+        // spellings, so it is the only one where a value comparison means anything.
+        // Widening this to another partition would fail for a reason that has
+        // nothing to do with cross-spelling parity, and the `value_checked == 1`
+        // assertion below exists so narrowing it to zero cannot pass silently
+        // either. Every partition is still covered by the SHAPE assertion above,
+        // which is the half that generalises.
         if *id == 3 {
             assert_eq!(mc.len(), 1, "id=3 holds one key");
             assert_eq!(

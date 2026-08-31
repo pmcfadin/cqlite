@@ -55,6 +55,14 @@
 //!   diagnostic that used to claim every unhandled key was "parsed as blob"
 //!   cannot come back.
 //!
+//! CROSS-SPELLING PARITY IS NOT PINNED HERE. That property — a multicell key and
+//! the frozen spelling of the same map presenting the IDENTICAL `Value` — lives in
+//! `cqlite-core/tests/issue_3612_multicell_map_composite_key.rs`
+//! (`udt_keys_are_identical_across_spellings_unpeeled`,
+//! `tuple_keys_are_identical_across_spellings_unpeeled`), because it can only be
+//! asserted against Cassandra-written bytes where the two spellings hold the same
+//! key. This file drives one decoder with hand-built input and cannot see it.
+//!
 //! These carry NO dataset/feature-flag dependency: `parse_cell_path_key` is a
 //! `pub(super)` method on a plainly-constructed parser, so they run in every
 //! build and lane and can never pass vacuously on an empty corpus.

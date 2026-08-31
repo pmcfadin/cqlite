@@ -685,9 +685,35 @@ impl V5CompressedLegacyParser {
             // therefore the ROOT-CAUSE fix; peeling wrappers afterwards could not
             // reach the INNER one.
             //
-            // `prefer_udt_marshal_element` keeps the schema form whenever the marshal
-            // element is not UDT-bearing, so no non-UDT map key changes behaviour
-            // (no-heuristics, issue #28: both inputs are authoritative metadata).
+            // WHY MARSHAL BEATS SCHEMA HERE — from CASSANDRA, not from our own code.
+            // `SerializationHeader.getType` (cassandra-5.0.8,
+            // `src/java/org/apache/cassandra/db/SerializationHeader.java`) is:
+            //
+            //     public AbstractType<?> getType(ColumnMetadata column)
+            //     {
+            //         return typeMap == null ? column.type : typeMap.get(column.name.bytes);
+            //     }
+            //
+            // So Cassandra's OWN read path decodes with the header's recorded type and
+            // falls back to the live schema's `column.type` only when the header carries
+            // no type map. The recorded type is not a guess — it is what the writer put
+            // beside these bytes, and after an `ALTER` the on-disk bytes conform to IT and
+            // not to the current schema. Decoding old bytes with a newer schema is how you
+            // mis-decode them.
+            //
+            // This does NOT contradict CLAUDE.md's "schema, else `Statistics.db`". That
+            // rule is about where type information may come from AT ALL — prefer declared
+            // metadata, never infer a type from byte patterns (issue #28). It is not a
+            // claim that a user-supplied schema overrides the writer's recorded type for
+            // the same column; `getType` above settles that question the other way.
+            //
+            // R7 is deliberately NARROWER than Cassandra's `getType`:
+            // `prefer_udt_marshal_element` takes the marshal ONLY when it is UDT-bearing
+            // and otherwise keeps the schema form, so no non-UDT map key changes
+            // behaviour. One consequence, and it is correct rather than unfortunate: a
+            // user-supplied schema that DISAGREES with the recorded type on a UDT-keyed
+            // multicell map is now ignored, which is exactly the case Cassandra resolves
+            // in the header's favour.
             let (schema_key_type, schema_value_type) = self.extract_map_types(&column.data_type)?;
             let marshal_map_elements = Self::extract_marshal_collection_elements(complex_type);
             let (marshal_key, marshal_value) = match &marshal_map_elements {
