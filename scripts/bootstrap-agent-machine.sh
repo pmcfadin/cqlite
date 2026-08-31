@@ -2165,6 +2165,25 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # absence of evidence, and reporting it as a contradiction would invent one.
   PIN_FILE_HAS_LINE=unknown
   PIN_FILE_VALUE=""
+  # pin_read_env_file: THE ONE PARSER, callable again (roborev job 319, Medium). It used to
+  # run inline, exactly once, at the top of the section — so every later decision read a
+  # snapshot taken before the writes. That was fine while this run was the only writer; it
+  # stopped being fine when the create and append learned to LOSE a race (jobs 314/316),
+  # because a lost race leaves the cache saying "no line" about a file that now HAS one, and
+  # two things downstream act on that stale answer: the shell-profile fallback appends a
+  # hardcoded `=1` — manufacturing the 1-vs-4 divergence 11ai exists to prevent — and the
+  # verdict compares the session against an empty PIN_FILE_VALUE and reports NOT-SYSTEM-WIDE
+  # about a correctly pinned box.
+  #
+  # Factored rather than re-implemented at the call sites: a second parse is a second place
+  # for the sentinel/quote/last-wins rules to drift, and those rules are the subtle part.
+  pin_read_env_file() {
+  # Reset to the SAME default the one-shot version started from (:2166), not to empty: an
+  # unreadable or symlinked file assigns nothing below, and `unknown` is the value the
+  # "uncorrelatable file" verdict keys on. Resetting to "" silently disabled that branch —
+  # caught by the existing case, which is the argument for making the function reproduce the
+  # original initial state rather than an intuitive-looking blank one.
+  PIN_FILE_HAS_LINE=unknown; PIN_FILE_VALUE=""
   if [ ! -e "$PIN_ENV_FILE" ]; then
     PIN_FILE_HAS_LINE=absent-file
   elif [ ! -L "$PIN_ENV_FILE" ] && [ -r "$PIN_ENV_FILE" ]; then
@@ -2187,6 +2206,8 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       PIN_FILE_HAS_LINE=no
     fi
   fi
+  }
+  pin_read_env_file
 
   PIN_CREATE_RESIDUE=""
   # pin_append_env_file: CHECK-AND-APPEND under a lock, re-reading inside it (roborev job
@@ -2240,8 +2261,14 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       umask 022
       set -C
       printf "%s\n%s\n" "$1" "$2" > "$3"
-    ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null || return 1
-    pin_create_mode_ok "$PIN_ENV_FILE"
+    ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null || {
+      # O_EXCL refuses when the file APPEARED between the caller's `[ ! -e ]` and here, which
+      # is a LOST RACE and not a failure — distinguished from a genuine write error so the
+      # caller can refresh its cache instead of reporting a broken box.
+      [ -e "$PIN_ENV_FILE" ] && { pin_create_rc=3; return 3; }
+      pin_create_rc=1; return 1
+    }
+    pin_create_mode_ok "$PIN_ENV_FILE"; pin_create_rc=$?; return "$pin_create_rc"
   }
 
   # pin_create_mode_ok: establish 0644 on a JUST-CREATED env file and CONFIRM it by reading
@@ -2310,6 +2337,11 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # in the section's own output.
       pin_made=$(ls -ld -- "$PIN_ENV_FILE" 2>/dev/null | awk '{print $1" "$3":"$4}')
       info "CREATED $PIN_ENV_FILE (${pin_made:-mode/owner unreadable}) carrying '$PIN_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
+    elif [ "${pin_create_rc:-}" = 3 ]; then
+      # RACED, and the contract wins — same disposition as the append's lost race.
+      pin_read_env_file
+      PIN_PERSIST_NOTE="not persisted (another writer created $PIN_ENV_FILE first)"
+      info "$PIN_ENV_FILE was created by something else while this run was working — left EXACTLY as it is, and re-read, so the verdict and the profile decision below use what the file NOW says rather than the snapshot taken before the race"
     elif [ -n "$PIN_CREATE_RESIDUE" ]; then
       # THE FAILURE REPORT MUST MATCH THE FILESYSTEM (roborev job 311, Low). The write is
       # two steps — content then mode — so a `tee` that succeeded followed by a mode that
@@ -2365,6 +2397,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # RACED, and the contract wins. Reported as the left-alone case rather than as a
       # failure: nothing is wrong with the box, and the file now holds someone else's
       # deliberate value.
+      pin_read_env_file
       PIN_PERSIST_NOTE="not persisted (a concurrent writer added a CQLITE_GATE_MAX_CONCURRENCY line first)"
       info "$PIN_ENV_FILE gained a CQLITE_GATE_MAX_CONCURRENCY line while this run was working — left EXACTLY as it is, because appending ours would land LAST and pam_env takes the last assignment, silently overriding a value someone else chose"
     elif [ "$pin_append_rc" = 0 ]; then
