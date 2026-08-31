@@ -194,7 +194,10 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   and then **verifies from a fresh, profile-free session that the value is visible and that the gate
   honours it** (`gate-pin: VERIFIED`, #3414), rather than trusting that the write happened. That
   verdict is scoped to a PAM-created session, so a gate launched from a systemd unit or container
-  entrypoint is not covered by it; the per-run authority stays the gate's own `cpu-budget:` token.
+  entrypoint is not covered by it; it also measures that the file and the session AGREE, not that the
+  file is where the session got the value, so a box setting the same value from a sudoers `env_file`
+  would read VERIFIED with an `/etc/environment` no PAM stack loads. The per-run authority stays the
+  gate's own `cpu-budget:` token.
   A visible value the gate discards or clamps reports `gate-pin: NOT-HONOURED` — its remedy is to
   fix the VALUE, since bootstrap never rewrites an existing one. With the
   pin in effect the #1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core

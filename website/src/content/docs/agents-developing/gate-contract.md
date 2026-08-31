@@ -958,8 +958,16 @@ caller blocks cleanly rather than spin-failing.
   above, `invalid` = it was empty or non-numeric and was silently discarded for the
   formula, `clamped` = it was a valid integer < 1 and was silently raised to 1.
   `3` and `3 because nothing set it` are different operational facts — read
-  `N(default)` on a fleet box as *the pin is not provisioned*, and fix it with
-  `bash scripts/bootstrap-agent-machine.sh --yes`.
+  `N(default)` on a fleet box as *the pin is not provisioned*.
+
+  **The remedy DIFFERS BY TOKEN, and getting that wrong sends you in a circle.** A
+  `default` box has no pin line at all, so
+  `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin` (or `--yes`) persists one.
+  An `invalid` or `clamped` box ALREADY HAS the line, holding a bad value — and
+  bootstrap deliberately never rewrites an existing value, because a box running >1
+  gate on purpose must not be clobbered — so re-running it there is a **silent
+  no-op**. Fix the VALUE by hand in `/etc/environment`. Bootstrap says the same thing
+  at the same fork, as `gate-pin: NOT-HONOURED`.
 - **SIGKILL-safe stale-slot reaping:** each slot is an `fcntl.flock` held by a
   small background daemon (`scripts/lib/gate_slot_daemon.py`) that the gate starts
   and monitors. Because the daemon opens the lock fd *after* it is forked, the
