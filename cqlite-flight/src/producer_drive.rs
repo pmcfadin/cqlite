@@ -20,8 +20,8 @@ use cqlite_core::storage::write_engine::merge::MergeStep;
 
 use crate::agg::AggPlan;
 use crate::batch_bytes::BatchByteCap;
-use crate::egress_flush::StageEncodeAccum;
 use crate::cancel::CancelFlag;
+use crate::egress_flush::StageEncodeAccum;
 use crate::producer::{BatchSink, MergeProducer, PartitionStepper, ProducerError};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 

@@ -156,8 +156,7 @@ impl<'a> ArrowRowAccumulator<'a> {
         // FIRST occurrence of a name wins (`or_insert`), so the canonical slot of
         // a duplicated name is its first output column. One `usize` per NAME, not
         // a `Vec<usize>` per name — the fan-out lives in `canonical` below.
-        let mut name_to_canonical: HashMap<&'a str, usize> =
-            HashMap::with_capacity(columns.len());
+        let mut name_to_canonical: HashMap<&'a str, usize> = HashMap::with_capacity(columns.len());
         for (idx, col) in columns.iter().enumerate() {
             name_to_canonical.entry(col.name.as_str()).or_insert(idx);
         }

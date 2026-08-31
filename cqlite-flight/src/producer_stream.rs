@@ -37,8 +37,8 @@ use cqlite_core::storage::write_engine::merge::{StreamingMerger, StreamingStep};
 use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
 
 use crate::batch_bytes::BatchByteCap;
-use crate::egress_flush::StageEncodeAccum;
 use crate::cancel::CancelFlag;
+use crate::egress_flush::StageEncodeAccum;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::row_source::{MergeRowSource, RowSource, SourceStep};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
