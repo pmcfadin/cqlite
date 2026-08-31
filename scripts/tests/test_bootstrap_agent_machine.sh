@@ -503,7 +503,7 @@ mk_hermetic_bin() {
   local dir="$1" t p
   mkdir -p "$dir"
   for t in bash dirname mktemp grep cp cat sed awk mkdir rm ln mv touch chmod \
-           head tail tr sort cut wc stat env git find xargs basename date sleep expr \
+           head tail tr sort cut wc stat env git find xargs basename date sleep expr flock \
            timeout gtimeout; do   # BOTH: stock macOS has only gtimeout (GNU coreutils)
     p=$(type -P "$t" 2>/dev/null) || continue
     [ -n "$p" ] && ln -sf "$p" "$dir/$t" 2>/dev/null || true
@@ -3787,6 +3787,32 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     bad "gate-pin: the failed create left a residue, or did not report rolling it back"
     printf '%s\n' "$out_bc" | grep -iE 'gate-pin|CREATED|REMOVED|persisted' | head -4
     echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
+  fi
+
+  # 11bh. TWO CONCURRENT RUNS MUST PRODUCE ONE LINE, NOT TWO (roborev job 316, Medium). The
+  #      append was a bare `tee -a` decided from a check taken ~150 lines earlier, so two
+  #      bootstraps on the same box — the standing model since #3393 is several lanes per box
+  #      — both saw "no line" and both appended, leaving DUPLICATE assignments that pam_env
+  #      resolves by taking the last.
+  #
+  #      This is the one half of that fix a test can actually schedule, and it is deterministic
+  #      in its OUTCOME rather than its timing: whichever run takes the flock first appends,
+  #      and the other re-reads INSIDE the lock, sees the line and declines. So the assertion
+  #      is on the count, never on which run won. (The other half — a NON-cooperating writer
+  #      using a plain `>>` — is declared uncovered at 11bg above: flock is advisory, and no
+  #      test can inject a write between another implementation's check and its append.)
+  envf_bh="$tmp/pin-env-bh"; : >"$envf_bh"
+  runpin "$pinroot" "$shims_one" "$envf_bh" HOME="$tmp/pin-home-bh1" --fix-gate-pin >/dev/null 2>&1 &
+  pin_bh1=$!
+  runpin "$pinroot" "$shims_one" "$envf_bh" HOME="$tmp/pin-home-bh2" --fix-gate-pin >/dev/null 2>&1 &
+  pin_bh2=$!
+  wait "$pin_bh1" 2>/dev/null; wait "$pin_bh2" 2>/dev/null
+  bh_lines=$(grep -cE '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$envf_bh" 2>/dev/null)
+  if [ "$bh_lines" = 1 ]; then
+    ok "gate-pin: two concurrent runs leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line (the loser re-reads inside the lock and declines)"
+  else
+    bad "gate-pin: concurrent runs left $bh_lines CQLITE_GATE_MAX_CONCURRENCY lines (pam_env would take the last)"
+    cat "$envf_bh"
   fi
 
   # 11bg WAS HERE AND WAS DELETED, because it passed against the defect it was written for

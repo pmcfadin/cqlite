@@ -2189,6 +2189,39 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   fi
 
   PIN_CREATE_RESIDUE=""
+  # pin_append_env_file: CHECK-AND-APPEND under a lock, re-reading inside it (roborev job
+  # 316, Medium). The caller's "is a line already there" fact is read ~150 lines earlier, and
+  # the append was a bare `tee -a`, so a value added in between — a provisioner setting a
+  # DELIBERATE `=4`, or a peer bootstrap on the same box — was silently overridden, because
+  # pam_env takes the LAST assignment. That breaks this script's own stated contract that it
+  # never rewrites an existing value, and two concurrent runs also produced DUPLICATE lines.
+  #
+  # `flock` serialises against every cooperating writer (both bootstrap runs take it), and
+  # the re-read INSIDE the lock shrinks the window to the locked region. Exit 3 means
+  # someone else won and we must not write.
+  #
+  # RESIDUAL, DECLARED: flock is ADVISORY, so a writer using a plain `>>` and no lock can
+  # still interleave. That is not closable from here — it needs cooperation from the other
+  # writer — and it is strictly better than the unlocked version it replaces. Where flock is
+  # absent the same body runs unlocked, which still buys the re-read: losing the lock is a
+  # weaker guarantee, not a reason to skip the check.
+  pin_append_env_file() {
+    local -a pin_lock=()
+    command -v flock >/dev/null 2>&1 && pin_lock=(flock "$PIN_ENV_FILE")
+    ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} ${pin_lock[@]+"${pin_lock[@]}"} bash -c '
+      f="$1"; comment="$2"; line="$3"
+      if grep -Eq "^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=" "$f" 2>/dev/null; then
+        exit 3
+      fi
+      prefix=""
+      # A file whose last byte is not a newline would otherwise have our KEY=VALUE welded
+      # onto its final line, and pam_env would read the result as one malformed entry.
+      if [ -s "$f" ] && [ -n "$(tail -c 1 "$f" 2>/dev/null)" ]; then prefix="
+"; fi
+      printf "%s%s\n%s\n" "$prefix" "$comment" "$line" >> "$f"
+    ' _ "$PIN_ENV_FILE" "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" 2>/dev/null
+  }
+
   # pin_create_env_file: CREATE-IF-ABSENT, atomically (roborev job 314, Medium). The
   # `[ ! -e "$PIN_ENV_FILE" ]` test in the caller and the write are two separate steps, and
   # the write used to be a TRUNCATING `tee` — so a file created in between, by cloud-init, a
@@ -2324,15 +2357,17 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # onto its final line, and pam_env would read the result as one malformed entry.
     # Prepend a newline in that case only; the append happens at most once per box, so
     # this can never accumulate blank lines.
-    pin_prefix=""
-    if [ -s "$PIN_ENV_FILE" ] && [ -n "$(tail -c 1 "$PIN_ENV_FILE" 2>/dev/null)" ]; then
-      pin_prefix=$'\n'
-    fi
     # Appended at the END, after any managed marker block the image owner put in the
     # file (this fleet's images carry a `# >>> agent-ami worker auth >>>` block), so
     # nothing already there is disturbed.
-    if printf '%s%s\n%s\n' "$pin_prefix" "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
-         | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee -a "$PIN_ENV_FILE" >/dev/null 2>&1; then
+    pin_append_env_file; pin_append_rc=$?
+    if [ "$pin_append_rc" = 3 ]; then
+      # RACED, and the contract wins. Reported as the left-alone case rather than as a
+      # failure: nothing is wrong with the box, and the file now holds someone else's
+      # deliberate value.
+      PIN_PERSIST_NOTE="not persisted (a concurrent writer added a CQLITE_GATE_MAX_CONCURRENCY line first)"
+      info "$PIN_ENV_FILE gained a CQLITE_GATE_MAX_CONCURRENCY line while this run was working — left EXACTLY as it is, because appending ours would land LAST and pam_env takes the last assignment, silently overriding a value someone else chose"
+    elif [ "$pin_append_rc" = 0 ]; then
       # BOTH halves of the cached parse must move together. Setting only HAS_LINE left
       # PIN_FILE_VALUE at its pre-write value (empty), so the value comparison below
       # compared the session against what the file said BEFORE the append and reported a
