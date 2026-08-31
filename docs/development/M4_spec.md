@@ -724,9 +724,12 @@ schema-aware normalization. That is a behavior change, out of scope for #1454, a
   family (a) or (b) applies to it (live cases: **a-2**, a `map` in key position, and **b-2**'s
   cell-level map site. **a-1** and **a-3**, both UDT-key cases, are CLOSED by #3504 — a UDT key is
   now a `cqlite.Udt` and identifies itself).
-- `udt` → an object keyed by field name with `_type` retained, i.e. the CLI's UDT JSON shape.
-  Since #3504 there is no `_keyspace` entry to drop: the binding no longer injects one, so any
-  `_keyspace` key present is a genuine FIELD and survives — as it does in the CLI's output.
+- `udt` → an object keyed by field name holding the **declared fields and nothing else**, i.e. the
+  CLI's UDT JSON shape since #3629 (both JSON writers now share
+  `cqlite-core/src/util/udt_json.rs`). There is **no `_type` entry and no `_keyspace` entry**: since
+  #3504 the bindings inject neither, and since #3629 neither does the CLI, so a `_type` or
+  `_keyspace` key present in the output is a genuine FIELD and survives. The shape matches
+  `cassandra-5.0.8:.../UserType.java:261` (`toJSONString`), which emits declared fields only.
   Recognition is structural (`isinstance(v, cqlite.Udt)`), not a `"_type"` content sniff.
 
 **Family (b), ENUMERATED: the Python host-shape lattice.** Family (b) — two CQL types sharing one

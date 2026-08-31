@@ -224,7 +224,7 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         .unwrap_or_else(|| panic!("`stn` element must be a 2-tuple, got {tuple}"));
 
     assert_eq!(
-        keys(&udt.clone()),
+        keys(udt),
         vec!["label".to_string(), "m".to_string()],
         "the nested `unhashable_fields` UDT must expose its two declared fields \
          and nothing else (golden: {{\"label\": \"unhashable\", \"m\": ...}})"

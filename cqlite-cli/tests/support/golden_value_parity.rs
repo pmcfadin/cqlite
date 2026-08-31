@@ -74,12 +74,19 @@
 //!   in EMITTED order, because Cassandra stores a map's entries in key-comparator
 //!   order and both sides read the same SSTable (finding N2). Sorting both sides
 //!   first, which this lane used to do, made a reordering compare equal.
-//! * **UDT `_type`.** `sstabledump` renders a UDT as a plain field→value object;
-//!   the JSON egress adds a `_type` discriminator naming the type. It is REQUIRED
-//!   to be present, a string, and the name the committed `CREATE TYPE` declares
-//!   (ASCII case folded, since an unquoted CQL identifier is case-insensitive);
-//!   only then is it dropped, and only from the CLI side. CSV renders no
-//!   discriminator, so the rule is JSON-only.
+//! * **UDT fields.** `sstabledump` renders a UDT as a plain field→value object,
+//!   and since #3629 so does the JSON egress: the `_type` discriminator it used to
+//!   add is GONE, so both sides carry the declared fields and nothing else and
+//!   nothing is dropped from either. Authority is
+//!   `cassandra-5.0.8:.../UserType.java:261` (`toJSONString`), which emits declared
+//!   fields only, with no type key and no keyspace key. KNOWN COVERAGE REDUCTION:
+//!   the deleted discriminator check compared the emitted type name against the
+//!   committed `CREATE TYPE`, so this lane can no longer detect a UDT resolved
+//!   against the WRONG type when two types declare the same field names, order and
+//!   types (`collide`/`collide_twin` in `test-data/fixtures/issue_3504/`). That is
+//!   unavoidable — the egress no longer carries type identity for a comparator to
+//!   check — and the old code was already blind here, refusing outright to compare
+//!   any UDT declaring a `_type` field. CSV never rendered a discriminator.
 //! * **Two spellings this DELIBERATELY does not distinguish, stated so neither
 //!   reads as an oversight.** (1) A timestamp's SPELLING: the separator, a zero
 //!   offset's form and the fraction width are normalized away on BOTH sides, so
