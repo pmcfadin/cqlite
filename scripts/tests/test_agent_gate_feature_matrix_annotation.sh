@@ -171,6 +171,49 @@ else
   fi
 fi
 
+# B7: THE ANNOTATION'S SOURCE IS NOT ENV-SELECTABLE (CLAUDE.md #3312 job 27 — "the
+# constrained party must not choose its own enforcer"). The annotation IS the block's
+# evidence about what was certified, so an env-settable helper path (or an inherited
+# component name) would let the environment substitute a fabricator while the SUMMARY
+# looked identical — a FORGED annotation, strictly worse than a blank one because it is
+# affirmatively false rather than merely absent. Three properties, all read from source:
+#   (a) the functions are DEFINED INSIDE the marker block of this very script — nothing is
+#       sourced from a path the environment could redirect;
+#   (b) the two state variables are assigned UNCONDITIONALLY (no `${…:-…}` default, which
+#       is exactly how an inherited value wins), so an inherited component name cannot arm
+#       recording before the first component;
+#   (c) no `.`/`source` of a variable-named file appears inside the block.
+# The needles are SPLIT so this assert cannot match its own source lines.
+fm_end_ln=$(grep -n '^# ==== END feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+if [ -z "$fm_begin" ] || [ -z "$fm_end_ln" ] || [ "$fm_end_ln" -le "${fm_begin:-0}" ]; then
+  bad "B7: could not locate a well-ordered BEGIN/END feature-matrix marker pair in $GATE"
+else
+  fm_block=$(sed -n "${fm_begin},${fm_end_ln}p" "$GATE")
+  b7=()
+  for fn in _fm_describe_cargo _fm_annotate _fm_summary_line cargo env; do
+    printf '%s\n' "$fm_block" | grep -q "^$fn() {" || b7+=("$fn-not-defined-inside-the-block")
+  done
+  # (b) unconditional assignment of both state variables.
+  var_dir="AGENT_GATE_FM""_DIR"
+  var_comp="AGENT_GATE_FM""_COMPONENT"
+  grep -qE "^$var_dir=\"\\\$LOG_DIR\"$" "$GATE" || b7+=("fm-dir-not-assigned-unconditionally-from-LOG_DIR")
+  grep -qE "^$var_comp=\"\"$" "$GATE" || b7+=("fm-component-not-cleared-of-any-inherited-value")
+  # …and no env-default form for either, anywhere in the script.
+  envdefault="\\\$\{AGENT_GATE_FM_"
+  if grep -nE "^(AGENT_GATE_FM_(DIR|COMPONENT))=.*$envdefault" "$GATE" >/dev/null 2>&1; then
+    b7+=("an-env-default-selects-the-annotation-state")
+  fi
+  # (c) no sourcing of a variable path inside the block.
+  if printf '%s\n' "$fm_block" | grep -qE '^[[:space:]]*(\.|source)[[:space:]]+"?\$'; then
+    b7+=("the-block-sources-a-variable-named-file")
+  fi
+  if [ "${#b7[@]}" -eq 0 ]; then
+    ok "B7: the annotation is defined INLINE in the gate script, its state is assigned unconditionally, and nothing env-settable selects its source (#3312 job 27)"
+  else
+    bad "B7: ${b7[*]}"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Unit cases for the descriptor / render / annotate path
 # ---------------------------------------------------------------------------
@@ -309,6 +352,97 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# (W) WRAPPER FIDELITY — the highest-risk property of this change
+# ---------------------------------------------------------------------------
+# Shadowing `cargo` and `env` as shell functions means that if a wrapper ever fails to
+# hand off to the real binary EXACTLY, it breaks every cargo-invoking component at once.
+# So the pass-through is MEASURED, not reasoned: a substituted `cargo` artifact on PATH
+# (never a path variable — #3312 job 27's corollary) echoes its argv/stdin and exits with
+# a chosen status, and the wrapper must reproduce all of it. Recording must add nothing to
+# stdout or stderr, because component logs are PARSED (#3400).
+fid="$tmp/fidelity"; mkdir -p "$fid"
+cat > "$fid/cargo" <<'FID'
+#!/usr/bin/env bash
+# Substituted cargo: reports argv one-per-line on stdout, a marker on stderr, echoes
+# stdin, and exits with $FID_RC.
+printf 'ARG[%s]
+' "$@"
+printf 'STDIN[%s]
+' "$(cat)"
+printf 'ERRMARK
+' >&2
+exit "${FID_RC:-0}"
+FID
+chmod +x "$fid/cargo"
+
+# The wrapper must be ARMED for these cases (an unarmed observer would trivially "pass"
+# a no-op test): point it at a live sidecar dir and a component name.
+export AGENT_GATE_FM_DIR="$tmp/fid-side"; mkdir -p "$AGENT_GATE_FM_DIR"
+export AGENT_GATE_FM_COMPONENT=core-tests
+
+w_out="$tmp/w.out"; w_err="$tmp/w.err"
+(
+  PATH="$fid:$PATH"
+  FID_RC=7 cargo test --package cqlite-core --features cli-helpers "a b" "" "glob*" </dev/null >"$w_out" 2>"$w_err"
+  echo "$?" > "$tmp/w.rc"
+)
+[ "$(cat "$tmp/w.rc")" = 7 ] && ok "W1: the cargo wrapper propagates the real binary's exit status (7)" \
+  || bad "W1: exit status was $(cat "$tmp/w.rc"), expected 7"
+
+# argv EXACTLY as given: an argument with a space stays ONE argument, an EMPTY argument
+# survives, and a glob character is not expanded (the recording path must not word-split).
+want_args=$'ARG[test]\nARG[--package]\nARG[cqlite-core]\nARG[--features]\nARG[cli-helpers]\nARG[a b]\nARG[]\nARG[glob*]'
+got_args=$(grep '^ARG\[' "$w_out")
+[ "$got_args" = "$want_args" ] && ok "W2: argv reaches the real binary byte-exact (space-bearing, EMPTY and glob args preserved)" \
+  || { bad "W2: argv differs"; printf 'got:\n%s\nwant:\n%s\n' "$got_args" "$want_args"; }
+
+# stdout carries ONLY the binary's output (no recording chatter), stderr ONLY the
+# binary's — component logs are parsed, so one stray line is a real defect (#3400).
+if [ "$(grep -c . "$w_err")" = 1 ] && grep -q '^ERRMARK$' "$w_err"; then
+  ok "W3: stderr carries only the real binary's output — the observer writes nothing to it"
+else
+  bad "W3: stderr was polluted: $(tr '\n' '|' <"$w_err")"
+fi
+if ! grep -qvE '^(ARG\[|STDIN\[)' "$w_out"; then
+  ok "W4: stdout carries only the real binary's output — the observer writes nothing to it"
+else
+  bad "W4: stdout was polluted: $(grep -vE '^(ARG\[|STDIN\[)' "$w_out" | tr '\n' '|')"
+fi
+
+# stdin reaches the real binary (a wrapper that consumed it would break any cargo
+# subcommand reading stdin).
+got_stdin=$( cd "$tmp" && PATH="$fid:$PATH" bash -c 'printf hello-stdin | cargo build' 2>/dev/null | sed -n 's/^STDIN\[\(.*\)\]$/\1/p' ) || true
+if [ "$got_stdin" = hello-stdin ]; then
+  ok "W5: stdin passes through the cargo wrapper untouched"
+else
+  # The `bash -c` child does not inherit the (deliberately unexported) function, so this
+  # case must drive the wrapper in THIS shell instead — do so rather than claim a pass.
+  got_stdin=$( PATH="$fid:$PATH"; printf hello-stdin | cargo build | sed -n 's/^STDIN\[\(.*\)\]$/\1/p' )
+  [ "$got_stdin" = hello-stdin ] && ok "W5: stdin passes through the cargo wrapper untouched" \
+    || bad "W5: stdin arrived as '$got_stdin'"
+fi
+
+# The env wrapper on the run_clippy path: status + argv + the cargo argv it records.
+: > "$AGENT_GATE_FM_DIR/clippy.features"
+(
+  PATH="$fid:$PATH"
+  AGENT_GATE_FM_COMPONENT=clippy \
+    env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features "a b" >"$tmp/e.out" 2>/dev/null
+  echo "$?" > "$tmp/e.rc"
+)
+if [ "$(cat "$tmp/e.rc")" = 0 ] && [ "$(grep -c '^ARG\[' "$tmp/e.out")" = 6 ]; then
+  ok "W6: the env wrapper execs the real cargo with argv intact and propagates its status"
+else
+  bad "W6: rc=$(cat "$tmp/e.rc") argv=$(grep -c '^ARG\[' "$tmp/e.out") (expected 0 / 6)"
+fi
+got=$(_fm_annotate clippy)
+[ "$got" = '[clippy cqlite-core --features a,b]' ] \
+  && ok "W7: an `env VAR=… cargo …` invocation IS recorded (the run_clippy path, which an env prefix would otherwise hide)" \
+  || bad "W7: got '$got'"
+unset AGENT_GATE_FM_COMPONENT
+export AGENT_GATE_FM_DIR="$tmp/side"
+
+# ---------------------------------------------------------------------------
 # (C) NO DRIFT — declared vs EXECUTED, measured with a recording cargo shim
 # ---------------------------------------------------------------------------
 shim_dir="$tmp/shim"; mkdir -p "$shim_dir"
@@ -390,9 +524,12 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
   fi
 }
 
-if [ "${FM_SKIP_DIFFERENTIAL:-0}" = 1 ]; then
-  echo "note - (C) differential skipped by FM_SKIP_DIFFERENTIAL=1 (debug only; the gate never sets it)"
-else
+# NO opt-out env var here, deliberately (CLAUDE.md #3312 job 27 corollary): a test-only
+# seam is one more thing a real invoker can set, and section (C) is the only part of this
+# guard that MEASURES rather than inspects — an env flag that silently skipped it would be
+# a vacuous green wearing a debug flag's clothes. A case needing a different cargo
+# SUBSTITUTES THE ARTIFACT in its own scratch dir (below), never a path variable.
+{
   # core-tests' nextest branch is a SEVENTH `bash -c` body (conditional on nextest being
   # installed), and it is the component whose line is pasted most often. CONTAINS, not
   # EXACT: on a host WITHOUT cargo-nextest the gate takes the direct-cargo fallback
@@ -414,7 +551,7 @@ else
   fi
   run_differential cli-tests         CONTAINS "pass 2 unreached: the zero-tests guard fires under a cargo stub"
   run_differential smoke             CONTAINS "the smoke script needs a real built binary"
-fi
+}
 
 echo
 echo "feature-matrix annotation guard: $PASS passed, $FAIL failed"

@@ -3207,9 +3207,17 @@ _fm_note_if_skipped() {
   return 0
 }
 # ==== END feature-matrix annotation (#3453) ====
-# The per-run sidecar directory. AGENT_GATE_FM_COMPONENT (set per component, below) is
-# what ARMS recording; until then cargo probes belong to no component and are ignored.
+# The per-run sidecar directory. Both variables are set UNCONDITIONALLY here — no
+# `${…:-…}`, no env indirection — because the annotation is the block's evidence about
+# what was certified, and the party the evidence constrains must not be able to choose
+# where it comes from (CLAUDE.md #3312 job 27: "the constrained party must not choose its
+# own enforcer"). An INHERITED AGENT_GATE_FM_COMPONENT would otherwise arm recording
+# before the first component and attribute the preflight's cargo probes — or a
+# pre-seeded set — to a component that never ran, which is worse than a blank annotation
+# because it is affirmatively false rather than merely absent. The directory is this run's
+# private mktemp LOG_DIR, so the sidecars cannot be pre-seeded either.
 AGENT_GATE_FM_DIR="$LOG_DIR"
+AGENT_GATE_FM_COMPONENT=""
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
 # path, so it uniquely identifies THIS invocation. We stamp it into every SUMMARY
 # block as `run-id:` so completeness can be verified for THIS run, never a stale
