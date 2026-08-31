@@ -846,5 +846,68 @@ fi
 
 # ===========================================================================
 echo
+# ===========================================================================
+echo "TEST 20: release uses the RECORD's lane-dir (roborev round 2), and a relative LANE_ROOT is refused"
+# ===========================================================================
+# (a) A lock taken for a NON-DEFAULT lane dir must be releasable WITHOUT repeating
+# --lane-dir. release used to re-derive ${LANE_ROOT}/lane-<N> while verify/probe read the
+# record, so a non-default worktree's lock could not be released through the normal path —
+# and once that worktree was REMOVED the cwd identity walk had nothing to match, leaving a
+# live stale lock. The record is keyed by ISSUE, so its own lane-dir is always available.
+ODD_LANE="$LANES/not-a-lane-path/wt-950"
+mkdir -p "$ODD_LANE"
+ORIG20="$PWD"
+cd "$ODD_LANE" || bad "could not cd into the odd lane dir"
+ll acquire 950 --lane-dir "$ODD_LANE"; rc20a=$RC
+HOLDER950=$(grep '^pid=' "$LANES/.lane-locks/lane-950.lock" 2>/dev/null | cut -d= -f2)
+# (a1) from INSIDE the lane, with NO --lane-dir: the record supplies the subject.
+ll release 950; rc20b=$RC; out20b=$OUT
+cd "$ORIG20" || true
+if [ "$rc20a" -eq 0 ] && [ "$rc20b" -eq 0 ] \
+   && printf '%s' "$out20b" | grep -q '^LANE-LOCK: RELEASED issue=950 ' \
+   && printf '%s' "$out20b" | grep -q "lane-dir=$ODD_LANE" \
+   && [ ! -f "$LANES/.lane-locks/lane-950.lock" ]; then
+  ok "(a1) release with NO --lane-dir releases a lock taken for a non-default path, reporting the RECORDED lane-dir"
+else
+  bad "(a1) expected RELEASED naming lane-dir=$ODD_LANE and the record gone; got rc=$rc20a/$rc20b
+$out20b"
+fi
+
+# (a2) THE HALF READING THE RECORD CANNOT FIX. The holder gate is our exact token and the
+# auto-resolved pid comes from the CWD walk, so a holder that has moved cwd — or whose lane
+# directory has been REMOVED, which is what finalize does — cannot resolve the identity it
+# locked with, and its own release is refused as not-holder. --pid is the remedy.
+mkdir -p "$ODD_LANE"
+cd "$ODD_LANE" || bad "could not re-enter the odd lane dir"
+ll acquire 950 --lane-dir "$ODD_LANE" >/dev/null 2>&1
+HOLDER950=$(grep '^pid=' "$LANES/.lane-locks/lane-950.lock" 2>/dev/null | cut -d= -f2)
+cd "$ORIG20" || true
+rm -rf "$ODD_LANE"                     # the lane is gone, as after `worktree remove`
+ll release 950; rc20e=$RC; out20e=$OUT                       # no identity available
+ll release 950 --pid "$HOLDER950"; rc20f=$RC; out20f=$OUT     # named explicitly
+if [ "$rc20e" -eq 2 ] && printf '%s' "$out20e" | grep -q 'RELEASE-REFUSED' \
+   && [ "$rc20f" -eq 0 ] && printf '%s' "$out20f" | grep -q '^LANE-LOCK: RELEASED issue=950 ' \
+   && [ ! -f "$LANES/.lane-locks/lane-950.lock" ]; then
+  ok "(a2) with the lane dir REMOVED, an identity-less release is REFUSED (not silently successful) and --pid $HOLDER950 releases it"
+else
+  bad "(a2) expected RELEASE-REFUSED then RELEASED via --pid; got rc=$rc20e/$rc20f
+$out20e
+$out20f"
+fi
+
+# (b) A RELATIVE LANE_ROOT is a lock BYPASS, not a style issue: it resolves against each
+# caller's cwd, so two sessions naming the SAME absolute lane directory compute DIFFERENT
+# lock roots and BOTH acquire. It must fail at the entry point, in the main shell.
+rc20c=0; out20c="$( cd /tmp && LANE_ROOT=relative/lanes bash "$LL" probe 1 2>&1 )" || rc20c=$?
+rc20d=0; ( cd /tmp && LANE_ROOT=rel bash "$LL" --help >/dev/null 2>&1 ) || rc20d=$?
+if [ "$rc20c" -eq 64 ] && printf '%s' "$out20c" | grep -q 'LANE_ROOT must be an ABSOLUTE path' \
+   && ! printf '%s' "$out20c" | grep -q '^LANE-LOCK:' \
+   && [ "$rc20d" -eq 0 ]; then
+  ok "(b) a RELATIVE LANE_ROOT is exit 64 with no LANE-LOCK: verdict line; --help still works on a misconfigured box"
+else
+  bad "(b) expected exit 64 for a relative LANE_ROOT and 0 for --help; got rc=$rc20c/$rc20d
+$out20c"
+fi
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

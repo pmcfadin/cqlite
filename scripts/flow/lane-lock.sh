@@ -853,7 +853,23 @@ with_lock() {
 # ---------------------------------------------------------------------------
 # Lane-directory resolution
 # ---------------------------------------------------------------------------
+# LANE_ROOT IS VALIDATED IN THE MAIN SHELL BEFORE ANY DISPATCH — see
+# require_lane_root_abs, called from the entry point. A comment here used to CLAIM that
+# validation existed when it did not (roborev round 2), and the gap was a real bypass,
+# not a cosmetic one: a RELATIVE LANE_ROOT resolves against each caller's cwd, so two
+# sessions naming the SAME absolute lane directory compute DIFFERENT lock roots and BOTH
+# acquire — the lock defeated by accident rather than by malice. Same reasoning as
+# CLAUDE.md's absolute-only rule for CQLITE_SCHEMAS_ROOT, where a relative value would
+# certify one root while the tests read another.
 lane_root() { printf '%s\n' "${LANE_ROOT:-/data/lanes}"; }
+
+# require_lane_root_abs — reject a relative or newline-bearing LANE_ROOT at the entry
+# point, in the MAIN shell (a die inside a command substitution exits only the subshell;
+# see require_abs_path's measured rationale). Unset is fine: the default is absolute.
+require_lane_root_abs() {
+  [ -n "${LANE_ROOT:-}" ] || return 0
+  require_abs_path LANE_ROOT "$LANE_ROOT"
+}
 
 # lock_root — where the lock FILES live: a SIBLING of the lane directories, never
 # inside one (header: `git worktree add` refuses a target that exists at all, so a lock
@@ -1181,7 +1197,16 @@ cmd_probe() {
   parse_record "$record" || true
   liveness="$(record_liveness)"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
-  emit "HELD issue=$issue liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN our-identity=$(identity_state) record=$record${mismatch:+ lane-dir-mismatch=$mismatch} lane-dir=$lane"
+  # our-pid / our-start-ticks are published ALONGSIDE our-token so a consumer can compare
+  # PROCESS identity WITHOUT the actor in it (#3436, roborev round 2). The token carries
+  # machine:actor:pid:boot:ticks, so a token difference can mean "a different process" OR
+  # merely "the same process under a different actor" — and claim.sh was reading the
+  # second as the first, telling a session a peer held a lane its OWN process held. The
+  # actor belongs in holder identity for verify/release; it does not belong in the test
+  # for "is this a different process". Publishing the fields separately keeps the
+  # comparison structural rather than making a caller split the token (#3312: do not
+  # reintroduce a delimiter to parse).
+  emit "HELD issue=$issue liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN our-pid=$G_PID our-start-ticks=${G_TICKS:-<none>} our-identity=$(identity_state) record=$record${mismatch:+ lane-dir-mismatch=$mismatch} lane-dir=$lane"
   return 0
 }
 
@@ -1216,18 +1241,38 @@ _release_locked() {
 }
 
 cmd_release() {
-  local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" force=0 lane
+  local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" force=0 lane pid_opt=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --force)    force=1; shift ;;
+      # --pid: name the holder explicitly. WHY release needs it (#3436, roborev round 2):
+      # the holder gate is our exact token, and the auto-resolved pid comes from the cwd
+      # walk — so a holder that has MOVED CWD (or whose lane directory has been removed,
+      # which is exactly what finalize does) can no longer resolve the identity it locked
+      # with, and its own release is refused as not-holder. Reading the record fixes the
+      # SUBJECT but cannot fix the IDENTITY. Three sanctioned ways to release, in order of
+      # preference: from inside the lane; with --pid naming the durable holder; or --force
+      # (the reaper path, which needs no identity at all).
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"; pid_opt="$2"; shift 2 ;;
       -*) die_usage "release: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "release: unexpected argument $1"; issue="$1"; shift ;;
     esac
   done
   require_numeric_issue "$issue" release
-  lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  # SAME AUTHORITY RULE AS verify/probe (#3436 FIX 6, extended to release on roborev
+  # round 2). `release` used to re-derive `${LANE_ROOT}/lane-<N>`, and FIX 6 fixed its
+  # two siblings while missing it — so a lock taken for a non-default worktree could not
+  # be released without repeating `--lane-dir`, and once that worktree was REMOVED the
+  # cwd identity walk had nothing to match, leaving a live stale lock nobody could clear
+  # through the normal path. The record is keyed by ISSUE, so its own `lane-dir` is
+  # always available and is the only correct subject.
+  if parse_record "$(lock_record "$issue")" && [ -n "${REC_LANE_DIR:-}" ]; then
+    lane="$REC_LANE_DIR"
+  else
+    lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  fi
   # No lock root means no record anywhere, and release is IDEMPOTENT — answer without
   # creating the root (a release must not have to make a directory to say "already
   # free"). The check moved from the lane dir to the lock root with the files.
@@ -1235,7 +1280,7 @@ cmd_release() {
     emit "RELEASED (already free) issue=$issue record=absent lane-dir=$lane"
     return 0
   fi
-  prepare_identity "$issue" "$lane" "$actor" ""
+  prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
   with_lock "$G_MUTEX" _release_locked "$force"
 }
 
@@ -1437,6 +1482,14 @@ cmd_status() {
 # ---------------------------------------------------------------------------
 SUBCOMMAND="${1:-}"
 [ "$#" -eq 0 ] || shift
+# LANE_ROOT is validated HERE, in the main shell, before any subcommand runs — a
+# relative value is a lock BYPASS (two cwds, two lock roots, both acquire), so it must
+# fail before anything reads a path. `--help` is exempt: printing usage must work on a
+# misconfigured box, and it touches no path.
+case "$SUBCOMMAND" in
+  -h | --help | help) : ;;
+  *) require_lane_root_abs ;;
+esac
 case "$SUBCOMMAND" in
   -h | --help | help) print_help ;;
   acquire) cmd_acquire "$@" ;;

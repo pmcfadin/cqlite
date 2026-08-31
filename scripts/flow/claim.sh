@@ -645,9 +645,15 @@ LANE_LOCK_LIVENESS=""          # the probe's verbatim liveness verdict
 LANE_LOCK_HOLDER=""            # occupant description for the stderr note (AC2)
 LANE_LOCK_HOLDER_MACHINE=""
 LANE_LOCK_HOLDER_PID=""
+LANE_LOCK_HOLDER_TICKS=""      # the holder's /proc start-ticks — with the pid, this is
+                               # PROCESS identity, which is what "a different process"
+                               # must be decided on (never the actor-bearing token)
+LANE_LOCK_HOLDER_ACTOR=""
 LANE_LOCK_HOLDER_TOKEN=""      # the record's holder token, verbatim from the probe
 LANE_LOCK_OUR_TOKEN=""         # the probe's OWN token for this session
-LANE_LOCK_OUR_IDENTITY=""      # session|explicit|UNRESOLVED, verbatim from the probe
+LANE_LOCK_OUR_IDENTITY=""      # cwd-match|explicit|UNRESOLVED, verbatim from the probe
+LANE_LOCK_OUR_PID=""           # our resolved pid, from the probe
+LANE_LOCK_OUR_TICKS=""         # our resolved /proc start-ticks, from the probe
 LANE_LOCK_OUR_MACHINE=""       # lane-lock.sh's OWN idea of this machine
 
 # lane_lock_available — 0 iff the sibling script is present and readable. It is
@@ -671,7 +677,10 @@ lane_lock_probe() {
   LANE_LOCK_STATE=""; LANE_LOCK_DIR=""; LANE_LOCK_LIVENESS=""
   LANE_LOCK_HOLDER=""; LANE_LOCK_HOLDER_MACHINE=""; LANE_LOCK_OUR_MACHINE=""
   LANE_LOCK_HOLDER_PID=""; LANE_LOCK_HOLDER_TOKEN=""; LANE_LOCK_OUR_TOKEN=""
+  LANE_LOCK_HOLDER_TICKS=""; LANE_LOCK_HOLDER_ACTOR=""
   LANE_LOCK_OUR_IDENTITY=""
+  LANE_LOCK_OUR_PID=""
+  LANE_LOCK_OUR_TICKS=""
 
   if ! lane_lock_available; then
     LANE_LOCK_STATE="unmeasured(lane-lock-script-unreadable)"
@@ -711,6 +720,8 @@ lane_lock_probe() {
   # never used to answer a question about the lane lock.
   LANE_LOCK_OUR_TOKEN="$(msg_field "$line" our-token)"
   LANE_LOCK_OUR_IDENTITY="$(msg_field "$line" our-identity)"
+  LANE_LOCK_OUR_PID="$(msg_field "$line" our-pid)"
+  LANE_LOCK_OUR_TICKS="$(msg_field "$line" our-start-ticks)"
   LANE_LOCK_OUR_MACHINE="$(printf '%s' "$LANE_LOCK_OUR_TOKEN" | cut -d: -f1)"
 
   case "$verdict" in
@@ -731,8 +742,10 @@ lane_lock_probe() {
       LANE_LOCK_HOLDER_MACHINE="$(msg_field "$line" holder-machine)"
       LANE_LOCK_HOLDER_TOKEN="$(msg_field "$line" holder-token)"
       LANE_LOCK_HOLDER_PID="$(msg_field "$line" holder-pid)"
+      LANE_LOCK_HOLDER_TICKS="$(msg_field "$line" holder-start-ticks)"
       hpid="$LANE_LOCK_HOLDER_PID"
       hactor="$(msg_field "$line" holder-actor)"
+      LANE_LOCK_HOLDER_ACTOR="$hactor"
       hts="$(msg_field "$line" acquired-ts)"
       hage="$(msg_field "$line" age)"
       # NAME THE OCCUPANT (#3436 AC2): a collision diagnosed generically sends
@@ -905,11 +918,32 @@ lane_local_evidence() {
   elif [ "${LANE_LOCK_LIVENESS:-}" = "ALIVE" ] \
      && [ -n "$LANE_LOCK_HOLDER_MACHINE" ] && [ -n "$LANE_LOCK_OUR_MACHINE" ] \
      && [ "$LANE_LOCK_HOLDER_MACHINE" = "$LANE_LOCK_OUR_MACHINE" ]; then
+    # A DIFFERENT PROCESS IS A PID/START-TICKS DIFFERENCE, NOT A TOKEN DIFFERENCE
+    # (#3436, roborev round 2). The token is machine:actor:pid:boot:ticks, so comparing
+    # tokens made a same-process ACTOR change look like a peer: one session acquiring the
+    # lane as actor A and claiming as actor B got told "a different live process on this
+    # machine holds that lane" about its OWN process. The actor is part of holder identity
+    # for verify/release; it is NOT part of "is this a different process". So compare the
+    # PROCESS fields the probe now publishes separately, and require BOTH to be present —
+    # an absent field yields no evidence rather than the permissive branch.
     if lane_lock_identity_established \
-       && [ -n "$LANE_LOCK_HOLDER_TOKEN" ] && [ -n "$LANE_LOCK_OUR_TOKEN" ] \
-       && [ "$LANE_LOCK_HOLDER_TOKEN" != "$LANE_LOCK_OUR_TOKEN" ]; then
+       && [ -n "$LANE_LOCK_HOLDER_PID" ] && [ -n "$LANE_LOCK_OUR_PID" ] \
+       && [ -n "$LANE_LOCK_HOLDER_TICKS" ] && [ -n "$LANE_LOCK_OUR_TICKS" ] \
+       && { [ "$LANE_LOCK_HOLDER_PID" != "$LANE_LOCK_OUR_PID" ] \
+            || [ "$LANE_LOCK_HOLDER_TICKS" != "$LANE_LOCK_OUR_TICKS" ]; }; then
       verdict="live-peer"
       evidence="lane-lock-alive-local-peer"
+    elif lane_lock_identity_established \
+       && [ -n "$LANE_LOCK_HOLDER_PID" ] && [ -n "$LANE_LOCK_OUR_PID" ] \
+       && [ "$LANE_LOCK_HOLDER_PID" = "$LANE_LOCK_OUR_PID" ] \
+       && [ -n "$LANE_LOCK_HOLDER_TOKEN" ] && [ -n "$LANE_LOCK_OUR_TOKEN" ] \
+       && [ "$LANE_LOCK_HOLDER_TOKEN" != "$LANE_LOCK_OUR_TOKEN" ]; then
+      # SAME process, DIFFERENT token => the difference is the actor (or another
+      # non-process field). Conservatively UNATTRIBUTED: it is demonstrably not a peer,
+      # and it is not `self` either, because the actor gates verify/release and this run
+      # does not hold the lane under the actor it is claiming with. Naming it would be a
+      # claim beyond the measurement in either direction.
+      evidence="lane-lock-alive-local-same-process-other-actor:holder-actor-${LANE_LOCK_HOLDER_ACTOR:-unstated}"
     else
       # A live LOCAL holder EXISTS, and this run cannot say whether it is us. Both facts
       # go into the evidence so the reader can see WHY the tool declined to name the

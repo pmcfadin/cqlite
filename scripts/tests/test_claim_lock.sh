@@ -1219,6 +1219,43 @@ for v in a b f h i; do
   fi
 done
 if [ -z "$d22_bad" ]; then
+# (k) SAME PROCESS, DIFFERENT ACTOR — not a peer (roborev round 2).
+# The token is machine:actor:pid:boot:ticks, so comparing TOKENS made an actor change look
+# like a different process: one session acquiring the lane as actor `flow` and claiming as
+# `other` was told "a different live process on this machine holds that lane" about its OWN
+# process, with the do-not-touch remedy attached. "A different process" is a PID/start-ticks
+# difference; the actor gates verify/release but says nothing about process identity. The
+# honest verdict here is neither peer nor self, so it is the generic one with the
+# same-process observation recorded.
+push_legacy_branch 46
+LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 46 --actor flow >/dev/null 2>&1
+rc=0; out22k=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ CLAIM_ACTOR=other bash "$CLAIM" claim 46 --actor other 2>/dev/null ) || rc=$?
+rc22k=$rc
+if [ "$rc22k" -eq 2 ] && printf '%s\n' "$out22k" | grep -q 'reason=legacy-branch-lock' \
+   && printf '%s\n' "$out22k" | grep -q 'lane-evidence=lane-lock-alive-local-same-process-other-actor' \
+   && ! printf '%s\n' "$out22k" | grep -q 'reason=lane-occupied-by-live-peer' \
+   && ! printf '%s\n' "$out22k" | grep -q 'reason=released-then-resumed'; then
+  ok "(k) AC6/round-2: the SAME process holding under a different actor is NOT lane-occupied-by-live-peer; the verdict is generic and the evidence records same-process-other-actor"
+else
+  bad "(k) expected reason=legacy-branch-lock with lane-evidence=...same-process-other-actor; got rc=$rc22k
+$out22k"
+fi
+
+# (k2) POSITIVE CONTROL: a genuinely different live process, same actor, IS a peer. Without
+# this, an implementation that never says live-peer would satisfy (k).
+push_legacy_branch 47
+sleep 900 &
+OCC47=$!
+LANE_LOCK_PID=$OCC47 bash "$LANELOCK" acquire 47 >/dev/null 2>&1
+rc=0; out22k2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 47 2>/dev/null ) || rc=$?
+if [ "$rc" -eq 2 ] && printf '%s\n' "$out22k2" | grep -q 'reason=lane-occupied-by-live-peer'; then
+  ok "(k2) control: a DIFFERENT live pid, same actor, still yields lane-occupied-by-live-peer — so (k) is not satisfied by never naming a peer"
+else
+  bad "(k2) expected lane-occupied-by-live-peer for a different live pid; got rc=$rc
+$out22k2"
+fi
+kill "$OCC47" 2>/dev/null || true
+
 # (j) COMPOSED EVIDENCE — rungs (b) AND (c) fire together (implementer residual 3).
 # Reachable and previously untested: a LIVE LOCAL peer holds the lane lock AND the lane
 # directory is a git checkout on this issue's branch. The point of the case is that the
