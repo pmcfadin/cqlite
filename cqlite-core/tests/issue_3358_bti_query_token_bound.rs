@@ -248,16 +248,27 @@ fn fixture() -> Fixture {
         // than reproducing it here badly, so this message names ONE command and lets
         // that tool produce the restore line. Do not "helpfully" add one back.
         //
-        // `env -u CQLITE_DATASETS_ROOT` is LOAD-BEARING, not tidiness. The probe is
-        // scoped to whatever root it is given, and on a fleet box that variable points
-        // at a machine-local corpus OUTSIDE any git work tree — where it correctly
-        // reports `NO SUBJECT` and exits 0, detecting nothing. Measured: with the
-        // variable set to /data/datasets the remedy finds none of the 10 deleted files;
-        // unset, it names all 10. The fixture we are hunting is the COMMITTED one in
-        // this checkout, so the probe must be pointed there. Removing `env -u` turns
-        // this remedy into a no-op that looks like an all-clear.
-        let verify_cmd = shell_quote(&repo_root().join("test-data/scripts/fetch-datasets.sh"));
-        let default_root = repo_root().join("test-data/datasets").display().to_string();
+        // BOTH values in the emitted command are ABSOLUTE, and both are load-bearing.
+        //
+        // The probe is scoped to the root it is given. On a fleet box
+        // CQLITE_DATASETS_ROOT points at a machine-local corpus OUTSIDE any git work
+        // tree, where it correctly reports `NO SUBJECT` and exits 0 — measured: it finds
+        // none of the 10 deleted files. So the caller's value must not be inherited.
+        //
+        // Unsetting it is NOT enough, which cost a review round: the script then falls
+        // back to a CWD-RELATIVE `test-data/datasets`, and `cargo test -p cqlite-core`
+        // is routinely run from `cqlite-core/`, where that names nothing and the command
+        // silently reports no missing fixtures. Measured from that directory: the
+        // unset form found none of the 10; this form finds all 10.
+        //
+        // Passing the absolute checkout corpus makes the command independent of both the
+        // caller's environment and the caller's directory. A remedy that is correct only
+        // from the repository root is a remedy that gets pasted from somewhere else and
+        // quietly reads as an all-clear — the exact silent-pass this test exists to stop.
+        let root = repo_root();
+        let verify_cmd = shell_quote(&root.join("test-data/scripts/fetch-datasets.sh"));
+        let verify_root = shell_quote(&root.join("test-data/datasets"));
+        let default_root = root.join("test-data/datasets").display().to_string();
         panic!(
             "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found under any \
              candidate dataset root (CQLITE_DATASETS_ROOT, then {default_root}).\n\
@@ -271,7 +282,7 @@ fn fixture() -> Fixture {
              Remedy: a SIGKILLed `fetch-datasets.sh` can delete tracked files \
              (#3310). Run:\n\
              \n\
-             \x20   env -u CQLITE_DATASETS_ROOT bash {verify_cmd} --verify-only\n\
+             \x20   CQLITE_DATASETS_ROOT={verify_root} bash {verify_cmd} --verify-only\n\
              \n\
              It names every git-tracked fixture that is missing and prints the exact, \
              correctly-scoped restore command for them — which is why this message \
