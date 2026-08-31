@@ -952,6 +952,145 @@ got=$(py_run "$py_plan_pure" 2)
   && ok "P4: rc 2 (maturin RAN and failed) still records the maturin invocation — a failed build is an invocation that happened" \
   || bad "P4: got '$got' want '$want_via'"
 
+# ---------------------------------------------------------------------------
+# (PB) THE PYTHON-BINDINGS DRIVER RECORD, DRIVEN END TO END — roborev job 273, F3
+# ---------------------------------------------------------------------------
+# run_python_bindings is the REAL function, extracted from the shipped gate. Its
+# --python-build-verify CHILD is stubbed (returning a chosen rc) because a real one needs a
+# venv, pip and a maturin toolchain; record_result is stubbed to the ONE thing it
+# contributes here — the terminal note — because the real one writes result files and runs
+# the summary/tree-integrity chokepoints, which need a whole gate run's state. That B11
+# asserts record_result really calls _fm_note_if_no_cargo_observed is what keeps the stub
+# honest.
+#
+# WHAT THIS MEASURES that the unit cases cannot: that run_python_bindings CAPTURES the rc
+# it used to discard and feeds it to the shared mapper. Before this fix the component ran a
+# bare `if bash … --python-build-verify; then`, so a venv/pip failure (rc 1) was
+# indistinguishable from a failed maturin build and the block claimed
+# `[via maturin: feature set NOT observed]` — a cargo invocation that never happened.
+pyb_run() { # <build-verify-rc> ; prints the rendered python-bindings annotation
+  local rc="$1" scratch
+  scratch=$(mktemp -d "$tmp/pyb-XXXXXX") || return 1
+  mkdir -p "$scratch/side"
+  cat > "$scratch/fake-gate-self" <<FAKESELF
+#!/usr/bin/env bash
+# Stands in for \`bash "\$GATE_SELF" --python-build-verify …\`: writes no active-venv path
+# (so the caller falls back to the shared venv, which here is a scratch path) and returns
+# the chosen rc.
+exit $rc
+FAKESELF
+  chmod +x "$scratch/fake-gate-self"
+  (
+    ONLY=""
+    LOG_DIR="$scratch"
+    REPO_ROOT="$scratch"
+    GATE_SELF="$scratch/fake-gate-self"
+    record_result() { _fm_note_if_no_cargo_observed "$1" "$2"; }
+    export AGENT_GATE_FM_DIR="$scratch/side"
+    AGENT_GATE_FM_COMPONENT=python-bindings
+    run_python_bindings >/dev/null 2>&1
+    _fm_annotate python-bindings
+  )
+}
+if type -P python3 >/dev/null 2>&1; then
+  got=$(pyb_run 1)
+  case "$got" in
+    *'never reached maturin'*'venv/pip'*)
+      ok "PB1: rc 1 (venv/pip setup failed) — run_python_bindings records that maturin was NEVER REACHED, naming the cause" ;;
+    *) bad "PB1: got '$got' — a venv/pip failure must not claim a maturin build" ;;
+  esac
+  got=$(pyb_run 4)
+  case "$got" in
+    *'never reached maturin'*'cargo/rustc'*)
+      ok "PB2: rc 4 (no cargo/rustc on PATH) — the toolchain gap is recorded as never reaching maturin" ;;
+    *) bad "PB2: got '$got'" ;;
+  esac
+  got=$(pyb_run 2)
+  [ "$got" = '[via maturin: feature set NOT observed]' ] \
+    && ok "PB3: rc 2 (maturin RAN and failed) — the invocation IS recorded; a failed build is an invocation that happened" \
+    || bad "PB3: got '$got'"
+else
+  skipped "PB1-PB3: no python3 on PATH — run_python_bindings SKIPs before the build-verify child, so the rc plumbing has no subject here"
+fi
+
+# ---------------------------------------------------------------------------
+# (E) MISCLASSIFICATION IS MECHANICALLY DETECTABLE — the part that stops a round 3
+# ---------------------------------------------------------------------------
+# roborev job 273, F2 survived a census that claimed "0 UNDECLARED at run time" because
+# that census READ THE TABLE for tooling-tests instead of EXERCISING it. So this section
+# exercises the classification: every `cargo`-class component is actually RUN, under
+# `--only` with the recording cargo shim, and an annotation carrying UNDECLARED is a FAIL.
+#
+# WHY UNDECLARED IS A MISCLASSIFICATION AND NOT A STYLE POINT: `cargo` class MEANS "this
+# component invokes cargo where this shell can observe it (its own shell, or a `bash -c`
+# body that calls _fm_observe_child)". A run that reaches its terminal status with an EMPTY
+# sidecar and no note therefore says one of two things is wrong — the component's cargo runs
+# in a child process (it should be `indirect:<driver>` or `unobservable:<why>`), or it has a
+# missing record. Both are the F2 defect, and both are invisible to a table read.
+#
+# THE SET IS DERIVED from the gate's COMPONENTS array + the extracted _fm_component_class,
+# never typed here, so a component that joins the set — or changes class — is covered with
+# no edit.
+#
+# E1, the one exception, and it is a FAIL DIRECTION, not an excusal: a component that CANNOT
+# be exercised must not be declared `cargo`, because an unexercisable claim of observability
+# is exactly what F2 was. `tooling-tests` runs THIS FILE, so exercising it would re-enter the
+# guard recursively; therefore it must be non-`cargo`, asserted here. Reverting it to `cargo`
+# reds this case by name — which is the mechanical detection F2 lacked.
+fm_recursion_hazard="tooling-tests"
+e1=()
+for c in $fm_recursion_hazard; do
+  if cls=$(_fm_component_class "$c" 2>/dev/null); then
+    [ "$cls" = cargo ] && e1+=("$c")
+  else
+    e1+=("$c(undeclared)")
+  fi
+done
+if [ "${#e1[@]}" -eq 0 ]; then
+  ok "E1: the component(s) this guard cannot exercise without recursing ($fm_recursion_hazard) are NOT declared class cargo — an unexercisable observability claim is the F2 defect"
+else
+  bad "E1: declared class cargo but cannot be exercised here (it runs this guard): ${e1[*]} — its cargo runs in child processes, so it must be indirect:<driver> or unobservable:<why>"
+fi
+
+# E2: EXERCISE the rest.
+e2_cargo=()
+for c in "${comps_arr[@]}"; do
+  cls=$(_fm_component_class "$c" 2>/dev/null) || continue
+  [ "$cls" = cargo ] || continue
+  case " $fm_recursion_hazard " in *" $c "*) continue ;; esac
+  e2_cargo+=("$c")
+done
+e2_bad=(); e2_missing=(); e2_ran=0; e2_observed=0
+for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
+  e2_sum="$tmp/e2-$c.txt"; e2_log="$tmp/e2-$c.log"; e2_argv="$tmp/e2-$c.argv"
+  : > "$e2_argv"
+  FM_SHIM_LOG="$e2_argv" \
+  AGENT_GATE_SUMMARY_FILE="$e2_sum" \
+  AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+  PATH="$shim_dir:$PATH" \
+    bash "$GATE" --only "$c" > "$e2_log" 2>&1
+  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP)" "$e2_sum" 2>/dev/null | head -1)
+  if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
+  e2_ran=$((e2_ran + 1))
+  e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"
+  case "$e2_ann" in
+    *UNDECLARED*|*UNCLASSIFIED*|'[]') e2_bad+=("$c=$e2_ann") ;;
+    *'no cargo build/test invoked'*)  ;;   # a NAMED terminal state, not a gap
+    *) e2_observed=$((e2_observed + 1)) ;;
+  esac
+done
+if [ "${#e2_cargo[@]}" -lt 20 ]; then
+  bad "E2: derived only ${#e2_cargo[@]} cargo-class component(s) from COMPONENTS — the derivation looks broken, so exercising them would prove almost nothing"
+elif [ "${#e2_missing[@]}" -ne 0 ]; then
+  bad "E2: no component line emitted for: ${e2_missing[*]} — the exercise did not happen, so no verdict about them exists"
+elif [ "$e2_observed" -lt 10 ]; then
+  bad "E2: only $e2_observed of $e2_ran exercised components reported an OBSERVED matrix — the shim is probably not being reached, so a green here would be vacuous"
+elif [ "${#e2_bad[@]}" -eq 0 ]; then
+  ok "E2: all $e2_ran exercised cargo-class components render an observed matrix ($e2_observed) or a NAMED terminal state — none reads UNDECLARED"
+else
+  bad "E2: MISCLASSIFIED or missing a record (declared cargo, observed nothing): ${e2_bad[*]}"
+fi
+
 echo
 echo "feature-matrix annotation guard: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
