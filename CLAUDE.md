@@ -429,7 +429,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   path. Two corrections came with it: **a config file does NOT keep a URL out of every argv** —
   git passes the configured URL to a transport HELPER, whose command line then carries the token —
   so a credential-bearing origin is now **refused** (userinfo must be absent or exactly `git`;
-  refusing ALL userinfo red the standard `ssh://git@github.com/…`, a false FAIL on correct input);
+  refusing ALL userinfo red the standard `ssh://git@github.com/…`, a false FAIL on correct input — **that ssh example is now moot, since job 296 refuses ssh forms outright; what KEEPS the rule is CI's `https://x-access-token:<TOKEN>@github.com/…`**);
   and **a specified control must be required to have WORKED** — the `chmod 600 … || true` on the
   isolated config is now fail-closed with the resulting mode VERIFIED (`find -perm 600`, since
   `stat` is GNU-vs-BSD incompatible), because "chmod exited 0" and "the file is 0600" are
@@ -558,9 +558,22 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   between a re-pointed remote and code execution. Anything unverifiable from the string (an ssh alias, a mirror, a local
   path, `file://`, a look-alike host) is a NAMED non-PASS, as is a URL-less `origin`. **And the URL grammar is CLOSED AXIS BY AXIS, because three rounds were "too permissive" in
   a NEW place each time** (no host; host but no transport; then `http://`/`git://` accepted):
-  transport (`https`/`ssh`/`git+ssh`/scp-form ONLY — `http://` and `git://` authenticate
+  transport (**`https://` ONLY since #3544/job 296** — `http://` and `git://` authenticate
   nothing, so an on-path impersonator supplies the objects this run certifies against; when the
-  rule was written those objects were EXECUTED, which is why it was a High), host,
+  rule was written those objects were EXECUTED, which is why it was a High. **`ssh://`,
+  `git+ssh://`, `ssh+git://` and scp-form `git@host:path` WERE accepted and are now REFUSED
+  (`ssh-transport:<form>`)**: the isolated environment must admit `HOME` for key and
+  `known_hosts` discovery, so OpenSSH still honours **`~/.ssh/config`**, where a
+  `Host github.com` rule rewrites `HostName` or runs `ProxyCommand`/`Match exec`. That is a
+  redirected baseline AND arbitrary execution behind a URL string that passes the identity check.
+  It is IN MODEL because HOME IS SHARED — every lane runs as one user with a writable
+  `/home/ubuntu`, so the planter is a PEER LANE, not the invoker (an invoker editing their own
+  config is out of model; a non-invoker route is a defect — same shape as #3617). It was met by
+  **DESCOPE, not hardening**, under the standing ruling on this family: a bounded residual was
+  unavailable because `ProxyCommand` EXECUTES, and the usual mitigation — a redirected baseline
+  degrades to a wrong component list the comparison detects — does not reach a harm that lands
+  during TRANSPORT, before any comparison. Measured cost: nil, every lane and CI already use
+  https; an ssh-form checkout now fails closed with the remedy named), host,
   port (default only), path, and userinfo (ACCEPTED — GitHub Actions writes
   `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
   checkout — and therefore REDACTED everywhere it is rendered, since SUMMARY blocks get pasted

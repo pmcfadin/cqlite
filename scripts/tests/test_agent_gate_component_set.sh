@@ -3163,7 +3163,7 @@ for _u in "https://github.com/contributor/cqlite.git" \
   [ "$(identity "$_u")" = not-canonical ] || id_bad="${id_bad:+$id_bad }ACCEPTED:$_u"
 done
 if [ -z "$id_bad" ]; then
-  ok "3544-remote-identity: every axis of the URL grammar has a rule — authenticated transports + pinned host + default port + exact path accepted; http/git/file, non-default ports, look-alike and unverifiable hosts, aliases, mirrors and local paths rejected"
+  ok "3544-remote-identity: every axis of the URL grammar has a rule — HTTPS ONLY + pinned host + default port + exact path accepted (ssh/git+ssh/scp are NO LONGER canonical — job 296); http/git/file, non-default ports, look-alike and unverifiable hosts, aliases, mirrors and local paths rejected"
 else
   bad "3544-remote-identity: misclassified: $id_bad"
 fi
