@@ -8692,11 +8692,34 @@ test_lane_lock_sweep_no_unobserved_attribution() {
     out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$rop" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
               bash -c "$body_ro" _ "$SUPERVISOR" "$rop" 2>&1 )"; rc=$?
     chmod 0755 "$rop" 2>/dev/null || true
-    if [[ "$out" == *"ACQUIRED="* ]] && [[ "$out" == *"FAILED to remove our own lock"* ]] \
-       && [[ "$out" == *"next start will find its holder affirmatively dead and reclaim it"* ]]; then
-      pass "lane-lock B9 sweep (release): a self-removal that FAILS is reported, with what happens next — a lock outliving a clean exit is otherwise unattributable, and silence there is the same defect one step earlier"
+    # WHAT THIS CASE ACTUALLY PRODUCES IS A PARTIAL REMOVAL, AND IT USED TO PIN THE FALSE CLAIM ABOUT IT
+    # (#3601, roborev job 240 B16). `rm -rf` unlinks CONTENTS before the directory, and those need write
+    # permission on DIFFERENT directories — `<lock>/pid` needs write on `<lock>`, `<lock>` needs write on
+    # its PARENT — so an unwritable parent deletes the pid record and leaves the directory. This case
+    # therefore reaches the pid-less state, and the assert here REQUIRED the log to promise that the next
+    # start would "reclaim it automatically", which is false: a pid-less lock is undecidable and the next
+    # start refuses over it indefinitely. A test that requires a false promise is what keeps the promise
+    # alive, so the state is now measured on disk FIRST and the claim asserted against it.
+    local surviving_pid='no' surviving_dir='no'
+    [[ -d "$rop/cqlite-worker-supervisor-$lane.lock" ]] && surviving_dir='yes'
+    [[ -f "$rop/cqlite-worker-supervisor-$lane.lock/pid" ]] && surviving_pid='yes'
+    if [[ "$surviving_dir" == 'yes' && "$surviving_pid" == 'no' ]]; then
+      pass "lane-lock B16 PREMISE: this case really does produce the PARTIAL removal — the lock directory survives and its pid record is GONE, so the claim below has the state it is about"
     else
-      fail "lane-lock-sweep-release: rc=$rc out=[$out] — the failed removal must be reported rather than swallowed"
+      fail "lane-lock-b16-premise: dir=[$surviving_dir] pid=[$surviving_pid] — the partial-removal state was not staged, so the asserts below would measure something else"
+    fi
+    if [[ "$out" == *"ACQUIRED="* ]] && [[ "$out" == *"PARTIALLY removed our own lock"* ]] \
+       && [[ "$out" == *"will NOT clear itself"* ]] && [[ "$out" == *"ACTION IS NEEDED"* ]] \
+       && [[ "$out" == *"PARENT directory is not writable"* ]]; then
+      pass "lane-lock B16: the partial removal is named as a partial removal, stated NOT to self-clear, flagged as needing action, and the cause an operator must fix (the parent's permissions) is named — because the removal a later refusal prints needs that same permission"
+    else
+      fail "lane-lock-b16-report: rc=$rc out=[$out] — a partial removal must be reported as the wedge it is"
+    fi
+    # NEGATIVE CONTROL: the pre-B16 promise must be ABSENT. This is the assert that stops it returning.
+    if [[ "$out" != *"reclaim it automatically"* ]]; then
+      pass "lane-lock B16: and it does NOT promise automatic reclaim — the promise that pointed away from this wedge is gone"
+    else
+      fail "lane-lock-b16-false-promise: the log still promises the next start will reclaim automatically, which is false for a pid-less lock"
     fi
     chmod 0755 "$rop" 2>/dev/null || true
     rm -rf "$rop" 2>/dev/null || true
@@ -8706,6 +8729,72 @@ test_lane_lock_sweep_no_unobserved_attribution() {
 }
 
 t test_lane_lock_sweep_no_unobserved_attribution
+
+
+# ---------------------------------------------------------------------------
+# "NOT OURS" IS NOT THE SAME FACT AS "SOMEONE ELSE'S" (#3601, roborev job 240 B17).
+#
+# The release reported EVERY state other than its own pid as "Something else owns that name now" —
+# including absent, unreadable, malformed and NUL-bearing records. Those establish only that ownership
+# CANNOT BE VERIFIED. Attributing them to another process names a holder that may not exist and sends an
+# operator looking for it; the DECISION is identical either way (remove nothing), so the wording is the
+# entire content of the finding, which is why it has to be the wording that is true.
+# ---------------------------------------------------------------------------
+test_lane_lock_release_distinguishes_foreign_from_unverifiable() {
+  local d tmp lane out body_steal foreign
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601b17$$"
+  mkdir -p "$tmp"
+
+  # One drive, derived from the shipped body by a single insertion, that replaces the lock's pid record
+  # with a value the caller chooses just before exiting — so the EXIT trap runs against that state.
+  body_steal="${SV_DRIVE_BODY/'exit 0'/'printf "%s\n" "$2" >"$SUPERVISOR_LOCK/pid"; exit 0'}"
+  if [[ "$body_steal" == "$SV_DRIVE_BODY" ]]; then
+    fail "lane-lock-b17-premise: the steal drive was not derived from the shipped body"
+    return 0
+  fi
+
+  # ---- (1) A PARSED FOREIGN PID: naming another holder is justified, because one was read.
+  foreign=909090
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_steal" _ "$SUPERVISOR" "$foreign" 2>&1 )"
+  if [[ "$out" == *"records holder pid $foreign, not this process"* ]] \
+     && [[ "$out" == *"Another holder owns that name"* ]]; then
+    pass "lane-lock B17 (parsed foreign pid): the refusal names the holder it actually read — an attribution backed by a parse is fine, and this is the only branch that may make one"
+  else
+    fail "lane-lock-b17-foreign: out=[$out]"
+  fi
+  rm -rf "$tmp"; mkdir -p "$tmp"
+
+  # ---- (2) AN UNPARSEABLE RECORD: ownership is unverifiable, and that is all that may be said.
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_steal" _ "$SUPERVISOR" 'not-a-pid' 2>&1 )"
+  if [[ "$out" == *"could not VERIFY that it owns it"* ]] \
+     && [[ "$out" == *"does NOT establish that another process holds this lock"* ]] \
+     && [[ "$out" == *"left exactly as found"* ]]; then
+    pass "lane-lock B17 (unparseable record): the refusal reports that ownership could not be VERIFIED and says explicitly that this does not establish another holder — the decision is unchanged, only the claim is now true"
+  else
+    fail "lane-lock-b17-unverifiable: out=[$out]"
+  fi
+  # NEGATIVE CONTROL, which is the whole finding: the unparseable branch must not attribute a holder.
+  if [[ "$out" != *"Another holder owns that name"* ]] && [[ "$out" != *"Something else owns that name"* ]]; then
+    pass "lane-lock B17: and it does NOT say another holder owns the name — the attribution that named a process nobody read is gone"
+  else
+    fail "lane-lock-b17-attributes: the unparseable branch still attributes the lock to another holder, which it never established"
+  fi
+  # ...and either way the record is untouched, so the wording change did not come with a behaviour change.
+  if [[ "$(cat "$tmp/cqlite-worker-supervisor-$lane.lock/pid" 2>/dev/null || true)" == 'not-a-pid' ]]; then
+    pass "lane-lock B17: the unverifiable record is left byte-for-byte as found — the decision was always to remove nothing, and it still is"
+  else
+    fail "lane-lock-b17-removed: the unverifiable record was modified or removed"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_release_distinguishes_foreign_from_unverifiable
 
 
 
