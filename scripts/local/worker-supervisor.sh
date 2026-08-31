@@ -2648,9 +2648,16 @@ supervisor_lock_refuse_unowned() {
   local cause="${1:-not-owned unrecorded}" detail=''
   case "$cause" in
     'declined'*)
-      # Only THIS path may claim the path is untouched: the publish saw a record already there and
-      # returned without writing (its staging file is removed on the way out).
-      detail="the lock directory was created by this process and then found to ALREADY CONTAIN a holder record, so this run declined to overwrite it and wrote NOTHING; that record reads [${cause#declined }]. The directory at that name is therefore not the one this process created — a peer renamed ours aside and published its own between our two steps. NOTHING at that path has been modified by this run"
+      # WHAT THIS PATH MAY CLAIM, NARROWED TO WHAT IS TRUE (#3601, roborev job 238 B15 — the SEVENTH
+      # instance of the alibi family, and it is in the text written to FIX the family's second instance).
+      # It used to say the run "wrote NOTHING" and that "NOTHING at that path has been modified", and
+      # both are false in detail: `supervisor_lock_publish` writes its staging file `pid.tmp.$$` BEFORE it
+      # tests for an existing `pid`, and `supervisor_lock_take` may then remove an ownership marker from
+      # the very directory being described. The load-bearing claim — the only one an operator needs and
+      # the only one this path establishes — is that THE EXISTING HOLDER RECORD WAS NOT OVERWRITTEN OR
+      # PUBLISHED OVER. That is what it says now, and the test asserts PRESERVATION OF THAT RECORD rather
+      # than an absence of modification the code never provided.
+      detail="the lock directory was created by this process and then found to ALREADY CONTAIN a holder record, so this run declined to publish over it; that record reads [${cause#declined }] and is INTACT — it was neither overwritten nor replaced. The directory at that name is therefore not the one this process created: a peer renamed ours aside and published its own between our two steps. This run did write and then remove its own scratch entries in that directory (a staging file, and an ownership marker), so it is not true that nothing there was touched — what is true, and what matters, is that the holder record itself was left exactly as found"
       ;;
     *)
       # This path DID write: `pid` at that name currently holds OUR pid, over whatever was there. Saying

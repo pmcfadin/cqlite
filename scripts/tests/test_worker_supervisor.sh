@@ -8437,12 +8437,31 @@ test_lane_lock_publish_declines_instead_of_clobbering() {
        '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
   printf "%s\n" 626262 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
-    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"declined to overwrite it and wrote NOTHING"* ]] \
-       && [[ "$out" == *"NOTHING at that path has been modified by this run"* ]] \
+    # THE ASSERTED PROPERTY IS PRESERVATION OF THE HOLDER RECORD, not an absence of modification (#3601,
+    # roborev job 238 B15). The old form required the refusal to say "wrote NOTHING" and "NOTHING at that
+    # path has been modified" — and so it PINNED two claims that were false in detail: the publish writes
+    # its staging file before it tests for an existing `pid`, and the un-create may remove an ownership
+    # marker from that same directory. A test that requires a false claim keeps the claim alive, which is
+    # how the alibi family survives being fixed; so this now asserts what the code actually guarantees.
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"declined to publish over it"* ]] \
+       && [[ "$out" == *"is INTACT — it was neither overwritten nor replaced"* ]] \
        && [[ "$out" == *"[pid 626262]"* ]] && [[ "$out" != *"ACQUIRED"* ]]; then
-      pass "lane-lock B11: with a peer's record published into the directory we created, the run refuses, names the record it found, and states it modified nothing"
+      pass "lane-lock B11/B15: with a peer's record published into the directory we created, the run refuses, names the record it found, and claims exactly the preservation it provides — not an absence of modification it does not"
     else
       fail "lane-lock-b11-endtoend: rc=$rc out=[$out]"
+    fi
+    # ...and the claim is not merely WORDED correctly, it is TRUE: the record's bytes are unchanged.
+    if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "626262" ]]; then
+      pass "lane-lock B15: the holder record is byte-for-byte as the peer left it — the refusal's one load-bearing claim is measured, not asserted"
+    else
+      fail "lane-lock-b15-record-not-preserved: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+    # NEGATIVE CONTROL for the wording: the refusal must NOT claim the path is untouched, because it is
+    # not. This is the assert that stops the false claim being reintroduced by a well-meaning edit.
+    if [[ "$out" != *"NOTHING at that path has been modified"* ]]; then
+      pass "lane-lock B15: the refusal does NOT claim the path is untouched — it says plainly that it wrote and removed its own scratch entries, because it did"
+    else
+      fail "lane-lock-b15-overclaims: the refusal claims nothing at that path was modified, which is false: a staging file and an ownership marker are written there"
     fi
     if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "626262" ]]; then
       pass "lane-lock B11: and the peer's record survives the whole refusal path — nothing on the way out removed or rewrote it"
