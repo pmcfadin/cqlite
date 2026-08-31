@@ -473,7 +473,14 @@ if [ "$AS_JSON" -eq 1 ]; then
   printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"board_page_rows":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":"yes"}\n' \
     "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$READY_PAGE_ROWS" "$BRANCH_ISSUE_COUNT" "$(json_str "$(redact_remote "$REMOTE")")" "$BOARD_AT_LIMIT"
 else
-  say "SCAN: advertised-collision rows=$ROWS ready=$READY_COUNT branch-issues=$BRANCH_ISSUE_COUNT remote=$(redact_remote "$REMOTE") measured=yes"
+  # `measured=` MUST FOLLOW THE COVERAGE, NOT THE EXIT PATH (#3436, roborev round 11). This
+  # printed a flat `measured=yes` even when the Ready page came back AT the limit, i.e. exactly
+  # the shape that may have been truncated — and a truncated Ready column can only ever HIDE
+  # rows, so `rows=0 measured=yes` asserted full board coverage the scan did not have. The JSON
+  # branch already carried board-at-limit; the human line did not, and the human line is what a
+  # sweep reads. Same rule as everything else here: a positive verdict needs an affirmative
+  # measurement, and "could not see the whole board" is not one.
+  say "SCAN: advertised-collision rows=$ROWS ready=$READY_COUNT branch-issues=$BRANCH_ISSUE_COUNT remote=$(redact_remote "$REMOTE") board-at-limit=$BOARD_AT_LIMIT measured=$([ "$BOARD_AT_LIMIT" = true ] && printf 'no' || printf 'yes')"
   if [ "$ROWS" -gt 0 ]; then
     say "SCAN: RESULT=FOUND rows=$ROWS (each row is board Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>. Remedy runs ON the box holding the lane: 'claim.sh verify <N>', then the documented resume path — never an unguarded create)"
   else

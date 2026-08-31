@@ -1074,14 +1074,23 @@ else
 $out22b"
 fi
 
-# (c) The prose must send the reader to the RIGHT procedure: it must say the
-# abandoned-lane test does NOT apply, and must name verify as the first step.
+# (c) The prose must send the reader to the RIGHT procedure — and this assertion was
+# INVERTED until roborev round 11. It required the text to say the abandoned-lane
+# procedure "does not apply", i.e. it PINNED AN OVER-CLAIM: the lane lock is
+# MACHINE-LOCAL and the branch is a REMOTE artifact, so holding the lock proves only
+# that this process holds this machine's lock for this issue. A live worker on another
+# machine can hold that branch with no claim ref (#3393, the very scenario this verdict
+# names), and should-reap / board Status / branch author are the ONLY signals here that
+# can see another machine. Telling the reader to skip them fails toward two writers. So
+# the text must now SCOPE the claim and KEEP those checks, and still name verify first.
 if printf '%s\n' "$out22b" | grep -q 'should-reap' \
-   && printf '%s\n' "$out22b" | grep -qi 'does not apply' \
+   && printf '%s\n' "$out22b" | grep -qi 'machine-local' \
+   && printf '%s\n' "$out22b" | grep -qi 'does NOT establish that the branch' \
+   && ! printf '%s\n' "$out22b" | grep -qi 'PROCEDURE DOES NOT APPLY' \
    && printf '%s\n' "$out22b" | grep -q "'verify' subcommand"; then
-  ok "(c) AC6: the released-then-resumed text names the abandoned-lane procedure as NOT applicable and points at verify"
+  ok "(c) AC6: the released-then-resumed text scopes its claim to LOCAL evidence, keeps the cross-machine checks, and points at verify"
 else
-  bad "(c) released-then-resumed text did not disclaim the abandoned-lane procedure / name verify:
+  bad "(c) released-then-resumed text over-claims (branch ownership from a machine-local lock) or drops the cross-machine checks:
 $out22b"
 fi
 

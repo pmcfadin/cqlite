@@ -1301,13 +1301,23 @@ cmd_verify() {
   # identity walk. Without this, `verify` from a session whose lane is
   # `.claude/worktrees/issue-<N>-<slug>` walked ancestors against
   # `${LANE_ROOT}/lane-<N>` and could never match its own lock.
-  if parse_record "$(lock_record "$issue")" && [ -n "${REC_LANE_DIR:-}" ]; then
+  # ONE SNAPSHOT, NOT TWO (#3436, roborev round 11). This used to parse the record here to
+  # choose the lane and then parse it AGAIN after prepare_identity for the verdict. Both reads
+  # hit the SAME path — G_RECORD is lock_record(issue), a pure function of issue and lock root,
+  # independent of the lane — so the second was a pure re-read and a TOCTOU window: a concurrent
+  # release/reacquire between them yields a verdict whose LANE came from record A and whose
+  # HOLDER came from record B, and a record that VANISHED between them leaves the REC_* fields
+  # cleared while the code carries on to a confident answer. prepare_identity writes only G_*,
+  # so the single parse below survives it.
+  local have_rec=0
+  parse_record "$(lock_record "$issue")" && have_rec=1
+  if [ "$have_rec" -eq 1 ] && [ -n "${REC_LANE_DIR:-}" ]; then
     lane="$REC_LANE_DIR"
   else
     lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
   fi
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"   # sets G_RECORD from the lock root
-  if ! parse_record "$G_RECORD"; then
+  if [ "$have_rec" -eq 0 ]; then
     emit "VERIFY-FAIL issue=$issue reason=no-lock $(self_fields) lane-dir=$lane"
     return 2
   fi
@@ -1383,10 +1393,14 @@ cmd_probe() {
   # boot-id/start-ticks, a non-live --pid) simply cannot match SELF, and the record's
   # own liveness is reported unchanged.
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt" compare
-  # parse_record above populated the REC_* globals; prepare_identity does not touch
-  # them, but re-read anyway so the parse and the comparison are adjacent and no future
-  # edit can separate them.
-  parse_record "$record" || true
+  # DELIBERATELY NOT RE-READ (#3436, roborev round 11). This line used to be
+  # `parse_record "$record" || true`, justified as keeping the parse adjacent to the
+  # comparison — but adjacency in the SOURCE bought nothing and cost correctness in TIME: a
+  # concurrent release/reacquire between the first parse and this one produced a verdict whose
+  # LANE came from the earlier record and whose HOLDER came from the later one, and the
+  # `|| true` meant a record that had VANISHED cleared every REC_* field and still reached
+  # `record_liveness`, so probe could report HELD or UNKNOWN-FOREIGN about a lock that no longer
+  # existed. The first parse is the snapshot; prepare_identity writes only G_*, so it survives.
   liveness="$(record_liveness)"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
   # our-pid / our-start-ticks are published ALONGSIDE our-token so a consumer can compare
