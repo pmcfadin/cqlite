@@ -865,6 +865,202 @@ if run 0 "success path prints SCOPE in the anchored-delta case too" \
     *) bad "scope: the delta pair must carry the SCOPE clause too (got: $OUT)" ;;
   esac
 fi
+# #3650 SLICE 1 EXTENSION. Slice 1 ships the base-staleness ADVISORY, which does
+# NOT close the merge-result gap, so all THREE original SCOPE lines are RETAINED
+# verbatim and only ONE line is added pointing at the advisory. Pinning the three
+# by their own text (not just by the marker) is what makes "retained" checkable:
+# a reword that quietly dropped one would otherwise still satisfy Case 39 above.
+SCOPE1="this proves a full gate PASSed on THIS tree"
+SCOPE2="the tree was certified against current main (#3650)"
+SCOPE3="composes this diff with main tip, which no gate here has executed"
+for shape in direct delta; do
+  if [ "$shape" = direct ]; then
+    run 0 "SCOPE retained (direct)" 2421 "$CERTIFIED" "$GOOD" || continue
+  else
+    run 0 "SCOPE retained (anchored delta)" 2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA" || continue
+  fi
+  missing=""
+  for needle in "$SCOPE1" "$SCOPE2" "$SCOPE3"; do
+    [ "${OUT#*"$needle"}" = "$OUT" ] && missing="$missing | $needle"
+  done
+  if [ -z "$missing" ]; then
+    ok "scope($shape): all THREE #3465 SCOPE lines are retained verbatim (#3650 slice 1)"
+  else
+    bad "scope($shape): a SCOPE line was dropped:$missing"
+  fi
+  case "$OUT" in
+    *"PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap"*)
+      ok "scope($shape): the added SCOPE line points at the advisory" ;;
+    *) bad "scope($shape): the added SCOPE line must point at the advisory (got: $OUT)" ;;
+  esac
+done
+
+# --- Case 41: the base-staleness ADVISORY (#3650 slice 1) -------------------
+# Slice 1's whole contract is that it changes NO verdict. The advisory is
+# resolved from premerge-assert.sh's OWN directory with no env override
+# (#3312's enforcer rule), so a case needing a different advisory SUBSTITUTES
+# THE ARTIFACT in a scratch copy of the tree — never a path variable, which
+# would be one more seam a real invoker could set.
+#
+# flow_copy <name> <advisory-body|ABSENT> — builds the scratch copy and sets the
+# global $COPY. It sets a GLOBAL rather than printing a path on purpose: a
+# command-substitution form runs in a SUBSHELL, so a bad() inside it would
+# increment a counter that dies with the subshell, and a failed copy would make
+# the caller's `&&` chain skip the case SILENTLY — a vacuous pass. The `local`
+# declarations are split too: `local a="$1" d="$T/$a/x"` reads $a before the
+# assignment takes effect and dies under `set -u`.
+flow_copy() {
+  local name="$1" body="$2"
+  local d="$T/$name/flow"
+  COPY=""
+  mkdir -p "$d"
+  if ! cp "$ASSERT" "$d/premerge-assert.sh"; then
+    bad "flow_copy($name): could not copy premerge-assert.sh into the scratch tree"
+    return 1
+  fi
+  if [ "$body" != ABSENT ]; then
+    printf '%s\n' "$body" >"$d/base-staleness.sh"
+    chmod +x "$d/base-staleness.sh"
+  fi
+  if [ ! -f "$d/premerge-assert.sh" ]; then
+    bad "flow_copy($name): the scratch copy is missing after cp"
+    return 1
+  fi
+  COPY="$d/premerge-assert.sh"
+  return 0
+}
+
+# run_copy <expected-exit> <desc> <copied-assert> <args...>
+run_copy() {
+  local want="$1" desc="$2" script="$3"
+  shift 3
+  OUT=$(PATH="$BIN:$PATH" bash "$script" "$@" 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+STALE_ADV='#!/usr/bin/env bash
+printf "BASE-STALENESS: behind 107 commits (on origin/main, not reachable from the merge-base)\n"
+printf "BASE-STALENESS: blast-radius 22 RECOGNISED of 107 commits behind\n"
+printf "BASE-STALENESS: verdict STALE-RECOGNISED\n"
+exit 4'
+if flow_copy adv-stale "$STALE_ADV" &&
+  run_copy 0 "a STALE-RECOGNISED advisory still merges (slice 1 changes no verdict)" \
+    "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory: a stale base still reaches PREMERGE: OK" ;;
+    *) bad "advisory: the verdict must be unchanged by the advisory (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: verdict STALE-RECOGNISED"*)
+      ok "advisory: the finding is printed on PREMERGE: ADVISORY lines" ;;
+    *) bad "advisory: STALE-RECOGNISED must be reported on ADVISORY lines (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: behind 107 commits"*)
+      ok "advisory: every line of the advisory's report is carried through" ;;
+    *) bad "advisory: the behind-count line must be carried through (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*"#3650"*) ok "advisory: the SCOPE disclaimer is STILL printed alongside it" ;;
+    *) bad "advisory: the SCOPE lines must survive (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"treat exit 5 /"*"UNMEASURED as STALE"*)
+      ok "advisory: the UNMEASURED-is-stale consumer contract is stated at the merge point" ;;
+    *) bad "advisory: the UNMEASURED-is-stale contract must be stated (got: $OUT)" ;;
+  esac
+fi
+
+# NON-VACUITY for the four stub cases below: the STALE stub above genuinely
+# carries the shape the case claims (exit 4 + the verdict token), so a case
+# asserting "a stale advisory does not change the verdict" is not testing a stub
+# that silently exits 0.
+if [ "${STALE_ADV#*exit 4}" != "$STALE_ADV" ] &&
+  [ "${STALE_ADV#*STALE-RECOGNISED}" != "$STALE_ADV" ]; then
+  ok "advisory fixture: the stub really exits 4 and really reports STALE-RECOGNISED"
+else
+  bad "advisory fixture: the stale stub does not have the shape the case claims"
+fi
+
+for pair in "5:an UNMEASURED (exit 5) advisory" "9:a BROKEN (exit 9) advisory" \
+  "0:a NO-STALENESS (exit 0) advisory"; do
+  code="${pair%%:*}"
+  what="${pair#*:}"
+  body="#!/usr/bin/env bash
+printf 'BASE-STALENESS: verdict from a stub exiting %s\n' $code
+exit $code"
+  if flow_copy "adv-exit-$code" "$body" &&
+    run_copy 0 "$what cannot change the exit code" "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"exit $code"*)
+        ok "advisory: $what is REPORTED with its exit code, and is not fatal" ;;
+      *) bad "advisory: $what must be reported with exit $code (got: $OUT)" ;;
+    esac
+  fi
+done
+
+# An ABSENT advisory is reported, not fatal — the artifact is simply not copied.
+if flow_copy adv-absent ABSENT &&
+  run_copy 0 "an ABSENT advisory cannot fail the assert" "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: ADVISORY base-staleness.sh is ABSENT"*)
+      ok "advisory: an absent advisory is named on an ADVISORY line, and is not fatal" ;;
+    *) bad "advisory: an absent advisory must be reported (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory: the verdict is unchanged when the advisory is absent" ;;
+    *) bad "advisory: an absent advisory must not change the verdict (got: $OUT)" ;;
+  esac
+fi
+
+# An advisory printing NOTHING is reported too (an empty report is not a clean one).
+SILENT_ADV='#!/usr/bin/env bash
+exit 0'
+if flow_copy adv-silent "$SILENT_ADV" &&
+  run_copy 0 "a SILENT advisory is reported, not read as clean" "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"produced NO output"*) ok "advisory: an empty report is named rather than read as a finding" ;;
+    *) bad "advisory: an empty report must be named (got: $OUT)" ;;
+  esac
+fi
+
+# A REFUSAL is unaffected: the advisory runs only on the success path, so a
+# refusing invocation carries no ADVISORY lines and still exits 2.
+if flow_copy adv-refuse "$STALE_ADV" &&
+  run_copy 2 "a refusal is unaffected by the advisory" "$COPY" 2421 "$CERTIFIED" "$T/lite-only.txt"; then
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*) bad "advisory: a refusal must not carry ADVISORY lines (got: $OUT)" ;;
+    *) ok "advisory: a refusal path prints no ADVISORY lines and still exits 2" ;;
+  esac
+fi
+
+# NON-VACUITY for the wiring itself: the stub cases above would all pass if the
+# real script invoked some OTHER path. Run the REAL, shipped script and require
+# the REAL advisory's own prefix to appear — that is the only case that proves
+# the wiring points at scripts/flow/base-staleness.sh.
+if run 0 "the SHIPPED script invokes the SHIPPED advisory" 2421 "$CERTIFIED" "$GOOD"; then
+  # The needle is the shipped advisory's own PREFIX, not one of its measured
+  # lines: the suite's cwd is not guaranteed to be a git work tree, and an
+  # UNMEASURED run is a perfectly good demonstration that the shipped artifact
+  # ran. Pinning a measured line here would red on a correct run.
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS:"*)
+      ok "advisory: the shipped premerge-assert really runs scripts/flow/base-staleness.sh" ;;
+    *) bad "advisory: the shipped script must invoke the shipped advisory (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*"NON-EXHAUSTIVE"*)
+      ok "advisory: the advisory's own non-exhaustiveness travels to the merge point" ;;
+    *) bad "advisory: the NON-EXHAUSTIVE lines must travel with the report (got: $OUT)" ;;
+  esac
+fi
+
 
 # --- Case 40: the three exit-3 causes are DISTINGUISHABLE (nit 8) ------------
 # Exit 3 covers a usage error, a tool failure and a gh failure. The CODES are

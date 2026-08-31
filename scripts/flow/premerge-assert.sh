@@ -109,12 +109,31 @@
 #     proves FACT 1 — the diff is unchanged since certification and a full gate
 #     of record PASSed on that exact tree — and it explicitly does NOT prove
 #     FACT 2 — that the diff was certified against the main it will join. Fact 2
-#     is a gate on the MERGE RESULT and is filed as #3650; it is deliberately
-#     NOT implemented here, and neither is a staleness bound or a "your base is N
-#     commits behind" advisory. The success path SAYS so (`PREMERGE: SCOPE`),
-#     because an enforcement that certifies the wrong tree while CLAIMING to
-#     close #3465 would be the vacuous-pass shape one level up — worse than the
-#     gap it replaces, which is at least visible.
+#     is a gate on the MERGE RESULT and is STILL NOT implemented here: it is
+#     #3650's SLICE 2, filed separately. The success path SAYS so
+#     (`PREMERGE: SCOPE`), because an enforcement that certifies the wrong tree
+#     while CLAIMING to close #3465 would be the vacuous-pass shape one level up
+#     — worse than the gap it replaces, which is at least visible.
+#
+#     WHAT SLICE 1 ADDED, AND WHAT IT DELIBERATELY DID NOT. This script now runs
+#     `scripts/flow/base-staleness.sh` (resolved from its OWN directory, with no
+#     env override — #3312's enforcer rule) and reports its finding on
+#     `PREMERGE: ADVISORY` lines: `N` commits behind the merge-base and `M` of
+#     those touching this diff's blast radius (paths the diff touches + a
+#     hard-coded gate-global set). That is INFORMATION, not enforcement:
+#     **the advisory can never change this script's exit code.** An advisory that
+#     is absent, fails, or reports `UNMEASURED` is REPORTED and is not fatal in
+#     slice 1. Two properties of it a reader must carry:
+#       * `UNMEASURED` MUST be treated as STALE by any consumer, never as fresh
+#         (#3650 D3) — the standing rule against deriving a pass from the absence
+#         of a bad signal. Slice 2 is the consumer that will act on it.
+#       * the blast radius is NOT a dependency closure. A commit changing an item
+#         this diff CALLS, touching neither this diff's paths nor a gate-global
+#         path, is reported as NOT staling. The advisory declares that on every
+#         run; it is a real false-negative class, filed, not closed.
+#     So the three `PREMERGE: SCOPE` lines are RETAINED: slice 1 does not close
+#     the gap they disclose, and removing them would be exactly the overclaim
+#     this residual exists to prevent.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -127,7 +146,9 @@
 # EXIT CODES
 #   0   gate of record verified + head matches + PR OPEN
 #       — prints "PREMERGE: OK <sha>", "PREMERGE: SCOPE ..." (what was and was
-#         NOT proven, #3650) and "PREMERGE: GATE-OF-RECORD ..."
+#         NOT proven, #3650), "PREMERGE: ADVISORY ..." (the non-blocking
+#         base-staleness report, #3650 slice 1 — it NEVER changes this exit
+#         code) and "PREMERGE: GATE-OF-RECORD ..."
 #         (plus "PREMERGE: DELTA-RECERT ..." in Case B)
 #   2   no/invalid gate of record, OR head moved (mismatch), OR PR closed/merged
 #       — LOUD multi-line refusal
@@ -236,6 +257,51 @@ refuse_tool_failure() {
   printf '  assert — do NOT re-run the gate. Refusing to merge (fail closed).\n' >&2
   printf '========================================================\n' >&2
   exit 3
+}
+
+# ---------------------------------------------------------------------------
+# THE BASE-STALENESS ADVISORY (#3650 slice 1) — INFORMATION, NEVER A VERDICT
+# ---------------------------------------------------------------------------
+# Resolved from THIS script's own directory, with NO env override and no
+# `${...:-...}` fallback: #3312's second rule is that the constrained party must
+# not choose its own enforcer, and "which paths stale my certification" is
+# exactly what a lane wanting to skip a re-gate would redirect. A test needing a
+# different advisory substitutes the ARTIFACT in a scratch copy of the tree.
+#
+# NOTHING here may alter this script's exit code. Every failure mode — absent,
+# not executable, non-zero, empty output, UNMEASURED — is REPORTED on a
+# `PREMERGE: ADVISORY` line and then ignored. That is slice 1's whole contract:
+# an enforcement built on an information source nobody has read yet would be the
+# vacuous-pass shape one level up.
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+advisory_script="$self_dir/base-staleness.sh"
+
+print_base_staleness_advisory() {
+  local adv_out adv_rc=0 line
+  if [ ! -f "$advisory_script" ]; then
+    printf 'PREMERGE: ADVISORY base-staleness.sh is ABSENT at %s — the base-staleness\n' \
+      "$advisory_script"
+    printf 'PREMERGE: ADVISORY report could not be produced. NOT fatal in #3650 slice 1: the\n'
+    printf 'PREMERGE: ADVISORY advisory changes no verdict, so its absence changes none either.\n'
+    return 0
+  fi
+  adv_out=$(bash "$advisory_script" 2>&1) || adv_rc=$?
+  if [ -z "$adv_out" ]; then
+    printf 'PREMERGE: ADVISORY base-staleness.sh produced NO output (exit %s) — reported, and\n' \
+      "$adv_rc"
+    printf 'PREMERGE: ADVISORY not fatal in #3650 slice 1.\n'
+    return 0
+  fi
+  while IFS= read -r line; do
+    printf 'PREMERGE: ADVISORY %s\n' "$line"
+  done <<EOF
+$adv_out
+EOF
+  printf 'PREMERGE: ADVISORY exit %s — advisory ONLY (#3650 slice 1): it did NOT affect this\n' \
+    "$adv_rc"
+  printf 'PREMERGE: ADVISORY assert. A CONSUMER of the advisory (slice 2) must treat exit 5 /\n'
+  printf 'PREMERGE: ADVISORY UNMEASURED as STALE, never as fresh.\n'
+  return 0
 }
 
 # assert_readable_summary <file> <what> — the three file-level preconditions.
@@ -682,6 +748,11 @@ printf 'PREMERGE: SCOPE this proves a full gate PASSed on THIS tree (%s); it doe
   "$certified"
 printf 'PREMERGE: SCOPE the tree was certified against current main (#3650) — a squash-merge\n'
 printf 'PREMERGE: SCOPE composes this diff with main tip, which no gate here has executed.\n'
+# One added SCOPE line pointing at the advisory (#3650 slice 1). The three lines
+# above are RETAINED verbatim: slice 1 ships INFORMATION, not the merge-result
+# gate, so the disclaimer they carry is still true.
+printf 'PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap (non-blocking, #3650 slice 1).\n'
+print_base_staleness_advisory
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
   "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
 if [ -n "$delta_file" ]; then
