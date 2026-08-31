@@ -231,6 +231,8 @@ project-policy decision tracked as **#3680**, as a precondition of *enforcement*
 - **WHEN** the advisory is run
 - **THEN** that field reads `DATE-UNAVAILABLE`
 - **AND** the verdict is the measured one, not `UNMEASURED`
+- **AND** the output carries no `UNMEASURED` token at all, so a slice-2 consumer grepping for it does not
+  false-positive on a fully measured run
 
 #### Scenario: The no-fetch guarantee is scoped and declared, not detected
 - **GIVEN** any run of the advisory
@@ -261,7 +263,12 @@ project-policy decision tracked as **#3680**, as a precondition of *enforcement*
 and that no `lazy-fetch-guard` measurement is claimed, alongside the partial-clone case that shows the
 kept `GIT_NO_LAZY_FETCH=1` export really prevents a lazy fetch on this fleet's git; the replacement-ref
 case, whose fixture is asserted with git to really hide the path and whose planted mutant — the export
-removed — is shown to fail open).
+removed — is shown to fail open; and the **commit-date-unavailable case**, which fails ONLY `git log` via a
+`PATH` `git` shim that forwards every other invocation to the real git, then asserts BOTH halves of the
+exception — `committed DATE-UNAVAILABLE` is printed AND the run stays measured (`verdict
+STALE-RECOGNISED`, exit `4`, the blast-radius counts intact, and no `UNMEASURED` token anywhere) — with
+two non-vacuity assertions, that the shim really failed exactly ONE `git log` call and that the same
+fixture WITHOUT the shim still prints a real date, so the case cannot pass with the shim unconsulted).
 
 ### Requirement: Slice 1 changes no verdict and retains the #3465 scope disclaimer
 

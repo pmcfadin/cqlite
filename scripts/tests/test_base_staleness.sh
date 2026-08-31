@@ -1602,6 +1602,88 @@ if [ "$tmpl_bad" -eq 0 ]; then
   ok "template: the script's own STATIC text carries none of PASS, OK, RESULT: (D2d, structural)"
 fi
 
+# --- Case 22 (R4 SCENARIO, #3650 C audit): AN UNAVAILABLE COMMIT DATE DOES ---
+#     NOT MAKE A MEASURED SCAN UNMEASURABLE
+#
+# THIS BRANCH EXISTS BECAUSE THE CODE DELIBERATELY DECLINES TO ESCALATE (review
+# B3): `git log -1 --format=%cI` is the ONE git call whose failure is not
+# `UNMEASURED`. It feeds neither N nor M, injecting the verdict token into a
+# fully measured run would false-positive a slice-2 consumer grepping
+# `UNMEASURED`, and reddening the tool on correct input is the guard agents learn
+# to waive. That is precisely the claim that needs evidence, and the R4 scenario
+# had NONE — `DATE-UNAVAILABLE` appeared nowhere in this suite.
+#
+# THE SHIM IS NARROW BY CONSTRUCTION: it forwards EVERY git invocation to the
+# real git and fails ONLY `log`, so exactly one call degrades while every call
+# FEEDING the measurement still runs. A broad `git` failure would prove nothing
+# about this exception — it would just be Case 9's UNMEASURED path again.
+#
+# NON-VACUITY, BOTH HALVES, because a PATH shim the script never reaches is
+# indistinguishable from a working degrade:
+#   (a) the shim RECORDS its `log` invocations, so the degrade is attributed to a
+#       call that really happened (exactly one, the date);
+#   (b) the SAME fixture WITHOUT the shim must still print a real date, i.e.
+#       Case 4's positive-path assertion holds here too and `DATE-UNAVAILABLE` is
+#       absent — otherwise this case could pass against a script that never
+#       prints a date at all.
+GIT_LOGFAIL_DIR="$T/git-logfail-shim"
+GIT_LOG_CALLS="$T/git-log-calls.txt"
+REAL_GIT_FOR_DATE=$(command -v git 2>/dev/null) || REAL_GIT_FOR_DATE=""
+if [ -z "$REAL_GIT_FOR_DATE" ]; then
+  bad "date-unavailable: no git on PATH — the informational-degrade cannot be observed"
+else
+  mkdir -p "$GIT_LOGFAIL_DIR"
+  {
+    printf '#!/usr/bin/env bash\n'
+    # The real git by ABSOLUTE path: the shim dir is FIRST on PATH, so a bare
+    # `git` here would re-enter this shim forever.
+    printf '# Test shim: record and FAIL `git log`; delegate everything else to the real git.\n'
+    printf 'if [ "${1:-}" = log ]; then printf %%s\\\\n "$*" >>"$GIT_LOG_CALLS"; exit 1; fi\n'
+    printf 'exec %s "$@"\n' "$REAL_GIT_FOR_DATE"
+  } >"$GIT_LOGFAIL_DIR/git"
+  chmod +x "$GIT_LOGFAIL_DIR/git"
+
+  # (b) FIRST, the positive path on this very fixture, WITHOUT the shim: the date
+  # is really printed here, so the degrade below is a degrade and not the normal
+  # output.
+  OUT=$(cd "$R_MOTIV" && bash "$ADVISORY" 2>&1)
+  RC=$?
+  record_out "commit date PRESENT (non-vacuity control for DATE-UNAVAILABLE)"
+  if [ "$RC" -eq 4 ]; then
+    ok "date-unavailable(control): the unshimmed fixture MEASURES (exit 4)"
+  else
+    bad "date-unavailable(control): the unshimmed fixture must exit 4, got $RC (output: $OUT)"
+  fi
+  has "date-unavailable(control): a REAL commit date is printed without the shim" "committed 2"
+  lacks "date-unavailable(control): the degrade token is absent without the shim" "DATE-UNAVAILABLE"
+
+  : >"$GIT_LOG_CALLS"
+  OUT=$(cd "$R_MOTIV" && PATH="$GIT_LOGFAIL_DIR:$PATH" GIT_LOG_CALLS="$GIT_LOG_CALLS" \
+    bash "$ADVISORY" 2>&1)
+  RC=$?
+  record_out "origin/main commit date UNAVAILABLE"
+  if [ "$RC" -eq 4 ]; then
+    ok "date-unavailable: the run stays MEASURED — exit 4, not 5"
+  else
+    bad "date-unavailable: an unavailable commit date must leave exit 4, got $RC (output: $OUT)"
+  fi
+  has "date-unavailable: the one field degrades to the literal token" \
+    "committed DATE-UNAVAILABLE"
+  has "date-unavailable: the verdict is still STALE-RECOGNISED" "verdict STALE-RECOGNISED"
+  # THE POINT OF THE EXCEPTION: the verdict vocabulary stays single-purpose, so a
+  # slice-2 consumer grepping `UNMEASURED` does not false-positive on this run.
+  lacks "date-unavailable: the run carries NO 'UNMEASURED' token anywhere" "UNMEASURED"
+  has "date-unavailable: the measurement itself is intact (N and M are reported)" \
+    "blast-radius 1 RECOGNISED of 2 commits behind"
+  # (a) the shim really fired, so the degrade above is attributed to a real call.
+  date_log_calls=$(grep -c . "$GIT_LOG_CALLS" | tr -d ' ')
+  if [ "$date_log_calls" -eq 1 ]; then
+    ok "date-unavailable: the shim IS wired — exactly ONE 'git log' call was failed (the date), so the degrade is not vacuous"
+  else
+    bad "date-unavailable: the shim recorded $date_log_calls 'git log' call(s), wanted 1 — the case would pass with the shim never consulted"
+  fi
+fi
+
 # --- NO SUMMARY BLOCK HERE, DELIBERATELY -------------------------------------
 # The whole-suite assertions, the count reconciliation, the summary line and the
 # exit status all live in `finish`, which runs from the EXIT trap installed near
