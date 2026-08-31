@@ -2010,6 +2010,63 @@ supervisor_legacy_lock_guard() {
 # measure no pid liveness at all.
 # ---------------------------------------------------------------------------
 
+# supervisor_lock_pid_nul_free <file> — echo EXACTLY one of
+#   nul-free | contains-nul | could-not-measure <cause>
+#
+# WHY THIS CANNOT BE DONE IN THE SHELL, WHICH IS THE WHOLE REASON IT EXISTS (#3601, roborev job 231).
+# A NUL byte is invisible to every check that runs on a shell VARIABLE: bash cannot hold one, and `read`
+# discards it silently. MEASURED on bash 5.2.21: a pid file whose bytes are `4242 NUL LF` reads back as
+# the string `4242`, length 4 — non-empty, single line, all decimal digits, non-zero. It therefore
+# passed every gate in `supervisor_lock_pid_read` and the lock got RECLAIMED, which is precisely the
+# AC1 defect this parser exists to close: a partially-written pid file is exactly where NULs come from,
+# since a crash mid-write can leave allocated-but-zeroed bytes. So the check MUST look at the file's
+# bytes, before any shell variable is involved, and comparing the byte count against the NUL-stripped
+# byte count is the portable way to do it (`wc -c` and `tr -d '\000'` are both POSIX; no GNU-only flag,
+# nothing that needs `grep -P`, `od` parsing or bash 4).
+#
+# BASH'S OWN WARNING IS NOT A USABLE SIGNAL, and this is worth recording because it looks like one.
+# `$(cat …)` on such a file does emit `warning: … ignored null byte in input` — on STDERR, which the
+# idiom at every one of these sites (`2>/dev/null`) already suppresses. Re-plumbing that redirection to
+# catch it would make correctness depend on matching bash's message TEXT, which is not a stable
+# contract: the same defect class as a gate parser keyed on cargo's literal status words (CLAUDE.md
+# #3400). The byte count is a measurement; the warning is a presentation detail.
+#
+# A FAILED MEASUREMENT IS NOT "NO NULS FOUND" — the third value, for the same reason `log_size` in this
+# file grew one (#3601): both counts are external commands and either can fail, and folding that onto
+# the permissive answer is how an unmeasurable read becomes an accepted pid. The counts are validated as
+# DIGIT STRINGS and compared as STRINGS, never with `-eq`, because `-eq` reads an empty operand as 0 and
+# two failed measurements would then compare EQUAL and report `nul-free`.
+#
+# THE TWO COUNTS COME FROM TWO OPENS, so a file rewritten between them yields mismatched counts and is
+# reported `contains-nul` — a REFUSAL. The ambiguity therefore costs a start and can never cost a live
+# holder its lock, which is the direction every branch here is biased in.
+#
+# Both operands are supplied by REDIRECTION, never as arguments, so an option-shaped path (#3601 AC7)
+# needs no `--` and no quoting argument here.
+supervisor_lock_pid_nul_free() {
+  local f="$1" raw='' stripped=''
+  raw="$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]')" || raw=''
+  stripped="$(tr -d '\000' <"$f" 2>/dev/null | wc -c | tr -d '[:space:]')" || stripped=''
+  case "$raw" in
+    '' | *[!0123456789]*)
+      printf '%s' 'could-not-measure raw-byte-count-unmeasurable'
+      return 0
+      ;;
+  esac
+  case "$stripped" in
+    '' | *[!0123456789]*)
+      printf '%s' 'could-not-measure nul-stripped-byte-count-unmeasurable'
+      return 0
+      ;;
+  esac
+  if [[ "$raw" == "$stripped" ]]; then
+    printf '%s' 'nul-free'
+  else
+    printf '%s' 'contains-nul'
+  fi
+  return 0
+}
+
 # supervisor_lock_pid_read <pid-file> — echo EXACTLY one of
 #   pid <digits>          a single, canonical, non-zero decimal pid
 #   unparseable <cause>   nothing usable is there, for a NAMED reason
@@ -2017,10 +2074,18 @@ supervisor_legacy_lock_guard() {
 # Every failure is a NAMED cause and never a bare empty string, because the caller must be able to tell
 # "no pid" from "pid 0" from "unreadable" — collapsing them is the original defect.
 #
-# NO EXTERNAL COMMAND. `read` and `[[ ]]` only, so no verdict depends on `PATH`, and the file is opened
-# by REDIRECTION — which parses no options, so an option-shaped path (#3601 AC7) needs no `--` here.
-# The digit test enumerates the ten digits rather than using a `[0-9]` RANGE, whose members are decided
-# by the caller's collation (a locale-dependent digit test cost #3549 a review round).
+# THE STRUCTURAL PARSE USES NO EXTERNAL COMMAND — `read` and `[[ ]]` only, so none of those verdicts
+# depends on `PATH` — and the file is opened by REDIRECTION, which parses no options, so an
+# option-shaped path (#3601 AC7) needs no `--` here. The digit test enumerates the ten digits rather
+# than using a `[0-9]` RANGE, whose members are decided by the caller's collation (a locale-dependent
+# digit test cost #3549 a review round).
+#
+# THE ONE EXCEPTION IS THE NUL CHECK, AND IT IS NOT A CHOICE: a NUL byte cannot be represented in a
+# bash variable at all, so no builtin comparison can see one, and the bytes must be measured outside the
+# shell. `supervisor_lock_pid_nul_free` does that and is THREE-valued, so a `PATH` that cannot supply
+# `wc`/`tr` makes this parser REFUSE with a named cause rather than accept an unverified pid — the
+# dependency costs a start, never a live holder's lock. It runs LAST, after the cheap builtin gates, so
+# the ordinary refusal paths fork nothing.
 supervisor_lock_pid_read() {
   local f="$1" first='' line='' n=0 readrc=0
   if [[ ! -e "$f" && ! -L "$f" ]]; then
@@ -2074,6 +2139,28 @@ supervisor_lock_pid_read() {
     printf '%s' 'unparseable pid-digit-count-out-of-well-formedness-bound'
     return 0
   fi
+  # LAST GATE BEFORE ACCEPTANCE: the FILE'S BYTES, not the string the shell was able to hold (#3601,
+  # roborev job 231). Everything above ran on a value `read` had already stripped NULs out of, so a
+  # `<digits> NUL LF` file satisfied all of it. It is deliberately last: it is the only gate that forks,
+  # and by here the content is known to be a short run of decimal digits, so a NUL is the one remaining
+  # thing that could make those digits a different number than the file records.
+  #
+  # A file that carries BOTH a NUL and other junk is refused ABOVE, under whichever gate it trips
+  # first, and that cause is also true of it — the dangerous shape, the one that reaches this line, is
+  # the file whose NUL-stripped content is a clean plausible pid.
+  local nul=''
+  nul="$(supervisor_lock_pid_nul_free "$f")" || nul='could-not-measure nul-probe-aborted'
+  case "$nul" in
+    nul-free) ;;
+    contains-nul)
+      printf '%s' 'unparseable pid-file-contains-nul'
+      return 0
+      ;;
+    *)
+      printf '%s' "unparseable pid-file-nul-check-${nul}"
+      return 0
+      ;;
+  esac
   printf 'pid %s' "$first"
 }
 

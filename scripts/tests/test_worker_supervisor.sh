@@ -6930,7 +6930,7 @@ test_lane_lock_holder_pid_is_parsed_before_use() {
   # ones a crash, a truncation or a foreign writer produces — not a curated list of things that happen
   # to fail, but one per rejection reason in `supervisor_lock_pid_read`.
   local staged
-  for shape in EMPTY GARBLED TWOLINE TRAILING ZERO LEADINGZERO OVERLONG NOTAFILE; do
+  for shape in EMPTY GARBLED TWOLINE TRAILING ZERO LEADINGZERO OVERLONG NOTAFILE NUL NULMID; do
     rm -rf "$lock"
     mkdir -p "$lock"
     case "$shape" in
@@ -6942,6 +6942,14 @@ test_lane_lock_holder_pid_is_parsed_before_use() {
       LEADINGZERO) printf '0%s\n' "$dead" >"$lock/pid" ;;
       OVERLONG)    printf '123456789012345\n' >"$lock/pid" ;;
       NOTAFILE)    mkdir -p "$lock/pid" ;;
+      # REAL NUL BYTES, WRITTEN AS BYTES (#3601, roborev job 231) — not a stand-in, because the entire
+      # defect is that a NUL is INVISIBLE to every check that runs on a shell variable. `NUL` is the
+      # dangerous shape: `<dead-pid> NUL LF`, whose NUL-stripped content is a clean, plausible, DEAD pid,
+      # so it passed non-empty + single-line + all-digits + non-zero and the lock was reclaimed. `NULMID`
+      # is the same hazard with the NUL INSIDE the digits, where the value the shell sees is a DIFFERENT
+      # number than the file records.
+      NUL)         printf '%s\000\n' "$dead" >"$lock/pid" ;;
+      NULMID)      printf '%s\000%s\n' "${dead%?}" "${dead#${dead%?}}" >"$lock/pid" ;;
     esac
     staged="$(ls -A "$lock" | tr '\n' ' ')"
     out="$(lane_lock_drive_at "$d" - "$tmp" "$lane" SUPERVISOR_LOCK_PID_TRIES=2 SUPERVISOR_LOCK_PID_WAIT=0.01)"; rc=$?
@@ -6963,7 +6971,7 @@ test_lane_lock_holder_pid_is_parsed_before_use() {
     # for the two shapes that leave content behind, `rmdir` correctly REFUSES, which is the safety
     # property the command was chosen for and is asserted separately below.
     case "$shape" in
-      EMPTY | GARBLED | TWOLINE | TRAILING | ZERO | LEADINGZERO | OVERLONG)
+      EMPTY | GARBLED | TWOLINE | TRAILING | ZERO | LEADINGZERO | OVERLONG | NUL | NULMID)
         rm -f -- "$lock/pid"
         lane_lock_remedy_ok "$shape" "$out" "$lock"
         ;;
@@ -7708,6 +7716,129 @@ test_log_size_unmeasurable_is_not_zero() {
 }
 
 t test_log_size_unmeasurable_is_not_zero
+
+
+
+
+# ---------------------------------------------------------------------------
+# NUL BYTES IN THE PID FILE (#3601, roborev job 231) — the hole in AC1's own guarantee.
+#
+# THE DEFECT, MEASURED BEFORE THE FIX: bash cannot hold a NUL and `read` discards it silently, so a pid
+# file whose BYTES are `<dead-pid> NUL LF` reads back as a clean `<dead-pid>` — non-empty, single line,
+# all decimal digits, non-zero. Every gate in `supervisor_lock_pid_read` passed it, the liveness probe
+# then said `dead`, and the lock was RECLAIMED. That is exactly the outcome AC1 exists to prevent, from
+# exactly the input AC1 is about: a partially-written pid file, which is where NULs come from, because a
+# crash mid-write can leave allocated-but-zeroed bytes.
+#
+# SO THE CHECK CANNOT LIVE IN THE SHELL, and this case asserts that premise rather than assuming it: it
+# first demonstrates that the shell's own view of the file is a clean all-digit pid, and only then that
+# the parser refuses anyway. Without the first half a green here would not show that anything hard was
+# happening.
+#
+# NOT VIA BASH'S WARNING, EITHER. `$(cat …)` on such a file emits `warning: … ignored null byte in
+# input` — on STDERR, which the `2>/dev/null` in use at every one of these sites already suppresses; and
+# keying correctness on bash's message TEXT would be the cargo-status-word defect class (CLAUDE.md
+# #3400). The shipped check measures bytes.
+# ---------------------------------------------------------------------------
+test_lane_lock_nul_bearing_pid_file_refuses() {
+  local d tmp lane lock out rc dead verdict shell_view ovr mout mrc shadow
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601nul$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  mkdir -p "$lock"
+  # REAL BYTES. `printf '%s\000\n'` writes an actual NUL; nothing here simulates one, because a simulated
+  # NUL would be visible to the shell and would therefore not reproduce the defect at all.
+  printf '%s\000\n' "$dead" >"$lock/pid"
+  local raw_bytes stripped_bytes
+  raw_bytes="$(wc -c <"$lock/pid" | tr -d '[:space:]')"
+  stripped_bytes="$(tr -d '\000' <"$lock/pid" | wc -c | tr -d '[:space:]')"
+  if [[ "$raw_bytes" -eq $((stripped_bytes + 1)) ]]; then
+    pass "lane-lock NUL PREMISE: the staged pid file really carries a NUL byte — $raw_bytes bytes on disk, $stripped_bytes with NULs stripped"
+  else
+    fail "lane-lock-nul-premise: raw=$raw_bytes stripped=$stripped_bytes — the fixture does not contain a NUL, so this case measures nothing"
+    return 0
+  fi
+  # ...AND THE SHELL CANNOT SEE IT. This is the half that shows why a byte-level check is required.
+  shell_view="$(env F="$lock/pid" bash -c 'IFS= read -r v <"$F"; printf "%s|%s" "$v" "${#v}"' 2>/dev/null || true)"
+  if [[ "$shell_view" == "$dead|${#dead}" ]]; then
+    pass "lane-lock NUL PREMISE: \`read\` hands the shell a CLEAN all-digit pid [$shell_view] — non-empty, single line, all digits, non-zero — so no check running on that value can possibly reject this file"
+  else
+    fail "lane-lock-nul-shell-view: [$shell_view] expected [$dead|${#dead}] — the premise of this case is that the NUL is invisible to the shell"
+  fi
+
+  # ---- (1) THE PARSER REFUSES, WITH ITS OWN NAMED CAUSE, consistent with the other gates.
+  verdict="$(env SUP="$SUPERVISOR" F="$lock/pid" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  if [[ "$verdict" == 'unparseable pid-file-contains-nul' ]]; then
+    pass "lane-lock NUL: the parser reads the FILE'S BYTES and refuses with its own cause [$verdict] — it is \`unparseable\`, never \`dead\`"
+  else
+    fail "lane-lock-nul-accepted: verdict=[$verdict] — a NUL-bearing pid file must not parse as a pid"
+  fi
+
+  # ---- (2) END TO END: refuse, reclaim nothing, leave the lock exactly as found, print the way out.
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane" SUPERVISOR_LOCK_PID_TRIES=2 SUPERVISOR_LOCK_PID_WAIT=0.01)"; rc=$?
+  if [[ "$rc" -ne 0 ]] && lane_refusal_ok "$out" && [[ "$out" == *"pid-file-contains-nul"* ]] \
+     && [[ "$out" != *"reclaiming stale lock"* ]] && [[ -f "$lock/pid" ]] \
+     && [[ "$(wc -c <"$lock/pid" | tr -d '[:space:]')" == "$raw_bytes" ]]; then
+    pass "lane-lock NUL: the start REFUSES over a NUL-bearing lock, names the cause, reclaims nothing and leaves the file byte-for-byte as found"
+  else
+    fail "lane-lock-nul-reclaimed: rc=$rc out=[$out] — this is the reclaim-from-a-live-holder path the NUL defect reopened"
+  fi
+  rm -f -- "$lock/pid"
+  lane_lock_remedy_ok "pid-file-contains-nul" "$out" "$lock"
+
+  # ---- (3) THE THIRD VALUE: the NUL check is TWO EXTERNAL COMMANDS, so either can fail, and a failed
+  # measurement must REFUSE rather than report "no NULs found" — the same discipline `log_size` grew in
+  # this change, for the same reason. `wc` is made to fail for real, by a shadow earlier on `PATH`.
+  shadow="$d/shadow"
+  mkdir -p "$shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
+  chmod +x "$shadow/wc"
+  printf '%s\n' "$dead" >"$d/clean-pid"
+  verdict="$(env SUP="$SUPERVISOR" F="$d/clean-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  if [[ "$verdict" == 'unparseable pid-file-nul-check-could-not-measure'* ]]; then
+    pass "lane-lock NUL (third value): with the byte count UNMEASURABLE the parser refuses and names the measurement failure [$verdict] — an unmeasurable read is never 'nul-free'"
+  else
+    fail "lane-lock-nul-measurement-collapsed: verdict=[$verdict] — a failed measurement must not become the permissive answer"
+  fi
+  # NON-VACUITY for (3): the SAME clean file parses normally once `wc` works, so the refusal above is the
+  # measurement failing and not the file.
+  verdict="$(env SUP="$SUPERVISOR" F="$d/clean-pid" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  if [[ "$verdict" == "pid $dead" ]]; then
+    pass "lane-lock NUL (third value, non-vacuity): the identical file parses as [$verdict] with a working \`wc\` — so (3) measured the probe's failure, not a bad fixture"
+  else
+    fail "lane-lock-nul-nonvacuity: verdict=[$verdict]"
+  fi
+
+  # ---- (4) MUTANT CONTRAST: the NUL gate removed by ONE literal substitution — its `contains-nul`
+  # verdict joins the accepting branch. Everything else, including the byte measurement itself, is
+  # shipped code, so the contrast isolates the GATE and not the probe.
+  mkdir -p "$lock"
+  printf '%s\000\n' "$dead" >"$lock/pid"
+  ovr="$d/m-nul.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_lock_pid_read \
+       '    nul-free) ;;' \
+       '    nul-free | contains-nul) ;;'; then
+    mout="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane" SUPERVISOR_LOCK_PID_TRIES=2 SUPERVISOR_LOCK_PID_WAIT=0.01)" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$lock"* && "$mout" == *"reclaiming stale lock"* ]]; then
+      pass "lane-lock NUL MUTANT: with the NUL gate removed the SAME byte-for-byte file is ACCEPTED and the lock RECLAIMED — the measured pre-job-231 behaviour, so the refusals above are that gate doing the work"
+    else
+      fail "lane-lock-mutant-nul: rc=$mrc out=[$mout] — the ungated form must be shown to reclaim, or every NUL assert measures nothing"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_nul_bearing_pid_file_refuses
 
 
 # ---------------------------------------------------------------------------
