@@ -131,7 +131,10 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
   `refs/claims/issue-<N>` does NOT mean this lane is yours to edit: the claim ref is a hard control
   cross-machine and a pure advisory locally, and its `machine+actor` identity cannot express "a
   different process on the same box" — so a resumed session must prove local occupancy separately.
-  `bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD"`; an `OCCUPIED` refusal names the
+  `bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD"` — **run it with your cwd INSIDE the
+  lane** (`$PWD` must BE the lane): the lock records the outermost ancestor whose cwd is inside the
+  lane directory, so an acquire from elsewhere can name no durable owner and is refused with
+  `reason=unresolved-identity` (#3436 FIX 5). An `OCCUPIED` refusal names the
   occupant, and you STOP rather than edit a lane a live process owns.
 - **Not held → fresh start**: claim per worker.md step 3, then route (oracle-driven → straight to
   implement; design-driven → `flow-activate` to Seam 1, render the spec INLINE in an issue comment

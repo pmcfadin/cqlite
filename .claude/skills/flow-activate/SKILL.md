@@ -51,18 +51,12 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    wt=".claude/worktrees/issue-<N>-<slug>"
    git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
    git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
-   # MACHINE-LOCAL lane lock (#3436) — the claim ref's local blind spot. It is a hard
-   # control cross-machine (git arbitrates the push) and a pure ADVISORY locally: a
-   # session that never runs claim.sh just proceeds, and even one that does is waved
-   # through, because claim.sh's re-entrancy is machine+actor and two sessions on one
-   # box are BOTH machine=<box> actor=flow. This lock's identity is the full PROCESS
-   # identity, so it can tell them apart. Take it before the first write to the lane.
-   bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$(cd "$wt" && pwd)" || {
-     # OCCUPIED names the occupant (pid, start identity, age). ALIVE and every
-     # UNKNOWN-* REFUSE; only a verifiably DEAD holder is auto-reclaimed. Do not
-     # proceed into a lane a live process owns — that IS the #3436 incident.
-     exit 0
-   }
+   # NO lane-lock acquire HERE, deliberately (#3436 FIX 5): at creation time this session
+   # is acting from the ROOT checkout and is not in the lane yet, so there is no durable
+   # process whose cwd is inside it — the lock would have nothing re-identifiable to
+   # record, and `acquire` now REFUSES with reason=unresolved-identity rather than write a
+   # record that refuses forever. The lane lock is taken by the session that works IN the
+   # lane (flow-implement / flow-address), from inside it.
    # Board visibility: assignee + Status=In Progress. Run the flow-board detection snippet FIRST — it
    # does `gh auth switch --user "$project_account"` so the project-capable account is active (the EMU
    # account flip otherwise makes the board write fail and degrade to a label SILENTLY).

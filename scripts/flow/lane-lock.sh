@@ -102,6 +102,29 @@
 #      recorded as a fallback: an unrelated long-lived ancestor would be a
 #      permanently-alive holder.
 #
+# HOW A STALE LOCK GETS CLEARED, AND BY WHOM — answered BEFORE building it
+# ------------------------------------------------------------------------
+# Owner ruling on this issue: "A stale lock with no way to distinguish live from stale
+# becomes a permanent blocker", and "a guard that never permits work is broken, not
+# fail-closed." So, exhaustively:
+#   * DEAD-* (boot-id differs, /proc/<pid> absent, pid reused, zombie) — AUTO-RECLAIMED
+#     by the next `acquire`. No human, no flag, no command. The reclaim is recorded in
+#     the audit log with the previous token and the previous verdict.
+#   * A REBOOT CLEARS EVERYTHING. The boot id changes, so every pre-reboot record reads
+#     DEAD-REBOOT and is auto-reclaimed on next use: a box restart is a global un-brick.
+#   * UNKNOWN-* (an identity that cannot be established at all — a foreign machine, a
+#     hand-made or format-drifted record, a host without /proc) — cleared DELIBERATELY,
+#     by a human or a reaper, with either
+#         lane-lock.sh reclaim <N> --expect <token> --reason <why>   (CAS, recorded)
+#         lane-lock.sh release <N> --force                            (unconditional)
+#     `release --force` only DELETES, so it needs no identity of its own and works from
+#     anywhere, which is what guarantees a stale record is always clearable.
+#   * AND NOTHING CREATES AN UN-RE-IDENTIFIABLE RECORD ANY MORE (see
+#     require_durable_identity): a write that cannot name a durable owner REFUSES with
+#     `reason=unresolved-identity` and writes nothing, which removes the main source of
+#     a permanent UNKNOWN-* rather than relying on the clearing paths above.
+# Every refusal a stale record can cause names its remedy inline, in one line.
+#
 # LIVENESS — a CLOSED verdict set; only DEAD-* permits auto-reclaim
 # -----------------------------------------------------------------
 #   SELF                    the record's token equals ours exactly (re-entrancy)
@@ -289,8 +312,11 @@
 #       FREE / HELD / RELEASED / RECLAIMED / status render
 #   2   OCCUPIED / VERIFY-FAIL / RELEASE-REFUSED / RECLAIM-LOST  (a REFUSAL: a real
 #       answer about ownership)
-#   1   ERROR reason=infra|unsupported <detail> — environmental/retryable, and NEVER
-#       a refusal verdict. A caller must not read exit 1 as "someone else holds it".
+#   1   ERROR reason=infra|unsupported|unresolved-identity <detail> —
+#       environmental/CORRECTABLE, and NEVER a refusal verdict. A caller must not read
+#       exit 1 as "someone else holds it". `unresolved-identity` in particular means
+#       "this invocation cannot name a durable owner, so nothing was written" and its
+#       text prints the two corrections (cwd inside the lane, or --pid).
 #   64  usage error (stderr, no `LANE-LOCK:` line)
 #
 # OUTPUT CONTRACT
@@ -486,10 +512,13 @@ resolve_pid() {
     if [ -n "$best" ] && [ "$best" != "$$" ]; then
       candidate="$best"; scope=session
     else
-      # Only $$ matched (or nothing did): this invocation's own shell. Recorded, not
-      # refused — and its liveness is UNKNOWN-EPHEMERAL, which REFUSES rather than
-      # auto-reclaims (header: an ephemeral pid dies between tool calls, so calling it
-      # dead would hand a live lane to a second writer).
+      # Only $$ matched (or nothing did): this invocation's own shell, which dies
+      # between tool calls. `ephemeral` is REPORTED here and judged by the CALLER:
+      #   * a WRITE (acquire/reclaim) REFUSES it — `reason=unresolved-identity`, see
+      #     require_durable_identity. Writing such a record BRICKS the lane (below).
+      #   * a COMPARE (probe) keeps it and says so on its own line as
+      #     `our-identity=UNRESOLVED`, because "I could not tell whether this is you" is
+      #     the useful answer from a read-only report and refusing would be useless.
       candidate="$$"; scope=ephemeral
     fi
   fi
@@ -810,6 +839,33 @@ prepare_identity() {
   G_MUTEX="$(lock_mutex "$G_ISSUE")"
 }
 
+# require_durable_identity <sub> — REFUSE a write that cannot record a re-identifiable
+# owner. Exit 1 (environmental/correctable), NEVER 2 (which asserts something about
+# OWNERSHIP), and it WRITES NOTHING — not the record, not the mutex, not the audit line.
+#
+# WHY REFUSING TO CREATE BEATS REFUSING TO EVALUATE (this reversed an earlier design).
+# An `ephemeral` pid is this invocation's own shell, which exits immediately, so the
+# record's liveness reads UNKNOWN-EPHEMERAL forever — and every UNKNOWN-* refuses,
+# INCLUDING the owning session's own later acquire. A single acquire from outside the
+# lane therefore BRICKED the lane on first use: strictly worse than having no lock,
+# because it reds on correct input, which is the lane agents learn to waive. The
+# situation is real and not a wiring typo — at worktree-CREATION time the session is
+# acting from the root checkout and is genuinely not in the lane yet, so no durable
+# owner EXISTS to record. Refusing to create the unusable record is the fail-closed
+# direction; continuing to EVALUATE an existing UNKNOWN-EPHEMERAL record (legacy or
+# hand-made) as a refusal is a different question and is unchanged.
+#
+# IT IS A CORRECTABLE CONDITION AND THE REFUSAL PRINTS THE CORRECTION, which is what
+# keeps it from being the "guard that never permits work" the owner ruling forbids: run
+# the acquire with the caller's cwd INSIDE the lane directory, or name the durable
+# process with --pid.
+require_durable_identity() {
+  local sub="$1"
+  [ "$G_SCOPE" = "ephemeral" ] || return 0
+  emit "ERROR reason=unresolved-identity detail=no-durable-session-process sub=$sub issue=$G_ISSUE pid-scope=$G_SCOPE candidate-pid=$G_PID lane-dir=$G_LANE (NOTHING WAS WRITTEN. This lock records the HOLDER's full process identity, and the only process it could find here is THIS invocation's own shell, which exits when this command returns. A record naming it reads UNKNOWN-EPHEMERAL forever, and every UNKNOWN-* refuses — including YOUR OWN later acquire — so writing it would BRICK the lane rather than lock it. Two corrections, both one line: (1) run this from a shell whose cwd is INSIDE the lane directory, which is what makes the long-lived session process findable — 'cd <lane-dir> && lane-lock.sh $sub $G_ISSUE'; or (2) name the durable process explicitly with '--pid <pid>'. If you are at worktree-CREATION time, do not acquire at all: the session is not in the lane yet, so no durable owner exists — the lock belongs to the session that works IN the lane)"
+  return 1
+}
+
 self_fields() {
   printf 'token=%s machine=%s actor=%s pid=%s pid-scope=%s' \
     "$G_TOKEN" "$G_MACHINE" "$G_ACTOR" "$G_PID" "$G_SCOPE"
@@ -886,6 +942,8 @@ cmd_acquire() {
     return 1
   fi
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
+  # BEFORE the mutex, so a refused acquire creates NOTHING at all (#3436 FIX 5a).
+  require_durable_identity acquire || return 1
   with_lock "$G_MUTEX" _acquire_locked
 }
 
@@ -1149,6 +1207,11 @@ cmd_reclaim() {
     return 1
   fi
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
+  # reclaim WRITES a record, so it is refused on the same terms as acquire — otherwise
+  # the break-glass could mint exactly the unreclaimable record acquire now refuses, and
+  # the header's "nothing ever creates a record that cannot be re-identified" would be
+  # false. `release --force` remains available from anywhere: it only DELETES.
+  require_durable_identity reclaim || return 1
   with_lock "$G_MUTEX" _reclaim_locked "$expect" "$reason_token"
 }
 

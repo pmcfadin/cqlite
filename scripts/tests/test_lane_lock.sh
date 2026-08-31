@@ -712,6 +712,60 @@ $(cat "$T/wt17.out" 2>/dev/null)"
 fi
 
 # ===========================================================================
+echo "TEST 18: an acquire that cannot name a durable owner REFUSES and writes nothing;"
+echo "         one that can is RE-ENTRANT for the SAME session from a NEW shell"
+# ===========================================================================
+# THIS IS THE CASE WHOSE ABSENCE LET THE LANE BE BRICKED ON FIRST USE. The wiring called
+# `acquire <N> --lane-dir "$(cd "$wt" && pwd)"` from OUTSIDE the lane: `$(cd … && pwd)`
+# only computes a path, so the acquire's own cwd was the root checkout, no ancestor's cwd
+# was inside the lane, the recorded pid-scope was `ephemeral` and the record read
+# UNKNOWN-EPHEMERAL — which REFUSES, including for the owning session's own later
+# acquire. Case (b) is the real-world sequence (flow-implement, then flow-address later)
+# and it FAILED before FIX 5.
+#
+# NO TEST-ONLY SEAM: (a) and (b) differ ONLY in this shell's cwd, which is the very thing
+# the resolution rule reads. No LANE_LOCK_PID, no --pid, no /proc override.
+
+# (a) from OUTSIDE the lane: a named refusal, exit 1, and NOTHING created.
+ll acquire 889; rc18a=$RC; out18a=$OUT
+a_rec=$([ -e "$(record_of 889)" ] && echo yes || echo no)
+a_mut=$([ -e "$LOCKS/lane-889.flock" ] && echo yes || echo no)
+a_log=$([ -e "$(log_of 889)" ] && echo yes || echo no)
+if [ "$rc18a" -eq 1 ] && printf '%s' "$out18a" | grep -q '^LANE-LOCK: ERROR reason=unresolved-identity ' \
+   && [ "$a_rec" = no ] && [ "$a_mut" = no ] && [ "$a_log" = no ] \
+   && printf '%s' "$out18a" | grep -q -- '--pid' \
+   && printf '%s' "$out18a" | grep -q 'cd '; then
+  ok "acquire with no durable owner: ERROR reason=unresolved-identity rc=1, NOTHING written (no record/mutex/log), and BOTH corrections printed"
+else
+  bad "expected reason=unresolved-identity rc=1 writing nothing; got rc=$rc18a record=$a_rec mutex=$a_mut log=$a_log
+$out18a"
+fi
+
+# (b) THE INTEGRATION CASE. This shell cd's INTO the lane, so the outermost ancestor whose
+# cwd is inside it is THIS suite's shell — a durable process that outlives each acquire.
+# The first acquire's own shell EXITS (it is a command substitution), and the second
+# acquire comes from a brand-new shell in the same session: it must be RE-ENTRANT.
+LANE_890="$LANES/lane-890"
+mkdir -p "$LANE_890"
+ORIG_CWD="$PWD"
+cd "$LANE_890" || bad "could not cd into the scratch lane dir"
+ll acquire 890; rc18b=$RC; out18b=$OUT
+ll acquire 890; rc18c=$RC; out18c=$OUT
+ll verify  890; rc18d=$RC
+cd "$ORIG_CWD" || true
+if [ "$rc18b" -eq 0 ] && printf '%s' "$out18b" | grep -q '^LANE-LOCK: ACQUIRED issue=890 ' \
+   && [ "$(field "$out18b" pid-scope)" = "session" ] \
+   && [ "$(field "$out18b" pid)" = "$$" ] \
+   && [ "$rc18c" -eq 0 ] && printf '%s' "$out18c" | grep -q 'ACQUIRED (re-entrant)' \
+   && [ "$rc18d" -eq 0 ]; then
+  ok "acquire from INSIDE the lane records the durable session pid ($$, pid-scope=session); a SECOND acquire from a new shell is ACQUIRED (re-entrant) and verify still passes"
+else
+  bad "the in-lane acquire/re-acquire sequence is broken: rc=$rc18b/$rc18c verify=$rc18d pid-scope=$(field "$out18b" pid-scope) pid=$(field "$out18b" pid) (expected $$)
+$out18b
+$out18c"
+fi
+
+# ===========================================================================
 echo
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

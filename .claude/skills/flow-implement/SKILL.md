@@ -82,10 +82,17 @@ never gate stdout or review churn.
      # cross-machine and only ADVISORY locally: two sessions on one box are both
      # machine=<box> actor=flow, so claim.sh cannot tell the second from the first's
      # retry. This lock's identity is the full PROCESS identity, so it can.
-     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$(cd "$wt" && pwd)" || {
+     # RUN IT FROM INSIDE THE LANE. `--lane-dir "$(cd "$wt" && pwd)"` only computes a
+     # PATH — the acquire's own cwd stays the root checkout, so no ancestor's cwd is in
+     # the lane, no durable session process can be identified, and the acquire is
+     # REFUSED (reason=unresolved-identity, #3436 FIX 5). The cwd is what makes the
+     # long-lived session process findable.
+     ( cd "$wt" && bash scripts/flow/lane-lock.sh acquire <N> ) || {
        # OCCUPIED names the occupant (pid, start identity, age). liveness=ALIVE or any
        # UNKNOWN-* REFUSES; only a verifiably DEAD holder is auto-reclaimed. Do NOT
        # proceed into a lane another live process owns — that is the #3436 incident.
+       # reason=unresolved-identity is a DIFFERENT answer: nothing was written, and the
+       # refusal prints its own correction.
        exit 0
      }
    else
@@ -112,7 +119,7 @@ never gate stdout or review churn.
      # CLAIM HELD → worktree + branch (naming/PR plumbing, NOT the lock).
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
      git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
-     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$(cd "$wt" && pwd)" || exit 0
+     ( cd "$wt" && bash scripts/flow/lane-lock.sh acquire <N> ) || exit 0   # from INSIDE the lane (#3436)
      gh issue edit <N> --add-assignee @me
      bash scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi

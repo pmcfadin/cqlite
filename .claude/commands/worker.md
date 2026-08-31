@@ -101,7 +101,11 @@ onto its own branch). Rules, non-negotiable:
    git -C ~/projects/cqlite worktree add ~/projects/cqlite-wt/issue-<N> -b issue-<N>-<slug> origin/main
    git -C ~/projects/cqlite-wt/issue-<N> push -u origin issue-<N>-<slug>   # PR head, NOT the lock
    cd ~/projects/cqlite-wt/issue-<N>
-   # THE MACHINE-LOCAL HALF (#3436) — take it before the first write to the lane:
+   # THE MACHINE-LOCAL HALF (#3436) — take it before the first write to the lane, and
+   # take it FROM INSIDE THE LANE (the `cd` above is load-bearing): the lock records the
+   # outermost ancestor whose cwd is inside the lane, so an acquire run from the root
+   # checkout can identify no durable owner and is REFUSED with
+   # reason=unresolved-identity rather than writing a record that refuses forever.
    bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
    ```
    **The claim ref cannot stop a second session ON THIS BOX, and that is not a bug in it (#3436).** It
