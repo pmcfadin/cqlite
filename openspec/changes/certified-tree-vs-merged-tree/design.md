@@ -307,6 +307,20 @@ already runs `test_premerge_assert.sh`). Beyond ordinary cases it carries:
    appears as a bare `0`. *The predecessor of these ran MID-SUITE, so it inspected Cases 2–6 only and never
    saw the `UNMEASURED`, usage or mutant runs, and its prefix check recorded success on both branches while
    asking the wrong question.*
+
+   **THEIR POSITION IS NO LONGER MAINTAINED BY HAND, BECAUSE THAT FAILED THREE TIMES (#3650 review R6
+   F3).** Round 2 found them running mid-suite; round 3 moved them to the end; round 5 appended new cases
+   *after* them and silently shrank their coverage again — invisibly, because the assertions still passed
+   on the subset they happened to see. A manually placed check cannot hold, so the position is replaced by
+   two mechanisms: they run **only from `finish`, the EXIT trap and the single exit path** (nothing can
+   execute after an EXIT trap, so a case appended anywhere — including the file's last line — is
+   inspected, and there is deliberately no explicit call at the end, which would be a position again);
+   and a **count reconciliation** is the actual guard — `record_out` counts recorded runs, the checks
+   record the count they inspected, and `finish` reds unless they ran exactly once and inspected exactly
+   that many. Verified by contrast: an anchor-violating case appended at the file's very end is invisible
+   under the previous structure (209 passed, 0 failed, exit 0) and reds under this one (exit 1, naming the
+   appended case); a re-introduced mid-suite invocation reds with `ran 2 times, not once`; and with the
+   `finish` call removed as well, the shortfall branch reds naming `16 run(s) were never evaluated`.
 5. **A DERIVED per-entry pin for the gate-global set, with TWO oracles reconciled fail-closed.** A
    mutation sweep found 8 of the 10 entries silently deletable with the suite green — Case 11 empties the
    WHOLE list, so nothing pinned an individual entry, and the two that did red were covered only

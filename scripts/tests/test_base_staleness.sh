@@ -36,6 +36,12 @@
 #      reported once at the end — the old Case 7 recorded success on BOTH
 #      branches of its prefix check (so it could never fail) and ran before the
 #      usage cases, 7 of whose 8 lines were unprefixed.
+#      THOSE ASSERTIONS LIVE IN `whole_suite_checks`, CALLED ONLY FROM `finish`,
+#      THE EXIT TRAP — never from a position in this file, which was maintained
+#      by hand and shrank THREE times (#3650 review R6 F3). A count
+#      reconciliation reds the suite if they run more than once or inspect fewer
+#      runs than `record_out` recorded. Append new cases anywhere; they are
+#      inspected. Do NOT add a call at the end of the file.
 #   4. FIXTURE SELF-CONSISTENCY (Case 1): each synthetic repo is asserted with
 #      git to actually have the shape its case claims, so a case cannot pass
 #      against a fixture that never had the property under test (the idiom at
@@ -79,6 +85,35 @@ VERDICT_BAD="$T/verdict-violations.txt"
 : >"$ANCHOR_BAD"
 : >"$VERDICT_BAD"
 
+# --- THE WHOLE-SUITE ASSERTIONS RUN FROM THE EXIT TRAP, AND THEIR COVERAGE IS
+#     RECONCILED BY COUNT (#3650 review R6 F3) --------------------------------
+#
+# THIRD RECURRENCE OF ONE STRUCTURAL FLAW, so it is not fixed a third time by
+# REPOSITIONING. Round 2 found the accumulated-output assertions running
+# mid-suite; round 3 moved them to the end; round 5 added new cases AFTER them,
+# silently shrinking their coverage again. A MANUALLY MAINTAINED POSITION cannot
+# hold: every case appended after it re-opens the hole, and the hole is invisible
+# because the assertions still pass — on the subset they happened to see.
+#
+# TWO MECHANISMS REPLACE THE POSITION, and neither depends on anyone remembering
+# anything:
+#   1. `whole_suite_checks` is invoked ONLY from `finish`, which is the EXIT trap
+#      and the single exit path. Nothing can run after an EXIT trap, so a case
+#      appended ANYWHERE in this file — including the last line — is inspected.
+#      There is deliberately NO explicit call at the end of the file: such a call
+#      would be a position again, and a case appended after it would be missed.
+#   2. THE COUNT RECONCILIATION, which is the actual guard. `record_out`
+#      increments `RECORD_CALLS`; `whole_suite_checks` records `RECORD_CALLS` as
+#      `INSPECTED_RECORDS` when it runs and counts its own invocations. `finish`
+#      then FAILS LOUDLY unless it ran EXACTLY ONCE and inspected EXACTLY the
+#      number of runs the suite recorded. So re-introducing a mid-suite
+#      invocation — the wrong shape — reds the suite naming the shortfall,
+#      instead of quietly narrowing what is checked.
+RECORD_CALLS=0
+INSPECTED_RECORDS=-1
+WHOLE_SUITE_RUNS=0
+FINISHED=0
+
 # record_out <tag> — accumulate $OUT and check the ANCHORED invariants on it:
 #   D2a  every nonempty line begins with `BASE-STALENESS: ` (stdout AND stderr:
 #        every `run` captures with 2>&1)
@@ -86,6 +121,7 @@ VERDICT_BAD="$T/verdict-violations.txt"
 # Called from run() so no case can forget it, and from the direct invocations too.
 record_out() {
   local tag="$1" line tok
+  RECORD_CALLS=$((RECORD_CALLS + 1))
   printf '%s\n' "$OUT" >>"$ALL_OUT"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -113,6 +149,107 @@ RECORD_OUT
 verdict_lines() {
   printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: verdict ' | tr -d ' '
 }
+
+# whole_suite_checks — the ACCUMULATED-OUTPUT assertions (was Case 17, was Case
+# 7). Invoked ONLY from `finish`, i.e. from the EXIT trap, so it cannot be
+# outrun by a case appended later in this file. DO NOT CALL IT ANYWHERE ELSE: the
+# count reconciliation in `finish` reds the suite if it runs more than once or
+# inspects fewer runs than the suite recorded (#3650 review R6 F3).
+#
+# THE VERDICT-COUNT SWEEP RUNS FIRST, because it calls `record_out` itself — the
+# accumulated-file assertions have to see its output too, or this function would
+# reproduce, inside itself, exactly the ordering defect it exists to close.
+whole_suite_checks() {
+  local nonempty cov_missing needle vl_bad vl_ran _n _r
+  WHOLE_SUITE_RUNS=$((WHOLE_SUITE_RUNS + 1))
+
+  vl_bad=""
+  vl_ran=0
+  for _n in R_DIFF R_FRESH R_MOTIV R_UNREL R_RES R_NOMAIN R_NOBASE; do
+    _r=${!_n:-}
+    # An UNSET fixture means the suite did not get that far: named, never
+    # silently skipped, because a shrunken sweep is the defect this closes.
+    if [ -z "$_r" ] || [ ! -d "$_r" ]; then
+      vl_bad="$vl_bad $_n=UNAVAILABLE"
+      continue
+    fi
+    OUT=$(cd "$_r" && bash "$ADVISORY" 2>&1)
+    record_out "verdict-count sweep $(basename "$_r")"
+    vl_ran=$((vl_ran + 1))
+    [ "$(verdict_lines)" -eq 1 ] || vl_bad="$vl_bad $(basename "$_r")=$(verdict_lines)"
+  done
+  if [ -z "$vl_bad" ] && [ "$vl_ran" -eq 7 ]; then
+    ok "anchor: every measurement run emits EXACTLY ONE 'verdict ' line (stale, clean and unmeasured; $vl_ran fixtures)"
+  else
+    bad "anchor: these runs did not emit exactly one 'verdict ' line:$vl_bad (swept $vl_ran of 7)"
+  fi
+
+  nonempty=$(grep -c . "$ALL_OUT" | tr -d ' ')
+  if [ "$nonempty" -lt 150 ]; then
+    bad "anchor: only $nonempty accumulated lines — the whole-suite assertion would be weak"
+  else
+    ok "anchor: the whole-suite assertion inspects $nonempty output lines from every case"
+  fi
+  cov_missing=""
+  for needle in 'verdict STALE-RECOGNISED' 'verdict NO-STALENESS-RECOGNISED' \
+    'verdict UNMEASURED' 'USAGE'; do
+    grep -q "$needle" "$ALL_OUT" || cov_missing="$cov_missing '$needle'"
+  done
+  if [ -z "$cov_missing" ]; then
+    ok "anchor: the accumulated output covers all THREE verdicts AND the usage path"
+  else
+    bad "anchor: accumulated output missing:$cov_missing — narrower than the suite claims"
+  fi
+  if [ -s "$ANCHOR_BAD" ]; then
+    bad "anchor: $(grep -c . "$ANCHOR_BAD" | tr -d ' ') line(s) lack the 'BASE-STALENESS: ' prefix; first: $(head -1 "$ANCHOR_BAD")"
+  else
+    ok "anchor: EVERY nonempty line of EVERY case, stdout AND stderr, begins with 'BASE-STALENESS: ' (D2a)"
+  fi
+  if [ -s "$VERDICT_BAD" ]; then
+    bad "anchor: a 'verdict ' line carries a token outside the closed set; first: $(head -1 "$VERDICT_BAD")"
+  else
+    ok "anchor: every 'verdict ' token is from {STALE-RECOGNISED, NO-STALENESS-RECOGNISED, UNMEASURED} (D2c)"
+  fi
+
+  # Recorded LAST, so it counts this function's own `record_out` calls too. Only
+  # the FIRST invocation records it: a second one would overwrite the shortfall a
+  # mid-suite call created, hiding the very shape being guarded against.
+  [ "$INSPECTED_RECORDS" -lt 0 ] && INSPECTED_RECORDS=$RECORD_CALLS
+}
+
+# finish — THE SINGLE EXIT PATH, run from the EXIT trap. It runs the whole-suite
+# assertions, reconciles their coverage BY COUNT, prints the summary and sets the
+# exit status. Because nothing can execute after an EXIT trap, a case appended
+# anywhere in this file is inspected without anyone repositioning anything.
+finish() {
+  local rc=$?
+  if [ "$FINISHED" -eq 1 ]; then
+    rm -rf "$T"
+    return
+  fi
+  FINISHED=1
+
+  whole_suite_checks
+
+  # THE COUNT RECONCILIATION — the actual guard (#3650 review R6 F3). Equality is
+  # the property: the whole-suite assertions must have inspected EVERY recorded
+  # run, and must have run exactly once.
+  if [ "$WHOLE_SUITE_RUNS" -ne 1 ]; then
+    bad "whole-suite: the accumulated-output assertions ran $WHOLE_SUITE_RUNS times, not once — they belong to finish() alone (#3650 R6 F3)"
+  elif [ "$INSPECTED_RECORDS" -ne "$RECORD_CALLS" ]; then
+    bad "whole-suite: they inspected $INSPECTED_RECORDS recorded runs but the suite recorded $RECORD_CALLS — $((RECORD_CALLS - INSPECTED_RECORDS)) run(s) were never evaluated; do NOT reposition the check, it must run from finish() (#3650 R6 F3)"
+  else
+    ok "whole-suite: the assertions inspected EVERY one of the $RECORD_CALLS recorded runs (nothing executed after them)"
+  fi
+
+  printf '\n=== base-staleness: %d passed, %d failed ===\n' "$PASS" "$FAIL"
+  rm -rf "$T"
+  if [ "$FAIL" -ne 0 ] || [ "$rc" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
+}
+trap finish EXIT
 
 MAIN_REF=refs/remotes/origin/main
 
@@ -1414,48 +1551,6 @@ else
   bad "scratch-read(fail-open): the contrast did not reproduce the fail-open (exit $SO_RC, unprefixed='$so_unpref')"
 fi
 
-# --- Case 17 (WHOLE SUITE, was Case 7): the ANCHORED output guarantee -------
-# Accumulated across EVERY case above and asserted HERE, after the last one. The
-# old placement covered Cases 2-6 only, so the UNMEASURED, usage and mutant runs
-# were never inspected.
-nonempty=$(grep -c . "$ALL_OUT" | tr -d ' ')
-if [ "$nonempty" -lt 150 ]; then
-  bad "anchor: only $nonempty accumulated lines — the whole-suite assertion would be weak"
-else
-  ok "anchor: the whole-suite assertion inspects $nonempty output lines from every case"
-fi
-cov_missing=""
-for needle in 'verdict STALE-RECOGNISED' 'verdict NO-STALENESS-RECOGNISED' \
-  'verdict UNMEASURED' 'USAGE'; do
-  grep -q "$needle" "$ALL_OUT" || cov_missing="$cov_missing '$needle'"
-done
-if [ -z "$cov_missing" ]; then
-  ok "anchor: the accumulated output covers all THREE verdicts AND the usage path"
-else
-  bad "anchor: accumulated output missing:$cov_missing — narrower than the suite claims"
-fi
-if [ -s "$ANCHOR_BAD" ]; then
-  bad "anchor: $(grep -c . "$ANCHOR_BAD" | tr -d ' ') line(s) lack the 'BASE-STALENESS: ' prefix; first: $(head -1 "$ANCHOR_BAD")"
-else
-  ok "anchor: EVERY nonempty line of EVERY case, stdout AND stderr, begins with 'BASE-STALENESS: ' (D2a)"
-fi
-if [ -s "$VERDICT_BAD" ]; then
-  bad "anchor: a 'verdict ' line carries a token outside the closed set; first: $(head -1 "$VERDICT_BAD")"
-else
-  ok "anchor: every 'verdict ' token is from {STALE-RECOGNISED, NO-STALENESS-RECOGNISED, UNMEASURED} (D2c)"
-fi
-vl_bad=""
-for r in "$R_DIFF" "$R_FRESH" "$R_MOTIV" "$R_UNREL" "$R_RES" "$R_NOMAIN" "$R_NOBASE"; do
-  OUT=$(cd "$r" && bash "$ADVISORY" 2>&1)
-  record_out "verdict-count sweep $(basename "$r")"
-  [ "$(verdict_lines)" -eq 1 ] || vl_bad="$vl_bad $(basename "$r")=$(verdict_lines)"
-done
-if [ -z "$vl_bad" ]; then
-  ok "anchor: every measurement run emits EXACTLY ONE 'verdict ' line (stale, clean and unmeasured)"
-else
-  bad "anchor: these runs did not emit exactly one 'verdict ' line:$vl_bad"
-fi
-
 # --- Case 19 (D5/#3650 review R5 F1): the no-fetch guarantee is MEASURED -----
 #
 # `GIT_NO_LAZY_FETCH=1` is honoured only from git 2.36. On older git, in a
@@ -1779,6 +1874,11 @@ if [ "$tmpl_bad" -eq 0 ]; then
   ok "template: the script's own STATIC text carries none of PASS, OK, RESULT: (D2d, structural)"
 fi
 
-# --- summary -----------------------------------------------------------------
-printf '\n=== base-staleness: %d passed, %d failed ===\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ]
+# --- NO SUMMARY BLOCK HERE, DELIBERATELY -------------------------------------
+# The whole-suite assertions, the count reconciliation, the summary line and the
+# exit status all live in `finish`, which runs from the EXIT trap installed near
+# the top of this file. A new case may therefore be appended HERE, or anywhere,
+# and it is still inspected — which is the whole point of #3650 review R6 F3:
+# three rounds of REPOSITIONING a manually placed check each re-opened the same
+# hole. Do not add a `whole_suite_checks` or `finish` call at the end of this
+# file; that would be a position again, and the count reconciliation reds it.
