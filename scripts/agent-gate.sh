@@ -2539,12 +2539,35 @@ apply_schemas_preflight() {
 # is "there is NO branch on which it can hang", and the way that invariant was broken three
 # times is instructive: each site looked local. So the whole set is enumerated here rather
 # than argued per site, and `scripts/tests/test_agent_gate_component_set.sh` asserts the
-# enumeration structurally — a NEW external command in this region FAILs that test until it
-# is classified, which is what stops the next reviewer finding instance four.
+# enumeration structurally — a NEW external command OR A NEW GIT OPERATION in this region FAILs
+# that test until it is classified, which is what stops the next reviewer finding instance four.
+#
+# THE OPERATION HALF OF THAT ASSERT IS NEW (roborev job 309), and this list is why: the sentence
+# above claimed the whole set was enumerated and pointed at a test that checked external program
+# NAMES only, so the git operations were guarded by nothing — and had drifted BOTH WAYS. Five
+# operations (`init`, `ls-remote`, `cat-file`, `rev-list`, and two `rev-parse` forms) had appeared
+# without being listed, while `update-ref -d` and `rev-parse FETCH_HEAD^{commit}` were still
+# listed with ZERO live uses. The stale direction is the worse one: a listed operation
+# PRE-AUTHORISES its own re-introduction, which is exactly why `bash` and `mkdir` were removed
+# from the declared external set rather than left in place. Both directions now FAIL the test.
 #
 #   BOUNDED (network-capable; every one goes through _component_set_bounded):
-#     git fetch --refmap= --no-tags …    the baseline read; network by definition. Both
-#                                        flags suppress SHARED-ref writes (branches, tags).
+#     git ls-remote csbaseline refs/heads/main
+#                                        the REF ORACLE: the baseline sha, read live from the
+#                                        canonical remote, with NO object transfer. It replaced a
+#                                        92 MB full-history fetch (3.74 s -> 0.51 s). Its output
+#                                        is remote-controlled TEXT and is validated, not parsed.
+#     git fetch --refmap= --no-tags …    the object transfer, run ONLY when this repository lacks
+#                                        the baseline commit. Network by definition. Both flags
+#                                        suppress SHARED-ref writes (branches, tags).
+#     git cat-file -e <sha>^{commit}     presence probe for the baseline commit IN THE ISOLATED
+#                                        repository (never the live one: there it answers about
+#                                        PROMISED objects, measured — rc 0 for a blob whose `show`
+#                                        then failed, even with GIT_NO_LAZY_FETCH=1).
+#     git rev-list --objects --missing=print --no-walk
+#                                        the COMPLETENESS half of that probe: a commit can be
+#                                        present while its tree/blobs are not, and "the commit
+#                                        exists" is not "the manifest can be read".
 #     git ls-tree <rev> -- scripts/agent-gate.components
 #                                        the THREE-VALUED presence probe that decides which
 #                                        read path runs. Reads a TREE, which a
@@ -2568,16 +2591,33 @@ apply_schemas_preflight() {
 #     git remote get-url origin          config read; names a remote, contacts none. Its
 #                                        value is judged against the canonical upstream
 #                                        identity IN-PROCESS (no resolution, no network).
-#     git rev-parse FETCH_HEAD^{commit}  ref + COMMIT object; commits are never filtered.
+#     git init -q <scratch>              creates an EMPTY repository in a directory this
+#                                        pre-flight just made. No remote is named, no object is
+#                                        read, and with global/system config neutralised no
+#                                        template can be pulled in. It is created in git's
+#                                        DEFAULT object format, which is why a sha256 baseline
+#                                        advertisement is refused at the ref oracle rather than
+#                                        failing here as a mystery transfer error (job 309).
+#     git rev-parse --verify --quiet <rev>
+#                                        resolves a sha to a COMMIT in the isolated repository —
+#                                        the transfer assert and HEAD's own sha. Commits are
+#                                        never filtered out of a clone.
 #     git merge-base --is-ancestor       walks commit parents only.
-#     git rev-parse --is-shallow-repository / --git-path shallow
-#                                        repository STATE reads (is the history truncated?);
-#                                        no object access, no remote contact.
-#     git update-ref -d <private ref>    deletes a ref in this worktree's own namespace.
+#     git rev-parse --is-shallow-repository / --git-path shallow / --git-path objects
+#                                        repository STATE reads (is the history truncated? where
+#                                        is the object store, so it can be offered to the
+#                                        isolated repo as an ALTERNATE?); no object access, no
+#                                        remote contact.
 #
-#   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, rm, cat, tr, cut, sed,
-#     basename, kill, sleep, true, chmod, env, find — plus `timeout`/`gtimeout` themselves, which
-#     ARE the bounding mechanism (local, and bounded by construction: they take the bound).
+#   LOCAL UTILITIES (no network, no spawn, bounded work). THE AUTHORITATIVE SET IS
+#     `declared_externals` in scripts/tests/test_agent_gate_component_set.sh, which is checked
+#     against this region on every run in BOTH directions; it is deliberately NOT re-listed here,
+#     because a second copy of a set is a second thing to drift — this list carried `env`, `find`
+#     and `chmod` at various times while the census could not see their sites, and omitted `head`
+#     and `wc` while the test declared them. What belongs HERE is the REASONING that the name list
+#     cannot carry:
+#     `timeout`/`gtimeout` ARE the bounding mechanism (local, and bounded by construction: they
+#     take the bound).
 #     `find` is the PORTABLE exact-mode test on the isolated fetch config (`find <file> -perm
 #     600`): one named path, no tree traversal, no network. It is used rather than `stat` because
 #     that is `-c %a` on GNU and `-f %Lp` on BSD (job 279).
