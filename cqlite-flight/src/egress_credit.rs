@@ -82,7 +82,13 @@
 //!    materialized inside the batch build, into ONE reused borrowed view of `rows`
 //!    slots, and dropped with the batch. Nothing retained scales with
 //!    `n_cols × rows`, and nothing is pre-sized — the stores GROW and then keep
-//!    that capacity across batches (`clear` retains it).
+//!    that capacity across batches up to a BOUND (`clear` retains it only while the
+//!    retained total stays within an allowance derived from the largest batch's own
+//!    present-cell count, and shrinks the excess above it). The bound matters:
+//!    capacity is retained PER COLUMN, so without it a workload whose dense column
+//!    moves between batches accumulates the SUM of per-column high-water marks and
+//!    reaches the very `n_cols × rows` residency this design avoids (issue #3552,
+//!    roborev rounds 6-7).
 //!
 //!    The reason it must be that way is a property of THIS cap: it is denominated
 //!    in PAYLOAD bytes, so a WIDE SPARSE projection has little payload, does not

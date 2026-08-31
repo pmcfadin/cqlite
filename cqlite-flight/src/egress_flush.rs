@@ -31,7 +31,11 @@ use crate::producer::{BatchSink, MergeProducer, ProducerError};
 ///
 /// Before issue #3552 the row→column transpose ran inside `flush_buffer`, i.e.
 /// inside the `StreamSubPhase::Encode` region. The fold moved it to PUSH time
-/// (`ArrowRowAccumulator::stage`), so without this accumulator the transpose would
+/// (`ArrowRowAccumulator::stage` for the cell resolution and width charge, then
+/// `ArrowRowAccumulator::commit` for the move into column-major storage — BOTH
+/// halves are timed; an earlier revision of this doc named only `stage`, and only
+/// `stage` was wrapped, so the counter under-reported wide projections by exactly
+/// the commit walk, issue #3552 roborev round 7), so without this accumulator the
 /// have left the measured window WITHOUT LEAVING THE PROGRAM: `stream_encode`
 /// would read LOWER with no work removed, and whoever took issue #3552's own
 /// before/after measurement would read a phantom improvement in the very
@@ -77,8 +81,9 @@ impl StageEncodeAccum {
     /// Run `f` — the push-time cell resolution + width charge — and fold its
     /// elapsed wall time into the local `stream_encode` total.
     ///
-    /// Exactly one `Instant::now()` pair per row when instrumented, and NO clock
-    /// at all when not.
+    /// Exactly one `Instant::now()` pair PER CALL when instrumented — two per row,
+    /// since both halves of the push-time transpose (`stage`, then `commit`) are
+    /// timed — and NO clock at all when not.
     #[inline]
     pub(crate) fn timed<T>(&mut self, f: impl FnOnce() -> T) -> T {
         if self.sink.is_none() {
@@ -243,5 +248,54 @@ impl MergeProducer {
         let permit = reservation.materialize(actual_capacity_bytes)?;
         byte_cap.reset();
         sink.emit(CreditedBatch::new(batch, permit))
+    }
+}
+
+#[cfg(test)]
+mod stage_encode_scope_tests {
+    /// `stream_encode` must cover BOTH halves of the push-time transpose.
+    ///
+    /// STRUCTURAL rather than timing-based **on purpose**. What is at risk here is the
+    /// SCOPE — which calls sit inside the timed window — and that is a source property,
+    /// so it is asserted against the source. A timing-based version (compare a wide
+    /// projection's `stream_encode` against a narrow one's) would be a wall-clock
+    /// threshold assert in a correctness test path, which is a MECHANIZED
+    /// `roborev-lints` failure (#2642) — so the test roborev asked for cannot be
+    /// written that way. Precedent for asserting on source:
+    /// `cqlite-core/src/observability/error_schema_tests.rs`.
+    ///
+    /// The defect this pins (issue #3552, roborev round 7): `commit()` sat OUTSIDE the
+    /// window. It walks every projected slot to move staged cells into column-major
+    /// storage — work the fold MOVED there from the formerly-timed transpose — so
+    /// `stream_encode` under-reported wide projections by exactly that walk, while the
+    /// docs named only `stage` and so read as if nothing was lost.
+    #[test]
+    fn both_push_time_transpose_halves_are_inside_the_timed_window() {
+        for (name, src) in [
+            ("producer_drive.rs", include_str!("producer_drive.rs")),
+            ("producer_stream.rs", include_str!("producer_stream.rs")),
+        ] {
+            assert!(
+                src.contains("stage_encode.timed(|| buffer.stage(row))"),
+                "{name}: `stage` is not inside a StageEncodeAccum::timed window"
+            );
+            assert!(
+                src.contains("stage_encode.timed(|| buffer.commit())"),
+                "{name}: `commit` is NOT inside a StageEncodeAccum::timed window — the \
+                 push-time transpose's second half goes uncounted and `stream_encode` \
+                 under-reports wide projections (issue #3552, roborev round 7)"
+            );
+            // An UNTIMED `buffer.commit();` statement at either loop's indentation would
+            // mean a call escaped the window even if a timed one exists elsewhere.
+            for indent in [
+                "\n            buffer.commit();",
+                "\n                    buffer.commit();",
+            ] {
+                assert!(
+                    !src.contains(indent),
+                    "{name}: an UNTIMED `buffer.commit();` call remains"
+                );
+            }
+        }
     }
 }

@@ -37,9 +37,12 @@
 //!   already-transposed cells straight to its builder — `transpose_columns` is not
 //!   run at all on this path.
 //!
-//! The store is reused across batches ([`clear`](ArrowRowAccumulator::clear)
-//! keeps every allocation), so the per-batch `n_cols × vec![None; n_rows]`
-//! allocation is gone too.
+//! The store is reused across batches — [`clear`](ArrowRowAccumulator::clear)
+//! keeps allocations up to a BOUND and releases the excess above it, so a store
+//! that grew far past what any batch since has used may shrink and later
+//! reallocate — so the per-batch `n_cols × vec![None; n_rows]` allocation is gone
+//! too. The bound is what stops per-column capacity accumulating across batches
+//! whose density moves between columns (issue #3552, roborev rounds 6-7).
 //!
 //! # Memory profile — sparse persistent, dense transient
 //!
@@ -170,8 +173,9 @@ pub struct ArrowRowAccumulator<'a> {
     ///
     /// Only a CANONICAL `c` is ever stored or read: a non-canonical
     /// (duplicate-name) column's store stays EMPTY for the whole scan, and its
-    /// cells come from `cells[canonical[c]]` (review B3). Cleared (never
-    /// reallocated) per batch.
+    /// cells come from `cells[canonical[c]]` (review B3). Cleared per batch,
+    /// retaining capacity up to [`ArrowRowAccumulator::clear`]'s bound — a store
+    /// over that bound is shrunk and may reallocate on a later batch.
     cells: Vec<Vec<(usize, Value)>>,
     /// The row under test: one slot per column, all `None` between rows.
     staged: Vec<Option<Value>>,
@@ -415,7 +419,10 @@ impl<'a> ArrowRowAccumulator<'a> {
         self.has_staged = false;
     }
 
-    /// Drop every COMMITTED row, keeping all allocations for the next batch.
+    /// Drop every COMMITTED row, keeping allocations for the next batch up to a
+    /// BOUND — a store whose retained capacity exceeds its share of that bound is
+    /// shrunk here and may reallocate on a later batch. Retention is bounded, not
+    /// unconditional; see the trim below for why unconditional retention is unsafe.
     ///
     /// A staged-but-uncommitted row is deliberately left staged: it belongs to the
     /// NEXT batch, which is what makes the test-then-push boundary work.

@@ -60,11 +60,16 @@ impl MergeProducer {
         // error, panic). `access_path` is `full_scan` for the k-way scan and
         // `streaming_partition_lookup` for the point-read path (issue #2207).
         let mut meter = ScanProgressMeter::new(progress, access_path);
-        // Issue #3552: the build pass's transpose stage, run at PUSH time — each
-        // projected cell is resolved ONCE per row, and that same visit charges the
-        // row's payload width. Reused across batches (cleared, never reallocated).
+        // Issue #3552: the build pass's transpose, run at PUSH time and SPLIT across two
+        // calls — `stage` resolves each projected cell ONCE per row and charges the
+        // width from that same visit, then `commit` moves the staged cells into
+        // column-major storage. Both are timed (roborev round 7); attributing the
+        // whole transpose to `stage` alone is what made `stream_encode` under-report.
+        // row's payload width. Reused across batches: `clear` retains capacity up to a
+        // BOUND and releases the excess, so a store far over that bound may shrink and
+        // later reallocate (issue #3552, roborev rounds 6-7).
         let mut buffer = ArrowRowAccumulator::with_capacity(&self.columns, self.batch_size);
-        // Issue #3552: `stage` performs the transpose that used to run inside
+        // Issue #3552: `stage` AND `commit` together perform the transpose that used to run inside
         // `flush_buffer`'s `stream_encode` region, so its wall time is folded back into
         // that SAME bucket from here — locally, one atomic on Drop, never per row. Without
         // this the transpose would have left the measured window without leaving the
@@ -150,7 +155,13 @@ impl MergeProducer {
                     if byte_cap.cut_before(width).is_yes() {
                         self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
-                    buffer.commit();
+                    // `commit` is the OTHER half of the push-time transpose — it walks every
+                    // projected slot and moves the staged cells into column-major storage — so it
+                    // is timed too, or `stream_encode` under-reports exactly the work the fold
+                    // moved here (issue #3552, roborev round 7). The intervening flush is
+                    // deliberately OUTSIDE both windows: it is `Encode`'s own region already, and
+                    // double-counting it would inflate the counter instead of correcting it.
+                    stage_encode.timed(|| buffer.commit());
                     emitted += 1;
                     byte_cap.accumulate(width);
                     if buffer.len() >= self.batch_size {
