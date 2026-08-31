@@ -5036,7 +5036,11 @@ grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
 # blocker 2), a component that FAILs before its first cargo call legitimately leaves an
 # EMPTY sidecar. That state is NAMED too — it is a fact we know exactly, and UNDECLARED
 # would understate it.
-grep -q 'FAILed before its first cargo build/test invocation' "$GATE" || fm_tokens_missing+=(failed-before-cargo)
+# The FAIL text is composed from a `$what` phrase (which names the metadata-probe exclusion
+# and, for an indirect component, the DRIVER), so both halves are asserted rather than one
+# contiguous literal that the composition would hide.
+grep -qF 'no cargo build/test invoked (component FAILed before ' "$GATE" || fm_tokens_missing+=(failed-before-cargo)
+grep -qF 'its first cargo build/test invocation' "$GATE" || fm_tokens_missing+=(failed-before-cargo-what)
 # …and the TWO states added by roborev job 273: `unobservable:<why>` (F2 — cargo may run in
 # child processes and this shell can say neither what nor whether), and an indirect
 # component whose DRIVER was never reached (F3 — the state the old code mis-reported as an
