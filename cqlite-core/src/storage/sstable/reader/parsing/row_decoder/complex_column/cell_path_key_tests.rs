@@ -991,11 +991,9 @@ fn a_component_length_below_minus_one_errors_and_never_panics() {
             let bytes = components_with_leading_len(raw);
             // The ONLY acceptable outcome is a returned error. A panic fails the
             // test by aborting it, which is the point of driving real bytes here.
-            let err = p
-                .parse_cell_path_key(&bytes, spelling, "cm")
-                .expect_err(&format!(
-                    "{spelling}: component length {raw} must be REFUSED, not decoded"
-                ));
+            let Err(err) = p.parse_cell_path_key(&bytes, spelling, "cm") else {
+                panic!("{spelling}: component length {raw} must be REFUSED, not decoded");
+            };
             let msg = err.to_string();
             assert!(
                 msg.contains("negative") || msg.contains("beyond data"),
