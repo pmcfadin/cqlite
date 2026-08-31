@@ -7848,17 +7848,24 @@ run_compaction_byte_parity() {
     return 0
   fi
   echo ">>> [$name] Rust byte-parity PR proxy for the nightly Java byte tier (#1405)"
+  # #3453: both groups run inside a `bash -c` body (and behind an `env` prefix, which
+  # execs the cargo BINARY), so neither is observable here — hoist the (package,
+  # features) pair into ONE variable expanded into both invocations AND into the two
+  # records below.
+  local cbp_pkg=cqlite-core cbp_feats=write-support
+  _fm_observe_cargo_argv test -p "$cbp_pkg" --features "$cbp_feats"
+  _fm_observe_cargo_argv test -p "$cbp_pkg" --features "$cbp_feats"
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
       set -euo pipefail
       # Group A — committed references, fail-closed (CQLITE_REQUIRE_FIXTURES=1).
       env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
-        cargo test -p cqlite-core --features write-support \
+        cargo test -p '"$cbp_pkg"' --features '"$cbp_feats"' \
           --test issue_1017_live_cell_compaction_byte_parity \
           --test issue_1020_udt_frozen_compaction_byte_parity \
           --test issue_1240_nested_frozen_collection_udt_parity
       # Group B — fetched-only test_tomb references, skip-aware (no require-fixtures).
       env CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
-        cargo test -p cqlite-core --features write-support \
+        cargo test -p '"$cbp_pkg"' --features '"$cbp_feats"' \
           --test issue_1019_static_dropped_collection_compaction_parity' >"$log" 2>&1; then
     status=PASS
   else

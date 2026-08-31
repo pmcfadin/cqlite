@@ -41,6 +41,10 @@ GATE="$REPO_ROOT/scripts/agent-gate.sh"
 PASS=0; FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# A case whose subject is UNOBSERVABLE on this box (a corpus-dependent component that
+# SKIPs without its committed fixtures) is reported as a SKIP, counted in NEITHER total,
+# so it can never be mistaken for a passing assertion (#3249's rule).
+skipped() { printf 'skip - %s\n' "$1"; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-annot.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT
@@ -399,6 +403,15 @@ else
   run_differential write-tests       EXACT
   run_differential memory-budget     EXACT
   run_differential integration-tests EXACT
+  # compaction-byte-parity is an EIGHTH `bash -c` body, behind an `env` prefix as well.
+  # It SKIPs without the committed test_compactionparity fixtures, and a differential over
+  # a component that never ran proves nothing — so it is reported as a SKIP rather than
+  # asserted, and only when the fixtures are actually here.
+  if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-/nonexistent}/sstables/test_compactionparity" ]; then
+    run_differential compaction-byte-parity EXACT
+  else
+    skipped "C-compaction-byte-parity: committed test_compactionparity fixtures absent under CQLITE_DATASETS_ROOT — the component SKIPs, so the differential would prove nothing"
+  fi
   run_differential cli-tests         CONTAINS "pass 2 unreached: the zero-tests guard fires under a cargo stub"
   run_differential smoke             CONTAINS "the smoke script needs a real built binary"
 fi
