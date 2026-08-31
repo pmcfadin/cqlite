@@ -2327,6 +2327,79 @@ else
   fi
 fi
 
+# --- orphan-holds-scope: ask WHAT is in the cgroup, not WHETHER anything is -------------------------
+# An orphaned process keeps a scope ActiveState=active forever (measured: one box, 12 orphaned sleeps,
+# 0 gate scopes), so _foreign_reservation's fall-through turned an affirmative "owner is dead" into
+# `live` and refused the path PERMANENTLY. Tested by extracting the helper: the launcher validates its
+# directories long before the fall-through, so this is not reachable from the CLI -- the same reason the
+# rollback is not (4b.155). A unit test reaches it; a launcher-level test would pass vacuously.
+_ug_src=$(sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER")
+if [ -z "$_ug_src" ]; then
+  bad "4b.165 _unit_runs_a_gate could be extracted" "extraction produced nothing"
+else
+  # A fake cgroup tree: `procs` lists pids we control, so the helper's verdict is fully determined.
+  _ugd="$TMP/ug"; mkdir -p "$_ugd"
+  # stub `systemctl` so ControlGroup resolves into our fake tree, and point the helper at it.
+  _ug_run() {  # <procs-content> -> prints rc
+    local content="$1" fakecg="$_ugd/fs" rc
+    mkdir -p "$fakecg/unit"
+    printf '%s\n' "$content" > "$fakecg/unit/cgroup.procs"
+    ( eval "${_ug_src//\/sys\/fs\/cgroup/$fakecg}"
+      systemctl() { printf '/unit\n'; }
+      _unit_runs_a_gate fake.service ) >/dev/null 2>&1; rc=$?
+    printf '%s' "$rc"
+  }
+  # (a) a cgroup containing ONLY an orphan must be affirmatively NOT-a-gate -> reservation reads free
+  sleep 120 & _orphan=$!
+  _rc_orphan=$(_ug_run "$_orphan")
+  if [ "$_rc_orphan" = 1 ]; then
+    ok "4b.165 a cgroup holding only an orphan is NOT a live gate (the permanent-refusal case)"
+  else
+    bad "4b.165 a cgroup holding only an orphan is not a live gate" "rc=$_rc_orphan (1 expected)"
+  fi
+  # (b) CONTROL: a real full gate in the cgroup must still read live, or (a) passes by answering
+  #     "not a gate" for everything and the reservation protection is gone.
+  _gate_pid=""
+  for _q in $(pgrep -f 'agent-gate\.sh' 2>/dev/null); do
+    _h=0; while IFS= read -r -d '' _a; do case "$_a" in *agent-gate.sh) _h=1 ;; esac; done < "/proc/$_q/cmdline" 2>/dev/null
+    [ "$_h" = 1 ] && { _gate_pid=$_q; break; }
+  done
+  if [ -n "$_gate_pid" ]; then
+    _rc_gate=$(_ug_run "$_gate_pid")
+    [ "$_rc_gate" = 0 ] && ok "4b.166 control: a real full gate in the cgroup still reads LIVE" \
+                        || bad "4b.166 control: a real full gate reads live" "rc=$_rc_gate (0 expected)"
+  else
+    skipc "4b.166 control: a real full gate reads live" "no agent-gate.sh running on this host"
+  fi
+  # (c) an UNREADABLE cgroup.procs must be the THIRD value, so the caller refuses rather than guessing
+  _rc_unread=$( { mkdir -p "$_ugd/fs/unit"; : > "$_ugd/fs/unit/cgroup.procs"; chmod 000 "$_ugd/fs/unit/cgroup.procs"; } 2>/dev/null
+                _ug_run "" ; chmod 644 "$_ugd/fs/unit/cgroup.procs" 2>/dev/null )
+  case "$_rc_unread" in
+    2) ok "4b.167 an unreadable cgroup.procs returns the THIRD value (caller refuses)" ;;
+    *) bad "4b.167 an unreadable cgroup.procs returns the third value" "rc=$_rc_unread (2 expected)" ;;
+  esac
+  kill "$_orphan" 2>/dev/null; wait "$_orphan" 2>/dev/null || true
+  chmod -R u+w "$_ugd" 2>/dev/null || true
+fi
+
+# The matcher must be an exact ARGV ELEMENT, never a substring of the joined cmdline: a searching shell
+# carries the pattern INSIDE an element, so it is excluded by construction with no exclusion list.
+if grep -q 'read -r -d "" a' "$LAUNCHER" \
+   && grep -qE '^\s+\*agent-gate\.sh\)' "$LAUNCHER" \
+   && grep -qE '^\s+--lite\|--delta\|--only\)' "$LAUNCHER" \
+   && ! grep -q '\*agent-gate\.sh\*' "$LAUNCHER"; then
+  ok "4b.168 the gate matcher is an exact argv element, not a cmdline substring"
+else
+  bad "4b.168 the gate matcher is an exact argv element" "$(grep -n 'agent-gate\.sh[*)]' "$LAUNCHER" | head -3)"
+fi
+
+# And scope state must no longer be consulted where the owner is affirmatively dead.
+if sed -n '/gone) : ;;/,/printf .free./p' "$LAUNCHER" | grep -q '_unit_is_live'; then
+  bad "4b.169 the dead-owner fall-through no longer consults ActiveState" "_unit_is_live still reachable there"
+else
+  ok "4b.169 the dead-owner fall-through no longer consults ActiveState"
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1
