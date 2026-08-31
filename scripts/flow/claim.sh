@@ -111,6 +111,9 @@
 #                                             the machine-local lane-directory lock
 #                                             (scripts/flow/lane-lock.sh, #3436 AC5):
 #                                             free / no-lane-dir / self / occupied-alive /
+#                                             occupied-alive-unattributed (a live holder,
+#                                             and this run could not establish whether it
+#                                             is US — see #3436 FIX 7) /
 #                                             occupied-unknown-<verdict> /
 #                                             reclaimable-<DEAD-verdict> /
 #                                             unmeasured(<cause>). An occupied state also
@@ -773,8 +776,9 @@ lane_lock_probe() {
   # SELF is broken out of the occupied note (and only the note): `probe` DOES
   # report it when the record's token is ours, and telling a session "if that
   # occupant is not you..." about its own lock is a warning that trains readers to
-  # ignore the warning. The STATE stays occupied-alive — the lane is occupied, and
-  # by a live process; who it is belongs in the text, not in the classification.
+  # ignore the warning. The state is `self` when SELF was established, and otherwise
+  # `occupied-alive` only when a DIFFERENT holder was established — an unattributable live
+  # holder is `occupied-alive-unattributed` (#3436 FIX 7).
   case "$LANE_LOCK_STATE" in
     self)
       # Deliberately NOT the alarming note below: telling a session "if that

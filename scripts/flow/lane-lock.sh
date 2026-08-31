@@ -307,6 +307,9 @@
 #           Releasing a free lane is RELEASED (already free), exit 0 — idempotent, so
 #           cleanup paths are safe to run twice or after a crash.
 #   reclaim <N> --expect <token>|none --reason <why> [--lane-dir <p>] [--actor <id>] [--pid <pid>]
+#           (RECLAIMED / RECLAIMED (re-entrant) / RECLAIM-LEASE-MISMATCH — its OWN verdict
+#           word, exit 0, for a re-entrant reclaim whose --expect did NOT hold, so a caller
+#           matching on the verdict word can see the violated precondition / RECLAIM-LOST)
 #           compare-and-swap adoption, the same discipline as `claim.sh adopt
 #           --expect`. --expect <token>: the record's CURRENT token must equal it
 #           exactly. --expect none: the record must NOT exist. --expect '' is a usage
