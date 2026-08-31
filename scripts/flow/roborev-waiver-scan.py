@@ -4,13 +4,13 @@
 Usage:
     roborev-waiver-scan.py prompt-content-absent <base> <head> <job> <allowlist> < comments.json
     roborev-waiver-scan.py findings-deferral     <base> <head> <job> <allowlist> <observed-count> \
-        < comments-and-body.json
+        < comments.json
 
 `<allowlist>` is a space-separated list of GitHub logins permitted to GRANT. Prints a facts-style
 result on stdout (one `key=value` per line, values whitespace-collapsed):
 
     state=granted|unauthorized|stale|malformed|none      (both kinds)
-          |count-mismatch|pr-unlinked                    (findings-deferral only)
+          |count-mismatch                                (findings-deferral only)
     author=<login>
     scope=base=<sha> head=<sha> job=<id>
     reason=<why>
@@ -70,7 +70,17 @@ WAIVE_MARKER = re.compile(
     r"^roborev-waive: prompt-content-absent"
     r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
 )
-WAIVE_PREFIX = "roborev-waive: prompt-content-absent "
+# ===== A MARKER *ATTEMPT* IS THE STEM PLUS WHITESPACE **OR END OF LINE** (roborev job 228) =====
+# The attempt test used to be the stem plus a MANDATORY TRAILING SPACE, so a marker-only comment
+# reading EXACTLY the stem — `roborev-defer: findings`, an authorization someone plainly meant to write
+# and then truncated — was not recognised as an attempt at all and was reported `NONE` ("no
+# authorization exists for this review"). That is a FAIL-QUIET ON AN ATTEMPTED AUTHORIZATION: the
+# author re-reads the syntax, sees the prefix they typed, and concludes the mechanism is broken, which
+# is the same diagnostic failure MALFORMED exists to prevent. So the STEM is separated from the field
+# separator: an ATTEMPT is the stem followed by whitespace or by nothing, and the ONE anchored full
+# pattern above — never a second, looser test — decides malformed-ness. The boundary is still TESTED
+# rather than dropped: `roborev-defer: findingsfoo` is a different word, not a truncated marker.
+WAIVE_STEM = "roborev-waive: prompt-content-absent"
 # `issues=` admits ONE OR MORE comma-separated integers, so "non-empty" is a property of the pattern
 # rather than a later check that could be forgotten. `count=` is the AFFIRMATIVE half of the binding
 # (#3626): the wrapper requires it to equal the OBSERVED findings count, so a marker written before
@@ -80,7 +90,7 @@ DEFER_MARKER = re.compile(
     r" issues=([0-9]+(?:,[0-9]+)*) count=([0-9]+)"
     r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
 )
-DEFER_PREFIX = "roborev-defer: findings "
+DEFER_STEM = "roborev-defer: findings"
 
 # ===== NO EMITTED DIAGNOSTIC CARRIES ANY PART OF THE MARKER FORM (#3312 job 23, layer 3) =====
 # The MALFORMED detail used to quote the whole required form, and that detail is interpolated into the
@@ -132,19 +142,25 @@ EMIT_KEYS = {
 # comment would be a false accusation printed on every later run. A marker-only comment whose FIELDS are
 # wrong is still MALFORMED — there the author plainly meant to authorize. The `NONE` cause teaches the rule.
 #
-# ONE IMPLEMENTATION, TWO KINDS (#3626): the prefix is a PARAMETER, so the deferral marker inherits this
+# ONE IMPLEMENTATION, TWO KINDS (#3626): the STEM is a PARAMETER, so the deferral marker inherits this
 # rule by CALL. A copy of it for the second kind would be a second place for the channel rule to diverge,
 # and a divergence here is an authorization bypass, not a cosmetic difference.
 
 
-def sole_marker_line(body, prefix):
-    """The comment's only nonblank line when it is a marker line of this kind, else None."""
+def sole_marker_line(body, stem):
+    """The comment's only nonblank line when it ATTEMPTS a marker of this kind, else None."""
     lines = [raw.rstrip("\r") for raw in body.split("\n")]
     nonblank = [line for line in lines if line.strip()]
     if len(nonblank) != 1:
         return None
     line = nonblank[0]
-    return line if line.startswith(prefix) else None
+    if not line.startswith(stem):
+        return None
+    rest = line[len(stem):]
+    # WHITESPACE OR END OF LINE, never a mandatory space (roborev job 228; see WAIVE_STEM above).
+    if rest and not rest[:1].isspace():
+        return None
+    return line
 
 
 PLACEHOLDERS = {
@@ -230,103 +246,64 @@ def unauthorized_detail(author, allowlist, what):
             % (author, what, " ".join(allowlist)))
 
 
-# ===== A LOCAL ISSUE REFERENCE, WITH TOKEN *AND* REPOSITORY BOUNDARIES (roborev job 225) =====
-# THE PR BODY IS WRITTEN BY THE WORKER — THE CONSTRAINED PARTY. So this predicate decides whether the
-# party being constrained satisfied its own constraint, and it must not be satisfiable by a reference
-# that names something else or renders as inert text. The first version bounded DIGITS only, so three
-# shapes passed while `gh issue view <N>` (which the caller runs) validated the unrelated LOCAL issue:
-#   * `other/repo#3602`  — a CROSS-REPOSITORY reference. GitHub resolves it to a different repository
-#                          entirely, so it records no disposition here.
-#   * `#3602suffix`      — not an autolink at all; a token boundary was missing on the right.
-#   * a copy inside a ``` fence, a `code span` or an <!-- HTML comment --> — content that a human
-#                          reading the PR does not see as a link, so the requirement "it must name
-#                          WHERE THE FINDING WENT" is not met by it.
+# ============ A PR-BODY LINK CHECK WAS HERE, AND WAS DELIBERATELY REMOVED (#3626) ============
+# DO NOT REINSTATE IT. What stood here — `strip_inert_regions()`, `body_references_issue()`, the
+# `LOCAL_REF_LEFT`/`LOCAL_REF_RIGHT` token boundaries and the `pr-unlinked` state — required each
+# deferred issue number to appear as a LOCAL, VISIBLE `#<N>` reference in the pull-request BODY. Three
+# generations of it were built and every one leaked.
 #
-# WHY REGEX AND NOT STRUCTURED LINK DATA. `gh pr view --json` exposes `closingIssuesReferences`, which
-# is a DIFFERENT relation: it lists issues a closing KEYWORD would close on merge. A deferred finding's
-# issue must stay OPEN — that is the whole point of deferring it — so a deferral PR closes nothing and
-# that field is empty for exactly the case this predicate exists for. GitHub exposes no "issues
-# mentioned by this body" field. So the reference is read from the body text, with the inert regions
-# removed first.
+# THE PRIMARY REASON IT IS GONE IS NOT THE LEAKS — IT IS THE ARTIFACT IT VALIDATED (lead ruling).
+# A PR BODY IS EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION. A
+# TOP-LEVEL COMMENT IS PERMANENT AND ATTRIBUTABLE. So the body-link leg was the WEAKER artifact of the
+# two, and it would STILL BE THE WEAKER ARTIFACT EVEN IF MARKDOWN PARSED TRIVIALLY: an authorization
+# that can be silently rewritten by the constrained party after it is granted evidences nothing. The
+# Markdown-recogniser problem below was never the root cause; it was a SYMPTOM of validating against a
+# mutable, unattributed artifact.
 #
-# EVERY AMBIGUITY IS RESOLVED TOWARD *NOT FOUND*, which is the fail-closed direction here: an
-# unrecognised shape yields `pr-unlinked`, whose remedy is one line in the PR body ("add `#<N>`"),
-# while the opposite error lets a deferred finding be dropped with no recorded disposition. The full
-# URL form (`https://github.com/<owner>/<repo>/issues/<N>`) is therefore NOT accepted either — this
-# scanner is not told which repository is local, and guessing is the shape being removed.
-FENCE_OPEN = re.compile(r"^(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+# THE TRAP WAS ALSO IN THE REQUIREMENT'S OWN WORDING (lead): it said the PR must "name WHERE THE
+# FINDING WENT", which invited a PROSE SCAN — when the property actually wanted is that the finding is
+# TRACKED. Retrievability (`gh issue view <N>`, in roborev-review-oracles.sh) is what enforces
+# not-dropped; a sentence in a body never did.
+#
+# THE MEASUREMENT, so nobody re-derives it: Markdown-handling references in this one predicate went
+# 0 -> 11 across two review rounds, and the bypass census did not close:
+#   shape                                          round   status when the leg was deleted
+#   other/repo#3602 (cross-repository)               R1     closed
+#   #3602suffix (missing right token boundary)       R1     closed
+#   inside a fenced code block                       R1     closed
+#   inside an <!-- HTML comment -->                  R1     closed
+#   `#3602` single-backtick code span                R1     closed
+#   ``#3602`` MULTI-backtick code span               R2     ACCEPTED (bypass)
+#   [#3602](https://example.com) explicit link       R2     ACCEPTED (bypass)
+#   4-space indented code block                       -     ACCEPTED (declared residual)
+#   GFM autolinks, reference-style [#N][ref], raw
+#     HTML, entity refs, nested emphasis              -     unhandled by any generation
+# Each fix asked "is this text a LINK or is it INERT?" of a grammar the PR author controls, so the list
+# of recognisers never closes — the identical shape #3312 closed by REMOVING a channel rather than
+# picking a rarer delimiter, and the identical shape #3229's owner ruling removed: A GUARD WITH KNOWN
+# DOCUMENTED FALSE-PASSES IS WORSE THAN NO GUARD, BECAUSE IT INVITES RELIANCE IT CANNOT SUPPORT.
+#
+# SUBTRACTION CANNOT INTRODUCE A FALSE PASS: with nothing predicted about the body, nothing is excused
+# by it. The property is now carried by three legs, none of which reads the PR body — (1) the marker
+# NAMES the issue numbers, in a top-level PR comment, from a hard-coded author allowlist, associated by
+# `gh --json` structured fields, permanent and attributable; (2) each named issue must be RETRIEVABLE
+# via `gh issue view`, three-valued so that "issue absent" and "could not ask" are never both read as
+# verified; (3) this block RECORDS the numbers, the count, the scope and the reason verbatim.
+#
+# REINSTATING A BODY SCAN HERE IS REINSTATING GENERATION THREE. If a stronger disposition signal is
+# ever wanted, it must come from an IMMUTABLE OR ATTRIBUTED artifact (a structured GitHub relation, or
+# the authorization comment itself), never from parsing the mutable body of the PR under review.
 
 
-def strip_inert_regions(body):
-    """The body with HTML comments, fenced code blocks and inline code spans removed.
-
-    CONSERVATIVE BY CONSTRUCTION, and that is what makes this bounded rather than the unbounded
-    "data or control?" game #3312 job 29 closed: every unterminated construct swallows the REST of
-    its scope (an unterminated `<!--` the rest of the body, an unclosed fence the rest of the body,
-    an unmatched backtick the rest of its line), so a malformed body removes MORE text and can only
-    make a reference harder to find.
-
-    DECLARED RESIDUAL: a 4-space INDENTED code block is NOT stripped (#3626, tracked separately).
-    The same 4-space indent is both an indented code block and a LIST CONTINUATION line, and the two
-    are indistinguishable without a full block-structure parse — so a naive stripper would remove
-    ordinary visible prose and produce false `PR-UNLINKED` refusals, which is worse than the narrow
-    case it closes (a guard that reds on correct input is the guard agents learn to waive). Fences,
-    inline spans and HTML comments ARE stripped.
-
-    THE FENCE CLOSER FOLLOWS CommonMark, deliberately: a closing fence uses the SAME character, is at
-    least as long as the opener, and carries NO info string. A naive "any fence line toggles" rule
-    desynchronises on a ```` ```bash ```` line INSIDE a fence — GitHub's renderer keeps that as code
-    while the naive rule would leave it as text, which is a reference the human sees as code and the
-    machine counts as a link. That is fail-OPEN, in the one direction this predicate must not fail.
-    """
-    # HTML comments first: they can span lines and can contain fences.
-    body = re.sub(r"<!--.*?-->", " ", body, flags=re.S)
-    body = re.sub(r"<!--.*\Z", " ", body, flags=re.S)
-    kept = []
-    open_fence = None
-    for line in body.split("\n"):
-        stripped = line.strip()
-        if open_fence is None:
-            match = FENCE_OPEN.match(stripped)
-            if match is not None:
-                open_fence = match.group("fence")
-                continue
-            # Inline code spans, and an unmatched backtick to end of line.
-            line = re.sub(r"`[^`]*`", " ", line)
-            line = re.sub(r"`.*$", " ", line)
-            kept.append(line)
-            continue
-        closer = FENCE_OPEN.match(stripped)
-        if (closer is not None
-                and closer.group("fence")[0] == open_fence[0]
-                and len(closer.group("fence")) >= len(open_fence)
-                and not closer.group("info").strip()):
-            open_fence = None
-    return "\n".join(kept)
-
-
-# A LOCAL `#<N>`: no repository qualifier or word character before it, no token character after it.
-# The left class covers `owner/repo#N`, `GH-`-style prefixes and any `word#N`; the right class covers
-# `#Nsuffix`. `.` and `)` are NOT in the right class, so `#3602.` and `(#3602)` still count.
-LOCAL_REF_LEFT = r"(?<![0-9A-Za-z._/-])"
-LOCAL_REF_RIGHT = r"(?![0-9A-Za-z_-])"
-
-
-def body_references_issue(pr_body, issue):
-    """Is `#<issue>` referenced by the pull-request body as a LOCAL issue, in visible text?"""
-    visible = strip_inert_regions(pr_body)
-    pattern = LOCAL_REF_LEFT + "#" + re.escape(issue) + LOCAL_REF_RIGHT
-    return re.search(pattern, visible) is not None
-
-
-def judge_defer_line(line, author, base, head, job, allowlist, observed_count, pr_body):
+def judge_defer_line(line, author, base, head, job, allowlist, observed_count):
     """Return (state, fields) for a line that starts with the findings-deferral prefix.
 
     THE MATCH IS AFFIRMATIVE, NEVER PERMISSIVE (#3626, on #3586's rule). A grant needs the scope to
-    match, the declared `count=` to EQUAL the observed findings count, and every declared issue to be
-    referenced from the PR body. Nothing here is derived from the ABSENCE of a contrary signal, and
-    there is deliberately NO reconstruction of per-finding identity from the review's prose: that is a
-    recogniser over author-controlled text, the class #3564 closed by REMOVING prose reconstruction.
+    match and the declared `count=` to EQUAL the observed findings count; the caller then requires
+    every declared issue to be RETRIEVABLE. Nothing here is derived from the ABSENCE of a contrary
+    signal, and there is deliberately NO reconstruction of per-finding identity from the review's
+    prose, nor any scan of the PR BODY (see the tombstone above): both are recognisers over
+    author-controlled text, the class #3564 and #3312 closed by REMOVING the recogniser.
     """
     match = DEFER_MARKER.match(line)
     if match is None:
@@ -360,29 +337,21 @@ def judge_defer_line(line, author, base, head, job, allowlist, observed_count, p
             "authorizer judged are the findings this run observed. A new finding at the same head "
             "raises the observed count and must not ride an older authorization; re-triage, then "
             "re-authorize for the count actually observed" % (m_count, observed_count)))
-    # ===== THE DISPOSITION HALF: A DEFERRAL WITHOUT A LINKED ISSUE IS A DROPPED FINDING =====
-    # The nit rule already requires one follow-up issue at merge time; requiring the PR body to
-    # reference each deferred issue makes that link MECHANICAL instead of remembered. Retrievability
-    # is asserted by the caller (it needs the network); this half is decidable from the same JSON the
-    # comments came from, so it lives with the rest of the structured parse.
-    unlinked = [n for n in m_issues.split(",") if not body_references_issue(pr_body, n)]
-    if unlinked:
-        return "pr-unlinked", dict(fields, detail=(
-            "the pull-request body does not reference issue(s) %s, so the deferred finding(s) have "
-            "no recorded disposition — a deferral without a linked issue is a DROPPED finding. Add "
-            "the reference to the PR body (the authorization comment records the ruling; the body "
-            "records where the finding went)" % ", ".join("#" + n for n in unlinked)))
+    # ===== THE DISPOSITION HALF LIVES ENTIRELY IN THE CALLER, AS RETRIEVABILITY =====
+    # "The finding is TRACKED" is established by asking GitHub whether each named issue EXISTS (a
+    # three-valued `gh issue view` in roborev-review-oracles.sh), not by scanning the PR body for a
+    # sentence about it — see the tombstone above for why the body scan was removed rather than fixed.
     # AUTHORIZATION IS THE LAST GATE, exactly as it is for the waiver.
     if author not in allowlist:
         return "unauthorized", dict(fields, detail=unauthorized_detail(author, allowlist, "deferral"))
     return "granted", fields
 
 
-def scan(kind, comments, base, head, job, allowlist, observed_count, pr_body):
+def scan(kind, comments, base, head, job, allowlist, observed_count):
     """The LAST GRANTED marker wins; otherwise the FIRST refusal is reported."""
     granted = None
     first_refusal = None
-    prefix = WAIVE_PREFIX if kind == WAIVE_KIND else DEFER_PREFIX
+    stem = WAIVE_STEM if kind == WAIVE_KIND else DEFER_STEM
     for comment in comments:
         if not isinstance(comment, dict):
             continue
@@ -399,14 +368,14 @@ def scan(kind, comments, base, head, job, allowlist, observed_count, pr_body):
         if not isinstance(body, str):
             continue
         # ONE DECISION, NO PARSE: is the marker the whole comment?
-        line = sole_marker_line(body, prefix)
+        line = sole_marker_line(body, stem)
         if line is None:
             continue
         if kind == WAIVE_KIND:
             state, fields = judge_waive_line(line, author, base, head, job, allowlist)
         else:
             state, fields = judge_defer_line(
-                line, author, base, head, job, allowlist, observed_count, pr_body)
+                line, author, base, head, job, allowlist, observed_count)
         if state == "granted":
             granted = fields
         elif first_refusal is None:
@@ -458,17 +427,10 @@ def main(argv):
     comments = data.get("comments") if isinstance(data, dict) else data
     if not isinstance(comments, list):
         comments = []
-    pr_body = data.get("body") if isinstance(data, dict) else None
-    if kind == DEFER_KIND and not isinstance(pr_body, str):
-        # THE PR BODY IS THE SOLE EVIDENCE for the disposition half, so a payload that does not carry
-        # it cannot yield a grant. Reported as its own state rather than as `pr-unlinked`: "the body
-        # says nothing about #N" and "there is no body to read" are different operator actions.
-        emit(kind, {"state": "unavailable",
-                    "detail": "the 'gh pr view' payload carries no readable 'body' field, so the "
-                              "disposition of a deferred finding could not be established"})
-        return 0
-    emit(kind, scan(kind, comments, base, head, job, allowlist,
-                    observed_count, pr_body if isinstance(pr_body, str) else ""))
+    # NO `body` IS READ, FOR EITHER KIND. Both authorizations are decided from top-level COMMENTS
+    # alone — permanent, attributable artifacts — and the PR body is deliberately not evidence for
+    # anything here (#3626; see the tombstone above `judge_defer_line`).
+    emit(kind, scan(kind, comments, base, head, job, allowlist, observed_count))
     return 0
 
 
