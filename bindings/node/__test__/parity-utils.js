@@ -38,6 +38,40 @@ function evictIfNeeded(cache) {
 // =============================================================================
 
 /**
+ * The canonical shape of a Cassandra table directory: `<table>-<32 hex uuid>`.
+ *
+ * Hoisted here (issue #3493) because the two golden lookups below now apply it.
+ * They previously selected a directory with a bare `startsWith(`${table}-`)`,
+ * which accepts committed siblings this regex rejects — `<table>-wip`,
+ * `<table>-extra-<uuid>` — so Jest could select a directory that
+ * `check-dataset-manifest.sh` (which requires the UUID shape) never validated,
+ * and the manifest would report the corpus complete while Jest read a broken
+ * golden out of the sibling. Consumer and validator now share ONE rule.
+ *
+ * Measured across both corpus roots when this was tightened: the only non-UUID
+ * table directory anywhere is `system/_paxos_repair_state`, which no lookup can
+ * select (it has no `<table>-` prefix), so this narrows nothing that resolves today.
+ */
+const TABLE_DIR_RE = /^(.+)-[0-9a-f]{32}$/;
+
+/**
+ * True if `entryName` is the canonical table directory FOR EXACTLY `table`.
+ *
+ * Equality on the captured table name, not a prefix test: `startsWith` treats
+ * `orders-extra-<uuid>` as a directory of table `orders`, while TABLE_DIR_RE
+ * parses its table name as `orders-extra`. This mirrors the manifest's
+ * `${base#"${table}-"}` + 32-hex-suffix test exactly.
+ *
+ * @param {string} entryName - Directory basename
+ * @param {string} table - Logical table name
+ * @returns {boolean}
+ */
+function isTableDirFor(entryName, table) {
+  const m = TABLE_DIR_RE.exec(entryName);
+  return m !== null && m[1] === table;
+}
+
+/**
  * Find the JSONL reference file for a given keyspace and table.
  * Tables have hash-suffixed directories: {table}-{hash}/nb-1-big-Data.db.jsonl
  *
@@ -63,7 +97,7 @@ function findJsonlFile(keyspace, table) {
   for (const entry of entries) {
     if (
       entry.isDirectory() &&
-      entry.name.startsWith(`${table}-`) &&
+      isTableDirFor(entry.name, table) &&
       isCommittedTableDir(keyspace, entry.name)
     ) {
       const jsonlFile = path.join(keyspaceDir, entry.name, 'nb-1-big-Data.db.jsonl');
@@ -100,7 +134,7 @@ function findOaJsonlFile(keyspace, table) {
   for (const entry of entries) {
     if (
       entry.isDirectory() &&
-      entry.name.startsWith(`${table}-`) &&
+      isTableDirFor(entry.name, table) &&
       isCommittedTableDir(keyspace, entry.name)
     ) {
       const tableDir = path.join(keyspaceDir, entry.name);
@@ -766,7 +800,8 @@ function formatValue(value) {
 // bindings/python/tests/corpus.py.
 // =============================================================================
 
-const TABLE_DIR_RE = /^(.+)-[0-9a-f]{32}$/;
+// (declaration hoisted above findJsonlFile — see the top-of-file definition)
+
 
 /**
  * All `system*` keyspaces (system, system_auth, system_schema,
@@ -1053,6 +1088,7 @@ function getKnownIssue(keyspace, table) {
 
 module.exports = {
   // JSONL utilities
+  isTableDirFor,
   findJsonlFile,
   findOaJsonlFile,
   countRowsInJsonl,

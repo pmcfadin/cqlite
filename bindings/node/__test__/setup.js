@@ -23,7 +23,83 @@ const PROJECT_ROOT = path.resolve(BINDINGS_DIR, '..', '..');
 const TEST_DATA_ROOT = process.env.CQLITE_DATASETS_ROOT ||
   path.join(PROJECT_ROOT, 'test-data', 'datasets');
 const SSTABLES_DIR = path.join(TEST_DATA_ROOT, 'sstables');
-const SCHEMAS_DIR = path.join(PROJECT_ROOT, 'test-data', 'schemas');
+// Issue #3493: honour CQLITE_SCHEMAS_ROOT. The agent gate's #3148 preflight resolves a
+// schemas root -- an out-of-tree override when set and usable, else the checkout's --
+// validates it, and STAMPS it in the SUMMARY. Ignoring the variable here meant a run
+// could certify one schemas root while this suite read another, once the gate started
+// running the whole suite.
+//
+// This MIRRORS the gate's `_gate_schemas_root` / Rust `resolve_schemas_root` rather than
+// inventing a third contract (roborev round 8, Medium -- the first cut diverged on two
+// of the three cases and would have failed ordinary `npm test` runs that the other
+// runners resolve fine):
+//   * blank / whitespace-only  -> treated as UNSET (the gate's override_present test is
+//                                 `*[![:space:]]*`, i.e. presence requires a non-space
+//                                 character), so an exported-but-empty value is not an
+//                                 attempt to override and must not be an error;
+//   * relative                 -> REJECTED, loudly. This is the one case that must fail
+//                                 rather than fall back: the gate resolves it against the
+//                                 repo root while each runner resolves against its own
+//                                 cwd, so it would silently mean two different roots;
+//   * absolute, not a directory-> fall back to the checkout, exactly as
+//                                 `_gate_schemas_root`'s `[ -d ... ]` guard does. A stale
+//                                 exported path is not a request to fail every run.
+// BLANKNESS IS THE UNICODE WHITE_SPACE PROPERTY -- the same set all three resolvers use
+// (roborev #3493 rounds 35-46).
+//
+// Six rules were tried here and five were wrong. The first four were each off by one
+// character (`trim()` on U+FEFF, `\p{White_Space}` measured against a locale-specific
+// gate on U+0085, ASCII-only on U+2003, the glibc set on U+2007). The fifth was wrong in
+// KIND: I mirrored a MEASUREMENT of the gate's `[[:space:]]`, which is locale-sensitive --
+// with a lone U+2003 the gate answered "present" under LC_ALL=C and "blank" under UTF-8,
+// so no fixed mirror could be right in both.
+//
+// Round 45 pinned both sides to ASCII, which made gate and Node deterministic but moved
+// the gate AWAY from Rust's `trim()` in the common UTF-8 case -- trading one divergence
+// for another. The end state is to pick ONE contract and implement it explicitly
+// everywhere: `char::is_whitespace` IS the Unicode White_Space property, so Rust already
+// has it, the gate now strips exactly that set by byte substitution (locale-independent),
+// and this is the same property natively. Agreement is by construction, not by
+// measurement.
+//
+// U+FEFF is NOT White_Space (Unicode removed it), so a BOM-only value stays present in
+// all three -- which is why `String.trim()`, that strips it, was wrong at the start.
+const SCHEMAS_ROOT_RAW = process.env.CQLITE_SCHEMAS_ROOT;
+const SCHEMAS_ROOT_OVERRIDE =
+  SCHEMAS_ROOT_RAW !== undefined &&
+  !/^\p{White_Space}*$/u.test(SCHEMAS_ROOT_RAW)
+    ? SCHEMAS_ROOT_RAW
+    : undefined;
+// Control characters are rejected BEFORE the absolute test, in that order, because the
+// gate rejects them first too and reports that as the reason (roborev round 12, Low --
+// the first cut accepted an absolute path carrying one, so the two "mirrors" diverged
+// on a case the gate has an explicit rule for).
+//
+// `\p{Cc}` -- the full Unicode Cc category -- rather than a hand-written C0+DEL range
+// (roborev round 13, Low). That range omitted the C1 block U+0080-U+009F, and BOTH other
+// resolvers reject it: `fixture_roots.rs` uses `char::is_control` (which IS Cc), and the
+// gate's `[[:cntrl:]]` matches C1 under this locale -- verified, not assumed, with
+// U+0085. So the hand-written range made JavaScript the one outlier of three, in a
+// mirror whose entire value is that it does not diverge. Naming the category instead of
+// enumerating a range is also what stops the next Unicode-shaped gap.
+if (SCHEMAS_ROOT_OVERRIDE !== undefined && /\p{Cc}/u.test(SCHEMAS_ROOT_OVERRIDE)) {
+  throw new Error(
+    'CQLITE_SCHEMAS_ROOT must not contain control characters (newline/CR/tab), got ' +
+    JSON.stringify(SCHEMAS_ROOT_OVERRIDE)
+  );
+}
+if (SCHEMAS_ROOT_OVERRIDE !== undefined && !path.isAbsolute(SCHEMAS_ROOT_OVERRIDE)) {
+  throw new Error(
+    `CQLITE_SCHEMAS_ROOT must be an absolute path, got '${SCHEMAS_ROOT_OVERRIDE}' ` +
+    '(the gate resolves it against the repo root while each runner resolves it against ' +
+    'its own cwd, so a relative value would silently mean two different roots)'
+  );
+}
+const SCHEMAS_DIR =
+  SCHEMAS_ROOT_OVERRIDE !== undefined && fs.existsSync(SCHEMAS_ROOT_OVERRIDE) &&
+  fs.statSync(SCHEMAS_ROOT_OVERRIDE).isDirectory()
+    ? SCHEMAS_ROOT_OVERRIDE
+    : path.join(PROJECT_ROOT, 'test-data', 'schemas');
 
 // Schema file paths for different test keyspaces
 const SCHEMA_BASIC_TYPES = path.join(SCHEMAS_DIR, 'basic-types.cql');
@@ -32,6 +108,12 @@ const SCHEMA_TIME_SERIES = path.join(SCHEMAS_DIR, 'time-series.cql');
 const SCHEMA_WIDE_ROWS = path.join(SCHEMAS_DIR, 'wide-rows.cql');
 // Issue #656 (VG4): oa test schema for test_oa keyspace
 const SCHEMA_OA_TEST = path.join(SCHEMAS_DIR, 'oa-test.cql');
+// Issue #3493 round 10: write.test.js and write-smoke.test.js used to build this path
+// themselves from `__dirname/../../../test-data/schemas`, which BYPASSES the resolver
+// above -- so CQLITE_SCHEMAS_ROOT was honoured by some of the suite and ignored by the
+// rest, and the gate could certify an out-of-tree root that parts of Jest never read.
+// Every schema the suite needs must come from here.
+const SCHEMA_WRITE_TEST = path.join(SCHEMAS_DIR, 'write-test.cql');
 
 // =============================================================================
 // Dataset Availability Detection
@@ -141,6 +223,7 @@ global.testPaths = {
   SCHEMA_TIME_SERIES,
   SCHEMA_WIDE_ROWS,
   SCHEMA_OA_TEST,
+  SCHEMA_WRITE_TEST,
 };
 
 global.DATASETS_AVAILABLE = DATASETS_AVAILABLE;
