@@ -108,9 +108,9 @@ pub enum StreamSubPhase {
     /// # Why this is a SEPARATE bucket from [`Self::Encode`]
     ///
     /// [`Self::Encode`] wraps only the projected cells' resolution and the Arrow
-    /// array build, on the merge-consumer thread (before issue #3552, the transpose
-    /// + `rows_to_record_batch` inside `flush_buffer`; since then, the push-time
-    /// resolution as well — see that variant's scope note). It has never covered
+    /// array build, on the merge-consumer thread (before issue #3552, the
+    /// transpose plus `rows_to_record_batch` inside `flush_buffer`; since then,
+    /// the push-time resolution as well — see that variant's scope note). It has never covered
     /// the encoder stage, which runs LATER and on a DIFFERENT thread (the async
     /// gRPC task). Any change aimed at the framing stage — the batch-size/encoder
     /// target alignment, or the dictionary-hydration rebuild — was therefore
