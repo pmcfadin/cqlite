@@ -27,6 +27,13 @@ gg() { git -c user.email=t@t -c user.name=t -c init.defaultBranch=main -c commit
 T=$(mktemp -d "${TMPDIR:-/tmp}/claim-lock-test.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
+# claim.sh now reports the machine-local lane-directory lock's state on every HELD
+# line (#3436 AC5), reading ${LANE_ROOT:-/data/lanes}/lane-<N>. Pin LANE_ROOT into
+# the sandbox for the WHOLE suite so no case reads a real fleet lane directory:
+# the report would otherwise depend on which lanes happen to exist on the host.
+export LANE_ROOT="$T/lanes"
+mkdir -p "$LANE_ROOT"
+
 ORIGIN="$T/origin.git"
 A="$T/A"
 B="$T/B"
