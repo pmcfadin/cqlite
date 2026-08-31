@@ -718,6 +718,37 @@ _res_ident=$(_proc_identity $$)
 # names that path as ITS summary. That is one question asked of several paths, using the SAME liveness
 # primitives as the main path (`_pid_state`, `_proc_is_zombie`, `_proc_identity`, `_unit_is_live`) rather
 # than a second copy of the classification.
+_unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = affirmatively not | 2 = unmeasurable
+  # ASK WHAT IS IN THE CGROUP, NOT WHETHER ANYTHING IS (lead order; box-wide finding). `ActiveState`
+  # answers "is any task left in the scope", which a single ORPHANED `sleep` satisfies forever -- one box
+  # was measured with 12 orphaned sleeps and 0 gate scopes. That let an affirmative "owner is dead" reading
+  # be overridden into `live`, so the path was refused FOREVER with nothing to reap the orphan.
+  local unit="$1" cg procs p a hit lite found=1
+  cg=$(systemctl --user show -p ControlGroup --value "$unit" 2>/dev/null) || return 2
+  [ -n "$cg" ] || return 2
+  procs="/sys/fs/cgroup${cg}/cgroup.procs"
+  [ -r "$procs" ] || return 2               # UNMEASURABLE => third value; the caller REFUSES, never guesses
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -r "/proc/$p/cmdline" ] || continue   # exited mid-scan: not evidence either way
+    hit=0; lite=0
+    # MATCH AN EXACT ARGV ELEMENT, NUL-delimited -- never a substring of the joined cmdline. A searching
+    # shell carries the pattern INSIDE an element (`pgrep -f agent-gate\.sh`), so no element ever ENDS in
+    # `agent-gate.sh` and the searcher is excluded BY CONSTRUCTION. A `$$` exclusion list is both
+    # insufficient (the pgrep child and command-substitution subshells match too) and a thing to forget.
+    # Measured: the argv form found 7 full gates and excluded both a --lite run and the searching shell;
+    # the substring-of-cmdline form counted 10, over-counting searchers.
+    while IFS= read -r -d "" a; do
+      case "$a" in
+        *agent-gate.sh)        hit=1 ;;
+        --lite|--delta|--only) lite=1 ;;   # exact element: a summary PATH containing "--only" cannot trip it
+      esac
+    done < "/proc/$p/cmdline"
+    if [ "$hit" = 1 ] && [ "$lite" = 0 ]; then found=0; break; fi
+  done < "$procs"
+  return $found
+}
+
 _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another launch's reserved summary?)
   local lk="$1.launch-lock" own own_unit own_pid own_start now_id _lkdir
   # ABSENCE IS ONLY CONCLUSIVE IF WE COULD LOOK (round-48 class audit, class 4: two-valued predicates).
@@ -755,7 +786,15 @@ _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another
     gone) : ;;
     *) printf 'unknown'; return 0 ;;
   esac
-  if [ -n "$own_unit" ] && _unit_is_live "$own_unit"; then printf 'live'; return 0; fi
+  # SCOPE STATE IS A SECONDARY SIGNAL, NEVER PRIMARY. By here the owner pid is affirmatively dead, a
+  # zombie, or pid-reused. Ask whether a GATE still runs in that unit -- not whether the cgroup is
+  # non-empty, which an orphan satisfies forever and which refused the path permanently.
+  if [ -n "$own_unit" ]; then
+    _unit_runs_a_gate "$own_unit"; case $? in
+      0) printf 'live';    return 0 ;;   # a real full gate is still in there
+      2) printf 'unknown'; return 0 ;;   # unmeasurable => refuse, do not reclaim
+    esac
+  fi
   printf 'free'
 }
 # Our artifact set: the beat destination, the log, and — if our own summary looks like another launch's
