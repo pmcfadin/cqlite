@@ -336,6 +336,19 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES — NOT BEFORE IT, NOT AFTER THE HARM (roborev
+  job 290).** The mirror of this issue's earlier ruling ("a check placed AFTER the harmful effect
+  can only report it"), and the same family as the two sha-equality failures. The component-set
+  pre-flight ran BEFORE `acquire_gate_slot`, and `_tree_recapture_after_slot` then RESET the
+  certification window to the tree present when the slot was granted — so an edit made WHILE QUEUED
+  became the new starting tree under a STALE `component-set:` verdict. The recapture is deliberate
+  and stays; the pre-flight is **repeated inside the window** (the earlier call is kept, because it
+  is what stops an uncertifiable run from queueing or compiling at all). **Second half, one
+  asymmetry down:** the LOCAL manifest is verified against the LOCAL declaration every run, so it is
+  a checked claim — while HEAD's manifest was TRUSTED, letting a stale one at HEAD excuse an
+  uncommitted removal as `DECLARED`. Provenance now reads HEAD's committed `COMPONENTS`
+  **declaration** as data and does not consult HEAD's manifest at all: **remove the second source
+  rather than reconcile it.**
   **A SYMLINK IS A BLOB, AND A GRAFT OUTLIVES `--no-replace-objects` (roborev job 285).** Two
   false-green routes, both closed by moving rather than flagging. (1) The presence probe accepted
   every `blob`, but a symlink IS one — the difference is the MODE (`120000`) — so the two halves of

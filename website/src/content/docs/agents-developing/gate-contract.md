@@ -468,6 +468,14 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**A check must be inside the window it certifies — not before it, not after the harm.** The
+pre-flight ran *before* the concurrency-slot wait, and the post-slot tree recapture then reset the
+certification window: an edit made while the run was queued became the new starting tree under a
+stale `component-set:` verdict. The recapture is deliberate, so the pre-flight is repeated inside
+the window it opens. And HEAD's manifest was *trusted* while the local one is *verified* against the
+local declaration every run — so provenance now reads HEAD's committed `COMPONENTS` declaration
+directly and does not consult HEAD's manifest: remove the second source rather than reconcile it.
+
 **A symlink is a blob, and a graft outlives `--no-replace-objects`.** The presence probe accepted
 every `blob`, but a symlink is one — the difference is the mode — so the working-tree validation
 *followed* the link and saw a full manifest while `git show <rev>:<path>` printed the link's target
