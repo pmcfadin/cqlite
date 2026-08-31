@@ -408,13 +408,25 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
     printf '%s\n' "$STUB_GH_ISSUE_ERR" >&2
     exit 1
   fi
-  for _stub_known in ${STUB_GH_ISSUES:-}; do
+  # ===== AND `state` IS MODELLED, BECAUSE A CLOSED ISSUE ANSWERS AND EXITS 0 (#3626 round 3) =====
+  # STUB_GH_ISSUES lists OPEN issues; STUB_GH_ISSUES_CLOSED lists CLOSED ones. The real `gh` returns
+  # the number and exits 0 for both, which is exactly why a number-only test could not enforce
+  # not-dropped — so the stub must be able to produce that shape or the case measures nothing.
+  for _stub_known in ${STUB_GH_ISSUES:-} ${STUB_GH_ISSUES_CLOSED:-}; do
     [ "$_stub_known" = "${3:-}" ] || continue
-    # `--jq .number` is what the wrapper asks for, so the stub answers in BOTH shapes: the bare
-    # integer when a jq expression selects it, the object otherwise.
+    _stub_state=OPEN
+    for _stub_closed in ${STUB_GH_ISSUES_CLOSED:-}; do
+      [ "$_stub_closed" = "$_stub_known" ] && _stub_state=CLOSED
+    done
+    # THE ANSWER FOLLOWS THE FIELDS THE CALLER ASKED FOR, as the real `gh` does. That matters for more
+    # than fidelity: the (df7e) mutant asks the OLD `--json number --jq .number` shape, and a stub that
+    # always appended a state would make the mutant fail for a reason that was never in question —
+    # a contrast that establishes nothing.
     case " $* " in
+      *" --jq "*[Ss]tate*|*" state"*|*",state"*)
+        printf '%s %s\n' "$_stub_known" "$_stub_state" ;;
       *" --jq "*) printf '%s\n' "$_stub_known" ;;
-      *) printf '{"number":%s}\n' "$_stub_known" ;;
+      *) printf '{"number":%s,"state":"%s"}\n' "$_stub_known" "$_stub_state" ;;
     esac
     exit 0
   done
@@ -1175,6 +1187,7 @@ export STUB_GH_RC=0
 # COULD-NOT-ASK by giving `gh issue view` a diagnostic that does NOT say the issue is missing.
 # There is deliberately no STUB_PR_BODY: the PR body is read by nothing (see the stub above).
 export STUB_GH_ISSUES=''
+export STUB_GH_ISSUES_CLOSED=''
 export STUB_GH_ISSUE_ERR=''
 export STUB_ON_REVIEW=''
 reset_stub() {
@@ -1201,6 +1214,7 @@ reset_stub() {
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
   STUB_GH_ISSUES=''
+  STUB_GH_ISSUES_CLOSED=''
   STUB_GH_ISSUE_ERR=''
   STUB_ON_REVIEW=''
 }
@@ -5004,6 +5018,244 @@ if sed_inplace_verified "$_dfr_dir/roborev-review-oracles.sh" \
 else
   bad 'case (df7c): could not patch the copied oracles file, so the naive form was never exercised — without this contrast (df7b) proves only that SOMETHING failed'
 fi
+reset_stub
+
+printf '== (df7d) #3626 round 3: a CLOSED issue is ISSUE-CLOSED — retrievable is NOT tracked ==\n'
+# `gh issue view` RETURNS THE NUMBER AND EXITS 0 FOR A CLOSED ISSUE, so a number-only test made "the
+# finding is tracked" satisfiable by an issue closed as a duplicate three weeks ago: `present` =>
+# `GRANTED` => `RESULT: PASS`, the finding permanently untracked, and the block asserting it was filed.
+# That is the exact thing this leg exists to prevent, so OPEN is required — DELIBERATELY STRONGER than
+# the lead's literal "retrievable" condition, because the claim made at the call site, in the scanner
+# and in the spec is the stronger NOT-DROPPED one.
+#
+# Everything else in this fixture is a PERFECT authorization — the marker that grants in (df1), the
+# right author, the right scope, the matching count — so the CLOSED state is the sole difference.
+reset_stub
+df_grant_fixture
+STUB_GH_ISSUES='3602'
+STUB_GH_ISSUES_CLOSED='3613'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7d)' FAIL 1
+assert_no_marker_form 'case (df7d)'
+assert_says 'case (df7d) the closed issue has its OWN state and cause' \
+  '^deferral: ISSUE-CLOSED \(GitHub answered that issue #3613 is CLOSED'
+assert_says 'case (df7d) it says a closed issue means the finding is DROPPED with a link attached' \
+  'which is the finding being DROPPED with a link attached'
+assert_says 'case (df7d) the strictness is declared, with a recoverable remedy' \
+  "stricter than 'retrievable' on purpose: reopen #3613, or file a fresh tracking issue"
+# THE FOUR STATES MUST NOT BE CONFUSABLE: a closed issue is not an absent one and not a could-not-ask.
+assert_lacks 'case (df7d) a closed issue never reports itself as absent' '^deferral: ISSUE-ABSENT'
+assert_lacks 'case (df7d) nor as a could-not-ask' '^deferral: ISSUE-UNVERIFIABLE'
+assert_lacks 'case (df7d) and nothing is deferred' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df7e) #3626 round 3: the NUMBER-ONLY form WOULD have granted the (df7d) fixture (mutant) ==\n'
+# THE RED/GREEN CONTRAST FOR (df7d): a run that FAILs satisfies (df7d) for any reason at all, so the
+# naive implementation — `--json number --jq .number`, exactly what this leg asked for until now — is
+# applied to a COPY and must GRANT on the same fixture. CONTROL FIRST AND NOT OPTIONAL: the UNPATCHED
+# copy must refuse it, so a mutant PASS cannot be an artefact of how the copy was made.
+reset_stub
+_dfc_dir="$tmp/deferral-closed"
+mkdir -p "$_dfc_dir"
+cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfc_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfc_dir/"
+fi
+df_grant_fixture
+STUB_GH_ISSUES='3602'
+STUB_GH_ISSUES_CLOSED='3613'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper --wrapper "$_dfc_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+assert_verdict 'case (df7e control) the UNPATCHED copy refuses the closed issue' FAIL 1
+assert_says 'case (df7e control) under the closed state' '^deferral: ISSUE-CLOSED'
+if sed_inplace_verified "$_dfc_dir/roborev-review-oracles.sh" \
+  's/^roborev_issue_retrievability() {$/roborev_issue_retrievability() {\
+  ROBOREV_ISSUE_STATE="unverifiable"; ROBOREV_ISSUE_DETAIL="number-only form"\
+  _naive=$(cd "$REPO" \&\& gh issue view "$1" --json number --jq .number 2>\/dev\/null) || true\
+  [ "$_naive" = "$1" ] \&\& ROBOREV_ISSUE_STATE="present"\
+  return 0/' \
+  'number-only form' ''; then
+  ok 'case (df7e): the number-only patch was really applied to the copy'
+  run_wrapper --wrapper "$_dfc_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+  assert_verdict 'case (df7e) the number-only form GRANTS over an issue closed as a duplicate' PASS 0
+  assert_says 'case (df7e) the mutant reaches a GRANTED deferral on the (df7d) fixture' \
+    '^deferral: GRANTED \(author=@pmcfadin'
+  assert_says 'case (df7e) and defers the findings to a closed issue' '^findings: DEFERRED \(2, issues=#3602,#3613'
+else
+  bad 'case (df7e): could not patch the copied oracles file, so the number-only form was never exercised — without this contrast (df7d) proves only that SOMETHING failed'
+fi
+reset_stub
+
+printf '== (df7f) #3626 round 3: the disposition backstop COUNTS VERIFICATIONS, it does not test the string ==\n'
+# THE ONE PROPERTY WITH NO ASSERT IN EITHER SUITE UNTIL NOW (roborev job 229 blocker 2). The backstop
+# used to be `[ -z "$ROBOREV_DEFERRAL_ISSUES" ]`, i.e. a NON-EMPTINESS test standing in for a
+# VERIFICATION test. Reproduced: `ROBOREV_DEFERRAL_ISSUES=","` passes `[ -z ]`, `${//,/ }` yields
+# `" "`, the UNQUOTED expansion splits into ZERO WORDS, the loop body never runs, and the function
+# returns with the state still `granted` — a grant with not one `gh issue view` executed.
+#
+# PROBED DIRECTLY, because the marker pattern's `issues=` cannot express that value today: the whole
+# point of a backstop is not to depend on an upstream check still being there, so the case must reach
+# the function the way a future loosening of `issues=` would. The mutant is the naive `-z` form.
+_df7f_probe="$tmp/df7f-probe.sh"
+_df7f_out="$tmp/df7f-out.txt"
+cat >"$_df7f_probe" <<'DF7F'
+set -uo pipefail
+REPO="$2"
+. "$1"   # oracles
+# The scanner is replaced wholesale rather than redirected: a granted state carrying a comma-only
+# issue list is not expressible through the real marker pattern, and the point is what the BACKSTOP
+# does with one, not what the pattern admits.
+roborev_findings_deferral_lookup() { :; }
+probe_disposition() { # probe_disposition <issues-value>
+  ROBOREV_DEFERRAL_STATE=granted
+  ROBOREV_DEFERRAL_ISSUES="$1"
+  ROBOREV_DEFERRAL_DETAIL=""
+  _probe_disposition_body
+  printf 'issues=[%s] state=%s detail=%s\n' "$1" "$ROBOREV_DEFERRAL_STATE" "$ROBOREV_DEFERRAL_DETAIL"
+}
+DF7F
+# THE SUBJECT IS THE REAL FUNCTION'S OWN DISPOSITION CODE, lifted out of the shipped file rather than
+# restated here: a re-typed copy would drift and the probe would measure the copy. The extraction runs
+# from the backstop's own banner to the function's closing brace.
+awk '/^  # ===== THE BACKSTOP COUNTS VERIFICATIONS PERFORMED/ { inb = 1 }
+     inb && /^}$/ { print "}"; exit }
+     inb { print }' "$ORACLES_SRC" >"$tmp/df7f-body.txt"
+{
+  printf '_probe_disposition_body() {\n'
+  sed 's/^  //' "$tmp/df7f-body.txt" | sed '$d'
+  printf '  return 0\n}\n'
+  printf 'probe_disposition ","\nprobe_disposition "3602,,3613"\nprobe_disposition "3602"\n'
+} >>"$_df7f_probe"
+# EVERY NUMBER THE PROBE NAMES MUST BE RETRIEVABLE, so the COUNT is the only thing left that can
+# refuse. Found here: with 3613 unknown to the stub, the `3602,,3613` case was refused as ISSUE-ABSENT
+# — non-granting, but by the WRONG LEG, so the case would have proved nothing about the count.
+# THE STUB MUST BE ON PATH IN THE PROBE, NOT JUST IN `run_wrapper` (found here): without it the probe
+# reached the REAL `gh`, which answered "none of the git remotes ... point to a known GitHub host" —
+# an unrecognised diagnostic, so `issue-unverifiable`. The case would then have reported the affirmative
+# count as over-strict when the count was never what refused it.
+STUB_GH_ISSUES='3602 3613'
+if [ -s "$tmp/df7f-body.txt" ] \
+  && PATH="$stubbin:$PATH" bash "$_df7f_probe" "$ORACLES_SRC" "$w_work" >"$_df7f_out" 2>&1; then
+  if grep -q '^issues=\[,\] state=unavailable' "$_df7f_out"; then
+    ok 'case (df7f): a comma-only issue list traverses ZERO issues, so the affirmative count refuses it (state unavailable, not granted)'
+  else
+    bad "case (df7f): the comma-only list did not fail closed: $(cat "$_df7f_out")"
+  fi
+  # AN EMPTY FIELD IS THE SAME DEFECT ONE SHAPE OVER: `3602,,3613` declares 3 fields and the split
+  # traverses 2, so one declared field is never checked. A non-emptiness test cannot see it either.
+  if grep -q '^issues=\[3602,,3613\] state=unavailable' "$_df7f_out"; then
+    ok 'case (df7f): an EMPTY issue field is refused too — 3 declared, 2 traversed, so one field was never checked'
+  else
+    bad "case (df7f): an empty issue field was not refused: $(grep '^issues=\[3602,,3613\]' "$_df7f_out" || cat "$_df7f_out")"
+  fi
+  if grep -q '^issues=\[3602\] state=granted' "$_df7f_out"; then
+    ok 'case (df7f): and a real single-issue list still grants, so the backstop is not merely refusing everything'
+  else
+    bad "case (df7f): the affirmative form refused a legitimate one-issue list, which would break the break-glass: $(cat "$_df7f_out")"
+  fi
+else
+  bad "case (df7f): the disposition probe did not run (body $(wc -c <"$tmp/df7f-body.txt" 2>/dev/null) bytes): $(cat "$_df7f_out" 2>/dev/null)"
+fi
+# THE MUTANT: the naive `-z`-only backstop, which GRANTS on the comma-only list. Without this
+# contrast the case above proves only that SOMETHING returned `unavailable`.
+_df7f_naive="$tmp/df7f-naive.sh"
+sed 's/^if \[ "\$verified_issues" -ne "\$declared_issues" \]; then$/if false; then/' \
+  "$_df7f_probe" >"$_df7f_naive"
+if grep -qF 'if false; then' "$_df7f_naive"; then
+  if PATH="$stubbin:$PATH" bash "$_df7f_naive" "$ORACLES_SRC" "$w_work" >"$_df7f_out" 2>&1 \
+    && grep -q '^issues=\[,\] state=granted' "$_df7f_out"; then
+    ok 'case (df7f mutant): with the affirmative count removed, the -z-only backstop GRANTS on a comma-only list — so the real refusal is measuring the count and nothing else'
+  else
+    bad "case (df7f mutant): the naive form did not grant, so the contrast establishes nothing: $(cat "$_df7f_out")"
+  fi
+else
+  bad 'case (df7f mutant): the count-equality line could not be neutralised in the probe copy, so the naive form was never exercised'
+fi
+reset_stub
+
+printf '== (df7g) #3626 round 3: an ABBREVIATED sha is MALFORMED, not STALE — both marker kinds ==\n'
+# The documented form is 40 hex. The patterns admitted `{7,40}`, so an abbreviated sha MATCHED and then
+# diverged from this run's 40-hex base/head — reported `STALE` ("the marker names a different review")
+# when the truth is that it names THIS review in a spelling the form does not permit. An authorizer sent
+# to re-check WHICH REVIEW they named finds nothing wrong with it. BOTH KINDS, because they share one
+# parser and a field rule that holds for one marker and not the other is a divergence in a channel rule.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=${w_base:0:12} head=${w_head:0:12} job=4656 reason=$d_reason\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7g) deferral' FAIL 1
+assert_no_marker_form 'case (df7g) deferral'
+assert_says 'case (df7g) an abbreviated sha is a FORM defect' '^deferral: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
+assert_lacks 'case (df7g) and is NOT reported as naming another review' '^deferral: STALE'
+assert_lacks 'case (df7g) nothing is deferred' '^findings: DEFERRED'
+reset_stub
+# THE WAIVER KIND, over its own key. The prompt deliberately does NOT match the census, so
+# `prompt-content:` reaches its ABSENCE branch and looks for a waiver.
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT='no census path appears here at all'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=${w_base:0:7} head=${w_head:0:7} job=4656 reason=abbreviated on purpose\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7g) waiver' FAIL 1
+assert_no_marker_form 'case (df7g) waiver'
+assert_says 'case (df7g) the waiver kind reports the same FORM defect' '^waiver: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
+assert_lacks 'case (df7g) and not STALE' '^waiver: STALE'
+reset_stub
+
+printf '== (df7h) #3626 round 3: the reason is recorded VERBATIM — repeated spaces and a tab survive ==\n'
+# `collapse()` rewrote INTERNAL whitespace, so a granted reason reached `deferral: GRANTED (...)`
+# altered while the spec, `--help` and the emitted NOTICE all promise it is recorded VERBATIM. An
+# authorization whose recorded terms are not the terms that were given is a weaker audit trail than it
+# claims to be, and the claim is the whole value of the record. What actually has to hold is only that
+# a value occupies ONE LINE.
+#
+# TWO BOUNDARIES, AND ONLY ONE OF THEM MAY REWRITE ANYTHING. The scanner must not touch internal
+# whitespace at all; the BLOCK boundary (`roborev_safe_line`) then renders a control character as a
+# VISIBLE escape, which is a different and legitimate thing — it keeps a control byte out of a line a
+# reader greps, without silently deleting information. So a repeated SPACE must survive byte-for-byte,
+# and a TAB must appear as the two-character `\t` rather than being COLLAPSED into a single space.
+reset_stub
+df_grant_fixture
+_df7h_reason='two  spaces and'$'\t''a tab; 5937937 in'
+_df7h_block='two  spaces and\ta tab; 5937937 in'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=$_df7h_reason\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7h)' PASS 0
+assert_no_marker_form 'case (df7h)'
+if grep -qF "reason=$_df7h_block)" "$OUT"; then
+  ok 'case (df7h): the granted reason survives verbatim — the repeated space is intact and the tab is a VISIBLE \t, not a collapsed space'
+else
+  bad "case (df7h): the granted reason was rewritten on the way to the block: $(grep '^deferral: ' "$OUT" || printf '<no deferral key>')"
+fi
+assert_lacks 'case (df7h) and the reason is NOT whitespace-collapsed' 'reason=two spaces and a tab'
+assert_one_result_line 'case (df7h)'
+reset_stub
+
+printf '== (df7i) #3626 round 3: a reason naming a marker STEM is refused, both kinds ==\n'
+# THE INVARIANT IS OVER THE OUTPUT, AND THE STRUCTURAL ASSERT ONLY COVERS THE CODE. A granted reason is
+# interpolated into `deferral:`/`waiver: GRANTED (... reason=...)`, which reaches the summary block —
+# and no emitted diagnostic may carry any part of a marker form, because blocks get pasted into PR
+# comments as a matter of course (#3312 job 23). A RUNTIME reason can inject what no source scan sees.
+# Refused rather than escaped: an authorizer has no legitimate need for a marker stem in a reason.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=see the roborev-defer: findings line above\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7i) deferral' FAIL 1
+assert_says 'case (df7i) a stem-bearing reason is a FORM defect naming what to do' \
+  '^deferral: MALFORMED \(the marker is missing a-stem-free-reason'
+assert_no_marker_form 'case (df7i) deferral'
+assert_lacks 'case (df7i) nothing is deferred' '^findings: DEFERRED'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT='no census path appears here at all'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=quoting roborev-waive in the reason\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7i) waiver' FAIL 1
+assert_says 'case (df7i) the waiver kind inherits the refusal BY CALL' \
+  '^waiver: MALFORMED \(the marker is missing a-stem-free-reason'
+assert_no_marker_form 'case (df7i) waiver'
 reset_stub
 
 printf '== (df9) #3626: a gh failure (no PR / no auth / API error) is UNAVAILABLE and FAILs closed ==\n'

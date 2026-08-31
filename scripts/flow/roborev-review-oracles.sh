@@ -1546,9 +1546,13 @@ roborev_findings_deferral_lookup() {
   # That value is unreachable TODAY only because the marker pattern's `issues=([0-9]+(?:,[0-9]+)*)`
   # forbids it — precisely the upstream dependency a backstop must not have. So the test is
   # AFFIRMATIVE: count the verifications actually performed and require that count to EQUAL the number
-  # of DECLARED comma-separated fields. Any list the split does not traverse one-for-one — an empty
-  # field, a stray space, a whitespace-only string — is then a mismatch and fails closed, whatever a
-  # future loosening of `issues=` lets through.
+  # of DECLARED comma-separated fields. Any list the split does not traverse one-for-one is then a
+  # mismatch and fails closed, whatever a future loosening of `issues=` lets through. Measured, so the
+  # claim is not broader than the check: `,` (declared 2, traversed 0) and `3602,,3613` (declared 3,
+  # traversed 2) are refused, and so is a whitespace-only string. `3602, 3613` is NOT refused and does
+  # not need to be — one comma declares 2 fields and the split yields 2 words, so each number is still
+  # put through retrievability individually, which is the property. This clause is spelled out because
+  # an inaccurate comment on a security-relevant check is what stops the next reader looking.
   declared_issues=$(( $(printf '%s' "$ROBOREV_DEFERRAL_ISSUES" | tr -cd ',' | wc -c) + 1 ))
   verified_issues=0
   # The precise diagnostic for the empty list is kept, because "granted with no issue list at all" and
