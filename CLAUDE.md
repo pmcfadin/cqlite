@@ -3061,6 +3061,72 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `--fix-credentials` wires the credential path only (no toolchain installs) and `--strict` turns any
   warning into exit 1, which is what `.agent-ami/profile.yaml`'s `verify.run` uses. The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
+- **The claim ref is a CROSS-MACHINE control and a LOCAL ADVISORY — the machine-local half is
+  `refs/claims`'s blind spot, and it is now a separate lock (#3436).** `claim.sh`'s arbitration is a
+  plain `git push` to a fixed-name ref, so *git* decides every cross-machine race. Locally it decides
+  nothing: a session that never calls `claim.sh` simply proceeds. Measured 2026-08-28 — two Claude
+  sessions worked #3367 in ONE worktree on ONE box for ~20 minutes; session B arrived 7 minutes after
+  A had created and claimed the lane, held no claim, and committed into A's branch. A's `git add -A`
+  then swept up B's uncommitted work, so a commit landed carrying **B's design under A's reasoning**,
+  and A reported a measurement ("34 scanning sites rewritten") taken against a tree B had already
+  refactored. **The only thing that noticed was `agent-gate.sh`'s `tree-integrity` (#2926), by
+  accident** — absent it, A would have certified a tree being rewritten underneath it.
+  **Why the existing controls could not fire, each for its own reason** (worth knowing, because each
+  is still true of the thing it does cover): the claim ref is advisory locally; the supervisor
+  single-instance lock protects supervisor-driven runs and **no supervisor was running**; `git
+  worktree add` gives no collision signal, and the `/data/lanes/lane-<N>` convention *guarantees* two
+  sessions on one issue pick the same directory; and the board said **`Ready`** throughout, so it was
+  actively inviting a third claimant.
+  So: **`scripts/flow/lane-lock.sh acquire <N>` before the first write to a lane directory**, and
+  release at finalize. Its identity is the FULL PROCESS identity — machine, actor, pid, boot-id and
+  `/proc/<pid>/stat` start-ticks — **NOT `machine+actor`, and that distinction IS the fix**:
+  `claim.sh`'s re-entrancy is keyed on machine+actor, and two Claude sessions on one box are both
+  `machine=<box> actor=flow`, so a machine+actor lock grants the second session a re-entrant win on
+  the first session's lane. Boot-id + start-ticks is also **clock-step immune**, which
+  `claim-heartbeat.sh`'s own header names as the unfixed weakness of its `now - elapsed`
+  reconstruction (a backward NTP step reads a reused pid as consistent, a forward one reads a live
+  supervisor as reused); a new record could do it right from the start, and does.
+  **Liveness is a CLOSED set and only a `DEAD-*` verdict permits auto-reclaim** — every `UNKNOWN-*`
+  refuses. That is the affirmative-measurement rule: an unknown liveness state must not inherit the
+  permissive branch. The sharpest instance is the **ephemeral pid**: the lock records the outermost
+  ancestor of `$$` whose `/proc/<pid>/cwd` is inside the lane dir (on this fleet the long-lived
+  `claude` session process — deliberately NOT the tmux server, whose cwd is the root checkout and
+  which is SHARED by all 4 lanes on a box, so recording it would make every lane read mutually-alive
+  forever); when no ancestor matches, the pid is the tool call's own shell, which dies between calls,
+  so calling it dead would auto-reclaim a LIVE lane. Hence `pid-scope=ephemeral` ⇒
+  `UNKNOWN-EPHEMERAL` ⇒ refuse.
+  **Scope, stated because a lock read as covering more than it does is its own false-clean**: it is
+  machine-local and says NOTHING cross-machine (that is `refs/claims/issue-<N>`'s job — the two are
+  complements, not alternatives); it is Linux-`/proc`-specific and degrades to a loud refusing
+  `UNKNOWN-NO-PROC` elsewhere; and **a lane whose session never acquired is invisible to it**, which
+  is why `claim.sh claim` now *reports* the lane-lock state on its verdict line rather than relying on
+  every session having taken it.
+
+- **THE FLOW RELEASES ON FINALIZE AND HAD NO RE-ACQUIRE ON RESUME — so resuming work is where the
+  window reopens, and the board advertises it (#3436).** Second measured instance, #3393 on
+  2026-08-29: a slice shipped, PR #3429 merged, the claim ref was **released correctly** and the board
+  set back to **Ready** — all proper finalize behaviour — and then the lead re-issued further work on
+  the same branch, which ran for **20+ commits holding no claim ref while the board advertised the
+  issue as available**. This is worse than the original collision: there a second session had to guess
+  a lane path, here **a well-behaved session doing exactly what doctrine says — read the board, take a
+  Ready item — would collide**, and the claim ref could not stop it because no ref existed.
+  **The rule: the trigger is "I am about to commit to a branch for an issue I do not currently hold",
+  NEVER "the branch is new".** So `claim.sh verify <N>` FIRST whenever work restarts; on failure take
+  the documented `adopt` path, never an unguarded create. `claim.sh claim` cannot serve here — it
+  refuses with `reason=legacy-branch-lock` because the branch still exists on origin — and that
+  refusal was correct for an abandoned peer lane but sent a session resuming **its own** branch to the
+  abandoned-lane procedure. It now distinguishes the two by name: with a local lane dir occupied by a
+  live holder (or a local worktree on the matching branch) the verdict is
+  `reason=released-then-resumed`, textually distinct from `reason=legacy-branch-lock`, each with its
+  own remedy. **Neither prints a runnable resume command** — the #2945 ruling stands: the readers are
+  agents that execute printed remediations literally, and an older-fleet worker holds only the BRANCH,
+  so a printed empty-lease adopt WOULD succeed against a live lane.
+  **And the machine-visible signature of the window is cheap enough to sweep for**: board
+  `Status=Ready` **AND** a pushed `issue-<N>-*` branch **AND** no `refs/claims/issue-<N>` — no
+  heuristics, three facts. `scripts/flow/advertised-collision-scan.sh` reports it in the `flow-board`
+  sweep, **positive-detection only** (exit 3 = found, exit 1 = none-or-unmeasurable, never exit 0),
+  following #3393's split ruling: the fail-open family there was five instances of a failed probe read
+  as a negative answer, so a clean bill of health is not this tool's to give.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
   not prose. `worker-supervisor.sh` stamps `refs/lane-claims/<machine>/<issue>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a

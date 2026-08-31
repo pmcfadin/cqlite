@@ -231,6 +231,20 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
           a resurrected holder detects the loss). Do **not** clear the assignee, flip `Status`, or delete
           the branch here — the endgame may still be genuinely resumable; you are *surfacing* the orphan
           for owner/worker adoption, not reaping the work.
+   - **Advertised collision window — a DETECTOR, not a reaper (issue #3436).** The two reapers above
+     ask "is a claim abandoned". This asks the opposite question: **is an issue being worked with no
+     claim at all, while the board advertises it as available?** Three facts, no heuristics — board
+     `Status=Ready` AND a pushed `issue-<N>-*` branch on origin AND no `refs/claims/issue-<N>`:
+     ```bash
+     bash scripts/flow/advertised-collision-scan.sh          # exit 3 = at least one row reported
+     ```
+     Measured instance: #3393 ran 20+ commits in exactly this state after a legitimate
+     release-on-finalize, with the board inviting a second claimant the whole time. **Report it, never
+     act on it**: it deletes no ref, moves no board item and touches no branch. The remedy is the
+     worker's — `claim.sh verify <N>`, then the documented `adopt` path — because only the session on
+     that box knows whether it owns the branch. Surface every row in the render with the issue, the
+     branch and the lane-lock state; **exit 1 is "none found OR not measurable", never a clean bill of
+     health** (positive-detection only, per #3393's split ruling).
    - An item with a fresh heartbeat (age ≤ 4h) is **not** touched by either rule. An item with an open PR
      that is **still moving** (head advanced or review activity within 4h) is a live review-wait — surface
      it as in-review as normal. Do not silently steal a live claim.

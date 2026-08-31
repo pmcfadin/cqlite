@@ -49,7 +49,21 @@ never gate stdout or review churn.
    ```
    If `have_project=0`, the `--remove-label` cleanup above is all you can do AND you MUST print the loud
    `⚠️ board unavailable …` warning so the owner knows the board will not reflect this claim.
-2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already hold the
+2. **Ensure the worktree exists — and that you hold the claim.**
+   **THE TRIGGER FOR RE-ACQUIRING IS "I AM ABOUT TO COMMIT TO A BRANCH FOR AN ISSUE I DO NOT CURRENTLY
+   HOLD", NEVER "THE BRANCH IS NEW" (#3436).** The flow has a release-on-finalize step and used to have
+   no re-acquire-on-resume step, so `verify` FIRST — unconditionally, on BOTH paths below, including the
+   design-driven one where the worktree already exists. Measured cost of skipping it: #3393 resumed on an
+   already-shipped branch and ran **20+ commits holding no claim ref while the board advertised the issue
+   as `Ready`**, which is a well-behaved second session's invitation to collide.
+   ```bash
+   bash scripts/flow/claim.sh verify <N> || { : "do NOT proceed — see the refusal's reason= below"; }
+   ```
+   On failure, read the `reason=`: **`released-then-resumed`** means this box already occupies the lane
+   (your own resumed branch) — take the documented `adopt --expect none --reason <why>` path;
+   **`legacy-branch-lock`** means a peer's branch outlived its claim — CONFIRM abandonment first (below).
+   Never an unguarded create, never a hand-crafted claim commit.
+   Design-driven issues already hold the
    claim ref + pushed branch (acquired in `flow-activate`); reuse them. Oracle-driven issues skip
    `flow-activate`, so they run the claim protocol (D2) HERE: `claim.sh` is the lock (the slugless
    fixed-name ref `refs/claims/issue-<N>`, #2665 — a slug-named branch is only PR plumbing). Acquire the
@@ -61,6 +75,16 @@ never gate stdout or review churn.
      # design-driven: claim ref + worktree already exist (from flow-activate).
      # Implementation starting IS a stage transition — refresh the heartbeat (#2089).
      bash scripts/flow/claim-heartbeat.sh beat <N>
+     # ...and take the MACHINE-LOCAL lane lock (#3436). The claim ref is a HARD control
+     # cross-machine and only ADVISORY locally: two sessions on one box are both
+     # machine=<box> actor=flow, so claim.sh cannot tell the second from the first's
+     # retry. This lock's identity is the full PROCESS identity, so it can.
+     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$(cd "$wt" && pwd)" || {
+       # OCCUPIED names the occupant (pid, start identity, age). liveness=ALIVE or any
+       # UNKNOWN-* REFUSES; only a verifiably DEAD holder is auto-reclaimed. Do NOT
+       # proceed into a lane another live process owns — that is the #3436 incident.
+       exit 0
+     }
    else
      # oracle-driven: acquire the claim ref now. claim.sh does the atomic push +
      # re-read; a UNIQUE root commit means a different-slug or identical-base
@@ -85,6 +109,7 @@ never gate stdout or review churn.
      # CLAIM HELD → worktree + branch (naming/PR plumbing, NOT the lock).
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
      git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
+     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$(cd "$wt" && pwd)" || exit 0
      gh issue edit <N> --add-assignee @me
      bash scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi

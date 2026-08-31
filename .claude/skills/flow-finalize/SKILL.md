@@ -153,6 +153,12 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    open-PR guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize):
    ```bash
    bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
+   # ...and drop the MACHINE-LOCAL lane lock (#3436). Removing the worktree already
+   # deletes the lock FILE, so this is for the audit line rather than correctness —
+   # run it BEFORE the worktree removal above if you want the release recorded. A lock
+   # left behind by a killed session is not a leak either: its holder reads DEAD-* and
+   # the next acquire reclaims it automatically.
+   bash scripts/flow/lane-lock.sh release <N> || true
    # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
    ```
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
