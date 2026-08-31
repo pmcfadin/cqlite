@@ -129,6 +129,19 @@
 # MEASUREMENT is itself stale. A missing `origin/main` is `UNMEASURED`, never a
 # silent zero. Fetch first if you want a current answer.
 #
+# `GIT_NO_LAZY_FETCH=1` IS WHAT MAKES THAT CLAIM TRUE RATHER THAN INTENDED
+# (#3650 review B2). In a PARTIAL/PROMISOR clone — `--filter=blob:none`,
+# `--filter=tree:0`, any `remote.origin.promisor=true` — plain OBJECT ACCESS
+# lazily fetches over the network and WRITES a packfile into the repository:
+# `rev-list`, `diff`, `diff-tree` and `log` all do it, with no fetch command
+# anywhere in this file. Measured on git 2.43.0 against a `--filter=tree:0`
+# clone: the `git diff <base>...<subject>` call alone took the object store from
+# 4 files to 12. Exporting the variable ONCE, before ANY object access, turns
+# that into an ordinary git failure, which every call site already routes to
+# `UNMEASURED` — the correct verdict for an unmeasurable scan, and a consumer
+# must treat it as stale (D3). Older git (< 2.36) ignores the variable, which is
+# the pre-existing behaviour and not a regression.
+#
 # WHAT IS NOT COVERED, DECLARED ON EVERY RUN
 # ------------------------------------------
 # This is NOT a dependency closure. A commit changing a Rust item this diff
@@ -143,6 +156,14 @@
 #
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -uo pipefail
+
+# EXPORTED BEFORE ANY OBJECT ACCESS (D5/#3650 review B2). See the D5 header: in a
+# partial/promisor clone, reading objects fetches from the network and writes
+# packfiles into the repository, so without this the "never fetches, never
+# writes" contract is an intention rather than a property. A missing object then
+# fails its git call, and every call site below routes a git failure to
+# UNMEASURED.
+export GIT_NO_LAZY_FETCH=1
 
 # ---------------------------------------------------------------------------
 # THE GATE-GLOBAL SET — ONE list, ONE place, NO env override (D1/#3312).

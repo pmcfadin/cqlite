@@ -605,6 +605,80 @@ else
   bad "no side effects: the advisory changed refs or files in the repository"
 fi
 
+# --- Case 13b: a PARTIAL/PROMISOR clone must not LAZILY FETCH (#3650 B2) ----
+# Case 13 proves no side effect in an ORDINARY clone, where there is no fetch to
+# trigger. The contract's real hazard is a PARTIAL clone: object access itself
+# fetches over the network and WRITES a packfile, with no fetch command anywhere
+# in the advisory. The fixture is a `--filter=tree:0 --no-checkout` clone over
+# `file://`, so the trees the diff needs are genuinely absent locally while the
+# promisor remote is genuinely reachable — which is what makes the measurement
+# decisive rather than a demonstration that a broken remote fails.
+#
+# The observable is the OBJECT STORE FILE COUNT, not the exit code: an
+# unreachable remote would also produce UNMEASURED, so only "did the repository
+# grow" distinguishes "did not fetch" from "tried and failed".
+PROM_SRC="$T/promisor-src"
+PROM="$T/promisor-clone"
+mkdir -p "$PROM_SRC"
+git init -q -b main "$PROM_SRC" >/dev/null
+g "$PROM_SRC" config user.email t@t
+g "$PROM_SRC" config user.name t
+g "$PROM_SRC" config uploadpack.allowFilter true
+commit_paths "$PROM_SRC" "c0 initial" "cqlite-core/src/storage/sstable/mod.rs"
+g "$PROM_SRC" checkout -q -b feature
+commit_paths "$PROM_SRC" "the PR" "cqlite-core/src/storage/sstable/mod.rs"
+g "$PROM_SRC" checkout -q main
+commit_paths "$PROM_SRC" "behind: gate-global churn" ".config/nextest.toml"
+prom_ok=1
+if ! git clone -q --no-local --filter=tree:0 --no-checkout \
+  "file://$PROM_SRC" "$PROM" >/dev/null 2>&1; then
+  bad "promisor: could not build the partial-clone fixture (needs a git with --filter support)"
+  prom_ok=0
+fi
+if [ "$prom_ok" -eq 1 ]; then
+  g "$PROM" update-ref refs/heads/feature refs/remotes/origin/feature
+  # FIXTURE SELF-CONSISTENCY (Case 1's idiom): it really is a promisor clone, and
+  # the subject/base refs really are there. A non-promisor fixture would make the
+  # whole case vacuous — nothing to lazily fetch.
+  if [ "$(g "$PROM" config --get remote.origin.promisor 2>/dev/null)" = "true" ] &&
+    g "$PROM" rev-parse --verify --quiet refs/heads/feature >/dev/null &&
+    g "$PROM" rev-parse --verify --quiet "$MAIN_REF" >/dev/null; then
+    ok "promisor fixture: the clone is a promisor clone with both refs present"
+  else
+    bad "promisor fixture: the clone is not a promisor clone (the case would be vacuous)"
+    prom_ok=0
+  fi
+fi
+if [ "$prom_ok" -eq 1 ]; then
+  prom_before=$(find "$PROM/.git/objects" -type f | wc -l | tr -d ' ')
+  if run 5 "promisor clone: a missing object is UNMEASURED, never a lazy fetch" \
+    "$PROM" refs/heads/feature; then
+    has "promisor: the unmeasurable scan names the git call that failed" \
+      "unmeasured-cause git diff --name-only -z"
+  fi
+  prom_after=$(find "$PROM/.git/objects" -type f | wc -l | tr -d ' ')
+  if [ "$prom_before" = "$prom_after" ]; then
+    ok "promisor: the object store did NOT grow ($prom_before files before and after)"
+  else
+    bad "promisor: the advisory LAZILY FETCHED — object files $prom_before -> $prom_after (#3650 B2)"
+  fi
+  # NON-VACUITY, and it must run LAST because it mutates the fixture: the same
+  # object access WITHOUT the guard really does fetch and really does write. Run
+  # with the variable explicitly cleared, because this suite's own environment
+  # may already carry it.
+  if env -u GIT_NO_LAZY_FETCH git -C "$PROM" diff --name-only \
+    "$MAIN_REF...refs/heads/feature" >/dev/null 2>&1; then
+    prom_probe=$(find "$PROM/.git/objects" -type f | wc -l | tr -d ' ')
+    if [ "$prom_probe" -gt "$prom_after" ]; then
+      ok "promisor probe: unguarded object access DOES fetch and write ($prom_after -> $prom_probe)"
+    else
+      bad "promisor probe: unguarded access wrote nothing — the case proves nothing about fetching"
+    fi
+  else
+    bad "promisor probe: unguarded object access failed — the promisor remote is not reachable"
+  fi
+fi
+
 # --- Case 14: reserved substrings, spaces and NEWLINES in a matched path ----
 # The absolute vocabulary claim ("no run's output contains PASS/OK/RESULT:") was
 # FALSIFIED by review: the advisory prints repository-controlled paths verbatim.
