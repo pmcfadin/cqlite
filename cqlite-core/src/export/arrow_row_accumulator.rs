@@ -222,6 +222,14 @@ impl<'a> ArrowRowAccumulator<'a> {
             "ArrowRowAccumulator::stage called with a row still staged — the \
              contract is stage -> (flush) -> commit per row (issue #3552)"
         );
+        // Both are built from `columns` in `new` and neither is ever resized, so
+        // every index in `name_to_indices` is in range for `staged` — asserted
+        // rather than left to a permissive `get_mut` below (issue #3552 review N3).
+        debug_assert_eq!(
+            self.staged.len(),
+            self.columns.len(),
+            "staging arity must equal the projected column count"
+        );
         // Reset the staging slot: an ABSENT column must arrive at the charging
         // core as `None`, exactly as a failed `row.values.get(name)` does.
         for slot in &mut self.staged {
@@ -239,15 +247,15 @@ impl<'a> ArrowRowAccumulator<'a> {
                 // name (`SELECT a, a`) are the only case that clones, and the
                 // clones are equal values, so the batch is byte-identical to the
                 // transpose's replicated reference.
+                // Direct indexing, not a `get_mut` whose `None` arm would SKIP a
+                // column the row carries: every index came from
+                // `name_to_indices`, which was built from the same `columns` that
+                // sized `staged`, so it is in range by construction (review N3).
                 if let Some((&last, rest)) = indices.split_last() {
                     for &idx in rest {
-                        if let Some(slot) = staged.get_mut(idx) {
-                            *slot = Some(value.clone());
-                        }
+                        staged[idx] = Some(value.clone());
                     }
-                    if let Some(slot) = staged.get_mut(last) {
-                        *slot = Some(value);
-                    }
+                    staged[last] = Some(value);
                 }
             }
         }
