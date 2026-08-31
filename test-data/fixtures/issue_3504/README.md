@@ -29,6 +29,28 @@ invisible exactly where these suites run. This
 directory is checkout-relative, so no env var can hide it. Precedent:
 `cqlite-core/tests/fixtures/issue_2225/`.
 
+## Who consumes this fixture (all four sites are now FIXED)
+
+| Site | Fixed by | Test |
+|---|---|---|
+| Python binding (`udt_to_py`, `value_to_hashable_key`) | #3504 | `bindings/python/tests/test_issue_3504_udt_field_namespace.py` |
+| Node binding (`udt_to_object`) | #3504 | `bindings/node/__test__/issue-3504-udt-field-namespace.test.js` |
+| **CLI `--format json`** (`cqlite-cli/src/output/json.rs`) | **#3629** | `cqlite-cli/tests/issue_3629_cli_udt_json_namespace.rs` |
+| **`cqlite-core` `ToJson for Value`** (`src/query/result.rs`) | **#3629** | `cqlite-core/tests/issue_3629_core_tojson_udt_namespace.rs` |
+
+The two #3629 sites were an independent SECOND COPY of the same defect and are now
+one shared rule, `cqlite-core/src/util/udt_json.rs::udt_to_json_object` — declared
+fields and nothing else, generic over the field-VALUE renderer because the two
+writers deliberately differ elsewhere (hex vs base64 blobs, human vs raw
+timestamps, `[{key,value}]` vs Display-keyed maps). Consequence, by design:
+`--format json` carries **no type channel at all**, exactly like `sstabledump`.
+
+The rule's primary source is Cassandra, not this repo:
+`cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+(`toJSONString`) iterates `types.size()` over `stringFieldNames` alone — no type key, no
+keyspace key — and appends the literal `null` for an absent field buffer (line 280), which is
+why `id 3`'s `"_type": null` below is CORRECT output for a null field.
+
 ## What the JSONL golden IS and IS NOT an oracle for
 
 The committed `*-Data.db.jsonl` (`sstabledump -l`) pins **decode** and proves the
@@ -38,6 +60,24 @@ rendering rule: for this input, sstabledump's flat
 binding injection produced, so physical-dump parity is structurally blind to the
 defect. Do not cite dump parity as evidence that the rendering is fixed — the
 oracle for that is the binding-level assertion on `.type_name`/`.fields`.
+
+**Which columns can go RED, measured (#3629).** The blindness above is per COLUMN,
+and getting it wrong produces a test that passes on unfixed code:
+
+* **RED-capable** — the UDTs that declare no `_type` field, where an injected key
+  is observable: `udt_collide.p` (`frozen<plain>`; golden
+  `{"label": "no-colliding-field", "real_field": 7}`) and
+  `udt_hashable_shapes.stn`'s `unhashable_fields`, nested in a tuple in a set
+  (golden `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`).
+* **BLIND** — every `collide`/`collide_twin` column (`c`, `fs`, `fcm`, `ftm`,
+  `stu`, `ssu`, `mtu`): the user's `_type` field TOTALLY overwrites the injected
+  one, and because `serde_json` is built with `preserve_order` and `Map::insert`
+  keeps an existing key's position while `collide` declares `"_type"` first, even
+  the key ORDER matched. Assert these as preservation guards only, labelled as
+  such. `id 3`'s `"_type": null` is the USER's null field and is CORRECT.
+* **NOT A SUBJECT AT ALL** — `cm`/`tm`: a non-frozen map's key lives in the cell
+  path and `parse_cell_path_key` falls back to `Value::Blob`, so the key never
+  becomes a `Value::Udt` and cannot exercise a UDT renderer.
 
 ## Layout
 

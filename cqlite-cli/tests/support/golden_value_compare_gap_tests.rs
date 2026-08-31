@@ -35,10 +35,7 @@ fn employee_golden() -> Vec<Row> {
 fn employee_cli(id: Value, home: Value) -> Vec<Row> {
     vec![row(&[
         ("id", id),
-        (
-            "e",
-            json!({"_type": "employee", "name": "Grace", "home": home, "level": 9}),
-        ),
+        ("e", json!({"name": "Grace", "home": home, "level": 9})),
     ])]
 }
 
@@ -83,7 +80,7 @@ fn a_skip_whose_divergence_is_gone_is_reported_as_stale() {
     // gap is declared, so the value is not compared), but the GAP must.
     let fixed = employee_cli(
         json!(1),
-        json!({"_type": "address", "street": "1 Navy Way", "city": "Arlington", "zip": "22201"}),
+        json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"}),
     );
     let report = compare_rows(
         &golden,
@@ -115,8 +112,7 @@ fn a_skip_whose_divergence_is_gone_is_reported_as_stale() {
 fn one_diverging_row_keeps_a_skip_applied() {
     let schema = schema_of(NESTED_UDT_DDL, "t");
     let home = json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
-    let decoded =
-        json!({"_type": "address", "street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
+    let decoded = json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
     let golden = vec![
         employee_golden()[0].clone(),
         row(&[
@@ -402,7 +398,7 @@ fn the_nested_udt_gap_does_not_cover_arbitrary_text_or_wrong_content() {
         json!("0xnothex"),
         json!("0xabc"),
         // Decoded — which is what closing the gap looks like — but WRONG.
-        json!({"_type": "address", "street": "9 Apollo", "city": "Arlington", "zip": "22201"}),
+        json!({"street": "9 Apollo", "city": "Arlington", "zip": "22201"}),
         json!(null),
         json!(9),
     ] {
