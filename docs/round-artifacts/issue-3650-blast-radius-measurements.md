@@ -87,7 +87,7 @@ commits behind that base:
 | definition | commits that stale the certification | share |
 |---|---|---|
 | any churn (the shape the ruling rejects) | 107 | 100% |
-| **AS SHIPPED — diff paths \u222a gate-global (`**/Cargo.*`)** | **28** | **26%** |
+| **AS SHIPPED — diff paths ∪ gate-global (`**/Cargo.*`)** | **28** | **26%** |
 | gate-global only, `**/Cargo.*` (any member's manifest) | 26 | 24% |
 | gate-global only, root-`Cargo.*` (first hand measurement) | 22 | 21% |
 | path-intersection with PR #3362's 2 paths, alone | 2 | 2% |
