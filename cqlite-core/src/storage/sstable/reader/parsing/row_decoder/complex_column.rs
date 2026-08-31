@@ -1,3 +1,4 @@
+use super::marshal_element::MarshalCollectionElements;
 use super::*;
 
 // Issue #3612: the cell-path KEY decoder, split out of this file (campsite
@@ -661,8 +662,42 @@ impl V5CompressedLegacyParser {
         } else if dt.starts_with("map<")
             || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
         {
-            // Parse map entries
-            let (key_type, value_type) = self.extract_map_types(&column.data_type)?;
+            // Parse map entries.
+            //
+            // KEY TYPE SELECTION — prefer the AUTHORITATIVE MARSHAL spelling, the
+            // same way the FROZEN map reader does (`cell_value_complex`, issue
+            // #1340). This is a parity requirement, not a refinement (issue #3612,
+            // R7): decoding the multicell key from the SCHEMA short form while the
+            // frozen reader decodes it from the marshal form makes the two spellings
+            // of one map produce `Value` keys that compare and hash DIFFERENTLY on
+            // the public Rust surface.
+            //
+            // MEASURED on the committed `test_nested_udt_keys` fixture, from
+            // Cassandra's own `Statistics.db`: the two columns' marshal key types are
+            // IDENTICAL — `m_tuple_udt` is
+            // `MapType(TupleType(UserType(..),Int32Type),Int32Type)` and
+            // `f_map_tuple_udt` is that same `MapType(..)` under one outer
+            // `FrozenType`, which `extract_marshal_collection_elements` strips. The
+            // SCHEMA form is what diverges: `frozen<tuple<frozen<key_part>, int>>`
+            // carries `frozen` at BOTH levels, so decoding from it produced
+            // `Frozen(Tuple([Frozen(Udt), Int]))` against the frozen reader's
+            // `Tuple([Udt, Int])`. Starting both readers from the same string is
+            // therefore the ROOT-CAUSE fix; peeling wrappers afterwards could not
+            // reach the INNER one.
+            //
+            // `prefer_udt_marshal_element` keeps the schema form whenever the marshal
+            // element is not UDT-bearing, so no non-UDT map key changes behaviour
+            // (no-heuristics, issue #28: both inputs are authoritative metadata).
+            let (schema_key_type, schema_value_type) = self.extract_map_types(&column.data_type)?;
+            let marshal_map_elements = Self::extract_marshal_collection_elements(complex_type);
+            let (marshal_key, marshal_value) = match &marshal_map_elements {
+                Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
+                _ => (None, None),
+            };
+            let key_type =
+                Self::prefer_udt_marshal_element(marshal_key, &schema_key_type).to_string();
+            let value_type =
+                Self::prefer_udt_marshal_element(marshal_value, &schema_value_type).to_string();
             let mut entries = Vec::with_capacity(prealloc_cap);
 
             for i in 0..cell_count_usize {

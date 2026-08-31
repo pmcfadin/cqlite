@@ -679,3 +679,218 @@ async fn multicell_tuple_keys_match_the_sstabledump_golden() {
         "every golden partition carrying m_tuple_udt must have been checked"
     );
 }
+
+// ===========================================================================
+// R7: cross-spelling parity ON THE PUBLIC SURFACE, unpeeled (issue #3612)
+// ===========================================================================
+//
+// The assertion this class of defect needed and did not have for three rounds.
+// R3-F2 was the same class; it was fixed by matching the frozen side per type and
+// verified against the UDT keys `cm`/`tm`, the only composite subjects the fixture
+// then had. The TUPLE subject added later exposed a case that fix never covered:
+// multicell `Frozen(Tuple([Frozen(Udt), Int]))` against frozen `Tuple([Udt, Int])`.
+// The bindings hide the wrappers, so only a comparison of the raw `Value` — no
+// `peel`, no `matches!` on the inner — can see it.
+//
+// ROOT CAUSE, and why the fix is at the type-selection site: the multicell branch
+// resolved its key type from the SCHEMA short form while the frozen reader prefers
+// the authoritative MARSHAL spelling. Cassandra's own `Statistics.db` for
+// `test_nested_udt_keys` shows the marshal key type is IDENTICAL for both columns
+// (`TupleType(UserType(..),Int32Type)`, the frozen one merely under an outer
+// `FrozenType` that is stripped), while the schema form
+// `frozen<tuple<frozen<key_part>, int>>` carries `frozen` at BOTH levels — so the
+// divergence was entirely in which string each reader started from. Peeling the
+// outer wrapper afterwards could not have fixed the INNER one.
+//
+// WHAT EQUALITY IS ASSERTABLE, per subject: only where the fixture stores the SAME
+// logical key in both spellings. That holds by construction for `cm`/`fcm` and
+// `tm`/`ftm` (the #3504 fixture stores one key in both), and for `m_tuple_udt` /
+// `f_map_tuple_udt` at id=3 ONLY — the other rows hold deliberately different data
+// (`charlie`/`delta` vs `mkey-a`/`mkey-b`), so a value comparison there would be
+// meaningless. Those rows are covered by SHAPE equality instead, which is the
+// property that generalises: same `Value` variant nesting, whatever the payload.
+
+/// The variant nesting of a `Value`, ignoring payloads — so two keys holding
+/// different data can still be compared for the property R7 is about.
+fn variant_shape(v: &Value) -> String {
+    match v {
+        Value::Frozen(inner) => format!("Frozen({})", variant_shape(inner)),
+        Value::Tuple(items) => format!(
+            "Tuple[{}]",
+            items
+                .iter()
+                .map(variant_shape)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::List(items) => format!(
+            "List[{}]",
+            items
+                .iter()
+                .map(variant_shape)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Set(items) => format!(
+            "Set[{}]",
+            items
+                .iter()
+                .map(variant_shape)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Map(pairs) => format!(
+            "Map[{}]",
+            pairs
+                .iter()
+                .map(|(k, val)| format!("{}=>{}", variant_shape(k), variant_shape(val)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Udt(_) => "Udt".to_string(),
+        // Scalars: the VARIANT NAME only. `Debug` renders `Integer(8)`, and the
+        // payload is exactly what this function exists to ignore, so truncate at
+        // the first `(`. (`type_name_of_val` was tried and prints
+        // `cqlite_core::types::Value` for every variant — useless in a diff.)
+        other => {
+            let d = format!("{other:?}");
+            d.split('(').next().unwrap_or("?").to_string()
+        }
+    }
+}
+
+fn hash_of(v: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+/// Every key of a map column, UNPEELED. `Frozen` at the COLUMN level is peeled
+/// (a frozen map column is legitimately one `Frozen(Map)`), but nothing inside is.
+fn map_keys_unpeeled(column: &str, v: &Value) -> Vec<Value> {
+    let pairs = match v {
+        Value::Map(p) => p,
+        Value::Frozen(inner) => match &**inner {
+            Value::Map(p) => p,
+            other => panic!("{column}: expected Frozen(Map), got Frozen({other:?})"),
+        },
+        other => panic!("{column}: expected a Map, got {other:?}"),
+    };
+    pairs.iter().map(|(k, _)| k.clone()).collect()
+}
+
+/// THE R7 ASSERTION for the #3504 fixture's two UDT-keyed subjects: `cm` vs `fcm`
+/// and `tm` vs `ftm` store the SAME key by construction, so their decoded keys must
+/// be EQUAL as `Value`s and hash equally — compared with no wrapper peeling at all.
+#[tokio::test]
+async fn udt_keys_are_identical_across_spellings_unpeeled() {
+    let row = subject_row().await;
+    for (multicell, frozen) in [("cm", "fcm"), ("tm", "ftm")] {
+        let mc = map_keys_unpeeled(multicell, &row[multicell]);
+        let fz = map_keys_unpeeled(frozen, &row[frozen]);
+        assert_eq!(mc.len(), 1, "{multicell}: the fixture stores one entry");
+        assert_eq!(fz.len(), 1, "{frozen}: the fixture stores one entry");
+        assert_eq!(
+            mc[0],
+            fz[0],
+            "{multicell} vs {frozen}: the two spellings of one map must present the \
+             SAME `Value` key with NO wrapper difference (issue #3612 R7). \
+             multicell shape={} frozen shape={}",
+            variant_shape(&mc[0]),
+            variant_shape(&fz[0])
+        );
+        assert_eq!(
+            hash_of(&mc[0]),
+            hash_of(&fz[0]),
+            "{multicell} vs {frozen}: equal keys must hash equally, or they are \
+             distinct entries in any hashed projection"
+        );
+    }
+}
+
+/// THE R7 ASSERTION for the TUPLE subject. Value equality at id=3, where the
+/// fixture stores the same key in both spellings; SHAPE equality everywhere else,
+/// because the other rows hold deliberately different data.
+#[tokio::test]
+async fn tuple_keys_are_identical_across_spellings_unpeeled() {
+    let Some(root) = datasets_root::sstables_root_for_table(TUPLE_KEYSPACE, TUPLE_TABLE) else {
+        panic!("{TUPLE_KEYSPACE}.{TUPLE_TABLE} is git-tracked; absence is a checkout problem");
+    };
+    let db = ingest(IngestionConfig {
+        schema_paths: vec![workspace_root()
+            .join("test-data")
+            .join("schemas")
+            .join("nested-udt-keys.cql")],
+        data_dir: root,
+        version_hint: None,
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: Some(TUPLE_KEYSPACE.to_string()),
+    })
+    .await
+    .expect("ingest")
+    .database;
+    let result = db
+        .execute(&format!(
+            "SELECT id, m_tuple_udt, f_map_tuple_udt FROM {TUPLE_KEYSPACE}.{TUPLE_TABLE}"
+        ))
+        .await
+        .expect("SELECT must succeed");
+    assert!(!result.rows.is_empty(), "zero rows from a PRESENT fixture");
+
+    let mut shape_checked = 0usize;
+    let mut value_checked = 0usize;
+    for row in &result.rows {
+        let Some(Value::Integer(id)) = row.values.get("id") else {
+            continue;
+        };
+        let (Some(mc_col), Some(fz_col)) = (
+            row.values.get("m_tuple_udt"),
+            row.values.get("f_map_tuple_udt"),
+        ) else {
+            continue;
+        };
+        if matches!(mc_col, Value::Null) || matches!(fz_col, Value::Null) {
+            continue;
+        }
+        let mc = map_keys_unpeeled("m_tuple_udt", mc_col);
+        let fz = map_keys_unpeeled("f_map_tuple_udt", fz_col);
+        assert!(!mc.is_empty() && !fz.is_empty(), "id={id}");
+
+        // SHAPE parity always: the variant nesting must not differ, whatever the
+        // payload. This is what caught R7 — `Frozen(Tuple[Frozen(Udt),Int])` vs
+        // `Tuple[Udt,Int]`.
+        for k in &mc {
+            assert_eq!(
+                variant_shape(k),
+                variant_shape(&fz[0]),
+                "id={id}: a multicell tuple key must have the SAME `Value` nesting \
+                 as the frozen spelling's (issue #3612 R7)"
+            );
+        }
+        shape_checked += 1;
+
+        // VALUE parity only where the fixture stores the same logical key in both
+        // columns. Measured: that is id=3 (`solo`, 99, 42) alone; ids 1 and 2 hold
+        // deliberately different data in the two columns.
+        if *id == 3 {
+            assert_eq!(mc.len(), 1, "id=3 holds one key");
+            assert_eq!(
+                mc[0], fz[0],
+                "id=3 stores the SAME key in both spellings, so the decoded \
+                 `Value`s must be equal with no peeling"
+            );
+            assert_eq!(hash_of(&mc[0]), hash_of(&fz[0]), "id=3: hashes must agree");
+            value_checked += 1;
+        }
+    }
+    assert!(
+        shape_checked >= 3,
+        "expected the three populated partitions to be shape-checked, got {shape_checked}"
+    );
+    assert_eq!(
+        value_checked, 1,
+        "exactly one partition (id=3) stores the same key in both spellings; if \
+         this is 0 the value-equality half ran against nothing"
+    );
+}

@@ -216,7 +216,41 @@
 //! why #3723's fix is STRICT REJECTION of such a path, not preserving the
 //! distinctness of two corrupt encodings.
 //!
-//! # Presenting the key EXACTLY as the FROZEN spelling does (issue #3612, R3-F2)
+//! # Presenting the key EXACTLY as the FROZEN spelling does (issue #3612, R3-F2/R7)
+//!
+//! **This is now true for every composite subject the corpus has, and it is
+//! achieved in TWO places that compose — read both before changing either.**
+//!
+//! 1. **The TYPE the two readers start from** (`complex_column`'s multicell map
+//!    branch). It now prefers the authoritative MARSHAL key type exactly as the
+//!    frozen reader does (`prefer_udt_marshal_element`, #1340), so for a
+//!    UDT-bearing key both readers receive the SAME string. Before R7 the
+//!    multicell branch used the SCHEMA short form, which for
+//!    `frozen<tuple<frozen<key_part>, int>>` carries `frozen` at BOTH levels and
+//!    produced `Frozen(Tuple([Frozen(Udt), Int]))` against the frozen reader's
+//!    `Tuple([Udt, Int])` — unequal and unequally-hashing on the public Rust
+//!    surface, though both bindings hid it.
+//! 2. **The WRAPPER, for keys where neither reader has a UDT-bearing marshal**
+//!    (`frozen_presentation_wrapper`, below). There `prefer_udt_marshal_element`
+//!    keeps the SCHEMA form on BOTH sides — e.g. `frozen<set<int>>` — so both
+//!    wrap, and this function reproduces that. It is still load-bearing; it is
+//!    simply no longer doing the UDT-bearing cases' work.
+//!
+//! Measured parity, per subject, unpeeled (`cqlite-core/tests/issue_3612_multicell_map_composite_key.rs`):
+//!
+//! | subject (multicell vs frozen) | before R7 | after R7 |
+//! |---|---|---|
+//! | `cm` vs `fcm` (UDT key) | `Udt` == `Udt` | unchanged, still equal |
+//! | `tm` vs `ftm` (UDT key) | `Udt` == `Udt` | unchanged, still equal |
+//! | `m_tuple_udt` vs `f_map_tuple_udt` (TUPLE key) | `Frozen(Tuple[Frozen(Udt),Int])` vs `Tuple[Udt,Int]` — **UNEQUAL** | `Tuple[Udt,Int]` on both — **EQUAL, equal hash** |
+//!
+//! No subject remains non-parity. Value equality is asserted wherever the fixture
+//! stores the SAME logical key in both spellings (`cm`/`fcm`, `tm`/`ftm`, and
+//! `m_tuple_udt` id=3); the other tuple rows hold deliberately different data, so
+//! they are covered by `Value`-nesting equality, which is the property that
+//! generalises.
+//!
+//! ## The historical note this replaced (issue #3612, R3-F2)
 //!
 //! Two spellings of one logical map must present the same key value, or `Value`'s
 //! `PartialEq`/`Hash` tell them apart on the public Rust surface. That rule, its
