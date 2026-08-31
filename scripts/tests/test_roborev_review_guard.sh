@@ -6041,6 +6041,19 @@ if [ -z "$_dfc_bad" ]; then
 else
   bad "structural (#3626): the deferral admission is not one coupled state —$_dfc_bad. A second derivation of 'was it granted?' can drift from the first, and a DEFERRED token that no authorization backs is indistinguishable from an authorized one to every reader of the block"
 fi
+# ===== THE DEFERRAL IS CONFINED TO THE ROBOREV VERDICT (#3626) =====
+# IT IS NOT A GENERAL "OVERRIDE ANY CHECK" MECHANISM, and the gate of record must not learn to read one:
+# `scripts/agent-gate.sh` is out of scope for this change by owner ruling (three lanes are live on it),
+# and no gate component may consume a deferral marker. Asserted rather than left to a one-time
+# `git diff` review, because the next person to want a broader override will look for a precedent.
+_dfg_gate="$SCRIPT_DIR/../agent-gate.sh"
+if [ ! -f "$_dfg_gate" ]; then
+  bad "structural (#3626): the agent gate is not at $_dfg_gate, so the confinement claim could not be checked"
+elif grep -qE 'roborev-defer|ROBOREV_DEFERRAL|deferral_admits' "$_dfg_gate"; then
+  bad 'structural (#3626): the agent gate reads a deferral marker or its state — the deferral is confined to the roborev wrapper verdict and must never become a general "override any check" mechanism (#3626 scope fence)'
+else
+  ok 'structural (#3626): no gate component consumes a deferral — the mechanism is confined to the roborev wrapper verdict'
+fi
 # ===== `findings:` NEVER REPORTS `NONE` ON ACCOUNT OF A DEFERRAL (#3626) =====
 # `NONE` stays reachable ONLY from the job record's structured `verdict` letter, so nobody grepping
 # `findings: NONE` reads a deferred run as a clean review. Asserted at the assignment site, because
