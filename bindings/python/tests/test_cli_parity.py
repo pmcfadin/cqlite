@@ -1118,10 +1118,12 @@ class TestCollectionIdentityContract:
         # (#3500): `set<frozen<list<frozen<udt>>>>` no longer reaches a `frozenset`
         # at all, because `contains_udt` sees the UDT under the inner list and
         # `set_to_py` takes its `list` branch. That column arrives as a `list` of
-        # `list`s of UDTs.
+        # `list`s of UDTs. The rendered UDT holds its DECLARED FIELDS AND NOTHING
+        # ELSE since #3629 — the CLI and `cqlite-core`'s `ToJson` stopped injecting
+        # `_type`, so the canonical form no longer carries it on any side.
         assert normalize_python_value(
             [[_udt("address", street="1 Main St")]], is_row_level=False
-        ) == [[{"_type": "address", "street": "1 Main St"}]]
+        ) == [[{"street": "1 Main St"}]]
 
         # A `frozenset` of projected elements is still REACHABLE — one level deeper,
         # as a `map<frozen<set<frozen<list<frozen<udt>>>>>, int>` key, where
