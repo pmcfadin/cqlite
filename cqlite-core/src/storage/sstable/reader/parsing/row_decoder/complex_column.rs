@@ -722,6 +722,33 @@ impl V5CompressedLegacyParser {
             };
             let key_type =
                 Self::prefer_udt_marshal_element(marshal_key, &schema_key_type).to_string();
+            // DECLARED GAP — THE VALUE HALF IS EXERCISED BY NO TEST AT ANY TIER.
+            //
+            // Stated affirmatively rather than left silent, because a green gate over
+            // this line would read as coverage and it is not: the question is never
+            // whether a line is right, it is WHICH LANE EXECUTES IT, and here the
+            // answer is none.
+            //
+            // MEASURED over the committed schemas (detector proved against planted
+            // positives first, so its "no" is evidence and not a broken parse): there
+            // are 5 multicell `map<..>` columns in the whole corpus — `mm`,
+            // `m_list_vals`, `cm`, `tm`, `m_tuple_udt` — of which 3 are UDT-bearing on
+            // the KEY and **0 are UDT-bearing on the VALUE** (the five value types are
+            // `int`, `frozen<list<int>>`, `int`, `int`, `int`). So
+            // `prefer_udt_marshal_element` returns the schema form for every map VALUE
+            // that exists today, and this line is observably inert: no fixture, and
+            // therefore no test at any tier, distinguishes it from the pre-R7 code.
+            //
+            // It is kept, not removed, and both halves of that matter. Removing it
+            // would leave KEY selection on the marshal and VALUE selection on the
+            // schema — an asymmetry that is itself a latent defect, and one nobody
+            // would find, since no fixture reaches either side. Keeping it silently
+            // would be worse than either. Its justification is the SAME primary source
+            // as the key half's (`SerializationHeader.getType`, cited above): the
+            // recorded type is what the writer put beside these bytes.
+            //
+            // What would close this gap is a fixture with a UDT-VALUED multicell map
+            // (e.g. `map<text, frozen<collide>>`); the corpus has none.
             let value_type =
                 Self::prefer_udt_marshal_element(marshal_value, &schema_value_type).to_string();
             let mut entries = Vec::with_capacity(prealloc_cap);
