@@ -15,7 +15,8 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 
 use cqlite_core::Value;
 use cqlite_ffi_common::vectors::{
-    vector_outcome, VectorOutcome, DECIMAL_VECTORS, INET_VECTORS, VARINT_VECTORS,
+    vector_outcome, VectorOutcome, DECIMAL_VECTORS, INET_VECTORS, JSON_NUMBER_VECTORS,
+    VARINT_VECTORS,
 };
 
 /// Turn one reported outcome into the dict shape both binding suites consume.
@@ -45,6 +46,9 @@ fn outcome_dict<'py>(
     dict.set_item("rendered", reported.rendered.as_deref())?;
     dict.set_item("scale", scale)?;
     dict.set_item("bytes", PyBytes::new(py, input))?;
+    // `"integer"`/`"float"` for a JSON-number entry (issue #3505), `None` for
+    // the byte-input types, which have no host-shape choice to make.
+    dict.set_item("host_kind", py.None())?;
     Ok(dict)
 }
 
@@ -125,6 +129,53 @@ pub fn _ffi_common_render_vectors(py: Python<'_>) -> PyResult<Py<PyList>> {
             },
         );
         rows.push(outcome_dict(py, "inet", 0, &bytes, &reported)?);
+    }
+
+    // JSON numbers (issue #3505). The input is TEXT, so its UTF-8 bytes ride in
+    // the `bytes` field and the suite decodes them to re-drive the same literal
+    // through `_json_number_from_text` for the host-TYPE assertion — the same
+    // two-surface split DECIMAL already uses with `_decimal_from_parts`.
+    //
+    // The rendering goes through the FULL production dispatch
+    // (`value_to_py(Value::Json(..))` → `json_to_py` → `json_number_to_py`), so
+    // a binding that stopped calling the shared classifier is caught here.
+    for vector in JSON_NUMBER_VECTORS {
+        let number: serde_json::Number = match serde_json::from_str(vector.json_text) {
+            Ok(n) => n,
+            // A committed literal that does not parse is a table defect; report
+            // it as a refusal rather than skipping the entry, so it cannot pass
+            // silently.
+            Err(err) => {
+                let message = format!(
+                    "committed literal `{}` did not parse: {err}",
+                    vector.json_text
+                );
+                let reported = vector_outcome(vector.name, vector.expect, Err(message.as_str()));
+                let dict =
+                    outcome_dict(py, "json_number", 0, vector.json_text.as_bytes(), &reported)?;
+                dict.set_item("host_kind", vector.host_kind.name())?;
+                rows.push(dict);
+                continue;
+            }
+        };
+        let produced = crate::value::value_to_py(
+            py,
+            &Value::Json(Box::new(serde_json::Value::Number(number))),
+        )
+        .and_then(|obj| obj.bind(py).str().map(|s| s.to_string()));
+        let message = produced.as_ref().err().map(|err| error_text(py, err));
+        let reported = vector_outcome(
+            vector.name,
+            vector.expect,
+            match (&produced, &message) {
+                (Ok(text), _) => Ok(text.as_str()),
+                (Err(_), Some(text)) => Err(text.as_str()),
+                (Err(_), None) => Err(""),
+            },
+        );
+        let dict = outcome_dict(py, "json_number", 0, vector.json_text.as_bytes(), &reported)?;
+        dict.set_item("host_kind", vector.host_kind.name())?;
+        rows.push(dict);
     }
 
     Ok(PyList::new(py, rows)?.unbind())

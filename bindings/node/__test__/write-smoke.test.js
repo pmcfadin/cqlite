@@ -30,15 +30,10 @@ const path = require('path');
 const { Database } = require('../lib/index.js');
 
 // Single-table schema (no-heuristics mandate, Issue #28): unambiguous write target.
-const SCHEMA_PATH = path.join(
-  __dirname,
-  '..',
-  '..',
-  '..',
-  'test-data',
-  'schemas',
-  'write-test.cql'
-);
+// Issue #3493: resolved through the SHARED resolver in setup.js, never rebuilt from
+// __dirname here. Building it locally bypassed CQLITE_SCHEMAS_ROOT, so the gate could
+// certify one schemas root while this file read another.
+const SCHEMA_PATH = global.testPaths.SCHEMA_WRITE_TEST;
 
 /** Recursively find the first file whose name ends with `-Data.db`. */
 function findDataDb(root) {

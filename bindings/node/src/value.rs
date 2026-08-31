@@ -26,7 +26,7 @@
 //! | Set | `Set` |
 //! | Map | `Map` |
 //! | Tuple | `Array` |
-//! | Udt | `object` with `_type`, `_keyspace`, and field properties |
+//! | Udt | `object` with `typeName`, `keyspace` and a nested `fields` object |
 
 use crate::error::to_napi_error;
 use cqlite_core::types::Value;
@@ -42,19 +42,22 @@ use std::cell::OnceCell;
 /// each constructor at most once per result conversion, lazily: a result with no
 /// `set`/`map` cells performs zero constructor lookups.
 ///
-/// INVARIANT: at most one `get_global()` + named-property lookup for `Set` and
-/// one for `Map` per `ConvCtx`, regardless of row/cell count; zero when the
-/// result has no set/map cells. The [`ctor_lookups`](self::testing::ctor_lookups)
-/// work counter proves this in tests.
+/// INVARIANT: at most one `get_global()` + named-property lookup for `Set`, one
+/// for `Map` and one for `Object.create` (the null-prototype UDT field bag, see
+/// [`udt_to_object`]) per `ConvCtx`, regardless of row/cell count; zero for a
+/// kind the result contains no cells of. The
+/// [`ctor_lookups`](self::testing::ctor_lookups) work counter proves this in
+/// tests.
 ///
 /// One `ConvCtx` is constructed per result (batch: once in `resolve`; streaming:
 /// once per yielded row, since napi handles are scoped to each `resolve` `Env`)
 /// and threaded by shared reference through `row_to_object` → `value_to_napi` →
-/// `set_to_js_set`/`map_to_js_map`.
+/// `set_to_js_set`/`map_to_js_map`/`udt_to_object`.
 pub struct ConvCtx<'a> {
     env: &'a Env,
     set_ctor: OnceCell<JsFunction>,
     map_ctor: OnceCell<JsFunction>,
+    object_create: OnceCell<JsFunction>,
 }
 
 impl<'a> ConvCtx<'a> {
@@ -65,6 +68,7 @@ impl<'a> ConvCtx<'a> {
             env,
             set_ctor: OnceCell::new(),
             map_ctor: OnceCell::new(),
+            object_create: OnceCell::new(),
         }
     }
 
@@ -87,6 +91,41 @@ impl<'a> ConvCtx<'a> {
             let global = self.env.get_global()?;
             global.get_named_property::<JsFunction>("Map")
         })
+    }
+
+    /// The cached global `Object.create`, fetched at most once per context.
+    ///
+    /// Used by [`udt_to_object`] to build the UDT field bag with a NULL
+    /// PROTOTYPE. Cached on the same terms as `Set`/`Map` above: a result with
+    /// no UDT cells performs zero lookups, and a result with a million pays one.
+    fn object_create(&self) -> Result<&JsFunction> {
+        cache_get_or_try_init(&self.object_create, || {
+            let global = self.env.get_global()?;
+            // Read through `JsUnknown` + `coerce_to_object`: the global `Object`
+            // IS a function, and napi's typed `get_named_property::<JsObject>`
+            // rejects a function ("Expect value to be Object, but received
+            // Function"). `ToObject` of a function is that same function object,
+            // whose `create` property is what we want.
+            global
+                .get_named_property::<JsUnknown>("Object")?
+                .coerce_to_object()?
+                .get_named_property::<JsFunction>("create")
+        })
+    }
+
+    /// A fresh object with a NULL PROTOTYPE — `Object.create(null)`.
+    ///
+    /// The whole point is that it INHERITS NOTHING, so no property name a
+    /// caller supplies can reach an inherited accessor or an inherited
+    /// non-writable slot. See [`udt_to_object`] for why that matters.
+    fn create_null_prototype_object(&self) -> Result<JsObject> {
+        let null = self.env.get_null()?;
+        // `ToObject` of an object is that same object (ECMA-262), so this
+        // re-types the returned handle without allocating or copying — it is a
+        // cast with a checked status, not a conversion.
+        self.object_create()?
+            .call(None, &[null])?
+            .coerce_to_object()
     }
 }
 
@@ -324,27 +363,66 @@ fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
     env.create_string(&ip_str).map(|s| s.into_unknown())
 }
 
+/// Convert a JSON number to the JavaScript value that represents it EXACTLY.
+///
+/// A thin adapter over the ONE shared classifier
+/// [`cqlite_ffi_common::json_number::classify_json_number`] — the same one the
+/// Python binding uses, so the two can no longer disagree about the boundary
+/// (before issue #3505 they disagreed twice over: Python fell through to a
+/// lossy `f64` then a `str`, Node to a lossy `f64` then a fabricated `null`).
+///
+/// **The JS answer is genuinely different from Python's, and this is the
+/// statement of it rather than an assumption (#3505 AC5).** A JS `number` is an
+/// `f64`, so it cannot carry an integer above `2^53`; `BigInt` can. `BigInt` is
+/// the ESTABLISHED lossless integer type in this binding — not a novel choice —
+/// because the `i64`-outside-`i32`-range arm below already used it before this
+/// change. So:
+///
+/// * `I64` inside `i32` range → `number` (unchanged: exact, and idiomatic JS)
+/// * `I64` outside `i32` range → `BigInt` (unchanged)
+/// * `U64` → `BigInt`. **The fix.** Previously `as_i64()` returned `None` and
+///   `as_f64()` succeeded lossily, so `18446744073709551615` reached JS as
+///   `1.8446744073709552e19`.
+/// * `F64` → `number` (a JSON float literal; exact by construction)
+/// * `Beyond` → an exact `BigInt` if the text is an integer literal, else a
+///   REFUSAL. The old arm returned `env.get_null()`, i.e. it delivered a
+///   **fabricated `null`** for an unrepresentable number — a silent
+///   data-loss bug in its own right, and strictly worse than Python's string
+///   fallback, since `null` is indistinguishable from a genuine JSON `null`.
+fn json_number_to_napi(env: &Env, n: &serde_json::Number) -> Result<JsUnknown> {
+    use cqlite_ffi_common::json_number::JsonNumberClass;
+    match cqlite_ffi_common::json_number::classify_json_number(n) {
+        JsonNumberClass::I64(i) => {
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&i) {
+                env.create_int32(i as i32).map(|v| v.into_unknown())
+            } else {
+                env.create_bigint_from_i64(i)?.into_unknown()
+            }
+        }
+        JsonNumberClass::U64(u) => env.create_bigint_from_u64(u)?.into_unknown(),
+        JsonNumberClass::F64(f) => env.create_double(f).map(|v| v.into_unknown()),
+        JsonNumberClass::Beyond(text) => {
+            match cqlite_ffi_common::json_number::beyond_text_to_sign_and_le_words(&text) {
+                Some((is_negative, words)) => env
+                    .create_bigint_from_words(is_negative, words)?
+                    .into_unknown(),
+                // Fail closed through the ONE FFI error contract, exactly as the
+                // DECIMAL and INET adapters do.
+                None => Err(to_napi_error(cqlite_core::Error::unsupported_format(
+                    cqlite_ffi_common::json_number::beyond_range_message(&text),
+                ))),
+            }
+        }
+    }
+}
+
 /// Convert serde_json::Value to JavaScript value.
 fn json_to_napi(ctx: &ConvCtx, json: &serde_json::Value) -> Result<JsUnknown> {
     let env = ctx.env();
     match json {
         serde_json::Value::Null => env.get_null().map(|v| v.into_unknown()),
         serde_json::Value::Bool(b) => env.get_boolean(*b).map(|v| v.into_unknown()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                // Check if it fits in i32 for JavaScript number
-                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                    env.create_int32(i as i32).map(|v| v.into_unknown())
-                } else {
-                    // Use BigInt for large integers
-                    env.create_bigint_from_i64(i)?.into_unknown()
-                }
-            } else if let Some(f) = n.as_f64() {
-                env.create_double(f).map(|v| v.into_unknown())
-            } else {
-                env.get_null().map(|v| v.into_unknown())
-            }
-        }
+        serde_json::Value::Number(n) => json_number_to_napi(env, n),
         serde_json::Value::String(s) => env.create_string(s).map(|v| v.into_unknown()),
         serde_json::Value::Array(arr) => {
             let mut js_arr = env.create_array_with_length(arr.len())?;
@@ -414,28 +492,81 @@ fn map_to_js_map(ctx: &ConvCtx, pairs: &[(Value, Value)]) -> Result<JsUnknown> {
     Ok(map_instance.into_unknown())
 }
 
-/// Convert UDT to JavaScript object.
+/// Convert a UDT to a JavaScript object whose type identity is carried OUT OF
+/// BAND (issue #3504).
 ///
-/// Creates an object with:
-/// - `_type`: The UDT type name
-/// - `_keyspace`: The keyspace containing the UDT
-/// - All field names as properties
+/// Creates `{ typeName, keyspace, fields }`, where `fields` is a nested object
+/// holding the declared fields and NOTHING else.
+///
+/// This used to set `_type` and `_keyspace` on the object and then set every
+/// field name on the SAME object, so a UDT field named `_type` or `_keyspace` —
+/// legal CQL via a quoted identifier — overwrote the marker and the type name
+/// became unrecoverable. Giving the fields a namespace of their own removes the
+/// slot they competed for; `result._type` is now `undefined` and the type name is
+/// `result.typeName`.
+///
+/// Fields are deliberately NOT also mirrored at the top level: that would
+/// re-flatten them beside `typeName`/`keyspace` and reintroduce the exact defect.
+/// The Python binding keeps mapping access via a dedicated `cqlite.Udt` type, so
+/// the two bindings differ in ergonomics and agree on semantics.
+///
+/// ## Why `fields` has a NULL PROTOTYPE
+///
+/// Giving the fields their own object is not by itself enough. An ordinary
+/// property assignment is a JavaScript `[[Set]]`, which CONSULTS THE PROTOTYPE
+/// CHAIN: if the name matches an inherited accessor, the assignment calls that
+/// setter instead of creating a field. On a plain `{}` — i.e. anything
+/// inheriting from `Object.prototype` — that is a live channel between a
+/// user-controlled NAME and the engine's own object model, which is the SAME
+/// control/data collision this whole change exists to remove, one layer down.
+/// Measured on the Cassandra-written fixture before this fix (a UDT declaring
+/// `"__proto__"`, legal CQL via a quoted identifier exactly as `"_type"` is):
+/// a string-valued field VANISHED (absent from `Object.keys`, not an own
+/// property, `fields.__proto__` reading back `Object.prototype`), and a
+/// null-valued one REPLACED the object's prototype with `null`.
+///
+/// `Object.create(null)` inherits nothing, so there is no accessor and no
+/// non-writable inherited slot for any name to reach, and every field becomes
+/// an ordinary own data property. Deliberately NOT a special case on the
+/// literal string `__proto__`: that would be picking a rarer delimiter rather
+/// than removing the shared channel, and it would leave every other inherited
+/// name — including any a future JavaScript adds to `Object.prototype` —
+/// still able to intercept a declared field. Defining own properties
+/// (`napi_define_properties`) would also bypass `[[Set]]`, but it leaves
+/// `'toString' in fields` true and `fields.constructor` truthy, so an absence
+/// probe on the bag still reads inherited junk; a null-prototype bag makes
+/// `fields[name] === undefined` mean exactly "no such field".
+///
+/// The cost is one cached `Object.create` call per UDT cell (the constructor
+/// lookup itself is once per result, [`ConvCtx::object_create`]), and the
+/// observable shape is unchanged for every read a caller performs on a mapping:
+/// `Object.keys`, `in`, indexing, spread, destructuring, `JSON.stringify` and
+/// `Object.entries` all behave identically. `fields.hasOwnProperty(...)` does
+/// NOT exist on it — use `Object.prototype.hasOwnProperty.call(fields, name)`
+/// or `Object.hasOwn(fields, name)`, which is also the only form that is
+/// correct on a bag whose keys are user-controlled.
+///
+/// The OUTER object keeps a normal prototype: `typeName`/`keyspace`/`fields` are
+/// chosen HERE, not by data, so no user-controlled name is ever written to it.
 fn udt_to_object(ctx: &ConvCtx, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     let env = ctx.env();
     let mut obj = env.create_object()?;
 
-    // Add type metadata
-    obj.set_named_property("_type", env.create_string(&udt.type_name)?)?;
-    obj.set_named_property("_keyspace", env.create_string(&udt.keyspace)?)?;
+    // Type identity, in a namespace no field name can reach.
+    obj.set_named_property("typeName", env.create_string(&udt.type_name)?)?;
+    obj.set_named_property("keyspace", env.create_string(&udt.keyspace)?)?;
 
-    // Add fields
+    // Declared fields, in their own namespace, on an object that inherits
+    // NOTHING — see the doc comment above.
+    let mut fields = ctx.create_null_prototype_object()?;
     for field in &udt.fields {
         let value = match &field.value {
             Some(v) => value_to_napi(ctx, v)?,
             None => env.get_null()?.into_unknown(),
         };
-        obj.set_named_property(&field.name, value)?;
+        fields.set_named_property(&field.name, value)?;
     }
+    obj.set_named_property("fields", fields)?;
 
     Ok(obj.into_unknown())
 }

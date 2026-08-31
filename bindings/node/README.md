@@ -349,10 +349,62 @@ CQL types are automatically converted to JavaScript types:
 | `map<K,V>` | `Map<K,V>` | via `executeNative()` |
 | `tuple<...>` | `[...]` | Array |
 | `frozen<T>` | Inner type | Unwrapped |
-| UDT | `object` | With `_type` and `_keyspace` fields |
+| UDT | `object` | `{ typeName, keyspace, fields }` via `executeNative()` (see below) |
 
 \* **Note:** With `execute()`, `varint` returns `"0x{hex}"` and `decimal` returns `"decimal:{scale}:0x{hex}"`.
 Use `executeNative()` for human-readable formats.
+
+### UDT type identity is carried out of band
+
+A CQL user-defined type is returned as `{ typeName, keyspace, fields }` **by
+`executeNative()`**. `execute()` shapes rows through the JSON writer, which emits a UDT as a bare
+object of its declared fields — mirroring the CLI's JSON — with no `typeName`/`keyspace`/`fields`
+wrapper, so the identity is not available on that path at all:
+
+```javascript
+const { rows } = await db.executeNative('SELECT address FROM ks.t LIMIT 1');
+const udt = rows[0].address;
+udt.typeName;          // 'address_type'  — the declared UDT type
+udt.keyspace;          // 'test_collections'
+udt.fields.street;     // '1 Main St'  — declared fields live here, and ONLY here
+Object.keys(udt);      // ['typeName', 'keyspace', 'fields']
+```
+
+**Breaking change (issue #3504).** `_type` and `_keyspace` used to be set on the same object as the
+UDT's own field names — so a UDT declaring a field named `_type` or `_keyspace` (legal CQL via a
+quoted identifier) silently **overwrote** the marker and the type name became unrecoverable.
+`interface UdtValue` also no longer declares a `[field: string]: Value` index signature: that
+signature is what permitted the collision. Migration:
+
+| Before | Now |
+|---|---|
+| `result._type` | `result.typeName` |
+| `result._keyspace` | `result.keyspace` |
+| `result.street` | `result.fields.street` |
+| `'_type' in value` to spot a UDT | `'typeName' in value && 'fields' in value` |
+
+Fields are deliberately NOT also mirrored at the top level — that would re-flatten them beside
+`typeName` and reintroduce the defect. The Python binding keeps `udt["street"]` via a dedicated
+`cqlite.Udt` type, so the two bindings differ in ergonomics and agree on semantics.
+
+**`fields` has a null prototype.** A field name is data, and a plain object's property assignment
+consults the prototype chain — so a UDT field named `__proto__` (legal CQL via a quoted identifier,
+exactly like `_type`) would call `Object.prototype`'s inherited accessor rather than become a field:
+a string value vanished, a null value replaced the object's prototype. `fields` is therefore built
+with `Object.create(null)`, which inherits nothing, so **every** field name — including any that a
+future JavaScript adds to `Object.prototype` — is an ordinary own data property:
+
+```javascript
+udt.fields.__proto__;                              // the declared field's value
+Object.getPrototypeOf(udt.fields);                 // null
+Object.hasOwn(udt.fields, '__proto__');            // true
+udt.fields.hasOwnProperty('x');                    // TypeError — not inherited
+Object.hasOwn(udt.fields, 'x');                    // use this instead
+```
+
+Indexing, `in`, `Object.keys`/`entries`, spread, destructuring and `JSON.stringify` are all
+unaffected. The outer object keeps a normal prototype: its keys (`typeName`, `keyspace`, `fields`)
+are chosen by the binding, never by data.
 
 ### CQL `decimal` rendering policy
 

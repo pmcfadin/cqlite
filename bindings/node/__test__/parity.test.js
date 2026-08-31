@@ -453,6 +453,64 @@ describe('Parity Summary (Issue #307 / dynamic enumeration #1229)', () => {
 // =============================================================================
 
 /**
+ * Locate an OA JSONL golden, failing LOUDLY under strict fixtures (issue #3493).
+ *
+ * A missing golden used to be a bare `return`, so under CQLITE_REQUIRE_FIXTURES=1 -- which
+ * the FULL gate now sets -- the OA parity assertions could all vanish and the gate still
+ * report success (roborev round 16). OA tables are excluded from the ALL_TABLES
+ * golden-coverage assertion, so nothing else would have noticed.
+ *
+ * Lenient runs keep the graceful skip: the goldens ship with the fetched corpus, so their
+ * absence is a legitimate state when fixtures were never fetched.
+ *
+ * @param {string} keyspace
+ * @param {string} table
+ * @returns {string|null} Path to the golden, or null on a lenient run without one.
+ * @throws {Error} When strict fixtures are required and the golden is absent.
+ */
+function requireOaGolden(keyspace, table) {
+  const jsonlPath = findOaJsonlFile(keyspace, table);
+  if (jsonlPath) return jsonlPath;
+  if (global.REQUIRE_FIXTURES) {
+    throw new Error(
+      `No JSONL golden for ${keyspace}.${table}. CQLITE_REQUIRE_FIXTURES=1, so this is a ` +
+      'failure rather than a skip: OA tables are outside the ALL_TABLES golden-coverage ' +
+      'assertion, so a silent skip here drops the parity check with nothing objecting ' +
+      '(issue #3493).'
+    );
+  }
+  console.log(`  Skipping ${keyspace}.${table}: JSONL file not found`);
+  return null;
+}
+
+/**
+ * Resolve the OA schema, failing LOUDLY when it is absent (issue #3493).
+ *
+ * The schemas are COMMITTED SOURCE -- `test-data/schemas`, resolved checkout-relative or
+ * from an absolute `CQLITE_SCHEMAS_ROOT` -- so their absence means a broken checkout or a
+ * mis-pointed root, never a legitimate environment. A bare `return` here used to make
+ * every OA assertion vanish behind `dbOa === null` under a green suite.
+ *
+ * Shared by BOTH OA `beforeAll` blocks, and called BEFORE oaBinariesPresent(): one
+ * guards committed source (an error), the other guards fetched fixtures (a real skip),
+ * and putting the skip first hid the error on every run without OA binaries.
+ *
+ * @returns {string} Absolute path to the OA schema.
+ * @throws {Error} When the committed schema is not present.
+ */
+function requireOaSchema() {
+  const schemaPath = global.testPaths.SCHEMA_OA_TEST;
+  if (!require('fs').existsSync(schemaPath)) {
+    throw new Error(
+      `OA schema not found at ${schemaPath}. It is committed source, so this means a ` +
+      'broken checkout or a wrong CQLITE_SCHEMAS_ROOT - failing loudly rather than ' +
+      'silently skipping every OA assertion (issue #3493).'
+    );
+  }
+  return schemaPath;
+}
+
+/**
  * Helper: check whether oa Data.db binary files are present.
  * Returns true when at least one oa-format Data.db exists in test_oa/.
  * Graceful-skip: if only JSONL goldens are present (no binaries), tests skip.
@@ -486,13 +544,31 @@ describe('VG6: OA Format Parity — Row Count (Issue #672)', () => {
   beforeAll(async () => {
     skipIfNoDatasets();
 
-    if (!oaBinariesPresent()) {
-      // Mark as skipped; individual tests will skip via dbOa === null check
-      return;
-    }
+    // Issue #3493: the COMMITTED-SOURCE check runs FIRST, before the fetched-fixture
+    // one. The ORDER is the whole point (roborev round 13): with oaBinariesPresent()
+    // first, a missing committed schema stayed silently hidden on any run without OA
+    // binaries -- most partial-corpus `npm test` runs -- so the loud error added
+    // earlier could not fire in the very situation it was written for.
+    const schemaPath = requireOaSchema();
 
-    const schemaPath = global.testPaths.SCHEMA_OA_TEST;
-    if (!require('fs').existsSync(schemaPath)) {
+    if (!oaBinariesPresent()) {
+      // FETCHED fixtures: a genuine skip -- but NOT under strict mode (issue #3493,
+      // roborev round 15). CQLITE_REQUIRE_FIXTURES=1 means "a dataset test that does not
+      // run is a failure", which is exactly what the full gate now sets. Skipping here
+      // under strict let a corpus pass check-dataset-manifest.sh -- which accepts any
+      // regular `*-Data.db` -- and then skip EVERY OA assertion beneath a green full
+      // gate, because oaBinariesPresent() requires the narrower `oa-<n>-big-Data.db`.
+      // The two predicates disagree by design, so the strict run must say so out loud.
+      if (global.REQUIRE_FIXTURES) {
+        throw new Error(
+          'OA binaries not found under ' +
+          require('path').join(global.testPaths.SSTABLES_DIR, 'test_oa') +
+          ' (expected a file matching oa-<n>-big-Data.db). CQLITE_REQUIRE_FIXTURES=1, so ' +
+          'this is a failure rather than a skip: a strict run that silently drops every ' +
+          'OA assertion is the vacuous pass strict mode exists to prevent (issue #3493).'
+        );
+      }
+      // Lenient runs still skip; individual tests skip via dbOa === null.
       return;
     }
 
@@ -515,11 +591,8 @@ describe('VG6: OA Format Parity — Row Count (Issue #672)', () => {
       return; // graceful skip (no assert failures)
     }
 
-    const jsonlPath = findOaJsonlFile('test_oa', table);
-    if (!jsonlPath) {
-      console.log(`  Skipping test_oa.${table}: JSONL file not found`);
-      return;
-    }
+    const jsonlPath = requireOaGolden('test_oa', table);
+    if (!jsonlPath) return;   // lenient run: graceful skip
 
     const expectedCount = countRowsInJsonl(jsonlPath);
     const result = await dbOa.execute(`SELECT * FROM test_oa.${table}`);
@@ -535,12 +608,31 @@ describe('VG4: OA Format Parity — Value Spot Check (Issue #656)', () => {
   beforeAll(async () => {
     skipIfNoDatasets();
 
-    if (!oaBinariesPresent()) {
-      return;
-    }
+    // Issue #3493: the COMMITTED-SOURCE check runs FIRST, before the fetched-fixture
+    // one. The ORDER is the whole point (roborev round 13): with oaBinariesPresent()
+    // first, a missing committed schema stayed silently hidden on any run without OA
+    // binaries -- most partial-corpus `npm test` runs -- so the loud error added
+    // earlier could not fire in the very situation it was written for.
+    const schemaPath = requireOaSchema();
 
-    const schemaPath = global.testPaths.SCHEMA_OA_TEST;
-    if (!require('fs').existsSync(schemaPath)) {
+    if (!oaBinariesPresent()) {
+      // FETCHED fixtures: a genuine skip -- but NOT under strict mode (issue #3493,
+      // roborev round 15). CQLITE_REQUIRE_FIXTURES=1 means "a dataset test that does not
+      // run is a failure", which is exactly what the full gate now sets. Skipping here
+      // under strict let a corpus pass check-dataset-manifest.sh -- which accepts any
+      // regular `*-Data.db` -- and then skip EVERY OA assertion beneath a green full
+      // gate, because oaBinariesPresent() requires the narrower `oa-<n>-big-Data.db`.
+      // The two predicates disagree by design, so the strict run must say so out loud.
+      if (global.REQUIRE_FIXTURES) {
+        throw new Error(
+          'OA binaries not found under ' +
+          require('path').join(global.testPaths.SSTABLES_DIR, 'test_oa') +
+          ' (expected a file matching oa-<n>-big-Data.db). CQLITE_REQUIRE_FIXTURES=1, so ' +
+          'this is a failure rather than a skip: a strict run that silently drops every ' +
+          'OA assertion is the vacuous pass strict mode exists to prevent (issue #3493).'
+        );
+      }
+      // Lenient runs still skip; individual tests skip via dbOa === null.
       return;
     }
 
@@ -565,9 +657,8 @@ describe('VG4: OA Format Parity — Value Spot Check (Issue #656)', () => {
       return;
     }
 
-    const jsonlPath = findOaJsonlFile('test_oa', 'udt_table');
+    const jsonlPath = requireOaGolden('test_oa', 'udt_table');
     if (!jsonlPath) {
-      console.log('  Skipping: JSONL file not found for test_oa.udt_table');
       return;
     }
 

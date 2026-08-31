@@ -42,15 +42,10 @@ function tmpWriteDir() {
  * (Issue #28) is satisfied: the write engine has an unambiguous write target.
  * The multi-table basic-types.cql is intentionally NOT used here.
  */
-const SCHEMA_PATH = path.join(
-  __dirname,
-  '..',
-  '..',
-  '..',
-  'test-data',
-  'schemas',
-  'write-test.cql'
-);
+// Issue #3493: resolved through the SHARED resolver in setup.js, never rebuilt from
+// __dirname here. Building it locally bypassed CQLITE_SCHEMAS_ROOT, so the gate could
+// certify one schemas root while this file read another.
+const SCHEMA_PATH = global.testPaths.SCHEMA_WRITE_TEST;
 
 /**
  * Open a writable database in a temp directory.
@@ -683,9 +678,8 @@ describe('Write error paths (Issue #391)', () => {
     // basic-types.cql has 8 CREATE TABLE statements — the no-heuristics mandate
     // (Issue #28) requires an explicit error rather than silently picking one.
     expect.assertions(2);
-    const multiTableSchema = path.join(
-      __dirname, '..', '..', '..', 'test-data', 'schemas', 'basic-types.cql'
-    );
+    // Issue #3493: shared resolver, not a locally rebuilt path (see SCHEMA_PATH above).
+    const multiTableSchema = global.testPaths.SCHEMA_BASIC_TYPES;
     const { dir, cleanup: c } = tmpWriteDir();
     try {
       await Database.open(dir, {

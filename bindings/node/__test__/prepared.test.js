@@ -45,10 +45,13 @@ describe('PreparedStatement', () => {
     //
     // The PUBLIC surface is exactly three names. The internal test-support
     // exports are underscore-prefixed by convention — `_errorContractProbe` and
-    // `_errorContractNodeCodes` (issue #1451) and `_ffiCommonRenderVectors`
-    // (issue #1452) — and are deliberately not part of the public surface. They
-    // are enumerated rather than merely counted so that adding a fourth internal
-    // export is a deliberate edit here, not a silent widening.
+    // `_errorContractNodeCodes` (issue #1451), `_ffiCommonRenderVectors`
+    // (issue #1452) and `_jsonNumberFromText` (issue #3505) — and are
+    // deliberately not part of the public surface. They are enumerated rather
+    // than merely counted so that adding another internal export is a
+    // deliberate edit here, not a silent widening. That is exactly what
+    // happened for `_jsonNumberFromText`: this assertion caught the widening,
+    // and this comment is the deliberate acknowledgement it demands.
     test('only Database, PreparedStatement, and version are exported publicly', () => {
       const mod = require('../lib/index.js');
       const allKeys = Object.keys(mod).sort();
@@ -61,6 +64,7 @@ describe('PreparedStatement', () => {
         '_errorContractNodeCodes',
         '_errorContractProbe',
         '_ffiCommonRenderVectors',
+        '_jsonNumberFromText',
       ]);
     });
   });

@@ -7,7 +7,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
+  precision, and neither binding fabricates a substitute value (#3505).** A
+  `Value::Json` cell's number was classified inline in each binding as
+  `as_i64()` → `as_f64()` → *fallback*. For a legal JSON integer above
+  `i64::MAX`, `as_i64()` returns `None` and **`as_f64()` succeeds lossily**
+  (`u64 → f64` has 53 mantissa bits), so `18446744073709551615` was delivered as
+  `1.8446744073709552e19`. The `fallback` arm was unreachable in both bindings.
+  - The classification now lives ONCE, in `cqlite-ffi-common::json_number`, as
+    `i64` → `u64` → `f64` → refusal. Adding the `u64` arm is the whole fix: it
+    makes the `f64` arm reachable only for the `Float` variant, where the
+    conversion is exact.
+  - **Python**: a `u64`-range integer is an exact `int` (Python integers are
+    arbitrary precision). The old `n.to_string()` fallback — which shifted the
+    host type from a number to a `str` — is gone.
+  - **Node**: a `u64`-range integer is a `BigInt`, the type this binding already
+    used for an `i64` outside `i32` range. The old fallback returned
+    `env.get_null()`, delivering a **fabricated `null`** for an unrepresentable
+    number, indistinguishable from a genuine JSON `null`; it is now a typed
+    `PARSE`/`Data` error.
+  - `serde_json`'s `arbitrary_precision` is deliberately **not** enabled; the
+    decision and its three reasons are recorded in
+    `cqlite-ffi-common/src/json_number.rs`.
+  - Residual, out of reach at this layer (**#3636**): an integer literal outside
+    `[i64::MIN, u64::MAX]` is collapsed to `f64` by `serde_json`'s **parser**
+    before any CQLite code runs, so it still arrives rounded. Enabling
+    `arbitrary_precision` alone does NOT fix it — under that feature `as_f64`
+    parses the stored string, so such a literal still classifies `F64` lossily.
+    A real fix additionally needs an exact-integer parse of `Number::as_str()`
+    placed BEFORE the `as_f64()` arm.
+  - Reachability, stated honestly: `Value::Json` requires a `"json"` comparator
+    and no fixture in `test-data/` has one, so this path is unreachable from
+    today's corpus.
+  - **Wiring evidence** (`JSON_NUMBER_VECTORS`, the #1452 mechanism): unit tests
+    on the shared classifier do NOT prove either binding CALLS it — the mutation
+    "make the `U64` arm `u as f64`" originally reddened nothing in the
+    repository. A committed cross-binding table of JSON number literals is now
+    driven through each binding's PRODUCTION dispatch
+    (`value_to_py`/`value_to_napi` → `json_to_*` → `json_number_to_*`) by
+    `cqlite._json_number_from_text` / `_jsonNumberFromText`, and both suites
+    assert the rendered text AND the host type. In JS the type half is the
+    load-bearing one: `String(9223372036854775808)` is identical for a lossy
+    double and an exact `BigInt`.
+
+- **Python parity harnesses: `values_equal` no longer masks int/float precision
+  loss (#3505).** Both copies coerced a mixed `int`/`float` pair through
+  `float()`, which rounded the EXACT side down to the LOSSY side — so the bug
+  above was invisible to the harness that should have caught it. The coercion is
+  now bounded at `2**53`: below it every integer is exactly representable in an
+  IEEE-754 double so the tolerant compare genuine `FLOAT`/`DOUBLE` columns need
+  is provably lossless and is retained; strictly above it (`2**53` itself is
+  exactly representable, so it stays on the tolerant side) the comparison is
+  exact.
+  `bool` is excluded in both directions (`isinstance(True, int)` is `True`, so
+  `True` and `1.0` compared equal). The rule was duplicated in
+  `test_cli_parity.py` and `test_parity.py` and now lives once in
+  `bindings/python/tests/numeric_compare.py`.
+  `bool` vs `Decimal` is rejected too, not only `bool` vs `int`/`float`:
+  `Decimal(1) == True` is `True` in Python, so the first pass left the `Decimal`
+  dispatch open.
+  A second degeneracy in the same formula is closed in both languages: with an
+  infinite operand `abs(a-b) <= max(rel_tol*max(|a|,|b|), abs_tol)` reduces to
+  `inf <= inf`, so EVERY finite value compared equal to `Infinity` and `+inf`
+  compared equal to `-inf` — real values for a CQL `float`/`double` column. Two
+  genuine equal infinities still match.
+  Node's `parity-utils.js` did NOT have the int/float mask — its
+  `bigint`↔`number` arms were already exact — but `BigInt(x)` threw `RangeError`
+  on a non-integer `number`, crashing the harness instead of reporting a
+  mismatch; hardened.
+  `test_parity`'s tolerant branch keeps its pre-#3505 ASYMMETRY (entered only
+  when the binding side is a float), so an `int` binding value against a `float`
+  golden stays an exact comparison — a change that removes a mask must not widen
+  a golden-file oracle as a side effect.
+
 ### Changed
+
+- **BREAKING (both bindings): a UDT's type identity is carried OUT OF BAND, so a
+  UDT field named `_type`/`_keyspace` displaces nothing (#3504).** Both bindings
+  rendered a UDT as ONE flat namespace holding the injected type identity and the
+  UDT's own declared field names, markers written first — `udt_to_py` did
+  `set_item("_type")`, `set_item("_keyspace")`, then `set_item(field.name)`, and
+  `udt_to_object` did the identical thing. A UDT that DECLARES a field named
+  `_type` or `_keyspace` (legal CQL via a quoted identifier) therefore silently
+  **overwrote** the marker, and the type name became unrecoverable from the
+  result; a NULL such field nulled it outright. That is a control marker placed in
+  a namespace the data controls, so the fix removes the channel rather than
+  picking a rarer marker.
+
+  - **Python**: a UDT is now a `cqlite.Udt` (frozen `#[pyclass]`, exported from
+    the module and declared in `__init__.pyi`) with `type_name` / `keyspace` /
+    `fields`. The mapping protocol is retained and delegates to `fields`, so
+    `udt["street"]`, `"city" in udt`, `len(udt)`, `iter(udt)` and
+    `keys`/`values`/`items` keep working. `__eq__`/`__hash__` are over
+    `(keyspace, type_name, fields)`.
+  - **Node**: a UDT is now `{ typeName, keyspace, fields }`, with the declared
+    fields in the nested `fields` object. `interface UdtValue` loses its
+    `[field: string]: Value` index signature — that signature is what permitted
+    the collision. **`fields` has a NULL PROTOTYPE** (`Object.create(null)`):
+    a plain object's property assignment consults the prototype chain, so a UDT
+    field named `__proto__` — legal CQL via a quoted identifier, exactly like
+    `_type` — reached `Object.prototype`'s inherited accessor instead of becoming
+    a field (measured on the fixture: a string value VANISHED, a null value
+    REPLACED the field bag's prototype). Inheriting nothing removes that channel
+    for every name rather than special-casing one. Every read shape is unchanged
+    (indexing, `in`, `Object.keys`/`entries`, spread, `JSON.stringify`); the one
+    difference is that `fields.hasOwnProperty(...)` no longer exists — use
+    `Object.hasOwn(fields, name)`, which is the correct form for a name-keyed bag
+    regardless.
+  - **`value_to_hashable_key`'s `Udt` arm (Python)** projected a UDT to a
+    `frozenset` holding a pair for `_type`, one for `_keyspace`, then one per
+    field, so a field named `_type` produced a **duplicate** `_type` pair that
+    nothing deduped (measured on the new fixture: pair names
+    `['_keyspace', '_keyspace', '_type', '_type', 'real_field']`). It now emits a
+    `Udt` — exactly one entry per declared field, none for the metadata — and
+    identity participates in equality/hash, so two UDTs of different declared
+    types with identical fields remain distinct `dict` keys. `Tuple`/`Set` arms
+    are deliberately still absent (#3500).
+  - **Projection totality WIDENED as a side effect, measured rather than
+    assumed.** Because a `cqlite.Udt` is HASHABLE where the old `dict` was not, a
+    UDT reached through the arm-less `Tuple` fall-through in a hashed position now
+    reads successfully: `set<frozen<tuple<frozen<udt>, int>>>` and
+    `map<frozen<tuple<frozen<udt>, int>>, int>` both raised
+    `TypeError: unhashable type: 'dict'` before and now yield a `frozenset` /
+    `dict` keyed by `(Udt, …)`. `set<frozen<set<frozen<udt>>>>` still raises
+    `TypeError: unhashable type: 'list'`, unchanged, because a UDT-bearing set
+    renders as a Python `list` for CLI parity (#804) — a different cause. This is
+    NOT "#3500 is fixed": no arm was added. Boundary pinned by
+    `test_udt_collision.udt_hashable_shapes` in the fixture.
+
+  **Migration.** Python: `udt["_type"]` → `udt.type_name`, `udt["_keyspace"]` →
+  `udt.keyspace`, `isinstance(v, dict)` → `isinstance(v, cqlite.Udt)`; field
+  access is unchanged. Node: `result._type` → `result.typeName`,
+  `result._keyspace` → `result.keyspace`, `result.street` →
+  `result.fields.street`. Reading a marker out of the field namespace is the ONLY
+  thing that stops working, and that is the deliverable: `udt["_type"]` now
+  reaches a FIELD of that name (`KeyError` when none is declared) and
+  `result._type` is `undefined`.
+
+  Node's shape is a plain object and Python's a dedicated class because each
+  binding already had an established idiom for a value type (Python's
+  `cqlite.Duration` is a `#[pyclass]`; Node's `Duration` is a plain object, with
+  napi classes reserved for handles). The spelling differs by language convention
+  — PyO3 exposes snake_case, napi-rs camelCases — and the semantics are identical.
+
+  Subject: `test-data/fixtures/issue_3504/`, a **Cassandra 5.0.2-written** SSTable
+  declaring `CREATE TYPE collide ("_type" text, "_keyspace" text, "__proto__"
+  text, real_field int)` (Cassandra accepts all three as quoted identifiers). No pre-existing corpus fixture declared such a field, so the defect had
+  no test subject. The CLI is deliberately NOT changed here: its JSON writer still
+  injects `_type`, and it is the binding parity suites' comparison ORACLE — moving
+  an oracle in the same change as its subject is how a guard goes blind. Tracked
+  as a follow-up on #3504 and recorded in `docs/development/M4_spec.md` §5.3.
 
 - **Node binding (observable): a malformed `inet` cell is a typed `PARSE` error
   on BOTH read paths, and `execute()` no longer returns `null` for one

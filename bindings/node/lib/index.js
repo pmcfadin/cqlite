@@ -153,7 +153,8 @@ function _errorContractNodeCodes() {
  * @private
  * @returns {Array<{cqlType: string, name: string, kind: string, expected: string,
  *                  expectedSha256: (string|null), outcome: string, actual: string,
- *                  rendered: (string|null), scale: number, bytes: Buffer}>}
+ *                  rendered: (string|null), scale: number, bytes: Buffer,
+ *                  hostKind: (string|null)}>}
  *   One entry per committed vector. `expected` is the committed expectation —
  *   collapsed to a digest for a multi-kilobyte rendering, in which case
  *   `expectedSha256` carries the lower-case SHA-256 hex of the UTF-8 bytes of the
@@ -170,6 +171,32 @@ function _ffiCommonRenderVectors() {
   }
 }
 
+/**
+ * Test-support: convert a JSON number LITERAL through this binding's PRODUCTION
+ * conversion path and return the JS value it delivers (issue #3505).
+ *
+ * The chain is the one a real result row takes: `value_to_napi` →
+ * `json_to_napi` → `json_number_to_napi` → the shared
+ * `classify_json_number`. It exists because that adapter had no test caller at
+ * all, so the observable claim -- a JSON integer above `i64::MAX` reaches JS as
+ * an exact `BigInt`, never a rounded `number` -- was asserted by nothing.
+ *
+ * Not part of the stable public API -- the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @param {string} text A JSON number literal, e.g. `'18446744073709551615'`.
+ * @returns {bigint|number} The value this binding delivers for that literal.
+ * @throws {Error} If `text` is not a JSON number literal.
+ */
+function _jsonNumberFromText(text) {
+  try {
+    return nativeBinding.jsonNumberFromText(text);
+  } catch (error) {
+    throw enhanceError(error);
+  }
+}
+
 module.exports = {
   Database,
   PreparedStatement,
@@ -177,4 +204,5 @@ module.exports = {
   _errorContractProbe,
   _errorContractNodeCodes,
   _ffiCommonRenderVectors,
+  _jsonNumberFromText,
 };

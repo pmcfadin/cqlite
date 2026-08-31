@@ -163,6 +163,36 @@ lanes, and adds the case the failing-assertion plants cannot reach: one that cfg
 compiles, runs **zero** tests and exits 0 — the only plant that exercises the non-zero-count half of
 `check_unittest_targets_ran`.
 
+**A CI exemption that defers to a local gate component is only as true as that component's SCOPE
+(#3493).** `.github/ci-gating-tiers.yml` excuses a workflow from `required` by naming the local
+component that supposedly owns its merge-gating half — and nothing checks that the named component
+actually covers it. Measured instance, since FIXED by #3522/#3574: the `node-ci.yml` exemption read
+*"the merge-gating half is the local gate's node-bindings component"* while `node-bindings` ran ONE
+of the Node suite's 27 test files (`npx jest write-readback-content`, narrowed for speed under
+#1255), so **26 files were gated by neither side** — and a deterministic export-surface red sat on
+`main` for ~2 days across 4 Node contexts without blocking a merge. Its sibling is the control:
+`python-bindings` runs the whole pytest suite, so the identically-worded Python exemption was true.
+This is the **circular-deferral** shape #3544 records for `ci-minimal-features.yml` — each side's
+coverage justified by the other's, the content exercised by neither, **with a documented rationale
+on both sides explaining why that is fine** — and it is a confirmed family, not a one-off. Two rules
+follow. **Narrowing a component for speed is a CHANGE TO A MERGE GATE**: if a registry exemption
+names it, correct that entry in the same diff or the exemption silently becomes false. And **when
+you widen or narrow, measure first** — the #1255 narrowing outlived its own premise (the widened
+component measures **138s**, dominated by the `release-unwind` LTO build it already paid), so the
+speed argument that justified the hole had stopped being true long before anyone re-checked it.
+
+**AND "DOES EVERY TEST RUN" IS NOT "IS THE CORPUS COMPLETE" (#3493).** #3522's census answers the
+first; it cannot answer the second, and neither can its per-suite guard. The Node parity cases
+**derive their table set FROM DISK**, so a partial extraction is green BY OMISSION: every suite
+runs, every suite does real work, and the missing tables are simply never enumerated. Hence
+`test-data/scripts/check-dataset-manifest.sh`, paired with `npm test` in `node-bindings`, asserting
+that every expected table is present AND usable. Measured against the real binding, on an otherwise
+intact generation: a **zero-length `CompressionInfo.db` or `Statistics.db` makes `SELECT` return 0
+ROWS silently** (not an error — the "0-rows-when-present" failure this repo says must never pass),
+and a second generation whose `Data.db` is well-formed garbage makes the reader throw. A
+completeness check proves files are present and usable AS FILES; it cannot prove they parse — that
+is the reader's job, and no amount of `stat`ing substitutes for it.
+
 **A GREEN FULL GATE DOES NOT SUBSUME `pr-gate-core` (#3453).** The two check sets overlap; neither
 contains the other, and this is structural, not a backlog item. The gate runs lanes CI cannot
 (`arrow-parity-guard` names a `#![cfg(feature = "arrow")]` integration target that pr-gate's `--lib
