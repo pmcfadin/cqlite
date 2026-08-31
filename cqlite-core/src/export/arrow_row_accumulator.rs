@@ -125,11 +125,12 @@ pub struct ArrowRowAccumulator<'a> {
 }
 
 impl<'a> ArrowRowAccumulator<'a> {
-    /// Prepare an accumulator for `columns`, sized for `capacity` rows per batch.
+    /// Prepare an accumulator for `columns`.
     ///
     /// Column shapes and the `name → indices` map are resolved HERE, once, and
-    /// reused for every row and every batch.
-    pub fn with_capacity(columns: &'a [ColumnInfo], capacity: usize) -> Self {
+    /// reused for every row and every batch. The per-column cell stores start
+    /// EMPTY — see [`Self::with_capacity`] for why they are never pre-sized.
+    pub fn new(columns: &'a [ColumnInfo]) -> Self {
         let mut name_to_indices: HashMap<&'a str, Vec<usize>> =
             HashMap::with_capacity(columns.len());
         for (idx, col) in columns.iter().enumerate() {
@@ -142,18 +143,37 @@ impl<'a> ArrowRowAccumulator<'a> {
             columns,
             prepared: PreparedColumns::new(columns),
             name_to_indices,
-            cells: (0..columns.len())
-                .map(|_| Vec::with_capacity(capacity))
-                .collect(),
+            // Do NOT pre-size per column: `n_cols × capacity ×
+            // size_of::<Option<Value>>()` is the `batch_size × width` product
+            // issue #2825's byte-cap exists to BOUND, and pre-sizing pays it
+            // eagerly, before a single row arrives, on every per-request drive
+            // loop (so a `SELECT … LIMIT 1` point read pays a full batch's
+            // reservation). With `size_of::<Value>() <= 40` and an 8192-row
+            // batch that is ~65 MB at 200 columns and ~131 MB at 400 — over the
+            // <128 MB target, on ONE stream, times `--max-concurrent-scans`, and
+            // `batch_size` is operator-settable with no upper clamp. Because
+            // `clear` RETAINS capacity, pre-sizing only ever bought the FIRST
+            // batch's amortized growth; the store reaches the same steady state
+            // after one batch either way (issue #3552 review B1).
+            cells: (0..columns.len()).map(|_| Vec::new()).collect(),
             staged: (0..columns.len()).map(|_| None).collect(),
             has_staged: false,
             rows: 0,
         }
     }
 
-    /// Prepare an accumulator for `columns` with no pre-sizing.
-    pub fn new(columns: &'a [ColumnInfo]) -> Self {
-        Self::with_capacity(columns, 0)
+    /// Prepare an accumulator for `columns` whose batches hold up to `capacity`
+    /// rows.
+    ///
+    /// `capacity` is accepted for call-site clarity — the caller knows the row cap
+    /// its batches are bounded by — and is DELIBERATELY not used to pre-allocate
+    /// the per-column cell stores: that product is exactly the eager
+    /// `n_cols × batch_size` residency [`Self::new`] documents, and `clear`
+    /// retains capacity, so the store reaches its steady state after one batch
+    /// regardless (issue #3552 review B1).
+    pub fn with_capacity(columns: &'a [ColumnInfo], capacity: usize) -> Self {
+        let _ = capacity;
+        Self::new(columns)
     }
 
     /// Committed rows in the current batch (a staged-but-uncommitted row is NOT
