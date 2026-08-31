@@ -208,13 +208,34 @@ mkdir -p "$tmp/help-home/.cargo"
 # Portable and non-fatal: `git` may be absent or this may not be a checkout, in which case
 # the stamp says UNKNOWN rather than pretending. It never fails the suite on its own —
 # the point is that the log can be read, not that the tree must be still.
+# A COUNT IS NOT A DIGEST (#3414 final roborev, finding CC). The first version recorded
+# HEAD plus the NUMBER of dirty paths — unchanged by editing an already-dirty file, and
+# unchanged by swapping one dirty path for another. So it would have reported STABLE across
+# exactly the shared-worktree edit it was built to expose, and BOTH incidents that motivated
+# it began with a file that was ALREADY modified: the instrument was blind to its own
+# founding case.
+#
+# The stamp now carries a digest of the actual content — porcelain status plus the
+# working-tree AND index diffs. `git hash-object` rather than `md5sum`/`shasum`: git is
+# already a hard requirement two lines up, while `md5sum` is GNU-only, and this suite has
+# already shipped one GNU-only probe that broke off Linux. A digest that cannot be computed
+# prints UNKNOWN, never an empty string — two empty digests compare EQUAL, which is the
+# false-STABLE all over again.
 pin_tree_id() {
+  local head dig
   if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    printf '%s dirty=%s' \
-      "$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'UNKNOWN')" \
-      "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    head=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'UNKNOWN')
+    dig=$( { git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null
+             git -C "$SCRIPT_DIR" diff 2>/dev/null
+             git -C "$SCRIPT_DIR" diff --cached 2>/dev/null
+           } | git hash-object --stdin 2>/dev/null )
+    case "$dig" in
+      ?*) dig=$(printf '%s' "$dig" | cut -c1-12) ;;
+      *)  dig=UNKNOWN ;;
+    esac
+    printf '%s worktree=%s' "$head" "$dig"
   else
-    printf 'UNKNOWN dirty=UNKNOWN'
+    printf 'UNKNOWN worktree=UNKNOWN'
   fi
 }
 PIN_TREE_START=$(pin_tree_id)
@@ -2836,9 +2857,9 @@ else
   # them is what keeps this a real guard — a bare count of 2 would let a third `ok` in as
   # soon as someone removed one of these.
   pin_ok_total=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "' || true)
-  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: (VERIFIED|NOT-APPLICABLE)' || true)
+  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: (VERIFIED|VERIFIED-NO-SYSTEM-FILE)' || true)
   if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 2 ] && [ "${pin_ok_named:-0}" = 2 ]; then
-    ok "gate-pin: section 5b's ONLY success verdicts are VERIFIED and NOT-APPLICABLE"
+    ok "gate-pin: section 5b's ONLY success verdicts are VERIFIED and VERIFIED-NO-SYSTEM-FILE"
   else
     bad "gate-pin: section 5b has ${pin_ok_total:-0} ok() call(s), ${pin_ok_named:-0} of them a named verdict"
   fi
@@ -3257,23 +3278,41 @@ else
     printf '%s\n' "$out_ab" | grep -i 'gate-pin' | head -2
   fi
 
-  # 11ac. NON-LINUX IS AN EXPLICIT, NON-FAILING INAPPLICABILITY (roborev round 3). The
-  #      mechanism is /etc/environment + pam_env, which is Linux-specific, so requiring
-  #      the file made a correctly-configured Mac permanently fail --strict — red on
-  #      correct input, the shape refused three times in this lane. It must be an [ok]
-  #      (so --strict can pass), it must SAY it is inapplicable rather than going silent,
-  #      and it must name the per-run authority.
+  # 11ac. A NON-LINUX HOST IS ASKED A NARROWER QUESTION, NOT EXEMPTED FROM IT (#3414 final
+  #      roborev, finding BB). The earlier contract emitted `ok "NOT-APPLICABLE"` on every
+  #      non-Linux host unconditionally, so `--strict` CERTIFIED AN UNPINNED MAC:
+  #      inapplicability of the PERSISTENCE STEP stood in for absence of the REQUIREMENT —
+  #      this issue's own defect wearing a platform label, in code a full gate had passed.
+  #
+  #      BOTH DIRECTIONS are asserted, and the second is the one that matters, because it
+  #      is the case the old code got wrong: a non-Linux host that sees an honoured pin
+  #      earns the scoped `ok`; one that sees nothing must be NON-PASSING.
   shims_mac="$tmp/pin-shims-mac"; mkpinshims "$shims_mac" 1
   mk_stub "$shims_mac" uname 'echo Darwin'
   envf_ac="$tmp/pin-env-ac"; : >"$envf_ac"
   out_ac=$(runpin "$pinroot" "$shims_mac" "$envf_ac" HOME="$pin_home_plain")
-  if printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin: NOT-APPLICABLE' \
-     && printf '%s' "$out_ac" | grep -q 'max-concurrency=N(pinned)' \
+  if printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin: VERIFIED-NO-SYSTEM-FILE' \
+     && printf '%s' "$out_ac" | grep -q 'does NOT establish the pin is system-wide' \
      && ! printf '%s' "$out_ac" | grep -qE '\[warn\].*gate-pin'; then
-    ok "gate-pin: a non-Linux host reports explicit NOT-APPLICABLE as an [ok], never a warn"
+    ok "gate-pin: a non-Linux host WITH an honoured pin gets the scoped ok, worded to claim less"
   else
-    bad "gate-pin: a non-Linux host was not reported as an explicit, non-failing inapplicability"
+    bad "gate-pin: a non-Linux host with a good pin was not reported with the scoped verdict"
     printf '%s\n' "$out_ac" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ac2. THE CASE THE OLD CONTRACT GOT WRONG: a non-Linux host whose fresh session sees
+  #      NOTHING must be NON-PASSING. Under the previous code this host got an unconditional
+  #      `ok`, so `--strict` exited 0 and certified a machine on which no gate is pinned.
+  shims_mac_none="$tmp/pin-shims-mac-none"; mkpinshims "$shims_mac_none" -
+  mk_stub "$shims_mac_none" uname 'echo Darwin'
+  envf_ac2="$tmp/pin-env-ac2"; : >"$envf_ac2"
+  out_ac2=$(runpin "$pinroot" "$shims_mac_none" "$envf_ac2" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_ac2" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_ac2" | grep -qE '\[warn\].*gate-pin'; then
+    ok "gate-pin: an UNPINNED non-Linux host is NON-PASSING — no platform exemption certifies it"
+  else
+    bad "gate-pin: an unpinned non-Linux host was certified (the finding-BB defect)"
+    printf '%s\n' "$out_ac2" | grep -i 'gate-pin' | head -3
   fi
 
   # 11ad. ...and the scoping is on PLATFORM, not on "the file is missing". A LINUX box
@@ -3283,7 +3322,7 @@ else
   envf_ad="$tmp/pin-env-ad-missing"; rm -f "$envf_ad"
   out_ad=$(runpin "$pinroot" "$shims_one" "$envf_ad" HOME="$pin_home_plain")
   if ! printf '%s' "$out_ad" | grep -qE '\[ok\].*gate-pin' \
-     && ! printf '%s' "$out_ad" | grep -q 'NOT-APPLICABLE'; then
+     && ! printf '%s' "$out_ad" | grep -qE 'NOT-APPLICABLE|VERIFIED-NO-SYSTEM-FILE'; then
     ok "gate-pin: a LINUX box with no system env file stays non-passing (scoped by platform, not by file absence)"
   else
     bad "gate-pin: a Linux anomaly was excused as a platform inapplicability"

@@ -72,8 +72,10 @@
 #      #3414 defect and session-only certifies a pin that may reach sudo sessions alone,
 #      and the file's VALUE must EQUAL the session's (presence alone let a file saying
 #      `abc` pass while a per-user override supplied `1`). NON-LINUX hosts report an
-#      explicit, non-failing NOT-APPLICABLE: the mechanism is Linux/pam_env-specific, so
-#      macOS is scoped out rather than supported. `--yes` persists it, and
+#      a NARROWER question, never an exemption: there is no PAM-read system-wide file to
+#      correlate against, so the file half is dropped and the verdict is the scoped
+#      VERIFIED-NO-SYSTEM-FILE — but an unpinned non-Linux host is still NON-PASSING. An
+#      unconditional `ok` there let `--strict` certify an unpinned Mac. `--yes` persists it, and
 #      so does the narrow `--fix-gate-pin` that `.agent-ami/profile.yaml`'s verify.run
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
