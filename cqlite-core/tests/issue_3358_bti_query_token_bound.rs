@@ -281,8 +281,6 @@ fn fixture() -> Fixture {
         // caller's environment and the caller's directory. A remedy that is correct only
         // from the repository root is a remedy that gets pasted from somewhere else and
         // quietly reads as an all-clear — the exact silent-pass this test exists to stop.
-        // The roots named here come from the RESOLVER, via `describe_search`, so the
-        // message can never name a candidate list the lookup above did not use.
         let root = datasets_root::repo_root();
         let verify_cmd = shell_quote(&root.join("test-data/scripts/fetch-datasets.sh"));
         let verify_root = shell_quote(&root.join("test-data/datasets"));
@@ -294,7 +292,8 @@ fn fixture() -> Fixture {
         // `fetch-datasets.sh`, the destructive invocation the rest of this message
         // spends six lines warning against. So the root list is taken from the
         // resolver and the sentence is composed here, naming what was actually
-        // required.
+        // required. Taking the list from the resolver is what stops the message naming
+        // a candidate set the lookup above did not use.
         let roots = datasets_root::sstables_root_candidates()
             .iter()
             .map(|r| r.display().to_string())
