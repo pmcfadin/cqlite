@@ -2644,7 +2644,6 @@ _CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTO
                    # else EMPTY
 _CS_HEAD_SHA=""    # HEAD resolved to a sha IN THIS CHECKOUT, so the scratch can be asked about
                    # it: `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD
-_CS_PARTIAL=""     # is this checkout a PARTIAL clone? yes | no | unknown (#3544 / job 268)
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
 _CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
                    # | fetched (the isolated hop + verified transfer) — job 258
@@ -3943,41 +3942,6 @@ _component_set_declaration_at_rev() {
   esac
 }
 
-# _component_set_is_partial: `yes` | `no` | `unknown` — is $REPO_ROOT a PARTIAL clone (roborev
-# job 268)? A partial clone has a PROMISOR remote, which is what makes an apparently-local object
-# read a NETWORK OPERATION: `git show <sha>:<path>` on a filtered-out tree or blob fetches it
-# lazily, through THAT REMOTE, honouring THIS repository's local config — so a local
-# `url.*.insteadOf` plus an enabled external protocol executes a remote helper, and the fetch also
-# writes objects into the shared store. That is the third route of one family (`insteadOf`, then
-# `ext::` on the transfer hop, now the promisor), and it is why baseline object reads moved into
-# the isolated scratch repository entirely.
-#
-# WHAT IT DECIDES: whether the FAST path (read the baseline in this checkout, no scratch at all)
-# is permissible. It is permissible only in a NON-partial clone, where a missing object is simply
-# a missing object and no read can reach the network.
-#
-# "UNKNOWN" COLLAPSES ONTO `yes`, and the direction is the safe one for the same reason the
-# presence check's collapses onto "absent": the conservative answer routes the run through the
-# isolated store, which costs a fetch and nothing else. Guessing `no` would keep the exposure on
-# exactly the hosts whose state could not be measured.
-#
-# CONFIG READS ONLY — no object is touched, so this probe cannot itself become a network call.
-_component_set_is_partial() {
-  local out
-  # local-only: a config read (does a promisor remote exist?). Contacts nothing.
-  out=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" config --get-regexp 'remote\..*\.promisor' 2>/dev/null || true)
-  if [ -n "$out" ]; then printf yes; return 0; fi
-  # local-only: the repository-format extension a partial clone records. Config read only.
-  out=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" config --get extensions.partialclone 2>/dev/null || true)
-  if [ -n "$out" ]; then printf yes; return 0; fi
-  # An AFFIRMATIVE "no" requires the config to have been READABLE. `git config --get` exits 1 for
-  # "not found" and something else for "cannot read", so a definite answer needs one successful
-  # config read; otherwise the state is unknown and the caller takes the conservative branch.
-  # local-only: config read.
-  if env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" config --list >/dev/null 2>&1; then printf no; return 0; fi
-  printf unknown
-}
-
 # _component_set_is_shallow: `yes` | `no` | `unknown` — is $REPO_ROOT a SHALLOW clone?
 #
 # WHY IT IS CONSULTED (roborev job 227). `git merge-base --is-ancestor A HEAD` answers 1 for
@@ -4095,11 +4059,15 @@ _component_set_build_git_env() {
   # half — `--no-replace-objects` is passed explicitly on the lane-local reads that are
   # deliberately NOT env-wrapped, so no object read anywhere in this pre-flight honours a
   # replacement.
-  # `GIT_NO_LAZY_FETCH=1` is a BELT, not the control (job 268). The control is structural: no
-  # baseline object is resolved in the live repository at all, and the fast path's presence probe
-  # only runs when `_component_set_is_partial` says `no`. This variable additionally tells git not
-  # to consult a promisor for a missing object — but it is git >= 2.36, and an unset variable on an
-  # older host does nothing silently, which is exactly why it cannot BE the control.
+  # `GIT_NO_LAZY_FETCH=1` is a BELT, not the control (job 268, TIGHTENED by job 299). The control
+  # is structural: NO OBJECT READ IN THIS PRE-FLIGHT RUNS IN THE LIVE REPOSITORY AT ALL — the
+  # baseline reads, the ancestry walk and (since job 299) the fast path's presence probe all run in
+  # the isolated scratch, over the lane's object directory as an alternate, which carries no config
+  # and therefore no promisor. This variable additionally tells git not to consult a promisor for a
+  # missing object — but it is git >= 2.36, and an unset variable on an older host does nothing
+  # silently, which is exactly why it cannot BE the control. A probe of whether THIS checkout is a
+  # partial clone is no longer needed and was deleted with the live read it gated (job 299): a
+  # stale predicate left in place would pre-authorise a re-introduced live read.
   _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0" "GIT_NO_REPLACE_OBJECTS=1" "GIT_NO_LAZY_FETCH=1")
   return 0
 }
@@ -4235,7 +4203,7 @@ _component_set_probe_inner() {
   # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
   # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
   # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
-  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""; _CS_PARTIAL=""
+  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -4521,33 +4489,112 @@ _component_set_probe_inner() {
   fi
   remote_sha="$lsr_sha"
 
+  # ---- EVERY OBJECT READ, ON BOTH PATHS, HAPPENS IN THE ISOLATED REPOSITORY ------------------
+  #
+  # The live repository is never asked to RESOLVE a baseline object (job 268), and never to answer
+  # an ANCESTRY question either (job 285): in a partial clone a read there is a lazy fetch through
+  # its promisor, and its `$GIT_DIR/info/grafts` — which `--no-replace-objects` does NOT disable —
+  # can forge parentage. Both are properties of the live repository that no per-call flag removes,
+  # so the reads move instead. The LANE's object store comes to THEM as an alternate.
+  #
+  # A KNOWN, REASONED BOUNDARY, recorded rather than left to be rediscovered: this makes the lane's
+  # object directory an INPUT to the isolated repository. That is accepted. Object storage is not a
+  # control channel — an alternate carries no config, so it brings no promisor, no `insteadOf`, no
+  # grafts, and a peer writing objects there cannot cause execution; objects are content-addressed,
+  # so it cannot substitute bytes for a sha we ask for — and comparing two histories requires both
+  # of them to be readable in one place. Do not "fix" it by copying objects instead; that would
+  # reintroduce a transfer.
+  if [ ! -d "$csdir/repo/.git/objects" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="the isolated scratch repository has no object directory"
+    return 0
+  fi
+  # THE LANE'S OBJECT DIR, resolved rather than assumed: in a `git worktree` this is the SHARED
+  # store of the parent checkout, which is exactly the one HEAD's objects live in.
+  local lane_objects
+  # local-only: resolves a PATH inside the git dir. No object is read and no remote is contacted.
+  lane_objects=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-path objects 2>/dev/null || true)
+  # MADE ABSOLUTE, because `--git-path` answers RELATIVE TO THE REPOSITORY ROOT for a plain clone
+  # (`.git/objects`) and absolute only for a worktree (`/…/repo/.git/objects` — the SHARED store).
+  # A relative value would be resolved against the SCRATCH repository, which is a different
+  # directory: measured, the alternate then pointed at nothing, `merge-base` exited 128 and every
+  # BEHIND verdict became INDETERMINATE. `--path-format=absolute` is git >= 2.31, so the prefix is
+  # applied here instead of relying on it.
+  case "$lane_objects" in
+    /*) : ;;
+    ?*) lane_objects="$REPO_ROOT/$lane_objects" ;;
+  esac
+  # WHITESPACE IS NOT A SEPARATOR HERE (roborev job 296, Medium). This used to reject a colon OR
+  # whitespace, which failed CLOSED on any valid checkout or TMPDIR containing a space — a guard
+  # that reds on correct input is the guard agents learn to waive. MEASURED, with a discriminating
+  # control, rather than reasoned from the docs:
+  #
+  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with space/objects"  -> git cat-file -t <sha> = commit
+  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with:colon/objects"  -> FAILS
+  #
+  # The value is handed to git as ONE quoted environment argument and git splits it on the
+  # colon PATH separator only, so a space-bearing path is expressible and a colon-bearing one is
+  # not. Only the actual separator is refused. (The URL whitespace check elsewhere STAYS: a URL has
+  # no legitimate whitespace, so there the rejection is not a false FAIL.)
+  case "$lane_objects" in
+    ''|*:*)
+      _CS_KIND=baseline-workspace
+      _CS_DETAIL="this repository's object directory could not be resolved to a path expressible in GIT_ALTERNATE_OBJECT_DIRECTORIES (empty, or containing a COLON — the separator that variable splits on), so HEAD's own objects cannot be made readable to the isolated repository"
+      return 0 ;;
+  esac
+  _CS_READ_DIR="$csdir/repo"
+  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
+
   # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
   # If this repository already has the object, there is NOTHING to fetch: a git object is
   # CONTENT-ADDRESSED, so "the lane holds <sha>" and "the canonical remote advertises <sha>" is
   # the same commit, byte for byte. On this fleet lanes are worktrees of ONE shared `.git`, so a
   # peer's fetch (or an earlier run's slow path below) usually put it there already.
   #
-  # BOUNDED, not annotated local-only: `cat-file -e` on a MISSING object in a partial clone asks
-  # the promisor remote for it, which is network-capable.
+  # THE PROBE RUNS IN THE ISOLATED REPOSITORY, NOT IN THE LIVE ONE (roborev job 299, High —
+  # THE THIRD FINDING OF ONE FAMILY, so the ruling recorded below was applied rather than carved
+  # around again). What was here asked `_component_set_is_partial` about the LIVE repository and
+  # then ran `cat-file -e` in the LIVE repository. Both of those read `.git/config`, and on this
+  # fleet every lane is a worktree of ONE SHARED `.git` — so between the two reads a PEER LANE can
+  # write that config: a promisor remote plus a `url.*.insteadOf` rewrite to an `ext::` helper, and
+  # the `cat-file -e` on a missing object then LAZY-FETCHES, which EXECUTES the helper. A TOCTOU
+  # across a shared file, and `GIT_NO_LAZY_FETCH=1` is only a belt (git >= 2.36; silently absent on
+  # an older supported host, which is exactly why it cannot BE the control).
+  #
+  # THE SHAPE, and why the answer is not a fourth carve: every live-repository read preserved for
+  # speed has turned into a route — round 16's partial-clone lazy fetch, then `info/grafts` (job
+  # 285), now this. The recorded ruling was that a third finding here should REMOVE the live read
+  # rather than narrow it again.
+  #
+  # BUT "REMOVE IT" IS NOT "DELETE THE BRANCH". Deleting the short-circuit would make EVERY
+  # invocation fetch, and the fetch it avoids was measured at 3.74 s / 92 MB of full history per
+  # invocation before the ref oracle reduced this path to 0.51 s and NO transfer. `--lite` runs
+  # every fix round; reinstating that cost to close this finding is not the trade. So the READ
+  # MOVES, exactly as the baseline object reads and the ancestry walk already did: the probe runs
+  # in `$_CS_READ_DIR` (the scratch this run created) with `$_CS_READ_ENV` supplying the LANE's
+  # object directory as `GIT_ALTERNATE_OBJECT_DIRECTORIES` — established above, before either
+  # path runs, which is why that block was hoisted.
+  #
+  # WHY THAT IS SOUND WHERE THE LIVE READ WAS NOT, and it is the same argument the alternate was
+  # adopted under: an alternate is PURE OBJECT STORAGE. It carries no config, so there is no
+  # promisor to consult, no `insteadOf` to rewrite anything, and no remote helper that could be
+  # named — a missing object there is a PLAIN NEGATIVE, not a network trigger. That also dissolves
+  # the reason the partial-clone special case existed at all: `cat-file -e`'s "answers about
+  # PROMISED objects" hazard (measured — it answered 0 for a blob whose `git show` then FAILED) is
+  # a property of a promisor, and this read has none. So `_component_set_is_partial` is not
+  # consulted here, and having no other caller it was DELETED rather than left as a stale entry
+  # that would pre-authorise a re-introduced live read.
+  #
+  # STILL BOUNDED, not annotated `# local-only`: the object store reached through the alternate is
+  # the LANE's, on shared storage, and a bound on a read that cannot be a network call still costs
+  # nothing while a missing bound on one that could is the whole class this pre-flight guards.
   #
   # AND "CANNOT TELL" COLLAPSES ONTO *ABSENT* HERE — deliberately the opposite choice from the
   # manifest presence probe, for a stated reason: the branch an unmeasurable answer falls into is
   # the SLOW path, which fetches and verifies authoritatively. Guessing "absent" costs time;
   # guessing "present" would skip a verification. The permissive-looking answer is the expensive
   # one, so there is no unknown taking a shortcut.
-  # THE FAST PATH IS PERMISSIBLE ONLY IN A NON-PARTIAL CLONE (roborev job 268). It reads the
-  # baseline manifest IN THIS CHECKOUT, and in a partial clone that read is a network operation
-  # through the promisor remote under this repository's own config — the route this round removes.
-  # So partial (and unmeasurable) clones always go through the isolated scratch store, which costs
-  # a fetch and closes the route; a normal clone keeps the 0.6s no-transfer path.
-  #
-  # `cat-file -e` is INSIDE the short-circuit deliberately, and for TWO reasons. Asking "do we
-  # have this object?" is itself the lazy-fetch trigger; and in a partial clone the answer is not
-  # even usable — measured with `GIT_NO_LAZY_FETCH=1` set, `cat-file -e` answered 0 for a blob
-  # whose `git show` then FAILED, because it answers about PROMISED objects rather than local ones.
-  # So in a partial clone this probe would be both a network trigger and a wrong answer.
-  _CS_PARTIAL="$(_component_set_is_partial)"
-  if [ "$_CS_PARTIAL" = no ] && _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
+  if _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
     _CS_SHA="$remote_sha"
     _CS_BASE_OBJ=reused
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
@@ -4560,9 +4607,13 @@ _component_set_probe_inner() {
     #
     # The reuse path keeps what it was for — no fetch, no object transfer — and gives up only
     # "creates no scratch repository", which is a `mktemp -d` plus a `git init` against a
-    # 15-second bound. THE PATTERN THIS CLOSES: every live-repository read preserved for speed has
-    # become a route (round 16's partial-clone lazy fetch, now grafts). If a third lands here, the
-    # reuse optimisation should be removed rather than carved again.
+    # 15-second bound. THE PATTERN THAT CLOSED: every live-repository read preserved for speed
+    # became a route (round 16's partial-clone lazy fetch, then grafts, then job 299's TOCTOU on
+    # the shared config). The third one landed, and the answer taken was the recorded one — the
+    # LIVE READ is gone, not narrowed. What survives is the SHORT-CIRCUIT (no fetch), which is a
+    # decision about whether to transfer objects and not a read of the live repository at all:
+    # the probe above runs in the scratch, over the lane's objects as an alternate. THERE IS NO
+    # LIVE-REPOSITORY OBJECT OR CONFIG READ LEFT ON THIS PATH TO CARVE.
   else
     _CS_BASE_OBJ=fetched
   err=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
@@ -4618,21 +4669,9 @@ _component_set_probe_inner() {
   # substitute different bytes for a given sha; that is why exposing the store is safe where
   # invoking a transport was not. `baseline-transfer-mismatch` is gone with the transfer: the
   # class is ELIMINATED rather than detected.
-  # WHITESPACE IS NOT A SEPARATOR HERE (roborev job 296, Medium). This used to reject a colon OR
-  # whitespace, which failed CLOSED on any valid checkout or TMPDIR containing a space — a guard
-  # that reds on correct input is the guard agents learn to waive. MEASURED, with a discriminating
-  # control, rather than reasoned from the docs:
-  #
-  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with space/objects"  -> git cat-file -t <sha> = commit
-  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with:colon/objects"  -> FAILS
-  #
-  # The value is handed to git as ONE quoted environment argument and git splits it on the
-  # colon PATH separator only, so a space-bearing path is expressible and a colon-bearing one is
-  # not. Only the actual separator is refused. (The URL whitespace check elsewhere STAYS: a URL has
-  # no legitimate whitespace, so there the rejection is not a false FAIL.)
   # NO CHECK ON `$csdir` HERE (roborev job 297, Low). It used to be refused for containing a colon,
   # on the `GIT_ALTERNATE_OBJECT_DIRECTORIES` reasoning above — but `$csdir` NEVER ENTERS that
-  # variable. Only `$lane_objects` does (see `_CS_READ_ENV` below); `$csdir` is passed as a quoted
+  # variable. Only `$lane_objects` does (see `_CS_READ_ENV` above); `$csdir` is passed as a quoted
   # `git -C` argument, where a colon is inert.
   #
   # The check was worse than merely redundant: it lived on the objects-ABSENT path only, so an
@@ -4647,54 +4686,12 @@ _component_set_probe_inner() {
   _CS_SHA="$cssha"
   fi
 
-  # ---- EVERY OBJECT READ, ON BOTH PATHS, HAPPENS IN THE ISOLATED REPOSITORY ------------------
-  #
-  # The live repository is never asked to RESOLVE a baseline object (job 268), and never to answer
-  # an ANCESTRY question either (job 285): in a partial clone a read there is a lazy fetch through
-  # its promisor, and its `$GIT_DIR/info/grafts` — which `--no-replace-objects` does NOT disable —
-  # can forge parentage. Both are properties of the live repository that no per-call flag removes,
-  # so the reads move instead. The LANE's object store comes to THEM as an alternate.
-  #
-  # A KNOWN, REASONED BOUNDARY, recorded rather than left to be rediscovered: this makes the lane's
-  # object directory an INPUT to the isolated repository. That is accepted. Object storage is not a
-  # control channel — an alternate carries no config, so it brings no promisor, no `insteadOf`, no
-  # grafts, and a peer writing objects there cannot cause execution; objects are content-addressed,
-  # so it cannot substitute bytes for a sha we ask for — and comparing two histories requires both
-  # of them to be readable in one place. Do not "fix" it by copying objects instead; that would
-  # reintroduce a transfer.
-  if [ ! -d "$csdir/repo/.git/objects" ]; then
-    _CS_KIND=baseline-workspace
-    _CS_DETAIL="the isolated scratch repository has no object directory"
-    return 0
-  fi
-  # THE LANE'S OBJECT DIR, resolved rather than assumed: in a `git worktree` this is the SHARED
-  # store of the parent checkout, which is exactly the one HEAD's objects live in.
-  local lane_objects
-  # local-only: resolves a PATH inside the git dir. No object is read and no remote is contacted.
-  lane_objects=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-path objects 2>/dev/null || true)
-  # MADE ABSOLUTE, because `--git-path` answers RELATIVE TO THE REPOSITORY ROOT for a plain clone
-  # (`.git/objects`) and absolute only for a worktree (`/…/repo/.git/objects` — the SHARED store).
-  # A relative value would be resolved against the SCRATCH repository, which is a different
-  # directory: measured, the alternate then pointed at nothing, `merge-base` exited 128 and every
-  # BEHIND verdict became INDETERMINATE. `--path-format=absolute` is git >= 2.31, so the prefix is
-  # applied here instead of relying on it.
-  case "$lane_objects" in
-    /*) : ;;
-    ?*) lane_objects="$REPO_ROOT/$lane_objects" ;;
-  esac
-  # Colon only, for the reason measured at the scratch-path check above (job 296).
-  case "$lane_objects" in
-    ''|*:*)
-      _CS_KIND=baseline-workspace
-      _CS_DETAIL="this repository's object directory could not be resolved to a path expressible in GIT_ALTERNATE_OBJECT_DIRECTORIES (empty, or containing a COLON — the separator that variable splits on), so HEAD's own objects cannot be made readable to the isolated repository"
-      return 0 ;;
-  esac
-  _CS_READ_DIR="$csdir/repo"
-  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
-  # ---- end of the OBJECTS-ABSENT (slow) path. Both paths have now set `_CS_SHA` to a commit
-  # this run can READ, whose value came from the canonical remote in THIS invocation: the fast
-  # path took it from the ref oracle and the objects were already here; the slow path took it from
-  # the isolated fetch, and every object read below runs IN the scratch (`$_CS_READ_DIR`).
+  # ---- Both paths have now set `_CS_SHA` to a commit this run can READ, whose value came from
+  # the canonical remote in THIS invocation: the fast path took it from the ref oracle and the
+  # objects were already here; the slow path took it from the isolated fetch. `_CS_READ_DIR` and
+  # `_CS_READ_ENV` were established ABOVE, before either path ran, so every object read below —
+  # and the fast path's own presence probe — runs IN the scratch with the lane's object store as
+  # an alternate.
   # The slow-path block above is deliberately left at its original indentation: re-indenting it
   # would bury the change that matters in a diff nobody can review.
 
