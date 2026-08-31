@@ -336,6 +336,21 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **THE ALLOWLIST HAS TO REACH THE SITES A LATER CHANGE ADDS (roborev job 276).** The migrated
+  object reads ran under a bare `env`, inheriting the caller's environment — the round-13 hole
+  re-opened at the NEW sites, not a new route: an inherited `GIT_DIR` points a read at another
+  repository, and `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` injects a promisor or an `insteadOf`.
+  Every git call in the pre-flight now runs under `env -i` + the ONE allowlist, with only
+  location-specific values (the alternate) layered on top — **including the STATE probes**, since
+  injected config could have made a real partial clone look non-partial and re-opened the fast
+  path. Two corrections came with it: **a config file does NOT keep a URL out of every argv** —
+  git passes the configured URL to a transport HELPER, whose command line then carries the token —
+  so a credential-bearing origin is now **refused** (userinfo must be absent or exactly `git`;
+  refusing ALL userinfo red the standard `ssh://git@github.com/…`, a false FAIL on correct input);
+  and **a specified control must be required to have WORKED** — the `chmod 600 … || true` on the
+  isolated config is now fail-closed with the resulting mode VERIFIED (`find -perm 600`, since
+  `stat` is GNU-vs-BSD incompatible), because "chmod exited 0" and "the file is 0600" are
+  different claims.
   **AND A LOCAL READ CAN BE A NETWORK OPERATION (roborev job 268).** In a PARTIAL clone,
   `ls-tree`/`show`/`cat-file` answer a missing object by fetching it from the **promisor remote**,
   under the live repository's **local config** — so `url.*.insteadOf` plus an enabled external

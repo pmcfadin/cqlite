@@ -468,6 +468,16 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**An allowlist has to reach the sites a later change adds.** The migrated object reads ran under a
+bare `env`, inheriting the caller's environment — the same hole as round 13, re-opened at the new
+sites. Every git call in the pre-flight now runs under `env -i` plus the one allowlist, including
+the state probes (injected config could have made a real partial clone look non-partial and
+re-opened the fast path). Two corrections came with it: a config file does **not** keep a URL out
+of every argv — git passes the configured URL to a transport *helper*, whose command line then
+carries the token — so a credential-bearing origin is **refused** (userinfo must be absent or
+exactly `git`); and a specified control must be required to have *worked* — the `chmod 600` on the
+isolated config is fail-closed with the resulting mode verified.
+
 **A local read can be a network operation.** In a *partial* clone, `ls-tree`/`show`/`cat-file`
 answer a missing object by fetching it from the **promisor remote** — under the live repository's
 local config, so an `insteadOf` plus an enabled external protocol executes a remote helper, and the
