@@ -62,6 +62,14 @@ unset CQLITE_REQUIRE_FIXTURES
 # Scrub the seam this file itself drives, so a stale export cannot pre-decide a case.
 unset CQLITE_TEST_CHECKOUT_SSTABLES_ROOT
 
+# Single-quote a path for safe pasting into a shell, mirroring `shell_quote` in
+# cqlite-core/tests/issue_3358_bti_query_token_bound.rs — same reason, same POSIX form:
+# an embedded single quote is closed, escaped and reopened. Raw single quotes were used
+# here first (roborev job 257), which breaks on a checkout path containing an apostrophe
+# and can turn later path characters into shell syntax when pasted. The Rust side of this
+# lane had already solved it; this mirrors it rather than re-deriving it.
+shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
 PASS=0
 FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -79,6 +87,19 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   echo "FATAL: mktemp -d produced no usable directory ('$tmp'); refusing to run" >&2
   exit 1
 fi
+# ABSOLUTE, before the trap and before anything is staged under it. A relative TMPDIR
+# yields a relative `$tmp`, and `run_lane` does `cd "$REPO"` — so every staged root would
+# resolve against the REPO instead of here, the empty case would miss its staged corpus,
+# fall back to the healthy checkout fixture, and the harness would FAIL a correct tree.
+# A guard that reds on correct input is the guard agents learn to waive.
+tmp=$(cd "$tmp" && pwd) || {
+  echo "FATAL: could not canonicalize the scratch root; refusing to run" >&2
+  exit 1
+}
+case $tmp in
+  /*) ;;
+  *) echo "FATAL: scratch root '$tmp' is not absolute; refusing to run" >&2; exit 1 ;;
+esac
 trap 'rm -rf "$tmp"' EXIT
 
 # The committed fixture must be present for ANY of this to mean anything: the control's
@@ -98,8 +119,8 @@ if [ ! -f "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
   echo "       remedy: run the tracked-fixture probe, which names every missing" >&2
   echo "       git-tracked file and prints a restore command scoped to ONLY those:" >&2
   echo "" >&2
-  echo "         CQLITE_DATASETS_ROOT='$REPO/test-data/datasets' \\" >&2
-  echo "           bash '$REPO/test-data/scripts/fetch-datasets.sh' --verify-only" >&2
+  echo "         CQLITE_DATASETS_ROOT=$(shell_quote "$REPO/test-data/datasets") \\" >&2
+  echo "           bash $(shell_quote "$REPO/test-data/scripts/fetch-datasets.sh") --verify-only" >&2
   echo "" >&2
   echo "       Follow its 'ERROR: TRACKED FIXTURES MISSING ... (issue #3310)' block." >&2
   echo "       If it instead reports 'Tracked-fixture probe (#3310): OK', nothing is" >&2
