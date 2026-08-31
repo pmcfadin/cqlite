@@ -1329,8 +1329,22 @@ cmd_release() {
     G_ISSUE="$issue"; G_LANE="$lane"
     G_RECORD="$(lock_record "$issue")"; G_MUTEX="$(lock_mutex "$issue")"
     G_LOG="$(lock_audit "$issue")"
-    G_TOKEN="<forced-no-identity>"; G_MACHINE="$(this_machine)"
-    G_ACTOR="$(resolve_actor "$actor")"; G_PID="<none>"; G_SCOPE="forced"
+    # NO IDENTITY RESOLUTION OF ANY KIND HERE — not the pid, and NOT THE ACTOR.
+    # roborev round 6 found `resolve_actor` still being called inside this very bypass:
+    # it VALIDATES the actor and dies (exit 64) on an unrecordable one, so an invalid
+    # INHERITED LANE_LOCK_ACTOR disabled the break-glass exactly as an inherited
+    # LANE_LOCK_PID did one round earlier. That was the fourth instance of one shape in
+    # this change — fix the site named, miss its sibling — and here the sibling was two
+    # lines inside my own fix. So every field is a FIXED PLACEHOLDER, and the whole point
+    # is that NOTHING on this path can refuse:
+    #   * no resolve_actor  (validates -> can die 64)
+    #   * no resolve_pid    (validates liveness -> can die 64)
+    #   * no boot-id/start-ticks capture (unreadable -> would refuse)
+    # `this_machine` is safe (a plain hostname read with a fallback) but is not needed
+    # either: a forced release compares nothing, so recording who forced it belongs in the
+    # AUDIT LINE, not in an identity field that only exists to be compared.
+    G_TOKEN="<forced-no-identity>"; G_MACHINE="<forced>"
+    G_ACTOR="<forced>"; G_PID="<none>"; G_SCOPE="forced"
   else
     prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
   fi

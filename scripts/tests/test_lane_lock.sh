@@ -922,9 +922,9 @@ ll release 950 --pid "$HOLDER950"; rc20f=$RC; out20f=$OUT     # named explicitly
 if [ "$rc20e" -eq 2 ] && printf '%s' "$out20e" | grep -q 'RELEASE-REFUSED' \
    && [ "$rc20f" -eq 0 ] && printf '%s' "$out20f" | grep -q '^LANE-LOCK: RELEASED issue=950 ' \
    && [ ! -f "$LANES/.lane-locks/lane-950.lock" ]; then
-  ok "(a2) with the lane dir REMOVED, an identity-less release is REFUSED (not silently successful) and --pid $HOLDER950 releases it"
+  ok "(a3) with the lane dir REMOVED, an identity-less release is REFUSED (not silently successful) and --pid $HOLDER950 releases it"
 else
-  bad "(a2) expected RELEASE-REFUSED then RELEASED via --pid; got rc=$rc20e/$rc20f
+  bad "(a3) expected RELEASE-REFUSED then RELEASED via --pid; got rc=$rc20e/$rc20f
 $out20e
 $out20f"
 fi
@@ -1060,6 +1060,29 @@ rc23a=0; out23a="$(LANE_ROOT="$LANES" LANE_LOCK_PID="$DEADP" bash "$LL" release 
 if [ "$rc23a" -eq 0 ] && printf '%s' "$out23a" | grep -q '^LANE-LOCK: RELEASED issue=980 ' \
    && [ ! -f "$LANES/.lane-locks/lane-980.lock" ]; then
   ok "(a) release --force succeeds with a DEAD inherited LANE_LOCK_PID and removes the record — the break-glass needs no identity"
+fi
+
+# (a2) THE SIBLING THE FIRST FIX MISSED (roborev round 6). Bypassing prepare_identity was
+# not enough: the bypass itself still called `resolve_actor`, which VALIDATES and dies (64)
+# on an unrecordable actor -- so an invalid INHERITED LANE_LOCK_ACTOR disabled the
+# break-glass exactly as an inherited LANE_LOCK_PID had one round earlier. Fourth instance
+# in this change of "fix the named site, miss its sibling", and here the sibling was two
+# lines inside the fix. So this drives BOTH hostile env vars, separately and together.
+for _bad in "LANE_LOCK_ACTOR=**" "LANE_LOCK_PID=$DEADP" "LANE_LOCK_ACTOR=** LANE_LOCK_PID=$DEADP"; do
+  LANE_982="$LANES/lane-982"; mkdir -p "$LANE_982"
+  sleep 300 & _h=$!
+  ( cd "$LANE_982" && env -u LANE_LOCK_ACTOR LANE_ROOT="$LANES" bash "$LL" acquire 982 --pid "$_h" >/dev/null 2>&1 )
+  kill "$_h" 2>/dev/null; wait "$_h" 2>/dev/null
+  _rc=0; _out="$(env $_bad LANE_ROOT="$LANES" bash "$LL" release 982 --force 2>&1)" || _rc=$?
+  if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | grep -q '^LANE-LOCK: RELEASED issue=982 ' \
+     && [ ! -f "$LANES/.lane-locks/lane-982.lock" ]; then
+    ok "(a2) release --force survives a hostile inherited environment [$_bad] — no identity is resolved on the forced path, so nothing on it can refuse"
+  else
+    bad "(a2) --force refused under [$_bad]: rc=$_rc
+$_out"
+  fi
+done
+if true; then :
 else
   bad "(a) expected --force to release regardless of a dead inherited pid; got rc=$rc23a
 $out23a"
