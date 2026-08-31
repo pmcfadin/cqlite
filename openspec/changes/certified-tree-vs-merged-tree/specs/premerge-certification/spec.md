@@ -237,9 +237,17 @@ rediscovered (#3650 review B3).
 - **AND** a `lazy-fetch-guard` line names the version field, that the variable is not honoured, and the
   affirmative `promisor NO` state
 
+#### Scenario: A local replacement ref cannot hide a blast-radius path
+- **GIVEN** a checkout carrying a `refs/replace/*` entry that substitutes a commit behind the base so that
+  `git diff-tree` reports none of the paths that commit really touches
+- **WHEN** the advisory is run
+- **THEN** the scan reports the real path and the commit stales the base
+- **AND** the verdict is `STALE-RECOGNISED`, never the permissive `NO-STALENESS-RECOGNISED`
+
 *Verified by:* `scripts/tests/test_base_staleness.sh` (missing-ref case; no-merge-base case; the
 "exit 5 is never exit 0" assertion; the lazy-fetch-guard cases, which fixture a promisor clone and an
-old/unparseable `git --version` through a `PATH` shim).
+old/unparseable `git --version` through a `PATH` shim; the replacement-ref case, whose fixture is asserted
+with git to really hide the path and whose planted mutant — the export removed — is shown to fail open).
 
 ### Requirement: Slice 1 changes no verdict and retains the #3465 scope disclaimer
 

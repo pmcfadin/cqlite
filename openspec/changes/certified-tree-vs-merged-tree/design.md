@@ -206,6 +206,22 @@ the common case is unaffected at any version and pays three `git config` calls o
 on an old git that shape would be reported non-promisor. Named rather than implied; closing it needs an
 alternates walk, which is more mechanism than this advisory's scope allows.
 
+**AMBIENT GIT STATE IS PINNED IN ONE PLACE, AND `refs/replace/*` JOINED THE LIST (#3650 review R6 F1).**
+`GIT_NO_LAZY_FETCH` is one instance of a family: repository- or invoker-controlled git state that changes
+what `merge-base`, `rev-list`, `diff` or `diff-tree` REPORT *without failing*, so the answer is confidently
+wrong — and always in the permissive direction, a false `NO-STALENESS-RECOGNISED`. Replacement refs are
+honoured by all four of those commands, so one local `git replace` can rewrite the ancestry the scan walks
+or hide a blast-radius path. Measured (git 2.43.0, a synthetic fixture): with the commit that touches the
+gate-global `.config/nextest.toml` replaced by a substitute carrying its parent's tree, `diff-tree`
+reported no paths and the scan emitted `blast-radius 0 RECOGNISED` / `NO-STALENESS-RECOGNISED`, while the
+same run with `GIT_NO_REPLACE_OBJECTS=1` exported reported the path and `STALE-RECOGNISED` — `behind` was
+`1` either way, so nothing else in the output betrayed the substitution. Unlike the lazy-fetch variable it
+needs no version measurement (every git with replacement refs honours it). The pins were in three separate
+places, each with its own rationale, so the *set* was visible nowhere; they are now enumerated in one
+comment block at the exports — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, and a pointer to the
+per-invocation porcelain `diff.renames`/`diff.relative` pins, which must stay at their call site because
+the plumbing side has to remain unpinned for rename symmetry. None is settable by the caller (#3312).
+
 **And the scratch location is the other half of the same claim, which is only as strong as its ORDERING
 and its SUBJECT (#3650 review job 239).** `mktemp -d` honours `TMPDIR`, so a `TMPDIR` inside the checkout
 makes this script write in the repository. Two properties, both learned the hard way:

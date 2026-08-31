@@ -1245,6 +1245,87 @@ for gg_pat in ${GG_UNION[@]+"${GG_UNION[@]}"}; do
   fi
 done
 
+# --- Case 20 (#3650 review R6 F1): AMBIENT `refs/replace/*` CANNOT BEND THE SCAN
+#
+# Git replacement refs are honoured by `merge-base`, `rev-list`, `diff` AND
+# `diff-tree`, so ONE local `refs/replace/*` entry can rewrite the ancestry this
+# scan walks or HIDE a blast-radius path from a commit behind — and the wrong
+# answer is the PERMISSIVE one, a false `NO-STALENESS-RECOGNISED`. Same family as
+# the `diff.renames`/`diff.relative` pins (Case 16) and `GIT_NO_LAZY_FETCH`
+# (Case 19): ambient git state that changes what git REPORTS without failing.
+#
+# THE FIXTURE IS A REAL `git replace`, not a simulation: a substitute commit with
+# the SAME parent and the PARENT'S TREE, so `diff-tree` on the original sha
+# reports NO paths at all and the gate-global `.config/nextest.toml` vanishes from
+# the scan. `behind` stays 1 either way, so nothing else in the output betrays the
+# substitution — which is why this needs a pin rather than a reader.
+#
+# The fixture is asserted with git to REALLY have that property (the Case 1
+# idiom): the same `diff-tree` is run twice, once as git found it and once with
+# `GIT_NO_REPLACE_OBJECTS=1`, and the two must DISAGREE. That measured contrast is
+# what makes the case non-vacuous — without it a passing run would prove nothing
+# about replacement refs.
+R_REPL=$(newrepo replace-ref)
+commit_paths "$R_REPL" "the PR: a non-gate-global path" \
+  "cqlite-core/src/storage/sstable/mod.rs"
+advance_main "$R_REPL"
+commit_paths "$R_REPL" "behind: touches the gate-global nextest config" \
+  ".config/nextest.toml"
+REPL_ORIG=$(g "$R_REPL" rev-parse HEAD)
+REPL_PARENT=$(g "$R_REPL" rev-parse HEAD^)
+publish_main "$R_REPL"
+back_to_feature "$R_REPL"
+repl_shape=0
+REPL_SUB=$(g "$R_REPL" commit-tree "$(g "$R_REPL" rev-parse "$REPL_PARENT^{tree}")" \
+  -p "$REPL_PARENT" -m "replacement that hides the gate-global path" 2>/dev/null)
+if [ -n "$REPL_SUB" ] && g "$R_REPL" replace -f "$REPL_ORIG" "$REPL_SUB" >/dev/null 2>&1; then
+  repl_listed=$(g "$R_REPL" replace -l 2>/dev/null | tr -d ' \n')
+  repl_hidden=$(g "$R_REPL" diff-tree -r --no-commit-id --name-only "$REPL_ORIG" 2>/dev/null)
+  repl_seen=$(env GIT_NO_REPLACE_OBJECTS=1 git -C "$R_REPL" diff-tree -r --no-commit-id \
+    --name-only "$REPL_ORIG" 2>/dev/null)
+  if [ -n "$repl_listed" ] && [ -z "$repl_hidden" ] &&
+    [ "$repl_seen" = ".config/nextest.toml" ]; then
+    repl_shape=1
+  fi
+fi
+if [ "$repl_shape" -eq 1 ]; then
+  ok "replace-ref fixture: a real replacement ref HIDES .config/nextest.toml from diff-tree, and GIT_NO_REPLACE_OBJECTS=1 still sees it"
+else
+  bad "replace-ref fixture: the replacement ref does not hide the gate-global path (listed='${repl_listed:-}' hidden='${repl_hidden:-}' seen='${repl_seen:-}') — the case would be vacuous"
+fi
+
+if [ "$repl_shape" -eq 1 ]; then
+  if run 4 "a refs/replace/* entry cannot hide a blast-radius path" "$R_REPL"; then
+    has "replace-ref: the hidden gate-global path is still matched" \
+      "gate-global .config/nextest.toml"
+    has "replace-ref: the commit behind still stales" \
+      "blast-radius 1 RECOGNISED of 1 commits behind"
+    has "replace-ref: the verdict is the NON-permissive one" "verdict STALE-RECOGNISED"
+  fi
+  # THE PLANT: drop the export, nothing else. It must FAIL OPEN on this exact
+  # fixture — a bare red is not evidence, so the plant is verified narrow first
+  # and the mutant is then shown still functional on an ordinary fixture.
+  MUT_REPL="$T/mutant-replace.sh"
+  sed '/^export GIT_NO_REPLACE_OBJECTS=1$/d' "$ADVISORY" >"$MUT_REPL"
+  if [ "$(diff "$ADVISORY" "$MUT_REPL" | grep -c '^[<>]')" -eq 1 ] &&
+    ! grep -q '^export GIT_NO_REPLACE_OBJECTS=1$' "$MUT_REPL" &&
+    grep -q '^export GIT_NO_REPLACE_OBJECTS=1$' "$ADVISORY"; then
+    ok "replace-mutant: the plant removed exactly the export and nothing else"
+  else
+    bad "replace-mutant: the plant is not narrow (or the export's spelling moved)"
+  fi
+  USE_SCRIPT="$MUT_REPL"
+  if run 0 "replace-mutant: WITHOUT the export the replacement ref FAILS OPEN" "$R_REPL"; then
+    has "replace-mutant: it wrongly reports a zero blast radius" "blast-radius 0 RECOGNISED"
+    has "replace-mutant: and wrongly reports no staleness" "verdict NO-STALENESS-RECOGNISED"
+  fi
+  if run 4 "replace-mutant: still detects an ordinary intersection (the plant is narrow)" \
+    "$R_DIFF"; then
+    ok "replace-mutant: the copy is otherwise functional, so the red above is the export"
+  fi
+  unset USE_SCRIPT
+fi
+
 # --- Case 17 (WHOLE SUITE, was Case 7): the ANCHORED output guarantee -------
 # Accumulated across EVERY case above and asserted HERE, after the last one. The
 # old placement covered Cases 2-6 only, so the UNMEASURED, usage and mutant runs

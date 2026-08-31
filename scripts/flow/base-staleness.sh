@@ -188,13 +188,54 @@
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -uo pipefail
 
-# EXPORTED BEFORE ANY OBJECT ACCESS (D5/#3650 review B2). See the D5 header: in a
-# partial/promisor clone, reading objects fetches from the network and writes
-# packfiles into the repository, so without this the "never fetches, never
-# writes" contract is an intention rather than a property. A missing object then
-# fails its git call, and every call site below routes a git failure to
-# UNMEASURED.
+# ---------------------------------------------------------------------------
+# AMBIENT GIT STATE THAT SILENTLY CHANGES THIS MEASUREMENT — THE PINS, IN ONE
+# PLACE (#3650 review R6 F1).
+#
+# Every entry here is the same defect class: repository- or invoker-controlled
+# git state that alters what `merge-base`, `rev-list`, `diff` or `diff-tree`
+# REPORT, without failing, so an unpinned input yields a confidently wrong answer
+# — and the wrong answer is always the permissive one, a false
+# `NO-STALENESS-RECOGNISED`. They were pinned in three separate places, each with
+# its own rationale, so the SET of pinned ambient inputs was not visible anywhere.
+# It is visible here. Add the next one to this list.
+#
+#   1. `GIT_NO_LAZY_FETCH=1` (D5/#3650 review B2) — EXPORTED BEFORE ANY OBJECT
+#      ACCESS. In a partial/promisor clone, reading objects fetches from the
+#      network and WRITES packfiles into the repository, so without this the
+#      "never fetches, never writes" contract is an intention rather than a
+#      property. A missing object then fails its git call, and every call site
+#      below routes a git failure to UNMEASURED. Honoured only from git 2.36,
+#      which is why the version+promisor measurement below exists.
+#   2. `GIT_NO_REPLACE_OBJECTS=1` (#3650 review R6 F1) — EXPORTED BEFORE ANY
+#      OBJECT ACCESS. `refs/replace/*` entries are honoured by `merge-base`,
+#      `rev-list`, `diff` AND `diff-tree`, so a single local replacement ref can
+#      rewrite the ancestry this scan walks or HIDE a blast-radius path from a
+#      commit behind. Measured on git 2.43.0 against a synthetic fixture (Case 20
+#      in the test suite): with one `git replace` of a commit that touches the
+#      gate-global `.config/nextest.toml`, `diff-tree` reported NO paths and the
+#      scan emitted `blast-radius 0 RECOGNISED` / `NO-STALENESS-RECOGNISED` —
+#      the permissive branch — while the same run with this variable exported
+#      reported the path and `STALE-RECOGNISED`. `behind` was 1 either way, so
+#      nothing else in the output showed the substitution. Unlike (1) this is
+#      honoured by every git that has replacement refs at all, so it needs no
+#      version measurement.
+#   3. `diff.renames` and `diff.relative`, both pinned OFF with `-c` AT the
+#      porcelain `git diff` call, NOT here, and deliberately so: `-c` is
+#      per-invocation, and the PLUMBING `diff-tree` scan must stay UNPINNED for
+#      rename symmetry. The full argument (and the measurement) is at that call
+#      site, which is the only place that can state which side is pinned and why.
+#      Named here so the reader of this block knows the set is 3, not 2. (Their
+#      exact spelling is deliberately NOT reproduced in this comment: the test
+#      suite's rename plant asserts that spelling is ABSENT from the mutant, and a
+#      comment carrying it would make that plant check pass for the wrong reason.)
+#
+# NONE of these is settable by the caller (#3312: an override is settable by the
+# party it constrains, and "which ambient state may bend my measurement" is
+# precisely what a lane wanting to skip a re-gate would set).
+# ---------------------------------------------------------------------------
 export GIT_NO_LAZY_FETCH=1
+export GIT_NO_REPLACE_OBJECTS=1
 
 # ---------------------------------------------------------------------------
 # THE GATE-GLOBAL SET — ONE list, ONE place, NO env override (D1/#3312).
@@ -762,6 +803,10 @@ fi
 #     THE PLUMBING-SIDE RISK RUNS THE OTHER WAY: adding `-M` to `diff-tree` to
 #     "improve" the commit scan would reintroduce the asymmetry from the opposite
 #     direction (destination-only on the commit side). DO NOT ADD `-M` THERE.
+# These two are entry 3 of the AMBIENT GIT STATE pin list at the top of this
+# file; that block is where the SET of pinned ambient inputs is visible in one
+# place (#3650 review R6 F1). They stay pinned HERE, per-invocation, because the
+# plumbing side must NOT inherit them.
 if ! git -c diff.renames=false -c diff.relative=false \
   diff --name-only -z "$merge_base...$subject_sha" >"$TMPD/diff-paths" 2>/dev/null; then
   unmeasured "git diff --name-only -z $merge_base...$subject_sha failed"
