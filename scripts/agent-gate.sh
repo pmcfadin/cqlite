@@ -3141,10 +3141,19 @@ _fm_describe_cargo() {
     featpart='--all-features'
   elif [ -n "$feats" ]; then
     featpart="--features $(_fm_abbrev_features "$feats")"
+  elif [ "$sub" = fmt ]; then
+    # FEATURE-INDEPENDENT SUBCOMMAND (roborev job 281). `cargo fmt` runs rustfmt over the
+    # source; it resolves and enables NO features, so rendering it `default-features` — which
+    # is what the no-flags branch below would do — states a feature set nobody selected. The
+    # whole point of this annotation is that a pasted block says what a component certified,
+    # so an inaccurate feature set here is worse than none: it is the annotation making the
+    # same unfounded claim the annotation exists to prevent.
+    featpart='features=n/a'
   else
     featpart='default-features'
   fi
-  [ "$nodef" -eq 1 ] && featpart="--no-default-features ${featpart}"
+  # `--no-default-features` cannot meaningfully prefix a feature-independent subcommand.
+  [ "$nodef" -eq 1 ] && [ "$featpart" != 'features=n/a' ] && featpart="--no-default-features ${featpart}"
   printf '%s %s %s' "$sub" "$scope" "$featpart"
   return 0
 }
