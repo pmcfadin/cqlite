@@ -30,7 +30,7 @@
 
 use crate::error::to_napi_error;
 use cqlite_core::types::Value;
-use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
+use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Property, PropertyAttributes, Result};
 use std::cell::OnceCell;
 
 /// Per-result-conversion context that caches the global `Set` and `Map`
@@ -432,7 +432,29 @@ fn json_to_napi(ctx: &ConvCtx, json: &serde_json::Value) -> Result<JsUnknown> {
             Ok(js_arr.into_unknown())
         }
         serde_json::Value::Object(obj) => {
-            let mut js_obj = env.create_object()?;
+            // NULL PROTOTYPE, at EVERY nesting depth (issue #3630). A JSON
+            // object's keys ARE the data — there is no declared key set — so
+            // this is the UDT field bag's sibling surface, not a row's, and it
+            // takes the field bag's contract for the same reason (#3504):
+            // `obj[k] === undefined` then means exactly "no such key", and no
+            // key can reach an inherited accessor. On a plain `{}` a key named
+            // `__proto__` would reach `Object.prototype`'s inherited SETTER
+            // instead of becoming a property — a string value silently
+            // discarded, a null value REPLACING the object's prototype.
+            //
+            // Deliberately NOT a special case on the literal string
+            // `__proto__`: that is a rarer delimiter rather than a removed
+            // channel, and it would leave every other inherited name — including
+            // any a future JavaScript adds — able to intercept a JSON key.
+            //
+            // ROWS TAKE A DIFFERENT CONTRACT ON PURPOSE — see [`row_to_object`].
+            // A row arrives beside its authoritative column list, so it can
+            // afford to keep `Object.prototype`; a bare mapping cannot, because
+            // the object is its only absence instrument.
+            //
+            // This recursion means an inner object is built the same way, so the
+            // property is one of the CONSTRUCTION and holds at any depth.
+            let mut js_obj = ctx.create_null_prototype_object()?;
             for (k, v) in obj {
                 js_obj.set_named_property(k, json_to_napi(ctx, v)?)?;
             }
@@ -608,6 +630,61 @@ pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<ColumnKeys> {
 /// Issue #1448: `ctx` carries the napi `Env` plus the per-result-cached
 /// `Set`/`Map` constructors, threaded into [`value_to_napi`] so a scan with many
 /// collection cells fetches each constructor once per result, not once per cell.
+///
+/// ## Why columns are DEFINED and not ASSIGNED (issue #3630)
+///
+/// A column name is DATA — a quoted CQL identifier or a `SELECT ... AS` alias
+/// makes any string reachable. This function used to write each name with an
+/// ordinary property assignment, and an assignment is a JavaScript `[[Set]]`,
+/// which CONSULTS THE PROTOTYPE CHAIN. `Object.prototype` carries exactly one
+/// accessor, `__proto__`, so a column of that name reached its inherited SETTER
+/// instead of becoming a property. MEASURED on the Cassandra-5.0.2-written
+/// `test-data/fixtures/issue_3630` fixture before this fix: a string-valued
+/// `"__proto__"` column VANISHED — absent from `Object.keys`, not an own
+/// property, reading back as `Object.prototype` — with no error and no warning
+/// anywhere. Every row of every result set goes through here, so the blast
+/// radius was larger than #3504's UDT field bag, which only rows carrying a UDT
+/// cell reached.
+///
+/// `napi_define_properties` performs `[[DefineOwnProperty]]`, which does not
+/// consult the prototype at all, so the channel is REMOVED rather than filtered.
+/// Deliberately NOT a special case on the literal string `__proto__`: that is
+/// picking a rarer delimiter, and it would leave every other inherited name —
+/// including any a future JavaScript adds to `Object.prototype` — able to
+/// intercept a declared column. The fixture carries `"constructor"` and
+/// `"toString"` precisely to distinguish the two: a literal-name check passes
+/// every `__proto__` case and is indistinguishable from a real fix until
+/// something asks about a different name.
+///
+/// ## Why a row KEEPS `Object.prototype`, while #3504's field bag does not
+///
+/// [`udt_to_object`] rejects this same mechanism for the field bag (see its doc
+/// comment) because own-property definition leaves `'toString' in fields` true
+/// and `fields.constructor` truthy, so an absence probe on the bag still reads
+/// inherited junk. That reasoning is SOUND and is not overturned here — it does
+/// not TRANSFER, because the axis is what the surface can be probed AGAINST:
+///
+/// * A row arrives beside `result.columns`, the authoritative SELECT column
+///   list, and `Object.hasOwn(row, name)` answers absence exactly. The
+///   inherited-junk cost is one the caller has a better instrument than.
+/// * A UDT field bag arrives with NO declared key list — the fields are all
+///   there is — so the object IS its only absence instrument, and one that
+///   answers `in` for names it does not hold cannot express absence at all.
+///
+/// Rows are also a DOCUMENTED plain-object surface (`lib/index.d.ts`:
+/// `interface Row { [column: string]: Value }`), whose consumers call
+/// `row.hasOwnProperty(...)`, spread rows, and hand them to code expecting a
+/// normal prototype. `Object.create(null)` would break all of that on EVERY row
+/// of EVERY query to fix a name almost no schema uses. So: same tradeoff,
+/// refused there, accepted here, on a structural difference rather than a
+/// preference.
+///
+/// ACCEPTED COST, stated: `'toString' in row` stays true and `row.constructor`
+/// stays truthy. `Object.hasOwn(row, name)` is the correct absence probe and
+/// `lib/index.d.ts` says so. One residual is outside this function's reach:
+/// `Object.assign(target, row)` performs `[[Set]]` on `target`, so a caller who
+/// copies a row into a fresh `{}` re-loses a `__proto__` column. `{...row}` and
+/// `Object.fromEntries(Object.entries(row))` do not, because both DEFINE.
 pub fn row_to_object(
     ctx: &ConvCtx,
     keys: &ColumnKeys,
@@ -615,6 +692,11 @@ pub fn row_to_object(
 ) -> Result<JsObject> {
     let env = ctx.env();
     let mut obj = env.create_object()?;
+    // Every column is DEFINED, never ASSIGNED — see the `## Why columns are
+    // DEFINED` section on this function. Descriptors are accumulated and applied
+    // in ONE `define_properties` call so V8 sees them in this exact order, which
+    // is what preserves #1446's `Object.keys(row)` ordering contract.
+    let mut descriptors: Vec<Property> = Vec::with_capacity(keys.ordered.len());
     // Emit the selected columns that are present in this row's values, in
     // authoritative SELECT order (#1446). For the normal case where metadata
     // names match the value keys, this is every column, so `Object.keys(row)`
@@ -623,10 +705,10 @@ pub fn row_to_object(
     // fallback name like `col_0` while the value is keyed by the expression name
     // like `Count(*)`, and null-filling would emit a phantom `col_0: null`
     // alongside the real cell.
-    for (col_name, js_key) in &keys.ordered {
+    for (col_name, _js_key) in &keys.ordered {
         if let Some(value) = values.get(col_name) {
             let js_value = value_to_napi(ctx, value)?;
-            obj.set_property(*js_key, js_value)?;
+            descriptors.push(data_property(col_name, &js_value)?);
         }
     }
     // Never drop cells (#1446 roborev): emit any values the authoritative column
@@ -646,11 +728,58 @@ pub fn row_to_object(
         for name in extra {
             if let Some(value) = values.get(name) {
                 let js_value = value_to_napi(ctx, value)?;
-                obj.set_named_property(name, js_value)?;
+                // SAME mechanism as the interned path above. Both paths write a
+                // user-controlled name, so a fix reaching only one leaves the
+                // other live — #3504 found exactly that duplication one file
+                // over, and #3630's spec makes them ONE requirement.
+                descriptors.push(data_property(name, &js_value)?);
             }
         }
     }
+    if !descriptors.is_empty() {
+        obj.define_properties(&descriptors)?;
+    }
     Ok(obj)
+}
+
+/// One own, enumerable, writable, configurable DATA property descriptor.
+///
+/// The three attributes are spelled out DELIBERATELY, and `PropertyAttributes::
+/// Default` must NOT be used here. In napi-rs those are two different things and
+/// they do not agree:
+///
+/// * the bitflag CONSTANT `PropertyAttributes::Default` is `sys::
+///   PropertyAttributes::default`, i.e. `napi_default` — **ZERO**, meaning no
+///   attributes: non-writable, NON-ENUMERABLE, non-configurable;
+/// * the trait method `PropertyAttributes::default()` is
+///   `Configurable | Enumerable | Writable`.
+///
+/// MEASURED by getting this wrong first: with the constant, every column arrived
+/// with `{writable: false, enumerable: false, configurable: false}`, so the value
+/// was present but `Object.keys(row)` was EMPTY and the row was unusable — a
+/// different silent-wrong-output bug substituted for the one being fixed. The
+/// explicit OR below is the attribute set of an ordinary ASSIGNED property, which
+/// is the point: a defined column must be observationally identical to an
+/// assigned one for every read a caller performs, while never consulting the
+/// prototype chain on the way in.
+///
+/// A name the descriptor cannot represent is an ERROR, never a skipped column.
+/// `Property::new` builds a `CString`, which fails on an interior NUL byte; a
+/// column silently dropped in that corner would be the very defect #3630
+/// removes, reintroduced somewhere nobody looks. It is routed through the one
+/// FFI error contract, as `json_number_to_napi`'s `Beyond` arm is.
+fn data_property(name: &str, value: &JsUnknown) -> Result<Property> {
+    let property = Property::new(name).map_err(|_| {
+        to_napi_error(cqlite_core::Error::unsupported_format(format!(
+            "column name cannot be represented as a JavaScript property name \
+             (it contains an interior NUL byte): {name:?}"
+        )))
+    })?;
+    Ok(property.with_value(value).with_property_attributes(
+        PropertyAttributes::Writable
+            | PropertyAttributes::Enumerable
+            | PropertyAttributes::Configurable,
+    ))
 }
 
 // Unit tests live in a sibling file to keep this file under the campsite
