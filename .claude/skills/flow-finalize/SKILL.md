@@ -132,24 +132,20 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ref is THE cross-machine lock); deleting the `issue-<N>-<slug>` branch is plumbing cleanup of the merged
    PR head, not the lock. Both happen in step 6 below. After finalize, nothing for this issue may remain
    `In Progress`/`In Review`, and neither the claim ref nor an `issue-<N>-*` branch may remain on origin.
-6. **Release the claim ref, then remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
+6. **Release the locks, THEN remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
    `issue-<N>-*` or blindly `--force` — that destroyed an unrelated active claim on 2026-06-27 (the #1143
    incident: PR merged from `issue-1143-read-p99-regression`, glob also matched + deleted the separate
    active `issue-1143-scan-window-offload`). Use the guardrailed script instead — it targets ONLY the
    merged PR's branch, refuses on >1 lock for the issue (1:1:1:1 violation), and refuses to remove a
    dirty/unpushed worktree:
-   ```bash
-   # --confirm-unmerged: a squash-merge leaves the branch tip out of `main`; step 1
-   # already verified PR state=MERGED, which IS the authority the flag stands for.
-   # `scripts/flow/*.sh` blobs are mode 100644 (no +x) — ALWAYS invoke them via `bash`.
-   bash scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch> --confirm-unmerged
-   # Add --dry-run first to preview. Exit codes: 0 ok · 2 multi-lock · 3 dirty/unpushed · 4 unmerged tip.
-   ```
-   On a non-zero exit the script changed nothing and surfaced why — resolve the 1:1:1:1 violation or the
-   dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
-   `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
-   (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
-   Then **release the claim ref itself** — the actual cross-machine lock (#2665). The PR is merged, so the
+   **Release the locks FIRST, while the lane directory still exists** — the claim ref, the actual
+   cross-machine lock (#2665), and the machine-local lane lock. The PR is merged, so the open-PR
+   guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize).
+   **The ORDER is load-bearing and was wrong until #3436 roborev round 15**: the cleanup below deletes
+   the worktree, and `lane-lock.sh release` proves you are the holder by walking up from your cwd
+   INSIDE the lane — so releasing afterwards is refused as not-holder and leaks the record. Round 12
+   wrote that warning into the comment below and left the steps in the old order, which is why a
+   later review found it again: an instruction is not a sequence.
    open-PR guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize):
    ```bash
    bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
@@ -160,10 +156,10 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    # KEYED BY ISSUE FIXES THE SUBJECT, NOT THE IDENTITY (#3436, roborev round 12). It needs
    # no --lane-dir, so it cannot miss a lane locked under a non-default path -- but proving
    # you are the HOLDER resolves an identity by walking up from your cwd INSIDE the lane, and
-   # step 5 above has already removed the worktree. Run from a deleted lane, release is
+   # the cleanup BELOW removes the worktree. Run from a deleted lane, release is
    # refused as not-holder, and the `|| true` below turned that into a silent leak: the record
    # outlives the lane and the next session for this issue meets a lock nobody can clear.
-   # SO: RELEASE BEFORE THE WORKTREE IS REMOVED, from inside the lane. If it is already gone,
+   # SO THIS BLOCK RUNS FIRST, from inside the lane. If the lane is already gone,
    # the sanctioned fallbacks are `--pid <durable-holder>` or `--force` (which only DELETES and
    # needs no identity). Do not suppress the failure, and verify the record is actually gone.
    # (#3436 FIX 8 --
@@ -178,6 +174,20 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    bash scripts/flow/lane-lock.sh status <N>
    # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
    ```
+
+   **Now remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
+   `issue-<N>-*` or blindly `--force`.
+   ```bash
+   # --confirm-unmerged: a squash-merge leaves the branch tip out of `main`; step 1
+   # already verified PR state=MERGED, which IS the authority the flag stands for.
+   # `scripts/flow/*.sh` blobs are mode 100644 (no +x) — ALWAYS invoke them via `bash`.
+   bash scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch> --confirm-unmerged
+   # Add --dry-run first to preview. Exit codes: 0 ok · 2 multi-lock · 3 dirty/unpushed · 4 unmerged tip.
+   ```
+   On a non-zero exit the script changed nothing and surfaced why — resolve the 1:1:1:1 violation or the
+   dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
+   `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
+   (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
    window (issue #2089):
    ```bash

@@ -1534,5 +1534,42 @@ $OUT"
 fi
 kill "$P34" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 35: finalize RELEASES BEFORE it deletes the lane — asserted on the ORDER, not the prose"
+# ===========================================================================
+# ROUND 12 WROTE "RELEASE BEFORE THE WORKTREE IS REMOVED" INTO A COMMENT AND LEFT THE STEPS IN THE
+# OLD ORDER. Round 15 found it again, ten lines below that very sentence — and the step TITLE had
+# said "release ... then remove" the whole time. Three artifacts asserting the correct order while
+# the sequence did the opposite, for three rounds. Prose cannot pin a sequence; a line number can.
+#
+# WHY THE ORDER IS LOAD-BEARING: `lane-lock.sh release` proves the caller is the holder by walking
+# up from cwd INSIDE the lane. finalize-cleanup deletes the worktree. Release afterwards is refused
+# as not-holder, and the record outlives the lane — the next session for that issue meets a lock
+# nobody can clear.
+FIN_SKILL="$SCRIPT_DIR/../../.claude/skills/flow-finalize/SKILL.md"
+if [ -r "$FIN_SKILL" ]; then
+  ln_release=$(grep -n 'lane-lock\.sh release <N>' "$FIN_SKILL" | head -1 | cut -d: -f1)
+  ln_cleanup=$(grep -n 'finalize-cleanup\.sh --issue' "$FIN_SKILL" | head -1 | cut -d: -f1)
+  if [ -n "$ln_release" ] && [ -n "$ln_cleanup" ] && [ "$ln_release" -lt "$ln_cleanup" ]; then
+    ok "(a) flow-finalize releases the lane lock (line $ln_release) BEFORE finalize-cleanup removes the worktree (line $ln_cleanup)"
+  else
+    bad "(a) finalize would release a lock after deleting the lane that proves who holds it: release=$ln_release cleanup=$ln_cleanup (release must come FIRST)"
+  fi
+  # AND THE FAILURE MUST STAY LOUD: `|| true` on the release is what turned the leak silent.
+  # READ THE COMMAND, NOT THE LINE. The first version of this assertion grepped the whole line
+  # for `|| true` and matched the COMMENT explaining its absence (`# NO \`|| true\`: a refused
+  # release is a LEAK`) — a false FAIL on correct input, and the same proxy defect this PR
+  # documents: a phrase found by grep means the doc MENTIONS it, often to retract it. So strip
+  # everything from the first `#` and test what would actually execute.
+  fin_cmd="$(grep 'lane-lock\.sh release <N>' "$FIN_SKILL" | grep -v '^\s*#' | head -1 | sed 's/#.*//')"
+  if ! printf '%s' "$fin_cmd" | grep -q '|| true'; then
+    ok "(b) the release is not suppressed with \`|| true\` — a refused release is a LEAK, not noise"
+  else
+    bad "(b) the release is suppressed with \`|| true\`, which is what made the leak silent"
+  fi
+else
+  bad "(a) cannot read $FIN_SKILL — this assertion covers a doctrine file and must not pass vacuously"
+fi
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

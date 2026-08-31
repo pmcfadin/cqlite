@@ -3078,8 +3078,9 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   sessions on one issue pick the same directory; and the board said **`Ready`** throughout, so it was
   actively inviting a third claimant.
   So: **`scripts/flow/lane-lock.sh acquire <N>` before the first write to a lane directory, RUN FROM
-  INSIDE THAT DIRECTORY** (`( cd "$wt" && bash scripts/flow/lane-lock.sh acquire <N> )` — the cwd is
-  what makes the durable session process findable; see the identity note below), and
+  INSIDE THAT DIRECTORY** (`bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD"`, with `$PWD`
+  BEING the lane — the cwd is what makes the durable session process findable; see the identity note
+  below), and
   `release <N>` at finalize. **Neither needs a `--lane-dir`, and no reader does either**: the lock
   files live in `$LANE_ROOT/.lane-locks/lane-<N>.*`, OUTSIDE any worktree, so the record is found by
   ISSUE alone. That is what makes `release`, the AC5 probe and the collision scan agree with the
@@ -3121,6 +3122,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `UNKNOWN-*` is cleared deliberately with `reclaim <N> --expect <token> --reason <why>` (CAS,
   recorded) or `release <N> --force`, which only DELETES, needs no identity of its own and therefore
   works from anywhere.
+  **THIS PARAGRAPH USED TO PRINT `( cd "$wt" && … acquire <N> )` — the exact form the next
+  paragraph condemns (#3436, roborev round 15).** FIX 14 corrected `worker.md` and
+  `drive-issue.md` and left the doctrine recommending the broken shape, so the two halves of one
+  file disagreed for four rounds and a reader following the first would record a transient
+  subshell. A correction that updates the callers and not the doctrine has not been made; it has
+  been described.
   **AND THE CWD TEST PROVES "WORKING IN THIS LANE", NOT "WILL OUTLIVE THIS COMMAND" — those are
   different facts and conflating them made the lock a NO-OP in its own wiring (#3436 FIX 14).** The
   auto-resolved scope is `pid-scope=cwd-match`, not `session`, because a transient subshell that just

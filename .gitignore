@@ -388,6 +388,12 @@ bindings/parity/out/
 # is not by this one. A gitignore that silently swallows an unrelated file is the quiet
 # direction of wrong — nothing errors, the file just never gets committed. The records only
 # ever live in a `.lane-locks/` directory, so say that instead of matching their basenames.
-.lane-lock*
+# `.lane-lock` is EXACT, not `.lane-lock*` (#3436, roborev round 15). The legacy pre-FIX-2
+# record is that literal filename, so the trailing `*` bought nothing and cost reach: it
+# silently ignored anything with that prefix at any depth, e.g. `docs/.lane-lock-review.md`.
+# Round 14 scoped the three `lane-[0-9]*` patterns, wrote a comment saying the set was scoped,
+# and left this one a basename glob — the comment was true of its neighbours and false of the
+# line directly beneath it.
+.lane-lock
 .lane-locks/
 **/.lane-locks/
