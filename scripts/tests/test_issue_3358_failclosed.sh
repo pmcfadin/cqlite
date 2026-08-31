@@ -85,8 +85,28 @@ trap 'rm -rf "$tmp"' EXIT
 # expected behavior is "it runs", and both failure cases are defined relative to it.
 # Absent => hard error, not a skip. This fixture is git-tracked (#3220).
 if [ ! -f "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
-  echo "FATAL: committed fixture $FIXTURE_REL/$DATA_DB is missing from the checkout;" >&2
-  echo "       remedy: git -C $REPO restore --source=HEAD -- test-data/datasets" >&2
+  echo "FATAL: committed fixture $FIXTURE_REL/$DATA_DB is missing from the checkout." >&2
+  echo "" >&2
+  # DELIBERATELY NOT `git restore -- test-data/datasets`. That pathspec is the WHOLE
+  # corpus directory, so it would also revert a reader's unrelated uncommitted fixture
+  # changes — silent data loss in a message offered as a repair (roborev job 256, High).
+  # It is also, precisely, one of the five defects the panic in
+  # cqlite-core/tests/issue_3358_bti_query_token_bound.rs documents itself as refusing
+  # to reproduce ("a glob that would restore the WHOLE fixture directory"). Same
+  # resolution as there: point at the tested emitter, which scopes the restore to the
+  # files that are actually missing, and do not hand-build one here.
+  echo "       remedy: run the tracked-fixture probe, which names every missing" >&2
+  echo "       git-tracked file and prints a restore command scoped to ONLY those:" >&2
+  echo "" >&2
+  echo "         CQLITE_DATASETS_ROOT='$REPO/test-data/datasets' \\" >&2
+  echo "           bash '$REPO/test-data/scripts/fetch-datasets.sh' --verify-only" >&2
+  echo "" >&2
+  echo "       Follow its 'ERROR: TRACKED FIXTURES MISSING ... (issue #3310)' block." >&2
+  echo "       If it instead reports 'Tracked-fixture probe (#3310): OK', nothing is" >&2
+  echo "       missing: ignore the remaining ERROR: lines (they report an incomplete" >&2
+  echo "       FETCHED corpus, which a checkout is never meant to be) and do NOT run" >&2
+  echo "       the '.dataset-pin' remedy they suggest — it re-runs the destructive" >&2
+  echo "       fetch path against this checkout root." >&2
   exit 1
 fi
 
