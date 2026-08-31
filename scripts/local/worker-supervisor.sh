@@ -2030,44 +2030,70 @@ SUPERVISOR_LOCK_PID_WAIT=0.05
 # How far into the pid file the NUL scan looks. Any legitimate pid file is a handful of bytes, so this is
 # four orders of magnitude of headroom; beyond it the scan reports `could-not-measure`, never `nul-free`.
 SUPERVISOR_PID_NUL_SCAN=4096
-# The pid-space ceiling used when the platform does not publish one. 4194304 is Linux's own
-# `PID_MAX_LIMIT` on 64-bit — i.e. the largest value any Linux box can configure — and every other
-# platform this script supports is lower (macOS caps at 99999). It is therefore conservative in the ONE
-# direction that matters: it can never reject a pid a real process could hold, so it cannot turn a live
-# holder into "malformed" and wedge the lane.
-SUPERVISOR_PID_MAX_FALLBACK=4194304
-
-# supervisor_pid_space_ceiling — the largest pid this platform can issue, from AUTHORITATIVE METADATA
-# where the platform publishes it, else the conservative constant above (#3601, roborev job 231 B3).
+# supervisor_pid_space_ceiling — echo EXACTLY one of
+#   authoritative <inclusive-max>   the largest pid this platform can ISSUE, from its own metadata
+#   unknown <cause>                 this platform publishes no bound we can read
 #
-# WHY A VALUE BOUND REPLACED A DIGIT-COUNT BOUND. The digit count was 10, and every real pid space is at
-# most 7 digits — so a 10-digit corruption was ACCEPTED, cast to `pid_t` by `kill`, reliably reported
-# ESRCH, became an affirmative `dead` and RECLAIMED THE LOCK, while a 15-digit corruption refused. Same
-# defect class, two different widths, opposite outcomes: the guarantee had a hole in exactly the
-# direction #3601 is about. A pid that cannot exist on this platform is malformed content, and that is
-# decidable from the platform's own published bound rather than from a guess about digit widths.
+# WHY A VALUE BOUND REPLACED A DIGIT-COUNT BOUND (#3601, roborev job 231 B3). The digit count was 10 and
+# every real pid space is at most 7 digits, so a 10-digit corruption was ACCEPTED, cast to `pid_t` by
+# `kill`, reliably reported ESRCH, became an affirmative `dead` and RECLAIMED THE LOCK — while a 15-digit
+# corruption of the same kind refused. One defect class, two widths, opposite outcomes, and the accepting
+# width is the direction #3601 exists to close.
+#
+# THE VALUE IS EXCLUSIVE AND IS CONVERTED (#3601, roborev job 231 B10). `proc(5)` on
+# `/proc/sys/kernel/pid_max`: "This file specifies the value at which PIDs wrap around (i.e., the value
+# in this file is one greater than the maximum PID)." So `pid_max` itself is NOT an issuable pid, and
+# accepting a holder pid equal to it was an off-by-one that let exactly one malformed value through. The
+# inclusive maximum is `pid_max - 1`, and that is what this echoes. A suite case pinned the pre-fix
+# boundary as correct and was fixed with the code, not around it.
+#
+# AND THERE IS NO CROSS-PLATFORM FALLBACK CONSTANT ANY MORE, WHICH IS THE POINT OF THE THIRD VALUE. An
+# earlier cut of this change substituted Linux's own `PID_MAX_LIMIT` (4194304) wherever `/proc` was
+# absent. On macOS, whose real ceiling is 99999, that accepted values up to 42x the platform limit — so
+# malformed pids passed there — and, worse, it was a GUESS ABOUT A PLATFORM WE HAD NOT MEASURED
+# presented as a bound, which is the no-heuristics violation this repository forbids outright
+# (CLAUDE.md #28: authoritative metadata only, never inference). An unmeasurable ceiling is not licence
+# to accept anything, and it is equally not licence to invent a number.
+#
+# SO WHAT DOES `unknown` DO? It makes the platform check NOT APPLY, and — this is the half that matters —
+# the parser then does not CLAIM it applied one. It cannot mean "refuse every pid": that would wedge
+# every non-Linux box permanently, which is the lead's ruling 2 (a guard that never permits work is
+# broken, not fail-closed). It is sound for this specific check, and only because of what the check IS:
+# a REJECTION-ONLY filter. It can turn `accept` into `refuse` and never the reverse, so its absence
+# cannot cause a wrong reclaim that was not already possible — it only fails to tighten. That reasoning
+# does NOT generalise to the liveness or NUL probes, whose verdicts SELECT the reclaim; theirs is
+# `cannot tell => refuse`. The residual with no platform bound is stated at the call site.
 #
 # THIS IS NOT THE DELETED `pid_max` READ COMING BACK. #3549 removed a `/proc/sys/kernel/pid_max` read
 # from the LEGACY guard's classifier because that classifier's verdict could not change the decision.
-# Here it does: it selects between refusing and reclaiming. The suite asserts the deletion as a PROPERTY
-# over the legacy functions rather than as a name ban over the file, for that reason.
-#
-# AN UNREADABLE BOUND IS NOT LICENCE TO ACCEPT MORE. Every failure path lands on the constant, which is
-# STRICTER than the old digit rule, never looser — so "cannot read the platform bound" tightens nothing
-# and loosens nothing; it just stops being able to tighten further.
+# Here it does. The suite asserts the deletion as a PROPERTY over the legacy functions rather than as a
+# name ban over the file, for that reason.
 supervisor_pid_space_ceiling() {
   local b=''
-  if [[ -r /proc/sys/kernel/pid_max ]]; then
-    { IFS= read -r b; } 2>/dev/null </proc/sys/kernel/pid_max || b=''
-    # Validated the same way a holder pid is: enumerated digits (collation-free), and short enough that
-    # the arithmetic comparison below cannot overflow a 64-bit shell integer.
-    case "$b" in
-      '' | *[!0123456789]*) b='' ;;
-    esac
-    if [[ -n "$b" && "${#b}" -gt 18 ]]; then b=''; fi
+  if [[ ! -r /proc/sys/kernel/pid_max ]]; then
+    printf '%s' 'unknown no-platform-pid-bound-published'
+    return 0
   fi
-  if [[ -z "$b" ]]; then b="$SUPERVISOR_PID_MAX_FALLBACK"; fi
-  printf '%s' "$b"
+  { IFS= read -r b; } 2>/dev/null </proc/sys/kernel/pid_max || b=''
+  # Validated the way a holder pid is: enumerated digits (collation-free, no `[0-9]` range), and short
+  # enough that the arithmetic below cannot overflow a 64-bit shell integer.
+  case "$b" in
+    '' | *[!0123456789]*)
+      printf '%s' 'unknown platform-pid-bound-unparseable'
+      return 0
+      ;;
+  esac
+  if [[ "${#b}" -gt 18 ]]; then
+    printf '%s' 'unknown platform-pid-bound-out-of-arithmetic-range'
+    return 0
+  fi
+  # A wrap point below 2 cannot issue a usable pid at all, so it is not a bound we can convert; saying so
+  # beats echoing `authoritative 0`, which would refuse every pid on this box.
+  if [[ "$b" -lt 2 ]]; then
+    printf '%s' 'unknown platform-pid-bound-implausible'
+    return 0
+  fi
+  printf 'authoritative %s' "$((b - 1))"
 }
 
 # supervisor_lock_pid_nul_free <file> — echo EXACTLY one of
@@ -2254,12 +2280,22 @@ supervisor_lock_pid_read() {
   # not an unusual pid (#3601, roborev job 231 B3). The previous 10-digit rule accepted a corruption that
   # `kill` then reported ESRCH for, which became an affirmative `dead` and RECLAIMED the lock — while a
   # wider corruption of the same kind refused.
+  # THE PLATFORM BOUND, WHEN THE PLATFORM PUBLISHES ONE — and nothing pretending to be one when it does
+  # not (#3601, roborev job 231 B10). `unknown` leaves this gate UNAPPLIED, so on a platform with no
+  # published pid space the parser is exactly as strong here as it was before the bound existed: the
+  # structural gates and the 18-digit arithmetic guard above still reject, and a plausible-looking
+  # corruption within them is still accepted, probed, and reclaimed if the kernel says no such process.
+  # That residual is REAL and is stated rather than papered over with a guessed constant.
   local pidceil=''
-  pidceil="$(supervisor_pid_space_ceiling)" || pidceil="$SUPERVISOR_PID_MAX_FALLBACK"
-  if [[ "$first" -gt "$pidceil" ]]; then
-    printf '%s' 'unparseable pid-above-the-platform-pid-space'
-    return 0
-  fi
+  pidceil="$(supervisor_pid_space_ceiling)" || pidceil='unknown ceiling-probe-aborted'
+  case "$pidceil" in
+    'authoritative '*)
+      if [[ "$first" -gt "${pidceil#authoritative }" ]]; then
+        printf '%s' 'unparseable pid-above-the-platform-pid-space'
+        return 0
+      fi
+      ;;
+  esac
   # LAST GATE BEFORE ACCEPTANCE: the FILE'S BYTES, not the string the shell was able to hold (#3601,
   # roborev job 231). Everything above ran on a value `read` had already stripped NULs out of, so a
   # `<digits> NUL LF` file satisfied all of it. It is deliberately last: it is the only gate that forks,
