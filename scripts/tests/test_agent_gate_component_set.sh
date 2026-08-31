@@ -38,7 +38,6 @@
 #                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
 #                  unboundable (3g);
 #                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (3a-v);
-#                  gate-script-changed (7u);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
 # NINETEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is set
@@ -922,35 +921,6 @@ if [ "$(field VERDICT "$ng_out")" = UNMEASURED ] \
 else
   bad "3544-no-git: expected KIND no-git naming $nogit"
   printf '%s\n' "$ng_out"
-fi
-# ---------------------------------------------------------------------------
-# 3f-ii. SYMLINKED GATE (roborev job 294, High). `-f` FOLLOWS symlinks, so the readable-regular-file
-#        check above is TRUE for a `scripts/agent-gate.sh` that links to an external, untracked file.
-#        Both halves of the running-gate check then read that target while `tree-integrity` records
-#        only the LINK — a 120000 blob whose content is the target's PATH TEXT — so a PASS would
-#        certify a tree that does not contain the code that ran.
-#
-#        SECOND INSTANCE OF ONE CLASS: job 285 was the same defect for the MANIFEST ("a symlink IS a
-#        blob; the difference is the MODE"). Hence the fixture ASSERTS the index mode is really
-#        120000 before reading any verdict — otherwise a fixture that silently produced a regular
-#        file would make this case pass while testing nothing.
-sl_bare=$(mkbaseline sl-base -)
-mkbranch sl-br "$sl_bare" -
-sl_fx="$tmp/sl-br"; sl_ext="$tmp/sl-br-external-gate.sh"; sl_ok=1
-mv "$sl_fx/scripts/agent-gate.sh" "$sl_ext" 2>/dev/null || sl_ok=0
-( fx "$sl_fx" && ln -s "$sl_ext" scripts/agent-gate.sh \
-    && git add -A && git "${GIT_ID[@]}" commit -qm "gate script is a symlink" ) >/dev/null 2>&1 || sl_ok=0
-sl_mode=$( ( fx "$sl_fx" && git ls-files -s -- scripts/agent-gate.sh ) 2>/dev/null | awk 'NR==1{print $1}')
-if [ "$sl_ok" -ne 1 ] || [ "$sl_mode" != 120000 ]; then
-  bad "3544-gate-symlink: FIXTURE did not build a symlinked gate (ok=$sl_ok, index mode='$sl_mode', wanted 120000) — the case cannot discriminate, so it is a FAIL and not a skip"
-else
-  sl_out=$(hook "$sl_fx")
-  if [ "$(field KIND "$sl_out")" = gate-script-unverifiable ] \
-     && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$sl_out")"; then
-    ok "3544-gate-symlink: a symlinked gate script is REFUSED by name (index mode 120000 asserted first) — the executed bytes live outside the certified tree, which -f cannot see"
-  else
-    bad "3544-gate-symlink: expected KIND gate-script-unverifiable + a FAIL-CLOSED line; got KIND='$(field KIND "$sl_out")' line='$(field COMPONENT_SET_LINE "$sl_out")'"
-  fi
 fi
 
 # 3f-ii. baseline-workspace: the scratch dir for extracting the baseline script cannot be
@@ -2511,14 +2481,16 @@ done
 #     dispatched. The recapture is deliberate and stays; the pre-flight is repeated inside the
 #     window instead.
 #
-#     FOUR ARMS (job 293 added the last two). `manifest` and `gate-script` edit the two things the
-#     old per-FIELD comparison could see. `executor` edits a component's EXECUTOR FUNCTION BODY and
-#     nothing else — the shape the field comparison was BLIND to, and the harmful one: the recaptured
-#     tree becomes the certification window while the process keeps the definitions it loaded before
-#     the queue, so a full PASS certifies gate code that never executed. `unrelated` is the NEGATIVE
-#     CONTROL: an in-queue edit to a file the gate does not execute must NOT be reported, or a guard
-#     that fires on everything would be indistinguishable from one that fires on the right thing and
-#     the three positive arms would prove nothing.
+#     ONE ARM: the MANIFEST — the DATA the pre-flight re-reads from disk. It is edited while the run
+#     is queued, so a verdict computed before the queue would still call the set unchanged.
+#
+#     THE THREE ARMS THAT COMPARED THE GATE SCRIPT ITSELF ARE GONE, WITH THE CHECK THEY DROVE
+#     (issue #3705). "Is the code I am executing the code in the tree I certify" cannot be answered
+#     from inside the running process: bash parses INCREMENTALLY, so any digest of `$GATE_SELF` is
+#     taken after thousands of lines are already parsed, and an atomic replace before that point
+#     leaves bash executing the OLD inode while the digest reads the NEW path (roborev job 294). It
+#     needs a bootstrap/re-exec handshake — a change to how the gate STARTS UP — and cannot ride
+#     inside a component-set comparison.
 #
 #     DRIVEN THROUGH THE REAL SLOT WAIT: the fixture holds the only slot with a lock file, so the
 #     gate genuinely QUEUES; the manifest is edited during that queue; then the lock is released.
@@ -2540,22 +2512,17 @@ mkdir -p "$win_fx/scripts/lib"
 cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$win_fx/scripts/lib/" 2>/dev/null
 if [ ! -f "$win_fx/scripts/lib/gate_slot_daemon.py" ] || ! command -v python3 >/dev/null 2>&1; then
   echo "skip - 3544-preflight-in-window[manifest]: the slot daemon or python3 is unavailable, so the queue window cannot be held open"
-  echo "skip - 3544-preflight-in-window[gate-script]: same precondition"
-  echo "skip - 3544-preflight-in-window[executor]: same precondition"
-  echo "skip - 3544-preflight-in-window[unrelated]: same precondition"
 else
-for win_edit in manifest gate-script executor unrelated; do
+# THE LOOP SHAPE IS KEPT AT ONE ARM (issue #3705 took the other three). Everything below —
+# the per-arm fixture, the slot holder, the bounded wait, the raced-slot control — is written
+# per `$win_edit` and reads correctly for one arm; unrolling it would be a large mechanical diff
+# through the trickiest code in this file for no behavioural change.
+for win_edit in manifest; do
   case "$win_edit" in
     manifest)    win_want=manifest-stale ;;
-    gate-script) win_want=gate-script-changed ;;
-    executor)    win_want=gate-script-changed ;;
-    # THE NEGATIVE CONTROL (roborev job 293): `NONE` means the in-queue edit must NOT be reported as
-    # gate-script-changed. Without it a check that fires on EVERY in-queue edit is indistinguishable
-    # from one that fires on the right ones, and the two positive arms above would prove nothing.
-    unrelated)   win_want=NONE ;;
   esac
-  # A FRESH FIXTURE PER EDIT: the previous iteration leaves its edit in place, and reusing it would
-  # make the second case observe the first case's damage rather than its own.
+  # A FRESH FIXTURE PER EDIT: an iteration leaves its edit in place, and reusing a fixture would
+  # make a later case observe an earlier case's damage rather than its own.
   win_fx=$(mkbranch "windowed-$win_edit" "$base_win" - --from-origin)
   mkdir -p "$win_fx/scripts/lib"
   cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$win_fx/scripts/lib/" 2>/dev/null
@@ -2605,17 +2572,13 @@ for win_edit in manifest gate-script executor unrelated; do
       sleep 0.2
       win_j=$((win_j + 1))
     done
-    # THE EDIT, made while the run is QUEUED. Two shapes, one harness (job 292 added the second):
-    #   manifest    — drop a component from the manifest so it no longer matches the array
-    #                 -> `manifest-stale`
-    #   gate-script — ADD a component to the on-disk COMPONENTS array while leaving the manifest
-    #                 alone. The running process still holds the OLD array, so the manifest and the
-    #                 array agree and the manifest check passes; only comparing the array against
-    #                 the DECLARATION ON DISK catches it -> `gate-script-changed`
+    # THE EDIT, made while the run is QUEUED:
+    #   manifest — drop a component from the manifest so it no longer matches the array
+    #              -> `manifest-stale`
     # THE EDIT MUST LAND WHILE THE RUN IS STILL QUEUED, and "the queued notice was printed" does not
     # prove that it did: the holder is only killed after the edit, but on a loaded box a slot could in
     # principle be granted (the holder daemon dying, a scheduling stall) between the notice and the
-    # `mv`. The gate prints ONE line when it acquires — `gate slot acquired -- proceeding (#1825)` —
+    # edit. The gate prints ONE line when it acquires — `gate slot acquired -- proceeding (#1825)` —
     # so the ordering is OBSERVABLE, and it is sampled either side of the edit. A case that could not
     # discriminate must SAY SO rather than be read as "the guard did not fire" (which is what a
     # non-reproducing failure of this arm looked like while this control was missing).
@@ -2624,77 +2587,31 @@ for win_edit in manifest gate-script executor unrelated; do
       grep -q 'gate slot acquired' "$win_log" 2>/dev/null && win_raced=1
       case "$win_edit" in
         manifest)
-          # `cp` IS CORRECT HERE, and the asymmetry with the two arms below is deliberate: the
-          # manifest is DATA the gate re-reads from disk, not a file any process is EXECUTING, so an
-          # in-place overwrite corrupts nobody's read stream. Do not "unify" these three plants on
-          # one verb — the verb is chosen per target, and the reason is in each arm.
+          # `cp` IS CORRECT HERE, AND ONLY BECAUSE THE TARGET IS DATA. The manifest is a file the
+          # gate RE-READS from disk, not one any process is EXECUTING, so an in-place overwrite
+          # corrupts nobody's read stream.
+          #
+          # NEVER `cp` OVER A SCRIPT A PROCESS IS EXECUTING. Kept here because it is the reason this
+          # verb is chosen per target, and the arm that carried the full explanation has been removed
+          # (#3705): bash reads a script INCREMENTALLY, keeping a byte offset into an open file, and
+          # `cp` overwrites IN PLACE, SAME INODE — so the running process's next read comes from the
+          # MODIFIED file at its old offset and it re-executes whatever now lives there. MEASURED,
+          # not theorised: a fixture gate re-entered `acquire_gate_slot`, TWO slot daemons appeared
+          # for ONE gate-pid, the ready-file was never written and the queue WEDGED FOREVER — a hang,
+          # which a log filter cannot tell from a pass. `mv` is a RENAME: the running process keeps
+          # its original inode while the TREE holds the new bytes, which is both safe and the
+          # realistic shape (an editor saving, `git checkout`, `git stash`).
           grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
           cp "$tmp/window-manifest.txt" "$win_fx/scripts/agent-gate.components" ;;
-        gate-script)
-          # USE `mv`. NEVER `cp` OVER A SCRIPT A PROCESS IS EXECUTING. Three facts, in order,
-          # because `cp` is the more obvious verb and someone will "simplify" this back:
-          #   1. BASH READS A SCRIPT INCREMENTALLY as it executes — it keeps a byte offset into an
-          #      open file, it does not slurp the file at startup.
-          #   2. `cp` OVERWRITES IN PLACE, SAME INODE. The running gate's next read therefore comes
-          #      from the MODIFIED file at its old offset, and it re-executes whatever region now
-          #      lives there. MEASURED, not theorised: the fixture gate re-entered
-          #      `acquire_gate_slot`, so TWO slot daemons appeared for ONE gate-pid (both carrying
-          #      the gate's own `--poll-secs 2`, not the fixture holder's `1`, which is what proved
-          #      both were gate-spawned), the ready-file was never written, and the queue wedged —
-          #      this arm HUNG FOREVER and the suite never printed a tally. A hang and a pass are
-          #      indistinguishable to a log filter, which is how it survived a commit.
-          #   3. `mv` IS A RENAME: it replaces the directory ENTRY while the running process keeps
-          #      the ORIGINAL inode open, so its read stream is untouched. The gate executes what it
-          #      loaded and the TREE holds the new bytes — which is also the realistic shape (an
-          #      editor saving, `git checkout`, `git stash`) and the only one that tests the property
-          #      instead of perturbing the subject.
-          sed 's|^COMPONENTS=(file-size|COMPONENTS=(zz-added-while-queued file-size|' \
-              "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
-          chmod +x "$tmp/window-gate-$win_edit.sh"
-          mv "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh" ;;
-        executor)
-          # THE JOB-293 CASE, and the one the per-field comparison could NOT see: a component's
-          # EXECUTOR FUNCTION BODY changes while the COMPONENTS declaration and the canonical pin
-          # stay byte-identical. The running process keeps the OLD function definitions, so the
-          # recaptured tree would be certified for code it never executed. Only a WHOLE-FILE digest
-          # catches it.
-          #
-          # USE `mv`, FOR THE REASON SPELLED OUT AT ITS OWN SITE (a comment one arm away is a comment
-          # that gets deleted): bash reads a script INCREMENTALLY, so a `cp` overwrites the inode the
-          # running gate is still reading and it re-executes from a shifted offset — measured on the
-          # arm above as a SECOND slot daemon for one gate-pid and a permanently wedged queue, i.e. a
-          # hang, not a failure. `mv` renames, so the running process keeps its original inode and
-          # only the TREE changes, which is the property under test.
-          sed 's|^  local name=file-size$|  local name=file-size\n  : "edited-while-queued-3544"|' \
-              "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
-          # AFFIRMATIVE: if the anchor line has been reworded the sed is a no-op and this case would
-          # be testing nothing while still reporting a verdict.
-          if cmp -s "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh"; then
-            bad "3544-preflight-in-window[executor]: the executor-body edit changed NOTHING (the anchor 'local name=file-size' no longer matches), so this case cannot discriminate"
-          fi
-          chmod +x "$tmp/window-gate-$win_edit.sh"
-          mv "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh" ;;
-        unrelated)
-          # NEGATIVE CONTROL: an in-queue edit to a file the gate does NOT execute. The digest is
-          # over the gate script alone, so this must pass the pre-flight; a red here would mean the
-          # guard fires on any mid-flight tree change, which `tree-integrity` already owns and which
-          # would make the positive arms above meaningless.
-          #
-          # DELIBERATELY NOT `mv`: this writes a NEW file, so there is no running reader and nothing
-          # to rename over. Making it `mv` for symmetry with the arms above would hide what the `mv`
-          # there is FOR — not corrupting a process's own read stream.
-          mkdir -p "$win_fx/docs"
-          printf 'edited while the gate was queued — #3544 negative control\n' \
-            >"$win_fx/docs/3544-window-negative-control.md" ;;
       esac
       grep -q 'gate slot acquired' "$win_log" 2>/dev/null && win_raced=1
     fi
     kill "$win_holder" 2>/dev/null || true
-    # ---- THE WAIT IS BOUNDED (#3698). `wait "$win_pid"` was unbounded, and this arm HUNG FOREVER
-    # under the in-place `cp` plant it used to carry (see the plant sites below): the fixture gate
-    # re-executed `acquire_gate_slot`, a second slot daemon appeared for the same gate-pid, and the
-    # queue wedged permanently. THE ROOT CAUSE IS FIXED, AND THE BOUND STAYS ANYWAY: this suite runs
-    # in `tooling-tests` on the FULL GATE, so an unbounded wait here hangs the gate of record — and a
+    # ---- THE WAIT IS BOUNDED (#3698). `wait "$win_pid"` was unbounded, and a since-removed arm of
+    # this loop (#3705) HUNG FOREVER under an in-place `cp` plant over the running gate script: the
+    # fixture gate re-executed `acquire_gate_slot`, a second slot daemon appeared for the same
+    # gate-pid, and the queue wedged permanently. THAT PLANT IS GONE AND THE BOUND STAYS ANYWAY:
+    # this suite runs in `tooling-tests` on the FULL GATE, so an unbounded wait here hangs the gate of record — and a
     # gate that hangs gets waived by the next agent rather than investigated. The bound is what
     # contains the NEXT unknown wedge.
     #
@@ -2752,20 +2669,6 @@ for win_edit in manifest gate-script executor unrelated; do
     elif [ "$win_raced" -eq 1 ]; then
       bad "3544-preflight-in-window[$win_edit]: the gate had ALREADY been granted its slot when the edit was made, so the edit did not land inside the queue window — this case cannot discriminate (a loaded box or a dead holder daemon, NOT a verdict about the guard)"
       grep -n 'gate slot' "$win_log" 2>/dev/null | head -3
-    elif [ "$win_want" = NONE ]; then
-      # THE CONTROL. A missing summary is NOT a passing control: with nothing emitted, "the line does
-      # not name gate-script-changed" is true of a run that never reached the pre-flight, so the
-      # emitted line must be PRESENT before its content means anything (affirmative measurement).
-      if ! grep -q '^component-set:' "$win_sum" 2>/dev/null; then
-        bad "3544-preflight-in-window[$win_edit]: no component-set line was emitted at all, so the absence of gate-script-changed asserts NOTHING — the control cannot discriminate"
-        grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
-        sed -n '1,5p' "$win_log" 2>/dev/null
-      elif grep -q 'gate-script-changed' "$win_sum" 2>/dev/null; then
-        bad "3544-preflight-in-window[$win_edit]: an in-queue edit to a file the gate does NOT execute was reported as gate-script-changed — the guard fires on any mid-flight tree change, so its positive arms prove nothing"
-        grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
-      else
-        ok "3544-preflight-in-window[$win_edit]: an in-queue edit to a file the gate does NOT execute is NOT reported as gate-script-changed — the guard discriminates the executing script from the rest of the tree"
-      fi
     elif [ "$win_rc" -ne 0 ] \
        && grep -q '^component-set: FAIL-CLOSED (#3544)' "$win_sum" 2>/dev/null \
        && grep -q "$win_want" "$win_sum" 2>/dev/null; then
@@ -2890,17 +2793,14 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=20   # +gate-script-unverifiable: the script this process executes is not a
-                         # regular TRACKED file — a SYMLINK, an index mode that is not
-                         # 100644/100755, or a mode that could not be READ (unmeasured is not
-                         # passing). Job 294, and the SECOND instance of job 285's "a symlink
-                         # IS a blob; the difference is the MODE" class.
-                         # gate-script-changed: the gate script ON DISK is not the script THIS
-                         # PROCESS is executing — an input crossing the certification window
-                         # (job 292). Since job 293 the test is a WHOLE-FILE content digest, so
-                         # the kind also covers an edit to a component's EXECUTOR FUNCTION; the
-                         # COMPONENTS declaration and the canonical pin are kept only to give
-                         # those two shapes a better MESSAGE. No new kind: one fact, one name.
+DECLARED_KIND_COUNT=18   # 20 -> 18: -gate-script-changed and -gate-script-unverifiable. Both
+                         # belonged to the in-queue "is the code I am executing the code in the
+                         # tree I certify" check, which MOVED OUT of this pre-flight to issue
+                         # #3705 — the question needs a bootstrap/re-exec handshake at startup
+                         # (bash parses INCREMENTALLY, so no digest taken from inside the running
+                         # process can answer it) and cannot ride inside a component-set
+                         # comparison. Nothing about the component set regressed: the pre-flight
+                         # is still REPEATED after the slot is granted (job 290).
                          # -baseline-transfer-mismatch: the transfer it detected is GONE (job
                          # 264) — the baseline objects are read out of the isolated scratch
                          # store instead of being fetched into this repository, so the class is
@@ -4255,10 +4155,12 @@ fi
 # So the count is asserted against a FLOOR, the way `test_agent_gate_summary.sh` already does it.
 # The floor is a MINIMUM, not an equality: adding cases must not require editing it, and removing
 # one must be deliberate enough to edit a number with this comment attached to it.
-# 105 -> 107 with the two cases job 293 added (the `executor` arm and the negative control): the
-# floor is a MINIMUM and keeps the same slack it was written with, so it still catches a DELETION
-# without being an equality nobody can add a case past.
-CASE_FLOOR=107
+# 105 -> 107 with the two cases job 293 added; 107 -> 103 when the in-queue gate-script check moved
+# to issue #3705, taking FOUR cases with it (`3544-gate-symlink` plus the `gate-script`, `executor`
+# and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
+# floor keeps the same slack it was written with: it still catches a DELETION without being an
+# equality nobody can add a case past.
+CASE_FLOOR=103
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
