@@ -382,7 +382,10 @@ fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
     for r in &rows {
         // Every column is absent from a zero-column projection, so there is
         // nothing to charge: the width is 0, matching the standalone estimator.
-        assert_eq!(acc.stage(r.clone()), estimate_arrow_row_bytes(&columns, r));
+        let expected = estimate_arrow_row_bytes(&columns, r);
+        let fused = acc.stage(r.clone());
+        assert_eq!(fused, expected);
+        assert_eq!(fused, 0);
         acc.commit();
     }
     // The accumulator DOES track the rows...
