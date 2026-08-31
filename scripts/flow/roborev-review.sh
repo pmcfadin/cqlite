@@ -155,7 +155,8 @@
 #   deferral          GRANTED (author=@<login> issues=<N>,<N> count=<n> scope=base=<…>
 #                     head=<…> job=<id> reason=<why>) | NONE (...) | STALE (...) |
 #                     MALFORMED (...) | UNAUTHORIZED (...) | COUNT-MISMATCH (...) |
-#                     ISSUE-ABSENT (...) | ISSUE-UNVERIFIABLE (...) | UNAVAILABLE (...)
+#                     ISSUE-ABSENT (...) | ISSUE-CLOSED (...) | ISSUE-UNVERIFIABLE (...) |
+#                     UNAVAILABLE (...)
 #                     PRESENT ONLY WHEN THE FINDINGS BRANCH HAD A DEFERRAL TO LOOK FOR (a
 #                     `--recheck-job` over an affirmatively measured `PRESENT (n)`), so it is
 #                     absent rather than placeholdered otherwise. INFORMATIONAL, exactly like
@@ -163,15 +164,15 @@
 #                     by itself. A deferral is a DEDICATED, column-zero line that is the SOLE
 #                     NONBLANK CONTENT of a TOP-LEVEL PR comment from an author on
 #                     ROBOREV_WAIVER_AUTHORS, binding base AND head AND job AND the finding
-#                     COUNT AND the filed issue numbers, each of which must be RETRIEVABLE
-#                     from GitHub — three-valued, so an issue that does not exist
-#                     (ISSUE-ABSENT) and one whose existence could not be ASKED
-#                     (ISSUE-UNVERIFIABLE) are separate non-granting states and neither
-#                     reads as verified. The PR BODY is not consulted at all: a body is
-#                     editable by anyone with write access with no per-edit attribution,
-#                     while a comment is permanent and attributable (#3626, see --help
-#                     for the exact form, which
-#                     is deliberately not repeated in any emitted diagnostic). It is granted
+#                     COUNT AND the filed issue numbers, each of which must be an OPEN
+#                     issue GitHub confirms — four-valued, so an issue that does not exist
+#                     (ISSUE-ABSENT), one GitHub says is CLOSED (ISSUE-CLOSED) and one whose
+#                     existence could not be ASKED (ISSUE-UNVERIFIABLE) are separate
+#                     non-granting states and none reads as verified. The PR BODY is not
+#                     consulted at all: a body is editable AT ANY TIME by anyone with write
+#                     access with no per-edit attribution, while a comment is permanent and
+#                     attributable (#3626, see --help for the exact form, which is
+#                     deliberately not repeated in any emitted diagnostic). It is granted
 #                     by the OWNER or the coordination LEAD; a worker may only REQUEST one.
 #                     SEPARATELY SCOPED FROM THE WAIVER, and that separation is load-bearing:
 #                     an absence waiver confers NO authority over `findings:`, a findings
@@ -530,21 +531,26 @@ per-finding identity, which roborev's prose does not provide — and no such ide
 reconstructed from that prose, because a recogniser over author-controlled text is the
 class #3564 closed by REMOVING prose reconstruction.
 
-issues= RECORDS THAT THE FINDING IS TRACKED, and each number must be a RETRIEVABLE
-GitHub issue — asked of GitHub, and THREE-VALUED: 'the issue does not exist'
-(ISSUE-ABSENT) and 'this box could not ask' (ISSUE-UNVERIFIABLE) are separate
-non-granting states, because gh issue view exits 1 for both and only the first is an
-ANSWER. A deferral naming an issue that does not exist is a dropped finding wearing a
-link.
+issues= RECORDS THAT THE FINDING IS TRACKED, and each number must be an OPEN GitHub
+issue — asked of GitHub, and FOUR-VALUED: 'the issue does not exist' (ISSUE-ABSENT),
+'GitHub says it is CLOSED' (ISSUE-CLOSED) and 'this box could not ask'
+(ISSUE-UNVERIFIABLE) are separate non-granting states, because gh issue view exits 1
+for the first and third and 0 for the second, and only two of the three are ANSWERS. A
+deferral naming an issue that does not exist is a dropped finding wearing a link, and
+one naming an issue closed as a duplicate three weeks ago is the same thing with a
+better disguise — so OPEN is required, which is deliberately STRONGER than
+'retrievable'. A false refusal is recoverable (reopen it, or file a fresh tracking
+issue and re-authorize) and is the fail-closed direction.
 
 NO PR-BODY LINK IS REQUIRED, DELIBERATELY (#3626). An earlier version also demanded a
 visible #<N> reference in the PR BODY. It was removed, not fixed: a PR body is EDITABLE
-TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, whereas a top-level
-comment is PERMANENT AND ATTRIBUTABLE — so the body was the weaker artifact, and would
-stay weaker even if Markdown parsed trivially. Its Markdown recognisers leaked in two
-successive review rounds (multi-backtick code spans, explicit links, and more unhandled)
-for the same reason every recogniser over author-controlled text leaks; the census and
-the argument are recorded at the deleted site in scripts/flow/roborev-waiver-scan.py.
+AT ANY TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, whereas a
+top-level comment is PERMANENT AND ATTRIBUTABLE — so the body was the weaker artifact,
+and would stay weaker even if Markdown parsed trivially. Its Markdown recognisers
+leaked in two successive review rounds (multi-backtick code spans, explicit links,
+and more unhandled) for the same reason every recogniser over author-controlled text
+leaks; the census and the argument are recorded at the deleted site in
+scripts/flow/roborev-waiver-scan.py.
 The ruling needs no second artifact: the authorization comment is permanent,
 attributable and in the PR.
 
@@ -553,7 +559,7 @@ WHAT IT REPORTS: 'findings: DEFERRED (<n>, issues=#…, authorized @<login>, job
 deferred one — beside a 'deferral: GRANTED (...)' key recording the author, the issue
 numbers, the count, the bound scope and the reason VERBATIM. Every non-granting state
 speaks under its own name and leaves the FAIL: NONE / STALE / MALFORMED / UNAUTHORIZED
-/ COUNT-MISMATCH / ISSUE-ABSENT / ISSUE-UNVERIFIABLE / UNAVAILABLE.
+/ COUNT-MISMATCH / ISSUE-ABSENT / ISSUE-CLOSED / ISSUE-UNVERIFIABLE / UNAVAILABLE.
 
 NOT DEFERRABLE, IN ANY MODE: 'findings: UNKNOWN' and 'findings: SKIP'. Those values
 mean the findings state was never ESTABLISHED — we cannot count what we cannot see, and
@@ -1651,7 +1657,7 @@ if [ -n "$misplaced_deferral" ]; then
   DETAILS+=("ERROR: verdict-grammar: a per-check key OTHER THAN 'findings:' reports a DEFERRED state — $misplaced_deferral. A lead-authorized deferral (#3626) defers a NAMED SET OF FINDINGS and confers authority over the 'findings:' key and nothing else: it says nothing about whether the reviewer's diff arrived (prompt-content), whether the branch was pushed, or whether the reviewed range matched this base and head, so it may not excuse any of them. Admitting it elsewhere would let ONE authorization excuse a check NOBODY authorized. This holds even when a deferral WAS granted, and it is not waivable. Failing closed: the cause is a defect in the wrapper or its sourced files — a check that assigned DEFERRED to its own key — NOT something to fix in the branch under review. An absence of prompt-content evidence has its OWN separate authorization (the #3312 waiver, reported as 'prompt-content: WAIVED'); every other key must simply pass.")
 fi
 if [ -n "$ungranted_deferral" ]; then
-  DETAILS+=("ERROR: verdict-grammar: a per-check key reports a DEFERRED state that the deferral oracle did not affirmatively GRANT: $ungranted_deferral. DEFERRED is non-failing ONLY on a complete, matching authorization — a top-level PR comment from an allowlisted author, whose SOLE NONBLANK CONTENT names THIS base, head and job, whose authorized count EQUALS the count this run observed, and each of whose named issues is RETRIEVABLE from GitHub — and only on --recheck-job. Deferral state for this run: ${DEFERRAL_REPORT:-<none looked for>}. Failing closed: a DEFERRED token that no authorization backs is indistinguishable from an authorized one to every reader of this block, which is the false-assurance shape this wrapper exists to prevent.")
+  DETAILS+=("ERROR: verdict-grammar: a per-check key reports a DEFERRED state that the deferral oracle did not affirmatively GRANT: $ungranted_deferral. DEFERRED is non-failing ONLY on a complete, matching authorization — a top-level PR comment from an allowlisted author, whose SOLE NONBLANK CONTENT names THIS base, head and job, whose authorized count EQUALS the count this run observed, and each of whose named issues is an OPEN issue GitHub confirms — and only on --recheck-job. Deferral state for this run: ${DEFERRAL_REPORT:-<none looked for>}. Failing closed: a DEFERRED token that no authorization backs is indistinguishable from an authorized one to every reader of this block, which is the false-assurance shape this wrapper exists to prevent.")
 fi
 if [ -n "$unrecognised" ]; then
   DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / WAIVED / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing), or DEFERRED (non-failing ONLY on an affirmatively granted deferral). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")

@@ -7,7 +7,7 @@ Usage:
         < comments.json
 
 `<allowlist>` is a space-separated list of GitHub logins permitted to GRANT. Prints a facts-style
-result on stdout (one `key=value` per line, values whitespace-collapsed):
+result on stdout (one `key=value` per line, one line per value; see `safe_value`):
 
     state=granted|unauthorized|stale|malformed|none      (both kinds)
           |count-mismatch                                (findings-deferral only)
@@ -51,9 +51,10 @@ state tracking — because deciding "data or control?" inside a grammar the auth
 game. No quoting construct can be the only thing in a comment, so quoting cannot grant.
 
 The whole decision lives here — shape, scope, reason and authorization — so the shell never associates
-an author with a body at all. Values are whitespace-collapsed on output for the same reason
-`roborev-job-facts.py` collapses its own: a newline inside a value would be a second in-band channel,
-and a `reason` is free text.
+an author with a body at all. Output values are held to ONE LINE — a newline inside a value would be a
+second in-band channel, the class this file exists to close — but INTERNAL PRINTABLE WHITESPACE IS
+PRESERVED VERBATIM, because the `reason` is an audit record and the spec promises it is recorded as
+given; only line breaks and other control characters are visibly escaped (see `safe_value`).
 """
 import json
 import re
@@ -66,9 +67,21 @@ import sys
 WAIVE_KIND = "prompt-content-absent"
 DEFER_KIND = "findings-deferral"
 
+# ===== A SHA FIELD IS EXACTLY 40 HEX, IN BOTH MARKERS (roborev job 229) =====
+# The pattern used to admit `{7,40}` while the documented form, `--help`, and every diagnostic say a
+# full 40-hex sha. An ABBREVIATED sha therefore MATCHED the pattern and then diverged from the run's
+# 40-hex base/head, so it was reported `STALE` — "the marker names a different review" — when the truth
+# is `MALFORMED`: the marker names THIS review in a spelling the form does not permit, and an
+# authorizer sent to re-check which review they named will not find anything wrong with it. Both kinds
+# are tightened together: they share this parser, and a field rule that holds for one marker and not
+# the other is a divergence in a channel rule. SAFE BY CONSTRUCTION — abbreviated-to-STALE and
+# abbreviated-to-MALFORMED are BOTH non-granting, so no existing authorization's grantability changes,
+# only its cause text.
+_SHA_FIELD = r"[0-9a-f]{40}"
+
 WAIVE_MARKER = re.compile(
     r"^roborev-waive: prompt-content-absent"
-    r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
+    r" base=(" + _SHA_FIELD + r") head=(" + _SHA_FIELD + r") job=([0-9]+) reason=(.*)$"
 )
 # ===== A MARKER *ATTEMPT* IS THE STEM PLUS WHITESPACE **OR END OF LINE** (roborev job 228) =====
 # The attempt test used to be the stem plus a MANDATORY TRAILING SPACE, so a marker-only comment
@@ -88,7 +101,7 @@ WAIVE_STEM = "roborev-waive: prompt-content-absent"
 DEFER_MARKER = re.compile(
     r"^roborev-defer: findings"
     r" issues=([0-9]+(?:,[0-9]+)*) count=([0-9]+)"
-    r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
+    r" base=(" + _SHA_FIELD + r") head=(" + _SHA_FIELD + r") job=([0-9]+) reason=(.*)$"
 )
 DEFER_STEM = "roborev-defer: findings"
 
@@ -168,13 +181,40 @@ PLACEHOLDERS = {
 }
 
 
-def collapse(value):
-    return " ".join(str(value).split())
+# ===== ONE LINE, BUT THE REASON IS RECORDED VERBATIM (roborev job 229) =====
+# The old `collapse()` was `" ".join(value.split())`, which rewrites INTERNAL whitespace — so a reason
+# with a tab or with repeated spaces reached `deferral: GRANTED (... reason=...)` altered, while the
+# spec, `--help` and the emitted NOTICE all promise the reason is recorded VERBATIM. An authorization
+# whose recorded terms are not the terms that were given is a weaker audit trail than it claims to be,
+# and the claim is the whole value of the record.
+#
+# What actually has to hold is narrower than "collapse": the output is `key=value` lines the shell
+# reads with `sed -n 's/^reason=//p'`, so a value must not contain a LINE BREAK — that would be a
+# second in-band channel, the class this file exists to close. So printable whitespace (space, tab) is
+# preserved EXACTLY and only characters that could forge structure or corrupt a terminal are escaped:
+# CR/LF become the two-character sequences `\n`/`\r`, and any other control character becomes `\xNN`.
+# Escaping is VISIBLE rather than silent, so a reason that contained one is still readable as what it
+# was. Leading/trailing whitespace is trimmed (a `reason` is already `.strip()`ed by `judge_reason`,
+# and a trailing space in a `key=value` line is invisible noise).
+def safe_value(value):
+    out = []
+    for ch in str(value):
+        if ch in (" ", "\t"):
+            out.append(ch)
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F or 0x80 <= ord(ch) <= 0x9F:
+            out.append("\\x%02x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out).strip(" \t")
 
 
 def emit(kind, result):
     for key in EMIT_KEYS[kind]:
-        sys.stdout.write("%s=%s\n" % (key, collapse(result.get(key, ""))))
+        sys.stdout.write("%s=%s\n" % (key, safe_value(result.get(key, ""))))
 
 
 def judge_reason(reason):
@@ -191,6 +231,28 @@ def judge_reason(reason):
     if reason.lower() in PLACEHOLDERS:
         return ("the marker is missing a-substantive-reason (the reason '%s' is a bare "
                 "placeholder)" % reason)
+    # ===== A REASON MAY NOT CARRY EITHER MARKER STEM (roborev job 229) =====
+    # A granted reason is interpolated into `waiver:`/`deferral: GRANTED (... reason=...)`, which
+    # reaches the summary block — and the block's standing invariant is that NO emitted diagnostic
+    # carries any part of a marker form, not even its prefix, because summary blocks get pasted into
+    # PR comments as a matter of course (#3312 job 23).
+    #
+    # THE REAL LESSON, recorded because it cost a review round: the STRUCTURAL assert covers the CODE
+    # (no literal marker form in the shell), while a RUNTIME reason can carry one through a channel no
+    # source scan can see. The assert and the invariant were treated as the same property and they are
+    # not — an invariant over OUTPUT needs a check on the OUTPUT PATH.
+    #
+    # NOT a security layer, and deliberately not built as one: the sole-content rule refuses a pasted
+    # block outright (probed — the emitted text is not recognised as a marker whether pasted whole or
+    # embedded in a block, while a genuine sole-content marker still is), so this is spec conformance
+    # and invariant coverage. Which makes REFUSAL the right shape rather than escaping: an authorizer
+    # has no legitimate need to put a marker stem inside a reason, so the whole class goes away.
+    for stem in ("roborev-waive", "roborev-defer"):
+        if stem in reason.lower():
+            return ("the marker is missing a-stem-free-reason (the reason names an authorization "
+                    "marker keyword, and a granted reason is printed in the summary block, which "
+                    "gets pasted into PR comments — no emitted diagnostic may carry any part of a "
+                    "marker form; restate the reason without it)")
     return None
 
 
@@ -238,6 +300,8 @@ def judge_waive_line(line, author, base, head, job, allowlist):
             "detail": unauthorized_detail(author, allowlist, "waiver"),
         }
     return "granted", {"author": author, "scope": scope, "reason": reason}
+
+
 def unauthorized_detail(author, allowlist, what):
     return ("the marker is well-formed and names this review, but its author '@%s' is not on "
             "the %s allowlist (%s) — this is a public repository, so the base/head/job "
@@ -287,8 +351,8 @@ def unauthorized_detail(author, allowlist, what):
 # by it. The property is now carried by three legs, none of which reads the PR body — (1) the marker
 # NAMES the issue numbers, in a top-level PR comment, from a hard-coded author allowlist, associated by
 # `gh --json` structured fields, permanent and attributable; (2) each named issue must be RETRIEVABLE
-# via `gh issue view`, three-valued so that "issue absent" and "could not ask" are never both read as
-# verified; (3) this block RECORDS the numbers, the count, the scope and the reason verbatim.
+# via `gh issue view`, four-valued so that "issue absent", "issue closed" and "could not ask" are never
+# read as verified; (3) this block RECORDS the numbers, the count, the scope and the reason verbatim.
 #
 # REINSTATING A BODY SCAN HERE IS REINSTATING GENERATION THREE. If a stronger disposition signal is
 # ever wanted, it must come from an IMMUTABLE OR ATTRIBUTED artifact (a structured GitHub relation, or
@@ -339,7 +403,8 @@ def judge_defer_line(line, author, base, head, job, allowlist, observed_count):
             "re-authorize for the count actually observed" % (m_count, observed_count)))
     # ===== THE DISPOSITION HALF LIVES ENTIRELY IN THE CALLER, AS RETRIEVABILITY =====
     # "The finding is TRACKED" is established by asking GitHub whether each named issue EXISTS (a
-    # three-valued `gh issue view` in roborev-review-oracles.sh), not by scanning the PR body for a
+    # four-valued `gh issue view` in roborev-review-oracles.sh — an OPEN issue, since a closed one
+    # tracks nothing), not by scanning the PR body for a
     # sentence about it — see the tombstone above for why the body scan was removed rather than fixed.
     # AUTHORIZATION IS THE LAST GATE, exactly as it is for the waiver.
     if author not in allowlist:
@@ -363,7 +428,7 @@ def scan(kind, comments, base, head, job, allowlist, observed_count):
             author = author_obj.get("login") or ""
         elif isinstance(author_obj, str):
             author = author_obj
-        author = collapse(author) or "unknown"
+        author = " ".join(str(author).split()) or "unknown"
         body = comment.get("body")
         if not isinstance(body, str):
             continue
