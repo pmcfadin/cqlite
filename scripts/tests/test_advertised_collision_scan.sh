@@ -338,6 +338,73 @@ bad:  $outBad"
 fi
 
 # ===========================================================================
+echo "TEST 13: --json ESCAPES its string values — a quote, a backslash and a tab"
+# ===========================================================================
+# Remote names, lane paths, branch refs and failure details are caller- or
+# filesystem-derived and used to be interpolated RAW, so one `"` produced output that
+# CLAIMED to be JSON and was not — the worst shape for a machine-read field, because the
+# consumer's parse error names the parser and not the value.
+#
+# THE VECTOR IS THE REMOTE, because that is a value a caller really controls
+# (CLAIM_REMOTE) and it reaches the UNMEASURABLE detail verbatim; a branch name cannot
+# hold a quote, so it cannot carry this test.
+BAD_REMOTE="$(printf 'ori"gin\\back\tslash')"
+GH13="$T/gh-json-esc"; mk_gh "$GH13" 600
+rc13=0
+out13=$( PATH="$GH13:$PATH" CLAIM_REMOTE="$BAD_REMOTE" bash "$SCAN" --json 2>/dev/null ) || rc13=$?
+# A clean run's JSON is checked in the SAME case, so a helper that escapes by mangling
+# every value (or by emitting nothing) cannot pass by breaking only the happy path.
+rc13ok=0
+out13ok=$(run_scan "$GH13" --json --issue 600) || rc13ok=$?
+
+json_verdict=""
+if command -v python3 >/dev/null 2>&1; then
+  # python3 is used WHEN PRESENT and never required: this suite runs in `tooling-tests`
+  # before the gate's python3 gate, so the fallback below must be able to carry the case
+  # alone.
+  if printf '%s\n' "$out13" | python3 -c '
+import json, sys
+want = sys.argv[1]
+lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
+if not lines:
+    sys.exit("no JSON emitted at all")
+objs = [json.loads(l) for l in lines]          # raises on invalid JSON
+if not any(want in str(o.get("detail", "")) for o in objs):
+    sys.exit("the raw remote did not round-trip through the escaping")
+' "$BAD_REMOTE" >/dev/null 2>&1; then
+    if printf '%s\n' "$out13ok" | python3 -c '
+import json, sys
+lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
+if len(lines) < 2:
+    sys.exit("expected a row object and a summary object")
+[json.loads(l) for l in lines]
+' >/dev/null 2>&1; then
+      json_verdict="parsed-by-python3"
+    fi
+  fi
+else
+  # BASH-ONLY FALLBACK: assert the escapes are literally present and that no RAW control
+  # byte survived into the output.
+  esc_q=no; esc_b=no; esc_t=no; raw_tab=yes
+  case "$out13" in *'\"'*)  esc_q=yes ;; esac
+  case "$out13" in *'\\'*)  esc_b=yes ;; esac
+  case "$out13" in *'\t'*)  esc_t=yes ;; esac
+  case "$out13" in *"$(printf '\t')"*) raw_tab=yes ;; *) raw_tab=no ;; esac
+  if [ "$esc_q" = yes ] && [ "$esc_b" = yes ] && [ "$esc_t" = yes ] && [ "$raw_tab" = no ]; then
+    json_verdict="escapes-present-no-raw-control (python3 absent)"
+  fi
+fi
+
+if [ "$rc13" -eq 1 ] && [ -n "$json_verdict" ]; then
+  ok "--json output stays valid JSON with a quote, a backslash and a tab in a value, and the clean run still parses ($json_verdict)"
+else
+  bad "--json escaping broken: rc=$rc13 (expected 1) verdict='${json_verdict:-FAILED}'
+$out13
+clean run (rc=$rc13ok):
+$out13ok"
+fi
+
+# ===========================================================================
 echo
 echo "==== ADVERTISED-COLLISION-SCAN TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

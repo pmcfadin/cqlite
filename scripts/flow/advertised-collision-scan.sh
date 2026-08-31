@@ -77,7 +77,12 @@
 # USAGE
 #   advertised-collision-scan.sh [--issue <N>] [--json] [--help]
 #     --issue <N>  restrict the scan to ONE issue (the three facts are unchanged)
-#     --json       one JSON object per row on stdout, plus a final summary object
+#     --json       one JSON object per row on stdout, plus a final summary object.
+#                  Every STRING value is escaped (see json_str) — remote names, lane
+#                  paths, branch lists and failure details are caller- or
+#                  filesystem-derived, and one `"` used to emit output that CLAIMED to
+#                  be JSON and was not. Counters and `board_page_at_limit` are emitted
+#                  as JSON numbers/booleans, unquoted.
 #
 # ENV
 #   CLAIM_REMOTE   origin remote name or URL (default: origin) — the same variable
@@ -108,13 +113,56 @@ export GIT_TERMINAL_PROMPT=0
 die_usage() { echo "$prog: $*" >&2; exit 64; }
 say()       { printf '%s\n' "$*"; }
 
+# ---------------------------------------------------------------------------
+# json_str <text> — <text> as a QUOTED, ESCAPED JSON string, quotes included.
+#
+# EVERY string value emitted under --json goes through this, and nothing else may
+# interpolate a value into JSON directly. Remote names (CLAIM_REMOTE), lane paths,
+# branch lists and failure details are all caller- or filesystem-derived, so a single
+# `"` or `\` produced OUTPUT THAT CLAIMED TO BE JSON AND WAS NOT — the worst failure
+# shape for a machine-read field, because the consumer's parse error names the parser
+# and not the value.
+#
+# PURE BASH ON PURPOSE — no python3, no jq. This script's suite runs in the gate's
+# `tooling-tests` component BEFORE its python3 gate, and acquiring an interpreter
+# dependency to print a string would be a new SKIP surface in a lane that has none.
+#
+# Escapes, in the only order that is correct: the BACKSLASH first (reversing it would
+# escape the escapes this function just added), then the double quote, then the five
+# short control escapes, then every remaining C0 control as \u00xx. DEL (0x7f) and
+# every byte above it pass through — JSON requires no escape for them, and passing
+# UTF-8 bytes through unchanged keeps valid UTF-8 valid. NUL cannot occur: bash cannot
+# hold it in a variable.
+json_str() {
+  local LC_ALL=C
+  local s="${1:-}" out="" i=0 len c code
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    c="${s:$i:1}"
+    i=$((i + 1))
+    case "$c" in
+      '\')         out="$out"'\\' ;;
+      '"')         out="$out"'\"' ;;
+      $'\b')       out="$out\b" ;;
+      $'\f')       out="$out\f" ;;
+      $'\n')       out="$out\n" ;;
+      $'\r')       out="$out\r" ;;
+      $'\t')       out="$out\t" ;;
+      [[:cntrl:]]) code="$(printf '%d' "'$c")"; out="$out$(printf '\\u%04x' "$code")" ;;
+      *)           out="$out$c" ;;
+    esac
+  done
+  printf '"%s"' "$out"
+}
+
 # unmeasurable <what> <detail> — an input that could not be READ, reported in the
 # active output mode and ALWAYS paired with exit 1. It names the input, because
 # "none found" and "could not look" are the two answers a positive-detection tool
 # must never render identically (#3393).
 unmeasurable() {
   if [ "$AS_JSON" -eq 1 ]; then
-    printf '{"summary":"advertised-collision","result":"UNMEASURABLE","rows":0,"measured":"no","unmeasurable":"%s","detail":"%s"}\n' "$1" "$2"
+    printf '{"summary":"advertised-collision","result":"UNMEASURABLE","rows":0,"measured":"no","unmeasurable":%s,"detail":%s}\n' \
+      "$(json_str "$1")" "$(json_str "$2")"
   else
     printf 'SCAN: UNMEASURABLE what=%s detail=%s\n' "$1" "$2"
     printf 'SCAN: advertised-collision rows=0 measured=no (positive-detection only: this is NOT a clean bill of health)\n'
@@ -313,8 +361,10 @@ for num in $(printf '%s\n' "$BRANCH_ISSUES" | grep -E '^[0-9]+$' | sort -n -u); 
   lld="$ROW_LL_DIR"
   ROWS=$((ROWS + 1))
   if [ "$AS_JSON" -eq 1 ]; then
-    printf '{"issue":%s,"board":"Ready","branches":"%s","claim_ref":"absent","lane_lock":"%s","lane_dir":"%s"}\n' \
-      "$num" "$brs" "$lls" "$lld"
+    # `issue` is the only unquoted value here and it is provably numeric (the loop
+    # source is `grep -E '^[0-9]+$'`); every string goes through json_str.
+    printf '{"issue":%s,"board":"Ready","branches":%s,"claim_ref":"absent","lane_lock":%s,"lane_dir":%s}\n' \
+      "$num" "$(json_str "$brs")" "$(json_str "$lls")" "$(json_str "$lld")"
   else
     say "COLLISION: issue=$num board=Ready branches=$brs claim-ref=absent lane-lock=$lls lane-dir=${lld:-unknown}"
   fi
@@ -325,8 +375,12 @@ VERDICT=NONE-REPORTED
 [ "$ROWS" -eq 0 ] || VERDICT=FOUND
 
 if [ "$AS_JSON" -eq 1 ]; then
-  printf '{"summary":"advertised-collision","result":"%s","rows":%s,"ready":%s,"branch_issues":%s,"remote":"%s","board_page_at_limit":%s,"measured":"yes"}\n' \
-    "$VERDICT" "$ROWS" "$READY_COUNT" "$BRANCH_ISSUE_COUNT" "$REMOTE" "$BOARD_AT_LIMIT"
+  # rows/ready/branch_issues are counters this script computed, and
+  # board_page_at_limit is the literal `true`/`false` — those stay unquoted NUMBERS and
+  # BOOLEANS. `remote` is CLAIM_REMOTE, i.e. caller-supplied, so it is escaped like every
+  # other string.
+  printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":"yes"}\n' \
+    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$BRANCH_ISSUE_COUNT" "$(json_str "$REMOTE")" "$BOARD_AT_LIMIT"
 else
   say "SCAN: advertised-collision rows=$ROWS ready=$READY_COUNT branch-issues=$BRANCH_ISSUE_COUNT remote=$REMOTE measured=yes"
   if [ "$ROWS" -gt 0 ]; then
