@@ -156,11 +156,6 @@ impl<'a> ArrowRowAccumulator<'a> {
         Self::with_capacity(columns, 0)
     }
 
-    /// The projected column set this accumulator transposes for.
-    pub fn columns(&self) -> &'a [ColumnInfo] {
-        self.columns
-    }
-
     /// Committed rows in the current batch (a staged-but-uncommitted row is NOT
     /// counted — it has not joined the batch).
     pub fn len(&self) -> usize {
@@ -234,7 +229,10 @@ impl<'a> ArrowRowAccumulator<'a> {
         for (column, slot) in self.cells.iter_mut().zip(self.staged.iter_mut()) {
             column.push(slot.take());
         }
-        self.rows += 1;
+        // Saturating for hygiene: a batch is bounded by the row cap long before
+        // this could matter, but a wrapping row count would corrupt the arity
+        // checks that guard the charge.
+        self.rows = self.rows.saturating_add(1);
         self.has_staged = false;
     }
 

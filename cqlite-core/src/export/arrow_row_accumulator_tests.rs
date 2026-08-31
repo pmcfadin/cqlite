@@ -145,7 +145,11 @@ fn the_equivalence_property_catches_a_fold_that_skips_absent_columns() {
         .filter(|c| r.values.contains_key(c.name.as_str()))
         .cloned()
         .collect();
-    assert_eq!(present_only.len(), 1, "the fixture must have absent columns");
+    assert_eq!(
+        present_only.len(),
+        1,
+        "the fixture must have absent columns"
+    );
     let skipping_absent = estimate_arrow_row_bytes(&present_only, &r);
 
     assert!(

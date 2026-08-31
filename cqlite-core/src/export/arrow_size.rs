@@ -348,10 +348,11 @@ impl<'a> PreparedColumns<'a> {
             return usize::MAX;
         }
         charge_row(
-            self.shapes
-                .iter()
-                .copied()
-                .zip(cells.iter().map(|col| col.get(row).and_then(Option::as_ref))),
+            self.shapes.iter().copied().zip(
+                cells
+                    .iter()
+                    .map(|col| col.get(row).and_then(Option::as_ref)),
+            ),
         )
     }
 }
