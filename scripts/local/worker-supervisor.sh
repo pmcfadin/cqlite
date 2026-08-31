@@ -881,14 +881,29 @@ captured_question() {
     | head -n 3 | tr '\n' ' ' | cut -c1-300
 }
 
-# log_size <logfile>: byte size of the file, or 0 when absent. A wedged
-# interactive prompt produces NO further output, so a frozen byte size across two
-# consecutive scans is the positive evidence that distinguishes a genuine wedge
-# from a busy worker that merely printed a tool name and kept writing.
+# log_size <logfile>: byte size of the file, `0` when absent, or `-1` when it COULD NOT BE MEASURED. A
+# wedged interactive prompt produces NO further output, so a frozen byte size across two consecutive
+# scans is the positive evidence that distinguishes a genuine wedge from a busy worker that merely
+# printed a tool name and kept writing.
+#
+# A FAILED MEASUREMENT IS NOT A VALUE (#3601). This used to return the EMPTY STRING when `wc` failed,
+# and empty collapses to `0` in the caller's `-eq` comparison — so two UNMEASURABLE reads compared
+# EQUAL and a healthy worker's log read as frozen. `-1` is the same "no measurement" sentinel the
+# caller's `prev_size` already starts at, so an unmeasurable read can never satisfy the caller's
+# `-ge 0` guards and can never be mistaken for a real byte count.
 log_size() {
-  local f="$1"
+  local f="$1" n
   [[ -f "$f" ]] || { printf '0'; return 0; }
-  wc -c <"$f" 2>/dev/null | tr -d ' '
+  n="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+  # The digits are enumerated rather than given as a `[0-9]` RANGE, whose members are decided by the
+  # caller's collation.
+  case "$n" in
+    '' | *[!0123456789]*)
+      printf '%s' '-1'
+      return 0
+      ;;
+  esac
+  printf '%s' "$n"
 }
 
 marker_field() {
@@ -2741,7 +2756,11 @@ run_iteration() {
       # this scan and the prior one AND the log did not grow between them (and
       # the process is still alive — the loop condition). prev_size<0 = no prior
       # scan yet, so the very first scan can never confirm.
-      if [[ "$prev_sig" -eq 1 && "$cur_sig" -eq 1 && "$prev_size" -ge 0 && "$cur_size" -eq "$prev_size" ]]; then
+      # AND BOTH SCANS MUST BE REAL MEASUREMENTS (#3601). `log_size` reports `-1` when it could not
+      # measure; without `cur_size -ge 0` two FAILED reads compare equal and the log reads as frozen —
+      # the "an empty probe is not a zero" shape. A `-1` also propagates into `prev_size` below, so the
+      # next scan cannot confirm against it either.
+      if [[ "$prev_sig" -eq 1 && "$cur_sig" -eq 1 && "$prev_size" -ge 0 && "$cur_size" -ge 0 && "$cur_size" -eq "$prev_size" ]]; then
         local qtext
         qtext="$(captured_question "$logfile")"
         printf '%s' "$qtext" >"$stuck_flag"

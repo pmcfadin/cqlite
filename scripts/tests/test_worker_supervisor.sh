@@ -7485,11 +7485,25 @@ t test_lane_lock_publish_is_read_back_before_it_is_trusted
 # is not writable — so the cause is checked before it is attributed to a holder.
 # ---------------------------------------------------------------------------
 test_lane_lock_uncreatable_path_is_not_reported_as_contention() {
-  local d lane out rc
+  local d lane out rc ro
   d="$(new_case_dir)"
   common_env "$d"
   lane="lane3601nopath$$"
-  out="$(lane_lock_drive_at "$d" - "$d/no-such-parent/deeper" "$lane" SUPERVISOR_LOCK_PID_TRIES=2 SUPERVISOR_LOCK_PID_WAIT=0.01)"; rc=$?
+  # THE `TMPDIR` MUST EXIST AND BE SEARCHABLE, AND ONLY THEN UNWRITABLE. An absent container is refused
+  # EARLIER, by the legacy guard's existence probe ("cannot tell" — measured), so it never reaches
+  # `mkdir` and would test the wrong refusal. Read-and-search but not write (0555) is the shape that
+  # reaches the claim and fails there.
+  ro="$d/readonly-tmp"
+  mkdir -p "$ro"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if ( : >"$ro/.probe" ) 2>/dev/null; then
+    rm -f "$ro/.probe" 2>/dev/null || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    skip "lane-lock (uncreatable path): this uid can write a 0555 directory (running as root), so an uncreatable lock path is not stageable here — unmeasurable on this host rather than passing vacuously"
+    return 0
+  fi
+  out="$(lane_lock_drive_at "$d" - "$ro" "$lane" SUPERVISOR_LOCK_PID_TRIES=2 SUPERVISOR_LOCK_PID_WAIT=0.01)"; rc=$?
+  chmod 0755 "$ro" 2>/dev/null || true
   if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could NOT BE CREATED"* ]] \
      && [[ "$out" == *"NOT contention"* ]] && [[ "$out" != *"reclaiming stale lock"* ]] \
      && [[ "$out" != *"already running"* ]]; then
@@ -7500,6 +7514,120 @@ test_lane_lock_uncreatable_path_is_not_reported_as_contention() {
 }
 
 t test_lane_lock_uncreatable_path_is_not_reported_as_contention
+
+
+
+
+# ---------------------------------------------------------------------------
+# `log_size`: A FAILED MEASUREMENT IS NOT A VALUE (#3601, the issue's fourth item).
+#
+# `log_size` returned the EMPTY STRING when `wc` failed, and empty collapses to `0` in the caller's
+# `-eq` comparison — so two UNMEASURABLE reads compared EQUAL and the wedge detector read a healthy,
+# growing log as FROZEN. That is the "an empty probe is not a zero" shape: a measurement that did not
+# happen became the value 0. It was mitigated, not prevented, by the conjoined prompt-signature
+# requirement, which is why it is fixed with the rest of this family rather than left as a landmine.
+#
+# BOTH LEVELS ARE DRIVEN: the probe's own three answers, and the CONSUMER — because a probe returning a
+# sentinel nobody checks is not a fix.
+# ---------------------------------------------------------------------------
+test_log_size_unmeasurable_is_not_zero() {
+  local d shadow out absent present unmeasurable
+  d="$(new_case_dir)"
+  common_env "$d"
+  printf '12345' >"$d/some.log"
+
+  absent="$(env SUP="$SUPERVISOR" F="$d/no-such.log" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  present="$(env SUP="$SUPERVISOR" F="$d/some.log" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  # `wc` FAILS FOR REAL — a shadow earlier on `PATH`, not a stubbed function — because the defect is
+  # what happens when the external tool this probe depends on cannot answer.
+  shadow="$d/shadow"
+  mkdir -p "$shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
+  chmod +x "$shadow/wc"
+  unmeasurable="$(env SUP="$SUPERVISOR" F="$d/some.log" PATH="$shadow:$PATH" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+
+  if [[ "$absent" == "0" && "$present" == "5" && "$unmeasurable" == "-1" ]]; then
+    pass "log_size: absent=[0] (a real zero), present=[5] (a real count), unmeasurable=[-1] (a NAMED non-value) — three answers, so a failed measurement can never be mistaken for a byte count"
+  else
+    fail "log-size-collapses: absent=[$absent] present=[$present] unmeasurable=[$unmeasurable] — an unmeasurable read must not come back as an empty string (which \`-eq\` reads as 0) or as any real count"
+  fi
+
+  # ---- THE CONSUMER, BEHAVIOURALLY. Same wedge scenario as the genuine-wedge case (a worker that
+  # prints the prompt signature and then stops), with `wc` shadowed so the size is UNMEASURABLE on every
+  # scan. The wedge must NOT be confirmed: two failed reads are not evidence of a frozen log. Pre-fix
+  # this reported `stuck-on-question` and paged the owner, from a measurement that never happened.
+  local d2 call_ctr jf rc scount acount fcount
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  call_ctr="$d2/calls"
+  write_stuck_then_finalize_stub "$d2/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=2
+  export STUCK_POLL_SECS=1
+  export MAX_ITER_SECS=8
+  jf="$JOURNAL_FILE"
+  mkdir -p "$d2/shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$d2/shadow/wc"
+  chmod +x "$d2/shadow/wc"
+
+  env PATH="$d2/shadow:$PATH" bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1
+  rc=$?
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$scount" -eq 0 && "$acount" -eq 1 && "$fcount" -eq 1 ]]; then
+    pass "log_size CONSUMER: with the byte size UNMEASURABLE on every scan the wedge is NOT confirmed (stuck=0) and the iteration is judged on what IS known (abnormal, then finalize) — two failed reads are not a frozen log"
+  else
+    fail "log-size-consumer-false-wedge: rc=$rc stuck=$scount abnormal=$acount finalized=$fcount (see $jf) — an unmeasurable size must not confirm a wedge"
+  fi
+
+  # ---- MUTANT CONTRAST: the pre-fix probe, restored by one substitution — an unmeasurable read comes
+  # back EMPTY. `-eq` then reads it as 0, both scans agree, and the same run reports a wedge that never
+  # happened. Driven through the probe AND through the consumer, because the empty value is harmless
+  # until something compares it.
+  local ovr mval
+  ovr="$d/m-logsize.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" log_size \
+       "      printf '%s' '-1'" \
+       "      printf '%s' ''"; then
+    mval="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$d/some.log" PATH="$shadow:$PATH" \
+             bash -c 'source "$SUP"; source "$OVR"; printf "[%s]" "$(log_size "$F")"' 2>/dev/null || true)"
+    if [[ "$mval" == "[]" ]]; then
+      pass "log_size MUTANT: the pre-fix probe returns the EMPTY STRING for an unmeasurable read (mval=$mval) — which \`[[ x -eq y ]]\` reads as 0, so two failures compared equal; the assert above reds on exactly that"
+    else
+      fail "log-size-mutant: mval=[$mval] — the pre-fix form must be shown to return empty"
+    fi
+    # ...and the consumer, with that same pre-fix probe, DOES confirm the false wedge. This is the harm,
+    # measured rather than argued.
+    local d3 jf3 mscount
+    d3="$(new_case_dir)"
+    common_env "$d3"
+    write_stuck_then_finalize_stub "$d3/bin/worker.sh" "$d3/calls"
+    export WORKER_CMD="$d3/bin/worker.sh"
+    export MAX_ISSUES=1
+    export BREAKER_N=2
+    export STUCK_POLL_SECS=1
+    export MAX_ITER_SECS=8
+    jf3="$JOURNAL_FILE"
+    mkdir -p "$d3/shadow"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$d3/shadow/wc"
+    chmod +x "$d3/shadow/wc"
+    # The supervisor is run with the mutant sourced AFTER it, through the same `bash` entry the ordinary
+    # case uses, so only the probe differs.
+    env PATH="$d3/shadow:$PATH" SUP="$SUPERVISOR" OVR="$ovr" \
+      bash -c 'source "$SUP" 2>/dev/null || true; source "$OVR"; main "$@"' _ >"$d3/stdout.log" 2>&1 || true
+    mscount=$(jline_count "$jf3" '"outcome":"stuck-on-question"')
+    if [[ "$mscount" -ge 1 ]]; then
+      pass "log_size CONSUMER MUTANT: with the pre-fix probe the identical run reports a wedge (stuck=$mscount) from a measurement that never happened — so the consumer assert above is the sentinel doing the work"
+    else
+      fail "log-size-consumer-mutant: stuck=$mscount (see $jf3) — the pre-fix form must be shown to produce the false wedge, or the consumer assert measures nothing"
+    fi
+  fi
+  unset WORKER_CMD
+}
+
+t test_log_size_unmeasurable_is_not_zero
 
 
 # ---------------------------------------------------------------------------
