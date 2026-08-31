@@ -293,21 +293,29 @@ echo "TEST 7: every UNKNOWN-* verdict REFUSES and leaves the record UNTOUCHED"
 # exit-code-only check on some of these, which is why each case also asserts the token
 # is unchanged.
 # ===========================================================================
+# THE RECORD IS COMPARED BYTE FOR BYTE, not just by its token (#3436 FIX 13c). The token
+# covers the five identity fields only, so a refusal that rewrote `acquired-ts`, the nonce
+# or the reclaim fields would have passed — and agent-gate.sh's own comment claimed these
+# cases left the record BYTE-IDENTICAL, which was true of the duplicate-key case below and
+# of none of these. Cheaper to make the claim true than to weaken it.
 unknown_case() {
   local label="$1" issue="$2"; shift 2
-  local tok_b tok_a rc_l out_l lv
+  local tok_b tok_a rc_l out_l lv rec_b rec_a
   # fresh lane per case, held by a LIVE pid, then the record is substituted
   ll acquire "$issue" --actor flow --pid "$B" >/dev/null 2>&1
   "$@"
   tok_b=$(token_of "$issue")
+  rec_b=$(cat "$(record_of "$issue")" 2>/dev/null)
   ll acquire "$issue" --actor flow --pid "$C"; rc_l=$RC; out_l="$OUT"
   tok_a=$(token_of "$issue")
+  rec_a=$(cat "$(record_of "$issue")" 2>/dev/null)
   lv=$(field "$out_l" liveness)
   if [ "$rc_l" -eq 2 ] && printf '%s' "$out_l" | grep -q '^LANE-LOCK: OCCUPIED ' \
-     && [ "$lv" = "$label" ] && [ "$tok_a" = "$tok_b" ]; then
-    ok "$label REFUSES (OCCUPIED rc=2) and does not rewrite the record"
+     && [ "$lv" = "$label" ] && [ "$tok_a" = "$tok_b" ] \
+     && [ -n "$rec_b" ] && [ "$rec_a" = "$rec_b" ]; then
+    ok "$label REFUSES (OCCUPIED rc=2) and leaves the record BYTE-IDENTICAL"
   else
-    bad "expected OCCUPIED rc=2 liveness=$label with an unchanged record; got rc=$rc_l liveness=$lv tok '$tok_b' -> '$tok_a'
+    bad "expected OCCUPIED rc=2 liveness=$label with a BYTE-IDENTICAL record; got rc=$rc_l liveness=$lv tok '$tok_b' -> '$tok_a'; record changed: $([ "$rec_a" = "$rec_b" ] && echo no || echo YES)
 $out_l"
   fi
 }
@@ -637,15 +645,21 @@ fi
 # ===========================================================================
 echo "TEST 15: status renders single-lane and enumerated views"
 # ===========================================================================
+# ASSERT `HELD`, NOT `HELD|FREE` (#3436 FIX 13e). Lane 402 provably holds a record at this
+# point, so the alternation passed even if `status` reported a held lane as FREE — the one
+# failure the case exists to catch. Same for the lock COUNT: `-ge 1` is satisfied by any
+# non-empty enumeration, so it is pinned to the number of records actually on disk.
 ll status 402; rc1=$RC; out1="$OUT"
 ll status; rc2=$RC; out2="$OUT"
 locks=$(field "$out2" locks)
-if [ "$rc1" -eq 0 ] && printf '%s' "$out1" | grep -q '^LANE-LOCK: \(HELD\|FREE\) issue=402 ' \
+records_on_disk=$(ls -1 "$LOCKS"/lane-*.lock 2>/dev/null | wc -l | tr -d ' ')
+if [ "$rc1" -eq 0 ] && printf '%s' "$out1" | grep -q '^LANE-LOCK: HELD issue=402 ' \
+   && [ "$(field "$out1" holder-pid)" = "$E" ] \
    && [ "$rc2" -eq 0 ] && printf '%s' "$out2" | grep -q '^LANE-LOCK: STATUS ' \
-   && [ -n "$locks" ] && [ "$locks" -ge 1 ]; then
-  ok "status <N> renders one lane; bare status enumerates the lane root (locks=$locks) rc=0"
+   && [ -n "$locks" ] && [ "$locks" = "$records_on_disk" ] && [ "$locks" -ge 1 ]; then
+  ok "status <N> renders lane 402 as HELD naming its holder; bare status enumerates EXACTLY the $records_on_disk records on disk (rc=0)"
 else
-  bad "status render failed: rc=$rc1/$rc2 locks='$locks'
+  bad "status render failed: rc=$rc1/$rc2 locks='$locks' records-on-disk='$records_on_disk' holder-pid='$(field "$out1" holder-pid)' (expected $E)
 $out1
 $out2"
 fi

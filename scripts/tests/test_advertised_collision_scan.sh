@@ -179,8 +179,14 @@ echo "TEST 5: NONE-REPORTED is exit 1 and NEVER exit 0"
 # bill of health is #3393's fail-open family.
 GH5="$T/gh-empty"; mk_gh "$GH5"
 out=$(run_scan "$GH5"); rc=$?
-if [ "$rc" -eq 1 ] && [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'RESULT=NONE-REPORTED'; then
-  ok "an empty Ready column yields exit 1 (never 0) and says it is not a clean bill of health"
+# `[ "$rc" -ne 0 ]` used to sit beside the `-eq 1`, which is tautological — it read like a
+# second check and was none (#3436 FIX 13e). What actually needs asserting alongside the
+# exit code is the TEXT: the run must SAY it is not a clean bill of health, since that
+# sentence is the only thing standing between exit 1 and a cron treating it as all-clear.
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'RESULT=NONE-REPORTED' \
+   && printf '%s\n' "$out" | grep -q 'positive-detection only' \
+   && printf '%s\n' "$out" | grep -q 'NEVER 0'; then
+  ok "an empty Ready column yields exit 1 (never 0) and SAYS in words that it is not a clean bill of health"
 else
   bad "expected exit 1 with RESULT=NONE-REPORTED; got rc=$rc
 $out"
