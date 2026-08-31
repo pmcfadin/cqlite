@@ -66,7 +66,11 @@
 #      in name only, so the gate itself is then asked (via its `--cpu-budget` hook,
 #      never a re-derivation of its rules) what it will do with the value. One
 #      greppable `gate-pin:` line: VERIFIED / NOT-HONOURED / FAILED / UNMEASURED, and
-#      only VERIFIED is an [ok] (same posture as `git-push:`).
+#      only VERIFIED is an [ok] (same posture as `git-push:`). `--yes` persists it, and
+#      so does the narrow `--fix-gate-pin` that `.agent-ami/profile.yaml`'s verify.run
+#      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
+#      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
+#      what the write just persisted — no reboot and no re-login.
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -88,6 +92,16 @@
 #                                                      #   withholds "All checks green." and can
 #                                                      #   never buy a vacuous green. For offline
 #                                                      #   boxes and hermetic self-tests.
+#   bash scripts/bootstrap-agent-machine.sh --fix-gate-pin     # persist the single-gate pin
+#                                                      #   (section 5b's /etc/environment write)
+#                                                      #   WITHOUT --yes, and nothing else — the
+#                                                      #   sibling of --fix-credentials, and what
+#                                                      #   .agent-ami/profile.yaml's verify.run
+#                                                      #   uses so a freshly launched box is
+#                                                      #   PINNED rather than merely reported
+#                                                      #   unpinned. Needs privilege; when it
+#                                                      #   cannot persist, the section stays
+#                                                      #   non-passing (never an [ok]).
 #   bash scripts/bootstrap-agent-machine.sh --skip-gate-pin    # skip ONLY section 5b (the
 #                                                      #   single-gate pin: the /etc/environment
 #                                                      #   write AND the PAM-session visibility
@@ -128,6 +142,20 @@ SKIP_GATE_PIN_HOW=""
 if [ "${CQLITE_BOOTSTRAP_SKIP_GATE_PIN:-0}" = 1 ]; then
   SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1"
 fi
+# --fix-gate-pin (issue #3414): perform section 5b's /etc/environment write WITHOUT --yes,
+# and nothing else. A SIBLING of --fix-credentials, deliberately not a widening of it:
+# that flag documents itself as running section 3b's auto-fix "and NOTHING else", and
+# quietly making that false is the drift this codebase pays for later. Same one-flag-per-
+# subject rule --skip-push-probe / --skip-smoke / --skip-gate-pin already follow.
+#
+# WHY A REPAIR FLAG AT ALL. `.agent-ami/profile.yaml`'s verify.run is the only bootstrap
+# invocation a launcher-onboarded box ever gets, and it does not pass --yes. Without this
+# flag a fresh box is left UNPINNED and verify merely reds — which converts #3414's silent
+# defect into a loud one without removing it, and a verify that reds on every new box is an
+# alarm people learn to waive. Persisting env wiring is not a toolchain install, so verify
+# stays a verification step rather than becoming an installer — the same reasoning that
+# justified --fix-credentials.
+FIX_GATE_PIN=0
 FIX_CREDENTIALS=0
 STRICT=0
 for arg in "$@"; do
@@ -136,6 +164,7 @@ for arg in "$@"; do
     --skip-smoke) SKIP_SMOKE=1 ;;
     --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
     --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
+    --fix-gate-pin) FIX_GATE_PIN=1 ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
     --strict) STRICT=1 ;;
     -h|--help)
@@ -147,6 +176,20 @@ for arg in "$@"; do
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
+
+# Contradictory intents must not resolve silently — "I told it to fix the pin and it
+# skipped the section" is exactly the class of quiet surprise this issue is about.
+# An EXPLICIT --skip-gate-pin beside --fix-gate-pin is a usage error; the ENV opt-out is
+# the weaker signal, so an explicit --fix-gate-pin overrides it (a harness exporting
+# CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 must not be able to neuter a caller's explicit repair).
+# Resolved here, after the loop, so flag ORDER cannot change the outcome.
+if [ "$FIX_GATE_PIN" = 1 ] && [ "$SKIP_GATE_PIN" = 1 ]; then
+  if [ "$SKIP_GATE_PIN_HOW" = "--skip-gate-pin" ]; then
+    echo "bootstrap: --skip-gate-pin and --fix-gate-pin are contradictory (try --help)" >&2
+    exit 2
+  fi
+  SKIP_GATE_PIN=0; SKIP_GATE_PIN_HOW=""
+fi
 
 # ---- OS + package-manager detection ----
 OS=$(uname -s)
@@ -1918,9 +1961,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     warn "gate-pin: cannot read $PIN_ENV_FILE — cannot tell whether the pin is already there, so nothing was written (a blind append could duplicate or contradict an existing line)"
   elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
     info "$PIN_ENV_FILE already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is (a box deliberately running >1 concurrent gate overrides the pin; bootstrap never rewrites an existing value)"
-  elif [ "$AUTO_YES" != 1 ]; then
-    PIN_PERSIST_NOTE="not persisted (no --yes)"
-    info "persist the pin:  bash scripts/bootstrap-agent-machine.sh --yes   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE)"
+  elif [ "$AUTO_YES" != 1 ] && [ "$FIX_GATE_PIN" != 1 ]; then
+    PIN_PERSIST_NOTE="not persisted (neither --yes nor --fix-gate-pin)"
+    info "persist the pin:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE; --yes does it too)"
   elif [ "$PIN_WRITE_PRIV" != 1 ]; then
     PIN_PERSIST_NOTE="no privilege to write $PIN_ENV_FILE ($PIN_PRIV_STATE)"
     warn "gate-pin: cannot write $PIN_ENV_FILE ($PIN_PRIV_STATE) — the pin was NOT persisted"
@@ -2098,7 +2141,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       case "$PIN_FILE_HAS_LINE" in
         yes)
           info "the pin IS in $PIN_ENV_FILE and a fresh session still does not see it — this is a PAM condition, NOT a missing pin"
-          info "re-running with --yes will NOT help: it finds the line already present and changes nothing"
+          info "re-running with --yes / --fix-gate-pin will NOT help: either finds the line already present and changes nothing"
           info "check the session stack reads it:  grep -n pam_env /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sshd   (each needs 'pam_env.so readenv=1')"
           ;;
         absent-file)
@@ -2109,7 +2152,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           ;;
         *)
           [ -n "$PIN_PERSIST_NOTE" ] && info "nothing was persisted this run: $PIN_PERSIST_NOTE"
-          info "fix:  bash scripts/bootstrap-agent-machine.sh --yes   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE)"
+          info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE; --yes does it too)"
           ;;
       esac
       info "the gate reports the same fact on its cpu-budget line as max-concurrency=N(default) instead of N(pinned)"
