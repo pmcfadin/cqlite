@@ -10,18 +10,64 @@
 //! DIFFER for a `list` (unconditionally) and for a UDT-bearing `set` (issue
 //! #804's CLI-parity `list`).
 //!
-//! # What reaches this module, which is WIDER than the obvious two columns
+//! # ROUTING: what reaches this module, and via which ARM — THE ONE STATEMENT
 //!
-//! Every `map` KEY goes through [`value_to_hashable_key`], because `value::map_to_py`
-//! has no gate — a Python `dict` key must be hashable whatever it holds. Every
-//! non-UDT `set` element goes through it too, from `value::set_to_py`'s `frozenset`
-//! branch. Those are the direct callers, but the REACH is deeper than the
-//! columns that name them: a `set` whose elements contain a UDT takes
-//! `set_to_py`'s `list` branch and converts each element with `value_to_py` —
-//! and if that element is a frozen MAP, `map_to_py` projects its keys through
-//! this module anyway. So "only the frozen-map columns reach the projection" is
-//! FALSE, and was stated wrongly in four places before #3500 corrected it. Scope
-//! a coverage claim to the ARM it reaches, never to the function.
+//! This section is the SINGLE authoritative statement of which columns of the
+//! #3500 fixture reach [`value_to_hashable_key`] and on which arm they land.
+//! `test-data/schemas/nested-udt-keys.cql`,
+//! `test-data/scripts/generate-nested-udt-keys.sh` and
+//! `bindings/python/tests/test_nested_udt_hashable.py` POINT here and assert no
+//! routing of their own. That is not tidiness: the fact was restated in every
+//! file that mentioned it and DRIFTED in all but one — wrong in four places in
+//! the test file (roborev job 245) and then in the two fixture headers (job
+//! 267), each time as the same over-broad "only the frozen maps reach it at
+//! all". It lives here because this is the file whose code decides the routing,
+//! so the person who invalidates the claim is the person editing it. Same
+//! treatment, for the same reason, as the `Value::Json` reachability claim
+//! stated once at its own arm.
+//!
+//! The DIRECT callers, both in [`crate::value`]:
+//!
+//! * `map_to_py` projects EVERY key through [`value_to_hashable_key`]. There is
+//!   no gate — a Python `dict` key must be hashable whatever it holds.
+//! * `set_to_py` projects elements through it only on its `frozenset` branch,
+//!   i.e. when [`contains_udt`] is false for every element. A UDT-bearing set
+//!   takes the `list` branch (#804) and converts each element with
+//!   `value_to_py` instead.
+//!
+//! The REACH is WIDER than those two callers, because `value_to_py` on a nested
+//! value re-enters `map_to_py`. Per column of
+//! `test_nested_udt_keys.nested_udt_keys`, which is this module's whole corpus:
+//!
+//! * `f_map_tuple_udt` — REACHES, via its frozen-map KEYS, which
+//!   `parse_frozen_map_value` decodes structurally. Arm: `Tuple`, recursing into
+//!   `Udt` (including its `None => py.None()` field branch).
+//! * `f_map_set_udt` — REACHES, same route. Arm: `Set`, recursing into `Udt`
+//!   (including that same `None` branch).
+//! * `s_map_udt_key` — REACHES, via the INNER frozen map's keys:
+//!   `set_to_py`'s `list` branch → `value_to_py` → `map_to_py`. Arm: `Udt`
+//!   (through `Frozen`), the inner key type being `frozen<key_part>`.
+//! * `s_map_udt_val` — REACHES, same route; its inner map keys are `int`. Arm:
+//!   SCALAR (`Integer`).
+//! * `m_tuple_udt` — REACHES, but its keys arrive as opaque `Value::Blob` from
+//!   the scalar-only `parse_cell_path_key` (a cqlite-core gap, #3612). Arm:
+//!   SCALAR (`Blob`).
+//! * `s_tuple_udt`, `s_set_udt`, `s_list_udt`, `f_set_tuple_udt` — do NOT reach
+//!   it. `set_to_py`'s `list` branch converts each element with `value_to_py`,
+//!   and nothing below those elements is a map.
+//!
+//! Two conclusions, both of which have been got wrong in the other direction:
+//!
+//! * "the frozen maps are the only columns that reach this function AT ALL" is
+//!   FALSE — FIVE of the nine columns do.
+//! * "the frozen maps are the only columns that reach the NEW `Tuple`/`Set`
+//!   arms" is TRUE, and is why those two columns exist: `s_map_udt_key`'s inner
+//!   map key is a UDT (`Udt` arm), `s_map_udt_val`'s is an `int` (scalar arm)
+//!   and `m_tuple_udt`'s is a `Blob` (scalar arm), so no other route lands on
+//!   `Tuple` or `Set`.
+//!
+//! Hence the rule the drift keeps proving: scope a coverage claim to the ARM it
+//! reaches, NEVER to the function.
 //!
 //! # Totality, and why it is the compiler's job
 //!
