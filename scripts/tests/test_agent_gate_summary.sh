@@ -798,12 +798,23 @@ fi
 #     false positive on a gate path: the ASSOCIATIVE ARRAY (`declare/local/typeset -A`),
 #     CASE-CONVERSION PARAMETER EXPANSION (the `${v` + `^^}` / `,,}` / `^}` / `,}` forms),
 #     and `&>>` append-redirection.
-#     FOURTH, added on roborev job 285: GNU-only `\b` in a `grep -E` pattern. POSIX ERE leaves
-#     `\b` UNDEFINED and BSD grep on macOS does not honour it, so a match silently FAILS and a
-#     mandatory guard reports false failures — the same first-class-host argument as the bash-4
-#     floor, one tool over. Unambiguous by the same test: there is no legitimate portable use of
-#     `\b` in `grep -E`, so it cannot false-positive. Found in 4 sites, one of which the PREVIOUS
-#     round's own fix had just introduced.
+#     A FOURTH ARM FOR GNU-ONLY `\b` IN `grep -E` WAS ADDED (job 285) AND REMOVED (job 291).
+#     It is the right RULE — POSIX ERE leaves `\b` undefined and BSD grep ignores it — but a
+#     line-based grep-for-greps cannot enforce it, and TWO blind spots were measured within one
+#     review round:
+#       (a) the needle had to be `grep [^|]*\b` to avoid spanning a shell pipe, and `[^|]*`
+#           therefore cannot span an ALTERNATION either — so `grep -nE '... (cargo|rustc)\b'`,
+#           a real offender in this very repository, evaded it. Alternations are common in
+#           greps, so this is not a corner case.
+#       (b) a needle ASSEMBLED from fragments (the technique used two paragraphs up to stop
+#           this lint matching its own source) also evades it — so the remedy for self-matching
+#           doubles as a way to hide a real offender.
+#     Closing either needs shell+regex parsing, which is the unbounded problem #3400's parse
+#     lint was descoped for and #3229's census oracle removed over: a guard with documented
+#     false PASSes is worse than none, because it invites reliance it cannot support. The real
+#     offenders found while it existed ARE fixed; what is gone is the claim to detect the next
+#     one. That claim is now made by nothing, which is honest, rather than by a lint that
+#     misses alternations.
 #     NOT linted, because judging them needs context a grep does not have: `mapfile` /
 #     `readarray` (a script may define its own function of that name) and COMPUTED negative
 #     subscripts (`${a[$i]}` with i<0 is undetectable statically anyway). A lint with false
@@ -849,12 +860,10 @@ while IFS= read -r _b32f; do
   _p_caret='\^'; _p_comma=','
   _p_case='\$\{[A-Za-z_][A-Za-z0-9_]*('"$_p_caret$_p_caret"'|'"$_p_comma$_p_comma"'|'"$_p_caret"'|'"$_p_comma"')\}'
   _p_amp='&'; _p_redir="$_p_amp"'>''>'
-  _p_bs='\\'; _p_gnub='grep [^|]*'"$_p_bs"'b'
   if grep -qE < <(sed 's/#.*$//' "$SCRIPT_DIR/../../$_b32f" 2>/dev/null) \
        -e '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
        -e "$_p_case" \
-       -e "$_p_redir" \
-       -e "$_p_gnub"; then
+       -e "$_p_redir"; then
     b32_offenders="$b32_offenders $_b32f"
   fi
 done <<EOF
@@ -863,9 +872,9 @@ EOF
 if [ "$b32_scanned" -lt 20 ]; then
   bad "portability-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
 elif [ -n "$b32_offenders" ]; then
-  bad "portability-8c: gate-invoked script(s) use a NON-PORTABLE construct (bash-4 associative array, bash-4 case-conversion parameter expansion, bash-4 append-redirection, or a GNU-only word-boundary escape in grep -E which POSIX ERE leaves undefined and BSD grep does not honour), which fails on macOS — a first-class gate host:$b32_offenders"
+  bad "portability-8c: gate-invoked script(s) use a NON-PORTABLE construct (bash-4 associative array, bash-4 case-conversion parameter expansion, or bash-4 append-redirection), which fails on macOS — a first-class gate host:$b32_offenders"
 else
-  ok "portability-8c: 0 of 4 RECOGNISED non-portable constructs (bash-4 associative array, bash-4 case-conversion parameter expansion, bash-4 append-redirection, GNU-only word-boundary escape in grep -E) found across $b32_scanned gate-invoked scripts — NOT an exhaustive portability proof: \`bash -n\` does not catch the bash-4 class (measured: rc=0 for all three) and nothing here executes under a BSD userland; only EXECUTION on a macOS host establishes either. The constructs are deliberately NOT spelled in this message: it would make the lint flag its own diagnostic."
+  ok "portability-8c: 0 of 3 RECOGNISED non-portable constructs (bash-4 associative array, bash-4 case-conversion parameter expansion, bash-4 append-redirection) found across $b32_scanned gate-invoked scripts — NOT an exhaustive portability proof: \`bash -n\` does not catch the bash-4 class (measured: rc=0 for all three) and nothing here executes under a BSD userland; only EXECUTION on a macOS host establishes either. The constructs are deliberately NOT spelled in this message: it would make the lint flag its own diagnostic."
 fi
 
 # 9. Accelerator absence WARN + state markers (issue #1848). The gate must:

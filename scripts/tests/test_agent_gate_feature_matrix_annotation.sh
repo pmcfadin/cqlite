@@ -212,7 +212,10 @@ fi
 # attribute a nested run's cargo invocations to itself. See the library header.
 # The needle is SPLIT so this guard cannot match its own source line (a self-matching
 # grep is a guard that is always red, which is a guard nobody keeps).
-fm_export_needle="export"' -f (cargo|env)\b'
+# Portable boundary, not GNU `\b`. The needle stays SPLIT (so this guard cannot match its own
+# source line), but note what that costs: an assembled needle is invisible to a grep-based
+# portability lint, which is one of the two blind spots that got that lint's `\b` arm descoped.
+fm_export_needle="export"' -f (cargo|env)([^[:alnum:]_]|$)'
 if grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts" >/dev/null 2>&1; then
   bad "B3: the cargo/env observers are EXPORTED — nested scripts would pollute a component's matrix"
   grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts" | head -5
@@ -347,7 +350,11 @@ fm_begin=$(grep -n '^# ==== BEGIN feature-matrix annotation' "$GATE" | head -1 |
 if [ -z "$fm_begin" ]; then
   bad "B6: could not locate the '==== BEGIN feature-matrix annotation' marker in $GATE"
 else
-  late_probes=$(grep -nE 'command -v (cargo|rustc)\b' "$GATE" | awk -F: -v b="$fm_begin" '$1 > b')
+  # Portable boundary, not GNU `\b` (POSIX ERE leaves it undefined; BSD grep on macOS ignores
+  # it, so this scan would find NOTHING there and B6 would pass vacuously). Note the descoped
+  # lint could never have caught this line: its needle was `grep [^|]*\b`, and the alternation
+  # `(cargo|rustc)` contains the very `|` that needle refuses to span.
+  late_probes=$(grep -nE 'command -v (cargo|rustc)([^[:alnum:]_]|$)' "$GATE" | awk -F: -v b="$fm_begin" '$1 > b')
   if [ -z "$late_probes" ]; then
     ok "B6: no 'command -v cargo/rustc' probe below the observer definition (they use type -P, which cannot match the shell function)"
   else

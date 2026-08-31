@@ -2621,9 +2621,13 @@ _python_build_verify_venv() {
       # (or 4) on its failure — AFTER this function has already invoked maturin once — so the
       # rc cannot express execution history and "never reached maturin" was a false claim.
       # A file, not a variable: this is a subshell, so a variable would not survive it.
-      [ -n "${_pbv_reach_marker:-}" ] && : > "$_pbv_reach_marker"
       # shellcheck disable=SC1091
       . "$active_venv/bin/activate"
+      # THE MARKER GOES HERE — AFTER activation, IMMEDIATELY BEFORE the invocation (roborev job
+      # 291). Written before the `. activate` it claimed a maturin run that an activation failure
+      # would have prevented: the same "asserting something not yet measured" defect this marker
+      # exists to fix, moved one line earlier.
+      [ -n "${_pbv_reach_marker:-}" ] && : > "$_pbv_reach_marker"
       eval "$maturin_cmd"
     )
   }
