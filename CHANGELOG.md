@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (CLI `--format json` and `cqlite-core`'s `ToJson`, observable): a UDT
+  renders as its DECLARED FIELDS AND NOTHING ELSE — the injected `_type` key is
+  gone (#3629).** This is the CLI-side half of #3504's class, on a third surface and
+  in **two independent code copies**: `cqlite-cli/src/output/json.rs`'s
+  `value_to_json` and `cqlite-core/src/query/result.rs`'s `impl ToJson for Value`
+  each inserted `"_type"` into the SAME JSON object that then received the UDT's own
+  declared fields. A UDT that DECLARES a field named `_type` (legal CQL via a quoted
+  identifier) therefore silently **overwrote** the injected type name, and a NULL
+  such field rendered it as `null` — so the type name was unrecoverable and the
+  collision was invisible. Both copies now call one shared rule,
+  `cqlite_core::util::udt_json::udt_to_json_object`, generic over the field-VALUE
+  renderer because the two writers differ deliberately in 11 other arms.
+
+  - **Before**: `{"_type":"plain","label":"no-colliding-field","real_field":7}`
+  - **After**:  `{"label":"no-colliding-field","real_field":7}`
+
+  **What a consumer that parsed `_type` should do.** `--format json` carries **no
+  type channel by design**: the document is a bare array of row objects (an empty
+  result is exactly `[]`) and column metadata supplies only key NAMES, so there is
+  nowhere in that shape for type identity to live. Read the type name from the
+  **schema** (`DESCRIBE TYPE` / the `CREATE TYPE`), or use a **binding**, where
+  #3504 put identity on the object OUTSIDE the field mapping (`type_name` /
+  `keyspace`). The new shape is what the reference tool already emitted:
+  `cassandra-5.0.8`'s `UserType.toJSONString` iterates `stringFieldNames` alone and
+  writes no type key and no keyspace key, appending literal `null` for an absent
+  field — which is also why a UDT whose own `_type` field IS null still correctly
+  renders `"_type": null`.
+
+  **Known coverage reduction**, recorded rather than omitted: the JSON/CSV
+  golden-parity lane's UDT comparator lost the check that compared the emitted type
+  name against the committed `CREATE TYPE`, so it can no longer detect a UDT
+  resolved against the WRONG type when two types declare the same field names,
+  order and types. That is unavoidable — the egress no longer carries type identity
+  for a comparator to check — and the old code was already blind on that fixture,
+  refusing outright to compare any UDT declaring a `_type` field.
+
 ### Fixed
 
 - **Both bindings (observable): a JSON number above `i64::MAX` no longer loses

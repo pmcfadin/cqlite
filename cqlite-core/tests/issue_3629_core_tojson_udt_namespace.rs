@@ -258,7 +258,7 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
 /// Row 3's `"_type": null` is the USER's null field and is CORRECT — the fix
 /// must not "repair" it into a type name.
 #[tokio::test]
-async fn blind_guard_colliding_udt_keeps_user_fields_verbatim() {
+async fn nondiscriminating_passes_on_unfixed_code_colliding_udt_keeps_user_fields_verbatim() {
     let rows = rows_by_id("udt_collide").await;
 
     assert_eq!(
@@ -287,7 +287,7 @@ async fn blind_guard_colliding_udt_keeps_user_fields_verbatim() {
 /// BLIND (preservation only). `fs frozen<set<frozen<collide>>>` — the
 /// collection-member path into the same renderer.
 #[tokio::test]
-async fn blind_guard_udt_inside_frozen_set() {
+async fn nondiscriminating_passes_on_unfixed_code_udt_inside_frozen_set() {
     let rows = rows_by_id("udt_collide").await;
     assert_eq!(
         cell(&rows, 1, "fs"),
@@ -309,7 +309,7 @@ async fn blind_guard_udt_inside_frozen_set() {
 /// renderer in the CLI, whose Map arm emits `{"key": …, "value": …}` — asserted
 /// in the CLI half.)
 #[tokio::test]
-async fn blind_guard_frozen_map_udt_key_is_display_stringified_not_json_rendered() {
+async fn nondiscriminating_passes_on_unfixed_code_frozen_map_udt_key_is_display_stringified() {
     let rows = rows_by_id("udt_collide").await;
     for (column, type_name) in [("fcm", "collide"), ("ftm", "collide_twin")] {
         let m = cell(&rows, 1, column);
@@ -331,7 +331,7 @@ async fn blind_guard_frozen_map_udt_key_is_display_stringified_not_json_rendered
 /// BLIND (preservation only). Table 2's `stu`/`ssu`/`mtu` all nest `collide`,
 /// which declares `_type`.
 #[tokio::test]
-async fn blind_guard_shapes_table_collide_nestings() {
+async fn nondiscriminating_passes_on_unfixed_code_shapes_table_collide_nestings() {
     let rows = rows_by_id("udt_hashable_shapes").await;
     let collide = json!({
         "_type": "tuple-type-marker",
