@@ -2609,12 +2609,17 @@ else
   #      must be the probe's VERIFIED verdict. Any future `ok` added for a file write,
   #      a profile grep or an inherited value reds this immediately.
   pin_section=$(awk '/^# ---- 5b\./,/^# ---- 5c\./' "$BOOTSTRAP")
+  # TWO success verdicts now, and both are ENUMERATED rather than merely counted: the
+  # probe's VERIFIED, and the non-Linux NOT-APPLICABLE (an explicit inapplicability, which
+  # must be an [ok] so a correctly-configured Mac is not permanently non-passing). Naming
+  # them is what keeps this a real guard — a bare count of 2 would let a third `ok` in as
+  # soon as someone removed one of these.
   pin_ok_total=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "' || true)
-  pin_ok_verified=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: VERIFIED' || true)
-  if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 1 ] && [ "${pin_ok_verified:-0}" = 1 ]; then
-    ok "gate-pin: section 5b's ONLY success verdict is the probe's VERIFIED line"
+  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: (VERIFIED|NOT-APPLICABLE)' || true)
+  if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 2 ] && [ "${pin_ok_named:-0}" = 2 ]; then
+    ok "gate-pin: section 5b's ONLY success verdicts are VERIFIED and NOT-APPLICABLE"
   else
-    bad "gate-pin: section 5b has ${pin_ok_total:-0} ok() call(s), ${pin_ok_verified:-0} of them the probe verdict"
+    bad "gate-pin: section 5b has ${pin_ok_total:-0} ok() call(s), ${pin_ok_named:-0} of them a named verdict"
   fi
 
   # 11j. The OPT-OUT is loud and NON-PASSING: a switch that returned `ok` would be a
@@ -2968,11 +2973,14 @@ else
   #      UNMEASURED. Asserted across all three file states in one loop, because the
   #      individual cases (11w absent, 11z2 present, 11s2 unreadable) each check one row
   #      and none of them states the INVARIANT that binds the three.
-  for pin_row in absent present unreadable; do
+  for pin_row in absent present mismatched unreadable; do
     envf_r5="$tmp/pin-env-r5-$pin_row"
     case "$pin_row" in
       absent)     : >"$envf_r5" ;;
       present)    printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_r5" ;;
+      # `mismatched` joined the loop with the value check (roborev round 3): the new
+      # comparison must not become a way for file state to soften a negative either.
+      mismatched) printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_r5" ;;
       unreadable) printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_r5"; chmod 0000 "$envf_r5" ;;
     esac
     if [ "$pin_row" = unreadable ] && [ "$(id -u)" = 0 ]; then
@@ -2989,6 +2997,70 @@ else
       printf '%s\n' "$out_r5" | grep -i 'gate-pin' | head -2
     fi
   done
+
+  # 11aa. THE FILE'S VALUE MUST EQUAL THE SESSION'S, not merely exist (issue #3414 roborev
+  #      round 3 — the FOURTH instance of this issue's own defect in this lane, and it was
+  #      inside the correlation added to fix the third). File says `abc`, a sudo- or
+  #      user-specific source supplies `1`: both halves of "line present AND session sees
+  #      it" hold, so the old check said VERIFIED — while every ordinary PAM session gets
+  #      `abc`, which the gate discards for its default formula and stamps N(invalid).
+  envf_aa="$tmp/pin-env-aa"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_aa"
+  out_aa=$(runpin "$pinroot" "$shims_one" "$envf_aa" HOME="$pin_home_plain")   # session sees 1
+  if printf '%s' "$out_aa" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! printf '%s' "$out_aa" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_aa" | grep -q "OVERRIDING the system-wide file"; then
+    ok "gate-pin: a file value the session does NOT match is not VERIFIED (presence is not the predicate)"
+  else
+    bad "gate-pin: a file/session VALUE mismatch was certified"
+    printf '%s\n' "$out_aa" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ab. ...and the equality is a STRING comparison, deliberately not a numeric one. The
+  #      gate's own resolver discards `1 ` (trailing space matches *[!0-9]*), so treating
+  #      it as equal to `1` here would make bootstrap certify a value the gate rejects —
+  #      a second classifier disagreeing with the one that decides, which is the thing
+  #      pin_gate_source_for exists to avoid.
+  envf_ab="$tmp/pin-env-ab"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1 \n' >"$envf_ab"
+  out_ab=$(runpin "$pinroot" "$shims_one" "$envf_ab" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_ab" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: '1 ' in the file is not equal to '1' in the session (string equality, as the gate resolves it)"
+  else
+    bad "gate-pin: a value the gate would DISCARD was normalised into a match"
+    printf '%s\n' "$out_ab" | grep -i 'gate-pin' | head -2
+  fi
+
+  # 11ac. NON-LINUX IS AN EXPLICIT, NON-FAILING INAPPLICABILITY (roborev round 3). The
+  #      mechanism is /etc/environment + pam_env, which is Linux-specific, so requiring
+  #      the file made a correctly-configured Mac permanently fail --strict — red on
+  #      correct input, the shape refused three times in this lane. It must be an [ok]
+  #      (so --strict can pass), it must SAY it is inapplicable rather than going silent,
+  #      and it must name the per-run authority.
+  shims_mac="$tmp/pin-shims-mac"; mkpinshims "$shims_mac" 1
+  mk_stub "$shims_mac" uname 'echo Darwin'
+  envf_ac="$tmp/pin-env-ac"; : >"$envf_ac"
+  out_ac=$(runpin "$pinroot" "$shims_mac" "$envf_ac" HOME="$pin_home_plain")
+  if printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin: NOT-APPLICABLE' \
+     && printf '%s' "$out_ac" | grep -q 'max-concurrency=N(pinned)' \
+     && ! printf '%s' "$out_ac" | grep -qE '\[warn\].*gate-pin'; then
+    ok "gate-pin: a non-Linux host reports explicit NOT-APPLICABLE as an [ok], never a warn"
+  else
+    bad "gate-pin: a non-Linux host was not reported as an explicit, non-failing inapplicability"
+    printf '%s\n' "$out_ac" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ad. ...and the scoping is on PLATFORM, not on "the file is missing". A LINUX box
+  #      with no /etc/environment is a genuine anomaly and must stay non-passing; folding
+  #      it into 11ac's branch would trade a false red for a false green. Same input as
+  #      11ac (no env file) with the only difference being the platform.
+  envf_ad="$tmp/pin-env-ad-missing"; rm -f "$envf_ad"
+  out_ad=$(runpin "$pinroot" "$shims_one" "$envf_ad" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_ad" | grep -qE '\[ok\].*gate-pin' \
+     && ! printf '%s' "$out_ad" | grep -q 'NOT-APPLICABLE'; then
+    ok "gate-pin: a LINUX box with no system env file stays non-passing (scoped by platform, not by file absence)"
+  else
+    bad "gate-pin: a Linux anomaly was excused as a platform inapplicability"
+    printf '%s\n' "$out_ad" | grep -i 'gate-pin' | head -2
+  fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to

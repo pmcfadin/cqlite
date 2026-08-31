@@ -69,7 +69,11 @@
 #      UNMEASURED, and only VERIFIED is an [ok] (same posture as `git-push:`). VERIFIED
 #      requires BOTH halves — the line present in the system-wide file AND a fresh
 #      session that sees a value the gate honours — because file-only was the original
-#      #3414 defect and session-only certifies a pin that may reach sudo sessions alone. `--yes` persists it, and
+#      #3414 defect and session-only certifies a pin that may reach sudo sessions alone,
+#      and the file's VALUE must EQUAL the session's (presence alone let a file saying
+#      `abc` pass while a per-user override supplied `1`). NON-LINUX hosts report an
+#      explicit, non-failing NOT-APPLICABLE: the mechanism is Linux/pam_env-specific, so
+#      macOS is scoped out rather than supported. `--yes` persists it, and
 #      so does the narrow `--fix-gate-pin` that `.agent-ami/profile.yaml`'s verify.run
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
@@ -1856,12 +1860,40 @@ PIN_PERSIST_NOTE=""
 # trailing `# ...` would become part of the value. Whole-line comments are skipped, so
 # the rationale goes on its own line above it.
 PIN_ENV_COMMENT='# cqlite: one full gate per box, full cores (issues #2640/#3414)'
-PIN_ENV_LINE='CQLITE_GATE_MAX_CONCURRENCY=1'
+PIN_ENV_VALUE='1'
+PIN_ENV_LINE="CQLITE_GATE_MAX_CONCURRENCY=$PIN_ENV_VALUE"
 EXPORT_LINE='export CQLITE_GATE_MAX_CONCURRENCY=1  # cqlite: one full gate per box, full cores (issue #2640)'
 
 if [ "$SKIP_GATE_PIN" = 1 ]; then
   warn "gate-pin: OPT-OUT ($SKIP_GATE_PIN_HOW) — the pin was NOT persisted and its visibility was NOT measured"
   info "this run cannot certify that a non-interactive shell sees CQLITE_GATE_MAX_CONCURRENCY; drop the opt-out to measure it"
+  PIN_SECTION_OK=0
+fi
+
+# PLATFORM SCOPING, EXPLICIT AND NOT INFERRED FROM FILE ABSENCE (#3414 roborev round 3).
+# /etc/environment + pam_env is a Linux mechanism. Requiring the file for VERIFIED made a
+# correctly-configured Mac PERMANENTLY non-passing under --strict — red on correct input,
+# which is the shape this lane has now refused three times: an alarm that always fires is
+# one people learn to waive, and it would have made `verify.run` unusable on any non-Linux
+# host rather than merely unverified.
+#
+# Scoped on $PLATFORM, deliberately NOT on "is /etc/environment missing?", because those
+# are different facts with opposite correct answers: a Mac has no such file BY DESIGN,
+# while a LINUX box without one is a genuine anomaly that must stay non-passing. Folding
+# them together would trade a false red for a false green.
+#
+# Reported as an explicit NON-FAILING verdict rather than silence: this repo's rule for
+# the CI tier registry is that absence is an error while inapplicability must be reported
+# as an explicit success, and the same reasoning applies to a provisioning check — a
+# section that simply prints nothing is indistinguishable from one that did not run.
+#
+# macOS persistence (a launchd equivalent) is deliberately NOT implemented: there is no
+# Mac on this fleet, so it could not be verified, and an unverifiable persistence path is
+# worse than a documented gap. macOS is SCOPED OUT here, not supported.
+if [ "$PIN_SECTION_OK" = 1 ] && [ "$PLATFORM" != linux ]; then
+  ok "gate-pin: NOT-APPLICABLE (the single-gate pin is persisted in /etc/environment and read by PAM's pam_env — a Linux mechanism; $PLATFORM has no equivalent here, so there is nothing to verify rather than something failing)"
+  info "on this platform the per-run authority is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) means that gate resolved the #1825 cap from the formula)"
+  info "to cap gates here, export CQLITE_GATE_MAX_CONCURRENCY in whatever this host's session-startup mechanism is; bootstrap does not manage it"
   PIN_SECTION_OK=0
 fi
 
@@ -1941,12 +1973,44 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # line (persist it) and a box whose line is present yet invisible to a fresh session
   # (a PAM condition — re-running with --yes finds the line already there and changes
   # NOTHING, so an operator told to do that just loops).
+  #
+  # AND IT CAPTURES THE VALUE, NOT JUST THE PRESENCE OF A LINE (#3414 roborev round 3).
+  # THIS IS THE FOURTH INSTANCE OF THIS ISSUE'S OWN DEFECT IN THIS LANE, and it was inside
+  # the correlation added to fix the third: presence is a PROXY for the fact that matters,
+  # exactly as "the export is in ~/.bashrc" was. Concretely — the file holds
+  # `CQLITE_GATE_MAX_CONCURRENCY=abc`, a sudoers env_file or ~/.pam_environment supplies
+  # `1`, both halves of the file-AND-session conjunction are satisfied, the verdict is
+  # VERIFIED — and every ordinary PAM session receives `abc`, which the gate discards for
+  # its default formula and stamps N(invalid). The verdict must therefore compare VALUES.
+  #
+  # Parsed the way pam_env reads the file, because a second, subtly-different parser here
+  # would be the same class of bug one layer down:
+  #   * whole-line `#` comments are skipped;
+  #   * NO inline-comment stripping — pam_env takes a trailing `# …` as part of the value,
+  #     which is precisely why this section's own append puts its comment on its own line;
+  #   * the LAST assignment wins if a file somehow carries two.
+  # An assignment we cannot parse is UNMEASURED, never a mismatch: a parse failure is an
+  # absence of evidence, and reporting it as a contradiction would invent one.
   PIN_FILE_HAS_LINE=unknown
+  PIN_FILE_VALUE=""
   if [ ! -e "$PIN_ENV_FILE" ]; then
     PIN_FILE_HAS_LINE=absent-file
   elif [ ! -L "$PIN_ENV_FILE" ] && [ -r "$PIN_ENV_FILE" ]; then
     if grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$PIN_ENV_FILE" 2>/dev/null; then
-      PIN_FILE_HAS_LINE=yes
+      # `sed -n 's/…//p' | tail -1` = last assignment wins. The pattern anchors at line
+      # start (so a `#`-commented line cannot match) and stops at the FIRST `=`, taking
+      # everything after it verbatim — no trimming, no comment stripping.
+      # A SENTINEL PREFIX, because an EMPTY capture and a FAILED capture are otherwise the
+      # same string: `CQLITE_GATE_MAX_CONCURRENCY=` is a legitimate (empty, gate-invalid)
+      # value, while sed producing nothing means the parse failed. Without the marker the
+      # `unparseable` branch is unreachable and an unparseable file would silently report
+      # an empty value — the unset-vs-set-empty conflation this issue removed from the
+      # gate, re-created in the parser that checks it.
+      pin_file_raw=$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=/VAL:/p' "$PIN_ENV_FILE" 2>/dev/null | tail -1)
+      case "$pin_file_raw" in
+        VAL:*) PIN_FILE_VALUE=${pin_file_raw#VAL:}; PIN_FILE_HAS_LINE=yes ;;
+        *)     PIN_FILE_HAS_LINE=unparseable ;;
+      esac
     else
       PIN_FILE_HAS_LINE=no
     fi
@@ -1962,7 +2026,10 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   elif [ ! -r "$PIN_ENV_FILE" ]; then
     PIN_PERSIST_NOTE="$PIN_ENV_FILE is unreadable"
     warn "gate-pin: cannot read $PIN_ENV_FILE — cannot tell whether the pin is already there, so nothing was written (a blind append could duplicate or contradict an existing line)"
-  elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
+  elif [ "$PIN_FILE_HAS_LINE" = yes ] || [ "$PIN_FILE_HAS_LINE" = unparseable ]; then
+    # `unparseable` counts as PRESENT for the append decision even though its value could
+    # not be read: grep DID match a line, so appending would leave the file with two
+    # assignments and pam_env would silently take the last one.
     info "$PIN_ENV_FILE already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is (a box deliberately running >1 concurrent gate overrides the pin; bootstrap never rewrites an existing value)"
   elif [ "$AUTO_YES" != 1 ] && [ "$FIX_GATE_PIN" != 1 ]; then
     PIN_PERSIST_NOTE="not persisted (neither --yes nor --fix-gate-pin)"
@@ -1990,7 +2057,12 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # nothing already there is disturbed.
     if printf '%s%s\n%s\n' "$pin_prefix" "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
          | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee -a "$PIN_ENV_FILE" >/dev/null 2>&1; then
+      # BOTH halves of the cached parse must move together. Setting only HAS_LINE left
+      # PIN_FILE_VALUE at its pre-write value (empty), so the value comparison below
+      # compared the session against what the file said BEFORE the append and reported a
+      # mismatch on a box this very run had just pinned correctly. Caught by 11q/11u.
       PIN_FILE_HAS_LINE=yes
+      PIN_FILE_VALUE="$PIN_ENV_VALUE"
       info "appended '$PIN_ENV_LINE' to $PIN_ENV_FILE — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
     else
       PIN_PERSIST_NOTE="the append to $PIN_ENV_FILE failed"
@@ -2199,8 +2271,22 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           # which is the same reason the fleet does not just let verify red).
           case "$PIN_FILE_HAS_LINE" in
             yes)
-              ok "gate-pin: VERIFIED ($PIN_ENV_FILE carries the line AND a fresh PAM-created, profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
-              pin_scope_note
+              # STRING equality on the raw effective value, deliberately not a numeric
+              # one. `1`, `01` and `1 ` are different strings and the gate's own resolver
+              # already treats them differently (a trailing space matches `*[!0-9]*` and
+              # is discarded as invalid). Normalising here would be a SECOND classifier
+              # free to disagree with the gate — the thing avoided by asking the gate what
+              # it honours instead of re-deriving its rules.
+              if [ "$PIN_FILE_VALUE" = "$pin_probe_seen" ]; then
+                ok "gate-pin: VERIFIED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE AND a fresh PAM-created, profile-free session sees that SAME value, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
+                pin_scope_note
+              else
+                warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' but this session sees '$pin_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and the gate will act on THAT, not on the one measured here)"
+                info "fix the VALUE in $PIN_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"
+              fi
+              ;;
+            unparseable)
+              warn "gate-pin: UNMEASURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but the CQLITE_GATE_MAX_CONCURRENCY assignment in $PIN_ENV_FILE could not be PARSED, so it cannot be compared against what the session saw)"
               ;;
             unknown)
               # Half the evidence is unreadable, so the correlation cannot be made. Not a
