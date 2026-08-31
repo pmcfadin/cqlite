@@ -1370,7 +1370,12 @@ echo "=== section 12b: an early-exiting gate emits no undefined-function noise =
 # change). Pinned here at the source rather than only there, where it looks like a
 # toolchain problem.
 selftest_err="$TMP/selftest.err"
-bash "$GATE" --emit-summary-selftest >/dev/null 2>"$selftest_err"
+# Redirect the summary into $TMP. These two cases assert on the gate's stderr and stdout, never
+# on the summary FILE, and without this they wrote the CHECKOUT DEFAULT
+# (.agent-gate-summary.txt) — leaving a synthetic block whose fields say `selftest` but whose
+# last line says `RESULT: PASS`, sitting exactly where a closer looks for the gate of record.
+# Harmless to these assertions, so there is no reason to leave the trap lying around.
+AGENT_GATE_SUMMARY_FILE="$TMP/selftest-summary.txt" bash "$GATE" --emit-summary-selftest >/dev/null 2>"$selftest_err"
 if grep -q 'command not found' "$selftest_err"; then
   bad "12.5 an early-exiting gate emits no 'command not found'" "$(grep -m3 'command not found' "$selftest_err")"
 else
@@ -1380,7 +1385,7 @@ fi
 # selftest produced nothing at all on stderr the case above is trivially satisfiable, so
 # assert the invocation actually ran by checking it emitted a summary block on stdout.
 sel_out="$TMP/selftest.out"
-bash "$GATE" --emit-summary-selftest >"$sel_out" 2>/dev/null
+AGENT_GATE_SUMMARY_FILE="$TMP/selftest-summary.txt" bash "$GATE" --emit-summary-selftest >"$sel_out" 2>/dev/null
 grep -q 'AGENT-GATE' "$sel_out" \
   && ok "12.6 the selftest invocation really ran (case 12.5 is non-vacuous)" \
   || bad "12.6 the selftest invocation really ran" "no AGENT-GATE block on stdout"

@@ -603,7 +603,7 @@ fi
 # The trap alone is not enough (job 178, Medium): it cannot run if the LAUNCHER is SIGKILLed
 # after the unit started, leaving the 0600 secrets file forever. The wrapper must unlink ITSELF,
 # tying the file's lifetime to the process that consumed it.
-if grep -q "printf 'rm -f -- %q" "$LAUNCHER"; then
+if grep -q "printf '%q -f -- %q" "$LAUNCHER"; then
   ok "4b.35b the generated wrapper unlinks itself before exec"
 else
   bad "4b.35b the generated wrapper unlinks itself before exec" "self-unlink not emitted"
@@ -613,8 +613,8 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   et="$TMP/envorder"; mkdir -p "$et"
   TMPDIR="$et" bash "$LAUNCHER" --summary "$TMP/eo.txt" --log "$TMP/eo.log" -- --only file-size >/dev/null 2>&1
   # the script is gone by now, so assert the ORDER from the generator instead
-  gen_rm=$(grep -n "printf 'rm -f -- %q" "$LAUNCHER" | head -1 | cut -d: -f1)
-  gen_exec=$(grep -n "printf 'exec bash %q" "$LAUNCHER" | head -1 | cut -d: -f1)
+  gen_rm=$(grep -n "printf '%q -f -- %q" "$LAUNCHER" | head -1 | cut -d: -f1)
+  gen_exec=$(grep -n "printf 'exec %q %q" "$LAUNCHER" | head -1 | cut -d: -f1)
   if [ -n "$gen_rm" ] && [ -n "$gen_exec" ] && [ "$gen_rm" -lt "$gen_exec" ]; then
     ok "4b.35c the self-unlink is emitted immediately before the exec line"
   else
@@ -2088,6 +2088,112 @@ else
   ok "4b.104 control: a correctly-identified pid IS signalled"
 fi
 wait "$_target" 2>/dev/null || true
+
+# --- roborev job 269: the three Mediums -----------------------------------------------------------
+# F1. The rollback list was a space-joined string iterated UNQUOTED, so it word-split and
+# glob-expanded. Structural pin first: an array, iterated quoted, and NO unquoted iteration left.
+_f1_src="$REPO_ROOT/scripts/flow/gate-detached.sh"
+if grep -q '^_extra_locks=()' "$_f1_src" \
+   && grep -q 'for _l in "${_extra_locks\[@\]}"' "$_f1_src" \
+   && ! grep -q 'in \$_extra_locks' "$_f1_src"; then
+  ok "4b.154 the rollback list is an ARRAY iterated QUOTED (no word-split, no glob)"
+else
+  bad "4b.154 the rollback list is an array iterated quoted" \
+      "$(grep -n '_extra_locks' "$_f1_src" | head -4)"
+fi
+
+# BEHAVIOURAL, and this is the discriminator: with a SPACE-bearing summary path, force the rollback
+# and require the lock it created to be GONE. Artifact order is "$SUMMARY.heartbeat" then "$LOGFILE",
+# so conflicting on the LOG guarantees the heartbeat lock was created first and must be rolled back —
+# without that ordering the case would pass vacuously. Pre-fix, `rm -f $_extra_locks` split
+# '<dir>/has space/b.txt.heartbeat.launch-lock' into two words and the real lock SURVIVED, so every
+# later launch on that path refused forever.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _sp="$TMP/has space"
+  mkdir -p "$_sp"
+  _spa=$(bash "$LAUNCHER" --summary "$_sp/a.txt" --log "$_sp/shared.log" -- --only roborev-lints 2>&1)
+  _spau=$(printf '%s' "$_spa" | sed -n 's/^unit:  *//p'); [ -n "$_spau" ] && echo "$_spau" >> "$UNITS_FILE"
+  _spb=$(bash "$LAUNCHER" --summary "$_sp/b.txt" --log "$_sp/shared.log" -- --only fmt 2>&1); _spbr=$?
+  _spbu=$(printf '%s' "$_spb" | sed -n 's/^unit:  *//p'); [ -n "$_spbu" ] && echo "$_spbu" >> "$UNITS_FILE"
+  if [ -n "$_spau" ] && [ "$_spbr" != 0 ] && [ ! -e "$_sp/b.txt.heartbeat.launch-lock" ]; then
+    ok "4b.155 a refused launch rolls back its own SPACE-bearing lock (leaves nothing behind)"
+  else
+    bad "4b.155 a refused launch rolls back its space-bearing lock" \
+        "first-unit='${_spau:-none}' second-exit=$_spbr leftover=$([ -e "$_sp/b.txt.heartbeat.launch-lock" ] && echo yes || echo no)"
+  fi
+  for _u in $_spau $_spbu; do systemctl --user stop "$_u" >/dev/null 2>&1; done
+else
+  skipc "4b.155 space-bearing rollback" "no user systemd manager on this host"
+fi
+
+# F2. The global launch lock fell back to ${TMPDIR:-/tmp} — a shared, PREDICTABLE, fixed-NAME path any
+# local user can pre-create and hold to refuse every detached launch on the box. It must now REFUSE on
+# a runtime dir it cannot affirmatively verify, and must NOT silently use TMPDIR instead.
+_badrt="$TMP/badrt"; _goodtmp="$TMP/goodtmp"
+mkdir -p "$_badrt" "$_goodtmp"; chmod 777 "$_badrt"
+_f2o=$(XDG_RUNTIME_DIR="$_badrt" TMPDIR="$_goodtmp" bash "$LAUNCHER" \
+         --summary "$TMP/f2.txt" --log "$TMP/f2.log" -- --only fmt 2>&1); _f2r=$?
+if [ "$_f2r" = 69 ] && ! [ -e "$_goodtmp/cqlite-gate-launch.lock" ] \
+   && printf '%s' "$_f2o" | grep -q 'per-user runtime directory'; then
+  ok "4b.156 a mode-0777 XDG_RUNTIME_DIR refuses (69) and does NOT fall back to TMPDIR"
+else
+  bad "4b.156 an unverifiable runtime dir refuses without falling back to TMPDIR" \
+      "exit=$_f2r tmpdir-lock=$([ -e "$_goodtmp/cqlite-gate-launch.lock" ] && echo created || echo absent) out=$(printf '%s' "$_f2o" | head -2 | tr '\n' ' ')"
+fi
+# CONTROL: a runtime dir we DO own at 0700 must not trip that refusal, or 4b.156 passes by refusing
+# everything and the launcher is simply broken.
+_goodrt="$TMP/goodrt"; mkdir -p "$_goodrt"; chmod 700 "$_goodrt"
+_f2c=$(XDG_RUNTIME_DIR="$_goodrt" bash "$LAUNCHER" \
+         --summary "$TMP/f2c.txt" --log "$TMP/f2c.log" -- --only fmt 2>&1)
+_f2cu=$(printf '%s' "$_f2c" | sed -n 's/^unit:  *//p'); [ -n "$_f2cu" ] && echo "$_f2cu" >> "$UNITS_FILE"
+if printf '%s' "$_f2c" | grep -q 'per-user runtime directory'; then
+  bad "4b.157 control: a 0700 runtime dir we own is accepted" "refused a dir it should accept"
+else
+  ok "4b.157 control: a 0700 runtime dir we own does NOT trip the refusal"
+fi
+[ -n "$_f2cu" ] && systemctl --user stop "$_f2cu" >/dev/null 2>&1
+
+# F3. The wrapper exports the CALLER's PATH before its last two lines run, so an unqualified `rm`
+# (self-unlink of the 0600 file holding every forwarded secret) and `bash` (what we exec) resolved
+# through a PATH this script does not control. Structural: both must be emitted as absolute, resolved
+# in the LAUNCHER's PATH.
+if grep -q "printf '%q -f -- %q" "$_f1_src" && grep -q 'printf .exec %q %q' "$_f1_src" \
+   && ! grep -q "printf 'rm -f -- %q" "$_f1_src" && ! grep -q "printf 'exec bash %q" "$_f1_src" \
+   && grep -q '_rm_abs="\$(command -v rm' "$_f1_src"; then
+  ok "4b.158 the wrapper's self-unlink and exec are emitted as ABSOLUTE resolved paths"
+else
+  bad "4b.158 the wrapper emits absolute rm/bash" "$(grep -n 'ENV_SCRIPT\"$' "$_f1_src" | tail -3)"
+fi
+# BEHAVIOURAL: capture the generated wrapper by stubbing systemd-run so it never runs (and therefore
+# never self-deletes), then assert the emitted lines carry absolute paths rather than bare words. A
+# structural grep alone cannot see what the launcher actually WROTE.
+_stub="$TMP/f3stub"; mkdir -p "$_stub"
+cat > "$_stub/systemd-run" <<'STUB'
+#!/bin/bash
+# Find the wrapper: the argument after the interpreter, and copy it aside instead of executing it.
+prev=""; for a in "$@"; do
+  case "$prev" in */bash) [ -f "$a" ] && cp "$a" "$CAPTURE_TO" 2>/dev/null && break ;;
+  esac
+  prev="$a"
+done
+exit 0
+STUB
+chmod +x "$_stub/systemd-run"
+_cap="$TMP/f3-wrapper.txt"
+CAPTURE_TO="$_cap" PATH="$_stub:$PATH" bash "$LAUNCHER" \
+  --summary "$TMP/f3.txt" --log "$TMP/f3.log" -- --only fmt >/dev/null 2>&1 || true
+if [ ! -s "$_cap" ]; then
+  skipc "4b.159 generated wrapper uses absolute rm/bash" "wrapper not captured (stub did not observe it)"
+else
+  _rml=$(grep -E -- '^/[^ ]*rm .* -f -- ' "$_cap" | head -1)
+  _exl=$(grep -E '^exec /' "$_cap" | head -1)
+  if [ -n "$_rml" ] && [ -n "$_exl" ]; then
+    ok "4b.159 the GENERATED wrapper self-unlinks and execs via absolute paths"
+  else
+    bad "4b.159 the generated wrapper uses absolute rm/bash" \
+        "rm-line='${_rml:-none}' exec-line='${_exl:-none}'"
+  fi
+fi
 
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
