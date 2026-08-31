@@ -1369,5 +1369,64 @@ $out29c"
 fi
 kill "$P29" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 30: reclaim's re-entrant path must match the directory TOO (roborev round 10)"
+# ===========================================================================
+# ROUND 9 ADDED THIS CHECK TO ACQUIRE AND LEFT ITS SIBLING IN RECLAIM — the reported line was
+# patched and the class was not swept, which is why this test exists as a pair with TEST 29
+# rather than as a variant of it. Without it a holder reclaims its OWN lease naming --lane-dir Y
+# while the record still protects X: success is reported for Y, nothing is rewritten, and another
+# issue can then acquire Y against a lock that never covered it.
+X30="$LANES/x30"; Y30="$LANES/y30"; mkdir -p "$X30" "$Y30"
+sleep 300 & P30=$!
+ll acquire 930 --lane-dir "$X30" --pid "$P30"; rc30a=$RC
+lease30=$(lease_of 930)
+ll reclaim 930 --lane-dir "$Y30" --pid "$P30" --expect "$lease30" --reason round10-wrong-directory-probe
+rc30b=$RC; out30b=$OUT
+if [ "$rc30a" -eq 0 ] && [ "$rc30b" -eq 2 ] \
+   && printf '%s' "$out30b" | grep -q 'reason=reentrant-lane-dir-mismatch' \
+   && printf '%s' "$out30b" | grep -q 'recorded-lane-dir='; then
+  ok "(a) a re-entrant RECLAIM naming a DIFFERENT directory is refused and names the recorded one"
+else
+  bad "(a) reclaim reported success for a directory its record does not protect: rc=$rc30a/$rc30b
+$out30b"
+fi
+# CONTROL: the same holder reclaiming the RECORDED directory still succeeds.
+ll reclaim 930 --lane-dir "$X30" --pid "$P30" --expect "$lease30" --reason round10-control-correct-directory
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'RECLAIMED (re-entrant)'; then
+  ok "(b) CONTROL: reclaiming under the RECORDED directory is still re-entrant success"
+else
+  bad "(b) CONTROL over-refused a legitimate re-entrant reclaim: rc=$RC
+$OUT"
+fi
+kill "$P30" 2>/dev/null || true
+
+# ===========================================================================
+echo "TEST 31: a symlinked ANCESTOR must not create a second directory mutex (roborev round 10)"
+# ===========================================================================
+# The lane dir does not exist yet at acquire time (acquire-before-`git worktree add`), and the
+# not-yet-exists branch normalised only LEXICALLY — so `/real/lane` and `/alias/lane`, where
+# `/alias` -> `/real`, produced different strings, different directory mutexes, and the
+# cross-issue scan never compared them. Two issues acquired what is one directory. The leaf still
+# cannot be resolved physically; its ANCESTORS can, and now are.
+mkdir -p "$LANES/realp31"
+ln -sfn "$LANES/realp31" "$LANES/aliasp31"
+sleep 300 & A31=$!
+sleep 300 & B31=$!
+ll acquire 931 --lane-dir "$LANES/realp31/lane31" --pid "$A31"; rc31a=$RC
+ll acquire 932 --lane-dir "$LANES/aliasp31/lane31" --pid "$B31"; rc31b=$RC; out31b=$OUT
+rec31=$(grep '^lane-dir=' "$(record_of 931)" 2>/dev/null | cut -d= -f2-)
+if [ "$rc31a" -eq 0 ] && [ "$rc31b" -eq 2 ] && printf '%s' "$out31b" | grep -q 'reason=same-lane-dir-other-issue'; then
+  ok "(a) two spellings of one directory (via a symlinked parent) contend: the second is OCCUPIED"
+else
+  bad "(a) the alias evaded the directory lock: rc=$rc31a/$rc31b recorded='$rec31'
+$out31b"
+fi
+case "$rec31" in
+  "$LANES/realp31/lane31") ok "(b) the RECORDED path is the physical one, so a later reader comparing /proc/<pid>/cwd matches" ;;
+  *) bad "(b) recorded '$rec31', want the physically-resolved '$LANES/realp31/lane31'" ;;
+esac
+kill "$A31" "$B31" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

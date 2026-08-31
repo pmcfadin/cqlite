@@ -1061,11 +1061,30 @@ lane_real() {
       real="$p"
     fi
   else
-    # Does not exist yet (acquire-before-worktree-add). Physical canonicalisation is
-    # impossible, but LEXICAL normalisation is not — and it is what makes the recorded value
-    # comparable to a future `/proc/<pid>/cwd`. Symlinks in a not-yet-existing path remain
-    # unresolvable; readers canonicalise physically once the directory appears.
-    real="$(lex_norm_path "$p")"
+    # Does not exist yet (acquire-before-worktree-add). The LEAF cannot be canonicalised
+    # physically, but its ANCESTORS can — and leaving them lexical was a directory-alias hole
+    # (#3436, roborev round 10): `/real/lane` and `/alias/lane`, where `/alias` -> `/real`,
+    # normalise to DIFFERENT strings, so they take DIFFERENT directory mutexes and the
+    # cross-issue scan never compares them. Both issues acquire what is one directory.
+    # So: physically resolve the DEEPEST EXISTING ancestor and re-append the remainder.
+    local lex head tail_ hreal
+    lex="$(lex_norm_path "$p")"
+    head="$lex"; tail_=""
+    while [ -n "$head" ] && [ "$head" != "/" ] && [ ! -d "$head" ]; do
+      tail_="${head##*/}${tail_:+/$tail_}"
+      head="${head%/*}"
+      [ -z "$head" ] && head="/"
+    done
+    real="$lex"
+    if [ -d "$head" ]; then
+      hreal="$( cd "$head" 2>/dev/null && pwd -P )" || hreal=""
+      if [ -n "$hreal" ]; then
+        case "$hreal" in
+          */) real="${hreal}${tail_}" ;;
+          *)  real="${hreal}${tail_:+/$tail_}" ;;
+        esac
+      fi
+    fi
   fi
   printf '%s\n' "$real"
 }
@@ -1544,6 +1563,15 @@ _reclaim_locked() {
   # never be reported as a satisfied one, so when --expect names something the record
   # does NOT hold, the verdict names BOTH values.
   if [ "$liveness" = "SELF" ]; then
+    # THE DIRECTORY MUST MATCH HERE TOO (#3436, roborev round 10). Round 9 added exactly this
+    # check to the re-entrant ACQUIRE path and left its sibling here: the reported line was
+    # patched and the CLASS was not swept. Without it a holder reclaims its own lease naming
+    # --lane-dir Y while the record still protects X — the command reports success for Y,
+    # rewrites nothing, and another issue can then acquire Y against a lock that never covered it.
+    if [ "${REC_LANE_DIR:-}" != "$G_LANE" ]; then
+      emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. Reclaiming it under this path would report protection the record does not provide. Reclaim under the recorded directory, or take this one under its own issue number.)"
+      return 2
+    fi
     # THE LEASE, HERE TOO. This branch compared the TOKEN while the CAS branch below
     # compared the lease, so once `--expect` became a lease the re-entrant SUCCESS path
     # was unreachable: every re-entrant reclaim reported a mismatch. Two comparison sites
