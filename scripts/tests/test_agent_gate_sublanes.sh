@@ -48,6 +48,14 @@ EXPECTED_FEATURE_MATRIX_SIDE="flight-tests legacy-heuristics feature-iso-parquet
 # this lane makes no wall-clock assertion at all — it runs cargo test over unit and
 # integration suites.
 EXPECTED_BINDING_RUST_SIDE="binding-rust-tests"
+# The #3453 all-features lane. SIDE for the same class-(a) reason, MEASURED both ways
+# rather than reasoned (see the rationale on _component_lane): `--all-features` is the
+# WIDEST cqlite-core feature set any component builds — 42 features including the OTLP
+# stack MAIN never enables — so it shares almost no compilation unit with MAIN's
+# `--features cli-helpers` build. Sharing MAIN's target dir buys nothing (all-features
+# after a warm cli-helpers build measured 104s vs 99s in a virgin dir) while serializing
+# ~100s onto the critical path.
+EXPECTED_ALL_FEATURES_SIDE="all-features-check"
 # Components that MUST stay on the strictly-serial MAIN lane despite being otherwise
 # isolatable — tooling-tests is here because its shell self-tests are latency-sensitive.
 EXPECTED_MAIN_ONLY="tooling-tests"
@@ -103,6 +111,15 @@ for c in $EXPECTED_BINDING_RUST_SIDE; do
   fi
 done
 
+# 3d) The #3453 all-features lane, asserted per component for the same reason as 3b/3c.
+for c in $EXPECTED_ALL_FEATURES_SIDE; do
+  if [ "$(lane_of "$c")" = side ]; then
+    ok "$c runs in the SIDE lane with its own CARGO_TARGET_DIR (#3453: --all-features is the widest cqlite-core set any component builds and shares almost no unit with MAIN)"
+  else
+    bad "$c is NOT on the SIDE lane (lane='$(lane_of "$c")') — it builds cqlite-core at --all-features, which shares almost no compilation unit with MAIN's cli-helpers build (#2657/#3453)"
+  fi
+done
+
 # 4) core-tests (the shared-target long pole) and the guard components that build
 #    cqlite-core under MAIN's feature set MUST stay on the strictly-serial MAIN lane
 #    — moving them to a concurrent lane is the shared-target thrash #1737 documents.
@@ -129,7 +146,7 @@ done
 # 5) The SIDE lane must be exactly the union of the two sets — nothing else silently
 #    joined it, so the MAIN build profile is unchanged for every other component.
 side_sorted=$(printf '%s\n' $side_list | sort)
-expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE $EXPECTED_BINDING_RUST_SIDE | sort)
+expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE $EXPECTED_BINDING_RUST_SIDE $EXPECTED_ALL_FEATURES_SIDE | sort)
 # The COUNT IS DERIVED from the expected sets, never written as a literal (#3522). It used
 # to read "the 11 expected isolatable components", and adding a twelfth made that number
 # wrong in a message that is only ever printed on SUCCESS — so the stale figure would have
@@ -137,7 +154,7 @@ expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE 
 # issues, because that is the part a reader needs and the part arithmetic cannot express.
 n_expected_side=$(printf '%s\n' $expected_side_sorted | grep -c .)
 if [ "$side_sorted" = "$expected_side_sorted" ]; then
-  ok "SIDE lane is exactly the $n_expected_side expected isolatable components (2 #1737 bindings + 5 #2657 isolatable + 4 #1699 feature-matrix lanes + 1 #3522 binding-side Rust lane; tooling-tests excluded)"
+  ok "SIDE lane is exactly the $n_expected_side expected isolatable components (2 #1737 bindings + 5 #2657 isolatable + 4 #1699 feature-matrix lanes + 1 #3522 binding-side Rust lane + 1 #3453 all-features lane; tooling-tests excluded)"
 else
   bad "SIDE lane membership drifted:
 --- got ---
@@ -174,7 +191,7 @@ fi
 # 9) is_side_component and _component_lane agree (single source of truth): every
 #    component the classifier calls "side" must be a member of the union above.
 for c in $side_list; do
-  case " $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE $EXPECTED_BINDING_RUST_SIDE " in
+  case " $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE $EXPECTED_BINDING_RUST_SIDE $EXPECTED_ALL_FEATURES_SIDE " in
     *" $c "*) : ;;
     *) bad "classifier put unexpected '$c' on the SIDE lane" ;;
   esac
