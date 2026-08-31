@@ -30,7 +30,7 @@
 
 use crate::error::to_napi_error;
 use cqlite_core::types::Value;
-use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Property, PropertyAttributes, Result};
+use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
 use std::cell::OnceCell;
 
 /// Per-result-conversion context that caches the global `Set` and `Map`
@@ -696,7 +696,7 @@ pub fn row_to_object(
     // DEFINED` section on this function. Descriptors are accumulated and applied
     // in ONE `define_properties` call so V8 sees them in this exact order, which
     // is what preserves #1446's `Object.keys(row)` ordering contract.
-    let mut descriptors: Vec<Property> = Vec::with_capacity(keys.ordered.len());
+    let mut descriptors = crate::row_properties::RowProperties::with_capacity(keys.ordered.len());
     // Emit the selected columns that are present in this row's values, in
     // authoritative SELECT order (#1446). For the normal case where metadata
     // names match the value keys, this is every column, so `Object.keys(row)`
@@ -705,10 +705,13 @@ pub fn row_to_object(
     // fallback name like `col_0` while the value is keyed by the expression name
     // like `Count(*)`, and null-filling would emit a phantom `col_0: null`
     // alongside the real cell.
-    for (col_name, _js_key) in &keys.ordered {
+    for (col_name, js_key) in &keys.ordered {
         if let Some(value) = values.get(col_name) {
             let js_value = value_to_napi(ctx, value)?;
-            descriptors.push(data_property(col_name, &js_value)?);
+            // The interned `JsString` from `intern_column_keys` is reused as the
+            // descriptor's name (#1446), which is the whole reason this uses the
+            // raw descriptor form — see `row_properties`.
+            descriptors.push(js_key, &js_value);
         }
     }
     // Never drop cells (#1446 roborev): emit any values the authoritative column
@@ -732,54 +735,18 @@ pub fn row_to_object(
                 // user-controlled name, so a fix reaching only one leaves the
                 // other live — #3504 found exactly that duplication one file
                 // over, and #3630's spec makes them ONE requirement.
-                descriptors.push(data_property(name, &js_value)?);
+                //
+                // No interned handle exists here (extras are keyed by the value
+                // map, not by the column list), so the name is created per row.
+                // That is the rare branch and it already sorts, so the cost is
+                // not on the hot path the #1446 interning protects.
+                let js_name = env.create_string(name)?;
+                descriptors.push(&js_name, &js_value);
             }
         }
     }
-    if !descriptors.is_empty() {
-        obj.define_properties(&descriptors)?;
-    }
+    descriptors.define_on(env, &mut obj)?;
     Ok(obj)
-}
-
-/// One own, enumerable, writable, configurable DATA property descriptor.
-///
-/// The three attributes are spelled out DELIBERATELY, and `PropertyAttributes::
-/// Default` must NOT be used here. In napi-rs those are two different things and
-/// they do not agree:
-///
-/// * the bitflag CONSTANT `PropertyAttributes::Default` is `sys::
-///   PropertyAttributes::default`, i.e. `napi_default` — **ZERO**, meaning no
-///   attributes: non-writable, NON-ENUMERABLE, non-configurable;
-/// * the trait method `PropertyAttributes::default()` is
-///   `Configurable | Enumerable | Writable`.
-///
-/// MEASURED by getting this wrong first: with the constant, every column arrived
-/// with `{writable: false, enumerable: false, configurable: false}`, so the value
-/// was present but `Object.keys(row)` was EMPTY and the row was unusable — a
-/// different silent-wrong-output bug substituted for the one being fixed. The
-/// explicit OR below is the attribute set of an ordinary ASSIGNED property, which
-/// is the point: a defined column must be observationally identical to an
-/// assigned one for every read a caller performs, while never consulting the
-/// prototype chain on the way in.
-///
-/// A name the descriptor cannot represent is an ERROR, never a skipped column.
-/// `Property::new` builds a `CString`, which fails on an interior NUL byte; a
-/// column silently dropped in that corner would be the very defect #3630
-/// removes, reintroduced somewhere nobody looks. It is routed through the one
-/// FFI error contract, as `json_number_to_napi`'s `Beyond` arm is.
-fn data_property(name: &str, value: &JsUnknown) -> Result<Property> {
-    let property = Property::new(name).map_err(|_| {
-        to_napi_error(cqlite_core::Error::unsupported_format(format!(
-            "column name cannot be represented as a JavaScript property name \
-             (it contains an interior NUL byte): {name:?}"
-        )))
-    })?;
-    Ok(property.with_value(value).with_property_attributes(
-        PropertyAttributes::Writable
-            | PropertyAttributes::Enumerable
-            | PropertyAttributes::Configurable,
-    ))
 }
 
 // Unit tests live in a sibling file to keep this file under the campsite

@@ -25,6 +25,8 @@ mod error;
 mod observability;
 mod prepared;
 mod refresh;
+/// Own-property definition for result rows — the #3630 write mechanism.
+mod row_properties;
 mod runtime;
 mod streaming;
 mod value;
