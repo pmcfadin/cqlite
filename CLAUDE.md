@@ -349,25 +349,24 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   uncommitted removal as `DECLARED`. Provenance now reads HEAD's committed `COMPONENTS`
   **declaration** as data and does not consult HEAD's manifest at all: **remove the second source
   rather than reconcile it.**
-  **AND EVERY INPUT THE CHECK REASONS ABOUT MUST BE INSIDE THAT WINDOW TOO — WHICH IS THE WHOLE
-  FILE, NOT A LIST OF FIELDS (roborev jobs 292 and 293).** Being inside the window yourself is not
-  enough if you compare against a snapshot taken outside it: `COMPONENTS` is an array bash loaded
-  before the queue, so a script that GAINED a component while queued was validated against the OLD
-  array (292). Comparing the array and the canonical pin FROM DISK fixed that instance and left the
-  family open — change a component's **executor function** while queued and the recaptured tree
-  becomes the certification window while the process keeps running the definitions it loaded before
-  it, so a full PASS certifies gate code that never executed (293). Three rounds in one place is the
-  tell that the GRANULARITY was wrong: this is a `tree-integrity`-family property, and the component
-  SET cannot express it. So the authority is a **whole-file content digest of `$GATE_SELF` taken at
-  startup**, which SUBSUMES every field comparison — growing the field list instead would be the
-  "rarer delimiter" shape #3312 forbids. The field comparisons are KEPT as the **message** (a digest
-  can only say "changed"; they can say "now declares 37, dispatching 36"), never as the test, and
-  they can never produce a PASS the digest did not. Three-valued and fail-closed: an unmeasured
-  startup digest or an undigestable on-disk script is its own named refusal, never "unchanged". It
-  reports as `gate-script-changed`, which carries its OWN diagnostic and remedy — **re-run against a
-  stable on-disk script** — because the generic UNMEASURED text ("the baseline could not be
-  measured", "restore access to origin/main") is FALSE for this kind, and a wrong remedy in a
-  fail-closed diagnostic is what makes an author suspect their own diff.
+  **AND EVERY INPUT THE CHECK REASONS ABOUT MUST BE INSIDE THAT WINDOW TOO (roborev jobs 292–294) —
+  BUT "IS THE CODE I AM EXECUTING THE CODE I CERTIFY" IS NOT ANSWERABLE FROM INSIDE THE RUNNING
+  PROCESS, AND IS SPLIT OUT TO #3705.** Being inside the window yourself is not enough if you compare
+  against a snapshot taken outside it: `COMPONENTS` is an array bash loaded before the queue, so a
+  script that GAINED a component while queued was validated against the OLD array (292); and change a
+  component's **executor function** while queued and the recaptured tree becomes the certification
+  window while the process keeps running the definitions it loaded before it (293). **The RULE stands.
+  The MECHANISM built for it does not**: a whole-file startup digest of `$GATE_SELF` (with the field
+  comparisons demoted to the message) is REMOVED, because **bash parses a script INCREMENTALLY** — the
+  digest is taken only after thousands of lines are already parsed, so an atomic replace before that
+  point leaves bash executing the OLD inode while the digest reads the NEW path (294). Answering the
+  question needs a **bootstrap/re-exec handshake**, i.e. a change to how `agent-gate.sh` STARTS UP,
+  and it cannot ride inside a component-set comparison. **Five consecutive rounds landed in that one
+  mechanism (290/292/293/294) while #3544's own property produced one finding in five** — the standing
+  signal to SPLIT rather than carve the same place again. What stays here: job 290's REPEAT of the
+  pre-flight after the slot is granted (cheap, and it makes the component-set verdict current with
+  respect to the recaptured tree), and job 285's MANIFEST mode validation. The gate-script symlink
+  refusal went to #3705 with the check it belonged to; a `gate-script-*` kind no longer exists.
   **A SYMLINK IS A BLOB, AND A GRAFT OUTLIVES `--no-replace-objects` (roborev job 285).** Two
   false-green routes, both closed by moving rather than flagging. (1) The presence probe accepted
   every `blob`, but a symlink IS one — the difference is the MODE (`120000`) — so the two halves of
