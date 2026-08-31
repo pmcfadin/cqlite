@@ -36,6 +36,45 @@ $1"; }
 # instead, by the base_warns assertion in block 7p.
 skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
+# --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
+# OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
+# Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
+# hole). But the refusal is a [warn], and it fires for EVERY sandboxed invocation, so under
+# root `base_warns` becomes 2, the baseline assertion below fails, and the three green-path
+# cases print `skip` — the exact three that round 2's finding was about. We unskipped them,
+# then re-skipped them four rounds later by fixing something else.
+#
+# Refused UP FRONT rather than per-case: the alternative is threading privilege-dropping
+# through test setup, which is how the seam came to need a root guard in the first place. A
+# suite that declares "not runnable as root" is honest and cheap; one that runs 190 cases
+# of which an unpredictable subset are silently meaningless is neither.
+#
+# COUNTED, never an `ok` — round 2's finding, and this file now has a hygiene case that
+# forbids announcing a skip through ok() anyway.
+#
+# AND IT IS THE FIRST THING THAT RUNS, BEFORE `mktemp -d` AND BEFORE ANY CASE (#3414
+# roborev round 8, lead caution). The manual check that this suite declines under root is
+# itself run with `sudo`, so anything executing above the decline would run AS ROOT — and
+# a single line up there that resolves CARGO_HOME from /etc/environment, or writes outside
+# its own tmpdir, would make the check for a safety property the thing that violates it.
+# That is not hypothetical: it is what happened 40 minutes earlier with the cargo config.
+# Even the tmpdir matters — created as root it is litter the invoking user cannot remove.
+# So the decline precedes everything, and the only host contact above it is now none.
+if [ "$(id -u)" = 0 ]; then
+  skip "THE ENTIRE SUITE: it drives bootstrap through a test seam that is REFUSED under root (#3414 finding S), so every sandboxed invocation gains a warning and the green-path assertions cannot run. Re-run as an unprivileged user."
+  echo
+  echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
+  # NONZERO, and this is the THIRD LEVEL at which this same shape has been caught (#3414
+  # roborev round 8). Round 2 found a CASE counted as a pass; round 4 found `ok "SKIP …"`;
+  # round 7's fix for those turned it into a SUITE-level version — the gate checks only
+  # exit status, so `exit 0` here reported `tooling-tests` green having executed nothing at
+  # all, including every regression this branch added. A declined suite is not a passing
+  # suite. The gate runs as an unprivileged user, so the normal path never reaches this and
+  # the cost is zero; running it as root becomes a loud failure instead of a silent green.
+  echo "DECLINED: this suite executed NOTHING and is exiting NONZERO so no caller can read it as a pass." >&2
+  exit 1
+fi
+
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
   ok "bootstrap script parses (bash -n)"
@@ -87,35 +126,6 @@ export CQLITE_BOOTSTRAP_TEST_MODE=1
 export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 : >"$CQLITE_BOOTSTRAP_ENV_FILE"
 
-# --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
-# OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
-# Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
-# hole). But the refusal is a [warn], and it fires for EVERY sandboxed invocation, so under
-# root `base_warns` becomes 2, the baseline assertion below fails, and the three green-path
-# cases print `skip` — the exact three that round 2's finding was about. We unskipped them,
-# then re-skipped them four rounds later by fixing something else.
-#
-# Refused UP FRONT rather than per-case: the alternative is threading privilege-dropping
-# through test setup, which is how the seam came to need a root guard in the first place. A
-# suite that declares "not runnable as root" is honest and cheap; one that runs 190 cases
-# of which an unpredictable subset are silently meaningless is neither.
-#
-# COUNTED, never an `ok` — round 2's finding, and this file now has a hygiene case that
-# forbids announcing a skip through ok() anyway.
-if [ "$(id -u)" = 0 ]; then
-  skip "THE ENTIRE SUITE: it drives bootstrap through a test seam that is REFUSED under root (#3414 finding S), so every sandboxed invocation gains a warning and the green-path assertions cannot run. Re-run as an unprivileged user."
-  echo
-  echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
-  # NONZERO, and this is the THIRD LEVEL at which this same shape has been caught (#3414
-  # roborev round 8). Round 2 found a CASE counted as a pass; round 4 found `ok "SKIP …"`;
-  # round 7's fix for those turned it into a SUITE-level version — the gate checks only
-  # exit status, so `exit 0` here reported `tooling-tests` green having executed nothing at
-  # all, including every regression this branch added. A declined suite is not a passing
-  # suite. The gate runs as an unprivileged user, so the normal path never reaches this and
-  # the cost is zero; running it as root becomes a loud failure instead of a silent green.
-  echo "DECLINED: this suite executed NOTHING and is exiting NONZERO so no caller can read it as a pass." >&2
-  exit 1
-fi
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
 # The mold section writes `${CARGO_HOME:-$HOME/.cargo}/config.toml`, and on this fleet
