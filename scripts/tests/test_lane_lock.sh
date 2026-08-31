@@ -1277,5 +1277,97 @@ else
 fi
 kill "$GL_H" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 27: the directory guard must hold under CONCURRENCY, not just in sequence (roborev round 9)"
+# ===========================================================================
+# TEST 26 ASSERTED THIS PROPERTY SEQUENTIALLY AND PASSED WHILE THE LOCK HELD NOTHING.
+# `with_lock` hardcoded fd 9 and the acquire path NESTS it (directory mutex outside, per-issue
+# mutex inside), so the inner `exec 9>` CLOSED the outer descriptor and released the directory
+# lock before the record write. Measured on the pre-fix code with 4 racers on one directory:
+# ALL FOUR acquired — the guard was not merely leaky, it was inert. A sequential test cannot
+# see this because the window only exists while another process is between the scan and the
+# write, so this test must RACE or it re-certifies the same hole.
+CONC27="$LANES/conc27-lane"; mkdir -p "$CONC27"
+c27_pids=""; i=0
+while [ "$i" -lt 4 ]; do sleeper; c27_pids="$c27_pids $REPLY_SLEEPER"; i=$((i + 1)); done
+c27_racers=""; c27_iss=940
+for p in $c27_pids; do
+  c27_iss=$((c27_iss + 1))
+  ( env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" acquire "$c27_iss" --lane-dir "$CONC27" --actor flow --pid "$p" >"$T/c27.$p.out" 2>&1 ) &
+  c27_racers="$c27_racers $!"
+done
+for p in $c27_racers; do wait "$p" 2>/dev/null || true; done
+c27_acq=0; c27_occ=0
+for p in $c27_pids; do
+  if grep -q '^LANE-LOCK: ACQUIRED issue=' "$T/c27.$p.out" 2>/dev/null; then c27_acq=$((c27_acq + 1))
+  elif grep -q '^LANE-LOCK: OCCUPIED ' "$T/c27.$p.out" 2>/dev/null; then c27_occ=$((c27_occ + 1)); fi
+done
+if [ "$c27_acq" -eq 1 ] && [ "$c27_occ" -eq 3 ]; then
+  ok "(a) 4 concurrent acquires under FOUR DIFFERENT issues on ONE directory: exactly 1 ACQUIRED, 3 OCCUPIED"
+else
+  bad "(a) one directory got $c27_acq simultaneous writers (occupied=$c27_occ); the directory mutex is not held across the record write"
+fi
+for p in $c27_pids; do kill "$p" 2>/dev/null || true; done
+
+# ===========================================================================
+echo "TEST 28: reclaim answers the directory question too (roborev round 9)"
+# ===========================================================================
+# reclaim MINTS a record, and it took only the per-issue mutex — so a stale record for issue A
+# could be reclaimed AFTER issue B legitimately took that directory, producing two live holders
+# with no race at all. Any path that writes a record must answer the same question acquire does.
+SH28="$LANES/shared-28"; mkdir -p "$SH28"
+sleep 300 & S28_A=$!
+ll acquire 928 --lane-dir "$SH28" --pid "$S28_A"; rc28a=$RC
+# the CAS value is the LEASE (<token>#<nonce>), not the holder token — a token alone is the
+# ABA hole TEST 21 pins, and there is deliberately no token= field in the record.
+lease28=$(lease_of 928)
+# a SECOND issue is refused from acquire (TEST 26) — and must be refused from reclaim as well
+sleep 300 & S28_B=$!
+ll reclaim 929 --lane-dir "$SH28" --pid "$S28_B" --expect none --reason round9-directory-conflict-probe
+rc28b=$RC; out28b=$OUT
+if [ "$rc28a" -eq 0 ] && [ "$rc28b" -eq 2 ] && printf '%s' "$out28b" | grep -q 'reason=same-lane-dir-other-issue'; then
+  ok "(a) reclaim under a DIFFERENT issue naming a live-held directory is OCCUPIED, not granted"
+else
+  bad "(a) reclaim minted a second writer for one directory: rc=$rc28a/$rc28b
+$out28b"
+fi
+# CONTROL: a guard that never permits work is broken. Reclaiming the OWN issue still works.
+ll reclaim 928 --lane-dir "$SH28" --pid "$S28_A" --expect "$lease28" --reason round9-control-self-reclaim
+if [ "$RC" -eq 0 ]; then
+  ok "(b) CONTROL: reclaiming the issue that owns the directory still succeeds"
+else
+  bad "(b) CONTROL over-refused a legitimate self-reclaim: rc=$RC
+$OUT"
+fi
+kill "$S28_A" "$S28_B" 2>/dev/null || true
+
+# ===========================================================================
+echo "TEST 29: a re-entrant acquire must name the RECORDED directory (roborev round 9)"
+# ===========================================================================
+# Re-entrancy compared the five identity components and never the DIRECTORY, so one process
+# holding issue N for X received ACQUIRED (re-entrant) for Y while the record still protected
+# X — Y advertised as locked and not locked. Same alias the directory mutex closes for two
+# issues, reopened for one issue naming two directories.
+X29="$LANES/x29"; Y29="$LANES/y29"; mkdir -p "$X29" "$Y29"
+sleep 300 & P29=$!
+ll acquire 929 --lane-dir "$X29" --pid "$P29"; rc29a=$RC
+ll acquire 929 --lane-dir "$Y29" --pid "$P29"; rc29b=$RC; out29b=$OUT
+ll acquire 929 --lane-dir "$X29" --pid "$P29"; rc29c=$RC; out29c=$OUT
+if [ "$rc29a" -eq 0 ] && [ "$rc29b" -eq 2 ] \
+   && printf '%s' "$out29b" | grep -q 'reason=reentrant-lane-dir-mismatch' \
+   && printf '%s' "$out29b" | grep -q 'recorded-lane-dir=' ; then
+  ok "(a) a re-entrant acquire naming a DIFFERENT directory is refused and names the recorded one"
+else
+  bad "(a) expected reentrant-lane-dir-mismatch; got rc=$rc29a/$rc29b
+$out29b"
+fi
+if [ "$rc29c" -eq 0 ] && printf '%s' "$out29c" | grep -q 'ACQUIRED (re-entrant)'; then
+  ok "(b) CONTROL: the same process re-acquiring the SAME directory is still re-entrant"
+else
+  bad "(b) CONTROL over-refused a legitimate re-entrant acquire: rc=$rc29c
+$out29c"
+fi
+kill "$P29" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

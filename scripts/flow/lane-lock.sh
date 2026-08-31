@@ -853,7 +853,7 @@ append_audit() {
 }
 
 # ---------------------------------------------------------------------------
-# with_lock <mutex-path> <fn> [args…] — hold the flock for the whole read-modify-write
+# with_lock <fd> <mutex-path> <fn> [args…] — hold the flock for the whole read-modify-write
 # of a mutating subcommand, then propagate the callee's exit status. The mutex PATH is
 # passed in rather than derived from the lane directory: the lock files live in the
 # sibling lock root (see the header's "WHY THE LOCK IS NOT IN THE LANE DIRECTORY"), so
@@ -905,25 +905,49 @@ same_dir_other_issue() {
   return 1
 }
 
+# THE DESCRIPTOR IS AN EXPLICIT PARAMETER, AND THAT IS THE FIX FOR A GUARD THAT HELD
+# NOTHING (#3436, roborev round 9). This helper NESTS — acquire takes the DIRECTORY mutex
+# and then calls itself for the PER-ISSUE mutex — and both used a hardcoded fd 9, so the
+# inner `exec 9>` CLOSED the outer descriptor and released the directory lock BEFORE the
+# record write. Round 8's directory guard therefore ran, passed its (sequential) test, and
+# protected nothing: two issues naming one directory could both scan clean and both
+# acquire. bash 4.1's `exec {var}>` would auto-allocate and make the collision
+# unrepresentable, but this file is declared macOS-bash-3.2 compatible (see the header), so
+# the fd is PASSED — and a reuse is REFUSED rather than silently releasing, because a wrong
+# fd is a programming error and the failure mode it replaces was silent.
 with_lock() {
+  local fd="$1"; shift
   local flock_file="$1"; shift
+  case " ${LANE_LOCK_FDS_HELD:-} " in
+    *" $fd "*)
+      emit_infra "detail=mutex-fd-reused fd=$fd path=$flock_file (a nested with_lock reusing an outer descriptor closes it and SILENTLY RELEASES the outer lock — #3436 round 9. Give the inner lock its own fd.)"
+      return 1
+      ;;
+  esac
   if ! command -v flock >/dev/null 2>&1; then
     emit_unsupported "detail=flock-unavailable mutex=$flock_file (this lock needs flock for its read-modify-write; no fallback mutex is invented on purpose — see the header)"
     return 1
   fi
-  if ! exec 9>"$flock_file"; then
+  if ! eval "exec $fd>\"\$flock_file\""; then
     emit_infra "detail=mutex-unopenable path=$flock_file"
     return 1
   fi
-  if ! flock 9; then
+  if ! flock "$fd"; then
     emit_infra "detail=flock-failed path=$flock_file"
-    exec 9>&-
+    eval "exec $fd>&-"
     return 1
   fi
+  LANE_LOCK_FDS_HELD="${LANE_LOCK_FDS_HELD:-} $fd"
   local rc=0
   "$@" || rc=$?
-  flock -u 9 2>/dev/null || true
-  exec 9>&-
+  flock -u "$fd" 2>/dev/null || true
+  eval "exec $fd>&-"
+  local _f _kept=""
+  for _f in ${LANE_LOCK_FDS_HELD:-}; do
+    [ "$_f" = "$fd" ] && continue
+    _kept="$_kept $_f"
+  done
+  LANE_LOCK_FDS_HELD="$_kept"
   return "$rc"
 }
 
@@ -1158,6 +1182,15 @@ _acquire_locked() {
         # OCCUPIED case below. claim.sh's machine+actor re-entrancy is precisely why
         # the claim ref could not stop #3436's second local session, so this must
         # NEVER be relaxed to a machine+actor comparison.
+        # AND THE DIRECTORY MUST MATCH (#3436, roborev round 9). Without this a process
+        # holding issue N for directory X gets ACQUIRED (re-entrant) for directory Y
+        # while the record still protects X only — so Y is advertised as locked and is
+        # not, which is the same alias the directory mutex closes for two issues,
+        # reopened for one issue naming two directories.
+        if [ "${REC_LANE_DIR:-}" != "$G_LANE" ]; then
+          emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. The record protects the recorded directory only, so returning re-entrant here would advertise protection this lock does not provide. Release it under this issue first, or take the other directory under its own issue number.)"
+          return 2
+        fi
         emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE"
         return 0
         ;;
@@ -1223,9 +1256,9 @@ cmd_acquire() {
       emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is already locked under a DIFFERENT issue by a live holder. The record is keyed by issue so readers need no path, but the DIRECTORY is what must not have two writers — so this refuses. If the other issue number is the mistake, fix the caller; if that lane is genuinely finished, release or reclaim it under ITS issue number.)"
       return 2
     fi
-    with_lock "$G_MUTEX" _acquire_locked
+    with_lock 9 "$G_MUTEX" _acquire_locked
   }
-  with_lock "$(dir_mutex "$G_LANE")" _acquire_under_dir_lock
+  with_lock 8 "$(dir_mutex "$G_LANE")" _acquire_under_dir_lock
 }
 
 # ---------------------------------------------------------------------------
@@ -1451,7 +1484,7 @@ cmd_release() {
   else
     prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
   fi
-  with_lock "$G_MUTEX" _release_locked "$force"
+  with_lock 9 "$G_MUTEX" _release_locked "$force"
 }
 
 # ---------------------------------------------------------------------------
@@ -1597,7 +1630,20 @@ cmd_reclaim() {
   # the header's "nothing ever creates a record that cannot be re-identified" would be
   # false. `release --force` remains available from anywhere: it only DELETES.
   require_durable_identity reclaim || return 1
-  with_lock "$G_MUTEX" _reclaim_locked "$expect" "$reason_token"
+  # RECLAIM WRITES A RECORD, SO IT NEEDS THE DIRECTORY MUTEX AND THE CROSS-ISSUE CHECK
+  # TOO (#3436, roborev round 9). Taking only the per-issue mutex let a STALE record for
+  # issue A be reclaimed AFTER issue B had legitimately acquired that directory — two
+  # live holders, deterministically, with no race required. Any path that mints a record
+  # must answer the same directory question acquire answers.
+  _reclaim_under_dir_lock() {
+    local conflict
+    if conflict="$(same_dir_other_issue "$G_ISSUE" "$G_LANE")"; then
+      emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is held under a DIFFERENT issue by a live holder, so reclaiming this issue's stale record would create a SECOND writer of one directory. Reclaim or release the conflicting issue instead.)"
+      return 2
+    fi
+    with_lock 9 "$G_MUTEX" _reclaim_locked "$expect" "$reason_token"
+  }
+  with_lock 8 "$(dir_mutex "$G_LANE")" _reclaim_under_dir_lock
 }
 
 # ---------------------------------------------------------------------------
