@@ -2256,126 +2256,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # every PAM stack (sshd, login, su, sudo), so the claim is not limited to the one
     # session type the probe could open. What it does NOT buy is a launch path with no
     # PAM in its ancestry at all — that residual is real and is stated, not implied.
-    info "scope: the line is in $PIN_ENV_FILE and the sshd/login session stacks were CHECKED to read it, so the claim is not limited to the sudo session probed — but a process tree created WITHOUT PAM, a systemd unit or a container entrypoint, never has it applied, so this does not prove every gate on this box is pinned"
+    info "scope: measured through a PAM-created (sudo) session against the line in $PIN_ENV_FILE. Whether the service stacks a gate is actually launched from also read that file is NOT checked here — and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has it applied at all"
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
     [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && info "subject: $PIN_PROBE_SUBJECT_NOTE"
-    [ -n "$PIN_PAM_UNCHECKED" ] && info "unchecked: $PIN_PAM_UNCHECKED — those service stacks could not be read, so this run says nothing about them either way"
-  }
-
-  # pin_pam_services_missing_readenv: the sshd/login session stacks that do NOT read
-  # $PIN_ENV_FILE. Echoes the offending service names, empty when none.
-  #
-  # A WEAKEN-ONLY SIGNAL, AND THAT IS WHAT MAKES CONSULTING CONFIG LEGITIMATE HERE
-  # (#3414 roborev round 5). Reading configuration to CREATE a positive verdict is the
-  # proxy reasoning this whole issue exists to remove — a file saying pam_env is loaded is
-  # not evidence that a session got the value, exactly as a line in ~/.bashrc was not. But
-  # the converse is sound: if the stack a gate's session is actually created by does not
-  # read the file at all, then a SUDO-verified pin is not evidence about that session. So
-  # this may only ever DOWNGRADE a would-be VERIFIED and can never produce one. Same
-  # asymmetry as the negative-probe rule above: an unmeasurable or absent half may weaken
-  # a positive claim and may never strengthen one.
-  #
-  # THE PREDICATE IS MEASURED, NOT GUESSED. `readenv` DEFAULTS TO ON (pam_env(8): "By
-  # default this option is on"), so a BARE `pam_env.so` reads the file and only an
-  # explicit `readenv=0` disables it — requiring the literal `readenv=1` would flag this
-  # very box, whose /etc/pam.d/sshd carries a bare `pam_env.so`, and weaken a correctly
-  # configured machine. A line with an explicit `envfile=` pointing somewhere ELSE (sshd
-  # and login both carry one for /etc/default/locale) is likewise not evidence for this
-  # file. So: a session line invoking pam_env.so, without readenv=0, and either without an
-  # envfile= or with one naming $PIN_ENV_FILE.
-  #
-  # A service whose config is ABSENT is not a gap — a box with no sshd needs no sshd
-  # stack. A service whose config is present but UNREADABLE is recorded as unchecked
-  # (PIN_PAM_UNCHECKED) rather than treated as missing: "cannot tell" must not manufacture
-  # a downgrade any more than it may manufacture a pass.
-  #
-  # THE DIRECTORY IS OVERRIDABLE ONLY INSIDE AN ALREADY-VALIDATED SEAM, and deliberately
-  # not by a switch of its own. `CQLITE_BOOTSTRAP_PAM_DIR` is honoured ONLY when
-  # PIN_ENV_FILE_IS_SEAM is 1 — i.e. when the env-file seam has already passed test-mode,
-  # absolute-path, not-production and NOT-ROOT validation — so it adds no new reachable
-  # surface and cannot be set independently of that gate. It matters that this is the
-  # direction it is: pointing the check at a directory that looks healthy could SUPPRESS a
-  # downgrade, and suppressing a downgrade is how a VERIFIED gets manufactured. Tying it
-  # to the seam keeps that reachable only where the section is already non-production.
-  PIN_PAM_DIR=/etc/pam.d
-  if [ "$PIN_ENV_FILE_IS_SEAM" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_PAM_DIR:-}" ]; then
-    case "$CQLITE_BOOTSTRAP_PAM_DIR" in
-      /etc/pam.d) : ;;                      # never the production directory
-      /*) [ -d "$CQLITE_BOOTSTRAP_PAM_DIR" ] && PIN_PAM_DIR="$CQLITE_BOOTSTRAP_PAM_DIR" ;;
-    esac
-  fi
-  # pin_pam_effective_lines <service-file>: the service file PLUS one level of @include.
-  #
-  # A DISTRIBUTION MAY FACTOR pam_env INTO THE COMMON STACK. Both /etc/pam.d/sshd and
-  # /etc/pam.d/login here carry `@include common-session`, and a predicate reading only the
-  # service file would report "no pam_env" on any distro that puts it there — weakening a
-  # correctly configured box, which is the red-on-correct-input shape this lane has hit
-  # four times. Measured on THIS box: common-session carries no pam_env line, so following
-  # the include changes nothing here; it is done for the distros where it would.
-  #
-  # ONE LEVEL, NOT RECURSIVE, and the not-found diagnostic SAYS SO — an absence you did not
-  # fully search for is not an absence, so the limit is declared rather than papered over.
-  pin_pam_effective_lines() {
-    local f="$1" inc
-    cat "$f" 2>/dev/null
-    while IFS= read -r inc; do
-      [ -n "$inc" ] || continue
-      case "$inc" in /*) : ;; *) inc="$PIN_PAM_DIR/$inc" ;; esac
-      [ -r "$inc" ] && cat "$inc" 2>/dev/null
-    done <<EOF
-$(awk '/^[[:space:]]*@include[[:space:]]+/ { print $2 }' "$f" 2>/dev/null)
-EOF
-  }
-
-  #
-  # RESULTS COME BACK IN GLOBALS AND THIS IS CALLED DIRECTLY, NEVER IN `$( )` (#3414
-  # roborev round 6). It used to be invoked as `pin_pam_gap=$(pin_pam_services_...)`, and
-  # `$( )` FORKS — so the PIN_PAM_UNCHECKED assignment happened in a subshell and was
-  # discarded. An UNREADABLE service config then reached VERIFIED *and* the scope note
-  # claimed the stacks had been checked: a false positive plus a false statement about
-  # what was measured, which is worse than either alone.
-  #
-  # THIS IS NOT A NEW LESSON, IT IS AN EXISTING ONE REPRODUCED ONE FILE OVER. CLAUDE.md
-  # already carries it for the gate's cargo-output parse sites — "read by redirection,
-  # never a pipe: a piped `while read` runs in a subshell and its verdict is discarded".
-  # That doctrine was written about agent-gate.sh, but it is a property of the SHELL, not
-  # of that file: `$( )` and `|` both fork, and a verdict assigned inside either does not
-  # survive. Said here because the next person reaches for `$( )` reflexively too.
-  #
-  # The rule this file now follows: a function that ECHOES its result may be used in a
-  # substitution or a pipe (the output IS the payload — pin_gate_source_for,
-  # pin_strip_pam_quotes, pin_pam_effective_lines); a function that ASSIGNS must be called
-  # directly. Swept at the time of this fix: this was the only assigner being substituted.
-  PIN_PAM_UNCHECKED=""
-  PIN_PAM_GAP=""
-  pin_pam_services_missing_readenv() {
-    local svc f missing=""
-    PIN_PAM_UNCHECKED=""
-    PIN_PAM_GAP=""
-    for svc in sshd login; do
-      f="$PIN_PAM_DIR/$svc"
-      [ -e "$f" ] || continue
-      if [ ! -r "$f" ]; then
-        PIN_PAM_UNCHECKED="${PIN_PAM_UNCHECKED:+$PIN_PAM_UNCHECKED }$svc"
-        continue
-      fi
-      # `envfile=` REDIRECTS WHICH FILE IS READ, so a pam_env line is evidence about ours
-      # only if it does not point elsewhere. Both service files here carry a second
-      # pam_env line with envfile=/etc/default/locale — that one reads the locale file and
-      # must not count, or a stack whose ONLY pam_env line was the locale one would read
-      # as pinned when it is not. sshd still qualifies, via its bare line alone.
-      if ! pin_pam_effective_lines "$f" | awk -v envfile="$PIN_ENV_FILE" '
-            /^[[:space:]]*#/ { next }
-            $1 == "session" && /pam_env\.so/ {
-              if ($0 ~ /readenv=0/) next
-              if ($0 ~ /envfile=/) { if ($0 !~ ("envfile=" envfile "([[:space:]]|$)")) next }
-              found = 1
-            }
-            END { exit(found ? 0 : 1) }' 2>/dev/null; then
-        missing="${missing:+$missing }$svc"
-      fi
-    done
-    PIN_PAM_GAP="$missing"
   }
 
   # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
@@ -2540,27 +2423,8 @@ EOF
               if [ "$PIN_FILE_VALUE" = "$pin_probe_seen" ]; then
                 # Called DIRECTLY: see the note on the function — a substitution here
                 # forks, and both of its result globals would be lost with the fork.
-                pin_pam_services_missing_readenv
-                pin_pam_gap="$PIN_PAM_GAP"
-                if [ -n "$pin_pam_gap" ]; then
-                  # WEAKEN ONLY. Both affirmative halves hold, but the session stacks a
-                  # gate is actually created by do not read this file, so what was
-                  # measured through sudo is not evidence about them.
-                  warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE and a sudo session sees it, but the PAM stack for [$pin_pam_gap] does NOT read $PIN_ENV_FILE — sessions created by those services, which is how gates are launched, will not get it)"
-                  info "add a session-stage 'pam_env.so' (readenv defaults to on) to $PIN_PAM_DIR/{$(printf '%s' "$pin_pam_gap" | tr ' ' ',')}, then re-run"
-                  info "searched each service file plus ONE level of @include; a pam_env buried deeper than that would not have been seen, so confirm by hand before rewriting a stack"
-                  info "the sudo-session result above is real but does not generalise; the per-run authority stays the gate's own cpu-budget: max-concurrency=N(...) token"
-                elif [ -n "$PIN_PAM_UNCHECKED" ]; then
-                  # NOT a gap and NOT a clean check. The stacks that decide whether this
-                  # generalises could not be read, so the scope the VERIFIED text would
-                  # claim was never established — and claiming it was is the half of this
-                  # finding that is worse than the false positive.
-                  warn "gate-pin: UNMEASURED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE and a sudo session sees it, but the PAM stack for [$PIN_PAM_UNCHECKED] could not be READ — whether sessions created by those services get it is UNKNOWN)"
-                  info "the sudo-session result above is real but its scope is unestablished; the per-run authority stays the gate's own cpu-budget: max-concurrency=N(...) token"
-                else
                 ok "gate-pin: VERIFIED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE AND a fresh PAM-created, profile-free session sees that SAME value, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
                 pin_scope_note
-                fi
               else
                 warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' but this session sees '$pin_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and the gate will act on THAT, not on the one measured here)"
                 info "fix the VALUE in $PIN_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"

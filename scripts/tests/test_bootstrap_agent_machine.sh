@@ -3029,10 +3029,13 @@ else
   # to assert that pam_env reads the file in every stack; it now says those stacks were
   # CHECKED. Asserting the checked wording is the point — the earlier phrasing was a
   # statement about PAM in general, this one is a statement about THIS box.
-  if printf '%s' "$out_x" | grep -q 'session stacks were CHECKED to read it' \
+  # The PAM weaken-signal was DELETED (#3414 round 7 ruling), so the note no longer claims
+  # the service stacks were checked — it now states that they are NOT checked here. That
+  # is the whole point of the deletion: the note must not assert a scope nothing measured.
+  if printf '%s' "$out_x" | grep -q 'is NOT checked here' \
      && printf '%s' "$out_x" | grep -q 'created WITHOUT PAM' \
      && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
-    ok "gate-pin: the scope note claims the CHECKED scope and still names the no-PAM residual"
+    ok "gate-pin: the scope note states what it did NOT check and names the gate's token as authority"
   else
     bad "gate-pin: the scope note does not match the correlated verdict"
     printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
@@ -3313,137 +3316,6 @@ else
     fi
   else
     skip "gate-pin sudo-invocation-mode cases (no passwordless sudo here)"
-  fi
-
-  # 11ao. PAM CONFIG IS A WEAKEN-ONLY SIGNAL (roborev round 5). If the sshd/login stacks
-  #      do not read the env file, a sudo-verified pin says nothing about the sessions
-  #      gates are launched from — so it DOWNGRADES. It may never create a VERIFIED, which
-  #      is what makes consulting config legitimate at all here.
-  #
-  #      The predicate is MEASURED, not guessed: pam_env's `readenv` DEFAULTS TO ON
-  #      (pam_env(8): "By default this option is on"), so a BARE `pam_env.so` reads the
-  #      file — requiring a literal `readenv=1` would flag this very box, whose
-  #      /etc/pam.d/sshd carries a bare one, and weaken a correct machine.
-  pin_pamd_ok="$tmp/pin-pamd-ok"; pin_pamd_gap="$tmp/pin-pamd-gap"
-  mkdir -p "$pin_pamd_ok" "$pin_pamd_gap"
-  printf 'session required pam_env.so\n'            >"$pin_pamd_ok/sshd"     # bare == reads it
-  printf 'session required pam_env.so readenv=1\n'  >"$pin_pamd_ok/login"
-  printf 'session required pam_unix.so\n'           >"$pin_pamd_gap/sshd"    # no pam_env
-  printf 'session required pam_env.so readenv=1\n'  >"$pin_pamd_gap/login"
-  envf_ao="$tmp/pin-env-ao"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ao"
-  out_ao_ok=$(runpin "$pinroot" "$shims_one" "$envf_ao" HOME="$pin_home_plain" \
-    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_ok")
-  out_ao_gap=$(runpin "$pinroot" "$shims_one" "$envf_ao" HOME="$pin_home_plain" \
-    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_gap")
-  if printf '%s' "$out_ao_ok" | grep -qE '\[ok\].*gate-pin: VERIFIED' \
-     && printf '%s' "$out_ao_gap" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
-     && printf '%s' "$out_ao_gap" | grep -q 'does NOT read' \
-     && ! printf '%s' "$out_ao_gap" | grep -qE '\[ok\].*gate-pin'; then
-    ok "gate-pin: a service stack that does not read the env file DOWNGRADES a would-be VERIFIED"
-  else
-    bad "gate-pin: the PAM-config signal did not weaken (or a bare pam_env.so was misread as a gap)"
-    printf '%s\n' "$out_ao_ok"  | grep -i 'gate-pin' | head -1
-    printf '%s\n' "$out_ao_gap" | grep -i 'gate-pin' | head -1
-  fi
-
-  # 11ap. ...and it is WEAKEN-ONLY: config alone must never CREATE a VERIFIED. A healthy
-  #      pam.d with the pin NOT visible to the session stays FAILED. Without this, 11ao's
-  #      positive half would pass against an implementation that let config decide.
-  envf_ap="$tmp/pin-env-ap"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ap"
-  out_ap=$(runpin "$pinroot" "$shims_none" "$envf_ap" HOME="$pin_home_plain" \
-    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_ok")
-  if printf '%s' "$out_ap" | grep -q 'gate-pin: FAILED' \
-     && ! printf '%s' "$out_ap" | grep -qE '\[ok\].*gate-pin'; then
-    ok "gate-pin: a healthy PAM config cannot CREATE a VERIFIED when the session sees nothing"
-  else
-    bad "gate-pin: config was allowed to manufacture a positive verdict"
-    printf '%s\n' "$out_ap" | grep -i 'gate-pin' | head -2
-  fi
-
-  # 11aq. TWO WAYS THE WEAKEN-SIGNAL COULD MISREAD A STACK (issue #3414, lead refinement).
-  #      (a) `envfile=` REDIRECTS which file is read, so a pam_env line pointing at
-  #          /etc/default/locale — both real service files here carry one — is not
-  #          evidence about ours. A stack whose ONLY pam_env line was that would otherwise
-  #          read as pinned when it is not.
-  #      (b) A distro may factor pam_env into the COMMON stack via `@include`; both real
-  #          files carry `@include common-session`. Reading only the service file would
-  #          report "no pam_env" there and weaken a correct box — the red-on-correct-input
-  #          shape, for the fifth time. One level is followed; deeper is not, and the
-  #          diagnostic says so rather than asserting an absence it did not establish.
-  pin_pamd_inc="$tmp/pin-pamd-inc"; pin_pamd_loc="$tmp/pin-pamd-loc"
-  mkdir -p "$pin_pamd_inc" "$pin_pamd_loc"
-  printf '@include common-session\n'                                  >"$pin_pamd_inc/sshd"
-  printf 'session required pam_env.so\n'                              >"$pin_pamd_inc/common-session"
-  printf 'session required pam_env.so\n'                              >"$pin_pamd_inc/login"
-  printf 'session required pam_env.so envfile=/etc/default/locale\n'  >"$pin_pamd_loc/sshd"
-  printf 'session required pam_env.so\n'                              >"$pin_pamd_loc/login"
-  envf_aq="$tmp/pin-env-aq"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_aq"
-  out_aq_inc=$(runpin "$pinroot" "$shims_one" "$envf_aq" HOME="$pin_home_plain" \
-    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_inc")
-  out_aq_loc=$(runpin "$pinroot" "$shims_one" "$envf_aq" HOME="$pin_home_plain" \
-    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_loc")
-  if printf '%s' "$out_aq_inc" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
-    ok "gate-pin: pam_env reached only through @include is found (one level), not read as absent"
-  else
-    bad "gate-pin: a stack that loads pam_env via @include was wrongly weakened"
-    printf '%s\n' "$out_aq_inc" | grep -i 'gate-pin' | head -2
-  fi
-  if printf '%s' "$out_aq_loc" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
-     && ! printf '%s' "$out_aq_loc" | grep -qE '\[ok\].*gate-pin'; then
-    ok "gate-pin: a pam_env line whose envfile= names ANOTHER file is not evidence for ours"
-  else
-    bad "gate-pin: an envfile=-redirected pam_env line was counted as reading our file"
-    printf '%s\n' "$out_aq_loc" | grep -i 'gate-pin' | head -2
-  fi
-  if printf '%s' "$out_aq_loc" | grep -q 'ONE level of @include'; then
-    ok "gate-pin: the gap diagnostic declares its own search limit (one @include level)"
-  else
-    bad "gate-pin: the gap diagnostic asserts an absence without naming how far it looked"
-  fi
-
-  # 11ar. AN UNREADABLE PAM STACK MUST NOT REACH VERIFIED (issue #3414 roborev round 6).
-  #      pin_pam_services_missing_readenv was called inside `$( )`, which FORKS — so its
-  #      PIN_PAM_UNCHECKED assignment happened in a subshell and was discarded. An
-  #      unreadable service config then produced VERIFIED *and* a scope note claiming the
-  #      stacks had been checked: a false positive plus a false statement about what was
-  #      measured. Only this branch loses the signal — the happy path works — which is why
-  #      it survived six review rounds, and why the case is written against the branch
-  #      rather than against the function.
-  #
-  #      Root can read a 0000 file, so as root the case would assert nothing.
-  if [ "$(id -u)" = 0 ]; then
-    skip "gate-pin unreadable-PAM-stack case (running as root: 0000 is still readable)"
-  else
-    pin_pamd_unread="$tmp/pin-pamd-unread"; mkdir -p "$pin_pamd_unread"
-    printf 'session required pam_env.so\n' >"$pin_pamd_unread/sshd"
-    printf 'session required pam_env.so\n' >"$pin_pamd_unread/login"
-    chmod 0000 "$pin_pamd_unread/sshd"
-    envf_ar="$tmp/pin-env-ar"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ar"
-    out_ar=$(runpin "$pinroot" "$shims_one" "$envf_ar" HOME="$pin_home_plain" \
-      CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_unread")
-    chmod 0644 "$pin_pamd_unread/sshd"
-    if printf '%s' "$out_ar" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_ar" | grep -q 'could not be READ' \
-       && ! printf '%s' "$out_ar" | grep -qE '\[ok\].*gate-pin' \
-       && ! printf '%s' "$out_ar" | grep -q 'were CHECKED to read it'; then
-      ok "gate-pin: an UNREADABLE PAM stack is UNMEASURED, and the run does not claim the stacks were checked"
-    else
-      bad "gate-pin: an unreadable PAM stack reached a verdict it had not earned (subshell swallowed the signal?)"
-      printf '%s\n' "$out_ar" | grep -i 'gate-pin\|CHECKED' | head -3
-    fi
-  fi
-
-  # 11as. STRUCTURAL, and it is the half that generalises: a function whose purpose is to
-  #      SET a variable must be called directly, never in `$( )` or downstream of `|`,
-  #      because both fork and the assignment does not survive. CLAUDE.md already carries
-  #      this for the gate's cargo-output parse sites; it is a property of the shell, not
-  #      of that file. A future edit could reintroduce the substitution while 11ar still
-  #      passed on a readable box, so the call shape is asserted directly.
-  if grep -qE '^\s*pin_pam_services_missing_readenv$' "$BOOTSTRAP" \
-     && ! grep -qE '\$\(pin_pam_services_missing_readenv' "$BOOTSTRAP"; then
-    ok "gate-pin: the PAM check is called directly, not in a subshell that would discard its globals"
-  else
-    bad "gate-pin: the PAM check is back inside a command substitution — its result globals are lost"
   fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
