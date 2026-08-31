@@ -324,6 +324,38 @@ def _schemas_root() -> Path:
     return _workspace_root() / "test-data" / "schemas"
 
 
+def _same_physical_dir(a: Path, b: Path) -> bool:
+    """True when two candidate spellings name ONE directory on disk.
+
+    Compares THINGS, not representations. Candidate roots used to be
+    deduplicated LEXICALLY, so an env var reaching the checkout corpus through a
+    symlink or a relative path added the SAME directory twice and the ambiguity
+    refusal below then rejected it as "two roots carry the declared generation"
+    — a false FAIL in a legitimate configuration (the fetch script prints an
+    export line and operators point it at whatever path they have).
+
+    ``samefile`` (st_dev, st_ino) is the primary test because it settles every
+    alias shape a lexical compare cannot: symlink, relative spelling, trailing
+    ``.``, bind mount, hardlinked directory. It requires BOTH paths to exist, so
+    a nonexistent candidate falls back to ``os.path.realpath``, which never
+    raises, resolves a broken symlink by its recorded target and normalises a
+    missing tail lexically. A nonexistent candidate is deliberately KEPT in the
+    list rather than dropped — the "searched [...]" diagnostic has to name the
+    root the operator actually exported, or a typo'd ``CQLITE_DATASETS_ROOT``
+    disappears from the one report that would reveal it — and being kept is
+    safe precisely because it is normalised: it can never crash the resolver and
+    never counts as a second root when it is another spelling of the same
+    missing path.
+
+    NOT a resolution for DISPLAY: only the dedup KEY is normalised. Diagnostics
+    keep the operator's own spelling, which is what they have to recognise.
+    """
+    try:
+        return a.samefile(b)
+    except OSError:
+        return os.path.realpath(a) == os.path.realpath(b)
+
+
 def _sstables_root_candidates() -> list[Path]:
     """Every ``sstables/`` root to search, in order.
 
@@ -334,6 +366,9 @@ def _sstables_root_candidates() -> list[Path]:
     (this one) the fetched corpus does not (#3104/#3220). Every candidate is
     inspected on every call; nothing short-circuits on the first hit, because an
     undeclared or duplicated generation in a LATER root is itself a failure.
+
+    Deduplicated PHYSICALLY (``_same_physical_dir``), never lexically: an alias
+    of a root already listed is not a second root.
     """
     candidates: list[Path] = []
     env_root = os.environ.get("CQLITE_DATASETS_ROOT")
@@ -342,7 +377,7 @@ def _sstables_root_candidates() -> list[Path]:
         nested = root / "sstables"
         candidates.append(nested if nested.is_dir() else root)
     checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
-    if checkout not in candidates:
+    if not any(_same_physical_dir(checkout, c) for c in candidates):
         candidates.append(checkout)
     return candidates
 
@@ -1763,6 +1798,65 @@ class TestFixtureResolutionContract:
         assert str(decoy) in message
         checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
         assert str(checkout) in message
+
+    def test_a_symlinked_env_root_is_one_root_not_an_ambiguity(
+        self, tmp_path, monkeypatch
+    ):
+        """An env root reaching the checkout through a SYMLINK is ONE root.
+
+        The false FAIL the ambiguity refusal above introduced: two candidate
+        spellings of the SAME directory were counted as two roots, so a
+        perfectly legitimate ``CQLITE_DATASETS_ROOT`` — the fetch script prints
+        an export line and operators point it at whatever path they have — made
+        the suite refuse to run. Deduplication compares THINGS (``samefile``),
+        not representations.
+        """
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        alias = tmp_path / "corpus-alias"
+        alias.symlink_to(
+            _workspace_root() / "test-data" / "datasets", target_is_directory=True
+        )
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(alias))
+
+        candidates = _sstables_root_candidates()
+        assert candidates == [alias / "sstables"], (
+            "the symlinked env root and the checkout are one directory, so they "
+            f"must collapse to one candidate; got {candidates}"
+        )
+        assert _sstables_root_for_table(KEYSPACE, TABLE).samefile(checkout)
+
+    def test_a_relative_env_root_is_one_root_not_an_ambiguity(self, monkeypatch):
+        """Same for a RELATIVE spelling of the checkout corpus.
+
+        A relative candidate and the absolute checkout differ lexically and are
+        the same directory, which ``samefile`` settles without resolving either
+        for display — the operator's spelling is what diagnostics name.
+        """
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        monkeypatch.chdir(_workspace_root())
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", "test-data/datasets")
+
+        candidates = _sstables_root_candidates()
+        assert candidates == [Path("test-data/datasets/sstables")], (
+            f"a relative alias of the checkout must be one candidate, got {candidates}"
+        )
+        assert _sstables_root_for_table(KEYSPACE, TABLE).samefile(checkout)
+
+    def test_a_nonexistent_env_root_is_searched_not_a_crash(
+        self, tmp_path, monkeypatch
+    ):
+        """A root that does not exist stays a named candidate and resolves fine.
+
+        ``samefile`` raises on a missing path, so the dedup key falls back to
+        ``realpath``. The candidate is KEPT rather than dropped so the resolver's
+        "searched [...]" diagnostic still names a typo'd export; it cannot become
+        a second spelling of the checkout, because it is a different path.
+        """
+        missing = tmp_path / "no_such_corpus_root"
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(missing))
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        assert _sstables_root_candidates() == [missing, checkout]
+        assert _sstables_root_for_table(KEYSPACE, TABLE) == checkout
 
     def test_table_absent_from_the_manifest_fails_closed(self):
         """A table the manifest does not declare cannot be resolved at all.
