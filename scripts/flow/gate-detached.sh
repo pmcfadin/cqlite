@@ -723,11 +723,23 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
   # answers "is any task left in the scope", which a single ORPHANED `sleep` satisfies forever -- one box
   # was measured with 12 orphaned sleeps and 0 gate scopes. That let an affirmative "owner is dead" reading
   # be overridden into `live`, so the path was refused FOREVER with nothing to reap the orphan.
-  local unit="$1" cg procs p a hit lite found=1
-  cg=$(systemctl --user show -p ControlGroup --value "$unit" 2>/dev/null) || return 2
-  [ -n "$cg" ] || return 2
+  local unit="$1" cg procs p a hit lite _pdir found=1
+  cg=$(systemctl --user show -p ControlGroup --value "$unit" 2>/dev/null) || return 2   # could not ASK
+  # AN EMPTY ControlGroup IS AN AFFIRMATIVE ANSWER, NOT AN UNKNOWN. `systemctl show` returns rc=0 with an
+  # EMPTY value for a unit that no longer exists, so treating empty as unmeasurable made every stale
+  # reservation permanently unreclaimable -- the exact defect this helper was written to fix, relocated one
+  # step. Caught by 4b.77/4b.86, which assert a dead owner does NOT block the path forever. A unit with no
+  # control group has no processes; that is a positive fact about the unit.
+  [ -n "$cg" ] || return 1
   procs="/sys/fs/cgroup${cg}/cgroup.procs"
-  [ -r "$procs" ] || return 2               # UNMEASURABLE => third value; the caller REFUSES, never guesses
+  if [ ! -e "$procs" ]; then
+    # Absent, or unlookable? `-e` is two-valued and collapses those. The scope genuinely vanishing is an
+    # affirmative "no gate"; an unsearchable parent is an unknown and must refuse.
+    _pdir=${procs%/*}
+    if [ -d "$_pdir" ] && [ -x "$_pdir" ]; then return 1; fi
+    return 2
+  fi
+  [ -r "$procs" ] || return 2               # exists but UNREADABLE => genuinely unmeasurable; caller refuses
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [ -r "/proc/$p/cmdline" ] || continue   # exited mid-scan: not evidence either way
