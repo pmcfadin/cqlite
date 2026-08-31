@@ -6955,7 +6955,16 @@ test_lane_lock_holder_pid_is_parsed_before_use() {
       TRAILING)    printf '%s x\n' "$dead" >"$lock/pid" ;;
       ZERO)        printf '0\n' >"$lock/pid" ;;
       LEADINGZERO) printf '0%s\n' "$dead" >"$lock/pid" ;;
-      OVERLONG)    printf '123456789012345\n' >"$lock/pid" ;;
+      # 19 DIGITS, AND THE WIDTH IS LOAD-BEARING (#3601, roborev job 236 B14). This fixture was 15
+      # digits, which only exceeds a bound the platform PUBLISHES: where none is published the ceiling
+      # gate does not apply and the parser's own platform-independent guard allows up to 18, so a
+      # 15-digit value is ACCEPTED and this shape's required refusal failed — on macOS/bash 3.2, a
+      # platform this file explicitly supports. 19 digits is past the arithmetic-length guard, which is
+      # a property of the shell's integer width rather than of any platform's pid space, so this shape
+      # refuses everywhere. Same class as B13, and surfaced BY the B13 fix: making the no-bound branch
+      # measured on this host instead of platform-conditional is what made this sibling's assumption
+      # visible.
+      OVERLONG)    printf '1234567890123456789\n' >"$lock/pid" ;;
       NOTAFILE)    mkdir -p "$lock/pid" ;;
       # REAL NUL BYTES, WRITTEN AS BYTES (#3601, roborev job 231) — not a stand-in, because the entire
       # defect is that a NUL is INVISIBLE to every check that runs on a shell variable. `NUL` is the
@@ -6992,6 +7001,29 @@ test_lane_lock_holder_pid_is_parsed_before_use() {
         ;;
     esac
   done
+
+  # ---- (1b) THE `OVERLONG` WIDTH IS PINNED MECHANICALLY, NOT BY THE COMMENT ABOVE IT (#3601 B14). A
+  # comment saying "19 digits, because 15 only beats a published bound" does not stop the next edit
+  # shrinking it, and the shrink is INVISIBLE on this host — it reds only on a platform without
+  # `/proc/sys/kernel/pid_max`, which nobody runs the suite on. So the same fixture content is driven
+  # through the parser with the ceiling FORCED to `unknown`, which is the macOS shape, and must still
+  # refuse. This is the mechanism-not-care point: a human catches instance N, a test catches the class.
+  local ovr_unk over_verdict
+  ovr_unk="$d/f-unknown-ceiling.sh"; : >"$ovr_unk"
+  if sv_mutant_override "$ovr_unk" supervisor_pid_space_ceiling \
+       "  printf 'authoritative %s' \"\$((b - 1))\"" \
+       "  printf '%s' 'unknown forced-for-test'; return 0"; then
+    rm -rf "$lock"
+    mkdir -p "$lock"
+    printf '1234567890123456789\n' >"$lock/pid"
+    over_verdict="$(env SUP="$SUPERVISOR" OVR="$ovr_unk" F="$lock/pid" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+    if [[ "$over_verdict" == 'unparseable pid-digit-count-out-of-well-formedness-bound' ]]; then
+      pass "lane-lock AC1 (OVERLONG, platform-independent): the fixture is refused by the ARITHMETIC-LENGTH guard even with no platform pid bound published [$over_verdict] — so this shape's refusal does not depend on the host publishing a ceiling"
+    else
+      fail "lane-lock-overlong-platform-dependent: verdict=[$over_verdict] — this fixture must be wide enough to be refused with no published ceiling, or the shape reds on macOS (the B14 defect); 15 digits was not"
+    fi
+    rm -rf "$lock"
+  fi
 
   # ---- (2) THE PRINTED REMEDY IS NON-RECURSIVE, AND THAT IS THE SAFETY PROPERTY. With content still in
   # the lock the printed line must FAIL rather than delete something nobody examined — the opposite of
