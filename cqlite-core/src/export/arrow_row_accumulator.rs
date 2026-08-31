@@ -200,6 +200,10 @@ pub struct ArrowRowAccumulator<'a> {
     /// how much capacity may stay resident between batches. A batch's own present
     /// cells are what the byte cap bounds, so they are the only sound basis.
     peak_cells: usize,
+    /// Per-column present-cell count at the LAST `clear` — what each store actually
+    /// needed most recently, so the trim can keep an active store warm and reclaim
+    /// from the ones that went quiet.
+    last_used: Vec<usize>,
 }
 
 impl<'a> ArrowRowAccumulator<'a> {
@@ -255,6 +259,7 @@ impl<'a> ArrowRowAccumulator<'a> {
             has_staged: false,
             rows: 0,
             peak_cells: 0,
+            last_used: vec![0; columns.len()],
         }
     }
 
@@ -329,10 +334,30 @@ impl<'a> ArrowRowAccumulator<'a> {
             self.columns.len(),
             "staging arity must equal the projected column count"
         );
-        // Reset the staging slot: an ABSENT column must arrive at the charging
-        // core as `None`, exactly as a failed `row.values.get(name)` does.
-        for slot in &mut self.staged {
-            *slot = None;
+        // An ABSENT column must arrive at the charging core as `None`, exactly as a
+        // failed `row.values.get(name)` does — so every slot must be `None` here.
+        //
+        // It already IS, on every path that reaches this line after a `commit`:
+        // `commit` TAKES every slot unconditionally (not just the filled ones), and
+        // the initial `staged` is all-`None`. An unconditional reset was therefore a
+        // redundant PROJECTION-WIDTH pass on the hot path, per row — which is work
+        // this issue exists to REMOVE, not add (issue #3552, roborev round 12).
+        //
+        // The one path that genuinely needs the reset is a re-`stage` with no
+        // intervening `commit` (`has_staged` still true), where the previous row's
+        // values are still resident. That case pays for itself; the common one does
+        // not. The `debug_assert` makes the skipped invariant CHECKED in debug builds
+        // rather than merely argued for here.
+        if self.has_staged {
+            for slot in &mut self.staged {
+                *slot = None;
+            }
+        } else {
+            debug_assert!(
+                self.staged.iter().all(Option::is_none),
+                "staging slots must be empty when no row is staged — `commit` takes \
+                 every slot, so a non-empty slot here means that contract broke"
+            );
         }
         // Resolve by iterating the ROW's own entries — the large per-row value map
         // is never probed by column name (issue #1495 / parser epic J1). An entry
@@ -429,7 +454,14 @@ impl<'a> ArrowRowAccumulator<'a> {
     pub fn clear(&mut self) {
         // A batch's OWN present-cell count is what the byte cap bounds, so it is the
         // only sound basis for what may stay resident. Measured BEFORE the clear.
-        let used: usize = self.cells.iter().map(Vec::len).sum();
+        let mut used = 0usize;
+        for (idx, column) in self.cells.iter().enumerate() {
+            let n = column.len();
+            used = used.saturating_add(n);
+            if let Some(slot) = self.last_used.get_mut(idx) {
+                *slot = n;
+            }
+        }
         self.peak_cells = self.peak_cells.max(used);
 
         for column in &mut self.cells {
@@ -452,15 +484,27 @@ impl<'a> ArrowRowAccumulator<'a> {
             .max(RETAINED_SLOT_FLOOR);
         let retained: usize = self.cells.iter().map(Vec::capacity).sum();
         if retained > allowance {
-            // An EQUAL per-column share, so the bound holds for ANY density
-            // distribution rather than for the one that happened to occur. Stores are
-            // shrunk, never dropped: the next batch re-grows only what it uses. The
-            // `.max(1)` keeps one warm slot per column on a projection wider than the
-            // floor, where an equal share would round to zero and churn every batch.
-            let share = (allowance / self.cells.len().max(1)).max(1);
-            for column in &mut self.cells {
-                if column.capacity() > share {
-                    column.shrink_to(share);
+            // Trim each store toward ITS OWN recent usage, not an equal share of the
+            // allowance. An equal share bounds the total correctly but churns
+            // permanently: once the inactive stores hold their shares, a column that
+            // is stably dense exceeds its own share every batch and is shrunk every
+            // batch, reallocating on the next one (issue #3552, roborev round 12).
+            //
+            // Usage-proportional keeps an actively populated store warm and takes the
+            // space back from the ones that went quiet. The total bound still holds:
+            // the kept slots sum to `Σ last_used[c] × SLACK` = `used × SLACK`, and
+            // `used <= peak_cells`, so the sum cannot exceed the allowance.
+            let Self {
+                cells, last_used, ..
+            } = self;
+            for (idx, column) in cells.iter_mut().enumerate() {
+                let keep = last_used
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_mul(RETAINED_SLOT_SLACK);
+                if column.capacity() > keep {
+                    column.shrink_to(keep);
                 }
             }
         }

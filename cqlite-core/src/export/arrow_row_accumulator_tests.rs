@@ -496,3 +496,73 @@ fn rotating_density_does_not_accumulate_per_column_capacity() {
         "retained {retained} slots exceeds the documented allowance {allowance}"
     );
 }
+
+/// A STABLY dense column must stay warm across batches — the trim must not shrink it
+/// every batch and force a reallocation on the next one.
+///
+/// The defect this pins (issue #3552, roborev round 12): the first trim divided the
+/// allowance into EQUAL per-column shares. That bounds the total correctly, but once
+/// the inactive stores hold their shares, a column that is stably dense exceeds its
+/// own share on every batch and is shrunk on every batch — permanent allocation churn
+/// in the steady state, which is the opposite of what retaining capacity is for.
+///
+/// Deliberately NOT a timing test: churn is observable structurally as capacity
+/// collapsing between batches, and a wall-clock threshold in a correctness path is a
+/// mechanized `roborev-lints` failure (#2642).
+#[test]
+fn a_stably_dense_column_stays_warm_across_batches() {
+    const N_COLS: usize = 48;
+    const ROWS_PER_BATCH: usize = 96;
+
+    let names: Vec<String> = (0..N_COLS).map(|i| format!("c{i}")).collect();
+    let columns: Vec<ColumnInfo> = names
+        .iter()
+        .map(|n| col(n, DataType::Text, Some(CqlType::Text)))
+        .collect();
+
+    let mut acc = ArrowRowAccumulator::new(&columns);
+
+    // First, move density across many columns so the stores collectively hold enough
+    // retained capacity to put the total over its allowance — the state in which the
+    // equal-share trim began churning.
+    for (dense, dense_name) in names.iter().enumerate() {
+        for r in 0..ROWS_PER_BATCH {
+            acc.stage(row(vec![(
+                dense_name.as_str(),
+                text(&format!("warm{dense}r{r}")),
+            )]));
+            acc.commit();
+        }
+        acc.clear();
+    }
+
+    // Now hold ONE column stably dense and watch its retained capacity across batches.
+    let stable = names[0].as_str();
+    let mut retained_after = Vec::new();
+    for batch in 0..4 {
+        for r in 0..ROWS_PER_BATCH {
+            acc.stage(row(vec![(stable, text(&format!("s{batch}r{r}")))]));
+            acc.commit();
+        }
+        acc.clear();
+        retained_after.push(acc.retained_cell_slots());
+    }
+
+    // Under the equal-share trim the stable column was shrunk to allowance/N_COLS (21
+    // slots) after EVERY batch, so this sequence collapsed to ~21 and stayed there
+    // while the column kept needing 96. Usage-proportional keeps it warm.
+    let last = *retained_after.last().expect("four batches recorded");
+    assert!(
+        last >= ROWS_PER_BATCH,
+        "a stably dense column was shrunk below its own steady-state need: retained \
+         {retained_after:?} across four identical batches, but each needed \
+         {ROWS_PER_BATCH} slots — the trim is churning"
+    );
+
+    // And the total bound still holds: this must not be a warmth-for-unboundedness trade.
+    let allowance = (ROWS_PER_BATCH * 2).max(1024) + N_COLS;
+    assert!(
+        last <= allowance,
+        "retained {last} exceeds the documented allowance {allowance}"
+    );
+}
