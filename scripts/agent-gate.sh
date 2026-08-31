@@ -678,6 +678,27 @@
 #                      report PASS on a guard that exited 0 having measured nothing.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
+#   all-features-check cargo check + cargo clippy (-D warnings), BOTH at
+#                      -p cqlite-core --all-features --all-targets (issue #3453).
+#                      THE ONE COMPONENT THAT ENABLES THE OTLP STACK. `clippy` above
+#                      EXCLUDES observability/observability-testing/metrics by #1844
+#                      design, core-tests runs --features cli-helpers, and
+#                      minimal-build runs --no-default-features — so before this
+#                      component NO cargo invocation in this script ever passed
+#                      `observability`, and a defect reachable only with it on could
+#                      not fail the gate of record while failing pr-gate.yml's
+#                      `cargo test -p cqlite-core --lib --all-features`. MEASURED on
+#                      main, not cited from an incident: the gate's feature set
+#                      DISCOVERS 3562 cqlite-core lib tests, pr-gate's 3782 — 220
+#                      execute in CI and nowhere here, and #3382's own fix pin is one
+#                      the gate cannot even list. Package-scoped, NOT --workspace:
+#                      --all-features only enables the SELECTED packages' features, and
+#                      the duckdb bundled-source amalgamation belongs to cqlite-cli
+#                      alone, so this stays minutes rather than the #916 cost. It
+#                      compiles and lints ONLY — it executes no test, so the
+#                      runtime/order-dependent half of the class (a process-global
+#                      OnceLock poisoned by test ordering) is still pr-gate-core's.
+#                      NEVER SKIPs (needs only cargo; absent from DATASET_COMPONENTS).
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
 #                      .rs files over threshold (800 src / 1500 test, total lines)
@@ -689,6 +710,36 @@
 # compile break in a non-enumerated test target, a fmt/compile break in the
 # (previously workspace-excluded) format-compatibility crate, and Python-only
 # regressions (LIMIT 0, SET<TEXT> validation) that shipped "gate PASS".
+
+# THIS GATE DOES NOT SUBSUME `pr-gate-core`, AND NEVER HAS (issue #3453).
+# The relationship is an ASYMMETRY IN BOTH DIRECTIONS, and it is a standing property
+# of the component set rather than a fact about any one lane:
+#   * This gate runs things pr-gate does not. `arrow-parity-guard` names a
+#     `#![cfg(feature = "arrow")]` integration target that pr-gate's `--lib
+#     --all-features` cannot reach (it compiles no tests/ target at all), and the
+#     feature-matrix / binding / parity lanes above are local-only in the same way.
+#   * pr-gate runs things this gate does not. Its `cargo test -p cqlite-core --lib
+#     --all-features` EXECUTES the crate's unit suite at a feature set no component
+#     here executes — including the OTel stack.
+#
+# THE SIZE OF THAT GAP, MEASURED ON main RATHER THAN CITED FROM AN INCIDENT (#3453):
+#   cargo test -p cqlite-core --features cli-helpers --lib -- --list  ->  3562 tests
+#   cargo test -p cqlite-core --all-features         --lib -- --list  ->  3782 tests
+# So 220 cqlite-core lib tests execute in pr-gate-core and NOWHERE in the gate of
+# record. #3382's own fix pin, a_stats_only_name_cannot_create_an_instrument_through_
+# the_emit_path, is one of them: the gate's feature set does not even DISCOVER it
+# (0 matches vs 1). The issue was filed around that single instance; the standing gap
+# is 220 tests wide.
+#
+# `all-features-check` closes the COMPILE/LINT half (a type error or a -D warnings lint
+# under `#[cfg(feature = "observability")]` now reds the gate of record) and
+# DELIBERATELY NOT the RUNTIME half: it EXECUTES NONE of those 220. So an order-
+# dependent defect of #3382's shape — a process-wide OnceLock<Instruments> poisoned by
+# whichever test binds the global meter to the no-op provider first, invisible to
+# `#[serial_test::serial]` grouping — still fails only in CI. (Note those tests are
+# gated on `observability-testing`, not `observability`.)
+# So a green SUMMARY here is not a prediction that pr-gate-core will pass. It never
+# was; before #3453 nothing said so out loud, which is how #3382 was surprising.
 #
 # All components run even after a failure so one run reports everything.
 # Exit code 0 iff every component passes. Machine-checkable output: the
@@ -2555,13 +2606,28 @@ _python_build_verify_venv() {
   # (cargo+rustc present, maturin still failed) propagates as-is: a REAL compile
   # error of our bindings.
   _pbv_build() {
-    if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+    # `type -P`, not `command -v` (#3453): the feature-matrix observer defines a shell
+    # FUNCTION named `cargo`, and `command -v` finds functions — so on a box with no
+    # cargo BINARY this probe would answer "present" and the toolchain-absent rc 4 (an
+    # offline/toolchain gap, reported as SKIP upstream) would be misreported as a real
+    # compile failure of our bindings. `type -P` searches PATH only.
+    if ! type -P cargo >/dev/null 2>&1 || ! type -P rustc >/dev/null 2>&1; then
       return 4
     fi
     (
       set -euo pipefail
+      # RECORD THE REACH AT EXECUTION TIME, not by inferring it from the final aggregate rc
+      # (roborev job 285). The self-heal path calls _pbv_setup a SECOND time and returns 1
+      # (or 4) on its failure — AFTER this function has already invoked maturin once — so the
+      # rc cannot express execution history and "never reached maturin" was a false claim.
+      # A file, not a variable: this is a subshell, so a variable would not survive it.
       # shellcheck disable=SC1091
       . "$active_venv/bin/activate"
+      # THE MARKER GOES HERE — AFTER activation, IMMEDIATELY BEFORE the invocation (roborev job
+      # 291). Written before the `. activate` it claimed a maturin run that an activation failure
+      # would have prevented: the same "asserting something not yet measured" defect this marker
+      # exists to fix, moved one line earlier.
+      [ -n "${_pbv_reach_marker:-}" ] && : > "$_pbv_reach_marker"
       eval "$maturin_cmd"
     )
   }
@@ -2608,7 +2674,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2634,6 +2700,22 @@ _component_lane() {
     # no-default-features+one-of parquet/delta-scan), which is class (a) of the SIDE
     # rationale below: sharing MAIN's target dir would thrash it (#2657).
     flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf side ;;
+    # all-features-check (#3453) is class (a): `--all-features` is the WIDEST feature set
+    # any component builds cqlite-core at (42 features, including the OTLP stack MAIN never
+    # enables), so it shares almost no unit with MAIN's `--features cli-helpers` build.
+    #
+    # MEASURED BOTH WAYS RATHER THAN REASONED, because the obvious argument ("interleaving
+    # two feature sets in one target dir thrashes it") turned out to be the SMALL effect.
+    # In one shared target dir: cli-helpers cold 98s -> all-features 104s -> cli-helpers
+    # re-run 7s, against an uninterleaved control whose re-run was 3s. So the thrash tax is
+    # +4s, not a rebuild — cargo fingerprints per feature set and the two sets coexist.
+    # What actually decided it is that sharing buys NOTHING: all-features after a warm
+    # cli-helpers build (104s) was no faster than the same build in a virgin target dir
+    # (99s), because the feature sets share almost no unit. MAIN would therefore serialize
+    # ~100s onto the critical path for no reuse; SIDE runs it concurrently for ~2.1G of
+    # disk. Warm, in the real gate, the whole component measured 50s (18s check + 23s
+    # clippy) with sccache on.
+    all-features-check) printf side ;;
     *) printf main ;;
   esac
 }
@@ -2864,6 +2946,628 @@ EXPLICIT_SUMMARY_FILE=0
 [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && EXPLICIT_SUMMARY_FILE=1
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
+# ==== BEGIN feature-matrix annotation (#3453) ====
+# The SUMMARY feature-matrix annotation. INLINE here, not a sourced sibling, on purpose:
+# eight hermetic self-tests build a synthetic repo by copying THIS ONE FILE into
+# `<fake-root>/scripts/agent-gate.sh` (9 sites — tree-integrity, tree-portability,
+# tree-provenance, nested-isolation, file-size-log, delta x2, summary), so a second
+# required file would make each of them fail closed on a missing sibling, and every future
+# one after that. `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` therefore
+# EXTRACTS these functions out of the shipped script (the repo's existing idiom — see
+# test_agent_gate_jest_guards.sh) instead of sourcing a library.
+#
+# OWNER RULING (2026-08-30): "the gate SUMMARY should name the feature matrix each
+# component ran so a pasted block states what it certified."
+#
+# A pasted `==== AGENT-GATE SUMMARY ====` block used to say `core-tests: PASS (412s)`
+# and nothing about WHAT was compiled — so the block could not distinguish a run that
+# certified the OTLP stack from one that never enabled it (the #3453 defect: 220
+# cqlite-core --lib tests execute in pr-gate-core's `--all-features` lane and NOWHERE
+# in the gate of record). Every component line now carries the feature matrix it
+# ACTUALLY ran under, in every mode (full / lite / delta).
+#
+# DERIVE, NEVER CURATE — the two mechanisms, and why there are two:
+#
+#   (1) OBSERVED (the default, and the whole reason this is not a hand-written table).
+#       `cargo` and `env` are shell FUNCTIONS here. Every cargo invocation made in the
+#       gate's OWN shell therefore routes through _fm_observe_cargo_argv, which reads
+#       the package/feature flags out of the REAL argv that is about to execute and
+#       appends one descriptor line to $AGENT_GATE_FM_DIR/<component>.features. There
+#       is no second copy of a feature list to drift from: the annotation IS the argv.
+#       (`env` is wrapped because run_clippy — which #3453 must not touch — invokes
+#       `env RUSTFLAGS="-D warnings" cargo clippy …`, and an `env` prefix execs the
+#       cargo BINARY, bypassing a `cargo` function.)
+#
+#   (2) OBSERVED FROM INSIDE THE CHILD BODY, for the eight components whose cargo calls
+#       live inside a single-quoted `bash -c` body (core-tests' nextest branch,
+#       memory-budget, integration-tests, write-tests, cli-tests, compaction-byte-parity,
+#       minimal-build, smoke). The wrappers above are deliberately NOT `export -f`-ed:
+#       exporting an INTERCEPTOR would make every bash DESCENDANT record too, so
+#       tooling-tests (which runs ~80 nested test scripts, several of them nested
+#       agent-gate self-tests) would attribute a nested run's cargo invocations to
+#       itself — a false claim in a gate log, which is worse than none. So each body
+#       instead calls the EXPLICIT recorder _fm_observe_child (which IS exported, and
+#       which intercepts nothing) on the line IMMEDIATELY BEFORE each cargo command, with
+#       the SAME hoisted package/feature variables the argv is built from.
+#
+#       RECORD AT EXECUTION TIME, NOT AT INTENT TIME (roborev job 269, blocker 2). These
+#       records used to be written by the PARENT before the child ran, which described
+#       what the component MEANT to run: a `cli-tests: FAIL` line then named BOTH of its
+#       feature sets even when Pass 1 — or the fail-closed target derivation above it —
+#       died before Pass 2 started, and the same held for the other seven (`&&` chains and
+#       `set -e` bodies short-circuit). A failure summary claiming an invocation that
+#       never occurred is affirmatively FALSE, which is strictly worse than silence.
+#       A body that dies before its first cargo call now leaves an EMPTY sidecar, and
+#       _fm_note_if_no_cargo_observed renders that state by name.
+#
+#   (3) NAMED-AS-UNOBSERVABLE, where cargo genuinely runs under a driver whose argv this
+#       shell can never see: python-bindings / node-bindings (declared `indirect:<driver>`
+#       in _fm_component_class) and the scoped-tests --lite PYTHON TIER, whose maturin
+#       build runs in a child process (_fm_note_maturin_rc appends the same
+#       `via <driver>: feature set NOT observed` text, ADDITIVELY beside the rust sets a
+#       mixed diff also observes). This is deliberately DISTINCT from `UNDECLARED`:
+#       "nobody said" and "known to be indirect, therefore unobservable" are different
+#       facts, and only one of them is a defect.
+#
+# FAIL CLOSED / DECLARE, NEVER A SILENT BLANK. Every component renders SOMETHING:
+# the observed sets, or an explicit `no-cargo`, or an explicit `via <driver>: feature
+# set NOT observed`, or `UNDECLARED`. A blank annotation is the vacuous-pass shape this
+# issue exists to remove, so there is no code path that produces one.
+# _fm_component_class is the declaration site, and
+# scripts/tests/test_agent_gate_feature_matrix_annotation.sh asserts that EVERY name in
+# agent-gate.sh's COMPONENTS array resolves there — a NEW component cannot join the set
+# undeclared.
+#
+# OBSERVATION BEATS DECLARATION. If a component declared `no-cargo` is observed running
+# cargo, the observed sets are rendered WITH a `!declared-no-cargo` marker rather than
+# the declaration being believed — a mis-declaration self-corrects and is visible.
+
+# _fm_active: recording is enabled only inside a component (AGENT_GATE_FM_COMPONENT is
+# set by dispatch_component / run_component). Cargo invocations from the preflight —
+# `cargo --version` for ci-pins, the `cargo tree`/`cargo metadata` probes — belong to no
+# component and are deliberately unrecorded.
+_fm_active() {
+  [ -n "${AGENT_GATE_FM_DIR:-}" ] && [ -n "${AGENT_GATE_FM_COMPONENT:-}" ] \
+    && [ -d "${AGENT_GATE_FM_DIR:-/nonexistent}" ]
+}
+
+_fm_sidecar() { printf '%s/%s.features' "${AGENT_GATE_FM_DIR:-}" "$1"; }
+
+# _fm_note <component> <descriptor>: append one invocation descriptor. Best-effort by
+# design — a failed append must never fail the component whose matrix it describes (the
+# consequence of a lost append is a visibly incomplete annotation, never a wrong one).
+_fm_note() {
+  local f
+  f=$(_fm_sidecar "$1") || return 0
+  printf '%s\n' "$2" >> "$f" 2>/dev/null || true
+  return 0
+}
+
+# _fm_indirect_desc <driver>: THE ONE SPELLING of "cargo ran, under a driver this
+# observer cannot see". Used by BOTH the class-based rendering (_fm_annotate's
+# `indirect:<driver>` arm, for python-bindings / node-bindings) AND the per-invocation
+# record the driver-reach recorders append (_fm_note_driver / _fm_observe_driver). One
+# function, because a
+# reader must see ONE concept: two spellings of the same state read as two states, and
+# the whole subject of this issue is that a block's words are load-bearing.
+#
+# It is deliberately NOT `UNDECLARED`. `UNDECLARED` means "nobody said what this ran
+# under" (an absence, possibly a defect in the annotation); this means "we KNOW cargo ran
+# and we KNOW this observer structurally cannot see its argv" — a different, and more
+# honest, statement (roborev job 269, blocker 1).
+_fm_indirect_desc() { printf 'via %s: feature set NOT observed' "$1"; }
+
+# _fm_unobservable_desc <why>: THE ONE SPELLING of "this shell cannot say whether cargo ran
+# at all, let alone under what features" (roborev job 273, F2). Distinct from
+# _fm_indirect_desc in exactly one way, and it is the important one: _fm_indirect_desc
+# ASSERTS that cargo ran (under a named driver whose reach was recorded), while this asserts
+# NOTHING in either direction. A component with no nameable single driver — tooling-tests,
+# whose ~60 child scripts may or may not compile — gets this, because the alternative is a
+# claim we cannot support.
+_fm_unobservable_desc() { printf 'cargo not observable: %s' "$1"; }
+
+# _fm_abbrev_features <csv>: render a feature list at bounded width. Up to 5 features
+# print in full; beyond that the count leads and the remainder is named as elided
+# ("+N more"), never silently truncated — an abbreviation must not imply a completeness
+# it does not have.
+_fm_abbrev_features() {
+  local csv="$1" n first
+  csv=$(printf '%s' "$csv" | tr ' ' ',' | tr -s ',' | sed 's/^,//; s/,$//')
+  [ -n "$csv" ] || { printf ''; return 0; }
+  n=$(printf '%s' "$csv" | tr ',' '\n' | grep -c .)
+  if [ "$n" -le 5 ]; then
+    printf '%s' "$csv"
+  else
+    first=$(printf '%s' "$csv" | cut -d, -f1-3)
+    printf '%s:%s,+%s more' "$n" "$first" "$(( n - 3 ))"
+  fi
+}
+
+# _fm_describe_cargo <argv…>: print a one-line descriptor of a cargo invocation, or
+# return 1 for an invocation that compiles/runs nothing (a metadata query: tree,
+# metadata, locate-project, --version). $1.. is the argv AFTER the `cargo` word.
+_fm_describe_cargo() {
+  local sub="" feats="" nodef=0 allf=0 ws=0 excl=0 tok scope featpart
+  local -a pkgs=()
+  for tok in "$@"; do
+    case "$tok" in
+      +*|-*) continue ;;
+      *) sub="$tok"; break ;;
+    esac
+  done
+  case "$sub" in
+    test|build|check|clippy|run|bench|fmt|doc|nextest|rustc) ;;
+    *) return 1 ;;
+  esac
+  # A VERSION PROBE compiles nothing, even when its subcommand is in the list above:
+  # `cargo nextest --version` is how the gate detects nextest, and describing it as a
+  # feature set would put a set nobody compiled into a component's annotation. Scan only
+  # the flags BEFORE a bare `--` (a later `--version` belongs to the test binary).
+  for tok in "$@"; do
+    case "$tok" in
+      --) break ;;
+      --version|-V) return 1 ;;
+    esac
+  done
+  # `cargo nextest run` reads better than a bare `nextest`, and the distinction is
+  # load-bearing on core-tests' line: `nextest run` EXECUTES the unit suite while the
+  # `cargo test --doc` beside it is the separate doctest pass, and both appear there.
+  # MUST run while "$@" is still intact — the flag scan below shifts it away (it did,
+  # first try, and the descriptor silently read `nextest`).
+  if [ "$sub" = nextest ]; then
+    local seen_nextest=0
+    for tok in "$@"; do
+      case "$tok" in
+        -*|+*) continue ;;
+        nextest) [ "$seen_nextest" -eq 1 ] || { seen_nextest=1; continue; } ;;
+      esac
+      [ "$seen_nextest" -eq 1 ] && { sub="nextest $tok"; break; }
+    done
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -p|--package) pkgs+=("${2:-?}"); shift ;;
+      --package=*)  pkgs+=("${1#*=}") ;;
+      -p=*)         pkgs+=("${1#*=}") ;;
+      --features)   feats="${feats:+$feats,}${2:-}"; shift ;;
+      --features=*) feats="${feats:+$feats,}${1#*=}" ;;
+      --all-features) allf=1 ;;
+      --no-default-features) nodef=1 ;;
+      --workspace|--all) ws=1 ;;
+      --exclude) excl=$(( excl + 1 )); shift ;;
+      --exclude=*) excl=$(( excl + 1 )) ;;
+    esac
+    shift
+  done
+  if [ "$ws" -eq 1 ]; then
+    scope=workspace
+    [ "$excl" -gt 0 ] && scope="workspace(excl $excl)"
+  elif [ "${#pkgs[@]}" -gt 0 ]; then
+    scope=$(printf '%s+' "${pkgs[@]}"); scope="${scope%+}"
+  else
+    scope='(default pkg)'
+  fi
+  if [ "$allf" -eq 1 ]; then
+    featpart='--all-features'
+  elif [ -n "$feats" ]; then
+    featpart="--features $(_fm_abbrev_features "$feats")"
+  elif [ "$sub" = fmt ]; then
+    # FEATURE-INDEPENDENT SUBCOMMAND (roborev job 281). `cargo fmt` runs rustfmt over the
+    # source; it resolves and enables NO features, so rendering it `default-features` — which
+    # is what the no-flags branch below would do — states a feature set nobody selected. The
+    # whole point of this annotation is that a pasted block says what a component certified,
+    # so an inaccurate feature set here is worse than none: it is the annotation making the
+    # same unfounded claim the annotation exists to prevent.
+    featpart='features=n/a'
+  else
+    featpart='default-features'
+  fi
+  # `--no-default-features` cannot meaningfully prefix a feature-independent subcommand.
+  [ "$nodef" -eq 1 ] && [ "$featpart" != 'features=n/a' ] && featpart="--no-default-features ${featpart}"
+  printf '%s %s %s' "$sub" "$scope" "$featpart"
+  return 0
+}
+
+# _fm_observe_cargo_argv <argv…>: record the invocation about to run. Always returns 0.
+_fm_observe_cargo_argv() {
+  _fm_active || return 0
+  local desc
+  desc=$(_fm_describe_cargo "$@" 2>/dev/null) || return 0
+  [ -n "$desc" ] || return 0
+  _fm_note "$AGENT_GATE_FM_COMPONENT" "$desc"
+  return 0
+}
+
+# cargo / env wrappers. Both are pass-throughs: they record, then exec the real
+# command with the untouched argv and the caller's stdin/stdout/stderr and exit
+# status. Recording can never alter what the gate runs.
+cargo() {
+  _fm_observe_cargo_argv "$@" || true
+  command cargo "$@"
+}
+
+# The `env` wrapper exists ONLY so that `env VAR=… cargo …` (run_clippy, _deny_warnings)
+# is observed. It skips env's own options and leading NAME=VALUE assignments to find the
+# command word; anything that is not `cargo` is recorded nowhere and simply passed on.
+env() {
+  local -a rest=("$@")
+  local seen_cmd=0
+  while [ "${#rest[@]}" -gt 0 ]; do
+    case "${rest[0]}" in
+      -i|--ignore-environment|-0|--null) rest=("${rest[@]:1}") ;;
+      -u|--unset) rest=("${rest[@]:2}") ;;
+      -u*|--unset=*|-C*|--chdir=*|-S*|--split-string=*) rest=("${rest[@]:1}") ;;
+      --) rest=("${rest[@]:1}"); seen_cmd=1; break ;;
+      -*) rest=("${rest[@]:1}") ;;
+      *=*) rest=("${rest[@]:1}") ;;
+      *) seen_cmd=1; break ;;
+    esac
+  done
+  if [ "$seen_cmd" -eq 1 ] && [ "${#rest[@]}" -gt 0 ] && [ "${rest[0]}" = cargo ]; then
+    _fm_observe_cargo_argv "${rest[@]:1}" || true
+  fi
+  command env "$@"
+}
+
+# ---------------------------------------------------------------------------
+# _fm_component_class <name>: the DECLARATION site (see the header). FOUR classes:
+#   cargo             — invokes cargo IN THE GATE'S OWN SHELL, or records its own sets
+#                       from inside a `bash -c` body via _fm_observe_child; the annotation
+#                       must be OBSERVED, and its absence renders UNDECLARED.
+#   no-cargo          — invokes no cargo at all, anywhere: git/wc, shell guards, python.
+#   indirect:<driver> — cargo DOES run, under a NAMED driver this observer cannot see, so
+#                       the feature set is honestly reported as not observed rather than
+#                       guessed at. Such a component MUST record whether its driver was
+#                       REACHED, at execution time, from an explicit signal (an rc, or a
+#                       recorder call on the line before the driver runs) — never assumed
+#                       from the terminal status (roborev job 273, F3).
+#   unobservable:<why> — this shell can say NEITHER what cargo ran NOR whether any did,
+#                       and no single driver can be named to record a reach against. The
+#                       class text states the reason; no claim is made in either direction.
+#
+# THE RULE THAT DECIDES BETWEEN THEM (roborev job 273, F2): the cargo/env interceptors are
+# deliberately NOT exported (see the header), so class `cargo` means "observable in the
+# gate's own shell, or self-recorded from a body". A component whose cargo runs only in a
+# CHILD PROCESS is therefore NOT class `cargo` — it is `indirect:<driver>` (one nameable
+# driver, whose reach is recorded) or `unobservable:<why>` (no such driver). Declaring one
+# `cargo` makes a PASSing run read UNDECLARED and — worse — lets a FAILing run claim it
+# "FAILed before its first cargo invocation" when a child cargo build really ran.
+# scoped-tests is not in COMPONENTS (run_scoped_tests appends it to NAMES in --lite /
+# --delta) but appears in those blocks, so it is classified here too.
+_fm_component_class() {
+  case "$1" in
+    # no-cargo: file-size is git+wc; roborev-lints, pub-surface and
+    # binding-unwind-profile run shell guards (verified: no `cargo` in
+    # check-workflow-injection.sh, check-no-wallclock-asserts.sh's gate path,
+    # check-pub-surface.sh or test_binding_unwind_profile.sh); delivery-telemetry runs a
+    # python test.
+    file-size|roborev-lints|pub-surface|binding-unwind-profile|delivery-telemetry)
+      printf 'no-cargo' ;;
+    # indirect: the extension is built by a driver that invokes cargo internally, so no
+    # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
+    # command the component runs); the feature set is NOT claimed.
+    python-bindings) printf 'indirect:maturin' ;;
+    node-bindings)   printf 'indirect:npm run build (napi)' ;;
+    fmt|clippy|core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'cargo' ;;
+    byte-budget-guard|arrow-parity-guard|memory-budget|integration-tests) printf 'cargo' ;;
+    format-compat|write-tests|cli-tests|compaction-byte-parity) printf 'cargo' ;;
+    bti-multiclustering|query-semantics-oracle|flight-query-semantics-oracle) printf 'cargo' ;;
+    flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf 'cargo' ;;
+    binding-rust-tests|oom-audit|parity-report|operator-metrics-doc) printf 'cargo' ;;
+    kit-dashboard-drift|minimal-build|all-features-check|smoke) printf 'cargo' ;;
+    # unobservable: tooling-tests shells out to ~60 nested test scripts. At least one
+    # really compiles (test_bti_perf_scan.sh does `cargo build -p cqlite-core --example
+    # bti_perf_scan --features cli-helpers`), several drive NESTED agent-gate runs, and the
+    # interceptors are unexported by design — so this shell sees no cargo argv, and there is
+    # no ONE driver whose reach could be recorded (enumerating which children compile would
+    # be exactly the curation this annotation refuses). It was declared `cargo`, which made a
+    # PASSing run render UNDECLARED and a FAILing one claim "FAILed before its first cargo
+    # invocation" while a child cargo build had in fact run — affirmatively false (roborev
+    # job 273, F2).
+    tooling-tests) printf 'unobservable:cargo may run inside ~60 nested test scripts (child processes)' ;;
+    scoped-tests) printf 'cargo' ;;
+    # The DYNAMIC --delta entries (roborev job 277 F2). These reach a SUMMARY line via
+    # `NAMES+=("<literal>")` in run_delta_*, NOT via COMPONENTS, so classifying only
+    # COMPONENTS left a legitimate delta block rendering [UNCLASSIFIED].
+    #   node-tests: jest against the ALREADY-BUILT module. run_delta refuses up front
+    #     unless node is ready, so this path builds nothing — the component's own log line
+    #     says `already-built module; no cargo build`. Verified: no cargo in its body.
+    node-tests) printf 'no-cargo' ;;
+    #   shell-selftests: executes the diff's changed scripts/tests/*.sh. Those are arbitrary
+    #     shell guards and some DO invoke cargo, in child processes the unexported
+    #     interceptors cannot see — so this is `unobservable`, never `no-cargo` (which would
+    #     be an affirmative claim that no cargo ran) and never `cargo` (nothing is observable
+    #     in the gate's own shell).
+    shell-selftests) printf 'unobservable:cargo may run inside the changed scripts/tests/*.sh (child processes)' ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# _fm_render <component>: the observed sets, deduplicated in first-seen order, identical
+# sets collapsed to `desc xN`. Bounded at 6 distinct sets, with the remainder DECLARED
+# (`+K more sets`) rather than dropped. Returns 1 when nothing was observed.
+_fm_render() {
+  local f
+  f=$(_fm_sidecar "$1") || return 1
+  [ -s "$f" ] || return 1
+  awk '
+    { if (!($0 in cnt)) { ord[++n] = $0 } ; cnt[$0]++ }
+    END {
+      if (n == 0) exit 1
+      cap = 6
+      shown = (n < cap ? n : cap)
+      out = ""
+      for (i = 1; i <= shown; i++) {
+        d = ord[i]
+        if (cnt[d] > 1) d = d " x" cnt[d]
+        out = out (i > 1 ? " | " : "") d
+      }
+      if (n > shown) out = out " | +" (n - shown) " more sets"
+      print out
+    }
+  ' "$f"
+}
+
+# _fm_annotate <component>: the bracketed suffix appended to a SUMMARY component line.
+# NEVER empty — that is the contract (see the header).
+_fm_annotate() {
+  local class obs
+  if ! class=$(_fm_component_class "$1"); then
+    # Not declared anywhere: name that, distinctly from a declared-cargo component whose
+    # observation is missing. The guard test makes this unreachable for COMPONENTS.
+    printf '[UNCLASSIFIED — not declared in _fm_component_class (#3453)]'
+    return 0
+  fi
+  if obs=$(_fm_render "$1") && [ -n "$obs" ]; then
+    case "$class" in
+      no-cargo) printf '[%s !declared-no-cargo]' "$obs" ;;
+      # An `unobservable` component may ALSO run cargo in this shell. Naming both is the
+      # only truthful rendering: the observed sets are real, and they are not the whole
+      # story, so the class text rides along ADDITIVELY rather than being displaced.
+      unobservable:*) printf '[%s | + %s]' "$obs" "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+      *)        printf '[%s]' "$obs" ;;
+    esac
+    return 0
+  fi
+  case "$class" in
+    no-cargo)       printf '[no-cargo]' ;;
+    unobservable:*) printf '[%s]' "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+    # An `indirect` component with an EMPTY sidecar is a RECORDING GAP, not a licence to
+    # claim its driver ran (roborev job 273, F3): every indirect component records its
+    # driver's reach at execution time, and record_result's
+    # _fm_note_if_no_cargo_observed names a SKIP/FAIL that never got that far. Reaching
+    # here means neither happened, so the honest report is UNDECLARED — carrying the same
+    # token every existing detector greps for — naming the driver whose outcome is missing.
+    indirect:*)     printf '[UNDECLARED — the outcome of driver '\''%s'\'' was never recorded (#3453)]' "${class#indirect:}" ;;
+    *)              printf '[UNDECLARED]' ;;
+  esac
+  return 0
+}
+
+# _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
+# line, used by all six emit sites (full, lite, two delta sites, the aggregation
+# self-test and --emit-summary-selftest) so no mode can render a block the others do
+# not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
+# every existing prefix/stage-line assertion still matches.
+_fm_summary_line() {
+  printf '%-18s %s (%s)  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")"
+}
+
+# _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
+# single observed cargo invocation would otherwise render UNDECLARED, which reads as a
+# defect in the annotation rather than as what actually happened. Record the observation
+# — nothing ran — from the two facts we HAVE (the terminal status, and an empty sidecar),
+# never from a guess about why. Two terminal states qualify, with DIFFERENT text because
+# they are different events:
+#
+#   SKIP — the component bailed before any cargo call (no python3, no node/npm, no cargo
+#          on PATH, fixtures absent).
+#   FAIL — the component reached its own failure BEFORE its first cargo call (a derivation
+#          that fails closed, a guard script exiting non-zero). Added with the #3453
+#          execution-time recording (roborev job 269 blocker 2): once a `bash -c` body
+#          records each invocation as it runs, a body that dies before its first cargo
+#          legitimately leaves an EMPTY sidecar, and `UNDECLARED` there would understate a
+#          fact we know exactly.
+#
+# Declared-no-cargo components are left alone so their `[no-cargo]` rendering stays exact,
+# and so are `unobservable:<why>` ones — for those, "nothing ran" is precisely what this
+# shell cannot know, and its class text already says so.
+#
+# `indirect:<driver>` components DO get a note, and that is roborev job 273 F3's fix. The
+# previous rule ("an indirect component that FAILs DID run cargo, so keep the via-driver
+# rendering") ASSUMED the failure happened at or after the driver. It does not have to:
+# python-bindings can fail in venv/pip setup before maturin, and node-bindings in `npm ci`
+# before `npm run build` — both then claimed an unobserved cargo invocation that never
+# happened. The assumption is now unnecessary, because every indirect component RECORDS its
+# driver's reach at execution time (_fm_note_driver / _fm_observe_driver, and
+# _fm_note_maturin_rc for the two maturin callers). So an EMPTY sidecar at a terminal SKIP
+# or FAIL is positive evidence that the driver was never reached, and the note says exactly
+# that, naming the driver.
+#
+# WORDING (same family, one instance further down): the note says "cargo build/test" and
+# names the exclusion, because `cargo metadata`/`tree`/`--version` PROBES are deliberately
+# not recorded (_fm_describe_cargo rejects them) — three components measured under a
+# recording shim FAILed after running a `cargo tree` probe, where a bare "no cargo invoked"
+# would have been literally false.
+_fm_note_if_no_cargo_observed() {
+  local class f drv=""
+  _fm_active || return 0
+  class=$(_fm_component_class "$1" 2>/dev/null) || class=cargo
+  case "$class" in
+    no-cargo|unobservable:*) return 0 ;;
+    indirect:*) drv="${class#indirect:}" ;;
+  esac
+  f=$(_fm_sidecar "$1")
+  [ -s "$f" ] && return 0
+  local what="its first cargo build/test invocation"
+  [ -n "$drv" ] && what="reaching its driver '$drv'"
+  case "${2:-}" in
+    SKIP) _fm_note "$1" "no cargo build/test invoked (component SKIPped before $what; metadata probes are not recorded)" ;;
+    FAIL) _fm_note "$1" "no cargo build/test invoked (component FAILed before $what; metadata probes are not recorded)" ;;
+  esac
+  return 0
+}
+
+# _fm_note_driver <component> <driver> <reached|not-reached> [detail]: THE ONE PLACE that
+# turns a driver's reach into a record (roborev job 273, F3). Every `indirect:<driver>`
+# component routes through here — or through _fm_observe_driver, its child-callable twin —
+# so a fourth indirect component cannot get the direction wrong by writing its own text.
+#
+# `reached` is an OBSERVATION, never a default: callers pass it only from an explicit signal
+# (a build-verify rc that means the driver was entered, or a recorder call on the line
+# before the driver runs). Anything that is not literally `reached` records the honest
+# alternative, so a mis-typed or missing third argument fails toward "no claim".
+_fm_note_driver() {
+  _fm_active || return 0
+  case "${3:-}" in
+    reached) _fm_note "$1" "$(_fm_indirect_desc "$2")" ;;
+    # UNKNOWN is a distinct state, not a synonym for not-reached: claiming a negative we did
+    # not measure is the same unfounded assertion this annotation exists to prevent.
+    unknown) _fm_note "$1" "cargo reach via $2 UNKNOWN${4:+ ($4)}" ;;
+    *)       _fm_note "$1" "no cargo build/test invoked (never reached $2${4:+; $4})" ;;
+  esac
+  return 0
+}
+
+# _fm_note_maturin_rc <component> <rc>: the rc→reach mapping for the TWO maturin callers
+# (run_python_bindings and run_scoped_tests' --lite python tier), in ONE copy.
+#
+# rc 0/2/3 are the three _python_build_verify_venv returns that mean `maturin develop` was
+# actually INVOKED (built+imported; maturin exited non-zero; imports failed after a clean
+# rebuild) — a FAILED build is an invocation that happened. rc 1 (venv/pip setup) and rc 4
+# (no cargo/rustc on PATH) mean the driver was never entered, and any other value is
+# unknown, which is also not evidence that it ran.
+_fm_note_maturin_rc() {
+  # POSITIVE EVIDENCE FIRST (roborev job 285). $3 is the reach marker _pbv_build touches
+  # immediately before invoking maturin. If it EXISTS, maturin ran — whatever the final rc
+  # says — because the rc is an AGGREGATE and the self-heal path can return 1 or 4 from a
+  # SECOND setup attempt after a first build already happened.
+  if [ -n "${3:-}" ] && [ -e "${3:-}" ]; then
+    _fm_note_driver "$1" maturin reached
+    return 0
+  fi
+  # No marker file. If the marker mechanism was ACTIVE ($3 given, i.e. a path we would have
+  # written), its absence is real negative evidence and the rc explains WHY. If no marker
+  # path was supplied at all we have not measured anything, so say so rather than asserting a
+  # negative from an aggregate rc — that inference is the defect this fixes.
+  if [ -z "${3:-}" ]; then
+    _fm_note_driver "$1" maturin unknown "reach not measured (no marker); build-verify rc '${2:-none}'"
+    return 0
+  fi
+  case "${2:-}" in
+    0|2|3) _fm_note_driver "$1" maturin reached ;;
+    1)     _fm_note_driver "$1" maturin not-reached "venv/pip setup failed before maturin" ;;
+    4)     _fm_note_driver "$1" maturin not-reached "no cargo/rustc on PATH" ;;
+    *)     _fm_note_driver "$1" maturin not-reached "build-verify rc '${2:-none}'" ;;
+  esac
+  return 0
+}
+
+# NOTE (roborev job 273, F3): _fm_note_python_tier is GONE. It was the FIRST instance of
+# the rc-aware driver record — "condition on the OUTCOME, not on reaching the branch" — and
+# the other two indirect components (python-bindings, node-bindings) were left assuming
+# their driver ran. One rule, one implementation: both maturin callers now use
+# _fm_note_maturin_rc above, and node-bindings records from inside its `bash -c` body with
+# _fm_observe_driver below. The scoped --lite python tier's specifics are unchanged (its
+# maturin build runs inside `bash "$GATE_SELF" --python-build-verify …`, a child process, so
+# no cargo argv passes through this shell) and the ADDITIVE property is unchanged too: the
+# record is appended to the same per-component sidecar the rust blast-radius loop writes, so
+# a MIXED diff renders `[test cqlite-core --features cli-helpers | via maturin: …]`.
+
+# _fm_observe_driver <component> <driver>: EXECUTION-TIME "this driver was reached"
+# recorder, callable from INSIDE a `bash -c` component body (roborev job 273, F3) — the
+# driver-reach twin of _fm_observe_child, and exported for the same reason.
+#
+# node-bindings' napi build is `npm run build`, chained after `npm ci` inside a single
+# `bash -c` body. A parent-side record would describe INTENT and would claim cargo ran when
+# `npm ci` failed first; recording on the line immediately BEFORE the driver runs makes the
+# record mean "execution reached this point", which is the only thing this shell can know.
+#
+# ONE SPELLING: the text comes from _fm_indirect_desc, exported alongside, so the child and
+# the parent cannot drift into two descriptions of one state.
+_fm_observe_driver() {
+  local comp="${1:-}" driver="${2:-}"
+  [ -n "$comp" ] || return 0
+  [ -n "$driver" ] || return 0
+  [ -n "${AGENT_GATE_FM_DIR:-}" ] || return 0
+  [ -d "${AGENT_GATE_FM_DIR:-/nonexistent}" ] || return 0
+  printf '%s\n' "$(_fm_indirect_desc "$driver")" >> "$(_fm_sidecar "$comp")" 2>/dev/null || true
+  return 0
+}
+
+# _fm_observe_child <component> <cargo-argv…>: EXECUTION-TIME recording from INSIDE a
+# `bash -c` component body (roborev job 269, blocker 2).
+#
+# THE DEFECT IT FIXES: the eight components whose cargo calls live inside a single-quoted
+# `bash -c` body used to record their feature sets in the PARENT, BEFORE the child ran —
+# so the record described INTENT, not EXECUTION. `cli-tests: FAIL` then named BOTH of its
+# feature sets even when Pass 1 (or the fail-closed target derivation) died before Pass 2
+# ever started, and the same held for core-tests, integration-tests, write-tests,
+# minimal-build, compaction-byte-parity and smoke. A failure summary that claims an
+# invocation which never occurred is affirmatively false, and a false rationale in a gate
+# log is worse than none: it is what stops the next person looking.
+#
+# WHY NOT JUST EXPORT THE `cargo` WRAPPER: exporting it would make every bash DESCENDANT
+# record, so tooling-tests (which runs ~80 nested scripts, several of them nested
+# agent-gate self-tests) would attribute a nested run's cargo to itself. That rationale is
+# unchanged; this is the narrow alternative — an EXPLICITLY CALLED recorder, which
+# intercepts nothing and fires only where a body calls it.
+#
+# NO SECOND FORMATTER: the descriptor comes from the gate's OWN _fm_describe_cargo (also
+# exported), so there is nothing for a copy to drift from and the guard's declared-vs-
+# EXECUTED differential stays a comparison against the real formatter (CLAUDE.md's #3283
+# rule: a port's correctness is only knowable differentially against the original).
+#
+# The COMPONENT NAME is passed as an argument, deliberately — AGENT_GATE_FM_COMPONENT is
+# NOT exported (an inherited component name would arm recording in a nested run, #3312 job
+# 27), so each body names itself. Only AGENT_GATE_FM_DIR is inherited: the child is not
+# choosing the enforcer, it is being told where to write, and the parent assigns that
+# directory unconditionally to its own private mktemp LOG_DIR.
+#
+# `set +e` INSIDE THE SUBSTITUTION IS LOAD-BEARING: three of these bodies run under
+# `set -euo pipefail`, and _fm_describe_cargo contains `[ … ] && var=…` lists that
+# legitimately evaluate false — under `set -e` the substitution shell would EXIT there and
+# every record would be silently lost (measured: it does). The subshell scope means the
+# caller's own options are untouched.
+_fm_observe_child() {
+  local comp="${1:-}" desc
+  [ -n "$comp" ] || return 0
+  shift || return 0
+  [ -n "${AGENT_GATE_FM_DIR:-}" ] || return 0
+  [ -d "${AGENT_GATE_FM_DIR:-/nonexistent}" ] || return 0
+  desc=$(set +e; _fm_describe_cargo "$@" 2>/dev/null) || return 0
+  [ -n "$desc" ] || return 0
+  printf '%s\n' "$desc" >> "$(_fm_sidecar "$comp")" 2>/dev/null || true
+  return 0
+}
+# ==== END feature-matrix annotation (#3453) ====
+# The per-run sidecar directory. Both variables are set UNCONDITIONALLY here — no
+# `${…:-…}`, no env indirection — because the annotation is the block's evidence about
+# what was certified, and the party the evidence constrains must not be able to choose
+# where it comes from (CLAUDE.md #3312 job 27: "the constrained party must not choose its
+# own enforcer"). An INHERITED AGENT_GATE_FM_COMPONENT would otherwise arm recording
+# before the first component and attribute the preflight's cargo probes — or a
+# pre-seeded set — to a component that never ran, which is worse than a blank annotation
+# because it is affirmatively false rather than merely absent. The directory is this run's
+# private mktemp LOG_DIR, so the sidecars cannot be pre-seeded either.
+AGENT_GATE_FM_DIR="$LOG_DIR"
+AGENT_GATE_FM_COMPONENT=""
+# EXPORTED for the `bash -c` component bodies, and ONLY these four (roborev job 269
+# blocker 2). The distinction from the cargo/env wrappers is the whole point: an
+# INTERCEPTOR must not be exported (every bash descendant would record, and a nested
+# agent-gate self-test under tooling-tests would attribute its cargo to the parent's
+# component), while an EXPLICITLY CALLED recorder fires only where a body calls it by
+# name. _fm_describe_cargo/_fm_abbrev_features/_fm_sidecar/_fm_indirect_desc ride along
+# because _fm_observe_child and _fm_observe_driver call them — the formatter and the
+# via-driver spelling must be the gate's own, never a copy.
+export -f _fm_observe_child _fm_observe_driver _fm_indirect_desc _fm_describe_cargo _fm_abbrev_features _fm_sidecar
+# The sidecar DIRECTORY is inherited by those children (they are told WHERE to write; they
+# do not choose it). AGENT_GATE_FM_COMPONENT is deliberately NOT exported — each body
+# passes its own name — so an inherited component name can never arm recording in a nested
+# run (#3312 job 27). The assignment above is unconditional, so an inherited value of
+# either variable is overwritten before anything reads it.
+export AGENT_GATE_FM_DIR
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
 # path, so it uniquely identifies THIS invocation. We stamp it into every SUMMARY
 # block as `run-id:` so completeness can be verified for THIS run, never a stale
@@ -4823,8 +5527,16 @@ if [ "$SELFTEST" -eq 1 ]; then
     "$TREE_END_LINE"
     "$TREE_INTEGRITY_LINE"
   )
+  # #3453: drive the feature-matrix annotation through its REAL path (describe the argv
+  # -> sidecar -> render) so the self-test proves the annotated line survives capture,
+  # instead of asserting on a hand-written string. These argvs are representative of the
+  # four named components; no cargo is executed (_fm_observe_cargo_argv only records).
+  AGENT_GATE_FM_COMPONENT=fmt        _fm_observe_cargo_argv fmt --all --check
+  AGENT_GATE_FM_COMPONENT=clippy     _fm_observe_cargo_argv clippy --workspace --all-targets --all-features --exclude cqlite-core
+  AGENT_GATE_FM_COMPONENT=core-tests _fm_observe_cargo_argv test --package cqlite-core --features cli-helpers
+  AGENT_GATE_FM_COMPONENT=smoke      _fm_observe_cargo_argv build --package cqlite-cli --bin cqlite
   for i in "${!NAMES[@]}"; do
-    meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
   # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
   # through the real emit path so the self-test can assert it lands in the block.
@@ -4949,6 +5661,12 @@ esac
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
   printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
+  # reader, which would silently absorb a third into $_secs. The feature matrix rides a
+  # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
+  # call — records that fact here, so its SUMMARY line says so rather than reading
+  # UNDECLARED.
+  _fm_note_if_no_cargo_observed "$1" "$2"
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
@@ -6244,6 +6962,10 @@ run_component() { # run_component <name> <cmd...>
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
   fi
+  # #3453: attribute every cargo invocation made while this component runs to it. Set
+  # here AND at the top of dispatch_component so --lite/--delta (which call
+  # run_component directly, bypassing the pool) annotate exactly like the full gate.
+  AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status
   echo ">>> [$name] $*"
@@ -6295,7 +7017,22 @@ run_python_bindings() {
   # clean up afterward.
   local active_venv_file active_venv
   active_venv_file=$(mktemp "${TMPDIR:-/tmp}/agent-gate-active-venv.XXXXXX")
-  if bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1; then
+  # #3453 (roborev job 273, F3): the build-verify RC is the only signal that says whether
+  # `maturin develop` — the driver that invokes cargo, in a child process this shell cannot
+  # observe — was actually ENTERED. rc 1 (venv/pip setup) and rc 4 (no cargo/rustc) mean it
+  # was not, and this component previously discarded the rc (a bare if/else on success), so
+  # a venv failure was reported as `[via maturin: feature set NOT observed]` — a claim that
+  # cargo ran when nothing had. Captured here and mapped by the SHARED _fm_note_maturin_rc,
+  # the same helper the --lite python tier uses.
+  local pbv_rc=0
+  # The reach marker travels by ENV because the verifier runs as a CHILD process; _pbv_build
+  # touches it immediately before invoking maturin, so the reach is MEASURED rather than
+  # inferred from this aggregate rc (roborev job 285).
+  local pbv_reach="$LOG_DIR/$name.maturin-reached"
+  rm -f "$pbv_reach"
+  _pbv_reach_marker="$pbv_reach" bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1 || pbv_rc=$?
+  _fm_note_maturin_rc "$name" "$pbv_rc" "$pbv_reach"
+  if [ "$pbv_rc" -eq 0 ]; then
     active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
     if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
         set -euo pipefail
@@ -6612,6 +7349,15 @@ run_node_bindings() {
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      # #3453 (roborev job 273, F3): record that execution REACHED the cargo-driving step,
+      # on the line immediately before it runs. `npm run build` is the napi build, i.e. the
+      # driver that invokes cargo in a child process this shell cannot observe -- and it is
+      # chained AFTER `npm ci`, so a failure in the install used to be summarised as
+      # "via npm run build (napi): feature set NOT observed", claiming a cargo invocation
+      # that never happened. With no record, the _fm_note_if_no_cargo_observed call in
+      # record_result reports the honest "FAILed before reaching its driver" instead.
+      # (No apostrophes in this comment -- see the note below.)
+      _fm_observe_driver node-bindings "npm run build (napi)"
       npm run build
       # npm run typecheck (#3493). node-ci.yml runs it as an ALWAYS-RUN PR smoke job, and
       # this component is the declared merge-gating half of that workflow -- so leaving it
@@ -7601,7 +8347,10 @@ run_oom_audit() {
   local start end status
   start=$(date +%s)
   local xtask_dir="${OOM_AUDIT_XTASK_DIR:-$REPO_ROOT/xtask}"
-  if ! command -v cargo >/dev/null 2>&1; then
+  # `type -P`, not `command -v` (#3453): `command -v` also finds the shell FUNCTION named
+  # `cargo` that the feature-matrix observer defines, so this SKIP would never fire on a
+  # box without a cargo binary and the component would FAIL instead of SKIPping.
+  if ! type -P cargo >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no cargo on PATH)"
     record_result "$name" "$status" 0
@@ -7678,17 +8427,26 @@ run_compaction_byte_parity() {
     return 0
   fi
   echo ">>> [$name] Rust byte-parity PR proxy for the nightly Java byte tier (#1405)"
+  # #3453: both groups run inside a `bash -c` body (and behind an `env` prefix, which
+  # execs the cargo BINARY), so neither is observable here — hoist the (package,
+  # features) pair into ONE variable expanded into both invocations AND into the in-body
+  # record preceding each. The body is `set -euo pipefail`, so Group A failing ABORTS
+  # before Group B: a parent-side pre-record would name two invocations when one ran
+  # (job 269 blocker 2).
+  local cbp_pkg=cqlite-core cbp_feats=write-support
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
       set -euo pipefail
       # Group A — committed references, fail-closed (CQLITE_REQUIRE_FIXTURES=1).
+      _fm_observe_child compaction-byte-parity test -p '"$cbp_pkg"' --features '"$cbp_feats"'
       env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
-        cargo test -p cqlite-core --features write-support \
+        cargo test -p '"$cbp_pkg"' --features '"$cbp_feats"' \
           --test issue_1017_live_cell_compaction_byte_parity \
           --test issue_1020_udt_frozen_compaction_byte_parity \
           --test issue_1240_nested_frozen_collection_udt_parity
       # Group B — fetched-only test_tomb references, skip-aware (no require-fixtures).
+      _fm_observe_child compaction-byte-parity test -p '"$cbp_pkg"' --features '"$cbp_feats"'
       env CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
-        cargo test -p cqlite-core --features write-support \
+        cargo test -p '"$cbp_pkg"' --features '"$cbp_feats"' \
           --test issue_1019_static_dropped_collection_compaction_parity' >"$log" 2>&1; then
     status=PASS
   else
@@ -9999,6 +10757,157 @@ run_feature_iso() { # run_feature_iso <feature>
     --no-default-features --features "all-compression,$1" --lib --no-run
 }
 
+# all-features-check: COMPILE + LINT cqlite-core at `--all-features` (issue #3453).
+#
+# THE DEFECT IT EXISTS FOR — MEASURED, NOT ARGUED. No cargo invocation anywhere in
+# this script ever passes `observability` (or its alias `metrics`, or
+# `observability-testing`). run_clippy's per-package matrix EXCLUDES all three by
+# design (#1844: the OTLP stack is per-gate tax), core-tests runs `--features
+# cli-helpers`, and minimal-build runs `--no-default-features`. So a defect reachable
+# ONLY with the OTel stack on could not fail the gate of record while failing
+# .github/workflows/pr-gate.yml's `cargo test -p cqlite-core --lib --all-features`.
+# The instance: PR #3382 achieved a 31/31 gate PASS without ever executing the test
+# that pinned that PR's own fix.
+#
+# THE SCOPE IS DELIBERATELY THE COMPILE/LINT HALF, AND ONLY THAT (owner ruling,
+# 2026-08-30). It does NOT execute a single test, so the runtime/order-dependent half
+# of the class — e.g. a process-wide `OnceLock` poisoned by whichever test binds the
+# global meter first, which no `#[serial_test::serial]` grouping makes visible — STILL
+# cannot fail this gate. `pr-gate-core` remains the backstop for that half. A full
+# all-features TEST lane was rejected on cost: it would pay tens of minutes on every
+# endgame to cover what a required CI check already covers.
+#
+# WHY PACKAGE-SCOPED (`-p cqlite-core`) AND NOT `--workspace`. `--all-features` turns
+# on the features of the SELECTED packages, and the `duckdb` bundled-C++-amalgamation
+# dependency is owned by cqlite-cli alone (its `duckdb-tests` feature). A
+# workspace-wide `--all-features` lane would therefore build DuckDB from source (the
+# #916 cost) on every gate and blow the minutes-not-tens-of-minutes budget this
+# component was authorised under. cqlite-core's heavy optional stack is the OTel one,
+# which is exactly the uncovered set — so the narrow scope buys the whole gap.
+#
+# IT DOES NOT TOUCH run_clippy, ON PURPOSE. That function's exclusions are #1844's
+# ruling; widening them to close #3453 would silently reopen #1844 (the OTel stack
+# re-entering the four-pass scoped matrix, and the DuckDB amalgamation with it). This
+# is a SEPARATE component whose subject is precisely the excluded set.
+#
+# IT NEVER SKIPS. It needs nothing beyond cargo — no fixtures, no python, no node —
+# so it is absent from DATASET_COMPONENTS and has no SKIP branch. #3522's rule: a
+# never-SKIPping lane folded into a SKIP-aware one is a coverage hole wearing a SKIP's
+# clothes.
+#
+# NO CARGO-OUTPUT PARSE, so #3400 does not arise here: the verdict is the two cargo
+# EXIT STATUSES, and `-D warnings` (via _deny_warnings, which survives an inherited
+# CARGO_ENCODED_RUSTFLAGS) is what makes a warning one of them. There is deliberately
+# nothing keyed on a status word, coloured or otherwise.
+#
+# IT DECLARES WHAT IT MEASURED, DERIVED. The feature set is read back from CARGO
+# (`_resolved_package_features cqlite-core --all-features`), not printed from the flag
+# this function passes — a lane that echoes its own arguments proves nothing about the
+# build that happened. The declaration FAILS CLOSED both ways: an underivable set is a
+# FAIL naming the derivation, and an `--all-features` resolve that does NOT contain the
+# observability triple is a FAIL too, because the lane's entire reason for existing
+# would have silently evaporated (a renamed/removed feature) while its SUMMARY line
+# stayed green.
+run_all_features_check() {
+  local name=all-features-check
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status=PASS
+  start=$(date +%s)
+  : > "$log"
+
+  # --- the SUBJECT, derived from cargo rather than restated from the flags ----
+  # SUBJECT_FEATURES is the reason this component exists; if a rename ever empties it,
+  # that must be a red, not a quiet no-op.
+  local subject_features="observability observability-testing metrics"
+  local enabled="" n_enabled=0 missing="" f
+  if ! enabled=$(_resolved_package_features cqlite-core --all-features); then
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set under --all-features."
+      echo "        'cargo tree -p cqlite-core --all-features' failed, emitted no line for the"
+      echo "        package (a cargo failure or an offline registry), or its feature-extraction"
+      echo "        pipeline failed. The DERIVATION failed, not the build: this component's whole"
+      echo "        claim is that it compiled the OTel-bearing feature set, and an underived"
+      echo "        subject cannot state that. It FAILs naming the derivation rather than"
+      echo "        compiling something it could not describe (issue #3453)."
+    } >> "$log"
+    status=FAIL
+  else
+    n_enabled=$(printf '%s' "$enabled" | wc -w | tr -d ' ')
+    for f in $subject_features; do
+      case "$enabled" in *" $f "*) ;; *) missing="$missing $f" ;; esac
+    done
+    if [ -n "$missing" ]; then
+      {
+        echo "[$name] FAIL-CLOSED: cqlite-core's --all-features resolve does NOT enable:$missing"
+        echo "        This component exists to compile and lint the OpenTelemetry stack that"
+        echo "        run_clippy deliberately excludes (#1844) and no other component enables"
+        echo "        (issue #3453). If those features have been renamed or removed, this lane is"
+        echo "        no longer covering the gap it was created for — and would keep reporting"
+        echo "        PASS about a feature set that no longer contains its subject."
+        echo "        Remedy: update this component's subject_features to the current names, or"
+        echo "        retire the component in the same change that retires the features."
+        echo "        derived enabled set ($n_enabled features): $enabled"
+      } >> "$log"
+      status=FAIL
+    fi
+  fi
+
+  # The DECLARATION line — package, feature set, targets — on stdout AND in the log, so
+  # a pasted run states what it certified rather than emitting a bare status token.
+  local declaration
+  declaration="[$name] subject: package=cqlite-core features=--all-features (${n_enabled} enabled, derived from cargo tree; includes $(printf '%s' "$subject_features" | tr ' ' ',')) targets=--all-targets; passes: (1) cargo check (2) cargo clippy -D warnings; executes NO tests (pr-gate-core owns the runtime half)"
+  echo ">>> $declaration"
+  printf '%s\n' "$declaration" >> "$log"
+
+  # --- pass 1: cargo check ---------------------------------------------------
+  local t0 t1
+  if [ "$status" = PASS ]; then
+    t0=$(date +%s)
+    if _deny_warnings cargo check --package cqlite-core --all-features --all-targets >> "$log" 2>&1; then
+      t1=$(date +%s)
+      echo "[$name] pass 1/2 cargo check --all-features --all-targets: OK ($((t1 - t0))s)" >> "$log"
+    else
+      t1=$(date +%s)
+      status=FAIL
+      echo "[$name] pass 1/2 cargo check --all-features --all-targets: FAIL ($((t1 - t0))s)" >> "$log"
+    fi
+  fi
+
+  # --- pass 2: cargo clippy --------------------------------------------------
+  # Mirrors .github/workflows/pr-gate.yml's clippy step (`--package cqlite-core
+  # --all-targets --all-features -- -D warnings`) so the gate enforces what that
+  # required check enforces. `-- -D warnings` AND _deny_warnings' RUSTFLAGS are both
+  # present on purpose: the former is pr-gate's literal invocation, the latter is what
+  # cannot be switched off by an inherited CARGO_ENCODED_RUSTFLAGS (#1699 round-5).
+  if [ "$status" = PASS ]; then
+    t0=$(date +%s)
+    if _deny_warnings cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings >> "$log" 2>&1; then
+      t1=$(date +%s)
+      echo "[$name] pass 2/2 cargo clippy --all-features --all-targets -D warnings: OK ($((t1 - t0))s)" >> "$log"
+    else
+      t1=$(date +%s)
+      status=FAIL
+      echo "[$name] pass 2/2 cargo clippy --all-features --all-targets -D warnings: FAIL ($((t1 - t0))s)" >> "$log"
+    fi
+  else
+    # SAY that it did not run. A silent omission here reads, to anyone scanning the
+    # log, as a clean clippy pass — the vacuous-green shape one level down.
+    echo "[$name] pass 2/2 cargo clippy: NOT RUN (an earlier pass already FAILed; its diagnostics are above)" >> "$log"
+  fi
+
+  end=$(date +%s)
+  if [ "$status" != PASS ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # parity-report: verify the committed derived parity report is not stale vs its
 # source manifest (issue #1338). Renders test-data/cassandra-parity-manifest.yml
 # with `cassandra-parity report --check`; PASS when the committed report matches a
@@ -11854,6 +12763,28 @@ run_tooling_tests() {
     return 0
   fi
 
+  # SUMMARY feature-matrix annotation guard (#3453). Hermetic (no cargo, no network, no
+  # datasets — a PATH-shim cargo records argv and compiles nothing) and ~3s. Three
+  # properties: EVERY name in COMPONENTS resolves to a declared class (so a new component
+  # cannot join the set with a blank matrix), all six per-component emit sites render
+  # through the ONE _fm_summary_line (so no MODE emits an un-annotated block), and — the
+  # measured half — for each of the six components whose cargo calls live in a `bash -c`
+  # body, the DECLARED matrix equals the argv that ACTUALLY EXECUTED under the shim,
+  # described through the gate's own _fm_describe_cargo rather than re-derived here. That
+  # last section is RED-verified: changing a feature literal in one of those bodies without
+  # the hoisted variable reds it. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_feature_matrix_annotation.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_feature_matrix_annotation.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (SUMMARY feature-matrix annotation guard #3453); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # binding-rust-tests target-partition self-test (#3522, roborev C3): hermetic, no cargo /
   # network / datasets. Drives _brt_partition_targets — sourced OUT OF THE REAL GATE SCRIPT,
   # never a copy — over synthetic metadata, including the case that cost a review round: when
@@ -12307,6 +13238,12 @@ run_file_size() {
 # AND the python tier. See PYTHON_LITE_TIER_CMD / classify_scoped_plan above.
 run_scoped_tests() {
   local name=scoped-tests
+  # #3453: attribute this lane's cargo invocations to `scoped-tests` (the name it appends
+  # to NAMES), NOT to whichever component ran before it. run_lite calls this AFTER
+  # run_component roborev-lints, so without this the blast-radius cargo runs would have
+  # landed in roborev-lints' sidecar — a declared no-cargo component — and the LITE block
+  # would have attributed a feature set to a component that compiled nothing.
+  AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status=PASS
   start=$(date +%s)
@@ -12358,6 +13295,12 @@ run_scoped_tests() {
     status=FAIL
     OVERALL=FAIL
     end=$(date +%s)
+    # #3453 (roborev job 273, F4): run_scoped_tests appends its verdict DIRECTLY to
+    # NAMES/STATUSES/TIMES and never calls record_result, which is where every other
+    # component's "ended without a cargo invocation" note is written. So this fail-closed
+    # exit — taken before any cargo runs — rendered `[UNDECLARED]` ("nobody said") instead
+    # of the fact we know exactly. Both of this function's terminal paths now note it.
+    _fm_note_if_no_cargo_observed "$name" "$status"
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
     return
@@ -12525,8 +13468,18 @@ run_scoped_tests() {
   # compile of the extension (seconds warm via the persistent venv + sccache,
   # ~1-3 min cold).
   if [ "$python_diff" -eq 1 ]; then
+    # ONE reach-marker path for BOTH branches below. Defined before the branch so it is never
+    # unbound under `set -u`, and so the no-python3 branch can pass it too: the marker mechanism
+    # being ACTIVE is what makes its ABSENCE real evidence of not-reached, rather than an
+    # unmeasured guess (roborev job 285).
+    local pbv_reach="$LOG_DIR/$name.maturin-reached"
+    rm -f "$pbv_reach"
     if ! command -v python3 >/dev/null 2>&1; then
       echo ">>> [$name] python binding diff but no python3 on PATH — SKIP python tier (run the full gate)"
+      # #3453 blocker 1: the tier is not reached at all, so record THAT — never a maturin
+      # invocation that did not happen. `none` is any non-{0,2,3} value; see
+      # _fm_note_maturin_rc.
+      _fm_note_maturin_rc "$name" none "$pbv_reach"
       PYTHON_TIER_NOTE="python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate"
     else
       local venv="$REPO_ROOT/target/agent-gate-venv"
@@ -12546,8 +13499,14 @@ run_scoped_tests() {
       # venv (possibly a private self-heal venv — Finding B; the shared $venv is
       # never torn down).
       active_venv_file=$(mktemp "${TMPDIR:-/tmp}/agent-gate-active-venv.XXXXXX")
-      RUN_SLOW_TESTS=0 bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" "$active_venv_file" >>"$log" 2>&1
+      RUN_SLOW_TESTS=0 _pbv_reach_marker="$pbv_reach" bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" "$active_venv_file" >>"$log" 2>&1
       pbv_rc=$?
+      # #3453 blocker 1: maturin invokes cargo in a CHILD process, so no argv passes
+      # through this shell's observer — record the honest `via maturin: feature set NOT
+      # observed` entry, ADDITIVELY (the rust blast-radius loop above already appended its
+      # OBSERVED sets to the same sidecar, so a MIXED diff renders both), and only for the
+      # rc values that mean maturin actually ran.
+      _fm_note_maturin_rc "$name" "$pbv_rc" "$pbv_reach"
       active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
       if [ "$pbv_rc" -eq 2 ]; then
         status=FAIL
@@ -12590,6 +13549,9 @@ run_scoped_tests() {
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
+  # #3453 (F4): the SECOND terminal path of this function — see the note at the no-parser
+  # exit. record_result is never called here either, so the note is written explicitly.
+  _fm_note_if_no_cargo_observed "$name" "$status"
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
@@ -12686,7 +13648,7 @@ run_lite() {
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   local i
   for i in "${!NAMES[@]}"; do
-    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -13050,7 +14012,7 @@ run_delta() {
     SUMMARY_META+=("${TREE_META_LINES[@]}")
     SUMMARY_META+=("${file_meta[@]}")
     for i in "${!DN[@]}"; do
-      SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
+      SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     done
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
     emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
@@ -13084,7 +14046,7 @@ run_delta() {
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   SUMMARY_META+=("${file_meta[@]}")
   for i in "${!DN[@]}"; do
-    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
+    SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -13249,7 +14211,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # #2926: synthetic tree identity (no git state needed for the aggregation self-test).
   SUMMARY_META+=("$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE")
   for _i in "${!NAMES[@]}"; do
-    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$_i]}:" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
+    SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -13453,9 +14415,19 @@ run_core_tests() {
   # fair share of cores so N concurrent gates never oversubscribe the box.
   # nextest reads --test-threads; the cargo-test fallback takes it after `--`.
   if [ "$NEXTEST" -eq 1 ]; then
+    # #3453: the nextest branch runs its two passes inside a `bash -c` body, which does
+    # NOT inherit the cargo observer (it intercepts nothing outside this shell) — so
+    # (package, features) is hoisted into ONE pair of variables expanded into BOTH passes
+    # AND into the _fm_observe_child call that precedes each. Without this the gate's
+    # longest component reported PASS with an UNDECLARED matrix (measured). Each record is
+    # made INSIDE the body, immediately before its own pass, so a first-pass failure
+    # cannot leave the block claiming the doctest pass also ran (job 269 blocker 2).
+    local core_pkg=cqlite-core core_feats=cli-helpers
     run_component core-tests bash -c '
-      cargo nextest run --package cqlite-core --features cli-helpers --test-threads "$1" -E "$2" &&
-      cargo test --doc --package cqlite-core --features cli-helpers -- "${@:3}"' \
+      _fm_observe_child core-tests nextest run --package '"$core_pkg"' --features '"$core_feats"' &&
+      cargo nextest run --package '"$core_pkg"' --features '"$core_feats"' --test-threads "$1" -E "$2" &&
+      _fm_observe_child core-tests test --doc --package '"$core_pkg"' --features '"$core_feats"' &&
+      cargo test --doc --package '"$core_pkg"' --features '"$core_feats"' -- "${@:3}"' \
       cqlite-agent-gate "$GATE_TEST_THREADS" "$nx_filter" "${skip_args[@]}"
   else
     run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \
@@ -13558,6 +14530,11 @@ _pool_selected() {
 # records its verdict to $LOG_DIR/<name>.result (see record_result), so it is safe
 # to run in a backgrounded subshell.
 dispatch_component() {
+  # #3453: arm the feature-matrix observer for THIS component. Each component runs in
+  # its own subshell (the #1737 bounded pool), so the assignment cannot leak across
+  # components; the runners that do their own timing/record_result (run_core_tests,
+  # run_flight_tests, run_python_bindings, …) are covered here rather than one by one.
+  AGENT_GATE_FM_COMPONENT="$1"
   case "$1" in
     fmt) run_component fmt cargo fmt --all --check ;;
     clippy) run_component clippy run_clippy ;;
@@ -13592,7 +14569,16 @@ dispatch_component() {
       --test issue_1578_streaming_aggregate_multigen_parity \
       --test issue_2069_global_aggregate_empty_table ;;
     arrow-parity-guard) run_component arrow-parity-guard run_arrow_parity_guard_cmd ;;
-    memory-budget) run_component memory-budget bash -c '
+    memory-budget)
+      # #3453: ONE variable per feature set, expanded into BOTH the `bash -c` argv below
+      # and the _fm_observe_child call that immediately precedes each invocation inside the
+      # body — the `bash -c` body runs in a child bash that does NOT inherit the cargo
+      # INTERCEPTOR (deliberately not `export -f`-ed; see the #3453 block near the top of
+      # this file), so each lane records ITSELF, from the same variable its argv is built
+      # from, at the moment it runs (job 269 blocker 2).
+      local mb_pkg=cqlite-core mb_feats=cli-helpers,dhat-heap,arrow
+      local mb_flight_pkg=cqlite-flight mb_flight_feats=dhat-heap
+      run_component memory-budget bash -c '
   # Read-path dhat budgets (issue #1565) + the export/Flight dhat budgets
   # (issue #1494, AD5): the converter per-row allocation guard (needs `arrow`)
   # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap) +
@@ -13606,11 +14592,14 @@ dispatch_component() {
   # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
   # mandatory on every lane (the dhat profiler is a process-global allocator).
   rc=0
-  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test memory_budget -- --test-threads=1 || rc=1
-  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
-  cargo test --package cqlite-flight --features dhat-heap \
+  _fm_observe_child memory-budget test --package '"$mb_flight_pkg"' --features '"$mb_flight_feats"'
+  cargo test --package '"$mb_flight_pkg"' --features '"$mb_flight_feats"' \
     --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
   # (d) row-assembly (RowCells) path — issue #2075: absolute allocs/row AND
   # allocs/cell budgets for the decode -> RowCells (Vec<(Arc<str>,Value)>) ->
@@ -13618,12 +14607,21 @@ dispatch_component() {
   # #1046 width-SCALING guard (which lacks a per-cell metric); measures/gates the
   # #1645 item 2 (smallvec RowCells) win. Same feature set as the sibling lanes to
   # reuse build artifacts.
-  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
-    integration-tests) run_component integration-tests bash -c '
-  cargo test --package cqlite-integration-tests --no-run &&
-  cargo test --package cqlite-integration-tests \
+    integration-tests)
+      # #3453: see the memory-budget branch — package hoisted so the recorded scope and
+      # the executed scope cannot drift. This lane passes NO --features (default set).
+      # The two records live INSIDE the body: the passes are `&&`-chained, so a failed
+      # compile pass must not leave the block claiming the run pass happened too.
+      local it_pkg=cqlite-integration-tests
+      run_component integration-tests bash -c '
+  _fm_observe_child integration-tests test --package '"$it_pkg"' --no-run &&
+  cargo test --package '"$it_pkg"' --no-run &&
+  _fm_observe_child integration-tests test --package '"$it_pkg"' &&
+  cargo test --package '"$it_pkg"' \
     --test comprehensive_component_integration_tests \
     --test fixture_specific_integration_tests \
     --test golden_path_get_operations_tests \
@@ -13631,11 +14629,29 @@ dispatch_component() {
     --test golden_path_scan_operations_tests \
     --test golden_path_summary_index_integration_tests' ;;
     format-compat) run_component format-compat cargo test --package format-compatibility-tests ;;
-    write-tests) run_component write-tests bash -c '
-  cargo test --package cqlite-core --features write-support --lib &&
-  cargo test --package cqlite-core --features write-support --test write_read_roundtrip &&
-  cargo test --package cqlite-core --features write-support --test compaction_integration' ;;
-    cli-tests) run_component cli-tests bash -c '
+    write-tests)
+      # #3453: one hoisted (package, features) pair, expanded into all three invocations
+      # AND into the _fm_observe_child call preceding each (see the memory-budget branch).
+      # In-body, so the `&&` chain short-circuiting after the --lib pass renders ONE set
+      # rather than the same set `x3` (job 269 blocker 2).
+      local wt_pkg=cqlite-core wt_feats=write-support
+      run_component write-tests bash -c '
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --lib &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test write_read_roundtrip &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test compaction_integration' ;;
+    cli-tests)
+      # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
+      # write-support) and a single-value annotation would be false for it — each pass
+      # records ITSELF from inside the body, from the same hoisted variables its argv uses
+      # (see memory-budget). THE MOTIVATING CASE for job 269 blocker 2: this body can exit
+      # before Pass 2 in four ways (three fail-closed derivations and the Pass-1
+      # zero-tests guard), and the old parent-side pre-record named the write-support set
+      # anyway — a FAIL line asserting a pass that never started.
+      local ct_pkg=cqlite-cli ct_ws_feats=write-support
+      run_component cli-tests bash -c '
   # issue #2039: ENUMERATE every cqlite-cli/tests/*.rs integration-test target
   # instead of a hardcoded 3-target allowlist. The old allowlist
   # (unit_tests + write_readback_content_tests + graceful_shutdown_tests) made any
@@ -13786,12 +14802,14 @@ dispatch_component() {
   # two bare mktemps are the only ones nobody else collects.
   trap "rm -rf \"$_cli_tmp\"" EXIT
 
-  cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
+  _fm_observe_child cli-tests test --package '"$ct_pkg"'
+  cargo test --package '"$ct_pkg"' "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
 
-  cargo test --package cqlite-cli --features write-support "${ws_flags[@]}" 2>&1 | tee "$log2"
+  _fm_observe_child cli-tests test --package '"$ct_pkg"' --features '"$ct_ws_feats"'
+  cargo test --package '"$ct_pkg"' --features '"$ct_ws_feats"' "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2"' ;;
@@ -13826,7 +14844,13 @@ dispatch_component() {
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
     tooling-tests) run_tooling_tests ;;
-    minimal-build) run_component minimal-build bash -c '
+    minimal-build)
+      # #3453: the minimal lane's DEFINING property is --no-default-features, so the
+      # SUMMARY must say so; hoisted here and expanded into both invocations below AND
+      # into the in-body record preceding each (a failed `cargo build` must not leave the
+      # block claiming the test-compile pass ran too — job 269 blocker 2).
+      local mn_pkg=cqlite-core mn_feats=all-compression
+      run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
   # that job sets RUSTFLAGS=-D warnings, so a warning-class error (e.g. an unused
   # `#[cfg(test)]` helper whose only caller is feature-gated out under the minimal
@@ -13835,16 +14859,24 @@ dispatch_component() {
   # Export it for BOTH the build and the test-compile so this component enforces
   # exactly what CI enforces.
   export RUSTFLAGS="-D warnings" &&
-  cargo build --package cqlite-core --no-default-features --features all-compression &&
+  _fm_observe_child minimal-build build --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' &&
+  cargo build --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' &&
   # Test-compile the minimal lane (issue #1978): the CI "All Compression Build &
   # Test" job runs `cargo test --no-default-features --features=all-compression
   # --lib`, which compiles the test targets. A plain `cargo build` never does, so
   # a `#[cfg(test)]` module referencing a write-support-gated item (e.g.
   # storage::serialization) silently escaped this gate. Compile-only (--no-run)
   # keeps it fast; no data fixtures needed for a compile check.
-  cargo test --package cqlite-core --no-default-features --features all-compression --lib --no-run' ;;
-    smoke) run_component smoke bash -c '
-  cargo build --package cqlite-cli --bin cqlite &&
+  _fm_observe_child minimal-build test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run &&
+  cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run' ;;
+    all-features-check) run_all_features_check ;;
+    smoke)
+      # #3453: smoke builds the CLI at DEFAULT features and then runs a shell script.
+      # Recorded in-body (job 269 blocker 2): if the build never starts, nothing claims it.
+      local sm_pkg=cqlite-cli
+      run_component smoke bash -c '
+  _fm_observe_child smoke build --package '"$sm_pkg"' --bin cqlite &&
+  cargo build --package '"$sm_pkg"' --bin cqlite &&
   CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh' ;;
     *) echo "dispatch_component: unknown component $1" >&2; return 2 ;;
   esac
@@ -14050,7 +15082,7 @@ if [ -n "$ONLY" ]; then
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
 fi
 for i in "${!NAMES[@]}"; do
-  SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
 # #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
 # which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,

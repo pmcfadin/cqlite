@@ -782,6 +782,101 @@ if [ -x /bin/bash ]; then
   fi
 fi
 
+# 8c. …AND THE SAME FLOOR APPLIES TO EVERY SCRIPT THE GATE INVOKES (roborev job 273, F1).
+#     8/8b exercise the GATE under /bin/bash; nothing enforced the floor on the ~80
+#     `scripts/tests/*.sh` and `scripts/ci/*.sh` files the gate SHELLS OUT TO, and one of
+#     them (the #3453 feature-matrix annotation guard, which `tooling-tests` ALWAYS runs)
+#     shipped a `declare -A` — a bash-4.0-only construct that FAILs the gate of record on
+#     macOS's stock /bin/bash 3.2, a host this repository treats as first-class.
+#
+#     DERIVED, NEVER CURATED: the subject set is every scripts/{ci,tests}/*.sh path that
+#     appears in agent-gate.sh, read out of the gate SOURCE, so a newly-wired script joins
+#     the lint with no edit here and a new file cannot enter the gate path unchecked.
+#
+#     THREE construct classes, and the split is deliberate AND was corrected by measurement.
+#     Linted, because each has exactly one meaning, no bash-3.2 fallback, and cannot be a
+#     false positive on a gate path: the ASSOCIATIVE ARRAY (`declare/local/typeset -A`),
+#     CASE-CONVERSION PARAMETER EXPANSION (the `${v` + `^^}` / `,,}` / `^}` / `,}` forms),
+#     and `&>>` append-redirection.
+#     A FOURTH ARM FOR GNU-ONLY `\b` IN `grep -E` WAS ADDED (job 285) AND REMOVED (job 291).
+#     It is the right RULE — POSIX ERE leaves `\b` undefined and BSD grep ignores it — but a
+#     line-based grep-for-greps cannot enforce it, and TWO blind spots were measured within one
+#     review round:
+#       (a) the needle had to be `grep [^|]*\b` to avoid spanning a shell pipe, and `[^|]*`
+#           therefore cannot span an ALTERNATION either — so `grep -nE '... (cargo|rustc)\b'`,
+#           a real offender in this very repository, evaded it. Alternations are common in
+#           greps, so this is not a corner case.
+#       (b) a needle ASSEMBLED from fragments (the technique used two paragraphs up to stop
+#           this lint matching its own source) also evades it — so the remedy for self-matching
+#           doubles as a way to hide a real offender.
+#     Closing either needs shell+regex parsing, which is the unbounded problem #3400's parse
+#     lint was descoped for and #3229's census oracle removed over: a guard with documented
+#     false PASSes is worse than none, because it invites reliance it cannot support. The real
+#     offenders found while it existed ARE fixed; what is gone is the claim to detect the next
+#     one. That claim is now made by nothing, which is honest, rather than by a lint that
+#     misses alternations.
+#     NOT linted, because judging them needs context a grep does not have: `mapfile` /
+#     `readarray` (a script may define its own function of that name) and COMPUTED negative
+#     subscripts (`${a[$i]}` with i<0 is undetectable statically anyway). A lint with false
+#     positives is the lint agents learn to waive (#3400's descoped parse lint, #3229's
+#     removed census oracle) — so the line is drawn at unambiguity, not at convenience.
+#
+#     THIS PARAGRAPH PREVIOUSLY SAID NO WIDER LINT WAS WRITTEN AND NAMED THE
+#     CASE-CONVERSION FORM AS DELIBERATELY EXCLUDED. Roborev job 277 then found exactly
+#     that construct, twice, IN THIS FILE. The 'needs context to judge' argument was true
+#     for `mapfile` and false for the expansions; keeping it whole cost a review round.
+#
+#     AND THE VERDICT DECLARES ITS OWN INCOMPLETENESS (`0 of 3 RECOGNISED`, never a bare
+#     all-clear), because this scan is NOT a bash-3.2 proof. Measured against docker
+#     bash:3.2 (3.2.57): `bash -n` returns rc=0 for `declare -A`, for the case-conversion
+#     expansion and for `mapfile` — they are RUNTIME failures, and `declare -A` is not even
+#     fatal without `set -e`. Only EXECUTION under 3.2 establishes compatibility.
+b32_scripts=$(grep -oE 'scripts/(ci|tests)/[a-z0-9_-]+\.sh' "$GATE" | sort -u)
+b32_offenders=""
+b32_scanned=0
+while IFS= read -r _b32f; do
+  [ -n "$_b32f" ] || continue
+  [ -r "$SCRIPT_DIR/../../$_b32f" ] || continue
+  b32_scanned=$((b32_scanned + 1))
+  # Three UNAMBIGUOUS bash-4 constructs. Each has exactly one meaning, none has a 3.2
+  # fallback, and none can be a false positive on a gate path — see the rationale above
+  # for why `mapfile` and computed negative subscripts are deliberately NOT here.
+  # Comment lines are skipped: this suite DOCUMENTS these constructs in prose (the
+  # paragraph above names one), and a lint that matches its own documentation is the
+  # self-matching defect this repo keeps re-learning.
+  # REDIRECTION, NOT A PIPE (#3685). `grep -q` exits on the first match, so under this file's
+  # `set -o pipefail` the producer takes SIGPIPE and the PIPELINE returns 141 — which `if`
+  # reads as NO MATCH. That is a FALSE NEGATIVE in a portability lint: measured here, the
+  # single real match in test_roborev_guard_portability.sh was silently lost this way, so the
+  # lint reported `0 of 4` clean while a match existed. Process substitution keeps grep's own
+  # status as the verdict. This is the THIRD instance of #3685 in this branch — the first two
+  # were in the annotation guard, and this one was written AFTER filing that issue.
+  # THE NEEDLES ARE ASSEMBLED FROM PIECES so this lint cannot match ITS OWN pattern
+  # literals. Measured: with the patterns written out, the lint flagged THIS FILE — the
+  # self-matching defect the paragraph above names, committed in the very code that warns
+  # about it. Comment-stripping is not enough, because these are CODE lines, not comments.
+  # Each variable below holds a fragment that is harmless alone; only the concatenation is
+  # the construct, and the concatenation exists solely at run time.
+  _p_caret='\^'; _p_comma=','
+  _p_case='\$\{[A-Za-z_][A-Za-z0-9_]*('"$_p_caret$_p_caret"'|'"$_p_comma$_p_comma"'|'"$_p_caret"'|'"$_p_comma"')\}'
+  _p_amp='&'; _p_redir="$_p_amp"'>''>'
+  if grep -qE < <(sed 's/#.*$//' "$SCRIPT_DIR/../../$_b32f" 2>/dev/null) \
+       -e '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
+       -e "$_p_case" \
+       -e "$_p_redir"; then
+    b32_offenders="$b32_offenders $_b32f"
+  fi
+done <<EOF
+$b32_scripts
+EOF
+if [ "$b32_scanned" -lt 20 ]; then
+  bad "portability-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
+elif [ -n "$b32_offenders" ]; then
+  bad "portability-8c: gate-invoked script(s) use a NON-PORTABLE construct (bash-4 associative array, bash-4 case-conversion parameter expansion, or bash-4 append-redirection), which fails on macOS — a first-class gate host:$b32_offenders"
+else
+  ok "portability-8c: 0 of 3 RECOGNISED non-portable constructs (bash-4 associative array, bash-4 case-conversion parameter expansion, bash-4 append-redirection) found across $b32_scanned gate-invoked scripts — NOT an exhaustive portability proof: \`bash -n\` does not catch the bash-4 class (measured: rc=0 for all three) and nothing here executes under a BSD userland; only EXECUTION on a macOS host establishes either. The constructs are deliberately NOT spelled in this message: it would make the lint flag its own diagnostic."
+fi
+
 # 9. Accelerator absence WARN + state markers (issue #1848). The gate must:
 #    (a) mark an intentionally-disabled accelerator (CQLITE_DISABLE_*) `off` and
 #        emit NO WARN; (b) mark a truly MISSING accelerator `absent` and emit a
@@ -4807,6 +4902,224 @@ else
   fi
 fi
 
+# --- 53. #3453: the all-features-check lane is REGISTERED where it must be, ABSENT ---
+#         where it must be, and its invocation cannot silently stop being all-features.
+#
+# WHY THIS EXISTS. Before #3453 no cargo invocation in the gate ever passed
+# `observability` (run_clippy EXCLUDES the OTel stack by #1844 design, core-tests runs
+# `--features cli-helpers`, minimal-build runs `--no-default-features`), so a defect
+# reachable only with that feature on could not fail the gate of record while failing
+# pr-gate.yml's `cargo test -p cqlite-core --lib --all-features`. Measured on PR #3382: a
+# 31/31 gate PASS that never executed the test pinning that PR's own fix.
+#
+# FOUR REGISTRIES MUST AGREE, and the failure of any one is SILENT: a name in COMPONENTS
+# with no dispatch arm hits `unknown component` (return 2); a name absent from COMPONENTS
+# is simply never run while every SUMMARY stays green. Both directions are asserted here,
+# for the same reason section 16 does it for the #1699 lanes.
+#
+# THE ABSENCES ARE AS LOAD-BEARING AS THE PRESENCES. This lane must NOT be in
+# DATASET_COMPONENTS (it opens no fixture; enrolling it would make a fixture-less
+# checkout fail closed for nothing — and #3522's rule is that a never-SKIPping lane
+# folded into a SKIP-aware one is a coverage hole wearing a SKIP's clothes), and it must
+# NOT leak into LITE_COMPONENTS / DELTA_COMPONENTS, whose whole value is staying fast.
+#
+# The STRUCTURAL asserts on the function body are here rather than in the opt-in
+# planted-break harness because the regression they guard is TEXTUAL: someone narrowing
+# `--all-features` to a curated list (the thing run_clippy already has to maintain by
+# hand), dropping `-p` for `--workspace` (which would build the cqlite-cli-owned duckdb
+# amalgamation from source — the #916 cost this lane was scoped to avoid), or removing
+# `_deny_warnings` because `-- -D warnings` reads as equivalent (it is not: an inherited
+# CARGO_ENCODED_RUSTFLAGS silently defeats a bare RUSTFLAGS — #1699 round 5). Sub-second,
+# no cargo, no network. The EXPENSIVE half — does the lane actually red on a planted
+# observability-only defect, and do the existing components stay green on the same plant?
+# — is scripts/tests/test_agent_gate_all_features_lane.sh, deliberately opt-in.
+AFC_LANE=all-features-check
+
+afc_list="$tmp/3453-list.txt"
+if bash "$GATE" --list >"$afc_list" 2>/dev/null && [ -s "$afc_list" ]; then
+  ok "3453-list-extract: \`--list\` produced a readable COMPONENTS listing ($(grep -c . "$afc_list" | tr -d ' ') components)"
+else
+  bad "3453-list-extract: \`--list\` failed or produced nothing — every membership assert below would be vacuous"
+fi
+if grep -qxF "$AFC_LANE" "$afc_list" 2>/dev/null; then
+  ok "3453-registered: $AFC_LANE is in COMPONENTS (printed by --list)"
+else
+  bad "3453-registered: $AFC_LANE is NOT printed by --list — dropped from COMPONENTS, so the OTel stack is once again compiled by no gate component"
+fi
+
+# Reuses section 16's extraction of the REAL dispatch arms (4-space-indented `<name>)`).
+if grep -qxF "$AFC_LANE" "$dispatch_arms" 2>/dev/null; then
+  ok "3453-dispatch: $AFC_LANE is reachable in dispatch_component"
+else
+  bad "3453-dispatch: $AFC_LANE has NO dispatch_component arm — it would hit 'unknown component' and return 2"
+fi
+
+# DATASET_COMPONENTS: must be ABSENT. `$dataset_components` is extracted (with its own
+# fail-closed guard) in section 16.
+if [ -z "$dataset_components" ]; then
+  bad "3453-dataset-absent: DATASET_COMPONENTS could not be extracted, so this absence assert has no subject"
+else
+  case " $dataset_components " in
+    *" $AFC_LANE "*)
+      bad "3453-dataset-absent: $AFC_LANE is in DATASET_COMPONENTS — it needs nothing beyond cargo, so enrolling it makes a fixture-less checkout fail closed for a lane that opens no Data.db" ;;
+    *)
+      ok "3453-dataset-absent: $AFC_LANE is correctly NOT in DATASET_COMPONENTS (never SKIPs, needs no corpus)" ;;
+  esac
+fi
+
+# The two fast-loop sets, read from the script's OWN listing hooks rather than the source.
+for _afc_mode in lite delta; do
+  # Uppercase via `tr`, NOT bash-4 case-conversion expansion (the `${v` + `^^}` form):
+  # that throws `bad substitution` on macOS's stock /bin/bash 3.2, a first-class gate
+  # host, and this file is ALWAYS invoked by tooling-tests (roborev job 277, #3453).
+  _afc_MODE=$(printf '%s' "$_afc_mode" | tr '[:lower:]' '[:upper:]')
+  _afc_f="$tmp/3453-$_afc_mode-list.txt"
+  _afc_rc=0
+  bash "$GATE" "--$_afc_mode-list" >"$_afc_f" 2>/dev/null || _afc_rc=$?
+  _afc_n=$(grep -c . "$_afc_f" 2>/dev/null || true)
+  if [ "$_afc_rc" -ne 0 ] || [ "${_afc_n:-0}" -eq 0 ]; then
+    bad "3453-$_afc_mode-absent: \`--$_afc_mode-list\` did not produce a readable list (rc=$_afc_rc, lines=${_afc_n:-0}) — the absence check has no subject"
+  elif grep -qxF "$AFC_LANE" "$_afc_f" 2>/dev/null; then
+    bad "3453-$_afc_mode-absent: $AFC_LANE leaked into ${_afc_MODE}_COMPONENTS — it is a full-gate component (a cold --all-features build), and --$_afc_mode is the fast loop"
+  else
+    ok "3453-$_afc_mode-absent: $AFC_LANE is correctly absent from ${_afc_MODE}_COMPONENTS (${_afc_n} entries read)"
+  fi
+done
+
+# --- the invocation itself, structurally ------------------------------------------
+afc_fn=$(awk '/^run_all_features_check\(\) \{/,/^\}/' "$GATE")
+if [ -n "$afc_fn" ]; then
+  ok "3453-fn-extract: extracted run_all_features_check's body ($(printf '%s\n' "$afc_fn" | grep -c . | tr -d ' ') lines)"
+else
+  bad "3453-fn-extract: could NOT extract run_all_features_check — it is missing, or renamed, and every structural assert below would pass vacuously"
+fi
+# The INVOCATION lines only. `^[^#]*cargo (check|clippy)` matched 8 lines, because this
+# function also NAMES its passes in its own log output (`echo "[$name] pass 1/2 cargo
+# check …"`) — a reporting line is not an invocation, and counting it made the
+# two-passes assert red on correct code. Comments and any line that merely PRINTS the
+# words are excluded; what remains is what cargo actually runs.
+afc_cargo=$(printf '%s\n' "$afc_fn" \
+  | grep -E 'cargo (check|clippy) ' \
+  | grep -vE '^[[:space:]]*#' \
+  | grep -vE '(echo|printf|declaration=)' || true)
+afc_n_cargo=$(printf '%s' "$afc_cargo" | grep -c . || true)
+if [ "${afc_n_cargo:-0}" -eq 2 ]; then
+  ok "3453-two-passes: exactly two cargo invocations (the ruled check + clippy pair)"
+else
+  bad "3453-two-passes: found ${afc_n_cargo:-0} cargo check/clippy invocations, expected 2 — the owner ruling for #3453 is a check AND a clippy pass"
+fi
+afc_bad=""
+printf '%s\n' "$afc_cargo" | grep -q -- '--all-features' || afc_bad="$afc_bad no---all-features"
+[ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-features' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-features"
+[ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-targets' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-targets"
+printf '%s\n' "$afc_cargo" | grep -q -- '--package cqlite-core' || afc_bad="$afc_bad not-package-scoped"
+printf '%s\n' "$afc_cargo" | grep -q -- '--workspace' && afc_bad="$afc_bad uses---workspace"
+if [ -z "$afc_bad" ]; then
+  ok "3453-invocation: both passes are \`--package cqlite-core --all-features --all-targets\` and neither is --workspace (which would build cqlite-cli's bundled duckdb from source — the #916 cost)"
+else
+  bad "3453-invocation:$afc_bad — this lane's entire subject is the feature set nothing else enables, so a narrowed feature list or a widened package scope silently retires it (or blows its minutes budget)"
+fi
+if [ "$(printf '%s\n' "$afc_cargo" | grep -c '_deny_warnings' || true)" = 2 ]; then
+  ok "3453-denywarn: both passes go through _deny_warnings, so -D warnings cannot be made inert by an inherited CARGO_ENCODED_RUSTFLAGS (#1699 round 5)"
+else
+  bad "3453-denywarn: a pass does not go through _deny_warnings — a bare \`env RUSTFLAGS=-D warnings\` is SILENTLY IGNORED when CARGO_ENCODED_RUSTFLAGS is set, even when empty"
+fi
+if printf '%s\n' "$afc_fn" | grep -q '_resolved_package_features cqlite-core --all-features'; then
+  ok "3453-subject-derived: the declared feature set is read back from CARGO, not echoed from the flag this function passes"
+else
+  bad "3453-subject-derived: run_all_features_check no longer derives its feature set via _resolved_package_features — a lane that prints its own arguments states nothing about the build that happened"
+fi
+if printf '%s\n' "$afc_fn" | grep -qE '^[^#]*status=SKIP'; then
+  bad "3453-never-skips: run_all_features_check gained a SKIP branch — it needs nothing beyond cargo, and a SKIP here is a coverage hole wearing a SKIP's clothes (#3522)"
+else
+  ok "3453-never-skips: run_all_features_check has no SKIP branch (it depends on nothing but cargo)"
+fi
+if printf '%s\n' "$afc_fn" | grep -q 'declaration="\[\$name\] subject:'; then
+  ok "3453-declares: the lane emits a subject declaration (package + feature set + targets), not a bare status token"
+else
+  bad "3453-declares: the lane no longer declares what it measured — issue #3453's own remedy is 'report a measurement, not a decision'"
+fi
+
+# --- 54. #3453: EVERY component line in the emitted block NAMES its feature matrix -----
+#
+# WHY THIS IS HERE and not only in the dedicated guard: this suite owns the SUMMARY BLOCK
+# CONTRACT, and "each component line states what it certified" is now part of that
+# contract (owner ruling 2026-08-30). A bare `core-tests: PASS (412s)` cannot distinguish a
+# run that certified the OTLP stack from one that never enabled it — the whole subject of
+# #3453 — so a block whose lines lost their matrix is a REGRESSION OF THIS BLOCK, whatever
+# the annotation machinery itself does.
+#
+# DIVISION OF LABOUR, stated so neither side is mistaken for the other: the COMPLETENESS
+# census (every name in COMPONENTS resolves to a declared class, and the declared-vs-
+# EXECUTED differential over the eight `bash -c` bodies) lives in
+# scripts/tests/test_agent_gate_feature_matrix_annotation.sh, which runs in tooling-tests.
+# Case 54e asserts that guard is still REGISTERED there, so the census cannot be silently
+# dropped and leave only these block-shape checks behind.
+#
+# Host-INDEPENDENT: bash plus --emit-summary-selftest (no cargo, no python3, no jq, no
+# network, no datasets), so none of these five can become a declared tooling skip.
+fm_sum="$tmp/3453-annot-summary.txt"
+if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
+  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$fm_sum")
+  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\) +\[.+\]$' "$fm_sum")
+  if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
+    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix"
+  else
+    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix"
+    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" || true
+  fi
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+    bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
+  else
+    ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
+  fi
+  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" | grep -q 'RESULT:'; then
+    bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
+  else
+    ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
+  fi
+else
+  bad "3453-annot-a: --emit-summary-selftest exited non-zero"
+  bad "3453-annot-b: not evaluated (selftest failed)"
+  bad "3453-annot-c: not evaluated (selftest failed)"
+fi
+# The FOUR non-observed renderings are a CLOSED set, each explicit. This is the property
+# that makes a blank annotation unrepresentable: every branch that cannot report an
+# observed matrix still prints a NAMED state.
+fm_tokens_missing=()
+grep -q "printf '\[no-cargo\]'" "$GATE" || fm_tokens_missing+=(no-cargo)
+grep -q 'feature set NOT observed' "$GATE" || fm_tokens_missing+=(via-driver-not-observed)
+grep -q "printf '\[UNDECLARED\]'" "$GATE" || fm_tokens_missing+=(UNDECLARED)
+grep -q 'UNCLASSIFIED' "$GATE" || fm_tokens_missing+=(UNCLASSIFIED)
+grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
+# …and, since the eight `bash -c` bodies record at EXECUTION time (#3453 roborev job 269
+# blocker 2), a component that FAILs before its first cargo call legitimately leaves an
+# EMPTY sidecar. That state is NAMED too — it is a fact we know exactly, and UNDECLARED
+# would understate it.
+# The FAIL text is composed from a `$what` phrase (which names the metadata-probe exclusion
+# and, for an indirect component, the DRIVER), so both halves are asserted rather than one
+# contiguous literal that the composition would hide.
+grep -qF 'no cargo build/test invoked (component FAILed before ' "$GATE" || fm_tokens_missing+=(failed-before-cargo)
+grep -qF 'its first cargo build/test invocation' "$GATE" || fm_tokens_missing+=(failed-before-cargo-what)
+# …and the TWO states added by roborev job 273: `unobservable:<why>` (F2 — cargo may run in
+# child processes and this shell can say neither what nor whether), and an indirect
+# component whose DRIVER was never reached (F3 — the state the old code mis-reported as an
+# unobserved cargo invocation).
+grep -q 'cargo not observable' "$GATE" || fm_tokens_missing+=(cargo-not-observable)
+grep -q 'never reached' "$GATE" || fm_tokens_missing+=(driver-never-reached)
+grep -q 'before reaching its driver' "$GATE" || fm_tokens_missing+=(failed-before-driver)
+if [ "${#fm_tokens_missing[@]}" -eq 0 ]; then
+  ok "3453-annot-d: every non-observed state has an EXPLICIT rendering (no-cargo / via <driver> NOT observed / cargo-not-observable / driver-never-reached / UNDECLARED / UNCLASSIFIED / SKIPped / FAILed-before-cargo / FAILed-before-driver) — a blank annotation is unrepresentable"
+else
+  bad "3453-annot-d: missing explicit rendering(s): ${fm_tokens_missing[*]}"
+fi
+fm_guard=scripts/tests/test_agent_gate_feature_matrix_annotation.sh
+if [ -r "$SCRIPT_DIR/../../$fm_guard" ] && grep -q "$fm_guard" "$GATE"; then
+  ok "3453-annot-e: the completeness/no-drift guard exists AND is registered in the gate (tooling-tests)"
+else
+  bad "3453-annot-e: $fm_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the COMPONENTS completeness census would be silently gone"
+fi
+
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
@@ -4850,7 +5163,17 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
-ASSERT_FLOOR=392
+# 405 -> 410 on #3453 (Phase B): section 54 adds 5 asserts, host-INDEPENDENT for the same
+# reason (bash plus --emit-summary-selftest; no cargo/python3/jq/network/datasets), so the
+# same "raise by exactly the number added" rule applies and the ~9 margin is preserved.
+# 392 -> 405 on #3453: section 53 adds 13 asserts, every one of them host-INDEPENDENT
+# (bash plus the gate's own --list/--lite-list/--delta-list hooks; no cargo, no python3,
+# no jq, no network), so none of them can turn into a declared skip on any of the eight
+# host shapes enumerated above. Raising the floor by exactly the number added therefore
+# preserves the deliberate ~9 margin rather than widening it — a floor that stays put
+# while the suite grows is a floor that stops detecting a silently-dying section, which
+# is the only thing it is for.
+ASSERT_FLOOR=410
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

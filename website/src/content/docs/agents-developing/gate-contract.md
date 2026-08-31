@@ -217,6 +217,7 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | `legacy-heuristics` | `cargo build -p cqlite-core --features legacy-heuristics`, then `cargo test --no-fail-fast … --lib` + `--test` targets DERIVED from **cargo metadata** — membership by a cfg site anywhere in the target's module closure, or by `required-features` (#1699) |
 | `feature-iso-parquet` | `cargo test -p cqlite-core --no-default-features --features all-compression,parquet --lib --no-run` — **without** `delta-scan` (#1699) |
 | `feature-iso-delta-scan` | the mirror — **without** `parquet` (#1699) |
+| `all-features-check` | `cargo check` **and** `cargo clippy … -- -D warnings`, both at `-p cqlite-core --all-features --all-targets` (issue #3453). The **only** component that enables the OpenTelemetry stack: `clippy` above excludes `observability`/`observability-testing`/`metrics` by #1844 design, `core-tests` runs `--features cli-helpers`, `minimal-build` runs `--no-default-features` — so before this lane no cargo invocation in the gate ever passed `observability`. Package-scoped, **not** `--workspace` (the `duckdb` bundled-source amalgamation belongs to `cqlite-cli` alone, so this stays minutes, not the #916 cost). Declares its DERIVED feature set on every run and FAILs closed if `--all-features` no longer enables its subject. Compiles and lints only — it executes no test, so the runtime half of the class stays `pr-gate-core`'s (see below). Never SKIPs |
 | `smoke` | `bash test-data/scripts/smoke-test-all-tables.sh` (against a freshly built debug binary) |
 
 All components run even after a failure so one run reports everything.
@@ -738,6 +739,46 @@ SUMMARY block through the real emission code without running the 5–8 minute ga
 The gate runs this test automatically as the `tooling-tests` component, so the
 capture guarantee is enforced on every gate run.
 
+## A green gate does not subsume `pr-gate-core` (#3453)
+
+The gate and the `required` CI check **overlap; neither contains the other**. This is
+structural, and worth stating because a green SUMMARY reads like a prediction that CI
+will pass.
+
+- **The gate runs lanes CI cannot.** `arrow-parity-guard` names a
+  `#![cfg(feature = "arrow")]` integration target that pr-gate's `cargo test -p
+  cqlite-core --lib --all-features` compiles no path to (a `--lib` run reaches no
+  `tests/` target); the feature-matrix, binding and parity lanes are local-only in the
+  same way.
+- **CI runs a lane the gate does not.** That same `--lib --all-features` invocation
+  **executes** cqlite-core's unit suite with the OTLP stack ON, at a feature set no gate
+  component executes.
+
+**The size of the gap, measured on `main` rather than cited from an incident:**
+
+```
+cargo test -p cqlite-core --features cli-helpers --lib -- --list   ->  3562 tests
+cargo test -p cqlite-core --all-features         --lib -- --list   ->  3782 tests
+```
+
+**220 cqlite-core lib tests execute in `pr-gate-core` and nowhere in the gate of record.**
+#3382's own fix pin — `a_stats_only_name_cannot_create_an_instrument_through_the_emit_path`
+— is one of them, and the gate's feature set cannot even *list* it (0 matches vs 1). That
+is how PR #3382 earned a **31/31 gate PASS without executing the test pinning its own
+fix**. The issue was filed around that single instance; the standing gap is 220 tests wide.
+
+`all-features-check` closes the **compile/lint half** of that gap — a type error, or a
+`-D warnings` lint, inside a `#[cfg(feature = "observability")]` item now reds the gate of
+record. It **deliberately does not close the runtime half**: it executes none of those 220, so an
+order-dependent defect of #3382's shape — a process-wide `OnceLock<Instruments>` poisoned
+by whichever test binds the global meter to the no-op provider first, invisible to
+`#[serial_test::serial]` grouping — still fails **only** in CI. (Those tests are gated on
+`observability-testing`, not `observability`.) A full all-features *test* lane was
+rejected on cost: tens of minutes on every endgame to duplicate a required check.
+
+So: a red CI check on a green-gate PR is an ordinary event, not evidence the gate
+malfunctioned.
+
 ## Machine-checkable summary block
 
 The gate emits a block between `==== AGENT-GATE SUMMARY ====` markers. The last
@@ -755,14 +796,18 @@ ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>
 tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
-fmt:               PASS|FAIL (<Ns>)
-clippy:            PASS|FAIL (<Ns>)
-core-tests:        PASS|FAIL (<Ns>)
-integration-tests: PASS|FAIL (<Ns>)
-write-tests:       PASS|FAIL (<Ns>)
-cli-tests:         PASS|FAIL (<Ns>)
-minimal-build:     PASS|FAIL (<Ns>)
-smoke:             PASS|FAIL (<Ns>)
+fmt:               PASS|FAIL (<Ns>)  [fmt workspace default-features]
+clippy:            PASS|FAIL (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]
+core-tests:        PASS|FAIL (<Ns>)  [test cqlite-core --features cli-helpers]
+integration-tests: PASS|FAIL (<Ns>)  [test cqlite-integration-tests default-features x2]
+write-tests:       PASS|FAIL (<Ns>)  [test cqlite-core --features write-support x3]
+cli-tests:         PASS|FAIL (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]
+minimal-build:     PASS|FAIL (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]
+all-features-check: PASS|FAIL (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]
+pub-surface:       PASS|FAIL (<Ns>)  [no-cargo]
+python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]
+tooling-tests:     PASS|FAIL (<Ns>)  [cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]
+smoke:             PASS|FAIL (<Ns>)  [build cqlite-cli default-features]
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
@@ -780,13 +825,132 @@ tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
 mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
-fmt:               PASS (<Ns>)
-clippy:            PASS (<Ns>)
+fmt:               PASS (<Ns>)  [fmt workspace default-features]
+clippy:            PASS (<Ns>)  [clippy workspace(excl 5) --all-features | ...]
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
+
+### Every component line NAMES the feature matrix it ran (#3453)
+
+Owner ruling, 2026-08-30: *"the gate SUMMARY should name the feature matrix each
+component ran so a pasted block states what it certified."* A bare
+`core-tests: PASS (412s)` cannot distinguish a run that certified the OTLP stack from
+one that never enabled it — which is the whole subject of #3453 (220 cqlite-core
+`--lib` tests execute in `pr-gate-core`'s `--all-features` lane and nowhere in the gate
+of record). So every component line, in **every** mode (full, `--lite`, `--delta`),
+carries a bracketed feature matrix. Read it as `<subcommand> <scope> <features>`, one
+entry per distinct invocation, `xN` when the same set ran N times.
+
+**It is DERIVED, not curated** (the `#3453` block in `scripts/agent-gate.sh`, kept INLINE
+because eight hermetic self-tests build a synthetic repo by copying that one file):
+
+- `cargo` and `env` are shell **functions** in the gate, so every cargo invocation made
+  in the gate's own shell is described **from the real argv about to execute**. There is
+  no second copy of a feature list to drift from.
+- The eight components whose cargo calls live inside a single-quoted `bash -c` body
+  (`core-tests`' nextest branch, `memory-budget`, `integration-tests`, `write-tests`,
+  `cli-tests`, `compaction-byte-parity`, `minimal-build`, `smoke`) hoist their
+  package/features into **one variable** that is expanded both into the argv and into the
+  recorded matrix. The cargo/env **interceptors** are deliberately **not** `export -f`-ed:
+  exporting an interceptor would make every bash descendant record too, so
+  `tooling-tests` (which runs nested agent-gate self-tests) would attribute a nested
+  run's cargo invocations to itself — a false rationale in a gate log is worse than none.
+  Each body instead calls the **explicitly named** recorder `_fm_observe_child` (which IS
+  exported, and which intercepts nothing) with the gate's own `_fm_describe_cargo`, so
+  there is no second formatter either.
+
+**It records EXECUTION, not intent** (roborev job 269, blocker 2). Those eight records
+used to be written by the *parent*, before the child body ran: `cli-tests: FAIL` then
+named **both** of its feature sets even when Pass 1 — or the fail-closed target
+derivation above it — died before Pass 2 ever started, and `write-tests` claimed the same
+set `x3` after failing on the first of three `&&`-chained passes. A failure summary that
+claims an invocation which never occurred is affirmatively false, and strictly worse than
+silence: it is what stops the next person looking. Every record is now appended on the
+line immediately **before** its own cargo command, from inside the body, so a
+short-circuit records nothing later. A body that dies before its first cargo call
+legitimately leaves an empty sidecar, and that state is named too.
+
+**It never renders blank.** A component with no observed invocation renders an explicit
+`[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; a `SKIP` that never
+reached cargo — or a `FAIL` before its first cargo call — says exactly that (and names the
+metadata-probe exclusion, because `cargo tree`/`metadata` probes are deliberately not
+recorded and three components FAIL exactly there).
+And **observation beats declaration**: a component declared `no-cargo` that is observed
+running cargo shows the observed sets with a `!declared-no-cargo` marker, so a
+mis-declaration self-corrects instead of being believed.
+
+**THE CLASS DECIDES WHAT MAY BE CLAIMED — four classes, and three rules that came out of
+one family of findings (roborev job 273).**
+
+1. **A component whose cargo runs only in a CHILD PROCESS is never class `cargo`.** The
+   interceptors are unexported by design, so `cargo` means *observable in the gate's own
+   shell, or self-recorded from a `bash -c` body*. `tooling-tests` was declared `cargo`
+   while its only cargo runs inside ~60 nested test scripts — so a PASS read
+   `[UNDECLARED]` and, worse, a FAIL could claim it *"FAILed before its first cargo
+   invocation"* after a child `cargo build` really ran. It is now the fourth class,
+   `unobservable:<why>`, rendered `[cargo not observable: <why>]`: it asserts **nothing**
+   in either direction and takes no SKIP/FAIL note, because "nothing ran" is precisely
+   what that shell cannot know. An in-shell observation rides beside it additively.
+2. **An `indirect:<driver>` component RECORDS whether its driver was REACHED**, from an
+   explicit signal — a build-verify rc, or a recorder call on the line immediately before
+   the driver runs — **never inferred from the terminal status**. `python-bindings` can die
+   in venv/pip before maturin and `node-bindings` in `npm ci` before `npm run build`, and
+   both used to report `[via maturin: …]` / `[via npm run build (napi): …]` for a cargo
+   invocation that never happened. One shared helper pair does the mapping for all of them
+   (`_fm_note_driver` + `_fm_note_maturin_rc`, plus the exported child-callable
+   `_fm_observe_driver`), so a fourth indirect component cannot get the direction wrong by
+   writing its own text. An indirect component with **no** record renders `UNDECLARED`
+   **naming the driver** — a visible recording gap, never a claim.
+3. **The misclassification is MECHANICALLY DETECTABLE**, which is the part that stops the
+   next round: the census that missed rule 1 *read the table* instead of exercising it. The
+   guard now RUNS every `cargo`-class component under `--only` with a recording shim
+   `cargo` (29 today, ~16 s for the whole guard) and treats an `UNDECLARED` annotation as a
+   FAIL — either the component's cargo runs in a child process, or a record is missing —
+   while a component that cannot be exercised without recursion (`tooling-tests` runs the
+   guard itself) must be declared non-`cargo`, also a FAIL.
+
+**A driver we cannot see is NAMED, not guessed** (roborev job 269, blocker 1).
+`python-bindings`, `node-bindings`, and the `--lite` `scoped-tests` **python tier** —
+whose `maturin develop` runs in a child process — render
+`[via <driver>: feature set NOT observed]` **once their driver is observed to have been
+reached**, and the python tier's entry is **additive**:
+a mixed rust+python diff reads
+`[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
+never one at the expense of the other. It is recorded only for the build-verify exit
+codes that mean maturin actually ran (a venv/pip failure or an absent cargo/rustc records
+that the tier never reached maturin). This is deliberately **distinct from
+`UNDECLARED`**: "nobody said" and "known to be indirect, therefore unobservable" are
+different facts, and only one of them is a defect.
+
+**Guard:** `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` (in
+`tooling-tests`, hermetic) asserts that every name in `COMPONENTS` resolves to a
+declared class — a new component cannot join the set with a blank matrix — that all six
+per-component emit sites render through the one `_fm_summary_line`, and, for the
+`bash -c` components, that the **declared matrix equals the argv that actually
+executed** under a recording PATH-shim `cargo`, described through the gate's own
+`_fm_describe_cargo` rather than re-derived in the test. It then re-runs that same
+differential under a **failing** shim, where each body must name exactly the one
+invocation it reached — with the short-circuit itself proved by measurement (strictly
+fewer invocations than the passing run), never assumed. And it drives the real
+`run_scoped_tests` for a pure-python and a mixed route, and the real
+`run_python_bindings` against a stubbed build-verify child for each rc. RED-verified, one
+plant per finding: reintroducing a parent-side pre-record, dropping the python-tier record,
+reverting `tooling-tests` to class `cargo`, declaring a cargo-less component `cargo`,
+discarding `run_python_bindings`' rc, removing (or merely MOVING) node's in-body recorder,
+and dropping the note from `run_scoped_tests`' record_result-bypassing exit each red a case
+that NAMES the planted symbol. It also refuses to certify itself vacuously: an EXIT trap
+fails any run that does not reach its terminal tally (measured — under real `/bin/bash`
+3.2.57 the pre-fix guard ran 1 of 84 cases and exited **0**, so a bash-4-only construct
+degraded it to a silent pass rather than a loud red), plus a verdict floor, plus the
+associative-array lint over every gate-invoked script in
+`test_agent_gate_summary.sh` section 8c.
+
+**A long feature list is abbreviated, and the abbreviation declares itself**:
+`33:all-compression,arrow,bench-internals,+30 more`, never a silent truncation. Beyond
+six distinct sets the remainder renders as `+K more sets`.
 
 ## A mid-run tree mutation invalidates the run (#2926)
 

@@ -304,7 +304,7 @@ add_construct '(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9]' \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])(mapfile|readarray)([[:space:]]|$)|declare[[:space:]]+-A|\$\{[A-Za-z_][A-Za-z_0-9]*,,\}' \
-  'bash 4 only — stock macOS /bin/bash is 3.2, so mapfile/readarray/associative arrays/${v,,} can abort the script outright' \
+  'bash 4 only — stock macOS /bin/bash is 3.2, so mapfile/readarray/associative arrays/case-conversion parameter expansion can abort the script outright' \
   '  mapfile -t arr <f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 
 if [ "${#CONSTRUCT_RE[@]}" -ne "${#CONSTRUCT_WHY[@]}" ] ||

@@ -7070,7 +7070,11 @@ else
     # below), and this loop must carry no `DEFERRED` arm and no read of the state. A THIRD `continue`,
     # a provenance-free admission, or any reappearance of `DEFERRED`/`deferral_admits` here, is the
     # escape hatch #3229 forbade.
-    _aff_continues=$(grep -cE '\bcontinue\b' "$_aff_body_f" || true)
+    # Portable word boundaries, not GNU `\b` (#3453): POSIX ERE leaves `\b` UNDEFINED and BSD
+    # grep on macOS — a first-class gate host — does not honour it, so this count would come
+    # back 0 there and this affirmation check would silently measure NOTHING. Equivalence
+    # measured against the GNU form (both count 3 on the same input).
+    _aff_continues=$(grep -cE '(^|[^[:alnum:]_])continue([^[:alnum:]_]|$)' "$_aff_body_f" || true)
     if [ "$_aff_continues" -eq 2 ] &&
       grep -qE '^[[:space:]]*PASS\) continue ;;' "$_aff_body_f" &&
       grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' "$_aff_body_f" &&

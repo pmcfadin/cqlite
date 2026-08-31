@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -192,6 +192,25 @@ ROWS silently** (not an error — the "0-rows-when-present" failure this repo sa
 and a second generation whose `Data.db` is well-formed garbage makes the reader throw. A
 completeness check proves files are present and usable AS FILES; it cannot prove they parse — that
 is the reader's job, and no amount of `stat`ing substitutes for it.
+
+**A GREEN FULL GATE DOES NOT SUBSUME `pr-gate-core` (#3453).** The two check sets overlap; neither
+contains the other, and this is structural, not a backlog item. The gate runs lanes CI cannot
+(`arrow-parity-guard` names a `#![cfg(feature = "arrow")]` integration target that pr-gate's `--lib
+--all-features` compiles no path to), and pr-gate runs a lane the gate does not: `cargo test -p
+cqlite-core --lib --all-features` EXECUTES cqlite-core's unit suite with the OTLP stack ON, which no
+gate component executes. **MEASURED ON `main`, NOT CITED FROM AN INCIDENT: the gate of record
+DISCOVERS 3562 cqlite-core `--lib` tests (`--features cli-helpers`); pr-gate-core discovers 3782
+(`--all-features`) — so 220 lib tests execute in CI and NOWHERE in the gate of record.** #3382's own
+fix pin (`a_stats_only_name_cannot_create_an_instrument_through_the_emit_path`) is one the gate cannot
+even list (`-- --list` finds 0 vs 1). That is how PR #3382 earned a 31/31 gate PASS without executing
+the test pinning its own fix — the issue was filed around one instance; the standing gap is 220 tests
+wide. `all-features-check` now closes the **compile/lint half** — a type error or a
+`-D warnings` lint under `#[cfg(feature = "observability")]` reds the gate of record — and
+**deliberately not the runtime half**: it executes NONE of those 220, so an order-dependent defect like #3382's
+(a process-wide `OnceLock<Instruments>` poisoned by whichever test binds the global meter to a no-op
+provider first, invisible to `#[serial_test::serial]` grouping) STILL fails only in CI. Note the
+tests in question are gated on `observability-testing`, not `observability`. So never read a green
+SUMMARY as a prediction about `required`; a red CI check on a green-gate PR is an ordinary event.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
@@ -300,6 +319,64 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
+- **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
+  `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
+  `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
+  `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
+  enabled it, which is this issue's whole subject. It is **DERIVED, never curated**: `cargo` and `env` are shell FUNCTIONS in the gate, so a
+  matrix is described from the REAL argv about to execute. **AND IT RECORDS EXECUTION, NOT INTENT.**
+  The eight components whose cargo calls live in a single-quoted `bash -c` body (core-tests'
+  nextest branch, memory-budget, integration-tests, write-tests, cli-tests,
+  compaction-byte-parity, minimal-build, smoke) first declared their sets in the PARENT, before the
+  child ran — so `cli-tests: FAIL` named BOTH of its feature sets even when Pass 1, or the
+  fail-closed target derivation above it, died before Pass 2 started, and write-tests claimed the
+  same set `x3` after failing on the first of three `&&`-chained passes. **A failure summary that
+  claims an invocation which never occurred is affirmatively false, and strictly worse than
+  silence** — it is what stops the next person looking. Each body now calls the EXPLICIT recorder
+  `_fm_observe_child` on the line immediately BEFORE each cargo command, from the same hoisted
+  package/feature variables the argv is built from, so a short-circuit records nothing later. The
+  cargo/env INTERCEPTORS stay deliberately NOT `export -f`-ed — exporting an interceptor would make
+  every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests) would
+  attribute a nested run's cargo to itself — while `_fm_observe_child`, which intercepts nothing and
+  fires only where a body calls it by name, IS exported (with the gate's own `_fm_describe_cargo`,
+  so there is no second formatter to drift). It **never renders blank**: `[UNDECLARED]` (cargo
+  expected, nothing observed), `[no-cargo]`, `[via <driver>: feature set NOT observed]`,
+  `[cargo not observable: <why>]`, or a named SKIP / FAILed-before-its-first-cargo /
+  never-reached-its-driver state; a long list abbreviates as `33:a,b,c,+30 more`, never
+  a silent truncation. **A driver we cannot see is NAMED, not guessed** — `python-bindings`,
+  `node-bindings` and the `--lite` scoped-tests PYTHON TIER (whose maturin build runs in a child
+  process) render `via <driver>: feature set NOT observed`, ADDITIVELY beside the rust sets a mixed
+  diff also observes (`[test cqlite-core --features cli-helpers | via maturin: feature set NOT
+  observed]`): "nobody said" and "known to be indirect, therefore unobservable" are different facts
+  and only one of them is a defect.
+  **AND THE CLASS DECIDES WHAT MAY BE CLAIMED — three rules, from one family of findings (roborev
+  job 273).** (1) A component whose cargo runs ONLY IN A CHILD PROCESS is **never class `cargo`**:
+  the interceptors are unexported by design, so `cargo` means "observable in this shell (or
+  self-recorded from a `bash -c` body)". `tooling-tests` was declared `cargo` while its only cargo
+  runs inside ~60 nested test scripts, so a PASS read `[UNDECLARED]` and a FAIL could claim it
+  "FAILed before its first cargo invocation" after a child `cargo build` really ran — hence the
+  fourth class `unobservable:<why>`, which asserts NOTHING in either direction and takes no
+  SKIP/FAIL note. (2) An `indirect:<driver>` component must **RECORD whether its driver was
+  REACHED, from an explicit signal** (a build-verify rc, or a recorder call on the line before the
+  driver runs) — never inferred from the terminal status: `python-bindings` can die in venv/pip
+  before maturin and `node-bindings` in `npm ci` before `npm run build`, and both used to claim an
+  unobserved cargo run. An indirect component with NO record renders `UNDECLARED` **naming the
+  driver** — a visible recording gap, not a claim. (3) The misclassification is now
+  **MECHANICALLY DETECTABLE**, because the census that missed (1) READ THE TABLE instead of
+  exercising it: every `cargo`-class component is RUN under `--only` with a recording shim `cargo`
+  and an `UNDECLARED` annotation is a FAIL, while a component that cannot be exercised without
+  recursion (`tooling-tests` runs the guard) must be declared non-`cargo` — also a FAIL.
+  **Observation beats declaration** — a component
+  declared `no-cargo` that IS observed running cargo renders the observed sets plus
+  `!declared-no-cargo`, so a mis-declaration self-corrects. Guard (hermetic, in
+  `tooling-tests`): `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` — every
+  `COMPONENTS` name must resolve to a declared class (a new component cannot join with a blank
+  matrix), all six emit sites must route through the one renderer, the DECLARED matrix of each
+  `bash -c` component must equal the argv that ACTUALLY EXECUTED under a recording PATH-shim
+  `cargo` (described through the gate's own `_fm_describe_cargo`, never re-derived), and the same
+  differential is re-run under a FAILING shim, where each body must name exactly the one invocation
+  it reached — with the short-circuit proved by measurement (strictly fewer invocations than the
+  passing run) rather than assumed.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
