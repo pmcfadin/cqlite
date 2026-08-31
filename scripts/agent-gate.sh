@@ -11998,6 +11998,14 @@ run_compaction_byte_parity() {
 # falls back to the in-repo committed fixture when CQLITE_DATASETS_ROOT names a corpus
 # that lacks it. Under the previous keyspace-granular resolution the case skipped.
 #
+# Fourth invocation — scripts/tests/test_issue_3358_failclosed.sh (#3731/#3220 AC3), the
+# same positive control for the OTHER committed-fixture BTI lane,
+# issue_3358_bti_query_token_bound. Its #3220 hardening recorded the RED verification as
+# measurements in a PR comment, which proves a guard fired once and regression-protects
+# nothing: a run with the fixture PRESENT is identical whether or not `fixture()` still
+# fails closed. roborev job 252 raised exactly that. Runs HERE for the same reason as the
+# third invocation — it drives a test binary this component's feature set has built.
+#
 # Third invocation — scripts/tests/test_point_vs_full_failclosed.sh (#3220 AC2), the
 # POSITIVE CONTROL for everything above: a green lane proves nothing unless the same
 # lane FAILs on a fixture that is absent from every candidate root AND on one that is
@@ -12035,7 +12043,8 @@ run_bti_multiclustering() {
     && env -u CQLITE_REQUIRE_FIXTURES "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test point_vs_full_differential >>"$log" 2>&1 \
-    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1; then
+    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1 \
+    && bash "$REPO_ROOT/scripts/tests/test_issue_3358_failclosed.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
