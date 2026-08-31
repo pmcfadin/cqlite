@@ -295,3 +295,72 @@ fn a_same_length_different_digit_rendering_fails_the_exact_check() {
     let why = check_outcome(&reported).expect_err("a wrong-digit rendering must fail");
     assert!(why.contains("SHA-256"), "{why}");
 }
+
+/// Every JSON-number vector must agree with the shared classifier (issue #3505).
+///
+/// The crate half of the wiring check: this pins the committed EXPECTATION
+/// against `classify_json_number`, so a wrong literal in the table is caught
+/// here rather than only in a binding suite. It does NOT prove a binding calls
+/// the classifier — that is what the bindings' own vector suites do.
+#[test]
+fn every_json_number_vector_matches_the_shared_classifier() {
+    use crate::json_number::{classify_json_number, JsonNumberClass};
+
+    assert!(!JSON_NUMBER_VECTORS.is_empty());
+    for vector in JSON_NUMBER_VECTORS {
+        let number: serde_json::Number = serde_json::from_str(vector.json_text)
+            .unwrap_or_else(|e| panic!("`{}` must parse as a JSON number: {e}", vector.name));
+        let class = classify_json_number(&number);
+
+        // The rendering the table commits, produced from the CLASS rather than
+        // from either binding's output.
+        let rendered = match &class {
+            JsonNumberClass::I64(i) => i.to_string(),
+            JsonNumberClass::U64(u) => u.to_string(),
+            JsonNumberClass::F64(f) => f.to_string(),
+            JsonNumberClass::Beyond(text) => panic!(
+                "`{}` classified Beyond({text}); the table documents that Beyond \
+                 is unreachable in a default build",
+                vector.name
+            ),
+        };
+        let reported = vector_outcome(vector.name, vector.expect, Ok(rendered.as_str()));
+        if let Err(why) = check_outcome(&reported) {
+            panic!("{why}");
+        }
+
+        // And the committed host kind must match the class the classifier chose:
+        // an integer literal must never classify F64 (that IS the #3505 defect).
+        let kind_from_class = match &class {
+            JsonNumberClass::I64(_) | JsonNumberClass::U64(_) => JsonHostKind::Integer,
+            JsonNumberClass::F64(_) => JsonHostKind::Float,
+            JsonNumberClass::Beyond(_) => unreachable!("panicked above"),
+        };
+        assert_eq!(
+            kind_from_class,
+            vector.host_kind,
+            "`{}` (`{}`) classified {class:?}, which is host kind {}, but the \
+             table commits {}",
+            vector.name,
+            vector.json_text,
+            kind_from_class.name(),
+            vector.host_kind.name()
+        );
+    }
+}
+
+/// The table's host-kind names are the stable wire strings both suites match on.
+#[test]
+fn json_host_kind_names_are_the_committed_wire_strings() {
+    assert_eq!(JsonHostKind::Integer.name(), "integer");
+    assert_eq!(JsonHostKind::Float.name(), "float");
+    // Every entry carries one of exactly those two, so a suite that switches on
+    // the string has no unhandled case.
+    for vector in JSON_NUMBER_VECTORS {
+        assert!(
+            matches!(vector.host_kind.name(), "integer" | "float"),
+            "`{}` has an unknown host kind",
+            vector.name
+        );
+    }
+}

@@ -39,7 +39,7 @@
 
 const crypto = require('node:crypto');
 
-const { _ffiCommonRenderVectors } = require('../lib/index.js');
+const { _ffiCommonRenderVectors, _jsonNumberFromText } = require('../lib/index.js');
 const { parseErrorMetadata } = require('../lib/error-wrapper.js');
 
 /** Lower-case SHA-256 hex of a string's UTF-8 bytes. */
@@ -52,9 +52,9 @@ const byType = (cqlType) => VECTORS.filter((entry) => entry.cqlType === cqlType)
 describe('shared cross-binding vector table (issue #1452)', () => {
   // Without this a vacuous pass would be possible: an empty table makes every
   // per-entry assertion below trivially satisfied.
-  test('the table is present and covers all three types', () => {
+  test('the table is present and covers every type', () => {
     expect(VECTORS.length).toBeGreaterThan(0);
-    for (const cqlType of ['decimal', 'varint', 'inet']) {
+    for (const cqlType of ['decimal', 'varint', 'inet', 'json_number']) {
       expect(byType(cqlType).length).toBeGreaterThan(0);
     }
     const names = VECTORS.map((entry) => entry.name);
@@ -165,6 +165,88 @@ describe('shared cross-binding vector table (issue #1452)', () => {
       expect(entry.outcome).toBe('err');
       expect(entry.actual).toContain('expected 4 or 16');
       expect(entry.actual).not.toMatch(/^0x[0-9a-f]+$/);
+    }
+  });
+});
+
+// =============================================================================
+// JSON numbers (issue #3505) — the WIRING evidence for `json_number_to_napi`
+// =============================================================================
+//
+// Why these exist rather than only the shared-crate tests: before this table the
+// production adapter `value::json_number_to_napi` had ZERO test callers anywhere
+// in the repository. The mutation `JsonNumberClass::U64(u) =>
+// env.create_double(u as f64)` reddened NOTHING — not the shared crate's own
+// tests (they pin `classify_json_number` only), not
+// `values-equal-numeric.test.js` (it pins the comparison harness), not the
+// Python suite. So AC1's observable claim ("`u64::MAX` reaches JS as a
+// `BigInt`") was asserted by no test at all.
+//
+// Both halves are needed, and in JS the type half carries more weight than in
+// Python: `String(9223372036854775808)` is the SAME text whether the value is a
+// lossy double or an exact BigInt, so only `typeof` separates them.
+describe('shared JSON-number vectors (issue #3505)', () => {
+  const JSON_NUMBERS = byType('json_number');
+  // JS integers above this cannot be held exactly by a `number`, so the host
+  // type MUST be `bigint` — this is Number.MAX_SAFE_INTEGER's bound, stated as
+  // the BigInt it is compared against.
+  const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+  test.each(JSON_NUMBERS.map((entry) => [entry.name, entry]))(
+    'arrives as the committed host type: %s',
+    (_name, entry) => {
+      // The table commits no refusals: the only refusing arm (Beyond) is
+      // unreachable in a default build.
+      expect(entry.kind).toBe('value');
+      const text = Buffer.from(entry.bytes).toString('utf8');
+      const value = _jsonNumberFromText(text);
+
+      if (entry.hostKind === 'integer') {
+        const expected = BigInt(entry.expected);
+        // Exact value, whichever host type carries it.
+        expect(typeof value === 'bigint' || typeof value === 'number').toBe(true);
+        if (typeof value === 'number') {
+          // A `number` is an f64: it may only carry this literal if the literal
+          // is inside the safe-integer range. Outside it, a `number` IS the
+          // #3505 defect, so the type is asserted rather than the value alone.
+          expect(Number.isInteger(value)).toBe(true);
+          const magnitude = expected < 0n ? -expected : expected;
+          expect(magnitude).toBeLessThanOrEqual(MAX_SAFE);
+        }
+        expect(BigInt(value)).toBe(expected);
+      } else if (entry.hostKind === 'float') {
+        expect(typeof value).toBe('number');
+        expect(value).toBe(Number(entry.expected));
+      } else {
+        throw new Error(`${entry.name}: unknown hostKind '${entry.hostKind}'`);
+      }
+    },
+  );
+
+  // A guard against the table being silently narrowed to values an f64 can hold,
+  // which would leave every assertion above green while covering nothing.
+  test('the u64 range is actually covered', () => {
+    const I64_MAX = 9223372036854775807n;
+    const aboveI64Max = JSON_NUMBERS.filter(
+      (entry) => entry.hostKind === 'integer' && BigInt(entry.expected) > I64_MAX,
+    );
+    expect(aboveI64Max.length).toBeGreaterThan(0);
+    // And at least one whose f64 rounding is OBSERVABLE in the rendering, so the
+    // text half of the check does not rest on the type half alone.
+    expect(
+      aboveI64Max.some((entry) => String(Number(entry.expected)) !== entry.expected),
+    ).toBe(true);
+    // Each of those must arrive as a BigInt — the headline claim, stated
+    // directly rather than only through the parametrised loop.
+    for (const entry of aboveI64Max) {
+      const text = Buffer.from(entry.bytes).toString('utf8');
+      expect(typeof _jsonNumberFromText(text)).toBe('bigint');
+    }
+  });
+
+  test('_jsonNumberFromText is fail-closed on non-numbers', () => {
+    for (const bad of ['"18446744073709551615"', 'not-a-number', '', '[1]', '1 2']) {
+      expect(() => _jsonNumberFromText(bad)).toThrow();
     }
   });
 });

@@ -363,27 +363,66 @@ fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
     env.create_string(&ip_str).map(|s| s.into_unknown())
 }
 
+/// Convert a JSON number to the JavaScript value that represents it EXACTLY.
+///
+/// A thin adapter over the ONE shared classifier
+/// [`cqlite_ffi_common::json_number::classify_json_number`] — the same one the
+/// Python binding uses, so the two can no longer disagree about the boundary
+/// (before issue #3505 they disagreed twice over: Python fell through to a
+/// lossy `f64` then a `str`, Node to a lossy `f64` then a fabricated `null`).
+///
+/// **The JS answer is genuinely different from Python's, and this is the
+/// statement of it rather than an assumption (#3505 AC5).** A JS `number` is an
+/// `f64`, so it cannot carry an integer above `2^53`; `BigInt` can. `BigInt` is
+/// the ESTABLISHED lossless integer type in this binding — not a novel choice —
+/// because the `i64`-outside-`i32`-range arm below already used it before this
+/// change. So:
+///
+/// * `I64` inside `i32` range → `number` (unchanged: exact, and idiomatic JS)
+/// * `I64` outside `i32` range → `BigInt` (unchanged)
+/// * `U64` → `BigInt`. **The fix.** Previously `as_i64()` returned `None` and
+///   `as_f64()` succeeded lossily, so `18446744073709551615` reached JS as
+///   `1.8446744073709552e19`.
+/// * `F64` → `number` (a JSON float literal; exact by construction)
+/// * `Beyond` → an exact `BigInt` if the text is an integer literal, else a
+///   REFUSAL. The old arm returned `env.get_null()`, i.e. it delivered a
+///   **fabricated `null`** for an unrepresentable number — a silent
+///   data-loss bug in its own right, and strictly worse than Python's string
+///   fallback, since `null` is indistinguishable from a genuine JSON `null`.
+fn json_number_to_napi(env: &Env, n: &serde_json::Number) -> Result<JsUnknown> {
+    use cqlite_ffi_common::json_number::JsonNumberClass;
+    match cqlite_ffi_common::json_number::classify_json_number(n) {
+        JsonNumberClass::I64(i) => {
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&i) {
+                env.create_int32(i as i32).map(|v| v.into_unknown())
+            } else {
+                env.create_bigint_from_i64(i)?.into_unknown()
+            }
+        }
+        JsonNumberClass::U64(u) => env.create_bigint_from_u64(u)?.into_unknown(),
+        JsonNumberClass::F64(f) => env.create_double(f).map(|v| v.into_unknown()),
+        JsonNumberClass::Beyond(text) => {
+            match cqlite_ffi_common::json_number::beyond_text_to_sign_and_le_words(&text) {
+                Some((is_negative, words)) => env
+                    .create_bigint_from_words(is_negative, words)?
+                    .into_unknown(),
+                // Fail closed through the ONE FFI error contract, exactly as the
+                // DECIMAL and INET adapters do.
+                None => Err(to_napi_error(cqlite_core::Error::unsupported_format(
+                    cqlite_ffi_common::json_number::beyond_range_message(&text),
+                ))),
+            }
+        }
+    }
+}
+
 /// Convert serde_json::Value to JavaScript value.
 fn json_to_napi(ctx: &ConvCtx, json: &serde_json::Value) -> Result<JsUnknown> {
     let env = ctx.env();
     match json {
         serde_json::Value::Null => env.get_null().map(|v| v.into_unknown()),
         serde_json::Value::Bool(b) => env.get_boolean(*b).map(|v| v.into_unknown()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                // Check if it fits in i32 for JavaScript number
-                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                    env.create_int32(i as i32).map(|v| v.into_unknown())
-                } else {
-                    // Use BigInt for large integers
-                    env.create_bigint_from_i64(i)?.into_unknown()
-                }
-            } else if let Some(f) = n.as_f64() {
-                env.create_double(f).map(|v| v.into_unknown())
-            } else {
-                env.get_null().map(|v| v.into_unknown())
-            }
-        }
+        serde_json::Value::Number(n) => json_number_to_napi(env, n),
         serde_json::Value::String(s) => env.create_string(s).map(|v| v.into_unknown()),
         serde_json::Value::Array(arr) => {
             let mut js_arr = env.create_array_with_length(arr.len())?;

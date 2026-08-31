@@ -59,7 +59,7 @@ def _by_type(cql_type: str):
     return [entry for entry in _vectors() if entry["cql_type"] == cql_type]
 
 
-def test_vector_table_is_present_and_covers_all_three_types():
+def test_vector_table_is_present_and_covers_every_type():
     """A vacuous pass is impossible: the table must be non-empty per type.
 
     Without this, an empty table would make every parametrised assertion below
@@ -67,7 +67,7 @@ def test_vector_table_is_present_and_covers_all_three_types():
     """
     entries = _vectors()
     assert entries, "the shared vector table must not be empty"
-    for cql_type in ("decimal", "varint", "inet"):
+    for cql_type in ("decimal", "varint", "inet", "json_number"):
         assert _by_type(cql_type), f"no {cql_type} vectors were reported"
     # Each entry name is unique, so a failure names one input unambiguously.
     names = [entry["name"] for entry in entries]
@@ -245,3 +245,80 @@ def test_scale_i32_min_renders_instead_of_raising():
     """``scale = i32::MIN`` also used to render in Node and raise in Python."""
     rendered = cqlite._decimal_from_parts(-(2**31), b"\x01")
     assert rendered == Decimal("1e2147483648")
+
+
+# =============================================================================
+# JSON numbers (issue #3505) — the WIRING evidence for `json_number_to_py`
+# =============================================================================
+#
+# Why these exist rather than only the shared-crate tests: before this table the
+# production adapter `value::json_number_to_py` had ZERO test callers anywhere in
+# the repository. The mutation `JsonNumberClass::U64(u) => (u as f64)` reddened
+# NOTHING — not the shared crate's own tests (they pin `classify_json_number`
+# only), not `test_json_number_precision.py` (it pins the comparison harness),
+# not jest. So AC1's observable claim ("`u64::MAX` reaches Python as an exact
+# `int`") was asserted by no test at all. `cqlite-ffi-common/src/vectors.rs` says
+# it in general: the shared tests "do NOT prove a binding actually CALLS them".
+#
+# Both halves are needed. The rendered TEXT catches a value change; the HOST TYPE
+# catches a same-text type change, which `str()` cannot see.
+
+
+@pytest.mark.parametrize("entry", _by_type("json_number"), ids=lambda e: e["name"])
+def test_json_number_arrives_as_the_committed_host_type(entry):
+    """The host-shape half, through the full production dispatch.
+
+    ``_json_number_from_text`` drives
+    ``value_to_py`` → ``json_to_py`` → ``json_number_to_py`` → the shared
+    classifier, i.e. exactly the chain a real result row takes.
+    """
+    assert entry["kind"] == "value", (
+        f"{entry['name']}: the JSON-number table commits no refusals "
+        "(the Beyond arm is unreachable in a default build)"
+    )
+    text = entry["bytes"].decode("utf-8")
+    value = cqlite._json_number_from_text(text)
+
+    if entry["host_kind"] == "integer":
+        # `type(...) is int` deliberately, not `isinstance`: a lossy arm returns
+        # a `float`, and `isinstance(True, int)` would also admit a bool.
+        assert type(value) is int, (
+            f"{entry['name']}: `{text}` arrived as {type(value).__name__} "
+            f"({value!r}); an integer literal must never become a float"
+        )
+        assert value == int(entry["expected"]), entry["name"]
+    elif entry["host_kind"] == "float":
+        assert type(value) is float, (
+            f"{entry['name']}: `{text}` arrived as {type(value).__name__}"
+        )
+        assert value == float(entry["expected"]), entry["name"]
+    else:  # pragma: no cover - fail closed on an unknown host kind
+        pytest.fail(f"{entry['name']}: unknown host_kind {entry['host_kind']!r}")
+
+
+def test_the_u64_range_is_actually_covered_by_the_json_number_table():
+    """The table must contain the class #3505 was losing, not just easy cases.
+
+    A guard against the table being silently narrowed to values an f64 can hold,
+    which would leave every assertion above green while covering nothing.
+    """
+    entries = _by_type("json_number")
+    above_i64_max = [
+        e for e in entries
+        if e["host_kind"] == "integer" and int(e["expected"]) > 2**63 - 1
+    ]
+    assert above_i64_max, (
+        "no JSON-number vector exceeds i64::MAX — the #3505 class is uncovered"
+    )
+    # And at least one whose f64 rounding is OBSERVABLE in the rendering, so the
+    # text half of the check is not relying on the type half alone.
+    assert any(
+        str(float(int(e["expected"]))) != e["expected"] for e in above_i64_max
+    ), "no covered value actually loses digits through an f64"
+
+
+def test_json_number_from_text_is_fail_closed_on_non_numbers():
+    """A typo'd literal must raise, never render a substituted default."""
+    for bad in ('"18446744073709551615"', "not-a-number", "", "[1]", "1 2"):
+        with pytest.raises(ValueError):
+            cqlite._json_number_from_text(bad)
