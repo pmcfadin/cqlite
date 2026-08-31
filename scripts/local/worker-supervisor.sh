@@ -2471,22 +2471,67 @@ supervisor_lock_release() {
   state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-aborted'
   if [[ "$state" == "pid $$" ]]; then
     rm -rf -- "$SUPERVISOR_LOCK" 2>/dev/null || true
-    # THE REMOVAL'S OUTCOME IS CHECKED, AND A FAILURE IS REPORTED (#3601, roborev job 231 B9 class sweep).
-    # This branch made no false claim — it made NO claim, silently — but the silence is the same problem
-    # one step earlier: a lock left behind by a supervisor that exited cleanly is unattributable, and the
-    # next start has to refuse over it or reclaim it. It is self-healing (the pid recorded is ours, and we
-    # are about to be gone, so the next start gets an affirmative `dead` and reclaims), which is why this
-    # reports rather than escalates.
-    if [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then
-      log "$(supervisor_one_line "exit: FAILED to remove our own lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it still exists after the removal. It records this process's pid ($$), so the next start will find its holder affirmatively dead and reclaim it automatically; no action is needed unless starts keep refusing (#3601).")"
+    if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
+      return 0
     fi
+    # THE SURVIVING LOCK IS RE-READ, BECAUSE `rm -rf` CAN SUCCEED IN PART (#3601, roborev job 240 B16).
+    #
+    # `rm -rf` recurses: it unlinks the CONTENTS first and the directory last, and those need permission
+    # on DIFFERENT directories — unlinking `<lock>/pid` needs write on `<lock>`, unlinking `<lock>` needs
+    # write on its PARENT. So an unwritable parent produces a partial removal, and MEASURED it does
+    # exactly that: `pid` is gone and the directory remains. The previous wording asserted the pid record
+    # was still there and promised the next start would reclaim automatically; in that state the next
+    # start sees a PID-LESS lock, which is undecidable, and REFUSES INDEFINITELY. So the promise was not
+    # merely inaccurate, it pointed away from a wedge — and our own read-only-parent suite case reaches
+    # this state, which is how it was found.
+    #
+    # THIS REPORTS THE WEDGE; IT DOES NOT PREVENT IT, and that distinction is the honest one. The
+    # alternative fix — rename the directory aside before deleting it, so the NAME is freed atomically —
+    # CANNOT prevent this wedge, and that is measured rather than argued: `mv <lock> <lock>.aside` needs
+    # write on the same PARENT that just refused the unlink, and fails with the same EACCES. Restoring the
+    # pid record instead would need a test-then-write against a directory that may by then be a peer's,
+    # i.e. the clobber hazard B11/B12 exist to remove, on the one path that runs at exit with no ability
+    # to report the outcome. So this path stays DIAGNOSIS ONLY: no new operation, no new window, and no
+    # new primitive — serialising the whole release is #3683.
+    #
+    # WHAT IT BUYS, precisely: the state was already reachable before this change (the pre-#3601 trap was
+    # the same unconditional `rm -rf`, silently), and it was undiagnosed. It is now named at the moment it
+    # happens, with the cause an operator must fix — the parent's permissions — because the remedy printed
+    # by a later start's refusal (`rmdir`) needs that same permission and fails without it.
+    local after=''
+    after="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || after='unparseable post-removal-probe-aborted'
+    case "$after" in
+      "pid $$")
+        log "$(supervisor_one_line "exit: FAILED to remove our own lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it still exists and STILL records this process's pid ($$), verified after the attempt. The next start will find that holder affirmatively dead and reclaim it automatically; no action is needed unless starts keep refusing (#3601).")"
+        ;;
+      'pid '*)
+        log "$(supervisor_one_line "exit: did NOT remove $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it still exists and now records holder pid ${after#pid }, which is not this process ($$). Something took that name during our exit; its record is intact and this run did not overwrite it. The next start will read that holder and report it by pid (#3601).")"
+        ;;
+      *)
+        log "$(supervisor_one_line "exit: PARTIALLY removed our own lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") — the pid record is GONE and the directory REMAINS (its pid file now reads [$after]). This will NOT clear itself: a pid-less lock is undecidable, so the next start REFUSES over it rather than reclaiming it. ACTION IS NEEDED. \`rm -rf\` removes a directory's contents before the directory itself, and those need write permission on DIFFERENT directories, so the usual cause is that this lock's PARENT directory is not writable by this user — check that first, because the removal a refusing start prints needs the same permission and will fail without it (#3601).")"
+        ;;
+    esac
     return 0
   fi
+  # NOT OURS — AND "NOT OURS" IS NOT THE SAME FACT AS "SOMEONE ELSE'S" (#3601, roborev job 240 B17).
+  # Every state other than our own pid used to be reported as "Something else owns that name now",
+  # including absent, unreadable, malformed and NUL-bearing records. Those establish only that ownership
+  # CANNOT BE VERIFIED; attributing them to another process names a holder that may not exist, and sends
+  # an operator looking for it. The decision is the same either way — we remove nothing — so only the
+  # wording differs, which is exactly why it has to be the wording that is true.
+  #
   # Rendered, not interpolated raw (#3549 job 201 F1 class, at a new site — #3601 roborev job 231 B7):
   # the path comes from the environment, and a newline or an ESC in it would split this line or forge an
   # unprefixed one. `supervisor_shell_quote` renders the path as a paste-safe value; `supervisor_one_line`
   # guarantees the composed message is ONE physical line whatever it interpolated.
-  log "$(supervisor_one_line "exit: NOT removing $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it no longer holds this process's pid ($$); its pid file reads [$state]. Something else owns that name now, so removing it would break a holder that is not us (#3601).")"
+  case "$state" in
+    'pid '*)
+      log "$(supervisor_one_line "exit: NOT removing $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it records holder pid ${state#pid }, not this process ($$). Another holder owns that name, so removing it would break a holder that is not us (#3601).")"
+      ;;
+    *)
+      log "$(supervisor_one_line "exit: NOT removing $(supervisor_shell_quote "$SUPERVISOR_LOCK") — this run could not VERIFY that it owns it: its pid file reads [$state], which is an absent, unreadable or malformed record. That does NOT establish that another process holds this lock, and it is not a reason to delete one either — an unverifiable record is left exactly as found (#3601).")"
+      ;;
+  esac
   return 0
 }
 
@@ -2747,7 +2792,7 @@ supervisor_lock_refuse_undecidable() {
   supervisor_lock_refuse \
     "refusing to start — the lock is HELD and this run could NOT DECIDE whether its holder is alive ($cause)" \
     "$observed. THIS IS NOT A REPORT THAT THE HOLDER IS DEAD, and it is not a report that it is alive: it is a report that the question was undecidable here. A reclaim needs AFFIRMATIVE evidence that the recorded holder is gone, and there is none, so this run stops rather than take a lock that may belong to a live supervisor (#3601). An ordinary stale lock — one left by a holder that was killed — carries a well-formed pid, is decided automatically, and never reaches this message" \
-    "PRECONDITION FIRST — establish that no supervisor is running for this lane (bash scripts/flow/claim-heartbeat.sh dead-lanes, and check for a live worker-supervisor process for this lane). Once you have, clear the lock by running the next line, on its own, exactly as printed. It is NON-RECURSIVE on purpose: it REFUSES if anything is still inside, so it cannot delete a holder's record you have not examined — if it refuses, list the contents and decide before removing anything$(supervisor_lock_shape_note)" \
+    "PRECONDITION FIRST — establish that no supervisor is running for this lane (bash scripts/flow/claim-heartbeat.sh dead-lanes, and check for a live worker-supervisor process for this lane). Once you have, clear the lock by running the next line, on its own, exactly as printed. It is NON-RECURSIVE on purpose: it REFUSES if anything is still inside, so it cannot delete a holder's record you have not examined — if it refuses, list the contents and decide before removing anything. Removing a lock also needs WRITE permission on its PARENT directory, which reading one does not: if the line below fails with a permission error, that is why, and it is also how a supervisor's own exit can leave a pid-less lock here (#3601)$(supervisor_lock_shape_note)" \
     "$(supervisor_lock_clear_command)"
 }
 
