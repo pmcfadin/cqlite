@@ -69,6 +69,18 @@
 //! `estimate_arrow_row_bytes`. Nothing about the absent-column charge is
 //! re-derived or approximated here.
 //!
+//! # What deliberately still uses the standalone estimator
+//!
+//! The AGGREGATE route (`cqlite_flight::producer`'s `split_rows_into_batches`)
+//! folds rows into accumulator state and materializes one PARTIAL row per
+//! `GROUP BY` group in one go, then applies the batch boundary AFTER THE FACT to
+//! an already-materialized row slice. It has no incremental push loop, so this
+//! seam does not reach it and it keeps calling
+//! [`estimate_arrow_row_bytes`](super::estimate_arrow_row_bytes) per row. Nothing
+//! there is duplicated work of the kind this module removes: that route resolves
+//! the cells once for the estimate and once for the build, but its rows are
+//! already in hand and are a per-GROUP count, not a per-ROW-of-the-scan one.
+//!
 //! Both accountings share ONE charging core (`arrow_size::charge_row`) and differ
 //! only in resolution, and their equivalence over the shared shape corpus —
 //! including absent columns, saturating fan-out and duplicate column names — is
