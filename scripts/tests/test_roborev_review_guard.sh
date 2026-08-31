@@ -6385,6 +6385,12 @@ else
   _aff_body_f="$tmp/aff-body.txt"
   awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' \
     "$WRAPPER_REAL" >"$_aff_body_f"
+  # AND THE NEGATED MEMBERS READ EXECUTABLE LINES ONLY. The comment block inside this `case`
+  # RECORDS the deleted `DEFERRED` arm by name and says why it may not come back — the durable
+  # artifact of the ruling — so scanning prose would make writing the history down a violation.
+  # That is the same mistake as the job-18 census assert, and this suite has ruled on it twice.
+  _aff_exec="$tmp/aff-body-exec.txt"
+  grep -vE '^[[:space:]]*#' "$_aff_body_f" >"$_aff_exec" || true
   _aff_body=$(cat "$_aff_body_f")
   if [ -z "$_aff_body" ]; then
     bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
@@ -6417,10 +6423,10 @@ else
       grep -qE '^[[:space:]]*PASS\) continue ;;' "$_aff_body_f" &&
       grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' "$_aff_body_f" &&
       grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' "$_aff_body_f" &&
-      ! grep -qE '^[[:space:]]*DEFERRED\)' "$_aff_body_f" &&
-      ! grep -qF 'deferral_admits' "$_aff_body_f" &&
-      ! grep -qF 'det_key" = "prompt-content"' "$_aff_body_f" &&
-      ! grep -qF 'det_key" = "findings"' "$_aff_body_f"; then
+      ! grep -qE '^[[:space:]]*DEFERRED\)' "$_aff_exec" &&
+      ! grep -qF 'deferral_admits' "$_aff_exec" &&
+      ! grep -qF 'det_key" = "prompt-content"' "$_aff_exec" &&
+      ! grep -qF 'det_key" = "findings"' "$_aff_exec"; then
       ok 'structural (#3626): the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on a complete provenance, and admits no DEFERRED and reads no deferral state — the findings deferral is confined to the findings key elsewhere'
     else
       bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED without complete provenance, admits a DEFERRED (which would let a findings deferral excuse a check nobody authorized — spec: a deferral SHALL NOT be applicable to any check other than findings:), or is keyed on det_key (#3312/#3626 job 225)"
