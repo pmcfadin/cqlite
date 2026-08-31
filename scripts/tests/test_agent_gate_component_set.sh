@@ -3113,12 +3113,6 @@ for _u in "https://github.com/pmcfadin/cqlite.git" \
           "https://github.com/pmcfadin/cqlite" \
           "https://github.com/pmcfadin/cqlite/" \
           "https://github.com:443/pmcfadin/cqlite.git" \
-          "git@github.com:pmcfadin/cqlite.git" \
-          "git@github.com:/pmcfadin/cqlite.git" \
-          "ssh://git@github.com/pmcfadin/cqlite.git" \
-          "ssh://git@github.com:22/pmcfadin/cqlite" \
-          "git+ssh://git@github.com/pmcfadin/cqlite.git" \
-          "ssh+git://git@github.com/pmcfadin/cqlite.git" \
           "HTTPS://WWW.GitHub.com/PMcFadin/CQLite.git/"; do
   [ "$(identity "$_u")" = canonical ] || id_bad="${id_bad:+$id_bad }REJECTED:$_u"
 done
@@ -3151,6 +3145,12 @@ for _u in "https://github.com/contributor/cqlite.git" \
           "/tmp/anything/pmcfadin/cqlite" \
           "file:///tmp/x/pmcfadin/cqlite.git" \
           "ssh://git@github.com:notaport/pmcfadin/cqlite" \
+          "git@github.com:pmcfadin/cqlite.git" \
+          "git@github.com:/pmcfadin/cqlite.git" \
+          "ssh://git@github.com/pmcfadin/cqlite.git" \
+          "ssh://git@github.com:22/pmcfadin/cqlite" \
+          "git+ssh://git@github.com/pmcfadin/cqlite.git" \
+          "ssh+git://git@github.com/pmcfadin/cqlite.git" \
           "http://github.com/pmcfadin/cqlite.git" \
           "git://github.com/pmcfadin/cqlite.git" \
           "ssh://git@github.com:2222/pmcfadin/cqlite" \
@@ -3990,7 +3990,9 @@ tr_bad=""
 for _pair in "https://github.com/pmcfadin/cqlite.git=canonical" \
              "http://github.com/pmcfadin/cqlite.git=not-canonical" \
              "git://github.com/pmcfadin/cqlite.git=not-canonical" \
-             "ssh://git@github.com/pmcfadin/cqlite.git=canonical"; do
+             "ssh://git@github.com/pmcfadin/cqlite.git=not-canonical" \
+             "git+ssh://git@github.com/pmcfadin/cqlite.git=not-canonical" \
+             "git@github.com:pmcfadin/cqlite.git=not-canonical"; do
   _u="${_pair%=*}"; _want="${_pair##*=}"
   _got=$(identity "$_u")
   [ "$_got" = "$_want" ] || tr_bad="${tr_bad:+$tr_bad }$_u(want $_want got $_got)"

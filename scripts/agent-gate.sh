@@ -3144,13 +3144,41 @@ _component_set_normalise_remote() {
   u=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
   case "$u" in
     https://*)   scheme=https; u="${u#https://}" ;;
-    ssh://*)     scheme=ssh;   u="${u#ssh://}" ;;
+    # ---- SSH TRANSPORTS ARE NOT CANONICAL (roborev job 296, High) -------------------------
+    #
+    # An ssh-form origin was judged canonical FROM ITS URL STRING, but the isolated environment
+    # admits `HOME` (ssh key + known_hosts discovery), so OpenSSH still honours `~/.ssh/config`.
+    # A `Host github.com` rule there can rewrite `HostName` to another server, or run
+    # `ProxyCommand` / `Match exec` — so the fetch could take a NON-CANONICAL baseline, and could
+    # EXECUTE, while passing the identity check.
+    #
+    # WHY THIS IS A DESCOPE AND NOT A HARDENING. This is another route in the family that has
+    # produced `url.*.insteadOf`, an `ext::` helper on the transfer hop, promisor lazy-fetch,
+    # `refs/replace` and `info/grafts`. The standing ruling on a further residual of that family is
+    # explicit: descope, or accept a bounded PROVABLY NON-EXECUTING residual — and NOT "harden the
+    # fourth route". A bounded residual is unavailable here because `ProxyCommand` executes, and the
+    # usual mitigating argument (a redirected baseline degrades to a WRONG COMPONENT LIST that the
+    # comparison detects) does not reach it: the harm lands during transport, before any comparison.
+    # So the grammar is narrowed instead. `~/.ssh/config`, `ProxyCommand` and `Match exec` leave the
+    # design rather than being defended against.
+    #
+    # IN MODEL because HOME IS SHARED: every lane on this fleet runs as one user with
+    # `HOME=/home/ubuntu`, writable by all of them, so the party who can plant that file is a PEER
+    # LANE — a different agent session — not the invoker. (An invoker editing their own config is
+    # out of model; a non-invoker route is a defect.) Same shape as the shared `.git/config`
+    # incident, #3617.
+    #
+    # COST, measured rather than assumed: every lane's `origin` is
+    # `https://github.com/pmcfadin/cqlite.git`, and CI uses
+    # `https://x-access-token:<TOKEN>@github.com/…`, so nothing on this fleet or in CI is affected.
+    # A checkout whose origin IS ssh-form now fails closed with this named refusal; the remedy is
+    # `git remote set-url origin https://github.com/pmcfadin/cqlite.git`.
+    ssh://*|git+ssh://*|ssh+git://*)
+      printf 'ssh-transport:%s' "${u%%://*}"; return 0 ;;
     # BOTH legacy ssh aliases git accepts, not one of them (roborev job 230): accepting
     # `git+ssh://` while rejecting the equivalent `ssh+git://` red a VALID canonical checkout,
     # which is the false-FAIL class — worth fixing at Low precisely because that is the class
     # agents learn to waive a lane over.
-    git+ssh://*) scheme=ssh;   u="${u#git+ssh://}" ;;
-    ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
     # with no server authentication, an on-path attacker IS the baseline, and the baseline is
     # read as the baseline.
@@ -3220,7 +3248,14 @@ _component_set_normalise_remote() {
     # NO SCHEME: git reads `host:path` as scp-like (an AUTHENTICATED ssh transport), and
     # everything else as a LOCAL PATH.
     case "${u%%/*}" in
-      *:*) host="${u%%:*}"; path="${u#*:}"
+      # SCP FORM IS AN SSH TRANSPORT, so it is refused for the reason above (job 296). The
+      # reasoning below is RETAINED because it established the userinfo narrowing that the
+      # schemed arm still relies on — it is history, not current behaviour.
+      # SCP FORM IS AN SSH TRANSPORT and is refused for the reason above (job 296). The
+      # reasoning below is RETAINED as history — it established the userinfo narrowing the
+      # SCHEMED arm still relies on — and describes behaviour this arm NO LONGER HAS.
+      *:*) printf 'ssh-transport:scp-form'; return 0 ;;
+           # (unreachable below — retained as the record of what this arm used to accept)
            # (SCP-FORM USERINFO is covered by the ONE userinfo rule above — job 276 unified them.
            # The reasoning is kept here because this is where it was first established.)
            # SCP-FORM USERINFO IS RESTRICTED TO `git` (roborev job 264, Medium). The canonical
@@ -3241,7 +3276,6 @@ _component_set_normalise_remote() {
            # a legitimate CI checkout.
            #
            # THE MARKER CARRIES NO PART OF THE VALUE, for the same reason as `whitespace-bearing`.
-           : ;;
       # THE PATH STAYS IN THE KEY, for the reason the port does: dropping it made EVERY local path
       # normalise to one value, so a canonical identity pinned to a local path matched ANY local
       # path — measured, and it turned the fork fixture's non-canonical origin into a PASS. That is
@@ -4498,14 +4532,26 @@ _component_set_probe_inner() {
   # substitute different bytes for a given sha; that is why exposing the store is safe where
   # invoking a transport was not. `baseline-transfer-mismatch` is gone with the transfer: the
   # class is ELIMINATED rather than detected.
+  # WHITESPACE IS NOT A SEPARATOR HERE (roborev job 296, Medium). This used to reject a colon OR
+  # whitespace, which failed CLOSED on any valid checkout or TMPDIR containing a space — a guard
+  # that reds on correct input is the guard agents learn to waive. MEASURED, with a discriminating
+  # control, rather than reasoned from the docs:
+  #
+  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with space/objects"  -> git cat-file -t <sha> = commit
+  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with:colon/objects"  -> FAILS
+  #
+  # The value is handed to git as ONE quoted environment argument and git splits it on the
+  # colon PATH separator only, so a space-bearing path is expressible and a colon-bearing one is
+  # not. Only the actual separator is refused. (The URL whitespace check elsewhere STAYS: a URL has
+  # no legitimate whitespace, so there the rejection is not a false FAIL.)
   case "$csdir" in
-    *[:[:space:]]*)
+    *:*)
       # `GIT_ALTERNATE_OBJECT_DIRECTORIES` is a COLON-separated list, so a colon (or whitespace)
       # in the path would silently split it into paths that are not this one. Refused, never
       # quoted-and-hoped: the scratch dir comes from `mktemp` under $TMPDIR, so this is a
       # pathological-TMPDIR guard rather than an expected state.
       _CS_KIND=baseline-workspace
-      _CS_DETAIL="the isolated scratch repository's path contains a colon or whitespace, which cannot be expressed in GIT_ALTERNATE_OBJECT_DIRECTORIES; refusing rather than reading objects from a path this run cannot name exactly"
+      _CS_DETAIL="the isolated scratch repository's path contains a COLON, the separator GIT_ALTERNATE_OBJECT_DIRECTORIES splits on, so it cannot be expressed there; refusing rather than reading objects from a path this run cannot name exactly"
       return 0 ;;
   esac
   _CS_SHA="$cssha"
@@ -4546,10 +4592,11 @@ _component_set_probe_inner() {
     /*) : ;;
     ?*) lane_objects="$REPO_ROOT/$lane_objects" ;;
   esac
+  # Colon only, for the reason measured at the scratch-path check above (job 296).
   case "$lane_objects" in
-    ''|*[:[:space:]]*)
+    ''|*:*)
       _CS_KIND=baseline-workspace
-      _CS_DETAIL="this repository's object directory could not be resolved to a path expressible in GIT_ALTERNATE_OBJECT_DIRECTORIES (empty, or containing a colon or whitespace), so HEAD's own objects cannot be made readable to the isolated repository"
+      _CS_DETAIL="this repository's object directory could not be resolved to a path expressible in GIT_ALTERNATE_OBJECT_DIRECTORIES (empty, or containing a COLON — the separator that variable splits on), so HEAD's own objects cannot be made readable to the isolated repository"
       return 0 ;;
   esac
   _CS_READ_DIR="$csdir/repo"
