@@ -460,21 +460,56 @@ pub(crate) fn decimal_to_pydecimal(
     Ok(decimal_class.call1((text,))?.into_any().unbind())
 }
 
+/// Convert a JSON number to the Python object that represents it EXACTLY.
+///
+/// A thin adapter over the ONE shared classifier
+/// [`cqlite_ffi_common::json_number::classify_json_number`]: the arm order and
+/// the `arbitrary_precision` decision live there, tested where the tests
+/// actually run (issue #3505; `cqlite-py`'s Rust half executes nowhere, so a
+/// unit test written here would too).
+///
+/// Python's `int` is arbitrary precision, so BOTH integer classes are exact and
+/// neither needs a float:
+///
+/// * `I64` / `U64` → Python `int`. The `U64` arm is the #3505 fix: the previous
+///   body tried `as_i64()` and then `as_f64()`, and for a JSON integer above
+///   `i64::MAX` the `as_f64()` call SUCCEEDED LOSSILY — `18446744073709551615`
+///   reached Python as `1.8446744073709552e19`.
+/// * `F64` → Python `float`. Only a JSON float LITERAL lands here now, where the
+///   `f64` is the exact parsed value.
+/// * `Beyond` → an exact `int` via `BigInt` if the text is an integer literal,
+///   else a REFUSAL. Never a lossy float, and never the old `n.to_string()`
+///   fallback, which shifted the host type from a number to a `str` (the
+///   `str` row of the `M4_spec.md` §5.3 host-shape lattice named exactly that
+///   source; it is gone).
+fn json_number_to_py(py: Python<'_>, n: &serde_json::Number) -> PyResult<PyObject> {
+    use cqlite_ffi_common::json_number::JsonNumberClass;
+    match cqlite_ffi_common::json_number::classify_json_number(n) {
+        JsonNumberClass::I64(i) => Ok(i.into_pyobject(py)?.into_any().unbind()),
+        JsonNumberClass::U64(u) => Ok(u.into_pyobject(py)?.into_any().unbind()),
+        JsonNumberClass::F64(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
+        JsonNumberClass::Beyond(text) => {
+            match cqlite_ffi_common::json_number::beyond_text_to_bigint(&text) {
+                // Python `int` holds it exactly, the same route the VARINT
+                // adapter uses (`varint_to_pyint`).
+                Some(big) => Ok(big.into_pyobject(py)?.into_any().unbind()),
+                // Fail closed. A number nothing can represent exactly is a data
+                // fault, reported through this binding's one production error
+                // path so it carries the single FFI error contract's identity.
+                None => Err(to_py_err(cqlite_core::Error::unsupported_format(
+                    cqlite_ffi_common::json_number::beyond_range_message(&text),
+                ))),
+            }
+        }
+    }
+}
+
 /// Convert serde_json::Value to Python object.
 pub(crate) fn json_to_py(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
     match json {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)?.into_any().unbind())
-            } else if let Some(f) = n.as_f64() {
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            } else {
-                // Fallback to string representation
-                Ok(n.to_string().into_pyobject(py)?.into_any().unbind())
-            }
-        }
+        serde_json::Value::Number(n) => json_number_to_py(py, n),
         serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
         serde_json::Value::Array(arr) => {
             let items: Vec<PyObject> = arr

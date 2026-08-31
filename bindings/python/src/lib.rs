@@ -103,6 +103,39 @@ fn _varint_from_bytes(py: Python<'_>, bytes: Vec<u8>) -> PyResult<PyObject> {
     value::varint_to_pyint(py, &bytes)
 }
 
+/// Test-support: convert a JSON number LITERAL to the Python object the
+/// production path delivers, through the exact production conversion
+/// (`value::value_to_py` on a `Value::Json`).
+///
+/// The full chain is the one a real result row takes:
+/// `value_to_py` → `json_to_py` → `json_number_to_py` →
+/// `cqlite_ffi_common::json_number::classify_json_number`. Nothing is
+/// re-implemented here, which is the point: without this surface the production
+/// adapter had NO test caller at all, so #3505's observable claim — a JSON
+/// integer above `i64::MAX` reaches Python as an exact `int`, never a rounded
+/// `float` — was asserted by nothing (issue #3505 review round 2).
+///
+/// `text` is a JSON number literal (`"18446744073709551615"`, `"1.5"`). It is
+/// parsed with `serde_json` exactly as the reader would, so the LEXICAL form
+/// decides the class — which is the whole subject of #3505. Input that is not a
+/// JSON number raises `ValueError` (fail-closed: a typo'd literal must never
+/// look like a passing conversion).
+///
+/// Not part of the stable public API; the leading underscore marks it internal
+/// test support.
+#[pyfunction]
+fn _json_number_from_text(py: Python<'_>, text: &str) -> PyResult<PyObject> {
+    let number: serde_json::Number = serde_json::from_str(text).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "`{text}` is not a JSON number literal: {err}"
+        ))
+    })?;
+    value::value_to_py(
+        py,
+        &cqlite_core::Value::Json(Box::new(serde_json::Value::Number(number))),
+    )
+}
+
 /// Test-support: raise the Python exception the shared FFI error contract maps a
 /// named core `Error` variant to (issue #1451).
 ///
@@ -152,6 +185,10 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Test-support: direct VARINT decoding path for the shared vector table
     // (issue #1452). See the fn doc comment.
     m.add_function(wrap_pyfunction!(_varint_from_bytes, m)?)?;
+
+    // Test-support: direct JSON-number conversion path for the shared vector
+    // table (issue #3505). See the fn doc comment.
+    m.add_function(wrap_pyfunction!(_json_number_from_text, m)?)?;
 
     // Test-support: shared FFI error-contract conformance probe (issue #1451).
     // See the fn doc comment.

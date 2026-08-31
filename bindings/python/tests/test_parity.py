@@ -37,6 +37,13 @@ import cqlite
 
 from conftest import DATASETS, SCHEMAS
 
+# ONE implementation of numeric equality, shared with test_cli_parity.py (#3505).
+from numeric_compare import (
+    is_bool_number_mismatch,
+    is_number,
+    numbers_equal,
+)
+
 from corpus import (
     SKIP_KEYSPACES,
     SKIP_PENDING_KEYSPACES,
@@ -476,14 +483,41 @@ def values_equal(actual: Any, expected: Any) -> bool:
             return False
         return all(values_equal(actual[k], expected[k]) for k in actual)
 
-    # Handle float comparison with tolerance
-    if isinstance(actual, float) and isinstance(expected, (int, float)):
-        if actual == expected:
-            return True
-        # Use relative tolerance for large values, absolute for small
-        rel_tol = 1e-6
-        abs_tol = 1e-9
-        return abs(actual - expected) <= max(rel_tol * max(abs(actual), abs(expected)), abs_tol)
+    # A `bool` paired with a number is a genuine type mismatch, not a numeric
+    # comparison (issue #3505): `isinstance(True, int)` is `True`, so `True` vs
+    # `1.0` used to reach the tolerant path below (and `True` vs `1` the exact
+    # fallthrough) and compare EQUAL.  A CQL `boolean` renders as JSON
+    # `true`/`false`, never as a number.
+    #
+    # This MUST stay above BOTH the numeric path and the `Decimal` branch below.
+    # "Number" here includes `Decimal`, because `Decimal(1) == True` is also
+    # `True` in Python: with the guard placed after the `Decimal` branch,
+    # `(Decimal(1), True)` matched there and `(True, Decimal(1))` matched via
+    # the default `==` fallthrough at the end.
+    if is_bool_number_mismatch(actual, expected):
+        return False
+
+    # Float comparison with tolerance, through the one shared rule (issue #3505).
+    #
+    # The gate is DELIBERATELY ASYMMETRIC, and it mirrors exactly what this suite
+    # did before #3505: the tolerant path is entered only when the BINDING side
+    # (`actual`) is a float.  An `int` binding value against a `float` golden
+    # keeps falling through to the exact `==` at the end of this function.
+    #
+    # Why not symmetric: this is a GOLDEN-FILE oracle, and a tolerance is a
+    # LOOSENING.  A symmetric gate makes `values_equal(1000000, 1000000.5)`
+    # return True (`0.5 <= 1e-6 * 1000000.5`), which the pre-#3505 suite reported
+    # as a mismatch.  A change whose whole subject is REMOVING a mask must not
+    # widen one as a side effect, so widening this direction stays an explicit
+    # product call.  Pinned by
+    # `test_json_number_precision.test_int_binding_value_vs_float_golden_stays_exact`.
+    #
+    # What #3505 changed is INSIDE the branch, not at its gate: the coercion used
+    # to be an unconditional `float()`, which hid an exact integer being rounded
+    # to a float.  `numbers_equal` keeps the tolerance below `2**53`, where it is
+    # provably lossless, and is exact strictly above it.
+    if isinstance(actual, float) and is_number(expected):
+        return numbers_equal(actual, expected)
 
     # Handle Decimal comparison
     if isinstance(actual, Decimal) and isinstance(expected, (int, float, Decimal)):

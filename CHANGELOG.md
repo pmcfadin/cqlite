@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
+  precision, and neither binding fabricates a substitute value (#3505).** A
+  `Value::Json` cell's number was classified inline in each binding as
+  `as_i64()` → `as_f64()` → *fallback*. For a legal JSON integer above
+  `i64::MAX`, `as_i64()` returns `None` and **`as_f64()` succeeds lossily**
+  (`u64 → f64` has 53 mantissa bits), so `18446744073709551615` was delivered as
+  `1.8446744073709552e19`. The `fallback` arm was unreachable in both bindings.
+  - The classification now lives ONCE, in `cqlite-ffi-common::json_number`, as
+    `i64` → `u64` → `f64` → refusal. Adding the `u64` arm is the whole fix: it
+    makes the `f64` arm reachable only for the `Float` variant, where the
+    conversion is exact.
+  - **Python**: a `u64`-range integer is an exact `int` (Python integers are
+    arbitrary precision). The old `n.to_string()` fallback — which shifted the
+    host type from a number to a `str` — is gone.
+  - **Node**: a `u64`-range integer is a `BigInt`, the type this binding already
+    used for an `i64` outside `i32` range. The old fallback returned
+    `env.get_null()`, delivering a **fabricated `null`** for an unrepresentable
+    number, indistinguishable from a genuine JSON `null`; it is now a typed
+    `PARSE`/`Data` error.
+  - `serde_json`'s `arbitrary_precision` is deliberately **not** enabled; the
+    decision and its three reasons are recorded in
+    `cqlite-ffi-common/src/json_number.rs`.
+  - Residual, out of reach at this layer (**#3636**): an integer literal outside
+    `[i64::MIN, u64::MAX]` is collapsed to `f64` by `serde_json`'s **parser**
+    before any CQLite code runs, so it still arrives rounded. Enabling
+    `arbitrary_precision` alone does NOT fix it — under that feature `as_f64`
+    parses the stored string, so such a literal still classifies `F64` lossily.
+    A real fix additionally needs an exact-integer parse of `Number::as_str()`
+    placed BEFORE the `as_f64()` arm.
+  - Reachability, stated honestly: `Value::Json` requires a `"json"` comparator
+    and no fixture in `test-data/` has one, so this path is unreachable from
+    today's corpus.
+  - **Wiring evidence** (`JSON_NUMBER_VECTORS`, the #1452 mechanism): unit tests
+    on the shared classifier do NOT prove either binding CALLS it — the mutation
+    "make the `U64` arm `u as f64`" originally reddened nothing in the
+    repository. A committed cross-binding table of JSON number literals is now
+    driven through each binding's PRODUCTION dispatch
+    (`value_to_py`/`value_to_napi` → `json_to_*` → `json_number_to_*`) by
+    `cqlite._json_number_from_text` / `_jsonNumberFromText`, and both suites
+    assert the rendered text AND the host type. In JS the type half is the
+    load-bearing one: `String(9223372036854775808)` is identical for a lossy
+    double and an exact `BigInt`.
+
+- **Python parity harnesses: `values_equal` no longer masks int/float precision
+  loss (#3505).** Both copies coerced a mixed `int`/`float` pair through
+  `float()`, which rounded the EXACT side down to the LOSSY side — so the bug
+  above was invisible to the harness that should have caught it. The coercion is
+  now bounded at `2**53`: below it every integer is exactly representable in an
+  IEEE-754 double so the tolerant compare genuine `FLOAT`/`DOUBLE` columns need
+  is provably lossless and is retained; strictly above it (`2**53` itself is
+  exactly representable, so it stays on the tolerant side) the comparison is
+  exact.
+  `bool` is excluded in both directions (`isinstance(True, int)` is `True`, so
+  `True` and `1.0` compared equal). The rule was duplicated in
+  `test_cli_parity.py` and `test_parity.py` and now lives once in
+  `bindings/python/tests/numeric_compare.py`.
+  `bool` vs `Decimal` is rejected too, not only `bool` vs `int`/`float`:
+  `Decimal(1) == True` is `True` in Python, so the first pass left the `Decimal`
+  dispatch open.
+  A second degeneracy in the same formula is closed in both languages: with an
+  infinite operand `abs(a-b) <= max(rel_tol*max(|a|,|b|), abs_tol)` reduces to
+  `inf <= inf`, so EVERY finite value compared equal to `Infinity` and `+inf`
+  compared equal to `-inf` — real values for a CQL `float`/`double` column. Two
+  genuine equal infinities still match.
+  Node's `parity-utils.js` did NOT have the int/float mask — its
+  `bigint`↔`number` arms were already exact — but `BigInt(x)` threw `RangeError`
+  on a non-integer `number`, crashing the harness instead of reporting a
+  mismatch; hardened.
+  `test_parity`'s tolerant branch keeps its pre-#3505 ASYMMETRY (entered only
+  when the binding side is a float), so an `int` binding value against a `float`
+  golden stays an exact comparison — a change that removes a mask must not widen
+  a golden-file oracle as a side effect.
+
 ### Changed
 
 - **BREAKING (both bindings): a UDT's type identity is carried OUT OF BAND, so a

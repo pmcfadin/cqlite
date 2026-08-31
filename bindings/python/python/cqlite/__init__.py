@@ -15,6 +15,8 @@ from cqlite._cqlite import (
     _raise_mapped_core_error,
     # Test-support: committed cross-binding vector table (issue #1452)
     _ffi_common_render_vectors,
+    # Test-support: direct JSON-number conversion path (issue #3505)
+    _json_number_from_text,
     # Exception types
     CqliteError,
     SchemaError,
@@ -64,6 +66,8 @@ __all__ = [
     "_raise_mapped_core_error",
     # Test-support: committed cross-binding vector table (issue #1452)
     "_ffi_common_render_vectors",
+    # Test-support: direct JSON-number conversion path (issue #3505)
+    "_json_number_from_text",
     # Exception types
     "CqliteError",
     "SchemaError",

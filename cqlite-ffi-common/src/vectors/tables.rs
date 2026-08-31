@@ -35,7 +35,9 @@
 //! value, digit count) that the script above assumes — so a form disagreement
 //! surfaces as a digest failure and a digit disagreement as a hash failure.
 
-use super::{DecimalVector, Expect, InetVector, Input, VarintVector};
+use super::{
+    DecimalVector, Expect, InetVector, Input, JsonHostKind, JsonNumberVector, VarintVector,
+};
 use crate::decimal::{DECIMAL_MAX_UNSCALED_BYTES, DECIMAL_POSITIONAL_MAX_BYTES};
 
 /// `123` as one byte.
@@ -340,5 +342,117 @@ pub const INET_VECTORS: &[InetVector] = &[
         name: "inet/malformed-seventeen-bytes",
         bytes: Input::Repeated { byte: 1, len: 17 },
         expect: Expect::Error("Invalid inet address length: 17 (expected 4 or 16)"),
+    },
+];
+
+/// Committed JSON-number cross-binding vectors (issue #3505).
+///
+/// # What these bind that no other test does
+///
+/// `json_number_tests.rs` pins [`crate::json_number::classify_json_number`], and
+/// the bindings' `values_equal` harness tests pin their comparison rules — but
+/// NEITHER proves a binding's production adapter (`json_number_to_py`,
+/// `json_number_to_napi`) actually calls the classifier. Before this table, the
+/// mutation "make the `U64` arm `u as f64`" reddened **nothing in the
+/// repository**, so #3505's observable claim — `u64::MAX` reaches Python as an
+/// exact `int` and JS as a `BigInt` — was asserted by no test at all.
+///
+/// # Why every entry is a VALUE and none is a refusal
+///
+/// The other three tables each carry at least one entry whose expected outcome
+/// is a typed error. This one structurally cannot: the only refusing arm is
+/// [`crate::json_number::JsonNumberClass::Beyond`], which is UNREACHABLE in a
+/// default build — `serde_json`'s parser collapses an over-range integer literal
+/// to an `f64` before any CQLite code runs (measured in `json_number.rs`, pinned
+/// by `beyond_is_unreachable_because_the_parser_collapses_overflow_to_f64`).
+/// Committing a refusal entry would mean faking an input that cannot occur.
+///
+/// # Why over-range integer literals are excluded
+///
+/// `18446744073709551616` and friends classify `F64` (the parser already lost
+/// them), and the two hosts stringify the resulting `f64` DIFFERENTLY —
+/// CPython's `str` gives `1.8446744073709552e+19` while JS's `String` gives
+/// `18446744073709552000`. A single committed rendering could not satisfy both,
+/// and the residual is a documented parser limitation rather than a
+/// cross-binding contract. Same reason the float entries are restricted to short
+/// decimal literals: `1e19` stringifies as `1e+19` in Python and
+/// `10000000000000000000` in JS.
+///
+/// Expectations were derived from the literals themselves (CPython `int`, which
+/// is arbitrary precision), never from either binding's output.
+pub const JSON_NUMBER_VECTORS: &[JsonNumberVector] = &[
+    JsonNumberVector {
+        name: "zero",
+        json_text: "0",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("0"),
+    },
+    JsonNumberVector {
+        name: "i32_max",
+        json_text: "2147483647",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("2147483647"),
+    },
+    JsonNumberVector {
+        name: "i32_min",
+        json_text: "-2147483648",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("-2147483648"),
+    },
+    // Node switches from `number` to `BigInt` here; Python does not switch at
+    // all. Both must still render the same digits.
+    JsonNumberVector {
+        name: "i32_max_plus_1",
+        json_text: "2147483648",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("2147483648"),
+    },
+    JsonNumberVector {
+        name: "i64_min",
+        json_text: "-9223372036854775808",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("-9223372036854775808"),
+    },
+    JsonNumberVector {
+        name: "i64_max",
+        json_text: "9223372036854775807",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("9223372036854775807"),
+    },
+    // THE #3505 CLASS: above `i64::MAX`, so `as_i64()` returns `None` and the
+    // pre-fix code fell to `as_f64()`, which succeeded LOSSILY.
+    JsonNumberVector {
+        name: "i64_max_plus_1",
+        json_text: "9223372036854775808",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("9223372036854775808"),
+    },
+    JsonNumberVector {
+        name: "u64_max_minus_1",
+        json_text: "18446744073709551614",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("18446744073709551614"),
+    },
+    // The headline case: `f64` rounds this to 18446744073709551616, so a lossy
+    // arm renders 18446744073709552000 (JS) / 1.8446744073709552e+19 (Python).
+    JsonNumberVector {
+        name: "u64_max",
+        json_text: "18446744073709551615",
+        host_kind: JsonHostKind::Integer,
+        expect: Expect::Value("18446744073709551615"),
+    },
+    // Float LITERALS must keep arriving as the host's double — the fix must not
+    // over-reach and turn a genuine float column into an integer.
+    JsonNumberVector {
+        name: "float_one_and_a_half",
+        json_text: "1.5",
+        host_kind: JsonHostKind::Float,
+        expect: Expect::Value("1.5"),
+    },
+    JsonNumberVector {
+        name: "float_negative_two_and_a_quarter",
+        json_text: "-2.25",
+        host_kind: JsonHostKind::Float,
+        expect: Expect::Value("-2.25"),
     },
 ];
