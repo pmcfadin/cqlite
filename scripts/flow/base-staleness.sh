@@ -179,6 +179,7 @@ unmeasured() {
 }
 
 rev=HEAD
+rev_set=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h | --help)
@@ -190,11 +191,15 @@ while [ "$#" -gt 0 ]; do
       exit 3
       ;;
     *)
-      if [ "$rev" != HEAD ]; then
+      # A SECOND positional is refused, never silently ignored (and the flag is a
+      # separate `rev_set` rather than `[ "$rev" != HEAD ]`, which accepted
+      # `HEAD <other>` because the first value happened to equal the default).
+      if [ "$rev_set" -eq 1 ]; then
         usage
         exit 3
       fi
       rev="$1"
+      rev_set=1
       shift
       ;;
   esac
@@ -268,6 +273,9 @@ done <"$TMPD/diff-paths"
 # `**/<basename>`.
 matches_gate_global() {
   local path="$1" pat bn
+  # The count guard is for bash 3.2, where `"${arr[@]}"` on an EMPTY array is an
+  # unbound-variable error under `set -u` (the planted-mutant test empties it).
+  [ "${#GATE_GLOBAL_LIST[@]}" -eq 0 ] && return 1
   for pat in "${GATE_GLOBAL_LIST[@]}"; do
     case "$pat" in
       '**/'*)
@@ -349,7 +357,7 @@ printf '%s measured origin/main %s committed %s (this script does NOT fetch)\n' 
   "$P" "$main_sha" "$main_date"
 printf '%s behind %s commits (on origin/main, not reachable from the merge-base)\n' "$P" "$behind"
 printf '%s diff-paths %s (git diff --name-only -z <merge-base>...<subject>)\n' "$P" "$diff_path_count"
-printf '%s gate-global-set %s entries: %s\n' "$P" "${#GATE_GLOBAL_LIST[@]}" "${GATE_GLOBAL_LIST[*]}"
+printf '%s gate-global-set %s entries: %s\n' "$P" "${#GATE_GLOBAL_LIST[@]}" "${GATE_GLOBAL_LIST[*]-}"
 if [ "$m" -eq 0 ]; then
   # Never a bare `0` (D2): a bare zero in a log reads as a verified all-clear
   # from a scan documented as incomplete.
