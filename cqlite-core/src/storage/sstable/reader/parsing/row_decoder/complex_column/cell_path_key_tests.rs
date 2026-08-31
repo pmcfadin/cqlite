@@ -2,66 +2,38 @@
 //! cell-path KEY.
 //!
 //! ## The defect
-//! A non-frozen `map<K, V>` is multicell: every entry is its own cell and the
-//! KEY lives in that cell's CELL PATH. `V5CompressedLegacyParser::parse_cell_path_key`
-//! used to decode that key from a hand-maintained allowlist of SIX scalar
-//! families (text/varchar/ascii, uuid/timeuuid, int, bigint/counter, date,
-//! timestamp) and returned `Value::Blob` for everything else. So a COMPOSITE key
-//! (`frozen<udt>`, `tuple<…>`, a frozen collection) and ~10 further scalar
-//! families (boolean, float, double, smallint, tinyint, decimal, varint, time,
-//! duration, inet, …) silently surfaced as raw bytes — the same key rendered
-//! structurally by the FROZEN spelling of the same map, and by Cassandra's own
-//! `sstabledump`.
+//! A non-frozen `map<K, V>` is multicell: every entry is its own cell and the KEY
+//! lives in that cell's CELL PATH. `parse_cell_path_key` used to decode it from a
+//! hand-maintained allowlist of six scalar families and return `Value::Blob` for
+//! everything else, so a COMPOSITE key and ~10 further scalar families silently
+//! surfaced as raw bytes — the same key the FROZEN spelling of that map, and
+//! `sstabledump`, render structurally. The fix delegates to the shared structural
+//! decoder. Full narrative, and the parity rules, in `cell_path_key.rs`'s header;
+//! it is not restated here, because two copies drift.
 //!
-//! The fix delegates to the structural decoder
-//! [`V5CompressedLegacyParser::parse_value_from_raw_bytes`] — the very function
-//! the SET branch already used for a set member's cell path — so the cell-path
-//! key path gains the whole type ladder (nested collections, tuples, UDTs,
-//! `frozen<…>`, and every scalar marshal form) instead of a second, narrower
-//! copy of it.
-//!
-//! ## What these tests pin (and why each one can fail on its own)
+//! ## What these tests pin (each can fail on its own)
 //! * **Composite keys decode structurally** (UDT, tuple), including a NULL field
-//!   inside the composite — the case the committed Cassandra fixture does not
-//!   carry (see `cqlite-core/tests/issue_3612_multicell_map_composite_key.rs`).
-//! * **The previously-broken scalar families decode** (boolean, decimal, …).
+//!   inside the composite — the case the committed fixture does not carry (see
+//!   `cqlite-core/tests/issue_3612_multicell_map_composite_key.rs`).
+//! * **The previously-broken scalar families decode** (boolean, decimal, float, …).
 //! * **CASE IS PRESERVED on delegation.** `primitive_marshal_to_cql_short` is
-//!   CASE-SENSITIVE (`s.ends_with("Int32Type")`). The pre-fix code computed
-//!   `type_str.to_lowercase()` up front, so handing the LOWERCASED string to the
-//!   structural decoder would fail every marshal-form normalization and land
-//!   right back in an opaque `Blob` — reintroducing the bug for the no-schema
-//!   `Statistics.db` path, where the key type arrives in marshal form. Several
-//!   cases below therefore use ORIGINAL-CASE marshal spellings and would red if
-//!   a future refactor re-lowercased the delegated type string.
-//! * **Width validation follows Cassandra's THREE-WAY serializer split**, which is
-//!   NOT a uniform `!= N`. For a cell path the ENTIRE stripped slice IS the key, so
-//!   an over-long slice is corruption, while `parse_value_from_raw_bytes` only
-//!   rejects UNDER-width (`< N`) because its other callers hand it
-//!   already-length-bounded element bytes. Read at the pinned `cassandra-5.0.8`
-//!   tag, `org.apache.cassandra.serializers.*.validate` splits:
-//!     * `N` **or `0`** (`!= N && !isEmpty`): Int32(4) Long(8) Float(4) Double(8)
-//!       UUID(16) Timestamp(8), and Counter(8) which `extends LongSerializer`;
-//!     * **strict `!= N`**: Short(2) Byte(1) SimpleDate(4) Time(8);
-//!     * `> 1`, i.e. 0 or 1: Boolean;
-//!     * Inet: RETURNS EARLY on empty, then `getByAddress` → 0, 4 or 16.
-//!
-//!   An earlier revision of THIS header claimed a uniform `!= N` while
-//!   `cell_path_key.rs` said in bold that that claim was wrong — two files in one
-//!   diff giving contradictory Cassandra authority for the table's load-bearing
-//!   distinction. The split above is the measured one; see
-//!   `an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table` and its
-//!   strict-family sibling, which pin both directions.
-//! * **A `blob` key is a legitimate blob**, not a fallback — pinned so the
-//!   diagnostic that used to claim every unhandled key was "parsed as blob"
-//!   cannot come back.
-//!
-//! CROSS-SPELLING PARITY IS NOT PINNED HERE. That property — a multicell key and
-//! the frozen spelling of the same map presenting the IDENTICAL `Value` — lives in
-//! `cqlite-core/tests/issue_3612_multicell_map_composite_key.rs`
-//! (`udt_keys_are_identical_across_spellings_unpeeled`,
-//! `tuple_keys_are_identical_across_spellings_unpeeled`), because it can only be
-//! asserted against Cassandra-written bytes where the two spellings hold the same
-//! key. This file drives one decoder with hand-built input and cannot see it.
+//!   CASE-SENSITIVE (`s.ends_with("Int32Type")`), so handing it a lowercased string
+//!   would fail every marshal-form normalization and land back in an opaque `Blob`
+//!   — reintroducing the bug for the no-schema `Statistics.db` path. Several cases
+//!   use ORIGINAL-CASE marshal spellings and would red if that regressed.
+//! * **Width validation follows Cassandra's THREE-WAY serializer split**, not a
+//!   uniform `!= N`: `N`-or-`0` (Int32/Long/Float/Double/UUID/Timestamp/Counter),
+//!   strict `!= N` (Short/Byte/SimpleDate/Time), `> 1` (Boolean), and Inet at 0/4/16.
+//!   Per-serializer citations are in `cell_path_key.rs`; both directions pinned below.
+//! * **A `blob` key is a blob only by EXACT name**, so a foreign
+//!   `…CustomBytesType` cannot silence the opaque-key diagnostic.
+//! * **CROSS-SPELLING PARITY, for the shapes no fixture supplies.** A multicell key
+//!   and the frozen spelling of the same map must present the IDENTICAL `Value`.
+//!   The fixture-backed subjects live in
+//!   `cqlite-core/tests/issue_3612_multicell_map_composite_key.rs`; the set-, list-
+//!   and map-keyed cases are pinned HERE, from the two marshal spellings, because
+//!   the corpus has no such column. (An earlier revision of this header said parity
+//!   was not pinned here at all — true until round 8 added those.)
 //!
 //! These carry NO dataset/feature-flag dependency: `parse_cell_path_key` is a
 //! `pub(super)` method on a plainly-constructed parser, so they run in every
@@ -1057,16 +1029,11 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // filed separately rather than changed here, since the filter governs every
 // complex column.
 //
-// Verified at the pinned `cassandra-5.0.8` tag, per serializer:
-//   `N` or `0`  : Int32(4) Long(8) Float(4) Double(8) UUID(16) Timestamp(8)
-//                 Counter(8, `extends LongSerializer`)   -- `!= N && !isEmpty`
-//   strict `!= N`: Short(2) Byte(1) SimpleDate(4) Time(8)
-//   `> 1`        : Boolean
-//   Inet         : THROWS on empty, then 4 or 16 only
-// An earlier revision of the module header claimed a uniform `!= N`; that was
-// wrong, and a table disagreeing with Cassandra is a false rejection of legal
-// data waiting to happen. Both directions of the asymmetry are pinned below,
-// because only the pair is evidence.
+// The per-serializer split is in `cell_path_key.rs`'s header (verified at the
+// pinned `cassandra-5.0.8` tag); it is not restated here, because this file
+// already carried a STALE copy saying "Inet THROWS on empty" — it returns early,
+// so inet is `0/4/16`. Both directions of the asymmetry are pinned below, because
+// only the pair is evidence.
 
 /// The `N`-or-`0` family: a 0-byte key passes the WIDTH table (Cassandra's
 /// serializer accepts an empty buffer for these). It still fails to DECODE, from
@@ -1278,27 +1245,20 @@ fn a_wrapper_divergence_would_be_observable_through_value_equality() {
 // ---------------------------------------------------------------------------
 //
 // WHY A UNIT TEST AND NOT A FIXTURE, recorded so nobody "upgrades" it later.
-// #3042's rule — the oracle must be Cassandra-written bytes — governs FRAMING and
-// ENCODING properties, where a CQLite-written/CQLite-read round trip is invariant
-// to a uniform error and therefore proves nothing. This property is different in
-// kind: it is that our decoder NORMALISES TWO TYPE SPELLINGS TO ONE PRESENTATION.
-// Both spellings are INPUTS, stated exactly from the marshal grammar, and there is
-// no framing to get symmetrically wrong — the same bytes are fed to both sides, so
-// a shared encoding mistake cannot hide the divergence being tested.
+// #3042 governs FRAMING/ENCODING properties, where a CQLite-written/CQLite-read
+// round trip is invariant to a uniform error. This property is different in kind:
+// that our decoder NORMALISES TWO TYPE SPELLINGS TO ONE PRESENTATION. Both
+// spellings are INPUTS stated from the marshal grammar, the same bytes feed both
+// sides, and there is no framing to get symmetrically wrong.
 //
-// It is a unit test because the corpus has no subject: MEASURED, the committed
-// schemas contain no multicell `map<frozen<set<…>>, …>`, `map<frozen<list<…>>, …>`
-// or `map<frozen<map<…>>, …>` at all (the 5 multicell map columns are keyed by
-// text, UDT, UDT and tuple). If such a fixture is ever added, prefer it — measured
-// beats reasoned — and keep this test as the cheap guard.
+// And the corpus has no subject: MEASURED, the committed schemas contain no
+// multicell set-, list- or map-keyed map at all (the 5 multicell map columns are
+// keyed by text, UDT, UDT and tuple). If such a fixture is added, prefer it.
 //
-// The two spellings are Cassandra's own, and the asymmetry is Cassandra's:
-//   multicell  `map<frozen<set<frozen<U>>>, int>`
-//              -> MapType(FrozenType(SetType(UserType(..))), Int32Type)
-//              -> key marshal KEEPS FrozenType (a multicell map key must be frozen)
-//   frozen     `frozen<map<frozen<set<frozen<U>>>, int>>`
-//              -> FrozenType(MapType(SetType(UserType(..)), Int32Type))
-//              -> key marshal OMITS it (all inside a frozen collection is frozen)
+// The two spellings are Cassandra's own: a MULTICELL map key marshal KEEPS its
+// `FrozenType` (such a key must be explicitly frozen) while the FROZEN spelling
+// omits it (all inside a frozen collection is already frozen). Worked through in
+// `map_key_type_for_decode`'s doc.
 
 /// A frozen `set<frozen<collide>>` body: `[i32 count][i32 len][udt bytes]…`.
 fn encode_set_of_collide() -> Vec<u8> {
