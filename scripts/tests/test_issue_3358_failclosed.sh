@@ -138,6 +138,36 @@ fi
 FIXTURE_STATUS_BEFORE=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null) \
   || FIXTURE_STATUS_BEFORE="UNMEASURED"
 
+# CONTENT, not status. `git status --porcelain` yields a STATUS CODE, and a file already
+# ` M` that this script modified AGAIN would keep status ` M` — so a status-only
+# before/after comparison PASSES while the fixture really changed (roborev job 265).
+# Demonstrated: identical porcelain line, different sha256. That is a false PASS in a
+# harness whose whole purpose is refusing vacuous passes, so the status leg is kept and a
+# content leg added beside it.
+#
+# Three-valued on purpose. The file COUNT is part of the value because sha256sum of empty
+# input is itself valid hex, so an empty or vanished fixture directory would otherwise
+# produce a well-formed digest that compares equal to nothing. A digest that cannot be
+# taken is `UNMEASURED`, never a hash, and UNMEASURED on either side FAILS the case — an
+# unanswerable question is not a clean answer.
+_fixture_content_digest() {
+  local n out
+  n=$(find "$REPO/$FIXTURE_REL" -type f 2>/dev/null | wc -l | tr -d ' ')
+  case $n in
+    ''|*[!0-9]*) printf 'UNMEASURED(count)'; return ;;
+    0)           printf 'UNMEASURED(no-files)'; return ;;
+  esac
+  out=$(find "$REPO/$FIXTURE_REL" -type f -print0 2>/dev/null \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum 2>/dev/null \
+        | sha256sum 2>/dev/null | cut -d' ' -f1)
+  case $out in
+    ''|*[!0-9a-f]*) printf 'UNMEASURED(digest)'; return ;;
+  esac
+  printf '%s:%s' "$n" "$out"
+}
+FIXTURE_DIGEST_BEFORE=$(_fixture_content_digest)
+
 # Run the target with an explicit environment. Prints nothing; the caller greps $out.
 run_lane() {
   local out=$1; shift
@@ -336,9 +366,23 @@ fi
 # that truncated the ORIGINAL in place would leave a 0-byte tracked file.
 fixture_status=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null)
 fixture_status_rc=$?
+fixture_digest_after=$(_fixture_content_digest)
 if [ "$fixture_status_rc" -ne 0 ]; then
   bad "safety: 'git status' failed (rc=$fixture_status_rc) — the untouched-fixture check \
 has no evidence and must not report green"
+elif [ "$FIXTURE_DIGEST_BEFORE" = "${FIXTURE_DIGEST_BEFORE#UNMEASURED}" ] \
+     && [ "$fixture_digest_after" != "${fixture_digest_after#UNMEASURED}" ]; then
+  bad "safety: the fixture CONTENT digest could not be taken after the run \
+($fixture_digest_after) — the unchanged-fixture check has no evidence and must not report \
+green"
+elif [ "$FIXTURE_DIGEST_BEFORE" != "${FIXTURE_DIGEST_BEFORE#UNMEASURED}" ]; then
+  bad "safety: the fixture CONTENT digest could not be taken BEFORE staging \
+($FIXTURE_DIGEST_BEFORE) — no baseline, so nothing can be compared and this must not \
+report green"
+elif [ "$fixture_digest_after" != "$FIXTURE_DIGEST_BEFORE" ]; then
+  bad "safety: this self-test CHANGED the tracked fixture CONTENT $FIXTURE_REL \
+(before: $FIXTURE_DIGEST_BEFORE after: $fixture_digest_after) — a status comparison alone \
+would have missed this"
 elif [ "$fixture_status" != "$FIXTURE_STATUS_BEFORE" ]; then
   # Compared against the BASELINE, not against clean. Requiring git-clean answered the
   # wrong question: a reader with a pre-existing uncommitted fixture edit — their own
@@ -352,8 +396,8 @@ elif [ ! -s "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
   bad "safety: the tracked $FIXTURE_REL/$DATA_DB is now EMPTY — case 3 truncated the \
 original instead of its copy"
 else
-  ok "safety: this run left the tracked fixture UNCHANGED (status identical to the \
-pre-staging baseline, and still non-empty)"
+  ok "safety: this run left the tracked fixture UNCHANGED — CONTENT digest and git \
+status both identical to the pre-staging baseline, and the Data.db still non-empty"
 fi
 
 # Anti-vacuity for THIS harness: `failed: 0` is only meaningful if every case actually
