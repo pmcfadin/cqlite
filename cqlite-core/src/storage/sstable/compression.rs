@@ -20,6 +20,19 @@ pub enum CompressionAlgorithm {
 }
 
 /// Maximum allowed decompressed size to prevent memory exhaustion attacks (128MB)
+///
+/// Gated to match its USES (lz4/snappy/deflate/zstd each gate a decompression
+/// path): with none enabled the bound has nothing to bound. Was unconditional,
+/// which broke `-D warnings` builds with no compression feature — including
+/// cqlite-ffi-common's `default-features = false` dependency, i.e. the gate's
+/// mandatory binding-rust-tests. NOT `#[allow(dead_code)]`: that would silence
+/// the next genuinely dead item here too. See #3740.
+#[cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "deflate",
+    feature = "zstd"
+))]
 const MAX_DECOMPRESSED_SIZE: usize = 128 * 1024 * 1024;
 
 impl CompressionAlgorithm {
