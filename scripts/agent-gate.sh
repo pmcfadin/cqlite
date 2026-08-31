@@ -2941,6 +2941,9 @@ _component_set_bounded() {
       ( "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; printf '%s.\n' "$?" >"$_CS_CAP_RC"
         sleep "$(( secs + 5 ))" ) &
       sup=$!
+      # REGISTERED IMMEDIATELY, with no command in between: this is as close to "before creation"
+      # as a pid allows, and it is what lets the INT/TERM/HUP handler stop a hung command.
+      _CS_SUP_PID="$sup"
       set +m
       rc=""
       while : ; do
@@ -2966,6 +2969,9 @@ _component_set_bounded() {
       fi
       kill -KILL "-$sup" 2>/dev/null || true
       wait "$sup" 2>/dev/null
+      # CLEARED AT REAP, not at exit: from here the id may be reused, so nothing may signal it
+      # again — including the signal handler.
+      _CS_SUP_PID=""
       case "$rc" in
         ''|*[!0-9]*) rc=124 ;;
       esac
@@ -3156,6 +3162,11 @@ _component_set_normalise_remote() {
       *:*) hport="${host##*:}"
            case "$scheme/$hport" in
              https/443|ssh/22) host="${host%:*}" ;;
+             # THE FULL REMAINDER STAYS IN THE KEY. It is tempting to reduce this to the port
+             # because the value reaches a diagnostic — and that is the WRONG LAYER: this
+             # function's output is the COMPARISON KEY the canonical-identity check equates, so
+             # anything dropped here makes two DIFFERENT remotes compare EQUAL. Rendering is
+             # reduced separately, by _component_set_axis_only (job 282).
              *) printf 'non-default-port:%s' "$u"; return 0 ;;
            esac ;;
     esac
@@ -3185,6 +3196,11 @@ _component_set_normalise_remote() {
            #
            # THE MARKER CARRIES NO PART OF THE VALUE, for the same reason as `whitespace-bearing`.
            : ;;
+      # THE PATH STAYS IN THE KEY, for the reason the port does: dropping it made EVERY local path
+      # normalise to one value, so a canonical identity pinned to a local path matched ANY local
+      # path — measured, and it turned the fork fixture's non-canonical origin into a PASS. That is
+      # the "any local path ending in those two segments" hole (job 225) re-created from the other
+      # end. The path is withheld at RENDER time by _component_set_axis_only instead.
       *)   printf 'local:%s' "$(_component_set_strip_repo_suffix "$u")"; return 0 ;;
     esac
   fi
@@ -3236,6 +3252,46 @@ _component_set_redact_url() {
     *@*) rest="<redacted>@${rest#*@}" ;;
   esac
   printf '%s%s' "$scheme" "$rest"
+}
+
+# _component_set_axis_only <normalised>: the part of a normalised value that is SAFE TO RENDER.
+#
+# WHY THIS EXISTS AT ALL (roborev job 282, the FIFTH finding in one family). The family:
+#   227 — the raw URL was rendered                        -> credential leak
+#   234 — redacted but not flattened                      -> newline forged `RESULT: PASS`
+#   239 — flattened but not redacted (fetch stderr)       -> credential leak, one path over
+#   264 — redaction handled `scheme://user@` only         -> scp-form leak
+#   282 — query strings verbatim; multi-`@` authorities redacted only to the first `@`
+# Every fix improved the SANITISER, and the list of places a secret can hide in a URL does not
+# close — which is the "rarer delimiter" this repository's mechanism ruling warns about. So the
+# rejected URL is NOT RENDERED ANY MORE. What is rendered is the AXIS the value was rejected on,
+# and the normalised identity ONLY when the normalised identity is itself grammatically clean.
+#
+# That second clause is load-bearing: a normalised value is not categorically safe. For an
+# otherwise well-formed URL the normaliser returns `<host>/<owner>/<repo>` — and a URL like
+# `https://github.com/owner/repo?token=SECRET` normalises to a value CARRYING that query string.
+# So the shape is checked, not assumed: a value matching a clean host/owner/repo is rendered whole
+# (it is what a reader needs to see they pointed at a fork), and anything else is reduced to its
+# leading token — the axis — which every rejection path above constructs from a fixed vocabulary
+# plus, at most, a port number.
+_component_set_axis_only() {
+  case "$1" in
+    *[![:alnum:]._/-]*)
+      # NOT CLEAN. If it carries an axis prefix (`non-default-port:8443`), render THAT — the
+      # vocabulary before the `:` is ours and the remainder is at most a port. Otherwise render a
+      # FIXED token: this is the branch a query string reaches
+      # (`github.com/owner/repo?token=SECRET` normalises to a value carrying the query), and the
+      # first cut of this function fell through to `${1%%:*}` — which, with no colon present, is
+      # the WHOLE VALUE. Measured: it printed the query string verbatim, i.e. it reproduced the
+      # very finding it was written to close.
+      case "$1" in
+        *:*) printf '%s' "${1%%:*}"; return 0 ;;
+      esac
+      printf 'identity-mismatch'; return 0 ;;
+  esac
+  # CLEAN. A `<host>/<owner>/<repo>` is rendered whole — that is what shows a reader they pointed
+  # at a fork — and a clean single token (`local-path`, `userinfo-bearing`) is its own axis.
+  printf '%s' "$1"
 }
 
 # _component_set_remote_is_canonical <url>: rc 0 iff <url> names the canonical upstream.
@@ -3837,11 +3893,53 @@ _component_set_drop_scratch_dir() {
   _CS_SCRATCH_DIR=""
 }
 
+# _CS_SUP_PID: the bounded runner's CURRENTLY ACTIVE supervisor, registered so the SIGNAL path can
+# reach it (roborev job 282). Empty whenever no bounded command is in flight.
+#
+# THIS IS THE THIRD INSTANCE OF ONE FAMILY, and that is why it is written as a rule rather than a
+# patch: round 9 was "register cleanup BEFORE creating the resource" (the private fetch ref),
+# round 14 was "clean up on SIGNALS too, not only on return", and round 17's fix for a racy kill
+# CREATED A NEW RESOURCE — the owned supervisor — whose cleanup was never registered with the
+# signal path. Fixing a resource-lifetime bug introduced a resource with the same lifetime bug.
+#
+# THE RULE, for whoever adds the next one: ANY OWNED CHILD MUST BE REGISTERED HERE THE MOMENT IT
+# EXISTS AND CLEARED THE MOMENT IT IS REAPED. Registration cannot precede creation for a pid — we
+# cannot know it before `$!` — so the assignment sits immediately after it, with no command in
+# between, and the cleared value is what tells the handler there is nothing to signal. Clearing at
+# reap is the round-17 invariant restated: never signal a pgid you no longer own.
+_CS_SUP_PID=""
+
+# _component_set_reap_supervisor: terminate and reap the ACTIVE supervisor's process group, if
+# there is one. Safe to call from a signal handler and safe to call twice.
+#
+# Why the group and not just the pid: the supervisor is the group LEADER (`set -m`), and the thing
+# that must stop is the bounded COMMAND, which is its child. Without this, a signal during a hung
+# command terminated the gate and left the command running — unbounded, and able to recreate the
+# capture files after cleanup had deleted them.
+_component_set_reap_supervisor() {
+  [ -n "$_CS_SUP_PID" ] || return 0
+  local sup="$_CS_SUP_PID"
+  # Cleared FIRST: if this is re-entered (a second signal), it must not signal an id whose
+  # ownership we are in the middle of releasing.
+  _CS_SUP_PID=""
+  kill -TERM "-$sup" 2>/dev/null || true
+  sleep 1
+  kill -KILL "-$sup" 2>/dev/null || true
+  wait "$sup" 2>/dev/null
+  return 0
+}
+
 # _component_set_cleanup_resources: EVERY resource this probe can create, dropped in ONE call —
-# the private fetch ref, the isolated scratch repository (whose config holds the origin URL and
-# so possibly a credential) and the bounded runner's capture files. One entry point because the
-# normal path and the signal path must not be able to drop different sets.
+# the active supervisor (and through it the bounded command), the isolated scratch repository
+# (whose config holds the origin URL and so possibly a credential) and the bounded runner's
+# capture files. One entry point because the normal path and the signal path must not be able to
+# drop different sets.
+#
+# THE SUPERVISOR GOES FIRST, and the order is the fix: deleting the capture files while the command
+# still runs lets it RECREATE them (it holds the paths), so the process is stopped before the files
+# it writes to are removed.
 _component_set_cleanup_resources() {
+  _component_set_reap_supervisor
   _component_set_drop_scratch_dir
   _component_set_drop_capture_files
   return 0
@@ -3962,7 +4060,7 @@ _component_set_probe_inner() {
     # the data is attacker-controlled. `_component_set_flatten` is the existing answer and is
     # already applied to every command-output interpolation in this function; the origin URL
     # is the one external value that was missing it.
-    _CS_DETAIL="origin is '$(_component_set_flatten "$(_component_set_redact_url "$origin_url")")' (normalised '$(_component_set_flatten "$(_component_set_normalise_remote "$origin_url")")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline, and no PASS may be derived from a baseline of unknown provenance, so it must be the upstream and nothing else"
+    _CS_DETAIL="origin does not name the canonical upstream $_CS_CANONICAL_REMOTE — rejected on: $(_component_set_axis_only "$(_component_set_normalise_remote "$origin_url")"). THE URL IS DELIBERATELY NOT RENDERED (#3544 / job 282): five successive findings leaked a credential out of this one value (raw, then unflattened, then unredacted stderr, then scp-form, then query strings and multi-@ authorities), and the set of places a secret can hide in a URL does not close — so the axis is named instead of the bytes. A fork, a re-pointed remote, an unauthenticated transport (http/git), a non-default port or a credential-bearing URL is a DIFFERENT baseline, and no PASS may be derived from one"
     return 0
   fi
 

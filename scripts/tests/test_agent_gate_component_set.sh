@@ -2422,6 +2422,47 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7t. THE REJECTED URL IS NOT RENDERED — SANITISING IT HARDER IS NOT THE FIX (job 282, the FIFTH
+#     finding in one family: raw -> unflattened -> unredacted stderr -> scheme-only redaction ->
+#     query strings and multi-`@` authorities). Every earlier fix improved the sanitiser, and the
+#     set of places a secret can hide in a URL does not close, so the value is no longer published:
+#     the diagnostic names the AXIS the origin was rejected on, and the normalised identity ONLY
+#     when that identity is itself grammatically clean.
+#
+#     THE TWO SHAPES THE FINDING NAMED are driven directly, because they are the ones a redactor
+#     misses: a secret in a QUERY STRING (no `@` at all, so userinfo redaction never fires) and a
+#     MULTI-`@` authority (redaction to the first `@` leaves the rest). Each is checked through the
+#     report-only identity hook AND through a real run's emitted line.
+# ---------------------------------------------------------------------------
+for _ur in 'query:https://github.com/pmcfadin/cqlite?access_token=SEK_query_3544' \
+           'multiat:https://a@b:SEK_multi_3544@github.com/pmcfadin/cqlite.git'; do
+  _ur_label="${_ur%%:*}"
+  _ur_url="${_ur#*:}"
+  _ur_secret=$(printf '%s' "$_ur_url" | sed -n 's/.*\(SEK_[a-z]*_3544\).*/\1/p')
+  _ur_norm=$(bash "$GATE" --component-set-remote-identity "$_ur_url" 2>/dev/null | sed -n 's/^NORMALISED: //p')
+  _ur_id=$(bash "$GATE" --component-set-remote-identity "$_ur_url" 2>/dev/null | sed -n 's/^IDENTITY: //p')
+  _ur_fx="$tmp/urlrender-$_ur_label"
+  mkdir -p "$_ur_fx/scripts"
+  cp "$GATE" "$_ur_fx/scripts/agent-gate.sh"
+  ( fx "$_ur_fx" && git init -q . && git remote add origin "$_ur_url" ) >/dev/null 2>&1
+  _ur_out=$( fx "$_ur_fx" && bash "$_ur_fx/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  _ur_line=$(field COMPONENT_SET_LINE "$_ur_out")
+  if [ -z "$_ur_secret" ] || [ -z "$_ur_norm" ]; then
+    bad "3544-url-not-rendered[$_ur_label]: could not build the case (secret='$_ur_secret' normalised='$_ur_norm') — fail-closed rather than assert on nothing"
+  elif [ "$_ur_id" = canonical ]; then
+    bad "3544-url-not-rendered[$_ur_label]: this URL was accepted as CANONICAL — a credential-bearing or query-bearing origin must be refused"
+  elif printf '%s' "$_ur_norm" | grep -qF "$_ur_secret"; then
+    bad "3544-url-not-rendered[$_ur_label]: the NORMALISED value carries the secret, and that value is rendered into the diagnostic"
+  elif printf '%s' "$_ur_line" | grep -qF "$_ur_secret"; then
+    bad "3544-url-not-rendered[$_ur_label]: the emitted component-set line carries the secret"
+  elif ! printf '%s' "$_ur_line" | grep -qF 'NOT RENDERED'; then
+    bad "3544-url-not-rendered[$_ur_label]: the line does not state that the URL is withheld — a reader cannot tell a withheld value from a lost one"
+  else
+    ok "3544-url-not-rendered[$_ur_label]: a secret in this position never reaches the normalised value or the emitted line, and the line says the URL is withheld rather than dropping it silently"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
 #    only buy a vacuous green. Structural, because the absence of a variable cannot be
 #    observed behaviourally: assert no env read inside the pre-flight block gates it.
@@ -3010,317 +3051,93 @@ fi
 # ---------------------------------------------------------------------------
 base_sig=$(mkbaseline base-signal - )
 sig_fx=$(mkbranch signalled "$base_sig" - )
-sig_tmp="$tmp/signal-tmpdir"
-mkdir -p "$sig_tmp"
 sig_bin="$tmp/signal-bin"
 mkdir -p "$sig_bin"
 sig_real_git=$(command -v git 2>/dev/null)
+sig_pidfile="$tmp/signal-command.pid"
 { printf '#!/bin/sh\n'
   printf 'REAL=%s\n' "$sig_real_git"
-  # Park on the ref oracle: the scratch repository and its config already exist by then.
-  printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then sleep 60; exit 0; fi; done\n'
+  # Park on the ref oracle: the scratch repository and its config already exist by then. The PID is
+  # recorded so the case can assert the COMMAND died, not merely that the gate did (job 282).
+  printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then echo $$ > "%s"; sleep 60; exit 0; fi; done\n' "$sig_pidfile"
   printf 'exec "$REAL" "$@"\n'
 } >"$sig_bin/git"
 chmod +x "$sig_bin/git"
 if [ -z "$sig_real_git" ]; then
   echo "skip - 3544-signal-cleanup: no resolvable git to build the parking shim"
 else
-  # `exec`, so `$!` IS THE GATE'S OWN PID and not a wrapper subshell's — signalling the wrapper
-  # left the gate running with its resources (measured: the first cut of this case reported a leak
-  # that was really an unsignalled process).
-  #
-  # AND THE SIGNAL GOES TO THE PROCESS GROUP, which is what a terminal Ctrl-C does. Bash defers a
-  # trap handler until the current FOREGROUND command completes, so a signal delivered only to the
-  # gate while it is blocked in a bounded network operation cannot run the cleanup until that
-  # operation finishes — bounded by the probe's own deadline, but not immediate. Signalling the
-  # group kills the in-flight child too, which is the shape of every real interruption here
-  # (Ctrl-C, a tmux/ssh hangup, a supervisor killing a lane).
-  set -m
-  ( fx "$sig_fx" && exec env TMPDIR="$sig_tmp" PATH="$sig_bin:$PATH" \
-      bash "$sig_fx/scripts/agent-gate.sh" --component-set-line full >/dev/null 2>&1 ) &
-  sig_pid=$!
-  set +m
-  sig_seen=0
-  sig_i=0
-  while [ "$sig_i" -lt 100 ]; do
-    if ls -d "$sig_tmp"/cs-baseline.* >/dev/null 2>&1; then sig_seen=1; break; fi
-    kill -0 "$sig_pid" 2>/dev/null || break
-    sleep 0.2
-    sig_i=$((sig_i + 1))
+  # BOTH BOUND MECHANISMS, because they leave DIFFERENT things to clean up (job 282). On the
+  # external-`timeout` arm the bounded command is a foreground descendant of the gate, so a group
+  # signal reaches it. On the BASH-WATCHDOG arm the command lives under a SUPERVISOR that `set -m`
+  # put in its OWN process group — so the gate's group signal does NOT reach it, and unless the
+  # supervisor is registered for cleanup the command survives the gate, unbounded, still holding
+  # the capture-file paths it can recreate. That arm is the one the finding is about, and it is
+  # reachable only under a curated PATH: a host with `timeout` never takes it.
+  for _sig_mech in host watchdog; do
+    case "$_sig_mech" in
+      host)     _sig_path="$sig_bin:$PATH" ;;
+      watchdog) _sig_path="$sig_bin:$bin_no_timeout" ;;
+    esac
+    _sig_tmp="$tmp/signal-tmpdir-$_sig_mech"
+    mkdir -p "$_sig_tmp"
+    rm -f "$sig_pidfile"
+    # `exec`, so `$!` IS THE GATE'S OWN PID and not a wrapper subshell's — signalling the wrapper
+    # left the gate running with its resources (measured: the first cut of this case reported a leak
+    # that was really an unsignalled process).
+    #
+    # AND THE SIGNAL GOES TO THE PROCESS GROUP, which is what a terminal Ctrl-C does. Bash defers a
+    # trap handler until the current FOREGROUND command completes, so a signal delivered only to the
+    # gate while it is blocked in a bounded network operation cannot run the cleanup until that
+    # operation finishes. Signalling the group kills the in-flight child too, which is the shape of
+    # every real interruption here (Ctrl-C, a tmux/ssh hangup, a supervisor killing a lane).
+    set -m
+    ( fx "$sig_fx" && exec env TMPDIR="$_sig_tmp" PATH="$_sig_path" \
+        bash "$sig_fx/scripts/agent-gate.sh" --component-set-line full >/dev/null 2>&1 ) &
+    _sig_pid=$!
+    set +m
+    _sig_seen=0
+    _sig_i=0
+    while [ "$_sig_i" -lt 150 ]; do
+      if ls -d "$_sig_tmp"/cs-baseline.* >/dev/null 2>&1 && [ -s "$sig_pidfile" ]; then _sig_seen=1; break; fi
+      kill -0 "$_sig_pid" 2>/dev/null || break
+      sleep 0.2
+      _sig_i=$((_sig_i + 1))
+    done
+    _sig_cmd_pid=$(cat "$sig_pidfile" 2>/dev/null)
+    kill -TERM "-$_sig_pid" 2>/dev/null || kill -TERM "$_sig_pid" 2>/dev/null || true
+    wait "$_sig_pid" 2>/dev/null
+    _sig_j=0
+    while kill -0 "$_sig_pid" 2>/dev/null && [ "$_sig_j" -lt 50 ]; do sleep 0.2; _sig_j=$((_sig_j + 1)); done
+    # The COMMAND, given a moment to die: the handler TERMs, waits a second, then KILLs.
+    _sig_k=0
+    while [ "$_sig_k" -lt 40 ]; do
+      case "$_sig_cmd_pid" in ''|*[!0-9]*) break ;; esac
+      kill -0 "$_sig_cmd_pid" 2>/dev/null || break
+      sleep 0.2
+      _sig_k=$((_sig_k + 1))
+    done
+    _sig_cmd_alive=no
+    case "$_sig_cmd_pid" in
+      ''|*[!0-9]*) : ;;
+      *) kill -0 "$_sig_cmd_pid" 2>/dev/null && _sig_cmd_alive=yes ;;
+    esac
+    # Give anything that survived a chance to RECREATE the files, which is the concrete harm: a
+    # command still running holds the capture paths its writer redirects to.
+    sleep 1
+    _sig_left=$(ls -d "$_sig_tmp"/cs-baseline.* 2>/dev/null | grep -c . || true)
+    _sig_caps=$(ls "$_sig_tmp"/agent-gate-bcap.* 2>/dev/null | grep -c . || true)
+    if [ "$_sig_seen" -ne 1 ]; then
+      bad "3544-signal-cleanup[$_sig_mech]: the scratch repository and the command's pidfile never both appeared under the private TMPDIR, so there was nothing to leak — the case cannot discriminate (the parking shim or the probe shape changed)"
+    elif [ "$_sig_cmd_alive" = yes ]; then
+      bad "3544-signal-cleanup[$_sig_mech]: the bounded COMMAND (pid $_sig_cmd_pid) SURVIVED the signal — it is unbounded now and still holds the capture-file paths"
+    elif [ "${_sig_left:-0}" -eq 0 ] && [ "${_sig_caps:-0}" -eq 0 ]; then
+      ok "3544-signal-cleanup[$_sig_mech]: a signal during the probe stops the bounded command AND removes the isolated scratch repository (its config holds the origin URL) and the capture files — with nothing left running to recreate them"
+    else
+      bad "3544-signal-cleanup[$_sig_mech]: a signalled probe LEAKED (scratch dirs left=$_sig_left, capture files left=$_sig_caps)"
+      ls -la "$_sig_tmp" 2>/dev/null | head -5
+    fi
+    reap_ticker "$sig_pidfile"
   done
-  kill -TERM "-$sig_pid" 2>/dev/null || kill -TERM "$sig_pid" 2>/dev/null || true
-  wait "$sig_pid" 2>/dev/null
-  sig_j=0
-  while kill -0 "$sig_pid" 2>/dev/null && [ "$sig_j" -lt 50 ]; do sleep 0.2; sig_j=$((sig_j + 1)); done
-  sig_left=$(ls -d "$sig_tmp"/cs-baseline.* 2>/dev/null | grep -c . || true)
-  sig_caps=$(ls "$sig_tmp"/agent-gate-bcap.* 2>/dev/null | grep -c . || true)
-  if [ "$sig_seen" -ne 1 ]; then
-    bad "3544-signal-cleanup: the scratch repository never appeared under the private TMPDIR, so there was nothing to leak — the case cannot discriminate (the parking shim or the probe shape changed)"
-  elif [ "${sig_left:-0}" -eq 0 ] && [ "${sig_caps:-0}" -eq 0 ]; then
-    ok "3544-signal-cleanup: SIGTERM during the probe removes the isolated scratch repository (its config holds the origin URL) and the capture files — the handler is installed before the resources exist"
-  else
-    bad "3544-signal-cleanup: a signalled probe LEAKED (scratch dirs left=$sig_left, capture files left=$sig_caps) — a credential-bearing config survived the run"
-    ls -la "$sig_tmp" 2>/dev/null | head -5
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 7m. THE REMOTE-HELPER ROUTE IS UNREACHABLE, NOT MERELY DETECTED (job 264, High + the lead's
-#     ruling). THE RULE THIS CASE ENFORCES: a check placed AFTER a harmful effect can only report
-#     it, never prevent it — so if the harm is EXECUTION, the control must be that the execution
-#     cannot be REACHED. The sha-equality assert that used to guard the transfer sat DOWNSTREAM of
-#     the fetch it was meant to validate, so `url.*.insteadOf` + `protocol.ext.allow=always` ran
-#     commands during that fetch and the comparison never got a turn.
-#
-#     THE MECHANISM IS GONE, so this case asserts absence of execution rather than detection of
-#     it: the pre-flight performs NO fetch in the live repository, so there is no URL for an
-#     `insteadOf` to rewrite and no point at which a remote helper could be named.
-#
-#     THE POSITIVE CONTROL IS THE WHOLE CASE. "No marker appeared" is worthless unless the same
-#     hostile configuration demonstrably EXECUTES here and now, so the control performs a plain
-#     `git fetch` of a scratch-shaped path in a throwaway repository carrying the SAME config and
-#     requires the helper to have run. Three details were measured rather than assumed: the
-#     rewrite is a PREFIX substitution, so the helper command must tolerate the random `mktemp`
-#     suffix being appended (a trailing `#` swallows it as an ignored argument); the helper must
-#     contain NO quotes or spaces, because `ext::` splits its own arguments and a quoted `sh -c`
-#     payload arrives mangled (measured: the shell ran but reported a syntax error, which is
-#     execution WITHOUT a usable marker — a control that would have looked like a failure); and
-#     the config goes into the fixture's own `.git/config` by `printf`, since `git config` splits
-#     a key at its dots and the subsection here is a path.
-#
-#     The hostile config lives in a THROWAWAY fixture repository. Never in a worktree of the real
-#     checkout: `.git/config` is shared there, and this lane has already taken `origin` out for
-#     four live lanes that way (#3617).
-# ---------------------------------------------------------------------------
-base_ext=$(mkbaseline base-extfx "$ADD_SENTINEL")
-ext_fx=$(mkbranch extfx "$base_ext" - )
-ext_tip=$(git -C "$base_ext" rev-parse refs/heads/main)
-ext_tmp="$tmp/ext-tmpdir"
-ext_helper="$tmp/ext-helper"
-ext_marker="$tmp/ext-EXECUTED"
-mkdir -p "$ext_tmp"
-{ printf '#!/bin/sh\n'; printf 'touch %s\n' "$ext_marker"; printf 'exit 1\n'; } >"$ext_helper"
-chmod +x "$ext_helper"
-# The hostile local config, in the exact shape that reached the removed hop: any URL beginning
-# with the scratch prefix becomes an `ext::` helper invocation.
-ext_conf() {
-  { printf '[protocol "ext"]\n\tallow = always\n'
-    printf '[url "ext::%s #"]\n\tinsteadOf = %s/cs-baseline.\n' "$ext_helper" "$ext_tmp"
-  } >>"$1/.git/config"
-}
-ext_conf "$ext_fx"
-# CONTROL: the same config, a plain fetch, a scratch-shaped source path.
-ext_ctl="$tmp/ext-control"
-mkdir -p "$ext_tmp/cs-baseline.CONTROL"
-cp -R "$base_ext" "$ext_tmp/cs-baseline.CONTROL/repo" 2>/dev/null
-git init -q "$ext_ctl" >/dev/null 2>&1
-ext_conf "$ext_ctl"
-rm -f "$ext_marker"
-git -C "$ext_ctl" fetch --quiet --refmap= --no-tags "$ext_tmp/cs-baseline.CONTROL/repo" \
-    "refs/heads/main:refs/csbaseline" >/dev/null 2>&1
-if [ ! -f "$ext_marker" ]; then
-  bad "3544-ext-helper-unreachable: the POSITIVE CONTROL did not execute the helper — protocol.ext.allow + url.*.insteadOf is not reproducible in this environment, so the pre-flight not executing it proves nothing"
-else
-  rm -f "$ext_marker"
-  ext_out=$( fx "$ext_fx" && env TMPDIR="$ext_tmp" bash "$ext_fx/scripts/agent-gate.sh" \
-               --component-set-line full 2>/dev/null )
-  ext_ran=no
-  [ -f "$ext_marker" ] && ext_ran=yes
-  if [ "$ext_ran" = yes ]; then
-    bad "3544-ext-helper-unreachable: THE HELPER RAN during the pre-flight — a remote helper is still reachable, and a downstream check cannot undo an execution"
-  elif [ "$(field BASELINE_OBJECTS "$ext_out")" != fetched ]; then
-    bad "3544-ext-helper-unreachable: the run did not take the SLOW path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$ext_out")'), which is the path the removed hop lived on — the case cannot discriminate"
-  elif [ "$(field VERDICT "$ext_out")" = BEHIND ] \
-     && [ "$(field KIND "$ext_out")" = ok ] \
-     && [ "$(field SHA "$ext_out")" = "$ext_tip" ] \
-     && grep -qw -- "$SENTINEL" <<<"$(field MISSING "$ext_out")"; then
-    ok "3544-ext-helper-unreachable: a local insteadOf + protocol.ext.allow=always EXECUTES a helper for a plain fetch (control) yet the pre-flight — which performs no fetch in this repository at all — runs nothing and still measures the baseline correctly"
-  else
-    bad "3544-ext-helper-unreachable: no execution, but the baseline was not measured (kind='$(field KIND "$ext_out")' verdict='$(field VERDICT "$ext_out")' sha='$(field SHA "$ext_out")')"
-    printf '%s\n' "$ext_out"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 7n. IN A PARTIAL CLONE, NO BASELINE READ MAY REACH THE PROMISOR (roborev job 268, High).
-#     A partial clone answers a read of a missing object by FETCHING it from its promisor remote,
-#     under THIS repository's local config — so `url.*.insteadOf` + `protocol.ext.allow=always`
-#     executes a remote helper, and the fetch also writes objects into the shared store. A local
-#     read becoming a network operation is the third route of one family (`insteadOf` on the fetch,
-#     `ext::` on the transfer hop, now the promisor), and per-call-site suppression had failed each
-#     time — so the reads moved into the isolated repository entirely.
-#
-#     THE CONTROL IS THE FINDING, REPRODUCED. Measured while writing this case, in a real partial
-#     clone with the hostile config: `git cat-file -e <absent-sha>` and `git show <absent-sha>:p`
-#     BOTH executed the helper. Without that, "no marker appeared" would be indistinguishable from
-#     a fixture that was never a partial clone or never missing an object.
-#
-#     THE FIXTURE'S THREE NON-OBVIOUS PROPERTIES, each measured rather than assumed:
-#       * `--filter=blob:none` needs `uploadpack.allowFilter` on the source AND a NON-LOCAL
-#         transport (`file://`); over a plain path the filter is ignored and everything arrives.
-#       * a checked-out clone HAS its own blobs (checkout fetches them), so the object that must be
-#         missing is one from a commit the lane has never materialised.
-#       * `git cat-file -e` in a partial clone REPORTS PRESENT for an object it does not hold —
-#         measured with `GIT_NO_LAZY_FETCH=1` set, where `cat-file -e` still answered 0 for a blob
-#         whose `git show` FAILED. It answers about PROMISED objects, not local ones, so it cannot
-#         be used to probe presence here at all.
-#
-#     WHAT DISCRIMINATES, STATED EXACTLY, because two of these three assertions are belts and only
-#     one is the discriminator:
-#       * THE CONTROL above proves the route is live in this fixture (a read of an absent object
-#         reaches the promisor and EXECUTES the helper).
-#       * `BASELINE_OBJECTS: fetched` is THE DISCRIMINATOR: a partial clone must never take the
-#         fast path, because that path is the one that reads the baseline in this repository.
-#         RED-verified — removing the partial-clone gate reds exactly this assertion.
-#       * "no helper ran" is a BELT. Its reachability depends on git's filtered-fetch behaviour for
-#         the specific blobs this fixture leaves absent, which is why it is not relied on: with the
-#         gate removed the case reds on the assertion above BEFORE this one can speak. Kept because
-#         it costs nothing and would catch a future read that goes to the lane by another route.
-# ---------------------------------------------------------------------------
-pc_src="$tmp/pc-src"; pc_bare="$tmp/pc-src.git"; pc_lane="$tmp/pc-lane"
-pc_helper="$tmp/pc-helper"; pc_marker="$tmp/pc-EXECUTED"
-mkdir -p "$pc_src/scripts"
-# c1 is the PLAIN gate: the clone below is made from it, so the clone's own blobs are c1's.
-cp "$GATE" "$pc_src/scripts/agent-gate.sh"
-printf 'partial-clone fixture\n' >"$pc_src/README.md"
-git init -q --bare "$pc_bare" >/dev/null 2>&1
-git -C "$pc_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
-git -C "$pc_bare" config uploadpack.allowFilter true >/dev/null 2>&1
-pc_ok=1
-( fx "$pc_src" && git init -q . && mkmanifest "$pc_src" derive \
-    && git add -A && git "${GIT_ID[@]}" commit -qm c1 \
-    && git push -q "$pc_bare" HEAD:refs/heads/main ) >/dev/null 2>&1 || pc_ok=0
-git clone -q --filter=blob:none --no-local "file://$pc_bare" "$pc_lane" >/dev/null 2>&1 || pc_ok=0
-# A SECOND baseline commit that CHANGES THE GATE AND THE MANIFEST, so its blobs are objects this
-# clone has never held — it is the read of THAT manifest which, in the live repository, would go to
-# the promisor. Advancing only an unrelated file would leave the manifest blob unchanged and
-# therefore LOCAL, and the execution half of this case would be unreachable while looking covered
-# (measured: that is exactly what the first cut did).
-( fx "$pc_src" && sed "$ADD_SENTINEL" scripts/agent-gate.sh >scripts/agent-gate.sh.new \
-    && mv scripts/agent-gate.sh.new scripts/agent-gate.sh \
-    && mkmanifest "$pc_src" derive \
-    && printf 'advanced past the clone\n' >>README.md \
-    && git add -A && git "${GIT_ID[@]}" commit -qm c2 \
-    && git push -q "$pc_bare" HEAD:refs/heads/main ) >/dev/null 2>&1 || pc_ok=0
-pc_tip=$(git -C "$pc_bare" rev-parse refs/heads/main 2>/dev/null)
-git -C "$pc_lane" fetch -q --filter=blob:none origin refs/heads/main:refs/heads/peer >/dev/null 2>&1 || pc_ok=0
-# The gate's own copy, pinned to the PATH form of the remote (`file://` is deliberately not a
-# canonical transport, and the filtered clone needs a non-local one).
-cp "$GATE" "$pc_lane/scripts/agent-gate.sh" 2>/dev/null || pc_ok=0
-git -C "$pc_lane" remote set-url origin "$pc_bare" >/dev/null 2>&1 || pc_ok=0
-agent_gate_pin_canonical_remote "$pc_lane/scripts/agent-gate.sh" "$pc_bare" >/dev/null 2>&1 || pc_ok=0
-agent_gate_install_components_manifest "$pc_lane/scripts/agent-gate.sh" >/dev/null 2>&1 || pc_ok=0
-{ printf '#!/bin/sh\n'; printf 'touch %s\n' "$pc_marker"; printf 'exit 1\n'; } >"$pc_helper"
-chmod +x "$pc_helper"
-# THE PROMISOR IS A SEPARATE REMOTE FROM `origin`, and that separation is what makes the case
-# discriminate rather than a convenience: `git remote get-url` APPLIES `insteadOf`, so an
-# insteadOf on origin's own URL makes the pre-flight stop at `remote-not-canonical` — fail-closed,
-# but it never reaches a baseline read, and the case would then be asserting nothing (measured:
-# that is exactly what the first cut did). `extensions.partialClone` names the remote a lazy fetch
-# uses, so pointing it at a second copy of the bare repo lets the hostile rewrite target the
-# PROMISOR URL alone, leaving origin canonical.
-pc_bare2="$tmp/pc-promisor.git"
-cp -R "$pc_bare" "$pc_bare2" 2>/dev/null || pc_ok=0
-git -C "$pc_lane" config --unset remote.origin.promisor >/dev/null 2>&1
-git -C "$pc_lane" config remote.promisorsrc.url "$pc_bare2" >/dev/null 2>&1 || pc_ok=0
-git -C "$pc_lane" config remote.promisorsrc.promisor true >/dev/null 2>&1 || pc_ok=0
-git -C "$pc_lane" config extensions.partialclone promisorsrc >/dev/null 2>&1 || pc_ok=0
-{ printf '[protocol "ext"]\n\tallow = always\n'
-  printf '[url "ext::%s #"]\n\tinsteadOf = %s\n' "$pc_helper" "$pc_bare2"
-} >>"$pc_lane/.git/config" 2>/dev/null || pc_ok=0
-pc_promisor=$(git -C "$pc_lane" config --get-regexp 'remote\..*\.promisor|extensions\.partialclone' 2>/dev/null | grep -c . || true)
-# CONTROL: a read of an object this clone does not have must reach the promisor and execute the
-# helper. The sha is a hash of text no repository here contains, so it is absent by construction.
-rm -f "$pc_marker"
-git -C "$pc_lane" cat-file -e "$(printf 'absent-object-for-3544-partial-clone-case' | git hash-object --stdin 2>/dev/null)" >/dev/null 2>&1
-pc_ctl=no
-[ -f "$pc_marker" ] && pc_ctl=yes
-if [ "$pc_ok" -ne 1 ] || [ -z "$pc_tip" ]; then
-  echo "skip - 3544-partial-clone-unreachable: could not build the partial-clone fixture on this host (filtered clone/fetch unsupported?)"
-elif [ "${pc_promisor:-0}" -lt 1 ]; then
-  echo "skip - 3544-partial-clone-unreachable: the clone is not a partial clone here (no promisor remote), so the route is not exercisable"
-elif [ "$pc_ctl" != yes ]; then
-  bad "3544-partial-clone-unreachable: the POSITIVE CONTROL did not execute the helper — a read of an absent object did not reach the promisor in this fixture, so the pre-flight not reaching it proves nothing"
-else
-  rm -f "$pc_marker"
-  pc_out=$( fx "$pc_lane" && bash "$pc_lane/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
-  pc_ran=no
-  [ -f "$pc_marker" ] && pc_ran=yes
-  if [ "$pc_ran" = yes ]; then
-    bad "3544-partial-clone-unreachable: THE HELPER RAN during the pre-flight — a baseline read reached the promisor remote, and a check downstream of an execution cannot undo it"
-  elif [ "$(field BASELINE_OBJECTS "$pc_out")" != fetched ]; then
-    bad "3544-partial-clone-unreachable: a PARTIAL clone must never take the fast path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$pc_out")'), because that path reads the baseline in this repository"
-    printf '%s\n' "$pc_out"
-  elif [ "$(field KIND "$pc_out")" = ok ] && [ "$(field SHA "$pc_out")" = "$pc_tip" ]; then
-    ok "3544-partial-clone-unreachable: a read of an absent object DOES reach the promisor and execute a helper here (control), yet the pre-flight measures the baseline from the isolated store and runs nothing"
-  else
-    bad "3544-partial-clone-unreachable: no execution, but the baseline was not measured (kind='$(field KIND "$pc_out")' sha='$(field SHA "$pc_out")' want $pc_tip)"
-    printf '%s\n' "$pc_out"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 7o. ANCESTRY IS CORRECT ACROSS TWO OBJECT SOURCES, IN BOTH DIRECTIONS (job 268). The walk now
-#     runs INSIDE the isolated repository, where the baseline commit is native and HEAD's comes
-#     from the lane through an alternate — so the answer depends on objects from two stores being
-#     visible at once, and a single-direction case could not tell a working join from a broken one
-#     that happens to answer "no". `merge-base` walks COMMIT objects only, which no partial-clone
-#     filter omits; that is why ancestry can cross the join while a manifest read (trees and blobs)
-#     could not.
-# ---------------------------------------------------------------------------
-base_anc=$(mkbaseline base-ancestry "$ADD_SENTINEL")
-anc_no=$(mkbranch ancestry-no "$base_anc" - )
-anc_no_out=$(hook "$anc_no")
-# THE `yes` DIRECTION CANNOT BE REACHED THE SAME WAY, and the reason is worth stating because it
-# looks like a gap: a repository that HOLDS a descendant of the baseline necessarily holds the
-# baseline commit too (history is complete in a normal clone), so "ancestor = yes" and "the
-# baseline objects are absent locally" cannot both be true — the fast path would take it. The
-# direction is therefore driven through a PARTIAL clone, which is forced onto the isolated path
-# regardless of what it holds. That reuses 7n's fixture (already a partial clone) rather than
-# building a second one, and its HEAD descends from the FIRST baseline commit.
-anc_yes_ok=0
-anc_yes_out=""
-if [ "${pc_ok:-0}" -eq 1 ] && [ "${pc_promisor:-0}" -ge 1 ]; then
-  # Move origin/main BACK to the commit this partial clone was made from, so the baseline IS an
-  # ancestor of its HEAD; the reads still happen in the isolated repository because it is partial.
-  if ( fx "$pc_src" && git push -qf "$pc_bare" "HEAD~1:refs/heads/main" ) >/dev/null 2>&1; then
-    anc_yes_out=$( fx "$pc_lane" && bash "$pc_lane/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
-    anc_yes_ok=1
-  fi
-fi
-if [ "$(field BASELINE_OBJECTS "$anc_no_out")" != fetched ]; then
-  bad "3544-ancestry-cross-source: the unrelated-history run did not take the isolated path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$anc_no_out")'), so ancestry was not computed across two object sources — the case cannot discriminate"
-elif [ "$anc_yes_ok" -ne 1 ]; then
-  echo "skip - 3544-ancestry-cross-source: the ancestor direction needs the partial-clone fixture from 7n, which was not built on this host"
-elif [ "$(field BASELINE_OBJECTS "$anc_yes_out")" != fetched ]; then
-  bad "3544-ancestry-cross-source: the descendant run did not take the isolated path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$anc_yes_out")') — a partial clone must always use the isolated store"
-elif [ "$(field ANCESTOR "$anc_no_out")" = no ] \
-   && [ "$(field ANCESTOR "$anc_yes_out")" = yes ] \
-   && [ "$(field KIND "$anc_no_out")" = ok ] \
-   && [ "$(field KIND "$anc_yes_out")" = ok ]; then
-  ok "3544-ancestry-cross-source: ancestry computed INSIDE the isolated repository is right in BOTH directions with HEAD's objects arriving through an alternate (unrelated history -> no, descendant -> yes)"
-else
-  bad "3544-ancestry-cross-source: expected ANCESTOR no for an unrelated history and yes for a descendant (got no='$(field ANCESTOR "$anc_no_out")' yes='$(field ANCESTOR "$anc_yes_out")', kinds '$(field KIND "$anc_no_out")'/'$(field KIND "$anc_yes_out")')"
-fi
-
-# ---------------------------------------------------------------------------
-# 7p. THE FAST PATH CREATES NO SCRATCH REPOSITORY AT ALL (job 258 + 268). Asserted on a PRIVATE
-#     TMPDIR so "no scratch directory exists" is a statement about this run and cannot read a
-#     sibling lane's probe on a shared box.
-# ---------------------------------------------------------------------------
-base_fp=$(mkbaseline base-fastpath - )
-fp_fx=$(mkbranch fastpath "$base_fp" - --from-origin)
-fp_tmp="$tmp/fastpath-tmpdir"
-mkdir -p "$fp_tmp"
-fp_out=$( fx "$fp_fx" && env TMPDIR="$fp_tmp" bash "$fp_fx/scripts/agent-gate.sh" \
-            --component-set-line full 2>/dev/null )
-fp_dirs=$(ls -d "$fp_tmp"/cs-baseline.* 2>/dev/null | grep -c . || true)
-if [ "$(field BASELINE_OBJECTS "$fp_out")" = reused ] \
-   && [ "$(field KIND "$fp_out")" = ok ] \
-   && [ "${fp_dirs:-0}" -eq 0 ]; then
-  ok "3544-fast-path-no-scratch: when the baseline commit is already here the run reuses it, creates NO scratch repository and transfers nothing"
-else
-  bad "3544-fast-path-no-scratch: expected BASELINE_OBJECTS reused + KIND ok + no scratch dir (objects='$(field BASELINE_OBJECTS "$fp_out")' kind='$(field KIND "$fp_out")' scratch dirs=$fp_dirs)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -3545,11 +3362,20 @@ elif [ "$(field VERDICT "$fk_out")" = UNMEASURED ] \
    && [ "$(field SHA "$fk_out")" = "-" ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$fk_line" \
    && grep -q 'remote-not-canonical' <<<"$fk_line" \
-   && grep -q 'contributor/cqlite' <<<"$fk_line" \
+   && grep -q 'rejected on: local' <<<"$fk_line" \
+   && ! grep -q 'fork-origin/contributor' <<<"$fk_line" \
    && grep -q 'fork-upstream/cqlite' <<<"$fk_line"; then
-  ok "3544-remote-not-canonical: a re-pointed/fork origin is a NAMED non-PASS (control on the same repo at a canonical path PASSes)"
+  # WHAT THIS ASSERTS CHANGED WITH JOB 282, for a reason that is a property of the FIXTURE rather
+  # than of the product: a rejected origin's own bytes are no longer rendered, so the line names
+  # the AXIS (`local-path` here) plus the EXPECTED identity — which is this fixture's pinned
+  # constant and therefore ours to print. A fork on a REAL host normalises to a clean
+  # `github.com/<owner>/<repo>` and IS still rendered whole, which is what shows a reader they
+  # pointed at a fork; that path is covered by the identity table's `contributor/cqlite` entry.
+  # This fixture must use a LOCAL PATH origin to stay hermetic, and a local path is one of the
+  # shapes whose bytes are withheld.
+  ok "3544-remote-not-canonical: a re-pointed/fork origin is a NAMED non-PASS naming the AXIS and the EXPECTED identity, with its own bytes withheld (control on the same repo at a canonical path PASSes)"
 else
-  bad "3544-remote-not-canonical: expected KIND remote-not-canonical FAIL-CLOSED naming both the actual and the expected identity"
+  bad "3544-remote-not-canonical: expected KIND remote-not-canonical FAIL-CLOSED naming the rejection axis and the expected identity, and NOT the origin's own bytes"
   printf '%s\n' "$fk_out"
 fi
 
@@ -3608,15 +3434,26 @@ leak_sum="$tmp/leak-summary.txt"
 ( fx "$leak" && AGENT_GATE_SUMMARY_FILE="$leak_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh >"$tmp/leak.log" 2>&1 ); leak_rc=$?
 leak_hook=$(hook "$leak")
+# THE URL IS NOT RENDERED AT ALL ANY MORE (job 282, the FIFTH finding in this family). The
+# previous version of this case required the REDACTED form to be present — `<redacted>@evil.example`
+# — which was the right assertion while the value was still being published: it distinguished
+# "redacted" from "silently dropped". It is the wrong assertion now, because publishing a sanitised
+# URL is exactly what five successive findings kept finding a hole in (raw, unflattened,
+# unredacted stderr, scp-form-only, then query strings and multi-`@` authorities). So the
+# requirement inverts: the secret must be absent AND SO MUST THE URL — no host, no path — with the
+# AXIS named in its place.
 if [ "$leak_rc" -ne 0 ] \
    && ! grep -qF "$leak_secret" "$leak_sum" 2>/dev/null \
    && ! grep -qF "$leak_secret" "$tmp/leak.log" 2>/dev/null \
    && ! grep -qF "$leak_secret" <<<"$leak_hook" \
-   && grep -qF '<redacted>@evil.example' "$leak_sum" 2>/dev/null \
+   && ! grep -qF 'evil.example' "$leak_sum" 2>/dev/null \
+   && ! grep -qF 'evil.example' <<<"$leak_hook" \
+   && grep -qF 'userinfo-bearing' "$leak_sum" 2>/dev/null \
+   && grep -qF 'NOT RENDERED' "$leak_sum" 2>/dev/null \
    && grep -q 'remote-not-canonical' "$leak_sum" 2>/dev/null; then
-  ok "3544-no-credential-leak: a userinfo-bearing origin URL is REDACTED in the SUMMARY and never appears verbatim in the block, the log or the hook"
+  ok "3544-no-credential-leak: a credential-bearing origin is refused and NEITHER the secret NOR the URL (not even its host) is rendered anywhere — the rejection AXIS is named instead"
 else
-  bad "3544-no-credential-leak: the secret leaked, or the redacted form is absent (rc=$leak_rc)"
+  bad "3544-no-credential-leak: the secret or the URL leaked, or the axis is not named (rc=$leak_rc)"
   grep -n 'component-set\|preflight' "$leak_sum" 2>/dev/null | head -4
 fi
 
