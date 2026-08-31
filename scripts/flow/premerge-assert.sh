@@ -787,6 +787,27 @@ fi
 [ -n "$full_dirty" ] || full_dirty=unknown
 
 # ---------------------------------------------------------------------------
+# THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)
+# ---------------------------------------------------------------------------
+# The advisory is bounded at ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE (65s).
+# Running it AFTER the `gh pr view` head/state check would leave up to 65s
+# between the instant the head was verified and the instant `PREMERGE: OK` is
+# emitted -- so a push inside that window would leave this script emitting OK for
+# a sha that is no longer the PR head, which is precisely the stale-head merge
+# #2456 exists to refuse. The fix is ordering, not a re-check: the advisory is
+# MEASURED here and PRINTED later in its original position, so the gh head/state
+# check remains the LAST thing that happens before OK.
+#
+# Capturing changes no output: every line of the report is written to stdout by
+# `print_base_staleness_advisory`, and printing it at the original call site keeps
+# the order identical -- which matters, because the `PREMERGE: SCOPE ... ADVISORY
+# lines below` clause asserts the advisory appears BELOW it.
+#
+# Cost, accepted: on a refusal path the 65s is already spent. Correctness of the
+# approval beats latency of a refusal, and nothing is printed on those paths.
+advisory_out=$(print_base_staleness_advisory)
+
+# ---------------------------------------------------------------------------
 # PR HEAD + STATE (#2456)
 # ---------------------------------------------------------------------------
 
@@ -849,7 +870,11 @@ printf 'PREMERGE: SCOPE composes this diff with main tip, which no gate here has
 # above are RETAINED verbatim: slice 1 ships INFORMATION, not the merge-result
 # gate, so the disclaimer they carry is still true.
 printf 'PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap (non-blocking, #3650 slice 1).\n'
-print_base_staleness_advisory
+# Printed here, MEASURED earlier (see the note above the head check): the
+# advisory's 65s bound must not sit between the head check and OK.
+if [ -n "$advisory_out" ]; then
+  printf '%s\n' "$advisory_out"
+fi
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
   "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
 if [ -n "$delta_file" ]; then

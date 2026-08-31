@@ -1770,6 +1770,72 @@ if run 3 "gh failure prints PREMERGE: GH-FAILURE only" 2421 "$CERTIFIED" "$GOOD"
 fi
 export MOCK_GH_FAIL=0
 
+# --- Case 43: the advisory is MEASURED BEFORE the head/state check -----------
+# REGRESSION GUARD (roborev job 250, Medium -> promoted to blocker). The advisory
+# is bounded at 60s + a 5s kill grace. When it ran AFTER the final `gh pr view`
+# head/state check, up to 65s separated "the head equals the certified sha" from
+# `PREMERGE: OK` -- and the caller's very next action is `gh pr merge --auto`,
+# which merges whatever head is current when `required` goes green. So a push in
+# that window turned a stale OK into a merge of an UNCERTIFIED head: the escape
+# #2456/#3465 exist to refuse, reintroduced by the advisory call site itself.
+#
+# The property asserted is ORDER, not duration: a duration assert here would be a
+# wall-clock race in the correctness path (the very thing roborev-lints forbids).
+# Both the advisory and `gh` append a token to one log; the advisory's must come
+# FIRST. That is observable, deterministic, and fails against the old ordering.
+ORDER_LOG="$T/order-43.log"
+ORDBIN="$T/bin-order-43"
+ORDFLOW="$T/flow-order-43"
+mkdir -p "$ORDBIN" "$ORDFLOW"
+# gh stub that RECORDS its invocation, then behaves like the standard mock.
+cat >"$ORDBIN/gh" <<'ORDGH'
+#!/usr/bin/env bash
+printf 'GH\n' >>"$PREMERGE_ORDER_LOG"
+if [ "${MOCK_GH_FAIL:-0}" = "1" ]; then echo "gh: could not connect" >&2; exit 1; fi
+printf '%s\n' "${MOCK_GH_OUT:-}"
+exit 0
+ORDGH
+chmod +x "$ORDBIN/gh"
+if ! cp "$ASSERT" "$ORDFLOW/premerge-assert.sh"; then
+  bad "order: could not build the scratch copy of premerge-assert.sh"
+else
+  cat >"$ORDFLOW/base-staleness.sh" <<'ORDADV'
+#!/usr/bin/env bash
+printf 'ADV\n' >>"$PREMERGE_ORDER_LOG"
+printf "BASE-STALENESS: ordering-case stub\n"
+printf "BASE-STALENESS: verdict NO-STALENESS-RECOGNISED\n"
+exit 0
+ORDADV
+  chmod +x "$ORDFLOW/base-staleness.sh"
+  : >"$ORDER_LOG"
+  ORDOUT=$(PATH="$ORDBIN:$BIN:$PATH" PREMERGE_ORDER_LOG="$ORDER_LOG" \
+    MOCK_GH_OUT="$CERTIFIED OPEN" MOCK_GH_FAIL=0 \
+    bash "$ORDFLOW/premerge-assert.sh" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  ORDRC=$?
+  if [ "$ORDRC" -ne 0 ]; then
+    bad "order: the success-path case did not exit 0 (rc=$ORDRC, got: $ORDOUT)"
+  else
+    ok "order: the ordering case runs the success path"
+    # Non-vacuity: BOTH tokens must be present, or an absent stub would "pass".
+    if ! grep -qx 'ADV' "$ORDER_LOG" || ! grep -qx 'GH' "$ORDER_LOG"; then
+      bad "order: NON-VACUITY -- expected both ADV and GH to be recorded (got: $(tr '\n' ',' <"$ORDER_LOG"))"
+    else
+      ok "order: non-vacuity -- both the advisory and gh were actually invoked"
+      if [ "$(head -n 1 "$ORDER_LOG")" = "ADV" ]; then
+        ok "order: the advisory is MEASURED BEFORE the gh head/state check (job 250)"
+      else
+        bad "order: the advisory ran AFTER the gh head check -- up to 65s of staleness sits between the head check and PREMERGE: OK (got: $(tr '\n' ',' <"$ORDER_LOG"))"
+      fi
+    fi
+    # The report must still be printed BELOW the SCOPE clause that promises it.
+    case "$ORDOUT" in
+      *"ADVISORY lines below measure that gap"*"BASE-STALENESS: ordering-case stub"*)
+        ok "order: the report is still PRINTED below the SCOPE clause that promises it" ;;
+      *) bad "order: capturing the advisory must not move its output (got: $ORDOUT)" ;;
+    esac
+  fi
+fi
+
 # --- summary -----------------------------------------------------------------
 printf '\n=== premerge-assert: %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
