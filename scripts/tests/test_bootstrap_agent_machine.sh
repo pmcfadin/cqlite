@@ -3373,6 +3373,51 @@ else
     bad "gate-pin: the gap diagnostic asserts an absence without naming how far it looked"
   fi
 
+  # 11ar. AN UNREADABLE PAM STACK MUST NOT REACH VERIFIED (issue #3414 roborev round 6).
+  #      pin_pam_services_missing_readenv was called inside `$( )`, which FORKS — so its
+  #      PIN_PAM_UNCHECKED assignment happened in a subshell and was discarded. An
+  #      unreadable service config then produced VERIFIED *and* a scope note claiming the
+  #      stacks had been checked: a false positive plus a false statement about what was
+  #      measured. Only this branch loses the signal — the happy path works — which is why
+  #      it survived six review rounds, and why the case is written against the branch
+  #      rather than against the function.
+  #
+  #      Root can read a 0000 file, so as root the case would assert nothing.
+  if [ "$(id -u)" = 0 ]; then
+    skip "gate-pin unreadable-PAM-stack case (running as root: 0000 is still readable)"
+  else
+    pin_pamd_unread="$tmp/pin-pamd-unread"; mkdir -p "$pin_pamd_unread"
+    printf 'session required pam_env.so\n' >"$pin_pamd_unread/sshd"
+    printf 'session required pam_env.so\n' >"$pin_pamd_unread/login"
+    chmod 0000 "$pin_pamd_unread/sshd"
+    envf_ar="$tmp/pin-env-ar"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ar"
+    out_ar=$(runpin "$pinroot" "$shims_one" "$envf_ar" HOME="$pin_home_plain" \
+      CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_unread")
+    chmod 0644 "$pin_pamd_unread/sshd"
+    if printf '%s' "$out_ar" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_ar" | grep -q 'could not be READ' \
+       && ! printf '%s' "$out_ar" | grep -qE '\[ok\].*gate-pin' \
+       && ! printf '%s' "$out_ar" | grep -q 'were CHECKED to read it'; then
+      ok "gate-pin: an UNREADABLE PAM stack is UNMEASURED, and the run does not claim the stacks were checked"
+    else
+      bad "gate-pin: an unreadable PAM stack reached a verdict it had not earned (subshell swallowed the signal?)"
+      printf '%s\n' "$out_ar" | grep -i 'gate-pin\|CHECKED' | head -3
+    fi
+  fi
+
+  # 11as. STRUCTURAL, and it is the half that generalises: a function whose purpose is to
+  #      SET a variable must be called directly, never in `$( )` or downstream of `|`,
+  #      because both fork and the assignment does not survive. CLAUDE.md already carries
+  #      this for the gate's cargo-output parse sites; it is a property of the shell, not
+  #      of that file. A future edit could reintroduce the substitution while 11ar still
+  #      passed on a readable box, so the call shape is asserted directly.
+  if grep -qE '^\s*pin_pam_services_missing_readenv$' "$BOOTSTRAP" \
+     && ! grep -qE '\$\(pin_pam_services_missing_readenv' "$BOOTSTRAP"; then
+    ok "gate-pin: the PAM check is called directly, not in a subshell that would discard its globals"
+  else
+    bad "gate-pin: the PAM check is back inside a command substitution — its result globals are lost"
+  fi
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the

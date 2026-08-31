@@ -9,9 +9,21 @@ place, and `gh`/roborev configured so a local gate run predicts CI.
 ```bash
 bash scripts/bootstrap-agent-machine.sh          # check everything; print any install commands
 bash scripts/bootstrap-agent-machine.sh --yes    # also auto-run brew/cargo installs + dataset fetch
-bash scripts/bootstrap-agent-machine.sh --fix-credentials --strict   # image/launcher preflight (#3369):
-                                                 # wire git push credentials ONLY, and exit 1 on any [warn]
+bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --strict
+                                                 # image/launcher preflight (#3369, #3414): wire git push
+                                                 # credentials AND persist the single-gate pin, then exit 1
+                                                 # on any [warn]. Two narrow repairs, nothing else — no
+                                                 # toolchain installs, so verify stays a verification step.
 ```
+
+**Both repair flags are needed, and omitting `--fix-gate-pin` reproduces #3414.** A launched box
+gets exactly one bootstrap invocation, and `--fix-credentials` alone leaves
+`CQLITE_GATE_MAX_CONCURRENCY` unpersisted — so every gate on that box silently resolves the #1825
+concurrency cap from the default formula and admits co-tenants, which is the defect #3414 exists to
+remove. `--fix-gate-pin` performs section 5b's `/etc/environment` write (idempotent; it never
+rewrites a value someone set deliberately) and the run then VERIFIES it by probing a fresh session.
+Check the `gate-pin:` line in the output, and the gate's own
+`cpu-budget: ... max-concurrency=N(pinned)` on the first summary that box produces.
 
 `--strict` is what the agent-ami profile's `verify.run` uses. Without it the script always
 exits 0 (so it composes into setup scripts) and the ONLY failure signal is the literal

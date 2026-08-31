@@ -36,10 +36,13 @@ gh auth status                                  # must include the 'project' sco
 ```
 
 **On a LAUNCHER-ONBOARDED box the credential step is already done (#3369)** — the agent-ami
-profile's `verify.run` is `bootstrap-agent-machine.sh --fix-credentials --strict`, which runs
-`gh auth setup-git` itself after the token is injected. It is **wired at onboard, not baked into
-the image**, so a hand-built box still needs the line above; the two paths do not conflict, and
-re-running it is idempotent.
+profile's `verify.run` is
+`bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --strict`, which runs
+`gh auth setup-git` itself after the token is injected **and persists the single-gate pin**
+(`--fix-gate-pin`, #3414 — without it a launched box arrives unpinned and every gate on it resolves
+the #1825 cap from the default formula). It is **wired at onboard, not baked into the image**, so a
+hand-built box still needs the line above; the two paths do not conflict, and re-running it is
+idempotent.
 
 **The `refs/claims/*` preflight is no longer a separate manual step either.** Every bootstrap run
 MEASURES push capability by performing the operation — it invokes `claim.sh smoke` and reports one

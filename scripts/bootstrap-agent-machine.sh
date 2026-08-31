@@ -2327,9 +2327,31 @@ $(awk '/^[[:space:]]*@include[[:space:]]+/ { print $2 }' "$f" 2>/dev/null)
 EOF
   }
 
+  #
+  # RESULTS COME BACK IN GLOBALS AND THIS IS CALLED DIRECTLY, NEVER IN `$( )` (#3414
+  # roborev round 6). It used to be invoked as `pin_pam_gap=$(pin_pam_services_...)`, and
+  # `$( )` FORKS — so the PIN_PAM_UNCHECKED assignment happened in a subshell and was
+  # discarded. An UNREADABLE service config then reached VERIFIED *and* the scope note
+  # claimed the stacks had been checked: a false positive plus a false statement about
+  # what was measured, which is worse than either alone.
+  #
+  # THIS IS NOT A NEW LESSON, IT IS AN EXISTING ONE REPRODUCED ONE FILE OVER. CLAUDE.md
+  # already carries it for the gate's cargo-output parse sites — "read by redirection,
+  # never a pipe: a piped `while read` runs in a subshell and its verdict is discarded".
+  # That doctrine was written about agent-gate.sh, but it is a property of the SHELL, not
+  # of that file: `$( )` and `|` both fork, and a verdict assigned inside either does not
+  # survive. Said here because the next person reaches for `$( )` reflexively too.
+  #
+  # The rule this file now follows: a function that ECHOES its result may be used in a
+  # substitution or a pipe (the output IS the payload — pin_gate_source_for,
+  # pin_strip_pam_quotes, pin_pam_effective_lines); a function that ASSIGNS must be called
+  # directly. Swept at the time of this fix: this was the only assigner being substituted.
   PIN_PAM_UNCHECKED=""
+  PIN_PAM_GAP=""
   pin_pam_services_missing_readenv() {
     local svc f missing=""
+    PIN_PAM_UNCHECKED=""
+    PIN_PAM_GAP=""
     for svc in sshd login; do
       f="$PIN_PAM_DIR/$svc"
       [ -e "$f" ] || continue
@@ -2353,7 +2375,7 @@ EOF
         missing="${missing:+$missing }$svc"
       fi
     done
-    printf '%s' "$missing"
+    PIN_PAM_GAP="$missing"
   }
 
   # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
@@ -2516,7 +2538,10 @@ EOF
               # free to disagree with the gate — the thing avoided by asking the gate what
               # it honours instead of re-deriving its rules.
               if [ "$PIN_FILE_VALUE" = "$pin_probe_seen" ]; then
-                pin_pam_gap=$(pin_pam_services_missing_readenv)
+                # Called DIRECTLY: see the note on the function — a substitution here
+                # forks, and both of its result globals would be lost with the fork.
+                pin_pam_services_missing_readenv
+                pin_pam_gap="$PIN_PAM_GAP"
                 if [ -n "$pin_pam_gap" ]; then
                   # WEAKEN ONLY. Both affirmative halves hold, but the session stacks a
                   # gate is actually created by do not read this file, so what was
@@ -2525,6 +2550,13 @@ EOF
                   info "add a session-stage 'pam_env.so' (readenv defaults to on) to $PIN_PAM_DIR/{$(printf '%s' "$pin_pam_gap" | tr ' ' ',')}, then re-run"
                   info "searched each service file plus ONE level of @include; a pam_env buried deeper than that would not have been seen, so confirm by hand before rewriting a stack"
                   info "the sudo-session result above is real but does not generalise; the per-run authority stays the gate's own cpu-budget: max-concurrency=N(...) token"
+                elif [ -n "$PIN_PAM_UNCHECKED" ]; then
+                  # NOT a gap and NOT a clean check. The stacks that decide whether this
+                  # generalises could not be read, so the scope the VERIFIED text would
+                  # claim was never established — and claiming it was is the half of this
+                  # finding that is worse than the false positive.
+                  warn "gate-pin: UNMEASURED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE and a sudo session sees it, but the PAM stack for [$PIN_PAM_UNCHECKED] could not be READ — whether sessions created by those services get it is UNKNOWN)"
+                  info "the sudo-session result above is real but its scope is unestablished; the per-run authority stays the gate's own cpu-budget: max-concurrency=N(...) token"
                 else
                 ok "gate-pin: VERIFIED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE AND a fresh PAM-created, profile-free session sees that SAME value, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
                 pin_scope_note
