@@ -1440,7 +1440,9 @@ else
   fi
 fi
 
-# 4b-ii. HEAD'S SET UNMEASURABLE: the provenance oracle is the SOLE evidence for DECLARED's
+# 4b-ii. HEAD'S SET UNMEASURABLE (the diagnostic names the PATHS, not a literal `HEAD:` rev —
+#     since job 268 HEAD is resolved to a SHA in this checkout and the read happens in the isolated
+#     repository, because `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD): the provenance oracle is the SOLE evidence for DECLARED's
 #     claim, so a run that cannot consult it must NOT excuse the removal. Forced by dropping
 #     the gate script from the INDEX and committing (HEAD's tree no longer holds it) while
 #     the working copy stays in place: `git show HEAD:scripts/agent-gate.sh` then fails for
@@ -1457,7 +1459,8 @@ hu_line=$(field COMPONENT_SET_LINE "$hu_out")
 if [ "$(field VERDICT "$hu_out")" = UNMEASURED ] \
    && [ "$(field KIND "$hu_out")" = head-set-unmeasured ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$hu_line" \
-   && grep -q 'git show HEAD:scripts/agent-gate.sh' <<<"$hu_line" \
+   && grep -q 'scripts/agent-gate.sh' <<<"$hu_line" \
+   && grep -q 'scripts/agent-gate.components' <<<"$hu_line" \
    && ! grep -q '^component-set: DECLARED' <<<"$hu_line" \
    && ! grep -q "own COMMITTED diff, NOT skew" <<<"$hu_line"; then
   ok "3544-head-unmeasured: an unreadable HEAD gate script is its own named non-PASS, never a DECLARED excusal"
