@@ -3004,11 +3004,39 @@ acquire_lock() {
     # else" — which had not happened, together with "re-run this supervisor", which loops forever. Same
     # family as the AC7 addendum: a message that sends the operator after a problem that is not there.
     # The realistic cause is the parent directory becoming unwritable after the lock appeared.
+    #
+    # AND THE IDENTITY WE MEASURED IS STALE BY THE TIME WE GET HERE (#3601, roborev job 242 B18). The
+    # liveness verdict above describes the pid file as it was read BEFORE the rename was attempted; the
+    # path can be replaced in between, so the object now at that name may belong to a LIVE holder. The
+    # previous wording declared "this lock IS stale and this run is entitled to it" and printed the
+    # NON-RECURSIVE REMOVAL COMMAND for it.
+    #
+    # THAT IS WHY THIS ONE IS NOT MERELY ANOTHER OVERCLAIM. The code destroys nothing here; the printed
+    # line does, in the operator's hands, and remedies in this file exist precisely to be pasted. It is
+    # the sibling of "a remedy that cannot work is worse than none" — a remedy that WORKS, aimed at the
+    # wrong target. So this branch now re-reads the lock, reports what is ACTUALLY there, declares
+    # nothing stale or removable, and prints only a READ-ONLY inspection: the one command shape that is
+    # safe under the assumption that the lock is live. `ls -ldn` names the object without following a
+    # symlink and `ls -lna` shows a directory's contents (both measured rc=0 on all three shapes under
+    # #3549), `--` because the path is `TMPDIR`-derived, and the path is rendered paste-safe.
+    local after_mv='' identity=''
+    after_mv="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || after_mv='unparseable post-rename-probe-aborted'
+    case "$after_mv" in
+      "pid $holder_pid")
+        identity="it still records pid $holder_pid, the holder this run measured as dead. That is consistent with the same lock still being there, but it is NOT proof: this run cannot establish that the object now at that name is the same one it measured, so it does not declare the lock stale"
+        ;;
+      'pid '*)
+        identity="it now records a DIFFERENT holder, pid ${after_mv#pid }, and not the pid $holder_pid this run measured as dead. Something took that name while the rename was failing, and that holder may be ALIVE — the dead-holder measurement above no longer describes what is at that path"
+        ;;
+      *)
+        identity="its pid file no longer reads as a usable holder record ([$after_mv]), so this run cannot tell whether the object now at that name is the stale lock it measured or something else that has since taken the name"
+        ;;
+    esac
     supervisor_lock_refuse \
-      "refusing to start — a DEAD holder's lock could not be cleared" \
-      "the recorded holder (pid $holder_pid) is affirmatively gone, so this lock IS stale and this run is entitled to it — but renaming it aside FAILED, so nothing was cleared and nothing was claimed. That is a FILESYSTEM failure, not contention: the lock's parent directory must be writable to clear a lock, and being able to READ a lock does not imply that. No other holder is implied and nothing here has been modified" \
-      "make the lock's parent directory writable by this user and re-run; the stale lock will then be cleared automatically, because its holder is already known to be dead. If you would rather clear it by hand, the next line does it non-recursively once the pid file is gone$(supervisor_lock_shape_note)" \
-      "$(supervisor_lock_clear_command)"
+      "refusing to start — a lock this run measured as stale could not be cleared" \
+      "renaming the lock aside FAILED, so nothing was cleared and nothing was claimed; nothing at that path has been modified by this run. That is a FILESYSTEM failure, not contention: clearing a lock needs WRITE permission on its PARENT directory, which reading one does not. AND THE IDENTITY OF WHAT IS THERE IS NOW UNESTABLISHED — $identity" \
+      "make the lock's parent directory writable by this user and RE-RUN: the next start re-measures the holder from scratch and will either reclaim the lock, if it is genuinely stale, or name its live holder. Do NOT remove anything on the strength of this message — this run measured a dead holder BEFORE its rename failed and cannot vouch for what is at that path now. To see what is actually there, run the next line, on its own, exactly as printed; it only reads" \
+      "ls -ldn -- $(supervisor_shell_quote "$SUPERVISOR_LOCK") && ls -lna -- $(supervisor_shell_quote "$SUPERVISOR_LOCK")"
   fi
   takerc=0
   supervisor_lock_take || takerc=$?
