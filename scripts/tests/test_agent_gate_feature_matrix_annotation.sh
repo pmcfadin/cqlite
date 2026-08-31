@@ -410,24 +410,23 @@ else
 fi
 
 # stdin reaches the real binary (a wrapper that consumed it would break any cargo
-# subcommand reading stdin).
-got_stdin=$( cd "$tmp" && PATH="$fid:$PATH" bash -c 'printf hello-stdin | cargo build' 2>/dev/null | sed -n 's/^STDIN\[\(.*\)\]$/\1/p' ) || true
-if [ "$got_stdin" = hello-stdin ]; then
-  ok "W5: stdin passes through the cargo wrapper untouched"
-else
-  # The `bash -c` child does not inherit the (deliberately unexported) function, so this
-  # case must drive the wrapper in THIS shell instead — do so rather than claim a pass.
-  got_stdin=$( PATH="$fid:$PATH"; printf hello-stdin | cargo build | sed -n 's/^STDIN\[\(.*\)\]$/\1/p' )
-  [ "$got_stdin" = hello-stdin ] && ok "W5: stdin passes through the cargo wrapper untouched" \
-    || bad "W5: stdin arrived as '$got_stdin'"
-fi
+# subcommand reading stdin). Driven in THIS shell, deliberately NOT through `bash -c`: a
+# child bash does not inherit the (unexported) function, so `cargo` there would resolve
+# straight to the substituted binary on PATH and the case would pass having tested the
+# artifact instead of the wrapper — a vacuous pass (it did, first try).
+got_stdin=$(
+  PATH="$fid:$PATH"
+  printf hello-stdin | cargo build | sed -n 's/^STDIN\[\(.*\)\]$/\1/p'
+)
+[ "$got_stdin" = hello-stdin ] && ok "W5: stdin passes through the cargo wrapper untouched" \
+  || bad "W5: stdin arrived as '$got_stdin'"
 
 # The env wrapper on the run_clippy path: status + argv + the cargo argv it records.
 : > "$AGENT_GATE_FM_DIR/clippy.features"
 (
   PATH="$fid:$PATH"
   AGENT_GATE_FM_COMPONENT=clippy \
-    env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features "a b" >"$tmp/e.out" 2>/dev/null
+    env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features "a b" </dev/null >"$tmp/e.out" 2>/dev/null
   echo "$?" > "$tmp/e.rc"
 )
 if [ "$(cat "$tmp/e.rc")" = 0 ] && [ "$(grep -c '^ARG\[' "$tmp/e.out")" = 6 ]; then
@@ -437,7 +436,7 @@ else
 fi
 got=$(_fm_annotate clippy)
 [ "$got" = '[clippy cqlite-core --features a,b]' ] \
-  && ok "W7: an `env VAR=… cargo …` invocation IS recorded (the run_clippy path, which an env prefix would otherwise hide)" \
+  && ok 'W7: an "env VAR=... cargo ..." invocation IS recorded (the run_clippy path, which an env prefix would otherwise hide)' \
   || bad "W7: got '$got'"
 unset AGENT_GATE_FM_COMPONENT
 export AGENT_GATE_FM_DIR="$tmp/side"
