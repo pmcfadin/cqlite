@@ -2403,7 +2403,7 @@ supervisor_lock_publish() {
 # ownership test at all, so a run that had lost its lock deleted the new holder's on the way out.
 # NOT CLOSED: the read and the removal are two operations, so a lock that becomes someone else's between
 # them is still removed. Closing that needs serialization across classify -> reclaim -> claim, which is
-# the same root as the reclaim ABA race at the rename below, and it is tracked as ONE follow-up rather
+# the same root as the reclaim ABA race at the rename below, and it is tracked as ONE follow-up (#3683)
 # than patched here: the primitive it needs is a lock protecting a lock, whose own staleness reopens
 # "how does a stale instance get cleared, and by whom?" one level down. Left as an explicit partial
 # because dropping the ownership test to avoid a half-fix would REGRESS to the unconditional delete.
@@ -2711,12 +2711,35 @@ acquire_lock() {
 
   # THE ONLY RECLAIMING PATH, AND IT IS REACHED ONLY FROM AN AFFIRMATIVE `dead`.
   log "$(supervisor_one_line "reclaiming stale lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") (holder pid $holder_pid is affirmatively DEAD: the kernel reports no such process)")"
-  # Atomic reclaim (rename-then-remove), not rm-then-mkdir: two supervisors racing a dead-pid lock both
-  # taking the rm-then-mkdir path could both end up believing they won. `mv` on the same filesystem is
-  # atomic, so only ONE racer's mv can succeed against a given stale directory name; that racer removes
-  # the renamed-aside copy and falls through to its own take below. The loser's mv fails (the name is
-  # already gone), so it falls through to its own take, which fails against the winner's fresh lock, and
-  # it refuses loudly instead of silently co-running. `--` on both operands: `TMPDIR`-derived (#3601 AC7).
+  # Reclaim by rename-then-remove, not rm-then-mkdir: the rename is a single atomic operation, so a
+  # racer that loses it does not get a window in which the lock name simply does not exist.
+  #
+  # WHAT THIS DOES **NOT** DO, STATED HERE BECAUSE THE COMMENT THAT USED TO SIT ON THIS LINE CLAIMED
+  # OTHERWISE (#3601, roborev job 231 F1; tracked as #3683). The prior wording asserted that "only ONE
+  # racer's mv can succeed" and that the loser therefore "refuses loudly instead of silently
+  # co-running". Both are FALSE, and the interleaving that falsifies them is this one:
+  #
+  #   A and B both read holder pid P and both get an affirmative `dead`.
+  #   A renames the stale lock aside, removes it, takes the name, publishes pid A -- A is now LIVE.
+  #   B's rename now runs. The name EXISTS again (it is A's fresh, live lock), so B's `mv` SUCCEEDS,
+  #   moving A's lock aside; B removes it and takes the name. A and B now BOTH believe they hold the
+  #   lane, and nothing printed a refusal.
+  #
+  # So the rename serialises the case where the loser arrives BEFORE the winner republishes, and it does
+  # not close the ABA window where the loser arrives AFTER. Closing that needs serialisation across
+  # classify -> reclaim -> claim (the same root as the read-then-remove in `supervisor_lock_release`),
+  # which is one follow-up (#3683) and not a widening of this change: the primitive it needs is a lock
+  # protecting a lock, whose own staleness reopens "how does a stale instance get cleared, and by whom?"
+  # one level down. Two shortcuts are already measured closed -- `mkdir`+`mv` is not atomic (it leaves a
+  # pid-less window), and `mv -T` is NOT `RENAME_NOREPLACE`: it refuses a non-empty target but SUCCEEDS
+  # against an EMPTY one, which is exactly a peer's pid-less window, besides being GNU-only.
+  #
+  # NARROWED, NOT CLOSED: this path is now reached ONLY from an affirmative `dead`, where the pre-#3601
+  # code reclaimed on ANY non-live answer (unparseable pid, EPERM, pid-less window), so the set of states
+  # that can reach the race is much smaller than it was -- but it is not empty. Do not read the paragraph
+  # above as a guarantee; it is a bound.
+  #
+  # `--` on both operands: `TMPDIR`-derived (#3601 AC7).
   if mv -f -- "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null; then
     rm -rf -- "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null || true
   elif [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then
