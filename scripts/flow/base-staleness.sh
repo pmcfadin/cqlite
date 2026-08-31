@@ -60,7 +60,9 @@
 #   4   STALE-RECOGNISED — at least one commit behind touches the blast radius
 #   5   UNMEASURED — the scan could not be performed (no origin/main, no
 #       merge-base, a git invocation failing, an unresolvable subject)
-#   3   usage error
+#   3   usage error — which is also what `--help` exits with, deliberately: exit
+#       0 MEANS `NO-STALENESS-RECOGNISED` here, so a run that measured nothing at
+#       all must never produce it.
 #
 # *** A CONSUMER MUST TREAT 5 / `UNMEASURED` AS STALE, NEVER AS FRESH. ***
 # That is CLAUDE.md's standing rule: never derive a pass from the absence of a
