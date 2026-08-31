@@ -3068,7 +3068,10 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=19   # 20 -> 18: -gate-script-changed and -gate-script-unverifiable. Both
+DECLARED_KIND_COUNT=19   # 18 -> 19: +repo-read-blocked (roborev job 312 — a live-repository read
+                         # that EXCEEDED its bound, which a config `include.path` naming a FIFO
+                         # causes). The step before was 20 -> 18 (-gate-script-changed,
+                         # -gate-script-unverifiable, both
                          # belonged to the in-queue "is the code I am executing the code in the
                          # tree I certify" check, which MOVED OUT of this pre-flight to issue
                          # #3705 — the question needs a bootstrap/re-exec handshake at startup
