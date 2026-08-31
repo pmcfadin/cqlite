@@ -108,6 +108,70 @@ and the motivating case is caught **for the right reason**: the shipped run name
 `matched 5e08db201 gate-global .config/nextest.toml`, so the detection is attributable to the
 culprit rather than coincidental on a count.
 
+## Finding 4 — REVIEW MOVED THE SET AGAIN: `scripts/tests/**` was missing (as shipped: 37/107)
+
+Round-1 review found the gate-global set listed `scripts/agent-gate.sh` but **not the ~16
+`scripts/tests/*.sh` suites the gate RUNS** under `tooling-tests`. A commit behind touching only
+`scripts/tests/test_worker_supervisor.sh` reds *every* lane's full gate regardless of the diff —
+which is the set's own membership predicate — and was reported as not staling.
+
+Measured before adding it, because the owner's condition is that a filter which fires on most
+commits is not a filter:
+
+| set | commits that stale, of 107 | share |
+|---|---|---|
+| any churn (the shape the ruling rejects) | 107 | 100% |
+| gate-global only, before this round | 26 | 24% |
+| **+ `scripts/tests/**`, gate-global only** | 35 | 33% |
+| **AS SHIPPED — union with the diff's own paths** | **37** | **35%** |
+| + `deny.toml` | 35 | adds **0** |
+| + all `scripts/*.sh` helpers | 35 | adds **0** |
+
+Commits touching **only** `scripts/tests/**`: **9**. `deny.toml` and `scripts/*.sh` fire **zero**
+times here and were deliberately **NOT** added — an unmeasured entry bought to look thorough is
+the opposite of what the measurement is for.
+
+**65% of the churn on an 8-day-old base still does not stale a certification.** Re-derived from the
+shipped script at `origin/main` = `b1e8598a2`:
+
+```
+$ bash scripts/flow/base-staleness.sh 4bc6b913a6afc63d2fe7f234152da9b03ea03a89
+BASE-STALENESS: blast-radius 37 RECOGNISED of 107 commits behind
+BASE-STALENESS: matched 5e08db201 gate-global .config/nextest.toml
+BASE-STALENESS: verdict STALE-RECOGNISED                                 (exit 4)
+```
+
+**The list is now DECLARED NON-CLOSED.** Before this round the output disclosed exactly one gap
+(the dependency closure) while having two, presenting the gate-global list as if complete —
+`scripts/tests/**` is the proof it is not. Affirming a completeness we do not have is the failure
+mode this whole issue is about, so the `NON-EXHAUSTIVE` block now names the list itself as a
+declared, non-closed list.
+
+## Finding 5 — A FAIL-OPEN FROM A PORCELAIN/PLUMBING ASYMMETRY (found by review, refined by measurement)
+
+The diff side read paths with **porcelain** `git diff --name-only -z`, which honors
+`diff.renames` (git default **true** since 2.9) — so a rename emits only the **destination**. The
+commit side uses **plumbing** `git diff-tree`, which does not rename-detect. A PR that splits
+`foo.rs` into `foo/mod.rs` (routine under the campsite rule) therefore loses the OLD path, and a
+commit behind that edited it matches neither half: `0 RECOGNISED`, exit 0, while the merge composes
+untested content.
+
+Measured on git 2.43.0 with a `git mv` + edit fixture, which **corrected the prescription**:
+
+```
+diff-tree, default config                    -> BOTH paths
+diff-tree with -c diff.renames=true FORCED   -> BOTH paths      # plumbing IGNORES the config
+diff-tree with explicit -M                   -> destination ONLY
+porcelain diff, diff.relative=true, subdir   -> "foo_renamed.rs"  # no src/ prefix at all
+```
+
+So only the **porcelain** call needs pinning (`--no-renames --no-relative`); `diff.renames` never
+reaches `diff-tree`. And `diff.relative` is the live hazard rather than a theoretical one — from a
+subdirectory it drops the path prefix entirely, making `M` a function of the invoker's **cwd**.
+The plumbing-side risk runs the *other* way: someone later adding `-M` to `diff-tree` would
+reintroduce the asymmetry from the opposite direction, which is what the code comment warns about.
+A comment claiming config leaks into `diff-tree` would be false and would rot.
+
 ## What is still NOT covered, declared rather than implied
 
 Path intersection ∪ gate-global is **not** a dependency closure. A commit that changes a
