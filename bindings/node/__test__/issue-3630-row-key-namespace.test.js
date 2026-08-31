@@ -370,11 +370,21 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
       );
       expect(result.rows.length).toBeGreaterThan(0);
       for (const row of result.rows) {
-        // The value really is null — see the #692 note above.
+        // THE PROTOTYPE CHECK COMES FIRST, DELIBERATELY. Both failure modes are
+        // present on unfixed code, and if the own-property assertion ran first it
+        // would fail first and the report would say only "the column is missing"
+        // — indistinguishable from the ordinary string case, hiding the very
+        // mode this test exists for. MEASURED on unfixed code, this exact query:
+        //   Object.keys(row)                 -> []
+        //   Object.getPrototypeOf(row)===null -> TRUE   <-- the distinguishing fact
+        //   typeof row.hasOwnProperty        -> "undefined"
+        // Note `Object.prototype.toString.call(row)` is '[object Object]' EITHER
+        // WAY, so it cannot detect this and is asserted only as a shape check.
+        expect(Object.getPrototypeOf(row)).not.toBeNull();
+        expect(typeof row.hasOwnProperty).toBe('function');
+        // ...and the null arrived as a VALUE (see the #692 note above).
         expect(ownDataProperty(row, ACCESSOR_COL)).toBeNull();
         expect(Object.keys(row)).toContain(ACCESSOR_COL);
-        // ...and the prototype was NOT replaced by it.
-        expect(Object.getPrototypeOf(row)).not.toBeNull();
         expect(Object.prototype.toString.call(row)).toBe('[object Object]');
       }
     });
