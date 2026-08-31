@@ -699,6 +699,42 @@ const CASES: &[Case] = &[
                 divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
                 why: "golden leaves the frozen inner map (UDT as VALUE) as raw serialized hex; the CLI decodes it",
             },
+            // THE FOUR CONTAINER-KEYED MAPS — a LANE limitation, not a value
+            // disagreement. `compare_map` pairs entries by canonical SCALAR key form
+            // and refuses a container key outright, so these columns are not compared
+            // AT ALL. The skip is whole-column and therefore OVER-SKIPS: it also
+            // suppresses a null, a malformed {key,value} array, a wrong entry count
+            // and a wrong tuple arity here. That cost is accepted and documented
+            // rather than bounded — three review rounds (roborev 302/305/306) showed
+            // that bounding it means reimplementing `compare_map`'s own feature list,
+            // because a Skip is path-scoped to a column and cannot express "compare
+            // everything except the keys". Real support needs a container
+            // representation in `Canon` (scalar-only today); tracked in #3726, and
+            // these four skips go stale and FAIL the lane when it lands.
+            Skip {
+                path: "m_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is tuple<key_part, int>; this lane pairs map keys by canonical scalar form only, so the column is not compared (#3726)",
+            },
+            Skip {
+                path: "f_map_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is frozen tuple<key_part, int>; this lane pairs map keys by canonical scalar form only, so the column is not compared (#3726)",
+            },
+            Skip {
+                path: "f_map_set_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is frozen set<key_part>; this lane pairs map keys by canonical scalar form only, so the column is not compared (#3726)",
+            },
+            Skip {
+                path: "f_map_tuple_list_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is frozen tuple<list<key_part>, int>; this lane pairs map keys by canonical scalar form only, so the column is not compared (#3726)",
+            },
         ],
     },
 ];

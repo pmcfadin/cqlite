@@ -167,6 +167,40 @@ pub enum Divergence {
     /// re-implementing Cassandra's collection and tuple serializers here. This gap
     /// costs the nested value's content; what it does not cost is the shape.
     NestedFrozenValueLeftUndecodedByGolden,
+    /// THIS LANE CANNOT COMPARE A MAP WITH A CONTAINER-TYPED KEY, so the whole
+    /// column is skipped.
+    ///
+    /// **A LANE LIMITATION, NOT A VALUE DISAGREEMENT, AND IT DELIBERATELY
+    /// OVER-SKIPS.** `super::compare_map` pairs entries by their canonical SCALAR
+    /// key form and refuses a container key outright, so the two sides are never
+    /// compared at this position. A reader grepping declared divergences for parity
+    /// defects must NOT count this one.
+    ///
+    /// DDL: the declared type is `map<K, V>` where `K` is a container, decided via
+    /// the same `super::is_scalar_type` predicate `compare_map` refuses on, so the
+    /// gap and the refusal cannot disagree about what a container key is.
+    ///
+    /// **WHAT IT SUPPRESSES, STATED RATHER THAN DISCOVERED (roborev jobs 302/305/306).**
+    /// This matcher reads NO values, so it also suppresses a null, a scalar, a
+    /// malformed `{key,value}` array, a wrong entry COUNT and a wrong tuple ARITY in
+    /// these four columns. Three review rounds tried to bound that by validating
+    /// shape — at the outer level, then the element level, then cardinality — and
+    /// each round found a level the previous one had not reached. The reason is
+    /// structural: the correct scope for this claim is *"compare everything about
+    /// this map EXCEPT the keys"*, and a [`super::SkipPaths`] entry is PATH-SCOPED
+    /// TO A COLUMN, so it cannot express a partial comparison. Every added check was
+    /// therefore reimplementing one more thing `compare_map` already does, and that
+    /// list is `compare_map`'s own feature list — it does not close.
+    ///
+    /// So the shape validation was abandoned and the over-skip is ACCEPTED and
+    /// DOCUMENTED. Over-skipping is honest and visible in the artifact; a claim that
+    /// misdescribes its own subject is neither. The real fix is a canonical
+    /// representation for CONTAINERS in `Canon` (which is scalar-only today, and
+    /// `canon_typed` refuses containers explicitly) plus recursive
+    /// canonicalization — tracked as the container-key comparison follow-up. When it
+    /// lands, `compare_map` no longer refuses, these skips suppress nothing, and
+    /// `Report::stale_skips` FAILS the lane until they are removed.
+    ContainerMapKeyNotPairableByThisLane,
 }
 
 impl Divergence {
@@ -198,6 +232,12 @@ impl Divergence {
                  UNDECODED as a flat scalar (raw bytes as hex for a collection, \
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
+            }
+            Divergence::ContainerMapKeyNotPairableByThisLane => {
+                "the declared map KEY type is a container, which this lane has no rule \
+                 for pairing, so the column is not compared at all — a limitation of \
+                 this comparator, NOT a disagreement between the two sides, and it \
+                 deliberately over-skips (see the variant's docs)"
             }
         }
     }
@@ -301,6 +341,15 @@ impl Divergence {
                 // `{key,value}` objects), so an object, a scalar, a null or a number
                 // here is NOT this gap and is reported as an ordinary diff.
                 matches!(cli, Value::Array(_))
+            }
+            Divergence::ContainerMapKeyNotPairableByThisLane => {
+                // DDL ONLY. No value is read — deliberately, and this is the whole
+                // resolution of jobs 302/305/306: any shape assertion here invites
+                // the next depth (outer kind, element kind, cardinality, arity, …),
+                // and the list of depths is `compare_map`'s feature list. The
+                // over-skip is the accepted, documented cost.
+                let _ = (golden, cli, egress, depth, kinding);
+                matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty))
             }
         }
     }
