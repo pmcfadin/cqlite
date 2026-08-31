@@ -316,8 +316,26 @@ printf 'export AGENT_GATE_SUMMARY_FILE=%q\n' "$SUMMARY" >> "$ENV_SCRIPT"
 # before `exec`: bash has read the whole script by then, and `exec` replaces the process so
 # nothing reads the file again. The launcher trap stays as the fallback for paths where the
 # wrapper never runs at all (a refused launch).
-printf 'rm -f -- %q\n' "$ENV_SCRIPT" >> "$ENV_SCRIPT"
-printf 'exec bash %q "$@"\n' "$REPO_ROOT/scripts/agent-gate.sh" >> "$ENV_SCRIPT"
+# ABSOLUTE tool paths, resolved HERE (roborev job 269, Medium). The wrapper exports the CALLER's
+# PATH before these two lines run, so an unqualified `rm`/`bash` resolves through a PATH this
+# script does not control: a PATH without `rm` makes the self-unlink fail SILENTLY, leaving the
+# 0600 file holding every forwarded secret on disk indefinitely, and a PATH that shadows `bash`
+# decides what we exec. Resolve both in the LAUNCHER's PATH and require absolute executables.
+_rm_abs="$(command -v rm || true)"; _bash_abs="$(command -v bash || true)"
+for _tool_pair in "rm:$_rm_abs" "bash:$_bash_abs"; do
+  _tool_name="${_tool_pair%%:*}"; _tool_path="${_tool_pair#*:}"
+  case "$_tool_path" in
+    /*) [ -x "$_tool_path" ] && continue
+        echo "gate-detached: resolved '$_tool_name' to '$_tool_path', which is not executable." >&2 ;;
+    *)  echo "gate-detached: cannot resolve '$_tool_name' to an absolute path (got '${_tool_path:-nothing}')." >&2 ;;
+  esac
+  echo "               The wrapper needs both to delete its own secret-bearing copy and to exec" >&2
+  echo "               the gate. Refusing rather than emitting a wrapper that may leak it (#3473)." >&2
+  rm -f "$ENV_SCRIPT" 2>/dev/null || true
+  exit 1
+done
+printf '%q -f -- %q\n' "$_rm_abs" "$ENV_SCRIPT" >> "$ENV_SCRIPT"
+printf 'exec %q %q "$@"\n' "$_bash_abs" "$REPO_ROOT/scripts/agent-gate.sh" >> "$ENV_SCRIPT"
 
 # The log is TRUNCATED with `>`, which follows symlinks (roborev job 169, Medium): in a shared
 # directory another user could plant a symlink at a caller-supplied log path and have us
@@ -741,7 +759,31 @@ _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another
 # Per-USER location, not shared /tmp: a lock every launch must take is a denial-of-service surface if any
 # local user can hold it, and XDG_RUNTIME_DIR is mode 0700. The 30s timeout means a held lock refuses
 # loudly rather than hanging.
-_dirlock="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cqlite-gate-launch.lock"
+# REFUSE rather than fall back (roborev job 269, Medium). The paragraph above states the per-user
+# requirement, and the code then fell back to TMPDIR-or-/tmp — a shared, PREDICTABLE, fixed-NAME
+# path any local user can pre-create and hold, permanently refusing every detached launch on the
+# box. (The two PRIVDIR mktemp -d calls above are NOT this bug: mktemp creates a fresh unguessable
+# 0700 directory, so there is no fixed name to squat. The defect is a fixed name, not /tmp itself.)
+# A fallback contradicting its own stated requirement is worse than no fallback: this script's
+# posture everywhere else is to refuse rather than quietly deliver less than it promised, and
+# `systemd-run --user` + lingering, both required above, already imply /run/user/$(id -u) exists.
+# Measured AFFIRMATIVELY: a directory, owned by US, mode 0700. An UNMEASURABLE answer (no stat,
+# unreadable parent) is UNKNOWN and refuses — never "probably fine".
+_rundir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+_rd_owner=""; _rd_mode=""
+if _rd_stat="$(stat -Lc '%u %a' "$_rundir" 2>/dev/null)"; then
+  _rd_owner="${_rd_stat%% *}"; _rd_mode="${_rd_stat##* }"
+fi
+if [ ! -d "$_rundir" ] || [ "$_rd_owner" != "$(id -u)" ] || [ "$_rd_mode" != 700 ]; then
+  echo "gate-detached: no usable per-user runtime directory for the global launch lock." >&2
+  echo "               tried: '$_rundir' (owner=${_rd_owner:-unmeasurable} mode=${_rd_mode:-unmeasurable}; need owner=$(id -u) mode=700)" >&2
+  echo "               A lock every launch must take is a denial-of-service surface if any other" >&2
+  echo "               local user can hold it, so this is NOT falling back to a shared directory." >&2
+  echo "               Remedy: ensure a systemd user session exists (loginctl enable-linger '$(id -un)')," >&2
+  echo "               so /run/user/$(id -u) is present, or export XDG_RUNTIME_DIR to a 0700 dir you own." >&2
+  exit 69
+fi
+_dirlock="$_rundir/cqlite-gate-launch.lock"
 if ! ( : >> "$_dirlock" ) 2>/dev/null; then
   echo "gate-detached: cannot create the directory lock '$_dirlock', so the artifact-set check and the" >&2
   echo "               reservation cannot be made atomic together. Refusing rather than racing another" >&2
@@ -914,12 +956,17 @@ fi
 # semantics above; these are markers with the SAME owner target, so each self-heals by exactly the same
 # rules when its owner dies. Created only after the summary lock is held, and rolled back together if any
 # fails, so a partial set never outlives a refused launch.
-_extra_locks=""
+# An ARRAY, never a space-joined string (roborev job 269, Medium). Iterating an unquoted string
+# word-splits and GLOB-EXPANDS every element, so a space-bearing $SUMMARY made the rollback remove
+# the wrong paths (leaving the real lock behind, so later launches refuse forever) and a glob
+# character could expand onto a LIVE peer's reservation and delete it. This repository tracks 40
+# space-bearing paths, so neither shape is hypothetical.
+_extra_locks=()
 _extra_ok=1
 for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   [ "$_art" = "$SUMMARY" ] && continue
   if ln -s "$_res_target" "$_art.launch-lock" 2>/dev/null; then
-    _extra_locks="$_extra_locks $_art.launch-lock"
+    _extra_locks+=("$_art.launch-lock")
   else
     # A STALE MARKER MUST BE REPLACED, NOT TOLERATED (roborev job 266, High). The first version treated
     # `free` here as "a stale marker of our own shape; harmless" — and that comment was FALSE, in the same
@@ -935,7 +982,7 @@ for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
       free)
         rm -f "$_art.launch-lock" 2>/dev/null || true
         if ln -s "$_res_target" "$_art.launch-lock" 2>/dev/null; then
-          _extra_locks="$_extra_locks $_art.launch-lock"
+          _extra_locks+=("$_art.launch-lock")
         else
           _extra_ok=0; break            # could not take a path we proved reclaimable: refuse, never proceed
         fi ;;
@@ -944,7 +991,7 @@ for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   fi
 done
 if [ "$_extra_ok" != 1 ]; then
-  for _l in $_extra_locks; do rm -f "$_l" 2>/dev/null || true; done
+  for _l in "${_extra_locks[@]}"; do rm -f -- "$_l" 2>/dev/null || true; done
   rm -f "$_reserve" 2>/dev/null || true
   echo "gate-detached: could not reserve every write destination for this launch." >&2
   echo "               One of '$SUMMARY.heartbeat' or '$LOGFILE' is claimed by another run, so a gate" >&2
