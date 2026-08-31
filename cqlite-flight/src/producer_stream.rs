@@ -373,9 +373,10 @@ impl MergeProducer {
             if byte_cap.cut_before(width).is_yes() {
                 self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
             }
-            // Timed for the same reason as the drive loop's: `commit` walks every
-            // projected slot to move staged cells into column-major storage, and that is
-            // work the fold MOVED here from the formerly-timed transpose (roborev round 7).
+            // Timed for the same reason as the drive loop's: `commit` moves the staged
+            // cells into column-major storage — walking only the slots the row filled,
+            // since roborev round 14 — and that is work the fold MOVED here from the
+            // formerly-timed transpose (roborev round 7).
             // The flush above stays outside both windows — it is already Encode's region.
             stage_encode.timed(|| buffer.commit());
             emitted += 1;

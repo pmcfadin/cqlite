@@ -351,8 +351,9 @@ impl<'a> ArrowRowAccumulator<'a> {
         // failed `row.values.get(name)` does — so every slot must be `None` here.
         //
         // It already IS, on every path that reaches this line after a `commit`:
-        // `commit` TAKES every slot unconditionally (not just the filled ones), and
-        // the initial `staged` is all-`None`. An unconditional reset was therefore a
+        // `commit` TAKES every slot IT FILLED (`staged_idx`, which is exact because
+        // `stage` fills only canonical slots), and the initial `staged` is all-`None`.
+        // An unconditional reset was therefore a
         // redundant PROJECTION-WIDTH pass on the hot path, per row — which is work
         // this issue exists to REMOVE, not add (issue #3552, roborev round 12).
         //

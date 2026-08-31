@@ -155,8 +155,9 @@ impl MergeProducer {
                     if byte_cap.cut_before(width).is_yes() {
                         self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
-                    // `commit` is the OTHER half of the push-time transpose — it walks every
-                    // projected slot and moves the staged cells into column-major storage — so it
+                    // `commit` is the OTHER half of the push-time transpose — it moves the
+                    // staged cells into column-major storage (walking only the slots the row
+                    // filled, since roborev round 14) — so it
                     // is timed too, or `stream_encode` under-reports exactly the work the fold
                     // moved here (issue #3552, roborev round 7). The intervening flush is
                     // deliberately OUTSIDE both windows: it is `Encode`'s own region already, and

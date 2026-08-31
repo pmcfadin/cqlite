@@ -265,8 +265,9 @@ mod stage_encode_scope_tests {
     /// `cqlite-core/src/observability/error_schema_tests.rs`.
     ///
     /// The defect this pins (issue #3552, roborev round 7): `commit()` sat OUTSIDE the
-    /// window. It walks every projected slot to move staged cells into column-major
-    /// storage — work the fold MOVED there from the formerly-timed transpose — so
+    /// window. It moves staged cells into column-major storage — work the fold MOVED
+    /// there from the formerly-timed transpose (and since round 14 it walks only the
+    /// slots the row filled, not every projected column) — so
     /// `stream_encode` under-reported wide projections by exactly that walk, while the
     /// docs named only `stage` and so read as if nothing was lost.
     #[test]
