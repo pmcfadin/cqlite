@@ -37,7 +37,6 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$HERE/../.." && pwd)
 GATE="$REPO_ROOT/scripts/agent-gate.sh"
-LIB="$REPO_ROOT/scripts/ci/gate-feature-matrix.sh"
 
 PASS=0; FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -47,13 +46,24 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-annot.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
 [ -r "$GATE" ] || { echo "FAIL - cannot read $GATE"; exit 1; }
-[ -r "$LIB" ]  || { echo "FAIL - cannot read $LIB (#3453)"; exit 1; }
 
-# The library is the subject, so it is SOURCED (not copied) — every unit case below runs
-# the shipped implementation. Sourcing defines `cargo`/`env` wrappers in THIS shell too;
-# harmless, since AGENT_GATE_FM_COMPONENT is unset except where a case sets it.
-# shellcheck source=/dev/null
-. "$LIB"
+# The annotation functions are EXTRACTED OUT OF THE SHIPPED GATE SCRIPT, never copied
+# here — the repo's existing idiom (test_agent_gate_jest_guards.sh,
+# test_cargo_output_parsers.sh): a test that re-implements its subject can only prove that
+# the copy works. FAILS CLOSED — an unextractable function is a FAIL, never a skip, or
+# this guard could pass having tested nothing. (Extraction also defines the `cargo`/`env`
+# wrappers in THIS shell; harmless, since AGENT_GATE_FM_COMPONENT is unset except where a
+# case sets it.)
+for fn in _fm_active _fm_sidecar _fm_note _fm_abbrev_features _fm_describe_cargo \
+          _fm_observe_cargo_argv cargo env _fm_component_class _fm_render _fm_annotate \
+          _fm_summary_line _fm_note_if_skipped; do
+  src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
+  if [ -z "$src" ]; then
+    echo "FAIL - could not extract $fn from $GATE — renamed or reshaped; this guard must not pass having tested nothing (#3453)" >&2
+    exit 1
+  fi
+  eval "$src" || { echo "FAIL - extracted $fn does not parse" >&2; exit 1; }
+done
 
 # ---------------------------------------------------------------------------
 # (A) COMPLETENESS

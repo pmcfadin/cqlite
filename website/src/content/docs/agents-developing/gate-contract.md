@@ -812,7 +812,8 @@ of record). So every component line, in **every** mode (full, `--lite`, `--delta
 carries a bracketed feature matrix. Read it as `<subcommand> <scope> <features>`, one
 entry per distinct invocation, `xN` when the same set ran N times.
 
-**It is DERIVED, not curated** (`scripts/ci/gate-feature-matrix.sh`):
+**It is DERIVED, not curated** (the `#3453` block in `scripts/agent-gate.sh`, kept INLINE
+because eight hermetic self-tests build a synthetic repo by copying that one file):
 
 - `cargo` and `env` are shell **functions** in the gate, so every cargo invocation made
   in the gate's own shell is described **from the real argv about to execute**. There is

@@ -293,8 +293,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
   `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
-  enabled it, which is this issue's whole subject. It is **DERIVED, never curated**
-  (`scripts/ci/gate-feature-matrix.sh`): `cargo` and `env` are shell FUNCTIONS in the gate, so a
+  enabled it, which is this issue's whole subject. It is **DERIVED, never curated**: `cargo` and `env` are shell FUNCTIONS in the gate, so a
   matrix is described from the REAL argv about to execute, and the six components whose cargo calls
   live in a single-quoted `bash -c` body hoist package+features into ONE variable expanded into both
   the argv and the record. The observers are deliberately NOT `export -f`-ed — exporting them would
