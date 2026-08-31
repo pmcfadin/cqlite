@@ -65,23 +65,23 @@
 -- nothing" class this fixture exists to close, so it is closed the same way:
 -- with real Cassandra-written bytes.
 --
--- THE TWO FROZEN MAPS ARE THE ONLY COLUMNS THAT REACH THE HASHABLE PROJECTION'S
--- NEW ARMS, AND THAT IS WHY THEY EXIST (issue #3500).
--- f_map_tuple_udt drives `value_to_hashable_key`'s `Tuple` arm and f_map_set_udt
--- its `Set` arm, end to end, from Cassandra-written bytes; without these two
--- columns both arms could regress with zero test failures. That is the reason
--- the two columns are in this table.
+-- THE `f_map_*` COLUMNS EXIST TO DRIVE THE HASHABLE PROJECTION'S NEW ARMS FROM
+-- CASSANDRA-WRITTEN BYTES (issue #3500).
+-- Each of them drives a specific arm of `value_to_hashable_key` end to end, from
+-- real Cassandra-written bytes; without them those arms could regress with zero
+-- test failures. That is the reason those columns are in this table.
 --
--- The ROUTING that establishes it — which columns reach `value_to_hashable_key`
--- and on which arm, per column, for all nine — is stated in exactly ONE place
--- and is NOT restated here: the ROUTING section of
--- bindings/python/src/value_hashable.rs. This header asserts nothing about it.
--- (The version that lived here said a UDT-bearing `set` column "never calls
--- `value_to_hashable_key` at all", which is false — s_map_udt_key /
--- s_map_udt_val reach it through their INNER frozen map's keys, and
--- m_tuple_udt's keys reach it as a `Value::Blob`. Five of the nine columns
--- reach the function; only these two reach the NEW arms. Scope such a claim to
--- the ARM, never to the function.)
+-- WHICH column drives WHICH arm — and which columns reach
+-- `value_to_hashable_key` at all — is stated in exactly ONE place and is NOT
+-- restated here: the ROUTING section of bindings/python/src/value_hashable.rs.
+-- This header asserts no routing of its own: no reach COUNT, and no "the only
+-- columns that…". Both shapes have been tried here and both drifted — one said a
+-- UDT-bearing `set` column "never calls `value_to_hashable_key` at all"; its
+-- replacement claimed the frozen maps were the only columns reaching the new
+-- arms, and went stale the moment a column was added. A routing-derived count or
+-- exclusivity claim decays wherever it is copied, so it lives only at ROUTING.
+-- Read ROUTING for what is true, and scope any coverage claim to the ARM, never
+-- to the function.
 --
 -- The four issue-named columns are deliberately NON-frozen at the top level, so
 -- each set element / map key is written as a CELL PATH — which is the shape a

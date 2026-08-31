@@ -35,10 +35,12 @@
 # WHICH of these columns reach the Python binding's `value_to_hashable_key`, and
 # on WHICH arm, is stated in exactly ONE place and is NOT restated here:
 # the ROUTING section of bindings/python/src/value_hashable.rs. This header
-# asserts nothing about it. (It was restated in four places in the test file and
-# in both fixture headers, and drifted in all but one — the version that lived
-# here claimed the two frozen maps were the only columns reaching that function
-# "at all", which is false: five of the nine columns do.)
+# asserts no routing of its own, and states no reach COUNT — those decay whenever
+# a column is added, which is exactly how they drifted before. (The claim was
+# restated in several places in the test file and in both fixture headers and
+# drifted in all but one: the version that lived HERE claimed the frozen maps
+# were the only columns reaching that function at all, which is not true. Read
+# ROUTING for what is; a history note must not restate a live fact.)
 #
 # This is a READ-fidelity fixture, not a compaction byte-parity fixture: there
 # is ONE flush and therefore ONE SSTable generation per table, no explicit
@@ -813,7 +815,7 @@ from it — a shorter TOC would require LESS and certify an INCOMPLETE SSTable."
 # with the column NAMES derived from $SCHEMA_FILE's own CREATE TABLE.
 #
 # WHY, and why it is not just a size check: `[[ -s ]]` cannot tell this fixture's
-# four-partition, nine-column golden from a three-partition one, from one missing
+# four-partition, all-columns golden from a three-partition one, from one missing
 # a column across every row, or from a golden dumped from a DIFFERENT table
 # (roborev job 257). All three are valid JSON of a plausible size.
 #
@@ -913,8 +915,8 @@ if depth:
 # the CQL type parameter brackets `<...>`: every column in this table is a nested
 # generic (`map<frozen<tuple<frozen<key_part>, int>>, int>`), so a paren-only
 # depth splits inside a type and yields fragments like `int>>` as column names —
-# measured, and it made the check demand five columns that do not exist while
-# never asserting the nine that do.
+# measured, and it made the check demand columns that do not exist while never
+# asserting the ones that do.
 entries, buf, depth = [], "", 0
 for ch in src[m.end():i - 1]:
     if ch in "(<":

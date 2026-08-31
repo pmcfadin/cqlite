@@ -33,12 +33,11 @@ the ARM for all ten columns. Read it before adding, deleting or re-scoping any
 coverage claim in this module.
 
 This module asserts nothing about that routing, because restating it is what
-went wrong: the claim was made in four places in this file and in both fixture
-headers, and drifted in all but one — every drifted version was the same
-over-broad "only the frozen maps reach the function at all", when six of the ten
-columns do and only three reach the NEW ``Tuple``/``Set`` arms. Hence the one
-rule that survives here: scope a coverage claim to the ARM, never to the
-function.
+went wrong: the claim was made in several places here and in both fixture
+headers and drifted in all but one, always as the same over-broad "only the
+frozen maps reach the function at all". Reach and per-arm split stay at ROUTING:
+a routing-derived COUNT or exclusivity claim decays when a column is added.
+Hence the rule that survives here: scope a claim to the ARM, not the function.
 
 ``contains_udt`` IS A SEPARATE MATTER, AND ITS ``Map`` ARM NEEDED ITS OWN
 COLUMNS. ``set_to_py`` is that function's only caller, so the value it inspects
@@ -594,7 +593,7 @@ class TestTupleBorneUdtInSetElement:
     def test_sparse_row(self, db):
         """id=4: this column decodes even though it is the only one written.
 
-        Asserts THIS column only. The other six columns of id=4 are checked
+        Asserts THIS column only. The other columns of id=4 are checked
         where they belong — each column class has its own
         ``test_absent_in_sparse_row``, and ``TestSelectStarWholeRow`` checks all
         of them together in one ``SELECT *``.
@@ -883,17 +882,16 @@ class TestTupleBorneUdtAsMapKey:
 class TestFrozenMapWithTupleBorneUdtKey:
     """``f_map_tuple_udt`` — ``frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>``.
 
-    ONE OF THE TWO COLUMNS THAT REACH ``value_to_hashable_key``'s ``Tuple`` ARM.
-    Read this before deleting it as redundant with ``s_tuple_udt``.
+    A COLUMN THAT DRIVES ``value_to_hashable_key``'s ``Tuple`` ARM. Read this
+    before deleting it as redundant with ``s_tuple_udt``.
 
     Which columns reach that arm is a CONSEQUENCE of the ROUTING section of
     ``value_hashable.rs``, which states the per-column routes and the mechanisms
-    behind them once; this docstring derives its purpose from that section and
-    asserts no routing of its own. The other one is
+    behind them once; this docstring derives its purpose from there and asserts
+    no routing and no count of its own. Its sibling on that arm is
     :class:`TestFrozenMapWithTupleBorneNestedListUdtKey`, and the division of
     labour matters: this column pins the arm's OUTPUT SHAPE, that one pins its
-    RECURSION, because only there do the ordinary and hashable projections
-    diverge.
+    RECURSION, because only there do the projections diverge.
 
     What this class depends on is the one route that DOES reach it: a FROZEN
     map arrives as ONE value cell, ``parse_frozen_map_value`` →
