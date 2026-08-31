@@ -1,5 +1,14 @@
 use super::*;
 
+// Issue #3612: the cell-path KEY decoder, split out of this file (campsite
+// #1116). A MULTICELL map's key lives in the cell path and used to be decoded
+// from a narrow allowlist here, falling back to an opaque `Value::Blob` for a
+// composite key and ~10 scalar families. Its only caller is the map branch
+// below, so it nests here rather than beside the whole-value decoders.
+mod cell_path_key;
+#[cfg(test)]
+mod cell_path_key_tests;
+
 /// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
 /// element's expiry, as input to [`ExpiryHomogeneity::fold`].
 ///

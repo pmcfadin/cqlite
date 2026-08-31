@@ -788,7 +788,6 @@ pub struct V5CompressedLegacyParser {
 mod block_emit;
 mod block_emit_windowed;
 mod cell_kind;
-mod cell_path_key; // issue #3612 (split out of `complex_column`, campsite #1116)
 mod cell_value;
 // campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
 mod cell_value_complex;
@@ -865,12 +864,6 @@ mod regression_1795_overflow_tests;
 // the value silently degrades to `Blob`.
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
-
-// Issue #3612: the DECODE surface for a MULTICELL map's cell-path KEY — a
-// composite (UDT/tuple/frozen-collection) key and ~10 scalar families used to
-// fall out of a narrow allowlist as an opaque `Blob`.
-#[cfg(test)]
-mod regression_3612_cell_path_key_tests;
 
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
