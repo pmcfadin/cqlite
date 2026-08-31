@@ -846,6 +846,67 @@ else
   bad "3544-manifest-garbage: expected KIND manifest-garbage quoting the offending line"
   printf '%s\n' "$bm_out"
 fi
+# ---------------------------------------------------------------------------
+# LOCALE-INDEPENDENT MANIFEST GRAMMAR (roborev job 297, Low). The manifest documents ASCII
+# `[A-Za-z0-9._-]+`, but the parser used `[:alnum:]`, which is LOCALE-DEPENDENT — so the same
+# manifest was valid on one host and invalid on another. The discriminator is precise: with
+# `[:alnum:]` under a UTF-8 locale a non-ASCII name PARSES, so the run reaches `manifest-stale`
+# (the set simply does not match `COMPONENTS`); with ASCII ranges it is refused as
+# `manifest-garbage`. So KIND alone separates the two implementations.
+#
+# THE CONTROL IS THE LOCALE PICK ITSELF: the case only runs under a locale in which `[:alnum:]`
+# demonstrably DOES accept `café`. On a host where no such locale exists there is nothing to
+# discriminate, and the case says so rather than asserting on an untested premise.
+loc_pick=""
+for _l in en_US.UTF-8 C.UTF-8 en_GB.UTF-8; do
+  if [ "$(LC_ALL="$_l" bash -c 'case "café" in *[![:alnum:]._-]*) echo REJ;; *) echo ACC;; esac' 2>/dev/null)" = ACC ]; then
+    loc_pick="$_l"; break
+  fi
+done
+if [ -z "$loc_pick" ]; then
+  echo "skip - 3544-manifest-locale: no locale on this host makes [:alnum:] accept a non-ASCII name, so the two implementations are indistinguishable here (host precondition, not a waived assertion)"
+else
+  locmani=$(mkbranch locmanifest "$base_ok" - --manifest-lines "$(printf 'file-size\ncaf\303\251')")
+  loc_out=$(LC_ALL="$loc_pick" hook "$locmani")
+  loc_kind=$(field KIND "$loc_out")
+  if [ "$loc_kind" = manifest-garbage ]; then
+    ok "3544-manifest-locale: a non-ASCII manifest name is refused as manifest-garbage even under $loc_pick, where [:alnum:] accepts it (control: that locale was verified to accept it) — the grammar is the documented ASCII one on every host"
+  else
+    bad "3544-manifest-locale: expected KIND manifest-garbage under $loc_pick; got '$loc_kind' (manifest-stale means the non-ASCII name PARSED, i.e. the grammar is still locale-dependent)"
+    printf '%s\n' "$loc_out" | head -4
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# THE CAPTURE REPLAY IS BOUNDED (roborev job 297, Medium). An unbounded `cat` of the captured
+# stdout is not covered by the execution deadline: a descendant outliving a SUCCESSFUL child keeps
+# writing, and `cat` stops only at EOF, which never arrives while a writer outpaces the reader.
+# Measured off-suite with a fast writer: `cat` did not terminate in 6s and the file reached 4.1 GB.
+#
+# WHAT THIS CASE COVERS, AND WHAT IT DELIBERATELY DOES NOT. It pins the CAP — an over-cap capture is
+# REFUSED (not truncated, not replayed) — which is the mechanism that makes the runaway case
+# impossible. It does NOT reproduce the unbounded hang itself: doing so needs a writer with no size
+# limit, and this suite is not going to write gigabytes to a shared filesystem to prove a bound that
+# the cap already makes unreachable. Stated rather than left as an apparent oversight.
+#
+# TWO ARMS, because a cap that refuses EVERYTHING would pass the first arm alone.
+osz_prog="$tmp/oversize-writer.sh"
+{ printf '#!/usr/bin/env bash\n'; printf 'head -c 2000000 /dev/zero | tr "\\\\0" "x"\n'; printf 'exit 0\n'; } >"$osz_prog"
+chmod +x "$osz_prog"
+osz_small="$tmp/small-writer.sh"
+{ printf '#!/usr/bin/env bash\n'; printf 'printf "component-set-small\\\\n"\n'; printf 'exit 0\n'; } >"$osz_small"
+chmod +x "$osz_small"
+osz_out="$tmp/osz.out"; osz_rc=""; small_out="$tmp/small.out"; small_rc=""
+timeout 30 bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 10 "$osz_prog" >"$osz_out" 2>/dev/null; osz_rc=$?
+timeout 30 bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 10 "$osz_small" >"$small_out" 2>/dev/null; small_rc=$?
+osz_line=$(sed -n 's/^RC: //p' "$osz_out" 2>/dev/null)
+small_line=$(sed -n 's/^RC: //p' "$small_out" 2>/dev/null)
+if [ "$osz_rc" != 124 ] && [ "$osz_line" = 198 ] && [ "$small_line" = 0 ] \
+   && grep -q 'component-set-small' "$small_out" 2>/dev/null; then
+  ok "3544-bound-replay-capped: a >1MiB capture is REFUSED (RC 198) promptly rather than replayed, while an under-cap capture still returns 0 AND its bytes reach the caller — the cap discriminates by size, it does not refuse everything"
+else
+  bad "3544-bound-replay-capped: expected oversize RC=198 (got '$osz_line', outer rc='$osz_rc' — 124 means the read was NOT bounded) and small RC=0 with its output replayed (got '$small_line')"
+fi
 
 # STALE: the manifest parses and is well-formed but does NOT match the gate's own array. Built
 # by DERIVING a correct manifest and then dropping one line, so the diagnostic must name that
@@ -4194,7 +4255,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=104
+CASE_FLOOR=105
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
