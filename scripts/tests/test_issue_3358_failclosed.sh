@@ -131,6 +131,13 @@ if [ ! -f "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
   exit 1
 fi
 
+# BASELINE for the safety case, captured before anything is staged. An unanswerable
+# `git status` is recorded as the sentinel `UNMEASURED` rather than as an empty string,
+# because empty means "clean" and would make a failed probe look like a clean baseline —
+# the permissive direction.
+FIXTURE_STATUS_BEFORE=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null) \
+  || FIXTURE_STATUS_BEFORE="UNMEASURED"
+
 # Run the target with an explicit environment. Prints nothing; the caller greps $out.
 run_lane() {
   local out=$1; shift
@@ -225,8 +232,14 @@ did not fail-close, or the run failed for an unrelated reason; see $absent_out"
 fi
 # The target's OWN diagnostic, generation-specific. A bare table-name match is banned:
 # healthy output carries it in the fixture path.
-if grep -q "no directory \`wide_multiclustering_small-\*\` holding \`${DATA_DB}\`" "$absent_out"; then
-  ok "absent: the rejection is this target's own generation-specific diagnostic"
+# PER CASE, not once for the run. A single occurrence satisfied "the guard fired" while
+# two of three cases could have failed for unrelated reasons — the count assert above
+# says three FAILED, not three failed for THIS reason (roborev job 263). Each case panics
+# with this message, so the occurrence count IS the per-case evidence. Measured on a
+# staged absent run: exactly 3, matching `test result: FAILED. 0 passed; 3 failed`.
+absent_diag=$(grep -c "no directory \`wide_multiclustering_small-\*\` holding \`${DATA_DB}\`" "$absent_out")
+if [ "$absent_diag" -ge "$TEST_COUNT" ]; then
+  ok "absent: the generation-specific diagnostic fired for ALL ${TEST_COUNT} cases ($absent_diag occurrences)"
 else
   bad "absent: no 'no directory \`wide_multiclustering_small-*\` holding \`${DATA_DB}\`' \
 line — the failure does not demonstrate THIS guard fired; see $absent_out"
@@ -297,8 +310,11 @@ fi
 # an unrelated failure elsewhere in the output plus the fixture name in a healthy path —
 # and the comment here previously CLAIMED "on one line" while the code did not check it
 # (roborev job 254). That is this lane's own defect class, in the file asserting it.
-if grep -qE "${FIXTURE_DIRNAME}.*Header buffer too small for parsing: 0 bytes" "$empty_out"; then
-  ok "empty: ONE line carries both this fixture and the zero-byte reader rejection"
+# Same per-case requirement, and still same-LINE so the conjunction is real rather than
+# two strings appearing somewhere in the output.
+empty_diag=$(grep -cE "${FIXTURE_DIRNAME}.*Header buffer too small for parsing: 0 bytes" "$empty_out")
+if [ "$empty_diag" -ge "$TEST_COUNT" ]; then
+  ok "empty: the zero-byte rejection fired for ALL ${TEST_COUNT} cases, this fixture named on the same line each time ($empty_diag occurrences)"
 else
   bad "empty: no single line carrying both '$FIXTURE_DIRNAME' and 'Header buffer too \
 small for parsing: 0 bytes' — the run failed for some OTHER reason, which does not \
@@ -323,13 +339,21 @@ fixture_status_rc=$?
 if [ "$fixture_status_rc" -ne 0 ]; then
   bad "safety: 'git status' failed (rc=$fixture_status_rc) — the untouched-fixture check \
 has no evidence and must not report green"
-elif [ -n "$fixture_status" ]; then
-  bad "safety: this self-test dirtied the tracked fixture $FIXTURE_REL"
+elif [ "$fixture_status" != "$FIXTURE_STATUS_BEFORE" ]; then
+  # Compared against the BASELINE, not against clean. Requiring git-clean answered the
+  # wrong question: a reader with a pre-existing uncommitted fixture edit — their own
+  # work, nothing to do with this script — got "this self-test dirtied the tracked
+  # fixture", a false FAIL that also FALSELY ACCUSED this script (roborev job 263). The
+  # property this case owns is a DELTA, "this run changed nothing"; "the tree is clean"
+  # is the gate's own mid-run tree-integrity guard (#2926), not ours.
+  bad "safety: this self-test CHANGED the tracked fixture $FIXTURE_REL \
+(before: '\''${FIXTURE_STATUS_BEFORE:-<clean>}'\'' after: '\''${fixture_status:-<clean>}'\'')"
 elif [ ! -s "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
   bad "safety: the tracked $FIXTURE_REL/$DATA_DB is now EMPTY — case 3 truncated the \
 original instead of its copy"
 else
-  ok "safety: the git-tracked fixture is untouched (git-clean and non-empty)"
+  ok "safety: this run left the tracked fixture UNCHANGED (status identical to the \
+pre-staging baseline, and still non-empty)"
 fi
 
 # Anti-vacuity for THIS harness: `failed: 0` is only meaningful if every case actually
