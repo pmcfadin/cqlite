@@ -323,6 +323,19 @@ print_help() {
 require_numeric_issue() {
   case "${1:-}" in
     *[!0-9]* | '') die_usage "$2 requires a numeric issue number (got '${1:-<none>}')" ;;
+    # LEADING ZERO IS REFUSED, FOR THE SAME REASON lane-lock.sh REFUSES IT (#3436, roborev
+    # round 19). `refs/claims/issue-$issue` is built from this string RAW, so `03436` creates a
+    # DIFFERENT REF from `3436` — two claim refs for one issue, which is the double-claim the
+    # claim ref exists to prevent, and it would be arbitrated correctly by git while protecting
+    # nothing. lane-lock.sh already had this arm and this copy of the same function did not, so
+    # a padded issue was accepted here and then rejected there, degrading an otherwise fine
+    # claim to `lane-lock=unmeasured(probe-exit-N)`.
+    #
+    # REFUSE rather than canonicalise, and the split is deliberate: a tool that MINTS an
+    # identity from the number refuses a spelling it did not choose, because the raw string
+    # becomes the identity; a tool that MATCHES numbers it FOUND (advertised-collision-scan)
+    # canonicalises, because it must reconcile spellings other tools created.
+    0*) die_usage "$2: issue number '${1}' has a leading zero. refs/claims/issue-$1 is derived from this string RAW, so '$1' and its canonical form would be two DIFFERENT claim refs for one issue — pass the canonical number" ;;
   esac
 }
 

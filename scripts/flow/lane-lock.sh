@@ -1080,7 +1080,11 @@ lane_real() {
   # So: walk the components LEFT TO RIGHT and resolve each existing prefix physically, which
   # is the order the kernel uses. `realpath -m` would do it in one call and is GNU-only; this
   # file is declared macOS bash 3.2 compatible (see the header), so it is done here.
+  LANE_REAL_UNRESOLVED=""
   real="$(_resolve_lane_path "$p")"
+  if [ -n "$LANE_REAL_UNRESOLVED" ]; then
+    note "lane dir '$p': could not physically resolve existing component(s) [$LANE_REAL_UNRESOLVED] (unsearchable, or a dangling symlink target). The path is used as spelled, so a DIFFERENT spelling of the same directory may take a different directory mutex. The record is keyed by ISSUE, so the lock itself is still found."
+  fi
   if [ -z "$real" ]; then
     note "could not canonicalise lane dir '$p' (unsearchable or vanished); using the path as given. The record is keyed by ISSUE, so this does not change which lock is read."
     real="$p"
@@ -1115,7 +1119,20 @@ _resolve_lane_path() {
         case "$cur" in */) next="${cur}${comp}" ;; *) next="${cur}/${comp}" ;; esac
         if [ -d "$next" ]; then
           phys="$( cd -P "$next" 2>/dev/null && pwd -P )" || phys=""
-          if [ -n "$phys" ]; then cur="$phys"; else cur="$next"; fi
+          if [ -n "$phys" ]; then
+            cur="$phys"
+          else
+            # AN EXISTING COMPONENT THAT WILL NOT RESOLVE IS SAID, NOT SILENTLY SUBSTITUTED
+            # (#3436, roborev round 19). An unsearchable directory or a dangling symlink target
+            # means canonicalisation FAILED for a component that EXISTS — so two aliases of one
+            # lane can still produce two mutex names, which is the alias hole this resolver
+            # closes elsewhere. It is not made fatal: refusing the acquire would brick a lane on
+            # a permissions problem (FIX 5/14), and the record is keyed by ISSUE so the lock is
+            # still found. But it was previously invisible, and an unresolved path presented as
+            # a resolved one is the permissive branch of an unmeasured state.
+            LANE_REAL_UNRESOLVED="${LANE_REAL_UNRESOLVED:+$LANE_REAL_UNRESOLVED }$next"
+            cur="$next"
+          fi
         else
           cur="$next"
         fi

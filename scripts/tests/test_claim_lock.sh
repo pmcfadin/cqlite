@@ -1382,5 +1382,34 @@ fi
 
 # ===========================================================================
 echo
+# ===========================================================================
+echo 'TEST: a LEADING-ZERO issue is refused, because the claim ref is built from it RAW (round 19)'
+# ===========================================================================
+# `refs/claims/issue-$issue` is derived from the string RAW, so `03436` would create a DIFFERENT
+# ref from `3436` — two claim refs for one issue, i.e. the double-claim the ref exists to prevent,
+# arbitrated correctly by git while protecting nothing. lane-lock.sh already refused this and this
+# copy of the SAME function did not, so a padded issue was accepted here and rejected there,
+# degrading an otherwise fine claim to `lane-lock=unmeasured(probe-exit-N)`.
+#
+# REFUSE, not canonicalise: a tool that MINTS an identity from the number refuses a spelling it
+# did not choose; a tool that MATCHES numbers it FOUND (advertised-collision-scan) canonicalises.
+for sub in status verify claim; do
+  out_z="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_z=$?
+  if [ "$rc_z" -ne 0 ] && printf '%s' "$out_z" | grep -q 'leading zero'; then
+    ok "($sub) a zero-padded issue is refused with the raw-derivation reason"
+  else
+    bad "($sub) a zero-padded issue was accepted: rc=$rc_z
+$out_z"
+  fi
+done
+# CONTROL: the canonical spelling still works — a guard that refuses everything is broken.
+out_c="$(bash "$CLAIM" status 3436 2>&1)"; rc_c=$?
+if [ "$rc_c" -eq 0 ] || printf '%s' "$out_c" | grep -q 'CLAIM: STATUS'; then
+  ok "CONTROL: the canonical issue number is still accepted"
+else
+  bad "CONTROL: the canonical number was refused too: rc=$rc_c
+$out_c"
+fi
+
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
