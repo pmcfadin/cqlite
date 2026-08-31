@@ -647,5 +647,56 @@ json=$out_j
 text=$out_t"
 fi
 
+# ===========================================================================
+# ROUND 18: a LEADING-ZERO issue number must not make a row disappear.
+# ===========================================================================
+# Every comparison in this script is TEXTUAL. `claim.sh` accepts a leading-zero issue, so
+# `refs/heads/issue-0600-slug` is reachable — and against board issue `600` it silently matched
+# nothing, dropping a real row. A false all-clear in the one tool whose contract is that it never
+# gives one.
+#
+# ROUND 17 FOUND THIS ON `--issue` AND I FIXED ONLY THAT SITE. Round 18 found the branch/claim
+# derivations one round later. These cases therefore cover EVERY entry point, not the reported
+# one: the option, a branch ref, a claim ref, and the board row.
+# 0620 is UNUSED by every earlier case (600/601/603 are taken), so a leftover branch cannot make
+# these pass. The FIRST draft called helpers that DO NOT EXIST here (the real ones are
+# `push_branch`/`push_claim`), so no padded branch was ever created and the case passed on the
+# leftover CANONICAL 600 branch from line 108 — a green test that exercised nothing, in the block
+# written to catch exactly that. The draft also suppressed the claim call's exit status, which is
+# the same error-hiding this PR removed from flow-finalize in round 12; no call here is suppressed.
+push_branch 0620                       # a zero-padded BRANCH ref: refs/heads/issue-0620-slug
+GH18="$T/gh-0620"; mk_gh "$GH18" 620   # board carries the CANONICAL number
+out18=$(run_scan "$GH18"); rc18=$?
+if [ "$rc18" -eq 3 ] && printf '%s\n' "$out18" | grep -q '^COLLISION-WINDOW: issue=620 '; then
+  ok "a zero-padded BRANCH (issue-0620-slug) matches board issue 620 and is reported"
+else
+  bad "zero-padded branch dropped the row: rc=$rc18
+$out18"
+fi
+
+out18b=$(run_scan "$GH18" --issue 0620); rc18b=$?
+if [ "$rc18b" -eq 3 ] && printf '%s\n' "$out18b" | grep -q '^COLLISION-WINDOW: issue=620 '; then
+  ok "--issue 0620 selects the same row as the canonical number"
+else
+  bad "--issue 0620 selected nothing: rc=$rc18b
+$out18b"
+fi
+
+# CONTROL: a zero-padded CLAIM ref must SUPPRESS the row. Canonicalisation has to work in the
+# direction that REMOVES a candidate too, or the guard leaks rows rather than dropping them.
+#
+# NOTE ON ITS RED-PROOF: this half PASSES against the pre-fix scan, and that is correct, not a
+# gap. Pre-fix the padded branch produced no row at all, so "no row" was trivially true — an
+# absence assertion cannot tell "correctly suppressed" from "never there". Its force comes from
+# the SEQUENCE above it in a post-fix run: the row is PRESENT at out18/out18b and ABSENT here.
+push_claim 0620
+out18c=$(run_scan "$GH18"); rc18c=$?
+if [ "$rc18c" -eq 1 ] && ! printf '%s\n' "$out18c" | grep -q '^COLLISION-WINDOW: issue=620 '; then
+  ok "CONTROL: a zero-padded CLAIM ref suppresses the row — canonicalisation works both ways"
+else
+  bad "CONTROL: a padded claim ref failed to suppress: rc=$rc18c
+$out18c"
+fi
+
 echo "==== ADVERTISED-COLLISION-SCAN TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

@@ -235,6 +235,21 @@ _scan_dir="$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)" || _scan_dir=""
 [ -z "$_scan_dir" ] || LANE_LOCK_SH="$_scan_dir/lane-lock.sh"
 unset _scan_dir
 
+# canon_issue <n> — strip leading zeros so EVERY issue number in this script is canonical.
+#
+# WHY IT IS A HELPER AND NOT AN INLINE STRIP (#3436, roborev round 18). Round 17 found that
+# `--issue 03436` matched nothing, because every comparison here is TEXTUAL; I canonicalised the
+# OPTION and left the numbers derived from BRANCH refs and CLAIM refs raw. `claim.sh` accepts a
+# leading-zero issue, so `refs/heads/issue-0600-slug` is reachable and would not match board issue
+# `600` — the row silently disappears, which is a false all-clear in the one tool whose contract
+# is that it never gives one. Same defect, one derivation site over, one round later.
+#
+# So canonicalisation happens at EVERY point a number ENTERS this script — the option, the branch
+# refs, the claim refs and the board rows — and nowhere else. That makes "every issue number in
+# this script is canonical" an invariant a reader can check by grepping this function's callers,
+# rather than a property that has to hold at each of the six comparison sites downstream.
+canon_issue() { printf '%s' "$1" | sed 's/^0*\([0-9]\)/\1/'; }
+
 ONLY_ISSUE=""
 AS_JSON=0
 while [ "$#" -gt 0 ]; do
@@ -246,7 +261,7 @@ while [ "$#" -gt 0 ]; do
              # canonical branch and board numbers — so a restricted scan reported "no rows" for
              # an issue that has them. Silent, and in the direction of a false all-clear, in the
              # one tool whose contract is that it never gives one.
-             ONLY_ISSUE="$(printf '%s' "$2" | sed 's/^0*\([0-9]\)/\1/')"
+             ONLY_ISSUE="$(canon_issue "$2")"
              shift 2 ;;
     --json)  AS_JSON=1; shift ;;
     -h|--help) print_help; exit 0 ;;
@@ -271,7 +286,7 @@ scan_branches() {
     ref="$(printf '%s' "$line" | awk '{print $2}')"
     case "$ref" in refs/heads/issue-*) ;; *) continue ;; esac
     rest="${ref#refs/heads/issue-}"
-    num="${rest%%-*}"
+    num="$(canon_issue "${rest%%-*}")"
     # A lane branch is `issue-<N>-<slug>`; a slugless `issue-<N>` is accepted too,
     # because it advertises the same window. Anything non-numeric is not a lane
     # branch and is skipped rather than guessed at.
@@ -300,7 +315,7 @@ scan_claims() {
     [ -n "$line" ] || continue
     ref="$(printf '%s' "$line" | awk '{print $2}')"
     case "$ref" in refs/claims/issue-*) ;; *) continue ;; esac
-    num="${ref#refs/claims/issue-}"
+    num="$(canon_issue "${ref#refs/claims/issue-}")"
     case "$num" in *[!0-9]*|'') continue ;; esac
     CLAIM_ISSUES="${CLAIM_ISSUES}${num}
 "
@@ -367,7 +382,7 @@ scan_board() {
         return 1 ;;
     esac
     [ "$row_repo" = "$BOARD_EXPECT_REPO" ] || continue   # another repo's issue: not ours
-    READY_ISSUES="${READY_ISSUES}${row_num}
+    READY_ISSUES="${READY_ISSUES}$(canon_issue "$row_num")
 "
     READY_COUNT=$((READY_COUNT + 1))
   done <<EOF
