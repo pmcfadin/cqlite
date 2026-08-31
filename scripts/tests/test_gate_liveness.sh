@@ -788,7 +788,7 @@ _proc_scan() { # <file> -> prints offending lines
   grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$1" 2>/dev/null | awk '{
       line = $0; sub(/^[0-9]+:/, "", line);
       if (line ~ /^[[:space:]]*#/) next;
-      if (line ~ /^[[:space:]]*(echo|printf)/ && line !~ /[$]\\(/ && line !~ /`/) next;
+      if (line ~ /^[[:space:]]*(echo|printf)/ && line !~ /[$][(]/ && line !~ /`/) next;
       print
     }'
 }
