@@ -7039,19 +7039,49 @@ test_lane_lock_pidless_window_is_never_read_as_dead() {
   lock="$tmp/cqlite-worker-supervisor-$lane.lock"
 
   # ---- (i) A REAL PEER HOLDING A PID-LESS LOCK THAT IT THEN PUBLISHES.
+  #
+  # THE INTERLEAVING IS SEQUENCED BY OBSERVABLE EVENTS, NOT BY A TUNED `sleep` (see the header note on
+  # this component's latency). A `sleep 0.4` in the peer would be exactly the load-dependent shape that
+  # flakes a serial gate component: under co-scheduled load the peer publishes late, the arriving run
+  # exhausts its window, and a correct implementation reds. So the two processes BLOCK ON EACH OTHER:
+  #
+  #   * the PEER creates the lock, then waits for a sentinel file before publishing;
+  #   * the sentinel is created by the ARRIVING RUN's own first read of the pid file — an override that
+  #     ADDS a `touch` to the shipped parse and changes nothing else, derived by `sv_mutant_override` so
+  #     it cannot drift into a re-implementation;
+  #   * the arriving run then re-reads until the pid appears, which is what it does in production.
+  #
+  # So the ordering is PROVEN rather than hoped: the peer CANNOT publish before the arriving run has
+  # entered the window, and the arriving run does not leave the window until the peer publishes. Load
+  # changes how long the case takes (normally milliseconds) and cannot change what it measures. The two
+  # bounds present are generous safety stops, not tuned values, and each FAILS LOUDLY if reached.
   rm -rf "$lock"
-  fixture_bg bash -c 'mkdir -p "$1"; sleep "$2"; printf "%s\n" "$$" >"$1/pid"; sleep 30' _ "$lock" 0.4
-  peer=$FIXTURE_LAST_PID
-  # Wait for the peer to have CREATED the lock, so the drive genuinely starts inside the window rather
-  # than before it. This is a precondition wait on an observable fact, not a timing guess.
-  local waited=0
-  while [[ ! -d "$lock" && "$waited" -lt 50 ]]; do sleep 0.02; waited=$((waited + 1)); done
-  if [[ -d "$lock" && ! -f "$lock/pid" ]]; then
-    pass "lane-lock AC2 PREMISE (i): the drive below starts with the peer's lock present and PID-LESS — the interleaving is staged, not assumed"
+  local probe_seen="$d/first-read-happened"
+  rm -f "$probe_seen"
+  ovr="$d/m-observe.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_pid_read \
+       "  local f=\"\$1\" first='' line='' n=0 readrc=0" \
+       "  local f=\"\$1\" first='' line='' n=0 readrc=0
+  : >>\"$probe_seen\""; then
+    pass "lane-lock AC2 PREMISE (i): the arriving run's first pid read is observable — the peer's publish is sequenced on it, so the interleaving needs no tuned delay"
   else
-    fail "lane-lock-window-premise: lock present=[$([[ -d "$lock" ]] && echo yes || echo no)] pid present=[$([[ -f "$lock/pid" ]] && echo yes || echo no)] — the window was not staged and the assert below has no subject"
+    fail "lane-lock-window-observer: the observing override could not be derived; the interleaving below would be timing-dependent, so the case stops rather than becoming a flake"
+    return 0
   fi
-  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane" SUPERVISOR_LOCK_PID_TRIES=200 SUPERVISOR_LOCK_PID_WAIT=0.02)"; rc=$?
+  # The peer's wait is bounded so a failed handshake ends the case instead of hanging the suite; it
+  # publishes anyway on expiry, which makes the assert below FAIL loudly rather than block.
+  fixture_bg bash -c 'mkdir -p "$1"; i=0; while [[ ! -e "$2" && "$i" -lt 1500 ]]; do sleep 0.02; i=$((i + 1)); done; printf "%s\n" "$$" >"$1/pid"; sleep 60' _ "$lock" "$probe_seen"
+  peer=$FIXTURE_LAST_PID
+  # Precondition, polled on an OBSERVABLE state change with a generous bound: the lock must exist and be
+  # PID-LESS before the arriving run starts, or the window was never staged.
+  local waited=0
+  while [[ ! -d "$lock" && "$waited" -lt 1500 ]]; do sleep 0.02; waited=$((waited + 1)); done
+  if [[ -d "$lock" && ! -f "$lock/pid" ]] && [[ ! -e "$probe_seen" ]]; then
+    pass "lane-lock AC2 PREMISE (i): the arriving run starts with the peer's lock present and PID-LESS, and the peer is blocked until that run reads it — the interleaving is staged, not assumed"
+  else
+    fail "lane-lock-window-premise: lock present=[$([[ -d "$lock" ]] && echo yes || echo no)] pid present=[$([[ -f "$lock/pid" ]] && echo yes || echo no)] sentinel=[$([[ -e "$probe_seen" ]] && echo yes || echo no)] — the window was not staged and the assert below has no subject"
+  fi
+  out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane" SUPERVISOR_LOCK_PID_TRIES=1500 SUPERVISOR_LOCK_PID_WAIT=0.02)"; rc=$?
   peerpid="$(cat "$lock/pid" 2>/dev/null || true)"
   if [[ "$rc" -ne 0 ]] && lane_refusal_ok "$out" && [[ "$out" != *"reclaiming stale lock"* ]] \
      && [[ -d "$lock" ]] && [[ -n "$peerpid" ]] && [[ "$out" == *"already running (pid $peerpid)"* ]]; then
@@ -7615,7 +7645,7 @@ test_log_size_unmeasurable_is_not_zero() {
   export MAX_ISSUES=1
   export BREAKER_N=2
   export STUCK_POLL_SECS=1
-  export MAX_ITER_SECS=8
+  export MAX_ITER_SECS=6
   jf="$JOURNAL_FILE"
   mkdir -p "$d2/shadow"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$d2/shadow/wc"
@@ -7658,7 +7688,7 @@ test_log_size_unmeasurable_is_not_zero() {
     export MAX_ISSUES=1
     export BREAKER_N=2
     export STUCK_POLL_SECS=1
-    export MAX_ITER_SECS=8
+    export MAX_ITER_SECS=6
     jf3="$JOURNAL_FILE"
     mkdir -p "$d3/shadow"
     printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$d3/shadow/wc"
