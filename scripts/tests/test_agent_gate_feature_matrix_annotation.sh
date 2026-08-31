@@ -196,8 +196,11 @@ for c in core-tests memory-budget integration-tests write-tests cli-tests \
   grep -qE "_fm_observe_child $c\b" "$GATE" || b9+=("$c-does-not-record-in-body")
 done
 fm_end_for_b9=$(grep -n '^# ==== END feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+# COMMENT lines are excluded: this file's own prose names the function repeatedly, and a
+# guard that reds on a comment is a guard people learn to waive.
 stray=$(grep -nE '(^|[^_[:alnum:]])_fm_observe_cargo_argv ' "$GATE" \
   | awk -F: -v e="${fm_end_for_b9:-0}" '$1 > e' \
+  | grep -vE '^[0-9]+:[[:space:]]*#' \
   | grep -v 'AGENT_GATE_FM_COMPONENT=' || true)
 [ -n "$stray" ] && b9+=("parent-side-pre-record: $(printf '%s' "$stray" | cut -d: -f1 | tr '\n' ' ')")
 if [ "${#b9[@]}" -eq 0 ]; then
@@ -397,16 +400,34 @@ esac
 rm -f "$AGENT_GATE_FM_DIR/file-size.features"
 
 # SKIP that never reached cargo: recorded as such, so the line does not read UNDECLARED.
-AGENT_GATE_FM_COMPONENT=oom-audit _fm_note_if_skipped oom-audit SKIP
+AGENT_GATE_FM_COMPONENT=oom-audit _fm_note_if_no_cargo_observed oom-audit SKIP
 got=$(_fm_annotate oom-audit)
 case "$got" in
   *'SKIPped'*) ok "R7: a SKIP before any cargo call renders 'no cargo invoked (component SKIPped)'" ;;
   *) bad "R7: got '$got'" ;;
 esac
 # …and a declared no-cargo component is left exactly as it was.
-AGENT_GATE_FM_COMPONENT=pub-surface _fm_note_if_skipped pub-surface SKIP
+AGENT_GATE_FM_COMPONENT=pub-surface _fm_note_if_no_cargo_observed pub-surface SKIP
 got=$(_fm_annotate pub-surface)
 [ "$got" = '[no-cargo]' ] && ok "R8: the SKIP note does not disturb a declared no-cargo component" || bad "R8: got '$got'"
+# A FAIL that died BEFORE its first cargo call (a fail-closed derivation, a guard script)
+# now legitimately leaves an EMPTY sidecar, because the records moved inside the child body
+# (roborev job 269, blocker 2). It must say so, not read UNDECLARED.
+AGENT_GATE_FM_COMPONENT=cli-tests _fm_note_if_no_cargo_observed cli-tests FAIL
+got=$(_fm_annotate cli-tests)
+case "$got" in
+  *'FAILed before its first cargo invocation'*)
+    ok "R10: a FAIL before any cargo call renders 'no cargo invoked (component FAILed before its first cargo invocation)', not UNDECLARED" ;;
+  *) bad "R10: got '$got'" ;;
+esac
+rm -f "$AGENT_GATE_FM_DIR/cli-tests.features"
+# …but an INDIRECT component that FAILs DID run cargo (under its driver), so claiming "no
+# cargo invoked" there would be affirmatively false. It keeps the via-driver rendering.
+AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_if_no_cargo_observed python-bindings FAIL
+got=$(_fm_annotate python-bindings)
+[ "$got" = '[via maturin: feature set NOT observed]' ] \
+  && ok "R11: an INDIRECT component that FAILs keeps its via-driver rendering (cargo DID run, unobserved)" \
+  || bad "R11: got '$got'"
 
 # The env wrapper must be a pass-through for everything that is not cargo.
 got=$(env FM_TEST_VAR=hello sh -c 'printf %s "$FM_TEST_VAR"')
@@ -682,7 +703,11 @@ exit 1
 FSHIM
 chmod +x "$failshim/cargo"
 
-for fc in write-tests integration-tests minimal-build cli-tests; do
+# cli-tests is deliberately NOT in this loop: under the PASSING shim its Pass-1 zero-tests
+# guard already fires, so its baseline is itself a one-invocation short-circuit and the
+# "strictly fewer" non-vacuity test has no headroom. C-cli-tests (EXACT) is what measures
+# it — and it measures exactly the blocker's motivating case.
+for fc in write-tests integration-tests minimal-build core-tests; do
   pass_n=$(grep -c . "$tmp/exec-$fc.features" 2>/dev/null || echo 0)
   run_differential "$fc" EXACT "" "$failshim" "-shortcircuit"
   fail_n=$FM_LAST_EXEC_COUNT
@@ -712,9 +737,18 @@ done
 # cargo workspace and a real maturin toolchain. So this section measures "given this
 # route and this build outcome, what does the block say" — which is precisely the
 # blocker's subject.
+# NOTE the variable name: bash locals are DYNAMICALLY scoped, so a stub referring to
+# `$plan` would resolve to run_scoped_tests' OWN `local plan` (empty at the moment the stub
+# runs) rather than to this function's argument — the routing then silently fell through to
+# the default `cqlite-core --lib` and all four cases below failed for a reason that had
+# nothing to do with the subject (it did, first try).
 py_run() { # <plan-lines> <build-verify-rc> ; prints the rendered scoped-tests annotation
-  local plan="$1" rc="$2"
-  local scratch="$tmp/py-$rc-$$"; mkdir -p "$scratch/side"
+  local py_plan_in="$1" rc="$2"
+  # A FRESH scratch (and therefore a fresh sidecar) per call: two calls sharing one
+  # sidecar accumulate each other's records, and the second case then measures the first
+  # one's leftovers (it did: `via maturin … x2` on a route that recorded it once).
+  local scratch; scratch=$(mktemp -d "$tmp/py-XXXXXX") || return 1
+  mkdir -p "$scratch/side"
   cat > "$scratch/fake-gate-self" <<FAKESELF
 #!/usr/bin/env bash
 # Stands in for \`bash "\$GATE_SELF" --python-build-verify …\`: writes no active-venv
@@ -724,7 +758,7 @@ FAKESELF
   chmod +x "$scratch/fake-gate-self"
   (
     # Collaborators of run_scoped_tests that are NOT the subject here.
-    classify_scoped_plan() { printf '%s\n' "$plan"; }
+    classify_scoped_plan() { printf '%s\n' "$py_plan_in"; }
     _package_index() { printf '%s\t%s\t%s\n' "$REPO_ROOT/cqlite-core" cqlite-core 1; }
     classify_test_targets() { cat >/dev/null; :; }
     classify_core_dependent_compile_check() { cat >/dev/null; :; }
