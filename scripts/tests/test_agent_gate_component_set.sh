@@ -748,6 +748,64 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3a-iv-quater. THE ANCESTRY WALK READS THE SHARED OBJECT STORE, SO IT IS BOUNDED (roborev job
+#     315, Medium) — and this case is the coverage that finding asked for. A LOOSE object is read
+#     with `open()` + `read()` on a zlib stream, so a FIFO at an object path blocks; a pack
+#     `.idx`/`.pack` FIFO does NOT (git mmaps those, and mmap on a FIFO fails rather than waiting).
+#     I measured the pack case first and wrongly generalised to "the object store is not exposed" —
+#     a harder test along the WRONG AXIS. This case pins the axis that actually blocks.
+#
+#     THE PLANT TARGETS THE **PARENT** COMMIT, and that is what makes it a test of the ancestry
+#     walk rather than of an earlier read. Verified standalone before writing it:
+#       parent object = real file :  rev-parse --verify HEAD^{commit} 2ms   merge-base 2ms
+#       parent object = FIFO      :  rev-parse --verify HEAD^{commit} 2ms   merge-base BLOCKED
+#     FIFOing HEAD's OWN object would block `rev-parse --verify HEAD^{commit}` instead and report
+#     `repo-read-blocked` from that site, passing this case for the wrong reason.
+#
+#     LITE BOUND (15s) not strict (120s): the property is "this read is bounded at all".
+# ---------------------------------------------------------------------------
+anc_fx=$(mkbranch anc-fifo "$(mkbaseline base-anc - )" - )
+anc_ctl=$(hook "$anc_fx")
+anc_objdir=$(git -C "$anc_fx" rev-parse --git-path objects 2>/dev/null)
+case "$anc_objdir" in /*) : ;; *) anc_objdir="$anc_fx/$anc_objdir" ;; esac
+anc_parent=$(git -C "$anc_fx" rev-parse --verify --quiet 'HEAD^^{commit}' 2>/dev/null || true)
+# BLAST-RADIUS GUARD, AND IT MATTERS MORE HERE THAN FOR THE CONFIG CASE. A WORKTREE's object
+# directory is NOT under its own path — it is the SHARED /data/lanes/repo/.git/objects on this
+# fleet. So planting a FIFO in "the fixture's" object store without resolving and checking that
+# path would hang EVERY LANE ON THE BOX. The resolved objects dir must itself lie strictly under
+# $tmp; the fixture path being under $tmp is NOT sufficient evidence for that.
+if [ -z "$anc_parent" ] || [ -z "$anc_objdir" ] \
+   || case "$anc_objdir" in "$tmp"/?*) false ;; *) true ;; esac; then
+  bad "3544-ancestry-bounded: refusing to plant a blocking object: resolved objects dir '$anc_objdir' is not strictly under \$tmp ('$tmp'), or HEAD has no parent commit ('$anc_parent') — a FIFO in a SHARED object store would hang every lane on this box"
+elif [ "$(field KIND "$anc_ctl")" != ok ]; then
+  bad "3544-ancestry-bounded: the POSITIVE CONTROL (same fixture, no FIFO) did not reach KIND ok (got '$(field KIND "$anc_ctl")') — the case cannot discriminate"
+else
+  anc_d=${anc_parent%${anc_parent#??}}; anc_f=${anc_parent#??}
+  anc_obj="$anc_objdir/$anc_d/$anc_f"
+  if [ ! -f "$anc_obj" ]; then
+    echo "skip - 3544-ancestry-bounded: HEAD's parent is packed, not loose ('$anc_obj' absent) — the loose-object path is not plantable in this fixture"
+  else
+    cp "$anc_obj" "$tmp/anc-parent-backup" && rm -f "$anc_obj" && mkfifo "$anc_obj"
+    anc_t0=$(date +%s)
+    anc_out=$( fx "$anc_fx" && bash "$anc_fx/scripts/agent-gate.sh" --component-set-line lite 2>/dev/null )
+    anc_el=$(( $(date +%s) - anc_t0 ))
+    # CLEANUP FIRST AND WITHOUT GIT: remove the FIFO, then RESTORE the real object bytes. The
+    # include.path case taught this — its `git config --unset` cleanup blocked for 10m43s on the
+    # very FIFO it had planted, and `|| true` cannot rescue a hang. Nothing here invokes git.
+    rm -f "$anc_obj" && cp "$tmp/anc-parent-backup" "$anc_obj"
+    anc_kind=$(field KIND "$anc_out")
+    anc_line=$(field COMPONENT_SET_LINE "$anc_out")
+    if [ "$anc_kind" = repo-read-blocked ] && [ "$anc_el" -lt 80 ] \
+       && grep -q 'ancestry walk' <<<"$anc_line" && grep -q 'SHARED object store' <<<"$anc_line"; then
+      ok "3544-ancestry-bounded: a FIFO at a LOOSE object path the ancestry walk must read is BOUNDED and refused by name (repo-read-blocked in ${anc_el}s), and the detail names the walk AND the shared object store"
+    else
+      bad "3544-ancestry-bounded: expected KIND repo-read-blocked well inside the bound (got '$anc_kind' in ${anc_el}s)"
+      printf '%s\n' "$anc_out"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3a-v. THE REF ORACLE'S OUTPUT IS REMOTE-CONTROLLED TEXT, SO IT IS VALIDATED (job 258). The
 #     pre-flight now learns the baseline sha from `git ls-remote` — which downloads no objects
 #     and replaced a 92 MB full-history fetch — and that value is interpolated into later `git`
@@ -4654,7 +4712,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=109
+CASE_FLOOR=110
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))

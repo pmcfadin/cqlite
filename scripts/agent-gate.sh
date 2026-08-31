@@ -5104,7 +5104,7 @@ _component_set_probe_inner() {
     if [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
       _CS_DETAIL="the ancestry walk could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright"
     else
-      _CS_DETAIL="the ancestry walk (git merge-base --is-ancestor) EXCEEDED its ${_CS_BOUND_HINT}s bound reading commit objects from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it with \`git count-objects -v\` and \`find \$(git rev-parse --git-path objects) -type p\`"
+      _CS_DETAIL="the ancestry walk (git merge-base --is-ancestor) EXCEEDED its ${_CS_BOUND_HINT}s bound reading commit objects from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it by resolving the object directory with \`git rev-parse --git-path objects\` and searching that directory for FIFOs with \`find <objdir> -type p\`"
     fi
     return 0
   fi
