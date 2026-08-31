@@ -14,8 +14,8 @@
 //! `statics::drive_partition_rows` (issue #3095), so they cannot drift from the
 //! streaming loop on statics.
 
-use cqlite_core::export::estimate_arrow_row_bytes;
-use cqlite_core::query::{PartitionKeyCache, QueryRow};
+use cqlite_core::export::ArrowRowAccumulator;
+use cqlite_core::query::PartitionKeyCache;
 use cqlite_core::storage::write_engine::merge::MergeStep;
 
 use crate::agg::AggPlan;
@@ -59,7 +59,10 @@ impl MergeProducer {
         // error, panic). `access_path` is `full_scan` for the k-way scan and
         // `streaming_partition_lookup` for the point-read path (issue #2207).
         let mut meter = ScanProgressMeter::new(progress, access_path);
-        let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
+        // Issue #3552: the build pass's transpose stage, run at PUSH time — each
+        // projected cell is resolved ONCE per row, and that same visit charges the
+        // row's payload width. Reused across batches (cleared, never reallocated).
+        let mut buffer = ArrowRowAccumulator::with_capacity(&self.columns, self.batch_size);
         let mut emitted: u64 = 0;
         // Issue #2825: running payload-byte estimate for the rows currently
         // buffered. Advanced by exactly one row's estimate per push and reset on
@@ -129,11 +132,18 @@ impl MergeProducer {
                     // Dual row-cap / byte-cap boundary (issue #2825), test-then-push:
                     // cut on the row that WOULD cross the cap, before it joins the
                     // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
-                    let width = estimate_arrow_row_bytes(&self.columns, &row);
+                    //
+                    // Issue #3552: `stage` resolves the row's cells into the
+                    // columnar store's staging slot and charges the width from
+                    // THOSE cells (one resolution per cell, not two); the staged
+                    // row joins the batch at `commit`, after any cut — the same
+                    // order, and the same numbers, as the estimate/push it
+                    // replaces.
+                    let width = buffer.stage(row);
                     if byte_cap.cut_before(width).is_yes() {
                         self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
-                    buffer.push(row);
+                    buffer.commit();
                     emitted += 1;
                     byte_cap.accumulate(width);
                     if buffer.len() >= self.batch_size {

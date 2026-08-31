@@ -14,8 +14,7 @@
 //! `producer_stream.rs` are already at/over the campsite source threshold
 //! (epic #1116).
 
-use cqlite_core::export::{build_arrow_schema, rows_to_record_batch};
-use cqlite_core::query::QueryRow;
+use cqlite_core::export::{build_arrow_schema, ArrowRowAccumulator};
 
 use crate::batch_bytes::{worst_case_batch_capacity_bytes, BatchByteCap};
 use crate::egress_credit::{count_arrow_array_nodes, CreditedBatch};
@@ -32,14 +31,16 @@ impl MergeProducer {
         Ok(count_arrow_array_nodes(&schema))
     }
 
-    /// Convert `buffer`'s rows into an Arrow batch and clear it.
+    /// Convert `buffer`'s committed rows into an Arrow batch and clear it.
     ///
     /// This is the `do_get` row route's ONLY batch-materialization point — all six
     /// flush sites reach it through [`Self::flush_credited`].
     ///
-    /// The schema is derived from `self.columns` per batch by
-    /// `rows_to_record_batch`, which builds it and hands it straight to its private
-    /// trusted tail, so it is built once and never revalidated. Hoisting that build
+    /// The schema is derived from `self.columns` per batch by the accumulator's
+    /// `to_record_batch`, which builds it with `build_arrow_schema` and hands it
+    /// straight to `RecordBatch::try_new`, so it is built once and never
+    /// revalidated (the same non-revalidating path `rows_to_record_batch` takes).
+    /// Hoisting that build
     /// to once per merge was measured twice on the WS0 corpus and delivered nothing
     /// (issue #3096: +0.30%, 95% CI covering zero, 4.5x below this box's ~1.4%
     /// between-binary code-layout noise floor; the removed per-batch work is
@@ -48,28 +49,20 @@ impl MergeProducer {
     /// Lives here rather than in `producer.rs` (~3.2k lines, far over the campsite
     /// source threshold, epic #1116) beside its only caller,
     /// [`Self::flush_credited`].
+    ///
+    /// Issue #3552: the cells are ALREADY transposed — the accumulator resolved
+    /// each of them once, at push time, when it charged the row's payload width —
+    /// so this runs the builders only, never a second pass over the rows. A
+    /// STAGED-but-uncommitted row (the byte-cap's crossing row) survives the
+    /// clear and opens the next batch, exactly as it used to be pushed into the
+    /// freshly emptied `Vec<QueryRow>`.
     fn flush_buffer(
         &self,
-        buffer: &mut Vec<QueryRow>,
+        buffer: &mut ArrowRowAccumulator<'_>,
     ) -> Result<arrow::record_batch::RecordBatch, ProducerError> {
-        let batch = rows_to_record_batch(&self.columns, buffer)?;
+        let batch = buffer.to_record_batch()?;
         buffer.clear();
         Ok(batch)
-    }
-
-    /// Re-derive the payload estimate of exactly the rows in `buffer`, the way
-    /// the running accumulator was built (one `BatchByteCap::row_width` per row,
-    /// saturating).
-    ///
-    /// Debug-only: this is the O(rows) recomputation the incremental accumulator
-    /// exists to avoid, used solely to keep the accumulator ⇄ buffer invariant in
-    /// [`Self::flush_credited`] enforced rather than merely documented.
-    #[cfg(debug_assertions)]
-    fn recomputed_buffer_payload(&self, buffer: &[QueryRow]) -> usize {
-        let columns = self.output_columns();
-        buffer.iter().fold(0usize, |acc, row| {
-            acc.saturating_add(BatchByteCap::row_width(columns, row))
-        })
     }
 
     /// Reserve egress credit for the buffered rows, materialize them under that
@@ -108,15 +101,20 @@ impl MergeProducer {
     pub(crate) fn flush_credited(
         &self,
         sink: &mut dyn BatchSink,
-        buffer: &mut Vec<QueryRow>,
+        buffer: &mut ArrowRowAccumulator<'_>,
         byte_cap: &mut BatchByteCap,
         n_array_nodes: usize,
     ) -> Result<(), ProducerError> {
         #[cfg(debug_assertions)]
         {
+            // Re-derived from the buffer's STORED cells (issue #3552), row by
+            // row, through the same charging core the running accumulator was
+            // advanced by — the O(rows) recomputation the incremental
+            // accumulator exists to avoid, kept so this invariant is enforced
+            // rather than merely documented.
             assert_eq!(
                 byte_cap.accumulated(),
-                self.recomputed_buffer_payload(buffer),
+                buffer.recomputed_payload(),
                 "flush_credited: `byte_cap.accumulated()` must describe EXACTLY the rows in \
                  `buffer` — a call site that flushed without resetting (or reset without \
                  flushing) would under-reserve here and trip the fail-closed path (issue #2821)"
