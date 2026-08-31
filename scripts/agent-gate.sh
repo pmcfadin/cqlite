@@ -16483,6 +16483,11 @@ run_pub_surface() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_lane_lock.sh (#3436), the regression suite for the
+# machine-local lane-directory lock (scripts/flow/lane-lock.sh), and
+# scripts/tests/test_advertised_collision_scan.sh (#3436 AC5), which pins the scan that
+# makes claim.sh warn about an already-occupied lane directory. Both are hermetic and
+# need no python3, so they run BEFORE this component's python3 gate.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -18144,6 +18149,48 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # machine-local lane-lock regression suite (#3436): hermetic (mktemp lane roots, real
+  # `sleep` processes for liveness, no python3/cargo/gh/git/network/datasets, seconds).
+  # Pins scripts/flow/lane-lock.sh, the lock that refuses a SECOND LOCAL SESSION in an
+  # occupied lane directory — the collision `refs/claims/issue-<N>` cannot stop, because
+  # its holder identity is machine+actor and two Claude sessions on one box share both.
+  # #3436 AC4 requires coverage of BOTH directions with neither passing by doing
+  # nothing, so the suite asserts the OCCUPIED line names the FIRST holder's pid, that a
+  # reclaim actually REWROTE the record and logged the displaced token + liveness +
+  # reason, and that every UNKNOWN-* refusal left the record BYTE-IDENTICAL. Placed
+  # BEFORE the python3 gate because it needs no python3 and must never be reached only
+  # on hosts that happen to have one. A failure FAILs the component, mirroring the
+  # keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_lane_lock.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (machine-local lane-lock regression suite #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # advertised-collision scan guard (#3436 AC5): pins the other half of #3436 — the
+  # scan that makes `claim.sh claim` WARN when it grants a claim for an issue whose lane
+  # directory already exists and is occupied, i.e. the half that makes the two locks
+  # (the remote claim ref and the machine-local lane lock) know about each other. Same
+  # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (advertised-collision scan guard #3436 AC5); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
