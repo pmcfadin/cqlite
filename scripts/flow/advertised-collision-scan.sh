@@ -305,10 +305,19 @@ probe_lane() {
   fi
   verdict="$(printf '%s\n' "${line#LANE-LOCK: }" | awk '{print $1}')" || verdict=""
   liveness="$(printf '%s\n' "$line" | tr ' ' '\n' | grep '^liveness=' | head -1)" || liveness=""
-  dir="$(printf '%s\n' "$line" | tr ' ' '\n' | grep '^lane-dir=' | head -1)" || dir=""
+  # lane-dir is read as THE REST OF THE LINE, never as a space-delimited word: it is the
+  # one field that can legitimately contain spaces (a real filesystem path), and
+  # lane-lock.sh emits it LAST for exactly this reason. A word scan truncated
+  # `/data/my lanes/lane-N` to `/data/my` (#3436 FIX 9b). `holder-lane-dir=`-style keys
+  # cannot answer for it: the match is anchored to the line start or a preceding space.
+  case "$line" in
+    lane-dir=*)    dir="${line#lane-dir=}" ;;
+    *" lane-dir="*) dir="${line#*" lane-dir="}" ;;
+    *)             dir="" ;;
+  esac
   ROW_LL_STATE="${verdict:-unstated}/${liveness#liveness=}"
   [ -n "${liveness}" ] || ROW_LL_STATE="${verdict:-unstated}/unstated"
-  ROW_LL_DIR="${dir#lane-dir=}"
+  ROW_LL_DIR="$dir"
   return 0
 }
 

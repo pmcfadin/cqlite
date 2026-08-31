@@ -182,13 +182,35 @@
 #                     acquired-ts, acquired-epoch, nonce; a reclaim additionally
 #                     records reclaimed-from, reclaimed-prev-liveness, reclaimed-ts,
 #                     reclaim-reason.
-#                     Every value is SANITIZED to one whitespace-free token before it
-#                     is written OR compared (the same discipline as claim.sh's
-#                     `sanitize_field`, restated here rather than sourced — see
-#                     CONSTRAINTS). Without it an `--actor 'flow
+#                     Every IDENTITY value is SANITIZED to one whitespace-free token
+#                     before it is written OR compared (the same discipline as
+#                     claim.sh's `sanitize_field`, restated here rather than sourced —
+#                     see CONSTRAINTS). Without it an `--actor 'flow
 #                     pid=1'`-shaped value could forge a holder field and win FALSE
 #                     re-entrancy on someone else's lane, which is the failure this
 #                     lock exists to make impossible.
+#                     `lane-dir` IS THE ONE EXCEPTION AND IS WRITTEN RAW (#3436 FIX 9a).
+#                     It has to be: it is a real filesystem path, and sanitizing it
+#                     would corrupt any path containing a space — reporting a lane
+#                     directory that does not exist is its own false clean. This
+#                     paragraph previously claimed EVERY value was sanitized, which was
+#                     simply untrue of this one field, in the one paragraph a reader
+#                     relies on for the anti-forgery property. What holds instead:
+#                       * a NEWLINE in `--lane-dir` is REFUSED at the argument boundary
+#                         (require_abs_path), because a newline is the only character
+#                         that could forge a second `key=` LINE in the record;
+#                       * `lane-dir` is not an identity field — it is never compared to
+#                         decide ownership (see record_is_self), so a raw value cannot
+#                         win re-entrancy;
+#                       * a duplicate key still reads UNKNOWN-UNREADABLE, so even a
+#                         forged line fails CLOSED rather than granting anything;
+#                       * on every EMITTED line it is the LAST field, so a consumer
+#                         reads it as the rest of the line rather than as a word (a
+#                         space-delimited scan turned `/data/my lanes/lane-5` into
+#                         `/data/my`, and claim.sh then reported `no-lane-dir` for a lane
+#                         that WAS locked — see claim.sh's msg_rest_field).
+#                     Forging the record by hand remains possible and is INVOKER-CLASS
+#                     per CLAUDE.md's triage rule: recorded, not fortified against.
 #                     Reading parses ONLY `^[a-z-]+=` lines and ignores unknown keys
 #                     (forward compatibility); a DUPLICATE key is UNKNOWN-UNREADABLE
 #                     — fail closed, because two values for one key means the record
@@ -431,6 +453,19 @@ require_abs_path() {
     /*) ;;
     *) die_usage "$1 must be an ABSOLUTE path (got '${2:-<empty>}'): a relative path resolves against each caller's cwd, so two callers would lock two different directories while believing they shared one" ;;
   esac
+  # A NEWLINE IS REFUSED, and it is the only character that needs to be (#3436 FIX 9a).
+  # The record is `key=value`, ONE PER LINE, and `lane-dir` is the one field written RAW
+  # (a real path may contain spaces, so sanitizing it would corrupt it). A newline is
+  # therefore the only value that can forge a second `key=` LINE. Spaces, quotes and
+  # shell metacharacters are all fine in a path and are deliberately preserved.
+  # ($'\n' and NOT "$(printf '\n')": command substitution STRIPS the trailing newline,
+  # yielding an EMPTY needle, and `*""*` matches every string — the check would refuse
+  # every path. Measured: it refused all of them.)
+  case "${2:-}" in
+    *$'\n'*)
+      die_usage "$1 must not contain a NEWLINE: the lock record is one key=value per line and this value is written raw (a path may legitimately contain spaces), so a newline is the one character that could forge a record line"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -620,8 +655,40 @@ record_token() {
   build_token "$REC_MACHINE" "$REC_ACTOR" "$REC_PID" "$(boot_short "$REC_BOOT_ID")" "$REC_START_TICKS"
 }
 
-# record_liveness <our-token> — print exactly one verdict from the CLOSED set in the
-# header. Requires parse_record to have run.
+# record_is_self — is the record OUR identity? A STRUCTURAL comparison of the five
+# identity fields against the resolved G_* values, NEVER a comparison of the joined tokens.
+#
+# #3312's OWN RULE, APPLIED TO THE FILE THAT CITES IT (#3436 FIX 13f): control and data
+# must not share a channel, and the remedy is to REMOVE THE SHARED CHANNEL, not to pick a
+# rarer delimiter. The token is ':'-joined and `sanitize_field` KEEPS ':', so an actor may
+# contain the delimiter — and a chosen `--actor` plus a hand-written record could make a
+# joined string equal another session's and win SELF, with nothing downstream to catch it
+# (the SELF compare deliberately precedes the numeric validation of start-ticks). That
+# exploit is INVOKER-CLASS, so per CLAUDE.md's triage rule it is not a security fix; the
+# structural comparison is simply the correct shape, and it costs one function.
+#
+# The joined form (build_token / record_token) is therefore for DISPLAY and the audit log;
+# the five fields are for COMPARISON. Two deliberately different representations — do not
+# conflate them again.
+#
+# It returns FALSE when this call resolved NO identity of its own (G_TOKEN empty, e.g.
+# `status`) and when our identity is DEGRADED: without boot-id AND start-ticks the values
+# are placeholders and two equally-degraded identities would compare equal, so an
+# affirmative match requires affirmative components.
+record_is_self() {
+  [ -n "${G_TOKEN:-}" ] || return 1
+  [ -n "${G_BOOT:-}" ] && [ -n "${G_TICKS:-}" ] || return 1
+  [ "${REC_MACHINE:-}" = "$G_MACHINE" ] || return 1
+  [ "${REC_ACTOR:-}" = "$G_ACTOR" ] || return 1
+  [ "${REC_PID:-}" = "$G_PID" ] || return 1
+  [ "${REC_START_TICKS:-}" = "$G_TICKS" ] || return 1
+  [ "$(boot_short "${REC_BOOT_ID:-}")" = "$(boot_short "$G_BOOT")" ] || return 1
+  return 0
+}
+
+# record_liveness — print exactly one verdict from the CLOSED set in the header. Requires
+# parse_record to have run, and reads OUR identity from the G_* globals (all empty when the
+# call resolved none, which makes SELF unreachable by construction — `status` relies on it).
 #
 # AFFIRMATIVE MEASUREMENT (CLAUDE.md): every branch below reaches ALIVE or a DEAD-*
 # only from a signal that was actually READ. Anything unread, unrecognised or
@@ -629,10 +696,9 @@ record_token() {
 # unmeasured state can never inherit the permissive answer. Do not "simplify" any of
 # these UNKNOWN-* branches into a fallthrough that returns ALIVE or DEAD-*.
 record_liveness() {
-  local our_token="$1" live_boot rec_token live_ticks state
+  local live_boot live_ticks state
   if [ "$REC_UNREADABLE" -eq 1 ]; then printf 'UNKNOWN-UNREADABLE\n'; return 0; fi
-  rec_token="$(record_token)"
-  if [ "$rec_token" = "$our_token" ]; then printf 'SELF\n'; return 0; fi
+  if record_is_self; then printf 'SELF\n'; return 0; fi
   if [ "$REC_MACHINE" != "$(this_machine)" ]; then printf 'UNKNOWN-FOREIGN\n'; return 0; fi
   if [ "$REC_PID_SCOPE" = "ephemeral" ]; then printf 'UNKNOWN-EPHEMERAL\n'; return 0; fi
   case "${REC_PID:-}" in
@@ -862,7 +928,7 @@ prepare_identity() {
 require_durable_identity() {
   local sub="$1"
   [ "$G_SCOPE" = "ephemeral" ] || return 0
-  emit "ERROR reason=unresolved-identity detail=no-durable-session-process sub=$sub issue=$G_ISSUE pid-scope=$G_SCOPE candidate-pid=$G_PID lane-dir=$G_LANE (NOTHING WAS WRITTEN. This lock records the HOLDER's full process identity, and the only process it could find here is THIS invocation's own shell, which exits when this command returns. A record naming it reads UNKNOWN-EPHEMERAL forever, and every UNKNOWN-* refuses — including YOUR OWN later acquire — so writing it would BRICK the lane rather than lock it. Two corrections, both one line: (1) run this from a shell whose cwd is INSIDE the lane directory, which is what makes the long-lived session process findable — 'cd <lane-dir> && lane-lock.sh $sub $G_ISSUE'; or (2) name the durable process explicitly with '--pid <pid>'. If you are at worktree-CREATION time, do not acquire at all: the session is not in the lane yet, so no durable owner exists — the lock belongs to the session that works IN the lane)"
+  emit "ERROR reason=unresolved-identity detail=no-durable-session-process sub=$sub issue=$G_ISSUE pid-scope=$G_SCOPE candidate-pid=$G_PID (NOTHING WAS WRITTEN. This lock records the HOLDER's full process identity, and the only process it could find here is THIS invocation's own shell, which exits when this command returns. A record naming it reads UNKNOWN-EPHEMERAL forever, and every UNKNOWN-* refuses — including YOUR OWN later acquire — so writing it would BRICK the lane rather than lock it. Two corrections, both one line: (1) run this from a shell whose cwd is INSIDE the lane directory, which is what makes the long-lived session process findable — 'cd <lane-dir> && lane-lock.sh $sub $G_ISSUE'; or (2) name the durable process explicitly with '--pid <pid>'. If you are at worktree-CREATION time, do not acquire at all: the session is not in the lane yet, so no durable owner exists — the lock belongs to the session that works IN the lane) lane-dir=$G_LANE"
   return 1
 }
 
@@ -896,7 +962,7 @@ self_fields() {
 _acquire_locked() {
   local liveness prev_token
   if parse_record "$G_RECORD"; then
-    liveness="$(record_liveness "$G_TOKEN")"
+    liveness="$(record_liveness)"
     prev_token="$(record_token)"
     case "$liveness" in
       SELF)
@@ -905,7 +971,7 @@ _acquire_locked() {
         # OCCUPIED case below. claim.sh's machine+actor re-entrancy is precisely why
         # the claim ref could not stop #3436's second local session, so this must
         # NEVER be relaxed to a machine+actor comparison.
-        emit "ACQUIRED (re-entrant) issue=$G_ISSUE lane-dir=$G_LANE $(self_fields) record=$G_RECORD"
+        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE"
         return 0
         ;;
       DEAD-*)
@@ -919,12 +985,12 @@ _acquire_locked() {
           return 1
         fi
         append_audit "$G_LOG" "verdict=ACQUIRED-RECLAIMED issue=$G_ISSUE token=$G_TOKEN prev-token=$prev_token prev-liveness=$liveness reason=auto-reclaim-dead-holder"
-        emit "ACQUIRED (reclaimed) issue=$G_ISSUE lane-dir=$G_LANE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD"
+        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD lane-dir=$G_LANE"
         return 0
         ;;
       *)
         # ALIVE and every UNKNOWN-* REFUSE. AC2: the refusal NAMES the occupant.
-        emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE liveness=$liveness $(holder_fields) our-token=$G_TOKEN"
+        emit "OCCUPIED issue=$G_ISSUE liveness=$liveness $(holder_fields) our-token=$G_TOKEN lane-dir=$G_LANE"
         return 2
         ;;
     esac
@@ -934,7 +1000,7 @@ _acquire_locked() {
     return 1
   fi
   append_audit "$G_LOG" "verdict=ACQUIRED issue=$G_ISSUE token=$G_TOKEN prev-token=<none> prev-liveness=<none> reason=free-lane"
-  emit "ACQUIRED issue=$G_ISSUE lane-dir=$G_LANE $(self_fields) record=$G_RECORD"
+  emit "ACQUIRED issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE"
   return 0
 }
 
@@ -997,12 +1063,12 @@ cmd_verify() {
     emit "VERIFY-FAIL issue=$issue reason=no-lock $(self_fields) lane-dir=$lane"
     return 2
   fi
-  liveness="$(record_liveness "$G_TOKEN")"
+  liveness="$(record_liveness)"
   if [ "$liveness" = "SELF" ]; then
-    emit "VERIFY-OK issue=$issue lane-dir=$lane $(self_fields) acquired-ts=${REC_ACQUIRED_TS:-<none>}"
+    emit "VERIFY-OK issue=$issue $(self_fields) acquired-ts=${REC_ACQUIRED_TS:-<none>} lane-dir=$lane"
     return 0
   fi
-  emit "VERIFY-FAIL issue=$issue lane-dir=$lane reason=not-holder liveness=$liveness $(holder_fields) our-token=$G_TOKEN"
+  emit "VERIFY-FAIL issue=$issue reason=not-holder liveness=$liveness $(holder_fields) our-token=$G_TOKEN lane-dir=$lane"
   return 2
 }
 
@@ -1073,7 +1139,7 @@ cmd_probe() {
   # them, but re-read anyway so the parse and the comparison are adjacent and no future
   # edit can separate them.
   parse_record "$record" || true
-  liveness="$(record_liveness "$G_TOKEN")"
+  liveness="$(record_liveness)"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
   emit "HELD issue=$issue liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN our-identity=$(identity_state) record=$record${mismatch:+ lane-dir-mismatch=$mismatch} lane-dir=$lane"
   return 0
@@ -1087,13 +1153,13 @@ _release_locked() {
   if ! parse_record "$G_RECORD"; then
     # IDEMPOTENT on purpose: cleanup paths (trap handlers, a supervisor's teardown, a
     # second operator) must be safe to run twice or after a crash.
-    emit "RELEASED (already free) issue=$G_ISSUE lane-dir=$G_LANE record=absent"
+    emit "RELEASED (already free) issue=$G_ISSUE record=absent lane-dir=$G_LANE"
     return 0
   fi
   prev_token="$(record_token)"
-  liveness="$(record_liveness "$G_TOKEN")"
+  liveness="$(record_liveness)"
   if [ "$force" != "1" ] && [ "$liveness" != "SELF" ]; then
-    emit "RELEASE-REFUSED issue=$G_ISSUE lane-dir=$G_LANE reason=not-holder liveness=$liveness $(holder_fields) our-token=$G_TOKEN"
+    emit "RELEASE-REFUSED issue=$G_ISSUE reason=not-holder liveness=$liveness $(holder_fields) our-token=$G_TOKEN lane-dir=$G_LANE"
     return 2
   fi
   if ! rm -f "$G_RECORD"; then
@@ -1102,9 +1168,9 @@ _release_locked() {
   fi
   append_audit "$G_LOG" "verdict=RELEASED issue=$G_ISSUE token=$G_TOKEN prev-token=$prev_token prev-liveness=$liveness reason=$([ "$force" = 1 ] && echo forced-release || echo holder-release)"
   if [ "$force" = "1" ] && [ "$liveness" != "SELF" ]; then
-    emit "RELEASED issue=$G_ISSUE lane-dir=$G_LANE mode=forced prev-token=$prev_token prev-liveness=$liveness"
+    emit "RELEASED issue=$G_ISSUE mode=forced prev-token=$prev_token prev-liveness=$liveness lane-dir=$G_LANE"
   else
-    emit "RELEASED issue=$G_ISSUE lane-dir=$G_LANE $(self_fields)"
+    emit "RELEASED issue=$G_ISSUE $(self_fields) lane-dir=$G_LANE"
   fi
   return 0
 }
@@ -1126,7 +1192,7 @@ cmd_release() {
   # creating the root (a release must not have to make a directory to say "already
   # free"). The check moved from the lane dir to the lock root with the files.
   if [ ! -d "$(lock_root)" ]; then
-    emit "RELEASED (already free) issue=$issue lane-dir=$lane record=absent"
+    emit "RELEASED (already free) issue=$issue record=absent lane-dir=$lane"
     return 0
   fi
   prepare_identity "$issue" "$lane" "$actor" ""
@@ -1179,7 +1245,7 @@ _reclaim_locked() {
   local have=0
   if parse_record "$G_RECORD"; then have=1; prev_token="$(record_token)"; fi
   if [ "$have" -eq 1 ]; then
-    liveness="$(record_liveness "$G_TOKEN")"
+    liveness="$(record_liveness)"
   else
     liveness="NO-RECORD"
   fi
@@ -1191,25 +1257,30 @@ _reclaim_locked() {
   # does NOT hold, the verdict names BOTH values.
   if [ "$liveness" = "SELF" ]; then
     if [ "$expect" = "$prev_token" ]; then
-      emit "RECLAIMED (re-entrant) issue=$G_ISSUE lane-dir=$G_LANE $(self_fields) from=$expect"
+      emit "RECLAIMED (re-entrant) issue=$G_ISSUE $(self_fields) from=$expect lane-dir=$G_LANE"
     else
-      emit "RECLAIMED (re-entrant, lease-mismatch expected=$expect actual=$prev_token) issue=$G_ISSUE lane-dir=$G_LANE $(self_fields) — we DO hold the lane, but the compare-and-swap precondition did NOT hold"
+      # A DISTINCT VERDICT WORD (#3436 FIX 13i): the FIRST token is what a caller matches
+      # on, and both this and a satisfied CAS exit 0 — so calling this one `RECLAIMED` made
+      # a VIOLATED --expect invisible to any consumer that does not read prose. The exit
+      # code stays 0 on purpose: we demonstrably DO hold the lane, and reporting
+      # RECLAIM-LOST would make a session abandon a lane it owns.
+      emit "RECLAIM-LEASE-MISMATCH (re-entrant: we DO hold the lane, but the compare-and-swap precondition did NOT hold) issue=$G_ISSUE expected=$expect actual=$prev_token $(self_fields) lane-dir=$G_LANE"
     fi
     return 0
   fi
 
   if [ "$expect" = "none" ]; then
     if [ "$have" -eq 1 ]; then
-      emit "RECLAIM-LOST issue=$G_ISSUE lane-dir=$G_LANE expected=none actual=$prev_token liveness=$liveness $(holder_fields)"
+      emit "RECLAIM-LOST issue=$G_ISSUE expected=none actual=$prev_token liveness=$liveness $(holder_fields) lane-dir=$G_LANE"
       return 2
     fi
   else
     if [ "$have" -eq 0 ]; then
-      emit "RECLAIM-LOST issue=$G_ISSUE lane-dir=$G_LANE expected=$expect actual=<none> liveness=$liveness"
+      emit "RECLAIM-LOST issue=$G_ISSUE expected=$expect actual=<none> liveness=$liveness lane-dir=$G_LANE"
       return 2
     fi
     if [ "$prev_token" != "$expect" ]; then
-      emit "RECLAIM-LOST issue=$G_ISSUE lane-dir=$G_LANE expected=$expect actual=$prev_token liveness=$liveness $(holder_fields)"
+      emit "RECLAIM-LOST issue=$G_ISSUE expected=$expect actual=$prev_token liveness=$liveness $(holder_fields) lane-dir=$G_LANE"
       return 2
     fi
   fi
@@ -1221,7 +1292,7 @@ _reclaim_locked() {
     return 1
   fi
   append_audit "$G_LOG" "verdict=RECLAIMED issue=$G_ISSUE token=$G_TOKEN prev-token=${prev_token:-<none>} prev-liveness=$liveness reason=$reason"
-  emit "RECLAIMED issue=$G_ISSUE lane-dir=$G_LANE $(self_fields) from=$expect prev-token=${prev_token:-<none>} prev-liveness=$liveness reason=$reason"
+  emit "RECLAIMED issue=$G_ISSUE $(self_fields) from=$expect prev-token=${prev_token:-<none>} prev-liveness=$liveness reason=$reason lane-dir=$G_LANE"
   return 0
 }
 
@@ -1273,7 +1344,8 @@ status_one() {
     emit "FREE issue=$issue_hint liveness=NO-RECORD record=absent lane-dir=$lane_hint"
     return 0
   fi
-  liveness="$(record_liveness '')"
+  # No identity is resolved in `status`, so SELF is unreachable by construction.
+  liveness="$(record_liveness)"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
   emit "HELD issue=${REC_ISSUE:-$issue_hint} liveness=$liveness reclaimable=$reclaimable $(holder_fields) record=$record lane-dir=${REC_LANE_DIR:-$lane_hint}"
 }

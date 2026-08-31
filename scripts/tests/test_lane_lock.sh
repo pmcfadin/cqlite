@@ -505,17 +505,22 @@ fi
 # never reported as a satisfied one (mirrors `claim.sh adopt`).
 tok=$(token_of 403)
 ll reclaim 403 --expect none --reason re-entrant-retry-after-confirm-blip --actor flow --pid "$D"; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'RECLAIMED (re-entrant, lease-mismatch expected=none actual=' \
-   && printf '%s' "$out" | grep -q "actual=$tok"; then
-  ok "re-entrant reclaim with a violated lease: rc=0 naming BOTH expected=none and actual=<our token>"
+# THE VERDICT WORD ITSELF MUST DIFFER (#3436 FIX 13i): both this and a satisfied CAS exit
+# 0, so a consumer matching on the first token (or on the exit code) could not otherwise see
+# that its --expect did NOT hold. The exit code stays 0 — we demonstrably hold the lane.
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIM-LEASE-MISMATCH ' \
+   && printf '%s' "$out" | grep -q 'expected=none' \
+   && printf '%s' "$out" | grep -q "actual=$tok" \
+   && ! printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED'; then
+  ok "re-entrant reclaim with a violated lease: its own verdict word RECLAIM-LEASE-MISMATCH (never RECLAIMED), rc=0, naming BOTH expected=none and actual=<our token>"
 else
-  bad "expected a re-entrant, lease-mismatch verdict naming both values; got rc=$rc
+  bad "expected the distinct RECLAIM-LEASE-MISMATCH verdict naming both values; got rc=$rc
 $out"
 fi
 
 ll reclaim 403 --expect "$tok" --reason re-entrant-retry-lease-held --actor flow --pid "$D"; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'RECLAIMED (re-entrant)' \
-   && ! printf '%s' "$out" | grep -q 'lease-mismatch'; then
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED (re-entrant)' \
+   && ! printf '%s' "$out" | grep -qi 'lease-mismatch'; then
   ok "re-entrant reclaim whose lease DID hold: plain RECLAIMED (re-entrant), no phantom mismatch"
 else
   bad "expected a plain re-entrant verdict when --expect matches; got rc=$rc

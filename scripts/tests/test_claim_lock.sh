@@ -956,6 +956,44 @@ else
 $err21f"
 fi
 
+# (h) A SPACE-BEARING LANE PATH (#3436 FIX 9b). `lane-dir` is the one field written RAW —
+# it is a real filesystem path — and claim.sh read it with a space-delimited word scan, so
+# `/data/my lanes/lane-38` became `/data/my`, the `[ -d ]` probe failed, and AC5 reported
+# `no-lane-dir` for a lane that EXISTS: a false clean produced by a parser, about the lock
+# whose entire job is preventing false cleans. lane-lock.sh now emits lane-dir LAST and
+# claim.sh reads it as the rest of the line.
+SPACE_ROOT="$T/my lanes"
+mkdir -p "$SPACE_ROOT/lane-38"
+rc=0
+out21h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPACE_ROOT" bash "$CLAIM" claim 38 2>"$T/err21h" ) || rc=$?
+rc21h=$rc
+err21h=$(cat "$T/err21h" 2>/dev/null)
+if [ "$rc21h" -eq 0 ] && printf '%s\n' "$out21h" | grep -q 'CLAIM: HELD' \
+   && printf '%s\n' "$out21h" | grep -q 'lane-lock=free' \
+   && ! printf '%s\n' "$out21h" | grep -q 'no-lane-dir'; then
+  ok "(h) FIX9b: an EXISTING lane directory whose path contains a SPACE reports lane-lock=free, not no-lane-dir"
+else
+  bad "(h) expected lane-lock=free for a space-bearing lane path; got rc=$rc21h
+$out21h
+$err21h"
+fi
+
+# ...and the same path must survive into the OCCUPANT description, which is the half a
+# reader acts on.
+LANE_LOCK_PID=$OCCUPANT_PID LANE_ROOT="$SPACE_ROOT" bash "$LANELOCK" acquire 39 --lane-dir "$SPACE_ROOT/lane-39" >/dev/null 2>&1
+rc=0
+out21h2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPACE_ROOT" bash "$CLAIM" claim 39 2>"$T/err21h2" ) || rc=$?
+err21h2=$(cat "$T/err21h2" 2>/dev/null)
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out21h2" | grep -q 'CLAIM: HELD' \
+   && printf '%s\n' "$out21h2" | grep -q 'lane-lock=occupied-alive' \
+   && printf '%s\n' "$err21h2" | grep -qF "lane-dir=$SPACE_ROOT/lane-39"; then
+  ok "(h) FIX9b: the occupant note carries the WHOLE space-bearing path ($SPACE_ROOT/lane-39), not its first word"
+else
+  bad "(h) expected the full space-bearing lane-dir in the occupant note; got rc=$rc
+$out21h2
+$err21h2"
+fi
+
 # (g) control: the field is not a constant. Four claims above measured four
 # different lane states, so a hard-coded value cannot satisfy all of them, and
 # `self` vs `occupied-alive` in particular cannot be one value.
