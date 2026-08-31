@@ -96,8 +96,12 @@ TABLE="row_collide"
 
 SCHEMA_FILE="$ROOT/schemas/issue-3630-row-collision.cql"
 
-# Every INSERT pins this timestamp so the committed sstabledump JSONL golden is
-# reproducible across regenerations instead of carrying a wall clock.
+# Every INSERT pins this timestamp, which stabilises liveness_info.tstamp in the
+# committed golden. It does NOT make the golden fully reproducible: row 2's
+# explicit CQL NULL writes a CELL TOMBSTONE whose local_delete_time is a wall
+# clock no CQL clause can pin (MEASURED — see
+# test-data/fixtures/issue_3630/README.md). Do not byte-compare the golden
+# across regenerations.
 T_FIXED=1000
 
 while [[ $# -gt 0 ]]; do

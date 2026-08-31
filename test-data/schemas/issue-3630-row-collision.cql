@@ -85,16 +85,34 @@
 --
 -- DELIBERATELY TINY, UNCOMPRESSED AND TIME-PINNED. No CompressionInfo.db: the
 -- fixture is a committed binary and the property under test is ABOVE decode.
--- Every INSERT carries an explicit USING TIMESTAMP 1000 so the committed
--- sstabledump JSONL golden is reproducible across regenerations instead of
--- carrying a wall clock.
+-- Every INSERT carries an explicit USING TIMESTAMP 1000, which pins
+-- liveness_info.tstamp in the committed sstabledump JSONL golden.
+--
+-- BUT THE GOLDEN IS NOT FULLY REPRODUCIBLE, AND THE FIRST DRAFT OF THIS COMMENT
+-- CLAIMED OTHERWISE. Row 2 writes an explicit CQL NULL, which produces a CELL
+-- TOMBSTONE carrying local_delete_time -- a wall clock (nowInSeconds) that NO
+-- CQL clause can pin. That one field differs on every regeneration. Same
+-- residual issue-3504-udt-collision.cql records for its collection tombstones.
+-- Do not byte-compare the golden across regenerations; compare value cells, or
+-- normalise local_delete_time away first. Recorded rather than tolerated
+-- because an overclaim in a committed fixture is what stops the next reader
+-- checking.
 --
 -- THE THREE ROWS (one per case the spec's first requirement names):
 --   1. id=1 — all four collision columns non-null (strings), real_col set.
 --             The string-valued `__proto__` case: the column must SURVIVE as an
 --             own enumerable data property.
---   2. id=2 — "__proto__" NULL, the other three set. The prototype-replacement
---             case: the row's prototype must be UNCHANGED.
+--   2. id=2 — "__proto__" written as an explicit CQL NULL, the other three set.
+--             MEASURED on the generated golden: this is a CELL TOMBSTONE with NO
+--             value cell, so it is NOT the prototype-replacement case it was
+--             drafted as. The replacement mode needs a null to be ASSIGNED, and
+--             with no entry in the decoded value map `row_to_object` SKIPS the
+--             column (the #1446 "declared but valueless columns are skipped,
+--             never null-filled" contract) so no assignment happens. Row 2's
+--             real role is therefore that SKIP path, which this change must
+--             preserve. The prototype-replacement oracle is a Rust-level unit
+--             test over `row_to_object` with a map explicitly holding
+--             `Value::Null`. See test-data/fixtures/issue_3630/README.md.
 --   3. id=3 — none of the collision columns set, real_col only. The contrast
 --             case, which pins that the fix is a property of the CONSTRUCTION
 --             and not of the data.
