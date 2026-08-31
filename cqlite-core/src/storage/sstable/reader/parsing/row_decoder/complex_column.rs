@@ -685,35 +685,10 @@ impl V5CompressedLegacyParser {
             // therefore the ROOT-CAUSE fix; peeling wrappers afterwards could not
             // reach the INNER one.
             //
-            // WHY MARSHAL BEATS SCHEMA HERE — from CASSANDRA, not from our own code.
-            // `SerializationHeader.getType` (cassandra-5.0.8,
-            // `src/java/org/apache/cassandra/db/SerializationHeader.java`) is:
-            //
-            //     public AbstractType<?> getType(ColumnMetadata column)
-            //     {
-            //         return typeMap == null ? column.type : typeMap.get(column.name.bytes);
-            //     }
-            //
-            // So Cassandra's OWN read path decodes with the header's recorded type and
-            // falls back to the live schema's `column.type` only when the header carries
-            // no type map. The recorded type is not a guess — it is what the writer put
-            // beside these bytes, and after an `ALTER` the on-disk bytes conform to IT and
-            // not to the current schema. Decoding old bytes with a newer schema is how you
-            // mis-decode them.
-            //
-            // This does NOT contradict CLAUDE.md's "schema, else `Statistics.db`". That
-            // rule is about where type information may come from AT ALL — prefer declared
-            // metadata, never infer a type from byte patterns (issue #28). It is not a
-            // claim that a user-supplied schema overrides the writer's recorded type for
-            // the same column; `getType` above settles that question the other way.
-            //
-            // R7 is deliberately NARROWER than Cassandra's `getType`:
-            // `prefer_udt_marshal_element` takes the marshal ONLY when it is UDT-bearing
-            // and otherwise keeps the schema form, so no non-UDT map key changes
-            // behaviour. One consequence, and it is correct rather than unfortunate: a
-            // user-supplied schema that DISAGREES with the recorded type on a UDT-keyed
-            // multicell map is now ignored, which is exactly the case Cassandra resolves
-            // in the header's favour.
+            // Precedence (marshal over schema) is Cassandra's own, not ours: see
+            // `map_key_type_for_decode`'s doc, which carries the `SerializationHeader
+            // .getType` citation and the scope qualifications. It is the one home for
+            // this rule, so the justification lives there too.
             let (schema_key_type, schema_value_type) = self.extract_map_types(&column.data_type)?;
             let marshal_map_elements = Self::extract_marshal_collection_elements(complex_type);
             let (marshal_key, marshal_value) = match &marshal_map_elements {
@@ -726,35 +701,32 @@ impl V5CompressedLegacyParser {
             // wrapper fixup on this side (roborev round 8, finding 1).
             let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key_type);
             // DECLARED GAP — THE VALUE HALF IS EXERCISED BY NO TEST AT ANY TIER.
+            // Stated affirmatively, not left silent: a green gate over this line would
+            // read as coverage and is not. The question is never whether a line is
+            // right, it is WHICH LANE EXECUTES IT, and here the answer is none.
             //
-            // Stated affirmatively rather than left silent, because a green gate over
-            // this line would read as coverage and it is not: the question is never
-            // whether a line is right, it is WHICH LANE EXECUTES IT, and here the
-            // answer is none.
+            // MEASURED over the committed schemas, with the detector proved against
+            // planted positives first so its "no" is evidence and not a broken parse:
+            // the corpus has 5 multicell `map<..>` columns (`mm`, `m_list_vals`, `cm`,
+            // `tm`, `m_tuple_udt`), 3 UDT-bearing on the KEY and 0 on the VALUE (value
+            // types: `int`, `frozen<list<int>>`, `int`, `int`, `int`). So this returns
+            // the schema form for every map value that exists, and is observably inert.
             //
-            // MEASURED over the committed schemas (detector proved against planted
-            // positives first, so its "no" is evidence and not a broken parse): there
-            // are 5 multicell `map<..>` columns in the whole corpus — `mm`,
-            // `m_list_vals`, `cm`, `tm`, `m_tuple_udt` — of which 3 are UDT-bearing on
-            // the KEY and **0 are UDT-bearing on the VALUE** (the five value types are
-            // `int`, `frozen<list<int>>`, `int`, `int`, `int`). So
-            // `prefer_udt_marshal_element` returns the schema form for every map VALUE
-            // that exists today, and this line is observably inert: no fixture, and
-            // therefore no test at any tier, distinguishes it from the pre-R7 code.
-            //
-            // It is kept, not removed, and both halves of that matter. Removing it
-            // would leave KEY selection on the marshal and VALUE selection on the
-            // schema — an asymmetry that is itself a latent defect, and one nobody
-            // would find, since no fixture reaches either side. Keeping it silently
-            // would be worse than either. Its justification is the SAME primary source
-            // as the key half's (`SerializationHeader.getType`, cited above): the
-            // recorded type is what the writer put beside these bytes.
-            //
-            // What would close this gap is a fixture with a UDT-VALUED multicell map
-            // (e.g. `map<text, frozen<collide>>`); the corpus has none.
+            // Kept, not removed: removing it would leave KEY selection on the marshal
+            // and VALUE selection on the schema, an asymmetry that is itself a latent
+            // defect and one nobody would find, since no fixture reaches either side.
+            // Same justification as the key half (see `map_key_type_for_decode`). What
+            // closes it is a UDT-VALUED multicell map fixture (`map<text,
+            // frozen<collide>>`); the corpus has none.
             let value_type =
                 Self::prefer_udt_marshal_element(marshal_value, &schema_value_type).to_string();
             let mut entries = Vec::with_capacity(prealloc_cap);
+            // Issue #3612 (roborev round 8, finding 2): count the entries whose key
+            // could not be modelled, and report ONCE below. The decoder used to
+            // `warn!` per entry, which on a large scan is `entries x rows` identical
+            // lines — a log flood that can exhaust storage and that destroys the
+            // only number an operator needs, namely how many entries were affected.
+            let mut opaque_key_entries: usize = 0;
 
             for i in 0..cell_count_usize {
                 let cell =
@@ -818,7 +790,17 @@ impl V5CompressedLegacyParser {
                         cell.path_bytes.len()
                     );
                     // For cell path keys, parse directly without expecting length prefixes
-                    Some(self.parse_cell_path_key(&cell.path_bytes, &key_type, &column.name)?)
+                    let mut opaque = false;
+                    let decoded = self.parse_cell_path_key_reporting(
+                        &cell.path_bytes,
+                        &key_type,
+                        &column.name,
+                        &mut opaque,
+                    )?;
+                    if opaque {
+                        opaque_key_entries += 1;
+                    }
+                    Some(decoded)
                 } else {
                     None
                 };
@@ -844,6 +826,22 @@ impl V5CompressedLegacyParser {
                         entries.push((key_value, Value::Null));
                     }
                 }
+            }
+
+            // ONE line per column per row, carrying the COUNT. Content unchanged
+            // from the per-entry version it replaces; only its cardinality changed.
+            if opaque_key_entries > 0 {
+                tracing::warn!(
+                    target: "cqlite::decode",
+                    column = %column.name,
+                    declared_type = %key_type,
+                    affected_entries = opaque_key_entries,
+                    total_entries = cell_count_usize,
+                    "multicell map key type is not one this reader can decode; those \
+                     keys are surfaced as opaque bytes (issue #3612). Check that the \
+                     schema (or the on-disk SerializationHeader) resolves it, e.g. \
+                     that a UDT named here is registered."
+                );
             }
 
             Value::Map(entries)

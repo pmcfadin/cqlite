@@ -301,11 +301,34 @@ impl V5CompressedLegacyParser {
     /// from the schema (`frozen<collide>`, `int`) or a Cassandra marshal form from
     /// `Statistics.db` (`org.apache.cassandra.db.marshal.UserType(…)`) — and is
     /// forwarded WITH ITS CASE INTACT (see the module header).
+    /// Decode a cell-path key. Convenience form that DISCARDS the
+    /// undecodable-key signal; see [`Self::parse_cell_path_key_reporting`].
     pub(super) fn parse_cell_path_key(
         &self,
         data: &[u8],
         type_str: &str,
         column_name: &str,
+    ) -> Result<Value> {
+        let mut opaque = false;
+        self.parse_cell_path_key_reporting(data, type_str, column_name, &mut opaque)
+    }
+
+    /// Decode a cell-path key and REPORT whether it surfaced as opaque bytes.
+    ///
+    /// `opaque_out` is set when the declared type is one this reader cannot model,
+    /// so the caller can aggregate. It is a caller-side signal rather than a
+    /// `warn!` here because this function runs ONCE PER MAP ENTRY: a scan of a
+    /// table with an unmodellable key type would emit `entries x rows` identical
+    /// lines, which floods the log, can exhaust log storage, and destroys the one
+    /// number an operator actually wants — HOW MANY entries were affected
+    /// (roborev round 8, finding 2). The caller emits at most one line per column
+    /// per row, carrying that count; the message's content is unchanged.
+    pub(super) fn parse_cell_path_key_reporting(
+        &self,
+        data: &[u8],
+        type_str: &str,
+        column_name: &str,
+        opaque_out: &mut bool,
     ) -> Result<Value> {
         let allowed = self.cell_path_key_allowed_widths(type_str);
         if !allowed.is_empty() && !allowed.contains(&data.len()) {
@@ -370,16 +393,7 @@ impl V5CompressedLegacyParser {
         // key DECLARED `blob`, which is a correct decode and stays silent —
         // which is the misleading-diagnostic half of issue #3612.
         if matches!(probe, Value::Blob(_)) && !self.cell_path_key_declares_blob(type_str) {
-            tracing::warn!(
-                target: "cqlite::decode",
-                column = column_name,
-                declared_type = type_str,
-                bytes = data.len(),
-                "multicell map key type is not one this reader can decode; the key \
-                 is surfaced as opaque bytes (issue #3612). Check that the schema \
-                 (or the on-disk SerializationHeader) resolves it, e.g. that a UDT \
-                 named here is registered."
-            );
+            *opaque_out = true;
         }
         // Returned EXACTLY as the shared decoder produced it. There is deliberately
         // no presentation fixup here any more: both map readers now receive the same

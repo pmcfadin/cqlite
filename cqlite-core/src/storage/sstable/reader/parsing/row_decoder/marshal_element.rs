@@ -163,6 +163,37 @@ impl V5CompressedLegacyParser {
     /// normalizer bolted onto one side (which is what round 3 did, and what left
     /// this hole one nesting level down).
     ///
+    /// # WHY MARSHAL BEATS SCHEMA AT ALL — from CASSANDRA, not from our own code
+    ///
+    /// `SerializationHeader.getType` (cassandra-5.0.8,
+    /// `src/java/org/apache/cassandra/db/SerializationHeader.java`) is:
+    ///
+    /// ```text
+    /// public AbstractType<?> getType(ColumnMetadata column)
+    /// {
+    ///     return typeMap == null ? column.type : typeMap.get(column.name.bytes);
+    /// }
+    /// ```
+    ///
+    /// Cassandra's OWN read path decodes with the header's recorded type and falls
+    /// back to the live schema's `column.type` only when the header carries no type
+    /// map. The recorded type is not a guess — it is what the writer put beside
+    /// these bytes, and after an `ALTER` the on-disk bytes conform to IT, not to the
+    /// current schema. Decoding old bytes with a newer schema is how you mis-decode
+    /// them.
+    ///
+    /// This does NOT contradict CLAUDE.md's "schema, else `Statistics.db`". That
+    /// rule is about where type information may come from AT ALL — prefer declared
+    /// metadata, never infer a type from byte patterns (issue #28). It is not a
+    /// claim that a user-supplied schema overrides the writer's recorded type for
+    /// the same column; `getType` settles that question the other way.
+    ///
+    /// We are deliberately NARROWER than `getType`: the marshal is taken ONLY when
+    /// it is UDT-bearing, so no non-UDT map key changes behaviour. One consequence,
+    /// correct rather than unfortunate: a user-supplied schema that DISAGREES with
+    /// the recorded type on a UDT-keyed multicell map is ignored — exactly the case
+    /// Cassandra resolves in the header's favour.
+    ///
     /// The strip is applied ONLY to the marshal form. When
     /// `prefer_udt_marshal_element` keeps the SCHEMA short form — every non
     /// UDT-bearing key — both readers already receive that same unstripped string
