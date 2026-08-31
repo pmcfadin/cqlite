@@ -2618,16 +2618,21 @@ supervisor_lock_take() {
   # has already removed the directory we just created — contention — and with EACCES/ENOSPC when the
   # filesystem cannot take a zero-byte file. Reporting the first as the second sends an operator to check
   # a disk that is fine.
-  if ! { : >"$marker"; } 2>/dev/null && [[ ! -d "$SUPERVISOR_LOCK" ]]; then
-    SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed-lock-gone cleanup-declined-lock-already-gone'
-    return 3
-  fi
-  if [[ ! -e "$marker" && ! -L "$marker" ]]; then
+  # ONE OUTCOME VARIABLE, SO EACH BRANCH HAS A LINE OF ITS OWN. An earlier cut folded the write and the
+  # existence re-test into two `if`s whose conditions were indistinguishable from the un-create's, which
+  # made a mutant unable to name either uniquely — `sv_mutant_override` correctly refused it.
+  local marker_written=0
+  if { : >"$marker"; } 2>/dev/null; then marker_written=1; fi
+  if [[ "$marker_written" -eq 0 ]]; then
     # NO OWNERSHIP EVIDENCE, SO NO REMOVAL. We know we created the directory and we cannot PROVE the one
     # at that name now is still ours, so it is left in place and reported. That risks the empty-lock wedge
     # B1 removed — but the cause is a filesystem that cannot take a zero-byte file, the same failure the
     # remedy names, and guessing our way to a deletion is how a peer's lock gets destroyed.
-    SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed cleanup-declined-no-ownership-evidence'
+    if [[ ! -d "$SUPERVISOR_LOCK" ]]; then
+      SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed-lock-gone cleanup-declined-lock-already-gone'
+    else
+      SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed cleanup-declined-no-ownership-evidence'
+    fi
     return 3
   fi
   # `supervisor_lock_publish` runs in a command substitution, which is a SUBSHELL — fine, because it

@@ -8750,9 +8750,13 @@ test_lane_lock_sweep_no_unobserved_attribution() {
   mkdir -p "$lock"
   printf '%s\n' "$dead" >"$lock/pid"
   ovr="$d/f-take.sh"; : >"$ovr"
+  # THE NAME MUST BE OCCUPIED FOR THIS TO BE A LOST RACE (#3601, roborev job 244 B20). This override used
+  # to just `return 1`, which after the reclaim left NOTHING at the name — and B20 correctly reports that
+  # as a path failure, not a race. So the fault now also holds the name, which is what a lost race means.
   if sv_mutant_override "$ovr" supervisor_lock_take \
        '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
-       '  return 1'; then
+       '  mkdir -p -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  return 1'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -ne 0 ]] && [[ "$out" == *"taken again before this run could claim it"* ]] \
        && [[ "$out" == *"both unestablished"* ]] \
@@ -9007,7 +9011,7 @@ test_lane_lock_uncreate_is_bound_to_the_created_instance() {
   local ovrk
   ovrk="$d/f-marker.sh"; : >"$ovrk"
   if sv_mutant_override "$ovrk" supervisor_lock_take \
-       '  if ! { : >"$marker"; } 2>/dev/null; then' \
+       '  if [[ "$marker_written" -eq 0 ]]; then' \
        '  if true; then'; then
     out="$(lane_lock_drive_at "$d" "$ovrk" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -ne 0 ]] && [[ "$out" == *"did NOT attempt to remove"* ]] \
@@ -9143,9 +9147,8 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
   rm -rf "$lock"
   ovr="$d/f-marker-gone.sh"; : >"$ovr"
   if sv_mutant_override "$ovr" supervisor_lock_take \
-       '  if ! { : >"$marker"; } 2>/dev/null && [[ ! -d "$SUPERVISOR_LOCK" ]]; then' \
-       '  rm -rf -- "$SUPERVISOR_LOCK"
-  if true; then'; then
+       '  if { : >"$marker"; } 2>/dev/null; then marker_written=1; fi' \
+       '  rm -rf -- "$SUPERVISOR_LOCK" 2>/dev/null || true'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -ne 0 ]] && [[ "$out" == *"ALREADY GONE"* ]] \
        && [[ "$out" == *"This is CONTENTION, not a filesystem fault"* ]] \
@@ -9182,7 +9185,10 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
   if [[ -z "$body" || "$body" != *'supervisor_lock_refuse_publish_failed() {'* ]]; then
     fail "lane-lock-sweep-structural-premise: could not extract the refusal from $SUPERVISOR"
   else
-    hardcoded="$(printf '%s\n' "$body" | grep -n 'remedy=' | grep -v 'first_action' || true)"
+    # Anchored on an INDENTED assignment, so the function's own `local … remedy='' …` declaration is not
+    # matched — an earlier cut of this guard flagged that line and reported a defect that was not there,
+    # which is this diff's own family showing up in a guard written for it.
+    hardcoded="$(printf '%s\n' "$body" | grep -nE '^ +remedy=' | grep -v 'first_action' || true)"
     if [[ -z "$hardcoded" ]]; then
       pass "lane-lock sweep STRUCTURAL: every remedy branch derives its first action from the failure's NATURE — no branch hard-codes an action that could be aimed at the wrong cause"
     else
