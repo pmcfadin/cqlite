@@ -317,6 +317,70 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
   });
 
   // ==========================================================================
+  // The ALIAS route — the issue's own "minimal repro needs no fixture" claim,
+  // and the only route that reaches the NULL-VALUED case
+  // ==========================================================================
+
+  describe('reached by a SELECT alias rather than a declared column', () => {
+    // MEASURED (task 1.1): `SELECT id AS __proto__` IS supported, so the issue's
+    // claim that a minimal repro needs no fixture at all is TRUE. Recorded here
+    // as a SECOND subject, never a substitute for the Cassandra-written fixture —
+    // the fixture is what proves the DECODER can carry such a column name, which
+    // an alias applied to an ordinary column does not.
+    //
+    // ALSO MEASURED: a QUOTED alias is a parse error ("Expected alias name after
+    // AS"), so these queries must use the unquoted form. That is a CQL-parser gap
+    // orthogonal to this issue; it is recorded, not worked around.
+
+    test('an aliased column named `__proto__` is an own data property', async () => {
+      const result = await db.executeNative(
+        'SELECT id AS __proto__ FROM test_row_collision.row_collide'
+      );
+      expect(result.columns.map((c) => c.name)).toEqual([ACCESSOR_COL]);
+      for (const row of result.rows) {
+        expect(ownDataProperty(row, ACCESSOR_COL)).toEqual(expect.any(Number));
+        expect(Object.keys(row)).toEqual([ACCESSOR_COL]);
+        expect(Object.getPrototypeOf(row)).not.toBeNull();
+      }
+    });
+
+    test('a NULL-valued column named `__proto__` does NOT replace the prototype', async () => {
+      // THIS IS THE SECOND, HARSHER FAILURE MODE, and this query is the ONLY
+      // route to it that exists today. Assigning a STRING to `__proto__` is a
+      // silent no-op; assigning NULL is the one case the inherited accessor
+      // HONOURS, so an unfixed `[[Set]]` REPLACES the row's prototype with null
+      // and the row silently stops being a normal object.
+      //
+      // The fixture CANNOT reach this (measured): an explicit CQL null is a cell
+      // TOMBSTONE, so the column arrives with no value at all, `row_to_object`
+      // skips it, and there is no assignment to intercept — see
+      // test-data/fixtures/issue_3630/README.md. And it cannot be reached from a
+      // Rust unit test either: a real `ConvCtx` needs a live napi `Env`, which
+      // `value_tests.rs` records as unavailable there.
+      //
+      // `TTL(col)` is the route because its evaluation is NOT YET WIRED (#692) so
+      // it returns `Value::Null` — a genuine null VALUE present in the row's
+      // value map, which is exactly the input required. If #692 lands and TTL
+      // starts returning a real integer, THIS TEST WILL SILENTLY STOP COVERING
+      // THE NULL CASE: the `toBeNull()` assertion below is what fails loudly then,
+      // and the remedy is to find another null-valued route rather than to relax
+      // it.
+      const result = await db.executeNative(
+        'SELECT TTL(real_col) AS __proto__ FROM test_row_collision.row_collide'
+      );
+      expect(result.rows.length).toBeGreaterThan(0);
+      for (const row of result.rows) {
+        // The value really is null — see the #692 note above.
+        expect(ownDataProperty(row, ACCESSOR_COL)).toBeNull();
+        expect(Object.keys(row)).toContain(ACCESSOR_COL);
+        // ...and the prototype was NOT replaced by it.
+        expect(Object.getPrototypeOf(row)).not.toBeNull();
+        expect(Object.prototype.toString.call(row)).toBe('[object Object]');
+      }
+    });
+  });
+
+  // ==========================================================================
   // #1446's ordering contract must survive
   // ==========================================================================
 
