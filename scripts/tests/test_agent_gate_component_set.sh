@@ -1043,6 +1043,7 @@ if [ -z "$wd_outer" ]; then
   echo "skip - 3544-bound-grandchild: same precondition (no outer host bound available)"
   echo "skip - 3544-bound-success-stray: same precondition (no outer host bound available)"
   echo "skip - 3544-bound-success-stray-control: same precondition (no outer host bound available)"
+  echo "skip - 3544-bound-owned-pgid: same precondition (no outer host bound available)"
 else
 wd_rc_line=$( fx "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 "$ticker" 2>/dev/null | sed -n 's/^RC: //p' )
@@ -1251,6 +1252,40 @@ else
   bad "3544-bound-success-stray: expected the capture to close on its own (outer rc='$succ_rc' want 0, reported RC='$succ_line' want 0, control rc='$succ_ctl_rc' want 124)"
 fi
 reap_ticker "$succpid"
+
+# ---------------------------------------------------------------------------
+# THE PROCESS GROUP IS STILL OURS WHEN IT IS SIGNALLED (roborev job 279). The watchdog arm used to
+# background the COMMAND, making the pgid the command's own pid, and then sent an unconditional
+# `kill -KILL -$pid` after a one-second grace — by which time the command and its descendants may
+# all have exited and bash may already have REAPED the leader, releasing that id. On a box running
+# four lanes the group that inherits it is most likely A PEER LANE'S GATE; this repository has the
+# incident on record (a pattern-based `pkill` killed a peer's gate at component 28 of 30).
+#
+# WHAT IS OBSERVABLE, AND WHAT IS NOT. The race itself cannot be constructed: pid reuse is not
+# controllable, so there is no honest positive control for "the signal went to a released group",
+# and inventing one would be worse than not having it. What the fix DOES make observable is that
+# the group is still ours to kill on the SUCCESS path — a stray descendant is now REAPED there,
+# where the previous shape left it running (it only signalled on the timeout path). That is a
+# genuine before/after difference on this arm, so it is what the case asserts; the ownership
+# invariant itself is asserted STRUCTURALLY below and labelled as such.
+#
+# The bash-watchdog arm is forced with a curated PATH, because a host with `timeout` never takes it.
+own="$tmp/owned-stray.sh"
+owntick="$tmp/owned-stray-tick.txt"
+ownpid="$tmp/owned-stray.pid"
+mk_ticker "$own" "$owntick" "$ownpid" 0 2
+: >"$owntick"
+own_rc=$( fx "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+            --component-set-bounded-run 5 "$own" 2>/dev/null | sed -n 's/^RC: //p' )
+own_at=$(wc -l <"$owntick" | tr -d ' ')
+sleep 3
+own_later=$(wc -l <"$owntick" | tr -d ' ')
+if [ "$own_rc" = 0 ] && [ "$own_later" = "$own_at" ]; then
+  ok "3544-bound-owned-pgid: on the bash-watchdog arm a SUCCESSFUL call still reaps its process group (stray frozen at $own_at) — the group is signalled while the supervisor holding it is alive, not after its id could have been released"
+else
+  bad "3544-bound-owned-pgid: expected rc 0 and a reaped stray (rc='$own_rc' ticks $own_at -> $own_later)"
+fi
+reap_ticker "$ownpid"
 fi
 
 # …and with NO mechanism at all the command must NOT RUN. This is the load-bearing half:
@@ -2355,6 +2390,35 @@ elif [ "$cfg_chmod_ln" -lt "$cfg_write_ln" ]; then
   ok "3544-config-mode-first: the isolated config is chmod 600 (line $cfg_chmod_ln) BEFORE the credential-bearing URL is written into it (line $cfg_write_ln)"
 else
   bad "3544-config-mode-first: the URL write (line $cfg_write_ln) precedes the chmod (line $cfg_chmod_ln) — a token would be world-readable in between"
+fi
+
+# ---------------------------------------------------------------------------
+# 7s. STRUCTURAL: EVERY SIGNAL IN THE BOUNDED RUNNER TARGETS THE SUPERVISOR IT KEEPS ALIVE
+#     (roborev job 279). Labelled structural on purpose — the race it prevents (a released pgid
+#     reused by an unrelated group, most likely a peer lane's gate) cannot be constructed in a
+#     test, so this asserts the PROPERTY THAT MAKES IT IMPOSSIBLE rather than the absence of the
+#     symptom: the group leader is a supervisor that parks after running the command, so its pid
+#     cannot be released while the escalation is in flight, and no `kill` names anything else.
+#
+#     Fail-closed on its own derivation: if the arm cannot be located the case FAILs rather than
+#     reporting a clean scan of nothing.
+# ---------------------------------------------------------------------------
+# COMMENT LINES ARE EXCLUDED, and that is not cosmetic: this function's header DISCUSSES the
+# signals it used to send (`kill -KILL -$pid`), so counting them made the assert report 2 of 6 and
+# fail on correct code. A structural check must read code, not prose about code.
+own_arm=$(awk '/^_component_set_bounded\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+own_kills=$(printf '%s\n' "$own_arm" | grep -c 'kill -' || true)
+own_sup_kills=$(printf '%s\n' "$own_arm" | grep -c 'kill -[A-Z]* "-\$sup"' || true)
+own_park=$(printf '%s\n' "$own_arm" | grep -c 'sleep "\$(( secs + 5 ))"' || true)
+own_stale=$(printf '%s\n' "$own_arm" | grep -c 'kill -[A-Z]* "-\$pid"' || true)
+if [ "${own_kills:-0}" -lt 2 ] || [ "${own_park:-0}" -lt 1 ]; then
+  bad "3544-owned-pgid-structural: could not locate the escalation in _component_set_bounded (kills=$own_kills park=$own_park) — the shape changed or the scan broke (fail-closed: this is not a clean result)"
+elif [ "${own_stale:-0}" -ne 0 ]; then
+  bad "3544-owned-pgid-structural: a signal still targets '-\$pid' ($own_stale occurrence(s)) — that id is the COMMAND's, which bash may have reaped by the time the escalation runs; signal the supervisor instead"
+elif [ "${own_sup_kills:-0}" -eq "${own_kills:-0}" ]; then
+  ok "3544-owned-pgid-structural: every signal ($own_sup_kills/$own_kills) targets the supervisor's group, and the supervisor parks for the bound plus 5s so its id cannot be released mid-escalation"
+else
+  bad "3544-owned-pgid-structural: $own_sup_kills of $own_kills signals target the supervisor — the others name an id whose ownership is not guaranteed at signal time"
 fi
 
 # ---------------------------------------------------------------------------

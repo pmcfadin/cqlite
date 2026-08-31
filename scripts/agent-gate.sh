@@ -2759,16 +2759,38 @@ _component_set_bound_mechanism() {
 # claims to.
 _CS_CAP_OUT=""
 _CS_CAP_ERR=""
+_CS_CAP_RC=""
 _component_set_capture_paths() {
-  if [ -n "$_CS_CAP_OUT" ] && [ -n "$_CS_CAP_ERR" ]; then return 0; fi
+  if [ -n "$_CS_CAP_OUT" ] && [ -n "$_CS_CAP_ERR" ] && [ -n "$_CS_CAP_RC" ]; then return 0; fi
   _CS_CAP_OUT=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_OUT=""
   _CS_CAP_ERR=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_ERR=""
-  if [ -z "$_CS_CAP_OUT" ] || [ -z "$_CS_CAP_ERR" ]; then
+  # The THIRD file carries the command's exit status out of the supervisor subshell (job 279): the
+  # watchdog arm no longer learns it from `wait`, because the process it waits for is a supervisor
+  # it keeps alive on purpose rather than the command itself.
+  _CS_CAP_RC=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_RC=""
+  if [ -z "$_CS_CAP_OUT" ] || [ -z "$_CS_CAP_ERR" ] || [ -z "$_CS_CAP_RC" ]; then
     [ -n "$_CS_CAP_OUT" ] && rm -f "$_CS_CAP_OUT" 2>/dev/null
     [ -n "$_CS_CAP_ERR" ] && rm -f "$_CS_CAP_ERR" 2>/dev/null
-    _CS_CAP_OUT=""; _CS_CAP_ERR=""
+    [ -n "$_CS_CAP_RC" ] && rm -f "$_CS_CAP_RC" 2>/dev/null
+    _CS_CAP_OUT=""; _CS_CAP_ERR=""; _CS_CAP_RC=""
     return 1
   fi
+  return 0
+}
+
+# _component_set_poll_interval: the shortest sleep this host accepts, as ONE token in
+# `_CS_POLL_SLEEP` (`0.05` or `1`). Memoized, and set by a DIRECT call — never through `$( )`,
+# which would set it in a subshell and lose it (the mechanism function's recorded trap).
+#
+# WHY IT EXISTS: the watchdog arm now polls for a completion RECORD rather than waiting on the
+# command, and a 1-second granularity would add up to a second to every bounded call on the hosts
+# that use this arm. `sleep 0.05` is not POSIX but is accepted by GNU and BSD sleep alike; a host
+# that rejects it falls back to 1s, which is correct but slower — measured, not assumed, by running
+# it once.
+_CS_POLL_SLEEP=""
+_component_set_poll_interval() {
+  [ -n "$_CS_POLL_SLEEP" ] && return 0
+  if sleep 0.05 2>/dev/null; then _CS_POLL_SLEEP=0.05; else _CS_POLL_SLEEP=1; fi
   return 0
 }
 
@@ -2777,7 +2799,8 @@ _component_set_capture_paths() {
 _component_set_drop_capture_files() {
   [ -n "$_CS_CAP_OUT" ] && rm -f "$_CS_CAP_OUT" 2>/dev/null
   [ -n "$_CS_CAP_ERR" ] && rm -f "$_CS_CAP_ERR" 2>/dev/null
-  _CS_CAP_OUT=""; _CS_CAP_ERR=""
+  [ -n "$_CS_CAP_RC" ] && rm -f "$_CS_CAP_RC" 2>/dev/null
+  _CS_CAP_OUT=""; _CS_CAP_ERR=""; _CS_CAP_RC=""
   _CS_BOUND_MECH=""   # the memoized mechanism was decided WITH those files; do not outlive them
   return 0
 }
@@ -2880,30 +2903,72 @@ _component_set_bounded() {
       # GNU timeout also runs its child in a new process group and signals the group
       # (verified here — its grandchild froze at 2 -> 2), so a bound must not mean one thing
       # on a coreutils host and another on a bash-watchdog host.
+      # NEVER SIGNAL A PROCESS GROUP YOU NO LONGER OWN — AND OWNERSHIP ENDS AT REAP, NOT AT EXIT
+      # (roborev job 279). The previous shape backgrounded the command itself, so the pgid WAS the
+      # command's pid; after TERM and the one-second grace it sent an unconditional
+      # `kill -KILL -$pid`, by which time the command and its descendants may all have exited and
+      # bash may already have REAPED the leader — releasing that id for reuse. On this box, which
+      # runs up to four lanes, the group that inherits it is most likely A PEER LANE'S GATE. This
+      # repository has the incident on record: a pattern-based `pkill` destroyed a peer's gate at
+      # component 28 of 30, and the standing rule from it is to kill by an id you OWN, never one
+      # you inferred.
+      #
+      # So the group leader is now a SUPERVISOR we keep alive on purpose: it runs the command,
+      # records the exit status, and then PARKS. Its pid — and therefore the pgid — cannot be
+      # released while we are still escalating, because the only thing that ends it is our own
+      # KILL followed by our own `wait`. Every signal below targets `$sup`, which is alive by
+      # construction at the moment it is sent.
+      #
+      # The park is BOUNDED at `secs + 5`: if this gate is itself SIGKILLed mid-call, the
+      # supervisor must not outlive it forever. Our deadline is `secs` and the grace is 1s, so our
+      # KILL always lands first on every path that reaches it.
+      #
+      # The exit status therefore arrives through a FILE rather than `wait`, with a trailing `.` as
+      # a completeness marker — a partial read of a record being written would otherwise be
+      # indistinguishable from a status.
+      local sup t deadline tps iv rcraw
+      : >"$_CS_CAP_RC" 2>/dev/null || true
+      _component_set_poll_interval
+      iv="$_CS_POLL_SLEEP"; tps=1
+      [ "$iv" = 1 ] || tps=20
+      deadline=$(( secs * tps ))
+      t=0
+      # `set -m` (bash job control) puts the child in its OWN process group on both Linux and
+      # macOS, so `kill -- -$sup` reaches the whole tree. `setsid` would ALSO work and is NOT
+      # used: it is absent from a default macOS, and adding a Linux-only dependency to fix a
+      # portability bug is how this family regenerates (job 210, finding 3, one file over).
       set -m
-      "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR" &
-      pid=$!
+      ( "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; printf '%s.\n' "$?" >"$_CS_CAP_RC"
+        sleep "$(( secs + 5 ))" ) &
+      sup=$!
       set +m
-      rc=0
-      while kill -0 "$pid" 2>/dev/null; do
-        if [ "$waited" -ge "$secs" ]; then
-          kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-          sleep 1
-          # UNCONDITIONAL group KILL (roborev job 214). This was guarded by
-          # `if kill -0 "$pid"`, i.e. it escalated only while the DIRECT CHILD was alive —
-          # so a child that exits on TERM while a GRANDCHILD ignores TERM and holds the
-          # capture pipe left the substitution hanging forever, with the guard believing it
-          # had bounded the work. The child's liveness says nothing about the group's, so it
-          # must not gate the escalation.
-          kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null
-          rc=124            # a status GNU timeout also uses for a bound exceeded
-          break
+      rc=""
+      while : ; do
+        if [ -s "$_CS_CAP_RC" ]; then
+          rcraw=$(cat "$_CS_CAP_RC" 2>/dev/null)
+          case "$rcraw" in
+            *.) rc="${rcraw%.}" ;;
+          esac
+          if [ -n "$rc" ]; then break; fi
         fi
-        sleep 1
-        waited=$((waited + 1))
+        if [ "$t" -ge "$deadline" ]; then rc=124; break; fi
+        sleep "$iv"
+        t=$(( t + 1 ))
       done
-      if [ "$rc" -ne 124 ]; then wait "$pid" 2>/dev/null; rc=$?; fi
+      # THE LADDER, unchanged in meaning: TERM -> grace -> unconditional group KILL when the bound
+      # fired; an immediate group KILL when the command finished on its own (a graceful TERM buys
+      # nothing for a command that has already exited, and skipping it keeps the normal path from
+      # paying a second per call). The KILL also reaps STRAY descendants, which the previous shape
+      # left running after a successful call.
+      if [ "$rc" = 124 ]; then
+        kill -TERM "-$sup" 2>/dev/null || true
+        sleep 1
+      fi
+      kill -KILL "-$sup" 2>/dev/null || true
+      wait "$sup" 2>/dev/null
+      case "$rc" in
+        ''|*[!0-9]*) rc=124 ;;
+      esac
       ;;
   esac
   # REPLAY, in the caller's own streams, AFTER the child is done. Stdout and stderr stay
