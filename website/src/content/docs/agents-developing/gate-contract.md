@@ -468,6 +468,15 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**Stop rendering the value rather than sanitising it again.** The rejected-origin diagnostic was
+the *fifth* finding in one family — raw URL, then unflattened, then unredacted stderr, then
+scheme-only redaction, then query strings and multi-`@` authorities. Every fix improved the
+sanitiser, and the set of places a secret can hide in a URL does not close, so the URL is no longer
+published at all: the line names the **axis** the origin was rejected on, plus the normalised
+identity only when that identity is itself grammatically clean. Note the layer distinction that
+cost a regression on the way: the normalised value is a **comparison key**, not a diagnostic
+string — reducing it made every local path compare equal.
+
 **An allowlist has to reach the sites a later change adds.** The migrated object reads ran under a
 bare `env`, inheriting the caller's environment — the same hole as round 13, re-opened at the new
 sites. Every git call in the pre-flight now runs under `env -i` plus the one allowlist, including

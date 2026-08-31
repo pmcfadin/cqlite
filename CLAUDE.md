@@ -336,6 +336,25 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN — AND A FIX THAT ADDS A RESOURCE INHERITS
+  THAT RESOURCE'S LIFETIME BUGS (roborev job 282).** Two closures. (1) The rejected-origin
+  diagnostic was the FIFTH finding in one family — raw URL rendered (227) → redacted but not
+  flattened (234) → flattened but not redacted (239) → scheme-only redaction (264) → **query
+  strings verbatim and multi-`@` authorities redacted only to the first `@`** (282). Every fix
+  improved the sanitiser, which is the "rarer delimiter" the mechanism ruling warns against, so the
+  URL is **no longer published**: the diagnostic names the AXIS it was rejected on, plus the
+  normalised identity **only when that identity is itself grammatically clean** (a
+  `…/repo?token=SECRET` normalises to a value CARRYING the query, so the shape is checked rather
+  than assumed). Two self-inflicted defects on the way, both worth knowing: a fall-through printed
+  `${v%%:*}` which with no colon **is the whole value**, reproducing the finding; and reducing the
+  NORMALISER's output instead of the RENDERED text made every local path normalise identically, so
+  a canonical identity pinned to a local path matched **any** local path — **the normalised value
+  is a COMPARISON KEY, not a diagnostic string.** (2) Round 17's own fix created the owned
+  supervisor and never registered it with the signal path — the third instance of one family
+  (round 9 register-before-create, round 14 clean-up-on-signals), i.e. **fixing a resource-lifetime
+  bug added a resource with the same bug**. Any owned child is now registered the moment it exists
+  and cleared the moment it is reaped, and cleanup reaps it BEFORE deleting the files it could
+  otherwise recreate.
   **NEVER SIGNAL A PROCESS GROUP YOU NO LONGER OWN — AND OWNERSHIP ENDS AT REAP, NOT AT EXIT
   (roborev job 279).** The bounded runner's watchdog arm backgrounded the COMMAND, so the pgid was
   the command's pid, and after TERM + a 1s grace it sent an unconditional `kill -KILL -$pid` — by
