@@ -67,15 +67,16 @@
 #
 # OPT-IN, NOT A GATE COMPONENT — AND THE DECIDING NUMBER IS DISK, NOT TIME. It performs
 # real `--all-features` compiles (the OTel stack) several times over: MEASURED 2617s and a
-# **47G peak** throwaway target dir for a full two-plant run. Slow is recoverable; filling a
+# **47-56G peak** throwaway target dir (OBSERVED: 47G on a two-plant run, 56G on a one-plant
+# subset — the peak is per-BUILD, not cumulative). Slow is recoverable; filling a
 # shared box is not — on this fleet a lane's target dir has reached 89G and filled the host,
 # and the symptom is a confusing unrelated-looking red that costs a diagnosis cycle before
-# anyone greps for ENOSPC. 47G per run is the strongest single argument that this must never
+# anyone greps for ENOSPC. ~50G+ per run is the strongest single argument that this must never
 # join `tooling-tests`, so it is recorded as a measurement rather than left to be assumed.
 # Same convention as scripts/tests/test_agent_gate_feature_matrix_lanes.sh (issue #1699
 # design D5): deliberately absent from COMPONENTS / LITE_COMPONENTS / DELTA_COMPONENTS.
 #
-# WHERE THAT 47G LANDS IS CHOSEN, NOT INHERITED. `mktemp -d` would default to $TMPDIR
+# WHERE THAT ~50G LANDS IS CHOSEN, NOT INHERITED. `mktemp -d` would default to $TMPDIR
 # (i.e. /tmp, which on the worker boxes lives on the 145G root filesystem alongside every
 # other lane), so this harness instead defaults its scratch to $REPO_ROOT/target/ — the
 # same filesystem as the checkout, which is the volume with the headroom (295G) and the one
@@ -199,7 +200,10 @@ esac
 mkdir -p "$SCRATCH_ROOT" || { echo "FATAL: could not create scratch root $SCRATCH_ROOT" >&2; exit 1; }
 
 # PREFLIGHT THE SPACE, and refuse rather than start. The measured peak for a full run is
-# 47G; the floor below is that plus a deliberately thin margin, because the failure being
+# 47G on a two-plant run and 56G on a ONE-plant subset, so peak is NOT cumulative in plant
+# count: each plant reverts and rebuilds, so a single --all-features build tree drives it and a
+# subset run can exceed a full one. The floor below is ~4G above the HIGHEST OBSERVATION, not
+# 13G above a bound -- do NOT tighten it toward 47G. The failure being
 # avoided is not this run's but the BOX's — three other lanes share this filesystem, and an
 # ENOSPC surfaces as an unrelated-looking red in somebody else's gate. `df -Pk` for the
 # POSIX-portable single-line form; an unreadable df is treated as UNKNOWN and REFUSED, never
@@ -209,7 +213,7 @@ free_kb=$(df -Pk "$SCRATCH_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
 case "${free_kb:-}" in
   ''|*[!0-9]*)
     echo "REFUSING TO RUN: could not measure free space on $SCRATCH_ROOT (df unreadable)." >&2
-    echo "  A full run peaks at 47G of throwaway build output; starting one against an" >&2
+    echo "  A run peaks at an observed 47-56G of throwaway build output; starting one against an" >&2
     echo "  unmeasured filesystem risks an ENOSPC that reds every other lane on this box." >&2
     exit 2 ;;
 esac
@@ -218,7 +222,7 @@ if [ "$free_gb" -lt "$AFC_MIN_FREE_GB" ]; then
   {
     echo "REFUSING TO RUN: only ${free_gb}G free on $SCRATCH_ROOT (need >= ${AFC_MIN_FREE_GB}G)."
     echo
-    echo "  A full two-plant run peaks at a MEASURED 47G of throwaway --all-features build"
+    echo "  A run peaks at a MEASURED 47-56G of throwaway --all-features build"
     echo "  output. Finishing is not the concern; an ENOSPC mid-run is, because it surfaces"
     echo "  as a confusing unrelated red in whatever else shares this filesystem."
     echo
@@ -266,7 +270,7 @@ echo "plants:   ${PLANTS[*]}"
 echo "control:  $CONTROL_NOTE"
 echo "worktree: $TREE (throwaway; the live checkout is never mutated)"
 echo "target:   $TARGET"
-echo "scratch:  $SCRATCH_ROOT (${free_gb}G free; a full run peaks at a measured 47G)"
+echo "scratch:  $SCRATCH_ROOT (${free_gb}G free; runs peak at a measured 47-56G)"
 echo
 
 git worktree add --detach "$TREE" "$LIVE_HEAD_BEFORE" >/dev/null 2>&1 || {
@@ -565,7 +569,7 @@ echo "control:   $CONTROL_NOTE"
 echo "elapsed:   $((END - START))s"
 # The PEAK is not measurable after cleanup, so report what is: the size still on disk at
 # summary time. Stated as what it is rather than labelled a peak it cannot observe.
-echo "disk:      $(du -sh "$WORK" 2>/dev/null | awk '{print $1}') in $WORK at summary time (measured peak for a full run: 47G; removed by the EXIT trap)"
+echo "disk:      $(du -sh "$WORK" 2>/dev/null | awk '{print $1}') in $WORK at summary time (observed peaks: 47G two-plant, 56G one-plant subset -- per-BUILD, not cumulative; removed by the EXIT trap)"
 [ "$SUBSET" -eq 1 ] && echo "mode:      SUBSET (${PLANTS[*]}) — a partial observation"
 for r in "${RESULTS[@]}"; do
   printf '%-22s %-20s %s\n' "${r%%|*}" "$(echo "$r" | cut -d'|' -f2)" "$(echo "$r" | cut -d'|' -f3-)"
