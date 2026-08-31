@@ -2999,6 +2999,32 @@ else
   grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | head -2
 fi
 
+# --- 13. NO SKIP MAY BE ANNOUNCED THROUGH ok() (issue #3414 roborev round 2) ----------
+# The finding was one `ok "SKIP ..."` — an announcement that incremented PASS and left the
+# skip count at 0, i.e. a skip reported as a pass, sitting inside the accounting added the
+# round before to expose exactly that. The sweep found a second instance in a sibling
+# suite. "If one existed, more may" is the durable half of that finding, so it is a check
+# rather than a one-time grep: this scans EVERY suite, so a new one cannot join the habit.
+#
+# The pattern separates an ANNOUNCEMENT from an ASSERTION ABOUT skips: `ok "SKIP …"` and
+# `ok "skip …"` are announcements, while `ok "skip-routing: …"` / `ok "skip-worktree: …"`
+# are real passing assertions whose subject happens to be skipping. Matching the former
+# and sparing the latter is why this keys on the delimiter after the word, not the word.
+# Also asserted host-independently: the root-only case that motivated it never executes on
+# an unprivileged host, so a behavioural test could not have covered it here at all.
+# COMMENT LINES ARE EXCLUDED, and that is not incidental: the paragraph above QUOTES the
+# offending form to explain it, so without this filter the check reds on its own
+# documentation — the artifact describing a rule becoming a violation of it. Filter on the
+# first non-space character of the matched line, after grep's `file:line:` prefix.
+pin_skip_offenders=$(grep -rnE '(^|[^_[:alnum:]])ok "(SKIP|skip)([[:space:]"]|$)' \
+  "$SCRIPT_DIR" 2>/dev/null | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' | head -5)
+if [ -z "$pin_skip_offenders" ]; then
+  ok "suite hygiene: no test announces a SKIP through ok() (a skip must never increment PASS)"
+else
+  bad "suite hygiene: a SKIP is announced through ok(), so it counts as a PASS and not as a skip:"
+  printf '%s\n' "$pin_skip_offenders"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
 [ "$FAIL" -eq 0 ]
