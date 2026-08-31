@@ -322,12 +322,19 @@ fn staged_cell(cells: &[Option<Value>], c: usize) -> Option<&Value> {
     cells.get(c).and_then(Option::as_ref)
 }
 
-/// One cell out of a COLUMN-MAJOR cell store, addressed by canonical index + row.
-fn columnar_cell(cells: &[Vec<Option<Value>>], c: usize, row: usize) -> Option<&Value> {
-    cells
-        .get(c)
-        .and_then(|store| store.get(row))
-        .and_then(Option::as_ref)
+/// One cell out of a SPARSE column-major cell store, addressed by canonical index
+/// + row: `cells[c]` holds `(row index, value)` for each PRESENT cell, ascending.
+///
+/// `None` means the row carries no cell for that column — a legitimate ABSENT
+/// cell, charged exactly as `estimate_arrow_row_bytes` charges a failed
+/// `values.get(name)`, never zero. The binary search is `O(log present)` and is
+/// only on the re-derivation path (`recomputed_payload`), which is the O(rows)
+/// recomputation the incremental accumulator exists to avoid in the first place —
+/// the PRODUCTION charge reads the dense staging slot in `row_bytes`.
+fn sparse_cell(cells: &[Vec<(usize, Value)>], c: usize, row: usize) -> Option<&Value> {
+    let store = cells.get(c)?;
+    let at = store.binary_search_by_key(&row, |(r, _)| *r).ok()?;
+    store.get(at).map(|(_, value)| value)
 }
 
 /// Visible ONLY inside `crate::export`: this is the seam between the estimator and
@@ -383,37 +390,38 @@ impl<'a> PreparedColumns<'a> {
         )
     }
 
-    /// Width of row `row` of a COLUMN-MAJOR cell store, read through the same
-    /// `canonical` indirection: column `i`'s cell is `cells[canonical[i]][row]`.
+    /// Width of row `row` of a SPARSE column-major cell store, read through the
+    /// same `canonical` indirection: column `i`'s cell is the entry for `row` in
+    /// `cells[canonical[i]]`, or absent.
     ///
     /// The layout the accumulator commits into, so a buffered row's width can be
     /// re-derived from the stored cells rather than from a remembered number.
     ///
-    /// Fails closed to `usize::MAX` on an arity mismatch, an out-of-range
-    /// canonical index, or a row index outside the canonical store, for the same
-    /// reason as [`Self::row_bytes`].
+    /// Fails closed to `usize::MAX` on an arity mismatch or an out-of-range
+    /// canonical index, for the same reason as [`Self::row_bytes`]. It does NOT
+    /// fail closed on a row missing from a column's store: in a sparse store that
+    /// is an ABSENT cell, charged as `None` — the same charge
+    /// `estimate_arrow_row_bytes` makes. `row < rows` is the CALLER's invariant
+    /// (`recomputed_payload` iterates `0..rows`); a cell wrongly missing from the
+    /// store would make this total come out SMALLER than the running accumulator,
+    /// which is exactly what `flush_credited`'s debug assertion compares.
     pub(in crate::export) fn row_bytes_columnar(
         &self,
-        cells: &[Vec<Option<Value>>],
+        cells: &[Vec<(usize, Value)>],
         canonical: &[usize],
         row: usize,
     ) -> usize {
         if canonical.len() != self.shapes.len() {
             return usize::MAX;
         }
-        // A plain loop, so neither `map_or(true, ..)` nor `is_none_or` appears —
-        // the two spellings of this guard that clippy has an opinion about.
-        for &c in canonical {
-            match cells.get(c) {
-                Some(store) if row < store.len() => {}
-                _ => return usize::MAX,
-            }
+        if canonical.iter().any(|&c| c >= cells.len()) {
+            return usize::MAX;
         }
         charge_row(
             self.shapes
                 .iter()
                 .copied()
-                .zip(canonical.iter().map(|&c| columnar_cell(cells, c, row))),
+                .zip(canonical.iter().map(|&c| sparse_cell(cells, c, row))),
         )
     }
 }

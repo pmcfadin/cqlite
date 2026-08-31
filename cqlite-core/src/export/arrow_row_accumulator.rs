@@ -31,7 +31,8 @@
 //! * [`commit`](ArrowRowAccumulator::commit) moves the staged cells into the
 //!   column-major store — into ONE store per distinct projected NAME, so a value
 //!   named by several output columns (`SELECT a, a`) is stored once and read twice
-//!   through the `canonical` index, never cloned (issue #3552 review B3);
+//!   through the `canonical` index, never cloned (issue #3552 review B3), and
+//!   storing only PRESENT cells, so an absent cell costs no slot (review B4);
 //! * [`to_record_batch`](ArrowRowAccumulator::to_record_batch) hands each column's
 //!   already-transposed cells straight to its builder — `transpose_columns` is not
 //!   run at all on this path.
@@ -39,6 +40,26 @@
 //! The store is reused across batches ([`clear`](ArrowRowAccumulator::clear)
 //! keeps every allocation), so the per-batch `n_cols × vec![None; n_rows]`
 //! allocation is gone too.
+//!
+//! # Memory profile — sparse persistent, dense transient
+//!
+//! What is RETAINED between batches is one `(row index, value)` pair per PRESENT
+//! cell, per distinct projected name. Nothing retained scales with
+//! `n_cols × rows`: an absent cell costs no slot, and a duplicate output column
+//! costs one `usize` in `canonical`, not a copy. What is DENSE is built only
+//! inside [`to_record_batch`](ArrowRowAccumulator::to_record_batch), into ONE
+//! reused `Vec<Option<&Value>>` of `rows` borrowed slots, and dropped with the
+//! batch.
+//!
+//! This matters because of what the byte-cap does NOT bound (issue #3552 reviews
+//! B1/B3/B4, three instances of one family): the cap is denominated in PAYLOAD
+//! bytes, so a wide SPARSE projection has small payload, does not trip the cap
+//! early, and fills the buffer to the ROW cap. Any per-row cost proportional to
+//! projection WIDTH rather than to payload is therefore effectively unbounded by
+//! the governor, and must not be retained. The rule this module is built to: ask
+//! of every allocation not just "is it bounded", but "bounded by what, in the
+//! worst case over BOTH projection width AND sparsity?" — and "the caps bound it"
+//! is a valid answer only for a quantity proportional to PAYLOAD.
 //!
 //! # Why stage/commit, and not push (the byte-budget contract — AC2)
 //!
@@ -120,11 +141,29 @@ pub struct ArrowRowAccumulator<'a> {
     /// re-derivation, and the batch build — goes through this, so a value is
     /// stored ONCE however many output columns name it (issue #3552 review B3).
     canonical: Vec<usize>,
-    /// Committed cells, column-major: `cells[c][i]` is row `i`'s cell for column
-    /// `c` — but ONLY for a canonical `c`. A non-canonical (duplicate-name)
-    /// column's store stays EMPTY for the whole scan and is never read; its cells
-    /// come from `cells[canonical[c]]`. Cleared (never reallocated) per batch.
-    cells: Vec<Vec<Option<Value>>>,
+    /// Committed cells, column-major and **SPARSE**: `cells[c]` holds one
+    /// `(row index, value)` pair per PRESENT cell of canonical column `c`, in
+    /// ascending row order (appended as rows commit, so it is sorted for free).
+    ///
+    /// An ABSENT cell occupies NO slot. That is the whole point of the
+    /// representation (issue #3552 review B4): a DENSE
+    /// `Vec<Vec<Option<Value>>>` costs `n_canonical_cols × rows` slots of
+    /// `size_of::<Option<Value>>()` whatever fraction of them is present, and
+    /// `clear` retains that capacity — so a WIDE SPARSE projection (ordinary in
+    /// Cassandra) retained tens of MB that NEITHER cap bounds: the byte cap bounds
+    /// PAYLOAD, and sparse rows have little payload, so it does not cut early and
+    /// the buffer fills to the row cap. Sparse storage makes the persistent cost
+    /// proportional to present cells, which is what the payload cap is
+    /// proportional to as well. The builders' dense row-aligned slice is
+    /// materialized TRANSIENTLY at flush, into one reused view — the same
+    /// sparse-persistent / dense-transient shape `main` had when it buffered
+    /// `Vec<QueryRow>` (maps hold only present cells) and transposed at flush.
+    ///
+    /// Only a CANONICAL `c` is ever stored or read: a non-canonical
+    /// (duplicate-name) column's store stays EMPTY for the whole scan, and its
+    /// cells come from `cells[canonical[c]]` (review B3). Cleared (never
+    /// reallocated) per batch.
+    cells: Vec<Vec<(usize, Value)>>,
     /// The row under test: one slot per column, all `None` between rows.
     staged: Vec<Option<Value>>,
     /// Whether [`Self::staged`] currently holds a staged, uncommitted row.
@@ -312,10 +351,18 @@ impl<'a> ArrowRowAccumulator<'a> {
     /// held once rather than once per output column (issue #3552 review B3). Its
     /// store therefore stays empty for the whole scan — every reader goes through
     /// `canonical`, so nothing ever indexes it directly.
+    ///
+    /// Only PRESENT cells are appended: an absent cell costs NO slot, so the
+    /// store's size tracks present cells rather than `n_cols × rows` (review B4).
+    /// An explicit `Value::Null` IS present and IS stored — the absent/null
+    /// distinction the builders rely on is preserved exactly, since a row missing
+    /// from a column's store reads back as `None` and a stored `Value::Null` reads
+    /// back as `Some(&Value::Null)`, which is what `transpose_columns` produced.
     pub fn commit(&mut self) {
         if !self.has_staged {
             return;
         }
+        let row_idx = self.rows;
         let Self {
             cells,
             staged,
@@ -323,16 +370,21 @@ impl<'a> ArrowRowAccumulator<'a> {
             ..
         } = self;
         for (idx, slot) in staged.iter_mut().enumerate() {
+            // Always TAKE, so a value can never survive into the next row —
+            // including for a duplicate-name column, where it is dropped (it is
+            // `None` already, since `stage` only ever fills canonical slots, but
+            // taking it makes that true by construction rather than by argument).
+            let value = slot.take();
             match (canonical.get(idx), cells.get_mut(idx)) {
-                // The canonical column for this name: it owns the storage.
-                (Some(&c), Some(store)) if c == idx => store.push(slot.take()),
-                // A duplicate-name column: nothing to store. Clear the slot so a
-                // value can never survive into the next row (it is `None` already
-                // — `stage` only ever fills canonical slots — but taking it is what
-                // makes that true by construction rather than by argument).
-                _ => {
-                    let _ = slot.take();
+                // The canonical column for this name owns the storage — and stores
+                // the cell ONLY if the row carries one.
+                (Some(&c), Some(store)) if c == idx => {
+                    if let Some(value) = value {
+                        store.push((row_idx, value));
+                    }
                 }
+                // A duplicate-name column, or an arity mismatch: nothing to store.
+                _ => {}
             }
         }
         // Saturating for hygiene: a batch is bounded by the row cap long before
@@ -393,9 +445,12 @@ impl<'a> ArrowRowAccumulator<'a> {
                 self.columns.len()
             )));
         }
-        // One borrowed view, reused across columns, so the per-column reference
-        // slice the builders take costs one allocation per BATCH, not per column
-        // (`transpose_columns` allocated one `Vec<Option<&Value>>` PER COLUMN).
+        // ONE dense borrowed view, reused across columns: the builders need a
+        // row-aligned `&[Option<&Value>]`, but only TRANSIENTLY, so the dense
+        // structure is materialized here rather than retained (issue #3552 review
+        // B4). It costs `rows × size_of::<Option<&Value>>()` once per BATCH —
+        // `transpose_columns` allocated that PER COLUMN, so this term is smaller
+        // than `main`'s by a factor of the projection width.
         let mut view: Vec<Option<&Value>> = Vec::with_capacity(self.rows);
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.columns.len());
         for (idx, col) in self.columns.iter().enumerate() {
@@ -411,8 +466,28 @@ impl<'a> ArrowRowAccumulator<'a> {
                     )))
                 }
             };
+            // Fail closed on a stored row index outside the committed range rather
+            // than panic on the indexed write below. The store is sorted ascending
+            // (appended as rows commit), so its LAST entry bounds every entry — an
+            // O(1) check, not a scan.
+            if let Some(&(last_row, _)) = store.last() {
+                if last_row >= self.rows {
+                    return Err(ArrowConvertError::InvalidValue(format!(
+                        "column {idx} holds row index {last_row} outside the {} \
+                         committed rows",
+                        self.rows
+                    )));
+                }
+            }
+            // Dense fill: absent rows stay `None`, present rows are BORROWED from
+            // the sparse store. O(present cells), walking in row order — no search,
+            // and no reallocation after the first column.
             view.clear();
-            view.extend(store.iter().map(Option::as_ref));
+            view.resize(self.rows, None);
+            for (row_idx, value) in store {
+                // In range by the guard above, so this cannot panic.
+                view[*row_idx] = Some(value);
+            }
             arrays.push(convert_column_to_array(col, &view)?);
         }
         Ok(RecordBatch::try_new(schema, arrays)?)

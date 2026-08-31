@@ -70,19 +70,34 @@
 //! # Residency OUTSIDE the governed set (named, not implied away)
 //!
 //! 1. **The producer's row buffer.** Since issue #3552 this is an
-//!    `ArrowRowAccumulator`: the rows' projected cells, held COLUMN-MAJOR as
-//!    `n_cols` `Vec<Option<Value>>` stores (plus one staging row), rather than a
-//!    `Vec<QueryRow>` of per-row hash maps. The bound is unchanged in kind — ≤
-//!    `batch_size` rows or one byte-cap's worth of payload, plus per-value Rust
-//!    overhead — and the accumulator holds only the PROJECTED cells, dropping each
-//!    row's map, key and metadata at push time. The stores are NOT pre-sized: they
-//!    GROW to the batch's row count and then keep that capacity across batches
-//!    (`clear` retains it), so the steady-state high-water mark is one batch's
-//!    worth of cells and is reached by growth, never reserved up front (issue
-//!    #3552 review B1). Resident while rows accumulate, while the producer is
-//!    parked on a reservation, and during materialization (buffer and batch
-//!    overlap until the accumulator is cleared). Not a `RecordBatch`, not visible
-//!    to `get_array_memory_size()`. PRE-EXISTING and outside the governed set.
+//!    `ArrowRowAccumulator` rather than a `Vec<QueryRow>` of per-row hash maps: it
+//!    holds only the PROJECTED cells, dropping each row's map, key and metadata at
+//!    push time. The bound is unchanged in kind — ≤ `batch_size` rows or one
+//!    byte-cap's worth of payload, plus per-value Rust overhead.
+//!
+//!    Its representation is **SPARSE-persistent, dense-transient**, and that is
+//!    load-bearing for THIS accounting rather than an implementation detail. What
+//!    is retained is one `(row index, value)` pair per PRESENT cell per distinct
+//!    projected name; the dense row-aligned slice the Arrow builders need is
+//!    materialized inside the batch build, into ONE reused borrowed view of `rows`
+//!    slots, and dropped with the batch. Nothing retained scales with
+//!    `n_cols × rows`, and nothing is pre-sized — the stores GROW and then keep
+//!    that capacity across batches (`clear` retains it).
+//!
+//!    The reason it must be that way is a property of THIS cap: it is denominated
+//!    in PAYLOAD bytes, so a WIDE SPARSE projection has little payload, does not
+//!    trip the cap early, and fills the buffer to the ROW cap. A retained cost
+//!    proportional to projection WIDTH rather than to payload is therefore
+//!    effectively ungoverned — a dense `n_cols × rows` store of
+//!    `Option<Value>` measured ~65 MB at 200 columns × 8192 rows with a small
+//!    Arrow payload (issue #3552 reviews B1/B3/B4: eager per-column reservation,
+//!    per-duplicate-column deep clone, and dense retention — three instances of
+//!    that one conflation).
+//!
+//!    Resident while rows accumulate, while the producer is parked on a
+//!    reservation, and during materialization (buffer and batch overlap until the
+//!    accumulator is cleared). Not a `RecordBatch`, not visible to
+//!    `get_array_memory_size()`. PRE-EXISTING and outside the governed set.
 //! 2. **A single row wider than #2825's per-batch cap**, delivered as a one-row
 //!    batch at its own natural width (`worst_case_batch_capacity_bytes`'s
 //!    `max(cap, widest_row_payload)` term). A property of the data.
@@ -159,9 +174,9 @@ pub(crate) use crate::egress_observation::EgressObservation;
 /// read in GOVERNED EGRESS CAPACITY only — the quantity this pool meters. Two
 /// server-side terms on the same query are real but sit OUTSIDE this accounting
 /// and are not deducted above: the producer's row buffer — since issue #3552 an
-/// `ArrowRowAccumulator` holding one batch's PROJECTED cells column-major, grown
-/// to the batch's row count rather than pre-reserved, and resident alongside the
-/// batch until it is cleared — and the encoder's
+/// `ArrowRowAccumulator` holding one batch's PRESENT projected cells sparsely,
+/// grown rather than pre-reserved, and resident alongside the batch until it is
+/// cleared — and the encoder's
 /// queued `FlightData` (an encoded copy of up to one batch's payload, ~4 MiB at
 /// defaults). So the headroom between 12 MiB and B4's 16 MiB is NOT free space
 /// to spend — it is where those terms live. Do not restate this line as a total

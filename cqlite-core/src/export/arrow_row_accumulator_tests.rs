@@ -259,11 +259,24 @@ fn duplicate_output_columns_store_the_payload_once_and_match_the_pre_fold_batch(
         acc.commit();
     }
 
-    // Storage: one store populated, the duplicate's store never written at all.
+    // Storage: one store populated SPARSELY, the duplicate's never written at all.
+    //
+    // The fixture's three rows are: a wide list, an explicit `Value::Null`, and
+    // the column ABSENT. Only the first two are PRESENT cells, so the store holds
+    // TWO entries for three rows — an absent cell costs no slot (issue #3552 B4).
+    // A dense store would hold three. The explicit null IS stored, which is what
+    // keeps the absent/null distinction the builders depend on.
     assert_eq!(
         acc.cells[0].len(),
-        rows.len(),
-        "the canonical column stores one cell per row"
+        2,
+        "the store is SPARSE: 2 present cells over 3 rows, not one slot per row \
+         (a dense store would retain n_cols x rows slots whatever the sparsity, \
+         which neither cap bounds — issue #3552 B4)"
+    );
+    assert_eq!(
+        acc.cells[0].iter().map(|(r, _)| *r).collect::<Vec<usize>>(),
+        vec![0usize, 1],
+        "present cells are stored with their row index, in ascending row order"
     );
     assert!(
         acc.cells[1].is_empty(),
