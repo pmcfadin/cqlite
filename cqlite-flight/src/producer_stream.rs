@@ -37,6 +37,7 @@ use cqlite_core::storage::write_engine::merge::{StreamingMerger, StreamingStep};
 use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
 
 use crate::batch_bytes::BatchByteCap;
+use crate::egress_flush::StageEncodeAccum;
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::row_source::{MergeRowSource, RowSource, SourceStep};
@@ -234,6 +235,12 @@ impl MergeProducer {
         // projected cell is resolved ONCE per row, and that same visit charges the
         // row's payload width. Reused across batches (cleared, never reallocated).
         let mut buffer = ArrowRowAccumulator::with_capacity(&self.columns, self.batch_size);
+        // Issue #3552: `stage` performs the transpose that used to run inside
+        // `flush_buffer`'s `stream_encode` region, so its wall time is folded back into
+        // that SAME bucket from here — locally, one atomic on Drop, never per row. Without
+        // this the transpose would have left the measured window without leaving the
+        // program and `stream_encode` would read lower with no work removed.
+        let mut stage_encode = StageEncodeAccum::new();
         let mut emitted: u64 = 0;
         // Issue #2819 (B2/B3): resolve the flight sub-phase sink ONCE here and
         // accumulate `stream_merge` CPU into a local, flushed to the shared atomic
@@ -357,7 +364,7 @@ impl MergeProducer {
             // width no longer costs a second, independent resolution pass. The
             // staged row joins the batch at `commit`, after any cut — the same
             // order (and the same numbers) as the estimate/push it replaces.
-            let width = buffer.stage(row);
+            let width = stage_encode.timed(|| buffer.stage(row));
             if byte_cap.cut_before(width).is_yes() {
                 self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
             }

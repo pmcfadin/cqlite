@@ -35,8 +35,14 @@ pub const PHASE_STREAM_COLD_FAULT: &str = "stream_cold_fault";
 pub const PHASE_STREAM_DECOMPRESS: &str = "stream_decompress";
 /// k-way merge + reconcile + row materialize, merge-consumer thread.
 pub const PHASE_STREAM_MERGE: &str = "stream_merge";
-/// Arrow `RecordBatch` ARRAY BUILD, merge-consumer thread. Does NOT cover the
-/// arrow-flight encoder stage — see [`PHASE_STREAM_ENCODE_FRAMING`].
+/// Arrow `RecordBatch` cell RESOLUTION + ARRAY BUILD, merge-consumer thread.
+/// Recorded from two places since issue #3552 (the push-time resolution in
+/// `egress_flush::StageEncodeAccum` and the flush-time build in `flush_buffer`) and
+/// NOT like-for-like with its pre-#3552 values — it gained the per-row width
+/// charge, which used to sit in no sub-phase. See
+/// `cqlite_core::observability::StreamSubPhase::Encode`'s scope note before
+/// comparing across that commit. Does NOT cover the arrow-flight encoder stage —
+/// see [`PHASE_STREAM_ENCODE_FRAMING`].
 pub const PHASE_STREAM_ENCODE: &str = "stream_encode";
 /// Arrow-flight IPC FRAMING of an already-built `RecordBatch` (dictionary
 /// hydration + encoder-target re-slicing + IPC serialization), recorded on the

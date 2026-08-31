@@ -73,7 +73,32 @@ pub enum StreamSubPhase {
     Decompress,
     /// k-way merge + LWW/tombstone/TTL reconcile + per-row materialize.
     Merge,
-    /// Arrow `RecordBatch` conversion (encode) — the ARRAY BUILD only.
+    /// Arrow `RecordBatch` conversion (encode): the projected cells' RESOLUTION
+    /// plus the ARRAY BUILD, on the merge-consumer thread.
+    ///
+    /// # Scope, and how it CHANGED at issue #3552 — read before comparing across
+    /// that commit
+    ///
+    /// Until #3552 this bucket was recorded in exactly one place, around
+    /// `cqlite-flight`'s `flush_buffer`, and covered the row→column transpose plus
+    /// the Arrow array build. #3552 folded the transpose into the byte-cap's
+    /// push-time cell resolution (`ArrowRowAccumulator::stage`), so the bucket is
+    /// now recorded from TWO places that sum into it: the push-time resolution
+    /// (`cqlite_flight::egress_flush::StageEncodeAccum`, folded in once per merge)
+    /// and the flush-time build (still `flush_buffer`).
+    ///
+    /// Recording both is what keeps the bucket from silently SHRINKING while the
+    /// work merely moved out of the measured window. But the two are not the same
+    /// SPAN of work, and the difference matters in ONE direction: the fused
+    /// resolution also performs the per-row width CHARGE, which before #3552 was a
+    /// separate `estimate_arrow_row_bytes` call at push time that sat in NO
+    /// sub-phase at all. So across #3552 this counter LOSES nothing and GAINS the
+    /// charge — it can read higher on identical work, and a naive before/after diff
+    /// of `stream_encode` alone across that commit is not a like-for-like
+    /// comparison. What IS comparable: rows/s, and `merge + encode` together (the
+    /// charge was previously outside both). The fold's whole point is that the
+    /// resolution and the charge are no longer separable, so no honest split of the
+    /// fused region into two buckets exists.
     Encode,
     /// Arrow-flight IPC FRAMING of an already-built `RecordBatch`: everything
     /// `FlightDataEncoderBuilder`'s stream does — dictionary hydration, splitting
@@ -82,8 +107,10 @@ pub enum StreamSubPhase {
     ///
     /// # Why this is a SEPARATE bucket from [`Self::Encode`]
     ///
-    /// [`Self::Encode`] wraps only the Arrow array build (`flush_buffer` →
-    /// `rows_to_record_batch`) on the merge-consumer thread. It has never covered
+    /// [`Self::Encode`] wraps only the projected cells' resolution and the Arrow
+    /// array build, on the merge-consumer thread (before issue #3552, the transpose
+    /// + `rows_to_record_batch` inside `flush_buffer`; since then, the push-time
+    /// resolution as well — see that variant's scope note). It has never covered
     /// the encoder stage, which runs LATER and on a DIFFERENT thread (the async
     /// gRPC task). Any change aimed at the framing stage — the batch-size/encoder
     /// target alignment, or the dictionary-hydration rebuild — was therefore

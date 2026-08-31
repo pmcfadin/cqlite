@@ -14,11 +14,92 @@
 //! `producer_stream.rs` are already at/over the campsite source threshold
 //! (epic #1116).
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use cqlite_core::export::{build_arrow_schema, ArrowRowAccumulator};
+use cqlite_core::observability::stream_subphase;
+use cqlite_core::observability::{StreamSubPhase, StreamSubPhaseTimings};
 
 use crate::batch_bytes::{worst_case_batch_capacity_bytes, BatchByteCap};
 use crate::egress_credit::{count_arrow_array_nodes, CreditedBatch};
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
+
+/// Local accumulator for the PUSH-time half of `stream_encode` (issue #3552).
+///
+/// # Why this exists
+///
+/// Before issue #3552 the row→column transpose ran inside `flush_buffer`, i.e.
+/// inside the `StreamSubPhase::Encode` region. The fold moved it to PUSH time
+/// (`ArrowRowAccumulator::stage`), so without this accumulator the transpose would
+/// have left the measured window WITHOUT LEAVING THE PROGRAM: `stream_encode`
+/// would read LOWER with no work removed, and whoever took issue #3552's own
+/// before/after measurement would read a phantom improvement in the very
+/// instrument the change is judged by (CLAUDE.md's #2877 shape — a share shift
+/// with unmoved rows/s is a FAIL, and an instrument that shifts by itself cannot
+/// tell you which happened).
+///
+/// # Why it is not an atomic per row
+///
+/// The sink `Arc` is resolved ONCE at construction (one thread-local read, not one
+/// per row — the issue #2819 B3 rule), each staged row's elapsed nanos fold into a
+/// plain `u64` in the drive loop's own frame, and the total reaches the shared
+/// `AtomicU64` in ONE `add_nanos` on [`Drop`]. So a full scan makes exactly one
+/// atomic write regardless of row count, and an early return (a cooperative
+/// cancel, a `LIMIT` break, a `?`-propagated error) still records the work already
+/// done. `Drop` runs when the drive loop returns, which is strictly before the
+/// teardown emitter and the `df_spike` harness read the counters, so the emitted
+/// per-RPC total is the same as folding per flush would give.
+///
+/// Modelled on `producer_stream::RowSubPhaseAccum`, which does exactly this for
+/// `stream_merge`.
+///
+/// # Inert with no flight sink
+///
+/// Every non-flight caller (compaction, CLI, point reads outside `do_get`)
+/// installs no sink, so [`Self::timed`] is one `Option` check on a local plus the
+/// bare closure — no `Instant::now()`, no thread-local read, no atomic — and
+/// `Drop` records nothing.
+pub(crate) struct StageEncodeAccum {
+    sink: Option<Arc<StreamSubPhaseTimings>>,
+    nanos: u64,
+}
+
+impl StageEncodeAccum {
+    /// Resolve the per-request sub-phase sink ONCE, before the drive loop.
+    pub(crate) fn new() -> Self {
+        Self {
+            sink: stream_subphase::current(),
+            nanos: 0,
+        }
+    }
+
+    /// Run `f` — the push-time cell resolution + width charge — and fold its
+    /// elapsed wall time into the local `stream_encode` total.
+    ///
+    /// Exactly one `Instant::now()` pair per row when instrumented, and NO clock
+    /// at all when not.
+    #[inline]
+    pub(crate) fn timed<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        if self.sink.is_none() {
+            return f();
+        }
+        let start = Instant::now();
+        let out = f();
+        self.nanos = self
+            .nanos
+            .saturating_add(stream_subphase::elapsed_nanos(start));
+        out
+    }
+}
+
+impl Drop for StageEncodeAccum {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink {
+            sink.add_nanos(StreamSubPhase::Encode, self.nanos);
+        }
+    }
+}
 
 impl MergeProducer {
     /// Arrow array NODES over this producer's projected output schema, counted
@@ -147,6 +228,12 @@ impl MergeProducer {
         // reserve park above (egress-credit backpressure, client-paced) nor the
         // emit below (`stream_grpc_write`). Runs on the merge-consumer thread once
         // per batch; a no-op with no flight sink installed (non-flight callers).
+        //
+        // This is now the FLUSH-TIME half of `stream_encode`. Issue #3552 moved the
+        // row→column transpose to push time, where [`StageEncodeAccum`] times it
+        // into the SAME bucket — so the bucket still spans the whole
+        // resolve-then-build cost, just recorded from two places. See
+        // `StageEncodeAccum` for what that changed about the bucket's SCOPE.
         let batch = cqlite_core::observability::stream_subphase::timed(
             cqlite_core::observability::StreamSubPhase::Encode,
             || self.flush_buffer(buffer),
