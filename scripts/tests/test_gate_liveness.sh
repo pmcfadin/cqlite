@@ -310,8 +310,17 @@ expect_reader "5.2 age 85s, just inside the 90s floor => RUNNING"  RUNNING 2 "" 
 # must be GONE and a sound signal must be NAMED, because deleting the bad advice without replacing
 # it would leave the reader with no way to answer the question the note raises.
 mk_beat "$TMP/a.txt.heartbeat" run-a 60 20
-run_reader -- "$TMP/a.txt"
-if printf '%s' "$OUT" | grep -qE 'a working one is >=?1|sits near 0\.01 cores'; then
+# `run_reader` passes "$@" STRAIGHT to the reader; the `--` in expect_reader's grammar is consumed
+# by its own `shift 5`. Passing it here handed the reader a literal `--` as its summary path, so the
+# verdict was UNKNOWN, no RUNNING note was emitted, and 5.2b (a NEGATIVE assertion) passed VACUOUSLY
+# on output that simply had no note in it. 5.2c, the positive control, is what caught that.
+run_reader "$TMP/a.txt"
+# NON-VACUITY FIRST: a negative assertion over $OUT is satisfied by output that has no note at all,
+# which is precisely how the `--` bug made 5.2b green. Establish the subject exists before judging it.
+if ! printf '%s' "$OUT" | grep -q 'gate-liveness: RUNNING'; then
+  bad "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress" \
+      "the fixture did not produce a RUNNING verdict, so there is no note to judge: $(printf '%s' "$OUT" | head -1)"
+elif printf '%s' "$OUT" | grep -qE 'a working one is >=?1|sits near 0\.01 cores'; then
   bad "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress" \
       "the retracted >=1-core recipe is still emitted"
 else
