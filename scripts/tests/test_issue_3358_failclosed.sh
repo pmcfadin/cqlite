@@ -241,15 +241,27 @@ the empty one was never rejected; see $empty_out"
 else
   ok "empty: the target did not report ok (no fallback to a healthy fixture)"
 fi
-# The rejection must be the READER refusing the empty file, named on one line together
-# with this fixture, so a sibling's failure cannot satisfy it.
-if grep -q "Header buffer too small for parsing: 0 bytes" "$empty_out" \
-   && grep -q "$FIXTURE_DIRNAME" "$empty_out"; then
-  ok "empty: rejected by the reader on the empty Data.db, naming this fixture"
+# COUNT-BEARING, exactly as the absent case is. `must_run` is per case (#3220 forbids a
+# suite-wide `ran > 0`), so "one case failed and two silently passed" is the defect
+# itself, not a pass. This assertion was missing here while the file's own contract
+# claimed it — roborev job 254.
+if grep -qE "^test result: FAILED\. 0 passed; ${TEST_COUNT} failed" "$empty_out"; then
+  ok "empty: ALL ${TEST_COUNT} cases failed — fail-closed is per case, not suite-wide"
 else
-  bad "empty: no 'Header buffer too small for parsing: 0 bytes' for $FIXTURE_DIRNAME — \
-the run failed for some OTHER reason, which does not prove the empty fixture was \
-rejected; see $empty_out"
+  bad "empty: no 'test result: FAILED. 0 passed; ${TEST_COUNT} failed' line — some case \
+did not reject the empty fixture; see $empty_out"
+fi
+# ONE line carrying BOTH the fixture identity and the zero-byte reader error. Two
+# separate greps would only prove each string appears SOMEWHERE, which is satisfiable by
+# an unrelated failure elsewhere in the output plus the fixture name in a healthy path —
+# and the comment here previously CLAIMED "on one line" while the code did not check it
+# (roborev job 254). That is this lane's own defect class, in the file asserting it.
+if grep -qE "${FIXTURE_DIRNAME}.*Header buffer too small for parsing: 0 bytes" "$empty_out"; then
+  ok "empty: ONE line carries both this fixture and the zero-byte reader rejection"
+else
+  bad "empty: no single line carrying both '$FIXTURE_DIRNAME' and 'Header buffer too \
+small for parsing: 0 bytes' — the run failed for some OTHER reason, which does not \
+prove the empty fixture was rejected; see $empty_out"
 fi
 if grep -q 'SKIP' "$empty_out"; then
   bad "empty: output contains 'SKIP' — an empty fixture must be a hard failure, not an \
@@ -282,7 +294,7 @@ fi
 # Anti-vacuity for THIS harness: `failed: 0` is only meaningful if every case actually
 # asserted. A deleted case, an early `exit`, or a block skipped by an editing accident
 # would otherwise report green.
-EXPECTED_CHECKS=14
+EXPECTED_CHECKS=15
 total_checks=$((PASS + FAIL))
 if [ "$total_checks" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - harness: %d assertions ran, expected %d — a dropped or '\
