@@ -2508,6 +2508,43 @@ else
   bad "4b.173 the backstop refusal explains the mechanism" "$(printf '%s' "$rp_out" | head -3)"
 fi
 rm -rf "$rp_t"
+# 4b.174/4b.175 (roborev job 318, Medium): the launcher must not accept the reader's RUNNING (exit 2)
+# as proof of monitorability without asking whether the unit still exists. A gate that publishes ONE
+# heartbeat and then dies before its terminal summary answers RUNNING for the whole staleness window,
+# so a bare `0|2)` arm let the launcher exit 0 and advertise a poll for a verdict that will never
+# arrive. Asserted STRUCTURALLY at BOTH acceptance sites, because the two differ only in what a
+# rejection means and a fix applied to one is the call-site defect this file already has a case for.
+_j318_bare=$(grep -cE '^\s*0\|2\)\s*_hb_seen=1' "$LAUNCHER" || true)
+_j318_gated=$(grep -cE '_unit_is_live "\$UNIT".*_hb_seen=1|2\) if _unit_is_live' "$LAUNCHER" || true)
+if [ "${_j318_bare:-0}" -eq 0 ]; then
+  ok "4b.174 no acceptance site treats RUNNING (exit 2) as monitorable without a unit check"
+else
+  bad "4b.174 no acceptance site treats RUNNING as monitorable without a unit check" \
+      "$_j318_bare bare 0|2) arm(s) remain — a one-beat-then-dead gate would exit 0"
+fi
+# The COUNT matters: there are TWO sites (the bounded in-loop probe and the post-loop fallback), and
+# fixing only the one roborev named is exactly the audit-by-primitive failure this suite exists to
+# catch. Both must gate on the unit.
+if [ "${_j318_gated:-0}" -ge 2 ]; then
+  ok "4b.175 BOTH RUNNING acceptance sites gate on _unit_is_live (found $_j318_gated)"
+else
+  bad "4b.175 BOTH RUNNING acceptance sites gate on _unit_is_live" \
+      "only $_j318_gated site(s) gated; the in-loop probe and the post-loop fallback both need it"
+fi
+# 4b.176 (roborev job 318, Low): the launcher validated an absolute `bash` and then exec'd a
+# hard-coded /bin/bash via a hard-coded /usr/bin/env, so a valid non-FHS systemd host passed every
+# capability check and failed at exec. Assert the resolved paths are what systemd-run is handed AND
+# that `env` went through the same validation loop as rm/bash -- resolving without validating would
+# reintroduce the hole one step later.
+if grep -qE '"\$_env_abs" -i "\$_bash_abs"' "$LAUNCHER" \
+   && ! grep -qE '/usr/bin/env -i /bin/bash' "$LAUNCHER" \
+   && grep -qE 'for _tool_pair in .*"env:\$_env_abs"' "$LAUNCHER"; then
+  ok "4b.176 systemd-run is handed the RESOLVED env/bash, and env is validated alongside rm/bash"
+else
+  bad "4b.176 systemd-run is handed the resolved env/bash, validated alongside rm/bash" \
+      "resolved-exec=$(grep -cE '"\$_env_abs" -i "\$_bash_abs"' "$LAUNCHER") hardcoded=$(grep -cE '/usr/bin/env -i /bin/bash' "$LAUNCHER") validated=$(grep -cE '"env:\$_env_abs"' "$LAUNCHER")"
+fi
+
 
 
 echo

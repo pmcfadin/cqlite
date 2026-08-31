@@ -326,6 +326,18 @@ elif printf '%s' "$OUT" | grep -qE 'a working one is >=?1|sits near 0\.01 cores'
 else
   ok "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress"
 fi
+# 5.2d (roborev job 318, Low): the note must be WELL-FORMED, not merely correct in content.
+# 5.2b and 5.2c assert what the note SAYS and what it no longer says; NEITHER can see a line
+# emitted TWICE -- and one was, for two hours, because a slice boundary in my own edit was off by
+# one. A content assertion is not a well-formedness assertion, so this asserts uniqueness over the
+# whole emitted response rather than over the note alone (the same defect could land anywhere).
+_dup=$(printf '%s\n' "$OUT" | sort | uniq -d | grep -c . || true)
+if [ "${_dup:-0}" -eq 0 ]; then
+  ok "5.2d no line of the RUNNING response is emitted twice"
+else
+  bad "5.2d no line of the RUNNING response is emitted twice" \
+      "$_dup duplicated line(s): $(printf '%s\n' "$OUT" | sort | uniq -d | head -2 | tr '\n' '|')"
+fi
 if printf '%s' "$OUT" | grep -q 'PID-SET TURNOVER' \
    && printf '%s' "$OUT" | grep -qi 'REAPED children only'; then
   ok "5.2c RUNNING names a sound progress signal AND why the pid reading fails"
