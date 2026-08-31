@@ -1754,8 +1754,16 @@ fi
 # and that check, leaving `_new_rid` empty — and the post-loop terminal check is guarded on it, so a
 # launch that HAD produced a verdict was refused and its unit stopped. Once the unit is inactive the
 # artifacts cannot change, so one settled re-derivation races nothing.
-if grep -q 'SETTLED SNAPSHOT' "$LAUNCHER" \
-   && sed -n '/if ! systemctl --user is-active --quiet "\$UNIT"/,/^  fi$/p' "$LAUNCHER" | grep -q '_new_rid='; then
+# ANCHOR ON THE PROPERTY, NOT THE IMPLEMENTATION TEXT (roborev job 272). This case used to bound its
+# sed range with the literal `is-active --quiet "$UNIT"` line and then look for any `_new_rid=`. Both
+# halves were wrong the same way: job 272 replaced that line with `_unit_is_live` (because
+# `is-active --quiet` reads transitional and unmeasurable states as dead), which emptied the range and
+# failed this case on a CORRECT fix -- the second time in this suite a structural check pinned to
+# implementation spelling has red-flagged a correct refactor. And `_new_rid=` was satisfied by the
+# UNSAFE two-grep re-derivation this case nominally guarded, so it locked the defect in. It now
+# requires the branch to re-derive through `_snap_pair`, which is the property that actually matters.
+if grep -qE 'SETTLED SNAPSHOT|ONE IMMUTABLE SNAPSHOT' "$LAUNCHER" \
+   && sed -n '/if ! _unit_is_live "\$UNIT"/,/^  fi$/p' "$LAUNCHER" | grep -q '_snap_pair'; then
   ok "4b.124 the inactive-unit branch re-derives the run-id from a settled snapshot"
 else
   bad "4b.124 the inactive-unit branch re-derives from a settled snapshot" "a fast gate can still be refused"
