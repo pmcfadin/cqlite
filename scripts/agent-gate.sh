@@ -4660,12 +4660,48 @@ _component_set_probe_inner() {
   # the LANE's, on shared storage, and a bound on a read that cannot be a network call still costs
   # nothing while a missing bound on one that could is the whole class this pre-flight guards.
   #
+  # ---- AND "WE HOLD THE COMMIT" IS NOT "WE CAN READ IT" (found while fixing job 299) -----------
+  #
+  # THE REGRESSION MOVING THE PROBE INTRODUCED, and it is why the probe is a CONJUNCTION. The old
+  # code refused the fast path in a partial clone via a CONFIG probe. Removing that probe (its
+  # reason — a live-repository read — is gone) left `cat-file -e <sha>^{commit}` as the whole
+  # precondition, and IN A PARTIAL CLONE THAT COMMIT IS PRESENT WHILE ITS BLOBS ARE NOT. RED-verified
+  # in a real `--filter=blob:none` clone that had fetched the tip:
+  #
+  #   cat-file -e <tip>^{commit}                              -> 0 (PRESENT)
+  #   rev-list --objects --missing=print --no-walk <tip>       -> ?5ea2ed41…  (the blob is ABSENT)
+  #
+  # So the fast path was taken and the manifest read then failed: `baseline-unreadable`, FAIL-CLOSED,
+  # on a CORRECT partial checkout — a false FAIL on correct input, the class this issue keeps ruling
+  # against. Measured as `3544-partial-clone-unreachable` / `3544-ancestry-cross-source` reddening.
+  #
+  # THE PRECONDITION IS THEREFORE OBJECT COMPLETENESS AT THAT COMMIT, not object presence of the
+  # commit. `rev-list --objects --missing=print --no-walk` enumerates the commit's own tree and
+  # blobs and prefixes every ABSENT one with `?`, so ONE probe answers it without duplicating the
+  # reader's source selection (manifest, else the gate-script declaration) — a second copy of that
+  # logic would be a second source to drift, which this pre-flight has already removed once.
+  # Deliberately a SUPERSET of what the reader needs: conservative in the only direction that is
+  # cheap, since a false "incomplete" costs a fetch and a false "complete" costs a false FAIL.
+  #
+  # AFFIRMATIVE, not "no bad signal": the enumeration must have PRODUCED OUTPUT (a commit always
+  # yields at least itself and its tree), so an empty or unmeasurable result is INCOMPLETE rather
+  # than clean. An unsupported `--missing=` on an older git exits non-zero and lands there too.
+  #
   # AND "CANNOT TELL" COLLAPSES ONTO *ABSENT* HERE — deliberately the opposite choice from the
   # manifest presence probe, for a stated reason: the branch an unmeasurable answer falls into is
   # the SLOW path, which fetches and verifies authoritatively. Guessing "absent" costs time;
   # guessing "present" would skip a verification. The permissive-looking answer is the expensive
   # one, so there is no unknown taking a shortcut.
-  if _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
+  local _cs_complete=no _cs_obj_total="" _cs_obj_absent=""
+  if _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1 \
+     && _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-list --objects --missing=print --no-walk "$remote_sha" >"$csdir/objcensus" 2>/dev/null; then
+    _cs_obj_total=$(wc -c <"$csdir/objcensus" 2>/dev/null)
+    _cs_obj_absent=$(sed -n '/^?/p' "$csdir/objcensus" 2>/dev/null | wc -c 2>/dev/null)
+    case "$_cs_obj_total" in ''|*[!0-9]*) _cs_obj_total=0 ;; esac
+    case "$_cs_obj_absent" in ''|*[!0-9]*) _cs_obj_absent=1 ;; esac
+    if [ "$_cs_obj_total" -gt 0 ] && [ "$_cs_obj_absent" -eq 0 ]; then _cs_complete=yes; fi
+  fi
+  if [ "$_cs_complete" = yes ]; then
     _CS_SHA="$remote_sha"
     _CS_BASE_OBJ=reused
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
