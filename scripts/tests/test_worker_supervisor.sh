@@ -5625,8 +5625,138 @@ t test_legacy_global_lock_refuses_a_present_lock
 t test_legacy_global_lock_symlink_shapes_refuse
 t test_explicit_lock_does_not_skip_the_check
 t test_legacy_global_lock_removal_condition_recorded
+# ---------------------------------------------------------------------------
+# Test 47k (#3549, roborev job 222 F1; lead ruling 2026-08-31): THE CHECK'S SCOPE IS DECLARED WHERE AN
+# OPERATOR READS IT.
+#
+# THE FINDING. The guard probes ONE path, derived from THIS process's `TMPDIR`. A pre-#3467 supervisor
+# launched with a different `TMPDIR`, or with an explicit `SUPERVISOR_LOCK`, holds a path we never stat.
+# The ruling was NOT to probe more paths (with the classifier deleted there is no stale/live
+# discrimination, so each extra path is a permanent false refusal with no remedy) and NOT to fail closed
+# (the path can never be established for an arbitrary launcher, so fail-closed means refuse ALWAYS).
+# The ruling was to DECLARE THE SCOPE and change no detection logic. So the property under test is a
+# STATEMENT, and the risk to it is that the statement quietly disappears — which is what this pins.
+#
+# WHY BOTH HALVES. Structural alone passes on a comment nobody prints; behavioural alone passes on a
+# line whose wording drifts free of the record at the guard. And the behavioural half carries a MUTANT
+# CONTRAST — the pre-fix silent `verified-absent) return 0` — because "the output contains a
+# qualification" is exactly the assert that passes for free if the drive is emitting anything at all.
+# Pins the RECORD and the EMISSION, not the prose: the tokens asserted are the ones that carry the
+# CLAIM (the path, that it is the ONLY one, and whose environment resolved it).
+# ---------------------------------------------------------------------------
+test_legacy_lock_scope_is_declared() {
+  local d tmp lane legacy derived out rc line ovr mout mrc block doc explicit
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549scope$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) BEHAVIOURAL, on the PROCEED path — the one an operator sees on every clean start. It must
+  # name the path actually tested and say that path is ALL that was tested; a bare absence is the
+  # falsely reassuring negative this ruling is about.
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$derived"* ]]; then
+    pass "scope-declared PREMISE: with no legacy lock the drive reaches the proceed path and acquires (so the line below is the guard's, not an error path's)"
+  else
+    fail "scope-declared-premise: rc=$rc out=[$out] — the proceed path must be reached, or nothing below is attributable"
+  fi
+  line="$(printf '%s\n' "$out" | grep -F 'legacy-lock check' | head -1)"
+  if [[ -n "$line" ]] && [[ "$line" == *"$legacy"* ]] \
+     && [[ "$line" == *"ONLY path"* ]] && [[ "$line" == *"TMPDIR"* ]]; then
+    pass "scope-declared: the proceed path STATES ITS REACH — it names the one path it tested ($legacy), says that is the only one, and says whose TMPDIR resolved it"
+  else
+    fail "scope-declared-proceed: line=[$line] out=[$out] — a clean start must state which path was checked and that it was the only one (#3549 job 222 F1)"
+  fi
+  # ...and it is a DIAGNOSTIC line, not a bare one: a bare line in this file's contract is a runnable
+  # command, and this is prose.
+  if [[ "$line" =~ ^\[worker-supervisor\]\  ]]; then
+    pass "scope-declared: the declaration is a prefixed diagnostic line, so it cannot be mistaken for the one bare runnable line the refusals print"
+  else
+    fail "scope-declared-prefix: line=[$line] — the proceed-path declaration must carry the log prefix"
+  fi
+  rm -rf "$derived"
+
+  # ---- (2) MUTANT CONTRAST: the pre-fix branch, which returned 0 in silence. The start still succeeds
+  # — which is the point: silence is INDISTINGUISHABLE from a checked all-clear, and that is the defect.
+  ovr="$d/m-scope.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_guard \
+       '    verified-absent)' \
+       '    verified-absent)
+      return 0'; then
+    mrc=0
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$derived"* ]] && [[ "$mout" != *"legacy-lock check"* ]]; then
+      pass "scope-declared MUTANT CONTRAST: with the pre-fix early return restored, the identical drive starts with NO statement of what was checked — an operator cannot tell a one-path check from a whole-box all-clear, so the assert above has teeth"
+    else
+      fail "scope-declared-mutant: rc=$mrc out=[$mout] — the silent branch must be shown to emit no declaration, or (1) measures nothing"
+    fi
+    rm -rf "$derived"
+  fi
+
+  # ---- (3) BEHAVIOURAL, on the REFUSAL path (job 222 F2): the relationship line must not assert that
+  # our lock is PER LANE when it is not. Staged in exactly the state where the old wording was FALSE —
+  # an explicitly named lock, which may be global and is not per-lane — with a legacy lock present.
+  explicit="$tmp/operator-named-global.lock"
+  mkdir -p "$legacy"
+  printf '%s\n' "1" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane" "$explicit")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out"; then
+    pass "scope-declared PREMISE (refusal): an explicitly-named lock is still refused over the present legacy lock, which is the state where 'our lock is PER LANE' was false"
+  else
+    fail "scope-declared-premise-refusal: rc=$rc out=[$out]"
+  fi
+  if [[ "$out" != *"is PER LANE"* ]] && [[ "$out" == *"$explicit"* ]]; then
+    pass "scope-declared (F2): the refusal describes the RESOLVED lock path ($explicit) instead of asserting it is per-lane — a claim that is false for exactly this run"
+  else
+    fail "scope-declared-per-lane: out=[$out] — the refusal must not claim our lock is PER LANE when the caller named it (#3549 job 222 F2)"
+  fi
+  rm -rf "$legacy" "$explicit" "$derived"
+
+  # ---- (4) STRUCTURAL, at the guard: the SPATIAL gap is recorded beside the temporal one, with why it
+  # cannot be closed and why extra probes were rejected. Same shape as the RESIDUAL pin above — the
+  # RECORD, not its prose — because a declaration that lives only in emitted text is one refactor away
+  # from being deleted as a stray log line.
+  block="$(sed -n '/^# RESIDUAL (#3549/,/^supervisor_legacy_lock_guard()/p' "$SUPERVISOR")"
+  if [[ -n "$block" ]] && [[ "$block" == *"SPATIAL"* ]] && [[ "$block" == *"#3596"* ]] \
+     && [[ "$block" == *"UNKNOWABLE"* || "$block" == *"unknowable"* ]] \
+     && [[ "$block" == *"REJECTED"* ]]; then
+    pass "scope-declared STRUCTURAL (code): the RESIDUAL block records the SPATIAL gap beside the temporal #3596 one, that another process's environment is unknowable, and that extra probes were REJECTED"
+  else
+    fail "scope-declared-residual: the RESIDUAL block does not record the spatial gap, its unknowable input and the rejection of extra probes (#3549 job 222 F1)"
+  fi
+
+  # ---- (5) STRUCTURAL, in the runbook: the same declaration in operator language, AND TIED TO THE CODE
+  # by quoting the emitted fragment. That tie is the point: a doc that paraphrases can drift silently,
+  # while a doc that quotes the emitted text fails here the moment the line is reworded — which is the
+  # failure mode this issue has already hit three times.
+  #
+  # THE EMITTED FRAGMENT IS MATCHED CASE-EXACTLY AND THE ARGUMENT TOKENS ARE NOT, deliberately: the
+  # first is a QUOTATION and any difference from the shipped bytes is exactly what this half exists to
+  # catch, while the last two are CLAIMS whose capitalisation is prose (measured: the runbook writes
+  # "**rejected**" in a sentence and "REJECTED" nowhere, so a case-exact token here would have red on
+  # correct text — the shape this file elsewhere calls the check people learn to waive).
+  doc="$REPO_ROOT/docs/development/fleet-runbook.md"
+  if [[ ! -r "$doc" ]]; then
+    fail "scope-declared-runbook-premise: $doc is not readable; the scan has no subject"
+    return 0
+  fi
+  if grep -qF 'legacy-lock check: nothing at' "$doc" \
+     && grep -qiF "the check's reach" "$doc" \
+     && grep -qiF 'rejected' "$doc"; then
+    pass "scope-declared STRUCTURAL (runbook): the runbook declares the check's reach, quotes the emitted line verbatim (so a reworded line reds this), and records that extra probes were rejected"
+  else
+    fail "scope-declared-runbook: docs/development/fleet-runbook.md does not carry the reach declaration tied to the emitted line (#3549 job 222 F1)"
+  fi
+
+  rm -rf "$tmp"
+}
+
 t test_legacy_global_lock_residual_recorded
 t test_legacy_lock_container_needs_search_not_read
+t test_legacy_lock_scope_is_declared
 
 
 

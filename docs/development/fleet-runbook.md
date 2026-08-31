@@ -576,10 +576,13 @@ What it guarantees:
     REFUSES with a `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane
     "another instance is already running"). Remedy: stop that supervisor, or upgrade its checkout past
     #3467.
-  - **verified-absent** → the start proceeds, and it says so: one `[worker-supervisor] legacy-lock
-    check: nothing at <path>, which is the ONLY path this check tested …` line, naming the resolved
-    path. Read it as the narrow statement it is — see **the check's reach**, below — not as "no
-    pre-#3467 supervisor can be holding a lock on this box".
+  - **verified-absent** → the start proceeds, **and it says so** — one `[worker-supervisor]`-prefixed
+    line reading
+    `legacy-lock check: nothing at <path>, which is the ONLY path this check tested …`,
+    naming the resolved path. (The quoted fragment is deliberately verbatim: the suite greps this file
+    for it, so rewording the emitted line reds a test instead of silently stranding this prose.) Read
+    it as the narrow statement it is — see **the check's reach**, below — not as "no pre-#3467
+    supervisor can be holding a lock on this box".
   - **could-not-tell** → the start REFUSES, and the cause says **THE EXISTENCE PROBE FAILED**. That is
     not a report that a legacy lock exists; it is a report that this run could not decide whether one
     does. Today the one reachable cause is a container (`$TMPDIR`) that is missing or not searchable by
