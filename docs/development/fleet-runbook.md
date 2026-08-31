@@ -63,10 +63,16 @@ first an `[ok]`: **`VERIFIED`** (the file sets a value, the session sees THAT SA
 gate honours it), **`NOT-SYSTEM-WIDE`** (the session sees a value the file does not set — a sudo-
 or user-specific override), **`NOT-HONOURED`** (visible, but the gate discards or clamps it),
 **`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, the gate could not be
-consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. On a **non-Linux** host
-the verdict is **`NOT-APPLICABLE`**, a second `[ok]`: `/etc/environment` + `pam_env` is a Linux
-mechanism, so macOS is scoped out rather than supported (no launchd equivalent is shipped — there
-is no Mac on this fleet to verify one against).
+consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. `VERIFIED` is the ONLY `[ok]`.
+
+On a **non-Linux** host there is no `[ok]`. `/etc/environment` + `pam_env` is a Linux mechanism, so
+macOS is scoped out rather than supported (no launchd equivalent is shipped — there is no Mac on
+this fleet to verify one against). An earlier form reported `NOT-APPLICABLE` as a second `[ok]`
+here; that was right about the mechanism and wrong about the verdict, because `--strict` reads the
+`[ok]` and so **certified an unpinned host**. Such a host now reports **`UNMEASURED`** when a value
+is visible — with no system-wide file to correlate against, a machine-wide pin cannot be told apart
+from a user-scoped one — and the per-run authority is the gate's own `cpu-budget:` token.
+`NOT-APPLICABLE` is emitted nowhere in the script today.
 Three facts to keep in mind when you touch this:
 
 * **`VERIFIED` is SCOPED, and the line says so.** The probe measures a PAM-created (sudo)

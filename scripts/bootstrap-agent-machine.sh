@@ -2269,8 +2269,19 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} bash -c '
       umask 022
       f="$3"
-      ( set -C; : > "$f" ) 2>/dev/null || exit 4
-      printf "%s\n%s\n" "$1" "$2" > "$f" 2>/dev/null || exit 5
+      # ATOMIC CREATE *WITH CONTENT*, via a hard link (roborev job 323, Medium). The previous
+      # form created the file exclusively and THEN wrote it, which reopened the very window it
+      # was meant to close: another writer appending between the two steps had its content
+      # erased by the truncating write, so the create was "atomic" only in the sense that
+      # nothing else could CREATE it. Writing the content into a temporary in the SAME
+      # directory and then `ln`-ing it into place makes the file appear complete or not at
+      # all — `ln` fails if the destination exists, so exclusivity and completeness are the
+      # same operation instead of two.
+      t="$f.cqlite-pin.$$"
+      rm -f "$t" 2>/dev/null
+      printf "%s\n%s\n" "$1" "$2" > "$t" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 5; }
+      ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
+      rm -f "$t" 2>/dev/null
     ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null
     pin_child_rc=$?
     if [ "$pin_child_rc" = 4 ]; then pin_create_rc=3; return 3; fi

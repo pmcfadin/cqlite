@@ -1954,9 +1954,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   set — a sudo- or user-specific override, so ordinary sessions get something else),
   **`NOT-HONOURED`** (visible, but the gate discards or clamps it — fix the VALUE, not the
   presence), **`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, the gate could
-  not be consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. A **non-Linux**
-  host reports **`NOT-APPLICABLE`** as a second `[ok]`: the mechanism is Linux/`pam_env`-specific,
-  so macOS is scoped OUT rather than supported. **`VERIFIED` IS SCOPED AND SAYS SO**: it
+  not be consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. **`VERIFIED` IS THE ONLY `[ok]`, AND A
+  NON-LINUX HOST DOES NOT GET ONE.** An earlier form emitted `ok "NOT-APPLICABLE"` there — the
+  mechanism is Linux/`pam_env`-specific, so macOS was scoped OUT rather than supported — and that
+  reasoning is still right about the MECHANISM and was wrong about the VERDICT: an `[ok]` is what
+  `--strict` reads, so it **certified an unpinned host**, which is the false-certification shape this
+  whole section exists to remove. A non-Linux host whose session shows a value now reports
+  **`UNMEASURED`** (there is no PAM-read system-wide file to correlate against, so a machine-wide pin
+  cannot be told apart from a user-scoped one), and the per-run authority there is the gate's own
+  `cpu-budget:` token. **Scoping a platform out is not the same as passing it**, and `NOT-APPLICABLE`
+  is emitted nowhere in the script today. **`VERIFIED` IS SCOPED AND SAYS SO**: it
   measures a PAM-created (sudo) session, so a gate launched from a systemd unit or a container
   entrypoint — no PAM in its ancestry, so `/etc/environment` never applies — is NOT covered, and the
   authoritative per-run confirmation stays that gate's own `cpu-budget: max-concurrency=N(pinned)`
