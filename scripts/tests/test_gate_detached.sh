@@ -2404,6 +2404,56 @@ else
   ok "4b.169 the dead-owner fall-through no longer consults ActiveState"
 fi
 
+# --- #3740: this launcher must not FORWARD build-flag contamination ------------------------------
+# agent-gate.sh's header says "never export global RUSTFLAGS on a worker": a non-empty RUSTFLAGS
+# SUPPRESSES cargo's managed block and the gate then APPENDS its own, yielding a doubled
+# `-D warnings -D warnings` applied to components the gate deliberately scopes it AWAY from. That
+# contamination made binding-rust-tests FAIL on a clean tree and halted the fleet for ~an hour on a
+# P0 that did not exist. This launcher forwards the caller's whole environment, so it is the
+# propagation vector -- and the flag arrives via systemd-run, where no command line shows it.
+#
+# Asserted on the GENERATED WRAPPER, not on the source: the wrapper is what the unit actually
+# executes. Captured by stubbing systemd-run so it is never run and so never self-deletes.
+_bf_stub="$TMP/bfstub"; mkdir -p "$_bf_stub"
+cat > "$_bf_stub/systemd-run" <<'BFSTUB'
+#!/bin/bash
+prev=""; for a in "$@"; do
+  case "$prev" in */bash) [ -f "$a" ] && cp "$a" "$CAPTURE_TO" 2>/dev/null && break ;; esac
+  prev="$a"
+done
+exit 0
+BFSTUB
+chmod +x "$_bf_stub/systemd-run"
+_bf_cap="$TMP/bf-wrapper.sh"
+RUSTFLAGS='-D warnings' CARGO_ENCODED_RUSTFLAGS='-Dwarnings' RUSTDOCFLAGS='-D warnings' \
+  CAPTURE_TO="$_bf_cap" PATH="$_bf_stub:$PATH" \
+  bash "$LAUNCHER" --summary "$TMP/bf.txt" --log "$TMP/bf.log" -- --only fmt >/dev/null 2>&1 || true
+if [ ! -s "$_bf_cap" ]; then
+  skipc "4b.170 build-flag vars are not forwarded" "wrapper not captured on this host"
+else
+  _bf_hits=$(grep -cE 'RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTDOCFLAGS' "$_bf_cap" || true)
+  # NON-VACUITY: the wrapper must actually be a wrapper (it forwards SOMETHING), or a zero above
+  # would just mean we captured an empty file.
+  _bf_exports=$(grep -c '^export ' "$_bf_cap" || true)
+  if [ "$_bf_hits" = 0 ] && [ "$_bf_exports" -ge 1 ]; then
+    ok "4b.170 RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS/RUSTDOCFLAGS are NOT forwarded ($_bf_exports other exports present)"
+  else
+    bad "4b.170 build-flag vars are not forwarded" \
+        "build-flag hits=$_bf_hits (want 0), other exports=$_bf_exports (want >=1)"
+  fi
+fi
+# The drop must be DISCLOSED, not silent: the deny arm names itself in SKIPPED, and SKIPPED is
+# emitted on the launch banner. Asserted structurally because a stubbed launch refuses before the
+# banner prints, so the emitted line cannot be observed here -- the channel is shared with the
+# non-identifier and newline-in-value categories.
+if grep -q 'build-flag-contamination' "$LAUNCHER" \
+   && grep -q 'DROPPED: \$SKIPPED' "$LAUNCHER"; then
+  ok "4b.171 the drop names itself in SKIPPED and SKIPPED reaches the banner"
+else
+  bad "4b.171 the drop is disclosed via SKIPPED on the banner" \
+      "$(grep -n 'SKIPPED' "$LAUNCHER" | tail -2)"
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1

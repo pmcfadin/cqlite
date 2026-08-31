@@ -289,6 +289,24 @@ while IFS= read -r -d '' kv; do
     # scheduling for a 30-50 minute job. Dropped so the new process decides and records its
     # own wrapper state.
     AGENT_GATE_WRAPPED|AGENT_GATE_WRAPPER) continue ;;
+    # BUILD-FLAG CONTAMINATION (#3740). agent-gate.sh's own header says "never export global
+    # RUSTFLAGS on a worker": a non-empty RUSTFLAGS in the environment SUPPRESSES cargo's managed
+    # block, and the gate then APPENDS its own -- yielding a doubled `-D warnings -D warnings` that
+    # applies deny-warnings to components the gate deliberately scopes it AWAY from. Measured: that
+    # contamination made binding-rust-tests FAIL on a CLEAN tree, was diagnosed as a source defect,
+    # and halted the fleet for about an hour on a P0 that did not exist.
+    #
+    # THIS LAUNCHER IS THE PROPAGATION VECTOR, which is why the drop belongs here: it forwards the
+    # caller's whole environment, so a lane that exported RUSTFLAGS once poisons every detached gate
+    # it starts -- invisibly, because the flag arrives through systemd-run rather than a command line
+    # anyone can read. Verified by capturing the generated wrapper: before this arm it carried
+    # RUSTFLAGS twice and CARGO_ENCODED_RUSTFLAGS once.
+    #
+    # Dropped, and NAMED in SKIPPED so the launch banner discloses it -- a silent drop would be its
+    # own version of the same problem. CARGO_ENCODED_RUSTFLAGS and RUSTDOCFLAGS are the same channel
+    # under other names; the gate sets what it needs per-component via a scoped prefix.
+    RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTDOCFLAGS)
+      SKIPPED="${SKIPPED:+$SKIPPED }$name(build-flag-contamination:#3740)"; continue ;;
     # The gate's summary path is set explicitly below.
     AGENT_GATE_SUMMARY_FILE) continue ;;
   esac
