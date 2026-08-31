@@ -79,7 +79,18 @@ an override is settable by the party it constrains.
 - **THEN** those commits are counted in `N` but NOT in `M`
 - **AND** the verdict is `NO-STALENESS-RECOGNISED`
 
-*Verified by:* `scripts/tests/test_base_staleness.sh` (gate-global match case; unrelated-churn case).
+Every entry of the gate-global set SHALL be pinned by a test that reds when that entry alone is
+removed. The subject set SHALL be DERIVED at run time rather than curated, and SHALL be reconciled
+against a second, independent committed declaration of the same list — a single derivation cannot pin an
+entry, since removing one removes its own probe.
+
+#### Scenario: Removing any single gate-global entry reds the suite
+- **GIVEN** a copy of the script with exactly one `GATE_GLOBAL_PATTERNS` entry deleted
+- **WHEN** the test suite runs against it
+- **THEN** it reports at least one failure, naming the entry
+
+*Verified by:* `scripts/tests/test_base_staleness.sh` (gate-global match case; unrelated-churn case;
+derived per-entry pin with the two-oracle reconciliation).
 *Rationale (measured):* `docs/round-artifacts/issue-3650-blast-radius-measurements.md` — on PR #3362 the
 culprit commit and the diff share no path, so intersection alone is unsound; intersection ∪ gate-global
 fires on 37 of 107 commits behind (35%) as shipped — measured with the script at `origin/main`

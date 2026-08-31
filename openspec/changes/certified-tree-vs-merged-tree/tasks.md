@@ -52,6 +52,12 @@ Surface exercised by each task is named, per `openspec/config.yaml` rules.
       fixtures whose MATCHED paths contain `OK`, `PASS`, a space and a NEWLINE, printed verbatim
       (newline escaped visibly); and a planted mutant reducing the sanitizer to a pass-through, which
       must break the anchor.
+- [x] 2.14 Case (DERIVED, per gate-global ENTRY): read `GATE_GLOBAL_PATTERNS` at run time, synthesize
+      one probe commit per entry per recognised shape, assert `STALE-RECOGNISED` **per entry** (never a
+      suite-wide `ran > 0`, #3220), FAIL CLOSED on an empty derivation. Reconcile against the
+      INDEPENDENT committed list in `design.md` D1a and probe the UNION, because a single derivation
+      cannot pin an entry — dropping one would drop its own probe (oracle sharing a source with its
+      subject). Verified by mutation sweep: each of the 10 entries reds when dropped.
 - [x] 2.13 Cases (D1d): a PR that RENAMES a path plus a commit behind editing the OLD path is
       `STALE-RECOGNISED`, and reds against a copy with the porcelain pin removed; and
       `diff.relative=true` with cwd in a subdirectory still stales.

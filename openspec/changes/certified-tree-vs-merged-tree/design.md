@@ -200,7 +200,17 @@ already runs `test_premerge_assert.sh`). Beyond ordinary cases it carries:
    appears as a bare `0`. *The predecessor of these ran MID-SUITE, so it inspected Cases 2–6 only and never
    saw the `UNMEASURED`, usage or mutant runs, and its prefix check recorded success on both branches while
    asking the wrong question.*
-5. **Rename/relative symmetry cases** (D1d): a PR that renames a path plus a commit behind editing the OLD
+5. **A DERIVED per-entry pin for the gate-global set, with TWO oracles reconciled fail-closed.** A
+   mutation sweep found 8 of the 10 entries silently deletable with the suite green — Case 11 empties the
+   WHOLE list, so nothing pinned an individual entry, and the two that did red were covered only
+   incidentally. Deriving the subject set from the script ALONE cannot fix that *by construction*: drop an
+   entry and its probe disappears with it (the oracle shares a source with its subject). So the subject
+   set is the **union** of the script's `GATE_GLOBAL_PATTERNS` and the **independent** committed
+   declaration in D1a above, the two are reconciled by name in both directions, and an unreadable second
+   oracle is a FAIL rather than a fallback to the first. A new entry is probed for free (derive, never
+   curate); a one-sided deletion reds twice. Measured: dropping any single entry now reds; emptying the
+   list reds hard; the control is green.
+6. **Rename/relative symmetry cases** (D1d): a PR that renames a path plus a commit behind editing the OLD
    path must be `STALE-RECOGNISED`, and it reds when the porcelain pin is removed; likewise
    `diff.relative=true` with cwd in a subdirectory.
 4. **An `UNMEASURED`-is-not-`0` case**: a git failure yields exit 5, never exit 0.

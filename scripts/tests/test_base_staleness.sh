@@ -731,6 +731,147 @@ if run 4 "the same repo from its ROOT stales with or without the pin (control)" 
   ok "relative: the fixture is stale from the repo root, so the subdirectory case is about cwd"
 fi
 
+# --- Case 16b (DERIVED, one assertion PER GATE-GLOBAL ENTRY) ----------------
+# Case 11 empties the WHOLE list, so it catches wholesale removal — and nothing
+# pinned an INDIVIDUAL entry: a mutation sweep found 8 of the 10 silently
+# deletable with the suite still green, including `scripts/tests/**`, the entry
+# review had just added. The two that did red were covered only INCIDENTALLY, as
+# a side effect of the motivating and reserved-substring fixtures.
+#
+# DERIVED, NOT CURATED (the repo rule behind `legacy-heuristics` computing its
+# target set and `flight-tests` its unit set): this case reads
+# GATE_GLOBAL_PATTERNS out of the SHIPPED script at run time and synthesizes one
+# probe commit per entry, so a FUTURE entry is pinned for free with no test edit.
+# That is what makes "the next person needs to find the list" actually hold.
+#
+# One probe path per recognised shape, chosen so the case proves the shape rather
+# than accidentally matching some other way:
+#   exact           -> the path itself
+#   **/<basename>   -> some/member/<basename>  (in a SUBDIRECTORY, so the `**/`
+#                      half is what matches, never the exact-match half)
+#   <prefix>/**     -> <prefix>/probe-fixture.txt
+# An UNRECOGNISED shape is a FAIL naming it, never a skip.
+# TWO ORACLES, RECONCILED FAIL-CLOSED — because ONE derivation cannot pin an
+# entry, BY CONSTRUCTION. The first version of this case derived the subject set
+# from the script alone, and the mutation sweep showed why that is BLIND: drop an
+# entry and the probe for it disappears with it, so the suite loses two `ok`s and
+# reports 0 failures. The oracle shared a source with its subject. So the subject
+# set is the UNION of:
+#   A  the shipped script's own GATE_GLOBAL_PATTERNS (so a NEW entry is probed
+#      for free, with no test edit — derive, never curate), and
+#   B  the INDEPENDENT committed declaration of the same list in the change's
+#      design document, which doctrine already requires to be kept current in the
+#      same change.
+# An entry deleted from A alone stays in the union, its probe runs, the advisory
+# does not stale, and the case REDS — which is the pin. The two sets are also
+# reconciled directly, so a drop is reported by name in both directions. This is
+# the repo's "same fact written twice, maintained BY HAND" pattern (cf. the
+# `.roborev.toml` / census mirror), and it makes the lead's "findable list"
+# condition stronger: script and design must AGREE.
+GG_LIST=()
+while IFS= read -r _e; do
+  [ -n "$_e" ] || continue
+  GG_LIST+=("$_e")
+done < <(awk "/^GATE_GLOBAL_PATTERNS='/{f=1;next} f&&/^'$/{f=0} f&&NF" "$ADVISORY")
+
+# Oracle B. Located by GLOB over both the active and the ARCHIVED openspec paths,
+# because `openspec archive` moves the directory; if neither is readable that is a
+# FAIL naming the reconciliation (the signal to re-home the oracle), never a
+# silent fallback to oracle A alone — which is the blindness this exists to fix.
+GG_DESIGN=""
+for _cand in "$SCRIPT_DIR"/../../openspec/changes/*/design.md \
+  "$SCRIPT_DIR"/../../openspec/changes/archive/*/design.md; do
+  [ -f "$_cand" ] || continue
+  grep -q 'D1a — What membership ASSERTS' "$_cand" || continue
+  GG_DESIGN="$_cand"
+  break
+done
+GG_DOC=()
+if [ -n "$GG_DESIGN" ]; then
+  while IFS= read -r _e; do
+    [ -n "$_e" ] || continue
+    GG_DOC+=("$_e")
+  done < <(awk '
+    /D1a — What membership ASSERTS/ { seen = 1 }
+    seen && /^```$/ { fence++; next }
+    seen && fence == 1 { for (i = 1; i <= NF; i++) print $i }
+    fence >= 2 { exit }
+  ' "$GG_DESIGN")
+fi
+if [ -z "$GG_DESIGN" ]; then
+  bad "derived: the INDEPENDENT oracle (design.md's D1a list) could not be located — re-home it; refusing to rely on the script alone"
+elif [ "${#GG_DOC[@]}" -eq 0 ]; then
+  bad "derived: the independent oracle at $GG_DESIGN yielded ZERO entries — the reconciliation would be vacuous"
+else
+  ok "derived: the independent oracle (${#GG_DOC[@]} entries) was read from $(basename "$(dirname "$GG_DESIGN")")/design.md"
+fi
+
+# FAIL CLOSED on an empty derivation: an empty subject set must be a FAILURE
+# naming the derivation, never a vacuous pass — an emptied list is exactly what
+# Case 11 plants, so a silent zero here would excuse the defect under test.
+if [ "${#GG_LIST[@]}" -eq 0 ]; then
+  bad "derived: the GATE_GLOBAL_PATTERNS derivation from $ADVISORY yielded ZERO entries — refusing to pass vacuously"
+elif [ "${#GG_LIST[@]}" -ne "$GG_ENTRIES" ]; then
+  bad "derived: the entry list (${#GG_LIST[@]}) disagrees with the counted entries ($GG_ENTRIES)"
+else
+  ok "derived: ${#GG_LIST[@]} gate-global entries derived from the shipped script at run time"
+fi
+
+# Reconcile the two, naming any difference in BOTH directions.
+printf '%s\n' ${GG_LIST[@]+"${GG_LIST[@]}"} | sort >"$T/gg-script"
+printf '%s\n' ${GG_DOC[@]+"${GG_DOC[@]}"} | sort >"$T/gg-doc"
+gg_only_script=$(comm -23 "$T/gg-script" "$T/gg-doc" | tr '\n' ' ')
+gg_only_doc=$(comm -13 "$T/gg-script" "$T/gg-doc" | tr '\n' ' ')
+if [ -z "$gg_only_script" ] && [ -z "$gg_only_doc" ] && [ -s "$T/gg-script" ]; then
+  ok "derived: the script's gate-global list and the design document's declaration AGREE exactly"
+else
+  bad "derived: script/design gate-global lists DISAGREE — script-only:[$gg_only_script] design-only:[$gg_only_doc]"
+fi
+
+# The subject set is the UNION, so an entry dropped from either side is still
+# PROBED and the probe is what reds.
+GG_UNION=()
+while IFS= read -r _e; do
+  [ -n "$_e" ] || continue
+  GG_UNION+=("$_e")
+done < <(sort -u "$T/gg-script" "$T/gg-doc")
+if [ "${#GG_UNION[@]}" -eq 0 ]; then
+  bad "derived: the union of both oracles is EMPTY — refusing to pass vacuously"
+else
+  ok "derived: probing the UNION of both oracles (${#GG_UNION[@]} entries), so a one-sided deletion still reds"
+fi
+gg_i=0
+# Asserted PER ENTRY, never with a suite-wide `ran > 0` (#3220): a count cannot
+# see one entry skipping behind its siblings.
+for gg_pat in ${GG_UNION[@]+"${GG_UNION[@]}"}; do
+  gg_i=$((gg_i + 1))
+  case "$gg_pat" in
+    '**/'*) gg_probe="some/member/${gg_pat#**/}" ;;
+    *'/**') gg_probe="${gg_pat%/**}/probe-fixture.txt" ;;
+    *'*'*)
+      bad "derived: entry '$gg_pat' is an UNRECOGNISED shape — the matcher recognises exact, <prefix>/** and **/<basename> only"
+      continue
+      ;;
+    *) gg_probe="$gg_pat" ;;
+  esac
+  R_GG=$(newrepo "gate-global-$gg_i")
+  # The diff touches a path that is NOT gate-global, so the ONLY way this can
+  # stale is via the entry under test.
+  commit_paths "$R_GG" "the PR: a non-gate-global path" \
+    "cqlite-core/src/storage/sstable/mod.rs"
+  advance_main "$R_GG"
+  commit_paths "$R_GG" "behind: touches only the entry under test" "$gg_probe"
+  publish_main "$R_GG"
+  back_to_feature "$R_GG"
+  if run 4 "derived[$gg_pat]: a commit behind touching only '$gg_probe' stales" "$R_GG"; then
+    # `gate-global` and not `diff-path`: the entry is what matched, not the diff.
+    has "derived[$gg_pat]: matched as gate-global via '$gg_probe'" \
+      "gate-global $gg_probe"
+    has "derived[$gg_pat]: exactly the one commit behind stales" \
+      "blast-radius 1 RECOGNISED of 1 commits behind"
+  fi
+done
+
 # --- Case 17 (WHOLE SUITE, was Case 7): the ANCHORED output guarantee -------
 # Accumulated across EVERY case above and asserted HERE, after the last one. The
 # old placement covered Cases 2-6 only, so the UNMEASURED, usage and mutant runs
