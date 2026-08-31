@@ -1314,6 +1314,46 @@ the pre-fix artifact before believing it, which is how this one was caught. `4b.
 cannot see what the launcher actually wrote, only what its source says it would write. `4b.157` is
 `4b.156`'s control, so a launcher that refused *everything* could not read as a pass.
 
+### Round 48: the class audit, and why the independent enumerator found 1 of 4
+
+The lead's ruling after round 47: three Mediums in one new file, all one class (unsafe shell handling of
+untrusted input), means **rounds SAMPLE a class, they do not ENUMERATE one** — so audit the file against
+a closed five-item list, fix everything in one series, RED-verify, ship.
+
+| Class | Finding | Disposition |
+|---|---|---|
+| 4 — two-valued file predicates | `_foreign_reservation` opened `[ -L $lk ] || [ -e $lk ] \|\| { printf free; }`. Both predicates collapse *no such path* and *not permitted to look* onto the same FALSE, and the branch answered **`free`** — the permissive value — for both. | **FIXED.** `free` now needs an affirmative measurement (containing directory is a directory **and** searchable); otherwise `unknown`, which every caller refuses. Composition degrades safely: an unsearchable grandparent makes `-d` false and lands in the same branch. |
+| 1 — unquoted expansion | `set -- $_state` and `set -- $rest`, **in both `gate-detached.sh` and `gate-heartbeat.sh`** — 4 instances. | **FIXED.** Two became pure parameter expansion; two keep the split (deliberate — `/proc/<pid>/stat` field 20) under `set -f`, prior `-f` state saved and restored. |
+| 1 — the **generated** wrapper | shellcheck run on the captured artifact, not the source. | **0 findings**; `%q` encodes a space+glob value as `a\ b\*c`. |
+| 2 — command qualification | The launcher runs under the caller's `PATH` by definition, so "qualify everything" is neither achievable nor meaningful against a hostile invoker (out of model per #3312). The boundary that matters: a command whose failure is **silent** and **security-consequential**, or whose output feeds a security decision. | Audited each: `stat` → refuse, `readlink` → `unknown`, `systemctl` → live, `flock` → refuse, `ln -s` → refuse. Already fail-closed. The **wrapper** was the real gap (F3, round 47). |
+| 3 — shared-dir fixed names | `PRIVDIR`, the heartbeat probes and the launch snapshot are all `mktemp`-unpredictable; the global lock moved to a verified 0700 per-user dir (F2). | Clean. Residual recorded: the `$SUMMARY.launch-lock` family are fixed names in a **caller-chosen** directory, but a planted lock makes `ln -s` fail and the pre-check refuse — a DoS, never a false pass. |
+| 5 — symlink / TOCTOU | `ln -s` is itself an atomic create, so losing the check→create race fails closed; the global lock removes the launcher-vs-launcher window. | One residual, unchanged and still recorded: the log truncation is check-then-create and bash cannot open `O_NOFOLLOW`. |
+| dead code | `_has_line` and `_START_RE` — defined, never called, while five sites spell that regex out inline. | **REMOVED.** Dead code shaped like a check is worse than none: an unused `_START_RE` implies a single source of truth that does not exist. |
+
+**THE METHOD LESSON, which outlives every finding above.** I pulled in shellcheck 0.11.0 specifically so
+the audit would not rest on my reading of my own file, and it reported **1 of the class's 4 instances**.
+Two of the misses were not tool limitations: those sites carried an explicit
+`# shellcheck disable=SC2086` added in an earlier round, so **the enumerator was silent because it had
+been told to be — at exactly the sites that needed it.** A blanket disable is not a narrowing; it
+suppresses every reason the check exists, and here it suppressed the *globbing* half that nobody meant
+to waive while licensing the *splitting* half that was deliberate. What actually closed the gap was
+**my own structural test failing on my own fix**: `4b.162` went red after class 1 was "finished".
+
+Three transferable rules:
+1. **An independent enumerator can be muzzled by your own repository.** Before trusting a clean scan,
+   grep for its suppression directives — a `disable=` line is evidence *about the scan*, not about the code.
+2. **Where a lint's subject is legitimate, express the intent instead of muting the lint** (`set -f`
+   around a deliberate split), and scope the directive to one command — shellcheck attaches a directive
+   to the **next command**, so on `set -f; set -- $rest; …` it covered only the `set -f`. That is how the
+   first attempt was caught.
+3. **A tool covering one of five classes must not be reported as covering the audit.** "0 findings" is a
+   class-1 statement here; classes 2–5 were enumerated by hand (21 file predicates individually).
+
+RED-verified both directions against `fb97362eb`: `4b.161` (the false `free`) and `4b.162` (unguarded
+splits, 2 per file) each fail on the pre-fix tree and pass after; `4b.160` is the control and passes on
+both, so `4b.161` cannot be satisfied by a function that answers `unknown` for everything. Suites:
+detached **195/0**, liveness **251/0**.
+
 ## Doctrine
 
 - A lane **may** run its own full gate, via `gate-detached.sh`. The claim "lanes cannot
