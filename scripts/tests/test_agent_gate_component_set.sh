@@ -3080,7 +3080,17 @@ else
   # no spawn. It was ABSENT from this list while being used, because the audit erased it: the
   # quote strip removed `"$(find …)"` as a matched pair, which is the blind spot job 279 found and
   # the substitution scan above now closes.
-  declared_externals="basename cat chmod cut env find git gtimeout kill mktemp rm sed sleep timeout tr true"
+  # `head` and `wc` (job 297): the BOUNDED capture replay. `head -c N <file>` reads at most N bytes
+  # and terminates, and `wc -c` counts what that produced — together they are the bound itself, which
+  # is why they are here rather than being wrapped in one. LOCAL UTILITIES: one named path, no
+  # network, no spawn, no shell. They replaced an unbounded `cat "$_CS_CAP_OUT"` that a descendant
+  # outliving a successful child could keep feeding — measured off-suite as 4.1 GB in 6s with the read
+  # never terminating.
+  #
+  # NOTE `cat` REMAINS in this set and is still used for STDERR, whose replay is best-effort by
+  # design: losing part of a diagnostic must not turn a measured result into a refusal. The bound
+  # matters on the STDOUT path because that is the one whose bytes are PARSED.
+  declared_externals="basename cat chmod cut env find git gtimeout head kill mktemp rm sed sleep timeout tr true wc"
   externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
   undeclared=""
   for _w in $externals; do
