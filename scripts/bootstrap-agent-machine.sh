@@ -2138,6 +2138,31 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # verdict decided by an unanchored match would be decided by whatever else printed.
     pin_probe_set=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe-set=//p' | head -1)
     pin_probe_seen=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe=//p' | head -1)
+    # THE VERDICT IS A CONJUNCTION OF TWO MEASUREMENTS, NEVER A FILE-STATE PRECEDENCE
+    # THAT OVERRIDES THE PROBE (#3414, lead ruling). Written out because getting the
+    # asymmetry backwards is easy and would silently undo an earlier ruling in this same
+    # issue:
+    #
+    #   session sees value | /etc/environment line        | verdict
+    #   -------------------|------------------------------|--------------------------
+    #   NO                 | anything — present, absent,   | FAILED. "Not visible" is an
+    #                      | unreadable, or no such file   | AFFIRMATIVE measurement;
+    #                      |                              | nothing about the file can
+    #                      |                              | rescue or worsen it. The file
+    #                      |                              | state picks only the REMEDY
+    #                      |                              | TEXT below, never the verdict.
+    #   yes                | present                      | VERIFIED (still subject to the
+    #                      |                              | gate-honours check)
+    #   yes                | verified absent (readable)   | NOT-SYSTEM-WIDE
+    #   yes                | unreadable / undeterminable  | UNMEASURED — the attribution
+    #                      |                              | half genuinely was not measured
+    #
+    # THE RULE THIS ENCODES, which came up three separate times in #3414: AN UNMEASURABLE
+    # HALF MAY ONLY EVER WEAKEN A POSITIVE CLAIM; IT MAY NEVER SOFTEN A NEGATIVE ONE.
+    # UNMEASURED earns its place by blocking a VERIFIED we cannot support — not by
+    # excusing a FAILED we have already established. Collapsing every unreadable-file case
+    # to UNMEASURED would downgrade a real FAILED to "could not measure", which is the
+    # discard-a-measurement error already ruled against for the unwritable-file case.
     if [ "$pin_probe_rc" = 124 ] || [ "$pin_probe_rc" = 137 ]; then
       warn "gate-pin: UNMEASURED (the probe exceeded its ${PIN_PROBE_BOUND}s bound and was killed — pin visibility is UNKNOWN, not ok)"
     elif ! printf '%s\n' "$pin_probe_out" | grep -q '^cqlite-gate-pin-probe-set='; then
@@ -2213,6 +2238,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # NOT VISIBLE. Two different boxes, two different remedies — split on a fact we
       # already read above rather than printing one remedy and hoping.
       warn "gate-pin: FAILED (a fresh profile-free session does NOT see CQLITE_GATE_MAX_CONCURRENCY — every non-interactive gate on this box will resolve the #1825 cap from the default formula and admit co-tenants, #3414)"
+      # The verdict is ALREADY emitted, unconditionally, above. What follows selects the
+      # REMEDY only — two different boxes reach FAILED and need different next steps, but
+      # no file state can turn this verdict into anything else (see the table above).
       case "$PIN_FILE_HAS_LINE" in
         yes)
           info "the pin IS in $PIN_ENV_FILE and a fresh session still does not see it — this is a PAM condition, NOT a missing pin"

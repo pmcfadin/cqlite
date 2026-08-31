@@ -2959,6 +2959,37 @@ else
     printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
   fi
 
+  # 11z5. THE NEGATIVE ROW IS INDEPENDENT OF FILE STATE (issue #3414, lead ruling). The
+  #      verdict is a conjunction of two measurements, not a file-state precedence: when
+  #      the session does NOT see the value, that is an affirmative measurement and the
+  #      verdict is FAILED whatever the file says — present, absent, or unreadable. The
+  #      rule is that an unmeasurable half may weaken a POSITIVE claim but may never
+  #      soften a NEGATIVE one, so an unreadable file must not downgrade a real FAILED to
+  #      UNMEASURED. Asserted across all three file states in one loop, because the
+  #      individual cases (11w absent, 11z2 present, 11s2 unreadable) each check one row
+  #      and none of them states the INVARIANT that binds the three.
+  for pin_row in absent present unreadable; do
+    envf_r5="$tmp/pin-env-r5-$pin_row"
+    case "$pin_row" in
+      absent)     : >"$envf_r5" ;;
+      present)    printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_r5" ;;
+      unreadable) printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_r5"; chmod 0000 "$envf_r5" ;;
+    esac
+    if [ "$pin_row" = unreadable ] && [ "$(id -u)" = 0 ]; then
+      skip "gate-pin negative-row invariant, unreadable file (running as root: 0000 is still readable)"
+      continue
+    fi
+    out_r5=$(runpin "$pinroot" "$shims_none" "$envf_r5" HOME="$pin_home_plain")
+    chmod 0644 "$envf_r5" 2>/dev/null || true
+    if printf '%s' "$out_r5" | grep -q 'gate-pin: FAILED' \
+       && ! printf '%s' "$out_r5" | grep -qE 'gate-pin: (UNMEASURED|NOT-SYSTEM-WIDE|VERIFIED)'; then
+      ok "gate-pin: session-cannot-see-it => FAILED with the env file $pin_row (file state cannot soften a negative)"
+    else
+      bad "gate-pin: file state '$pin_row' changed a NEGATIVE probe's verdict"
+      printf '%s\n' "$out_r5" | grep -i 'gate-pin' | head -2
+    fi
+  done
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
