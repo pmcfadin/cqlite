@@ -59,8 +59,11 @@ never gate stdout or review churn.
    ```bash
    bash scripts/flow/claim.sh verify <N> || { : "do NOT proceed — see the refusal's reason= below"; }
    ```
-   On failure, read the `reason=`: **`released-then-resumed`** means this box already occupies the lane
-   (your own resumed branch) — take the documented `adopt --expect none --reason <why>` path;
+   On failure, read the `reason=` — there are THREE and they are NOT interchangeable:
+   **`released-then-resumed`** means the lane lock holds THIS SESSION's own token (your own resumed
+   branch) — take the documented `adopt --expect none --reason <why>` path;
+   **`lane-occupied-by-live-peer`** means a DIFFERENT live process on this box is in that lane — adopt
+   NOTHING and reap NOTHING, find that session (the refusal names its pid) or take another issue;
    **`legacy-branch-lock`** means a peer's branch outlived its claim — CONFIRM abandonment first (below).
    Never an unguarded create, never a hand-crafted claim commit.
    Design-driven issues already hold the

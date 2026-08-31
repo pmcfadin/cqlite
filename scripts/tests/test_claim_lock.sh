@@ -949,14 +949,24 @@ else
 fi
 
 # ===========================================================================
-echo "TEST 22: AC6 — released-then-resumed is a verdict of its OWN, and neither refusal prints a runnable resume"
+echo "TEST 22: AC6 — the legacy-branch refusal splits THREE ways by what the evidence PROVES, and none prints a runnable resume"
 # ===========================================================================
 # Measured on #3393: a slice shipped, the claim ref was released correctly and the
 # board went back to Ready — proper finalize behaviour — then work resumed on the
 # SAME branch for 20+ commits holding no claim. `claim` refused with
 # reason=legacy-branch-lock and pointed at the abandoned-lane procedure, which is
-# exactly the wrong advice when the lane is yours and live. The two states have
+# exactly the wrong advice when the lane is yours and live. The states have
 # OPPOSITE remedies, so they must be textually distinct.
+#
+# ROUND-1 REVIEW FIX, and case (h) is the regression: three evidence rungs used to
+# collapse onto reason=released-then-resumed, whose text says "the branch above is
+# almost certainly YOUR OWN" and points at adoption. Only ONE of them proves that.
+# A live LOCAL lane-lock holder proves a live process on THIS BOX owns the lane, NOT
+# that it is THIS SESSION — and that is exactly #3436's scenario, so the refusal told
+# a reader to adopt the claim for an actively-worked PEER lane (the inverse hazard).
+# A lane DIRECTORY on the issue's branch proves less again. So: SELF ->
+# released-then-resumed; live local peer -> lane-occupied-by-live-peer; everything
+# else, worktree-only evidence INCLUDED -> legacy-branch-lock.
 push_legacy_branch() {   # <issue> — an issue-<N>-* branch on origin, no claim ref
   (
     cd "$A" || exit 1
@@ -973,8 +983,9 @@ push_legacy_branch 40
 out22a=$(runA claim 40 2>/dev/null); rc22a=$?
 if [ "$rc22a" -eq 2 ] && printf '%s\n' "$out22a" | grep -q 'reason=legacy-branch-lock' \
    && printf '%s\n' "$out22a" | grep -q 'claim-ref=free' \
+   && printf '%s\n' "$out22a" | grep -q 'lane-evidence=none' \
    && ! printf '%s\n' "$out22a" | grep -q 'released-then-resumed'; then
-  ok "(a) AC6: an issue-40-* branch with NO local lane evidence keeps reason=legacy-branch-lock (exit 2)"
+  ok "(a) AC6: an issue-40-* branch with NO local lane evidence keeps reason=legacy-branch-lock (exit 2, lane-evidence=none)"
 else
   bad "(a) expected reason=legacy-branch-lock exit 2 with no released-then-resumed; got rc=$rc22a
 $out22a"
@@ -991,7 +1002,8 @@ rc22b=$rc
 if [ "$rc22b" -eq 2 ] && printf '%s\n' "$out22b" | grep -q 'reason=released-then-resumed' \
    && printf '%s\n' "$out22b" | grep -q 'claim-ref=free' \
    && printf '%s\n' "$out22b" | grep -q 'lane-evidence=lane-lock-self' \
-   && ! printf '%s\n' "$out22b" | grep -q 'reason=legacy-branch-lock'; then
+   && ! printf '%s\n' "$out22b" | grep -q 'reason=legacy-branch-lock' \
+   && ! printf '%s\n' "$out22b" | grep -q 'reason=lane-occupied-by-live-peer'; then
   ok "(b) AC6: the lane lock held by THIS session yields reason=released-then-resumed (exit 2, lane-evidence=lane-lock-self)"
 else
   bad "(b) expected reason=released-then-resumed exit 2 with lane-evidence=lane-lock-self; got rc=$rc22b
@@ -1009,34 +1021,13 @@ else
 $out22b"
 fi
 
-# (d) THE #2945 RULING, and a test is the only thing that keeps it true: NEITHER
-# refusal may print a runnable resume command. The readers are agents that execute
-# printed remediations literally, and an older-fleet worker holds only the BRANCH,
-# so a printed empty-lease adopt WOULD succeed against a live lane.
-if ! printf '%s\n' "$out22a" | grep -q 'claim.sh adopt' \
-   && ! printf '%s\n' "$out22b" | grep -q 'claim.sh adopt' \
-   && ! printf '%s\n' "$out22a" | grep -q -- '--expect none' \
-   && ! printf '%s\n' "$out22b" | grep -q -- '--expect none'; then
-  ok "(d) AC6: neither refusal prints a runnable resume command (no 'claim.sh adopt', no '--expect none')"
-else
-  bad "(d) a refusal printed a runnable resume command (#2945 violation):
-generic:  $out22a
-resumed:  $out22b"
-fi
-
-# (e) DISTINCTNESS control: a single-verdict implementation must fail. The reason
-# tokens are compared as values, not searched for as substrings.
-r22a=$(printf '%s\n' "$out22a" | grep -o 'reason=[^ ]*' | head -1)
-r22b=$(printf '%s\n' "$out22b" | grep -o 'reason=[^ ]*' | head -1)
-if [ -n "$r22a" ] && [ -n "$r22b" ] && [ "$r22a" != "$r22b" ]; then
-  ok "(e) AC6 control: the two refusals carry DISTINCT reason tokens ($r22a vs $r22b)"
-else
-  bad "(e) expected two distinct reason tokens; got '$r22a' and '$r22b'"
-fi
-
-# (f) Evidence (c) — the case that makes this useful on DAY ONE: a lane that
-# resumed BEFORE this lock existed never took it, so the only local signal is a
-# worktree whose HEAD branch is this issue's.
+# (f) ROUND-1 REVIEW: WORKTREE-ONLY EVIDENCE IS REPORTED AND DECIDES NOTHING.
+# A lane directory on this issue's branch used to be evidence enough for
+# released-then-resumed — i.e. an unattributed directory got a reader told the branch
+# was theirs, with an adoption pointer attached. A directory existing says nobody is
+# necessarily in it, and the branch says nothing about WHICH session put it there. So
+# the verdict falls back to the generic one AND the observation still shows up in
+# `lane-evidence=`, which is what keeps the rung visible without it deciding.
 push_legacy_branch 42
 mkdir -p "$LANE_ROOT/lane-42"
 (
@@ -1046,11 +1037,13 @@ mkdir -p "$LANE_ROOT/lane-42"
   gg checkout -q -b issue-42-slug
 )
 out22f=$(runA claim 42 2>/dev/null); rc22f=$?
-if [ "$rc22f" -eq 2 ] && printf '%s\n' "$out22f" | grep -q 'reason=released-then-resumed' \
-   && printf '%s\n' "$out22f" | grep -q 'lane-evidence=lane-worktree-branch'; then
-  ok "(f) AC6: a local lane checkout on issue-42-* (no lane lock at all) is evidence enough for released-then-resumed"
+if [ "$rc22f" -eq 2 ] && printf '%s\n' "$out22f" | grep -q 'reason=legacy-branch-lock' \
+   && printf '%s\n' "$out22f" | grep -q 'lane-evidence=lane-worktree-branch' \
+   && ! printf '%s\n' "$out22f" | grep -q 'released-then-resumed' \
+   && ! printf '%s\n' "$out22f" | grep -q 'lane-occupied-by-live-peer'; then
+  ok "(f) AC6: a local lane checkout on issue-42-* (no lane lock) keeps reason=legacy-branch-lock, with the worktree still REPORTED in lane-evidence="
 else
-  bad "(f) expected released-then-resumed via lane-worktree-branch; got rc=$rc22f
+  bad "(f) expected reason=legacy-branch-lock with lane-evidence=lane-worktree-branch...; got rc=$rc22f
 $out22f"
 fi
 
@@ -1066,33 +1059,93 @@ mkdir -p "$LANE_ROOT/lane-43"
 )
 out22g=$(runA claim 43 2>/dev/null); rc22g=$?
 if [ "$rc22g" -eq 2 ] && printf '%s\n' "$out22g" | grep -q 'reason=legacy-branch-lock' \
+   && printf '%s\n' "$out22g" | grep -q 'lane-evidence=none' \
    && ! printf '%s\n' "$out22g" | grep -q 'released-then-resumed'; then
-  ok "(g) AC6 control: a lane checkout NOT on issue-43-* is no evidence — the generic verdict stands"
+  ok "(g) AC6 control: a lane checkout NOT on issue-43-* is no evidence at all (lane-evidence=none) — so (f)'s branch match is proven to do work"
 else
   bad "(g) expected the generic legacy-branch-lock verdict for a non-matching branch; got rc=$rc22g
 $out22g"
 fi
 
-# (h) Evidence (b) — a LIVE LOCAL holder that is NOT this session. The lane lock is
-# acquired for the sleeper's pid but the claim runs WITHOUT LANE_LOCK_PID, so
-# lane-lock `verify` fails (the token is not ours) and evidence (a) cannot fire;
-# the probe still reports ALIVE with the holder machine equal to ours, which is
-# (b). The lane directory here is the one lane-lock.sh created — NOT a git
-# checkout — so (c) cannot fire either, which is what makes this case attribute
-# the verdict to (b) alone.
+# (h) THE ROUND-1 REGRESSION CASE. Evidence (b): a LIVE LOCAL holder that is NOT this
+# session. The lane lock is acquired for the sleeper's pid but the claim runs WITHOUT
+# LANE_LOCK_PID, so lane-lock `verify` fails (the token is not ours) and rung (a)
+# cannot fire; the probe still reports ALIVE with the holder machine equal to ours and
+# a holder token DIFFERENT from ours, which is (b). The lane directory here is the one
+# lane-lock.sh created — NOT a git checkout — so (c) cannot fire either, which is what
+# makes this case attribute the verdict to (b) alone.
+#
+# THIS IS THE CASE THAT WAS PREVIOUSLY WRONG: it returned reason=released-then-resumed,
+# telling a session that a lane an ACTIVELY-WORKED PEER holds was "almost certainly
+# YOUR OWN" and pointing it at claim adoption — the inverse of the right advice, and
+# the exact collision #3436 exists to prevent. It must now be its own verdict.
 push_legacy_branch 44
 LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 44 >/dev/null 2>&1
 out22h=$(runA claim 44 2>/dev/null); rc22h=$?
-if [ "$rc22h" -eq 2 ] && printf '%s\n' "$out22h" | grep -q 'reason=released-then-resumed' \
-   && printf '%s\n' "$out22h" | grep -q 'lane-evidence=lane-lock-alive-local'; then
-  ok "(h) AC6: a LIVE LOCAL lane-lock holder that is not this session is evidence (b) (lane-evidence=lane-lock-alive-local)"
+if [ "$rc22h" -eq 2 ] && printf '%s\n' "$out22h" | grep -q 'reason=lane-occupied-by-live-peer' \
+   && printf '%s\n' "$out22h" | grep -q 'lane-evidence=lane-lock-alive-local-peer' \
+   && printf '%s\n' "$out22h" | grep -q "lane-holder-pid=$OCCUPANT_PID" \
+   && ! printf '%s\n' "$out22h" | grep -q 'reason=released-then-resumed' \
+   && ! printf '%s\n' "$out22h" | grep -q 'reason=legacy-branch-lock'; then
+  ok "(h) AC6 regression: a LIVE LOCAL lane-lock holder that is NOT this session is reason=lane-occupied-by-live-peer (exit 2), naming the holder pid — NOT released-then-resumed"
 else
-  bad "(h) expected released-then-resumed via lane-lock-alive-local; got rc=$rc22h
+  bad "(h) expected reason=lane-occupied-by-live-peer exit 2 with lane-evidence=lane-lock-alive-local-peer and lane-holder-pid=$OCCUPANT_PID; got rc=$rc22h
+$out22h"
+fi
+
+# (h2) ...and its PROSE must send the reader somewhere else again: not to adoption,
+# and not to the abandonment tests, which describe a lane nobody is in.
+if printf '%s\n' "$out22h" | grep -q 'DO NOT ADOPT THE CLAIM REF' \
+   && printf '%s\n' "$out22h" | grep -q 'should-reap' \
+   && printf '%s\n' "$out22h" | grep -qi 'does not apply' \
+   && printf '%s\n' "$out22h" | grep -qi 'find that session'; then
+  ok "(h) AC6: the live-peer text refuses BOTH other remedies by name (no adoption, no abandonment procedure) and says to find that session"
+else
+  bad "(h) live-peer text did not refuse adoption + the abandonment procedure:
 $out22h"
 fi
 
 kill "$OCCUPANT_PID" 2>/dev/null || true
 wait "$OCCUPANT_PID" 2>/dev/null || true
+
+# (d) THE #2945 RULING, and a test is the only thing that keeps it true: NO refusal
+# may print a runnable resume command. The readers are agents that execute printed
+# remediations literally, and an older-fleet worker holds only the BRANCH, so a
+# printed empty-lease adopt WOULD succeed against a live lane. All FOUR refusal
+# outputs above are checked, the live-peer one included — it is the one where a
+# printed adopt would do the most damage.
+d22_bad=""
+for v in a b f h; do
+  eval "d22_out=\"\$out22$v\""
+  if printf '%s\n' "$d22_out" | grep -q 'claim.sh adopt' \
+     || printf '%s\n' "$d22_out" | grep -q -- '--expect none'; then
+    d22_bad="$d22_bad ($v)"
+  fi
+done
+if [ -z "$d22_bad" ]; then
+  ok "(d) AC6: no refusal prints a runnable resume command (no 'claim.sh adopt', no '--expect none') — checked on all four"
+else
+  bad "(d) a refusal printed a runnable resume command (#2945 violation):$d22_bad
+generic:   $out22a
+resumed:   $out22b
+worktree:  $out22f
+live-peer: $out22h"
+fi
+
+# (e) DISTINCTNESS control over ALL THREE reason tokens: a two-verdict implementation
+# fails here, which is precisely what the round-1 defect was. The tokens are compared
+# as VALUES, never searched for as substrings (`legacy-branch-lock` is a substring of
+# nothing else here, but `released-then-resumed` vs a hypothetical
+# `released-then-resumed-peer` would defeat a substring test).
+r22a=$(printf '%s\n' "$out22a" | grep -o 'reason=[^ ]*' | head -1)
+r22b=$(printf '%s\n' "$out22b" | grep -o 'reason=[^ ]*' | head -1)
+r22h=$(printf '%s\n' "$out22h" | grep -o 'reason=[^ ]*' | head -1)
+uniq_reasons=$(printf '%s\n%s\n%s\n' "$r22a" "$r22b" "$r22h" | sort -u | grep -c .)
+if [ -n "$r22a" ] && [ -n "$r22b" ] && [ -n "$r22h" ] && [ "$uniq_reasons" -eq 3 ]; then
+  ok "(e) AC6 control: the three refusals carry THREE DISTINCT reason tokens ($r22a / $r22b / $r22h)"
+else
+  bad "(e) expected three distinct reason tokens; got '$r22a' '$r22b' '$r22h' (uniq=$uniq_reasons)"
+fi
 
 # ===========================================================================
 echo

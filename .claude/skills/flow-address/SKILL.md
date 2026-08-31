@@ -33,10 +33,11 @@ Resolve them in the worktree and reply per thread.
    bash scripts/flow/claim.sh verify <N>       # on failure read reason=; see flow-implement step 2
    bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$(cd <worktree> && pwd)" || exit 0
    ```
-   A `released-then-resumed` refusal is NOT a stale lock and NOT an abandoned peer lane — it means this
-   box already occupies its own lane; take the documented `adopt --expect none --reason <why>` path. A
-   `lane-lock` `OCCUPIED` with `liveness=ALIVE` means a DIFFERENT live process on this box owns that
-   worktree: stop, do not edit. Only a verifiably DEAD holder is auto-reclaimed.
+   A `released-then-resumed` refusal is NOT a stale lock and NOT an abandoned peer lane — it means the
+   lane lock holds THIS SESSION's own token; take the documented `adopt --expect none --reason <why>`
+   path. A `lane-occupied-by-live-peer` refusal is its opposite: a DIFFERENT live process on this box is
+   in that lane — adopt nothing, reap nothing, stop. Same for a `lane-lock` `OCCUPIED` with
+   `liveness=ALIVE`: do not edit. Only a verifiably DEAD holder is auto-reclaimed.
 5. **Fix in the worktree** (`.claude/worktrees/issue-<N>-<slug>`), spawning `sstable-developer` for
    non-trivial code changes. Set the transient `addressing` sub-marker (a skill-managed marker the
    board→label mirror #2855 does not own); clear the sibling transient `spec-review` marker. Do NOT

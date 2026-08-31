@@ -3115,10 +3115,20 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   the documented `adopt` path, never an unguarded create. `claim.sh claim` cannot serve here — it
   refuses with `reason=legacy-branch-lock` because the branch still exists on origin — and that
   refusal was correct for an abandoned peer lane but sent a session resuming **its own** branch to the
-  abandoned-lane procedure. It now distinguishes the two by name: with a local lane dir occupied by a
-  live holder (or a local worktree on the matching branch) the verdict is
-  `reason=released-then-resumed`, textually distinct from `reason=legacy-branch-lock`, each with its
-  own remedy. **Neither prints a runnable resume command** — the #2945 ruling stands: the readers are
+  abandoned-lane procedure. It now splits that refusal THREE ways by name, **and the split is decided by
+  what each signal PROVES, not by whether any signal fired** — the first draft mapped three evidence
+  rungs onto one verdict and produced the inverse hazard:
+  `reason=released-then-resumed` **only** when the machine-local lane lock holds this session's EXACT
+  five-component token (its text says the branch is "almost certainly YOUR OWN" and points at
+  adoption, which nothing weaker licenses); `reason=lane-occupied-by-live-peer` when a live LOCAL
+  holder's token DIFFERS from ours — a peer session on this box is in that lane, so adopting the claim
+  is #3436's own damage and the abandonment tests (`should-reap`, board Status, branch author) describe
+  a lane nobody is in; and `reason=legacy-branch-lock`, unchanged, for everything else **including
+  worktree-only evidence** (a lane directory on the issue's branch says nobody is necessarily in it,
+  and nothing about WHICH session put it there). All three carry `lane-evidence=<tokens>` naming the
+  rungs that were observed — a worktree observation is REPORTED there and decides nothing — and all
+  three fail closed toward the generic verdict when a signal cannot be read.
+  **None prints a runnable resume command** — the #2945 ruling stands: the readers are
   agents that execute printed remediations literally, and an older-fleet worker holds only the BRANCH,
   so a printed empty-lease adopt WOULD succeed against a live lane.
   **And the machine-visible signature of the window is cheap enough to sweep for**: board
