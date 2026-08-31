@@ -1949,10 +1949,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   inherited value — **and `BASH_ENV`/`ENV` with it, since a non-interactive bash SOURCES `$BASH_ENV`
   and that file can re-export the variable just scrubbed** — and reads it back out of a fresh,
   profile-free session, in the same posture as `git-push:`. FIVE verdicts ship and only the first is
-  an `[ok]`: **`VERIFIED`** (visible AND the gate honours the value), **`NOT-HONOURED`** (visible,
-  but the gate discards or clamps it — the remedy is to fix the VALUE, not the presence),
-  **`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, or the gate could not be
-  consulted about the value), **`OPT-OUT`/`SKIPPED`**. **`VERIFIED` IS SCOPED AND SAYS SO**: it
+  an `[ok]`: **`VERIFIED`** (the system-wide file sets a value, a fresh session sees THAT SAME
+  value, and the gate honours it), **`NOT-SYSTEM-WIDE`** (the session sees a value the file does not
+  set — a sudo- or user-specific override, so ordinary sessions get something else),
+  **`NOT-HONOURED`** (visible, but the gate discards or clamps it — fix the VALUE, not the
+  presence), **`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, the gate could
+  not be consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. A **non-Linux**
+  host reports **`NOT-APPLICABLE`** as a second `[ok]`: the mechanism is Linux/`pam_env`-specific,
+  so macOS is scoped OUT rather than supported. **`VERIFIED` IS SCOPED AND SAYS SO**: it
   measures a PAM-created (sudo) session, so a gate launched from a systemd unit or a container
   entrypoint — no PAM in its ancestry, so `/etc/environment` never applies — is NOT covered, and the
   authoritative per-run confirmation stays that gate's own `cpu-budget: max-concurrency=N(pinned)`

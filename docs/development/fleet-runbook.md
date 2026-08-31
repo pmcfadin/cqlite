@@ -56,9 +56,14 @@ bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (
 **and `BASH_ENV`/`ENV` with it**, since a non-interactive bash sources `$BASH_ENV` and that file
 could re-export the very variable just removed — then reads the variable back out of a fresh,
 profile-free session. It is never a grep of the file it just wrote. Five verdicts ship, only the
-first an `[ok]`: **`VERIFIED`** (visible AND honoured by the gate), **`NOT-HONOURED`** (visible,
-but the gate discards or clamps the value), **`FAILED`** (not visible), **`UNMEASURED`** (the
-probe could not run, or the gate could not be consulted), **`OPT-OUT`/`SKIPPED`**.
+first an `[ok]`: **`VERIFIED`** (the file sets a value, the session sees THAT SAME value, and the
+gate honours it), **`NOT-SYSTEM-WIDE`** (the session sees a value the file does not set — a sudo-
+or user-specific override), **`NOT-HONOURED`** (visible, but the gate discards or clamps it),
+**`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, the gate could not be
+consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. On a **non-Linux** host
+the verdict is **`NOT-APPLICABLE`**, a second `[ok]`: `/etc/environment` + `pam_env` is a Linux
+mechanism, so macOS is scoped out rather than supported (no launchd equivalent is shipped — there
+is no Mac on this fleet to verify one against).
 Three facts to keep in mind when you touch this:
 
 * **`VERIFIED` is SCOPED, and the line says so.** The probe measures a PAM-created (sudo)
