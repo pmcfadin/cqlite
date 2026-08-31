@@ -3023,7 +3023,17 @@ fi
 #            `_component_set_bounded` or carries a `# local-only: <reason>` annotation at
 #            its own site — an unannotated one is a GAP;
 #       (ii) the set of EXTERNAL PROGRAMS the region invokes equals a DECLARED list, so a
-#            new one (`curl`, `ssh`, `python3`, another `bash`) cannot appear unclassified.
+#            new one (`curl`, `ssh`, `python3`, another `bash`) cannot appear unclassified;
+#       (iii) the set of GIT OPERATIONS (subcommands) it invokes equals a DECLARED list, in
+#            BOTH directions — a new `git diff`/`git status`/`git archive` cannot arrive
+#            unclassified, and a declared operation that no longer appears must be removed,
+#            because a stale entry pre-authorises a re-introduction.
+#
+#     GRANULARITY, stated rather than left to be assumed: (iii) is keyed on the SUBCOMMAND, not
+#     on subcommand-plus-flags. That is the granularity of the property — which git COMMANDS run
+#     here decides the execution routes the enumeration comment analyses — and a flag-level key
+#     would red on a reordering of correct code. A new FLAG on a declared subcommand is therefore
+#     NOT caught here; it is caught by review, at the enumeration comment.
 #
 #     WHAT IT CLAIMS: every external invocation is CLASSIFIED. It cannot prove a command
 #     is truly network-free — that is a judgement, recorded per site in the annotations and
@@ -3068,9 +3078,17 @@ function annotated(i) {
 function classify(t, i, bounded, probe,   w, cmd) {
   sub(/^[ \t]*/, "", t)
   sub(/^![ \t]*/, "", t)
+  # THE CONDITION IS AN ALLOWLIST AND THE BODY MUST USE THE SAME ONE (roborev job 309). The body's
+  # second `sub` matched `[a-z]+`, i.e. ANY lowercase word — so once the loop had been entered for a
+  # real keyword it stripped the COMMAND as well. Measured: `if ! env -i … git init …` audited as
+  # `EXT then` and NOTHING ELSE — no `env`, no `git`, no GAP — and `if ! git fetch origin main` was
+  # reported as an external program named `fetch` with no GAP at all. Fourteen `if ! …` sites live in
+  # this region, so the guard's own subject was partly invisible to it; `chmod` sat in
+  # declared_externals for a site the census could not see. Two copies of one rule, which is the
+  # drift this file keeps finding — the alternation is now written once, in both places.
   while (t ~ /^(if|while|until|then|else|elif|do|not)[ \t]+/ || t ~ /^![ \t]*/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) {
     sub(/^![ \t]*/, "", t)
-    sub(/^([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|[a-z]+)[ \t]+/, "", t)
+    sub(/^([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|if|while|until|then|else|elif|do|not)[ \t]+/, "", t)
   }
   split(t, w, /[ \t]/)
   cmd = w[1]
@@ -3079,10 +3097,26 @@ function classify(t, i, bounded, probe,   w, cmd) {
   # `env -i VAR=… git …` (job 258): the ENVIRONMENT WRAPPER is not the command. `env` is recorded
   # above as the real external it is, and then this looks THROUGH it — otherwise wrapping a call in
   # `env` would silently EXEMPT the git behind it from the bound check.
-  if (cmd == "env") {
-    sub(/^env[ \t]+/, "", t)
-    while (t ~ /^-[iu][ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
-      sub(/^(-[iu]|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*)[ \t]+/, "", t)
+  # LOOK THROUGH THE WRAPPERS, BOTH OF THEM. `env -i VAR=… git …` (job 258) is the ENVIRONMENT
+  # wrapper and `_component_set_bounded <secs> …` (job 309) is the BOUND wrapper; neither IS the
+  # command. Each is recorded above as what it is and then looked THROUGH, or wrapping a call would
+  # silently exempt it. The bound wrapper had to join for the OP census below to have its own
+  # subject: EVERY network-capable git here is bounded, so an operation inventory blind to that
+  # form would be blind to `fetch` and `ls-remote` — the two operations it exists to notice.
+  # The BOUND ARGUMENT is stripped by an ALLOWLIST of the shapes that survive the quote strip
+  # (digits, or a `$`-expansion remnant), never by position: a blind "drop one token" would eat
+  # the command itself at the sites where the bound was quoted and is therefore already blank.
+  while (cmd == "env" || cmd == "_component_set_bounded") {
+    prev = t
+    if (cmd == "env") {
+      sub(/^env[ \t]+/, "", t)
+      while (t ~ /^-[iu][ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
+        sub(/^(-[iu]|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*)[ \t]+/, "", t)
+    } else {
+      sub(/^_component_set_bounded[ \t]+/, "", t)
+      sub(/^([0-9]+|\$[A-Za-z_{][^ \t]*)[ \t]+/, "", t)
+    }
+    if (t == prev) return          # nothing consumed: refuse rather than spin
     split(t, w, /[ \t]/)
     cmd = w[1]
     if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) return
@@ -3090,6 +3124,22 @@ function classify(t, i, bounded, probe,   w, cmd) {
   }
   if (cmd == "git" && !bounded && !probe && !annotated(i))
     printf "GAP\t%d\t%s\n", i, substr(line[i], 1, 60)
+  # THE GIT OPERATION ITSELF (job 309). Keyed on the SUBCOMMAND, deliberately, not on subcommand
+  # plus flags: the property worth guarding is which git COMMANDS run here, because that is what
+  # decides the execution routes the enumeration comment analyses (hooks fire on ref writes,
+  # `core.fsmonitor` only for index-reading commands like `status`/`diff`/`checkout`/`stash`,
+  # textconv only for `diff`/`archive`). A new FLAG on an existing subcommand opens no new route,
+  # while keying on flags would red on a reordering — a guard that reds on correct input is the
+  # guard agents learn to waive. Global options are skipped, so `-C`/`--no-replace-objects` do not
+  # masquerade as the subcommand.
+  if (cmd == "git") {
+    op = t
+    if (op ~ /^git[ \t]/) sub(/^git[ \t]+/, "", op)
+    else sub(/^.*[ \t]git[ \t]+/, "", op)
+    while (op ~ /^-[^ \t]*[ \t]+/) sub(/^-[^ \t]*[ \t]+/, "", op)
+    split(op, gw, /[ \t]/)
+    printf "OP\t%s\n", (gw[1] ~ /^[a-z][a-z-]*$/ ? gw[1] : "<unrecognised:" gw[1] ">")
+  }
 }
 END {
   for (i = 1; i <= NR; i++) {
@@ -3193,13 +3243,46 @@ else
     case " $declared_externals " in *" $_w "*) continue ;; esac
     undeclared="${undeclared:+$undeclared }$_w"
   done
-  if [ -n "$git_gaps" ]; then
+  # (iii) THE GIT OPERATION INVENTORY (roborev job 309), checked in BOTH DIRECTIONS. The
+  #       enumeration comment at the head of the pre-flight block says "the whole set is
+  #       enumerated here" and this test was cited beside it as the thing that asserts it — but
+  #       the assert covered external program NAMES only, so the git operations were guarded by
+  #       nothing and had drifted BOTH ways: `init`, `ls-remote`, `cat-file`, `rev-list` and two
+  #       `rev-parse` forms had appeared unlisted, while `update-ref -d` and
+  #       `rev-parse FETCH_HEAD^{commit}` were still listed with ZERO live uses.
+  #
+  #       AN ABSENT DECLARED OPERATION IS ALSO A FAILURE, not merely untidy: a stale entry
+  #       PRE-AUTHORISES a re-introduction, which is exactly why `bash` and `mkdir` were REMOVED
+  #       from declared_externals rather than left in place when the two `--list` spawns went. The
+  #       same rule now applies to both sets.
+  git_ops=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | sort -u)
+  declared_git_ops="cat-file fetch init ls-remote ls-tree merge-base remote rev-list rev-parse show"
+  undeclared_ops=""; stale_ops=""; stale_externals=""
+  for _o in $git_ops; do
+    case " $declared_git_ops " in *" $_o "*) continue ;; esac
+    undeclared_ops="${undeclared_ops:+$undeclared_ops }$_o"
+  done
+  for _o in $declared_git_ops; do
+    printf '%s\n' "$git_ops" | grep -qx -- "$_o" && continue
+    stale_ops="${stale_ops:+$stale_ops }$_o"
+  done
+  for _w in $declared_externals; do
+    printf '%s\n' "$externals" | grep -qx -- "$_w" && continue
+    stale_externals="${stale_externals:+$stale_externals }$_w"
+  done
+  if [ -z "$git_ops" ]; then
+    bad "3544-no-unbounded: the git-operation census came back EMPTY on a region of $region_lines lines — the derivation broke (fail-closed: an empty subject set would declare every operation classified)"
+  elif [ -n "$git_gaps" ]; then
     bad "3544-no-unbounded: git invocation(s) in the pre-flight neither bounded nor annotated '# local-only: <reason>':"
     printf '%s\n' "$git_gaps" | while IFS= read -r _g; do echo "   $_g"; done
   elif [ -n "$undeclared" ]; then
     bad "3544-no-unbounded: UNDECLARED external program(s) in the pre-flight region: $undeclared — classify each in the enumeration comment (bounded or local-only) and add it to declared_externals"
+  elif [ -n "$undeclared_ops" ]; then
+    bad "3544-no-unbounded: UNDECLARED git operation(s) in the pre-flight region: $undeclared_ops — add each to the enumeration comment at the head of the pre-flight block (BOUNDED or LOCAL-ONLY, with its reason) and to declared_git_ops"
+  elif [ -n "$stale_ops" ] || [ -n "$stale_externals" ]; then
+    bad "3544-no-unbounded: DECLARED but NO LONGER USED — git operation(s): ${stale_ops:-none}; external program(s): ${stale_externals:-none}. Remove each from its declared set and from the enumeration comment: a stale entry pre-authorises a re-introduction (the reason `bash` and `mkdir` were removed rather than left)"
   else
-    ok "3544-no-unbounded: every git invocation in the pre-flight is bounded or annotated local-only, and no undeclared external program appears (region $region_lines lines)"
+    ok "3544-no-unbounded: every git invocation in the pre-flight is bounded or annotated local-only, no undeclared external program appears, and the git-operation inventory matches the region EXACTLY in both directions ($(printf '%s' "$git_ops" | wc -w | tr -d ' ') operations, region $region_lines lines)"
   fi
 
   # POSITIVE CONTROLS for BOTH halves, through the SAME audit program: plant each defect
@@ -3224,16 +3307,31 @@ else
       printf 'run_probe() { [ -z "$(newprog7279 "$CONF" -perm 600 -print 2>/dev/null)" ]; }\n'; } >"$ctl_qsub"
   ctl_envwrap="$tmp/region-envwrap.sh"
   {   cat "$region"; printf 'run_probe() { env -i PATH="$PATH" git -C "$REPO_ROOT" fetch origin main >/dev/null 2>&1; }\n'; } >"$ctl_envwrap"
+  # …and the `if ! <cmd>` shape, which is the blind spot the loop fix closes (job 309). Before it,
+  # this exact plant audited as an external program named `fetch` with NO GAP: the keyword strip
+  # consumed the command that followed `!`. Fourteen live sites in this region have that shape, so
+  # the control is not hypothetical — `chmod` was declared for a site the census could not see.
+  ctl_ifbang="$tmp/region-ifbang.sh"
+  {   cat "$region"; printf 'run_probe() { if ! git -C "$REPO_ROOT" fetch origin main; then return 1; fi; }\n'; } >"$ctl_ifbang"
+  # …and a NEW GIT OPERATION behind the BOUND wrapper — the form every network-capable call here
+  # uses. `git diff` is chosen deliberately: the enumeration comment's route analysis names
+  # index-reading commands as the ones that would open `core.fsmonitor`, so this is the class of
+  # change the inventory exists to stop arriving unclassified.
+  ctl_newop="$tmp/region-newop.sh"
+  {   cat "$region"; printf 'run_probe() { _component_set_bounded 5 git -C "$REPO_ROOT" diff --name-only >/dev/null 2>&1; }\n'; } >"$ctl_newop"
   ctl_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_unbounded" | grep -c '^GAP	')
   ctl_ann_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_annotated" | grep -c '^GAP	')
   ctl_curl_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_curl" | sed -n 's/^EXT\t//p' | grep -cx curl)
   ctl_envwrap_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_envwrap" | grep -c '^GAP	')
   ctl_qsub_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_qsub" | sed -n 's/^EXT\t//p' | grep -cx newprog7279)
+  ctl_ifbang_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_ifbang" | grep -c '^GAP	')
+  ctl_newop_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_newop" | sed -n 's/^OP\t//p' | grep -cx diff)
   if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 0 ] && [ "$ctl_curl_seen" -ge 1 ] \
-     && [ "$ctl_envwrap_gaps" -eq 1 ] && [ "$ctl_qsub_seen" -ge 1 ]; then
-    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), a program inside a QUOTED SUBSTITUTION (the job-279 blind spot), stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
+     && [ "$ctl_envwrap_gaps" -eq 1 ] && [ "$ctl_qsub_seen" -ge 1 ] \
+     && [ "$ctl_ifbang_gaps" -eq 1 ] && [ "$ctl_newop_seen" -ge 1 ]; then
+    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), the same defect after \`if !\` (1 — the job-309 blind spot), a program inside a QUOTED SUBSTITUTION (the job-279 blind spot), a NEW git operation behind the bound wrapper, stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
   else
-    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, quoted-subst seen=$ctl_qsub_seen expected >=1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
+    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, if-bang=$ctl_ifbang_gaps expected 1, quoted-subst seen=$ctl_qsub_seen expected >=1, new-op seen=$ctl_newop_seen expected >=1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
   fi
 fi
 
