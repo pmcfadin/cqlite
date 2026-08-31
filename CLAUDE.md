@@ -931,23 +931,43 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   new finding at the same head raises the observed count and fails** — that is how the UNDEFERRED set is
   computed without a per-finding identity roborev's prose does not provide, and **no such identity is
   reconstructed from that prose** (the class #3564 closed by REMOVING prose reconstruction stays closed).
-  `issues=` also names **where the finding went**: each number must be a RETRIEVABLE issue **and** be
-  REFERENCED FROM THE PR BODY, because a deferral without a linked issue is a DROPPED finding. **And the
-  PR body is written by the WORKER — the constrained party — so that reference is checked with TOKEN
-  *and* REPOSITORY boundaries** (roborev job 225): a digits-only bound admitted `owner/repo#N` (a
-  different repository, which the caller's own `gh issue view <N>` then validated against the unrelated
-  LOCAL issue), `#Nsuffix` (not an autolink at all) and a copy inside a fence, a code span or an HTML
-  comment (content a reader does not see as a link) — four ways for the constrained party to satisfy its
-  own constraint. Inert regions are removed before the match, unterminated constructs swallow the rest
-  of their scope, and the fence closer follows CommonMark (same char, ≥ as long, no info string) because
-  a naive toggle desynchronises on a ```` ```bash ```` line INSIDE a fence — the FAIL-OPEN direction.
-  Every ambiguity resolves toward NOT FOUND: the remedy for a false `PR-UNLINKED` is one line in the PR
-  body, while the other error drops a finding silently. The full-URL form is deliberately not accepted. It reports
+  `issues=` records that the finding is **TRACKED**, and RETRIEVABILITY is the leg that enforces it:
+  each number must be a retrievable GitHub issue, asked **THREE-VALUED** — only a payload affirmatively
+  naming that number is `present` and may grant; an issue GitHub answers does not exist is
+  `ISSUE-ABSENT`; an issue whose existence could NOT BE ASKED (no `gh`, no auth, a network/API failure,
+  an unparseable payload, or any diagnostic that does not say the issue is missing) is
+  `ISSUE-UNVERIFIABLE`. The two are **textually distinct** because they are different operator actions
+  ("that issue number is wrong" vs "this box cannot reach GitHub"), and **`gh issue view` EXITS 1 FOR
+  BOTH** (measured, gh 2.98.0) — so an exit-code-only test is the two-valued predicate that always picks
+  the permissive answer and would grant over issues nobody confirmed exist. Unrecognised ⇒ could-not-ask,
+  and a could-not-ask is NEVER read as verified.
+  **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG IS DELETED — DO NOT REINSTATE IT (#3626, lead
+  ruling).** An earlier revision demanded each number also appear as a local, visible `#N` in the PR
+  BODY (`PR-UNLINKED` otherwise), with recognisers for `owner/repo#N`, `#Nsuffix`, fences, code spans and
+  HTML comments. **The reason it is gone is NOT the bypasses: a PR body is EDITABLE AT ANY TIME BY ANYONE
+  WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a top-level comment is PERMANENT AND
+  ATTRIBUTABLE.** So it was the WEAKER artifact and would stay weaker **even if Markdown parsed
+  trivially** — an authorization the constrained party can silently rewrite after it is granted evidences
+  nothing; the recogniser problem was a SYMPTOM. The requirement's own wording invited it, too: "name
+  where the finding went" invited a PROSE SCAN when the property wanted is that the finding is TRACKED.
+  The census, kept because it is the evidence the class does not close (Markdown-handling references in
+  that one predicate went **0 → 11** over two rounds): round 1 closed five shapes (cross-repository,
+  `#Nsuffix`, fenced block, HTML comment, single-backtick span); round 2 found **two more** — a
+  multi-backtick span and an explicit `[#N](url)` link — with GFM autolinks, reference-style links, raw
+  HTML, entity refs and nested emphasis unhandled by any generation and the 4-space indent already a
+  declared residual. #3312 (*remove the shared channel, do not pick a rarer delimiter*) and #3229's owner
+  ruling (*a guard with known documented false-PASSes is worse than no guard*) both apply, and
+  **subtraction cannot introduce a false PASS**: with nothing predicted about the body, nothing is
+  excused by it. Any future strengthening must come from an **immutable or attributed** artifact (a
+  structured GitHub relation, or the authorization comment itself), never from parsing the mutable body
+  of the PR under review. It reports
   a **distinct token** — `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`, **NEVER
   `NONE`** (which stays reachable only from the record's structured verdict letter, so nobody grepping
   `findings: NONE` reads a deferred run as clean) — beside a `deferral:` key that speaks even when
-  nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAUTHORIZED`/`COUNT-MISMATCH`/`ISSUE-UNRESOLVABLE`/
-  `PR-UNLINKED`/`UNAVAILABLE`, each leaving the FAIL). **`findings: UNKNOWN` and `SKIP` are NOT
+  nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAUTHORIZED`/`COUNT-MISMATCH`/`ISSUE-ABSENT`/
+  `ISSUE-UNVERIFIABLE`/`UNAVAILABLE`, each leaving the FAIL). A marker **attempt** is the stem plus
+  whitespace **or end-of-line**, so a marker-only comment that is exactly the stem is `MALFORMED`, never
+  a fail-quiet `NONE`. **`findings: UNKNOWN` and `SKIP` are NOT
   deferrable in any mode**: those states were never ESTABLISHED, and a pass may not rest on a state that
   could not be read. **The two authorizations stay SEPARATELY SCOPED and neither falls back to the
   other** — an absence waiver confers no authority over `findings:`, a findings deferral none over

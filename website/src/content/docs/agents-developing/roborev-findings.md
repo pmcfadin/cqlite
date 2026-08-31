@@ -706,26 +706,55 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    roborev's prose does not provide, and **none is reconstructed from that prose**: the class closed above
    by *removing* prose reconstruction stays closed.
 
-   **`issues=` names where the finding went.** Each number must be a **retrievable** issue
-   (`ISSUE-UNRESOLVABLE` otherwise) **and** be **referenced from the PR body** (`PR-UNLINKED` otherwise),
-   because a deferral without a linked issue is a **dropped** finding.
+   **`issues=` records that the finding is TRACKED, and retrievability is the leg that enforces it.**
+   Each number must be a **retrievable** GitHub issue, asked **three-valued**: only a payload
+   affirmatively naming that number is `present` and permits a grant; an issue GitHub answers does not
+   exist is `ISSUE-ABSENT`; and an issue whose existence could **not be asked** — no `gh`, no auth, a
+   network/API failure, an unparseable payload, or **any diagnostic that does not say the issue is
+   missing** — is `ISSUE-UNVERIFIABLE`. The two non-granting states are **textually distinct** because
+   they are different operator actions: *"that issue number is wrong"* versus *"this box cannot reach
+   GitHub"*. **`gh issue view` exits 1 for both** (measured on gh 2.98.0: `GraphQL: Could not resolve to
+   an issue or pull request with the number of N.` versus `HTTP 401: Bad credentials`), so an
+   exit-code-only test is exactly the two-valued predicate that always picks the permissive answer — it
+   would grant a deferral over issues **nobody confirmed exist**. The verdict therefore comes from the
+   diagnostic, anything unrecognised is a could-not-ask, and a could-not-ask is **never** read as
+   verified.
 
-   **The PR body is written by the worker — the constrained party — so that reference is checked with
-   token *and* repository boundaries** (roborev job 225). A digits-only bound admitted four shapes, each
-   of which let the constrained party satisfy its own constraint: `owner/repo#N` (a different repository,
-   while the caller's own `gh issue view <N>` validated the unrelated **local** issue), `#Nsuffix` (not a
-   GitHub autolink at all), and a copy inside a fenced block, an inline code span or an HTML comment
-   (content a reader of the PR does not see as a link). Inert regions are therefore removed before the
-   match; every unterminated construct swallows the rest of its scope, and the fence **closer** follows
-   CommonMark — same character, at least as long, no info string — because a naive "any fence line
-   toggles" rule desynchronises on a ```` ```bash ```` line *inside* a fence, which GitHub renders as
-   code while the naive rule would read the text after it as prose. That is the **fail-open** direction,
-   the one direction this predicate must not fail. Every ambiguity resolves toward **not found**: the
-   remedy for a false `PR-UNLINKED` is one line in the PR body, while the opposite error drops a finding
-   with no recorded disposition. The full-URL form is deliberately not accepted — this scanner is not
-   told which repository is local, and guessing is the shape being removed. The nit rule already requires one
-   follow-up issue at merge time; this makes the link mechanical instead of remembered, and the ruling
-   needs no separate artifact — the authorization comment is permanent, attributable and in the PR.
+   **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG WAS DELETED (#3626, lead ruling).** An earlier
+   revision demanded each `issues=` number also appear as a local, visible `#N` in the **PR body**
+   (`PR-UNLINKED` otherwise), with recognisers for cross-repository references, alphanumeric suffixes,
+   fenced blocks, code spans and HTML comments. It is gone, and **the reason is not the bypasses**:
+
+   > **A PR body is editable at any time by anyone with write access, with NO per-edit attribution. A
+   > top-level comment is permanent and attributable.**
+
+   So the body-link leg was the **weaker artifact**, and it would stay weaker **even if Markdown parsed
+   trivially** — an authorization the constrained party can silently rewrite after it is granted
+   evidences nothing. The Markdown-recogniser problem was a **symptom**, not the cause. The requirement's
+   own wording invited it: *"name where the finding went"* invited a **prose scan**, when the property
+   actually wanted is that the finding is **TRACKED**. The census is kept because it is the evidence the
+   class does not close — Markdown-handling references in that one predicate went **0 → 11** across two
+   review rounds:
+
+   | shape | round | status when the leg was deleted |
+   |---|---|---|
+   | `other/repo#3602` cross-repository | R1 | closed |
+   | `#3602suffix` | R1 | closed |
+   | fenced code block | R1 | closed |
+   | `<!-- #3602 -->` HTML comment | R1 | closed |
+   | `` `#3602` `` single-backtick span | R1 | closed |
+   | ``` ``#3602`` ``` multi-backtick span | **R2** | **ACCEPTED (bypass)** |
+   | `[#3602](https://example.com)` explicit link | **R2** | **ACCEPTED (bypass)** |
+   | 4-space indented code block | — | ACCEPTED (declared residual) |
+   | GFM autolinks, `[#N][ref]`, raw HTML, entity refs, nested emphasis | — | unhandled by any generation |
+
+   #3312 (*remove the shared channel, do not pick a rarer delimiter*) and #3229's owner ruling (*a guard
+   with known documented false-PASSes is worse than no guard, because it invites reliance it cannot
+   support*) both apply. **Subtraction cannot introduce a false PASS**: with nothing predicted about the
+   body, nothing is excused by it. Any future strengthening of the disposition must come from an
+   **immutable or attributed** artifact — a structured GitHub relation, or the authorization comment
+   itself — never from parsing the mutable body of the PR under review. **Reinstating a body scan is
+   reinstating generation three.**
 
    **What it reports** is a distinct token, and never `NONE`:
 
@@ -738,12 +767,15 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    `NONE` stays reachable **only** from the record's structured `verdict` letter, so nobody grepping
    `findings: NONE` reads a deferred run as a clean review. The `deferral:` key states its own state even
    when nothing was granted — `NONE` / `STALE` / `MALFORMED` / `UNAUTHORIZED` / `COUNT-MISMATCH` /
-   `ISSUE-UNRESOLVABLE` / `PR-UNLINKED` / `UNAVAILABLE`, every one leaving the FAIL — because *"your
+   `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`, every one leaving the FAIL — because *"your
    marker names the wrong job"* and *"there is no marker"* are different operator actions and a bare FAIL
    distinguishes neither. Per #3312's own finding, a **marker-only** comment with bad fields is
    `MALFORMED` while a comment carrying the marker **plus other content** is ignored **silently**
    (`NONE`): someone documenting the form never attempted an authorization, and a false accusation
-   reprinted on every later run is worse than silence.
+   reprinted on every later run is worse than silence. A marker **attempt** is the stem followed by
+   whitespace **or the end of the line**, so a marker-only comment that is exactly the stem
+   (`roborev-defer: findings`) is `MALFORMED` and not a fail-quiet `NONE` — an author told "no
+   authorization exists" re-reads syntax they typed and concludes the mechanism is broken.
 
    **`findings: UNKNOWN` and `findings: SKIP` are not deferrable, in any mode.** Those values mean the
    findings state was never *established* — we cannot count what we cannot see, so a deferral over one
