@@ -202,6 +202,18 @@ the guard agents learn to waive. An absolute the code violates is the same defec
 vocabulary guarantee this change already had to restate, so it is scoped rather than left to be
 rediscovered (#3650 review B3).
 
+**AND THE NO-FETCH GUARANTEE IS A DECLARED PRECONDITION, NOT A DETECTED ONE (#3650, owner ruling).** The
+advisory's "never fetches, never writes" contract SHALL be stated as SCOPED to **git >= 2.36 on a
+non-promisor clone** — the range in which the exported `GIT_NO_LAZY_FETCH=1` is honoured — and that scope
+SHALL be declared in the script header, at the code, in one operator-visible output line and in the design
+document. Outside that scope the guarantee is neither held nor detected, and the advisory SHALL say so
+rather than imply an assurance. It SHALL NOT parse `git --version`, SHALL NOT probe the promisor state, and
+no verdict SHALL depend on either: measured on this fleet, git is **2.43.0** and no clone carries a
+promisor marker (`remote.origin.promisor` and `extensions.partialclone` both absent; no
+`objects/info/promisor` and no `objects/pack/*.promisor` under `--git-common-dir`), so detection built in
+review round 5 covered a state that does not occur and was deleted. A repo-wide git version floor is a
+project-policy decision tracked as **#3680**, as a precondition of *enforcement*.
+
 #### Scenario: A missing origin/main is unmeasurable, not clean
 - **GIVEN** a checkout with no `origin/main` ref
 - **WHEN** the advisory is run
@@ -220,6 +232,14 @@ rediscovered (#3650 review B3).
 - **THEN** that field reads `DATE-UNAVAILABLE`
 - **AND** the verdict is the measured one, not `UNMEASURED`
 
+#### Scenario: The no-fetch guarantee is scoped and declared, not detected
+- **GIVEN** any run of the advisory
+- **WHEN** it is run
+- **THEN** it prints one line declaring the scope of the no-fetch/no-write guarantee — git >= 2.36 on a
+  non-promisor clone — and stating that the guarantee is DECLARED-NOT-VERIFIED and, outside that scope,
+  neither held nor detected
+- **AND** the advisory performs no version or promisor detection and no verdict depends on either
+
 #### Scenario: A scratch file that cannot be read is unmeasurable, not a zero blast radius
 - **GIVEN** a run whose scratch file for the diff's paths, a commit's paths, or the commits behind cannot
   be opened for reading
@@ -237,8 +257,11 @@ rediscovered (#3650 review B3).
 - **AND** the verdict is `STALE-RECOGNISED`, never the permissive `NO-STALENESS-RECOGNISED`
 
 *Verified by:* `scripts/tests/test_base_staleness.sh` (missing-ref case; no-merge-base case; the
-"exit 5 is never exit 0" assertion; the replacement-ref case, whose fixture is asserted
-with git to really hide the path and whose planted mutant — the export removed — is shown to fail open).
+"exit 5 is never exit 0" assertion; the no-fetch-scope case, which asserts the declaration is in the output
+and that no `lazy-fetch-guard` measurement is claimed, alongside the partial-clone case that shows the
+kept `GIT_NO_LAZY_FETCH=1` export really prevents a lazy fetch on this fleet's git; the replacement-ref
+case, whose fixture is asserted with git to really hide the path and whose planted mutant — the export
+removed — is shown to fail open).
 
 ### Requirement: Slice 1 changes no verdict and retains the #3465 scope disclaimer
 

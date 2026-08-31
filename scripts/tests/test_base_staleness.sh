@@ -1551,6 +1551,24 @@ else
   bad "scratch-read(fail-open): the contrast did not reproduce the fail-open (exit $SO_RC, unprefixed='$so_unpref')"
 fi
 
+# --- Case 19 (D5/#3650, owner ruling): THE NO-FETCH SCOPE IS DECLARED --------
+#
+# Round 5 made the no-fetch absolute TRUE with a `git --version` parse and a
+# three-valued promisor probe; the owner reversed it, because NEITHER adverse
+# condition occurs on this fleet (git 2.43.0; no promisor config and no promisor
+# object-store marker anywhere), so that machinery detected an unreachable state.
+# The scope is now DECLARED instead — and this case exists so the declaration
+# cannot be deleted silently: it must be in the OUTPUT, and it must not read as
+# an assurance. The cases that exercised only the deleted mechanism (the PATH git
+# shims, the promisor fixtures and the version-boundary cases) went with it.
+if run 4 "the no-fetch scope is DECLARED on every run, not verified" "$R_MOTIV"; then
+  has "no-fetch-scope: the declaration names its scope" \
+    "no-fetch-scope DECLARED-NOT-VERIFIED git>=2.36 on a non-promisor clone"
+  has "no-fetch-scope: it says the guarantee is not detected outside that scope" \
+    "outside it the guarantee is neither held nor detected"
+  lacks "no-fetch-scope: nothing claims a measured no-fetch guard" "lazy-fetch-guard"
+fi
+
 # --- Case 18 (D2d): the script's own STATIC TEMPLATE TEXT is token-free -----
 # The ABSOLUTE substring claim about a RUN is falsified and gone. This is what
 # replaces it, and unlike a claim about one sample run it is PROVABLE: the

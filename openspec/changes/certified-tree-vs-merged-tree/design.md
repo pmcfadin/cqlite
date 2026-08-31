@@ -168,6 +168,32 @@ all do. Measured on git 2.43.0 against a `--filter=tree:0` clone: the diff call 
 store from 4 files to 12. The variable is exported once, before any object access; a missing object then
 fails its git call, which every call site already routes to `UNMEASURED`.
 
+**The variable alone is not the guarantee — it is honoured only from git 2.36 — so the claim is SCOPED,
+DECLARED AND NOT DETECTED (#3650 review R5 F1, reversed by the owner ruling).** The no-fetch/no-write
+contract holds for **git >= 2.36 on a non-promisor clone**. Outside that combination — an older git in a
+partial/promisor clone — the object reads really can fetch and write packfiles, and the advisory neither
+detects nor reports that. The precondition is stated in four places: the script header, the code at the
+declaration, one operator-visible `BASE-STALENESS: no-fetch-scope DECLARED-NOT-VERIFIED …` line printed on
+every run, and the spec requirement below.
+
+*The measurement the scope rests on, quoted so a reader can re-check it rather than trust it:* every lane
+on this fleet runs **git 2.43.0**; `git config --get remote.origin.promisor` and
+`git config --get extensions.partialclone` both exit 1 (key absent); and neither `objects/info/promisor`
+nor `objects/pack/*.promisor` exists under `--git-common-dir`. **Both adverse conditions are absent.**
+
+**THE DECISION, AND ITS REVERSAL — the transferable part.** Round 5 chose "make the absolute true" over
+"scope the claim", on the argument that *detection is cheap*. What it cost was ~60 lines of source (112
+lines of code as measured by the comment-stripped count, plus ~80 lines of comment, plus ten
+shim-driven test cases with five `PATH` git shims and four promisor fixtures) to decide a state that **does not occur anywhere on this
+fleet**. The owner reversed it on the #3549 R10 precedent: **where a scenario is unreachable, declare the
+scope in code, in operator-visible text and in the PR body rather than build machinery for it.** The
+lesson worth carrying: **cheapness is a property of the IMPLEMENTATION, not of the DECISION, and it is
+only knowable after you build it** — "this is cheap to detect" is an estimate made before the conservative
+version parse, the three-valued probe, the three marker sources, the shim harness and the non-vacuity
+fixtures exist. Judging reachability FIRST would have reached the same answer for none of the cost. A
+repo-wide git version floor remains a project-policy decision and belongs to **#3680**, as a precondition
+of *enforcement*, not of this advisory.
+
 **AND EVERY SCRATCH READ IS A CHECKED OPEN, BECAUSE `done <"$file"` IS A FAIL-OPEN (#3650 review R6 F2).**
 The NUL-separated git output is written to files under the scratch dir and read back by redirection (never
 `$( )`, which discards NULs). An unchecked `done <"$file"` does two things when the file cannot be opened,

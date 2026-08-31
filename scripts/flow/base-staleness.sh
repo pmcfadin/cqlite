@@ -156,6 +156,33 @@
 # `UNMEASURED` — the correct verdict for an unmeasurable scan, and a consumer
 # must treat it as stale (D3).
 #
+# THAT GUARANTEE IS SCOPED, DECLARED, AND NOT DETECTED: GIT >= 2.36 ON A
+# NON-PROMISOR CLONE (#3650 review R5 F1, reversed by the owner ruling).
+# `GIT_NO_LAZY_FETCH` is honoured only from git 2.36, so OUTSIDE that scope — an
+# older git in a partial/promisor clone — the object reads below can still fetch
+# and write packfiles, and this script neither detects nor reports that. It is a
+# DECLARED PRECONDITION, not a checked one, and the `BASE-STALENESS:
+# no-fetch-scope` line says so — DECLARED-NOT-VERIFIED — on every run.
+#
+# THE MEASUREMENT BEHIND THE SCOPE, so a reader can re-check it rather than trust
+# it: every lane on this fleet runs git 2.43.0, and no clone here is a promisor
+# clone — `git config --get remote.origin.promisor` and
+# `git config --get extensions.partialclone` both exit 1 (key absent), and
+# neither `objects/info/promisor` nor `objects/pack/*.promisor` exists under
+# `--git-common-dir`. Both adverse conditions are therefore ABSENT.
+#
+# DETECTION FOR THEM WAS BUILT AND DELETED. Round 5 chose "make the absolute
+# true" and shipped ~60 lines: a conservative `git --version` parse plus a
+# three-valued promisor probe over three sources, refusing as `UNMEASURED`
+# outside the supported combination. The owner reversed it on the #3549 R10
+# precedent — where a scenario is unreachable, DECLARE the scope in code, in
+# operator-visible output and in the PR body rather than carry machinery for a
+# state that does not occur. The transferable lesson is at design.md D5:
+# CHEAPNESS IS A PROPERTY OF THE IMPLEMENTATION, NOT OF THE DECISION, and it is
+# only knowable after you build it. A repo-wide git version FLOOR is a
+# project-policy decision and belongs to #3680, as a precondition of
+# ENFORCEMENT; it is deliberately not imposed by this advisory.
+#
 # WHAT IS NOT COVERED, DECLARED ON EVERY RUN
 # ------------------------------------------
 # This is NOT a dependency closure. A commit changing a Rust item this diff
@@ -188,7 +215,9 @@ set -uo pipefail
 #      network and WRITES packfiles into the repository, so without this the
 #      "never fetches, never writes" contract is an intention rather than a
 #      property. A missing object then fails its git call, and every call site
-#      below routes a git failure to UNMEASURED.
+#      below routes a git failure to UNMEASURED. Honoured only from git 2.36, so
+#      the contract is SCOPED to git >= 2.36 on a non-promisor clone — declared,
+#      not detected; see the header and the `no-fetch-scope` output line.
 #   2. `GIT_NO_REPLACE_OBJECTS=1` (#3650 review R6 F1) — EXPORTED BEFORE ANY
 #      OBJECT ACCESS. `refs/replace/*` entries are honoured by `merge-base`,
 #      `rev-list`, `diff` AND `diff-tree`, so a single local replacement ref can
@@ -509,6 +538,24 @@ if [ -z "$common_canon" ]; then
     "That is UNMEASURED, never a pass (#3650 D3)."
 fi
 
+# --- THE NO-FETCH SCOPE IS DECLARED, NOT DETECTED (#3650, owner ruling) ------
+#
+# `GIT_NO_LAZY_FETCH=1` is exported at the top of this file and is honoured from
+# git 2.36, so D5's "never fetches, never writes" holds for GIT >= 2.36 ON A
+# NON-PROMISOR CLONE. Outside that combination — an older git in a
+# partial/promisor clone — the object reads below can still fetch over the network
+# and write packfiles, and THIS SCRIPT DOES NOT DETECT IT. That is stated here, in
+# the header, in the line below, in design.md D5 and in the spec; it is a
+# precondition, not an assurance.
+#
+# Measured on this fleet: git 2.43.0; `git config --get remote.origin.promisor`
+# and `git config --get extensions.partialclone` both exit 1 (key absent); no
+# `objects/info/promisor` and no `objects/pack/*.promisor` under
+# `--git-common-dir`. NEITHER adverse condition occurs here, which is why round
+# 5's detection (a `git --version` parse plus a three-valued promisor probe, ~60
+# lines) was DELETED on the ruling: a mechanism for an unreachable state. A
+# version FLOOR belongs to #3680, as a precondition of ENFORCEMENT.
+printf '%s no-fetch-scope DECLARED-NOT-VERIFIED git>=2.36 on a non-promisor clone (D5: this script never fetches and never writes WITHIN that scope; outside it the guarantee is neither held nor detected — #3650)\n' "$P"
 
 # in_repository <canonical-dir> — NAMES the repository root the dir lies inside
 # (work tree OR git common dir); prints nothing when it is outside both. The dir
