@@ -6043,13 +6043,38 @@ if ! grep -qE 'PROMPT_CONTENT="PASS \(.*[Ww]aive' "$CHECKS_FILE" \
 else
   bad 'structural: a waived absence is spelled as a PASS, or WAIVED is outside the block grammar — either way a reader cannot tell a waived run from a certified one (#3312 ruling (4))'
 fi
+# ===== THE PIPED-`grep -q` SWEEP, RECORDED SO IT DOES NOT HAVE TO BE REDONE (#3387, #3626 round 3) =====
+# `writer | grep -q needle` under this file's `pipefail` is fail-open BY BYTE POSITION: `grep -q`
+# exits at its first match, SIGPIPEs the writer, and the pipeline status becomes 141, so a MATCH is
+# reported as a NON-match. Polarity decides what that costs. NEGATED clauses (`! … | grep -q`) and
+# `… | grep -q … && flag=0` report a real violation as clean — FAIL-OPEN, and those are fixed by
+# extracting the writer's output to a file and grepping the FILE. Plain positive clauses inside an
+# `&&` chain only lose an `ok` to a `bad` — a FALSE RED, loud and self-correcting.
+# Sweep of this file at #3626 round 3: 31 piped sites, 13 fail-open by polarity. Fixed: the three
+# WAIVER-side guards over whole-file writers (this block, the sole-content Markdown-recogniser scan,
+# and the marker-form-in-the-shell scan) — their DEFERRAL siblings were already hardened, and an
+# asymmetry inside one file reads as deliberate. The remaining 10 fail-open sites all write a single
+# extracted function body, one `case` line or a normally-EMPTY `grep -n` result — bytes, not
+# kilobytes — so the writer completes in one non-blocking write and no SIGPIPE is reachable. They are
+# named in the #3626 PR body rather than churned here. A NEW site must be classified the same way.
 # THE AFFIRMATION BACKSTOP ADMITS `WAIVED` ONLY ON COMPLETE PROVENANCE, and gates on the provenance
 # rather than on which key carries it: a key-scoped exemption is the shape the ruling deleted.
+# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3387). The third clause is NEGATED, which is the
+# fail-open polarity: `grep -q` exits at its FIRST match, SIGPIPEs the writer, this file's `pipefail`
+# takes the 141, and a MATCH is therefore reported as a NON-match — so a reintroduced per-key
+# `prompt-content` escape hatch, the exact shape the #3312 ruling deleted, would read as absent. The
+# two positive clauses are extracted with it: they are only false-red capable, but leaving them piped
+# would put two spellings of one rule side by side, which is how a later edit "fixes" the wrong half.
+# This is the WAIVER's copy of the guard whose DEFERRAL sibling is hardened at `_dfe_exec` below —
+# an asymmetry inside one file reads as deliberate and invites exactly that mistake.
 _aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
-_aff_body=$(sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER_REAL")
-if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' \
-  && printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_STATE:-}" = "granted"' \
-  && ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
+_aff_body_f="$tmp/aff-body.txt"
+sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER_REAL" >"$_aff_body_f"
+if [ ! -s "$_aff_body_f" ]; then
+  bad 'structural: the affirmation-backstop block could not be located in the wrapper, so its provenance terms were not checked — a failure to measure, not a measurement'
+elif grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' "$_aff_body_f" \
+  && grep -qF 'ROBOREV_WAIVER_STATE:-}" = "granted"' "$_aff_body_f" \
+  && ! grep -qF 'det_key" = "prompt-content"' "$_aff_body_f"; then
   ok 'structural: WAIVED is admitted only with a complete, sha-matching provenance, and the gate is not key-scoped'
 else
   bad 'structural: the affirmation backstop admits WAIVED without checking its provenance, or reintroduces a per-key escape hatch (#3312 ruling (4))'
@@ -6073,7 +6098,14 @@ grep -qF 'ONE DECISION, NO PARSE' "$SCAN_TOOL" || _sole_ok=0
 # EXECUTABLE LINES ONLY: the comment block RECORDS the four superseded recognisers by name (including
 # HTML <pre>), and that history is the durable artifact — scanning prose would make writing it down a
 # violation, which is the same mistake as the job-18 census assert.
-grep -vE '^[[:space:]]*#' "$SCAN_TOOL" | grep -qE 'FENCE_CHARS|fence_run|def .*fence|<pre>|lstrip\("`"\)' && _sole_ok=0
+# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3387). The polarity is fail-open: the whole
+# point is that a MATCH sets `_sole_ok=0`, and `grep -q` exits at its first match, SIGPIPEs the
+# upstream `grep -v`, and `pipefail` hands the pipeline a 141 — so the `&&` never fires and a
+# REINTRODUCED Markdown recogniser reads as absent. Today the guard finds nothing (the recogniser
+# was deleted), which is precisely why the fail-open leg is invisible until it matters.
+_sole_scan_exec="$tmp/sole-scan-exec.txt"
+grep -vE '^[[:space:]]*#' "$SCAN_TOOL" >"$_sole_scan_exec" || true
+grep -qE 'FENCE_CHARS|fence_run|def .*fence|<pre>|lstrip\("`"\)' "$_sole_scan_exec" && _sole_ok=0
 grep -qE 'FENCE_CHARS|fence_run' "$ORACLES" && _sole_ok=0
 if [ "$_sole_ok" -eq 1 ]; then
   ok 'structural: an authorization must be the SOLE NONBLANK CONTENT of its comment, decided without parsing Markdown'
@@ -6115,7 +6147,17 @@ else
 fi
 # AND THE SCANNER OWNS THE MARKER FORM: two implementations of the pattern would drift, and the shell
 # having one at all is what made the text channel possible.
-if ! grep -v '^[[:space:]]*#' "$ORACLES" | grep -qF 'roborev-waive: prompt-content-absent' \
+# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3387). This is the WAIVER marker's copy of the
+# guard whose DEFERRAL sibling is hardened at `_dfe_exec`, and the negated clause is the fail-open
+# one: `grep -q` exits at its first match, SIGPIPEs the `grep -v`, `pipefail` takes the 141, and the
+# `!` turns a real shell-side copy of the marker form into "absent" — i.e. a second implementation of
+# the channel rule, which is an authorization bypass (#3312 job 26), would report clean. The oracles
+# file's non-comment output is ~26 KB (it grew ~32% on #3626) against a 64 KB pipe buffer: at that
+# size the writer normally finishes, so the fail-open is currently unlikely rather than routine —
+# but the verdict is resting on a pipe-buffer size, which is the whole reason for the rule.
+_tm_oracles_exec="$tmp/tm-oracles-exec.txt"
+grep -v '^[[:space:]]*#' "$ORACLES" >"$_tm_oracles_exec" || true
+if ! grep -qF 'roborev-waive: prompt-content-absent' "$_tm_oracles_exec" \
   && grep -qF 'roborev-waive: prompt-content-absent' "$SCAN_TOOL"; then
   ok 'structural: the marker form is expressed once, in the structured scanner'
 else
