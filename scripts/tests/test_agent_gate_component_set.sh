@@ -542,6 +542,12 @@ mkgitshim() {
         printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "deadbeef-not-an-object-id" "refs/heads/main"; exit 0; fi; done\n' ;;
       lsremote-wrong-ref)
         printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "0000000000000000000000000000000000000000" "refs/heads/somewhere-else"; exit 0; fi; done\n' ;;
+      # A WELL-FORMED sha256 OBJECT ID FOR THE RIGHT REF (job 309). This is the shape the two
+      # other shims cannot produce: 64 lowercase hex characters and `refs/heads/main`, i.e. a
+      # value the old grammar ACCEPTED. It must be refused, because the isolated scratch
+      # repository is created in git's default object format and could not read it.
+      lsremote-sha256)
+        printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "refs/heads/main"; exit 0; fi; done\n' ;;
       *) echo "FATAL: mkgitshim: unknown mode '$mode'" >&2; exit 1 ;;
     esac
     printf 'exec "$REAL" "$@"\n'
@@ -631,8 +637,15 @@ fi
 #     name that was asked for. Both halves are driven, because a validator that accepts the
 #     wrong ref would compare against a baseline nobody named.
 # ---------------------------------------------------------------------------
+#     THE THIRD MODE IS THE NARROWING (job 309): a 64-character sha256 id for the RIGHT ref is
+#     WELL-FORMED and was ACCEPTED here, while the isolated scratch repository is created in
+#     git's default object format and so could neither read the lane's objects as an alternate
+#     nor transfer sha256 objects into itself. Accepting it deferred the failure to a generic
+#     `fetch-failed` that blamed the network for a format mismatch, so the value is refused at
+#     this line WITH ITS REASON — and the case asserts the reason, not just the refusal, because
+#     the other two modes already produce the refusal and could not tell this fix from them.
 base_lsr=$(mkbaseline base-lsr - )
-for _lsr_mode in lsremote-not-a-sha lsremote-wrong-ref; do
+for _lsr_mode in lsremote-not-a-sha lsremote-wrong-ref lsremote-sha256; do
   _lsr_fx=$(mkbranch "lsr-${_lsr_mode}" "$base_lsr" - )
   _lsr_ctl=$(hook "$_lsr_fx")
   _lsr_bin=$(mkgitshim "$_lsr_mode" "$_lsr_mode")
@@ -645,8 +658,9 @@ for _lsr_mode in lsremote-not-a-sha lsremote-wrong-ref; do
      && [ "$(field KIND "$_lsr_out")" = baseline-ref-unparsable ] \
      && [ "$(field SHA "$_lsr_out")" = "-" ] \
      && grep -q 'FAIL-CLOSED (#3544)' <<<"$_lsr_line" \
-     && grep -q 'remote-controlled text is validated' <<<"$_lsr_line"; then
-    ok "3544-ref-unparsable[$_lsr_mode]: an advertisement that is not <object-id> refs/heads/main is refused BY NAME, never passed on to a git argument or a SUMMARY line"
+     && grep -q 'remote-controlled text is validated' <<<"$_lsr_line" \
+     && { [ "$_lsr_mode" != lsremote-sha256 ] || grep -q 'sha256' <<<"$_lsr_line"; }; then
+    ok "3544-ref-unparsable[$_lsr_mode]: an advertisement that is not <40-hex object-id> refs/heads/main is refused BY NAME with its reason, never passed on to a git argument or a SUMMARY line"
   else
     bad "3544-ref-unparsable[$_lsr_mode]: expected KIND baseline-ref-unparsable + SHA '-'"
     printf '%s\n' "$_lsr_out"
@@ -4372,7 +4386,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=106
+CASE_FLOOR=107
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))

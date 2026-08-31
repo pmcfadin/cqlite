@@ -4539,10 +4539,26 @@ _component_set_probe_inner() {
   fi
   # THE OUTPUT IS REMOTE-CONTROLLED TEXT, so it is VALIDATED, not merely parsed. `_CS_SHA` is
   # interpolated into later `git` arguments and into the SUMMARY block, so a value that is not
-  # an object id is refused BY NAME rather than passed on. Both hash lengths are accepted (sha1
-  # and sha256), and the REF NAME is checked too — an advertisement for something other than
-  # `refs/heads/main` is not the baseline this guard compares against.
-  local lsr_line="" lsr_sha="" lsr_ref=""
+  # an object id is refused BY NAME rather than passed on. The REF NAME is checked too — an
+  # advertisement for something other than `refs/heads/main` is not the baseline this guard
+  # compares against.
+  #
+  # ONLY THE 40-CHARACTER (sha1) FORM IS ACCEPTED, and that is a DELIBERATE NARROWING (roborev
+  # job 309). A 64-character sha256 id used to be accepted here while the isolated scratch
+  # repository is created by a plain `git init` — i.e. in git's DEFAULT object format — so a
+  # sha256 baseline could neither be read through the lane's object store as an alternate nor
+  # transferred into the scratch. The run would have failed several steps later as a generic
+  # `fetch-failed`, blaming the network for a format mismatch. Accepting a value nothing behind
+  # this line can use is a CLAIM OF SUPPORT that no code honours, so the claim is DELETED rather
+  # than qualified: the refusal happens HERE, by name, carrying its reason.
+  #
+  # `--object-format` on the `git init` was the alternative and was rejected on scope: it is
+  # capability for a state this guard's own origin pin makes unreachable (the pin requires
+  # `github.com/pmcfadin/cqlite`, whose remote serves sha1, and a sha1 remote cannot be cloned
+  # into a sha256 checkout), and it needs a git-version fallback — new surface bought for
+  # nothing this repository can test. If GitHub ever serves sha256, this refusal is the line
+  # that will say so, in one sentence, instead of a mystery `fetch-failed`.
+  local lsr_line="" lsr_sha="" lsr_ref="" lsr_why=""
   IFS= read -r lsr_line <"$csdir/lsr" 2>/dev/null || lsr_line="${lsr_line:-}"
   set -f
   # shellcheck disable=SC2086  # deliberate field split of git's own `<sha> TAB <ref>` output
@@ -4550,12 +4566,21 @@ _component_set_probe_inner() {
   set +f
   lsr_sha="${1:-}"; lsr_ref="${2:-}"
   case "$lsr_sha" in
-    *[!0-9a-f]*|'') lsr_sha="" ;;
-    *) case "${#lsr_sha}" in 40|64) : ;; *) lsr_sha="" ;; esac ;;
+    *[!0-9a-f]*|'')
+      lsr_why="the object-id field is empty or not lowercase hex" ; lsr_sha="" ;;
+    *)
+      case "${#lsr_sha}" in
+        40) : ;;
+        64) lsr_why="the object id is the 64-character (sha256) form, which this pre-flight refuses because its isolated scratch repository is created in git's default object format and could not read or transfer sha256 objects — the refusal is stated here rather than deferred to a generic fetch failure" ; lsr_sha="" ;;
+        *)  lsr_why="the object-id field is ${#lsr_sha} hex characters, not git's 40" ; lsr_sha="" ;;
+      esac ;;
   esac
   if [ -z "$lsr_sha" ] || [ "$lsr_ref" != "refs/heads/main" ]; then
+    # A VALID id with the WRONG ref name reaches here with no reason recorded above, so the
+    # remaining cause is named rather than left to a reader of the raw line.
+    [ -n "$lsr_why" ] || lsr_why="the ref name advertised is not refs/heads/main"
     _CS_KIND=baseline-ref-unparsable
-    _CS_DETAIL="the canonical remote's advertisement of refs/heads/main is not an object id and a ref name: '$(_component_set_flatten "$lsr_line")' — remote-controlled text is validated, never passed on to a git argument or a SUMMARY line"
+    _CS_DETAIL="the canonical remote's advertisement of refs/heads/main is not an object id and a ref name ($lsr_why): '$(_component_set_flatten "$lsr_line")' — remote-controlled text is validated, never passed on to a git argument or a SUMMARY line"
     return 0
   fi
   remote_sha="$lsr_sha"
