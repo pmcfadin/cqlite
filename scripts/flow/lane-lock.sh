@@ -132,7 +132,8 @@
 #   * UNKNOWN-* (an identity that cannot be established at all — a foreign machine, a
 #     hand-made or format-drifted record, a host without /proc) — cleared DELIBERATELY,
 #     by a human or a reaper, with either
-#         lane-lock.sh reclaim <N> --expect <token> --reason <why>   (CAS, recorded)
+#         lane-lock.sh reclaim <N> --expect <lease> --reason <why>   (CAS, recorded;
+#                     take <lease> from `probe`'s or `status`'s `lease=` field)
 #         lane-lock.sh release <N> --force                            (unconditional)
 #     `release --force` only DELETES, so it needs no identity of its own and works from
 #     anywhere, which is what guarantees a stale record is always clearable.
@@ -323,12 +324,16 @@
 #           (RELEASE-REFUSED otherwise); --force deletes unconditionally (reaper).
 #           Releasing a free lane is RELEASED (already free), exit 0 — idempotent, so
 #           cleanup paths are safe to run twice or after a crash.
-#   reclaim <N> --expect <token>|none --reason <why> [--lane-dir <p>] [--actor <id>] [--pid <pid>]
+#   reclaim <N> --expect <lease>|none --reason <why> [--lane-dir <p>] [--actor <id>] [--pid <pid>]
 #           (RECLAIMED / RECLAIMED (re-entrant) / RECLAIM-LEASE-MISMATCH — its OWN verdict
 #           word, exit 0, for a re-entrant reclaim whose --expect did NOT hold, so a caller
 #           matching on the verdict word can see the violated precondition / RECLAIM-LOST)
 #           compare-and-swap adoption, the same discipline as `claim.sh adopt
-#           --expect`. --expect <token>: the record's CURRENT token must equal it
+#           --expect`. --expect <lease>: the record's CURRENT lease must equal it
+#           EXACTLY. The lease is `<token>#<nonce>` — the RECORD INCARNATION, published as
+#           `lease=` by probe/status. It is NOT the holder token: the token is unchanged by
+#           a same-process release+reacquire, so a token-based lease let a stale observer
+#           overwrite a newly acquired LIVE lock (ABA). Read it from `lease=`, never build it.
 #           exactly. --expect none: the record must NOT exist. --expect '' is a usage
 #           error. --reason is REQUIRED and is validated exactly like claim.sh's:
 #           empty, nothing-recordable ('   ', '---', '…'), a bare placeholder (why,
@@ -451,9 +456,20 @@ resolve_actor() {
   printf '%s\n' "$tok"
 }
 
+# require_numeric_issue <value> <subcommand>
+#
+# DIGITS ARE NOT ENOUGH — THE KEY MUST BE CANONICAL (#3436, roborev round 3). Every path
+# this tool derives (record, mutex, audit, default lane dir) interpolates the issue string
+# RAW, so `3436` and `03436` are two different mutexes for ONE lane and BOTH acquire —
+# concurrent ownership through an alias, which is the defect this file exists to prevent.
+# A leading zero is REJECTED rather than normalised: an issue number never legitimately
+# carries one, so silently rewriting the caller's key would hide a real caller bug (and a
+# rewrite has to be applied at every derivation site, where the next one added would miss
+# it). `0` itself is rejected too — there is no issue 0.
 require_numeric_issue() {
   case "${1:-}" in
     *[!0-9]* | '') die_usage "$2 requires a numeric issue number (got '${1:-<none>}')" ;;
+    0*) die_usage "$2: issue number '${1}' has a leading zero. Every lock path is derived from this string RAW, so '${1}' and '${1#0}' would be two different locks for ONE lane and both would be granted. Use the canonical form '${1#0}'." ;;
   esac
 }
 
@@ -670,6 +686,14 @@ parse_record() {
   return 0
 }
 
+# record_lease — the RECORD INCARNATION, which is what a compare-and-swap must name.
+# `<token>#<nonce>`: the token says WHO holds it, the nonce says WHICH ACQUISITION this is.
+# A reclaim lease built from the token alone is an ABA hole (see _reclaim_locked), because
+# a release+re-acquire by the same process reproduces the token exactly. The nonce is
+# per-write (`$$-RANDOM-RANDOM-epoch`), so it changes on every acquire and every reclaim.
+# It is published by `probe`/`status` as `lease=` so a caller never has to build it.
+record_lease() { printf '%s#%s\n' "$(record_token)" "${REC_NONCE:-<none>}"; }
+
 # record_token — the holder token implied by the parsed record.
 record_token() {
   build_token "$REC_MACHINE" "$REC_ACTOR" "$REC_PID" "$(boot_short "$REC_BOOT_ID")" "$REC_START_TICKS"
@@ -769,10 +793,10 @@ holder_fields() {
     '' | *[!0-9]*) age="unknown" ;;
     *) age="$((now - REC_ACQUIRED_EPOCH))s" ;;
   esac
-  printf 'holder-issue=%s holder-machine=%s holder-actor=%s holder-pid=%s holder-pid-scope=%s holder-start-ticks=%s holder-token=%s acquired-ts=%s age=%s\n' \
+  printf 'holder-issue=%s holder-machine=%s holder-actor=%s holder-pid=%s holder-pid-scope=%s holder-start-ticks=%s holder-token=%s lease=%s acquired-ts=%s age=%s\n' \
     "${REC_ISSUE:-<none>}" "${REC_MACHINE:-<none>}" "${REC_ACTOR:-<none>}" \
     "${REC_PID:-<none>}" "${REC_PID_SCOPE:-<none>}" "${REC_START_TICKS:-<none>}" \
-    "$(record_token)" "${REC_ACQUIRED_TS:-<none>}" "$age"
+    "$(record_token)" "$(record_lease)" "${REC_ACQUIRED_TS:-<none>}" "$age"
 }
 
 # ---------------------------------------------------------------------------
@@ -1326,9 +1350,9 @@ validate_reason() {
 }
 
 _reclaim_locked() {
-  local expect="$1" reason="$2" liveness prev_token=""
+  local expect="$1" reason="$2" liveness prev_token="" prev_lease=""
   local have=0
-  if parse_record "$G_RECORD"; then have=1; prev_token="$(record_token)"; fi
+  if parse_record "$G_RECORD"; then have=1; prev_token="$(record_token)"; prev_lease="$(record_lease)"; fi
   if [ "$have" -eq 1 ]; then
     liveness="$(record_liveness)"
   else
@@ -1341,7 +1365,11 @@ _reclaim_locked() {
   # never be reported as a satisfied one, so when --expect names something the record
   # does NOT hold, the verdict names BOTH values.
   if [ "$liveness" = "SELF" ]; then
-    if [ "$expect" = "$prev_token" ]; then
+    # THE LEASE, HERE TOO. This branch compared the TOKEN while the CAS branch below
+    # compared the lease, so once `--expect` became a lease the re-entrant SUCCESS path
+    # was unreachable: every re-entrant reclaim reported a mismatch. Two comparison sites
+    # for one precondition is the bug; both now read `prev_lease`.
+    if [ "$expect" = "$prev_lease" ]; then
       emit "RECLAIMED (re-entrant) issue=$G_ISSUE $(self_fields) from=$expect lane-dir=$G_LANE"
     else
       # A DISTINCT VERDICT WORD (#3436 FIX 13i): the FIRST token is what a caller matches
@@ -1349,7 +1377,7 @@ _reclaim_locked() {
       # a VIOLATED --expect invisible to any consumer that does not read prose. The exit
       # code stays 0 on purpose: we demonstrably DO hold the lane, and reporting
       # RECLAIM-LOST would make a session abandon a lane it owns.
-      emit "RECLAIM-LEASE-MISMATCH (re-entrant: we DO hold the lane, but the compare-and-swap precondition did NOT hold) issue=$G_ISSUE expected=$expect actual=$prev_token $(self_fields) lane-dir=$G_LANE"
+      emit "RECLAIM-LEASE-MISMATCH (re-entrant: we DO hold the lane, but the compare-and-swap precondition did NOT hold) issue=$G_ISSUE expected=$expect actual=$prev_lease $(self_fields) lane-dir=$G_LANE"
     fi
     return 0
   fi
@@ -1364,8 +1392,17 @@ _reclaim_locked() {
       emit "RECLAIM-LOST issue=$G_ISSUE expected=$expect actual=<none> liveness=$liveness lane-dir=$G_LANE"
       return 2
     fi
-    if [ "$prev_token" != "$expect" ]; then
-      emit "RECLAIM-LOST issue=$G_ISSUE expected=$expect actual=$prev_token liveness=$liveness $(holder_fields) lane-dir=$G_LANE"
+    # THE LEASE IS THE RECORD INCARNATION, NOT THE PROCESS TOKEN (#3436, roborev round 3).
+    # Comparing the token was an ABA hole: machine:actor:pid:boot:ticks is UNCHANGED when
+    # the same process releases and re-acquires, so a reclaimer holding a token observed
+    # before that cycle matched a record written after it, and overwrote a NEWLY ACQUIRED
+    # LIVE lock — two writers, which is the CAS guarantee inverted. claim.sh does not have
+    # this hole because git arbitrates on a per-claim commit SHA, unique per acquisition;
+    # our equivalent is the per-record `nonce`, which was generated and recorded from the
+    # start and simply never reached the lease. `record_lease` binds both, so a lease names
+    # one acquisition rather than one process.
+    if [ "$prev_lease" != "$expect" ]; then
+      emit "RECLAIM-LOST issue=$G_ISSUE expected=$expect actual=$prev_lease liveness=$liveness $(holder_fields) lane-dir=$G_LANE"
       return 2
     fi
   fi
@@ -1399,7 +1436,7 @@ cmd_reclaim() {
   # An EMPTY --expect '' is a usage error on purpose — the classic `--expect "$TOKEN"`
   # with TOKEN unset. Coercing it to `none` would turn a compare-and-swap into an
   # unconditional take.
-  [ "$expect_given" -eq 1 ] || die_usage "reclaim requires --expect <token> (CAS against the CURRENT record) or --expect none (the record must NOT exist)"
+  [ "$expect_given" -eq 1 ] || die_usage "reclaim requires --expect <lease> (CAS against the CURRENT record; take the value from probe/status's lease= field, which is <token>#<nonce> — NOT the holder token, because a token is unchanged by a same-process release+reacquire) or --expect none (the record must NOT exist)"
   [ -n "$expect" ] || die_usage "reclaim: --expect '' is rejected on purpose — pass the holder token you expect, or the literal 'none'"
   [ "$reason_given" -eq 1 ] || die_usage "reclaim requires --reason saying what the reclaim IS (it is recorded in the record and the audit log next to who took it), e.g. --reason lane-holder-oom-killed-pid-4211"
   reason_token="$(validate_reason "$reason")"
@@ -1498,6 +1535,6 @@ case "$SUBCOMMAND" in
   release) cmd_release "$@" ;;
   reclaim) cmd_reclaim "$@" ;;
   status)  cmd_status "$@" ;;
-  "") die_usage "a subcommand is required: acquire <N> | verify <N> | probe <N> [--pid <pid>] | release <N> [--force] | reclaim <N> --expect <token>|none --reason <why> | status [<N>]" ;;
+  "") die_usage "a subcommand is required: acquire <N> | verify <N> | probe <N> [--pid <pid>] | release <N> [--force] | reclaim <N> --expect <lease>|none --reason <why> | status [<N>]" ;;
   *)  die_usage "unknown subcommand: $SUBCOMMAND (expected acquire|verify|probe|release|reclaim|status)" ;;
 esac

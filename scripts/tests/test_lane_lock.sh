@@ -97,6 +97,17 @@ token_of() {
   field "$o" holder-token
 }
 
+# lease_of <issue> — the RECORD INCARNATION, which is what `reclaim --expect` compares
+# (#3436 roborev round 3). Deliberately a DIFFERENT helper from token_of: a lease built
+# from the token alone is an ABA hole, since a same-process release+reacquire reproduces
+# the token exactly. Assertions about ownership use token_of; assertions about a
+# compare-and-swap use lease_of, and conflating them is the defect.
+lease_of() {
+  local o
+  o="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" probe "$1" 2>/dev/null)" || true
+  field "$o" lease
+}
+
 # set_rec_field <issue> <key> <value> — SUBSTITUTE THE ARTIFACT: rewrite exactly one
 # line of the record. This is how the verdicts that cannot be produced on demand are
 # reached; it is a scratch file in this suite's own temp dir, never a seam in the tool.
@@ -468,7 +479,8 @@ fi
 echo "TEST 11: reclaim compare-and-swap"
 # ===========================================================================
 tok=$(token_of 402)
-ll reclaim 402 --expect "$tok" --reason lane-holder-oom-killed-verified-by-dmesg --actor flow --pid "$E"; rc=$RC; out="$OUT"
+lease402=$(lease_of 402)   # --expect compares the record INCARNATION, not the token (ABA)
+ll reclaim 402 --expect "$lease402" --reason lane-holder-oom-killed-verified-by-dmesg --actor flow --pid "$E"; rc=$RC; out="$OUT"
 tok_new=$(token_of 402)
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED ' \
    && [ "$tok_new" != "$tok" ] && printf '%s' "$tok_new" | grep -q ":$E:" \
@@ -482,11 +494,12 @@ $out"
 fi
 
 tok=$(token_of 402)
+lease402b=$(lease_of 402)   # `actual=` reports the LEASE (record incarnation), not the token
 ll reclaim 402 --expect "not-the-current-token" --reason stale-lease-check --actor flow --pid "$D"; rc=$RC; out="$OUT"
 tok_after=$(token_of 402)
 if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIM-LOST ' \
    && [ "$(field "$out" expected)" = "not-the-current-token" ] \
-   && [ "$(field "$out" actual)" = "$tok" ] && [ "$tok_after" = "$tok" ]; then
+   && [ "$(field "$out" actual)" = "$lease402b" ] && [ "$tok_after" = "$tok" ]; then
   ok "violated --expect: RECLAIM-LOST rc=2 naming expected= and actual=, record unchanged"
 else
   bad "expected RECLAIM-LOST rc=2 with both values named; got rc=$rc tok '$tok' -> '$tok_after'
@@ -512,13 +525,14 @@ fi
 # RE-ENTRANT RECLAIM with a VIOLATED lease must name BOTH values — a failed CAS is
 # never reported as a satisfied one (mirrors `claim.sh adopt`).
 tok=$(token_of 403)
+lease403=$(lease_of 403)
 ll reclaim 403 --expect none --reason re-entrant-retry-after-confirm-blip --actor flow --pid "$D"; rc=$RC; out="$OUT"
 # THE VERDICT WORD ITSELF MUST DIFFER (#3436 FIX 13i): both this and a satisfied CAS exit
 # 0, so a consumer matching on the first token (or on the exit code) could not otherwise see
 # that its --expect did NOT hold. The exit code stays 0 — we demonstrably hold the lane.
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIM-LEASE-MISMATCH ' \
    && printf '%s' "$out" | grep -q 'expected=none' \
-   && printf '%s' "$out" | grep -q "actual=$tok" \
+   && printf '%s' "$out" | grep -q "actual=$lease403" \
    && ! printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED'; then
   ok "re-entrant reclaim with a violated lease: its own verdict word RECLAIM-LEASE-MISMATCH (never RECLAIMED), rc=0, naming BOTH expected=none and actual=<our token>"
 else
@@ -526,7 +540,12 @@ else
 $out"
 fi
 
-ll reclaim 403 --expect "$tok" --reason re-entrant-retry-lease-held --actor flow --pid "$D"; rc=$RC; out="$OUT"
+# RE-OBSERVE the lease: the preceding reclaim rewrote the record, so the earlier lease is
+# now legitimately stale. That is the ABA fix working as intended — a lease names ONE
+# acquisition, so any write invalidates it, and a test that reused the old value would be
+# asserting the hole rather than the fix.
+lease403b=$(lease_of 403)
+ll reclaim 403 --expect "$lease403b" --reason re-entrant-retry-lease-held --actor flow --pid "$D"; rc=$RC; out="$OUT"
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED (re-entrant)' \
    && ! printf '%s' "$out" | grep -qi 'lease-mismatch'; then
   ok "re-entrant reclaim whose lease DID hold: plain RECLAIMED (re-entrant), no phantom mismatch"
@@ -543,7 +562,7 @@ reason_case() {
   local label="$1"; shift
   local rc_l out_l tok_a
   rc_l=0
-  out_l="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" reclaim 403 --expect "$tok" "$@" --actor flow 2>&1)" || rc_l=$?
+  out_l="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" reclaim 403 --expect "$lease403" "$@" --actor flow 2>&1)" || rc_l=$?
   tok_a=$(token_of 403)
   if [ "$rc_l" -eq 64 ] && [ "$tok_a" = "$tok" ] && ! printf '%s' "$out_l" | grep -q 'LANE-LOCK:'; then
     ok "--reason $label -> exit 64 (usage error on stderr, no LANE-LOCK: line), record unchanged"
@@ -907,6 +926,57 @@ if [ "$rc20c" -eq 64 ] && printf '%s' "$out20c" | grep -q 'LANE_ROOT must be an 
 else
   bad "(b) expected exit 64 for a relative LANE_ROOT and 0 for --help; got rc=$rc20c/$rc20d
 $out20c"
+fi
+
+# ===========================================================================
+echo "TEST 21: the reclaim lease is a record INCARNATION (ABA), and the issue key is canonical"
+# ===========================================================================
+# (a) ABA. machine:actor:pid:boot:ticks is UNCHANGED when the same process releases and
+# re-acquires, so a lease built from the TOKEN matched a record written AFTER that cycle
+# and overwrote a NEWLY ACQUIRED LIVE lock — the CAS guarantee inverted, two writers.
+# claim.sh has no such hole because git arbitrates on a per-claim commit sha; the local
+# equivalent is the per-write nonce, which was recorded from the start and never reached
+# the lease. The stale lease must LOSE and the current one must still WIN — the second
+# half is what stops a refuse-everything fix passing.
+sleep 300 & ABA_P=$!
+sleep 300 & ABA_Q=$!
+LANE_961="$LANES/lane-961"; mkdir -p "$LANE_961"
+ll acquire 961 --pid "$ABA_P" --lane-dir "$LANE_961" >/dev/null 2>&1
+ll probe 961; LEASE1=$(printf '%s' "$OUT" | grep -oE 'lease=[^ ]+' | cut -d= -f2-)
+ll release 961 --pid "$ABA_P" >/dev/null 2>&1
+ll acquire 961 --pid "$ABA_P" --lane-dir "$LANE_961" >/dev/null 2>&1
+ll probe 961; LEASE2=$(printf '%s' "$OUT" | grep -oE 'lease=[^ ]+' | cut -d= -f2-)
+TOK1="${LEASE1%%#*}"; TOK2="${LEASE2%%#*}"
+ll reclaim 961 --expect "$LEASE1" --reason aba-stale-lease --pid "$ABA_Q"; rc21a=$RC; out21a=$OUT
+ll reclaim 961 --expect "$LEASE2" --reason aba-current-lease --pid "$ABA_Q"; rc21b=$RC; out21b=$OUT
+if [ -n "$LEASE1" ] && [ -n "$LEASE2" ] && [ "$LEASE1" != "$LEASE2" ] \
+   && [ "$TOK1" = "$TOK2" ] \
+   && [ "$rc21a" -eq 2 ] && printf '%s' "$out21a" | grep -q '^LANE-LOCK: RECLAIM-LOST' \
+   && [ "$rc21b" -eq 0 ] && printf '%s' "$out21b" | grep -q '^LANE-LOCK: RECLAIMED'; then
+  ok "(a) a lease observed BEFORE a same-process release+reacquire LOSES (RECLAIM-LOST) while the CURRENT lease still wins — and the token halves are IDENTICAL, so only the nonce closed the ABA hole"
+else
+  bad "(a) ABA: expected stale=RECLAIM-LOST(2) current=RECLAIMED(0) with identical token halves; got rc=$rc21a/$rc21b tok1=$TOK1 tok2=$TOK2
+$out21a
+$out21b"
+fi
+kill "$ABA_P" "$ABA_Q" 2>/dev/null || true
+
+# (b) A NONCANONICAL ISSUE KEY IS AN ALIAS, AND AN ALIAS IS TWO LOCKS FOR ONE LANE.
+# Every path is derived from the issue string RAW, so `3436` and `03436` produced
+# different mutexes and BOTH acquired. Rejected rather than normalised: an issue number
+# never legitimately carries a leading zero, so rewriting it would hide a caller bug and
+# would have to be repeated at every derivation site.
+ll acquire 03436 --lane-dir "$LANE_961"; rc21c=$RC; out21c=$OUT
+ll probe 0;    rc21d=$RC
+ll probe 3436; rc21e=$RC
+if [ "$rc21c" -eq 64 ] && printf '%s' "$out21c" | grep -q 'leading zero' \
+   && printf '%s' "$out21c" | grep -q "canonical form '3436'" \
+   && ! printf '%s' "$out21c" | grep -q '^LANE-LOCK:' \
+   && [ "$rc21d" -eq 64 ] && [ "$rc21e" -eq 0 ]; then
+  ok "(b) a leading-zero issue key is exit 64 naming the canonical form (no LANE-LOCK: verdict), issue 0 is refused, and the canonical key still works"
+else
+  bad "(b) expected 64/64/0 for 03436 / 0 / 3436; got $rc21c/$rc21d/$rc21e
+$out21c"
 fi
 
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
