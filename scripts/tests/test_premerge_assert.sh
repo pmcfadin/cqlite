@@ -69,6 +69,55 @@ exit 0
 MOCK
 chmod +x "$BIN/gh"
 
+# REAL_TO — the HOST's own supported timeout runner, resolved by the SAME
+# algorithm the script under test uses (`timeout` THEN `gtimeout`, each PROBED
+# for `--kill-after`, since BusyBox and older implementations reject the flag).
+# Resolving `timeout` alone here would answer a different question than the
+# script asks and would red on a supported gtimeout-only host (#3650 review R2).
+REAL_TO=""
+for _rt_cand in timeout gtimeout; do
+  _rt_path=$(command -v "$_rt_cand" 2>/dev/null) || _rt_path=""
+  [ -n "$_rt_path" ] || continue
+  if "$_rt_path" --kill-after=1 1 true >/dev/null 2>&1; then
+    REAL_TO="$_rt_path"
+    break
+  fi
+done
+unset _rt_cand _rt_path
+
+# $BIN/timeout — A TEST-ONLY RUNNER SHIM, AND WHY THE WHOLE SUITE NEEDS ONE
+# (#3650 review R3). The script under test requires a runner supporting
+# `--kill-after` and SKIPS the advisory when there is none, which is correct
+# behaviour — so every case asserting advisory CONTENT through `run`/`run_copy`
+# was implicitly asserting that the HOST has GNU coreutils. On a stock macOS
+# without it, 10 assertions demanded advisory output the shipped script is
+# documented not to produce: the suite contradicted its own documented
+# behaviour. The content cases are about the REPORT, not about the bound — the
+# bound is owned, decisively and on both configurations, by Case 41b's four
+# paths, which construct their own PATHs and are unaffected by this shim.
+#
+# It DELEGATES to the host's real runner when there is one, so a real bound
+# still applies wherever one is available, and runs the command directly only
+# when the host has none. It deliberately does NOT implement a bound in bash: a
+# second timing implementation is the kind of mechanism #3650's scope discipline
+# forbids, and it is unnecessary here because every content-case advisory stub
+# exits immediately.
+if [ -n "$REAL_TO" ]; then
+  cat >"$BIN/timeout" <<SHIM
+#!/usr/bin/env bash
+exec "$REAL_TO" "\$@"
+SHIM
+else
+  cat >"$BIN/timeout" <<'SHIM'
+#!/usr/bin/env bash
+# No real runner on this host: accept and discard the bound, then run directly.
+case "$1" in --kill-after=*) shift ;; esac
+shift   # the bound in seconds
+exec "$@"
+SHIM
+fi
+chmod +x "$BIN/timeout"
+
 # run <expected-exit> <description> <args...> — invokes the assert with the gh
 # mock on PATH, captures combined output + exit code. Sets $OUT and $RC.
 run() {
@@ -1354,12 +1403,9 @@ exit 0
 STUB
 }
 
-REAL_TO=""
-for cand in timeout gtimeout; do
-  cp=$(command -v "$cand" 2>/dev/null) || cp=""
-  [ -n "$cp" ] || continue
-  if "$cp" --kill-after=1 1 true >/dev/null 2>&1; then REAL_TO="$cp"; break; fi
-done
+# REAL_TO is resolved once near the top of the suite, by the same algorithm the
+# script uses. This path needs a REAL runner (it delegates to it rather than
+# reimplementing the escalation it is testing), so it skips where there is none.
 if [ -z "$REAL_TO" ]; then
   echo "skip - advisory bound: the TERM-ignoring case needs a real timeout/gtimeout supporting --kill-after"
 else
@@ -1443,6 +1489,18 @@ fi
 # real script invoked some OTHER path. Run the REAL, shipped script and require
 # the REAL advisory's own prefix to appear — that is the only case that proves
 # the wiring points at scripts/flow/base-staleness.sh.
+#
+# IT IS NOW DECISIVE ON EVERY HOST (#3650 review R3). It ran with the ambient
+# PATH and unconditionally demanded advisory output, while Case 41b declares "no
+# supported runner ⇒ SKIP" correct — so on a stock macOS with no GNU coreutils
+# the suite contradicted its own documented behaviour. `run` puts $BIN first, and
+# $BIN now carries the test-only runner shim documented at the top of this file,
+# so a supported runner is GUARANTEED here and the expectation below is the only
+# correct one. The no-runner configuration is not dropped: Case 41b's Path 2
+# owns it, constructing a PATH with neither candidate and asserting the
+# documented skip output plus the advisory's ABSENCE. Deliberately NOT loosened
+# to accept either output: that would turn a contradiction into a case that
+# proves nothing.
 if run 0 "the SHIPPED script invokes the SHIPPED advisory" 2421 "$CERTIFIED" "$GOOD"; then
   # The needle is the shipped advisory's own PREFIX, not one of its measured
   # lines: the suite's cwd is not guaranteed to be a git work tree, and an
@@ -1457,6 +1515,16 @@ if run 0 "the SHIPPED script invokes the SHIPPED advisory" 2421 "$CERTIFIED" "$G
     *"PREMERGE: ADVISORY"*"NON-EXHAUSTIVE"*)
       ok "advisory: the advisory's own non-exhaustiveness travels to the merge point" ;;
     *) bad "advisory: the NON-EXHAUSTIVE lines must travel with the report (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NOT RUN"*)
+      bad "advisory: a runner IS on PATH here, so the bound must not be reported unavailable (got: $OUT)" ;;
+    *) ok "advisory: with a supported runner on PATH the advisory is not reported unavailable" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*"#3650"*)
+      ok "advisory: the SCOPE lines and the literal #3650 print on the shipped path" ;;
+    *) bad "advisory: the SCOPE lines must print on the shipped path (got: $OUT)" ;;
   esac
 fi
 
