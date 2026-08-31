@@ -399,6 +399,42 @@ _alias_of=""
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_lock" ] && _alias_of="the launch reservation"
 _c_mutex=$(_canon "$SUMMARY.launch-lock.mutex")
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_mutex" ] && _alias_of="the reclamation mutex"
+# EVERY OUTPUT PATH MUST BE DISJOINT FROM EVERY GENERATED RESERVATION PATH, IN BOTH DIRECTIONS
+# (roborev job 316, Medium). The checks above only ask "is the LOG one of the SUMMARY's derived
+# paths". The reverse was unguarded, so `--summary /tmp/gate.log.launch-lock --log /tmp/gate.log`
+# let the extra-lock loop plant its reservation SYMLINK at the advertised summary path: the gate
+# then wrote its summary THROUGH that link, and the exit-time reclamation deleted the very path a
+# poller had been told to read. Enumerated as two SETS, not as pairs — pair-by-pair is how each
+# preceding round found "the next unnamed shape", so this closes the class instead of naming one
+# more dangerous case.
+_res_paths="$(_canon "$SUMMARY.launch-lock")
+$(_canon "$SUMMARY.launch-lock.mutex")
+$(_canon "$SUMMARY.heartbeat.launch-lock")
+$(_canon "$LOGFILE.launch-lock")"
+for _o_name in summary heartbeat log; do
+  case "$_o_name" in
+    summary)   _o_path="$_c_sum" ;;
+    heartbeat) _o_path="$_c_hb"  ;;
+    log)       _o_path="$_c_log" ;;
+  esac
+  # A heredoc, NEVER a pipe: a piped `while read` runs in a subshell, where this `exit 1` would
+  # exit only that subshell and the launcher would carry on — the same silent-verdict-discard the
+  # gate's own cargo-parse rule forbids.
+  while IFS= read -r _r_path; do
+    [ -n "$_r_path" ] || continue
+    [ "$_o_path" = "$_r_path" ] || continue
+    echo "gate-detached: the $_o_name path is also a reservation path this launcher creates" >&2
+    echo "               ('$_o_path'). Refusing (#3473)." >&2
+    echo "               This script plants a SYMLINK at every reservation path and REMOVES it when" >&2
+    echo "               it exits, so an output path that doubles as one would be written through" >&2
+    echo "               that link and then deleted: the advertised path would not hold the" >&2
+    echo "               artifact, and a poller would read the absence as a vanished gate." >&2
+    echo "               Choose --summary/--log paths whose derived lock names do not collide." >&2
+    exit 1
+  done <<_RESEOF
+$_res_paths
+_RESEOF
+done
 if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
   [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
   [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
@@ -1016,10 +1052,24 @@ if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
       gone)    _live=no ;;                # AFFIRMATIVE: no such process
       *)       _live=unknown ;;
     esac
-    # ...then the unit, which keeps the lock meaningful after the launcher exits. An unmeasurable
-    # unit state reads as LIVE, so this can only move `no` toward `yes`, never the reverse.
-    if [ "$_live" = no ] && [ -n "$_own_unit" ] && _unit_is_live "$_own_unit"; then
-      _live=yes
+    # ...then the unit, which keeps the lock meaningful after the launcher exits.
+    #
+    # ASK WHETHER A GATE RUNS, NOT WHETHER THE UNIT IS NON-INACTIVE (roborev job 316, Medium).
+    # This site called `_unit_is_live`, whose 0 means "live OR unmeasurable" — and an ORPHANED
+    # process keeps a unit active indefinitely, so an AFFIRMATIVELY DEAD owner was promoted back
+    # to `yes` and this path was refused forever. That is the exact permanent-refusal defect
+    # `_unit_runs_a_gate` exists to prevent, and `_foreign_reservation` above already asks it;
+    # this call site was missed. AUDIT BY CALL SITE, NOT BY PRIMITIVE — fixing the helper did
+    # not fix its callers.
+    #
+    # An UNMEASURABLE unit becomes `unknown`, NOT `yes`: `unknown` reaches the refusal below,
+    # which NAMES a manual remedy, whereas `yes` asserts a live run exists and offers none.
+    if [ "$_live" = no ] && [ -n "$_own_unit" ]; then
+      _unit_runs_a_gate "$_own_unit"; case $? in
+        0) _live=yes ;;                 # a real full gate is still in that cgroup
+        1) : ;;                         # affirmatively no gate: keep `no`, reclaim below
+        *) _live=unknown ;;             # unmeasurable => refuse-with-remedy, never a false `yes`
+      esac
     fi
     # A link we cannot fully parse is not proof of death. Every such refusal names the manual
     # remedy, because a refusal with no way out would be job 196's permanent block in a new hat.
@@ -1258,6 +1308,14 @@ while [ "$_i" -lt 40 ]; do
   # grammar in `_unit_is_live` — only `inactive|failed` are affirmative terminal answers, everything
   # else is live-or-unmeasurable — and this site simply did not use it. Same class as the audited
   # two-valued file predicates, one level out: a multi-state signal read through a two-valued probe.
+  #
+  # AND DELIBERATELY *NOT* `_unit_runs_a_gate` HERE, which is the other predicate in this file and
+  # the right one for RECLAIMING A FOREIGN reservation (roborev job 316). The two answer different
+  # questions. There, an orphan keeping a unit active must not block a path forever, so "is a GATE
+  # in the cgroup" is required. Here the subject is OUR OWN unit moments after `systemd-run`, and
+  # the gate may not have exec'd yet — so `_unit_runs_a_gate` could answer "affirmatively no gate"
+  # about a perfectly healthy launch and refuse it. Pick the predicate from the QUESTION, not from
+  # which one is stricter.
   if ! _unit_is_live "$UNIT"; then
     # ONE IMMUTABLE SNAPSHOT, via _snap_pair (roborev job 272, Medium). This read the nonce and the
     # run-id with two SEPARATE greps against a LIVE file, so a concurrent direct gate rewriting it
