@@ -53,7 +53,9 @@ back into one.
 
 - **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
   (design-driven) + roborev clean — the closer runs `bash scripts/flow/premerge-assert.sh <pr>
-  <certified-sha>`, re-reads for a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
+  <certified-sha> <gate-summary-file>` — the third argument is REQUIRED and is the FULL gate's own
+  summary file, so a merge with NO gate of record is now mechanically refused (#3465) — re-reads for
+  a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
   `ScheduleWakeup`-poll a PR's own CI** (#2667). Do NOT wait for the owner. **Seam 1 (spec approval)

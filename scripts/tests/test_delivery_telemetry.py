@@ -606,8 +606,8 @@ class GateNotRunTests(unittest.TestCase):
         self.assertTrue(all(r["gate_runs"] >= 1 for r in legacy))
 
 
-# Sentinel for "omit this key entirely" — distinct from None, which is a MEASURED
-# never-closed stateReason. issue #3550.
+# Sentinel for "omit this key entirely" — distinct from None, which is a MEASURED value.
+# issues #3550/#3559.
 _OMIT = object()
 
 _U = "https://github.com/pmcfadin/cqlite/issues/3393"
@@ -628,7 +628,7 @@ class SliceDeliveryTests(unittest.TestCase):
         self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
 
     def _ghfields(self, tmp, closed_at, merged_at="2026-06-10T03:00:00Z", name="ghfields.json",
-                  state_reason="", pr_closes_this_issue=False, issue=3393, pr=3467):
+                  issue_open_at_merge=True, pr_closes_this_issue=False, issue=3393, pr=3467):
         p = tmp / name
         fields = {
             "created_at": "2026-06-10T00:00:00Z",
@@ -638,8 +638,11 @@ class SliceDeliveryTests(unittest.TestCase):
             "priority": "P1",
             "routing": "oracle",
         }
-        if state_reason is not _OMIT:
-            fields["state_reason"] = state_reason
+        # `issue_open_at_merge` is the timeline-replayed answer to the question --slice
+        # asserts (issue #3559); it REPLACED #3550's `state_reason` proxy. The replay itself
+        # and its refusals live in scripts/tests/test_delivery_telemetry_timeline.py.
+        if issue_open_at_merge is not _OMIT:
+            fields["issue_open_at_merge"] = issue_open_at_merge
         if pr_closes_this_issue is not _OMIT:
             fields["pr_closes_this_issue"] = pr_closes_this_issue
         if issue is not _OMIT:
@@ -773,94 +776,43 @@ class SliceDeliveryTests(unittest.TestCase):
             self.assertEqual(rec["phase_s"]["to_pr_s"], 3600)     # unchanged basis
             self.assertEqual(rec["phase_s"]["review_s"], 7200)    # unchanged basis
 
-    def test_record_slice_refused_when_the_issue_is_closed_now(self):
-        """--slice asserts the issue was open AT DELIVERY TIME, which CURRENT state cannot
-        decide, so a closed issue is refused in BOTH timestamp orderings.
+    def test_record_slice_decided_by_the_timeline_not_by_the_current_closed_at(self):
+        """#3550 refused --slice for a closed-NOW issue in every timestamp ordering, because
+        CURRENT state cannot decide a question about DELIVERY time. #3559 replays the issue
+        TIMELINE instead, so the SAME closed_at values now decide differently depending on
+        where the closing EVENT sits relative to mergedAt — which is the point.
 
-        The second case is the one that matters: an auto-closing PR merges BEFORE GitHub
-        records the closure, so closed_at slightly AFTER merged_at is the NORMAL ordering of
-        an ordinary COMPLETED delivery. A `closed_at <= merged_at` guard was tried and would
-        have permitted --slice on essentially every ordinary delivery while looking like a
-        check (issue #3559).
+        A `closed_at <= merged_at` guard was tried and is wrong: an auto-closing PR merges
+        BEFORE GitHub records the closure, so closed_at slightly AFTER merged_at is the
+        NORMAL ordering of an ordinary COMPLETED delivery, and such a guard would have
+        permitted --slice on essentially every ordinary delivery while looking like a check.
+        Hence the three closed_at values below, each paired with BOTH timeline answers: the
+        record's kind must track the timeline and be INDEPENDENT of that ordering.
+        Message-level coverage of each refusal is in
+        scripts/tests/test_delivery_telemetry_timeline.py.
         """
         for label, closed in (("closed before the merge", "2026-06-10T02:00:00Z"),
                               ("auto-closed just after the merge", "2026-06-10T03:00:05Z"),
                               ("closed long after the merge", "2026-07-01T00:00:00Z")):
-            with self.subTest(label), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(ledger, self._ghfields(tmp, closed), "--slice"))
-                msg = str(cm.exception)
-                self.assertIn("--slice", msg)
-                self.assertIn("CLOSED", msg)
-                # the refusal must route the genuine late-stamp case somewhere real, and must
-                # not invite the hand-append workaround
-                self.assertIn("3559", msg)
-                self.assertIn("hand-append", msg.lower())
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_slice_refused_when_the_issue_is_open_only_because_it_was_reopened(self):
-        """The mirror hazard, and the one --slice could get WRONG rather than refuse: a
-        REOPENED issue also has closed_at null, so an ordinary COMPLETED delivery stamped
-        after a reopen would be forced down the slice path and permanently mislabeled."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            with self.assertRaises(SystemExit) as cm:
-                dt.main(self._rec_argv(
-                    ledger, self._ghfields(tmp, None, state_reason="REOPENED"), "--slice"))
-            msg = str(cm.exception)
-            self.assertIn("REOPENED", msg)
-            self.assertIn("3559", msg)
-            self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_slice_refuses_an_unmeasured_state_reason(self):
-        """An ABSENT stateReason is unmeasured, which is not 'never closed' — it must not
-        inherit the permissive branch."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            with self.assertRaises(SystemExit) as cm:
-                dt.main(self._rec_argv(
-                    ledger, self._ghfields(tmp, None, state_reason=_OMIT), "--slice"))
-            self.assertIn("stateReason", str(cm.exception))
-            self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_slice_refuses_a_whitespace_only_state_reason(self):
-        """`.strip()` folded "   " onto "" — a MALFORMED value taking the AFFIRMATIVE
-        never-closed branch. gh emits "" and REST emits null; neither ever emits whitespace,
-        so a blank-but-non-empty string is unmeasured input, not a measurement."""
-        for blank in ("   ", "\t", "\n", " \t "):
-            with self.subTest(state_reason=blank), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(
-                        ledger, self._ghfields(tmp, None, state_reason=blank), "--slice"))
-                self.assertIn("neither", str(cm.exception))
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_slice_refuses_an_unrecognised_state_reason(self):
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            with self.assertRaises(SystemExit) as cm:
-                dt.main(self._rec_argv(
-                    ledger, self._ghfields(tmp, None, state_reason="COMPLETED"), "--slice"))
-            self.assertIn("neither", str(cm.exception))
-            self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_slice_accepts_a_null_state_reason_as_never_closed(self):
-        """gh emits "" and the REST API emits null for a never-closed issue; both mean the
-        same thing and both must pass."""
-        for never_closed in ("", None):
-            with self.subTest(state_reason=never_closed), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                self.assertEqual(0, dt.main(self._rec_argv(
-                    ledger, self._ghfields(tmp, None, state_reason=never_closed), "--slice")))
-                self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
+            for open_at_merge in (True, False):
+                with self.subTest(label, open_at_merge=open_at_merge), \
+                        tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    ledger = tmp / "ledger.jsonl"
+                    gh = self._ghfields(tmp, closed, issue_open_at_merge=open_at_merge)
+                    argv = self._rec_argv(ledger, gh, "--slice")
+                    if open_at_merge:
+                        self.assertEqual(0, dt.main(argv))
+                        rec = json.loads(ledger.read_text().strip())
+                        self.assertIsNone(rec["closed_at"])
+                        self.assertEqual(rec["cycle_time_s"], 10800)   # created -> merged
+                    else:
+                        with self.assertRaises(SystemExit) as cm:
+                            dt.main(argv)
+                        msg = str(cm.exception)
+                        self.assertIn("CLOSED", msg)
+                        self.assertIn("hand-append", msg.lower())
+                        self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_a_slice_pr_closes_nothing_so_the_window_guard_does_not_fire(self):
         with tempfile.TemporaryDirectory() as d:
@@ -981,10 +933,13 @@ class SliceDeliveryTests(unittest.TestCase):
 
     def test_record_refused_in_the_merge_to_autoclose_window(self):
         """The propagation window: GitHub records an auto-close AFTER the merge, so for a few
-        seconds an ordinary COMPLETED delivery presents EXACTLY as a never-closed issue —
-        closed_at null AND stateReason empty. Both other signals lie; the PR's own closing
-        declaration does not, because a slice pr closes NOTHING. Refused with or without
-        --slice: recording either way in that window files a wrong record."""
+        seconds an ordinary COMPLETED delivery presents EXACTLY as a never-closed issue:
+        closed_at is null AND the timeline replay truthfully answers "open at mergedAt",
+        because the close is recorded AFTER the merge. So the timeline cannot decide this one
+        either — the PR's own closing declaration is the only signal that can, since a slice
+        pr closes NOTHING. That is why the #3550 guard is load-bearing FOREVER and was not
+        removed with the state_reason proxy (issue #3559). Refused with or without --slice:
+        recording either way in that window files a wrong record."""
         for extra in ((), ("--slice",)):
             with self.subTest(slice_flag=bool(extra)), tempfile.TemporaryDirectory() as d:
                 tmp = Path(d)
@@ -1006,12 +961,13 @@ class SliceDeliveryTests(unittest.TestCase):
                      [{"url": True}], [{"url": ""}], [3550], [{"url": _U}, "junk"]):
             with self.subTest(refs=refs):
                 def fake_run(argv, **kw):
+                    if argv[:2] == ["gh", "api"]:
+                        return _FakeProc("[]")   # empty timeline (#3559)
                     if argv[:3] == ["gh", "issue", "view"]:
                         return _FakeProc(json.dumps({
                             "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
                             "labels": [{"name": "P1"}, {"name": "oracle"}],
-                            "stateReason": "",
-                    "url": "https://github.com/pmcfadin/cqlite/issues/1",
+                            "url": "https://github.com/pmcfadin/cqlite/issues/1",
                         }))
                     return _FakeProc(json.dumps({
                         "createdAt": "2026-06-01T00:30:00Z",
@@ -1020,35 +976,38 @@ class SliceDeliveryTests(unittest.TestCase):
 
                 with mock.patch.object(dt.subprocess, "run", fake_run):
                     with self.assertRaises(SystemExit) as cm:
-                        dt._github_fields(1, 2)
+                        dt._github_fields(1, 2, slice_requested=True)
                 self.assertIn("closingIssuesReferences", str(cm.exception))
 
     def test_github_fields_refuses_an_absent_closing_issues_references(self):
         """`.get` would map an absent field to None -> "closes nothing" -> the window guard
-        silently disabled. Absence must be a named refusal, like stateReason's."""
+        silently disabled. Absence must be a named refusal, like the url check's."""
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
                     "labels": [{"name": "P1"}, {"name": "oracle"}],
-                    "stateReason": "",
                 }))
             return _FakeProc(json.dumps({
                 "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         self.assertIn("closingIssuesReferences", str(cm.exception))
 
     def test_github_fields_refuses_when_the_issue_reply_omits_url(self):
         """url joined the required set with the URL-identity migration; if it can go missing
         the comparison's left operand is absent and the guard is off."""
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
-                    "labels": [{"name": "P1"}, {"name": "oracle"}], "stateReason": "",
+                    "labels": [{"name": "P1"}, {"name": "oracle"}],
                 }))
             return _FakeProc(json.dumps({
                 "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
@@ -1056,39 +1015,10 @@ class SliceDeliveryTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         # tight discriminator: bare "url" also matches the issue_url refusal and the
         # closingIssuesReferences entry-without-url refusal
         self.assertIn("no url field", str(cm.exception))
-
-    def test_record_refuses_a_malformed_falsy_state_reason(self):
-        """`(state_reason or "")` would fold False/0/[] onto the never-closed answer — the
-        truthiness shape this issue keeps re-finding, one level down from closed_at."""
-        for bogus in (False, 0, [], {}):
-            with self.subTest(state_reason=bogus), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(
-                        ledger, self._ghfields(tmp, None, state_reason=bogus), "--slice"))
-                self.assertIn("stateReason", str(cm.exception))
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_reopened_issue_without_slice_is_routed_to_the_timeline_not_to_the_flag(self):
-        """Classification is a property of the ISSUE, not of the flag, so it is decided before
-        the coupling. Otherwise a reopened issue is told to pass --slice and the next
-        invocation refuses it, bouncing the operator between two refusals."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            with self.assertRaises(SystemExit) as cm:
-                dt.main(self._rec_argv(
-                    ledger, self._ghfields(tmp, None, state_reason="REOPENED")))
-            msg = str(cm.exception)
-            self.assertIn("REOPENED", msg)
-            self.assertIn("3559", msg)
-            self.assertNotIn("Pass --slice", msg)
-            self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_strict_rfc3339_is_shared_by_the_cli_check_and_the_ledger_validator(self):
         """`fromisoformat` is far more permissive than RFC-3339: it accepts basic format,
@@ -1240,7 +1170,7 @@ class SliceDeliveryTests(unittest.TestCase):
                     "pr_opened_at": "2026-06-10T01:00:00Z",
                     "merged_at": "2026-06-10T03:00:00Z",
                     "closed_at": "2026-06-10T04:00:00Z",
-                    "priority": "P1", "routing": "oracle", "state_reason": "",
+                    "priority": "P1", "routing": "oracle",
                     "pr_closes_this_issue": False,
                 }
                 fields[field] = bogus
@@ -1555,13 +1485,14 @@ class GhPathTests(unittest.TestCase):
 
     def test_github_fields_builds_argv_and_maps_json(self):
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
-                self.assertIn("createdAt,closedAt,labels,stateReason,url", argv)
+                self.assertIn("createdAt,closedAt,labels,url", argv)
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P1"}, {"name": "oracle"}],
-                    "stateReason": "COMPLETED",
                     "url": "https://github.com/pmcfadin/cqlite/issues/1234",
                 }))
             if argv[:3] == ["gh", "pr", "view"]:
@@ -1576,47 +1507,31 @@ class GhPathTests(unittest.TestCase):
             raise AssertionError(f"unexpected argv: {argv}")
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            fields = dt._github_fields(1234, 5678)
+            fields = dt._github_fields(1234, 5678, slice_requested=True)
         self.assertEqual(fields["created_at"], "2026-06-01T00:00:00Z")
         self.assertEqual(fields["closed_at"], "2026-06-01T02:00:00Z")
         self.assertEqual(fields["pr_opened_at"], "2026-06-01T00:30:00Z")
         self.assertEqual(fields["merged_at"], "2026-06-01T01:30:00Z")
         self.assertEqual(fields["priority"], "P1")
         self.assertEqual(fields["routing"], "oracle")  # explicit label, not inferred
-        # the live path must ALWAYS supply state_reason: --slice refuses when the key is
-        # absent, so omitting it here would make every real slice stamp fail (issue #3550)
-        self.assertEqual(fields["state_reason"], "COMPLETED")
+        # the live path must ALWAYS supply the timeline-replayed answer: --slice refuses
+        # when the key is absent, so omitting it here would make every real slice stamp fail
+        # (issue #3559). The empty timeline above means "never closed" -> open at mergedAt.
+        self.assertIs(fields["issue_open_at_merge"], True)
+        self.assertIsNone(fields["issue_close_event_at"])
+        self.assertNotIn("state_reason", fields)
         # the live path DERIVES the boolean from both authoritative queries; the operands
         # never leave this function, so they cannot be made to disagree
         self.assertIs(fields["pr_closes_this_issue"], True)
 
-    def test_github_fields_refuses_an_absent_state_reason_rather_than_nulling_it(self):
-        """A `.get` would map an ABSENT stateReason (a gh/API change, an older gh) to None,
-        which _assert_never_closed reads as affirmative proof the issue was NEVER closed —
-        an unmeasured signal inheriting the permissive answer, i.e. the guard defeating
-        itself. Absence must be a named refusal."""
-        def fake_run(argv, **kw):
-            if argv[:3] == ["gh", "issue", "view"]:
-                return _FakeProc(json.dumps({
-                    "createdAt": "2026-06-01T00:00:00Z",
-                    "closedAt": None,
-                    "labels": [{"name": "P1"}, {"name": "oracle"}],
-                }))
-            return _FakeProc(json.dumps({
-                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
-                "closingIssuesReferences": []}))
-
-        with mock.patch.object(dt.subprocess, "run", fake_run):
-            with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
-        self.assertIn("stateReason", str(cm.exception))
-
     def _issue_pr_fakes(self, issue_url, closing_url):
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
-                    "labels": [{"name": "P1"}, {"name": "oracle"}], "stateReason": "",
+                    "labels": [{"name": "P1"}, {"name": "oracle"}],
                     "url": issue_url}))
             return _FakeProc(json.dumps({
                 "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
@@ -1638,7 +1553,7 @@ class GhPathTests(unittest.TestCase):
         with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(
                 "https://github.com/pmcfadin/cqlite/issues/3393",
                 "https://github.com/other/repo/issues/3393")):
-            fields = dt._github_fields(3393, 3467)
+            fields = dt._github_fields(3393, 3467, slice_requested=True)
         # a same-NUMBER, different-REPOSITORY closing ref is not this issue
         self.assertIs(fields["pr_closes_this_issue"], False)
         # the live path must supply the (issue, pr) binding build_record requires
@@ -1648,7 +1563,7 @@ class GhPathTests(unittest.TestCase):
         with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(
                 "https://github.com/pmcfadin/cqlite/issues/3393",
                 "https://github.com/pmcfadin/cqlite/issues/3393")):
-            self.assertIs(dt._github_fields(3393, 3467)["pr_closes_this_issue"], True)
+            self.assertIs(dt._github_fields(3393, 3467, slice_requested=True)["pr_closes_this_issue"], True)
 
     def test_github_fields_refuses_a_non_canonical_issue_url(self):
         """The refusal added with the collapse had no test. Its failure mode is fail-OPEN:
@@ -1661,11 +1576,13 @@ class GhPathTests(unittest.TestCase):
             with self.subTest(url=bad):
                 with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(bad, None)):
                     with self.assertRaises(SystemExit) as cm:
-                        dt._github_fields(3393, 3467)
+                        dt._github_fields(3393, 3467, slice_requested=True)
                 self.assertIn("canonical", str(cm.exception))
 
     def test_github_fields_raises_on_multiple_priority_labels(self):
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z",
@@ -1673,7 +1590,6 @@ class GhPathTests(unittest.TestCase):
                     "labels": [{"name": "P1"}, {"name": "P2"}],  # invariant violation
                     # complete fixture: without these the missing-field check (#3550) short-
                     # circuits and this test never reaches the label logic it exists for
-                    "stateReason": "COMPLETED",
                     "url": "https://github.com/pmcfadin/cqlite/issues/1",
                 }))
             return _FakeProc(json.dumps({
@@ -1682,18 +1598,19 @@ class GhPathTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         # assert the LABEL error, not merely that something exited
         self.assertIn("multiple priority labels", str(cm.exception))
 
     def test_github_fields_design_label_maps(self):
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P2"}, {"name": "design"}],
-                    "stateReason": "COMPLETED",
                     "url": "https://github.com/pmcfadin/cqlite/issues/1234",
                 }))
             return _FakeProc(json.dumps({
@@ -1701,18 +1618,19 @@ class GhPathTests(unittest.TestCase):
                 "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            fields = dt._github_fields(1, 2)
+            fields = dt._github_fields(1, 2, slice_requested=True)
         self.assertEqual(fields["routing"], "design")
         self.assertEqual(fields["priority"], "P2")
 
     def test_github_fields_raises_on_conflicting_routing_labels(self):
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             if argv[:3] == ["gh", "issue", "view"]:
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P2"}, {"name": "oracle"}, {"name": "design"}],
-                    "stateReason": "COMPLETED",
                     "url": "https://github.com/pmcfadin/cqlite/issues/1",
                 }))
             return _FakeProc(json.dumps({
@@ -1721,7 +1639,7 @@ class GhPathTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         self.assertIn("routing", str(cm.exception))
 
     def test_gh_failure_becomes_clean_systemexit(self):
@@ -1738,6 +1656,8 @@ class GhPathTests(unittest.TestCase):
         calls = []
 
         def fake_run(argv, **kw):
+            if argv[:2] == ["gh", "api"]:
+                return _FakeProc("[]")   # empty timeline: never closed (#3559)
             calls.append(argv)
             return _FakeProc("https://github.com/pmcfadin/cqlite/issues/123")
 

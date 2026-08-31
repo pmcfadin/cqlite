@@ -82,7 +82,38 @@ carry).
   and never poll a PR's own CI.
 - **Residual — re-run order.** A tier re-run *after* `required` has already gone green cannot be
   retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
-  `scripts/flow/premerge-assert.sh` remains the closer's last look.
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
+  remains the closer's last look — and since #3465 it is where the gate of record stops being a
+  convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
+  one full `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, no
+  `nested-under:` line (#2874: a nested sub-gate runs at the SAME tree, so the sha binding provably
+  cannot see it) and `commit:`/`tree-start:` covering the certified sha. A `--lite` summary is refused
+  by name anywhere, and a `--delta` summary as the THIRD argument (their headers are distinct by
+  construction) — which is exactly the PR #3408 escape: 22 lite PASSes and no full gate.
+  **The OPTIONAL fourth argument is how a `--delta` re-cert certifies a merge.** #1892 *mandates*
+  `--delta`, "never a repeat full gate", for a test/docs-only diff on top of a full PASS at anchor
+  `X`, and mandates the PR record BOTH blocks — so a 3-arg-only guard red on correct, mandated input.
+  In that shape the third argument is the ANCHOR's full PASS (its sha need not be the certified sha)
+  and the fourth is one `==== AGENT-GATE DELTA SUMMARY ====` block carrying `MODE: delta` (asserted
+  affirmatively, the inverse of the full block's belt), `RESULT: PASS`, `tree-integrity: PASS`, a
+  `delta-anchor:` naming exactly that anchor — an `(UNRESOLVED)` anchor refuses — and its own
+  `commit:`/`tree-start:` at the certified sha. The chain is closed end to end; a delta block ALONE
+  is still the #3408 escape and still refused.
+  **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
+  It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
+  It does not prove the change was certified against the `main` it will join: a squash-merge composes
+  the diff with main's CURRENT tip, so for any PR whose base is behind main the certified tree and the
+  merged tree are **different objects** (measured on #3358/PR #3362 — a head gate FAILing only because
+  a known flake's fix was on main and not in that base; the malign direction is a PASS at a stale head
+  hiding an interaction with something that landed in between). A gate on the merge result is #3650 and
+  is deliberately not part of this mechanism. **The sha half of the same check closes a second, different escape (PR
+  #3616): a real gate, someone else's.** A closer located its gate run dir by recency
+  (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was about to
+  merge #3616 on PR #3580's verdict — everything about it was real, and only the `run-id:` line
+  exposed it, read by a human. `premerge-assert.sh` cannot verify `run-id:` (it did not launch the
+  gate, and #2874's reader contract belongs to whoever did), so requiring BOTH `commit:` (7 hex) and
+  `tree-start:` (12 hex) to match the certified sha is what turns a cross-lane verdict into a
+  mechanical refusal: a peer's summary names the OTHER PR's head.
 - **Break-glass is per-tier, and it actually works.** `ci:waive:<tier-id>` (an owner action) excuses a
   tier that is **absent** or **pending at the deadline**; it can **never** excuse a failed or cancelled
   one, and there is no blanket waiver. The label takes effect without a re-run: `required` re-reads the

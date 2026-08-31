@@ -14,13 +14,45 @@ treat such multi-cycle issues as multiple deliveries (they are), not fold them i
 The same holds for a SLICE delivery (issue #3550): an issue that ships one or more PRs while
 DELIBERATELY remaining OPEN (the shape the lead ruled correct on #3393). Such a record is
 stamped with `--slice`, carries `closed_at: null` (the marker), and bounds its cycle time on
-the PR's mergedAt. `--slice` asserts a fact about DELIVERY time, which the issue's CURRENT
-state cannot decide, so it is refused in THREE states: the issue is closed now; it is open
-only because it was REOPENED; or GitHub has not yet recorded this PR's auto-close (the PR
-declares it closes the issue, so it is a completed delivery, not a slice). The first two need
-the issue timeline replayed to mergedAt (issue #3559); the third clears itself in seconds. Closing the issue to satisfy this tool, or hand-appending a line past the
-validator, are both FORBIDDEN — a tool's data model must never decide whether a problem is
-recorded as solved, and `retro` reports slice records as their own class.
+the PR's mergedAt.
+
+`--slice` asserts a fact about DELIVERY time — "when this PR merged, the issue was
+deliberately open" — which the issue's CURRENT state cannot decide. Since issue #3559 it is
+decided by replaying the issue's own TIMELINE to the PR's `mergedAt` (`_issue_state_at`), and
+the rule is a CONJUNCTION:
+
+    slice  <=>  (the issue was OPEN at mergedAt)  AND  (this PR closes NOTHING)
+
+Both halves are permanent. Open-at-mergedAt alone never becomes sufficient, because GitHub
+records an auto-close AFTER the merge: an ordinary COMPLETED delivery whose PR declares
+`Closes #N` was ALSO literally open at mergedAt, so dropping the second operand would file a
+false slice record for essentially every ordinary delivery.
+
+THE TOOL REFUSES WHAT IT CAN DISPROVE, AND TREATS THE FLAG AS AN ASSERTION WHERE IT CANNOT
+(issue #3559). One case stays undecidable: `open at mergedAt` + `PR closes nothing` +
+a non-null `closed_at` is observationally identical for a genuine late-stamped slice and for
+a COMPLETED delivery whose PR omitted `Closes #N` and was closed by hand afterwards. The
+difference is INTENT, which GitHub does not record. Requiring `--slice` there would file a
+false slice record for the second case, and refusing the combination outright would be a dead
+letter (a merged PR's `closingIssuesReferences` cannot be re-linked). So such a record is
+written, and the tool SAYS on stderr that its kind rests on the operator's assertion rather
+than a measurement — because a record whose basis was asserted must not look identical to one
+that was proven. Carrying that basis IN the record is `classification_basis`, a follow-up:
+#3550's design is no new REQUIRED field, since adding one fails `lint` on every already
+committed record.
+
+`--slice` IS AN OPERATOR ASSERTION, and this tool's job is to REFUSE it wherever it can be
+DISPROVED — provably closed at mergedAt, or the PR declares the close. Where it cannot be
+disproved, the assertion stands. That boundary is real and is stated rather than papered
+over: a completed delivery whose PR omits `Closes #N` and whose issue is closed BY HAND days
+later is observationally IDENTICAL to a genuine slice whose issue is later completed by
+another PR — both are open-at-mergedAt, close-nothing, closed-later. No GitHub signal
+separates them; the difference is intent. (Doctrine bounds it: `flow-implement` mandates
+`Closes #<N>` in every PR body, so inside the sanctioned flow the discriminator is present.)
+
+Closing the issue to satisfy this tool, or hand-appending a line past the validator, are both
+FORBIDDEN — a tool's data model must never decide whether a problem is recorded as solved —
+and `retro` reports slice records as their own class.
 
 Authoritative-data-only mandate (CLAUDE.md / issue #28): every field is an observed
 event — a GitHub timestamp/label or a run counter supplied by the stamping step — or
@@ -416,55 +448,266 @@ def _issue_identity(value):
     return (m.group(1), m.group(2), int(m.group(3))) if m else None
 
 
-def _assert_never_closed(gh_fields: dict, issue: int) -> None:
-    """Raise SystemExit unless the issue has provably NEVER been closed (issue #3550).
+# --------------------------------------------------------------------------- timeline replay
+#
+# The ONLY timeline events that move an issue between open and closed. Nothing else a
+# timeline carries can change the answer, so nothing else is read (issue #3559).
+_TIMELINE_STATE_EVENTS = ("closed", "reopened")
 
-    A null `closed_at` proves the issue is open NOW; only a never-closed issue proves it was
-    open WHEN THE PR MERGED, which is what a slice record asserts. A REOPENED issue also has
-    `closed_at: null`, so without this an ordinary COMPLETED delivery stamped after a reopen
-    would be recorded as a slice — the one direction of this classification that produces a
-    WRONG record rather than a refusal. GitHub's `stateReason` separates the two
-    affirmatively: empty (gh) / null (REST) when never closed, "REOPENED" when reopened.
 
-    Every non-affirmative state is a refusal, never a shrug: an ABSENT key is UNMEASURED (not
-    "never closed"), a non-string value is malformed, and an unrecognised value is
-    unattributable. #3559's timeline replay is the general answer for all of them, and each
-    message names it. Called for ANY open issue, before the --slice coupling below, so a
-    reopened issue is routed straight here rather than told to pass a flag that would then be
-    refused.
+def _decode_json_stream(text: str, what: str) -> list:
+    """Decode a stream of CONCATENATED JSON values, refusing an incomplete read.
+
+    `gh api --paginate` merges array pages into ONE array on gh 2.98 and concatenates one
+    array per page on older versions, so both shapes are read here. Every byte must be
+    consumed: a TRUNCATED tail is a named refusal, never a short answer — an incomplete
+    replay could miss the very event that decides the classification and would then report
+    "open" from a timeline it only partly saw (issue #3559).
     """
-    if "state_reason" not in gh_fields:
+    decoder = json.JSONDecoder()
+    values, idx, size = [], 0, len(text)
+    while True:
+        while idx < size and text[idx].isspace():
+            idx += 1
+        if idx >= size:
+            break
+        try:
+            value, idx = decoder.raw_decode(text, idx)
+        except ValueError as exc:
+            raise SystemExit(
+                f"error: {what} returned a reply this tool could not fully parse, "
+                f"starting at byte {idx} ({exc}) — an incompletely-read timeline is "
+                f"UNMEASURED, never a short "
+                f"answer: the event that decides the classification could be in the part "
+                f"that did not parse (issue #3559)")
+        values.append(value)
+    if not values:
         raise SystemExit(
-            "error: the issue's stateReason is required to tell a never-closed issue from a "
-            "REOPENED one (both have closed_at null) and it was not supplied — an unmeasured "
-            "signal is never read as 'never closed' (issue #3550)")
-    raw = gh_fields["state_reason"]
-    # Only None or a str is a measurement. `(raw or "")` would fold False/0/[] onto the
-    # never-closed answer — the truthiness shape this issue keeps re-finding.
-    if raw is not None and not isinstance(raw, str):
+            f"error: {what} returned nothing to parse — every issue timeline carries at "
+            f"least the issue's own events, so an empty reply is an unmeasured read, not an "
+            f"empty timeline (issue #3559)")
+    return values
+
+
+def _issue_state_at(issue_url, issue: int, merged_at):
+    """Replay the issue TIMELINE and report its state at `merged_at` (issue #3559).
+
+    Returns ``(open_at_merge, close_event_at)``: whether the issue was OPEN at that instant,
+    and — when it was not — the `created_at` of the `closed` event that decided it, carried
+    for the refusal message ALONE (no branch anywhere reads it, so it cannot fail open).
+
+    The rule: consider only `closed`/`reopened` events, keep those STRICTLY BEFORE
+    `merged_at`, and let the LAST one decide — `closed` => closed, `reopened` => open, none
+    => open, because an issue that has no state event before the merge was never closed
+    before it. Ordering is established from the PARSED timestamps here rather than assumed of
+    the API's delivery order (it returns ascending in practice, but nothing here depends on
+    that; ties among events strictly before the merge keep the order the API gave, which is
+    the only further information available and cannot change which SIDE of the merge they
+    fall on).
+
+    An event in the SAME SECOND as `merged_at` is a REFUSAL, not a before (roborev finding):
+    both timestamps are one-second resolution, so the tie is unmeasurable, and such an event
+    is always the deciding one. `<=` resolved it permissively.
+
+    Every non-affirmative state is its own named refusal — a failed `gh` call, an
+    unparseable/truncated reply, a page that is not an array, an entry that is not an object,
+    an entry whose `event` cannot be read (it could BE the deciding `closed` event), a
+    deciding event without a usable `created_at`, a non-canonical issue URL, an unusable
+    `merged_at`. `created_at` is required only of the events that DECIDE: a `labeled` entry's
+    timestamp is never read, so there is nothing there to be permissive about (measured on
+    #3393's real 261-event timeline, where every entry carries one anyway).
+    """
+    identity = _issue_identity(issue_url)
+    if identity is None:
         raise SystemExit(
-            f"error: the issue's stateReason must be null or a string, got {raw!r} — a falsy "
-            f"non-string is malformed input, never an affirmative 'never closed' "
-            f"(issue #3550)")
-    # Matched EXACTLY against the measured values, with no normalisation of the never-closed
-    # answer. `.strip()` folded a whitespace-only string onto "" — i.e. a malformed value took
-    # the AFFIRMATIVE branch, the fifth instance of this file's recurring shape. gh emits ""
-    # and REST emits null for never-closed; neither ever emits whitespace, so a blank-but-
-    # non-empty string is unmeasured input and takes the same refusal as any other.
-    if raw is None or raw == "":
-        return  # affirmatively never closed
-    state_reason = raw.strip().upper()
-    if state_reason == "REOPENED":
+            f"error: cannot replay issue #{issue}'s timeline: {issue_url!r} is not a "
+            f"canonical GitHub issue URL, so the owner/repo the timeline lives under is "
+            f"unknown — refusing rather than guessing a repository (issue #3559)")
+    owner, repo, number = identity
+    if not isinstance(merged_at, str) or not merged_at.strip():
         raise SystemExit(
-            f"error: issue #{issue} is open only because it was REOPENED, so its null "
-            f"closed_at does not show it was open when the PR merged — recording this as a "
-            f"slice would mislabel an ordinary completed delivery. Deciding it needs the "
-            f"issue timeline replayed to mergedAt: issue #3559 — do NOT hand-append the "
-            f"record (issue #3550).")
-    raise SystemExit(
-        f"error: cannot classify issue #{issue}: its stateReason is {raw!r}, which is neither "
-        f"the empty value of a never-closed issue nor 'REOPENED' — refusing rather than "
-        f"guessing (issue #3559 replays the timeline for the cases this cannot decide).")
+            f"error: cannot replay issue #{issue}'s timeline: merged_at is {merged_at!r}, "
+            f"not an instant to replay to — a slice asserts the issue was open WHEN THE PR "
+            f"MERGED, and a record is only ever stamped for a MERGED pr (issue #3559)")
+    _require_full_timestamp(merged_at, "merged_at")
+    merged_ts = _parse_ts(merged_at)
+    # per_page=100 keeps a long timeline to a few pages; --paginate reads all of them and a
+    # partial read is refused by _decode_json_stream rather than silently truncated.
+    path = f"repos/{owner}/{repo}/issues/{number}/timeline?per_page=100"
+    what = f"`gh api {path} --paginate`"
+    entries = []
+    for page in _decode_json_stream(_gh(["gh", "api", path, "--paginate"]), what):
+        if not isinstance(page, list):
+            raise SystemExit(
+                f"error: {what} returned a timeline page of type {type(page).__name__}, "
+                f"expected an array of events — refusing rather than reading an unparseable "
+                f"reply as an empty timeline, which would answer 'open' (issue #3559)")
+        entries.extend(page)
+    deciding = []
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"error: {what} returned a timeline entry at position {position} of type "
+                f"{type(entry).__name__}, expected an object — refusing rather than skipping "
+                f"an entry that could be the `closed` event that decides this (issue #3559)")
+        kind = entry.get("event")
+        if not isinstance(kind, str) or not kind.strip():
+            raise SystemExit(
+                f"error: {what} returned a timeline entry at position {position} whose "
+                f"'event' name could not be read ({kind!r}) — an entry of unknown kind could "
+                f"BE the `closed` event that decides this, so it is refused rather than "
+                f"skipped (issue #3559)")
+        if kind not in _TIMELINE_STATE_EVENTS:
+            # A PADDED or differently-cased spelling of a state event is NOT "some other
+            # event type this tool ignores": it is a state event that would be silently
+            # SKIPPED, i.e. the permissive direction. GitHub emits the exact lowercase names,
+            # so anything that only matches after normalising is unmeasured input — refused
+            # here rather than normalised, because a lenient reader plus an exact-match
+            # consumer is how a non-match becomes indistinguishable from a correct non-match.
+            if kind.strip().lower() in _TIMELINE_STATE_EVENTS:
+                raise SystemExit(
+                    f"error: {what} returned a timeline entry at position {position} whose "
+                    f"'event' is {kind!r} — that matches a state-changing event only after "
+                    f"normalising, and skipping it would silently drop an event that decides "
+                    f"the classification (issue #3559)")
+            continue
+        at = entry.get("created_at")
+        if not isinstance(at, str) or not at.strip():
+            raise SystemExit(
+                f"error: {what} returned a `{kind}` event at position {position} with no "
+                f"usable 'created_at' ({at!r}) — a state event that cannot be PLACED cannot "
+                f"be ordered against the PR's mergedAt (issue #3559)")
+        _require_full_timestamp(at, f"timeline `{kind}` event created_at")
+        ts = _parse_ts(at)
+        if ts == merged_ts:
+            # SECOND-PRECISION TIE = UNMEASURABLE, NOT "before the merge" (roborev
+            # finding, issue #3559). GitHub emits both the timeline's created_at and
+            # the PR's mergedAt at one-second resolution, so a state event stamped in
+            # the SAME second as the merge cannot be ordered against it: the close may
+            # have landed either side. `<=` silently resolved that tie in the
+            # permissive direction and could therefore reject a genuine slice or accept
+            # one that was still closed when its PR merged. An event at exactly
+            # mergedAt is ALWAYS the deciding one (nothing else can be later while
+            # still being at-or-before), so this is refused rather than skipped.
+            #
+            # Measured cost before choosing refusal: across the last 7 real auto-close
+            # deliveries on this repo, closedAt trailed mergedAt by 1-2s and was NEVER
+            # in the same second, so the ordinary path does not pay for this. Where the
+            # tie does occur the answer is genuinely unknown, and this tool's whole
+            # premise is that an unknown is a refusal.
+            raise SystemExit(
+                f"error: issue's timeline has a `{kind}` event at {at}, the SAME SECOND "
+                f"as PR mergedAt {merged_at} — GitHub timestamps this to one-second "
+                f"resolution, so it cannot be ordered against the merge and whether the "
+                f"issue was open at that instant is UNMEASURABLE. Refusing rather than "
+                f"guessing a side: resolve it from the PR's and issue's own event log "
+                f"and stamp accordingly, and do NOT hand-append the record past the "
+                f"validator (issue #3559).")
+        if ts < merged_ts:
+            deciding.append((ts, position, kind, at))
+    if not deciding:
+        # No state event at or before the merge: the issue had never been closed by then.
+        return True, None
+    # CONFLICTING KINDS TIED AT THE DECIDING SECOND ARE UNMEASURABLE (roborev round 5).
+    # The mergedAt tie was refused one branch up, and preserving "API order decides" for
+    # ties STRICTLY BEFORE the merge quietly reintroduced the same class here: if the
+    # latest pre-merge second holds BOTH a `closed` and a `reopened`, the answer depends
+    # on response POSITION, which is not an authoritative ordering and is not validated
+    # anywhere. A reordered response would INVERT the slice classification.
+    #
+    # Scoped to CONFLICTING kinds only, deliberately. A tie among events of the SAME kind
+    # is harmless — every ordering yields the same verdict — and refusing it would red a
+    # decidable invocation, which is how a check becomes one agents learn to waive.
+    latest_ts = max(e[0] for e in deciding)
+    tied = [e for e in deciding if e[0] == latest_ts]
+    tied_kinds = {e[2] for e in tied}
+    if len(tied_kinds) > 1:
+        raise SystemExit(
+            f"error: issue's timeline has BOTH a `closed` and a `reopened` event at "
+            f"{tied[0][3]}, the latest instant before PR mergedAt {merged_at} — GitHub "
+            f"timestamps to one-second resolution, so which of them happened last is "
+            f"UNMEASURABLE, and the two imply OPPOSITE classifications. Refusing rather "
+            f"than letting the API's response order decide: that order is not an "
+            f"authoritative sequence. Resolve it from the issue's own event log and stamp "
+            f"accordingly, and do NOT hand-append the record past the validator "
+            f"(issue #3559).")
+    _, _, kind, at = max(tied, key=lambda e: e[1])
+    return (kind == "reopened"), (None if kind == "reopened" else at)
+
+
+def _classification_basis_note(kind: str, detail: str) -> str:
+    """Say on stderr when a record's kind rests on the OPERATOR'S ASSERTION, not a measurement.
+
+    THE UNDECIDABLE CASE, stated where it is decided (issue #3559, lead ruling on
+    `REQ-3559-02`, option C). `issue_open_at_merge=True` + `pr_closes_this_issue=False` +
+    a non-null `closed_at` is OBSERVATIONALLY IDENTICAL for two different truths:
+
+        a genuine slice, whose issue was later completed by some other PR
+        a COMPLETED delivery whose PR omitted `Closes #N`, closed by hand afterwards
+
+    The difference is INTENT — was this PR the completion — and GitHub carries no signal for
+    it. So the tool refuses where it can DISPROVE (provably closed at mergedAt, or the PR
+    declares the close) and treats the flag as an ASSERTION where it cannot. Refusing what
+    you can disprove is measurement; refusing what you merely cannot confirm is a dead
+    letter — you cannot retroactively re-link `closingIssuesReferences` on a merged PR, so no
+    action would clear it.
+
+    This exists because a record whose basis was an unverified assertion otherwise looks
+    IDENTICAL to one the tool proved, and "a positive verdict requires an affirmative
+    measurement" is the repository's rule: where the affirmation is a human's, say so. It is
+    a NOTE, never a refusal — the ruling accepted this residual as bounded (measured: the 5
+    most recent stamped completed deliveries all declare `Closes`, so in-flow work never
+    reaches the ambiguous branch; `flow-implement` mandates it).
+
+    Recording the basis IN the record is `classification_basis`, deliberately deferred to a
+    follow-up: #3550's design is NO new required field, since adding one fails `lint` on every
+    already-committed record and backfilling an append-only ledger is the wrong move.
+
+    RETURNS the note rather than printing it (roborev round 2): it says "recorded as", and
+    `build_record` runs BEFORE schema validation, duplicate detection and the ledger write —
+    so printing here let a FAILED invocation claim a classification had been recorded when
+    nothing was appended. `cmd_record` prints it only after the write succeeds.
+    """
+    return (f"note: recorded as a {kind} on YOUR ASSERTION, not a measurement — {detail} "
+            f"This tool refuses only what it can DISPROVE; it cannot tell this apart from "
+            f"the other reading, so the classification is yours (issue #3559).")
+
+
+def _measured_bool(gh_fields: dict, field: str, issue: int, why: str) -> bool:
+    """Read a boolean seam field AFFIRMATIVELY, or refuse naming what was unmeasured.
+
+    Both callers decide a classification from one bool each, so every non-affirmative state
+    is a refusal: an ABSENT key is UNMEASURED (never the permissive answer), and a
+    truthy/falsy stand-in ("", 0, "false", None) is malformed input, not a measurement. The
+    `--from-json` seam can inject anything, and a permissive branch keyed on the absence of a
+    bad signal is exactly the shape CLAUDE.md forbids (issues #3550/#3559).
+    """
+    if field not in gh_fields:
+        raise SystemExit(
+            f"error: '{field}' is required to {why}, and it was not supplied for issue "
+            f"#{issue} — an unmeasured signal never inherits the permissive answer "
+            f"(issues #3550/#3559)")
+    value = gh_fields[field]
+    if not isinstance(value, bool):
+        raise SystemExit(
+            f"error: '{field}' must be a boolean, got {value!r} "
+            f"({type(value).__name__}) — a truthy/falsy stand-in is unmeasured input, never "
+            f"an affirmative answer (issues #3550/#3559)")
+    return value
+
+
+def _close_event_clause(gh_fields: dict) -> str:
+    """Name the deciding `closed` event in a refusal, when the replay carried it.
+
+    DIAGNOSTIC ONLY: nothing branches on this value, so an absent or malformed one can only
+    make a refusal less specific — never turn a refusal into an acceptance. That is why the
+    timestamp is a separate field from the bool that decides, instead of a second operand the
+    decision depends on (issue #3559).
+    """
+    at = gh_fields.get("issue_close_event_at")
+    if isinstance(at, str) and at.strip():
+        return f" (the deciding `closed` event is at {at})"
+    return " (the replay did not carry the closing event's timestamp)"
 
 
 def _seconds_between(start: str, end: str) -> int:
@@ -492,11 +735,25 @@ def _gh(argv: list) -> str:
         raise SystemExit(f"error: `{' '.join(argv)}` failed: {detail}")
 
 
-def _github_fields(issue: int, pr: int) -> dict:
-    """Pull authoritative timestamps/labels live from `gh` (only when not injected)."""
+def _github_fields(issue: int, pr: int, *, slice_requested: bool) -> dict:
+    """Pull authoritative timestamps/labels live from `gh` (only when not injected).
+
+    THE TIMELINE REPLAY IS CONDITIONAL, and that is a correctness property rather than an
+    optimisation (roborev round 2, issue #3559). `build_record` consults the timeline only on
+    the CLASSIFICATION paths — `--slice`, or a null `closed_at` — so replaying it
+    unconditionally let a failure in a signal NOBODY READS refuse an ordinary completed
+    delivery: an unreachable timeline endpoint, a malformed event, or (worse, because this
+    change introduced it) a state event in the same second as `mergedAt`, which is now a
+    named refusal. An auto-close CAN land in the merge's second, so a routine stamp could
+    have been blocked by the very tie-refusal added two commits earlier.
+
+    When it is not replayed the two fields are OMITTED, never defaulted: `_measured_bool`
+    then refuses an unexpected consumer instead of reading a fabricated value as a
+    measurement, which is the rule this file keeps re-learning.
+    """
     issue_json = json.loads(_gh(
         ["gh", "issue", "view", str(issue), "--json",
-         "createdAt,closedAt,labels,stateReason,url"]))
+         "createdAt,closedAt,labels,url"]))
     pr_json = json.loads(_gh(
         ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt,closingIssuesReferences"]))
     if "closingIssuesReferences" not in pr_json:
@@ -525,10 +782,9 @@ def _github_fields(issue: int, pr: int) -> dict:
                 f"'url' is not a canonical GitHub issue URL: {ref!r} — refusing rather than "
                 f"discarding it, which would read as 'closes nothing' (issue #3550)")
         closing_identities.append(identity)
-    # Every field we asked for must have come back. `stateReason` in particular is the sole
-    # never-closed-vs-REOPENED signal, so its absence must be a named refusal here rather
-    # than a None that reads downstream as "never closed" (issue #3550).
-    missing = [f for f in ("createdAt", "closedAt", "labels", "stateReason", "url")
+    # Every field we asked for must have come back — an absent field must be a named
+    # refusal here rather than a None that reads downstream as a value (issue #3550).
+    missing = [f for f in ("createdAt", "closedAt", "labels", "url")
                if f not in issue_json]
     if missing:
         raise SystemExit(
@@ -539,6 +795,27 @@ def _github_fields(issue: int, pr: int) -> dict:
             f"error: `gh issue view {issue}` returned a 'url' that is not a canonical GitHub "
             f"issue URL: {issue_json['url']!r} — refusing rather than comparing an "
             f"unrecognised identity, which could never match (issue #3550)")
+    # THE authoritative answer to the question --slice asserts: was this issue OPEN when
+    # this PR merged? Replayed from the issue's own timeline (issue #3559), which is the only
+    # record that can place a close/reopen relative to the merge. `mergedAt` must be a usable
+    # instant before the replay can mean anything; build_record refuses a null one too, but
+    # that is downstream of here.
+    merged_at = pr_json.get("mergedAt")
+    if not isinstance(merged_at, str) or not merged_at.strip():
+        raise SystemExit(
+            f"error: `gh pr view {pr}` returned no usable mergedAt ({merged_at!r}) — the "
+            f"issue timeline can only be replayed to an authoritative merge instant, and a "
+            f"record is only ever stamped for a MERGED pr (issue #3559)")
+    # Only the classification paths read these; see the docstring.
+    replay_needed = slice_requested or issue_json.get("closedAt") is None
+    timeline_fields = {}
+    if replay_needed:
+        issue_open_at_merge, issue_close_event_at = _issue_state_at(
+            issue_json["url"], issue, merged_at)
+        timeline_fields = {
+            "issue_open_at_merge": issue_open_at_merge,
+            "issue_close_event_at": issue_close_event_at,
+        }
     labels = [l.get("name") for l in issue_json.get("labels", []) if l.get("name")]
     prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
     # one-priority invariant: a multi-priority issue is a labeling error — surface it
@@ -573,24 +850,26 @@ def _github_fields(issue: int, pr: int) -> dict:
         "pr": pr,
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
-        # GitHub's own reason the issue is in its current state. For an OPEN issue this is
-        # empty when it has NEVER been closed and "REOPENED" when it has — the one cheap
-        # affirmative signal distinguishing the two, and `closed_at: null` alone cannot
-        # (see build_record's --slice guard, issue #3550). Indexed, NOT `.get`: a `.get`
-        # would map an ABSENT field (a gh/API change, an older gh) to None, which
-        # _assert_never_closed reads as affirmative proof the issue was never closed — an
-        # unmeasured signal silently inheriting the permissive answer, which is the whole
-        # defect that guard exists to prevent. The presence check above makes it a clean
-        # refusal instead.
-        "state_reason": issue_json["stateReason"],
+        # `issue_open_at_merge` (was the issue OPEN at this PR's mergedAt, replayed from the
+        # issue TIMELINE, issue #3559) and the diagnostic-only `issue_close_event_at` are
+        # spliced in from `timeline_fields` BELOW, and are ABSENT when no branch will read
+        # them. The replay REPLACES #3550's `stateReason` proxy rather than joining it: that
+        # proxy answered only "has this issue EVER been closed", so it refused every genuine
+        # slice of a reopened or since-closed issue. Two mechanisms approximating one fact is
+        # the defect, not the fix. `issue_close_event_at` exists so a refusal can name the
+        # instant it refuses on, and no branch reads it deliberately: a second field a
+        # decision depends on is the "two operands that must agree" shape that produced six
+        # consecutive defects on this seam (issue #3550).
         "pr_opened_at": pr_json["createdAt"],
         "merged_at": pr_json["mergedAt"],
         # The issues THIS PR declares it closes ("Closes #N"). A SLICE pr by definition
-        # closes nothing — the issue deliberately stays open — so this discriminates a real
-        # slice from an ordinary completed delivery whose auto-close has not yet PROPAGATED
-        # (issue #3550). Measured, not timed: during that window closed_at is null AND
-        # stateReason is empty, so both of the other signals look exactly like a never-closed
-        # issue and only this one tells the truth.
+        # closes nothing — the issue deliberately stays open — so this is the SECOND operand
+        # of the slice conjunction, and it does NOT become redundant now that the timeline is
+        # replayed (issues #3550/#3559): GitHub records an auto-close AFTER the merge, so an
+        # ordinary COMPLETED delivery was TRULY open at mergedAt and the replay says so
+        # correctly. Only this field separates "open at mergedAt because the issue is never
+        # closing" from "open at mergedAt because the close lands five seconds later".
+        # Measured, not timed: no clock, no threshold.
         # ONE BOOLEAN, not two operands. Both sides are derived here from the SAME two
         # authoritative queries, so they cannot disagree. Passing the URLs through the
         # --from-json seam instead put two values that MUST AGREE in an operator's hands,
@@ -599,11 +878,19 @@ def _github_fields(issue: int, pr: int) -> dict:
         "pr_closes_this_issue": _issue_identity(issue_json["url"]) in closing_identities,
         "priority": priority,
         "routing": routing,
+        # ABSENT when no branch reads them — see the docstring. Spliced rather than defaulted.
+        **timeline_fields,
     }
 
 
-def build_record(args, gh_fields: dict) -> dict:
+def build_record(args, gh_fields: dict, notes: list = None) -> dict:
     """Assemble a record from supplied counters + authoritative GitHub fields.
+
+    `notes` is an OUT-PARAMETER for operator-facing notes the CALLER must print only once the
+    record is actually written (roborev round 2, issue #3559): this function runs before
+    schema validation, duplicate detection and the ledger append, so a note printed here
+    could describe a record that never landed. A list out-param rather than a changed return
+    type, so existing callers and tests that only want the record are unaffected.
 
     Error convention: caller-input / precondition errors (a missing counter, a null
     timestamp, an undeterminable priority/routing) `raise SystemExit` here — they are bad
@@ -713,86 +1000,157 @@ def build_record(args, gh_fields: dict) -> dict:
     if isinstance(closed_at, str):
         _require_full_timestamp(closed_at, "closed_at")
 
-    # closed_at <-> --slice, coupled in BOTH directions (issue #3550), refused here as a bad
-    # invocation so the CLI names the offending flag rather than reporting an opaque
-    # built-record schema/basis error. Mirrors the gate coupling above.
+    # closed_at / --slice / the issue TIMELINE, coupled in BOTH directions (issues
+    # #3550/#3559), refused here as a bad invocation so the CLI names the offending flag
+    # rather than reporting an opaque built-record schema/basis error.
     #
     # `--slice` asserts a fact about DELIVERY time — "when this PR merged, the issue was
-    # deliberately open" — and CURRENT state cannot decide it, so this refuses rather than
-    # guesses. A TIMESTAMP COMPARISON WAS TRIED AND IS WRONG (issue #3559): an auto-closing
-    # PR merges BEFORE GitHub records the closure, so `closedAt > mergedAt` is the NORMAL
-    # ordering of an ordinary COMPLETED delivery, not the signature of a late-stamped slice —
-    # a `closedAt <= mergedAt` guard would therefore permit --slice on essentially every
-    # ordinary delivery while looking like a check. Per CLAUDE.md's #3229 lesson (a guard
-    # with known false-PASSes is worse than no guard, because it invites reliance it cannot
-    # support) it was REMOVED rather than weakened further. Deciding this properly needs the
-    # issue TIMELINE replayed to mergedAt, which is issue #3559.
+    # deliberately open" — and CURRENT state cannot decide it. #3550 approximated it from
+    # current state and therefore refused every genuine slice of a since-closed or reopened
+    # issue; #3559 replays the issue's own TIMELINE to mergedAt instead, which is
+    # authoritative for exactly that question.
     #
-    # Cost, stated rather than hidden: a genuine slice cannot be stamped once its issue is
-    # ever closed. That is fail-closed — an unrecorded delivery is recoverable, a ledger that
-    # silently reclassifies a completed delivery as a slice is not.
-    if closed_at is None:
-        # FIRST: is the issue open, or merely not-yet-recorded-as-closed? GitHub records an
-        # auto-close AFTER the merge, and inside that propagation window an ordinary COMPLETED
-        # delivery presents EXACTLY as a never-closed issue — closed_at null AND stateReason
-        # empty — so both other signals lie and the operator would be told to pass --slice,
-        # recording a false slice. This PR's own closing declaration is the one signal that
-        # does not lie: a slice pr closes NOTHING, because its issue deliberately stays open.
-        # Checked regardless of --slice, and it is NOT a timing heuristic — no clock, no
-        # threshold, just an authoritative field already on the PR query.
-        # ONE MEASUREMENT, affirmatively required. Everything this guard needs is "did this
-        # PR declare it closes this issue" — a single fact both sides of which are derived in
-        # _github_fields from the same two authoritative queries. It was previously TWO
-        # operands (issue_url + closes_issues) carried across the --from-json seam, where an
-        # operator could make them disagree; every mismatch failed OPEN, because a non-match
-        # and a correct non-match are the same observation. Six consecutive defects on that
-        # seam (closed_at truthiness, stateReason x3, closes_issues value, issue_url binding)
-        # were all that one shape, so the operands were removed rather than validated a
-        # seventh time. A bool cannot half-agree with itself.
-        if "pr_closes_this_issue" not in gh_fields:
-            raise SystemExit(
-                "error: 'pr_closes_this_issue' is required to tell a slice from a completed "
-                "delivery whose auto-close has not propagated yet (both show a null "
-                "closed_at) — an unmeasured signal is never read as 'closes nothing' "
-                "(issue #3550)")
-        closes_this = gh_fields["pr_closes_this_issue"]
-        if not isinstance(closes_this, bool):
-            raise SystemExit(
-                f"error: 'pr_closes_this_issue' must be a boolean, got {closes_this!r} "
-                f"({type(closes_this).__name__}) — a truthy/falsy stand-in is unmeasured "
-                f"input, never an affirmative answer (issue #3550)")
+    # THE RULE IS A CONJUNCTION, and both halves are load-bearing FOREVER:
+    #
+    #     slice  <=>  (the issue was OPEN at mergedAt)  AND  (this PR closes NOTHING)
+    #
+    # Open-at-mergedAt ALONE is not sufficient and never becomes sufficient: GitHub records
+    # an auto-close AFTER the merge, so an ordinary COMPLETED delivery whose PR declares
+    # `Closes #N` was ALSO literally open at mergedAt. Dropping the second operand would file
+    # a false slice record for essentially every ordinary delivery — a false PASS in the
+    # common direction. So `pr_closes_this_issue` is NOT a propagation-window stopgap made
+    # redundant by the replay: it is the only signal separating "open at mergedAt because the
+    # issue is never closing" from "open at mergedAt because the close lands five seconds
+    # later", and it is now checked whether or not closed_at is currently null (with the
+    # timeline accepting a closed-NOW issue, the closed-now half of that shape is reachable).
+    #
+    # A TIMESTAMP COMPARISON WAS TRIED AND IS WRONG (issue #3559): `closedAt > mergedAt` is
+    # the NORMAL ordering of an ordinary completed delivery, so a `closedAt <= mergedAt`
+    # guard would permit --slice on essentially every delivery while looking like a check. It
+    # was REMOVED rather than weakened (CLAUDE.md's #3229 lesson), and the replay — which
+    # places the close EVENT, not the current closedAt field — is its replacement.
+    #
+    # The seam fields are required on the CLASSIFICATION paths only (--slice, or a null
+    # closed_at). An ordinary completed delivery reads its terminal timestamp from closed_at
+    # and no branch consults the timeline, so demanding the field there would refuse a
+    # correct invocation over a value nothing reads.
+    if slice_delivery or closed_at is None:
+        closes_this = _measured_bool(
+            gh_fields, "pr_closes_this_issue", args.issue,
+            "tell a slice from a completed delivery whose auto-close has not propagated yet "
+            "(both show a null closed_at)")
+        open_at_merge = _measured_bool(
+            gh_fields, "issue_open_at_merge", args.issue,
+            "tell whether the issue was OPEN when the PR merged, which is the fact --slice "
+            "asserts and current state cannot decide (it is replayed from the issue timeline)")
+        # FIRST operand of the conjunction, checked first because in the propagation window
+        # BOTH refusals apply and this one names the real cause. Not a timing heuristic — no
+        # clock, no threshold, just an authoritative field already on the PR query.
         if closes_this:
+            resolution = (
+                f"its closed_at is null only because GitHub has not recorded the auto-close "
+                f"yet (it lands after the merge) — re-run once the close is recorded and "
+                f"stamp it WITHOUT --slice"
+                if closed_at is None else
+                f"the issue's own closed_at ({closed_at}) records that closure — stamp it "
+                f"WITHOUT --slice")
             raise SystemExit(
                 f"error: PR #{args.pr} declares it CLOSES issue #{args.issue}, so this is a "
-                f"completed delivery, not a slice — its closed_at is null only because "
-                f"GitHub has not recorded the auto-close yet (it lands after the merge). "
-                f"Re-run once the close is recorded and stamp it WITHOUT --slice; passing "
-                f"--slice here would file a false slice record (issue #3550).")
-        # The issue is genuinely open. Whether it was open AT DELIVERY is a property of the
-        # issue, not of the flag, so it is decided BEFORE the coupling below — otherwise a
-        # reopened issue is told to pass --slice and the next invocation refuses it, bouncing
-        # the operator between two refusals.
-        _assert_never_closed(gh_fields, args.issue)
-        if not slice_delivery:
+                f"completed delivery, not a slice: a slice PR closes NOTHING, because its "
+                f"issue deliberately stays open. {resolution}; passing --slice here would "
+                f"file a false slice record. Being open at mergedAt does NOT make this a "
+                f"slice — every auto-closing PR's issue was open at mergedAt, because the "
+                f"close is recorded afterwards (issues #3550/#3559).")
+        if slice_delivery and not open_at_merge:
             raise SystemExit(
-                f"error: issue #{args.issue} is still OPEN (its closed_at is null), so this "
-                f"is a SLICE delivery: a merged PR shipping part of an issue that "
-                f"deliberately stays open. Pass --slice to record it — the PR's mergedAt then "
-                f"bounds cycle_time_s and closed_at is recorded as null (issue #3550).\n"
-                f"       Do NOT route around this refusal. Both available workarounds are "
-                f"FORBIDDEN: (1) closing the issue to satisfy this tool — a tool's data model "
-                f"must never decide whether a problem is recorded as solved; (2) "
-                f"hand-appending a record to the JSONL past the validator — the tool is the "
-                f"gate on the ledger's shape.")
-    elif slice_delivery:
-        raise SystemExit(
-            f"error: --slice records a delivery of an issue that was deliberately OPEN when "
-            f"the PR merged, but issue #{args.issue} is CLOSED now (closed_at {closed_at}) "
-            f"and current state cannot tell a late-stamped slice from an ordinary completed "
-            f"delivery — GitHub records an auto-close AFTER the merge, so the timestamps look "
-            f"alike. If this WAS a completed delivery, drop --slice. If it was genuinely a "
-            f"slice stamped after the issue closed, that needs the issue timeline replayed to "
-            f"mergedAt: issue #3559 — do NOT hand-append the record (issue #3550).")
+                f"error: --slice records a delivery of an issue that was deliberately OPEN "
+                f"when the PR merged, but replaying issue #{args.issue}'s timeline to PR "
+                f"#{args.pr}'s mergedAt ({gh_fields['merged_at']}) places it CLOSED at that instant"
+                f"{_close_event_clause(gh_fields)}. This delivery COMPLETED the issue, so "
+                f"record it WITHOUT --slice — a later reopen does not turn a completed "
+                f"delivery into a slice. Do NOT hand-append the record past the validator, "
+                f"and do NOT close or reopen the issue to satisfy this tool: a tool's data "
+                f"model must never decide whether a problem is recorded as solved "
+                f"(issues #3550/#3559).")
+        if not slice_delivery:
+            # closed_at is null here (the loop's other arm ran only for --slice).
+            if open_at_merge:
+                raise SystemExit(
+                    f"error: issue #{args.issue} was OPEN when PR #{args.pr} merged and this "
+                    f"PR closes nothing, so this is a SLICE delivery: a merged PR shipping "
+                    f"part of an issue that deliberately stays open. Pass --slice to record "
+                    f"it — the PR's mergedAt then bounds cycle_time_s and closed_at is "
+                    f"recorded as null (issues #3550/#3559).\n"
+                    f"       Do NOT route around this refusal. Both available workarounds "
+                    f"are FORBIDDEN: (1) closing the issue to satisfy this tool — a tool's "
+                    f"data model must never decide whether a problem is recorded as solved; "
+                    f"(2) hand-appending a record to the JSONL past the validator — the tool "
+                    f"is the gate on the ledger's shape.")
+            # Closed at mergedAt, but reopened since, so its current closed_at is null: the
+            # delivery COMPLETED the issue, yet the completed record's terminal timestamp is
+            # not currently observable. Both directions are refusals — deliberately, and this
+            # is a KNOWN RESIDUAL: a completed delivery whose issue was reopened before it
+            # was ever stamped is not recordable until the issue is closed again on its own
+            # terms. Telling the operator to pass --slice instead would mislabel it
+            # permanently, which is the one outcome worse than an unstamped delivery.
+            # DO NOT advise waiting for a reclose. A later close belongs to a LATER
+            # delivery cycle, and the completed path reads the issue's CURRENT closedAt —
+            # so stamping after a reclose attributes that other cycle's closure and cycle
+            # time to THIS pr (roborev round 4). The mis-attribution itself is older than
+            # this change (on main, closed_at is `issue_json["closedAt"]` with no notion of
+            # which close ended which cycle) and is tracked separately; what this change
+            # must not do is TELL an operator to produce it.
+            raise SystemExit(
+                f"error: issue #{args.issue} was CLOSED when PR #{args.pr} merged"
+                f"{_close_event_clause(gh_fields)}, so this delivery COMPLETED it — but the "
+                f"issue has been REOPENED since, so its current closed_at is null and this "
+                f"cycle's own closure is no longer the issue's closed_at. This record cannot "
+                f"be stamped as-is, and WAITING FOR THE ISSUE TO CLOSE AGAIN DOES NOT FIX IT: "
+                f"a later close belongs to a later delivery cycle, and stamping then would "
+                f"attribute that cycle's closure and cycle_time_s to PR #{args.pr}. Raise it "
+                f"with the lead rather than working around it. Do NOT pass --slice (it would "
+                f"permanently mislabel a completed delivery), do NOT close the issue to "
+                f"satisfy this tool, and do NOT hand-append the record past the validator "
+                f"(issues #3550/#3559).")
+
+    # THE BASIS NOTE (issue #3559, REQ-3559-02 option C). Both surviving classifications
+    # CAN rest on the operator rather than on evidence, and only one of them was ever
+    # visible. Built AFTER every refusal above, and RETURNED rather than printed — it says
+    # "recorded as", and nothing is recorded until cmd_record's ledger write succeeds
+    # (roborev round 2).
+    #
+    # SCOPED TO THE UNDECIDABLE CASE, in BOTH directions. A note on a record the tool
+    # PROVED is noise readers learn to skip, which would cost exactly the signal this note
+    # exists to carry. So the discriminator is `pr_closes_this_issue`: when it is
+    # affirmatively TRUE the classification is proven by the PR's own closing declaration
+    # and nothing is asserted. It is read here WITHOUT `_measured_bool` on purpose — this is
+    # a diagnostic, not a decision, and an absent field must weaken the CLAIM (we cannot
+    # say it was proven) rather than refuse a record every branch above already accepted.
+    basis_note = None
+    proven_by_closing_ref = gh_fields.get("pr_closes_this_issue") is True
+    if closed_at is not None and not proven_by_closing_ref:
+        if slice_delivery:
+            # Disprove-impossible: the timeline proved the issue was open at mergedAt and
+            # this PR closes nothing, which is everything measurable — but an undeclared
+            # completion presents identically, so the SLICE reading is the operator's.
+            basis_note = _classification_basis_note(
+                "SLICE delivery",
+                f"the timeline proves issue #{args.issue} was open when PR #{args.pr} merged "
+                f"and that the PR closes nothing, but it CANNOT prove the PR was not an "
+                f"undeclared completion of it (its closed_at is {closed_at}).")
+        else:
+            # The path roborev round 1's finding names. No timeline is replayed here (an
+            # ordinary completed delivery reads its terminal timestamp from closed_at), so
+            # the completed reading rests on the OMISSION of --slice — and this branch is
+            # reached only when the PR declares no closing reference, i.e. exactly when
+            # that omission is the only evidence there is.
+            basis_note = _classification_basis_note(
+                "COMPLETED delivery",
+                f"you omitted --slice, this PR declares no closing reference, and this path "
+                f"does not replay issue #{args.issue}'s timeline — so a late-stamped SLICE "
+                f"of a since-closed issue would present identically here.")
+    if basis_note is not None and notes is not None:
+        notes.append(basis_note)
 
     created = gh_fields["created_at"]
     pr_opened = gh_fields["pr_opened_at"]
@@ -856,9 +1214,11 @@ def cmd_record(args) -> int:
     if args.from_json:
         gh_fields = json.loads(Path(args.from_json).read_text())
     else:
-        gh_fields = _github_fields(args.issue, args.pr)
+        gh_fields = _github_fields(args.issue, args.pr,
+                                   slice_requested=bool(args.slice_delivery))
 
-    record = build_record(args, gh_fields)
+    notes: list = []
+    record = build_record(args, gh_fields, notes)
     errors = validate_record(record, schema)
     if errors:
         print("error: built record is not schema-valid:", file=sys.stderr)
@@ -896,6 +1256,11 @@ def cmd_record(args) -> int:
     with ledger.open("a") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
     print(f"recorded issue #{record['issue']} (pr #{record['pr']}) -> {ledger}")
+    # Only now is "recorded as ..." true (roborev round 2, issue #3559): every path above
+    # can still refuse, and a note claiming a classification was recorded when nothing was
+    # appended is worse than no note.
+    for note in notes:
+        print(note, file=sys.stderr)
     return 0
 
 
@@ -1201,10 +1566,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "(issue #2667); OPTIONAL — omit when unobserved, never default to 0")
     rec.add_argument("--slice", dest="slice_delivery", action="store_true",
                      help="record a delivery of an issue that intentionally stays OPEN "
-                          "(issue #3550): writes closed_at: null and bounds cycle_time_s on "
-                          "the PR's mergedAt. Refused if the issue is closed now, if it is "
-                          "open only because it was REOPENED, or if this PR declares it "
-                          "closes the issue (a slice PR closes nothing)")
+                          "(issues #3550/#3559): writes closed_at: null and bounds "
+                          "cycle_time_s on the PR's mergedAt. Decided by replaying the "
+                          "issue TIMELINE to the PR's mergedAt, and refused unless the "
+                          "issue was OPEN at that instant AND this PR closes nothing (a "
+                          "slice PR closes nothing; every auto-closing PR's issue was also "
+                          "open at mergedAt, because the close is recorded afterwards)")
     rec.add_argument("--from-json", dest="from_json", default=None,
                      help="inject GitHub-derived fields from a JSON file (else pull via gh). "
                           "The file must name the delivery it was built for with integer "
