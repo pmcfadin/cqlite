@@ -7544,12 +7544,26 @@ test_log_size_unmeasurable_is_not_zero() {
   mkdir -p "$shadow"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
   chmod +x "$shadow/wc"
-  unmeasurable="$(env SUP="$SUPERVISOR" F="$d/some.log" PATH="$shadow:$PATH" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  # TWO CALLER SHAPES, AND THE DIFFERENCE IS THE POINT. The BARE call runs the probe in the caller's own
+  # shell, which inherits the supervisor's `set -euo pipefail`; the WRAPPED call runs it inside a command
+  # substitution, where errexit is NOT inherited. A failing `wc` makes an internal pipeline non-zero, and
+  # in the bare shape that aborts the caller BEFORE the probe classifies anything — measured: the bare
+  # call produced NO OUTPUT AT ALL, no sentinel and no error, i.e. the probe killed its caller instead of
+  # answering. The pre-#3601 form was safe only because its one caller sits inside a `set +e` region, and
+  # a probe whose correctness depends on that is one edit away from taking the supervisor down.
+  local unmeasurable_bare=''
+  unmeasurable_bare="$(env SUP="$SUPERVISOR" F="$d/some.log" PATH="$shadow:$PATH" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  unmeasurable="$(env SUP="$SUPERVISOR" F="$d/some.log" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(log_size "$F")"' 2>/dev/null || true)"
 
   if [[ "$absent" == "0" && "$present" == "5" && "$unmeasurable" == "-1" ]]; then
     pass "log_size: absent=[0] (a real zero), present=[5] (a real count), unmeasurable=[-1] (a NAMED non-value) — three answers, so a failed measurement can never be mistaken for a byte count"
   else
     fail "log-size-collapses: absent=[$absent] present=[$present] unmeasurable=[$unmeasurable] — an unmeasurable read must not come back as an empty string (which \`-eq\` reads as 0) or as any real count"
+  fi
+  if [[ "$unmeasurable_bare" == "-1" ]]; then
+    pass "log_size (errexit caller): the BARE call from a shell carrying the supervisor's own \`set -euo pipefail\` still returns the sentinel — the probe answers rather than aborting its caller"
+  else
+    fail "log-size-aborts-errexit-caller: bare=[$unmeasurable_bare] — a failing internal pipeline aborted the caller before the probe could classify anything, so it returns no sentinel at all"
   fi
 
   # ---- THE CONSUMER, BEHAVIOURALLY. Same wedge scenario as the genuine-wedge case (a worker that

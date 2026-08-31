@@ -894,7 +894,13 @@ captured_question() {
 log_size() {
   local f="$1" n
   [[ -f "$f" ]] || { printf '0'; return 0; }
-  n="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+  # `|| n=''` IS LOAD-BEARING UNDER `set -e`, NOT DEFENSIVE PADDING. `wc` failing makes the pipeline
+  # non-zero (`pipefail`), and a non-zero command substitution in an ASSIGNMENT aborts an errexit shell
+  # before the classification below ever runs — so without this the probe would not return a sentinel,
+  # it would kill its caller. Measured: the bare call `log_size "$f"` from a `set -e` shell produced NO
+  # output at all. The pre-#3601 form was safe only by accident, because its one caller sits inside a
+  # `set +e` region; a probe's correctness must not depend on that.
+  n="$(wc -c <"$f" 2>/dev/null | tr -d ' ')" || n=''
   # The digits are enumerated rather than given as a `[0-9]` RANGE, whose members are decided by the
   # caller's collation.
   case "$n" in
@@ -2300,7 +2306,12 @@ acquire_lock() {
   # measuring, not toward the permissive answer the wait exists to avoid.
   case "$tries_max" in '' | *[!0123456789]*) tries_max=20 ;; esac
 
-  holder="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")"
+  # THE PROBE ASSIGNMENTS CARRY A FAIL-CLOSED FALLBACK (#3549 job 201 F3, same shape). Both probes
+  # return 0 on every path they take, so these are unreachable today — but a non-zero inside a `$( )`
+  # makes the ASSIGNMENT non-zero, and under this script's own errexit that would abort the start
+  # silently instead of refusing. The fallbacks land on the REFUSING verdict of each probe, so an
+  # unforeseen internal failure costs a start and can never cost a live holder its lock.
+  holder="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || holder='unparseable pid-probe-aborted'
   # THE PID-LESS WINDOW IS RESOLVED BY MEASURING PERSISTENCE, WHICH IS NOT A TIMING HEURISTIC — and it
   # will read like one, so here is the difference. A heuristic infers WHAT is happening from HOW LONG it
   # has been happening. This measures a different property: a pid-less lock is a state a STARTING holder
@@ -2325,7 +2336,7 @@ acquire_lock() {
     # then spins its bounded number of iterations instead of pausing, which measures the same property
     # with less patience.
     sleep "$wait_secs" 2>/dev/null || true
-    holder="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")"
+    holder="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || holder='unparseable pid-probe-aborted'
   done
 
   case "$holder" in
@@ -2338,7 +2349,7 @@ acquire_lock() {
       ;;
   esac
 
-  liveness="$(supervisor_lock_holder_liveness "$holder_pid")"
+  liveness="$(supervisor_lock_holder_liveness "$holder_pid")" || liveness='unknown liveness-probe-aborted'
   case "$liveness" in
     live)
       # AC4: THE REFUSAL SAYS WHAT IT KNOWS AND SAYS WHAT IT DID NOT CHECK. It has established that pid
