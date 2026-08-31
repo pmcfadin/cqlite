@@ -127,6 +127,12 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
     may be a live peer's, so it is NOT overwritten for you. Move it aside deliberately
     (`mv .drive-issue-state.md .drive-issue-state.md.unreadable`); the lane then reads `ABSENT` and
     you write a fresh stamped marker on the normal path. Say in your report that you did it.
+- **Held → ALSO re-take the machine-local lane lock before the first write (#3436).** Holding
+  `refs/claims/issue-<N>` does NOT mean this lane is yours to edit: the claim ref is a hard control
+  cross-machine and a pure advisory locally, and its `machine+actor` identity cannot express "a
+  different process on the same box" — so a resumed session must prove local occupancy separately.
+  `bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD"`; an `OCCUPIED` refusal names the
+  occupant, and you STOP rather than edit a lane a live process owns.
 - **Not held → fresh start**: claim per worker.md step 3, then route (oracle-driven → straight to
   implement; design-driven → `flow-activate` to Seam 1, render the spec INLINE in an issue comment
   as the approval request, then Delta 3). The spec render and the coord request are **ONE combined

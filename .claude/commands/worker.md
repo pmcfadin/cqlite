@@ -101,7 +101,21 @@ onto its own branch). Rules, non-negotiable:
    git -C ~/projects/cqlite worktree add ~/projects/cqlite-wt/issue-<N> -b issue-<N>-<slug> origin/main
    git -C ~/projects/cqlite-wt/issue-<N> push -u origin issue-<N>-<slug>   # PR head, NOT the lock
    cd ~/projects/cqlite-wt/issue-<N>
+   # THE MACHINE-LOCAL HALF (#3436) — take it before the first write to the lane:
+   bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
    ```
+   **The claim ref cannot stop a second session ON THIS BOX, and that is not a bug in it (#3436).** It
+   is a hard control cross-machine because git arbitrates the push server-side; locally it arbitrates
+   nothing — a session that never runs `claim.sh` simply proceeds, and even one that DOES is waved
+   through, because `claim.sh`'s holder identity (and so its re-entrancy) is `machine+actor`, and two
+   sessions on one box are both `machine=<box> actor=flow`. That granularity **cannot express** "a
+   different process on the same box". Measured: two sessions worked #3367 in one worktree for ~20
+   minutes; one session's `git add -A` swept up the other's uncommitted work, so a commit landed
+   carrying someone else's design under the committer's reasoning. `lane-lock.sh`'s identity is the
+   full PROCESS identity (machine, actor, pid, boot-id, `/proc` start-ticks), so a same-machine
+   same-actor different-live-pid acquire is `OCCUPIED`. An `OCCUPIED` refusal **names the occupant**;
+   only a verifiably `DEAD-*` holder is auto-reclaimed, and every `UNKNOWN-*` refuses.
+   And **`git add -A` is banned in a lane for this reason** — stage explicit paths, always.
    The claim ref — not the branch — arbitrates the race (git server-side, per-issue, slug-independent):
    a UNIQUE root-commit push means a different-slug or identical-base competitor can no longer
    double-claim (#2665). `worktree add` leaves the root checkout untouched — that is the entire point.
