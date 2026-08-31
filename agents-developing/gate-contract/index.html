@@ -151,7 +151,38 @@ cannot go green until every registered tier has reported success — so keep arm
 and never poll a PR’s own CI.</li>
 <li><strong>Residual — re-run order.</strong> A tier re-run <em>after</em> <code dir="auto">required</code> has already gone green cannot be
 retracted by a finished job: <strong>re-run the tier, then re-run <code dir="auto">required</code></strong>, in that order.
-<code dir="auto">scripts/flow/premerge-assert.sh</code> remains the closer’s last look.</li>
+<code dir="auto">scripts/flow/premerge-assert.sh &#x3C;pr> &#x3C;certified-sha> &#x3C;gate-of-record-summary> [&#x3C;delta-summary>]</code>
+remains the closer’s last look — and since #3465 it is where the gate of record stops being a
+convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
+one full <code dir="auto">==== AGENT-GATE SUMMARY ====</code> block with <code dir="auto">RESULT: PASS</code>, <code dir="auto">tree-integrity: PASS</code>, no
+<code dir="auto">nested-under:</code> line (#2874: a nested sub-gate runs at the SAME tree, so the sha binding provably
+cannot see it) and <code dir="auto">commit:</code>/<code dir="auto">tree-start:</code> covering the certified sha. A <code dir="auto">--lite</code> summary is refused
+by name anywhere, and a <code dir="auto">--delta</code> summary as the THIRD argument (their headers are distinct by
+construction) — which is exactly the PR #3408 escape: 22 lite PASSes and no full gate.
+<strong>The OPTIONAL fourth argument is how a <code dir="auto">--delta</code> re-cert certifies a merge.</strong> #1892 <em>mandates</em>
+<code dir="auto">--delta</code>, “never a repeat full gate”, for a test/docs-only diff on top of a full PASS at anchor
+<code dir="auto">X</code>, and mandates the PR record BOTH blocks — so a 3-arg-only guard red on correct, mandated input.
+In that shape the third argument is the ANCHOR’s full PASS (its sha need not be the certified sha)
+and the fourth is one <code dir="auto">==== AGENT-GATE DELTA SUMMARY ====</code> block carrying <code dir="auto">MODE: delta</code> (asserted
+affirmatively, the inverse of the full block’s belt), <code dir="auto">RESULT: PASS</code>, <code dir="auto">tree-integrity: PASS</code>, a
+<code dir="auto">delta-anchor:</code> naming exactly that anchor — an <code dir="auto">(UNRESOLVED)</code> anchor refuses — and its own
+<code dir="auto">commit:</code>/<code dir="auto">tree-start:</code> at the certified sha. The chain is closed end to end; a delta block ALONE
+is still the #3408 escape and still refused.
+<strong>What a <code dir="auto">PREMERGE: OK</code> does NOT prove (#3650), printed on the success path as <code dir="auto">PREMERGE: SCOPE</code>.</strong>
+It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
+It does not prove the change was certified against the <code dir="auto">main</code> it will join: a squash-merge composes
+the diff with main’s CURRENT tip, so for any PR whose base is behind main the certified tree and the
+merged tree are <strong>different objects</strong> (measured on #3358/PR #3362 — a head gate FAILing only because
+a known flake’s fix was on main and not in that base; the malign direction is a PASS at a stale head
+hiding an interaction with something that landed in between). A gate on the merge result is #3650 and
+is deliberately not part of this mechanism. <strong>The sha half of the same check closes a second, different escape (PR
+#3616): a real gate, someone else’s.</strong> A closer located its gate run dir by recency
+(<code dir="auto">ls -t /tmp/agent-gate.*</code>), read a PEER LANE’s dir, saw 33 of 37 components PASS and was about to
+merge #3616 on PR #3580’s verdict — everything about it was real, and only the <code dir="auto">run-id:</code> line
+exposed it, read by a human. <code dir="auto">premerge-assert.sh</code> cannot verify <code dir="auto">run-id:</code> (it did not launch the
+gate, and #2874’s reader contract belongs to whoever did), so requiring BOTH <code dir="auto">commit:</code> (7 hex) and
+<code dir="auto">tree-start:</code> (12 hex) to match the certified sha is what turns a cross-lane verdict into a
+mechanical refusal: a peer’s summary names the OTHER PR’s head.</li>
 <li><strong>Break-glass is per-tier, and it actually works.</strong> <code dir="auto">ci:waive:&#x3C;tier-id></code> (an owner action) excuses a
 tier that is <strong>absent</strong> or <strong>pending at the deadline</strong>; it can <strong>never</strong> excuse a failed or cancelled
 one, and there is no blanket waiver. The label takes effect without a re-run: <code dir="auto">required</code> re-reads the
