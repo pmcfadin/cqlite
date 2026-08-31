@@ -41,7 +41,20 @@
 #                (`comm`) is parenthesized and may contain BOTH spaces and
 #                parentheses (measured on the fleet: `tmux: server`), so the parse
 #                splits on the LAST ')' and indexes from there. `awk '{print $22}'`
-#                over the raw line is WRONG and is never used here.
+#                over the raw line is WRONG and is never used here. Splitting on the
+#                LAST ')' is also strictly safer than on the first `") "`, which a
+#                comm containing `") "` would break.
+#
+#   MEASURED ON THIS HOST (ip-172-31-7-163, 2026-08-31), so the design rests on
+#   observation rather than on what /proc is supposed to do:
+#     * /proc/sys/kernel/random/boot_id reads as bb94898a-7792-44e1-8f38-cdafea462803
+#       WITHOUT root — so the identity is available to an ordinary worker.
+#     * `flock` is util-linux 2.39.3 at /usr/bin/flock.
+#     * the last-')' split agrees with `awk '{print $22}'` on two live pids, and TWO
+#       independent reads of pid 3056664 both returned starttime=28412855 — i.e. the
+#       value is stable for a live process, which is the whole premise of using it as
+#       an identity. After the split, positional 20 is `starttime` and positional 2 is
+#       `ppid`, because the remainder begins at field 3 (`state`).
 # `scripts/flow/claim-heartbeat.sh` (see its header, "CLOCK-STEP SENSITIVITY")
 # documents its own identity check as clock-step sensitive because it reconstructs a
 # start epoch as `now - elapsed` and compares it against a wall-clock `ts`: an NTP
@@ -66,9 +79,15 @@
 #        bash  (cwd=/data/lanes/lane-3436)  <- $$
 #        claude(cwd=/data/lanes/lane-3436)  <- SELECTED: the session process
 #        tmux: server (cwd=/data/lanes/repo, ppid=1)  <- correctly EXCLUDED
-#      Excluding the tmux server is load-bearing, not incidental: ONE tmux server is
-#      SHARED by every lane on the box, so recording it would make every lane's lock
-#      look mutually alive forever, and no dead lane would ever be reclaimable.
+#      Note the tmux server's cwd is the ROOT checkout (/data/lanes/repo), not a lane —
+#      which is exactly WHY the "cwd is the lane dir or inside it" rule excludes it.
+#      Excluding it is load-bearing, not incidental: ONE tmux server is SHARED by every
+#      lane on the box — FOUR concurrent lanes at the time of measurement
+#      (lane-3414, lane-3436, lane-3453, lane-3559) — so recording it would make all
+#      four locks name the SAME pid, every lane would look mutually alive forever, and
+#      no dead lane would ever be reclaimable. That is catastrophic rather than merely
+#      wrong: the reclaim path is the only thing standing between a killed session and
+#      a permanently stuck lane.
 #      (That process's `comm` is also literally `tmux: server` — a space-bearing
 #      comm, which is why the /proc/<pid>/stat parse above splits on the last ')'.)
 #
@@ -180,11 +199,25 @@
 #           / OCCUPIED (exit 2, and it NAMES the occupant — AC2).
 #   verify  <N> [--lane-dir <p>] [--actor <id>] [--pid <pid>]
 #           exit 0 iff the record holds OUR EXACT token (VERIFY-OK / VERIFY-FAIL).
-#   probe   <N> [--lane-dir <p>]
+#   probe   <N> [--lane-dir <p>] [--actor <id>] [--pid <pid>]
 #           read-only liveness report: FREE / HELD, always exit 0 for an occupied
 #           lane — occupancy is DATA to a probe, not an error. Writes NOTHING (no
-#           record, no mutex, no log). This is the entry point another tool calls
-#           (e.g. claim.sh warning about an occupied lane, #3436 AC5).
+#           record, no mutex, no log, and it never creates the lane dir). This is the
+#           entry point another tool calls (e.g. claim.sh warning about an occupied
+#           lane, #3436 AC5).
+#           IT RESOLVES OUR IDENTITY IN COMPARE MODE, so `liveness=SELF` is reachable
+#           and MEANS "THIS VERY SESSION HOLDS IT". That distinction is what
+#           claim.sh's #3436 AC5/AC6 reporting keys on: SELF ("you already occupy
+#           your own lane — re-acquire the claim, the released-then-resumed state")
+#           and ALIVE ("a DIFFERENT live process on this box owns that lane — do not
+#           touch it") have OPPOSITE remedies, and with no identity to compare
+#           against they are textually identical. `--actor`/`--pid` are accepted for
+#           the same reason `verify` accepts them; omitted, the session pid is
+#           auto-resolved, which is why a caller in the session's own process tree
+#           needs no flag at all. A degraded or non-live identity simply cannot match
+#           SELF — probe still reports the record's liveness and still exits 0.
+#           `reclaimable=` states whether an `acquire` would auto-reclaim, so a caller
+#           need not re-implement the DEAD-*/UNKNOWN-* split.
 #   release <N> [--lane-dir <p>] [--actor <id>] [--force]
 #           delete the record. Without --force it requires our exact token
 #           (RELEASE-REFUSED otherwise); --force deletes unconditionally (reaper).
@@ -384,7 +417,7 @@ proc_ppid()        { proc_stat_field "$1" 2; }
 REPLY_PID=""
 REPLY_PID_SCOPE=""
 resolve_pid() {
-  local lane_real="$1" explicit="${2:-}"
+  local lane_real="$1" explicit="${2:-}" purpose="${3:-write}"
   local candidate="" scope=""
   if [ -n "$explicit" ]; then
     candidate="$explicit"; scope=explicit
@@ -426,7 +459,16 @@ resolve_pid() {
   # An EXPLICIT pid with no /proc entry cannot have a process identity recorded for
   # it, and recording an identity-less holder would create a lock nobody can ever
   # reclaim automatically. Refuse at the argument boundary instead.
-  if [ "$scope" = explicit ] && proc_available && [ ! -e "/proc/$candidate" ]; then
+  #
+  # …but ONLY for purpose=write. `probe` resolves an identity purely to COMPARE (so it
+  # can say SELF), records nothing, and is called on the SUCCESS path of another tool
+  # (claim.sh): a read-only report must never be able to change its caller's verdict,
+  # so for purpose=compare a non-live pid is a NOTE and the comparison simply cannot
+  # match SELF. A non-NUMERIC pid stays fatal in both modes — that is unambiguously a
+  # caller typo, not an environment state.
+  if [ "$scope" = explicit ] && [ "$purpose" = compare ] && proc_available && [ ! -e "/proc/$candidate" ]; then
+    note "pid $candidate is not live on this host (no /proc/$candidate); a compare-only identity cannot match the holder's, so SELF is unreachable for this call"
+  elif [ "$scope" = explicit ] && [ "$purpose" = write ] && proc_available && [ ! -e "/proc/$candidate" ]; then
     die_usage "--pid $candidate is not a live process on this host (no /proc/$candidate) — a lock records the HOLDER's process identity (boot id + start ticks), which cannot be read for a pid that does not exist"
   fi
   REPLY_PID="$candidate"
@@ -684,12 +726,13 @@ G_BOOT=""; G_TICKS=""; G_TOKEN=""; G_RECORD=""; G_LOG=""
 # prepare_identity <issue> <lane-real> <actor-raw> <pid-opt> — resolve OUR identity
 # and the file paths. Every value is sanitized here, once, so the token we WRITE and
 # the token we COMPARE are always the same value (claim.sh's this_machine rationale).
+# prepare_identity <issue> <lane-real> <actor-raw> <pid-opt> [write|compare]
 prepare_identity() {
   G_ISSUE="$1"
   G_LANE="$2"
   G_ACTOR="$(resolve_actor "$3")"
   G_MACHINE="$(this_machine)"
-  resolve_pid "$G_LANE" "${4:-}"
+  resolve_pid "$G_LANE" "${4:-}" "${5:-write}"
   G_PID="$REPLY_PID"
   G_SCOPE="$REPLY_PID_SCOPE"
   G_BOOT="$(sanitize_field "$(live_boot_id)")"
@@ -827,10 +870,12 @@ cmd_verify() {
 # have to re-implement the DEAD-*/UNKNOWN-* split.
 # ---------------------------------------------------------------------------
 cmd_probe() {
-  local issue="" lane_opt="" lane liveness reclaimable=no
+  local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" pid_opt="" lane liveness reclaimable=no
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
+      --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";   shift 2 ;;
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2"; shift 2 ;;
       -*) die_usage "probe: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "probe: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -841,12 +886,28 @@ cmd_probe() {
     emit "FREE issue=$issue lane-dir=$lane liveness=NO-RECORD record=absent"
     return 0
   fi
-  # A probe does not resolve OUR pid (that would be an identity claim it has no need
-  # to make), so it compares against an impossible token: the SELF verdict is not a
-  # probe's business — a caller that needs it runs `verify`.
-  liveness="$(record_liveness '')"
+  # A probe RESOLVES OUR IDENTITY — in COMPARE mode, which writes nothing and refuses
+  # nothing — so that `SELF` is reachable. It has to be: with an impossible token
+  # (which is what this used to pass) our OWN session's lock reports ALIVE, textually
+  # indistinguishable from a live LOCAL PEER's, and those two have OPPOSITE remedies —
+  # "you already occupy your own lane, re-acquire the claim" vs "a different live
+  # process on this box owns that lane, do not touch it". claim.sh's #3436 AC5/AC6
+  # reporting keys on exactly that distinction. The identity resolution reuses the
+  # ancestor walk, so a caller in the same process tree as the session (claim.sh is)
+  # resolves the same session pid and the tokens match with no new flag.
+  #
+  # Nothing here may write or refuse: no mkdir of the lane dir, no record, no mutex,
+  # and the return stays 0 for an occupied lane. A degraded identity (unreadable
+  # boot-id/start-ticks, a non-live --pid) simply cannot match SELF, and the record's
+  # own liveness is reported unchanged.
+  prepare_identity "$issue" "$lane" "$actor" "$pid_opt" compare
+  # parse_record above populated the REC_* globals; prepare_identity does not touch
+  # them, but re-read anyway so the parse and the comparison are adjacent and no future
+  # edit can separate them.
+  parse_record "$lane/.lane-lock" || true
+  liveness="$(record_liveness "$G_TOKEN")"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
-  emit "HELD issue=$issue lane-dir=$lane liveness=$liveness reclaimable=$reclaimable $(holder_fields)"
+  emit "HELD issue=$issue lane-dir=$lane liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN"
   return 0
 }
 
@@ -1088,6 +1149,6 @@ case "$SUBCOMMAND" in
   release) cmd_release "$@" ;;
   reclaim) cmd_reclaim "$@" ;;
   status)  cmd_status "$@" ;;
-  "") die_usage "a subcommand is required: acquire <N> | verify <N> | probe <N> | release <N> [--force] | reclaim <N> --expect <token>|none --reason <why> | status [<N>]" ;;
+  "") die_usage "a subcommand is required: acquire <N> | verify <N> | probe <N> [--pid <pid>] | release <N> [--force] | reclaim <N> --expect <token>|none --reason <why> | status [<N>]" ;;
   *)  die_usage "unknown subcommand: $SUBCOMMAND (expected acquire|verify|probe|release|reclaim|status)" ;;
 esac

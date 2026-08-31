@@ -365,6 +365,42 @@ $outh2"
 fi
 
 # ===========================================================================
+echo "TEST 10b: probe distinguishes SELF from a live LOCAL PEER"
+# The two verdicts have OPPOSITE remedies — "you already occupy your own lane,
+# re-acquire the claim" (the released-then-resumed state) vs "a DIFFERENT live process
+# on this box owns that lane, do not touch it" — and claim.sh's #3436 AC5/AC6 reporting
+# keys on the distinction. With no identity to compare against, probe reported ALIVE for
+# BOTH, which is the gap this case pins. Both calls must stay exit 0 and write nothing.
+# ===========================================================================
+before_entries="$(ls -A "$(lane_of 402)" | sort | tr '\n' ',')"
+ll probe 402 --actor flow --pid "$D"; rcs=$RC; outs="$OUT"
+ll probe 402 --actor flow --pid "$E"; rcp=$RC; outp="$OUT"
+after_entries="$(ls -A "$(lane_of 402)" | sort | tr '\n' ',')"
+if [ "$rcs" -eq 0 ] && [ "$(field "$outs" liveness)" = "SELF" ] \
+   && [ "$rcp" -eq 0 ] && [ "$(field "$outp" liveness)" = "ALIVE" ] \
+   && [ "$(field "$outp" holder-pid)" = "$D" ] \
+   && [ "$(field "$outs" reclaimable)" = "no" ] && [ "$(field "$outp" reclaimable)" = "no" ] \
+   && [ "$before_entries" = "$after_entries" ]; then
+  ok "probe: SELF for the holder's own identity, ALIVE (holder-pid=$D) for a live peer, both rc=0, lane dir unchanged"
+else
+  bad "probe could not distinguish SELF from a live peer: rcSELF=$rcs liveness=$(field "$outs" liveness) / rcPEER=$rcp liveness=$(field "$outp" liveness) holder-pid=$(field "$outp" holder-pid); entries '$before_entries' -> '$after_entries'
+$outs
+$outp"
+fi
+
+# A non-live --pid on probe must NOT refuse and must NOT change the reported liveness:
+# probe is called on another tool's SUCCESS path, so a read-only report may never alter
+# its caller's verdict. It simply cannot match SELF.
+dead_pid=$(sleeper); kill "$dead_pid" 2>/dev/null; wait "$dead_pid" 2>/dev/null
+ll probe 402 --actor flow --pid "$dead_pid"; rcd=$RC; outd="$OUT"
+if [ "$rcd" -eq 0 ] && [ "$(field "$outd" liveness)" = "ALIVE" ] && [ "$(field "$outd" holder-pid)" = "$D" ]; then
+  ok "probe with a NON-LIVE --pid still reports the holder's liveness and exits 0 (never refuses)"
+else
+  bad "probe with a non-live --pid must stay rc=0 and report the holder; got rc=$rcd liveness=$(field "$outd" liveness)
+$outd"
+fi
+
+# ===========================================================================
 echo "TEST 11: reclaim compare-and-swap"
 # ===========================================================================
 tok=$(token_of 402)
