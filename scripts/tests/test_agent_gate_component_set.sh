@@ -2482,6 +2482,15 @@ done
 #     dispatched. The recapture is deliberate and stays; the pre-flight is repeated inside the
 #     window instead.
 #
+#     FOUR ARMS (job 293 added the last two). `manifest` and `gate-script` edit the two things the
+#     old per-FIELD comparison could see. `executor` edits a component's EXECUTOR FUNCTION BODY and
+#     nothing else — the shape the field comparison was BLIND to, and the harmful one: the recaptured
+#     tree becomes the certification window while the process keeps the definitions it loaded before
+#     the queue, so a full PASS certifies gate code that never executed. `unrelated` is the NEGATIVE
+#     CONTROL: an in-queue edit to a file the gate does not execute must NOT be reported, or a guard
+#     that fires on everything would be indistinguishable from one that fires on the right thing and
+#     the three positive arms would prove nothing.
+#
 #     DRIVEN THROUGH THE REAL SLOT WAIT: the fixture holds the only slot with a lock file, so the
 #     gate genuinely QUEUES; the manifest is edited during that queue; then the lock is released.
 #     A POSITIVE CONTROL asserts the edit really landed inside the queue window (the gate had not
@@ -2497,11 +2506,18 @@ cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$win_fx/scripts/lib/" 2>/dev/null
 if [ ! -f "$win_fx/scripts/lib/gate_slot_daemon.py" ] || ! command -v python3 >/dev/null 2>&1; then
   echo "skip - 3544-preflight-in-window[manifest]: the slot daemon or python3 is unavailable, so the queue window cannot be held open"
   echo "skip - 3544-preflight-in-window[gate-script]: same precondition"
+  echo "skip - 3544-preflight-in-window[executor]: same precondition"
+  echo "skip - 3544-preflight-in-window[unrelated]: same precondition"
 else
-for win_edit in manifest gate-script; do
+for win_edit in manifest gate-script executor unrelated; do
   case "$win_edit" in
     manifest)    win_want=manifest-stale ;;
     gate-script) win_want=gate-script-changed ;;
+    executor)    win_want=gate-script-changed ;;
+    # THE NEGATIVE CONTROL (roborev job 293): `NONE` means the in-queue edit must NOT be reported as
+    # gate-script-changed. Without it a check that fires on EVERY in-queue edit is indistinguishable
+    # from one that fires on the right ones, and the two positive arms above would prove nothing.
+    unrelated)   win_want=NONE ;;
   esac
   # A FRESH FIXTURE PER EDIT: the previous iteration leaves its edit in place, and reusing it would
   # make the second case observe the first case's damage rather than its own.
@@ -2551,7 +2567,16 @@ for win_edit in manifest gate-script; do
     #                 alone. The running process still holds the OLD array, so the manifest and the
     #                 array agree and the manifest check passes; only comparing the array against
     #                 the DECLARATION ON DISK catches it -> `gate-script-changed`
+    # THE EDIT MUST LAND WHILE THE RUN IS STILL QUEUED, and "the queued notice was printed" does not
+    # prove that it did: the holder is only killed after the edit, but on a loaded box a slot could in
+    # principle be granted (the holder daemon dying, a scheduling stall) between the notice and the
+    # `mv`. The gate prints ONE line when it acquires — `gate slot acquired -- proceeding (#1825)` —
+    # so the ordering is OBSERVABLE, and it is sampled either side of the edit. A case that could not
+    # discriminate must SAY SO rather than be read as "the guard did not fire" (which is what a
+    # non-reproducing failure of this arm looked like while this control was missing).
+    win_raced=0
     if [ "$win_queued" -eq 1 ]; then
+      grep -q 'gate slot acquired' "$win_log" 2>/dev/null && win_raced=1
       case "$win_edit" in
         manifest)
           grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
@@ -2568,7 +2593,31 @@ for win_edit in manifest gate-script; do
               "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
           chmod +x "$tmp/window-gate-$win_edit.sh"
           mv "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh" ;;
+        executor)
+          # THE JOB-293 CASE, and the one the per-field comparison could NOT see: a component's
+          # EXECUTOR FUNCTION BODY changes while the COMPONENTS declaration and the canonical pin
+          # stay byte-identical. The running process keeps the OLD function definitions, so the
+          # recaptured tree would be certified for code it never executed. Only a WHOLE-FILE digest
+          # catches it. Same atomic-rename discipline as the arm above, for the same reason.
+          sed 's|^  local name=file-size$|  local name=file-size\n  : "edited-while-queued-3544"|' \
+              "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
+          # AFFIRMATIVE: if the anchor line has been reworded the sed is a no-op and this case would
+          # be testing nothing while still reporting a verdict.
+          if cmp -s "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh"; then
+            bad "3544-preflight-in-window[executor]: the executor-body edit changed NOTHING (the anchor 'local name=file-size' no longer matches), so this case cannot discriminate"
+          fi
+          chmod +x "$tmp/window-gate-$win_edit.sh"
+          mv "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh" ;;
+        unrelated)
+          # NEGATIVE CONTROL: an in-queue edit to a file the gate does NOT execute. The digest is
+          # over the gate script alone, so this must pass the pre-flight; a red here would mean the
+          # guard fires on any mid-flight tree change, which `tree-integrity` already owns and which
+          # would make the positive arms above meaningless.
+          mkdir -p "$win_fx/docs"
+          printf 'edited while the gate was queued — #3544 negative control\n' \
+            >"$win_fx/docs/3544-window-negative-control.md" ;;
       esac
+      grep -q 'gate slot acquired' "$win_log" 2>/dev/null && win_raced=1
     fi
     kill "$win_holder" 2>/dev/null || true
     wait "$win_pid" 2>/dev/null; win_rc=$?
@@ -2577,6 +2626,23 @@ for win_edit in manifest gate-script; do
     if [ "$win_queued" -ne 1 ]; then
       bad "3544-preflight-in-window: the gate never reported queueing for a slot, so the edit could not be made INSIDE the window — the case cannot discriminate"
       sed -n '1,5p' "$win_log" 2>/dev/null
+    elif [ "$win_raced" -eq 1 ]; then
+      bad "3544-preflight-in-window[$win_edit]: the gate had ALREADY been granted its slot when the edit was made, so the edit did not land inside the queue window — this case cannot discriminate (a loaded box or a dead holder daemon, NOT a verdict about the guard)"
+      grep -n 'gate slot' "$win_log" 2>/dev/null | head -3
+    elif [ "$win_want" = NONE ]; then
+      # THE CONTROL. A missing summary is NOT a passing control: with nothing emitted, "the line does
+      # not name gate-script-changed" is true of a run that never reached the pre-flight, so the
+      # emitted line must be PRESENT before its content means anything (affirmative measurement).
+      if ! grep -q '^component-set:' "$win_sum" 2>/dev/null; then
+        bad "3544-preflight-in-window[$win_edit]: no component-set line was emitted at all, so the absence of gate-script-changed asserts NOTHING — the control cannot discriminate"
+        grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
+        sed -n '1,5p' "$win_log" 2>/dev/null
+      elif grep -q 'gate-script-changed' "$win_sum" 2>/dev/null; then
+        bad "3544-preflight-in-window[$win_edit]: an in-queue edit to a file the gate does NOT execute was reported as gate-script-changed — the guard fires on any mid-flight tree change, so its positive arms prove nothing"
+        grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
+      else
+        ok "3544-preflight-in-window[$win_edit]: an in-queue edit to a file the gate does NOT execute is NOT reported as gate-script-changed — the guard discriminates the executing script from the rest of the tree"
+      fi
     elif [ "$win_rc" -ne 0 ] \
        && grep -q '^component-set: FAIL-CLOSED (#3544)' "$win_sum" 2>/dev/null \
        && grep -q "$win_want" "$win_sum" 2>/dev/null; then
@@ -2701,9 +2767,12 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=19   # +gate-script-changed: the gate script (its COMPONENTS declaration or
-                         # its canonical-upstream pin) differs from what THIS PROCESS loaded —
-                         # an input crossing the certification window (job 292)
+DECLARED_KIND_COUNT=19   # gate-script-changed: the gate script ON DISK is not the script THIS
+                         # PROCESS is executing — an input crossing the certification window
+                         # (job 292). Since job 293 the test is a WHOLE-FILE content digest, so
+                         # the kind also covers an edit to a component's EXECUTOR FUNCTION; the
+                         # COMPONENTS declaration and the canonical pin are kept only to give
+                         # those two shapes a better MESSAGE. No new kind: one fact, one name.
                          # -baseline-transfer-mismatch: the transfer it detected is GONE (job
                          # 264) — the baseline objects are read out of the isolated scratch
                          # store instead of being fetched into this repository, so the class is
@@ -4058,7 +4127,10 @@ fi
 # So the count is asserted against a FLOOR, the way `test_agent_gate_summary.sh` already does it.
 # The floor is a MINIMUM, not an equality: adding cases must not require editing it, and removing
 # one must be deliberate enough to edit a number with this comment attached to it.
-CASE_FLOOR=105
+# 105 -> 107 with the two cases job 293 added (the `executor` arm and the negative control): the
+# floor is a MINIMUM and keeps the same slack it was written with, so it still catches a DELETION
+# without being an equality nobody can add a case past.
+CASE_FLOOR=107
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
