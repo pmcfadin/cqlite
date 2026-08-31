@@ -2761,51 +2761,35 @@ supervisor_lock_refuse_publish_failed() {
   case "$cause" in
     *' '*) cleanup="${cause#* }" ;;
   esac
-  # THE NATURE OF THE FAILURE IS CARRIED SEPARATELY FROM THE STEP THAT FAILED (#3601, job 244 sweep). The
-  # same step fails for two reasons that want OPPOSITE actions — a peer removing the directory (re-run)
-  # versus a broken filesystem (fix the box, and re-running loops) — so the first action an operator is
-  # given is selected by the nature, not by the step.
-  local nature='' nature_line='' first_action=''
+  # THE STEP THAT FAILED IS REPORTED; THE *CAUSE* IS NOT CLAIMED (#3601, roborev job 245 B21). An earlier
+  # cut carried a `nature` per cause — `filesystem` for a failed write or rename, `contention` when the
+  # directory had vanished — derived from a post-failure `-d` test. That test cannot decide it in either
+  # direction (see `supervisor_lock_nature_unestablished`), and `write-failed` claimed a filesystem fault
+  # with no test at all. So each branch now states only WHAT it observed, and the shared ambiguity text
+  # states what could have caused it, with the order to check.
+  local what='' nature_line='' first_action=''
   case "$pub" in
     marker-failed)
-      what='writing our OWNERSHIP MARKER into the lock FAILED — this run got the lock name and could not record, even provisionally, that the directory is its own'
-      nature='filesystem'
+      what='writing our OWNERSHIP MARKER into the lock FAILED — this run got the lock name and could not record, even provisionally, that the directory is its own; the directory was still there when this run looked'
       ;;
     marker-failed-lock-gone)
-      what='writing our OWNERSHIP MARKER into the lock FAILED because the lock directory this run had just created was ALREADY GONE'
-      nature='contention'
+      what='writing our OWNERSHIP MARKER into the lock FAILED, and the lock directory this run had just created was GONE when this run looked'
       ;;
     write-failed)
       what='writing our pid into the lock FAILED — no byte of it was written'
-      nature='filesystem'
       ;;
     rename-failed)
-      what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place'
-      nature='filesystem'
+      what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place; the lock directory was still there when this run looked'
       ;;
     rename-failed-lock-gone)
-      what='publishing our pid into the lock FAILED at the rename because the lock directory this run had created was ALREADY GONE'
-      nature='contention'
+      what='publishing our pid into the lock FAILED at the rename, and the lock directory this run had created was GONE when this run looked'
       ;;
     *)
       what="recording our pid in the lock FAILED ([$pub])"
-      nature='unestablished'
       ;;
   esac
-  case "$nature" in
-    filesystem)
-      nature_line='This is a FILESYSTEM failure, not contention: no other holder is implied by the failure itself. The usual causes are a full filesystem (ENOSPC — routine on this fleet) or a read-only mount'
-      first_action='check free space and mount options for the filesystem holding the path named above (df, mount) — re-running without changing either will fail the same way'
-      ;;
-    contention)
-      nature_line='This is CONTENTION, not a filesystem fault: something removed or replaced the directory this run had just created, while this run was recording itself in it. No disk or permission problem is implied'
-      first_action='re-run this supervisor — nothing needs fixing and nothing needs clearing; the next start will either take the lock or name whoever holds it'
-      ;;
-    *)
-      nature_line='Whether this was a filesystem fault or contention is NOT established by the failure itself, so this refusal does not claim either'
-      first_action='inspect the path named above and the filesystem holding it (df, mount) before re-running: this run could not tell a broken filesystem from a peer taking the name'
-      ;;
-  esac
+  nature_line="$(supervisor_lock_nature_unestablished)"
+  first_action="$(supervisor_lock_nature_actions)"
   # EVERY SENTENCE BELOW IS BOUND TO AN OBSERVATION `supervisor_lock_take` ACTUALLY MADE (#3601 B9).
   case "$cleanup" in
     cleanup-verified-absent)
@@ -2922,6 +2906,49 @@ supervisor_lock_refuse_lost_race() {
     "nothing is wrong: re-run this supervisor. If it keeps losing, the winner is a live supervisor for this lane and the next start will name its pid"
 }
 
+# supervisor_lock_nature_unestablished / supervisor_lock_nature_actions — THE ONE THING EVERY FAILURE
+# SITE IN THIS FILE MAY SAY ABOUT *WHY* AN OPERATION FAILED (#3601, roborev job 245 B21).
+#
+# WHY THERE IS NO CONFIDENT VERDICT LEFT. Every one of these sites tried to tell contention apart from a
+# filesystem fault by looking at whether the lock path exists AFTER the failure. That is unsound in BOTH
+# directions, and the two directions were introduced two rounds apart:
+#   * job 244 (B20) fixed "contention reported as a disk problem": `mkdir` fails with EEXIST, the name is
+#     present, and the code called it a path failure.
+#   * job 245 (B21) is the inverse it created: contender A moves the old lock aside, B's operation fails
+#     while the name is ABSENT, A republishes before B reaches the check — and B reports a filesystem
+#     fault and sends an operator to repair permissions on a box that is fine.
+# A post-failure existence test cannot decide this, because a peer can remove or recreate that name
+# between the failure and the check, either way round. The failing call's errno is the only thing that
+# could decide it and this script cannot see it.
+#
+# AND IT IS NOT RECOVERED BY PARSING `mv`/`mkdir` STDERR. Message text is locale-dependent and is not a
+# contract — that is the cargo-output-parse defect class this repo has already paid for (CLAUDE.md
+# #3400), and a locale-sensitive guess dressed as a verdict is worse than an honest ambiguity.
+#
+# SO THE AMBIGUITY IS PRESERVED — AND MADE ACTIONABLE, which is the whole point. The sweep's value was
+# telling "retry" apart from "fix the box", and going ambiguous gives that up unless the text says both
+# possibilities WITH what to check for each and in what order. An honest "it is one of these two, here is
+# how to tell" beats a confident wrong nature and it also beats a shrug.
+#
+# THE SOUND ALTERNATIVE, NOT BUILT HERE, RECORDED SO IT IS NOT REDISCOVERED: measure the filesystem
+# AFFIRMATIVELY instead of inferring it — try to create and unlink a scratch file in the lock's PARENT, so
+# a success proves the filesystem is fine (hence contention) and a failure demonstrates the fault. That is
+# a real answer rather than an inference, and it is deliberately NOT added here: it puts a new write on
+# every failure path, and a mechanism that produces one new instance per fix is one to remove rather than
+# iterate. It belongs with #3683/#3697.
+#
+# APPLIED AT ALL FIVE SITES, not the three the finding named. The first `take`'s uncreatable refusal and
+# the reclaim rename's refusal made the same claim from the same kind of test, and `write-failed` claimed
+# a filesystem fault with no test at all; leaving those confident while fixing the others would have been
+# the same defect with a smaller blast radius.
+supervisor_lock_nature_unestablished() {
+  printf '%s' "WHETHER THIS WAS CONTENTION OR A FILESYSTEM FAULT IS NOT ESTABLISHED: this script cannot see the failing call's error code, and the state of that path afterwards cannot decide it either, because a peer can remove or recreate the name between the failure and any check made here — in either direction"
+}
+
+supervisor_lock_nature_actions() {
+  printf '%s' "IT IS ONE OF TWO THINGS AND THIS IS THE ORDER TO TELL THEM APART. (1) A FILESYSTEM FAULT: check the PARENT directory of the path named above — it must exist, be a directory, be writable by this user, and its filesystem must have free space and not be mounted read-only (ls -ld on the parent, df, mount). If any of those is wrong, that is the cause, and re-running changes nothing until it is fixed. (2) CONTENTION: if all of those are clean, another supervisor was taking or releasing this lock at the same moment, nothing is wrong with this box, and re-running is sufficient"
+}
+
 # supervisor_lock_refuse_uncreatable [<phase-note>] — `mkdir` failed AND nothing is at that name, so the
 # failure is about the PATH and not about a holder (#3601 AC7 addendum; reused post-reclaim by job 244 B20).
 #
@@ -2931,8 +2958,8 @@ supervisor_lock_refuse_uncreatable() {
   local phase="${1:-}"
   supervisor_lock_refuse \
     "refusing to start — the lock directory could NOT BE CREATED, and nothing exists at that path" \
-    "this is NOT contention: no lock is there and no holder is implied${phase:+ ($phase)}. \`mkdir\` failed for a reason to do with the PATH itself — the parent directory missing, not a directory, or not writable by this user, or the filesystem being full" \
-    "check the parent directory of the path named above: it must exist, be a directory, and be writable by this user, and the filesystem must have space. The path is \${TMPDIR:-/tmp}-derived unless this run's launcher named it, so a TMPDIR pointing somewhere absent, read-only or full is the usual cause. Re-running WITHOUT changing any of that will fail exactly the same way"
+    "\`mkdir\` failed and NOTHING is at that name now${phase:+ ($phase)}. $(supervisor_lock_nature_unestablished)" \
+    "$(supervisor_lock_nature_actions). The path is \${TMPDIR:-/tmp}-derived unless this run's launcher named it, so a TMPDIR pointing somewhere absent, read-only or full is the usual first cause to check"
 }
 
 acquire_lock() {
@@ -3117,8 +3144,8 @@ acquire_lock() {
     esac
     supervisor_lock_refuse \
       "refusing to start — a lock this run measured as stale could not be cleared" \
-      "renaming the lock aside FAILED, so nothing was cleared and nothing was claimed; nothing at that path has been modified by this run. That is a FILESYSTEM failure, not contention: clearing a lock needs WRITE permission on its PARENT directory, which reading one does not. AND THE IDENTITY OF WHAT IS THERE IS NOW UNESTABLISHED — $identity" \
-      "make the lock's parent directory writable by this user and RE-RUN: the next start re-measures the holder from scratch and will either reclaim the lock, if it is genuinely stale, or name its live holder. Do NOT remove anything on the strength of this message — this run measured a dead holder BEFORE its rename failed and cannot vouch for what is at that path now. To see what is actually there, run the next line, on its own, exactly as printed; it only reads" \
+      "renaming the lock aside FAILED, so nothing was cleared and nothing was claimed; nothing at that path has been modified by this run. $(supervisor_lock_nature_unestablished). AND THE IDENTITY OF WHAT IS THERE IS NOW UNESTABLISHED TOO — $identity" \
+      "$(supervisor_lock_nature_actions). Either way, RE-RUN rather than clearing anything by hand: the next start re-measures the holder from scratch and will reclaim the lock if it is genuinely stale, or name its live holder. Do NOT remove anything on the strength of this message — this run measured a dead holder BEFORE its rename failed and cannot vouch for what is at that path now. To see what is actually there, run the next line, on its own, exactly as printed; it only reads" \
       "ls -ldn -- $(supervisor_shell_quote "$SUPERVISOR_LOCK") && ls -lna -- $(supervisor_shell_quote "$SUPERVISOR_LOCK")"
   fi
   takerc=0
