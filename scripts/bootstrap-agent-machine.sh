@@ -1977,7 +1977,27 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # then fail in the measurement.
   PIN_ROOT=()
   PIN_PRIV_STATE=unknown
+  # Initialised HERE, above the first thing that can set it: the non-root name check below
+  # records a subject note, and an initialisation further down would blank it (the note
+  # would vanish and the state would degrade to a bare no-identity).
+  PIN_PROBE_SUBJECT_NOTE=""
+  # AND THE NAME MUST MAP BACK TO $EUID (#3414 roborev round 9). `id -un` is a PATH lookup
+  # against NSS, and both halves can lie: a shadowed or malformed `id`, or a stale NSS
+  # mapping, can name an account that is NOT the one we are running as. The name is then
+  # handed to `sudo -n -u`, so the probe would open a session for a DIFFERENT account and
+  # report its PAM environment as ours — the wrong-subject defect the root branch below
+  # already guards, on the path nobody thought to guard because it looked like it was just
+  # asking who we are. $EUID is the authority (shell-set, no fork, unshadowable); the name
+  # is a label for the messages and is only usable once it resolves back to that uid.
+  # A mismatch is UNMEASURED, never a guess between two disagreeing sources.
   PIN_SELF_USER=$(id -un 2>/dev/null || true)
+  if [ -n "$PIN_SELF_USER" ]; then
+    pin_name_uid=$(id -u "$PIN_SELF_USER" 2>/dev/null || echo none)
+    if [ "$pin_name_uid" != "$PIN_EUID" ]; then
+      PIN_PROBE_SUBJECT_NOTE="'id -un' answered '$PIN_SELF_USER', which resolves to uid $pin_name_uid rather than this process's EUID $PIN_EUID — a shadowed 'id' or a stale NSS mapping, so probing that name would answer about the wrong account"
+      PIN_SELF_USER=""
+    fi
+  fi
   PIN_SELF_UID="$PIN_EUID"   # one source: resolved before the seam guard, which needs it
   # UNDER `sudo bash bootstrap …` THE ANSWER TO `id -un` IS root, WHICH IS THE WRONG
   # SUBJECT (#3414 roborev round 5). Gates run as the agent account, and the two genuinely
@@ -1998,7 +2018,6 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # (root invoking sudo tells us nothing new), and if a username is present it must resolve
   # to that same uid. Anything absent or inconsistent is UNMEASURED — never a fall back to
   # answering about root, and never a guess between two disagreeing sources.
-  PIN_PROBE_SUBJECT_NOTE=""
   if [ "$PIN_EUID" = 0 ]; then
     pin_sudo_uid="${SUDO_UID-}"
     case "$pin_sudo_uid" in ''|*[!0-9]*) pin_sudo_uid="" ;; esac

@@ -60,7 +60,24 @@ skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 # That is not hypothetical: it is what happened 40 minutes earlier with the cargo config.
 # Even the tmpdir matters — created as root it is litter the invoking user cannot remove.
 # So the decline precedes everything, and the only host contact above it is now none.
-if [ "$(id -u)" = 0 ]; then
+#
+# AND IT ASKS BASH, NOT `id` (#3414 roborev round 9). The production guard was moved to the
+# readonly $EUID because `id` can be missing, shadowed or malformed; this decline is a
+# SAFETY gate, so the same argument applies with more force — an `id` that fails here does
+# not merely misreport, it lets the suite continue AS ROOT past the one check whose purpose
+# is to stop exactly that. $EUID is set by the shell itself, needs no PATH lookup and no
+# fork, and cannot be shadowed. A missing or non-numeric value FAILS CLOSED: unable to tell
+# is not permission to proceed.
+pin_suite_euid="${EUID-}"
+case "$pin_suite_euid" in
+  ''|*[!0-9]*)
+    printf 'bad  - THE ENTIRE SUITE: cannot determine the effective UID (EUID=%s). Refusing to run: this suite must not execute as root, and a shell that cannot answer that question cannot be trusted to have declined.\n' "${pin_suite_euid:-<unset>}"
+    echo
+    echo "PASS=$PASS FAIL=$((FAIL + 1)) SKIP=$SKIPS"
+    echo "DECLINED: EUID is unavailable, so root could not be ruled out. Run under bash." >&2
+    exit 1 ;;
+esac
+if [ "$pin_suite_euid" = 0 ]; then
   skip "THE ENTIRE SUITE: it drives bootstrap through a test seam that is REFUSED under root (#3414 finding S), so every sandboxed invocation gains a warning and the green-path assertions cannot run. Re-run as an unprivileged user."
   echo
   echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
