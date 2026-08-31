@@ -82,12 +82,21 @@ never gate stdout or review churn.
      # cross-machine and only ADVISORY locally: two sessions on one box are both
      # machine=<box> actor=flow, so claim.sh cannot tell the second from the first's
      # retry. This lock's identity is the full PROCESS identity, so it can.
-     # RUN IT FROM INSIDE THE LANE. `--lane-dir "$(cd "$wt" && pwd)"` only computes a
-     # PATH — the acquire's own cwd stays the root checkout, so no ancestor's cwd is in
-     # the lane, no durable session process can be identified, and the acquire is
-     # REFUSED (reason=unresolved-identity, #3436 FIX 5). The cwd is what makes the
-     # long-lived session process findable.
-     ( cd "$wt" && bash scripts/flow/lane-lock.sh acquire <N> ) || {
+     # RUN IT FROM THE SESSION'S OWN CWD, NOT A SUBSHELL. Two traps, one line apart:
+     #  * `--lane-dir "$(cd "$wt" && pwd)"` only computes a PATH. The acquire's own cwd
+     #    stays the root checkout, no ancestor's cwd is in the lane, and the acquire is
+     #    REFUSED (reason=unresolved-identity, #3436 FIX 5). Loud, and nothing written.
+     #  * `( cd "$wt" && lane-lock.sh acquire <N> )` is WORSE, because it SUCCEEDS and
+     #    protects nothing (#3436 FIX 14). The cwd-matching ancestor it finds is the
+     #    SUBSHELL, which exits when the command returns; the record then reads
+     #    DEAD-NO-PROCESS and the next acquire — a peer's — is granted by auto-reclaim.
+     #    Measured: recorded pid alive=NO immediately after, peer got ACQUIRED
+     #    (reclaimed). A lock that returns ACQUIRED and holds nothing is a FALSE CLEAN.
+     # The cwd test finds a process working in the lane; it does NOT establish that the
+     # process OUTLIVES the command. Only the session's own cwd does that. So `cd` for
+     # the rest of the flow (a real cd, not a subshell), or pass an explicit --pid.
+     cd "$wt" || exit 1
+     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || {
        # OCCUPIED names the occupant (pid, start identity, age). liveness=ALIVE or any
        # UNKNOWN-* REFUSES; only a verifiably DEAD holder is auto-reclaimed. Do NOT
        # proceed into a lane another live process owns — that is the #3436 incident.
@@ -119,7 +128,8 @@ never gate stdout or review churn.
      # CLAIM HELD → worktree + branch (naming/PR plumbing, NOT the lock).
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
      git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
-     ( cd "$wt" && bash scripts/flow/lane-lock.sh acquire <N> ) || exit 0   # from INSIDE the lane (#3436)
+     cd "$wt" || exit 1   # a REAL cd, for the rest of the flow — NOT a subshell (#3436 FIX 14)
+     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
      gh issue edit <N> --add-assignee @me
      bash scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi

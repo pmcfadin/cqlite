@@ -816,7 +816,7 @@ lane_lock_probe() {
 # derived from a field that was never read.
 lane_lock_identity_established() {
   case "${LANE_LOCK_OUR_IDENTITY:-}" in
-    session | explicit) return 0 ;;
+    cwd-match | explicit) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -843,7 +843,7 @@ lane_lock_field() {
 #                                            almost certainly YOUR OWN").
 #                                            -> LANE_LOCAL_VERDICT=self
 #   (b) probe says ALIVE, the holder machine is lane-lock.sh's own machine, the probe
-#       ESTABLISHED ITS OWN IDENTITY (`our-identity=session|explicit`), AND the holder
+#       ESTABLISHED ITS OWN IDENTITY (`our-identity=cwd-match|explicit`), AND the holder
 #       token differs from ours           -> a live process ON THIS BOX owns the lane
 #                                            and it is NOT US. That is #3436's own
 #                                            scenario, and its remedy is the OPPOSITE
@@ -1016,7 +1016,7 @@ cmd_claim() {
       return 2
     fi
     if [ "$LANE_LOCAL_VERDICT" = "self" ]; then
-      emit "LOST issue=$issue reason=released-then-resumed detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free resume=documented-procedure lane-evidence=$LANE_LOCAL_EVIDENCE lane-lock=${LANE_LOCK_STATE:-unmeasured(not-probed)} (THIS MACHINE ALREADY OCCUPIES THAT LANE, so the branch above is almost certainly YOUR OWN, resumed after a legitimate release: finalize released the claim ref and no step re-took it when work restarted (#3436 AC6). This is NOT a stale lock and NOT an abandoned peer lane, so the ABANDONED-LANE PROCEDURE DOES NOT APPLY — do not run claim-heartbeat.sh should-reap, and do not read the board Status or the branch author as evidence of abandonment: those describe a lane nobody is in, and someone is in this one. REMEDY: re-check ownership with this script's 'verify' subcommand FIRST; if you do not hold the ref, take the documented empty-lease resume path — the compare-and-swap adoption that records WHO took it and WHY — spelled out in the claim protocol (CLAUDE.md) and in 'bash scripts/flow/claim.sh -h'. It is deliberately NOT printed here as a runnable line (#2945): the readers are agents that run printed remediations literally, and this diagnosis rests on local evidence that can be wrong. Never hand-craft a claim commit)"
+      emit "LOST issue=$issue reason=released-then-resumed detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free resume=documented-procedure lane-evidence=$LANE_LOCAL_EVIDENCE lane-lock=${LANE_LOCK_STATE:-unmeasured(not-probed)} (THIS SESSION ALREADY HOLDS THAT LANE'S LOCK, so the branch above is almost certainly YOUR OWN, resumed after a legitimate release: finalize released the claim ref and no step re-took it when work restarted (#3436 AC6). This is NOT a stale lock and NOT an abandoned peer lane, so the ABANDONED-LANE PROCEDURE DOES NOT APPLY — do not run claim-heartbeat.sh should-reap, and do not read the board Status or the branch author as evidence of abandonment: those describe a lane nobody is in, and someone is in this one. REMEDY: re-check ownership with this script's 'verify' subcommand FIRST; if you do not hold the ref, take the documented empty-lease resume path — the compare-and-swap adoption that records WHO took it and WHY — spelled out in the claim protocol (CLAUDE.md) and in 'bash scripts/flow/claim.sh -h'. It is deliberately NOT printed here as a runnable line (#2945): the readers are agents that run printed remediations literally, and this diagnosis rests on local evidence that can be wrong. Never hand-craft a claim commit)"
       return 2
     fi
     # THE FAIL-CLOSED DEFAULT, and it now also catches WORKTREE-ONLY evidence: a lane

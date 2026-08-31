@@ -3121,6 +3121,22 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `UNKNOWN-*` is cleared deliberately with `reclaim <N> --expect <token> --reason <why>` (CAS,
   recorded) or `release <N> --force`, which only DELETES, needs no identity of its own and therefore
   works from anywhere.
+  **AND THE CWD TEST PROVES "WORKING IN THIS LANE", NOT "WILL OUTLIVE THIS COMMAND" — those are
+  different facts and conflating them made the lock a NO-OP in its own wiring (#3436 FIX 14).** The
+  auto-resolved scope is `pid-scope=cwd-match`, not `session`, because a transient subshell that just
+  `cd`'d into the lane matches the rule and is outermost among the matches, so it is what gets
+  recorded. Measured while the field was still called `session`: the wired
+  `( cd "$wt" && lane-lock.sh acquire <N> )` recorded the SUBSHELL, which exits when the command
+  returns, the record then read `DEAD-NO-PROCESS`, and a peer's next acquire was granted by
+  auto-reclaim — **an acquire that returns `ACQUIRED` and protects nothing.** That is strictly worse
+  than the bricking bug it replaced, because bricking is loud and this reads as success. So: acquire
+  from the **session's own cwd** (`--lane-dir "$PWD"`, which is why `worker.md` and `drive-issue.md`
+  are correct and must not be "tidied" into a subshell) or pass an explicit `--pid`; a
+  `$(cd … && pwd)` computes only a path and is refused, and a `( cd … && … )` subshell succeeds
+  dishonestly. Durability is the CALLER's guarantee, so the guard lives in the suite: it asserts the
+  recorded pid is the test's own `$$` **and** that a second acquire is `(re-entrant)` — a transient
+  holder fails both, so a future edit that reintroduces a subshell `cd` reds the suite instead of
+  silently disarming the lock.
   **Scope, stated because a lock read as covering more than it does is its own false-clean**: it is
   machine-local and says NOTHING cross-machine (that is `refs/claims/issue-<N>`'s job — the two are
   complements, not alternatives); it is Linux-`/proc`-specific — on a host without `/proc` no durable
@@ -3167,7 +3183,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   repo keeps relearning — and it told sessions their own lane belonged to someone else. It is
   fail-SAFE (it refuses rather than handing the lane over), which is exactly why it is dangerous: a
   refusal that fires on correct input is the refusal agents learn to waive. So `probe` publishes
-  `our-identity=session|explicit|UNRESOLVED` (a DEGRADED identity is `UNRESOLVED` even when the pid
+  `our-identity=cwd-match|explicit|UNRESOLVED` (a DEGRADED identity is `UNRESOLVED` even when the pid
   was EXPLICIT, because a token carrying placeholders is evidence of nothing), a consumer may not
   distinguish SELF from a peer without it, and the AC5 `lane-lock=` field follows the same rule with
   `occupied-alive-unattributed` meaning "a live holder exists and this run could not establish whether

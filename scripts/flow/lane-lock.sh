@@ -72,7 +72,24 @@
 #   3. auto-resolve         -> walk the ancestor chain from $$ upward via field 4
 #      (ppid) of /proc/<pid>/stat, stopping at pid 1, and take the OUTERMOST
 #      ancestor whose /proc/<pid>/cwd resolves to the lane directory or a path
-#      inside it. That is the long-lived session process. pid-scope=session.
+#      inside it. pid-scope=cwd-match.
+#
+#      THE NAME IS DELIBERATE, AND `session` WAS THE WRONG ONE (#3436 FIX 14). This
+#      test establishes that an ancestor is WORKING IN that lane. It does NOT establish
+#      that the ancestor OUTLIVES the command, and those are different facts: a
+#      transient subshell that just `cd`'d into the lane matches, and is outermost among
+#      the matches, so it is selected. Labelling it `session` asserted durability that
+#      was never measured — the same defect shape this file exists to fix, one level
+#      down. Measured cost when it was called `session`: the wired
+#      `( cd "$wt" && acquire <N> )` recorded the subshell, which exited on return, the
+#      record read DEAD-NO-PROCESS, and a peer was granted the lane by auto-reclaim —
+#      an acquire that returns ACQUIRED and protects NOTHING, which is a false clean and
+#      strictly worse than a loud refusal. What makes the recorded pid durable is the
+#      CALLER's discipline (the session's own cwd is the lane, or an explicit --pid), so
+#      the sanctioned wiring is where that guarantee lives; this field only reports what
+#      the walk found. `test_lane_lock.sh` pins the durable case by asserting the
+#      recorded pid is the suite's own $$ AND that a second acquire is RE-ENTRANT — a
+#      transient holder fails both, which is the guard that keeps the wiring honest.
 #
 #      MEASURED on the real fleet box (ip-172-31-7-163, 2026-08-31), inside
 #      /data/lanes/lane-3436:
@@ -548,7 +565,7 @@ resolve_pid() {
       guard=$((guard + 1))
     done
     if [ -n "$best" ] && [ "$best" != "$$" ]; then
-      candidate="$best"; scope=session
+      candidate="$best"; scope=cwd-match
     else
       # Only $$ matched (or nothing did): this invocation's own shell, which dies
       # between tool calls. `ephemeral` is REPORTED here and judged by the CALLER:
@@ -870,9 +887,29 @@ resolve_lane_dir() {
 
 # lane_real <path> — the resolved path when it exists, the literal path otherwise
 # (acquire/reclaim mkdir first, so they always get the resolved form).
+# lane_real <path> — the physical path, when it can be taken.
+#
+# #3436 FIX 13h: this used to be `( cd "$p" && pwd -P )` bare. An UNSEARCHABLE directory
+# (mode 000, or a permission change under us) makes the `cd` fail, and because every
+# caller uses it inside a command substitution, `set -e` aborted the run with a raw
+# `cd: Permission denied` and NO `LANE-LOCK:` line at all — breaking the header's promise
+# that exit 1 is always `ERROR reason=infra|unsupported`. A caller parsing our output saw
+# nothing to parse. The path is a CONVENIENCE (it canonicalises symlinks), never a
+# correctness input: the record is found by ISSUE, so falling back to the given path is
+# both safe and the honest answer — we report what we were told when we cannot improve on
+# it, and we say so on stderr rather than dying.
 lane_real() {
-  local p="$1"
-  if [ -d "$p" ]; then ( cd "$p" && pwd -P ); else printf '%s\n' "$p"; fi
+  local p="$1" real=""
+  if [ -d "$p" ]; then
+    real="$( cd "$p" 2>/dev/null && pwd -P )" || real=""
+    if [ -z "$real" ]; then
+      note "could not canonicalise lane dir '$p' (unsearchable or vanished); using the path as given. The record is keyed by ISSUE, so this does not change which lock is read."
+      real="$p"
+    fi
+  else
+    real="$p"
+  fi
+  printf '%s\n' "$real"
 }
 
 G_ISSUE=""; G_LANE=""; G_ACTOR=""; G_MACHINE=""; G_PID=""; G_SCOPE=""
@@ -948,7 +985,7 @@ require_durable_identity() {
 identity_state() {
   if [ -z "$G_BOOT" ] || [ -z "$G_TICKS" ]; then printf 'UNRESOLVED'; return 0; fi
   case "$G_SCOPE" in
-    session)  printf 'session' ;;
+    cwd-match) printf 'cwd-match' ;;
     explicit) printf 'explicit' ;;
     *)        printf 'UNRESOLVED' ;;
   esac

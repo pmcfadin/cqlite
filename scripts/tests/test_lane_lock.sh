@@ -773,13 +773,13 @@ ll acquire 890; rc18c=$RC; out18c=$OUT
 ll verify  890; rc18d=$RC
 cd "$ORIG_CWD" || true
 if [ "$rc18b" -eq 0 ] && printf '%s' "$out18b" | grep -q '^LANE-LOCK: ACQUIRED issue=890 ' \
-   && [ "$(field "$out18b" pid-scope)" = "session" ] \
+   && [ "$(field "$out18b" pid-scope)" = "cwd-match" ] \
    && [ "$(field "$out18b" pid)" = "$$" ] \
    && [ "$rc18c" -eq 0 ] && printf '%s' "$out18c" | grep -q 'ACQUIRED (re-entrant)' \
    && [ "$rc18d" -eq 0 ]; then
-  ok "acquire from INSIDE the lane records the durable session pid ($$, pid-scope=session); a SECOND acquire from a new shell is ACQUIRED (re-entrant) and verify still passes"
+  ok "acquire from the SESSION's own cwd records $$ (pid-scope=cwd-match, a DURABLE process because this suite is that process); a SECOND acquire from a new shell is ACQUIRED (re-entrant) and verify still passes -- a transient holder would fail BOTH halves, which is what keeps the wiring honest (#3436 FIX 14)"
 else
-  bad "the in-lane acquire/re-acquire sequence is broken: rc=$rc18b/$rc18c verify=$rc18d pid-scope=$(field "$out18b" pid-scope) pid=$(field "$out18b" pid) (expected $$)
+  bad "the in-lane acquire/re-acquire sequence is broken: rc=$rc18b/$rc18c verify=$rc18d pid-scope=$(field "$out18b" pid-scope) pid=$(field "$out18b" pid) (expected $$, cwd-match)
 $out18b
 $out18c"
 fi

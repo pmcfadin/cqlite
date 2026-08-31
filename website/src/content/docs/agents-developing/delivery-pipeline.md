@@ -679,7 +679,7 @@ proves neither ownership nor occupancy — a directory existing says nobody is n
 affirmative evidence**: when `claim` runs from the root checkout (the normal case) it cannot resolve its own
 identity, its token matches nobody, and the lane reads `ALIVE` *whether or not the holder is us* — naming a
 peer there asserts a positive from the **failure to prove its opposite**, and told sessions their own lane
-belonged to someone else. `probe` therefore publishes `our-identity=session|explicit|UNRESOLVED` and the
+belonged to someone else. `probe` therefore publishes `our-identity=cwd-match|explicit|UNRESOLVED` and the
 consumer may not distinguish SELF from peer without it; the AC5 warning field follows the same rule, with
 `occupied-alive-unattributed` for "a live holder exists and this run could not establish whether it is you".
 **None of the three prints a runnable resume command** — the #2945 ruling above stands unchanged.

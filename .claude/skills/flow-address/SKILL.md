@@ -31,10 +31,14 @@ Resolve them in the worktree and reply per thread.
    currently hold"*. Do BOTH, before any fix:
    ```bash
    bash scripts/flow/claim.sh verify <N>       # on failure read reason=; see flow-implement step 2
-   # From INSIDE the lane: `$(cd … && pwd)` only computes a path, and an acquire whose own
-   # cwd is outside the lane cannot identify a durable session process — it is REFUSED
-   # with reason=unresolved-identity and writes nothing (#3436 FIX 5).
-   ( cd <worktree> && bash scripts/flow/lane-lock.sh acquire <N> ) || exit 0
+   # From the SESSION's own cwd, never a subshell. `$(cd … && pwd)` computes only a path
+   # and is REFUSED (reason=unresolved-identity, #3436 FIX 5); `( cd … && acquire )` is
+   # worse — it SUCCEEDS while recording the subshell, which exits on return, so the
+   # record reads DEAD-NO-PROCESS and a peer is granted the lane by auto-reclaim
+   # (#3436 FIX 14). The cwd test finds a process working in the lane; it does not prove
+   # the process outlives the command.
+   cd <worktree> || exit 1
+   bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
    ```
    A `released-then-resumed` refusal is NOT a stale lock and NOT an abandoned peer lane — it means the
    lane lock holds THIS SESSION's own token; take the documented `adopt --expect none --reason <why>`
