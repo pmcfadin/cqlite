@@ -785,25 +785,91 @@ EMITTED=0
 # That is display fidelity, not a safety property, and the guarantee this boundary makes is
 # exactly "no value spans a line and no `key:` can be introduced". A caller needing the
 # exact bytes reads them from git, not from a summary block.
+#
+# SECOND PROPERTY, ADDED AT THE SAME BOUNDARY FOR THE SAME REASON (roborev job 230): NO EMITTED
+# VALUE CARRIES AN AUTHORIZATION KEYWORD. The block's standing invariant is that no emitted
+# diagnostic carries any part of a marker form, not even its prefix (#3312 job 23), because
+# summary blocks get pasted into PR comments as a matter of course. `judge_reason` in
+# roborev-waiver-scan.py refuses a stem-bearing REASON, but a marker keyword can reach a
+# diagnostic through several OTHER externally-sourced fields this process does not control — a
+# GitHub login (`waiver:`/`deferral: UNAUTHORIZED (... its author '@<login>' ...)`), `gh issue
+# view`'s stdout and stderr (`deferral: ... ($errtext)`), and any future value that grows an
+# interpolation. Fixing them one at a time is the per-site list this boundary exists to abolish,
+# so the denylist goes HERE, where every block value and every DETAILS line already passes.
+#
+# WHAT THE THREAT IS AND IS NOT, so nobody later mistakes this for a closed BYPASS or reopens it
+# as one. NOT a bypass: a GitHub login admits letters, digits and hyphens and NOT colons or
+# spaces, so a login can contain `roborev-defer` but can never contain a full stem
+# (`roborev-defer: findings`); and an emitted line begins `deferral: UNAUTHORIZED (`, which is
+# not a stem, so the scanner's `sole_marker_line` `startswith` test refuses it (verified with a
+# positive control). It IS a spec-conformance and invariant-coverage defect: the invariant is
+# stated absolutely, and a rule with an exception for "the layers below catch it anyway" decays
+# the next time a layer moves. Deliberately NOT a security-grade escaping layer — a two-token
+# denylist, and it must not grow into one.
+#
+# DISPLAY ONLY, WHICH IS THE SAFETY ARGUMENT: every authorization decision (allowlist, scope,
+# count, retrievability) is made on the RAW value long before it reaches this renderer, and
+# nothing downstream re-parses a rendered value as an authorization. So this can never move a
+# verdict, and if this spelling ever diverges from the scanner's `MARKER_KEYWORD` the only
+# possible effect is redacting differently — never granting. That is why the same rule at two
+# emit boundaries is acceptable where two marker PARSERS would not be: a parser decides, a
+# renderer does not.
+#
+# PURE BASH, NO SUBSHELL: explicit bracket classes give the case-insensitive match without
+# `sed` (which would take a command substitution's exit status inside a `set -e` function) and
+# without toggling `nocasematch`. The pattern is also written so this source line does not
+# itself contain a literal marker keyword.
+#
+# The replacement token deliberately carries no part of either marker form, so redacting can
+# never produce something a later paste could fill in. It is spelled IDENTICALLY to the
+# scanner's `MARKER_KEYWORD_REDACTION`, so one redaction reads the same wherever it surfaces.
+ROBOREV_MARKER_REDACTION='[authorization-keyword-redacted]'
 roborev_safe_line() { # roborev_safe_line <text> -> sets _rx_safe
-  local s="$1" out="" i n ch
+  local s="$1" out="" i n ch _redacted=""
   _rx_safe="$s"
   case "$s" in
-    *[[:cntrl:]]*) ;;
-    *) return 0 ;;
+    *[[:cntrl:]]*)
+      n=${#s}
+      for ((i = 0; i < n; i++)); do
+        ch="${s:$i:1}"
+        case "$ch" in
+          $'\n') out+='\n' ;;
+          $'\r') out+='\r' ;;
+          $'\t') out+='\t' ;;
+          [[:cntrl:]]) printf -v ch '\\%03o' "'$ch"; out+="$ch" ;;
+          *) out+="$ch" ;;
+        esac
+      done
+      _rx_safe="$out"
+      ;;
   esac
-  n=${#s}
-  for ((i = 0; i < n; i++)); do
-    ch="${s:$i:1}"
-    case "$ch" in
-      $'\n') out+='\n' ;;
-      $'\r') out+='\r' ;;
-      $'\t') out+='\t' ;;
-      [[:cntrl:]]) printf -v ch '\\%03o' "'$ch"; out+="$ch" ;;
-      *) out+="$ch" ;;
-    esac
+  # AFTER the control-character rendering and on BOTH paths, because the guarantee is over the
+  # text that is actually EMITTED — not over an intermediate form, and not only over the values
+  # that happened to need escaping.
+  #
+  # A LONGER WORD IS A DIFFERENT WORD, which is the file's own rule for `roborev-defer:
+  # findingsfoo` applied to the renderer. The keyword is redacted only where it is NOT continued
+  # by another letter, and that boundary is LOAD-BEARING, not cosmetic: the scanner's own file
+  # name, `roborev-waiver-scan.py`, is printed by the fail-closed `waiver: UNAVAILABLE (... tool:
+  # <path>)` diagnostic (case wv31), and an operator has to read that path to fix the state. A
+  # blanket substring redaction mangles it, and a diagnostic that cannot be acted on is the defect
+  # this repository's cause strings exist to avoid. Rebuilt through BASH_REMATCH rather than
+  # `${var//pat/repl}` because a pattern substitution cannot express "or end of line" and would
+  # CONSUME the following character it must preserve.
+  #
+  # THE DECLARED RESIDUAL: a keyword embedded inside a longer word (`roborev-waiverfoo`) is left
+  # alone, so such a value still shows the keyword as a substring. That is deliberate — it carries
+  # no marker FORM (the form needs the keyword, then its kind, then the fields), and the test
+  # helper `assert_no_marker_form` greps the bare keyword UNANCHORED, i.e. stricter than this
+  # renderer, so any case that ever emits one is caught there rather than silently rendered.
+  local _pre _m
+  while [[ $_rx_safe =~ [rR][oO][bB][oO][rR][eE][vV]-([wW][aA][iI][vV][eE]|[dD][eE][fF][eE][rR])([^a-zA-Z]|$) ]]; do
+    _m="${BASH_REMATCH[0]}"
+    _pre="${_rx_safe%%"$_m"*}"
+    _redacted="$_redacted$_pre$ROBOREV_MARKER_REDACTION${BASH_REMATCH[2]}"
+    _rx_safe="${_rx_safe#*"$_m"}"
   done
-  _rx_safe="$out"
+  _rx_safe="$_redacted$_rx_safe"
 }
 
 emit_kv() { # emit_kv <key> <value> — the ONLY way a value enters the block

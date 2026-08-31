@@ -181,6 +181,57 @@ PLACEHOLDERS = {
 }
 
 
+# ===== NO EMITTED VALUE CARRIES AN AUTHORIZATION KEYWORD (roborev job 230) =====
+# THE SAME GUARANTEE, ONE FIELD OVER — which is why it is fixed as a CLASS and not as a field.
+# `judge_reason` refuses a stem-bearing REASON (job 229) and the AUTHOR was left unguarded. An author
+# is a GitHub login this process does not control: `unauthorized_detail` interpolated it VERBATIM, and
+# that detail reaches `waiver:`/`deferral: UNAUTHORIZED (...)` in the summary block — so the standing
+# invariant "no emitted diagnostic carries any part of a marker form, not even its prefix" (#3312 job
+# 23) was violated by a login containing `roborev-defer`, which GitHub's login charset permits.
+#
+# WHAT THE THREAT IS AND IS NOT, recorded so nobody later mistakes this for a closed BYPASS or reopens
+# it as one:
+#   * IT IS NOT A BYPASS. A GitHub login admits letters, digits and hyphens and NOT colons or spaces,
+#     so a login can contain `roborev-defer` but can NEVER contain a full stem (`roborev-defer:
+#     findings`). And the emitted line begins `deferral: UNAUTHORIZED (`, which is not a stem, so
+#     `sole_marker_line`'s `startswith` test refuses it — verified directly on job 229 with a positive
+#     control (a genuine sole-content marker is still recognised, a pasted block is not).
+#   * IT IS a spec-conformance and invariant-coverage defect. The invariant is stated ABSOLUTELY, and a
+#     rule carrying an exception for "the layers below catch it anyway" decays the next time a layer
+#     moves. The tests covered stem-bearing REASONS and not stem-bearing AUTHORS — a property asserted
+#     only where it cannot fail is not asserted, the same shape as the `assert_lacks` that was attached
+#     to the `NONE` state alone.
+# So this is deliberately NOT a security-grade escaping layer and must not grow into one: it is a
+# TWO-TOKEN DENYLIST applied at the ONE place every value leaves this process.
+#
+# FIXED AS A CLASS: every value this tool emits passes through `safe_value` (`emit` walks `EMIT_KEYS`),
+# so `state`, `author`, `scope`, `reason`, `detail`, `issues`, `count` — and ANY KEY ADDED LATER, plus
+# the argv-sourced `allowlist` that `unauthorized_detail` interpolates — inherit the guard instead of
+# each needing its own fix.
+#
+# REDACTION HERE, REFUSAL IN `judge_reason` — the opposite choice, deliberately. A REASON is
+# author-chosen prose with no legitimate need for a stem, so REFUSING it removes the class outright. An
+# AUTHOR is an identity this tool must REPORT in order to say who was refused, so it is rendered with
+# the keyword neutralised and the rest of the login intact and readable.
+#
+# DISPLAY ONLY, WHICH IS THE WHOLE SAFETY ARGUMENT. Authorization is decided on the RAW login against
+# the allowlist BEFORE anything reaches this boundary (`author not in allowlist` in both judges), and
+# nothing downstream re-parses these values as an authorization. So redaction cannot move any verdict,
+# and a divergence between this spelling and the shell's sole emit boundary (`roborev_safe_line` in
+# roborev-review.sh, which neutralises every block value and every DETAILS line) can only ever redact
+# differently — never grant. THAT is why two boundaries are acceptable here where two marker PARSERS
+# would not be: a parser decides, a renderer does not.
+# A LONGER WORD IS A DIFFERENT WORD — this file's own rule for `roborev-defer: findingsfoo`, applied
+# to the renderer. The negative lookahead is LOAD-BEARING, not cosmetic: THIS FILE'S OWN NAME,
+# `roborev-waiver-scan.py`, is printed by the shell's fail-closed `waiver: UNAVAILABLE (... tool:
+# <path>)` diagnostic, and an operator has to read that path to fix the state. It also keeps
+# `judge_reason` from falsely accusing a reason that legitimately names this script. DECLARED
+# RESIDUAL: a keyword embedded in a longer word (`roborev-waiverfoo`) is left alone — it carries no
+# marker FORM, which needs the keyword, then its kind, then the fields.
+MARKER_KEYWORD = re.compile(r"roborev-(?:waive|defer)(?![A-Za-z])", re.IGNORECASE)
+MARKER_KEYWORD_REDACTION = "[authorization-keyword-redacted]"
+
+
 # ===== ONE LINE, BUT THE REASON IS RECORDED VERBATIM (roborev job 229) =====
 # The old `collapse()` was `" ".join(value.split())`, which rewrites INTERNAL whitespace — so a reason
 # with a tab or with repeated spaces reached `deferral: GRANTED (... reason=...)` altered, while the
@@ -209,7 +260,9 @@ def safe_value(value):
             out.append("\\x%02x" % ord(ch))
         else:
             out.append(ch)
-    return "".join(out).strip(" \t")
+    # REDACT AFTER ESCAPING, never before: the guarantee is over the text that is actually EMITTED, so
+    # the denylist must run over the final rendering rather than over an intermediate one.
+    return MARKER_KEYWORD.sub(MARKER_KEYWORD_REDACTION, "".join(out)).strip(" \t")
 
 
 def emit(kind, result):
@@ -247,12 +300,13 @@ def judge_reason(reason):
     # embedded in a block, while a genuine sole-content marker still is), so this is spec conformance
     # and invariant coverage. Which makes REFUSAL the right shape rather than escaping: an authorizer
     # has no legitimate need to put a marker stem inside a reason, so the whole class goes away.
-    for stem in ("roborev-waive", "roborev-defer"):
-        if stem in reason.lower():
-            return ("the marker is missing a-stem-free-reason (the reason names an authorization "
-                    "marker keyword, and a granted reason is printed in the summary block, which "
-                    "gets pasted into PR comments — no emitted diagnostic may carry any part of a "
-                    "marker form; restate the reason without it)")
+    # ONE SPELLING OF THE KEYWORD LIST, shared with the emit-boundary redaction above: a second copy
+    # would be a second place for the class to be fixed only halfway, which is exactly job 230.
+    if MARKER_KEYWORD.search(reason):
+        return ("the marker is missing a-stem-free-reason (the reason names an authorization "
+                "marker keyword, and a granted reason is printed in the summary block, which "
+                "gets pasted into PR comments — no emitted diagnostic may carry any part of a "
+                "marker form; restate the reason without it)")
     return None
 
 
