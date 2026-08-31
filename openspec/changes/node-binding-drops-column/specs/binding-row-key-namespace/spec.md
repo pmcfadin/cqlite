@@ -96,12 +96,27 @@ that the fix did not regress the ordinary path.
 
 #### Scenario: A column name a plain object cannot express is refused, not dropped
 
-- **GIVEN** a column name the chosen mechanism cannot represent (under the `Property`/`CString`
-  mechanism, a name containing an interior NUL byte)
+**STATUS: PREMISE VOID under the delivered mechanism — recorded rather than deleted, because the
+requirement was real for the mechanism this scenario was written against.**
+
+This scenario was written for M1 (napi-rs's safe `Property`), which builds each name as a `CString`
+and therefore FAILS on a name containing an interior NUL — creating a corner in which a column could
+have been silently dropped, which is the very defect this change removes. The D1b measurement refused
+M1 (11.73% regression against a 5% threshold), and the delivered mechanism M2 passes the name as an
+already-created, LENGTH-DELIMITED `JsString` (`Env::create_string` → `napi_create_string_utf8` with a
+length). **There is no unrepresentable column name, so there is no refusal to implement and nothing
+to test.**
+
+The obligation the scenario encodes SURVIVES as a constraint on any future mechanism change: if a
+mechanism is ever adopted that cannot represent some name, it MUST refuse through the one FFI error
+contract and MUST NOT skip the column.
+
+- **GIVEN** a mechanism that cannot represent some legal column name
 - **WHEN** the row is converted
 - **THEN** the conversion returns an **error** through the binding's one FFI error contract
-- **AND** the column is never silently skipped — a dropped column with no diagnostic is the defect
-  this change exists to remove, and a fix that reintroduces it in a corner is not a fix.
+- **AND** the column is never silently skipped
+- **AND** under the delivered M2 mechanism this case is UNREACHABLE, which is an absence of a failure
+  mode rather than a tested behaviour.
 
 ### Requirement: A JSON object cell inherits nothing
 

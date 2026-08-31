@@ -92,14 +92,32 @@ impl RowProperties {
     /// takes a `napi_value`, so the once-per-result interned handle is reused
     /// directly and no per-row string work happens at all. `utf8name` is left
     /// null — Node-API requires exactly one of the two, and supplying `name`
-    /// means the length-delimited handle is used, so a name containing an
-    /// interior NUL is representable here (unlike M1's `CString`).
+    /// means the length-delimited handle is used.
+    ///
+    /// A side effect worth recording because it RETIRES a requirement M1 needed:
+    /// M1 built each name as a `CString`, which fails on an interior NUL byte, so
+    /// it needed an explicit refusal path to avoid silently dropping such a
+    /// column. Here the name is an already-created length-delimited `JsString`
+    /// (`intern_column_keys` uses `Env::create_string`, i.e.
+    /// `napi_create_string_utf8` WITH a length), so there is no unrepresentable
+    /// name and therefore no refusal to implement. That is an absence of a
+    /// failure mode, not a tested behaviour — no test exercises an interior-NUL
+    /// column name, because no fixture can produce one.
     pub fn push(&mut self, name: &JsString, value: &JsUnknown) {
         self.descriptors.push(sys::napi_property_descriptor {
-            // SAFETY-ADJACENT NOTE (not an `unsafe` op): `NapiRaw::raw` merely
-            // copies the opaque handle out of the wrapper. The handles stay valid
-            // because both `name` and `value` are borrowed for this call and live
-            // in the enclosing `Env` scope, which outlives `define_on`.
+            // SAFETY: `NapiRaw::raw` IS an unsafe fn (an earlier version of this
+            // comment claimed otherwise, which was simply false — it sits inside
+            // an `unsafe` block). Its obligation is that the extracted
+            // `napi_value` must not be used after its handle scope ends. It is
+            // not: the raw handles are stored only in `self.descriptors` and
+            // consumed by `define_on`, which the caller invokes in the same
+            // enclosing scope.
+            //
+            // Storing the RAW handle rather than the wrapper is sound because a
+            // `napi_value` is owned by the napi HANDLE SCOPE, not by the Rust
+            // wrapper: dropping a `JsString`/`JsUnknown` does not release or
+            // invalidate the underlying value, so the descriptor array does not
+            // borrow anything it could outlive.
             utf8name: std::ptr::null(),
             name: unsafe { name.raw() },
             method: None,
