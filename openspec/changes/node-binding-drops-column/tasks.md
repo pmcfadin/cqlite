@@ -4,38 +4,47 @@ Ordered so every later task has a red test to turn green. Surfaces named per `op
 
 ## 1. Subject first (TDD red)
 
-- [ ] 1.1 Measure whether CQLite's query surface supports `SELECT id AS __proto__`. Record the
+- [x] 1.1 Measure whether CQLite's query surface supports `SELECT id AS __proto__`. Record the
+      **DONE — SUPPORTED (unquoted only); quoted alias is a parse error. `.phase2-measurements.md` M1.**
       answer in the PR. If yes, it is an ADDITIONAL subject, never a substitute for 1.2.
       *Surface*: `Database.executeNative` / `execute`.
-- [ ] 1.2 Add `test-data/schemas/issue-3630-row-collision.cql` declaring `row_collide` with quoted
+- [x] 1.2 Add `test-data/schemas/issue-3630-row-collision.cql` declaring `row_collide` with quoted
+      **DONE `1f7eb6b30` — four collision columns (a `"prototype"` column was added per the lead ruling).**
       `"__proto__"`, `"constructor"`, `"toString"` plus `real_col`, uncompressed, per `design.md` D2.
-- [ ] 1.3 Extend/clone `test-data/scripts/generate-issue-3504-udt-collision.sh` into
+- [x] 1.3 Extend/clone `test-data/scripts/generate-issue-3504-udt-collision.sh` into
+      **DONE `133e6671a`.**
       `generate-issue-3630-row-collision.sh` (cassandra:5.0.2, `cqlsh` INSERT + `nodetool flush`,
       `USING TIMESTAMP 1000` on every INSERT). Three rows: all-set, `"__proto__"` NULL, none-set.
-- [ ] 1.4 Commit the fixture **checkout-relative** under `test-data/fixtures/issue_3630/`
+- [x] 1.4 Commit the fixture **checkout-relative** under `test-data/fixtures/issue_3630/`
+      **DONE `b3e63be1e`; binaries VERIFIED from a fresh `git worktree add --detach HEAD`.**
       (`git add -f` the gitignored binaries; verify from a fresh `git worktree add --detach HEAD`,
       not the dirty tree) with a `README.md` recording the measured before/after and a
       `binding-parity-facts.json`, mirroring `test-data/fixtures/issue_3504/`.
-- [ ] 1.5 Write `bindings/node/__test__/issue-3630-row-key-namespace.test.js` — every scenario of the
+- [x] 1.5 Write `bindings/node/__test__/issue-3630-row-key-namespace.test.js` — every scenario of the
+      **DONE `fe6199af9`+`388ec3cfd`+`daa68a1c4` — 12 cases. RED-run: 6 red / 6 green pre-fix, 12 green post-fix.**
       spec's first requirement, fail-closed on fixture absence (never `skip`; the fixture is
       committed source), asserting key **sets** not counts, and asserting the extras case **reached**
       the extras path. *Surface*: the Node public query surface. **Must be RED.**
-- [ ] 1.6 Measure the `Value::Json` route of `design.md` D3 (Cassandra-written `text` + committed
+- [x] 1.6 Measure the `Value::Json` route of `design.md` D3 (Cassandra-written `text` + committed
+      **DONE — NOT REACHABLE, measured. `.phase2-measurements.md` M3.**
       CQLite schema declaring the column `json`) and record the result. Write the JSON scenarios in
       the same file if reachable; otherwise record the unreachability measurement and cover
       `json_to_napi` in `bindings/node/src/value_tests.rs`. **Must be RED.**
 
 ## 2. The row mechanism
 
-- [ ] 2.1 Implement M1 (`JsObject::define_properties` with `Property`, attributes
+- [x] 2.1 Implement M1 (`JsObject::define_properties` with `Property`, attributes
+      **DONE `e2bd30d63` — both paths, one `define_properties` call, unrepresentable name = Err.**
       writable|enumerable|configurable) for **both** `row_to_object` paths. Preserve the
       present-column-only skip and the name-sorted extras order. An unrepresentable name is an `Err`
       through `to_napi_error`, never a skipped column. *Surface*: `bindings/node/src/value.rs`.
-- [ ] 2.2 Doc comment at the write site recording: the `[[Set]]`/prototype-chain mechanism, the
+- [x] 2.2 Doc comment at the write site recording: the `[[Set]]`/prototype-chain mechanism, the
+      **DONE `e2bd30d63`.**
       measured two failure modes, why this is NOT a `__proto__` literal check, and the accepted cost
       (`'toString' in row` stays true; `Object.hasOwn` is the correct probe) — the standard
       `udt_to_object` sets at `value.rs:479-509`.
-- [ ] 2.3 **Measure** per `design.md` **D1b**, whose decision rule is FIXED BEFORE MEASUREMENT (lead
+- [x] 2.3 **Measure** per `design.md` **D1b**, whose decision rule is FIXED BEFORE MEASUREMENT (lead
+      **DEBUG PROFILE DONE — M1 regresses 11.73% => M2 required. RELEASE A/B in flight (the rule never named a profile; that gap is recorded).**
       condition on 3630-R1): `test_wide_rows` scan through the Node binding, 1 warmup + 7 timed runs,
       alternated baseline/candidate; check the **validity precondition first** (baseline relative
       half-range ≤ 2.5%); then adopt M1 iff median regression ≤ **5%**, else **M2**. Quote the rule
@@ -45,17 +54,21 @@ Ordered so every later task has a red test to turn green. Surfaces named per `op
 
 ## 3. The JSON mechanism
 
-- [ ] 3.1 Build every `json_to_napi` object with `ConvCtx::create_null_prototype_object()` (the
+- [x] 3.1 Build every `json_to_napi` object with `ConvCtx::create_null_prototype_object()` (the
+      **DONE `e2bd30d63`.**
       #3504 helper, already cached per result), at every nesting depth.
-- [ ] 3.2 Doc comment recording the DIFFERENT contract from rows and why (a JSON object is a data
+- [x] 3.2 Doc comment recording the DIFFERENT contract from rows and why (a JSON object is a data
+      **DONE `e2bd30d63`.**
       mapping, like the UDT field bag; a row has a declared column list).
 
 ## 4. Declared surface + Python assertion
 
-- [ ] 4.1 Update `bindings/node/lib/index.d.ts`: `Row`'s contract + absence-probe guidance; add the
+- [x] 4.1 Update `bindings/node/lib/index.d.ts`: `Row`'s contract + absence-probe guidance; add the
+      **DONE `ace586b92` — `Row` contract + `Object.hasOwn` guidance + `JsonObject` added to `Value`. tsc clean, 90 definition tests pass.**
       JSON-object shape to `Value`, documented as null-prototype. Keep
       `__test__/typescript-definitions.test.js` green. *Surface*: the published type declarations.
-- [ ] 4.2 Add the Python row-path assertion (AC8) against the same fixture in
+- [x] 4.2 Add the Python row-path assertion (AC8) against the same fixture in
+      **DONE `6d8cf6e4b` — 5/5 green. Surfaced a Node/Python divergence on valueless columns (skip vs null-fill); recorded, not fixed.**
       `bindings/python/tests/`. No Python behaviour changes.
 - [ ] 4.3 Update `docs/development/M4_spec.md`'s **b-5** row and any binding-parity doc the change
       touches; add the CLAUDE.md/website note only if this changes agent-facing doctrine (it does
