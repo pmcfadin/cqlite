@@ -1900,7 +1900,16 @@ fi
 # Effective privilege, resolved BEFORE the seam guard because the guard now depends on it.
 # Unknown is treated as privileged (fail closed): a seam that steers a write must not be
 # admitted because we could not establish who we are.
-PIN_EUID=$(id -u 2>/dev/null || true)
+# `$EUID` — Bash's own readonly — NEVER a PATH-resolved `id` (#3414 roborev round 8, HIGH).
+# The privilege decision gates a seam that can steer a ROOT `tee -a` at an arbitrary
+# absolute path, so a shadowed or merely MALFORMED `id` (a busybox variant, a broken PATH)
+# makes a root invocation look unprivileged and reopens the round-5 High through a
+# different door. A malformed `id` is an ACCIDENT, not an attack, which is what puts this
+# inside the threat model rather than in the invoker-controls-the-process category.
+# A nonnumeric value is treated as UNKNOWN, never as "not root": the guards below read an
+# empty PIN_EUID as privileged, so an unreadable identity fails closed. Also one fewer fork.
+PIN_EUID="${EUID-}"
+case "$PIN_EUID" in ''|*[!0-9]*) PIN_EUID="" ;; esac
 
 if [ "$PIN_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ] \
    && { [ "$PIN_EUID" = 0 ] || [ -z "$PIN_EUID" ]; }; then
@@ -1981,19 +1990,36 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # silent fall back to root: falling back would answer a question about the wrong user
   # and report it as if it were the right one, which is the substitution this whole
   # section exists to stop.
+  # SUDO_UID IS THE AUTHORITY AND SUDO_USER MUST AGREE WITH IT (#3414 roborev round 8).
+  # Trusting the NAME alone accepts stale or inconsistent metadata — `SUDO_UID=1000
+  # SUDO_USER=root` would probe root and could report VERIFIED while the agent account has
+  # a different PAM environment, which is the wrong-subject defect this retarget exists to
+  # fix, wearing the retarget's own clothes. So: a validated NUMERIC SUDO_UID, NONZERO
+  # (root invoking sudo tells us nothing new), and if a username is present it must resolve
+  # to that same uid. Anything absent or inconsistent is UNMEASURED — never a fall back to
+  # answering about root, and never a guess between two disagreeing sources.
   PIN_PROBE_SUBJECT_NOTE=""
   if [ "$PIN_EUID" = 0 ]; then
-    pin_invoker="${SUDO_USER:-}"
-    if [ -z "$pin_invoker" ] && [ -n "${SUDO_UID:-}" ]; then
-      pin_invoker=$(id -un "$SUDO_UID" 2>/dev/null || true)
-    fi
-    if [ -n "$pin_invoker" ]; then
-      if id -u "$pin_invoker" >/dev/null 2>&1; then
-        PIN_SELF_USER="$pin_invoker"
-        PIN_PROBE_SUBJECT_NOTE="probed as '$pin_invoker' (the account that invoked sudo), not root — root's session is not the one a gate runs in"
-      else
+    pin_sudo_uid="${SUDO_UID-}"
+    case "$pin_sudo_uid" in ''|*[!0-9]*) pin_sudo_uid="" ;; esac
+    pin_sudo_name="${SUDO_USER-}"
+    if [ -z "$pin_sudo_uid" ]; then
+      PIN_SELF_USER=""
+      PIN_PROBE_SUBJECT_NOTE="running as root with no usable SUDO_UID (absent or non-numeric), so the account a gate would run as is unknown"
+    elif [ "$pin_sudo_uid" = 0 ]; then
+      PIN_SELF_USER=""
+      PIN_PROBE_SUBJECT_NOTE="SUDO_UID is 0, so sudo was invoked BY root — that tells us nothing about the account a gate runs as"
+    else
+      pin_resolved=$(id -un "$pin_sudo_uid" 2>/dev/null || true)
+      if [ -z "$pin_resolved" ]; then
         PIN_SELF_USER=""
-        PIN_PROBE_SUBJECT_NOTE="sudo named invoker '$pin_invoker', which does not resolve to an account"
+        PIN_PROBE_SUBJECT_NOTE="SUDO_UID $pin_sudo_uid does not resolve to an account"
+      elif [ -n "$pin_sudo_name" ] && [ "$(id -u "$pin_sudo_name" 2>/dev/null || echo none)" != "$pin_sudo_uid" ]; then
+        PIN_SELF_USER=""
+        PIN_PROBE_SUBJECT_NOTE="INCONSISTENT sudo metadata — SUDO_USER '$pin_sudo_name' does not resolve to SUDO_UID $pin_sudo_uid, so which account to probe is ambiguous and neither answer would be trustworthy"
+      else
+        PIN_SELF_USER="$pin_resolved"
+        PIN_PROBE_SUBJECT_NOTE="probed as '$pin_resolved' (uid $pin_sudo_uid, the account that invoked sudo), not root — root's session is not the one a gate runs in"
       fi
     fi
   fi
@@ -2199,6 +2225,14 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # value instead would agree today and go stale the moment someone edits
     # /etc/environment, manufacturing the same divergence later and more quietly.
     info "not touching $PROFILE — $PIN_ENV_FILE already sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE, and PAM delivers that to interactive shells too; appending a hardcoded '=$PIN_ENV_VALUE' here could only override it"
+  elif [ "$PIN_FILE_HAS_LINE" != no ] && [ "$PIN_FILE_HAS_LINE" != absent-file ]; then
+    # UNREADABLE IS NOT ABSENT (#3414 roborev round 8). The skip above keys on a value
+    # having been FOUND; this branch catches the states where we could not tell — an
+    # unreadable file, or a line we could not parse. Appending the hardcoded `=1` there
+    # would recreate exactly the divergence the skip exists to prevent, because the file we
+    # could not read may already pin 4. An unmeasurable state must not inherit the
+    # permissive branch: append only where absence was AFFIRMATIVELY established.
+    info "not touching $PROFILE — could not determine what $PIN_ENV_FILE sets ($PIN_FILE_HAS_LINE), and appending a hardcoded '=$PIN_ENV_VALUE' could contradict a value that is already there"
   elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
     if printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" 2>/dev/null; then
       info "appended the export to $PROFILE — the FALLBACK for interactive shells on a box with no system-wide value; it is not the verdict, which comes from the session probe below"
@@ -2337,8 +2371,8 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     warn "gate-pin: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap)"
     info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
   elif [ "$PIN_PRIV_STATE" = invoker-unresolvable ]; then
-    warn "gate-pin: UNMEASURED ($PIN_PROBE_SUBJECT_NOTE, and root's own session is NOT the subject a gate runs in — refusing to answer about the wrong user)"
-    info "re-run as the agent account, or fix SUDO_USER/SUDO_UID so the invoking account can be resolved"
+    warn "gate-pin: UNMEASURED ($PIN_PROBE_SUBJECT_NOTE — refusing to answer about the wrong user)"
+    info "re-run as the agent account itself, which needs no sudo metadata to be trusted"
   elif [ "$PIN_PRIV_STATE" = no-identity ]; then
     warn "gate-pin: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — pin visibility is UNKNOWN, not ok)"
   elif [ "$PIN_PRIV_STATE" = no-sudo-binary ]; then

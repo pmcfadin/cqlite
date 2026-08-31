@@ -106,7 +106,15 @@ if [ "$(id -u)" = 0 ]; then
   skip "THE ENTIRE SUITE: it drives bootstrap through a test seam that is REFUSED under root (#3414 finding S), so every sandboxed invocation gains a warning and the green-path assertions cannot run. Re-run as an unprivileged user."
   echo
   echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
-  exit 0
+  # NONZERO, and this is the THIRD LEVEL at which this same shape has been caught (#3414
+  # roborev round 8). Round 2 found a CASE counted as a pass; round 4 found `ok "SKIP …"`;
+  # round 7's fix for those turned it into a SUITE-level version — the gate checks only
+  # exit status, so `exit 0` here reported `tooling-tests` green having executed nothing at
+  # all, including every regression this branch added. A declined suite is not a passing
+  # suite. The gate runs as an unprivileged user, so the normal path never reaches this and
+  # the cost is zero; running it as root becomes a loud failure instead of a silent green.
+  echo "DECLINED: this suite executed NOTHING and is exiting NONZERO so no caller can read it as a pass." >&2
+  exit 1
 fi
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
@@ -3297,7 +3305,7 @@ else
       timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_am" | grep -q 'does not resolve to an account' \
+       && printf '%s' "$out_am" | grep -qE 'does not resolve to an account|INCONSISTENT sudo metadata' \
        && ! printf '%s' "$out_am" | grep -qE '\[ok\].*gate-pin'; then
       ok "gate-pin: an unresolvable sudo invoker is UNMEASURED, never answered about root instead"
     else
@@ -3316,6 +3324,89 @@ else
     fi
   else
     skip "gate-pin sudo-invocation-mode cases (no passwordless sudo here)"
+  fi
+
+  # 11at. THE PRIVILEGE DECISION MUST NOT GO THROUGH A PATH-RESOLVED BINARY (issue #3414
+  #      roborev round 8, HIGH). It used to call `id -u`, so a shadowed or merely MALFORMED
+  #      `id` — a busybox variant, a broken PATH — made a ROOT invocation look
+  #      unprivileged, and the seam then steered a root `tee -a` at an arbitrary absolute
+  #      path: the round-5 High reopened through a different door. Bash's readonly $EUID
+  #      cannot be shadowed and costs no fork.
+  #
+  #      Driven as a REAL root invocation with a lying `id` first on PATH, because that is
+  #      the only way to distinguish "we read $EUID" from "we read a binary that agreed".
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
+    printf '#!/usr/bin/env bash\necho 1000\n' >"$pin_liar/id"; chmod +x "$pin_liar/id"
+    pin_liar_target="$tmp/pin-liar-target"; rm -f "$pin_liar_target"
+    out_at=$(sudo -n env PATH="$pin_liar:$PATH" \
+      CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe --yes 2>&1)
+    if printf '%s' "$out_at" | grep -q 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
+      ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
+    else
+      bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
+      printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
+      ls -l "$pin_liar_target" 2>/dev/null
+    fi
+    sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
+
+    # 11au. SUDO_USER MUST AGREE WITH SUDO_UID (roborev round 8). Trusting the NAME alone
+    #      accepts stale metadata — `SUDO_UID=1000 SUDO_USER=root` would probe root and
+    #      could report VERIFIED while the agent account differs, which is the
+    #      wrong-subject defect the retarget exists to fix, wearing the retarget's clothes.
+    out_au=$(sudo -n env SUDO_UID=1000 SUDO_USER=root \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_au" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_au" | grep -q 'INCONSISTENT sudo metadata' \
+       && ! printf '%s' "$out_au" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: SUDO_USER disagreeing with SUDO_UID is UNMEASURED, not a probe of the wrong account"
+    else
+      bad "gate-pin: inconsistent sudo metadata was trusted"
+      printf '%s\n' "$out_au" | grep -i 'gate-pin' | head -2
+    fi
+
+    # 11av. ...and root invoking sudo (SUDO_UID=0) tells us nothing about a gate's account.
+    out_av=$(sudo -n env SUDO_UID=0 SUDO_USER=root \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_av" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_av" | grep -q 'sudo was invoked BY root'; then
+      ok "gate-pin: SUDO_UID=0 is UNMEASURED — root invoking sudo says nothing about a gate's account"
+    else
+      bad "gate-pin: SUDO_UID=0 was treated as a usable probe subject"
+      printf '%s\n' "$out_av" | grep -i 'gate-pin' | head -2
+    fi
+    sudo -n rm -rf "$pin_root_sandbox" 2>/dev/null || true; mkdir -p "$pin_root_sandbox/.cargo"
+  else
+    skip "gate-pin privilege-source and sudo-metadata cases (no passwordless sudo here)"
+  fi
+
+  # 11aw. UNREADABLE IS NOT ABSENT for the profile append (roborev round 8). The Q fix
+  #      keyed on a value having been FOUND, so an unreadable or unparseable env file fell
+  #      through to appending the hardcoded `=1` — and if that file already pins 4, we
+  #      silently create the divergence Q existed to prevent. An unmeasurable state must
+  #      not inherit the permissive branch.
+  if [ "$(id -u)" = 0 ]; then
+    skip "gate-pin unreadable-file profile-append case (running as root: 0000 is still readable)"
+  else
+    pin_home_aw="$tmp/pin-home-aw"; mkdir -p "$pin_home_aw/.cargo"; : >"$pin_home_aw/.bashrc"
+    envf_aw="$tmp/pin-env-aw"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_aw"; chmod 0000 "$envf_aw"
+    out_aw=$(runpin "$pinroot" "$shims_none" "$envf_aw" HOME="$pin_home_aw" SHELL=/bin/bash --yes)
+    chmod 0644 "$envf_aw"
+    if ! grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$pin_home_aw/.bashrc" \
+       && printf '%s' "$out_aw" | grep -q 'could not determine what'; then
+      ok "gate-pin: an UNREADABLE env file does not get the hardcoded profile export (unreadable is not absent)"
+    else
+      bad "gate-pin: an unreadable env file fell through to the append, recreating the divergence Q removed"
+      printf '%s\n' "$out_aw" | grep -i 'not touching\|could not determine' | head -2
+      cat "$pin_home_aw/.bashrc"
+    fi
   fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
@@ -3416,6 +3507,24 @@ if [ -z "$pin_mustrun_missing" ]; then
   ok "suite: the three green-path cases RAN (not skipped by a warning-count drift)"
 else
   bad "suite: green-path case(s) did not run — silently disabled again: $pin_mustrun_missing"
+fi
+
+# --- 16. A WHOLESALE DECLINE MUST NOT EXIT 0 (#3414 roborev round 8) -------------------
+# Third instance of one shape (case-level pass, `ok "SKIP"`, then suite-level), so it is a
+# check rather than a fixed comment. STRUCTURAL, and the limit is stated rather than
+# implied: a behavioural test would mean re-running this suite as root FROM INSIDE ITSELF,
+# which is recursive and minutes long, so what is asserted here is that every wholesale
+# `skip`-then-exit path exits nonzero. The behavioural half is a one-off manual check under
+# `sudo`, recorded in the lane verdict file — a structural grep must not be read as a
+# behavioural guarantee.
+pin_decline_bad=$(awk '
+  /^  skip "THE ENTIRE SUITE/ { seen = NR }
+  seen && NR > seen && NR <= seen + 8 && /^  exit 0$/ { print NR }
+' "$0")
+if [ -z "$pin_decline_bad" ] && grep -qE '^  exit 1$' "$0"; then
+  ok "suite hygiene: the wholesale-decline path exits NONZERO (a declined suite is not a passing suite)"
+else
+  bad "suite hygiene: a wholesale decline exits 0 — the gate reads only exit status, so it would certify a suite that ran nothing"
 fi
 
 echo
