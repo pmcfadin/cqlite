@@ -179,11 +179,13 @@ pub enum Divergence {
     /// alone, via the same `super::is_scalar_type` predicate `compare_map` refuses
     /// on, so the gap and the refusal can never disagree about what a container is.
     ///
-    /// EGRESS SHAPE: none, and that asymmetry IS the point. Every other variant
-    /// here is a conjunction of an oracle side and a rendered shape because it
-    /// describes a disagreement between two values. This one describes the absence
-    /// of a comparison, so it reads no values at all — asserting a shape would be
-    /// inventing a claim about output nobody examined.
+    /// EGRESS SHAPE: both sides must still BE maps — the golden a JSON object, the
+    /// CLI its `{key,value}` pair-list array — but neither side's CONTENTS are
+    /// examined. That split is the whole point: what this lane cannot do is pair the
+    /// KEY SET, and it says nothing about the values behind those keys. It does NOT
+    /// follow that the column may be anything at all: an earlier version decided from
+    /// the DDL alone and thereby suppressed a null or malformed rendering of the
+    /// entire column, which is the blind spot this module exists to remove.
     ///
     /// NOT COVERED: a map with a SCALAR key type (compared normally in both
     /// formats), and any non-map position.
@@ -326,17 +328,30 @@ impl Divergence {
                 matches!(cli, Value::Array(_) | Value::Object(_))
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
-                // Decided from the DDL ALONE — no value is read, because this
-                // variant records the ABSENCE of a comparison rather than a
-                // disagreement between two rendered values. Asking anything of
-                // `golden` or `cli` here would be inventing a claim about output
-                // that was never examined.
+                // The DDL side: a map whose KEY type is a container. The SAME
+                // predicate `super::compare_map` refuses on, so the gap and the
+                // refusal cannot disagree about what counts as a container key.
+                if !matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty)) {
+                    return false;
+                }
+                // AND BOTH SIDES MUST STILL BE WELL-FORMED MAPS (roborev job 302,
+                // Medium). An earlier version of this arm decided from the DDL alone
+                // and read no values, reasoning that a lane limitation is not a claim
+                // about output. That reasoning was half right and the wrong half was
+                // load-bearing: declining to pair the ENTRIES is correct, but
+                // declining to look at the SHAPE made this gap suppress a null, a
+                // scalar or any malformed rendering of its whole column — which is
+                // exactly the "permanent blind spot for its whole column" this module
+                // was written to remove (see the module header). What is unpairable is
+                // the KEY SET, not the column's existence.
                 //
-                // The predicate is the SAME ONE `super::compare_map` refuses on, so
-                // the gap and the refusal cannot disagree about what counts as a
-                // container key.
-                let _ = (golden, cli, egress, depth, kinding);
-                matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty))
+                // So: the golden must be a JSON object (its map spelling) and the CLI
+                // an array (its `{key,value}` pair-list spelling). Neither side's
+                // CONTENTS are examined — that is the part this lane genuinely cannot
+                // do — but a column that stopped being a map at all is NOT this gap
+                // and is reported as an ordinary diff.
+                let _ = (egress, depth, kinding);
+                matches!(golden, Value::Object(_)) && matches!(cli, Value::Array(_))
             }
         }
     }
