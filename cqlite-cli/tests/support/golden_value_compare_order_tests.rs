@@ -276,20 +276,14 @@ fn a_udt_renders_its_fields_in_the_declared_order() {
     ])];
     let ordered = vec![row(&[
         ("id", json!(1)),
-        (
-            "p",
-            json!({"_type": "person", "first_name": "A", "last_name": "B", "age": 30}),
-        ),
+        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
     ])];
     let report = compare_rows(&golden, &ordered, &schema, &["id"], &[], &[], Egress::Json);
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
 
     let permuted = vec![row(&[
         ("id", json!(1)),
-        (
-            "p",
-            json!({"_type": "person", "age": 30, "first_name": "A", "last_name": "B"}),
-        ),
+        ("p", json!({"age": 30, "first_name": "A", "last_name": "B"})),
     ])];
     let report = compare_rows(&golden, &permuted, &schema, &["id"], &[], &[], Egress::Json);
     assert_eq!(
