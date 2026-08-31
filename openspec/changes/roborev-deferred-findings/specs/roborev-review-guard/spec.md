@@ -331,6 +331,30 @@ It is REFUSED rather than escaped, because an authorizer has no legitimate need 
 assert covers the *code*, while a *runtime* reason can inject what no source scan sees — an invariant
 over OUTPUT needs a check on the OUTPUT PATH.
 
+**AND THE RULE IS OVER *EVERY* EMITTED VALUE, NOT OVER THE `reason` FIELD.** The reason is the field
+an authorizer chooses, so refusing it removes that class outright; but a marker keyword can reach a
+diagnostic through fields nobody chooses — the **GitHub login** of an unauthorized commenter (which
+`UNAUTHORIZED` must report in order to say who was refused), **`gh issue view`'s stdout and stderr**
+(which reach `deferral:` as an `ISSUE-UNVERIFIABLE` cause), the allowlist, and any value a future key
+interpolates. So each of the two processes SHALL neutralise the keywords at its **one emit boundary** —
+the structured scanner where every `key=value` leaves it, and the wrapper where every block value and
+every DETAILS line is already rendered — and SHALL NOT do it per interpolation site, which is a list to
+keep complete. There, unlike the reason, the value is **REDACTED rather than refused**: it is an
+identity or a diagnostic the run must still report.
+
+The keyword SHALL be neutralised only where it is **not continued by another letter**: a longer word is
+a different word — the same rule the parser already applies to `roborev-defer: findingsfoo` — and the
+boundary is load-bearing, because the scanner's own file name embeds a keyword and is printed by the
+fail-closed `waiver: UNAVAILABLE (… tool: <path>)` cause that an operator must read to act. A value
+carrying a keyword inside a longer word is a **declared residual**: it carries no marker *form*.
+
+This is spec conformance and invariant coverage, **not** a security layer, and SHALL NOT become one: a
+GitHub login admits letters, digits and hyphens and not colons or spaces, so it cannot hold a full
+stem, and an emitted line begins `deferral: UNAUTHORIZED (`, which the sole-content rule refuses. It is
+safe as a **display-only** transformation precisely because every authorization decision — allowlist,
+scope, count, retrievability — SHALL be made on the **raw** value before any renderer runs; so the two
+boundaries can only ever redact differently, never grant.
+
 **Both markers' `base=`/`head=` fields SHALL be exactly 40 hex.** An abbreviated sha SHALL report
 `MALFORMED`, never `STALE`: it names THIS review in a spelling the form does not permit, and an
 authorizer sent to re-check *which review* they named will find nothing wrong with it. The rule holds
@@ -356,6 +380,18 @@ its text names what was unverifiable.
 #### Scenario: A marker naming a different job
 - **WHEN** a well-formed marker names a job other than the one under decision
 - **THEN** `deferral:` reads `STALE (…)` and `RESULT: FAIL`
+
+#### Scenario: An unauthorized author's login carries a marker keyword
+- **WHEN** the sole nonblank content of a top-level comment is a well-formed marker of either kind naming this review, from a NON-allowlisted author whose GitHub login contains `roborev-waive` or `roborev-defer`
+- **THEN** the state is `UNAUTHORIZED`, the emitted cause names the author with the keyword redacted and the rest of the login intact, no emitted diagnostic carries any part of a marker form, and `RESULT: FAIL`
+
+#### Scenario: A `gh` diagnostic carries a marker keyword
+- **WHEN** `gh issue view` fails with a diagnostic containing a marker keyword
+- **THEN** `deferral: ISSUE-UNVERIFIABLE (…)` still quotes the diagnostic it could not interpret, with the keyword redacted by the wrapper's own emit boundary
+
+#### Scenario: An ordinary value is untouched
+- **WHEN** a deferral is granted by an allowlisted author with an ordinary login
+- **THEN** the block records the author verbatim and no value is redacted
 
 #### Scenario: A granted record is legible from the block alone
 - **WHEN** a deferral is granted
@@ -386,7 +422,10 @@ component — SHALL gain a case for **every** state named above: the grant, and 
 quoted, bulleted, mid-sentence, fenced, HTML-wrapped), the diagnostic-is-not-a-credential property,
 the affirmative-count backstop, the abbreviated-sha `MALFORMED` verdict for **both** marker kinds,
 the verbatim recording of a reason carrying repeated spaces and a tab, the refusal of a stem-bearing
-reason for **both** kinds, and the separate-scoping pair. Every case whose subject is a leg that can
+reason for **both** kinds, the **redaction of a keyword-bearing GitHub login for both kinds** and of a
+keyword-bearing `gh` diagnostic (the wrapper boundary, which the login cases do not reach), the
+**preservation of the scanner's own file name** in the `UNAVAILABLE` cause, and the separate-scoping
+pair. Every case whose subject is a leg that can
 GRANT SHALL carry a **planted-defect contrast** — the naive form of that leg, applied to a scratch
 copy, granting the fixture the real code refuses, with the unpatched copy's refusal measured FIRST. Each case SHALL plant its artifacts in its **own scratch copy of the
 tree**.

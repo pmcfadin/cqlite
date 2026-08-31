@@ -110,3 +110,26 @@
 - [x] 5.7 A `reason` containing either marker stem is refused, with grant-path coverage for both kinds.
 - [x] 5.8 Edit scars fixed: the mangled "EDITABLE AT ANY TIME" rationale, the un-reflowed help wrap,
       and the scanner's missing PEP8 blank lines.
+
+## 6. Round-4 review (roborev job 230)
+
+- [x] 6.1 THE SAME GUARANTEE, ONE FIELD OVER — fixed as a CLASS, not a field. Every externally-sourced
+      value is neutralised of both authorization keywords at each process's ONE emit boundary
+      (`safe_value` in the scanner, through which `emit` sends every `EMIT_KEYS` value; the wrapper's
+      `roborev_safe_line`, already the single gate for every block value and every DETAILS line), so a
+      future key inherits the guard instead of needing its own fix. Fields swept: the comment author
+      login, the reason (round 3, re-verified), scope/issues/count, the argv-sourced allowlist,
+      `gh issue view`'s stdout and stderr via `ROBOREV_ISSUE_DETAIL`, and the scanner `state`.
+      `judge_reason` now asks the ONE shared keyword pattern rather than carrying a second copy of it.
+- [x] 6.2 Redaction is word-bounded (`(?![A-Za-z])` / `[^a-zA-Z]|$`) — a longer word is a different
+      word — because the scanner's own file name embeds a keyword and is printed by the fail-closed
+      `waiver: UNAVAILABLE (… tool: <path>)` cause an operator must read. Pinned by a wv31 control.
+- [x] 6.3 Severity stated precisely rather than escalated, in code and in doctrine: NOT a bypass (a
+      GitHub login admits no colon or space, so it cannot hold a full stem; and the emitted line begins
+      `deferral: UNAUTHORIZED (`, which `sole_marker_line`'s `startswith` refuses), but a
+      spec-conformance and invariant-coverage defect against the absolute "not even its prefix" rule.
+      Deliberately NOT a security-grade escaping layer.
+- [x] 6.4 Coverage for stem-bearing AUTHORS, both kinds (df7j), the SHELL half the login cases cannot
+      reach (a keyword-bearing `gh issue view` diagnostic), an untouched-ordinary-login control, and the
+      structural assert that the denylist is at the two boundaries and nowhere else. 1181 -> 1209
+      assertions; a both-boundaries mutant reds 6 of them.

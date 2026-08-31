@@ -991,7 +991,25 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   control character as a visible escape, because the property required is one line per value, not
   collapsed whitespace); and a `reason` may **not contain either marker stem** — refused, not escaped,
   since **the structural assert covers the CODE while a RUNTIME value can inject what no source scan
-  sees, so an invariant over OUTPUT needs a check on the OUTPUT PATH**. **`findings: UNKNOWN` and `SKIP` are NOT
+  sees, so an invariant over OUTPUT needs a check on the OUTPUT PATH**. **AND THAT RULE IS OVER EVERY
+  EMITTED VALUE, NOT OVER THE `reason` — fixing the field and not the class cost a review round
+  (roborev job 230).** The reason is the field an authorizer CHOOSES, so refusing it removes that class;
+  a keyword also arrives through fields nobody chooses — an unauthorized commenter's **GitHub login**
+  (which `UNAUTHORIZED` must report to say who was refused), **`gh issue view`'s stdout/stderr** (which
+  reach `deferral:` as an `ISSUE-UNVERIFIABLE` cause), the allowlist, and whatever a future key
+  interpolates. So each process neutralises the keywords at its **ONE emit boundary** (`safe_value` in
+  the scanner; `roborev_safe_line` in the wrapper, already the gate for every block value and every
+  DETAILS line), never per interpolation site — a per-site escape is a list to keep complete. There the
+  value is **REDACTED, not refused**: it is an identity or a diagnostic the run must still report.
+  Only where the keyword is **not continued by another letter** — a longer word is a different word,
+  exactly as `roborev-defer: findingsfoo` is — because the scanner's own FILE NAME embeds a keyword and
+  is printed by the fail-closed `waiver: UNAVAILABLE (… tool: <path>)` cause an operator has to read.
+  It is **display-only, which is the whole safety argument**: every authorization decision is made on
+  the RAW value before any renderer runs, so two boundaries can only redact differently, never grant —
+  acceptable where two marker PARSERS would not be, since a parser decides and a renderer does not.
+  Deliberately **not** a security layer: a login admits letters, digits and hyphens and NOT colons or
+  spaces, so it cannot hold a full stem, and an emitted line begins `deferral: UNAUTHORIZED (`, which
+  the sole-content rule refuses. **`findings: UNKNOWN` and `SKIP` are NOT
   deferrable in any mode**: those states were never ESTABLISHED, and a pass may not rest on a state that
   could not be read. **The two authorizations stay SEPARATELY SCOPED and neither falls back to the
   other** — an absence waiver confers no authority over `findings:`, a findings deferral none over

@@ -752,6 +752,34 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    **the structural assert covers the CODE, while a RUNTIME value can inject what no source scan sees —
    an invariant over OUTPUT needs a check on the OUTPUT PATH.**
 
+   **AND THE RULE IS OVER EVERY EMITTED VALUE, NOT OVER THE `reason` FIELD (roborev job 230).** Fixing
+   the field and leaving the class cost a review round — the same guarantee one field over. The `reason`
+   is the field an authorizer *chooses*, so refusing it removes that class outright; but a marker keyword
+   also arrives through fields nobody chooses: an unauthorized commenter's **GitHub login** (which
+   `UNAUTHORIZED` has to report in order to say who was refused), **`gh issue view`'s stdout and
+   stderr** (which reach `deferral:` as an `ISSUE-UNVERIFIABLE` cause), the allowlist, and whatever a
+   future key interpolates. So each of the two processes neutralises the keywords at its **one emit
+   boundary** — `safe_value` in the structured scanner, `roborev_safe_line` in the wrapper (already the
+   single gate for every block value and every DETAILS line) — and never per interpolation site, because
+   **a per-site escape is a list to keep complete**. There, unlike the reason, the value is **redacted
+   rather than refused**: it is an identity or a diagnostic the run must still report.
+
+   Only where the keyword is **not continued by another letter**, because **a longer word is a different
+   word** — the rule the parser already applies to `roborev-defer: findingsfoo`. That boundary is
+   load-bearing, not cosmetic: the scanner's own file name embeds a keyword and is printed by the
+   fail-closed `waiver: UNAVAILABLE (… tool: <path>)` cause an operator must read to fix the state, and a
+   blanket substring redaction turns it into a diagnostic nobody can act on. Declared residual: a
+   keyword *inside* a longer word is left alone — it carries no marker **form**.
+
+   Two boundaries rather than one is safe because the transformation is **display-only**: every
+   authorization decision (allowlist, scope, count, retrievability) is made on the **raw** value before
+   any renderer runs, so a divergence between the two spellings can only redact differently — never
+   grant. **That is why the same rule at two emit boundaries is fine where two marker PARSERS would not
+   be: a parser decides, a renderer does not.** And it is deliberately **not** a security layer: a
+   GitHub login admits letters, digits and hyphens and not colons or spaces, so it can contain
+   `roborev-defer` but never a full stem, and an emitted line begins `deferral: UNAUTHORIZED (`, which
+   the sole-content rule refuses. Spec conformance and invariant coverage — nothing more.
+
    **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG WAS DELETED (#3626, lead ruling).** An earlier
    revision demanded each `issues=` number also appear as a local, visible `#N` in the **PR body**
    (`PR-UNLINKED` otherwise), with recognisers for cross-repository references, alphanumeric suffixes,
