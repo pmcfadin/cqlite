@@ -139,26 +139,66 @@ unequal, distinctly-hashing values.
 Making a UDT a hashable `cqlite.Udt` **did** change totality — an earlier draft of this scenario
 claimed it did not, which was false. The new behaviour is kept (restoring a `TypeError` to preserve a
 documented bug would be absurd); what is required is that the boundary be measured and pinned in both
-directions. Measured on `test_udt_collision.udt_hashable_shapes`, with `origin/main`'s binding for the
-"before" column.
+directions. Measured on `test_udt_collision.udt_hashable_shapes`, with #3504's then-`origin/main`
+binding for the "before" column.
 
-- **GIVEN** a UDT reached through the arm-less `Tuple` fallthrough in a HASHED position —
-  `set<frozen<tuple<frozen<udt>, int>>>` (a `frozenset` element) or
+**THE BOUNDARY MOVED AGAIN, BY #3500, AND THIS SCENARIO IS RE-DERIVED ACCORDINGLY.** #3504 measured
+the boundary as it stood when #3504 landed, and named #3500 as the issue that would move it — the same
+designed handoff as its test pins. #3500 then added the `Tuple` and `Set` arms to
+`value_to_hashable_key` (both it and `contains_udt` are now TOTAL — every `Value` variant named, no
+`_ =>`, pinned by `#[deny(clippy::wildcard_enum_match_arm)]`) and made `contains_udt` a full subtree
+traversal. The clauses below state the CURRENT requirement. #3504's own measurements are RETAINED as
+DATED historical context — past tense, attributed — because they are the evidence that the boundary was
+pinned in both directions, and not the live contract. Re-derived from
+`bindings/python/tests/test_issue_3504_udt_field_namespace.py` (R1-2) and
+`bindings/python/tests/test_nested_udt_hashable.py`.
+
+- **GIVEN** a UDT reached through a `Tuple` in a HASHED KEY position —
   `map<frozen<tuple<frozen<udt>, int>>, int>` (a `dict` key)
 - **WHEN** the column is read through either binding surface
-- **THEN** the projection SUCCEEDS, the projected key holds a `cqlite.Udt` with its declared fields,
-  and the key is retrievable by an independently constructed equal value
-- **AND** on `main` the identical input raised `TypeError: unhashable type: 'dict'`, because the
-  fallthrough rendered the UDT as a `dict`.
+- **THEN** the projection SUCCEEDS through `value_to_hashable_key`'s real `Tuple` ARM, the projected
+  key holds a `cqlite.Udt` with its declared fields, and the key is retrievable by an independently
+  constructed equal value
+- **AND** type identity participates: the same field values under a different declared type are a
+  DIFFERENT key
+- **AND** *(historical, as measured by #3504, before #3500)* pre-#3504 the identical input raised
+  `TypeError: unhashable type: 'dict'`, because the arm-less fallthrough rendered the UDT as a `dict`;
+  between #3504 and #3500 it succeeded INCIDENTALLY through that same fallthrough, whose output merely
+  happened to be hashable once a UDT became a `cqlite.Udt`. It no longer depends on that.
+
+- **GIVEN** the same nesting in a SET rather than in a map key — `set<frozen<tuple<frozen<udt>, int>>>`
+- **WHEN** the column is read
+- **THEN** it does NOT reach the hashable projection at all: `contains_udt` traverses the tuple, so
+  `set_to_py` takes its #804 list-for-CLI-parity branch and the column reads as a Python `list` of
+  `(cqlite.Udt, int)` tuples, each element still equal to — and hashing equal to — an independently
+  constructed value, since a `list` container does not make its elements unhashable
+- **AND** that container change is DELIBERATE (#3500 AC1 over AC5): it removes the nesting-dependent
+  asymmetry whereby the same UDT-bearing set was a `list` at depth 1 and a `frozenset` at depth 2
+- **AND** *(historical, as measured by #3504, before #3500)* the column read as a `frozenset`, because
+  `contains_udt` did not look inside a tuple and the set therefore took the hashing branch; pre-#3504
+  it raised `TypeError: unhashable type: 'dict'`.
 
 - **GIVEN** a UDT-bearing `set` in a hashed position — `set<frozen<set<frozen<udt>>>>`
 - **WHEN** the column is read
-- **THEN** it STILL raises `TypeError: unhashable type: 'list'`, identically before and after, because
-  `set_to_py` renders a UDT-bearing set as a Python `list` for CLI parity (#804) — a cause this change
-  does not touch. The error naming `'list'` rather than `'dict'` is what identifies it.
+- **THEN** it reads as a Python `list` of `list`s of `cqlite.Udt`, each UDT carrying its declared
+  fields with its type identity out of band, because `contains_udt` traverses `Set` so the OUTER set
+  takes #804's `list` branch too and never asks for a hash
+- **AND** the fix is NOT the new `Set` arm in `value_to_hashable_key`: that arm serves the MAP-KEY
+  path (a `map<frozen<set<…>>, v>` key, which has no #804 branch to take) and compiler-enforced
+  totality, and is never reached for THIS column. Recorded because the two mechanisms are not
+  interchangeable and the obvious attribution is the wrong one
+- **AND** *(historical, as measured by #3504, before #3500)* it raised
+  `TypeError: unhashable type: 'list'`, identically before and after #3504, because `set_to_py`
+  renders a UDT-bearing set as a Python `list` for CLI parity (#804) while `contains_udt` did not
+  traverse `Set`, so the outer set's hashing branch met an unhashable `list` element. The error naming
+  `'list'` rather than `'dict'` is what identified that cause, and is why #3504 could not move it.
 
-- **AND** the `Tuple`/`Set` arms remain ABSENT from `value_to_hashable_key`: #3500 is not fixed, and
-  the shapes above are resolved INCIDENTALLY by the UDT becoming hashable, not by adding an arm.
+- **AND** the `Tuple` and `Set` arms are PRESENT in `value_to_hashable_key`, which names every `Value`
+  variant, so NO shape depends on `value_to_py`'s output happening to be hashable, and a whole-table
+  `SELECT *` over these shapes completes rather than aborting on one unprojectable cell.
+  *(Historical, as measured by #3504, before #3500: both arms were ABSENT, #3500 was not fixed, and
+  the shapes above were resolved INCIDENTALLY by the UDT becoming hashable rather than by adding an
+  arm — the distinction #3504 recorded, and the one #3500 closed.)*
 - **AND** `Udt.__hash__` SHALL still propagate `TypeError` for a genuinely unhashable field value.
   No decoder path reaches that today — a collection field inside a frozen UDT decodes to
   `Value::Blob`, i.e. hashable `bytes` — so it is asserted on a constructed value, and the decode gap
