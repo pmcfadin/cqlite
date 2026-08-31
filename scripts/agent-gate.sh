@@ -11842,6 +11842,28 @@ run_tooling_tests() {
     return 0
   fi
 
+  # SUMMARY feature-matrix annotation guard (#3453). Hermetic (no cargo, no network, no
+  # datasets — a PATH-shim cargo records argv and compiles nothing) and ~3s. Three
+  # properties: EVERY name in COMPONENTS resolves to a declared class (so a new component
+  # cannot join the set with a blank matrix), all six per-component emit sites render
+  # through the ONE _fm_summary_line (so no MODE emits an un-annotated block), and — the
+  # measured half — for each of the six components whose cargo calls live in a `bash -c`
+  # body, the DECLARED matrix equals the argv that ACTUALLY EXECUTED under the shim,
+  # described through the gate's own _fm_describe_cargo rather than re-derived here. That
+  # last section is RED-verified: changing a feature literal in one of those bodies without
+  # the hoisted variable reds it. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_feature_matrix_annotation.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_feature_matrix_annotation.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (SUMMARY feature-matrix annotation guard #3453); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # binding-rust-tests target-partition self-test (#3522, roborev C3): hermetic, no cargo /
   # network / datasets. Drives _brt_partition_targets — sourced OUT OF THE REAL GATE SCRIPT,
   # never a copy — over synthetic metadata, including the case that cost a review round: when
@@ -12295,6 +12317,12 @@ run_file_size() {
 # AND the python tier. See PYTHON_LITE_TIER_CMD / classify_scoped_plan above.
 run_scoped_tests() {
   local name=scoped-tests
+  # #3453: attribute this lane's cargo invocations to `scoped-tests` (the name it appends
+  # to NAMES), NOT to whichever component ran before it. run_lite calls this AFTER
+  # run_component roborev-lints, so without this the blast-radius cargo runs would have
+  # landed in roborev-lints' sidecar — a declared no-cargo component — and the LITE block
+  # would have attributed a feature set to a component that compiled nothing.
+  AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status=PASS
   start=$(date +%s)
