@@ -56,11 +56,14 @@
 //!   it. `set_to_py`'s `list` branch converts each element with `value_to_py`,
 //!   and nothing below those elements is a map.
 //!
-//! Those first two are also the ONLY values in this repository that reach the
-//! `Udt` arm's `None => py.None()` field branch with `convert =
-//! value_to_hashable_key`: every other null UDT field in the fixture travels
-//! `value::udt_to_py`'s own `None` branch, which is `build_udt` with `convert =
-//! value_to_py` — a different projection.
+//! Those first two are also the ONLY values in this repository that reach
+//! `build_udt`'s `None => py.None()` field branch with
+//! `convert = value_to_hashable_key`, i.e. through this module's `Udt` arm — one
+//! through `Tuple`, one through `Set`. The BRANCH itself is not this arm's
+//! property: `build_udt` is shared with `value::udt_to_py` since #3504, so the
+//! set columns' null fields execute the same branch with
+//! `convert = value_to_py`. What is exclusive is the ARM's route into it, which
+//! is the whole reason a coverage claim here has to name the arm.
 //!
 //! Two conclusions, both of which have been got wrong in the other direction:
 //!

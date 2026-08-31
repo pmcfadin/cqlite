@@ -27,24 +27,18 @@ f_map_set_udt    ``TypeError: unhashable type: 'list'``
 
 WHICH COLUMNS COVER ``value_to_hashable_key``, AND WHICH DO NOT
 ---------------------------------------------------------------
-Only the two FROZEN-MAP columns reach that function's ``Tuple`` and ``Set``
-arms. A ``set`` whose elements contain a UDT takes ``set_to_py``'s list fallback
-and converts the ELEMENT with ``value_to_py``; a MULTICELL map's keys arrive as
-opaque ``Value::Blob`` from the scalar-only ``parse_cell_path_key`` (#3612), so
-they land on a scalar arm. A frozen map escapes both: its keys are decoded
-structurally and ``map_to_py`` projects every one of them through
-``value_to_hashable_key``. So ``f_map_tuple_udt`` covers the ``Tuple`` arm and
-``f_map_set_udt`` the ``Set`` arm, and their id=2 keys are the only values in
-this repository that execute the ``Udt`` arm's ``None => py.None()`` branch —
-BOTH of them do, one through each of those two arms. Without those two columns
-all three could regress with zero test failures.
+Stated in exactly ONE place, and deliberately not restated here: the ROUTING
+section of ``bindings/python/src/value_hashable.rs``, which gives the route and
+the ARM for all nine columns. Read it before adding, deleting or re-scoping any
+coverage claim in this module.
 
-The FUNCTION is reached more widely than its NEW ``Tuple``/``Set`` ARMS are, and
-every coverage claim below is scoped to the ARM, not the function:
-``m_tuple_udt``'s keys reach it as ``Value::Blob``, and ``s_map_udt_key`` /
-``s_map_udt_val`` reach its ``Udt`` and scalar arms, because ``value_to_py`` on a
-set element that is a frozen MAP calls ``map_to_py``, which projects that inner
-map's keys through it.
+This module asserts nothing about that routing, because restating it is what
+went wrong: the claim was made in four places in this file and in both fixture
+headers, and drifted in all but one — every drifted version was the same
+over-broad "only the frozen maps reach the function at all", when five of the
+nine columns do and only two reach the NEW ``Tuple``/``Set`` arms. Hence the one
+rule that survives here: scope a coverage claim to the ARM, never to the
+function.
 
 ``contains_udt`` IS A SEPARATE MATTER, AND ITS ``Map`` ARM NEEDED ITS OWN
 COLUMNS. ``set_to_py`` is that function's only caller, so the value it inspects
@@ -514,10 +508,10 @@ def test_the_two_udt_projections_agree_for_a_scalar_field_udt(db):
     The two helpers return the same object, which is a CLAIM about production and
     not a fact about the test file — so it is checked against values the binding
     actually produced, on both sides of the seam at once: ``s_tuple_udt``'s
-    element reaches its UDT through ``udt_to_py`` (``set_to_py``'s list fallback
-    converts with ``value_to_py``), while ``f_map_tuple_udt``'s KEY reaches its
-    UDT through ``value_to_hashable_key``. Same declared UDT, same field values,
-    different code path.
+    element reaches its UDT through ``value_to_py`` and ``f_map_tuple_udt``'s KEY
+    through ``value_to_hashable_key`` (both routes are in the ROUTING section of
+    ``value_hashable.rs``). Same declared UDT, same field values, different code
+    path.
 
     This is the property #3504 delivers — one ``build_udt``, differing only in the
     per-field converter — and it holds for ``key_part`` because ``text`` and
@@ -580,13 +574,11 @@ class TestTupleBorneUdtInSetElement:
     def test_null_udt_fields(self, db):
         """id=2: NULL UDT fields inside a set element.
 
-        These nulls travel ``udt_to_py``'s own ``None`` branch, NOT
-        ``value_to_hashable_key``'s. ``contains_udt`` is total post-fix, so this
-        column takes ``set_to_py``'s LIST fallback and its elements are
-        converted with ``value_to_py``; the hashable converter's ``Udt``-arm
-        ``None => py.None()`` branch is covered by the two FROZEN-MAP columns
-        instead. Golden order: ``\\@\\:5:2`` then ``nullrank\\:\\@:1``
-        (``\\@`` is sstabledump's null marker).
+        These nulls are converted with ``value_to_py`` (``build_udt``'s ``None``
+        branch with ``convert = value_to_py``), not through the hashable
+        projection's ``Udt`` arm — for which column reaches which arm, see the
+        ROUTING section of ``value_hashable.rs``. Golden order: ``\\@\\:5:2`` then
+        ``nullrank\\:\\@:1`` (``\\@`` is sstabledump's null marker).
         """
         row = _rows_by_id(db, "s_tuple_udt")[2]
         assert row.get("s_tuple_udt") == [
@@ -815,10 +807,10 @@ class TestTupleBorneUdtAsMapKey:
     which is a Python-binding fix. CONSEQUENCE, stated plainly: the hashable
     projection for MULTICELL tuple-borne map keys is currently UNEXERCISED by
     any fixture in this repository — this class pins the ``bytes`` it gets
-    instead. ``value_to_hashable_key``'s new ``Tuple`` arm IS covered, by
-    ``f_map_tuple_udt``'s FROZEN-map keys (:class:`TestFrozenMapWithTupleBorneUdtKey`)
-    and NOT by the set-element path above, which takes ``set_to_py``'s list
-    fallback and so never projects a ``Tuple`` through that function at all.
+    instead. The ``Tuple`` arm itself IS covered, by ``f_map_tuple_udt``
+    (:class:`TestFrozenMapWithTupleBorneUdtKey`); why this column and the
+    set-element columns do not cover it is in the ROUTING section of
+    ``value_hashable.rs``.
 
     AC SHAPE 3 IS DISCHARGED BY THIS PINNED GAP TEST PLUS #3612 — BY LEAD
     RULING, not by a worker descope. Issue #3500's acceptance criteria expect
@@ -894,27 +886,17 @@ class TestFrozenMapWithTupleBorneUdtKey:
     THE COLUMN THAT COVERS ``value_to_hashable_key``'s ``Tuple`` ARM. Read this
     before deleting it as redundant with ``s_tuple_udt``.
 
-    Every OTHER column in this fixture leaves the new arm unexecuted, for two
-    independent reasons:
+    That no other column in this fixture reaches the ``Tuple`` arm is a
+    CONSEQUENCE of the ROUTING section of ``value_hashable.rs``, which states the
+    per-column routes and the two mechanisms behind them once; this docstring
+    derives its purpose from that section and asserts no routing of its own.
 
-    * a ``set`` whose elements contain a UDT takes ``set_to_py``'s LIST
-      fallback, which converts the ELEMENT with ``value_to_py`` and so never
-      projects it through ``value_to_hashable_key``. Issue #3500's own AC1 —
-      make ``contains_udt`` total — is what makes that true of every UDT-bearing
-      set column. (``value_to_py`` can still reach the hashable converter
-      DEEPER: an element that is a frozen MAP has its own keys projected by
-      ``map_to_py`` — see :class:`TestSetElementFrozenMapWithUdtKeyHalf` — but
-      never a ``Tuple``);
-    * a MULTICELL map's keys arrive as opaque ``Value::Blob`` from the
-      scalar-only ``parse_cell_path_key`` (see ``TestTupleBorneUdtAsMapKey``
-      and #3612), so they never reach the ``Tuple`` arm either.
-
-    A FROZEN map escapes both. It arrives as ONE value cell, and
-    ``parse_frozen_map_value`` → ``read_frozen_element`` →
-    ``parse_value_from_raw_bytes``
+    What this class depends on is the one route that DOES reach it: a FROZEN
+    map arrives as ONE value cell, ``parse_frozen_map_value`` →
+    ``read_frozen_element`` → ``parse_value_from_raw_bytes``
     (``cqlite-core/src/storage/sstable/reader/parsing/row_decoder/``) decodes
-    each KEY structurally into a real ``Value::Frozen(Value::Tuple([...]))``.
-    ``map_to_py`` then projects every key through ``value_to_hashable_key``.
+    each KEY structurally into a real ``Value::Frozen(Value::Tuple([...]))``,
+    and ``map_to_py`` projects every key through ``value_to_hashable_key``.
 
     RED-VERIFIED, not argued: with this fixture and the PRE-FIX binding
     (commit ``01c28646b``) this column raises
@@ -976,19 +958,18 @@ class TestFrozenMapWithTupleBorneUdtKey:
     def test_null_udt_field_inside_a_hashable_key(self, db):
         """id=2: ``None`` field values INSIDE a dict key — the ``Udt`` ``None`` arm.
 
-        ONE OF THE TWO places in the repository that reach the ``None =>
-        py.None()`` field branch WITH ``convert = value_to_hashable_key``, and the
-        one that gets there through the ``Tuple`` arm;
+        This reaches ``build_udt``'s ``None => py.None()`` field branch with
+        ``convert = value_to_hashable_key``, through the ``Tuple`` arm;
         :class:`TestFrozenMapWithNestedSetUdtKey`'s
         ``test_null_and_empty_udt_fields_stay_distinct`` reaches it through the
-        ``Set`` arm. Both are frozen-map KEYS.
+        ``Set`` arm. Which values in this repository get there by that route, and
+        which reach the same branch with ``convert = value_to_py`` instead, is in
+        the ROUTING section of ``value_hashable.rs``.
 
-        SCOPE, corrected for #3504: that branch is no longer a line of the ``Udt``
-        arm — it is ``build_udt``'s, SHARED with ``udt_to_py``. So the set columns
-        DO execute the same branch (with ``convert = value_to_py``); what they do
-        not exercise is this ARM's route into it. The distinction is the arm, not
-        the branch, and the earlier wording — "a DIFFERENT function" — is false
-        after the two paths were unified. Scope a coverage claim to the ARM.
+        SCOPE: the branch is NOT a line of the ``Udt`` arm — it is
+        ``build_udt``'s, SHARED with ``udt_to_py`` since #3504 — so the
+        distinction being pinned here is the ARM's route into it, not the branch.
+        An earlier wording ("a DIFFERENT function") was false for that reason.
 
         Both directions are pinned: a null ``rank`` and a null ``label``, in two
         keys that must stay DISTINCT (a projection that collapsed ``None`` onto a
@@ -1226,10 +1207,13 @@ class TestSetElementFrozenMapWithUdtValueHalf:
     def test_null_udt_fields_in_the_map_value(self, db):
         """id=2: a wholly-null UDT value beside an empty-string/zero one.
 
-        ``''`` is not ``None``, and both survive as separate entries. These
-        travel ``udt_to_py``'s own ``None`` branch (the map VALUE is projected
-        with ``value_to_py``), not ``value_to_hashable_key``'s — the two are
-        different functions and the frozen-map classes above cover the other one.
+        ``''`` is not ``None``, and both survive as separate entries. The map
+        VALUE is projected with ``value_to_py``, so these nulls reach
+        ``build_udt``'s ``None`` branch with ``convert = value_to_py`` — NOT
+        through the hashable projection's ``Udt`` arm. (They are not "different
+        functions": ``build_udt`` is SHARED since #3504, so the difference is the
+        ARM's route into a shared branch. Which values take
+        which route is in the ROUTING section of ``value_hashable.rs``.)
         """
         row = _rows_by_id(db, "s_map_udt_val")[2]
         assert row.get("s_map_udt_val") == [
