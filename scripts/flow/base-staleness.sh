@@ -143,8 +143,30 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # THE GATE-GLOBAL SET — ONE list, ONE place, NO env override (D1/#3312).
 #
-# Content that can change ANY gate's verdict regardless of the diff. Three entry
-# shapes, and nothing else is recognised:
+# WHAT MEMBERSHIP ASSERTS (the predicate — read this before adding an entry):
+#   *** CONTENT AT THIS PATH CAN CHANGE A GATE'S VERDICT INDEPENDENTLY OF THE
+#       DIFF UNDER TEST. ***
+# Not "is important", not "is shared" — INDEPENDENTLY OF THE DIFF. A path
+# qualifies when a commit touching only it can flip ANY lane's full gate from
+# PASS to FAIL (or back) while that lane's own diff is unchanged: the test
+# runner's config, the toolchain pin, a workspace manifest, the gate script
+# itself, the scripts the gate EXECUTES, shared test support, the fixture corpus,
+# CI workflow definitions.
+#
+# TO ADD AN ENTRY: add one line below, in one of the three recognised shapes, and
+# state in the commit message which gate COMPONENT it can flip and how you
+# MEASURED its selectivity over the commits behind a real base (the method is in
+# docs/round-artifacts/issue-3650-blast-radius-measurements.md). An unmeasured
+# entry is not justified — the whole point of the set is that it is NARROWER than
+# "any churn behind the base", so every entry has to earn its false-positive cost.
+#
+# THIS LIST IS DECLARED NON-CLOSED, and the output says so on every run. It is a
+# curated, measured list of RECOGNISED gate-global content, not an enumeration of
+# all such content: a path that is gate-global and absent from it is a
+# false-negative this script reports as NOT staling. That is the SECOND declared
+# gap, alongside the dependency-closure gap.
+#
+# Three entry shapes, and nothing else is recognised:
 #   exact           an exact repo-relative path
 #   <prefix>/**     that subtree
 #   **/<basename>   that basename anywhere in the tree
@@ -154,6 +176,17 @@ set -uo pipefail
 # only a root-manifest change. (design.md's list spells them bare; `**/` is the
 # faithful reading of "the Cargo manifests", and is a superset, so it cannot
 # create a false NO-STALENESS-RECOGNISED.)
+#
+# `scripts/tests/**` is listed for the same reason `scripts/agent-gate.sh` is:
+# the gate does not only READ that roster, it EXECUTES it — `tooling-tests` runs
+# ~16 `scripts/tests/*.sh` — so a commit touching only, say,
+# scripts/tests/test_worker_supervisor.sh reds EVERY lane's full gate regardless
+# of that lane's diff, which is the membership predicate verbatim. Measured over
+# the same 107-commit base as the rest of the set: it takes the fired count from
+# 26 to 35 of 107, and 9 of those commits touch NOTHING ELSE in the set. Two
+# neighbours were measured and DELIBERATELY NOT ADDED because they fire ZERO
+# times there — `deny.toml` and the loose `scripts/*.sh` helpers — since an
+# unmeasured entry only buys false positives.
 # ---------------------------------------------------------------------------
 GATE_GLOBAL_PATTERNS='
 .config/nextest.toml
@@ -162,6 +195,7 @@ rust-toolchain.toml
 **/Cargo.lock
 scripts/agent-gate.sh
 scripts/ci/**
+scripts/tests/**
 cqlite-core/tests/support/**
 test-data/**
 .github/workflows/**
@@ -236,12 +270,19 @@ usage() {
 
 # Non-exhaustiveness is printed on EVERY run, including the unmeasured ones — the
 # output is what gets pasted, so the caveat travels with it.
+# TWO declared gaps, not one. The earlier text named only the dependency closure,
+# which affirmed a completeness the gate-global list does not have.
 print_non_exhaustive() {
   printf '%s NON-EXHAUSTIVE the blast radius is (paths this diff touches) + (a hard-coded\n' "$P"
-  printf '%s NON-EXHAUSTIVE gate-global set). It is NOT a dependency closure: a commit that\n' "$P"
-  printf '%s NON-EXHAUSTIVE changes an item this diff CALLS, while touching neither this\n' "$P"
-  printf '%s NON-EXHAUSTIVE diff'"'"'s paths nor a gate-global path, can still change a gate'"'"'s\n' "$P"
-  printf '%s NON-EXHAUSTIVE verdict and is reported here as NOT staling (#3650 non-goal).\n' "$P"
+  printf '%s NON-EXHAUSTIVE gate-global set). TWO gaps are DECLARED, both false-negative:\n' "$P"
+  printf '%s NON-EXHAUSTIVE gap 1 of 2 — NOT a dependency closure: a commit that changes an\n' "$P"
+  printf '%s NON-EXHAUSTIVE item this diff CALLS, while touching neither this diff'"'"'s paths\n' "$P"
+  printf '%s NON-EXHAUSTIVE nor a gate-global path, can still change a gate'"'"'s verdict and is\n' "$P"
+  printf '%s NON-EXHAUSTIVE reported here as NOT staling (#3650 non-goal).\n' "$P"
+  printf '%s NON-EXHAUSTIVE gap 2 of 2 — the gate-global set is a CURATED, MEASURED, DECLARED\n' "$P"
+  printf '%s NON-EXHAUSTIVE NON-CLOSED list of RECOGNISED gate-global content, never an\n' "$P"
+  printf '%s NON-EXHAUSTIVE enumeration of all of it: content that is gate-global and absent\n' "$P"
+  printf '%s NON-EXHAUSTIVE from the list is likewise reported here as NOT staling.\n' "$P"
 }
 
 # unmeasured <cause...> — exit 5. Prints NO blast-radius count and NO
@@ -316,7 +357,10 @@ if ! main_sha=$(git rev-parse --verify --quiet "$BASE_REF^{commit}" 2>/dev/null)
     "'git fetch origin main' and re-run. An absent base ref is unmeasurable, not clean."
 fi
 main_date=$(sane "$(git log -1 --format=%cI "$main_sha" 2>/dev/null)")
-[ -n "$main_date" ] || main_date=UNMEASURED-DATE
+# NOT `UNMEASURED-...`: that token is the verdict word, and injecting it into a
+# fully MEASURED run would make a slice-2 consumer grepping for `UNMEASURED`
+# false-positive. Keep the verdict vocabulary single-purpose.
+[ -n "$main_date" ] || main_date=DATE-UNAVAILABLE
 
 # D4: the MERGE-BASE, never origin/main's tip. #3392 is the recorded cost.
 if ! merge_base=$(git merge-base "$main_sha" "$subject_sha" 2>/dev/null) ||
@@ -333,15 +377,37 @@ fi
 # The diff's own paths. `-z` is MANDATORY (#3229): this repo tracks 40
 # space-bearing paths under docs/, and a path-reading `git diff` without -z
 # C-quotes them, so a newline-delimited read misclassifies and mis-compares.
-# The diff's own paths. `-z` is MANDATORY (#3229): this repo tracks 40
-# space-bearing paths under docs/, and a path-reading `git diff` without -z
-# C-quotes them, so a newline-delimited read misclassifies and mis-compares.
 #
 # The NUL-separated output goes to a FILE and is read by REDIRECTION, never
 # through `$( )` — command substitution DISCARDS NUL bytes, which would silently
 # collapse every path into one record and defeat `-z` entirely. The file lives in
 # TMPDIR: this script never writes in the repository.
-if ! git diff --name-only -z "$merge_base...$subject_sha" >"$TMPD/diff-paths" 2>/dev/null; then
+#
+# *** THESE TWO PATH SOURCES MUST BE RENAME-SYMMETRIC AND ROOT-RELATIVE ON BOTH
+#     SIDES, OR THE `M = 0` BRANCH FAILS OPEN. *** Measured (git 2.43.0, a
+# `git mv src/foo.rs src/foo_renamed.rs` plus an edit):
+#   * PORCELAIN (`git diff`, this call) HONOURS `diff.renames`, whose git default
+#     has been TRUE since 2.9, and emitted the DESTINATION ONLY. Unpinned, a PR
+#     that renames a file — routine here, the campsite rule makes splits normal —
+#     loses the OLD path from DIFF_PATHS, so a commit behind that edited the old
+#     path matches NEITHER half of the blast radius and the scan reports
+#     `blast-radius 0 RECOGNISED` while the merge composes content nothing tested.
+#   * PORCELAIN also honours `diff.relative`, and this is the LIVE hazard because
+#     it is a config the INVOKER controls: with it set and cwd in a subdirectory
+#     the same call emitted `foo_renamed.rs` with NO `src/` prefix, which can
+#     never equal the root-relative `src/foo.rs` the commit side reports. That
+#     makes `M` a function of the invoker'"'"'s cwd, so `--no-relative` is required
+#     rather than defensive. BOTH are therefore pinned off HERE.
+#   * PLUMBING (`git diff-tree`, the commit scan below) does NOT honour
+#     `diff.renames` even when it is FORCED ON: measured, `-c diff.renames=true`
+#     still emitted BOTH paths. Rename detection there needs an explicit `-M`.
+#     So the plumbing call needs no pin, and this comment deliberately does NOT
+#     claim the config reaches it — that claim would be false and would rot.
+#     THE PLUMBING-SIDE RISK RUNS THE OTHER WAY: adding `-M` to `diff-tree` to
+#     "improve" the commit scan would reintroduce the asymmetry from the opposite
+#     direction (destination-only on the commit side). DO NOT ADD `-M` THERE.
+if ! git -c diff.renames=false -c diff.relative=false \
+  diff --name-only -z "$merge_base...$subject_sha" >"$TMPD/diff-paths" 2>/dev/null; then
   unmeasured "git diff --name-only -z $merge_base...$subject_sha failed"
 fi
 DIFF_PATHS=()
@@ -393,19 +459,31 @@ matches_diff_paths() {
 # 107-commit case). A pathological N is reported and scanned, never silently
 # truncated — a truncated scan would have to be an UNMEASURED, so truncating
 # would trade a slow answer for a fail-closed one.
-commits=""
+# Written to a FILE and read by redirection, not iterated as an unquoted
+# expansion: the header claims shellcheck-clean, and `for c in $commits` was the
+# one word-splitting expansion in the file.
+: >"$TMPD/behind-commits"
 if [ "$behind" -gt 0 ]; then
-  if ! commits=$(git rev-list "$merge_base..$main_sha" 2>/dev/null); then
+  if ! git rev-list "$merge_base..$main_sha" >"$TMPD/behind-commits" 2>/dev/null; then
     unmeasured "git rev-list $merge_base..$main_sha failed"
   fi
 fi
 
+# How many matched commits are LISTED individually; the rest are summarised. One
+# named constant, referenced twice — never a repeated magic literal. The reported
+# COUNT is never truncated, only the listing.
+MATCHED_LIST_LIMIT=20
+
 m=0
 matched_lines=""
-for c in $commits; do
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
   # `-m --first-parent` so a MERGE commit reports its change against its first
   # parent instead of reporting NOTHING; `--root` so a root commit is not
   # silently empty either. Either silence would understate M.
+  # NO `-M` here, deliberately — see the rename-symmetry note on the porcelain
+  # call above. `diff-tree` does not rename-detect without it, which is exactly
+  # the behaviour the diff side is pinned to match.
   if ! git diff-tree -r -z --no-commit-id --name-only -m --first-parent --root "$c" \
     >"$TMPD/commit-paths" 2>/dev/null; then
     unmeasured "git diff-tree failed on commit $c — the scan is INCOMPLETE, so it is" \
@@ -434,7 +512,7 @@ for c in $commits; do
     matched_lines="$matched_lines$(git rev-parse --short=9 "$c" 2>/dev/null) $why $(sane "$hit")
 "
   fi
-done
+done <"$TMPD/behind-commits"
 
 # --- report ----------------------------------------------------------------
 printf '%s subject %s (%s)\n' "$P" "$(sane "$rev")" "$subject_sha"
@@ -457,14 +535,15 @@ else
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     n=$((n + 1))
-    if [ "$n" -le 20 ]; then
+    if [ "$n" -le "$MATCHED_LIST_LIMIT" ]; then
       printf '%s matched %s\n' "$P" "$line"
     fi
   done <<EOF
 $matched_lines
 EOF
-  if [ "$n" -gt 20 ]; then
-    printf '%s matched (+%s further staling commits scanned but not listed)\n' "$P" "$((n - 20))"
+  if [ "$n" -gt "$MATCHED_LIST_LIMIT" ]; then
+    printf '%s matched (+%s further staling commits scanned but not listed)\n' \
+      "$P" "$((n - MATCHED_LIST_LIMIT))"
   fi
 fi
 print_non_exhaustive
