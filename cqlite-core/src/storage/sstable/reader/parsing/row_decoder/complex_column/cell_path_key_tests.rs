@@ -44,6 +44,7 @@
 //!     * **strict `!= N`**: Short(2) Byte(1) SimpleDate(4) Time(8);
 //!     * `> 1`, i.e. 0 or 1: Boolean;
 //!     * Inet: RETURNS EARLY on empty, then `getByAddress` → 0, 4 or 16.
+//!
 //!   An earlier revision of THIS header claimed a uniform `!= N` while
 //!   `cell_path_key.rs` said in bold that that claim was wrong — two files in one
 //!   diff giving contradictory Cassandra authority for the table's load-bearing
