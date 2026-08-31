@@ -2102,12 +2102,20 @@ else
       "$(grep -n '_extra_locks' "$_f1_src" | head -4)"
 fi
 
-# BEHAVIOURAL, and this is the discriminator: with a SPACE-bearing summary path, force the rollback
-# and require the lock it created to be GONE. Artifact order is "$SUMMARY.heartbeat" then "$LOGFILE",
-# so conflicting on the LOG guarantees the heartbeat lock was created first and must be rolled back —
-# without that ordering the case would pass vacuously. Pre-fix, `rm -f $_extra_locks` split
-# '<dir>/has space/b.txt.heartbeat.launch-lock' into two words and the real lock SURVIVED, so every
-# later launch on that path refused forever.
+# NOT a discriminator for the array fix, and the honest version of this case says so. I wrote it as
+# one -- "force the rollback with a space-bearing path and require the lock to be gone" -- and MEASURED
+# it against the pre-fix script: it PASSED there too, i.e. it was vacuous, asserting an absence that
+# holds trivially. Three probes explain why, and they are worth recording because they establish a
+# property, not just a test outcome: a live foreign reservation on the log, an uncreatable log
+# (read-only parent), and a lock path that is a DIRECTORY are EACH refused by the artifact-set
+# PRE-CHECK (or the log-writability check) BEFORE any lock is created. The pre-check evaluates every
+# artifact as free / live / owner-unestablished under the global launch lock, and the lock prevents a
+# peer interleaving between check and `ln -s`. So the `_extra_ok=0` rollback is unreachable from
+# outside; only an I/O-level `ln -s` failure (ENOSPC/EROFS after the writability check passed) reaches
+# it, which cannot be induced reliably here. The array fix is therefore DEFENCE IN DEPTH, covered
+# STRUCTURALLY by 4b.154 -- and this case now pins the reachability fact instead of pretending to test
+# the rollback: a conflicting artifact set must be refused with NO lock left behind. If someone later
+# weakens the pre-check, the rollback becomes reachable and this case catches the leftover.
 if [ "$HAVE_SYSTEMD" = yes ]; then
   _sp="$TMP/has space"
   mkdir -p "$_sp"
@@ -2115,15 +2123,16 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   _spau=$(printf '%s' "$_spa" | sed -n 's/^unit:  *//p'); [ -n "$_spau" ] && echo "$_spau" >> "$UNITS_FILE"
   _spb=$(bash "$LAUNCHER" --summary "$_sp/b.txt" --log "$_sp/shared.log" -- --only fmt 2>&1); _spbr=$?
   _spbu=$(printf '%s' "$_spb" | sed -n 's/^unit:  *//p'); [ -n "$_spbu" ] && echo "$_spbu" >> "$UNITS_FILE"
-  if [ -n "$_spau" ] && [ "$_spbr" != 0 ] && [ ! -e "$_sp/b.txt.heartbeat.launch-lock" ]; then
-    ok "4b.155 a refused launch rolls back its own SPACE-bearing lock (leaves nothing behind)"
+  if [ -n "$_spau" ] && [ "$_spbr" != 0 ] && [ ! -e "$_sp/b.txt.heartbeat.launch-lock" ] \
+     && printf '%s' "$_spb" | grep -q 'artifact-set collision'; then
+    ok "4b.155 a conflicting artifact set is refused by the PRE-CHECK, leaving no lock behind"
   else
-    bad "4b.155 a refused launch rolls back its space-bearing lock" \
+    bad "4b.155 a conflicting artifact set is refused before any lock is created" \
         "first-unit='${_spau:-none}' second-exit=$_spbr leftover=$([ -e "$_sp/b.txt.heartbeat.launch-lock" ] && echo yes || echo no)"
   fi
   for _u in $_spau $_spbu; do systemctl --user stop "$_u" >/dev/null 2>&1; done
 else
-  skipc "4b.155 space-bearing rollback" "no user systemd manager on this host"
+  skipc "4b.155 artifact-set pre-check" "no user systemd manager on this host"
 fi
 
 # F2. The global launch lock fell back to ${TMPDIR:-/tmp} — a shared, PREDICTABLE, fixed-NAME path any

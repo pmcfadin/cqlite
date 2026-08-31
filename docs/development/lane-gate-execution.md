@@ -1294,10 +1294,22 @@ false comment licensing the defect beneath it** — see that section above.
 
 And the coverage that pins them is deliberately mixed. `4b.154`/`4b.158` are **structural** (the array
 exists, iterated quoted; the emission is absolute), which is what a reviewer can check by reading.
-`4b.155` is the **behavioural discriminator** and only works because of an ordering fact: the artifact
-loop is `"$SUMMARY.heartbeat"` then `"$LOGFILE"`, so conflicting on the **log** guarantees the heartbeat
-lock was already created and must be rolled back. Conflict on the summary instead and the case passes
-vacuously, having rolled back nothing. `4b.159` captures the **generated** wrapper by stubbing
+`4b.155` was **written as the behavioural discriminator and is not one** — recorded here because the
+correction is the useful part. The intent was "force the rollback with a space-bearing path, require the
+lock to be gone"; measured against the pre-fix script it **passed there too**, i.e. it asserted an
+absence that holds trivially. Three probes explain why: a live foreign reservation on the log, an
+uncreatable log (read-only parent), and a lock path that is a **directory** are each refused by the
+artifact-set **pre-check** (or the log-writability check) **before any lock is created**. The pre-check
+classifies every artifact as free / live / owner-unestablished under the global launch lock, and the
+lock stops a peer interleaving between check and `ln -s`. **So the `_extra_ok=0` rollback is not
+reachable from outside**; only an I/O-level `ln -s` failure (ENOSPC/EROFS after the writability check
+passed) reaches it. F1 is therefore a real latent defect whose exploit path — roborev's "remove
+unrelated/live reservation files" — **requires reaching a rollback external input cannot reach**. The
+fix stands as defence in depth, covered **structurally** by `4b.154`; `4b.155` was repointed at the
+property it actually verifies, so that weakening the pre-check later makes the rollback reachable and
+trips it. The general rule this cost: **a test that passes on the unfixed code is not coverage, and a
+vacuous test wearing behavioural clothing is worse than no test** — so RED-run every new case against
+the pre-fix artifact before believing it, which is how this one was caught. `4b.159` captures the **generated** wrapper by stubbing
 `systemd-run` so it is never executed and therefore never self-deletes — because a structural grep
 cannot see what the launcher actually wrote, only what its source says it would write. `4b.157` is
 `4b.156`'s control, so a launcher that refused *everything* could not read as a pass.
