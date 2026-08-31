@@ -24,8 +24,14 @@ GATE="$SCRIPT_DIR/../agent-gate.sh"
 
 PASS=0
 FAIL=0
+SKIPS=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; PASS=$PASS; FAIL=$((FAIL + 1)); }
+# A SKIP IS NOT A PASS (#3414 roborev round 2). The host-conditional case below announced
+# itself through `ok`, which incremented PASS and reported nothing skipped — so a suite
+# total could not distinguish "ran and passed" from "did not run", which is the same
+# proxy-for-a-fact shape this issue exists to remove, one directory over.
+skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
 # budget_field <line> <field>: extract "<field>=<value>" from a `cpu-budget:` line.
 budget_field() {
@@ -142,7 +148,7 @@ if [ "$(uname -s)" = Darwin ] && command -v taskpolicy >/dev/null 2>&1; then
     bad "wrapper-active line not well-formed (space leaked from '$w'?): $wline"
   fi
 else
-  ok "SKIP wrapper-engage case (not macOS-with-taskpolicy)"
+  skip "wrapper-engage case (not macOS-with-taskpolicy)"
 fi
 
 # --- 8. The cpu-budget line is well-formed (all fields present) ---
@@ -240,5 +246,5 @@ else
 fi
 
 echo
-echo "PASS=$PASS FAIL=$FAIL"
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
 [ "$FAIL" -eq 0 ]

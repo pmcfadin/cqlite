@@ -65,8 +65,11 @@
 #      VISIBILITY IS ONLY HALF THE QUESTION: a value the gate does not HONOUR is a pin
 #      in name only, so the gate itself is then asked (via its `--cpu-budget` hook,
 #      never a re-derivation of its rules) what it will do with the value. One
-#      greppable `gate-pin:` line: VERIFIED / NOT-HONOURED / FAILED / UNMEASURED, and
-#      only VERIFIED is an [ok] (same posture as `git-push:`). `--yes` persists it, and
+#      greppable `gate-pin:` line: VERIFIED / NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED /
+#      UNMEASURED, and only VERIFIED is an [ok] (same posture as `git-push:`). VERIFIED
+#      requires BOTH halves — the line present in the system-wide file AND a fresh
+#      session that sees a value the gate honours — because file-only was the original
+#      #3414 defect and session-only certifies a pin that may reach sudo sessions alone. `--yes` persists it, and
 #      so does the narrow `--fix-gate-pin` that `.agent-ami/profile.yaml`'s verify.run
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
@@ -2047,7 +2050,11 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # a doc, because an unqualified VERIFIED reads as "gates on this box are pinned" and the
   # probe cannot see a gate launched from a non-PAM parent (#3414 review B2).
   pin_scope_note() {
-    info "scope: this measured a PAM-created (sudo) session. A process tree created WITHOUT PAM — a systemd unit, a container entrypoint — never has $PIN_ENV_FILE applied, so this does NOT prove every gate on this box is pinned"
+    # What the correlation DOES buy: the line is in the system-wide file pam_env reads in
+    # every PAM stack (sshd, login, su, sudo), so the claim is not limited to the one
+    # session type the probe could open. What it does NOT buy is a launch path with no
+    # PAM in its ancestry at all — that residual is real and is stated, not implied.
+    info "scope: the line is in $PIN_ENV_FILE, which pam_env reads for EVERY PAM-created session (sshd, login, su, sudo) — but a process tree created WITHOUT PAM, a systemd unit or a container entrypoint, never has it applied, so this does not prove every gate on this box is pinned"
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
   }
 
@@ -2143,14 +2150,47 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       pin_gate_src=$(pin_gate_source_for "$pin_probe_seen") || pin_gate_src=""
       case "$pin_gate_src" in
         pinned)
-          # The text says what was MEASURED and nothing more. It used to assert the value
-          # "came from the system env file via PAM, not from inheritance" — the second
-          # half is establishable (this run's value, BASH_ENV and ENV were all scrubbed),
-          # the FIRST half is not: ~/.pam_environment or a sudoers env_file satisfies the
-          # observation identically. Claiming an attribution the probe cannot make is the
-          # proxy-for-a-fact shape this whole section exists to remove.
-          ok "gate-pin: VERIFIED (a PAM-created, profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate HONOURS it verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first, so it is not inherited from this shell)"
-          pin_scope_note
+          # TWO AFFIRMATIVE HALVES, AND NEITHER SUFFICES ALONE (#3414 roborev round 2).
+          # Scoping the TEXT to "a sudo session" while leaving the VERDICT an `ok` still
+          # certified onboarding green: zero warnings => "All checks green." => verify.run
+          # passes, on a box where the value might reach ONLY sudo sessions (a sudoers
+          # `env_file`, `~/.pam_environment`) while every gate launched outside sudo gets
+          # nothing. A verdict that passes while its own text says it might not hold is a
+          # contradiction, not a caveat.
+          #
+          # So the probe is CORRELATED WITH THE FILE, using the read already taken to
+          # decide the append — no second probe:
+          #   file line + session sees it  => VERIFIED, and that is well-founded for ANY
+          #     PAM-created session (sshd, login, su — pam_env reads /etc/environment in
+          #     all of those stacks, not just sudo's), not merely for the one we opened.
+          #   session sees it, no file line => the value comes from something sudo- or
+          #     user-specific; it is NOT a system-wide pin. Non-passing.
+          # File-only was the ORIGINAL #3414 defect and session-only is this finding, so
+          # requiring both is the smallest honest verdict. Two fixes the reviewer offered
+          # are deliberately NOT taken: "verify through the actual gate launch path"
+          # (bootstrap cannot know that path) and "keep any sudo-scoped result
+          # non-passing" (the probe is ALWAYS sudo-scoped, so that reds every box's
+          # onboarding forever — an always-firing alarm is one people learn to waive,
+          # which is the same reason the fleet does not just let verify red).
+          case "$PIN_FILE_HAS_LINE" in
+            yes)
+              ok "gate-pin: VERIFIED ($PIN_ENV_FILE carries the line AND a fresh PAM-created, profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
+              pin_scope_note
+              ;;
+            unknown)
+              # Half the evidence is unreadable, so the correlation cannot be made. Not a
+              # pass: a positive verdict requires an affirmative measurement of BOTH halves.
+              warn "gate-pin: UNMEASURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but $PIN_ENV_FILE could not be READ, so it cannot be confirmed the value is a system-wide pin rather than a sudo- or user-specific one)"
+              ;;
+            *)
+              warn "gate-pin: NOT-SYSTEM-WIDE (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but there is NO CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE — so it is reaching this session from a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment) and gates launched outside that source get nothing)"
+              if [ "$PIN_FILE_HAS_LINE" = absent-file ]; then
+                info "this $PLATFORM host has no $PIN_ENV_FILE, so there is no system-wide file to correlate against — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image)"
+              else
+                info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (persists '$PIN_ENV_LINE' to $PIN_ENV_FILE, which every PAM session reads — the per-user source stays as it is)"
+              fi
+              ;;
+          esac
           ;;
         invalid)
           # Its OWN verdict, not FAILED: the pin is present and visible, so "persist the

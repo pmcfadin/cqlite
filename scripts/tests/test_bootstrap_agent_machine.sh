@@ -905,6 +905,15 @@ mk_push_repo() {
   # running. Staging it here plus the pinned `sudo` shim in mk_push_bin makes 5b contribute
   # ZERO warnings deterministically — on a pinned host and an unpinned one alike.
   cp "$SCRIPT_DIR/../agent-gate.sh" "$dir/scripts/agent-gate.sh"
+  # A PER-SANDBOX system env file carrying the pin, pointed at by run_push. Section 5b's
+  # VERIFIED now requires BOTH the file line and a session that sees it (roborev round 2),
+  # so without this the sandboxes would take the new NOT-SYSTEM-WIDE branch, base_warns
+  # would go back to 2, and the three end-to-end cases would silently skip again — the
+  # round-4 defect returning through the round-5 fix. Per-sandbox rather than the
+  # suite-wide seam ALSO removes an order-dependence that was already latent: the shared
+  # file is appended to by whichever earlier `--yes` case runs first, so what these cases
+  # measured depended on suite ordering.
+  printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$dir/etc-environment"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
 
@@ -992,6 +1001,7 @@ run_push() {
   local repo="$1" bin="$2" gc="$3"; shift 3
   push_rc=0
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
+    CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
@@ -2768,7 +2778,10 @@ else
   #      Root can read a 0000 file, so the case would assert nothing as root — skipped
   #      rather than silently inverted.
   if [ "$(id -u)" = 0 ]; then
-    ok "SKIP gate-pin unreadable-env-file case (running as root: 0000 is still readable)"
+    # Through `skip`, NOT `ok` (#3414 roborev round 2): an `ok` here increments PASS and
+    # leaves SKIP unchanged — a skip counted as a pass, sitting inside the very accounting
+    # added to expose that.
+    skip "gate-pin unreadable-env-file case (running as root: 0000 is still readable)"
   else
     envf_s2="$tmp/pin-env-s2"; printf 'FOO=bar\n' >"$envf_s2"; chmod 0000 "$envf_s2"
     # shims_none (a session that injects nothing) is the right stand-in here: the append
@@ -2869,13 +2882,81 @@ else
   #      must therefore carry the limit AND name the gate's own cpu-budget token as the
   #      authoritative per-run confirmation — and must not re-assert the attribution it
   #      cannot establish ("came from the system env file").
-  if printf '%s' "$out_x" | grep -q 'does NOT prove every gate on this box is pinned' \
-     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)' \
-     && ! printf '%s' "$out_x" | grep -q 'came from the system env file'; then
-    ok "gate-pin: VERIFIED states what it did NOT measure and names cpu-budget as authoritative"
+  # Scoped to the ATTRIBUTION half; the scope-note WORDING is 11z4's subject, so the two
+  # cases do not both red on one rewording. What must never come back is the claim the
+  # probe cannot establish — that the value "came from the system env file" — since
+  # ~/.pam_environment or a sudoers env_file satisfies the observation identically. (What
+  # licenses the system-wide claim now is the FILE correlation, not the probe.)
+  if ! printf '%s' "$out_x" | grep -q 'came from the system env file' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
+    ok "gate-pin: VERIFIED does not re-assert the unestablishable attribution, and names cpu-budget as authoritative"
   else
-    bad "gate-pin: VERIFIED claims more than the probe measured (missing scope note?)"
+    bad "gate-pin: VERIFIED claims an attribution the probe cannot make (or dropped the cpu-budget pointer)"
     printf '%s\n' "$out_x" | grep -iA 2 'gate-pin: VERIFIED' | head -4
+  fi
+
+  # 11z. VERIFIED REQUIRES BOTH HALVES (issue #3414 roborev round 2). A session that sees
+  #      the value while the system-wide file does NOT carry the line means the value is
+  #      arriving from something sudo- or user-specific (a sudoers env_file,
+  #      ~/.pam_environment) — real for the session bootstrap opened, absent for every
+  #      gate launched outside it. Scoping the TEXT was not enough: the verdict was still
+  #      an `ok`, so zero warnings still bought "All checks green." and verify.run still
+  #      passed on such a box.
+  envf_z="$tmp/pin-env-z"; : >"$envf_z"          # file has NO pin line ...
+  out_z=$(runpin "$pinroot" "$shims_one" "$envf_z" HOME="$pin_home_plain")   # ... session DOES see one
+  if printf '%s' "$out_z" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! printf '%s' "$out_z" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_z" | grep -q 'sudo- or user-specific source'; then
+    ok "gate-pin: a session-visible value with NO line in the system env file is NOT-SYSTEM-WIDE, never VERIFIED"
+  else
+    bad "gate-pin: a sudo-only value was certified as a system-wide pin"
+    printf '%s\n' "$out_z" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11z2. ...and the file half alone is not enough either, which is the ORIGINAL #3414
+  #      defect: the line is in the file but no session sees it. Asserting both directions
+  #      is what makes "neither half suffices" a tested property rather than a comment.
+  #      (11b/11q already cover the both-halves-present positive.)
+  envf_z2="$tmp/pin-env-z2"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_z2"
+  out_z2=$(runpin "$pinroot" "$shims_none" "$envf_z2" HOME="$pin_home_plain")
+  if printf '%s' "$out_z2" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_z2" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: the file half ALONE is not VERIFIED either (the original #3414 defect)"
+  else
+    bad "gate-pin: a file line with no session visibility was treated as a pin"
+    printf '%s\n' "$out_z2" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11z3. An UNREADABLE system env file cannot be correlated, so the run has only half the
+  #      evidence the verdict requires — UNMEASURED, never VERIFIED. Root can read a 0000
+  #      file, so the case would assert nothing there.
+  if [ "$(id -u)" = 0 ]; then
+    skip "gate-pin uncorrelatable-file case (running as root: 0000 is still readable)"
+  else
+    envf_z3="$tmp/pin-env-z3"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_z3"; chmod 0000 "$envf_z3"
+    out_z3=$(runpin "$pinroot" "$shims_one" "$envf_z3" HOME="$pin_home_plain")
+    chmod 0644 "$envf_z3"
+    if printf '%s' "$out_z3" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_z3" | grep -q 'could not be READ' \
+       && ! printf '%s' "$out_z3" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: an unreadable system env file cannot be correlated => UNMEASURED, not VERIFIED"
+    else
+      bad "gate-pin: an uncorrelatable file still produced a verdict about system-wide scope"
+      printf '%s\n' "$out_z3" | grep -i 'gate-pin' | head -3
+    fi
+  fi
+
+  # 11z4. The scope note must now claim the CORRELATED scope — every PAM stack, not just
+  #      the sudo session the probe opened — while still naming the residual it cannot
+  #      cover. A note that under-claims after the correlation is as wrong as one that
+  #      over-claimed before it.
+  if printf '%s' "$out_x" | grep -q 'pam_env reads for EVERY PAM-created session' \
+     && printf '%s' "$out_x" | grep -q 'created WITHOUT PAM' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
+    ok "gate-pin: the scope note claims the correlated scope and still names the no-PAM residual"
+  else
+    bad "gate-pin: the scope note does not match the correlated verdict"
+    printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
   fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
