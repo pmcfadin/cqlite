@@ -38,7 +38,12 @@
 # ON — which is exactly why no existing component sees it. Two plants, one per half of
 # the lane:
 #   observability-type   a type error inside a #[cfg(feature = "observability")] item
-#                        -> caught by pass 1 (cargo check) AND pass 2 (clippy)
+#                        -> caught by pass 1 (cargo check). NOT by pass 2: the component
+#                           SKIPS clippy once an earlier pass has failed, so neither of the
+#                           first two plants ever exercised the clippy pass in the FAILING
+#                           direction. That gap was real and is why observability-clippy
+#                           exists (roborev job 281) — a header claiming coverage the
+#                           harness does not have is worse than no claim.
 #   observability-lint   a `-D warnings`-class lint (an unused variable) inside a
 #                        #[cfg(feature = "observability-testing")] item -> caught only
 #                        because -D warnings is in force. It is gated on
@@ -89,7 +94,7 @@
 # Usage:
 #   bash scripts/tests/test_agent_gate_all_features_lane.sh                  # both plants
 #   bash scripts/tests/test_agent_gate_all_features_lane.sh <plant> ...      # subset
-#     plants: observability-type observability-lint
+#     plants: observability-type observability-lint observability-clippy
 #   CQLITE_DATASETS_ROOT=<abs>  required ONLY for the control run's core-tests half;
 #                               without it the control degrades to clippy alone and SAYS SO.
 #
@@ -104,7 +109,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "not a git checkout" >&2; e
 cd "$REPO_ROOT" || exit 1
 
 LANE=all-features-check
-ALL_PLANTS=(observability-type observability-lint)
+ALL_PLANTS=(observability-type observability-lint observability-clippy)
 
 SUBSET=0
 if [ "$#" -gt 0 ]; then
@@ -314,6 +319,37 @@ pub fn afc3453_planted_observability_lint_fn() -> bool {
 EOF
 }
 plant_marker_observability_lint='afc3453_planted_observability_lint_break'
+
+# A CLIPPY-ONLY lint: it must PASS `cargo check -D warnings` and FAIL `cargo clippy -D
+# warnings`. Without it the clippy half of the lane was never observed failing, because the
+# component runs check FIRST and skips clippy once it fails — so both earlier plants proved
+# only pass 1. That matters here more than usual: clippy at --all-features is precisely what
+# run_clippy EXCLUDES by #1844 design, i.e. the half of this component with no other cover.
+#
+# MEASURED, not chosen from a list: `clippy::needless_return` produces NO rustc diagnostic
+#   cargo check  -p cqlite-core --all-features --all-targets (RUSTFLAGS=-D warnings) -> rc=0
+#   cargo clippy -p cqlite-core --all-features --all-targets -- -D warnings           -> rc=101
+#                                                          "error: unneeded `return` statement"
+#
+# AND THE MARKER IS THE BINDING NAME, for the reason the lint plant above records: clippy
+# points at the STATEMENT (`return afc3453_planted_clippy_only_v + 1;`) and a file:line, never
+# the enclosing item. Verified by reading the real diagnostic, not assumed.
+plant_observability_clippy() {
+  cat >> "$TREE/cqlite-core/src/lib.rs" <<'PLANTEOF'
+
+// #3453 PLANTED BREAK (clippy-only; all-features lane observation harness) — reverted by the harness.
+#[cfg(feature = "observability")]
+pub fn afc3453_planted_clippy_only() -> u32 {
+    let afc3453_planted_clippy_only_v = 41u32;
+    return afc3453_planted_clippy_only_v + 1;
+}
+PLANTEOF
+}
+plant_marker_observability_clippy='afc3453_planted_clippy_only_v'
+plant_desc_observability_clippy='a CLIPPY-ONLY lint (clippy::needless_return) inside a #[cfg(feature = "observability")] fn — it PASSES cargo check -D warnings and fails ONLY the clippy pass, so it is the only plant that observes pass 2 in the failing direction'
+# Which passes this plant must exercise, asserted from the component log below. The other two
+# plants stop at pass 1, so only this one can pin pass 2.
+plant_passes_observability_clippy='1=OK,2=FAIL'
 plant_desc_observability_lint='an UNUSED-VARIABLE (-D warnings class) lint inside a #[cfg(feature = "observability-testing")] fn — gated on observability-TESTING because that, not `observability`, is what gates the #3382 tests; fires only because -D warnings is in force'
 
 # One uniform revert: restore tracked files, delete untracked ones. `clean -fd` without
@@ -444,6 +480,32 @@ for plant in "${PLANTS[@]}"; do
     [ "$attributed" = 0 ] && grep -qF "$marker" "$planted_log" && attributed=1
   fi
 
+  # PASS DISCRIMINATION (roborev job 281). A plant may declare WHICH of the component's two
+  # passes it must exercise, e.g. `1=OK,2=FAIL`. Without this, a plant that reds the lane
+  # proves only that SOMETHING failed — and both original plants stop at pass 1, because the
+  # component skips clippy once check has failed, so the clippy pass had no failing-direction
+  # coverage at all. Read from the component's own log lines, which state each pass verdict.
+  passes_var="plant_passes_${fn}"
+  passes_spec="${!passes_var:-}"
+  passes_ok=1
+  passes_detail=""
+  if [ -n "$passes_spec" ]; then
+    for claim in ${passes_spec//,/ }; do
+      want_n="${claim%%=*}"; want_v="${claim##*=}"
+      hit=0
+      for l in $planted_component_logs; do
+        # Redirection, not a pipe: `grep -q` exits on first match and this file runs
+        # `pipefail`, so a piped producer can take SIGPIPE and invert the verdict (#3685).
+        grep -qE "pass ${want_n}/2 .*: ${want_v}\b" "$l" && hit=1
+      done
+      [ "$hit" = 1 ] || { passes_ok=0; passes_detail="$passes_detail pass${want_n}!=${want_v}"; }
+    done
+    if [ "$passes_ok" = 1 ]; then
+      echo "  pass-discrimination: OK — the component log shows $passes_spec, so this plant"
+      echo "     exercises the pass it claims to (not merely 'the lane went red')"
+    fi
+  fi
+
   # The control passes IFF every control component reports PASS (a SKIP is NOT a pass —
   # a skipped control measures nothing, and reporting it as green would manufacture the
   # very evidence this half exists to provide).
@@ -457,10 +519,16 @@ for plant in "${PLANTS[@]}"; do
   done
   [ "$control_rc" = 3 ] || { control_ok=0; control_detail="$control_detail exit=$control_rc"; }
 
-  if [ "$clean_ok" = 1 ] && [ "$planted_ok" = 1 ] && [ "$attributed" = 1 ] && [ "$control_ok" = 1 ]; then
+  if [ "$clean_ok" = 1 ] && [ "$planted_ok" = 1 ] && [ "$attributed" = 1 ] && [ "$control_ok" = 1 ] && [ "$passes_ok" = 1 ]; then
     RESULTS+=("$plant|FIRED|lane FAIL naming $marker; control ($CONTROL_NOTE) stayed GREEN on the same plant")
     echo "  => FIRED: $LANE went red and NAMED $marker, while$control_statuses stayed green on the"
     echo "     SAME planted tree — which is issue #3453's thesis, demonstrated rather than asserted."
+  elif [ "$planted_ok" = 1 ] && [ "$attributed" = 1 ] && [ "$control_ok" = 1 ] && [ "$passes_ok" = 0 ]; then
+    RESULTS+=("$plant|WRONG-PASS|lane fired and control stayed green, but the component log does not show $passes_spec:$passes_detail")
+    echo "  => WRONG PASS: the lane went red for the wrong reason —$passes_detail. The plant"
+    echo "     was chosen to exercise a specific pass; a red from a different pass proves"
+    echo "     nothing about the one it was written for."
+    FAILED=1
   elif [ "$planted_ok" = 1 ] && [ "$attributed" = 1 ] && [ "$control_ok" = 0 ]; then
     RESULTS+=("$plant|CONTROL-RED|the lane fired, but the control also went red:$control_detail")
     echo "  => CONTROL RED: the lane fired, but$control_detail — so an EXISTING component already"
