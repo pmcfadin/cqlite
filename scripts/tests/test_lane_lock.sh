@@ -688,7 +688,19 @@ echo "TEST 16: --help exits 0 and documents every subcommand"
 # Guards the header against drifting out of the file: print_help renders the header
 # comment, so a subcommand added without documenting it fails here.
 # ===========================================================================
-ll --help; rc=$RC; out="$OUT"
+# RETRY THE CAPTURE, NOT THE ASSERTION (#3436). This case failed twice at load ~102 on a
+# 16-core box with three peer gates running, and passed 3/3 at load ~87 and 3/3 in isolation
+# — the signature of a fork failure making the command substitution yield an empty or
+# truncated capture, not of a header regression. Retrying the READ is legitimate because the
+# property under test is "the header documents every subcommand", and `--help` is pure and
+# read-only; retrying does not weaken that property. Retrying the ASSERTION would.
+# Bounded at 3, and a persistent failure still lands in `bad` with the byte/line diagnostic,
+# so a real regression cannot be retried into a pass.
+rc=1; out=""
+for _try in 1 2 3; do
+  ll --help; rc=$RC; out="$OUT"
+  [ "$rc" -eq 0 ] && [ "${#out}" -gt 1000 ] && break
+done
 missing=""
 for sub in acquire verify probe release reclaim status; do
   printf '%s' "$out" | grep -q "^  $sub " || missing="$missing $sub"
@@ -696,7 +708,10 @@ done
 if [ "$rc" -eq 0 ] && [ -z "$missing" ] && printf '%s' "$out" | grep -q '3436'; then
   ok "--help exits 0 and documents acquire/verify/probe/release/reclaim/status (and cites #3436)"
 else
-  bad "--help incomplete: rc=$rc undocumented:${missing:-<none>}"
+  # DIAGNOSE WHICH CLAUSE FAILED. This case failed twice with `rc=0 undocumented:<none>`,
+  # i.e. every named clause satisfied — which told us nothing and cost two investigations.
+  # An assertion that cannot say why it failed is a bad assertion.
+  bad "--help incomplete: rc=$rc undocumented:${missing:-<none>} 3436-hits=$(printf '%s' "$out" | grep -c 3436) out-lines=$(printf '%s' "$out" | wc -l) out-bytes=${#out}"
 fi
 
 # ===========================================================================
