@@ -874,15 +874,48 @@ legitimately leaves an empty sidecar, and that state is named too.
 
 **It never renders blank.** A component with no observed invocation renders an explicit
 `[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; a `SKIP` that never
-reached cargo — or a `FAIL` before its first cargo call — says exactly that.
+reached cargo — or a `FAIL` before its first cargo call — says exactly that (and names the
+metadata-probe exclusion, because `cargo tree`/`metadata` probes are deliberately not
+recorded and three components FAIL exactly there).
 And **observation beats declaration**: a component declared `no-cargo` that is observed
 running cargo shows the observed sets with a `!declared-no-cargo` marker, so a
 mis-declaration self-corrects instead of being believed.
 
+**THE CLASS DECIDES WHAT MAY BE CLAIMED — four classes, and three rules that came out of
+one family of findings (roborev job 273).**
+
+1. **A component whose cargo runs only in a CHILD PROCESS is never class `cargo`.** The
+   interceptors are unexported by design, so `cargo` means *observable in the gate's own
+   shell, or self-recorded from a `bash -c` body*. `tooling-tests` was declared `cargo`
+   while its only cargo runs inside ~60 nested test scripts — so a PASS read
+   `[UNDECLARED]` and, worse, a FAIL could claim it *"FAILed before its first cargo
+   invocation"* after a child `cargo build` really ran. It is now the fourth class,
+   `unobservable:<why>`, rendered `[cargo not observable: <why>]`: it asserts **nothing**
+   in either direction and takes no SKIP/FAIL note, because "nothing ran" is precisely
+   what that shell cannot know. An in-shell observation rides beside it additively.
+2. **An `indirect:<driver>` component RECORDS whether its driver was REACHED**, from an
+   explicit signal — a build-verify rc, or a recorder call on the line immediately before
+   the driver runs — **never inferred from the terminal status**. `python-bindings` can die
+   in venv/pip before maturin and `node-bindings` in `npm ci` before `npm run build`, and
+   both used to report `[via maturin: …]` / `[via npm run build (napi): …]` for a cargo
+   invocation that never happened. One shared helper pair does the mapping for all of them
+   (`_fm_note_driver` + `_fm_note_maturin_rc`, plus the exported child-callable
+   `_fm_observe_driver`), so a fourth indirect component cannot get the direction wrong by
+   writing its own text. An indirect component with **no** record renders `UNDECLARED`
+   **naming the driver** — a visible recording gap, never a claim.
+3. **The misclassification is MECHANICALLY DETECTABLE**, which is the part that stops the
+   next round: the census that missed rule 1 *read the table* instead of exercising it. The
+   guard now RUNS every `cargo`-class component under `--only` with a recording shim
+   `cargo` (29 today, ~16 s for the whole guard) and treats an `UNDECLARED` annotation as a
+   FAIL — either the component's cargo runs in a child process, or a record is missing —
+   while a component that cannot be exercised without recursion (`tooling-tests` runs the
+   guard itself) must be declared non-`cargo`, also a FAIL.
+
 **A driver we cannot see is NAMED, not guessed** (roborev job 269, blocker 1).
 `python-bindings`, `node-bindings`, and the `--lite` `scoped-tests` **python tier** —
 whose `maturin develop` runs in a child process — render
-`[via <driver>: feature set NOT observed]`, and the python tier's entry is **additive**:
+`[via <driver>: feature set NOT observed]` **once their driver is observed to have been
+reached**, and the python tier's entry is **additive**:
 a mixed rust+python diff reads
 `[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
 never one at the expense of the other. It is recorded only for the build-verify exit
@@ -901,10 +934,18 @@ executed** under a recording PATH-shim `cargo`, described through the gate's own
 differential under a **failing** shim, where each body must name exactly the one
 invocation it reached — with the short-circuit itself proved by measurement (strictly
 fewer invocations than the passing run), never assumed. And it drives the real
-`run_scoped_tests` for a pure-python and a mixed route. RED-verified: reintroducing a
-parent-side pre-record, or dropping the python-tier record, reds these sections with the
-exact pre-fix renderings (`[test cqlite-cli default-features | test cqlite-cli --features
-write-support]` on a run that executed one pass; `[UNDECLARED]` on a python-only diff).
+`run_scoped_tests` for a pure-python and a mixed route, and the real
+`run_python_bindings` against a stubbed build-verify child for each rc. RED-verified, one
+plant per finding: reintroducing a parent-side pre-record, dropping the python-tier record,
+reverting `tooling-tests` to class `cargo`, declaring a cargo-less component `cargo`,
+discarding `run_python_bindings`' rc, removing (or merely MOVING) node's in-body recorder,
+and dropping the note from `run_scoped_tests`' record_result-bypassing exit each red a case
+that NAMES the planted symbol. It also refuses to certify itself vacuously: an EXIT trap
+fails any run that does not reach its terminal tally (measured — under real `/bin/bash`
+3.2.57 the pre-fix guard ran 1 of 84 cases and exited **0**, so a bash-4-only construct
+degraded it to a silent pass rather than a loud red), plus a verdict floor, plus the
+associative-array lint over every gate-invoked script in
+`test_agent_gate_summary.sh` section 8c.
 
 **A long feature list is abbreviated, and the abbreviation declares itself**:
 `33:all-compression,arrow,bench-internals,+30 more`, never a silent truncation. Beyond
