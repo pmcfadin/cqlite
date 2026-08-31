@@ -69,9 +69,20 @@ into two buckets — that is what fusing means. **The comparable quantities are 
 both directions.** Stated in code at `StreamSubPhase::Encode`, `PHASE_STREAM_ENCODE`, `streaming.rs`
 and `flush_credited`.
 
-`StageEncodeAccum` costs **zero atomics and zero clocks per row** (per-row elapsed folded into a
-`u64` in the drive loop's frame; one `add_nanos` on `Drop`), so the instrument does not tax the path
-this change exists to relieve.
+`StageEncodeAccum` costs **zero atomics per row** — per-row elapsed folds into a `u64` in the drive
+loop's own frame and reaches the shared counter in ONE `add_nanos` on `Drop`, so a full scan makes
+one atomic write regardless of row count.
+
+**It is not clock-free, and an earlier revision of this report wrongly said it was.** When a flight
+sink is installed it takes one `Instant::now()` pair per timed call — **two per row**, since both
+halves of the push-time transpose (`stage`, then `commit`) are timed (issue #3552 roborev round 7;
+before that round it was one pair per row, so the claim was already wrong when first written). With
+**no** sink — compaction, CLI, point reads outside `do_get` — there is no clock at all, which is the
+case the "zero clocks" wording came from.
+
+Budget the two clock reads per row when interpreting an instrumented A/B. The instrument is cheap
+relative to the work it measures, but it is NOT free, and this report exists to stop AC3 being
+measured on a false premise.
 
 ## 4. Recipe for whoever takes AC3 (the expensive parts are already done)
 
