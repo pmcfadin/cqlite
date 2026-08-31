@@ -1008,6 +1008,18 @@ Two results from running that audit here are worth keeping, because both are cas
 
 ### A false COMMENT licensed a real defect — and prose has been the weak layer throughout
 
+**THREE instances now, and the third makes the pattern the point rather than the anecdote.** (1) the
+`host` comment below; (2) `# a stale marker of our own shape; harmless`, which licensed the job-266
+High; (3) job 269's launch-lock placement, where the paragraph immediately above the code stated the
+requirement — *"a lock every launch must take is a denial-of-service surface if any local user can
+hold it, and XDG_RUNTIME_DIR is mode 0700"* — and the very next line read
+`${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}`, i.e. fell back to exactly the shared location the sentence
+forbids. All three share one shape: **the comment asserts the safety property, and the reader (a
+later author, or a reviewer, or me) checks the comment instead of the expression.** A comment that
+states an invariant is therefore a *liability* unless something enforces it — which is why the
+job-269 fix does not merely correct the path but makes the check AFFIRMATIVE (own it, and be 0700)
+and REFUSE on an unmeasurable answer, so the invariant is executable rather than narrated.
+
 The beater read `HOST_NAME=$(uname -n 2>/dev/null || echo unknown)`, and the comment directly above it
 said `host` is *"a DIAGNOSTIC for whoever reads this file, not an input to any verdict."* **If that were
 true the placeholder would be harmless.** It is not true: the reader compares that field against its
@@ -1265,6 +1277,30 @@ mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 Self-tests: `scripts/tests/test_gate_liveness.sh` (189 cases) and
 `scripts/tests/test_gate_detached.sh` (130 cases), both in the full gate's
 `tooling-tests` component.
+
+### Round 47 (roborev job 269): three Mediums, and what each one generalises to
+
+| Fix | Defect | Why it mattered |
+|---|---|---|
+| F1 | `_extra_locks` was a space-joined string iterated **unquoted** (`for _l in $_extra_locks`) | Word-splitting AND glob expansion. A space-bearing `$SUMMARY` made rollback remove the wrong words, so the real lock **survived** and every later launch on that path refused forever; a glob character could expand onto a **live peer's** reservation and delete it. This repository tracks 40 space-bearing paths under `docs/`, so neither shape is hypothetical. |
+| F2 | the global launch lock fell back to `${TMPDIR:-/tmp}` | A **fixed-name** path in a shared directory: any local user can pre-create and hold it, refusing every detached launch on the box. Note what the defect is NOT — the two `PRIVDIR=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-gate-XXXXXX")` calls are fine, because `mktemp` yields a fresh unguessable 0700 name. **The defect is the fixed NAME, not `/tmp`.** |
+| F3 | the wrapper's `rm` (self-unlink) and `bash` (exec) were unqualified | The wrapper exports the **caller's** `PATH` before those lines run, so both resolved through a `PATH` this script does not control. A `PATH` without `rm` makes the self-unlink fail **silently**, leaving the 0600 file holding every forwarded secret on disk indefinitely; a `PATH` that shadows `bash` decides what we exec. |
+
+Two things worth carrying forward. **F1 and F3 are the same class**: a value this script controls
+(`$SUMMARY`, `$PATH`) is handed to a shell construct that reinterprets it — word-splitting/globbing in
+one case, `PATH` resolution in the other. The fix in both is to remove the reinterpretation (an array;
+absolute paths resolved in our own `PATH`), not to sanitise the value. **F2 is the third instance of a
+false comment licensing the defect beneath it** — see that section above.
+
+And the coverage that pins them is deliberately mixed. `4b.154`/`4b.158` are **structural** (the array
+exists, iterated quoted; the emission is absolute), which is what a reviewer can check by reading.
+`4b.155` is the **behavioural discriminator** and only works because of an ordering fact: the artifact
+loop is `"$SUMMARY.heartbeat"` then `"$LOGFILE"`, so conflicting on the **log** guarantees the heartbeat
+lock was already created and must be rolled back. Conflict on the summary instead and the case passes
+vacuously, having rolled back nothing. `4b.159` captures the **generated** wrapper by stubbing
+`systemd-run` so it is never executed and therefore never self-deletes — because a structural grep
+cannot see what the launcher actually wrote, only what its source says it would write. `4b.157` is
+`4b.156`'s control, so a launcher that refused *everything* could not read as a pass.
 
 ## Doctrine
 

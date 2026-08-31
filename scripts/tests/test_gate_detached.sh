@@ -2185,13 +2185,13 @@ CAPTURE_TO="$_cap" PATH="$_stub:$PATH" bash "$LAUNCHER" \
 if [ ! -s "$_cap" ]; then
   skipc "4b.159 generated wrapper uses absolute rm/bash" "wrapper not captured (stub did not observe it)"
 else
-  _rml=$(grep -E -- '^/[^ ]*rm .* -f -- ' "$_cap" | head -1)
+  _rml=$(grep -E -- '^/[^ ]*rm -f -- ' "$_cap" | head -1)
   _exl=$(grep -E '^exec /' "$_cap" | head -1)
   if [ -n "$_rml" ] && [ -n "$_exl" ]; then
     ok "4b.159 the GENERATED wrapper self-unlinks and execs via absolute paths"
   else
     bad "4b.159 the generated wrapper uses absolute rm/bash" \
-        "rm-line='${_rml:-none}' exec-line='${_exl:-none}'"
+        "rm-line='${_rml:-none}' exec-line='${_exl:-none}' captured: $(tr '\n' '|' < "$_cap" | tail -c 200)"
   fi
 fi
 
