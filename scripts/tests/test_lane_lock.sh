@@ -701,17 +701,37 @@ for _try in 1 2 3; do
   ll --help; rc=$RC; out="$OUT"
   [ "$rc" -eq 0 ] && [ "${#out}" -gt 1000 ] && break
 done
+# PIPE-FREE MATCHING, because the pipeline itself was a suspect. This case flaked ~1 in 3
+# FULL-SUITE runs at ANY load (recurred at load 1.6, which falsified the earlier
+# load-contention explanation), with the diagnostic showing rc=0, nothing undocumented, 16
+# `3436` hits, 392 lines, 26796 bytes — i.e. EVERY named clause satisfied at diagnostic time.
+# The only shape consistent with that is a transient failure of an assertion-time pipeline
+# whose re-run at diagnostic time succeeds. The candidate mechanism is `grep -q` exiting on
+# first match while `printf` is still writing 26KB, taking SIGPIPE, and `set -o pipefail`
+# (line 42) reporting the pipeline as failed even though grep matched.
+#
+# THAT MECHANISM IS INFERRED, NOT PROVEN: 300 standalone iterations of the exact pipeline
+# produced 0 failures, so I cannot claim it. What is certain is that `case` removes the
+# pipeline, the subprocess and the race BY CONSTRUCTION, costs nothing, and is faster. So the
+# fragility is fixed without asserting a cause I could not reproduce.
 missing=""
+nl='
+'
 for sub in acquire verify probe release reclaim status; do
-  printf '%s' "$out" | grep -q "^  $sub " || missing="$missing $sub"
+  case "$out" in
+    "  $sub "*|*"$nl  $sub "*) : ;;
+    *) missing="$missing $sub" ;;
+  esac
 done
-if [ "$rc" -eq 0 ] && [ -z "$missing" ] && printf '%s' "$out" | grep -q '3436'; then
+cites_issue=no
+case "$out" in *3436*) cites_issue=yes ;; esac
+if [ "$rc" -eq 0 ] && [ -z "$missing" ] && [ "$cites_issue" = yes ]; then
   ok "--help exits 0 and documents acquire/verify/probe/release/reclaim/status (and cites #3436)"
 else
   # DIAGNOSE WHICH CLAUSE FAILED. This case failed twice with `rc=0 undocumented:<none>`,
   # i.e. every named clause satisfied — which told us nothing and cost two investigations.
   # An assertion that cannot say why it failed is a bad assertion.
-  bad "--help incomplete: rc=$rc undocumented:${missing:-<none>} 3436-hits=$(printf '%s' "$out" | grep -c 3436) out-lines=$(printf '%s' "$out" | wc -l) out-bytes=${#out}"
+  bad "--help incomplete: rc=$rc undocumented:${missing:-<none>} cites-3436=$cites_issue out-bytes=${#out}"
 fi
 
 # ===========================================================================

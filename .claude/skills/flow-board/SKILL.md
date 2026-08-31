@@ -236,7 +236,7 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
      claim at all, while the board advertises it as available?** Three facts, no heuristics — board
      `Status=Ready` AND a pushed `issue-<N>-*` branch on origin AND no `refs/claims/issue-<N>`:
      ```bash
-     bash scripts/flow/advertised-collision-scan.sh          # exit 3 = at least one row reported
+     bash scripts/flow/advertised-collision-scan.sh          # exit 3 = at least one row reported; rows are prefixed `COLLISION-WINDOW:` because the three facts are a SIGNATURE of a window, not proof a collision is occurring
      ```
      Measured instance: #3393 ran 20+ commits in exactly this state after a legitimate
      release-on-finalize, with the board inviting a second claimant the whole time. **Report it, never

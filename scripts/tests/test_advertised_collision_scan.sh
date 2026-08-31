@@ -98,7 +98,11 @@ echo "TEST 1: all three facts true -> the row is REPORTED, exit 3"
 push_branch 600
 GH1="$T/gh-600"; mk_gh "$GH1" 600
 out=$(run_scan "$GH1"); rc=$?
-if [ "$rc" -eq 3 ] && printf '%s\n' "$out" | grep -q '^COLLISION: issue=600 ' \
+# The prefix says WINDOW, never bare COLLISION: the three facts are a signature of a window in
+# which a collision is possible, not proof one is occurring — nobody may be in that lane. A
+# revert to `COLLISION:` reds here rather than passing.
+if [ "$rc" -eq 3 ] && printf '%s\n' "$out" | grep -q '^COLLISION-WINDOW: issue=600 ' \
+   && ! printf '%s\n' "$out" | grep -qE '^COLLISION: ' \
    && printf '%s\n' "$out" | grep -q 'branches=refs/heads/issue-600-slug' \
    && printf '%s\n' "$out" | grep -q 'claim-ref=absent' \
    && printf '%s\n' "$out" | grep -q 'RESULT=FOUND'; then

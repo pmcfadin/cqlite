@@ -438,7 +438,7 @@ for num in $(printf '%s\n' "$BRANCH_ISSUES" | grep -E '^[0-9]+$' | sort -n -u); 
     printf '{"issue":%s,"board":"Ready","branches":%s,"claim_ref":"absent","lane_lock":%s,"lane_dir":%s}\n' \
       "$num" "$(json_str "$brs")" "$(json_str "$lls")" "$(json_str "$lld")"
   else
-    say "COLLISION: issue=$num board=Ready branches=$brs claim-ref=absent lane-lock=$lls lane-dir=${lld:-unknown}"
+    say "COLLISION-WINDOW: issue=$num board=Ready branches=$brs claim-ref=absent lane-lock=$lls lane-dir=${lld:-unknown}"
   fi
 done
 
