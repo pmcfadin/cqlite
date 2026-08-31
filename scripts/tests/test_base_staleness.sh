@@ -415,6 +415,29 @@ commit_paths "$R_RES" "behind: a CR/TAB/ESC/DEL-bearing path" "$CTL_PATH"
 publish_main "$R_RES"
 back_to_feature "$R_RES"
 
+# DIRECTORY/FILE CONFLICT, BOTH DIRECTIONS (roborev job 272, Medium). A path and a
+# path UNDER it cannot coexist in one git tree, so these two commits CANNOT merge
+# with the PR — yet under pure equality the scan matched neither and could report
+# NO-STALENESS-RECOGNISED over an unmergeable base. Deliberately NOT under a
+# gate-global prefix: `cqlite-core/src/**` is not in the gate-global set, so a match
+# here can ONLY come from the diff-path intersection, which is the thing under test.
+# mainline branched at c0, BEFORE the feature commits, so neither shape exists there
+# and the two commits below need no working-tree gymnastics.
+R_DIRFILE=$(newrepo dirfile-conflict)
+commit_paths "$R_DIRFILE" "the PR: a file UNDER a path main turns into a file" \
+  "cqlite-core/src/dirfile/inner.rs"
+commit_paths "$R_DIRFILE" "the PR: a file main turns into a directory" \
+  "cqlite-core/src/plainfile"
+advance_main "$R_DIRFILE"
+# direction 1: the diff has `.../dirfile/inner.rs`; behind has `.../dirfile` as a FILE
+commit_paths "$R_DIRFILE" "behind: the diff's ANCESTOR directory as a file" \
+  "cqlite-core/src/dirfile"
+# direction 2: the diff has `.../plainfile` as a file; behind has a file UNDER it
+commit_paths "$R_DIRFILE" "behind: a DESCENDANT of the diff's file path" \
+  "cqlite-core/src/plainfile/inner.rs"
+publish_main "$R_DIRFILE"
+back_to_feature "$R_DIRFILE"
+
 # RENAME — the PR renames a file the campsite-rule way and a commit behind edits
 # the OLD path. The porcelain `git diff` honours `diff.renames` (git's default is
 # TRUE since 2.9) and reports the DESTINATION ONLY, while the commit scan's
@@ -1115,6 +1138,76 @@ if run 4 "the matched record's sha resolves to a commit behind the base" "$R_MOT
     bad "matched-sha: the resolved commit is not one of the commits behind the base"
   fi
 fi
+
+# --- Case 17: DIRECTORY/FILE conflicts are intersections ---------------------
+# Both commits behind are unmergeable with the diff, and under the pre-fix equality
+# predicate BOTH were reported as not staling — exit 0 and
+# NO-STALENESS-RECOGNISED over a base that cannot merge. This case therefore
+# discriminates the fix by itself: it cannot pass against equality-only matching.
+# The non-over-match half matters just as much and is asserted below: a plain string
+# prefix would also match `plainfile2`, over-reporting every sibling that shares a
+# name stem, so the component-wise slash is load-bearing in both directions.
+if run 4 "directory/file conflict counts as a path intersection" "$R_DIRFILE"; then
+  has "dirfile: BOTH unmergeable commits are counted" \
+    "blast-radius 2 RECOGNISED of 2 commits behind"
+  has "dirfile: the diff's ANCESTOR directory-as-a-file is matched (direction 1)" \
+    "cqlite-core/src/dirfile"
+  has "dirfile: a DESCENDANT of the diff's file path is matched (direction 2)" \
+    "cqlite-core/src/plainfile/inner.rs"
+  has "dirfile: the match is attributed to diff-paths, not to the gate-global set" \
+    "diff-path"
+fi
+# The COMPONENT-WISE half: a name-stem sibling must NOT match. `plainfile2` shares
+# the string prefix `plainfile` but no path component, so a `${b#$a}` prefix test
+# (no slash) would call it staling. Asserted as a NON-match, since an over-reporting
+# advisory is the failure mode that trains readers to ignore it.
+R_STEM=$(newrepo name-stem-sibling)
+commit_paths "$R_STEM" "the PR: a file whose NAME is a prefix of another" \
+  "cqlite-core/src/plainfile"
+advance_main "$R_STEM"
+commit_paths "$R_STEM" "behind: a NAME-STEM SIBLING, not a path descendant" \
+  "cqlite-core/src/plainfile2"
+publish_main "$R_STEM"
+back_to_feature "$R_STEM"
+if run 0 "a name-stem sibling is NOT a path intersection" "$R_STEM"; then
+  has "stem: the sibling does NOT stale the base" \
+    "blast-radius 0 RECOGNISED of 1 commits behind"
+  has "stem: and the verdict stays the no-finding token" \
+    "verdict NO-STALENESS-RECOGNISED"
+fi
+
+# --- Case 17b (PLANTED MUTANT): the ancestor test is LOAD-BEARING --------------
+# Case 17 alone does NOT prove the fix. My first attempt at showing discrimination
+# set USE_SCRIPT in the ENVIRONMENT and was WORTHLESS: the suite `unset`s
+# USE_SCRIPT after its earlier mutants, so Case 17 ran against the SHIPPED script
+# and produced a green I briefly read as evidence of discrimination. A mutant must
+# be planted HERE and scoped to this case, the way Cases 11 and 15 do it.
+MUT_EQ="$T/mutant-eq-only.sh"
+awk '
+  /^    if \[ "\$d" = "\$path" \] \|\|$/ {
+    print "    [ \"$d\" = \"$path\" ] && return 0"
+    skip = 1
+    next
+  }
+  skip && /^    fi$/ { skip = 0; next }
+  skip              { next }
+                    { print }
+' "$ADVISORY" >"$MUT_EQ"
+if [ -s "$MUT_EQ" ] && bash -n "$MUT_EQ" 2>/dev/null &&
+  [ "$(grep -c 'path#' "$MUT_EQ")" -eq 0 ] &&
+  [ "$(grep -c 'path#' "$ADVISORY")" -gt 0 ]; then
+  ok "eq-mutant: the plant IS the defect described (ancestor/descendant tests gone, equality kept)"
+else
+  bad "eq-mutant: plant did not apply as described (empty, unparseable, or ancestor tests survived)"
+fi
+USE_SCRIPT="$MUT_EQ"
+if run 0 "equality-only matching MISSES both directory/file conflicts" "$R_DIRFILE"; then
+  has "eq-mutant: both unmergeable commits are reported as NOT staling" \
+    "blast-radius 0 RECOGNISED of 2 commits behind"
+  has "eq-mutant: and the NO-FINDING token is emitted over a base that cannot merge" \
+    "verdict NO-STALENESS-RECOGNISED"
+fi
+unset USE_SCRIPT
 
 # --- Case 14: reserved substrings, spaces and NEWLINES in a matched path ----
 # The absolute vocabulary claim ("no run's output contains PASS/OK/RESULT:") was

@@ -721,10 +721,30 @@ matches_gate_global() {
 }
 
 # matches_diff_paths <path> -> 0 if the path is one the diff itself touches.
+#
+# Equality is NOT sufficient (roborev job 272, Medium). A path and a path UNDER it
+# cannot coexist in one git tree, so `foo` as a FILE on main and `foo/bar` in this
+# diff is a guaranteed merge conflict — and under pure equality neither spelling
+# matched the other, so the scan reported the commit as NOT staling and could emit
+# `NO-STALENESS-RECOGNISED` over a base that cannot even merge. That is a
+# false negative in the intersection ITSELF, not one of the two declared
+# non-exhaustiveness gaps (neither of which is about path SHAPE), so it is fixed
+# rather than declared.
+#
+# The ancestor test is COMPONENT-WISE, via the trailing slash: `${b#"$a"/}` differs
+# from `$b` only when `$b` starts with `$a` AND a separator follows, so `foo` does
+# not match `foobar` — a plain string prefix would, and would over-report every
+# sibling sharing a name stem. Both directions are tested because either side may
+# be the ancestor.
 matches_diff_paths() {
-  local path="$1" i=0
+  local path="$1" i=0 d
   while [ "$i" -lt "$diff_path_count" ]; do
-    [ "${DIFF_PATHS[$i]}" = "$path" ] && return 0
+    d="${DIFF_PATHS[$i]}"
+    if [ "$d" = "$path" ] ||
+      [ "${path#"$d"/}" != "$path" ] ||
+      [ "${d#"$path"/}" != "$d" ]; then
+      return 0
+    fi
     i=$((i + 1))
   done
   return 1
