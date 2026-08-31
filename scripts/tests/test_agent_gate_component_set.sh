@@ -890,22 +890,95 @@ fi
 # the cap already makes unreachable. Stated rather than left as an apparent oversight.
 #
 # TWO ARMS, because a cap that refuses EVERYTHING would pass the first arm alone.
+#
+# THE CAP IS SUBSTITUTED IN A SCRATCH COPY OF THE GATE, not written up to (job 299). The real
+# stdout cap is 64 MiB — it has to exceed the largest LEGITIMATE capture, which is a `git show` of
+# the whole gate script (>1 MB and growing; at 1 MiB it sat BELOW that and refused every
+# declaration read, 9 cases of this suite). Writing 64 MiB to a shared filesystem to prove a bound
+# is exactly what this case's own note above declines to do, so the ARTIFACT is substituted instead
+# — the idiom `agent_gate_pin_canonical_remote` uses, and never a settable seam, which would be one
+# more thing a real invoker can set. THE SUBSTITUTION IS VERIFIED STRUCTURALLY (awk `exit 3` when
+# the literal is absent): without that, a renamed constant would leave the copy at 64 MiB, the
+# oversize arm would return 0, and the case would red for a reason that reads like a broken cap.
+cap_gate="$tmp/capgate.sh"
+cap_small_cap=65536
+cap_ok=1
+if ! awk -v v="$cap_small_cap" '
+      BEGIN { done = 0 }
+      { if (!done && $0 ~ /^_CS_CAP_MAX_BYTES=[0-9]+$/) { print "_CS_CAP_MAX_BYTES=" v; done = 1; next }
+        print }
+      END { if (!done) exit 3 }' "$GATE" >"$cap_gate"; then
+  cap_ok=0
+fi
 osz_prog="$tmp/oversize-writer.sh"
-{ printf '#!/usr/bin/env bash\n'; printf 'head -c 2000000 /dev/zero | tr "\\\\0" "x"\n'; printf 'exit 0\n'; } >"$osz_prog"
+{ printf '#!/usr/bin/env bash\n'; printf 'head -c 200000 /dev/zero | tr "\\\\0" "x"\n'; printf 'exit 0\n'; } >"$osz_prog"
 chmod +x "$osz_prog"
 osz_small="$tmp/small-writer.sh"
 { printf '#!/usr/bin/env bash\n'; printf 'printf "component-set-small\\\\n"\n'; printf 'exit 0\n'; } >"$osz_small"
 chmod +x "$osz_small"
 osz_out="$tmp/osz.out"; osz_rc=""; small_out="$tmp/small.out"; small_rc=""
-timeout 30 bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 10 "$osz_prog" >"$osz_out" 2>/dev/null; osz_rc=$?
-timeout 30 bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 10 "$osz_small" >"$small_out" 2>/dev/null; small_rc=$?
-osz_line=$(sed -n 's/^RC: //p' "$osz_out" 2>/dev/null)
-small_line=$(sed -n 's/^RC: //p' "$small_out" 2>/dev/null)
-if [ "$osz_rc" != 124 ] && [ "$osz_line" = 198 ] && [ "$small_line" = 0 ] \
-   && grep -q 'component-set-small' "$small_out" 2>/dev/null; then
-  ok "3544-bound-replay-capped: a >1MiB capture is REFUSED (RC 198) promptly rather than replayed, while an under-cap capture still returns 0 AND its bytes reach the caller — the cap discriminates by size, it does not refuse everything"
+if [ "$cap_ok" -ne 1 ]; then
+  bad "3544-bound-replay-capped: no '_CS_CAP_MAX_BYTES=<n>' literal in $GATE — the constant was renamed, so this case cannot bound the copy it measures (it must NEVER fall back to the shipped 64 MiB value, which would make the oversize arm vacuous)"
 else
-  bad "3544-bound-replay-capped: expected oversize RC=198 (got '$osz_line', outer rc='$osz_rc' — 124 means the read was NOT bounded) and small RC=0 with its output replayed (got '$small_line')"
+  timeout 30 bash "$cap_gate" --component-set-bounded-run 10 "$osz_prog" >"$osz_out" 2>/dev/null; osz_rc=$?
+  timeout 30 bash "$cap_gate" --component-set-bounded-run 10 "$osz_small" >"$small_out" 2>/dev/null; small_rc=$?
+  osz_line=$(sed -n 's/^RC: //p' "$osz_out" 2>/dev/null)
+  small_line=$(sed -n 's/^RC: //p' "$small_out" 2>/dev/null)
+  if [ "$osz_rc" != 124 ] && [ "$osz_line" = 198 ] && [ "$small_line" = 0 ] \
+     && grep -q 'component-set-small' "$small_out" 2>/dev/null; then
+    ok "3544-bound-replay-capped: with the cap substituted to ${cap_small_cap}B in a scratch copy (substitution structurally verified), an over-cap capture is REFUSED (RC 198) promptly rather than replayed, while an under-cap one still returns 0 AND its bytes reach the caller — the cap discriminates by size, it does not refuse everything"
+  else
+    bad "3544-bound-replay-capped: expected oversize RC=198 (got '$osz_line', outer rc='$osz_rc' — 124 means the read was NOT bounded) and small RC=0 with its output replayed (got '$small_line')"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# THE STDERR REPLAY IS BOUNDED TOO, AND IT TRUNCATES WHERE STDOUT REFUSES (roborev job 299, Medium).
+# The stdout cap above left stderr as a bare `cat`, which is the SAME defect on the other stream: a
+# descendant that outlives a SUCCESSFUL child keeps the stderr fd it inherited, and `cat` on a
+# regular file stops only at EOF, which never arrives while a writer outpaces the reader.
+#
+# WHAT DISCRIMINATES, and the two arms are chosen so that neither disposition can pass by accident:
+#   * OVERSIZE STDERR MUST NOT BECOME A REFUSAL. `RC: 0` — the CHILD'S OWN status — is the
+#     assertion: stderr feeds diagnostics only, nothing parses it, and turning a runaway writer on
+#     an unparsed stream into a failed pre-flight would be a false FAIL on a measured result. An
+#     `RC: 198` here would mean the stdout disposition had been copied onto the wrong stream.
+#   * THE BYTES MUST ACTUALLY BE CUT. The child emits 8 MiB to stderr and the caller must receive a
+#     small fraction of it. This is what reds against the bare `cat` it replaces (which delivers all
+#     8 MiB), so the case has a live subject rather than asserting a property that already held.
+#   * SECOND ARM: a SMALL stderr message must still arrive IN FULL. A bound that dropped stderr
+#     entirely, or replayed nothing, would pass the first arm alone.
+#
+# THE WRITER IS BOUNDED AT 8 MiB, NOT ENDLESS, and that is a deliberate limit of this case rather
+# than an oversight: an endless writer is the residual declared at the replay site (#3717) — nothing
+# reaps it, so it would go on filling a SHARED filesystem after this suite exits, and on this fleet a
+# full disk breaks every lane. 8 MiB is 128x the 64 KiB stderr cap, which is enough to observe the
+# cut; it is not enough to observe a HANG, and no assertion here claims to.
+# ---------------------------------------------------------------------------
+serr_prog="$tmp/stderr-writer.sh"
+{ printf '#!/usr/bin/env bash\n'
+  printf '( head -c 8388608 /dev/zero | tr "\\\\0" "e" >&2 ) &\n'
+  printf 'exit 0\n'
+} >"$serr_prog"
+chmod +x "$serr_prog"
+serr_small="$tmp/stderr-small.sh"
+{ printf '#!/usr/bin/env bash\n'; printf 'printf "component-set-stderr-small\\\\n" >&2\n'; printf 'exit 0\n'; } >"$serr_small"
+chmod +x "$serr_small"
+serr_out="$tmp/serr.out"; serr_err="$tmp/serr.err"; serr_rc=""
+serr_sout="$tmp/serr-small.out"; serr_serr="$tmp/serr-small.err"
+timeout 60 bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 10 "$serr_prog" >"$serr_out" 2>"$serr_err"; serr_rc=$?
+timeout 60 bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 10 "$serr_small" >"$serr_sout" 2>"$serr_serr"
+serr_line=$(sed -n 's/^RC: //p' "$serr_out" 2>/dev/null)
+serr_small_line=$(sed -n 's/^RC: //p' "$serr_sout" 2>/dev/null)
+serr_bytes=$(wc -c <"$serr_err" 2>/dev/null)
+case "$serr_bytes" in ''|*[!0-9]*) serr_bytes=-1 ;; esac
+if [ "$serr_rc" != 124 ] && [ "$serr_line" = 0 ] \
+   && [ "$serr_bytes" -gt 0 ] && [ "$serr_bytes" -le 131072 ] \
+   && [ "$serr_small_line" = 0 ] \
+   && grep -q 'component-set-stderr-small' "$serr_serr" 2>/dev/null; then
+  ok "3544-bound-replay-err-bounded: a SUCCESSFUL child that backgrounds a fast 8MiB stderr writer returns promptly with its OWN status (RC 0, never the 198 refusal stdout gets) and the replay is CUT to ${serr_bytes}B, while a small stderr message still arrives in full — the two streams have opposite dispositions by design"
+else
+  bad "3544-bound-replay-err-bounded: expected RC=0 (child's own status, NOT 198) with a truncated stderr replay (got RC='$serr_line', outer rc='$serr_rc' — 124 means the stderr read was NOT bounded, stderr bytes=$serr_bytes of 8388608 written; >131072 means it was replayed unbounded) and the small arm RC=0 with its message replayed (got '$serr_small_line')"
 fi
 
 # STALE: the manifest parses and is well-formed but does NOT match the gate's own array. Built
@@ -4294,7 +4367,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=105
+CASE_FLOOR=106
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
