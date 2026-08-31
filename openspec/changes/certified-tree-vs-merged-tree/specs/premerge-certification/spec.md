@@ -220,23 +220,6 @@ rediscovered (#3650 review B3).
 - **THEN** that field reads `DATE-UNAVAILABLE`
 - **AND** the verdict is the measured one, not `UNMEASURED`
 
-#### Scenario: The no-fetch guarantee is measured, and an unguaranteeable one is unmeasurable
-- **GIVEN** a git that does not honour `GIT_NO_LAZY_FETCH` (older than 2.36, or a version string that
-  cannot be parsed)
-- **AND** a repository that is a partial/promisor clone, or whose promisor state cannot be determined
-- **WHEN** the advisory is run
-- **THEN** it performs no object access at all
-- **AND** the verdict is `UNMEASURED`, naming the git version and the promisor state
-- **AND** it exits `5`
-
-#### Scenario: A non-promisor repository is not burdened with a git version floor
-- **GIVEN** a git that does not honour `GIT_NO_LAZY_FETCH`
-- **AND** a repository affirmatively determined NOT to be a partial/promisor clone
-- **WHEN** the advisory is run
-- **THEN** the scan proceeds and reports its measured verdict
-- **AND** a `lazy-fetch-guard` line names the version field, that the variable is not honoured, and the
-  affirmative `promisor NO` state
-
 #### Scenario: A scratch file that cannot be read is unmeasurable, not a zero blast radius
 - **GIVEN** a run whose scratch file for the diff's paths, a commit's paths, or the commits behind cannot
   be opened for reading
@@ -254,8 +237,7 @@ rediscovered (#3650 review B3).
 - **AND** the verdict is `STALE-RECOGNISED`, never the permissive `NO-STALENESS-RECOGNISED`
 
 *Verified by:* `scripts/tests/test_base_staleness.sh` (missing-ref case; no-merge-base case; the
-"exit 5 is never exit 0" assertion; the lazy-fetch-guard cases, which fixture a promisor clone and an
-old/unparseable `git --version` through a `PATH` shim; the replacement-ref case, whose fixture is asserted
+"exit 5 is never exit 0" assertion; the replacement-ref case, whose fixture is asserted
 with git to really hide the path and whose planted mutant — the export removed — is shown to fail open).
 
 ### Requirement: Slice 1 changes no verdict and retains the #3465 scope disclaimer
