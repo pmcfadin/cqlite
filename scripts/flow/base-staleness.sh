@@ -299,8 +299,15 @@ sane() {
 # a cosmetic slip: 7 of these 8 lines used to lack it.
 usage() {
   printf '%s USAGE — the call is wrong (this is NOT a measurement verdict)\n' "$P" >&2
+  # `${0##*/}` rather than `$(basename "$0")` (#3650 review B4): `basename` is an
+  # EXTERNAL command whose stderr is NOT captured here, so if it is missing or
+  # fails the shell emits a diagnostic with NO `BASE-STALENESS: ` prefix —
+  # breaking D2a's anchor, which is the one invariant every consumer and every
+  # test rests on, from the one function whose job is to be readable when the
+  # call was wrong. Bash suffix removal needs no subprocess and cannot fail. It
+  # still goes through `sane`: `$0` is caller-controlled.
   printf '%s USAGE usage: %s [<rev>]      # <rev> defaults to HEAD\n' \
-    "$P" "$(sane "$(basename "$0")")" >&2
+    "$P" "$(sane "${0##*/}")" >&2
   printf '%s USAGE Reports N commits on origin/main behind <rev>'"'"'s MERGE-BASE with\n' "$P" >&2
   printf '%s USAGE origin/main, and M of those touching the diff'"'"'s blast radius\n' "$P" >&2
   printf '%s USAGE (paths the diff touches + a hard-coded gate-global set).\n' "$P" >&2

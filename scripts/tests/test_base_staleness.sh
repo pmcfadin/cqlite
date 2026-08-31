@@ -605,6 +605,61 @@ else
   bad "no side effects: the advisory changed refs or files in the repository"
 fi
 
+# --- Case 12b: the USAGE path needs no external command (#3650 B4) ---------
+# The usage block prints the program name, and it used to come from
+# `$(basename "$0")` — an external command whose stderr is NOT captured, so a
+# missing or failing `basename` emits a diagnostic with NO prefix, breaking D2a's
+# anchor from the one function whose job is to be readable when the call is
+# wrong. Run with a PATH pointing at an EMPTY DIRECTORY: `--help` exits before
+# any git call, and every remaining operation is a bash builtin. `bash` itself is
+# invoked by ABSOLUTE path (`$BASH`): with a PATH holding nothing, `bash <script>`
+# fails at exec with 127 and emits an unprefixed line of the HARNESS's own
+# making — which is how the first draft of this case FAILED for the wrong reason,
+# and how its mutant half PASSED for the wrong reason (bash-not-found, not
+# basename-not-found, was breaking the anchor).
+EMPTY_BIN="$T/empty-bin"
+mkdir -p "$EMPTY_BIN"
+OUT=$(cd "$R_MOTIV" && PATH="$EMPTY_BIN" "$BASH" "$ADVISORY" --help 2>&1)
+RC=$?
+record_out "usage with an EMPTY PATH"
+if [ "$RC" -eq 3 ]; then
+  ok "usage(no PATH): --help still exits 3 with no external command available"
+else
+  bad "usage(no PATH): expected exit 3, got $RC (got: $OUT)"
+fi
+if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+  bad "usage(no PATH): an output line lacks the prefix: $(printf '%s\n' "$OUT" |
+    grep -m1 -v '^BASE-STALENESS: ')"
+else
+  ok "usage(no PATH): every line keeps the prefix with no external command available"
+fi
+has "usage(no PATH): the program name is still printed" "usage: base-staleness.sh"
+
+# PLANTED MUTANT: the SAME run against a copy that restores `basename` must break
+# the anchor, so the case above is a property of the fix and not of an empty PATH
+# being harmless. NOT recorded into $ALL_OUT — it is the violation the suite
+# forbids.
+MUT_BN="$T/mutant-basename.sh"
+sed 's/"\$P" "\$(sane "\${0##\*\/}")" >&2/"$P" "$(sane "$(basename "$0")")" >\&2/' \
+  "$ADVISORY" >"$MUT_BN"
+if bash -n "$MUT_BN" 2>/dev/null && grep -q 'basename "\$0"' "$MUT_BN" &&
+  ! grep -q 'sane "${0##\*/}"' "$MUT_BN"; then
+  ok "basename-mutant: the plant IS the defect described (basename restored in usage)"
+else
+  bad "basename-mutant: the plant is not the defect described (syntax or content mismatch)"
+fi
+MUT_OUT=$(cd "$R_MOTIV" && PATH="$EMPTY_BIN" "$BASH" "$MUT_BN" --help 2>&1)
+mut_unpref=$(printf '%s\n' "$MUT_OUT" | grep -m1 -v '^BASE-STALENESS: ')
+# The unprefixed line must be ABOUT `basename`, not about anything else: the
+# first draft of this case broke the anchor with `bash: No such file or
+# directory` and read as proof of a defect it never exercised.
+case "$mut_unpref" in
+  *basename*)
+    ok "basename-mutant: with basename unavailable it emits an UNPREFIXED line NAMING basename" ;;
+  '') bad "basename-mutant: the plant did not break the anchor — Case 12b proves nothing" ;;
+  *) bad "basename-mutant: the unprefixed line is not about basename: $mut_unpref" ;;
+esac
+
 # --- Case 13b: a PARTIAL/PROMISOR clone must not LAZILY FETCH (#3650 B2) ----
 # Case 13 proves no side effect in an ORDINARY clone, where there is no fetch to
 # trigger. The contract's real hazard is a PARTIAL clone: object access itself
