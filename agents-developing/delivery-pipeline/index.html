@@ -243,7 +243,14 @@ sub-gate runs at the SAME tree, so the sha binding provably cannot distinguish i
 PASSed on THAT EXACT TREE — not that the change was certified against the <code dir="auto">main</code> it will join. A
 squash-merge composes the diff with main’s CURRENT tip, so for any PR whose base is behind main the
 certified tree and the merged tree are different objects (measured on #3358/PR #3362). A gate on the
-MERGE RESULT is #3650; it is deliberately not implemented here, and neither is a staleness bound.
+MERGE RESULT is #3650 <strong>slice 2</strong> and is deliberately not implemented here. What slice 1 DID add is
+a <strong>non-blocking base-staleness advisory</strong> on <code dir="auto">PREMERGE: ADVISORY</code> lines
+(<code dir="auto">scripts/flow/base-staleness.sh</code>): <code dir="auto">N</code> commits behind the merge-base with <code dir="auto">origin/main</code> and <code dir="auto">M</code> of
+those touching the diff’s blast radius — measured at the <strong>certified sha</strong>, not the local checkout’s
+<code dir="auto">HEAD</code> (paths the diff touches + a hard-coded gate-global set; every run declares TWO gaps: it is not
+a dependency closure, and the gate-global list is itself curated and NON-CLOSED). It is information, never a verdict: it cannot change
+the exit code, an absent/failing/<code dir="auto">UNMEASURED</code> advisory is non-fatal, and any consumer of it must
+treat <code dir="auto">UNMEASURED</code> as STALE rather than fresh.
 Report a pass as “gate of record verified at <code dir="auto">&#x3C;sha></code>”, never “certified against main”. The closer <strong>refuses to merge on any
 non-zero exit</strong> (fail closed). It also re-reads issue/PR comments for a fresh <code dir="auto">HOLD:</code> order in the
 same pre-merge pass. Motivated by the 2026-07-14 stale-merge escape on

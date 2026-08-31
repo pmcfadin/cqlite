@@ -174,8 +174,49 @@ It does not prove the change was certified against the <code dir="auto">main</co
 the diff with main’s CURRENT tip, so for any PR whose base is behind main the certified tree and the
 merged tree are <strong>different objects</strong> (measured on #3358/PR #3362 — a head gate FAILing only because
 a known flake’s fix was on main and not in that base; the malign direction is a PASS at a stale head
-hiding an interaction with something that landed in between). A gate on the merge result is #3650 and
-is deliberately not part of this mechanism. <strong>The sha half of the same check closes a second, different escape (PR
+hiding an interaction with something that landed in between). A gate on the merge result is #3650
+<strong>slice 2</strong> and is deliberately not part of this mechanism.
+<strong>#3650 slice 1 DID land, as a non-blocking advisory: <code dir="auto">PREMERGE: ADVISORY</code> lines.</strong> They carry
+<code dir="auto">scripts/flow/base-staleness.sh</code>’s report — <code dir="auto">N</code> commits behind the <strong>merge-base</strong> with <code dir="auto">origin/main</code>
+(never the base ref’s tip, #3392) and <code dir="auto">M</code> of those touching the diff’s blast radius, defined as
+<em>(paths the diff touches) + (a hard-coded, no-env-override gate-global set)</em>: content that can change
+ANY gate’s verdict regardless of the diff — a NAMED, COMMITTED list (<code dir="auto">GATE_GLOBAL_PATTERNS</code>), never
+an inline glob, whose membership asserts exactly one predicate: <em>content here can change a gate’s
+verdict INDEPENDENTLY of the diff</em> (<code dir="auto">.config/nextest.toml</code>, the toolchain pin, the Cargo
+manifests, <code dir="auto">scripts/agent-gate.sh</code>, <code dir="auto">scripts/ci/**</code>, <code dir="auto">scripts/tests/**</code>,
+<code dir="auto">cqlite-core/tests/support/**</code>, <code dir="auto">test-data/**</code>, <code dir="auto">.github/workflows/**</code>). <code dir="auto">scripts/tests/**</code> is in it
+because the gate does not merely READ that roster, it EXECUTES it (<code dir="auto">tooling-tests</code> runs ~16 of them),
+so one commit touching one of those files reds EVERY lane’s full gate. Measured against the case that
+produced the issue: on PR #3362 the culprit commit and the diff share NO path, so path intersection
+alone would call that certification fresh exactly when it was not; intersection + gate-global fires on
+37 of 107 commits behind (35%) — measured at <code dir="auto">origin/main</code> <code dir="auto">b1e8598a2</code>, subject <code dir="auto">4bc6b913a</code>, the sha
+quoted because <code dir="auto">behind</code> is a function of where main was — and the
+run NAMES the culprit (<code dir="auto">matched 5e08db201 gate-global .config/nextest.toml</code>) so the detection is
+attributable rather than coincidental on a count. The list is <strong>declared NON-CLOSED in the output</strong>
+(gap 2 of 2, beside the dependency-closure gap), and the two path sources are pinned
+<strong>rename-symmetric and root-relative</strong> — porcelain <code dir="auto">git diff</code> honours <code dir="auto">diff.renames</code>/<code dir="auto">diff.relative</code>
+and plumbing <code dir="auto">git diff-tree</code> does not, so unpinned, a PR that renames a path would lose the old path
+and report <code dir="auto">blast-radius 0 RECOGNISED</code> on a genuinely stale base (a fail-open). <strong>It is
+information, not a verdict</strong> — it cannot change <code dir="auto">premerge-assert.sh</code>’s exit code, and an absent,
+failing, timed-out or <code dir="auto">UNMEASURED</code> advisory is reported and non-fatal. Its 60s bound carries a
+<strong>SIGKILL escalation</strong> (<code dir="auto">--kill-after</code>), because plain <code dir="auto">timeout &#x3C;secs></code> only SIGTERMs and then waits,
+so a child ignoring TERM would keep the merge critical path blocked indefinitely; the runner is
+resolved as <code dir="auto">timeout</code> then <code dir="auto">gtimeout</code> (GNU coreutils on macOS) with <code dir="auto">--kill-after</code> support PROBED, and
+where none exists the advisory is <strong>SKIPPED and reported</strong>, never run unbounded or behind a bound a
+child can ignore. Anchoring is the other half of “information, not a verdict”, so its output is
+<strong>ANCHORED</strong>: every line, stdout and stderr, begins with <code dir="auto">BASE-STALENESS: </code>, every dynamic field is
+control-character sanitized (git permits newlines in paths, and one would otherwise emit an
+unprefixed line), the verdict appears only on a <code dir="auto">verdict </code> line carrying a closed-set token, and the
+script’s own static template text carries none of <code dir="auto">PASS</code>/<code dir="auto">OK</code>/<code dir="auto">RESULT:</code>, asserted structurally over
+the source. <em>The earlier, absolute claim — “its output carries no <code dir="auto">PASS</code>, <code dir="auto">OK</code> or <code dir="auto">RESULT:</code> in any
+run” — was FALSIFIED BY REVIEW and is recorded as changed, not softened: the advisory prints
+repository-controlled paths verbatim, and the tracked path
+<code dir="auto">test-data/scripts/CI_SMOKE_TEST_USAGE.md</code> contains <code dir="auto">OK</code>. Declared residual: a path may contain a
+reserved substring, and the anchor is what makes that harmless.</em> Its no-finding verdict is
+<code dir="auto">NO-STALENESS-RECOGNISED</code> (a scan result, never <code dir="auto">FRESH</code>/<code dir="auto">CLEAN</code>), <code dir="auto">M = 0</code> prints <code dir="auto">0 RECOGNISED</code> and
+never a bare <code dir="auto">0</code>, and every run declares that the blast radius is <strong>not a dependency closure</strong>. A consumer that acts on it (slice
+2) MUST treat exit <code dir="auto">5</code>/<code dir="auto">UNMEASURED</code> as STALE, never as fresh. The three <code dir="auto">PREMERGE: SCOPE</code> lines are
+RETAINED, because the advisory does not close the gap they disclose. <strong>The sha half of the same check closes a second, different escape (PR
 #3616): a real gate, someone else’s.</strong> A closer located its gate run dir by recency
 (<code dir="auto">ls -t /tmp/agent-gate.*</code>), read a PEER LANE’s dir, saw 33 of 37 components PASS and was about to
 merge #3616 on PR #3580’s verdict — everything about it was real, and only the <code dir="auto">run-id:</code> line

@@ -105,8 +105,49 @@ carry).
   the diff with main's CURRENT tip, so for any PR whose base is behind main the certified tree and the
   merged tree are **different objects** (measured on #3358/PR #3362 — a head gate FAILing only because
   a known flake's fix was on main and not in that base; the malign direction is a PASS at a stale head
-  hiding an interaction with something that landed in between). A gate on the merge result is #3650 and
-  is deliberately not part of this mechanism. **The sha half of the same check closes a second, different escape (PR
+  hiding an interaction with something that landed in between). A gate on the merge result is #3650
+  **slice 2** and is deliberately not part of this mechanism.
+  **#3650 slice 1 DID land, as a non-blocking advisory: `PREMERGE: ADVISORY` lines.** They carry
+  `scripts/flow/base-staleness.sh`'s report — `N` commits behind the **merge-base** with `origin/main`
+  (never the base ref's tip, #3392) and `M` of those touching the diff's blast radius, defined as
+  *(paths the diff touches) + (a hard-coded, no-env-override gate-global set)*: content that can change
+  ANY gate's verdict regardless of the diff — a NAMED, COMMITTED list (`GATE_GLOBAL_PATTERNS`), never
+  an inline glob, whose membership asserts exactly one predicate: *content here can change a gate's
+  verdict INDEPENDENTLY of the diff* (`.config/nextest.toml`, the toolchain pin, the Cargo
+  manifests, `scripts/agent-gate.sh`, `scripts/ci/**`, `scripts/tests/**`,
+  `cqlite-core/tests/support/**`, `test-data/**`, `.github/workflows/**`). `scripts/tests/**` is in it
+  because the gate does not merely READ that roster, it EXECUTES it (`tooling-tests` runs ~16 of them),
+  so one commit touching one of those files reds EVERY lane's full gate. Measured against the case that
+  produced the issue: on PR #3362 the culprit commit and the diff share NO path, so path intersection
+  alone would call that certification fresh exactly when it was not; intersection + gate-global fires on
+  37 of 107 commits behind (35%) — measured at `origin/main` `b1e8598a2`, subject `4bc6b913a`, the sha
+  quoted because `behind` is a function of where main was — and the
+  run NAMES the culprit (`matched 5e08db201 gate-global .config/nextest.toml`) so the detection is
+  attributable rather than coincidental on a count. The list is **declared NON-CLOSED in the output**
+  (gap 2 of 2, beside the dependency-closure gap), and the two path sources are pinned
+  **rename-symmetric and root-relative** — porcelain `git diff` honours `diff.renames`/`diff.relative`
+  and plumbing `git diff-tree` does not, so unpinned, a PR that renames a path would lose the old path
+  and report `blast-radius 0 RECOGNISED` on a genuinely stale base (a fail-open). **It is
+  information, not a verdict** — it cannot change `premerge-assert.sh`'s exit code, and an absent,
+  failing, timed-out or `UNMEASURED` advisory is reported and non-fatal. Its 60s bound carries a
+  **SIGKILL escalation** (`--kill-after`), because plain `timeout <secs>` only SIGTERMs and then waits,
+  so a child ignoring TERM would keep the merge critical path blocked indefinitely; the runner is
+  resolved as `timeout` then `gtimeout` (GNU coreutils on macOS) with `--kill-after` support PROBED, and
+  where none exists the advisory is **SKIPPED and reported**, never run unbounded or behind a bound a
+  child can ignore. Anchoring is the other half of "information, not a verdict", so its output is
+  **ANCHORED**: every line, stdout and stderr, begins with `BASE-STALENESS: `, every dynamic field is
+  control-character sanitized (git permits newlines in paths, and one would otherwise emit an
+  unprefixed line), the verdict appears only on a `verdict ` line carrying a closed-set token, and the
+  script's own static template text carries none of `PASS`/`OK`/`RESULT:`, asserted structurally over
+  the source. *The earlier, absolute claim — "its output carries no `PASS`, `OK` or `RESULT:` in any
+  run" — was FALSIFIED BY REVIEW and is recorded as changed, not softened: the advisory prints
+  repository-controlled paths verbatim, and the tracked path
+  `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK`. Declared residual: a path may contain a
+  reserved substring, and the anchor is what makes that harmless.* Its no-finding verdict is
+  `NO-STALENESS-RECOGNISED` (a scan result, never `FRESH`/`CLEAN`), `M = 0` prints `0 RECOGNISED` and
+  never a bare `0`, and every run declares that the blast radius is **not a dependency closure**. A consumer that acts on it (slice
+  2) MUST treat exit `5`/`UNMEASURED` as STALE, never as fresh. The three `PREMERGE: SCOPE` lines are
+  RETAINED, because the advisory does not close the gap they disclose. **The sha half of the same check closes a second, different escape (PR
   #3616): a real gate, someone else's.** A closer located its gate run dir by recency
   (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was about to
   merge #3616 on PR #3580's verdict — everything about it was real, and only the `run-id:` line
