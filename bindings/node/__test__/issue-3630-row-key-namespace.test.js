@@ -112,6 +112,29 @@ function assertFixturePresent() {
   }
 }
 
+/**
+ * Realm-safe "this object's prototype was not replaced" assertion.
+ *
+ * `Object.getPrototypeOf(row) === Object.prototype` DOES NOT WORK HERE and its
+ * failure is not a defect: jest runs this file in a sandboxed VM context whose
+ * `Object` intrinsic is a DIFFERENT object from the one the addon reaches through
+ * `env.get_global()`, so the identity comparison is false even for a perfectly
+ * healthy plain object. Measured: it failed on rows 2 and 3 — rows with no
+ * colliding cell at all — with jest reporting "Expected: {} Received: serializes
+ * to the same string", the signature of two distinct-but-identical prototypes.
+ * (`types.test.js` documents the same realm split for `instanceof Map`.)
+ *
+ * The property that actually matters is what the defect does: assigning null to
+ * `__proto__` REPLACES the prototype with null. So assert (a) the prototype is
+ * not null, and (b) it is the SAME object for every row — self-consistency, which
+ * is realm-independent and still catches a single row being mutated by its data.
+ */
+function expectPrototypeIntact(row, reference) {
+  const proto = Object.getPrototypeOf(row);
+  expect(proto).not.toBeNull();
+  expect(proto).toBe(reference);
+}
+
 /** Build an expectation object safely — see the header on why not a literal. */
 function expectedRow(entries) {
   return Object.fromEntries(entries);
@@ -184,8 +207,12 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
     // columns are DEFINED rather than assigned. Asserted for every row, including
     // the one carrying a null-valued accessor column, because the property must
     // be one of the CONSTRUCTION and not of the data.
+    // The reference is the prototype of a row with NO collision column, i.e. one
+    // no data could have mutated. Every other row must share that exact object.
+    const reference = Object.getPrototypeOf(rows.get(3));
+    expect(reference).not.toBeNull();
     for (const id of [1, 2, 3]) {
-      expect(Object.getPrototypeOf(rows.get(id))).toBe(Object.prototype);
+      expectPrototypeIntact(rows.get(id), reference);
     }
   });
 
@@ -195,7 +222,10 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
     // of every query, and why remedy 2 was rejected for rows.
     expect(row.hasOwnProperty(ACCESSOR_COL)).toBe(true);
     expect(typeof row.toString).toBe('string'); // shadowed BY THE COLUMN, see below
-    expect(row instanceof Object).toBe(true);
+    // NOT `row instanceof Object` — same realm split as the prototype identity
+    // above (the addon's Object is a different intrinsic), so that would fail on
+    // a healthy row. `Object.prototype.toString` reads the internal slot instead.
+    expect(Object.prototype.toString.call(row)).toBe('[object Object]');
     expect({ ...row }[ACCESSOR_COL]).toBe('user-supplied-proto');
   });
 
@@ -203,19 +233,26 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
   // The CLASS, not the name — asserted over every column the row carries
   // ==========================================================================
 
-  test('EVERY column of EVERY row is an own enumerable data property', () => {
-    // A guard that matches a NAME cannot see a PROPERTY. This case names no
-    // column: it iterates whatever the row actually carries and asserts the
-    // invariant, so a future inherited name added to Object.prototype is covered
+  test('EVERY DECLARED column of the fully-populated row is an own data property', () => {
+    // A guard that matches a NAME cannot see a PROPERTY, so this case names no
+    // column — it derives its subject from the AUTHORITATIVE column list, which
+    // means a future inherited name added to `Object.prototype` is covered here
     // without editing this file.
-    for (const [id, row] of rows) {
-      const keys = Object.keys(row);
-      expect(keys.length).toBeGreaterThan(0);
-      for (const key of keys) {
-        // Throws with the offending key named if the invariant fails.
-        expect({ id, key, ok: typeof ownDataProperty(row, key) !== 'undefined' })
-          .toEqual({ id, key, ok: true });
-      }
+    //
+    // IT MUST ITERATE `columns`, NOT `Object.keys(row)`, AND THAT IS THE WHOLE
+    // POINT. The first draft iterated `Object.keys(row)` and PASSED against
+    // UNFIXED CODE — vacuously, because the lost `__proto__` column is precisely
+    // the one absent from `Object.keys`, so the loop could only ever inspect the
+    // columns that had already survived. A test whose subject set is the output
+    // it is checking cannot see an omission from that output. Row 1 has every
+    // cell populated by construction, so every DECLARED column must arrive.
+    const row = rows.get(1);
+    expect(columns.length).toBeGreaterThan(0);
+    const missing = columns.filter((name) => !Object.hasOwn(row, name));
+    expect(missing).toEqual([]);
+    for (const name of columns) {
+      expect({ name, ok: ownDataProperty(row, name) !== undefined })
+        .toEqual({ name, ok: true });
     }
   });
 
@@ -262,7 +299,7 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
     expect(Object.hasOwn(row, ACCESSOR_COL)).toBe(false); // ...and correctly absent
     expect(Object.keys(row)).not.toContain(ACCESSOR_COL);
     // No phantom null, and — the point of the row — no prototype write either.
-    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    expectPrototypeIntact(row, Object.getPrototypeOf(rows.get(3)));
 
     // The other three columns on the same row are unaffected.
     expect(ownDataProperty(row, 'constructor')).toBe('user-supplied-constructor-2');
@@ -276,7 +313,7 @@ describe('row column / Object.prototype collision (issue #3630)', () => {
     for (const col of ALL_COLLISION_COLS) {
       expect(Object.hasOwn(row, col)).toBe(false);
     }
-    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(row)).not.toBeNull();
   });
 
   // ==========================================================================
