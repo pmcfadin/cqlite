@@ -600,9 +600,6 @@ insert_full() {
 }
 
 # id 2 — NULL UDT FIELDS inside every hashable position, plus an EMPTY-string
-# field (distinct from null). value_to_hashable_key's Udt arm has a
-# `None => py.None()` path that no committed fixture previously reached.
-# id 2 — NULL UDT FIELDS inside every hashable position, plus an EMPTY-string
 # field (distinct from null).
 #
 # EXCEPT s_map_udt_key, which carries an empty-string label instead of a null
@@ -614,11 +611,12 @@ insert_full() {
 # value` line in this generator's own log. Null-field coverage for the new pair
 # lives in s_map_udt_val's map VALUES, where the formatter is fine.
 #
-# The FROZEN-MAP keys here are what make `value_to_hashable_key`'s Udt-arm
-# `None => py.None()` branch reachable: those keys are the only values in this
-# repository that arrive at that function as a structured `Value::Udt` carrying
-# a `None` field. (The set columns' null fields go through `udt_to_py`'s own
-# `None` branch — a different function.)
+# The null fields written here are why id=2 exists: a `None` UDT field is what
+# `build_udt`'s `None => py.None()` path handles, and no committed fixture
+# reached that path before this one. WHICH columns get there through the hashable
+# projection's own arms, and which get there with `convert = value_to_py`, is
+# stated only in the ROUTING section of bindings/python/src/value_hashable.rs;
+# this generator asserts neither.
 insert_null_fields() {
   log "=== nested_udt_keys id=2 (null UDT fields + empty-string field) ==="
   cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
