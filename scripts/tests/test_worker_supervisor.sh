@@ -8390,6 +8390,124 @@ test_lane_lock_publish_declines_instead_of_clobbering() {
 t test_lane_lock_publish_declines_instead_of_clobbering
 
 
+
+
+# ---------------------------------------------------------------------------
+# NO DIAGNOSTIC NAMES A STEP THAT DID NOT RUN (#3601, roborev job 231 B9 — and the CLASS, not just the
+# reported instance).
+#
+# THE REPORTED INSTANCE: `supervisor_lock_take` ignores its two cleanup failures — deliberately, because a
+# peer populating the directory is a legitimate reason for `rmdir` to refuse — and the refusal then stated
+# unconditionally that the directory "has been REMOVED AGAIN". With a peer's record inside, or a
+# filesystem that refuses the removal, the lock REMAINED while the operator was told there was nothing to
+# clear.
+#
+# THE CLASS: four instances of it landed in this one diff — a refusal claiming a read-back that never ran
+# (B1), a mutant comment claiming an isolation it did not have (B4), a code comment vouching for the race
+# it sits on (fixed by hand), and this one. The lead's ruling is that such an artifact is worse than no
+# artifact, because it is what stops the next reader looking. So the cases below assert the property for
+# EVERY branch of the cleanup, including the two the reported finding did not name.
+# ---------------------------------------------------------------------------
+test_lane_lock_cleanup_outcome_is_verified_not_claimed() {
+  local d tmp lane lock out rc ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601cln$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # The publish's write is failed by a shipped-derived override in every case below; `take`'s cleanup and
+  # the refusal — the code being asserted — stay shipped.
+  ovr="$d/f-write.sh"; : >"$ovr"
+  if ! sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    return 0
+  fi
+
+  # ---- (a) THE CLEANUP SUCCEEDS: only here may the refusal say the directory is gone, and it says the
+  # absence was VERIFIED rather than assumed.
+  rm -rf "$lock"
+  out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"absence was VERIFIED after the removal"* ]] \
+     && [[ "$out" == *"Nothing needs clearing by hand"* ]] && [[ ! -e "$lock" ]]; then
+    pass "lane-lock B9 (cleanup succeeded): the refusal claims the removal ONLY with the absence verified afterwards, and the lock really is gone"
+  else
+    fail "lane-lock-b9-verified: rc=$rc lock=[$([[ -e "$lock" ]] && echo present || echo gone)] out=[$out]"
+  fi
+
+  # ---- (b) A PEER'S RECORD BLOCKS THE `rmdir`: the lock REMAINS, and the refusal must say so, name the
+  # foreign holder, and offer NO removal command — the record is not ours to delete.
+  local ovrb
+  ovrb="$d/f-write-peer.sh"; : >"$ovrb"
+  rm -rf "$lock"
+  if sv_mutant_override "$ovrb" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  printf "%s\n" 717171 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then printf "%s" write-failed; return 1; fi'; then
+    out="$(lane_lock_drive_at "$d" "$ovrb" "$tmp" "$lane")"; rc=$?
+    local bare
+    bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"it REMAINS"* ]] && [[ "$out" == *"NOT ours ([pid 717171])"* ]] \
+       && [[ "$out" != *"absence was VERIFIED"* ]] && [[ -z "$bare" ]]; then
+      pass "lane-lock B9 (peer record blocks the cleanup): the refusal says the lock REMAINS, names the foreign holder, and prints NO removal command — a record we do not own is not ours to offer for deletion"
+    else
+      fail "lane-lock-b9-foreign: rc=$rc bare=[$bare] out=[$out]"
+    fi
+    if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "717171" ]]; then
+      pass "lane-lock B9: and the peer's record survives — the cleanup's \`rmdir\` is non-recursive precisely so it cannot delete it"
+    else
+      fail "lane-lock-b9-foreign-destroyed: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+  fi
+
+  # ---- (c) A RESIDUAL THAT IS NOT A HOLDER: the lock remains with unusable content, so the refusal says
+  # it remains AND offers the non-recursive clear command, which the (b) case must not.
+  local ovrc
+  ovrc="$d/f-write-junk.sh"; : >"$ovrc"
+  rm -rf "$lock"
+  if sv_mutant_override "$ovrc" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  printf "%s\n" not-a-pid >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then printf "%s" write-failed; return 1; fi'; then
+    out="$(lane_lock_drive_at "$d" "$ovrc" "$tmp" "$lane")"; rc=$?
+    local barec
+    barec="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"it REMAINS"* ]] && [[ "$out" == *"unparseable pid-not-all-decimal-digits"* ]] \
+       && [[ "$barec" == 'rmdir -- '* ]]; then
+      pass "lane-lock B9 (residual, not a holder): the refusal says the lock REMAINS, names what is in it, and DOES offer the non-recursive clear — the three cleanup outcomes get three different remedies because the right action differs"
+    else
+      fail "lane-lock-b9-residual: rc=$rc bare=[$barec] out=[$out]"
+    fi
+  fi
+
+  # ---- (d) MUTANT CONTRAST: the pre-B9 spelling — the cleanup verdict is asserted unconditionally, so
+  # the operator is told the directory was removed while it demonstrably remains. Applied to the shipped
+  # `take` by ONE substitution, driven over case (b)'s staging.
+  local ovrd mout
+  ovrd="$d/m-claim.sh"; : >"$ovrd"
+  rm -rf "$lock"
+  if sv_mutant_override "$ovrd" supervisor_lock_take \
+       '  if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then' \
+       '  if true; then'; then
+    cat "$ovrb" >>"$ovrd"
+    mout="$(lane_lock_drive_at "$d" "$ovrd" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"absence was VERIFIED after the removal"* ]] && [[ -e "$lock" ]]; then
+      pass "lane-lock B9 MUTANT: with the cleanup verdict asserted rather than observed, the refusal tells the operator the directory was removed WHILE IT IS STILL THERE — the exact false artifact, so the asserts above are the verification doing the work"
+    else
+      fail "lane-lock-mutant-b9: lock=[$([[ -e "$lock" ]] && echo present || echo gone)] out=[$mout] — the unconditional claim must be shown to lie"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_cleanup_outcome_is_verified_not_claimed
+
+
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
