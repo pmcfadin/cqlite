@@ -679,6 +679,35 @@ if [ "$prom_ok" -eq 1 ]; then
   fi
 fi
 
+# --- Case 13c: the `matched` record's SHA FIELD is a real sha (#3650 B3) ----
+# The field used to come from an UNCHECKED `git rev-parse --short=9` inside a
+# command substitution, whose failure is SWALLOWED — yielding a record with an
+# EMPTY sha, i.e. `matched  gate-global <path>`. It is now bash truncation, which
+# cannot fail. Asserted against GIT rather than against a shape: the token must
+# RESOLVE to a commit in the fixture, and that commit must be one of the commits
+# BEHIND, not the subject.
+if run 4 "the matched record's sha resolves to a commit behind the base" "$R_MOTIV"; then
+  m_sha=$(printf '%s\n' "$OUT" |
+    sed -n 's/^BASE-STALENESS: matched \([^ ]*\) .*/\1/p' | head -1)
+  case "$m_sha" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+      ok "matched-sha: the field is a 9-hex abbreviation, never the empty string" ;;
+    *) bad "matched-sha: expected a 9-hex abbreviation, got '$m_sha' (got: $OUT)" ;;
+  esac
+  m_full=$(g "$R_MOTIV" rev-parse --verify --quiet "$m_sha^{commit}" 2>/dev/null) || m_full=""
+  if [ -n "$m_full" ]; then
+    ok "matched-sha: the abbreviation RESOLVES to a commit in the repository"
+  else
+    bad "matched-sha: '$m_sha' does not resolve to a commit — the field is not a real sha"
+  fi
+  if [ -n "$m_full" ] && g "$R_MOTIV" rev-list mainline | grep -qx "$m_full" &&
+    ! g "$R_MOTIV" rev-list feature | grep -qx "$m_full"; then
+    ok "matched-sha: it names a commit BEHIND the base, not the subject side"
+  else
+    bad "matched-sha: the resolved commit is not one of the commits behind the base"
+  fi
+fi
+
 # --- Case 14: reserved substrings, spaces and NEWLINES in a matched path ----
 # The absolute vocabulary claim ("no run's output contains PASS/OK/RESULT:") was
 # FALSIFIED by review: the advisory prints repository-controlled paths verbatim.

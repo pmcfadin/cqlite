@@ -185,9 +185,22 @@ whole-suite anchor + closed-verdict-set case; structural template case; sanitize
 ### Requirement: An unmeasurable scan is UNMEASURED and is fail-closed by contract
 
 Where the scan cannot be performed — `origin/main` absent, no merge-base between the branch and
-`origin/main`, or a git invocation failing — the advisory SHALL report `UNMEASURED` with a cause and exit
-`5`. It SHALL NOT report `0`, `NO-STALENESS-RECOGNISED`, or exit `0`. The script header and this spec
-SHALL state that a consumer MUST treat `UNMEASURED` as stale, never as fresh.
+`origin/main`, an unresolvable subject rev, or the failure of a git invocation **feeding the measurement**
+(`rev-parse` of either ref, `merge-base`, `rev-list`, `diff`, `diff-tree`) — the advisory SHALL report
+`UNMEASURED` with a cause and exit `5`. It SHALL NOT report `0`, `NO-STALENESS-RECOGNISED`, or exit `0`.
+The script header and this spec SHALL state that a consumer MUST treat `UNMEASURED` as stale, never as
+fresh.
+
+**ONE GIT CALL IS EXCEPTED, AND THE EXCEPTION IS SCOPED HERE, WHERE THE CLAIM IS MADE.** This
+requirement previously read "or a git invocation failing", an unqualified absolute the implementation
+deliberately violates: the **informational** commit date of `origin/main` (`git log -1 --format=%cI`)
+SHALL degrade to the literal `DATE-UNAVAILABLE` in that one field and SHALL NOT make the run
+`UNMEASURED`. It feeds neither `N` nor `M`, so a fully measured scan stays measured; injecting the
+verdict token into a measured run would false-positive a slice-2 consumer grepping `UNMEASURED`; and
+escalating a cosmetic informational field to a non-verdict would red the tool on correct input, which is
+the guard agents learn to waive. An absolute the code violates is the same defect class as the falsified
+vocabulary guarantee this change already had to restate, so it is scoped rather than left to be
+rediscovered (#3650 review B3).
 
 #### Scenario: A missing origin/main is unmeasurable, not clean
 - **GIVEN** a checkout with no `origin/main` ref
@@ -200,6 +213,12 @@ SHALL state that a consumer MUST treat `UNMEASURED` as stale, never as fresh.
 - **GIVEN** a branch with no merge-base with `origin/main`
 - **WHEN** the advisory is run
 - **THEN** the verdict is `UNMEASURED` and it exits `5`
+
+#### Scenario: An unavailable informational commit date does NOT make a measured scan unmeasurable
+- **GIVEN** a measurable checkout whose `origin/main` commit date cannot be read
+- **WHEN** the advisory is run
+- **THEN** that field reads `DATE-UNAVAILABLE`
+- **AND** the verdict is the measured one, not `UNMEASURED`
 
 *Verified by:* `scripts/tests/test_base_staleness.sh` (missing-ref case; no-merge-base case; the
 "exit 5 is never exit 0" assertion).

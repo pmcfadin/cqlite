@@ -96,8 +96,23 @@
 # ------------------------------------------
 #   0   NO-STALENESS-RECOGNISED — the scan completed and recognised nothing
 #   4   STALE-RECOGNISED — at least one commit behind touches the blast radius
-#   5   UNMEASURED — the scan could not be performed (no origin/main, no
-#       merge-base, a git invocation failing, an unresolvable subject)
+#   5   UNMEASURED — the scan could not be performed: no origin/main, no
+#       merge-base, an unresolvable subject rev, or the failure of a git
+#       invocation FEEDING THE MEASUREMENT (`rev-parse` of either ref,
+#       `merge-base`, `rev-list`, `diff`, `diff-tree`).
+#
+#       ONE GIT CALL IS EXCEPTED, AND THE EXCEPTION IS STATED HERE, WHERE THE
+#       CLAIM IS MADE (#3650 review B3). This used to read "a git invocation
+#       failing", an unqualified absolute the code deliberately violates: the
+#       INFORMATIONAL commit date of origin/main (`git log -1 --format=%cI`)
+#       degrades to the literal `DATE-UNAVAILABLE` in that one field and does NOT
+#       make the run UNMEASURED. It feeds neither N nor M, so a fully MEASURED
+#       scan stays measured; injecting the verdict token into a measured run
+#       would false-positive a slice-2 consumer grepping `UNMEASURED`; and
+#       escalating a cosmetic field to a non-verdict would red the tool on
+#       correct input, which is the guard agents learn to waive. An absolute the
+#       code violates is the same defect class as the falsified vocabulary claim
+#       below, so it is SCOPED here rather than left to be rediscovered.
 #   3   usage error — which is also what `--help` exits with, deliberately: exit
 #       0 MEANS `NO-STALENESS-RECOGNISED` here, so a run that measured nothing at
 #       all must never produce it.
@@ -382,10 +397,16 @@ if ! main_sha=$(git rev-parse --verify --quiet "$BASE_REF^{commit}" 2>/dev/null)
   unmeasured "$BASE_REF is absent — this script does NOT fetch (#3650 D5); run" \
     "'git fetch origin main' and re-run. An absent base ref is unmeasurable, not clean."
 fi
-main_date=$(sane "$(git log -1 --format=%cI "$main_sha" 2>/dev/null)")
+# THE ONE GIT CALL WHOSE FAILURE IS NOT `UNMEASURED`, and the exception is
+# declared in the header's EXIT CODES section, in spec.md and in design.md D5 —
+# not only here (#3650 review B3): a contract stating an absolute the code
+# deliberately violates is the defect, whichever side is "right".
 # NOT `UNMEASURED-...`: that token is the verdict word, and injecting it into a
 # fully MEASURED run would make a slice-2 consumer grepping for `UNMEASURED`
-# false-positive. Keep the verdict vocabulary single-purpose.
+# false-positive. Keep the verdict vocabulary single-purpose. This field feeds
+# neither N nor M, so its absence costs a reader one informational value and
+# escalating it would red the tool on correct input.
+main_date=$(sane "$(git log -1 --format=%cI "$main_sha" 2>/dev/null)")
 [ -n "$main_date" ] || main_date=DATE-UNAVAILABLE
 
 # D4: the MERGE-BASE, never origin/main's tip. #3392 is the recorded cost.
@@ -535,7 +556,12 @@ while IFS= read -r c; do
     # SANITIZED HERE, at capture (D2b). `matched_lines` is newline-delimited, so a
     # path containing a newline would both break the anchor on output AND split
     # into two bogus records on the way in.
-    matched_lines="$matched_lines$(git rev-parse --short=9 "$c" 2>/dev/null) $why $(sane "$hit")
+    # `${c:0:9}` rather than `git rev-parse --short=9` (#3650 review B3): that
+    # subprocess was UNCHECKED and its failure is SWALLOWED by command
+    # substitution, so a failing git here produced a record with an EMPTY sha.
+    # Bash truncation cannot fail, needs no subprocess in a loop that runs once
+    # per matched commit, and `$c` is already a full sha `git rev-list` printed.
+    matched_lines="$matched_lines${c:0:9} $why $(sane "$hit")
 "
   fi
 done <"$TMPD/behind-commits"

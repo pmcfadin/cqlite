@@ -131,7 +131,7 @@ delimiter — and masking a path would also mangle it for the reader):
 |---|---|
 | 0 | `NO-STALENESS-RECOGNISED` — scan completed, affirmatively measured, nothing recognised |
 | 4 | `STALE-RECOGNISED` — at least one commit behind the base touches the blast radius |
-| 5 | `UNMEASURED` — the scan could not be performed (missing ref, no merge-base, git failure) |
+| 5 | `UNMEASURED` — the scan could not be performed (missing ref, no merge-base, unresolvable subject, or the failure of a git call **feeding the measurement**: `rev-parse`/`merge-base`/`rev-list`/`diff`/`diff-tree`) |
 | 3 | usage error |
 
 **The contract, written now so slice 2 cannot walk into the fail-open hole:** a consumer MUST treat
@@ -160,6 +160,22 @@ A verifier with a side effect is a worse verifier. The script reads `origin/main
 missing `origin/main` is `UNMEASURED` (exit 5), never a silent zero. Doctrine tells the caller to fetch
 first — `premerge-assert`'s existing guidance already says `git fetch && git rebase origin/main` before
 every gate.
+
+**`GIT_NO_LAZY_FETCH=1` is what makes the no-fetch claim TRUE rather than intended (#3650 review B2).**
+There is no fetch command in the script, but in a **partial/promisor** clone plain object access fetches
+over the network and **writes a packfile into the repository** — `rev-list`, `diff`, `diff-tree` and `log`
+all do. Measured on git 2.43.0 against a `--filter=tree:0` clone: the diff call alone took the object
+store from 4 files to 12. The variable is exported once, before any object access; a missing object then
+fails its git call, which every call site already routes to `UNMEASURED`.
+
+**And the "any failed git invocation ⇒ `UNMEASURED`" claim is SCOPED, not absolute (#3650 review B3).**
+The calls feeding the measurement (`rev-parse` of either ref, `merge-base`, `rev-list`, `diff`,
+`diff-tree`) yield `UNMEASURED`. The **informational** `origin/main` commit date is explicitly excepted
+and degrades to `DATE-UNAVAILABLE`: it feeds neither `N` nor `M`, injecting the verdict token into a
+fully measured run would false-positive a slice-2 consumer grepping `UNMEASURED`, and escalating a
+cosmetic field to a non-verdict would red the tool on correct input. The exception is stated in all three
+places the claim is made — script header, spec, here — because an absolute the code deliberately violates
+is the defect regardless of which side is right.
 
 ## D6 — Slice 1 changes NO verdict, and the #3465 disclaimer is RETAINED
 
