@@ -7832,8 +7832,11 @@ test_lane_lock_nul_bearing_pid_file_refuses() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
   chmod +x "$shadow/wc"
   printf '%s\n' "$dead" >"$d/clean-pid"
+  # Re-staged at a path of its own: the remedy step above deliberately CLEARED the lock, so `$lock/pid`
+  # no longer exists by here and reading it would assert `pid-file-absent` instead of the NUL verdict.
+  printf '%s\000\n' "$dead" >"$d/nul-pid"
   local v_nul_nowc v_clean_nowc
-  v_nul_nowc="$(env SUP="$SUPERVISOR" F="$lock/pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  v_nul_nowc="$(env SUP="$SUPERVISOR" F="$d/nul-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
   v_clean_nowc="$(env SUP="$SUPERVISOR" F="$d/clean-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
   if [[ "$v_clean_nowc" == "pid $dead" ]]; then
     pass "lane-lock NUL (fork-free): a clean pid file still parses as [$v_clean_nowc] with \`wc\` unavailable — the detector is a builtin, so a missing coreutils tool cannot stop this lane starting"
