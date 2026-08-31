@@ -1407,6 +1407,11 @@ supervisor_lock_path() {
 # for every checkout that a launcher can reach, and confirm no legacy lock is present
 # (`ls -d "${TMPDIR:-/tmp}"/cqlite-worker-supervisor.lock`). Both halves are required: an old checkout
 # that is merely idle can still be launched. Until then this guard is load-bearing.
+# THAT `ls` ANSWERS FOR THE `TMPDIR` OF THE SHELL YOU RUN IT IN, AND FOR NO OTHER (#3549, job 222 F1):
+# a launcher with a different `TMPDIR`, or one that named `SUPERVISOR_LOCK` itself, resolves a different
+# absolute path, so run it under each launcher's own environment — and treat the ANCESTRY half as the
+# one that actually closes the condition, since it holds for every path a launcher could pick. Same
+# scope limit as the guard's own check; see the SPATIAL GAP in the RESIDUAL block below.
 # (`supervisor_shell_quote` and `supervisor_one_line` are NOT part of that removal — see the note at
 # each; they are general emitters.)
 #
@@ -1783,6 +1788,44 @@ supervisor_legacy_lock_refuse() {
 #    supervisor that starts later from an old checkout remains a documented, bounded risk. Per #3549's own doctrine: a
 #    deferred defect whose activation condition is unwritten is a landmine; one whose condition is
 #    written is a documented risk.
+#
+# AND THE SECOND GAP, WHICH IS SPATIAL WHERE #3596 IS TEMPORAL (#3549, roborev job 222 F1; lead ruling
+# 2026-08-31 — DECLARE IT, change no detection logic). Read the two together: #3596 above is a gap in
+# TIME (a pre-#3467 supervisor that starts AFTER our check); this is a gap in SPACE (a pre-#3467
+# supervisor whose lock is not at the path we tested).
+#
+# 5. WHAT IS DETECTED, EXACTLY. One path: `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock`, as THIS
+#    process's own environment resolves it at guard time. Nothing else is looked at, in any state.
+# 6. WHAT IS THEREFORE NOT DETECTED. A pre-#3467 supervisor launched with a DIFFERENT `TMPDIR` — its
+#    machine-global default then resolves to a different absolute path — or one launched with an
+#    explicit `SUPERVISOR_LOCK`: the pre-#3467 script honours that variable too — read out of the
+#    pre-image, `git show f33f726c4^:scripts/local/worker-supervisor.sh` line 215 is
+#    `SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"` — so its lock
+#    sits wherever its own launcher put it. In either case that supervisor holds a lock at a
+#    path this guard never stats, and our `verified-absent` is a true statement about the path we tested
+#    and says nothing about the one it holds. This is why the proceed-path line and the refusal's
+#    relationship line both state which path was resolved and by whose environment: a bare absence
+#    invites the falsely reassuring reading, and an unqualified "no legacy lock" would be a claim this
+#    check cannot support.
+# 7. WHY IT CANNOT BE CLOSED. Another process's environment is UNKNOWABLE from here — we cannot read the
+#    `TMPDIR` a supervisor we have never seen was launched with, nor a lock path its launcher chose —
+#    the missing input is not on this side of the process boundary, so no amount of care here produces
+#    it. And "fail closed when the path cannot be established" degenerates: since the path
+#    can NEVER be established for an arbitrary launcher, fail-closed would mean REFUSE ALWAYS, and a
+#    guard that never permits a start is broken, not fail-closed. The verdict stays scoped to the path
+#    it can name, and the SCOPE is declared instead.
+# 8. WHY EXTRA PROBES WERE REJECTED, and not merely "not done" (lead ruling). Probing further candidate
+#    paths (other plausible `TMPDIR`s, a glob of lock-shaped names) would each add a place where a
+#    STALE directory permanently refuses every lane with NO REMEDY: since the classifier was deleted
+#    (see `supervisor_legacy_lock_presence`) this guard cannot tell a stale lock from a live one, so
+#    every additional probed path buys detection of a rarer live collision at the price of a permanent
+#    false refusal — which inverts the trade the refusal is worth making at ONE canonical path an
+#    operator can reason about. More probes would also manufacture exactly the appearance of
+#    completeness this block exists to deny.
+# 9. WHEN IT CLOSES: the SAME condition as #3596 and as this guard's own REMOVAL CONDITION above —
+#    every checkout a launcher can reach is at or past #3467, at which point no pre-#3467 supervisor can
+#    run under ANY `TMPDIR` or lock name. All THREE retire together; do not close one and leave the
+#    others' records standing.
 supervisor_legacy_lock_guard() {
   # THIS GUARD ALWAYS RUNS. THERE IS NO SKIP AND NO OPT-OUT (#3549, lead ruling 2026-08-30 — AC4
   # REMOVED AS UNSOUND).
