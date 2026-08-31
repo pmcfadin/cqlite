@@ -92,4 +92,5 @@ binding-unwind-profile
 pub-surface
 tooling-tests
 minimal-build
+all-features-check
 smoke
