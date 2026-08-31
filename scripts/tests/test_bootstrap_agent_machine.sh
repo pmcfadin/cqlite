@@ -236,8 +236,15 @@ pin_tree_id() {
     dig=$( { git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null
              git -C "$SCRIPT_DIR" diff 2>/dev/null
              git -C "$SCRIPT_DIR" diff --cached 2>/dev/null
-             git -C "$SCRIPT_DIR" ls-files --others --exclude-standard -z 2>/dev/null \
-               | xargs -0 -r git -C "$SCRIPT_DIR" hash-object -- 2>/dev/null
+             # PORTABLE NUL loop, not `xargs -0 -r` (#3414 final roborev). `-r`
+             # (--no-run-if-empty) is GNU-only and BSD/macOS xargs REJECTS it, so on a
+             # supported macOS host the whole untracked-contents branch failed silently
+             # and edits to already-untracked files were reported STABLE. A silent
+             # omission inside an integrity digest is the worst possible failure mode:
+             # the digest still LOOKS like it covered them.
+             while IFS= read -r -d "" _u; do
+               git -C "$SCRIPT_DIR" hash-object -- "$_u" 2>/dev/null
+             done < <(git -C "$SCRIPT_DIR" ls-files --others --exclude-standard -z 2>/dev/null)
            } | git hash-object --stdin 2>/dev/null )
     case "$dig" in
       ?*) dig=$(printf '%s' "$dig" | cut -c1-12) ;;

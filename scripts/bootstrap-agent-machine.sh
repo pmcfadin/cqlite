@@ -2189,7 +2189,15 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   fi
 
   # ---- (1) persist. Reported with info/warn ONLY — a write is never the verdict ----
-  if [ ! -e "$PIN_ENV_FILE" ]; then
+  # AND ONLY ON LINUX (#3414 final roborev). The verdict half already treats a non-Linux
+  # host as unmanaged, but this block still APPENDED to /etc/environment whenever that file
+  # happened to exist and --yes/--fix-gate-pin was passed — mutating a system file that the
+  # platform's own session mechanism does not consume. Writing to a file nobody reads is not
+  # a harmless no-op; it is an unrequested change to host state that will outlive the run.
+  if [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
+    PIN_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
+    info "not touching $PIN_ENV_FILE on this $PLATFORM host — pam_env is a Linux mechanism and this platform does not consume that file, so writing it would change host state for nothing"
+  elif [ ! -e "$PIN_ENV_FILE" ]; then
     PIN_PERSIST_NOTE="no $PIN_ENV_FILE on this host"
     info "no $PIN_ENV_FILE on this $PLATFORM host — there is no PAM-read system-wide env file to persist the pin into"
   elif [ -L "$PIN_ENV_FILE" ]; then
