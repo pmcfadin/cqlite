@@ -48,15 +48,45 @@
 #
 # THE VOCABULARY IS CHOSEN SO THIS CANNOT BE READ AS A CERTIFICATION (D2)
 # ----------------------------------------------------------------------
-# No `PASS`, no `OK`, no `RESULT:` appears in ANY run's output — those are the
-# verdict vocabulary of `AGENT-GATE *SUMMARY`, `ROBOREV REVIEW SUMMARY` and
-# `PREMERGE:` blocks, and this repo's failure mode is someone grepping for one of
-# them. Every line carries the distinct prefix `BASE-STALENESS:`. The no-finding
-# verdict is `NO-STALENESS-RECOGNISED`, never `FRESH` and never `CLEAN`: it names
-# a SCAN RESULT, not a state of the world. `M = 0` prints `0 RECOGNISED`, never a
-# bare `0` (precedent: `cfg-gated-subtree gaps: N RECOGNISED`), and every run
-# prints its own `NON-EXHAUSTIVE` lines, in the OUTPUT rather than only in docs,
-# because the output is what gets pasted.
+# THE ABSOLUTE FORM OF THIS GUARANTEE WAS FALSIFIED BY REVIEW (roborev job 233,
+# finding F2), AND IS RECORDED HERE RATHER THAN QUIETLY SOFTENED. It used to read
+# "no `PASS`, no `OK`, no `RESULT:` appears in ANY run's output". That is FALSE:
+# this script prints repository-controlled data VERBATIM in its dynamic fields,
+# and a repository path may contain any of those substrings. Confirmed against
+# this tree: `test-data/**` is a gate-global pattern and the tracked path
+# `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK` (in `SMOKE`), so a
+# commit touching it emits `OK` on a `matched` line. Three tracked paths contain
+# `OK` today. The original AC5 test passed only because the sampled run's matched
+# set happened to exclude them — a test passing for the wrong reason.
+#
+# THE ANCHORED FORM REPLACES IT, and it is what the tests assert:
+#   (a) EVERY output line, stdout AND stderr, begins with `BASE-STALENESS: `.
+#   (b) Every dynamic field is CONTROL-CHARACTER SANITIZED (newline, CR, other
+#       C0, DEL -> a visible `\n`/`\r`/`\xNN` escape) so (a) cannot be broken by
+#       repository-controlled data. GIT PERMITS NEWLINES IN PATHS: unsanitized, a
+#       matched path containing one emits a line with NO PREFIX AT ALL, breaking
+#       the very anchor everything else rests on. The path is otherwise kept
+#       VERBATIM — masking a reserved substring would mangle it for the reader,
+#       and #3312's rule is to anchor or remove the channel, never to pick a
+#       rarer delimiter.
+#   (c) The verdict appears ONLY on a `BASE-STALENESS: verdict ` line, and its
+#       token is from the CLOSED set {STALE-RECOGNISED, NO-STALENESS-RECOGNISED,
+#       UNMEASURED}. Continuation prose goes on `verdict-detail` lines, so the
+#       verdict line's token position can never hold a word.
+#   (d) This script's own STATIC TEMPLATE TEXT contains none of `PASS`, `OK`,
+#       `RESULT:` — asserted STRUCTURALLY over the source file, which is a
+#       provable property, unlike a claim about one sample run.
+# DECLARED RESIDUAL: a repository path CAN contain `PASS`/`OK`/`RESULT:`, and
+# when it does this script prints it. The anchor is what makes that harmless — a
+# grep for a foreign verdict token can land on a path, but every line it can land
+# on is visibly a `BASE-STALENESS:` line, and no line of this output can ever be
+# mistaken for a line of an `AGENT-GATE`/`ROBOREV`/`PREMERGE` block.
+#
+# The no-finding verdict is `NO-STALENESS-RECOGNISED`, never `FRESH` and never
+# `CLEAN`: it names a SCAN RESULT, not a state of the world. `M = 0` prints
+# `0 RECOGNISED`, never a bare `0` (precedent: `cfg-gated-subtree gaps: N
+# RECOGNISED`), and every run prints its own `NON-EXHAUSTIVE` lines, in the OUTPUT
+# rather than only in docs, because the output is what gets pasted.
 #
 # EXIT CODES, AND THE CONSUMER CONTRACT (D3)
 # ------------------------------------------
@@ -150,15 +180,58 @@ EOF
 
 P='BASE-STALENESS:'
 
+# sane <string> -> the string with every C0 control character and DEL replaced by
+# a VISIBLE escape, on stdout. Applied to EVERY dynamic field (D2b).
+#
+# This is the load-bearing half of the anchor: git PERMITS NEWLINES IN PATHS, so
+# an unsanitized path printed verbatim emits a SECOND line carrying no
+# `BASE-STALENESS: ` prefix — which breaks the one invariant every consumer and
+# every test rests on. It sanitizes CONTROL characters ONLY: the path is
+# otherwise kept verbatim, because masking a reserved substring would mangle the
+# path for the reader while the anchor already makes it harmless.
+#
+# The three common cases go through bash parameter substitution; the
+# per-character fallback is entered only when a rarer control byte survives, so
+# the hot path (one call per matched commit) stays substitution-only.
+sane() {
+  local s="$1" out c i n
+  s="${s//$'\r'/'\r'}"
+  s="${s//$'\n'/'\n'}"
+  s="${s//$'\t'/'\t'}"
+  case "$s" in
+    *[[:cntrl:]]*) ;;
+    *)
+      printf '%s' "$s"
+      return 0
+      ;;
+  esac
+  out=""
+  n=${#s}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    c="${s:i:1}"
+    case "$c" in
+      [[:cntrl:]]) out=$(printf '%s\\x%02x' "$out" "'$c") ;;
+      *) out="$out$c" ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+# EVERY line here is prefixed too (F3). Under D2's anchored guarantee the prefix
+# is THE load-bearing invariant, so an unprefixed usage line is a hole in it, not
+# a cosmetic slip: 7 of these 8 lines used to lack it.
 usage() {
   printf '%s USAGE — the call is wrong (this is NOT a measurement verdict)\n' "$P" >&2
-  printf 'usage: %s [<rev>]      # <rev> defaults to HEAD\n' "$(basename "$0")" >&2
-  printf '       Reports N commits on origin/main behind <rev>'"'"'s MERGE-BASE with\n' >&2
-  printf '       origin/main, and M of those touching the diff'"'"'s blast radius\n' >&2
-  printf '       (paths the diff touches + a hard-coded gate-global set).\n' >&2
-  printf '       Exits 0 no-staleness-recognised / 4 stale-recognised /\n' >&2
-  printf '       5 unmeasured / 3 usage. A CONSUMER MUST TREAT 5 AS STALE.\n' >&2
-  printf '       Advisory only (#3650 slice 1): it changes no verdict anywhere.\n' >&2
+  printf '%s USAGE usage: %s [<rev>]      # <rev> defaults to HEAD\n' \
+    "$P" "$(sane "$(basename "$0")")" >&2
+  printf '%s USAGE Reports N commits on origin/main behind <rev>'"'"'s MERGE-BASE with\n' "$P" >&2
+  printf '%s USAGE origin/main, and M of those touching the diff'"'"'s blast radius\n' "$P" >&2
+  printf '%s USAGE (paths the diff touches + a hard-coded gate-global set).\n' "$P" >&2
+  printf '%s USAGE Exits 0 no-staleness-recognised / 4 stale-recognised /\n' "$P" >&2
+  printf '%s USAGE 5 unmeasured / 3 usage. A CONSUMER MUST TREAT 5 AS STALE.\n' "$P" >&2
+  printf '%s USAGE Advisory only (#3650 slice 1): it changes no verdict anywhere.\n' "$P" >&2
 }
 
 # Non-exhaustiveness is printed on EVERY run, including the unmeasured ones — the
@@ -175,12 +248,15 @@ print_non_exhaustive() {
 # NO-STALENESS-RECOGNISED, so it can never be misread as a zero finding (D3).
 unmeasured() {
   while [ "$#" -gt 0 ]; do
-    printf '%s unmeasured-cause %s\n' "$P" "$1"
+    printf '%s unmeasured-cause %s\n' "$P" "$(sane "$1")"
     shift
   done
   print_non_exhaustive
-  printf '%s verdict UNMEASURED — the scan could not be performed. A CONSUMER MUST TREAT\n' "$P"
-  printf '%s verdict THIS AS STALE, never as fresh (#3650 D3); this is not a certification.\n' "$P"
+  # D2c: the verdict TOKEN stands alone on the one `verdict ` line; prose goes on
+  # `verdict-detail` lines, so the token position can never hold a word.
+  printf '%s verdict UNMEASURED\n' "$P"
+  printf '%s verdict-detail the scan could not be performed. A CONSUMER MUST TREAT THIS AS\n' "$P"
+  printf '%s verdict-detail STALE, never as fresh (#3650 D3); this is not a certification.\n' "$P"
   exit 5
 }
 
@@ -219,31 +295,33 @@ BASE_REF=refs/remotes/origin/main
 
 # Scratch space for the NUL-separated git output (see the -z note below). In
 # TMPDIR, never in the repository: this script writes nothing in the repo.
-if ! TMPD=$(mktemp -d "${TMPDIR:-/tmp}/base-staleness.XXXXXX"); then
-  unmeasured "could not create a scratch dir under ${TMPDIR:-/tmp}"
+# `2>/dev/null` on both: an unredirected tool writing to stderr would emit a line
+# with no `BASE-STALENESS: ` prefix, breaking D2a's anchor.
+if ! TMPD=$(mktemp -d "${TMPDIR:-/tmp}/base-staleness.XXXXXX" 2>/dev/null); then
+  unmeasured "could not create a scratch dir under $(sane "${TMPDIR:-/tmp}")"
 fi
-trap 'rm -rf "$TMPD"' EXIT
+trap 'rm -rf "$TMPD" 2>/dev/null' EXIT
 
 # --- resolve the three inputs, each failure being UNMEASURED (never a zero) ---
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
-  unmeasured "not inside a git work tree (cwd $(pwd))"
+  unmeasured "not inside a git work tree (cwd $(sane "$(pwd)"))"
 fi
 if ! subject_sha=$(git rev-parse --verify --quiet "$rev^{commit}" 2>/dev/null) ||
   [ -z "$subject_sha" ]; then
-  unmeasured "the subject rev '$rev' does not resolve to a commit"
+  unmeasured "the subject rev '$(sane "$rev")' does not resolve to a commit"
 fi
 if ! main_sha=$(git rev-parse --verify --quiet "$BASE_REF^{commit}" 2>/dev/null) ||
   [ -z "$main_sha" ]; then
   unmeasured "$BASE_REF is absent — this script does NOT fetch (#3650 D5); run" \
     "'git fetch origin main' and re-run. An absent base ref is unmeasurable, not clean."
 fi
-main_date=$(git log -1 --format=%cI "$main_sha" 2>/dev/null)
+main_date=$(sane "$(git log -1 --format=%cI "$main_sha" 2>/dev/null)")
 [ -n "$main_date" ] || main_date=UNMEASURED-DATE
 
 # D4: the MERGE-BASE, never origin/main's tip. #3392 is the recorded cost.
 if ! merge_base=$(git merge-base "$main_sha" "$subject_sha" 2>/dev/null) ||
   [ -z "$merge_base" ]; then
-  unmeasured "no merge-base between $BASE_REF and '$rev' — unrelated histories" \
+  unmeasured "no merge-base between $BASE_REF and '$(sane "$rev")' — unrelated histories" \
     "(or a shallow clone truncating the shared ancestry)."
 fi
 
@@ -350,13 +428,16 @@ for c in $commits; do
   done <"$TMPD/commit-paths"
   if [ -n "$hit" ]; then
     m=$((m + 1))
-    matched_lines="$matched_lines$(git rev-parse --short=9 "$c" 2>/dev/null) $why $hit
+    # SANITIZED HERE, at capture (D2b). `matched_lines` is newline-delimited, so a
+    # path containing a newline would both break the anchor on output AND split
+    # into two bogus records on the way in.
+    matched_lines="$matched_lines$(git rev-parse --short=9 "$c" 2>/dev/null) $why $(sane "$hit")
 "
   fi
 done
 
 # --- report ----------------------------------------------------------------
-printf '%s subject %s (%s)\n' "$P" "$rev" "$subject_sha"
+printf '%s subject %s (%s)\n' "$P" "$(sane "$rev")" "$subject_sha"
 printf '%s base %s <- the MERGE-BASE of origin/main and the subject, NOT origin/main'"'"'s tip (#3392)\n' \
   "$P" "$merge_base"
 printf '%s measured origin/main %s committed %s (this script does NOT fetch)\n' \
@@ -387,12 +468,15 @@ EOF
   fi
 fi
 print_non_exhaustive
+# D2c again: one `verdict ` line, one closed-set token, prose on `verdict-detail`.
 if [ "$m" -gt 0 ]; then
-  printf '%s verdict STALE-RECOGNISED — %s of the %s commits behind touch this diff'"'"'s\n' \
+  printf '%s verdict STALE-RECOGNISED\n' "$P"
+  printf '%s verdict-detail %s of the %s commits behind touch this diff'"'"'s blast radius.\n' \
     "$P" "$m" "$behind"
-  printf '%s verdict blast radius. Advisory only in #3650 slice 1: no verdict changes.\n' "$P"
+  printf '%s verdict-detail Advisory only in #3650 slice 1: no verdict changes.\n' "$P"
   exit 4
 fi
-printf '%s verdict NO-STALENESS-RECOGNISED — a SCAN RESULT, not a state of the world, and\n' "$P"
-printf '%s verdict not a certification. See the NON-EXHAUSTIVE lines above (#3650 slice 1).\n' "$P"
+printf '%s verdict NO-STALENESS-RECOGNISED\n' "$P"
+printf '%s verdict-detail a SCAN RESULT, not a state of the world, and not a certification.\n' "$P"
+printf '%s verdict-detail See the NON-EXHAUSTIVE lines above (#3650 slice 1).\n' "$P"
 exit 0
