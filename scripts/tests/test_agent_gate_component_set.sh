@@ -3042,6 +3042,188 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7n. IN A PARTIAL CLONE, NO BASELINE READ MAY REACH THE PROMISOR (roborev job 268, High).
+#     A partial clone answers a read of a missing object by FETCHING it from its promisor remote,
+#     under THIS repository's local config — so `url.*.insteadOf` + `protocol.ext.allow=always`
+#     executes a remote helper, and the fetch also writes objects into the shared store. A local
+#     read becoming a network operation is the third route of one family (`insteadOf` on the fetch,
+#     `ext::` on the transfer hop, now the promisor), and per-call-site suppression had failed each
+#     time — so the reads moved into the isolated repository entirely.
+#
+#     THE CONTROL IS THE FINDING, REPRODUCED. Measured while writing this case, in a real partial
+#     clone with the hostile config: `git cat-file -e <absent-sha>` and `git show <absent-sha>:p`
+#     BOTH executed the helper. Without that, "no marker appeared" would be indistinguishable from
+#     a fixture that was never a partial clone or never missing an object.
+#
+#     THE FIXTURE'S THREE NON-OBVIOUS PROPERTIES, each measured rather than assumed:
+#       * `--filter=blob:none` needs `uploadpack.allowFilter` on the source AND a NON-LOCAL
+#         transport (`file://`); over a plain path the filter is ignored and everything arrives.
+#       * a checked-out clone HAS its own blobs (checkout fetches them), so the object that must be
+#         missing is one from a commit the lane has never materialised.
+#       * `git cat-file -e` in a partial clone REPORTS PRESENT for an object it does not hold —
+#         measured with `GIT_NO_LAZY_FETCH=1` set, where `cat-file -e` still answered 0 for a blob
+#         whose `git show` FAILED. It answers about PROMISED objects, not local ones, so it cannot
+#         be used to probe presence here at all.
+#
+#     WHAT DISCRIMINATES, STATED EXACTLY, because two of these three assertions are belts and only
+#     one is the discriminator:
+#       * THE CONTROL above proves the route is live in this fixture (a read of an absent object
+#         reaches the promisor and EXECUTES the helper).
+#       * `BASELINE_OBJECTS: fetched` is THE DISCRIMINATOR: a partial clone must never take the
+#         fast path, because that path is the one that reads the baseline in this repository.
+#         RED-verified — removing the partial-clone gate reds exactly this assertion.
+#       * "no helper ran" is a BELT. Its reachability depends on git's filtered-fetch behaviour for
+#         the specific blobs this fixture leaves absent, which is why it is not relied on: with the
+#         gate removed the case reds on the assertion above BEFORE this one can speak. Kept because
+#         it costs nothing and would catch a future read that goes to the lane by another route.
+# ---------------------------------------------------------------------------
+pc_src="$tmp/pc-src"; pc_bare="$tmp/pc-src.git"; pc_lane="$tmp/pc-lane"
+pc_helper="$tmp/pc-helper"; pc_marker="$tmp/pc-EXECUTED"
+mkdir -p "$pc_src/scripts"
+# c1 is the PLAIN gate: the clone below is made from it, so the clone's own blobs are c1's.
+cp "$GATE" "$pc_src/scripts/agent-gate.sh"
+printf 'partial-clone fixture\n' >"$pc_src/README.md"
+git init -q --bare "$pc_bare" >/dev/null 2>&1
+git -C "$pc_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+git -C "$pc_bare" config uploadpack.allowFilter true >/dev/null 2>&1
+pc_ok=1
+( fx "$pc_src" && git init -q . && mkmanifest "$pc_src" derive \
+    && git add -A && git "${GIT_ID[@]}" commit -qm c1 \
+    && git push -q "$pc_bare" HEAD:refs/heads/main ) >/dev/null 2>&1 || pc_ok=0
+git clone -q --filter=blob:none --no-local "file://$pc_bare" "$pc_lane" >/dev/null 2>&1 || pc_ok=0
+# A SECOND baseline commit that CHANGES THE GATE AND THE MANIFEST, so its blobs are objects this
+# clone has never held — it is the read of THAT manifest which, in the live repository, would go to
+# the promisor. Advancing only an unrelated file would leave the manifest blob unchanged and
+# therefore LOCAL, and the execution half of this case would be unreachable while looking covered
+# (measured: that is exactly what the first cut did).
+( fx "$pc_src" && sed "$ADD_SENTINEL" scripts/agent-gate.sh >scripts/agent-gate.sh.new \
+    && mv scripts/agent-gate.sh.new scripts/agent-gate.sh \
+    && mkmanifest "$pc_src" derive \
+    && printf 'advanced past the clone\n' >>README.md \
+    && git add -A && git "${GIT_ID[@]}" commit -qm c2 \
+    && git push -q "$pc_bare" HEAD:refs/heads/main ) >/dev/null 2>&1 || pc_ok=0
+pc_tip=$(git -C "$pc_bare" rev-parse refs/heads/main 2>/dev/null)
+git -C "$pc_lane" fetch -q --filter=blob:none origin refs/heads/main:refs/heads/peer >/dev/null 2>&1 || pc_ok=0
+# The gate's own copy, pinned to the PATH form of the remote (`file://` is deliberately not a
+# canonical transport, and the filtered clone needs a non-local one).
+cp "$GATE" "$pc_lane/scripts/agent-gate.sh" 2>/dev/null || pc_ok=0
+git -C "$pc_lane" remote set-url origin "$pc_bare" >/dev/null 2>&1 || pc_ok=0
+agent_gate_pin_canonical_remote "$pc_lane/scripts/agent-gate.sh" "$pc_bare" >/dev/null 2>&1 || pc_ok=0
+agent_gate_install_components_manifest "$pc_lane/scripts/agent-gate.sh" >/dev/null 2>&1 || pc_ok=0
+{ printf '#!/bin/sh\n'; printf 'touch %s\n' "$pc_marker"; printf 'exit 1\n'; } >"$pc_helper"
+chmod +x "$pc_helper"
+# THE PROMISOR IS A SEPARATE REMOTE FROM `origin`, and that separation is what makes the case
+# discriminate rather than a convenience: `git remote get-url` APPLIES `insteadOf`, so an
+# insteadOf on origin's own URL makes the pre-flight stop at `remote-not-canonical` — fail-closed,
+# but it never reaches a baseline read, and the case would then be asserting nothing (measured:
+# that is exactly what the first cut did). `extensions.partialClone` names the remote a lazy fetch
+# uses, so pointing it at a second copy of the bare repo lets the hostile rewrite target the
+# PROMISOR URL alone, leaving origin canonical.
+pc_bare2="$tmp/pc-promisor.git"
+cp -R "$pc_bare" "$pc_bare2" 2>/dev/null || pc_ok=0
+git -C "$pc_lane" config --unset remote.origin.promisor >/dev/null 2>&1
+git -C "$pc_lane" config remote.promisorsrc.url "$pc_bare2" >/dev/null 2>&1 || pc_ok=0
+git -C "$pc_lane" config remote.promisorsrc.promisor true >/dev/null 2>&1 || pc_ok=0
+git -C "$pc_lane" config extensions.partialclone promisorsrc >/dev/null 2>&1 || pc_ok=0
+{ printf '[protocol "ext"]\n\tallow = always\n'
+  printf '[url "ext::%s #"]\n\tinsteadOf = %s\n' "$pc_helper" "$pc_bare2"
+} >>"$pc_lane/.git/config" 2>/dev/null || pc_ok=0
+pc_promisor=$(git -C "$pc_lane" config --get-regexp 'remote\..*\.promisor|extensions\.partialclone' 2>/dev/null | grep -c . || true)
+# CONTROL: a read of an object this clone does not have must reach the promisor and execute the
+# helper. The sha is a hash of text no repository here contains, so it is absent by construction.
+rm -f "$pc_marker"
+git -C "$pc_lane" cat-file -e "$(printf 'absent-object-for-3544-partial-clone-case' | git hash-object --stdin 2>/dev/null)" >/dev/null 2>&1
+pc_ctl=no
+[ -f "$pc_marker" ] && pc_ctl=yes
+if [ "$pc_ok" -ne 1 ] || [ -z "$pc_tip" ]; then
+  echo "skip - 3544-partial-clone-unreachable: could not build the partial-clone fixture on this host (filtered clone/fetch unsupported?)"
+elif [ "${pc_promisor:-0}" -lt 1 ]; then
+  echo "skip - 3544-partial-clone-unreachable: the clone is not a partial clone here (no promisor remote), so the route is not exercisable"
+elif [ "$pc_ctl" != yes ]; then
+  bad "3544-partial-clone-unreachable: the POSITIVE CONTROL did not execute the helper — a read of an absent object did not reach the promisor in this fixture, so the pre-flight not reaching it proves nothing"
+else
+  rm -f "$pc_marker"
+  pc_out=$( fx "$pc_lane" && bash "$pc_lane/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  pc_ran=no
+  [ -f "$pc_marker" ] && pc_ran=yes
+  if [ "$pc_ran" = yes ]; then
+    bad "3544-partial-clone-unreachable: THE HELPER RAN during the pre-flight — a baseline read reached the promisor remote, and a check downstream of an execution cannot undo it"
+  elif [ "$(field BASELINE_OBJECTS "$pc_out")" != fetched ]; then
+    bad "3544-partial-clone-unreachable: a PARTIAL clone must never take the fast path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$pc_out")'), because that path reads the baseline in this repository"
+    printf '%s\n' "$pc_out"
+  elif [ "$(field KIND "$pc_out")" = ok ] && [ "$(field SHA "$pc_out")" = "$pc_tip" ]; then
+    ok "3544-partial-clone-unreachable: a read of an absent object DOES reach the promisor and execute a helper here (control), yet the pre-flight measures the baseline from the isolated store and runs nothing"
+  else
+    bad "3544-partial-clone-unreachable: no execution, but the baseline was not measured (kind='$(field KIND "$pc_out")' sha='$(field SHA "$pc_out")' want $pc_tip)"
+    printf '%s\n' "$pc_out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7o. ANCESTRY IS CORRECT ACROSS TWO OBJECT SOURCES, IN BOTH DIRECTIONS (job 268). The walk now
+#     runs INSIDE the isolated repository, where the baseline commit is native and HEAD's comes
+#     from the lane through an alternate — so the answer depends on objects from two stores being
+#     visible at once, and a single-direction case could not tell a working join from a broken one
+#     that happens to answer "no". `merge-base` walks COMMIT objects only, which no partial-clone
+#     filter omits; that is why ancestry can cross the join while a manifest read (trees and blobs)
+#     could not.
+# ---------------------------------------------------------------------------
+base_anc=$(mkbaseline base-ancestry "$ADD_SENTINEL")
+anc_no=$(mkbranch ancestry-no "$base_anc" - )
+anc_no_out=$(hook "$anc_no")
+# THE `yes` DIRECTION CANNOT BE REACHED THE SAME WAY, and the reason is worth stating because it
+# looks like a gap: a repository that HOLDS a descendant of the baseline necessarily holds the
+# baseline commit too (history is complete in a normal clone), so "ancestor = yes" and "the
+# baseline objects are absent locally" cannot both be true — the fast path would take it. The
+# direction is therefore driven through a PARTIAL clone, which is forced onto the isolated path
+# regardless of what it holds. That reuses 7n's fixture (already a partial clone) rather than
+# building a second one, and its HEAD descends from the FIRST baseline commit.
+anc_yes_ok=0
+anc_yes_out=""
+if [ "${pc_ok:-0}" -eq 1 ] && [ "${pc_promisor:-0}" -ge 1 ]; then
+  # Move origin/main BACK to the commit this partial clone was made from, so the baseline IS an
+  # ancestor of its HEAD; the reads still happen in the isolated repository because it is partial.
+  if ( fx "$pc_src" && git push -qf "$pc_bare" "HEAD~1:refs/heads/main" ) >/dev/null 2>&1; then
+    anc_yes_out=$( fx "$pc_lane" && bash "$pc_lane/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+    anc_yes_ok=1
+  fi
+fi
+if [ "$(field BASELINE_OBJECTS "$anc_no_out")" != fetched ]; then
+  bad "3544-ancestry-cross-source: the unrelated-history run did not take the isolated path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$anc_no_out")'), so ancestry was not computed across two object sources — the case cannot discriminate"
+elif [ "$anc_yes_ok" -ne 1 ]; then
+  echo "skip - 3544-ancestry-cross-source: the ancestor direction needs the partial-clone fixture from 7n, which was not built on this host"
+elif [ "$(field BASELINE_OBJECTS "$anc_yes_out")" != fetched ]; then
+  bad "3544-ancestry-cross-source: the descendant run did not take the isolated path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$anc_yes_out")') — a partial clone must always use the isolated store"
+elif [ "$(field ANCESTOR "$anc_no_out")" = no ] \
+   && [ "$(field ANCESTOR "$anc_yes_out")" = yes ] \
+   && [ "$(field KIND "$anc_no_out")" = ok ] \
+   && [ "$(field KIND "$anc_yes_out")" = ok ]; then
+  ok "3544-ancestry-cross-source: ancestry computed INSIDE the isolated repository is right in BOTH directions with HEAD's objects arriving through an alternate (unrelated history -> no, descendant -> yes)"
+else
+  bad "3544-ancestry-cross-source: expected ANCESTOR no for an unrelated history and yes for a descendant (got no='$(field ANCESTOR "$anc_no_out")' yes='$(field ANCESTOR "$anc_yes_out")', kinds '$(field KIND "$anc_no_out")'/'$(field KIND "$anc_yes_out")')"
+fi
+
+# ---------------------------------------------------------------------------
+# 7p. THE FAST PATH CREATES NO SCRATCH REPOSITORY AT ALL (job 258 + 268). Asserted on a PRIVATE
+#     TMPDIR so "no scratch directory exists" is a statement about this run and cannot read a
+#     sibling lane's probe on a shared box.
+# ---------------------------------------------------------------------------
+base_fp=$(mkbaseline base-fastpath - )
+fp_fx=$(mkbranch fastpath "$base_fp" - --from-origin)
+fp_tmp="$tmp/fastpath-tmpdir"
+mkdir -p "$fp_tmp"
+fp_out=$( fx "$fp_fx" && env TMPDIR="$fp_tmp" bash "$fp_fx/scripts/agent-gate.sh" \
+            --component-set-line full 2>/dev/null )
+fp_dirs=$(ls -d "$fp_tmp"/cs-baseline.* 2>/dev/null | grep -c . || true)
+if [ "$(field BASELINE_OBJECTS "$fp_out")" = reused ] \
+   && [ "$(field KIND "$fp_out")" = ok ] \
+   && [ "${fp_dirs:-0}" -eq 0 ]; then
+  ok "3544-fast-path-no-scratch: when the baseline commit is already here the run reuses it, creates NO scratch repository and transfers nothing"
+else
+  bad "3544-fast-path-no-scratch: expected BASELINE_OBJECTS reused + KIND ok + no scratch dir (objects='$(field BASELINE_OBJECTS "$fp_out")' kind='$(field KIND "$fp_out")' scratch dirs=$fp_dirs)"
+fi
+
+# ---------------------------------------------------------------------------
 # 7i. THE URL NEVER ENTERS ANY ARGV (job 242). An accepted canonical URL may carry a token, and
 #     a URL in a `git` argument is readable via `ps` / /proc/<pid>/cmdline. SOURCE-SHAPE assert,
 #     said plainly: proving absence from argv behaviourally would mean sampling /proc against a

@@ -3702,7 +3702,12 @@ _component_set_build_git_env() {
   # half — `--no-replace-objects` is passed explicitly on the lane-local reads that are
   # deliberately NOT env-wrapped, so no object read anywhere in this pre-flight honours a
   # replacement.
-  _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0" "GIT_NO_REPLACE_OBJECTS=1")
+  # `GIT_NO_LAZY_FETCH=1` is a BELT, not the control (job 268). The control is structural: no
+  # baseline object is resolved in the live repository at all, and the fast path's presence probe
+  # only runs when `_component_set_is_partial` says `no`. This variable additionally tells git not
+  # to consult a promisor for a missing object — but it is git >= 2.36, and an unset variable on an
+  # older host does nothing silently, which is exactly why it cannot BE the control.
+  _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0" "GIT_NO_REPLACE_OBJECTS=1" "GIT_NO_LAZY_FETCH=1")
   return 0
 }
 
@@ -3792,7 +3797,10 @@ _component_set_probe() {
 # probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
 # verdict mapping and the emit live in the two functions below.
 _component_set_probe_inner() {
-  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""; _CS_PARTIAL=""
+  # `GIT_NO_LAZY_FETCH=1` on EVERY object read, in both paths: a no-op in the scratch (no promisor
+  # there) and a no-op in a non-partial clone, protective only if the partial-clone probe is ever
+  # wrong about an exotic promisor setup. Belt; see the allowlist for why it is not the control.
+  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=("GIT_NO_LAZY_FETCH=1"); _CS_HEAD_SHA=""; _CS_PARTIAL=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -4061,8 +4069,11 @@ _component_set_probe_inner() {
   # So partial (and unmeasurable) clones always go through the isolated scratch store, which costs
   # a fetch and closes the route; a normal clone keeps the 0.6s no-transfer path.
   #
-  # `cat-file -e` is INSIDE the short-circuit deliberately: asking "do we have this object?" is
-  # itself the lazy-fetch trigger, so it must not run at all when a promisor could answer it.
+  # `cat-file -e` is INSIDE the short-circuit deliberately, and for TWO reasons. Asking "do we
+  # have this object?" is itself the lazy-fetch trigger; and in a partial clone the answer is not
+  # even usable — measured with `GIT_NO_LAZY_FETCH=1` set, `cat-file -e` answered 0 for a blob
+  # whose `git show` then FAILED, because it answers about PROMISED objects rather than local ones.
+  # So in a partial clone this probe would be both a network trigger and a wrong answer.
   _CS_PARTIAL="$(_component_set_is_partial)"
   if [ "$_CS_PARTIAL" = no ] && _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
     _CS_SHA="$remote_sha"
@@ -4170,7 +4181,7 @@ _component_set_probe_inner() {
       return 0 ;;
   esac
   _CS_READ_DIR="$csdir/repo"
-  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
+  _CS_READ_ENV=("GIT_NO_LAZY_FETCH=1" "GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
   _CS_SHA="$cssha"
   fi
   # ---- end of the OBJECTS-ABSENT (slow) path. Both paths have now set `_CS_SHA` to a commit
@@ -4242,7 +4253,7 @@ _component_set_probe_inner() {
   # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
   # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
   # local-only: resolves a ref plus a COMMIT object, neither of which a filter omits.
-  _CS_HEAD_SHA=$(git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
+  _CS_HEAD_SHA=$(env GIT_NO_LAZY_FETCH=1 git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else
