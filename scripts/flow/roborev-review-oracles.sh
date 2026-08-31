@@ -1350,19 +1350,85 @@ roborev_absence_waiver_lookup() {
 # control is the permanent, attributable comment, which is why a substantive reason is required and
 # recorded verbatim.
 
+# ===== RETRIEVABILITY IS THREE-VALUED: PRESENT / ABSENT / COULD-NOT-ASK (#3626, lead condition 1) =====
+# This is the LOAD-BEARING leg of a deferral's disposition — the PR-body link check it used to share
+# that job with was DELETED, not patched (the full census and the reason live at the deleted site in
+# `roborev-waiver-scan.py`; in one line: a PR body is editable by anyone with write access with no
+# per-edit attribution, so it was the weaker artifact even before its Markdown recognisers leaked). A
+# load-bearing leg MUST NOT collapse "cannot tell" onto an answer.
+#
+# `gh issue view` EXITS 1 FOR BOTH A MISSING ISSUE AND AN AUTH/NETWORK FAILURE — measured on gh 2.98.0:
+#   not found : `GraphQL: Could not resolve to an issue or pull request with the number of N.`  exit 1
+#   no auth   : `HTTP 401: Bad credentials (https://api.github.com/graphql)`                    exit 1
+# so an exit-code-only test is exactly the two-valued predicate that always picks the permissive
+# answer. The verdict therefore comes from the DIAGNOSTIC, and EVERY unrecognised diagnostic is
+# COULD-NOT-ASK: both non-present states are non-granting, and what differs is the OPERATOR ACTION
+# ("that issue number is wrong" vs "this box cannot reach GitHub"), so guessing between them buys
+# nothing and guessing wrong sends the operator to fix the wrong thing.
+#
+# Sets ROBOREV_ISSUE_STATE = present | absent | unverifiable, and ROBOREV_ISSUE_DETAIL for the two
+# non-granting ones. It never returns non-zero, because a two-valued RETURN would re-import the very
+# collapse this function exists to remove.
+roborev_issue_retrievability() {
+  local issue="$1" out errfile errtext folded ok
+  ROBOREV_ISSUE_STATE="unverifiable"
+  ROBOREV_ISSUE_DETAIL="'gh issue view $issue' was never asked"
+  if ! command -v gh >/dev/null 2>&1; then
+    ROBOREV_ISSUE_DETAIL="'gh' is not on PATH, so whether issue #$issue exists could not be asked"
+    return 0
+  fi
+  if ! errfile="$(mktemp 2>/dev/null)"; then
+    ROBOREV_ISSUE_DETAIL="no temporary file could be created to capture the 'gh' diagnostic, so a missing issue could not be told apart from a could-not-ask — the two must never read alike, so this is the could-not-ask"
+    return 0
+  fi
+  # `--jq .number` lets `gh` do the JSON parse and yields ONE integer, so the AFFIRMATIVE test is an
+  # exact string comparison instead of a regex over JSON. (The COMMENTS payload is deliberately NOT
+  # read through `--jq`: there, author and body must stay separate FIELDS of one object so no body can
+  # forge its author. Here there is no association to preserve — only an integer.)
+  if out="$(cd "$REPO" && gh issue view "$issue" --json number --jq .number 2>"$errfile")"; then
+    ok=1
+  else
+    ok=0
+  fi
+  errtext="$(tr -d '\r' <"$errfile" | tr '\n' ' ')"
+  rm -f "$errfile"
+  folded="$(printf '%s' "$errtext" | tr '[:upper:]' '[:lower:]')"
+  if [ "$ok" -eq 1 ]; then
+    # THE PERMISSIVE BRANCH IS KEYED ON THE AFFIRMATIVE VALUE: the payload must name THIS issue.
+    if [ "$out" = "$issue" ]; then
+      ROBOREV_ISSUE_STATE="present"
+      ROBOREV_ISSUE_DETAIL=""
+      return 0
+    fi
+    ROBOREV_ISSUE_STATE="unverifiable"
+    ROBOREV_ISSUE_DETAIL="'gh issue view $issue' succeeded but returned '$out' rather than that issue's number, so its existence was never AFFIRMATIVELY established"
+    return 0
+  fi
+  case "$folded" in
+    *"could not resolve to an issue"*)
+      ROBOREV_ISSUE_STATE="absent"
+      ROBOREV_ISSUE_DETAIL="GitHub answered that issue #$issue DOES NOT EXIST in this repository ($errtext)"
+      ;;
+    *)
+      ROBOREV_ISSUE_STATE="unverifiable"
+      ROBOREV_ISSUE_DETAIL="'gh issue view $issue' failed WITHOUT answering that the issue does not exist (${errtext:-no diagnostic was produced}), so whether #$issue exists is UNKNOWN — this is a could-not-ask, not an answer"
+      ;;
+  esac
+  return 0
+}
+
 # roborev_findings_deferral_lookup <base-sha> <head-sha> <job-id> <observed-findings-count>:
 # does the PR for this branch carry a findings deferral for THIS REVIEW, covering exactly this many
-# findings, with every named issue retrievable and referenced from the PR body? Sets, and never
-# returns non-zero:
+# findings, with every named issue RETRIEVABLE? Sets, and never returns non-zero:
 #   ROBOREV_DEFERRAL_STATE   granted | unauthorized | stale | malformed | none | count-mismatch |
-#                            issue-unresolvable | pr-unlinked | unavailable
+#                            issue-absent | issue-unverifiable | unavailable
 #   ROBOREV_DEFERRAL_AUTHOR / _SCOPE / _REASON / _DETAIL / _ISSUES / _COUNT
 #
 # FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, an unusable scanner, a marker for another
-# scope, a count that does not match, an unretrievable issue, an issue the PR body never references, a
-# placeholder reason, a missing field — every one of them leaves the findings FAILing, under its own
-# named state, because "your marker names the wrong job" and "there is no marker" are different
-# operator actions and a bare FAIL distinguishes neither.
+# scope, a count that does not match, an issue GitHub says does not exist, an issue whose existence
+# could not be ASKED, a placeholder reason, a missing field — every one of them leaves the findings
+# FAILing, under its own named state, because "your marker names the wrong job" and "there is no
+# marker" are different operator actions and a bare FAIL distinguishes neither.
 roborev_findings_deferral_lookup() {
   local base="$1" head="$2" job="$3" observed="$4" json result issue
   ROBOREV_DEFERRAL_STATE="none"
@@ -1397,13 +1463,16 @@ roborev_findings_deferral_lookup() {
     ROBOREV_DEFERRAL_DETAIL="the structured authorization scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — an authorization is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
     return 0
   fi
-  # ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY. `body` comes back with `comments` because the
-  # disposition half asks whether the PR body references each deferred issue, and both questions are
-  # then answered from ONE structured payload rather than from two reads that could disagree. No
-  # `--jq`: author and body must stay SEPARATE FIELDS of the same object all the way to the decision.
-  if ! json=$(cd "$REPO" && gh pr view --json comments,body 2>/dev/null); then
+  # ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY — AND `comments` IS THE WHOLE PAYLOAD (#3626).
+  # `body` was fetched here for a PR-body link check that has been DELETED rather than patched: a PR
+  # body is editable at any time by anyone with write access with NO per-edit attribution, while a
+  # top-level comment is permanent and attributable, so the body was the weaker artifact and is now
+  # evidence for nothing (the full bypass census is at the deleted site in `roborev-waiver-scan.py`).
+  # No `--jq`: author and body must stay SEPARATE FIELDS of the same object all the way to the
+  # decision, so nothing inside a body can change whose comment it is.
+  if ! json=$(cd "$REPO" && gh pr view --json comments 2>/dev/null); then
     ROBOREV_DEFERRAL_STATE="unavailable"
-    ROBOREV_DEFERRAL_DETAIL="'gh pr view --json comments,body' failed (no PR for this branch, no auth, or an API error), so no deferral could be read"
+    ROBOREV_DEFERRAL_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no deferral could be read"
     return 0
   fi
   [ -n "$json" ] || return 0
@@ -1422,12 +1491,13 @@ roborev_findings_deferral_lookup() {
   # A STATE THIS CODE HAS NEVER JUDGED IS NOT A GRANT: an unrecognised (or empty) verdict from the
   # scanner fails closed instead of inheriting the permissive path.
   case "$ROBOREV_DEFERRAL_STATE" in
-    # `unavailable` IS a state the scanner itself emits (a payload with no readable PR body), and it
-    # arrives WITH its own detail — so it is recognised here rather than rewritten. Rewriting it
-    # replaced a precise cause ("there is no body to read") with a generic one ("unrecognised state"),
-    # which is the diagnostic-quality failure this key exists to avoid; nothing becomes permissive,
-    # because `unavailable` is non-granting on both paths.
-    granted|unauthorized|stale|malformed|none|count-mismatch|pr-unlinked|unavailable) ;;
+    # `unavailable` is RETAINED here as a pass-through, though the scanner emits no such state today
+    # (the one it had reported a payload with no readable PR body, and the PR body is no longer read at
+    # all — #3626). A scanner that ever reports its own unavailability keeps its PRECISE cause instead
+    # of being rewritten to a generic "unrecognised state", which is the diagnostic-quality failure
+    # this case exists to avoid; nothing becomes permissive either way, because `unavailable` is
+    # non-granting on both paths. `pr-unlinked` is GONE with the check that produced it.
+    granted|unauthorized|stale|malformed|none|count-mismatch|unavailable) ;;
     *)
       ROBOREV_DEFERRAL_DETAIL="the deferral scanner returned the unrecognised state '$ROBOREV_DEFERRAL_STATE'; failing closed"
       ROBOREV_DEFERRAL_STATE="unavailable"
@@ -1435,11 +1505,12 @@ roborev_findings_deferral_lookup() {
       ;;
   esac
   [ "$ROBOREV_DEFERRAL_STATE" = "granted" ] || return 0
-  # ===== DISPOSITION, SECOND HALF: EACH DEFERRED ISSUE MUST BE RETRIEVABLE =====
-  # The PR-body reference is decided in the scanner (it is in the same payload); RETRIEVABILITY needs a
-  # second network read, so it lives here. UNRETRIEVABLE FAILS CLOSED under its own cause rather than
-  # being skipped: "the issue I filed does not exist" and "the body forgot to mention it" are different
-  # operator actions, and a deferral pointing at nothing is a dropped finding wearing a link.
+  # ===== DISPOSITION: EACH DEFERRED ISSUE MUST BE RETRIEVABLE, AND THAT IS THE WHOLE OF IT =====
+  # This is the ONE leg that enforces NOT-DROPPED, since the PR-body scan was removed (#3626). It needs
+  # a network read, so it lives here rather than in the structured scanner. It is THREE-VALUED: an
+  # issue GitHub says does not exist and an issue whose existence could not be ASKED are separate
+  # states with separate causes, because they are different operator actions — and neither is ever read
+  # as verified. A deferral pointing at nothing is a dropped finding wearing a link.
   # ONE GRANT IS UNDONE BY ANY FAILURE — the loop cannot leave a partial grant standing, because the
   # state is overwritten before the first failure returns.
   # A STRUCTURAL BACKSTOP, unreachable through the marker pattern (`issues=` admits one or more
@@ -1455,11 +1526,24 @@ roborev_findings_deferral_lookup() {
   # replaced with spaces and the default IFS does the split — no global IFS to save and restore, which
   # is one fewer thing to leave broken on an early return.
   for issue in ${ROBOREV_DEFERRAL_ISSUES//,/ }; do
-    if ! (cd "$REPO" && gh issue view "$issue" --json number >/dev/null 2>&1); then
-      ROBOREV_DEFERRAL_STATE="issue-unresolvable"
-      ROBOREV_DEFERRAL_DETAIL="issue #$issue could not be retrieved ('gh issue view $issue' failed: it does not exist, is in another repository, or 'gh' could not reach it), so the disposition of a deferred finding rests on nothing. A deferral must name a FILED issue; fail-closed rather than deferring into a void"
-      return 0
-    fi
+    roborev_issue_retrievability "$issue"
+    # KEYED ON THE AFFIRMATIVE VALUE: only `present` continues. Every other value — including one this
+    # code has never judged — takes a non-granting branch, so an unplanned state cannot inherit the
+    # permissive path. ONE GRANT IS UNDONE BY ANY FAILURE: the state is overwritten before the return,
+    # so the loop can never leave a partial grant standing.
+    case "$ROBOREV_ISSUE_STATE" in
+      present) ;;
+      absent)
+        ROBOREV_DEFERRAL_STATE="issue-absent"
+        ROBOREV_DEFERRAL_DETAIL="$ROBOREV_ISSUE_DETAIL — so the disposition of a deferred finding rests on nothing. A deferral must name a FILED issue; fail-closed rather than deferring into a void. Check the number in the marker, file the issue, then re-authorize"
+        return 0
+        ;;
+      *)
+        ROBOREV_DEFERRAL_STATE="issue-unverifiable"
+        ROBOREV_DEFERRAL_DETAIL="$ROBOREV_ISSUE_DETAIL — and a deferral may not be granted on an UNVERIFIED disposition: 'the issue does not exist' and 'this box could not ask GitHub' are different operator actions, and only the first is an answer. This one is reported separately BECAUSE it is not an answer — fix the ability to reach GitHub (auth, network, rate limit) and re-run; do NOT change the marker"
+        return 0
+        ;;
+    esac
   done
   return 0
 }
