@@ -537,5 +537,37 @@ else
 $out13b"
 fi
 
+# ===========================================================================
+echo "TEST 16: a credential-bearing remote is REDACTED in every output path"
+# ===========================================================================
+# CLAIM_REMOTE accepts a URL and was printed VERBATIM in two `unmeasurable` details and in
+# both summaries, so a token-bearing HTTPS remote wrote the SECRET into every log, PR comment
+# and CI transcript carrying the output. JSON escaping does not help — escaping makes a secret
+# well-formed, not absent. Asserted on BOTH output modes, and on the failure path as well as
+# the summary, because the details are where the remote appears most.
+SECRET='ghp_TESTONLYSECRETVALUE0001'
+CRED_REMOTE="https://bot:${SECRET}@example.invalid/org/repo.git"
+for mode in "" "--json"; do
+  out16=$( cd "$T" && CLAIM_REMOTE="$CRED_REMOTE" LANE_ROOT="$LANE_ROOT" bash "$SCAN" $mode 2>&1 )
+  label="${mode:-text}"
+  if ! printf '%s' "$out16" | grep -q "$SECRET" \
+     && printf '%s' "$out16" | grep -q '\*\*\*@example.invalid'; then
+    ok "($label) the token is ABSENT and the remote is shown redacted as ***@example.invalid — host and path kept, so 'which remote failed' stays answerable"
+  else
+    bad "($label) credential leaked or redaction missing:
+$out16"
+  fi
+done
+
+# CONTROL: a remote with NO userinfo must pass through UNCHANGED, or the redaction would make
+# every ordinary diagnostic unreadable — the over-redaction failure mode.
+out16c=$( cd "$T" && CLAIM_REMOTE="$ORIGIN" LANE_ROOT="$LANE_ROOT" bash "$SCAN" 2>&1 )
+if printf '%s' "$out16c" | grep -qF "$ORIGIN" && ! printf '%s' "$out16c" | grep -q '\*\*\*@'; then
+  ok "control: a remote with no userinfo is printed unchanged — the redaction does not over-reach"
+else
+  bad "control: a credential-free remote was altered:
+$out16c"
+fi
+
 echo "==== ADVERTISED-COLLISION-SCAN TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

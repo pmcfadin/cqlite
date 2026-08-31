@@ -726,7 +726,14 @@ record_is_self() {
   [ "${REC_ACTOR:-}" = "$G_ACTOR" ] || return 1
   [ "${REC_PID:-}" = "$G_PID" ] || return 1
   [ "${REC_START_TICKS:-}" = "$G_TICKS" ] || return 1
-  [ "$(boot_short "${REC_BOOT_ID:-}")" = "$(boot_short "$G_BOOT")" ] || return 1
+  # THE FULL BOOT ID, not the 8-char display form (#3436, roborev round 7). The short form
+  # exists for the display token; comparing it here compared a 32-bit PREFIX of a 128-bit
+  # value that is RECORDED IN FULL and sitting right there. A colliding prefix plus a reused
+  # pid and start-ticks would have granted re-entrancy to a stale PRE-REBOOT record — and
+  # because SELF is tested BEFORE the DEAD-REBOOT branch, that false SELF would have won.
+  # This is the same defect as everything else this change fixed: comparing a truncated proxy
+  # when the exact value was available. In the identity code written to be exact.
+  [ "${REC_BOOT_ID:-}" = "$G_BOOT" ] || return 1
   return 0
 }
 
@@ -938,6 +945,32 @@ resolve_lane_dir() {
 # correctness input: the record is found by ISSUE, so falling back to the given path is
 # both safe and the honest answer — we report what we were told when we cannot improve on
 # it, and we say so on stderr rather than dying.
+# lex_norm_path <abs-path> — LEXICAL normalisation: collapse `//`, drop `.`, resolve `..`,
+# strip trailing slashes. No filesystem access, so it works on a path that does NOT EXIST YET —
+# which is the whole point, because `acquire` legitimately runs BEFORE `git worktree add`
+# creates the lane.
+#
+# WHY (#3436, roborev round 7, REPRODUCED): the recorded `lane-dir` is copied into the cwd
+# identity walk, and `/proc/<pid>/cwd` is always canonical. So a path recorded as
+# `.../lane-961/` or `.../x/../lane-962` never matched the holder's own cwd once the directory
+# existed: probe reported `liveness=ALIVE` instead of `SELF`, claim.sh then read its OWN lock as
+# a live PEER, and `release` without `--pid` was refused to the holder. Comparing a
+# non-canonical string as though it were a canonical path — the same shape as comparing a
+# truncated boot id.
+lex_norm_path() {
+  local in="$1" out="" seg
+  case "$in" in /*) ;; *) printf '%s\n' "$in"; return 0 ;; esac
+  local IFS=/
+  for seg in $in; do
+    case "$seg" in
+      ''|.) ;;
+      ..)   out="${out%/*}" ;;
+      *)    out="$out/$seg" ;;
+    esac
+  done
+  printf '%s\n' "${out:-/}"
+}
+
 lane_real() {
   local p="$1" real=""
   if [ -d "$p" ]; then
@@ -947,7 +980,11 @@ lane_real() {
       real="$p"
     fi
   else
-    real="$p"
+    # Does not exist yet (acquire-before-worktree-add). Physical canonicalisation is
+    # impossible, but LEXICAL normalisation is not — and it is what makes the recorded value
+    # comparable to a future `/proc/<pid>/cwd`. Symlinks in a not-yet-existing path remain
+    # unresolvable; readers canonicalise physically once the directory appears.
+    real="$(lex_norm_path "$p")"
   fi
   printf '%s\n' "$real"
 }

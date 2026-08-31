@@ -1162,5 +1162,60 @@ $OUT"
 fi
 kill "$SCOPE_H" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 25: identity compares the FULL boot id, and a recorded lane-dir is canonical"
+# ===========================================================================
+# (a) `record_is_self` compared the 8-char DISPLAY prefix of a 128-bit boot id that is
+# RECORDED IN FULL. A colliding prefix plus a reused pid and start-ticks would grant
+# re-entrancy to a stale PRE-REBOOT record — and SELF is tested BEFORE the DEAD-REBOOT
+# branch, so the false SELF would win. Comparing a truncated proxy when the exact value is
+# in hand, inside the identity code written to be exact.
+sleep 300 & BP_H=$!
+LANE_970b="$LANES/lane-970b"; mkdir -p "$LANE_970b"
+ll acquire 970 --lane-dir "$LANE_970b" --pid "$BP_H" >/dev/null 2>&1
+REC970="$LANES/.lane-locks/lane-970.lock"
+real_boot=$(grep '^boot-id=' "$REC970" | cut -d= -f2)
+forged_boot="${real_boot:0:8}$(printf '%s' "${real_boot:8}" | tr 'abcdef0123456789' 'bcdefa1234567890')"
+set_rec_field 970 boot-id "$forged_boot"
+ll probe 970 --pid "$BP_H"
+if [ "${real_boot:0:8}" = "${forged_boot:0:8}" ] && [ "$real_boot" != "$forged_boot" ] \
+   && printf '%s' "$OUT" | grep -q 'liveness=DEAD-REBOOT' \
+   && ! printf '%s' "$OUT" | grep -q 'liveness=SELF'; then
+  ok "(a) a boot id sharing the 8-char DISPLAY prefix but differing in full is DEAD-REBOOT, never a false SELF"
+else
+  bad "(a) prefix-colliding boot id was not rejected: same-prefix=$([ "${real_boot:0:8}" = "${forged_boot:0:8}" ] && echo y || echo n)
+$OUT"
+fi
+kill "$BP_H" 2>/dev/null || true
+
+# (b) A lane-dir recorded BEFORE the directory exists must still be comparable to a future
+# /proc/<pid>/cwd, which is always canonical. Recorded raw, `lane-971/` and `y/../lane-971`
+# never matched the holder's own cwd: probe said ALIVE instead of SELF, claim.sh read its OWN
+# lock as a live peer, and `release` was refused TO THE HOLDER. Asserted through the
+# user-visible consequence (release without --force), not just the recorded string.
+for shape in "trailing-slash" "dotdot"; do
+  sleep 300 & CN_H=$!
+  case "$shape" in
+    trailing-slash)want="$LANES/lane-972"; give="$LANES/lane-972/" ;;
+    dotdot)         want="$LANES/lane-973"; give="$LANES/z/../lane-973" ;;
+  esac
+  iss=$(basename "$want" | tr -dc '0-9')
+  ll acquire "$iss" --lane-dir "$give" --pid "$CN_H" >/dev/null 2>&1
+  recorded=$(grep '^lane-dir=' "$LANES/.lane-locks/lane-$iss.lock" 2>/dev/null | cut -d= -f2-)
+  mkdir -p "$want"
+  ll probe "$iss" --pid "$CN_H"; probe_out="$OUT"
+  ll release "$iss" --pid "$CN_H"; rel_rc=$RC; rel_out="$OUT"
+  if [ "$recorded" = "$want" ] \
+     && printf '%s' "$probe_out" | grep -q 'liveness=SELF' \
+     && [ "$rel_rc" -eq 0 ] && printf '%s' "$rel_out" | grep -q '^LANE-LOCK: RELEASED' ; then
+    ok "(b/$shape) a non-canonical acquisition path is recorded CANONICAL ($recorded), the holder is SELF, and release succeeds WITHOUT --force"
+  else
+    bad "(b/$shape) recorded='$recorded' want='$want' rel_rc=$rel_rc
+$probe_out
+$rel_out"
+  fi
+  kill "$CN_H" 2>/dev/null || true
+done
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

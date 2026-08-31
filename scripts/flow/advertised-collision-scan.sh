@@ -161,6 +161,25 @@ say()       { printf '%s\n' "$*"; }
 # the decoder replaced the bad byte before the parse ever ran. Re-running against RAW
 # BYTES with a strict decode inverted the result. A JSON-validity test that decodes
 # leniently is not a JSON-validity test.
+# redact_remote <remote> — a remote for DISPLAY, with URL userinfo stripped.
+#
+# WHY (#3436, roborev round 7): CLAIM_REMOTE accepts a URL, and this script printed it
+# VERBATIM in two `unmeasurable` details and in the text and JSON summaries. A
+# credential-bearing HTTPS remote (`https://user:token@host/org/repo.git`) therefore wrote the
+# TOKEN into every log, PR comment and CI transcript that carried the output. JSON escaping
+# does not help: escaping makes a secret well-formed, not absent.
+#
+# Only the userinfo component is removed — host, path and scheme are the useful parts of the
+# diagnostic, and over-redacting would make "which remote failed" unanswerable. A bare
+# filesystem path or an ssh-style `git@host:org/repo` has no userinfo to strip and passes
+# through unchanged, which keeps the common cases readable.
+redact_remote() {
+  case "${1:-}" in
+    *://*@*) printf '%s://***@%s\n' "${1%%://*}" "${1#*://*@}" ;;
+    *)       printf '%s\n' "${1:-}" ;;
+  esac
+}
+
 json_str() {
   local LC_ALL=C
   local s="${1:-}" out="" i=0 len c code
@@ -380,11 +399,11 @@ branches_of() {
 # MEASURE ALL THREE INPUTS. Any failure is UNMEASURABLE + exit 1, naming the
 # input — never a "none found" that reads like an all-clear.
 if ! scan_branches; then
-  unmeasurable "issue-branches" "git ls-remote --heads $REMOTE 'issue-*' FAILED — the pushed-branch fact could not be read (remote unreachable, auth, or no such remote)"
+  unmeasurable "issue-branches" "git ls-remote --heads $(redact_remote "$REMOTE") 'issue-*' FAILED — the pushed-branch fact could not be read (remote unreachable, auth, or no such remote)"
   exit 1
 fi
 if ! scan_claims; then
-  unmeasurable "claim-refs" "git ls-remote $REMOTE 'refs/claims/issue-*' FAILED — the held-claim fact could not be read (remote unreachable, auth, or no such remote)"
+  unmeasurable "claim-refs" "git ls-remote $(redact_remote "$REMOTE") 'refs/claims/issue-*' FAILED — the held-claim fact could not be read (remote unreachable, auth, or no such remote)"
   exit 1
 fi
 if ! scan_board; then
@@ -452,9 +471,9 @@ if [ "$AS_JSON" -eq 1 ]; then
   # BOOLEANS. `remote` is CLAIM_REMOTE, i.e. caller-supplied, so it is escaped like every
   # other string.
   printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"board_page_rows":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":"yes"}\n' \
-    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$READY_PAGE_ROWS" "$BRANCH_ISSUE_COUNT" "$(json_str "$REMOTE")" "$BOARD_AT_LIMIT"
+    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$READY_PAGE_ROWS" "$BRANCH_ISSUE_COUNT" "$(json_str "$(redact_remote "$REMOTE")")" "$BOARD_AT_LIMIT"
 else
-  say "SCAN: advertised-collision rows=$ROWS ready=$READY_COUNT branch-issues=$BRANCH_ISSUE_COUNT remote=$REMOTE measured=yes"
+  say "SCAN: advertised-collision rows=$ROWS ready=$READY_COUNT branch-issues=$BRANCH_ISSUE_COUNT remote=$(redact_remote "$REMOTE") measured=yes"
   if [ "$ROWS" -gt 0 ]; then
     say "SCAN: RESULT=FOUND rows=$ROWS (each row is board Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>. Remedy runs ON the box holding the lane: 'claim.sh verify <N>', then the documented resume path — never an unguarded create)"
   else
