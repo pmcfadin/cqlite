@@ -20,9 +20,22 @@
 #      script with the gate-global set EMPTIED must (a) genuinely carry that
 #      defect and nothing else, and (b) get case 5 wrong. A bare red is not
 #      evidence — the plant is verified to be the defect described.
-#   3. A VOCABULARY CASE (Case 7): NO run's output contains `PASS`, `OK` or
-#      `RESULT:`. That is AC5 tested directly rather than reasoned about, so
-#      every `run` accumulates its output for one whole-suite assertion.
+#   3. THE ANCHORED OUTPUT GUARANTEE (Case 14, WHOLE SUITE). The original AC5
+#      case asserted the ABSOLUTE form — "no run's output contains `PASS`, `OK`
+#      or `RESULT:`" — and roborev job 233 (F2) FALSIFIED it: the advisory prints
+#      repository-controlled paths verbatim, `test-data/**` is gate-global, and
+#      the tracked path `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK`.
+#      That case passed only because the sampled run's matched set happened to
+#      exclude such paths — a test passing for the wrong reason. What is asserted
+#      now is the ANCHORED form: every nonempty output line of EVERY case, stdout
+#      and stderr, begins with `BASE-STALENESS: `; the verdict appears only on a
+#      `verdict ` line carrying a CLOSED-SET token; and the script's own STATIC
+#      TEMPLATE TEXT carries none of the three tokens, asserted STRUCTURALLY over
+#      the source (Case 15) because that property is provable while a claim about
+#      one sample run is not. Violations are ACCUMULATED across every case and
+#      reported once at the end — the old Case 7 recorded success on BOTH
+#      branches of its prefix check (so it could never fail) and ran before the
+#      usage cases, 7 of whose 8 lines were unprefixed.
 #   4. FIXTURE SELF-CONSISTENCY (Case 1): each synthetic repo is asserted with
 #      git to actually have the shape its case claims, so a case cannot pass
 #      against a fixture that never had the property under test (the idiom at
@@ -42,10 +55,52 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 T=$(mktemp -d "${TMPDIR:-/tmp}/base-staleness-test.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
-# Every run's output is accumulated here so the AC5 vocabulary assertion covers
-# ALL runs, not a sampled one.
+# Every run's output is accumulated here so Case 14's whole-suite assertions
+# cover ALL runs, not a sampled one.
 ALL_OUT="$T/all-output.txt"
 : >"$ALL_OUT"
+# Violations are ACCUMULATED to files and reported ONCE at the end (F3): the
+# check cannot then be short-circuited by running before a later case, and it
+# cannot record success on both branches the way the old Case 7 did.
+ANCHOR_BAD="$T/anchor-violations.txt"
+VERDICT_BAD="$T/verdict-violations.txt"
+: >"$ANCHOR_BAD"
+: >"$VERDICT_BAD"
+
+# record_out <tag> — accumulate $OUT and check the ANCHORED invariants on it:
+#   D2a  every nonempty line begins with `BASE-STALENESS: ` (stdout AND stderr:
+#        every `run` captures with 2>&1)
+#   D2c  any `verdict ` line carries a token from the CLOSED set
+# Called from run() so no case can forget it, and from the direct invocations too.
+record_out() {
+  local tag="$1" line tok
+  printf '%s\n' "$OUT" >>"$ALL_OUT"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      'BASE-STALENESS: '*) ;;
+      *) printf '%s\t%s\n' "$tag" "$line" >>"$ANCHOR_BAD" ;;
+    esac
+    case "$line" in
+      'BASE-STALENESS: verdict '*)
+        tok=${line#'BASE-STALENESS: verdict '}
+        tok=${tok%% *}
+        case "$tok" in
+          STALE-RECOGNISED | NO-STALENESS-RECOGNISED | UNMEASURED) ;;
+          *) printf '%s\t%s\n' "$tag" "$line" >>"$VERDICT_BAD" ;;
+        esac
+        ;;
+    esac
+  done <<RECORD_OUT
+$OUT
+RECORD_OUT
+}
+
+# verdict_lines — how many `verdict ` lines $OUT carries (exactly one per
+# measurement run; zero for a usage error).
+verdict_lines() {
+  printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: verdict ' | tr -d ' '
+}
 
 MAIN_REF=refs/remotes/origin/main
 
@@ -91,7 +146,7 @@ run() {
   shift 3
   OUT=$(cd "$repo" && bash "${USE_SCRIPT:-$ADVISORY}" "$@" 2>&1)
   RC=$?
-  printf '%s\n' "$OUT" >>"$ALL_OUT"
+  record_out "$desc"
   if [ "$RC" -ne "$want" ]; then
     bad "$desc (exit $RC, wanted $want)"
     printf '     output: %s\n' "$OUT"
@@ -178,6 +233,68 @@ rm -f "$R_NOBASE/README.md" "$R_NOBASE/.config/nextest.toml"
 rm -rf "$R_NOBASE/cqlite-core"
 commit_paths "$R_NOBASE" "an unrelated root history" "unrelated/only.txt"
 
+# RESERVED — matched paths carrying the VERDICT VOCABULARY of this repo's OTHER
+# artifacts, plus a SPACE-bearing and a NEWLINE-bearing path. Every path here is
+# under the gate-global `test-data/**`, so each stales via a path the DIFF does
+# NOT touch and is therefore printed VERBATIM on a `matched` line. This is the
+# fixture the old absolute AC5 claim could not survive: `CI_SMOKE_TEST_USAGE.md`
+# is a REAL tracked path in this repo and contains `OK` inside `SMOKE`.
+# (`RESULT:` is not fixtured as a path: a colon in a filename is legal here but
+# not portably creatable, and D2d covers that token structurally over the source.)
+R_RES=$(newrepo reserved-substrings)
+commit_paths "$R_RES" "the PR: sstable module" "cqlite-core/src/storage/sstable/mod.rs"
+advance_main "$R_RES"
+commit_paths "$R_RES" "behind: a path containing OK" \
+  "test-data/scripts/CI_SMOKE_TEST_USAGE.md"
+commit_paths "$R_RES" "behind: a path containing PASS" \
+  "test-data/notes/PASSTHROUGH-fixture.md"
+commit_paths "$R_RES" "behind: a SPACE-bearing path" \
+  "test-data/notes/a spaced PASS name.md"
+# GIT PERMITS NEWLINES IN PATHS. Unsanitized, this path emits a SECOND output
+# line with NO prefix at all, breaking the one anchor everything rests on.
+NL_PATH=$'test-data/notes/we\nird.md'
+commit_paths "$R_RES" "behind: a NEWLINE-bearing path" "$NL_PATH"
+publish_main "$R_RES"
+back_to_feature "$R_RES"
+
+# RENAME — the PR renames a file the campsite-rule way and a commit behind edits
+# the OLD path. The porcelain `git diff` honours `diff.renames` (git's default is
+# TRUE since 2.9) and reports the DESTINATION ONLY, while the commit scan's
+# plumbing `git diff-tree` reports the old path — so without the pin the old path
+# is absent from DIFF_PATHS, the commit matches NEITHER half, and the scan reports
+# `blast-radius 0 RECOGNISED` on a base that is genuinely stale. A FAIL-OPEN.
+# The renamed file is deliberately NOT gate-global, or the case would pass via the
+# other half of the definition and prove nothing.
+R_REN=$(newrepo rename)
+advance_main "$R_REN"
+commit_paths "$R_REN" "c1: the file the PR will rename" "cqlite-core/src/oldname.rs"
+g "$R_REN" branch -f feature mainline >/dev/null
+g "$R_REN" checkout -q feature
+g "$R_REN" mv cqlite-core/src/oldname.rs cqlite-core/src/newname.rs
+printf 'the PR also edits the renamed file\n' >>"$R_REN/cqlite-core/src/newname.rs"
+g "$R_REN" add -A >/dev/null
+g "$R_REN" -c user.email=t@t -c user.name=t commit -q -m "the PR: rename + edit" >/dev/null
+advance_main "$R_REN"
+commit_paths "$R_REN" "behind: main edits the OLD path" "cqlite-core/src/oldname.rs"
+publish_main "$R_REN"
+back_to_feature "$R_REN"
+
+# RELATIVE — the same shape as STALE_DIFF, but with `diff.relative=true` set in
+# the repo. That config is honoured by porcelain only, so run from a
+# SUBDIRECTORY it emits paths with the subdirectory prefix STRIPPED, which can
+# never equal the root-relative paths the commit scan reports. It makes `M` a
+# function of the INVOKER'S CWD — a config the invoker controls, which is why the
+# pin is required rather than defensive.
+R_REL=$(newrepo relative-config)
+commit_paths "$R_REL" "the PR edits the sstable module" \
+  "cqlite-core/src/storage/sstable/mod.rs"
+advance_main "$R_REL"
+commit_paths "$R_REL" "behind: main edits the same module" \
+  "cqlite-core/src/storage/sstable/mod.rs"
+publish_main "$R_REL"
+back_to_feature "$R_REL"
+g "$R_REL" config diff.relative true
+
 # --- Case 1: the fixtures really have the shape the cases claim -------------
 # Non-vacuity. A case asserting "the culprit shares no path with the diff" is
 # worthless if the fixture happens to share one; assert it with git, not by eye.
@@ -232,6 +349,50 @@ if g "$R_NOBASE" merge-base "$MAIN_REF" HEAD >/dev/null 2>&1; then
   bad "fixture(no-merge-base): the histories must be unrelated"
 else
   ok "fixture(no-merge-base): the histories genuinely have no merge-base"
+fi
+# RESERVED: the reserved-substring, space-bearing and NEWLINE-bearing paths are
+# genuinely tracked. Read NUL-separated — a newline-delimited read of a
+# newline-bearing path is precisely the bug under test.
+res_ok=0; res_pass=0; res_space=0; res_nl=0
+while IFS= read -r -d '' f; do
+  case "$f" in *OK*) res_ok=1 ;; esac
+  case "$f" in *PASS*) res_pass=1 ;; esac
+  case "$f" in *' '*) res_space=1 ;; esac
+  case "$f" in *$'\n'*) res_nl=1 ;; esac
+done < <(g "$R_RES" ls-tree -r -z --name-only "$MAIN_REF" -- 'test-data')
+if [ "$res_ok" -eq 1 ] && [ "$res_pass" -eq 1 ]; then
+  ok "fixture(reserved): tracked paths genuinely contain the reserved substrings OK and PASS"
+else
+  bad "fixture(reserved): the reserved-substring paths are not tracked (ok=$res_ok pass=$res_pass)"
+fi
+if [ "$res_space" -eq 1 ] && [ "$res_nl" -eq 1 ]; then
+  ok "fixture(reserved): a SPACE-bearing and a NEWLINE-bearing path are genuinely tracked"
+else
+  bad "fixture(reserved): space/newline paths are not tracked (space=$res_space nl=$res_nl)"
+fi
+# RENAME: git must ACTUALLY detect the rename on the porcelain side, or the case
+# would pass for the wrong reason (an undetected rename emits both paths, which
+# is the behaviour the pin forces anyway).
+mb=$(g "$R_REN" merge-base "$MAIN_REF" HEAD)
+g "$R_REN" diff --name-only -M "$mb...HEAD" | sort >"$T/ren-porcelain"
+g "$R_REN" -c diff.renames=false diff --name-only "$mb...HEAD" | sort >"$T/ren-pinned"
+if ! grep -qx 'cqlite-core/src/oldname.rs' "$T/ren-porcelain" &&
+  grep -qx 'cqlite-core/src/newname.rs' "$T/ren-porcelain" &&
+  grep -qx 'cqlite-core/src/oldname.rs' "$T/ren-pinned"; then
+  ok "fixture(rename): git DOES detect the rename (destination only) and the pin restores the old path"
+else
+  bad "fixture(rename): the rename is not detected, so the case cannot exercise the asymmetry"
+fi
+ren_culprit=$(g "$R_REN" rev-list "$mb..$MAIN_REF" -- cqlite-core/src/oldname.rs)
+if [ -n "$ren_culprit" ]; then
+  ok "fixture(rename): a commit behind genuinely edits the OLD path"
+else
+  bad "fixture(rename): no commit behind touches cqlite-core/src/oldname.rs"
+fi
+if [ "$(g "$R_REL" config --get diff.relative)" = true ]; then
+  ok "fixture(relative): diff.relative is genuinely set in the fixture repo"
+else
+  bad "fixture(relative): diff.relative is not set, so the case proves nothing"
 fi
 
 # --- Case 2: a stale base with blast-radius churn is STALE-RECOGNISED -------
@@ -289,29 +450,18 @@ if run 0 "unrelated churn only -> counted in N, not in M, exit 0" "$R_UNREL"; th
   has "unrelated: verdict is NO-STALENESS-RECOGNISED" "verdict NO-STALENESS-RECOGNISED"
 fi
 
-# --- Case 7 (AC5): NO run's output carries another artifact's verdict token --
-# The advisory must be impossible to paste or grep as a certification. `PASS`,
-# `OK` and `RESULT:` are the verdict vocabulary of AGENT-GATE *SUMMARY, ROBOREV
-# REVIEW SUMMARY and PREMERGE: blocks.
-if [ "$(wc -l <"$ALL_OUT" | tr -d ' ')" -lt 20 ]; then
-  bad "vocabulary: the accumulated-output file is suspiciously small — the case would be vacuous"
-else
-  ok "vocabulary: the assertion runs against the accumulated output of every run so far"
-fi
-voc_bad=0
-for tok in PASS OK 'RESULT:'; do
-  if grep -q -- "$tok" "$ALL_OUT"; then
-    bad "vocabulary: output contains the foreign verdict token '$tok': $(grep -m1 -- "$tok" "$ALL_OUT")"
-    voc_bad=1
-  fi
-done
-[ "$voc_bad" -eq 0 ] && ok "vocabulary: no run contains PASS, OK or RESULT: (AC5)"
-if grep -q 'BASE-STALENESS:' "$ALL_OUT" &&
-  ! grep -v '^BASE-STALENESS:' "$ALL_OUT" | grep -q 'BASE-STALENESS'; then
-  ok "vocabulary: every emitted line carries the distinct BASE-STALENESS: prefix"
-else
-  ok "vocabulary: BASE-STALENESS: prefix present (usage/stderr lines are prefixed too)"
-fi
+# --- Case 7 (was the AC5 vocabulary case) — MOVED TO THE END OF THE SUITE ----
+# It used to live HERE, and that placement was half of its defect: $ALL_OUT at
+# this point holds Cases 2-6 only, so the UNMEASURED cases (9/10), the usage
+# cases (12) and every mutant run appended AFTER the grep had already run — a
+# reword of unmeasured() introducing a forbidden token would have shipped green,
+# while the suite header and spec.md both claimed "any of the stale, non-stale or
+# UNMEASURABLE cases". The other half was that its prefix check recorded success
+# on BOTH branches (so it could never fail) and asked the wrong question
+# ("does a NON-prefixed line mention the prefix"), with an else-branch rationale
+# that was simply false — usage() printed 6 unprefixed lines.
+# It is now Case 14, after the LAST case, and its absolute-substring half is
+# retired as FALSIFIED (see the header). Nothing runs here.
 
 # --- Case 8 (AC5): a zero blast radius is affirmative, and non-exhaustive ---
 if run 0 "zero blast radius prints 0 RECOGNISED, never a bare 0" "$R_UNREL"; then
@@ -329,7 +479,7 @@ if run 0 "zero blast radius prints 0 RECOGNISED, never a bare 0" "$R_UNREL"; the
 fi
 for r in "$R_DIFF" "$R_FRESH" "$R_MOTIV" "$R_UNREL"; do
   OUT=$(cd "$r" && bash "$ADVISORY" 2>&1)
-  printf '%s\n' "$OUT" >>"$ALL_OUT"
+  record_out "non-exhaustive sweep $(basename "$r")"
   if [ "${OUT#*NON-EXHAUSTIVE}" = "$OUT" ]; then
     bad "non-exhaustive: $(basename "$r") omitted its NON-EXHAUSTIVE lines"
   fi
@@ -380,11 +530,20 @@ awk '
   inlist                            { next }
                                     { print }
 ' "$ADVISORY" >"$MUT"
+# Derived from the shipped list rather than hard-coded, so adding a gate-global
+# entry cannot silently make the plant non-narrow (it was a literal `9` and went
+# stale the moment `scripts/tests/**` was added).
+GG_ENTRIES=$(awk "/^GATE_GLOBAL_PATTERNS='/{f=1;next} f&&/^'$/{f=0} f&&NF" "$ADVISORY" | grep -c .)
+if [ "$GG_ENTRIES" -ge 5 ]; then
+  ok "mutant: the shipped gate-global list has $GG_ENTRIES entries (derived, not hard-coded)"
+else
+  bad "mutant: could not derive the gate-global entry count (got '$GG_ENTRIES')"
+fi
 plant_removed=$(( $(grep -c . "$ADVISORY") - $(grep -c . "$MUT") ))
-if [ "$plant_removed" -eq 9 ] &&
+if [ "$plant_removed" -eq "$GG_ENTRIES" ] &&
   ! grep -q '^\.config/nextest\.toml$' "$MUT" &&
   grep -q '^\.config/nextest\.toml$' "$ADVISORY"; then
-  ok "mutant: the plant removed exactly the 9 gate-global entries and nothing else"
+  ok "mutant: the plant removed exactly the $GG_ENTRIES gate-global entries and nothing else"
 else
   bad "mutant: the plant is not the defect described (removed $plant_removed non-blank lines)"
 fi
@@ -403,7 +562,7 @@ fi
 # fresh precisely when it is not. That is the unsoundness, observed.
 OUT=$(cd "$R_MOTIV" && bash "$MUT" 2>&1)
 RC=$?
-printf '%s\n' "$OUT" >>"$ALL_OUT"
+record_out "mutant(gate-global emptied) on the motivating fixture"
 if [ "$RC" -eq 0 ] && [ "${OUT#*NO-STALENESS-RECOGNISED}" != "$OUT" ]; then
   ok "mutant: WITHOUT the gate-global set the motivating case is wrongly not-stale (Case 5 reds)"
 else
@@ -434,7 +593,7 @@ g "$R_MOTIV" for-each-ref >"$T/refs-before"
 g "$R_MOTIV" status --porcelain >"$T/status-before"
 find "$R_MOTIV" -type f | sort >"$T/files-before"
 OUT=$(cd "$R_MOTIV" && bash "$ADVISORY" 2>&1) || true
-printf '%s\n' "$OUT" >>"$ALL_OUT"
+record_out "no-side-effects run"
 g "$R_MOTIV" for-each-ref >"$T/refs-after"
 g "$R_MOTIV" status --porcelain >"$T/status-after"
 find "$R_MOTIV" -type f | sort >"$T/files-after"
@@ -444,6 +603,207 @@ if diff -q "$T/refs-before" "$T/refs-after" >/dev/null &&
   ok "no side effects: no ref moved, no file appeared, the work tree is untouched"
 else
   bad "no side effects: the advisory changed refs or files in the repository"
+fi
+
+# --- Case 14: reserved substrings, spaces and NEWLINES in a matched path ----
+# The absolute vocabulary claim ("no run's output contains PASS/OK/RESULT:") was
+# FALSIFIED by review: the advisory prints repository-controlled paths verbatim.
+# What is asserted instead is that such a path is printed VERBATIM (masking it
+# would mangle it for the reader) and that the ANCHOR survives it.
+if run 4 "reserved-substring / space / NEWLINE bearing matched paths" "$R_RES"; then
+  has "reserved: all four staling commits are counted" \
+    "blast-radius 4 RECOGNISED of 4 commits behind"
+  has "reserved: an OK-bearing path is printed VERBATIM" \
+    "gate-global test-data/scripts/CI_SMOKE_TEST_USAGE.md"
+  has "reserved: a PASS-bearing path is printed VERBATIM" \
+    "gate-global test-data/notes/PASSTHROUGH-fixture.md"
+  has "reserved: a SPACE-bearing path is printed VERBATIM" \
+    "gate-global test-data/notes/a spaced PASS name.md"
+  has "reserved: the NEWLINE in a path is escaped VISIBLY, not emitted raw" \
+    "gate-global test-data/notes/we\nird.md"
+  if [ "$(verdict_lines)" -eq 1 ]; then
+    ok "reserved: exactly ONE 'verdict ' line, despite paths carrying foreign verdict tokens"
+  else
+    bad "reserved: expected exactly one 'verdict ' line, got $(verdict_lines)"
+  fi
+  # The per-line anchor for THIS run specifically (the whole-suite roll-up is
+  # Case 16; this one names the case that would break it).
+  if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+    bad "reserved: an output line lacks the prefix: $(printf '%s\n' "$OUT" | grep -m1 -v '^BASE-STALENESS: ')"
+  else
+    ok "reserved: every line stays prefixed even with a newline-bearing path in the matched set"
+  fi
+fi
+
+# --- Case 15 (PLANTED MUTANT): the CONTROL-CHAR SANITIZER is load-bearing ---
+# A copy with sane() reduced to a pass-through. Two halves, as with Case 11: the
+# plant IS the defect described, and it produces the unprefixed line that breaks
+# the anchor. This output is deliberately NOT recorded into $ALL_OUT — it is the
+# violation the suite exists to forbid.
+MUT_SANE="$T/mutant-sane.sh"
+awk '
+  /^sane\(\) \{$/ { print "sane() { printf %s \"$1\"; }"; skip = 1; next }
+  skip && /^\}$/  { skip = 0; next }
+  skip            { next }
+                  { print }
+' "$ADVISORY" | sed "s/printf %s \"\$1\"/printf '%s' \"\$1\"/" >"$MUT_SANE"
+if bash -n "$MUT_SANE" 2>/dev/null &&
+  ! grep -q 'cntrl' "$MUT_SANE" && grep -q 'cntrl' "$ADVISORY"; then
+  ok "sane-mutant: the plant IS the defect described (sane() reduced to a pass-through)"
+else
+  bad "sane-mutant: the plant is not the defect described (syntax or content mismatch)"
+fi
+# (a) A CALLER-controlled newline (an unresolvable subject rev) reaches an
+# `unmeasured-cause` line through a single printf, so the pass-through emits a
+# line with NO PREFIX AT ALL — the anchor broken, observed.
+NL_REV=$'no-such\nbranch'
+OUT=$(cd "$R_RES" && bash "$MUT_SANE" "$NL_REV" 2>&1)
+RC=$?
+if [ "$RC" -eq 5 ] && printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+  ok "sane-mutant: WITHOUT sanitization a newline in a field emits an UNPREFIXED line"
+else
+  bad "sane-mutant: the pass-through must break the anchor (exit $RC, all lines prefixed?)"
+fi
+# ...and the SHIPPED script, same input: prefixed throughout, newline visible.
+if run 5 "a NEWLINE-bearing subject rev stays anchored and is escaped visibly" \
+  "$R_RES" "$NL_REV"; then
+  has "sanitize: the caller-supplied newline is escaped, not emitted raw" "no-such\nbranch"
+  if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+    bad "sanitize: a newline-bearing rev broke the prefix in the SHIPPED script"
+  else
+    ok "sanitize: every line stays prefixed with a newline-bearing rev (the mutant reds here)"
+  fi
+fi
+# (b) REPOSITORY-controlled data: on the reserved fixture the pass-through splits
+# one matched path across TWO `matched` records, so the listing disagrees with the
+# count it reports. The shipped script lists exactly the 4 it counted.
+OUT=$(cd "$R_RES" && bash "$MUT_SANE" 2>&1)
+mut_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
+OUT=$(cd "$R_RES" && bash "$ADVISORY" 2>&1)
+record_out "shipped run on the reserved fixture"
+ship_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
+if [ "$ship_matched" -eq 4 ] && [ "$mut_matched" -gt "$ship_matched" ]; then
+  ok "sane-mutant: unsanitized, a newline-bearing PATH inflates the listing ($mut_matched vs $ship_matched matched lines)"
+else
+  bad "sane-mutant: expected the shipped script to list 4 and the mutant more (got $ship_matched / $mut_matched)"
+fi
+
+# --- Case 16 (BLOCKER A): rename symmetry — the fail-open the pin closes -----
+if run 4 "a renamed PR path + a commit behind editing the OLD path is STALE" "$R_REN"; then
+  has "rename: the OLD path is in the blast radius" \
+    "diff-path cqlite-core/src/oldname.rs"
+  has "rename: the staling commit is counted" "blast-radius 1 RECOGNISED of 1 commits behind"
+fi
+# The plant: drop the porcelain pin. It must FAIL OPEN — exit 0, blast-radius 0.
+MUT_REN="$T/mutant-renames.sh"
+sed 's/^if ! git -c diff\.renames=false -c diff\.relative=false \\$/if ! git \\/' \
+  "$ADVISORY" >"$MUT_REN"
+if [ "$(diff "$ADVISORY" "$MUT_REN" | grep -c '^[<>]')" -eq 2 ] &&
+  ! grep -q 'diff.renames=false' "$MUT_REN" && grep -q 'diff.renames=false' "$ADVISORY"; then
+  ok "rename-mutant: the plant removed exactly the porcelain pin and nothing else"
+else
+  bad "rename-mutant: the plant is not narrow (or the pin's spelling moved)"
+fi
+USE_SCRIPT="$MUT_REN"
+if run 0 "rename-mutant: WITHOUT the pin the stale rename case FAILS OPEN" "$R_REN"; then
+  has "rename-mutant: it wrongly reports a zero blast radius" "blast-radius 0 RECOGNISED"
+  has "rename-mutant: and wrongly reports no staleness" "verdict NO-STALENESS-RECOGNISED"
+fi
+if run 4 "rename-mutant: still detects a non-renamed intersection (the plant is narrow)" \
+  "$R_DIFF"; then
+  ok "rename-mutant: the copy is otherwise functional, so Case 16's red is the pin"
+fi
+# UNSET BEFORE the shipped case below — leaving it set made the "shipped" relative
+# case silently run the MUTANT (it red, which is how this was caught).
+unset USE_SCRIPT
+# ...and the diff.relative half, which is a config the INVOKER controls.
+if run 4 "diff.relative=true + cwd in a SUBDIRECTORY still stales" "$R_REL/cqlite-core/src"; then
+  has "relative: the root-relative path is still matched" \
+    "diff-path cqlite-core/src/storage/sstable/mod.rs"
+fi
+USE_SCRIPT="$MUT_REN"
+if run 0 "relative-mutant: WITHOUT the pin, cwd + diff.relative FAIL OPEN" \
+  "$R_REL/cqlite-core/src"; then
+  has "relative-mutant: M becomes a function of the invoker's cwd" "blast-radius 0 RECOGNISED"
+fi
+unset USE_SCRIPT
+if run 4 "the same repo from its ROOT stales with or without the pin (control)" "$R_REL"; then
+  ok "relative: the fixture is stale from the repo root, so the subdirectory case is about cwd"
+fi
+
+# --- Case 17 (WHOLE SUITE, was Case 7): the ANCHORED output guarantee -------
+# Accumulated across EVERY case above and asserted HERE, after the last one. The
+# old placement covered Cases 2-6 only, so the UNMEASURED, usage and mutant runs
+# were never inspected.
+nonempty=$(grep -c . "$ALL_OUT" | tr -d ' ')
+if [ "$nonempty" -lt 150 ]; then
+  bad "anchor: only $nonempty accumulated lines — the whole-suite assertion would be weak"
+else
+  ok "anchor: the whole-suite assertion inspects $nonempty output lines from every case"
+fi
+cov_missing=""
+for needle in 'verdict STALE-RECOGNISED' 'verdict NO-STALENESS-RECOGNISED' \
+  'verdict UNMEASURED' 'USAGE'; do
+  grep -q "$needle" "$ALL_OUT" || cov_missing="$cov_missing '$needle'"
+done
+if [ -z "$cov_missing" ]; then
+  ok "anchor: the accumulated output covers all THREE verdicts AND the usage path"
+else
+  bad "anchor: accumulated output missing:$cov_missing — narrower than the suite claims"
+fi
+if [ -s "$ANCHOR_BAD" ]; then
+  bad "anchor: $(grep -c . "$ANCHOR_BAD" | tr -d ' ') line(s) lack the 'BASE-STALENESS: ' prefix; first: $(head -1 "$ANCHOR_BAD")"
+else
+  ok "anchor: EVERY nonempty line of EVERY case, stdout AND stderr, begins with 'BASE-STALENESS: ' (D2a)"
+fi
+if [ -s "$VERDICT_BAD" ]; then
+  bad "anchor: a 'verdict ' line carries a token outside the closed set; first: $(head -1 "$VERDICT_BAD")"
+else
+  ok "anchor: every 'verdict ' token is from {STALE-RECOGNISED, NO-STALENESS-RECOGNISED, UNMEASURED} (D2c)"
+fi
+vl_bad=""
+for r in "$R_DIFF" "$R_FRESH" "$R_MOTIV" "$R_UNREL" "$R_RES" "$R_NOMAIN" "$R_NOBASE"; do
+  OUT=$(cd "$r" && bash "$ADVISORY" 2>&1)
+  record_out "verdict-count sweep $(basename "$r")"
+  [ "$(verdict_lines)" -eq 1 ] || vl_bad="$vl_bad $(basename "$r")=$(verdict_lines)"
+done
+if [ -z "$vl_bad" ]; then
+  ok "anchor: every measurement run emits EXACTLY ONE 'verdict ' line (stale, clean and unmeasured)"
+else
+  bad "anchor: these runs did not emit exactly one 'verdict ' line:$vl_bad"
+fi
+
+# --- Case 18 (D2d): the script's own STATIC TEMPLATE TEXT is token-free -----
+# The ABSOLUTE substring claim about a RUN is falsified and gone. This is what
+# replaces it, and unlike a claim about one sample run it is PROVABLE: the
+# script's own literal text — every printf format and every literal it prints —
+# carries none of `PASS`, `OK`, `RESULT:`.
+#
+# Only WHOLE-LINE comments are stripped. That is the CONSERVATIVE direction: a
+# trailing-comment strip would have to cut at a `#`, and this file's `#`
+# characters live inside printf formats (`(#3392)`) and parameter expansions
+# (`${pat#**/}`), so cutting there could TRUNCATE a template and HIDE a token.
+# Keeping too much text can only produce a false FAIL, never a false PASS.
+grep -v '^[[:space:]]*#' "$ADVISORY" >"$T/advisory-code.txt"
+code_lines=$(grep -c . "$T/advisory-code.txt" | tr -d ' ')
+all_lines=$(grep -c . "$ADVISORY" | tr -d ' ')
+if [ "$code_lines" -lt "$all_lines" ] && [ "$code_lines" -gt 60 ] &&
+  grep -q 'verdict NO-STALENESS-RECOGNISED' "$T/advisory-code.txt" &&
+  grep -q 'NON-EXHAUSTIVE' "$T/advisory-code.txt" &&
+  grep -q 'blast-radius' "$T/advisory-code.txt"; then
+  ok "template: the comment-stripped source ($code_lines of $all_lines lines) still holds the output templates"
+else
+  bad "template: the comment strip left no usable template text ($code_lines of $all_lines) — the case would be vacuous"
+fi
+tmpl_bad=0
+for tok in PASS OK 'RESULT:'; do
+  if grep -q -- "$tok" "$T/advisory-code.txt"; then
+    bad "template: the script's own static text contains '$tok': $(grep -m1 -- "$tok" "$T/advisory-code.txt")"
+    tmpl_bad=1
+  fi
+done
+if [ "$tmpl_bad" -eq 0 ]; then
+  ok "template: the script's own STATIC text carries none of PASS, OK, RESULT: (D2d, structural)"
 fi
 
 # --- summary -----------------------------------------------------------------
