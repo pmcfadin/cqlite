@@ -341,6 +341,22 @@ _field() {
 
 verdict() { # verdict <STATUS> <exit> <detail>
   echo "gate-liveness: $1 ($3)"
+  # RUNNING MEANS ALIVE, NOT PROGRESSING — and the caveat is emitted HERE, once, rather than
+  # appended to each of the five `verdict RUNNING` sites, so a sixth site inherits it and there is
+  # no list to forget. Measured the hard way: a gate WAITING for the #1825 slot beats exactly like
+  # one compiling, so this reader answered RUNNING for 4.9 hours about a run that had done nothing,
+  # and both a lane and its coordination lead read that as progress. STALLED's own text already
+  # carries its limitation ("NOT a claim that the process is dead"); RUNNING carried none, and the
+  # asymmetry is the defect: the verdict that over-claims DEATH was disclosed carefully and the one
+  # that over-claims PROGRESS was not disclosed at all. A caveat that lives only in the source is
+  # not a disclosure to whoever reads the artifact.
+  if [ "$1" = RUNNING ]; then
+    echo "note: RUNNING means this run is ALIVE, not that it is PROGRESSING — a gate queued for the"
+    echo "      gate slot beats identically to one doing work. For progress, compare CUMULATIVE cpu"
+    echo "      (utime+stime+cutime+cstime from /proc/<gate-pid>/stat) against elapsed: a queued gate"
+    echo "      sits near 0.01 cores sustained, a working one is >=1. A single delta is NOT enough;"
+    echo "      component load swings 0 -> 2+ cores inside one component."
+  fi
   echo "summary: $SUMMARY"
   echo "heartbeat: $HB"
   [ -n "$WANT_RUN_ID" ] && echo "expected-run-id: $WANT_RUN_ID"
