@@ -2109,10 +2109,15 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     fi
   fi
 
-  # The shell-profile export is kept for INTERACTIVE convenience only — a human who
-  # opens a terminal and runs the gate by hand. It is reported with `info`, NEVER `ok`:
-  # a profile line is precisely the artifact whose presence certified nothing for
-  # months, and letting it produce a success verdict anywhere would reintroduce #3414.
+  # The shell-profile export is the FALLBACK for a box where no system-wide value could be
+  # established — that is the only state in which it adds anything, and the branches below
+  # are ordered to say so. It is NOT merely "interactive convenience": PAM applies
+  # /etc/environment to interactive login shells too, so where a system-wide value exists
+  # this file is redundant at best and an override at worst (see the skip branch).
+  #
+  # It is reported with `info`, NEVER `ok`, whichever branch runs: a profile line is
+  # precisely the artifact whose presence certified nothing for months, and letting it
+  # produce a success verdict anywhere would reintroduce #3414.
   PROFILE=""
   case "${SHELL:-}" in
     */zsh) PROFILE="$HOME/.zshrc" ;;
@@ -2137,9 +2142,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     info "not touching $PROFILE — $PIN_ENV_FILE already sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE, and PAM delivers that to interactive shells too; appending a hardcoded '=$PIN_ENV_VALUE' here could only override it"
   elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
     if printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" 2>/dev/null; then
-      info "appended the export to $PROFILE for INTERACTIVE shells (convenience only — the verdict below comes from the session probe, not from this file)"
+      info "appended the export to $PROFILE — the FALLBACK for interactive shells on a box with no system-wide value; it is not the verdict, which comes from the session probe below"
     else
-      info "could not append to $PROFILE (interactive convenience only) — add by hand: $EXPORT_LINE"
+      info "could not append to $PROFILE (the interactive fallback; the system-wide pin is what a gate reads) — add by hand: $EXPORT_LINE"
     fi
   fi
 
