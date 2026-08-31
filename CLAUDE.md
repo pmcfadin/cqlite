@@ -336,6 +336,23 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **AND A LOCAL READ CAN BE A NETWORK OPERATION (roborev job 268).** In a PARTIAL clone,
+  `ls-tree`/`show`/`cat-file` answer a missing object by fetching it from the **promisor remote**,
+  under the live repository's **local config** — so `url.*.insteadOf` plus an enabled external
+  protocol executes a remote helper, and the lazy fetch writes objects into the shared store. That
+  was the THIRD route of one family (`insteadOf` on the fetch, `ext::` on the transfer hop, the
+  promisor), and per-call-site suppression had failed each time — so **every baseline/HEAD object
+  read and the ancestry walk moved INTO the isolated scratch repository**, with the lane's object
+  directory supplied as an alternate (pure object storage: no config, hence no promisor, no
+  `insteadOf`, nothing for a helper to be invoked from; a missing object there is a named refusal).
+  Ancestry compares against **HEAD resolved to a sha in the checkout**, because inside the scratch
+  the ref `HEAD` means the SCRATCH's own unborn HEAD. **The fast path is gated on the clone not
+  being partial** (`_component_set_is_partial`, three-valued, UNKNOWN ⇒ treated as partial: the
+  conservative branch costs a fetch, not correctness), because that path reads the baseline in the
+  live repository — and `cat-file -e` cannot even probe presence there: measured with
+  `GIT_NO_LAZY_FETCH=1` set, it answered 0 for a blob whose `show` then FAILED, since it answers
+  about PROMISED objects. `GIT_NO_LAZY_FETCH=1` is carried as a **belt, not the control** (git ≥ 2.36;
+  an unset variable does nothing silently, which is exactly why it cannot be the control).
   **UNTRUSTED REPOSITORY STATE IS BIGGER THAN CONFIG (roborev job 264).** Closing git's *config*
   sources and treating "untrusted repository state" as closed with them left three holes, and the
   shape of the error is the recurring one — one axis closed, space declared done. **(1) Replacement

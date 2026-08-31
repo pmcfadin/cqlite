@@ -468,6 +468,18 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**A local read can be a network operation.** In a *partial* clone, `ls-tree`/`show`/`cat-file`
+answer a missing object by fetching it from the **promisor remote** — under the live repository's
+local config, so an `insteadOf` plus an enabled external protocol executes a remote helper, and the
+lazy fetch also writes objects into the shared store. That was the third route of one family, so
+**every baseline and HEAD object read, and the ancestry walk, now run inside the isolated scratch
+repository**, with the lane's object directory supplied as an alternate — pure object storage,
+carrying no config and therefore no promisor and nothing for a helper to be invoked from. Ancestry
+compares against HEAD *resolved to a sha in the checkout*, because inside the scratch the ref `HEAD`
+would mean the scratch's own unborn HEAD. The fast path is gated on the clone not being partial,
+and `GIT_NO_LAZY_FETCH=1` is carried as a belt rather than the control (git ≥ 2.36; an unset
+variable does nothing silently).
+
 **Untrusted repository state is bigger than config.** Closing git's *config* sources and treating
 "untrusted repository state" as closed with them left three holes. **Replacement refs**:
 `refs/replace/<sha>` transparently substitutes another commit, so the pre-flight reported the
