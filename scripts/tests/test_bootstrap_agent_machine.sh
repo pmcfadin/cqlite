@@ -3609,6 +3609,31 @@ else
   printf '%s\n' "$pin_skip_offenders"
 fi
 
+# --- 13b. THE TRIPWIRE MUST BE ABLE TO FIRE (#3414 roborev round 10) -------------------
+# Case 14 asserts the guard found nothing. That is a claim about the WORLD, and on its own
+# it is satisfied equally by a guard that works and by a guard that is blind — exactly the
+# absence-of-a-bad-signal shape this issue keeps returning to. Nothing in this suite
+# legitimately touches the shared file, so the guard's ability to DETECT is otherwise never
+# exercised: a plant that neutered it left the suite green.
+#
+# So the guard is self-tested against a STAND-IN file, never the real one: point
+# PIN_SHARED_CARGO at a throwaway, have the wrapped command mutate it, and require a
+# violation to be recorded.
+pin_guard_probe="$tmp/guard-selftest-target"; printf 'x\n' >"$pin_guard_probe"
+pin_guard_log="$tmp/guard-selftest-violations.log"; : >"$pin_guard_log"
+PIN_SHARED_CARGO="$pin_guard_probe" PIN_SHARED_VIOLATIONS="$pin_guard_log" \
+  "$PIN_BS" -c 'printf "mutated\n" >>"$1"' _ "$pin_guard_probe" >/dev/null 2>&1
+pin_guard_clean="$tmp/guard-selftest-clean.log"; : >"$pin_guard_clean"
+PIN_SHARED_CARGO="$pin_guard_probe" PIN_SHARED_VIOLATIONS="$pin_guard_clean" \
+  "$PIN_BS" -c 'true' >/dev/null 2>&1
+if [ -s "$pin_guard_log" ] && [ ! -s "$pin_guard_clean" ]; then
+  ok "host hygiene: the tripwire DETECTS a mutation across a wrapped invocation (and stays quiet without one)"
+else
+  bad "host hygiene: the tripwire cannot fire — case 14's 'nothing touched it' would be vacuous"
+  printf '  mutating run recorded: %s bytes; clean run recorded: %s bytes\n' \
+    "$(wc -c <"$pin_guard_log")" "$(wc -c <"$pin_guard_clean")"
+fi
+
 # --- 14. THIS SUITE MUST NOT TOUCH SHARED HOST STATE -----------------------------------
 # Asserted affirmatively rather than by inspection, because the reach is easy to
 # reintroduce (a new case that sets HOME and forgets CARGO_HOME, or a `sudo` invocation
