@@ -16,8 +16,14 @@ BOOTSTRAP="$SCRIPT_DIR/../bootstrap-agent-machine.sh"
 PASS=0
 FAIL=0
 SKIPS=0
-ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
-bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# Every case name that actually REPORTED. Case 15 reads this rather than re-deriving what
+# "should" have run: the question is whether a case executed, and the only evidence of that
+# is that it announced a verdict.
+PIN_RAN_CASES=""
+ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); PIN_RAN_CASES="$PIN_RAN_CASES
+$1"; }
+bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); PIN_RAN_CASES="$PIN_RAN_CASES
+$1"; }
 # SKIPS ARE NEITHER PASS NOR FAIL, so they must be COUNTED and REPORTED (issue #3414
 # review B1). Three end-to-end cases silently became skips when section 5b started adding
 # one warning to every sandbox, and the suite still said FAIL=0 — including the case whose
@@ -80,6 +86,28 @@ export GIT_CONFIG_NOSYSTEM=1
 export CQLITE_BOOTSTRAP_TEST_MODE=1
 export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 : >"$CQLITE_BOOTSTRAP_ENV_FILE"
+
+# --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
+# OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
+# Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
+# hole). But the refusal is a [warn], and it fires for EVERY sandboxed invocation, so under
+# root `base_warns` becomes 2, the baseline assertion below fails, and the three green-path
+# cases print `skip` — the exact three that round 2's finding was about. We unskipped them,
+# then re-skipped them four rounds later by fixing something else.
+#
+# Refused UP FRONT rather than per-case: the alternative is threading privilege-dropping
+# through test setup, which is how the seam came to need a root guard in the first place. A
+# suite that declares "not runnable as root" is honest and cheap; one that runs 190 cases
+# of which an unpredictable subset are silently meaningless is neither.
+#
+# COUNTED, never an `ok` — round 2's finding, and this file now has a hygiene case that
+# forbids announcing a skip through ok() anyway.
+if [ "$(id -u)" = 0 ]; then
+  skip "THE ENTIRE SUITE: it drives bootstrap through a test seam that is REFUSED under root (#3414 finding S), so every sandboxed invocation gains a warning and the green-path assertions cannot run. Re-run as an unprivileged user."
+  echo
+  echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
+  exit 0
+fi
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
 # The mold section writes `${CARGO_HOME:-$HOME/.cargo}/config.toml`, and on this fleet
@@ -3495,6 +3523,27 @@ if [ "$pin_shared_cargo_after" = "$PIN_SHARED_CARGO_BEFORE" ]; then
 else
   bad "host hygiene: this suite MUTATED the shared $PIN_SHARED_CARGO — it breaks cargo for every other user on the box"
   printf '  before: %s\n  after:  %s\n' "$PIN_SHARED_CARGO_BEFORE" "$pin_shared_cargo_after"
+fi
+
+# --- 15. THE THREE GREEN-PATH CASES MUST HAVE RUN, BY NAME (#3414 roborev round 7) -----
+# They have now been silently disabled TWICE by unrelated changes — once when section 5b
+# started warning in every sandbox (round 4), once when the seam began refusing under root
+# (round 7). Both times the suite reported FAIL=0 and both times the skip count was the
+# only trace. The baseline assertion at :1102 catches the CAUSE, and case 13 catches skips
+# announced as passes; this catches the EFFECT directly, keyed on the case names, because
+# the two prior recurrences arrived through different causes and a third will too.
+pin_mustrun_missing=""
+for pin_mustrun in \
+  "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)" \
+  "push: AC1+AC3 end to end" \
+  "push: the refusal is exactly ONE warning and names the host"; do
+  printf '%s\n' "$PIN_RAN_CASES" | grep -qF -- "$pin_mustrun" \
+    || pin_mustrun_missing="${pin_mustrun_missing:+$pin_mustrun_missing; }$pin_mustrun"
+done
+if [ -z "$pin_mustrun_missing" ]; then
+  ok "suite: the three green-path cases RAN (not skipped by a warning-count drift)"
+else
+  bad "suite: green-path case(s) did not run — silently disabled again: $pin_mustrun_missing"
 fi
 
 echo
