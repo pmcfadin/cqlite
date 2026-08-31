@@ -262,15 +262,79 @@ fn recomputed_payload_matches_the_sum_of_the_row_widths() {
     }
 }
 
-/// A zero-column projection still counts its rows (the row count lives in the
-/// accumulator, not in a column's length).
+/// A zero-column projection: `len()` reports the staged rows, and the BATCH
+/// cannot carry them.
+///
+/// # What this test asserts, and what it must not be read as proving
+///
+/// It does NOT prove zero-column projections work — it pins the opposite. With no
+/// columns there is no array to carry a length, so `to_record_batch()` cannot
+/// report `len()` rows: the row count is tracked in the accumulator and is LOST at
+/// the batch boundary. The test asserts the property that actually matters for
+/// issue #3552 (AC4, output unchanged): the fused path and the pre-fold
+/// `rows_to_record_batch` behave IDENTICALLY on this input — same `Ok`/`Err`, and
+/// equal batches when `Ok` — because both end in the same
+/// `RecordBatch::try_new(schema, arrays)` over an empty array list. The
+/// disagreement arm is the live assertion: it fires if either path is ever
+/// "fixed" on its own.
+///
+/// This behaviour is PRE-EXISTING, not introduced by the fold: `origin/main`'s
+/// `rows_to_record_batch` ends in the identical `try_new` with no explicit row
+/// count and `convert_to_arrays` returns an empty vec for zero columns. Changing
+/// it here would change Arrow output for this case inside a behaviour-preserving
+/// refactor, so it is deliberately NOT changed. **Whether a zero-column
+/// projection is reachable at all on the `do_get`/streaming path is UNRESOLVED** —
+/// this is neither a known-harmless case nor a known-live one. Issue #3742 owns
+/// both that question and the behaviour.
+///
+/// The exact terminal behaviour of `try_new` on an empty array list (a zero-row
+/// batch, or an `Err`) is deliberately not hard-coded beyond the `Ok` arm, because
+/// it is arrow's, not this crate's, and both outcomes are equally consistent with
+/// the property under test.
 #[test]
-fn a_zero_column_projection_still_counts_rows() {
+fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
     let columns: Vec<ColumnInfo> = Vec::new();
+    let rows: Vec<QueryRow> = (0..3)
+        .map(|_| row(vec![("a", Value::Integer(1))]))
+        .collect();
+
     let mut acc = ArrowRowAccumulator::new(&columns);
-    for _ in 0..3 {
-        assert_eq!(acc.stage(row(vec![("a", Value::Integer(1))])), 0);
+    for r in &rows {
+        // Every column is absent from a zero-column projection, so there is
+        // nothing to charge: the width is 0, matching the standalone estimator.
+        assert_eq!(acc.stage(r.clone()), estimate_arrow_row_bytes(&columns, r));
         acc.commit();
     }
-    assert_eq!(acc.len(), 3);
+    // The accumulator DOES track the rows...
+    assert_eq!(acc.len(), 3, "len() reports the committed rows");
+
+    // ...and the batch does NOT, identically on both paths (issue #3742).
+    match (acc.to_record_batch(), rows_to_record_batch(&columns, &rows)) {
+        (Ok(fused), Ok(reference)) => {
+            assert_eq!(
+                fused, reference,
+                "the fused and pre-fold zero-column batches must be identical"
+            );
+            assert_eq!(
+                fused.num_rows(),
+                0,
+                "an empty array list carries no length, so the batch reports 0 rows"
+            );
+            assert_ne!(
+                fused.num_rows(),
+                acc.len(),
+                "the tracked count is LOST at the batch boundary — this test pins \
+                 that, it does not endorse it (issue #3742)"
+            );
+        }
+        // Both paths REFUSING is equally consistent: the property under test is
+        // that they agree, not which way arrow decides.
+        (Err(_), Err(_)) => {}
+        (fused, reference) => panic!(
+            "the fused and pre-fold zero-column paths DISAGREE — fused ok={}, \
+             reference ok={} (issue #3742)",
+            fused.is_ok(),
+            reference.is_ok()
+        ),
+    }
 }

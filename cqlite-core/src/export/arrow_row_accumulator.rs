@@ -119,8 +119,20 @@ pub struct ArrowRowAccumulator<'a> {
     staged: Vec<Option<Value>>,
     /// Whether [`Self::staged`] currently holds a staged, uncommitted row.
     has_staged: bool,
-    /// Committed row count. Tracked explicitly so a ZERO-column projection still
-    /// reports its rows.
+    /// Committed row count, tracked explicitly rather than read off a column's
+    /// length — so it is available for a ZERO-column projection, where there is no
+    /// column to read.
+    ///
+    /// Which surface reports it, precisely: [`Self::len`] reports THIS count for
+    /// every projection, including a zero-column one. [`Self::to_record_batch`]
+    /// does NOT — with no columns there is no array to carry a length, so the batch
+    /// cannot report these rows (it reports 0, or refuses; the terminal behaviour is
+    /// `RecordBatch::try_new`'s). That divergence is PRE-EXISTING — pre-fold
+    /// `rows_to_record_batch` ends in the same `try_new` over an empty array list —
+    /// and is deliberately not changed here, since doing so would change Arrow
+    /// output inside a behaviour-preserving refactor. Whether a zero-column
+    /// projection is reachable on the `do_get`/streaming path is unresolved; issue
+    /// #3742 owns both questions.
     rows: usize,
 }
 
