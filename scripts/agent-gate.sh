@@ -8152,20 +8152,22 @@ run_compaction_byte_parity() {
   echo ">>> [$name] Rust byte-parity PR proxy for the nightly Java byte tier (#1405)"
   # #3453: both groups run inside a `bash -c` body (and behind an `env` prefix, which
   # execs the cargo BINARY), so neither is observable here — hoist the (package,
-  # features) pair into ONE variable expanded into both invocations AND into the two
-  # records below.
+  # features) pair into ONE variable expanded into both invocations AND into the in-body
+  # record preceding each. The body is `set -euo pipefail`, so Group A failing ABORTS
+  # before Group B: a parent-side pre-record would name two invocations when one ran
+  # (job 269 blocker 2).
   local cbp_pkg=cqlite-core cbp_feats=write-support
-  _fm_observe_cargo_argv test -p "$cbp_pkg" --features "$cbp_feats"
-  _fm_observe_cargo_argv test -p "$cbp_pkg" --features "$cbp_feats"
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
       set -euo pipefail
       # Group A — committed references, fail-closed (CQLITE_REQUIRE_FIXTURES=1).
+      _fm_observe_child compaction-byte-parity test -p '"$cbp_pkg"' --features '"$cbp_feats"'
       env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
         cargo test -p '"$cbp_pkg"' --features '"$cbp_feats"' \
           --test issue_1017_live_cell_compaction_byte_parity \
           --test issue_1020_udt_frozen_compaction_byte_parity \
           --test issue_1240_nested_frozen_collection_udt_parity
       # Group B — fetched-only test_tomb references, skip-aware (no require-fixtures).
+      _fm_observe_child compaction-byte-parity test -p '"$cbp_pkg"' --features '"$cbp_feats"'
       env CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
         cargo test -p '"$cbp_pkg"' --features '"$cbp_feats"' \
           --test issue_1019_static_dropped_collection_compaction_parity' >"$log" 2>&1; then
@@ -14122,14 +14124,17 @@ run_core_tests() {
   # nextest reads --test-threads; the cargo-test fallback takes it after `--`.
   if [ "$NEXTEST" -eq 1 ]; then
     # #3453: the nextest branch runs its two passes inside a `bash -c` body, which does
-    # NOT inherit the cargo observer — so (package, features) is hoisted into ONE pair of
-    # variables expanded into BOTH passes AND into the two records below. Without this the
-    # gate's longest component reported PASS with an UNDECLARED matrix (measured).
+    # NOT inherit the cargo observer (it intercepts nothing outside this shell) — so
+    # (package, features) is hoisted into ONE pair of variables expanded into BOTH passes
+    # AND into the _fm_observe_child call that precedes each. Without this the gate's
+    # longest component reported PASS with an UNDECLARED matrix (measured). Each record is
+    # made INSIDE the body, immediately before its own pass, so a first-pass failure
+    # cannot leave the block claiming the doctest pass also ran (job 269 blocker 2).
     local core_pkg=cqlite-core core_feats=cli-helpers
-    _fm_observe_cargo_argv nextest run --package "$core_pkg" --features "$core_feats"
-    _fm_observe_cargo_argv test --doc --package "$core_pkg" --features "$core_feats"
     run_component core-tests bash -c '
+      _fm_observe_child core-tests nextest run --package '"$core_pkg"' --features '"$core_feats"' &&
       cargo nextest run --package '"$core_pkg"' --features '"$core_feats"' --test-threads "$1" -E "$2" &&
+      _fm_observe_child core-tests test --doc --package '"$core_pkg"' --features '"$core_feats"' &&
       cargo test --doc --package '"$core_pkg"' --features '"$core_feats"' -- "${@:3}"' \
       cqlite-agent-gate "$GATE_TEST_THREADS" "$nx_filter" "${skip_args[@]}"
   else
@@ -14274,16 +14279,13 @@ dispatch_component() {
     arrow-parity-guard) run_component arrow-parity-guard run_arrow_parity_guard_cmd ;;
     memory-budget)
       # #3453: ONE variable per feature set, expanded into BOTH the `bash -c` argv below
-      # and the _fm_observe_cargo_argv calls that record the matrix — the `bash -c` body
-      # runs in a child bash that does NOT inherit the observer functions (they are
-      # deliberately not `export -f`-ed; see the #3453 block near the top of this file), so the
-      # sets are declared here FROM THE SAME VARIABLE rather than re-typed.
+      # and the _fm_observe_child call that immediately precedes each invocation inside the
+      # body — the `bash -c` body runs in a child bash that does NOT inherit the cargo
+      # INTERCEPTOR (deliberately not `export -f`-ed; see the #3453 block near the top of
+      # this file), so each lane records ITSELF, from the same variable its argv is built
+      # from, at the moment it runs (job 269 blocker 2).
       local mb_pkg=cqlite-core mb_feats=cli-helpers,dhat-heap,arrow
       local mb_flight_pkg=cqlite-flight mb_flight_feats=dhat-heap
-      _fm_observe_cargo_argv test --package "$mb_pkg" --features "$mb_feats"
-      _fm_observe_cargo_argv test --package "$mb_pkg" --features "$mb_feats"
-      _fm_observe_cargo_argv test --package "$mb_flight_pkg" --features "$mb_flight_feats"
-      _fm_observe_cargo_argv test --package "$mb_pkg" --features "$mb_feats"
       run_component memory-budget bash -c '
   # Read-path dhat budgets (issue #1565) + the export/Flight dhat budgets
   # (issue #1494, AD5): the converter per-row allocation guard (needs `arrow`)
@@ -14298,10 +14300,13 @@ dispatch_component() {
   # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
   # mandatory on every lane (the dhat profiler is a process-global allocator).
   rc=0
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test memory_budget -- --test-threads=1 || rc=1
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
+  _fm_observe_child memory-budget test --package '"$mb_flight_pkg"' --features '"$mb_flight_feats"'
   cargo test --package '"$mb_flight_pkg"' --features '"$mb_flight_feats"' \
     --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
   # (d) row-assembly (RowCells) path — issue #2075: absolute allocs/row AND
@@ -14310,17 +14315,20 @@ dispatch_component() {
   # #1046 width-SCALING guard (which lacks a per-cell metric); measures/gates the
   # #1645 item 2 (smallvec RowCells) win. Same feature set as the sibling lanes to
   # reuse build artifacts.
+  _fm_observe_child memory-budget test --package '"$mb_pkg"' --features '"$mb_feats"'
   cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
     integration-tests)
       # #3453: see the memory-budget branch — package hoisted so the recorded scope and
       # the executed scope cannot drift. This lane passes NO --features (default set).
+      # The two records live INSIDE the body: the passes are `&&`-chained, so a failed
+      # compile pass must not leave the block claiming the run pass happened too.
       local it_pkg=cqlite-integration-tests
-      _fm_observe_cargo_argv test --package "$it_pkg" --no-run
-      _fm_observe_cargo_argv test --package "$it_pkg"
       run_component integration-tests bash -c '
+  _fm_observe_child integration-tests test --package '"$it_pkg"' --no-run &&
   cargo test --package '"$it_pkg"' --no-run &&
+  _fm_observe_child integration-tests test --package '"$it_pkg"' &&
   cargo test --package '"$it_pkg"' \
     --test comprehensive_component_integration_tests \
     --test fixture_specific_integration_tests \
@@ -14331,22 +14339,26 @@ dispatch_component() {
     format-compat) run_component format-compat cargo test --package format-compatibility-tests ;;
     write-tests)
       # #3453: one hoisted (package, features) pair, expanded into all three invocations
-      # AND into the three records below (see the memory-budget branch).
+      # AND into the _fm_observe_child call preceding each (see the memory-budget branch).
+      # In-body, so the `&&` chain short-circuiting after the --lib pass renders ONE set
+      # rather than the same set `x3` (job 269 blocker 2).
       local wt_pkg=cqlite-core wt_feats=write-support
-      _fm_observe_cargo_argv test --package "$wt_pkg" --features "$wt_feats"
-      _fm_observe_cargo_argv test --package "$wt_pkg" --features "$wt_feats"
-      _fm_observe_cargo_argv test --package "$wt_pkg" --features "$wt_feats"
       run_component write-tests bash -c '
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --lib &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test write_read_roundtrip &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test compaction_integration' ;;
     cli-tests)
       # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
-      # write-support) and a single-value annotation would be false for it — both are
-      # recorded, from the same hoisted variables the argv uses (see memory-budget).
+      # write-support) and a single-value annotation would be false for it — each pass
+      # records ITSELF from inside the body, from the same hoisted variables its argv uses
+      # (see memory-budget). THE MOTIVATING CASE for job 269 blocker 2: this body can exit
+      # before Pass 2 in four ways (three fail-closed derivations and the Pass-1
+      # zero-tests guard), and the old parent-side pre-record named the write-support set
+      # anyway — a FAIL line asserting a pass that never started.
       local ct_pkg=cqlite-cli ct_ws_feats=write-support
-      _fm_observe_cargo_argv test --package "$ct_pkg"
-      _fm_observe_cargo_argv test --package "$ct_pkg" --features "$ct_ws_feats"
       run_component cli-tests bash -c '
   # issue #2039: ENUMERATE every cqlite-cli/tests/*.rs integration-test target
   # instead of a hardcoded 3-target allowlist. The old allowlist
@@ -14498,11 +14510,13 @@ dispatch_component() {
   # two bare mktemps are the only ones nobody else collects.
   trap "rm -rf \"$_cli_tmp\"" EXIT
 
+  _fm_observe_child cli-tests test --package '"$ct_pkg"'
   cargo test --package '"$ct_pkg"' "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
 
+  _fm_observe_child cli-tests test --package '"$ct_pkg"' --features '"$ct_ws_feats"'
   cargo test --package '"$ct_pkg"' --features '"$ct_ws_feats"' "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
@@ -14540,10 +14554,10 @@ dispatch_component() {
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the
-      # SUMMARY must say so; hoisted here and expanded into both invocations below.
+      # SUMMARY must say so; hoisted here and expanded into both invocations below AND
+      # into the in-body record preceding each (a failed `cargo build` must not leave the
+      # block claiming the test-compile pass ran too — job 269 blocker 2).
       local mn_pkg=cqlite-core mn_feats=all-compression
-      _fm_observe_cargo_argv build --package "$mn_pkg" --no-default-features --features "$mn_feats"
-      _fm_observe_cargo_argv test --package "$mn_pkg" --no-default-features --features "$mn_feats" --lib --no-run
       run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
   # that job sets RUSTFLAGS=-D warnings, so a warning-class error (e.g. an unused
@@ -14553,6 +14567,7 @@ dispatch_component() {
   # Export it for BOTH the build and the test-compile so this component enforces
   # exactly what CI enforces.
   export RUSTFLAGS="-D warnings" &&
+  _fm_observe_child minimal-build build --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' &&
   cargo build --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' &&
   # Test-compile the minimal lane (issue #1978): the CI "All Compression Build &
   # Test" job runs `cargo test --no-default-features --features=all-compression
@@ -14560,13 +14575,15 @@ dispatch_component() {
   # a `#[cfg(test)]` module referencing a write-support-gated item (e.g.
   # storage::serialization) silently escaped this gate. Compile-only (--no-run)
   # keeps it fast; no data fixtures needed for a compile check.
+  _fm_observe_child minimal-build test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run &&
   cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run' ;;
     all-features-check) run_all_features_check ;;
     smoke)
       # #3453: smoke builds the CLI at DEFAULT features and then runs a shell script.
+      # Recorded in-body (job 269 blocker 2): if the build never starts, nothing claims it.
       local sm_pkg=cqlite-cli
-      _fm_observe_cargo_argv build --package "$sm_pkg" --bin cqlite
       run_component smoke bash -c '
+  _fm_observe_child smoke build --package '"$sm_pkg"' --bin cqlite &&
   cargo build --package '"$sm_pkg"' --bin cqlite &&
   CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh' ;;
     *) echo "dispatch_component: unknown component $1" >&2; return 2 ;;

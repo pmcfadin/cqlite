@@ -29,6 +29,23 @@
 #       a claim: change a feature literal in one of those bodies without changing the
 #       hoisted variable and this section reds.
 #
+#   (D) TRUTHFUL ON A SHORT-CIRCUIT, MEASURED (roborev job 269, blocker 2) — the same
+#       differential re-run with a cargo shim that FAILS, so each `bash -c` body aborts
+#       after its FIRST invocation. The declared annotation must then name exactly that
+#       one invocation. This is the property a parent-side pre-record could not have: it
+#       described INTENT, so a `cli-tests: FAIL` line named the write-support pass that
+#       never started. Non-vacuity is asserted, not assumed: the failing run must record
+#       strictly FEWER invocations than section (C)'s passing run, or the case proves
+#       nothing about short-circuiting.
+#
+#   (P) THE INDIRECT TIER IS NAMED, NOT GUESSED (roborev job 269, blocker 1) — the scoped
+#       --lite python tier builds the extension through maturin in a CHILD process, so no
+#       cargo argv passes through the gate's shell. run_scoped_tests itself is driven here
+#       (extracted from the shipped script, with its ROUTING stubbed and a fake
+#       --python-build-verify child) for a PURE-PYTHON and a MIXED rust+python route, and
+#       the rendered annotation is asserted: `[via maturin: feature set NOT observed]` and
+#       `[<observed rust set> | via maturin: …]` respectively — additive, never replacing.
+#
 # Hermetic: no network, no datasets, no real compilation (the shim replaces cargo), no
 # node/python/jq. Needs only bash + the checkout.
 
@@ -58,9 +75,10 @@ trap 'rm -rf "$tmp"' EXIT
 # this guard could pass having tested nothing. (Extraction also defines the `cargo`/`env`
 # wrappers in THIS shell; harmless, since AGENT_GATE_FM_COMPONENT is unset except where a
 # case sets it.)
-for fn in _fm_active _fm_sidecar _fm_note _fm_abbrev_features _fm_describe_cargo \
-          _fm_observe_cargo_argv cargo env _fm_component_class _fm_render _fm_annotate \
-          _fm_summary_line _fm_note_if_skipped; do
+for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_abbrev_features \
+          _fm_describe_cargo _fm_observe_cargo_argv _fm_observe_child cargo env \
+          _fm_component_class _fm_render _fm_annotate _fm_summary_line \
+          _fm_note_if_no_cargo_observed _fm_note_python_tier run_scoped_tests; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
     echo "FAIL - could not extract $fn from $GATE — renamed or reshaped; this guard must not pass having tested nothing (#3453)" >&2
@@ -148,6 +166,75 @@ if grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts" >/dev/null 2>&1; then
   grep -RnE "$fm_export_needle" "$REPO_ROOT/scripts" | head -5
 else
   ok "B3: the cargo/env observers are not exported (no nested-run attribution)"
+fi
+
+# B8: the CHILD-BODY recorder IS exported, and only it. The eight `bash -c` component
+# bodies run in a child bash, which inherits exported FUNCTIONS only — so
+# _fm_observe_child (an explicitly-called recorder, which intercepts nothing) and the
+# formatter it calls must be exported, while the cargo/env INTERCEPTORS must not be (B3).
+# Without the export the bodies would silently record nothing and every one of those
+# components would read UNDECLARED.
+b8=()
+for fn in _fm_observe_child _fm_describe_cargo _fm_abbrev_features _fm_sidecar; do
+  grep -qE "^export -f .*\b$fn\b" "$GATE" || b8+=("$fn-not-exported")
+done
+if [ "${#b8[@]}" -eq 0 ]; then
+  ok "B8: the child-body recorder + its formatter are exported (the bash -c bodies can record), while the interceptors are not (B3)"
+else
+  bad "B8: ${b8[*]} — a bash -c body would record NOTHING and read UNDECLARED"
+fi
+
+# B9: NO PARENT-SIDE PRE-RECORD SURVIVES (roborev job 269, blocker 2). Every one of the
+# eight `bash -c` components records from INSIDE its body, and the only remaining
+# _fm_observe_cargo_argv CALL SITES outside the annotation block are the four lines of the
+# --emit-summary-selftest reference block (each carrying its own
+# `AGENT_GATE_FM_COMPONENT=<name>` prefix, which a real component branch never has). A new
+# parent-side pre-record — the exact defect this blocker names — therefore reds here.
+b9=()
+for c in core-tests memory-budget integration-tests write-tests cli-tests \
+         compaction-byte-parity minimal-build smoke; do
+  grep -qE "_fm_observe_child $c\b" "$GATE" || b9+=("$c-does-not-record-in-body")
+done
+fm_end_for_b9=$(grep -n '^# ==== END feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+stray=$(grep -nE '(^|[^_[:alnum:]])_fm_observe_cargo_argv ' "$GATE" \
+  | awk -F: -v e="${fm_end_for_b9:-0}" '$1 > e' \
+  | grep -v 'AGENT_GATE_FM_COMPONENT=' || true)
+[ -n "$stray" ] && b9+=("parent-side-pre-record: $(printf '%s' "$stray" | cut -d: -f1 | tr '\n' ' ')")
+if [ "${#b9[@]}" -eq 0 ]; then
+  ok "B9: all eight bash -c components record from INSIDE the body, and no parent-side pre-record remains (a record now means an invocation that STARTED)"
+else
+  bad "B9: ${b9[*]}"
+fi
+
+# B10: the indirect rendering has ONE spelling. The class-based arm (python-bindings /
+# node-bindings) and the scoped python tier's per-invocation record must both come from
+# _fm_indirect_desc — two spellings of one state read as two states.
+b10=()
+grep -qF '$(_fm_indirect_desc "${class#indirect:}")' "$GATE" \
+  || b10+=("the-class-arm-does-not-use-_fm_indirect_desc")
+grep -qE '_fm_note "\$1" "\$\(_fm_indirect_desc maturin\)"' "$GATE" \
+  || b10+=("the-python-tier-record-does-not-use-_fm_indirect_desc")
+n_literal=$(grep -c "printf 'via %s: feature set NOT observed'" "$GATE")
+[ "$n_literal" = 1 ] || b10+=("the-literal-appears-$n_literal-times-outside-_fm_indirect_desc")
+if [ "${#b10[@]}" -eq 0 ]; then
+  ok "B10: the 'via <driver>: feature set NOT observed' text has exactly ONE definition, used by both the class arm and the python-tier record"
+else
+  bad "B10: ${b10[*]}"
+fi
+
+# B11: the scoped python tier RECORDS, and does so from the build-verify RC — not from
+# merely reaching the branch. rc 1 (venv/pip setup) and rc 4 (no cargo/rustc) mean maturin
+# was never invoked, so claiming an unobserved cargo invocation there would be this
+# issue's own defect one level down.
+b11=()
+grep -qE '_fm_note_python_tier "\$name" "\$pbv_rc"' "$GATE" \
+  || b11+=("run_scoped_tests-does-not-record-the-python-tier-from-its-rc")
+grep -qE '^    0\|2\|3\) _fm_note "\$1" "\$\(_fm_indirect_desc maturin\)" ;;' "$GATE" \
+  || b11+=("_fm_note_python_tier-no-longer-conditions-on-rc-0-2-3")
+if [ "${#b11[@]}" -eq 0 ]; then
+  ok "B11: the scoped python tier records via maturin ONLY for the rcs that mean maturin ran (0/2/3), from the real build-verify rc"
+else
+  bad "B11: ${b11[*]}"
 fi
 
 # B6: `command -v cargo` is UNSAFE once the observer defines a shell function named
@@ -473,29 +560,37 @@ describe_shim_log() {
 #                smoke needs a real binary), so the executed sets must be a SUBSET of the
 #                declared ones. Named here rather than quietly asserted as EXACT: a test
 #                that claims a strength it does not have is the defect this issue is about.
-run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
-  local c="$1" mode="$2" why="${3:-}"
-  local sum="$tmp/only-$c.txt" log="$tmp/only-$c.log" shimlog="$tmp/argv-$c.log"
+# <shim-dir> defaults to the PASSING shim; section (D) passes the FAILING one. It is a
+# function ARGUMENT, never an env var: a test-only env seam is one more thing a real
+# invoker can set (#3312 job 27's corollary), and the caller here is this file.
+# FM_LAST_EXEC_COUNT is set to the number of cargo invocations the shim actually saw, so a
+# caller can prove a short-circuit happened instead of assuming it.
+FM_LAST_EXEC_COUNT=0
+run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-dir] [tag]
+  local c="$1" mode="$2" why="${3:-}" use_shim="${4:-$shim_dir}" tag="${5:-}"
+  local sum="$tmp/only-$c$tag.txt" log="$tmp/only-$c$tag.log" shimlog="$tmp/argv-$c$tag.log"
   : > "$shimlog"
+  FM_LAST_EXEC_COUNT=0
   FM_SHIM_LOG="$shimlog" \
   AGENT_GATE_SUMMARY_FILE="$sum" \
   AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
-  PATH="$shim_dir:$PATH" \
+  PATH="$use_shim:$PATH" \
     bash "$GATE" --only "$c" > "$log" 2>&1
   local line ann
   line=$(grep -E "^$c: +(PASS|FAIL|SKIP)" "$sum" 2>/dev/null | head -1)
   if [ -z "$line" ]; then
-    bad "C-$c: no '$c:' component line in the emitted block"
+    bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
   fi
   ann=${line#*\[}; ann="[${ann}"
   case "$ann" in
-    '[UNDECLARED]'|*UNCLASSIFIED*|'[]') bad "C-$c: annotation is '$ann'"; return ;;
+    '[UNDECLARED]'|*UNCLASSIFIED*|'[]') bad "C-$c$tag: annotation is '$ann'"; return ;;
   esac
-  local exec_side="$tmp/exec-$c.features"
+  local exec_side="$tmp/exec-$c$tag.features"
   describe_shim_log "$shimlog" "$exec_side"
+  FM_LAST_EXEC_COUNT=$(grep -c . "$exec_side" 2>/dev/null || echo 0)
   if [ ! -s "$exec_side" ]; then
-    bad "C-$c: the shim recorded no compile/run cargo invocation — the differential proved nothing"
+    bad "C-$c$tag: the shim recorded no compile/run cargo invocation — the differential proved nothing"
     return
   fi
   # Render the EXECUTED argv through the same renderer the block uses.
@@ -506,9 +601,9 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
   export AGENT_GATE_FM_DIR="$saved"
   if [ "$mode" = EXACT ]; then
     if [ "$ann" = "$expected" ]; then
-      ok "C-$c: declared matrix == the argv that EXECUTED  $ann"
+      ok "C-$c$tag: declared matrix == the argv that EXECUTED  $ann"
     else
-      bad "C-$c: DRIFT — block says $ann but the executed argv describes $expected"
+      bad "C-$c$tag: DRIFT — block says $ann but the executed argv describes $expected"
     fi
   else
     local missing=() dsc
@@ -516,9 +611,9 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
       case "$ann" in *"$dsc"*) ;; *) missing+=("$dsc") ;; esac
     done < <(sort -u "$exec_side")
     if [ "${#missing[@]}" -eq 0 ]; then
-      ok "C-$c: every EXECUTED set is named in the declared matrix (CONTAINS${why:+; $why})  $ann"
+      ok "C-$c$tag: every EXECUTED set is named in the declared matrix (CONTAINS${why:+; $why})  $ann"
     else
-      bad "C-$c: executed set(s) NOT named in the block: ${missing[*]}"
+      bad "C-$c$tag: executed set(s) NOT named in the block: ${missing[*]}"
     fi
   fi
 }
@@ -529,12 +624,14 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
 # a vacuous green wearing a debug flag's clothes. A case needing a different cargo
 # SUBSTITUTES THE ARTIFACT in its own scratch dir (below), never a path variable.
 {
-  # core-tests' nextest branch is a SEVENTH `bash -c` body (conditional on nextest being
-  # installed), and it is the component whose line is pasted most often. CONTAINS, not
-  # EXACT: on a host WITHOUT cargo-nextest the gate takes the direct-cargo fallback
-  # branch, which records ONE set (the observer sees it) while the shim run here may
-  # observe either shape — asserting equality would make this case host-dependent.
-  run_differential core-tests        CONTAINS "host-dependent: nextest branch vs direct-cargo fallback"
+  # core-tests' nextest branch is one of the eight `bash -c` bodies (taken only when
+  # cargo-nextest is installed), and it is the component whose line is pasted most often.
+  # EXACT on BOTH hosts since the records moved INSIDE the body (job 269 blocker 2): the
+  # nextest branch records its two passes as they run, and the direct-cargo fallback is
+  # observed by the in-shell wrapper — each host's declared set is now, by construction,
+  # exactly what that host executed. (It was CONTAINS before, because the PARENT declared
+  # the nextest pair even on a host that ran the fallback.)
+  run_differential core-tests        EXACT
   run_differential minimal-build     EXACT
   run_differential write-tests       EXACT
   run_differential memory-budget     EXACT
@@ -548,9 +645,132 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
   else
     skipped "C-compaction-byte-parity: committed test_compactionparity fixtures absent under CQLITE_DATASETS_ROOT — the component SKIPs, so the differential would prove nothing"
   fi
-  run_differential cli-tests         CONTAINS "pass 2 unreached: the zero-tests guard fires under a cargo stub"
-  run_differential smoke             CONTAINS "the smoke script needs a real built binary"
+  # cli-tests and smoke were CONTAINS for exactly the defect job 269 blocker 2 names: the
+  # body ABORTS partway under a stub (cli-tests' Pass-1 zero-tests guard fires; the smoke
+  # script needs a real built binary), and the parent declared the unreached sets anyway.
+  # Now that each pass records itself as it runs, both are EXACT — and EXACT here is the
+  # regression test for the blocker: reintroduce a parent-side pre-record and these red.
+  run_differential cli-tests         EXACT
+  run_differential smoke             EXACT
 }
+
+# ---------------------------------------------------------------------------
+# (D) TRUTHFUL ON A SHORT-CIRCUIT — measured with a FAILING cargo shim
+# ---------------------------------------------------------------------------
+# roborev job 269, blocker 2: the records used to be written by the PARENT before the
+# child body ran, so they described INTENT. A `cli-tests: FAIL` line then named BOTH of
+# its feature sets even when Pass 1 died before Pass 2 started, and write-tests claimed
+# the same set `x3` after failing on the first of three `&&`-chained passes. A failure
+# summary that claims an invocation which never occurred is affirmatively false.
+#
+# The instrument: a SUBSTITUTED cargo artifact in its own scratch dir (never a path
+# variable — #3312 job 27's corollary) that records its argv and EXITS 1, so every body
+# aborts after its first invocation. Two assertions per component, because either alone
+# would be weak:
+#   (i) NON-VACUITY — the failing run must have executed strictly FEWER invocations than
+#       section (C)'s passing run. Without this, a component that legitimately ran
+#       everything would "pass" this section having proved nothing about short-circuits.
+#  (ii) TRUTHFULNESS — declared == executed (EXACT), rendered through the gate's own
+#       renderer, never a curated expectation string.
+failshim="$tmp/failshim"; mkdir -p "$failshim"
+cat > "$failshim/cargo" <<'FSHIM'
+#!/usr/bin/env bash
+# Failing cargo shim: records its argv, compiles nothing, and FAILS — so every
+# `&&`-chained / `set -e` component body aborts after this first invocation.
+printf '%s\n' "$*" >> "${FM_SHIM_LOG:?}"
+exit 1
+FSHIM
+chmod +x "$failshim/cargo"
+
+for fc in write-tests integration-tests minimal-build cli-tests; do
+  pass_n=$(grep -c . "$tmp/exec-$fc.features" 2>/dev/null || echo 0)
+  run_differential "$fc" EXACT "" "$failshim" "-shortcircuit"
+  fail_n=$FM_LAST_EXEC_COUNT
+  if [ "${pass_n:-0}" -le 0 ]; then
+    bad "D-$fc: section (C) recorded no passing-run baseline, so 'fewer under failure' has no subject"
+  elif [ "${fail_n:-0}" -lt "$pass_n" ]; then
+    ok "D-$fc: the body really short-circuited under a failing cargo ($fail_n of $pass_n invocation(s) ran) AND the block named only those"
+  else
+    bad "D-$fc: no short-circuit observed ($fail_n vs $pass_n invocations) — the EXACT assert above proved nothing about a failure path"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# (P) THE INDIRECT PYTHON TIER IS NAMED, NOT GUESSED — roborev job 269, blocker 1
+# ---------------------------------------------------------------------------
+# The scoped --lite python tier builds the extension by running maturin in a CHILD
+# process, so the cargo invocation maturin makes can never pass through this shell's
+# observer. Before this fix a PURE-python --lite reported `scoped-tests: PASS …
+# [UNDECLARED]` ("nobody said"), and a MIXED rust+python diff listed only the rust matrix,
+# silently omitting the maturin build entirely.
+#
+# WHAT IS MEASURED vs WHAT IS STUBBED, stated rather than implied: run_scoped_tests is the
+# REAL function, extracted from the shipped gate, and the annotation is rendered through
+# the real _fm_annotate. Its ROUTING (classify_scoped_plan, separately asserted by the
+# py-route cases in test_agent_gate_summary.sh) and its --python-build-verify CHILD are
+# stubbed, because they are the two things that would otherwise require a git fixture, a
+# cargo workspace and a real maturin toolchain. So this section measures "given this
+# route and this build outcome, what does the block say" — which is precisely the
+# blocker's subject.
+py_run() { # <plan-lines> <build-verify-rc> ; prints the rendered scoped-tests annotation
+  local plan="$1" rc="$2"
+  local scratch="$tmp/py-$rc-$$"; mkdir -p "$scratch/side"
+  cat > "$scratch/fake-gate-self" <<FAKESELF
+#!/usr/bin/env bash
+# Stands in for \`bash "\$GATE_SELF" --python-build-verify …\`: writes no active-venv
+# path (so the caller falls back to the shared venv) and returns the chosen rc.
+exit $rc
+FAKESELF
+  chmod +x "$scratch/fake-gate-self"
+  (
+    # Collaborators of run_scoped_tests that are NOT the subject here.
+    classify_scoped_plan() { printf '%s\n' "$plan"; }
+    _package_index() { printf '%s\t%s\t%s\n' "$REPO_ROOT/cqlite-core" cqlite-core 1; }
+    classify_test_targets() { cat >/dev/null; :; }
+    classify_core_dependent_compile_check() { cat >/dev/null; :; }
+    _scoped_noparser_fail_msg() { printf 'no metadata parser'; }
+    PYTHON_LITE_TIER_CMD="maturin develop && pytest"
+    PYTHON_LITE_MATURIN_CMD="maturin develop"
+    PYTHON_LITE_PYTEST_CMD="true"
+    PYTHON_TIER_NOTE=""
+    GATE_SELF="$scratch/fake-gate-self"
+    # REPO_ROOT drives the venv path only; pointing it at a scratch dir keeps the pytest
+    # phase from ever activating a real venv on this box.
+    REPO_ROOT="$scratch"
+    LOG_DIR="$scratch"
+    GATE_BASE_OVERRIDE=HEAD
+    OVERALL=PASS
+    NAMES=(); STATUSES=(); TIMES=()
+    export AGENT_GATE_FM_DIR="$scratch/side"
+    PATH="$shim_dir:$PATH" FM_SHIM_LOG="$scratch/argv.log"
+    export FM_SHIM_LOG="$scratch/argv.log"
+    run_scoped_tests >/dev/null 2>&1
+    _fm_annotate scoped-tests
+  )
+}
+py_plan_pure='python-tier: maturin develop && pytest'
+py_plan_mixed='rust-pkg: cqlite-core
+python-tier: maturin develop && pytest'
+want_via='[via maturin: feature set NOT observed]'
+got=$(py_run "$py_plan_pure" 0)
+[ "$got" = "$want_via" ] \
+  && ok "P1: a PURE-python route renders $want_via — the state is NAMED as unobservable, not left UNDECLARED" \
+  || bad "P1: got '$got' want '$want_via'"
+want_mixed='[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]'
+got=$(py_run "$py_plan_mixed" 0)
+[ "$got" = "$want_mixed" ] \
+  && ok "P2: a MIXED rust+python route renders BOTH — the maturin entry is ADDITIVE, it does not replace the observed rust matrix" \
+  || bad "P2: got '$got' want '$want_mixed'"
+got=$(py_run "$py_plan_pure" 4)
+case "$got" in
+  *'never reached maturin'*)
+    ok "P3: rc 4 (no cargo/rustc — maturin never invoked) records THAT, not a maturin invocation that did not happen" ;;
+  *) bad "P3: rc 4 rendered '$got' — it must not claim a maturin build" ;;
+esac
+got=$(py_run "$py_plan_pure" 2)
+[ "$got" = "$want_via" ] \
+  && ok "P4: rc 2 (maturin RAN and failed) still records the maturin invocation — a failed build is an invocation that happened" \
+  || bad "P4: got '$got' want '$want_via'"
 
 echo
 echo "feature-matrix annotation guard: $PASS passed, $FAIL failed"
