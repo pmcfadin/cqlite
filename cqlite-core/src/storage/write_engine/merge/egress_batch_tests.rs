@@ -585,3 +585,222 @@ fn a_throttled_row_capacity_caps_the_real_batch_size() {
         "the ramp at a throttled ceiling: 1+2+4 then 8s (oracle sanity)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2820, roborev round 2 (FINDING 1): the byte budget must bound NESTED
+// values too.
+//
+// The estimator these batches are measured with used to end in
+// `_ => 32, // Default estimate for complex types`, so a `List`/`Map`/`Set`/
+// `Tuple`/`Udt`/`Frozen`/`Json` row of ANY size counted as ~32 bytes: 256 large
+// nested rows summed to a few KiB, never reached the 1 MiB budget, and the batch
+// ran to the ROW ceiling instead. Every assert below that the batch stayed under
+// the row ceiling is therefore RED under the old flat-32 estimate and GREEN with
+// the exhaustive one — the same control shape as the 775-vs-11 send-count pin.
+//
+// Deliberately NOT covered by the pre-existing 48 KiB-`Blob` byte-bound test:
+// a flat `Blob` was sized correctly all along, which is exactly why the flat
+// fixture (and the dhat measurement built on it) could not see this.
+// ---------------------------------------------------------------------------
+
+/// ~`payload` bytes of nested value under one cell, in each of the shapes the
+/// flat-32 wildcard used to swallow.
+#[derive(Clone, Copy, Debug)]
+enum NestedShape {
+    List,
+    Map,
+    Udt,
+    FrozenList,
+}
+
+/// One cell whose value carries `chunks × chunk` bytes nested inside `shape`.
+fn nested_value(shape: NestedShape, chunks: usize, chunk: usize) -> crate::types::Value {
+    use crate::types::{UdtField, UdtValue, Value};
+    let blob = || Value::Blob(vec![0x5a; chunk].into());
+    match shape {
+        NestedShape::List => Value::List((0..chunks).map(|_| blob()).collect()),
+        NestedShape::Map => Value::Map(
+            (0..chunks)
+                .map(|i| (Value::text(format!("k{i}")), blob()))
+                .collect(),
+        ),
+        NestedShape::Udt => Value::Udt(Box::new(UdtValue {
+            type_name: "big".to_string(),
+            keyspace: "ks".to_string(),
+            fields: (0..chunks)
+                .map(|i| UdtField {
+                    name: format!("f{i}"),
+                    value: Some(blob()),
+                })
+                .collect(),
+        })),
+        NestedShape::FrozenList => {
+            Value::Frozen(Box::new(Value::List((0..chunks).map(|_| blob()).collect())))
+        }
+    }
+}
+
+fn nested_entry(n: i64, shape: NestedShape, chunks: usize, chunk: usize) -> MergeEntry {
+    use crate::storage::write_engine::merge::model::CellData;
+    MergeEntry::new(
+        0,
+        DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+        None,
+        100 + n,
+        RowData::Live {
+            cells: vec![CellData::new(
+                "nested".to_string(),
+                nested_value(shape, chunks, chunk),
+                100 + n,
+            )],
+        },
+    )
+}
+
+/// The estimate for a nested row must track the bytes it actually carries.
+///
+/// The tight, direct form of the finding: under the flat-32 wildcard every one
+/// of these rows estimated at a couple of hundred bytes regardless of payload.
+#[test]
+fn a_nested_row_is_estimated_at_the_bytes_it_carries() {
+    const CHUNKS: usize = 16;
+    const CHUNK: usize = 4096;
+    const CARRIED: usize = CHUNKS * CHUNK; // 64 KiB
+
+    for shape in [
+        NestedShape::List,
+        NestedShape::Map,
+        NestedShape::Udt,
+        NestedShape::FrozenList,
+    ] {
+        let size =
+            super::super::RunReader::estimate_entry_size(&nested_entry(0, shape, CHUNKS, CHUNK));
+        assert!(
+            size >= CARRIED,
+            "{shape:?}: a row carrying {CARRIED} B of nested blob estimated at \
+             only {size} B — the byte budget is bypassable for this shape"
+        );
+        // Sanity in the other direction: the estimate is an approximation, not a
+        // multiple — container overhead must not dominate the payload.
+        assert!(
+            size < 4 * CARRIED,
+            "{shape:?}: estimate {size} B is more than 4x the {CARRIED} B carried; \
+             container overhead has swamped the payload"
+        );
+    }
+}
+
+/// A batch of large NESTED rows must flush on BYTES, not run to the row ceiling.
+///
+/// RED under the flat-32 estimate: 512 rows × ~200 estimated bytes never reaches
+/// 1 MiB, so `biggest_rows` was the full 256-row ceiling for every shape.
+#[test]
+fn the_byte_bound_trips_for_large_nested_rows_not_the_row_ceiling() {
+    const ROWS: usize = 512;
+    const CHUNKS: usize = 16;
+    const CHUNK: usize = 4096; // 64 KiB carried per row
+    let row_ceiling = batch_limit_ceiling(super::super::STREAMING_CHANNEL_CAPACITY);
+    assert_eq!(row_ceiling, 256, "premise: the ROW ceiling is 256");
+
+    for shape in [
+        NestedShape::List,
+        NestedShape::Map,
+        NestedShape::Udt,
+        NestedShape::FrozenList,
+    ] {
+        // Capacity ROWS + 4: this test measures the BATCHER's flush decisions, so
+        // it must never block on the channel.
+        let (tx, rx) = std::sync::mpsc::sync_channel(ROWS + 4);
+        let local_sent = AtomicI64::new(0);
+        let mut batcher =
+            EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+        for n in 0..ROWS {
+            assert!(matches!(
+                batcher.push(nested_entry(n as i64, shape, CHUNKS, CHUNK)),
+                ControlFlow::Continue(())
+            ));
+        }
+        let _ = batcher.flush();
+        drop(tx);
+
+        let mut biggest_rows = 0usize;
+        let mut biggest_bytes = 0usize;
+        let mut total_rows = 0usize;
+        let mut messages = 0usize;
+        while let Ok(msg) = rx.recv() {
+            let MergeMsg::Batch(batch) = msg else {
+                panic!("the batcher sends only DATA batches");
+            };
+            let bytes: usize = batch
+                .iter()
+                .map(super::super::RunReader::estimate_entry_size)
+                .sum();
+            biggest_rows = biggest_rows.max(batch.len());
+            biggest_bytes = biggest_bytes.max(bytes);
+            total_rows += batch.len();
+            messages += 1;
+        }
+
+        assert_eq!(
+            total_rows, ROWS,
+            "{shape:?}: no row may be dropped by the byte flush"
+        );
+        // THE guard. Under `_ => 32` this is exactly `256 < 256` and FAILS.
+        assert!(
+            biggest_rows < row_ceiling,
+            "{shape:?}: the BYTE budget must trip before the {row_ceiling}-row \
+             ceiling for 64 KiB nested rows (biggest batch {biggest_rows} rows)"
+        );
+        let one_row =
+            super::super::RunReader::estimate_entry_size(&nested_entry(0, shape, CHUNKS, CHUNK));
+        assert!(
+            biggest_bytes <= BATCH_EMIT_BYTES_MERGE + one_row,
+            "{shape:?}: a batch ({biggest_bytes} B) may exceed the budget by at \
+             most one row ({one_row} B), never by a multiple"
+        );
+        // Non-vacuity: it must still BATCH (a per-row send satisfies every bound
+        // above while losing the whole optimisation).
+        assert!(
+            messages < ROWS,
+            "{shape:?}: the byte bound must still batch — {messages} messages for \
+             {ROWS} rows"
+        );
+        assert!(
+            biggest_rows > 1,
+            "{shape:?}: some batch must carry more than one 64 KiB nested row \
+             (biggest={biggest_rows})"
+        );
+    }
+}
+
+/// A pathologically WIDE value fails CLOSED (`usize::MAX`), never permissively.
+///
+/// The node budget bounds worst-case work; when it is exhausted the size is
+/// unknown, and an unknown size must take the FAIL-CLOSED branch (an immediate
+/// flush) rather than a small guess. The guard is checked BEFORE enqueuing, so
+/// the traversal never grows a worklist proportional to the element count.
+#[test]
+fn a_value_past_the_node_budget_fails_closed_rather_than_undercounting() {
+    use crate::storage::write_engine::merge::model::CellData;
+    use crate::types::Value;
+    let cap = super::super::entry_size::MAX_ESTIMATE_NODES;
+    let entry = MergeEntry::new(
+        0,
+        DecoratedKey::new(0, vec![0]),
+        None,
+        100,
+        RowData::Live {
+            cells: vec![CellData::new(
+                "wide".to_string(),
+                Value::List(vec![Value::Null; cap + 1]),
+                100,
+            )],
+        },
+    );
+    assert_eq!(
+        super::super::RunReader::estimate_entry_size(&entry),
+        usize::MAX,
+        "a value past the {cap}-node budget must fail CLOSED so the batcher \
+         flushes immediately and read-ahead stops"
+    );
+}
