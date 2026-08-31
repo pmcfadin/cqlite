@@ -1680,7 +1680,18 @@ supervisor_legacy_lock_refuse() {
   legacy_shown="$(supervisor_shell_quote "$legacy")" || true
   own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
   printf '%s\n' "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
-  printf '%s\n' "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($own_shown), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
+  # THIS LINE DESCRIBES TWO RESOLVED PATHS; IT ASSERTS NO RELATIONSHIP IT HAS NOT ESTABLISHED (#3549,
+  # roborev job 222 F2). It used to say our own lock "is PER LANE" unconditionally and conclude that the
+  # two are therefore invisible to each other. Per-lane is only the DEFAULT: a caller may name our lock
+  # path itself, and that name may be machine-global — it may even BE the legacy path — in which case
+  # both halves of the old sentence were false at once. It also said "the" machine-global lock, as if
+  # one such path existed; the name is `TMPDIR`-derived, so it is the machine-global path only for a
+  # launcher whose environment resolves it the same way ours does (see the SPATIAL GAP in the RESIDUAL
+  # block above). So: print both paths as RESOLVED, and make the consequence conditional on them
+  # differing, which is the fact that actually produces the co-run. Naming the override VARIABLE here is
+  # separately forbidden (job 208 F1: a refused operator must not be handed something that reads as an
+  # escape hatch), which is why it describes the LAUNCHER rather than naming the variable.
+  printf '%s\n' "worker-supervisor: that path is the pre-#3467 machine-global single-instance lock name as THIS process's \${TMPDIR:-/tmp} resolves it; this run's own lock is at $own_shown (per lane by default, or wherever this run's launcher named it) — so unless those two are the SAME path, neither supervisor can see the other's lock and both would run in one worktree (#3549)." >&2
   # A CASE-SPECIFIC remedy, when there is one. The two refusing states differ in what an operator should
   # DO — a PRESENT lock means "something is at that path; find out what it is"; a probe that COULD NOT
   # ANSWER means "the question was undecidable here; make it decidable" — so the generic line below is
@@ -1792,7 +1803,7 @@ supervisor_legacy_lock_guard() {
   # decision taken elsewhere because no decision is taken elsewhere. `TMPDIR` at guard time is also the
   # RIGHT reading on its own terms — a pre-#3467 supervisor derives the machine-global name from the
   # environment it starts in, which our own resolution moment says nothing about.
-  local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state
+  local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state shown=""
   # A PROBE THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
   # The probe returns 0 on every path it takes, but under a caller with `inherit_errexit` any
   # unforeseen non-zero inside the `$( )` makes THIS ASSIGNMENT non-zero, and with the script's own
@@ -1802,6 +1813,32 @@ supervisor_legacy_lock_guard() {
   state="$(supervisor_legacy_lock_presence "$legacy")" || state="could-not-tell presence-probe-exited-nonzero"
   case "$state" in
     verified-absent)
+      # THE PROCEED PATH STATES WHAT WAS CHECKED, BECAUSE A BARE ABSENCE INVITES A FALSELY REASSURING
+      # NEGATIVE (#3549, roborev job 222 F1 — lead ruling: DECLARE THE SCOPE, change no detection
+      # logic). This branch used to be silent. Silence is not itself a false claim, but the guard runs
+      # on every start and an operator reading a clean start reasonably concludes "no pre-#3467
+      # supervisor can be holding a lock here" — which is NOT what was established. What WAS
+      # established is narrower, and the line says exactly it: ONE path was tested, and that path was
+      # derived from THIS process's `TMPDIR`. A pre-#3467 supervisor launched with a different `TMPDIR`,
+      # or with its own lock path named by its launcher, holds a path this check never looks at. That is
+      # the SPATIAL gap recorded in the RESIDUAL block above; it is stated here, in the operator's own
+      # output, because the RESIDUAL block is read by whoever edits this file and this line is read by
+      # whoever runs it.
+      #
+      # ONE LINE, at the level `log` already uses for startup facts, and only here — the refusing
+      # branches already NAME the path they found, so they assert no completeness that needs qualifying
+      # beyond the relationship line in the emitter. The path is rendered so a `TMPDIR` containing a
+      # control character cannot split this into two physical lines (the same contract the refusal
+      # emitter holds; `log` is `printf`-based, so `xpg_echo` cannot reinterpret the escape either).
+      # `|| true` because an assignment-from-substitution is an errexit abort site and a rendering that
+      # could not be made must cost the FIELD, never the line.
+      #
+      # IT NAMES NO VARIABLE. Job 208 F1's rule is about refusals, but the reason generalises: a line
+      # printed on every successful start is the most-read text this guard has, and there is no opt-out
+      # to advertise in it either (AC4 removed as unsound). The launcher, not the variable, is what an
+      # operator can act on.
+      shown="$(supervisor_shell_quote "$legacy")" || true
+      log "legacy-lock check: nothing at $shown, which is the ONLY path this check tested — it is the pre-#3467 machine-global lock name as THIS process's \${TMPDIR:-/tmp} resolves it. A pre-#3467 supervisor started under a different TMPDIR, or with its lock path named by its own launcher, would hold a path this check does not see; and one that starts after this moment is not stopped by it either (#3549 spatial gap, #3596 later-start gap)."
       return 0
       ;;
     present)
