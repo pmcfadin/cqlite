@@ -759,6 +759,14 @@ fi
 # set is the UNION of:
 #   A  the shipped script's own GATE_GLOBAL_PATTERNS (so a NEW entry is probed
 #      for free, with no test edit — derive, never curate), and
+# DECLARED LIMIT: a COORDINATED deletion from BOTH A and B in one diff is NOT
+# caught and goes green (measured). Two oracles that both live in this repo cannot
+# see an edit that moves both, so this pins ONE-SIDED drift (a rebase, a cleanup, a
+# partial edit), not a deliberate two-sided change. Saying only "a one-sided
+# deletion reds" would read as "deletions are caught", which is the
+# affirming-completeness-we-lack shape this suite exists to refuse. The control for
+# the two-sided case is diff review — both hunks land in the same PR, which is why
+# oracle B is a COMMITTED DECLARATION and not a generated artifact.
 #   B  the INDEPENDENT committed declaration of the same list in the change's
 #      design document, which doctrine already requires to be kept current in the
 #      same change.

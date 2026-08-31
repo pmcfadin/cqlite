@@ -210,6 +210,15 @@ already runs `test_premerge_assert.sh`). Beyond ordinary cases it carries:
    oracle is a FAIL rather than a fallback to the first. A new entry is probed for free (derive, never
    curate); a one-sided deletion reds twice. Measured: dropping any single entry now reds; emptying the
    list reds hard; the control is green.
+   **DECLARED LIMIT — a COORDINATED deletion from BOTH oracles in one diff is NOT caught, and is
+   green (measured: 116 passed / 0 failed).** Two oracles that both live in this repository cannot
+   detect an edit that moves both, so this pin defends against *one-sided drift* — a rebase, a
+   cleanup, a partial edit — and not against a deliberate two-sided change. That residual is stated
+   rather than implied, because "a one-sided deletion still reds" reads to a hurried reviewer as
+   "deletions are caught", which is exactly the affirming-a-completeness-we-do-not-have shape this
+   whole change exists to close. The control on a two-sided edit is the diff review: both hunks are
+   visible in the same PR, which is the point of keeping oracle B a committed declaration rather than
+   a generated artifact.
 6. **Rename/relative symmetry cases** (D1d): a PR that renames a path plus a commit behind editing the OLD
    path must be `STALE-RECOGNISED`, and it reds when the porcelain pin is removed; likewise
    `diff.relative=true` with cwd in a subdirectory.
