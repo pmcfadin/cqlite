@@ -932,7 +932,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   computed without a per-finding identity roborev's prose does not provide, and **no such identity is
   reconstructed from that prose** (the class #3564 closed by REMOVING prose reconstruction stays closed).
   `issues=` also names **where the finding went**: each number must be a RETRIEVABLE issue **and** be
-  REFERENCED FROM THE PR BODY, because a deferral without a linked issue is a DROPPED finding. It reports
+  REFERENCED FROM THE PR BODY, because a deferral without a linked issue is a DROPPED finding. **And the
+  PR body is written by the WORKER — the constrained party — so that reference is checked with TOKEN
+  *and* REPOSITORY boundaries** (roborev job 225): a digits-only bound admitted `owner/repo#N` (a
+  different repository, which the caller's own `gh issue view <N>` then validated against the unrelated
+  LOCAL issue), `#Nsuffix` (not an autolink at all) and a copy inside a fence, a code span or an HTML
+  comment (content a reader does not see as a link) — four ways for the constrained party to satisfy its
+  own constraint. Inert regions are removed before the match, unterminated constructs swallow the rest
+  of their scope, and the fence closer follows CommonMark (same char, ≥ as long, no info string) because
+  a naive toggle desynchronises on a ```` ```bash ```` line INSIDE a fence — the FAIL-OPEN direction.
+  Every ambiguity resolves toward NOT FOUND: the remedy for a false `PR-UNLINKED` is one line in the PR
+  body, while the other error drops a finding silently. The full-URL form is deliberately not accepted. It reports
   a **distinct token** — `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`, **NEVER
   `NONE`** (which stays reachable only from the record's structured verdict letter, so nobody grepping
   `findings: NONE` reads a deferred run as clean) — beside a `deferral:` key that speaks even when
@@ -943,9 +953,21 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   other** — an absence waiver confers no authority over `findings:`, a findings deferral none over
   `prompt-content:` — because collapsing them would let a delivery-artifact waiver excuse a real defect;
   a run may legitimately carry both, each under its own key. `DEFERRED` is a value of the **closed**
-  verdict grammar, non-failing **only** on the single coupled granted state that the grammar scan, the
-  findings gate and the affirmation backstop all read — one state, not three, so they cannot drift into
-  two opinions about whether one authorization was granted. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  verdict grammar, non-failing **only** on the single coupled granted state that the grammar scan and the
+  findings gate both read — one state, not two, so they cannot drift into two opinions about whether one
+  authorization was granted. **AND THAT ADMISSION IS CONFINED TO ONE KEY, `findings:`, BY CONSTRUCTION**
+  (roborev job 225): the scan carries each key's NAME beside its value and admits the token for
+  `findings` alone, and the deterministic-key affirmation backstop carries **no** `DEFERRED` arm and
+  reads the state not at all. The confinement was first left resting on an ABSENCE — no other key
+  happened to emit the token — which is #3564's lesson verbatim, so ask of every key *what fails the run
+  if THIS key alone goes bad*. The contrast with the absence waiver is the reason: **a waiver authorizes a
+  PROPERTY** (an absence) that only one key can ever report, so its provenance IS the whole test and it is
+  correctly not key-scoped; **a deferral authorizes a NAMED SET OF FINDINGS** and says nothing about
+  whether the reviewer's diff arrived or the reviewed range matched, so an unconfined admission would let
+  ONE authorization excuse a check NOBODY authorized. Relatedly, **no emitted diagnostic reproduces any
+  part of either marker — not even its prefix**: the MALFORMED detail used to quote the whole required
+  form and is interpolated into the summary key, so the block printed a fillable authorization beside a
+  live base/head/job while a comment beside the interpolation asserted it never did. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict

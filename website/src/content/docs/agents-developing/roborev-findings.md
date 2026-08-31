@@ -708,7 +708,22 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
 
    **`issues=` names where the finding went.** Each number must be a **retrievable** issue
    (`ISSUE-UNRESOLVABLE` otherwise) **and** be **referenced from the PR body** (`PR-UNLINKED` otherwise),
-   because a deferral without a linked issue is a **dropped** finding. The nit rule already requires one
+   because a deferral without a linked issue is a **dropped** finding.
+
+   **The PR body is written by the worker — the constrained party — so that reference is checked with
+   token *and* repository boundaries** (roborev job 225). A digits-only bound admitted four shapes, each
+   of which let the constrained party satisfy its own constraint: `owner/repo#N` (a different repository,
+   while the caller's own `gh issue view <N>` validated the unrelated **local** issue), `#Nsuffix` (not a
+   GitHub autolink at all), and a copy inside a fenced block, an inline code span or an HTML comment
+   (content a reader of the PR does not see as a link). Inert regions are therefore removed before the
+   match; every unterminated construct swallows the rest of its scope, and the fence **closer** follows
+   CommonMark — same character, at least as long, no info string — because a naive "any fence line
+   toggles" rule desynchronises on a ```` ```bash ```` line *inside* a fence, which GitHub renders as
+   code while the naive rule would read the text after it as prose. That is the **fail-open** direction,
+   the one direction this predicate must not fail. Every ambiguity resolves toward **not found**: the
+   remedy for a false `PR-UNLINKED` is one line in the PR body, while the opposite error drops a finding
+   with no recorded disposition. The full-URL form is deliberately not accepted — this scanner is not
+   told which repository is local, and guessing is the shape being removed. The nit rule already requires one
    follow-up issue at merge time; this makes the link mechanical instead of remembered, and the ruling
    needs no separate artifact — the authorization comment is permanent, attributable and in the PR.
 
@@ -743,9 +758,29 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    which is exactly the false PASS #3564 removed.
 
    `DEFERRED` is a value of the **closed** verdict grammar, non-failing **only** on the single coupled
-   granted state that the grammar scan, the `findings:` gate and the affirmation backstop **all** read —
-   one state, not three, so they cannot drift into two opinions about whether one authorization was
-   granted. Re-deriving the provenance per gate would *be* that drift.
+   granted state that the grammar scan and the `findings:` gate **both** read — one state, not two, so
+   they cannot drift into two opinions about whether one authorization was granted. Re-deriving the
+   provenance per gate would *be* that drift.
+
+   **And that admission is confined to one key, `findings:`, by construction** (roborev job 225). The
+   scan carries each key's **name** beside its value and admits the token for `findings` alone; the
+   deterministic-key affirmation backstop carries **no** `DEFERRED` arm and does not read the state at
+   all. It was first written unconfined, on the reasoning that provenance is what matters and a
+   key-scoped test has to be re-argued whenever a key is added — a real argument, and wrong here. **A
+   waiver authorizes a *property*** (an absence) that only one key can ever report, so its provenance is
+   the whole test and it is correctly not key-scoped. **A deferral authorizes a *named set of
+   findings*** and says nothing about whether the reviewer's diff arrived, whether the push landed or
+   whether the reviewed range matched — so an unconfined admission let **one** authorization excuse a
+   check **nobody** authorized, and the only thing standing between it and a false PASS was that no other
+   key *happened* to emit the token. That is lesson (1) below, verbatim.
+
+   Relatedly, **no emitted diagnostic reproduces any part of either marker — not even its prefix.** The
+   `MALFORMED` detail used to quote the whole required form, and that detail is interpolated into the
+   `waiver:`/`deferral:` summary key: the block printed a complete, fillable authorization beside a live
+   base/head/job, while a comment two lines from the interpolation asserted it never did. One fix in the
+   shared scanner closed it for **both** kinds, because both details come from the one structured parse.
+   The absence is now asserted against **every** diagnostic-emitting case rather than only the `NONE`
+   state, where it held trivially — **a property asserted only where it cannot fail is not asserted.**
 
    **Two transferable lessons.** (1) *Delegating a key's failure to its neighbour is a latent false PASS* —
    the coupling is invisible while both keys are populated by the same event and evaporates in the first mode

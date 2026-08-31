@@ -24,7 +24,10 @@
 - [x] 2.3 Assert `count=` equals the **observed** findings count and `issues=` is non-empty →
       otherwise `COUNT-MISMATCH`.
 - [x] 2.4 Assert disposition per issue: retrievable (`ISSUE-UNRESOLVABLE` otherwise) **and**
-      referenced from the PR body (`PR-UNLINKED` otherwise).
+      referenced from the PR body (`PR-UNLINKED` otherwise). The body reference is recognised only as a
+      LOCAL `#N` bounded on both sides (no `owner/repo#N`, no `#Nsuffix`) and only in VISIBLE content
+      (fenced blocks, inline code spans and HTML comments removed first), because the body is written
+      by the constrained party; every ambiguity resolves toward NOT referenced.
 - [x] 2.5 Refuse to defer `findings: UNKNOWN` / `SKIP` in every mode; add **no** prose reconstruction
       of per-finding identity.
 - [x] 2.6 Resolve the scanner from the wrapper's own directory — no override, no `${…:-…}` fallback.
@@ -37,8 +40,9 @@
       every non-`GRANTED` value leaves the FAIL. `GRANTED` names author, issues, count, scope and the
       **verbatim** reason. The `NONE` cause teaches both the sole-content and top-level rules.
 - [x] 3.3 Extend the **closed** verdict grammar: `DEFERRED` non-failing only when the oracle granted;
-      exact **token** match (up to first space), never a prefix; extend the affirmation backstop so
-      grammar and backstop read **one** coupled state.
+      exact **token** match (up to first space), never a prefix; the scan carries each key's NAME so
+      the admission is **confined to `findings:`**, and the deterministic-key affirmation backstop
+      carries no `DEFERRED` arm and does not read the coupled state.
 - [x] 3.4 Emit **no part** of the marker in any diagnostic; point at `--help`.
 - [x] 3.5 Update the wrapper's `usage()` / header doctrine block to document the marker and its
       constraints.

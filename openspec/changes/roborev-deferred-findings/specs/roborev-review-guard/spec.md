@@ -117,6 +117,15 @@ head, each raise or lower the observed count and therefore fail.
 under `deferral: ISSUE-UNRESOLVABLE (…)`; an issue absent from the PR body SHALL leave it FAILing
 under `deferral: PR-UNLINKED (…)`. A deferral without a linked issue is a dropped finding.
 
+The PR body is authored by the **worker** — the party the disposition requirement constrains — so the
+reference SHALL be recognised only as a **LOCAL** issue reference bounded on **both** sides by a
+non-token, non-repository-qualifier character, and only where it appears in **visible** body content.
+A cross-repository reference (`owner/repo#N`), a reference carrying an alphanumeric suffix (`#Nsuffix`)
+and a reference appearing **only** inside a fenced code block, an inline code span or an HTML comment
+SHALL each leave the run FAILing under `deferral: PR-UNLINKED (…)`. Every ambiguity SHALL resolve
+toward **not referenced**: the remedy for a false `PR-UNLINKED` is one line in the PR body, whereas the
+opposite error lets a deferred finding be dropped with no recorded disposition.
+
 **Non-deferrable states.** `findings: UNKNOWN` and `findings: SKIP` SHALL NOT be deferrable in any
 mode. Those values mean the findings state was never **established**, and a pass may not rest on a
 state that could not be read; only an affirmatively measured `PRESENT (n)` SHALL be deferrable. The
@@ -135,6 +144,14 @@ removing prose reconstruction, and it SHALL NOT be reopened.
 #### Scenario: The authorization names an issue that is not linked from the PR body
 - **WHEN** `issues=` names a retrievable issue that the PR body does not reference
 - **THEN** the run reports `deferral: PR-UNLINKED (…)` and `RESULT: FAIL`
+
+#### Scenario: The PR body references the issue only in another repository, with a suffix, or in inert content
+- **WHEN** `issues=` names retrievable issues and the PR body references them only as `owner/repo#N`, as `#Nsuffix`, inside a fenced code block, inside an inline code span, or inside an HTML comment
+- **THEN** the run reports `deferral: PR-UNLINKED (…)` naming those issues and `RESULT: FAIL` — the constrained party may not satisfy its own disposition constraint with a reference to something else or with content the reader does not see as a link
+
+#### Scenario: The PR body references the issue in ordinary visible prose
+- **WHEN** `issues=` names retrievable issues and the PR body references each as a bare `#N` in visible text (parenthesised or sentence-final included), beside unrelated inert content
+- **THEN** the disposition half is satisfied, so a granted, matching marker still reports `deferral: GRANTED (…)`, `findings: DEFERRED (…)` and `RESULT: PASS`
 
 #### Scenario: The authorization names an unretrievable issue
 - **WHEN** an `issues=` number cannot be retrieved
@@ -162,9 +179,19 @@ verdict SHALL be gated on the **undeferred** set only, so `RESULT: PASS` becomes
 **only** when the deferral oracle affirmatively granted, and an unrecognised value SHALL continue to
 FAIL. Each value SHALL be reduced to its verdict **token** (up to the first space) and matched
 **exactly**, never by prefix — `PASS*`-style prefix acceptance checks a spelling rather than a state.
-The affirmation backstop (no `PASS` may carry a verdict-carrying key that is not affirmatively
-passing) SHALL be extended so that `DEFERRED` counts as affirmative **only** in that same coupled
-sense, reading one state rather than two, so the grammar and the backstop cannot drift apart.
+The admission SHALL be **confined to the `findings:` key by key name**: the verdict scan SHALL carry
+each key's NAME beside its value, and `DEFERRED` SHALL be non-failing for `findings` and for no other
+key — this is the mechanism by which "the deferral SHALL NOT be readable by, or applicable to, any
+check other than the wrapper's `findings:` key" (below) is realised, rather than resting on the
+accident that no other key emits the token. The affirmation backstop (no `PASS` may carry a
+verdict-carrying key that is not affirmatively passing) covers the six DETERMINISTIC keys, none of
+which is `findings:`, and SHALL therefore carry **no** `DEFERRED` arm and SHALL NOT read the coupled
+state at all; a deterministic key holding the token SHALL fail in the verdict scan, by key name, with
+its own diagnostic. (An earlier draft required the backstop to be EXTENDED with a provenance-gated,
+key-agnostic `DEFERRED` arm, by analogy with the absence waiver's. The analogy does not hold: a
+waiver authorizes a PROPERTY — an absence — that only one key can ever report, whereas a deferral
+authorizes a NAMED SET OF FINDINGS and confers no information about any other check. That draft
+contradicted the confinement requirement below, and the confinement governs.)
 
 The deferral SHALL be honoured **only** on `--recheck-job <id>`, which enqueues nothing: the operator
 learns the job id **and** the findings only from the finished run, and re-running the wrapper to

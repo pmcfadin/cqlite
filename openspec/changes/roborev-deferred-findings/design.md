@@ -107,10 +107,15 @@ RESULT: PASS
 `findings:` **never reports `NONE`** for a deferral — `NONE` stays reachable only from the record's
 structured `verdict` letter, so nobody grepping for a clean review finds a deferred one. `DEFERRED`
 is a **new value in the closed verdict grammar**, non-failing **only** when the deferral oracle
-affirmatively granted; an unrecognised or ungranted spelling still FAILs. The affirmation backstop
-(no `PASS` may carry a verdict-carrying key that is not affirmatively passing) is extended to treat
-`DEFERRED` as affirmative **only** in that same coupled sense — the two must not be able to drift,
-so they read one state, not two.
+affirmatively granted; an unrecognised or ungranted spelling still FAILs. The admission is
+**confined to the `findings:` key by key name** — the scan carries each key's NAME beside its value —
+so the deterministic-key affirmation backstop carries **no** `DEFERRED` arm and does not read the
+coupled state at all; a deterministic key holding the token fails in the scan, by key name, under its
+own diagnostic. Confining it by KEY rather than by PROVENANCE ALONE is the difference between the two
+authorizations: a waiver authorizes a PROPERTY (an absence) only one key can report, while a deferral
+authorizes a NAMED SET OF FINDINGS and says nothing about whether the reviewer's diff arrived — so an
+unconfined admission would let one authorization excuse a check nobody authorized, prevented only by
+the accident that no other key emits the token.
 
 `deferral:` states its own state even when nothing was granted — `NONE` / `STALE` / `MALFORMED` /
 `UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-UNRESOLVABLE` / `PR-UNLINKED` / `UNAVAILABLE` — each
