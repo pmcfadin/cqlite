@@ -300,9 +300,18 @@ fn fixture() -> Fixture {
              \n\
              \x20   CQLITE_DATASETS_ROOT={verify_root} bash {verify_cmd} --verify-only\n\
              \n\
-             It names every git-tracked fixture that is missing and prints the exact, \
-             correctly-scoped restore command for them — which is why this message \
-             does not try to construct one."
+             READ ONLY ITS FIRST LINE, `Tracked-fixture probe (#3310)`: that is the \
+             half that answers this failure, naming every git-tracked fixture that is \
+             missing and printing the exact, correctly-scoped `git restore` for them — \
+             which is why this message does not try to construct one.\n\
+             \n\
+             IGNORE the `ERROR:` lines that follow it, and do NOT run the remedy they \
+             suggest. They report a DIFFERENT condition — the checkout corpus is not a \
+             complete FETCHED corpus, which it is never meant to be — and the command \
+             exits 1 with 7 such lines even when nothing is missing. One of them \
+             proposes clearing `.dataset-pin` and re-running the fetch, whose default \
+             path is destructive (`rm -rf` on the dataset root): against this checkout \
+             root that would DELETE the committed fixtures you are trying to restore."
         )
     });
     let golden = golden_rows_by_pk(&dir);
