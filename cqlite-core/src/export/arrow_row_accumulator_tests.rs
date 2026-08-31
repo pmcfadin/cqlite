@@ -20,7 +20,7 @@
 
 use super::*;
 use crate::export::arrow_shape_corpus::{col, row, shape_corpus, text};
-use crate::export::{estimate_arrow_row_bytes, rows_to_record_batch};
+use crate::export::{arrow_payload_bytes, estimate_arrow_row_bytes, rows_to_record_batch};
 use crate::schema::CqlType;
 use crate::types::DataType;
 
@@ -189,23 +189,103 @@ fn a_saturating_fan_out_fails_closed_on_both_accountings() {
     assert_eq!(acc.stage(r), usize::MAX, "fused width did not fail closed");
 }
 
-/// Duplicate output columns for one name (`SELECT a, a`) receive equal cells, and
-/// the width matches the standalone estimate — which resolves the same name twice.
-#[test]
-fn duplicate_output_columns_match_the_standalone_estimate_and_replicate() {
+/// A WIDE collection value projected twice (`SELECT a, a`) — legal CQL, and the
+/// case where a per-duplicate deep clone would cost the most.
+fn duplicate_name_fixture() -> (Vec<ColumnInfo>, Vec<QueryRow>) {
+    let list_of_text = CqlType::List(Box::new(CqlType::Text));
     let columns = vec![
-        col("a", DataType::Text, Some(CqlType::Text)),
-        col("a", DataType::Text, Some(CqlType::Text)),
+        col("a", DataType::List, Some(list_of_text.clone())),
+        col("a", DataType::List, Some(list_of_text)),
     ];
+    let wide = Value::List((0..64).map(|i| text(&format!("element-{i}"))).collect());
     let rows = vec![
-        row(vec![("a", text("dup"))]),
+        row(vec![("a", wide)]),
         row(vec![("a", Value::Null)]),
-        row(vec![]),
+        row(vec![]), // absent from the row entirely
     ];
-    let acc = stage_all(&columns, &rows, "duplicate names");
+    (columns, rows)
+}
+
+/// Duplicate output columns for one name produce byte-identical output to the
+/// pre-fold path, charge the same width as the standalone estimate (which resolves
+/// the name once per column), and store the payload EXACTLY ONCE.
+///
+/// # This test fails if the deep clone is reintroduced
+///
+/// The fan-out is by reference: the value is moved into its name's CANONICAL slot
+/// and every duplicate column reads that slot through `canonical`. All three ways
+/// a clone could come back are caught here, which is the point — equal VALUES in
+/// both slots (what this test used to assert) is true of a clone as well, so it
+/// could not distinguish them:
+///
+/// * a clone into the duplicate's STAGING slot — caught by the `staged` assertions
+///   between `stage` and `commit` (a clone there is transient, dropped at commit,
+///   so no later observation can see it);
+/// * a clone into the duplicate's CELL STORE — caught by `cells[1]` being empty;
+/// * anything that changes the OUTPUT — caught by the batch equality.
+#[test]
+fn duplicate_output_columns_store_the_payload_once_and_match_the_pre_fold_batch() {
+    let (columns, rows) = duplicate_name_fixture();
+
+    // The canonical map: both output columns resolve to column 0's store.
+    let mut acc = ArrowRowAccumulator::with_capacity(&columns, rows.len());
+    assert_eq!(
+        acc.canonical,
+        vec![0, 0],
+        "both same-named output columns must resolve to the FIRST one's store"
+    );
+
+    for (i, r) in rows.iter().enumerate() {
+        let expected = estimate_arrow_row_bytes(&columns, r);
+        let fused = acc.stage(r.clone());
+        assert_eq!(
+            fused, expected,
+            "row {i}: a duplicated name must be CHARGED once per output column"
+        );
+        // The payload exists in ONE staging slot. A `value.clone()` into the
+        // duplicate column would show up right here.
+        assert!(
+            acc.staged[1].is_none(),
+            "row {i}: the duplicate output column must hold no copy of its own — \
+             a deep clone per duplicate column allocates the payload N times, at \
+             stage time, before `cut_before` admits the row (issue #3552 B3)"
+        );
+        assert_eq!(
+            acc.staged[0].is_some(),
+            !r.values.is_empty(),
+            "row {i}: the canonical slot holds the value exactly when the row \
+             carries one"
+        );
+        acc.commit();
+    }
+
+    // Storage: one store populated, the duplicate's store never written at all.
+    assert_eq!(
+        acc.cells[0].len(),
+        rows.len(),
+        "the canonical column stores one cell per row"
+    );
+    assert!(
+        acc.cells[1].is_empty(),
+        "the duplicate output column must have NO store of its own — a value \
+         named twice is stored once and read twice (issue #3552 B3)"
+    );
+
+    // Output: byte-identical to the pre-fold path, which fanned out a `&Value`.
     let fused = acc.to_record_batch().expect("fused build");
     let reference = rows_to_record_batch(&columns, &rows).expect("reference build");
-    assert_eq!(fused, reference, "duplicate-name batch differs");
+    assert_eq!(
+        fused, reference,
+        "the duplicate-name batch must be byte-identical to the pre-fold one"
+    );
+    // Non-vacuity: both duplicate columns really carry the wide list.
+    assert_eq!(fused.num_columns(), 2);
+    assert_eq!(fused.num_rows(), rows.len());
+    assert_eq!(
+        arrow_payload_bytes(&fused),
+        arrow_payload_bytes(&reference),
+        "identical batches must carry identical payload bytes"
+    );
 }
 
 /// A STAGED row survives a flush: `clear` empties the committed rows and leaves

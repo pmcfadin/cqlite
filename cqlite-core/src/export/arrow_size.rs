@@ -314,6 +314,22 @@ where
 /// Per-column Arrow slot shapes resolved ONCE for a column set, so the fused
 /// push-time accounting does not re-run `column_shape` per row (issue #3552).
 ///
+/// One cell out of a ROW-MAJOR staging slot, addressed by canonical index.
+///
+/// A free function (not a closure at the call site) so the `.zip(..)` argument
+/// stays short enough to read — and so the indirection is named once.
+fn staged_cell(cells: &[Option<Value>], c: usize) -> Option<&Value> {
+    cells.get(c).and_then(Option::as_ref)
+}
+
+/// One cell out of a COLUMN-MAJOR cell store, addressed by canonical index + row.
+fn columnar_cell(cells: &[Vec<Option<Value>>], c: usize, row: usize) -> Option<&Value> {
+    cells
+        .get(c)
+        .and_then(|store| store.get(row))
+        .and_then(Option::as_ref)
+}
+
 /// Visible ONLY inside `crate::export`: this is the seam between the estimator and
 /// `super::arrow_row_accumulator`, not a public contract and not a crate-wide one
 /// (issue #3552 review N5). `estimate_arrow_row_bytes` remains the public surface.
@@ -334,44 +350,70 @@ impl<'a> PreparedColumns<'a> {
         self.shapes.len()
     }
 
-    /// Width of one row whose cells are ALREADY resolved in column order:
-    /// `cells[c]` is column `c`'s cell, `None` when the row does not carry it.
+    /// Width of one row whose cells are ALREADY resolved, read through a
+    /// `canonical` indirection: column `i`'s cell is `cells[canonical[i]]`.
     ///
-    /// Fails closed to `usize::MAX` on an arity mismatch. A short `cells` would
-    /// otherwise silently drop the trailing columns' charges (`zip` truncates)
-    /// and UNDER-count, the one direction the conservatism contract forbids.
-    pub(in crate::export) fn row_bytes(&self, cells: &[Option<Value>]) -> usize {
-        if cells.len() != self.shapes.len() {
+    /// The indirection is what lets a value be STORED ONCE and charged for every
+    /// output column that names it. Two output columns with the same name
+    /// (`SELECT a, a`) share one canonical slot, so this charges them both —
+    /// exactly as `estimate_arrow_row_bytes` charges both, resolving the name
+    /// twice — without the value existing twice (issue #3552 review B3).
+    /// `canonical[i] == i` for every column with a unique name.
+    ///
+    /// Fails closed to `usize::MAX` on an arity mismatch or an out-of-range
+    /// canonical index. A short `canonical` would otherwise silently drop the
+    /// trailing columns' charges (`zip` truncates) and UNDER-count, the one
+    /// direction the conservatism contract forbids.
+    pub(in crate::export) fn row_bytes(
+        &self,
+        cells: &[Option<Value>],
+        canonical: &[usize],
+    ) -> usize {
+        if canonical.len() != self.shapes.len() {
+            return usize::MAX;
+        }
+        if canonical.iter().any(|&c| c >= cells.len()) {
             return usize::MAX;
         }
         charge_row(
             self.shapes
                 .iter()
                 .copied()
-                .zip(cells.iter().map(Option::as_ref)),
+                .zip(canonical.iter().map(|&c| staged_cell(cells, c))),
         )
     }
 
-    /// Width of row `row` of a COLUMN-MAJOR cell store (`cells[c][row]`) — the
-    /// layout the accumulator commits into, so a buffered row's width can be
+    /// Width of row `row` of a COLUMN-MAJOR cell store, read through the same
+    /// `canonical` indirection: column `i`'s cell is `cells[canonical[i]][row]`.
+    ///
+    /// The layout the accumulator commits into, so a buffered row's width can be
     /// re-derived from the stored cells rather than from a remembered number.
     ///
-    /// Fails closed to `usize::MAX` on an arity mismatch or a row index outside
-    /// any column, for the same reason as [`Self::row_bytes`].
+    /// Fails closed to `usize::MAX` on an arity mismatch, an out-of-range
+    /// canonical index, or a row index outside the canonical store, for the same
+    /// reason as [`Self::row_bytes`].
     pub(in crate::export) fn row_bytes_columnar(
         &self,
         cells: &[Vec<Option<Value>>],
+        canonical: &[usize],
         row: usize,
     ) -> usize {
-        if cells.len() != self.shapes.len() || cells.iter().any(|col| row >= col.len()) {
+        if canonical.len() != self.shapes.len() {
             return usize::MAX;
         }
+        // A plain loop, so neither `map_or(true, ..)` nor `is_none_or` appears —
+        // the two spellings of this guard that clippy has an opinion about.
+        for &c in canonical {
+            match cells.get(c) {
+                Some(store) if row < store.len() => {}
+                _ => return usize::MAX,
+            }
+        }
         charge_row(
-            self.shapes.iter().copied().zip(
-                cells
-                    .iter()
-                    .map(|col| col.get(row).and_then(Option::as_ref)),
-            ),
+            self.shapes
+                .iter()
+                .copied()
+                .zip(canonical.iter().map(|&c| columnar_cell(cells, c, row))),
         )
     }
 }

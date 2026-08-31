@@ -29,7 +29,9 @@
 //!   large per-row map), and returns the row's payload width charged from those
 //!   slots;
 //! * [`commit`](ArrowRowAccumulator::commit) moves the staged cells into the
-//!   column-major store;
+//!   column-major store — into ONE store per distinct projected NAME, so a value
+//!   named by several output columns (`SELECT a, a`) is stored once and read twice
+//!   through the `canonical` index, never cloned (issue #3552 review B3);
 //! * [`to_record_batch`](ArrowRowAccumulator::to_record_batch) hands each column's
 //!   already-transposed cells straight to its builder — `transpose_columns` is not
 //!   run at all on this path.
@@ -108,12 +110,20 @@ pub struct ArrowRowAccumulator<'a> {
     columns: &'a [ColumnInfo],
     /// Per-column Arrow slot shapes, resolved once (never per row).
     prepared: PreparedColumns<'a>,
-    /// `column name → ALL of its output indices`. Duplicate names (`SELECT a, a`)
-    /// map to several indices, so a present cell reaches every matching column —
-    /// the behaviour `transpose_columns` documents and preserves.
-    name_to_indices: HashMap<&'a str, Vec<usize>>,
+    /// `column name → its CANONICAL output index` — the FIRST column with that
+    /// name. Duplicate output columns for one name (`SELECT a, a`) resolve to the
+    /// same canonical index, which is how one stored value serves all of them.
+    name_to_canonical: HashMap<&'a str, usize>,
+    /// `output column index → the index whose store holds its cells`.
+    /// `canonical[i] == i` for a unique name; for a duplicate it points at the
+    /// first column of that name. Every read of a cell — the width charge, the
+    /// re-derivation, and the batch build — goes through this, so a value is
+    /// stored ONCE however many output columns name it (issue #3552 review B3).
+    canonical: Vec<usize>,
     /// Committed cells, column-major: `cells[c][i]` is row `i`'s cell for column
-    /// `c`. Cleared (never reallocated) per batch.
+    /// `c` — but ONLY for a canonical `c`. A non-canonical (duplicate-name)
+    /// column's store stays EMPTY for the whole scan and is never read; its cells
+    /// come from `cells[canonical[c]]`. Cleared (never reallocated) per batch.
     cells: Vec<Vec<Option<Value>>>,
     /// The row under test: one slot per column, all `None` between rows.
     staged: Vec<Option<Value>>,
@@ -143,18 +153,32 @@ impl<'a> ArrowRowAccumulator<'a> {
     /// reused for every row and every batch. The per-column cell stores start
     /// EMPTY — see [`Self::with_capacity`] for why they are never pre-sized.
     pub fn new(columns: &'a [ColumnInfo]) -> Self {
-        let mut name_to_indices: HashMap<&'a str, Vec<usize>> =
+        // FIRST occurrence of a name wins (`or_insert`), so the canonical slot of
+        // a duplicated name is its first output column. One `usize` per NAME, not
+        // a `Vec<usize>` per name — the fan-out lives in `canonical` below.
+        let mut name_to_canonical: HashMap<&'a str, usize> =
             HashMap::with_capacity(columns.len());
         for (idx, col) in columns.iter().enumerate() {
-            name_to_indices
-                .entry(col.name.as_str())
-                .or_default()
-                .push(idx);
+            name_to_canonical.entry(col.name.as_str()).or_insert(idx);
         }
+        // `unwrap_or(idx)` is unreachable — every column's name was just inserted —
+        // and its fallback is the correct answer anyway (a column is its own
+        // canonical slot), so it cannot silently mis-resolve.
+        let canonical: Vec<usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| {
+                name_to_canonical
+                    .get(col.name.as_str())
+                    .copied()
+                    .unwrap_or(idx)
+            })
+            .collect();
         Self {
             columns,
             prepared: PreparedColumns::new(columns),
-            name_to_indices,
+            name_to_canonical,
+            canonical,
             // Do NOT pre-size per column: `n_cols × capacity ×
             // size_of::<Option<Value>>()` is the `batch_size × width` product
             // issue #2825's byte-cap exists to BOUND, and pre-sizing pays it
@@ -235,7 +259,7 @@ impl<'a> ArrowRowAccumulator<'a> {
              contract is stage -> (flush) -> commit per row (issue #3552)"
         );
         // Both are built from `columns` in `new` and neither is ever resized, so
-        // every index in `name_to_indices` is in range for `staged` — asserted
+        // every index in `name_to_canonical` is in range for `staged` — asserted
         // rather than left to a permissive `get_mut` below (issue #3552 review N3).
         debug_assert_eq!(
             self.staged.len(),
@@ -251,37 +275,66 @@ impl<'a> ArrowRowAccumulator<'a> {
         // is never probed by column name (issue #1495 / parser epic J1). An entry
         // whose name is not projected is dropped, as the transpose dropped it.
         let staged = &mut self.staged;
-        let name_to_indices = &self.name_to_indices;
+        let name_to_canonical = &self.name_to_canonical;
         for (name, value) in row.values {
-            if let Some(indices) = name_to_indices.get(name.as_ref()) {
-                // One value, possibly several output columns: the LAST index takes
-                // it by move, the others clone. Duplicate output columns for one
-                // name (`SELECT a, a`) are the only case that clones, and the
-                // clones are equal values, so the batch is byte-identical to the
-                // transpose's replicated reference.
+            if let Some(&canonical_idx) = name_to_canonical.get(name.as_ref()) {
+                // MEMORY: each row value is MOVED into exactly one slot and is
+                // never cloned — including when several output columns name it
+                // (`SELECT a, a`). The duplicate columns read this same canonical
+                // slot at charge time and at build time, so the fan-out costs
+                // nothing beyond a second `usize` index, exactly as
+                // `transpose_columns` fanned out a `&Value` for free.
+                //
+                // Cloning here instead would deep-copy the payload once per
+                // duplicate column — recursively for a collection, tuple, UDT,
+                // JSON or decimal — at STAGE time, i.e. BEFORE `cut_before`
+                // decides the batch boundary and before the egress reservation
+                // exists: unbounded memory taken outside the governed window and
+                // ahead of the admission decision (issue #3552 review B3, the same
+                // family as review B1's eager reservation). The output would be
+                // byte-identical either way, which is precisely why saying only
+                // that is not enough.
+                //
                 // Direct indexing, not a `get_mut` whose `None` arm would SKIP a
-                // column the row carries: every index came from
-                // `name_to_indices`, which was built from the same `columns` that
-                // sized `staged`, so it is in range by construction (review N3).
-                if let Some((&last, rest)) = indices.split_last() {
-                    for &idx in rest {
-                        staged[idx] = Some(value.clone());
-                    }
-                    staged[last] = Some(value);
-                }
+                // column the row carries: the index came from `name_to_canonical`,
+                // built from the same `columns` that sized `staged`, so it is in
+                // range by construction (review N3).
+                staged[canonical_idx] = Some(value);
             }
         }
         self.has_staged = true;
-        self.prepared.row_bytes(&self.staged)
+        self.prepared.row_bytes(&self.staged, &self.canonical)
     }
 
     /// Move the staged row's cells into the batch. A no-op when nothing is staged.
+    ///
+    /// Only CANONICAL columns are appended to: a duplicate-name column has no
+    /// store of its own and reads its canonical column's, so a duplicated value is
+    /// held once rather than once per output column (issue #3552 review B3). Its
+    /// store therefore stays empty for the whole scan — every reader goes through
+    /// `canonical`, so nothing ever indexes it directly.
     pub fn commit(&mut self) {
         if !self.has_staged {
             return;
         }
-        for (column, slot) in self.cells.iter_mut().zip(self.staged.iter_mut()) {
-            column.push(slot.take());
+        let Self {
+            cells,
+            staged,
+            canonical,
+            ..
+        } = self;
+        for (idx, slot) in staged.iter_mut().enumerate() {
+            match (canonical.get(idx), cells.get_mut(idx)) {
+                // The canonical column for this name: it owns the storage.
+                (Some(&c), Some(store)) if c == idx => store.push(slot.take()),
+                // A duplicate-name column: nothing to store. Clear the slot so a
+                // value can never survive into the next row (it is `None` already
+                // — `stage` only ever fills canonical slots — but taking it is what
+                // makes that true by construction rather than by argument).
+                _ => {
+                    let _ = slot.take();
+                }
+            }
         }
         // Saturating for hygiene: a batch is bounded by the row cap long before
         // this could matter, but a wrapping row count would corrupt the arity
@@ -309,7 +362,10 @@ impl<'a> ArrowRowAccumulator<'a> {
     /// the buffered rows" invariant enforced rather than merely documented.
     pub fn recomputed_payload(&self) -> usize {
         (0..self.rows).fold(0usize, |acc, row| {
-            acc.saturating_add(self.prepared.row_bytes_columnar(&self.cells, row))
+            acc.saturating_add(
+                self.prepared
+                    .row_bytes_columnar(&self.cells, &self.canonical, row),
+            )
         })
     }
 
@@ -327,8 +383,11 @@ impl<'a> ArrowRowAccumulator<'a> {
     pub fn to_record_batch(&self) -> Result<RecordBatch, ArrowConvertError> {
         let schema = Arc::new(build_arrow_schema(self.columns)?);
         // Fail closed rather than build a short array list `RecordBatch::try_new`
-        // would have to reject: the two must be the same arity by construction.
-        if self.cells.len() != self.columns.len() || self.prepared.len() != self.columns.len() {
+        // would have to reject: the three must be the same arity by construction.
+        if self.cells.len() != self.columns.len()
+            || self.canonical.len() != self.columns.len()
+            || self.prepared.len() != self.columns.len()
+        {
             return Err(ArrowConvertError::InvalidValue(format!(
                 "columnar accumulator arity {} does not match the {} projected columns",
                 self.cells.len(),
@@ -336,12 +395,25 @@ impl<'a> ArrowRowAccumulator<'a> {
             )));
         }
         // One borrowed view, reused across columns, so the per-column reference
-        // slice the builders take costs one allocation per BATCH, not per column.
+        // slice the builders take costs one allocation per BATCH, not per column
+        // (`transpose_columns` allocated one `Vec<Option<&Value>>` PER COLUMN).
         let mut view: Vec<Option<&Value>> = Vec::with_capacity(self.rows);
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.columns.len());
-        for (col, cells) in self.columns.iter().zip(self.cells.iter()) {
+        for (idx, col) in self.columns.iter().enumerate() {
+            // Read through `canonical`: a duplicate-name column builds its array
+            // from the SAME stored cells as the first column of that name, so the
+            // value is BORROWED a second time rather than stored a second time —
+            // byte-identical output, one copy in memory (issue #3552 review B3).
+            let store = match self.canonical.get(idx).and_then(|&c| self.cells.get(c)) {
+                Some(store) => store,
+                None => {
+                    return Err(ArrowConvertError::InvalidValue(format!(
+                        "column {idx} has no canonical cell store"
+                    )))
+                }
+            };
             view.clear();
-            view.extend(cells.iter().map(Option::as_ref));
+            view.extend(store.iter().map(Option::as_ref));
             arrays.push(convert_column_to_array(col, &view)?);
         }
         Ok(RecordBatch::try_new(schema, arrays)?)
