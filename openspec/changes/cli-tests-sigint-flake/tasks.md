@@ -2259,3 +2259,124 @@ libtest captures a passing test's output, so **there is no added noise at all**.
 * `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
 * `transcript.rs` 973 lines, still under the 1500-line test threshold; no other file touched, no
   constant changed, no product code touched.
+
+## Round 18 — one fix: a wait decided its end from the WRONG PIPE (roborev job 265)
+
+### The finding, and why it is NOT batchable — the lead's framing, recorded as the lead's
+
+`transcript.rs:578`: **`ended` ignored which stream the caller had asked for.** It consulted only the
+WHOLE-store [`PipeStatus`], where every `PartiallyClosed` state is nonterminal *whichever* pipe went.
+So with the **requested** reader already at EOF (or failed) and its sibling still attached, the
+awaited line could never arrive — and the wait nevertheless slept out its entire remaining budget,
+up to the 360s/600s bases in `budgets.rs`, before reporting a **deadline** instead of the actual pipe
+result.
+
+Both halves of that are wrong: the verdict is delayed by minutes, and the **cause named is a
+deadline that bound nothing**.
+
+**Why this one does not batch (lead ruling, and it is correct).** `ended` and `want` are **this PR's
+own new code**, and *an unsatisfiable wait that runs the full deadline and reports the wrong cause*
+is **this PR's own thematic defect, one level up**: #3515's original failure was literally a wrong
+cause — `no graceful shutdown handler` derived from a bare timeout. Shipping a new wrong-cause path
+inside the change that exists to eliminate wrong-cause paths is not a batchable nit. The earlier
+classification ("a wrong-cause diagnostic on a rare path", batched at round 17) **is reversed by lead
+ruling**, because it missed that wrong-cause diagnostics *are the subject of the issue*; the reversal
+is recorded here with its reason, since a reversal without one reads as inconsistency.
+
+**`mod.rs:958` (`await_write_ack` panicking without killing/reaping the child) stays batched in
+#3652 as PRE-EXISTING** — `main`'s `assert!(ack.is_some(), …)` does the same thing, so fixing it here
+would smuggle a real behavioural change into a test-only PR.
+
+### The fix — per-STREAM terminal state, and the awaited stream decides
+
+* **The store tracks its readers PER STREAM** (`ReaderSlots`: one fixed slot per stream,
+  `Unattached`/`Open`/`Ended`). A fixed pair rather than a list of attachments makes "two readers on
+  one stream" unrepresentable, so a per-stream verdict cannot be ambiguous — and the two counts
+  `PipeStatus` needs are **derived** from it, so a count can never disagree with the state it
+  summarises. It is also `Copy` and 2 bytes wide, which is what keeps `WaitEnd` inside
+  `clippy::result_large_err` without boxing a type these tests match on by variant.
+* **`ReaderHandle` owns its `Stream`.** The stream a line is attributed to and the stream marked
+  ended when the handle drops are now ONE fact, so `record`/`read_failed` no longer take a stream: a
+  per-call attribution is a **second control channel** for the same information (CLAUDE.md, #3312),
+  and a handle whose caller passed the other stream would have recorded lines as one pipe's while
+  ending the other's — the exact misattribution the new verdict is decided from. `attach`
+  consequently pairs each handle with its own pipe **by the handle's stream**, not by position.
+* **`TranscriptSnapshot::stream_status(want)`** — the awaited pipe's own state, from the same
+  snapshot every other verdict reads: `Unavailable`, `Open`, or `Ended(Eof | ReadFailed{note} |
+  NeverAttached)`. Clean EOF and a failed read are distinguished from the reader's **recorded
+  terminal result** and never from a count, which is identical for both (job 255, finding 2, asked of
+  ONE stream). `NeverAttached` is the third state a two-valued answer would have had to collapse:
+  nothing can EVER be recorded on such a stream, so waiting is pointless, and it is named as a defect
+  in this harness rather than waited out.
+* **`ended(want, …)` keeps the STRONGER whole-store verdict first.** When every reader has ended, the
+  established fact is that output is over on *both* pipes, and that is what `PipesClosed`/
+  `ReaderFailed` say — narrowing those to the awaited stream would report **less** than was measured.
+  The awaited stream's own state decides only where the store's does not: a partial closure, an
+  all-open store, and an unreadable one (where it establishes nothing either, so the wait continues).
+* **`WaitEnd::AwaitedStreamEnded`** names the ended pipe, why it ended, and the surviving pipe's
+  state — because that is where a reader of the failure should look next.
+
+### RED verification — one committed plant, throwaway `git worktree add --detach`, never on this branch
+
+Plant: revert `ended`'s per-stream arm to the pre-fix `Err(snapshot)`, committed in `/tmp/red-3515`
+(detached at this branch's HEAD), re-read via `git show HEAD:…` with `git status --porcelain` empty,
+worktree removed afterwards.
+
+```
+--- plant as committed (git show HEAD:<file>) ---
+fn ended(
+    want: Stream,
+    after: Duration,
+    snapshot: TranscriptSnapshot,
+) -> Result<WaitEnd, TranscriptSnapshot> {
+    match snapshot.pipe_status() {
+        PipeStatus::ReaderFailed { .. } => Ok(WaitEnd::ReaderFailed { after, snapshot }),
+        PipeStatus::AllEof { .. } => Ok(WaitEnd::PipesClosed { after, snapshot }),
+        PipeStatus::PartiallyClosed { .. }
+        | PipeStatus::AllOpen { .. }
+        | PipeStatus::Unavailable => Err(snapshot),
+    }
+}
+--- git status --porcelain (must be empty) ---
+[empty above]
+```
+
+Under that plant (`cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests`):
+
+```
+awaited_stream_tests::a_wait_on_a_stream_that_was_never_attached_is_reported_as_a_harness_defect ... FAILED
+awaited_stream_tests::a_wait_whose_awaited_reader_failed_reports_the_read_failure_not_a_deadline ... FAILED
+awaited_stream_tests::a_wait_whose_awaited_reader_reached_eof_returns_the_pipes_result_not_a_deadline ... FAILED
+...
+nothing could ever be recorded on the awaited stream, and the wait spent its whole budget before blaming the deadline (round 18)
+the awaited stream's reader had FAILED, so its line could never arrive — and the wait ran out its budget and blamed the deadline (round 18)
+the reader for the AWAITED stream had ended, so the awaited line could never arrive — and the wait slept out its whole budget and then reported a DEADLINE as the cause of a wait no deadline could have satisfied (round 18)
+
+test result: FAILED. 38 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.03s
+```
+
+**The `30.03s` is the defect itself, measured**: three waits with a 30s live deadline each slept it
+out. Fixed, the same three return on their first poll and the whole binary finishes in **0.31s**.
+
+**The fourth new test passes under the plant, deliberately.**
+`a_wait_whose_awaited_reader_is_still_attached_is_still_bound_by_the_deadline` is the
+**non-regression** half: the narrowing must be to the AWAITED stream and not to "any stream", or a
+wait would be abandoned while the line it watches for could still arrive — a **false failure**,
+strictly worse than the wrong-cause diagnostic being fixed. A test that pins "nothing changed here"
+cannot fail on the pre-fix code by construction, and it is recorded as such rather than presented as
+RED evidence.
+
+### State at the end of round 18
+
+* **41 tests** in `graceful_shutdown_tests` (was 37): +4 in the new `awaited_stream_tests` child
+  module — awaited-reader EOF, awaited-reader read failure, awaited reader still attached
+  (non-regression), and a stream no reader was ever attached to.
+* No constant changed: `T1_DEADLINE_BASE` 360s / cap 720s, `T2_DEADLINE_BASE` 600s / cap 900s, census
+  and calibration untouched. **No product code touched** — the diff is `cqlite-cli/tests/**` plus
+  this OpenSpec change.
+* `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
+* File sizes, all under the 1500-line test threshold: `harness_tests.rs` 1276 (it reached **1510**
+  with the four tests inline, 10 lines PAST the threshold, so they moved to
+  `harness_tests/awaited_stream_tests.rs` 258 — split by SUBJECT, following
+  `budgets.rs`/`budgets/census_tests.rs`), `transcript.rs` 1275, `budgets.rs` 1391, `mod.rs` 981,
+  `budgets/census_tests.rs` 248.
