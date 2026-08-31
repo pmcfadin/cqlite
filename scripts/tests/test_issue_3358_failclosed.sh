@@ -344,6 +344,18 @@ if [ "$total_checks" -ne "$EXPECTED_CHECKS" ]; then
   FAIL=$((FAIL + 1))
 fi
 
+# EMITTED, not merely commented. The header records this limit in source, but a reader
+# sees the RUN: 15 `ok` lines and a `passed:` count convey "everything checked", and a
+# caveat that lives only where a caveat-hunter looks is not a disclosure to the person
+# who needs it. So the narrowing is printed on every run, affirmatively worded, and
+# deliberately NOT an assertion — it is a disclosure, so it must not move PASS/FAIL or
+# the EXPECTED_CHECKS count.
+printf '\n%s\n' "DECLARED LIMIT (1 RECOGNISED): the 'absent' case's staging-is-surgical claim is"
+printf '%s\n' "  evidenced from the FILESYSTEM (keyspace dir mirrored, one fixture withheld), NOT from"
+printf '%s\n' "  this lane's own output. The sibling harness proves it from lane output because its"
+printf '%s\n' "  target drives many fixtures and a sibling case's PASS line shows only one was hidden;"
+printf '%s\n' "  this target has exactly ONE fixture, so that evidence does not exist here."
+
 printf '\n%s\n' "----------------------------------------"
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
