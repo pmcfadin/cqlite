@@ -3775,8 +3775,16 @@ STUBEOF
 # racers only one `mv "$LOCK" "$LOCK.stale.$$"` can succeed against a given
 # stale directory name; the loser's `mv` fails (source already gone) and it
 # falls through to its own `mkdir "$LOCK"`, which fails against the winner's
-# fresh lock, hitting the existing loud "failed to acquire lock" exit path.
+# fresh lock, hitting the loud lost-race exit path.
 # No test function here by design — see comment in acquire_lock() itself.
+# UPDATED (#3601): that exit path is now `supervisor_lock_refuse_lost_race`, which names the cause
+# instead of the pre-#3601 bare "failed to acquire lock", and it is reached only when the name is taken
+# by someone else — a `mkdir` that fails because the PATH cannot hold a lock is diagnosed separately
+# (`test_lane_lock_uncreatable_path_is_not_reported_as_contention`). The reclaim's operands also now
+# terminate option parsing, which `test_lane_lock_option_shaped_tmpdir_starts_normally` drives. The
+# same-instant two-racer interleaving remains untested for the reason above; the interleaving that IS
+# reproducible — a peer holding a PID-LESS lock — is driven with a real competing process by
+# `test_lane_lock_pidless_window_is_never_read_as_dead`.
 
 # ---------------------------------------------------------------------------
 # Test (#2841): the resolved DEFAULT WORKER_CMD (caller does not export one)
@@ -5223,9 +5231,37 @@ test_legacy_global_lock_refuses_a_present_lock() {
   # to waive.
   revived="$(grep -nE 'supervisor_legacy_lock_state|supervisor_pid_liveness|GLOBIGNORE|pid_max' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -z "$revived" ]]; then
-    pass "legacy-lock (ruling 2): the classifier, the pid-liveness probe, the pid_max bound and the glob-state neutralisation are GONE from the supervisor's code"
+    pass "legacy-lock (ruling 2): the classifier, the deleted pid-liveness SYMBOL, the pid_max bound and the glob-state neutralisation are GONE from the supervisor's code"
   else
     fail "legacy-lock-classifier-resurrected: [$revived] — machinery whose output cannot change the decision is back on the decision path"
+  fi
+  # ...AND THE PROPERTY THE NAME CHECK CANNOT SEE (#3601). A NAME BAN IS NOT A PROPERTY ASSERT: the
+  # ruling deleted pid liveness from THIS decision path, not from the file, and #3601 legitimately
+  # rebuilt the capability for the PER-LANE lock — where, unlike here, the verdict selects between
+  # refusing and reclaiming, so it is a guard and not a description generator. Read as a file-wide ban
+  # the assert above would have to red on that correct code, which is the assert people learn to waive;
+  # read as a name it can be satisfied by a rename, which is the assert that sees nothing. So the
+  # durable half is stated over the three functions that ARE the legacy decision: none of them may
+  # measure a pid's liveness, by any spelling — no `kill`, and no call to the per-lane probes.
+  local legacy_fn legacy_body legacy_code liveness_on_legacy_path=""
+  for legacy_fn in supervisor_legacy_lock_presence supervisor_legacy_lock_refuse supervisor_legacy_lock_guard; do
+    legacy_body="$(sed -n "/^$legacy_fn()/,/^}/p" "$SUPERVISOR")"
+    if [[ -z "$legacy_body" || "$legacy_body" != *"$legacy_fn() {"* ]]; then
+      fail "legacy-lock-liveness-property-premise: could not extract $legacy_fn from $SUPERVISOR; the scan below has no subject"
+      legacy_code=""
+      break
+    fi
+    legacy_code="$(printf '%s\n' "$legacy_body" | grep -vE '^[[:space:]]*#' || true)"
+    if [[ -z "$legacy_code" ]]; then
+      fail "legacy-lock-liveness-property-premise: $legacy_fn has no non-comment line"
+      break
+    fi
+    liveness_on_legacy_path+="$(printf '%s\n' "$legacy_code" | grep -nE 'kill[[:space:]]|supervisor_lock_holder_liveness|supervisor_lock_pid_read' || true)"
+  done
+  if [[ -n "$legacy_code" && -z "$liveness_on_legacy_path" ]]; then
+    pass "legacy-lock (ruling 2, as a PROPERTY): no function on the legacy decision path measures a pid's liveness or parses a pid, by any spelling — so the deletion holds even though the capability exists elsewhere in the file for a path where its verdict changes the decision"
+  elif [[ -n "$legacy_code" ]]; then
+    fail "legacy-lock-liveness-on-legacy-path: [$liveness_on_legacy_path] — the legacy guard tests for EXISTENCE and stops; measuring a holder's liveness there is the machinery the ruling removed, whatever it is called"
   fi
   # ...AND THE PROBE STILL EXECUTES NO EXTERNAL COMMAND, so none of its verdicts depends on `PATH`.
   # Comment lines are stripped first (the prose legitimately NAMES tools it does not use, and a check
