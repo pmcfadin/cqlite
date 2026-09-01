@@ -101,7 +101,7 @@ fn frozen_map_text_int_udt_field_decodes_from_the_fixtures_own_cassandra_bytes()
         Box::new(CqlType::Int),
     )));
     let decoded = parser()
-        .parse_simple_udt_field_value(MAP_A_1_GOLDEN_BYTES, &field_type)
+        .parse_simple_udt_field_value_at(MAP_A_1_GOLDEN_BYTES, &field_type, 0)
         .expect("the fixture's own 20 Cassandra-written bytes must decode");
     assert_eq!(
         unfrozen(&decoded),
@@ -115,7 +115,7 @@ fn frozen_list_int_udt_field_decodes_to_its_elements() {
     let field_type = CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Int))));
     let bytes = pack(&[7i32.to_be_bytes().to_vec(), 8i32.to_be_bytes().to_vec()]);
     let decoded = parser()
-        .parse_simple_udt_field_value(&bytes, &field_type)
+        .parse_simple_udt_field_value_at(&bytes, &field_type, 0)
         .expect("a frozen<list<int>> UDT field must decode");
     assert_eq!(
         unfrozen(&decoded),
@@ -130,7 +130,7 @@ fn frozen_set_text_udt_field_decodes_to_its_members() {
     let field_type = CqlType::Frozen(Box::new(CqlType::Set(Box::new(CqlType::Text))));
     let bytes = pack(&[b"alpha".to_vec(), b"beta".to_vec()]);
     let decoded = parser()
-        .parse_simple_udt_field_value(&bytes, &field_type)
+        .parse_simple_udt_field_value_at(&bytes, &field_type, 0)
         .expect("a frozen<set<text>> UDT field must decode");
     assert_eq!(
         unfrozen(&decoded),
@@ -146,7 +146,7 @@ fn frozen_set_text_udt_field_decodes_to_its_members() {
 fn bare_map_udt_field_type_decodes_too() {
     let field_type = CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int));
     let decoded = parser()
-        .parse_simple_udt_field_value(MAP_A_1_GOLDEN_BYTES, &field_type)
+        .parse_simple_udt_field_value_at(MAP_A_1_GOLDEN_BYTES, &field_type, 0)
         .expect("a bare map<text,int> UDT field must decode");
     assert_eq!(
         decoded,
@@ -165,7 +165,7 @@ fn frozen_tuple_udt_field_decodes_to_its_components() {
     bytes.extend_from_slice(&4i32.to_be_bytes());
     bytes.extend_from_slice(&30i32.to_be_bytes());
     let decoded = parser()
-        .parse_simple_udt_field_value(&bytes, &field_type)
+        .parse_simple_udt_field_value_at(&bytes, &field_type, 0)
         .expect("a frozen<tuple<text,int>> UDT field must decode");
     assert_eq!(
         unfrozen(&decoded),
@@ -186,7 +186,7 @@ fn frozen_tuple_udt_field_with_missing_trailing_components_is_null_padded() {
     bytes.extend_from_slice(&5i32.to_be_bytes());
     bytes.extend_from_slice(b"alpha");
     let decoded = parser()
-        .parse_simple_udt_field_value(&bytes, &field_type)
+        .parse_simple_udt_field_value_at(&bytes, &field_type, 0)
         .expect("a short tuple is legal per TupleType.split");
     assert_eq!(
         unfrozen(&decoded),
@@ -204,7 +204,7 @@ fn frozen_tuple_udt_field_negative_component_length_is_null() {
     bytes.extend_from_slice(&4i32.to_be_bytes());
     bytes.extend_from_slice(&30i32.to_be_bytes());
     let decoded = parser()
-        .parse_simple_udt_field_value(&bytes, &field_type)
+        .parse_simple_udt_field_value_at(&bytes, &field_type, 0)
         .expect("a null tuple component is legal");
     assert_eq!(
         unfrozen(&decoded),
@@ -227,7 +227,7 @@ fn frozen_list_of_udt_udt_field_resolves_elements_through_the_registry() {
         Box::new(CqlType::Custom("plain".to_string())),
     )))));
     let decoded = parser
-        .parse_simple_udt_field_value(&pack(&[element]), &field_type)
+        .parse_simple_udt_field_value_at(&pack(&[element]), &field_type, 0)
         .expect("a frozen<list<frozen<plain>>> UDT field must decode via the registry");
     match unfrozen(&decoded) {
         Value::List(items) => {
@@ -254,7 +254,7 @@ fn frozen_list_of_udt_udt_field_resolves_elements_through_the_registry() {
 #[test]
 fn a_declared_blob_field_still_decodes_to_a_blob() {
     let decoded = parser()
-        .parse_simple_udt_field_value(&[0xDE, 0xAD], &CqlType::Blob)
+        .parse_simple_udt_field_value_at(&[0xDE, 0xAD], &CqlType::Blob, 0)
         .expect("blob is a decodable declared type");
     assert_eq!(decoded, Value::blob(vec![0xDE, 0xAD]));
 }
@@ -265,22 +265,22 @@ fn a_declared_blob_field_still_decodes_to_a_blob() {
 fn scalars_the_old_arm_blobbed_now_decode_from_their_declared_type() {
     let p = parser();
     assert_eq!(
-        p.parse_simple_udt_field_value(&7i16.to_be_bytes(), &CqlType::SmallInt)
+        p.parse_simple_udt_field_value_at(&7i16.to_be_bytes(), &CqlType::SmallInt, 0)
             .expect("smallint"),
         Value::SmallInt(7)
     );
     assert_eq!(
-        p.parse_simple_udt_field_value(&[0xFF], &CqlType::TinyInt)
+        p.parse_simple_udt_field_value_at(&[0xFF], &CqlType::TinyInt, 0)
             .expect("tinyint"),
         Value::TinyInt(-1)
     );
     assert_eq!(
-        p.parse_simple_udt_field_value(&1_234i64.to_be_bytes(), &CqlType::Time)
+        p.parse_simple_udt_field_value_at(&1_234i64.to_be_bytes(), &CqlType::Time, 0)
             .expect("time"),
         Value::Time(1_234)
     );
     assert_eq!(
-        p.parse_simple_udt_field_value(&9i64.to_be_bytes(), &CqlType::Counter)
+        p.parse_simple_udt_field_value_at(&9i64.to_be_bytes(), &CqlType::Counter, 0)
             .expect("counter"),
         Value::BigInt(9)
     );
@@ -293,7 +293,7 @@ fn scalars_the_old_arm_blobbed_now_decode_from_their_declared_type() {
 #[test]
 fn an_unresolvable_nested_udt_field_is_an_explicit_error_naming_the_type() {
     let err = parser()
-        .parse_simple_udt_field_value(&[0u8; 4], &CqlType::Custom("no_such_udt".to_string()))
+        .parse_simple_udt_field_value_at(&[0u8; 4], &CqlType::Custom("no_such_udt".to_string()), 0)
         .expect_err("an unresolvable UDT field type must NOT degrade to a blob");
     let text = err.to_string();
     assert!(
@@ -383,10 +383,9 @@ fn a_cyclic_udt_through_a_collection_is_refused_not_recursed() {
     let p = cyclic_parser();
     let deep = nested_cyclic_bytes(MAX_TYPE_NESTING_DEPTH * 4);
     let err = p
-        .parse_simple_udt_field_value(
+        .parse_simple_udt_field_value_at(
             &deep,
-            &CqlType::Frozen(Box::new(CqlType::Custom("cyclic".to_string()))),
-        )
+            &CqlType::Frozen(Box::new(CqlType::Custom("cyclic".to_string()))), 0)
         .expect_err(
             "a cyclic UDT reached through a collection must be REFUSED; before              #3631's BLOCKER 2 fix each UDT hop reset the depth counter and this              recursed until the stack was exhausted",
         );
@@ -408,7 +407,7 @@ fn alternating_collection_and_udt_layers_share_one_nesting_limit() {
     // POSITIVE CONTROL: two layers is well inside the limit and must decode.
     let shallow = nested_cyclic_bytes(2);
     let decoded = p
-        .parse_simple_udt_field_value(&shallow, &ty)
+        .parse_simple_udt_field_value_at(&shallow, &ty, 0)
         .expect("a SHALLOW cyclic-typed value must still decode — the limit must                  bound depth, not reject the shape");
     assert!(
         matches!(unfrozen(&decoded), Value::Udt(_)),
@@ -419,7 +418,7 @@ fn alternating_collection_and_udt_layers_share_one_nesting_limit() {
     // MAX_TYPE_NESTING_DEPTH layers of `list`+`UDT` is over budget.
     let deep = nested_cyclic_bytes(MAX_TYPE_NESTING_DEPTH);
     assert!(
-        p.parse_simple_udt_field_value(&deep, &ty).is_err(),
+        p.parse_simple_udt_field_value_at(&deep, &ty, 0).is_err(),
         "{} alternating collection/UDT layers must exceed the shared limit of {}",
         MAX_TYPE_NESTING_DEPTH,
         MAX_TYPE_NESTING_DEPTH
@@ -445,9 +444,10 @@ fn a_zero_count_collection_with_trailing_payload_is_refused_not_emptied() {
     let mut bytes = 0i32.to_be_bytes().to_vec();
     bytes.extend_from_slice(b"payload-that-must-not-vanish");
     let err = p
-        .parse_simple_udt_field_value(
+        .parse_simple_udt_field_value_at(
             &bytes,
             &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int)),
+            0,
         )
         .expect_err("a zero-count map with trailing bytes must be REFUSED, not emptied");
     let text = err.to_string();
@@ -465,16 +465,17 @@ fn trailing_bytes_after_a_well_formed_collection_are_refused() {
     let mut bytes = pack(&[7i32.to_be_bytes().to_vec()]);
     bytes.extend_from_slice(&[0xAA, 0xBB]);
     assert!(
-        p.parse_simple_udt_field_value(&bytes, &CqlType::List(Box::new(CqlType::Int)))
+        p.parse_simple_udt_field_value_at(&bytes, &CqlType::List(Box::new(CqlType::Int)), 0)
             .is_err(),
         "2 bytes past the last declared element must be refused"
     );
     // POSITIVE CONTROL: the same value without the tail decodes, so the case
     // distinguishes "the check works" from "this shape never decodes".
     assert_eq!(
-        p.parse_simple_udt_field_value(
+        p.parse_simple_udt_field_value_at(
             &pack(&[7i32.to_be_bytes().to_vec()]),
-            &CqlType::List(Box::new(CqlType::Int))
+            &CqlType::List(Box::new(CqlType::Int)),
+            0
         )
         .expect("the exactly-framed list must decode"),
         Value::List(vec![Value::Integer(7)])
@@ -490,13 +491,13 @@ fn trailing_bytes_after_the_last_tuple_component_are_refused() {
     let mut bytes = 4i32.to_be_bytes().to_vec();
     bytes.extend_from_slice(&9i32.to_be_bytes());
     let exact = p
-        .parse_simple_udt_field_value(&bytes, &ty)
+        .parse_simple_udt_field_value_at(&bytes, &ty, 0)
         .expect("an exactly-framed 1-tuple must decode");
     assert_eq!(exact, Value::Tuple(vec![Value::Integer(9)]));
 
     bytes.extend_from_slice(&[0xFF]);
     assert!(
-        p.parse_simple_udt_field_value(&bytes, &ty).is_err(),
+        p.parse_simple_udt_field_value_at(&bytes, &ty, 0).is_err(),
         "a byte past the last declared component is trailing garbage"
     );
 }
@@ -512,7 +513,7 @@ fn an_oversized_fixed_width_scalar_is_refused() {
     let mut oversized = 9i32.to_be_bytes().to_vec();
     oversized.extend_from_slice(&[0, 0, 0, 0, 0]);
     let err = p
-        .parse_simple_udt_field_value(&pack(&[oversized]), &ty)
+        .parse_simple_udt_field_value_at(&pack(&[oversized]), &ty, 0)
         .expect_err("a 9-byte `int` element must be refused, not truncated to 4");
     assert!(
         err.to_string().contains("4 bytes wide"),
@@ -529,9 +530,10 @@ fn an_empty_buffer_for_a_fixed_width_scalar_is_not_rejected_by_the_width_rule() 
     // An empty `map` field is the reachable empty-buffer case and must stay empty
     // rather than becoming a trailing-bytes refusal.
     assert_eq!(
-        p.parse_simple_udt_field_value(
+        p.parse_simple_udt_field_value_at(
             &[],
-            &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int))
+            &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int)),
+            0
         )
         .expect("an empty frozen map field must decode as the empty map"),
         Value::Map(vec![])
@@ -580,7 +582,7 @@ fn inner_a_1() -> Vec<u8> {
 fn a_registry_udt_field_consuming_every_byte_decodes() {
     let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
     let value = p
-        .parse_simple_udt_field_value(&inner_a_1(), &CqlType::Custom("inner".to_string()))
+        .parse_simple_udt_field_value_at(&inner_a_1(), &CqlType::Custom("inner".to_string()), 0)
         .expect("the exact serialization must decode");
     match unfrozen(&value) {
         Value::Udt(udt) => {
@@ -599,7 +601,7 @@ fn trailing_bytes_after_the_last_registry_udt_field_are_refused() {
     // post-loop `if (position < length) throw ... "but got more"`.
     bytes.extend_from_slice(&0i32.to_be_bytes());
     let err = p
-        .parse_simple_udt_field_value(&bytes, &CqlType::Custom("inner".to_string()))
+        .parse_simple_udt_field_value_at(&bytes, &CqlType::Custom("inner".to_string()), 0)
         .expect_err("trailing bytes after the last declared field are corruption");
     let msg = err.to_string();
     assert!(
@@ -618,7 +620,7 @@ fn a_partial_trailing_registry_udt_field_length_prefix_is_refused() {
     let mut bytes = inner_a_1();
     bytes.extend_from_slice(&[0x00, 0x00]); // 2 of the 4 prefix bytes
     let err = p
-        .parse_simple_udt_field_value(&bytes, &CqlType::Custom("inner2".to_string()))
+        .parse_simple_udt_field_value_at(&bytes, &CqlType::Custom("inner2".to_string()), 0)
         .expect_err("an incomplete field-length prefix is corruption, not an omitted field");
     assert!(err.to_string().contains("trailing byte"), "got: {}", err);
 }
@@ -631,7 +633,7 @@ fn omitted_trailing_registry_udt_fields_are_accepted_at_exact_end_of_buffer() {
     // refusing every short encoding, which Cassandra accepts.
     let p = parser_with_udt("inner2", &[("a", CqlType::Int), ("b", CqlType::Text)]);
     let value = p
-        .parse_simple_udt_field_value(&inner_a_1(), &CqlType::Custom("inner2".to_string()))
+        .parse_simple_udt_field_value_at(&inner_a_1(), &CqlType::Custom("inner2".to_string()), 0)
         .expect("a UDT whose trailing fields are omitted at exact EOF is legal");
     match unfrozen(&value) {
         Value::Udt(udt) => {
@@ -653,7 +655,7 @@ fn trailing_bytes_after_the_last_inline_udt_field_are_refused() {
     let mut bytes = inner_a_1();
     bytes.extend_from_slice(&0i32.to_be_bytes());
     let err = p
-        .parse_simple_udt_field_value(&bytes, &ty)
+        .parse_simple_udt_field_value_at(&bytes, &ty, 0)
         .expect_err("trailing bytes after the last inline field are corruption");
     assert!(err.to_string().contains("trailing byte"), "got: {}", err);
 }
@@ -671,7 +673,7 @@ fn a_partial_trailing_inline_udt_field_length_prefix_is_refused() {
     let mut bytes = inner_a_1();
     bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // 3 of the 4 prefix bytes
     let err = p
-        .parse_simple_udt_field_value(&bytes, &ty)
+        .parse_simple_udt_field_value_at(&bytes, &ty, 0)
         .expect_err("an incomplete inline field-length prefix is corruption");
     assert!(err.to_string().contains("trailing byte"), "got: {}", err);
 }
@@ -687,7 +689,7 @@ fn omitted_trailing_inline_udt_fields_are_accepted_at_exact_end_of_buffer() {
         ],
     );
     let value = p
-        .parse_simple_udt_field_value(&inner_a_1(), &ty)
+        .parse_simple_udt_field_value_at(&inner_a_1(), &ty, 0)
         .expect("an inline UDT whose trailing fields are omitted at exact EOF is legal");
     match unfrozen(&value) {
         Value::Udt(udt) => assert_eq!(udt.fields[1].value, None),
@@ -712,9 +714,10 @@ fn omitted_trailing_inline_udt_fields_are_accepted_at_exact_end_of_buffer() {
 fn a_registry_udt_field_length_below_minus_one_is_refused_without_panicking() {
     let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
     let err = p
-        .parse_simple_udt_field_value(
+        .parse_simple_udt_field_value_at(
             &(-2i32).to_be_bytes(),
             &CqlType::Custom("inner".to_string()),
+            0,
         )
         .expect_err("-2 is not a legal component length");
     let msg = err.to_string();
@@ -729,7 +732,7 @@ fn an_inline_udt_field_length_below_minus_one_is_refused_without_panicking() {
     let p = parser();
     let ty = CqlType::Udt("inline1".to_string(), vec![("a".to_string(), CqlType::Int)]);
     let err = p
-        .parse_simple_udt_field_value(&(-2i32).to_be_bytes(), &ty)
+        .parse_simple_udt_field_value_at(&(-2i32).to_be_bytes(), &ty, 0)
         .expect_err("-2 is not a legal component length");
     assert!(err.to_string().contains("negative length"), "got: {}", err);
 }
@@ -742,9 +745,10 @@ fn a_udt_field_length_of_i32_min_is_refused_without_overflowing() {
     // guard but different arithmetic.
     let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
     let err = p
-        .parse_simple_udt_field_value(
+        .parse_simple_udt_field_value_at(
             &i32::MIN.to_be_bytes(),
             &CqlType::Custom("inner".to_string()),
+            0,
         )
         .expect_err("i32::MIN is not a legal component length");
     assert!(err.to_string().contains("negative length"), "got: {}", err);
@@ -839,7 +843,7 @@ const DURATION_1MO_2D_3NS: &[u8] = &[0x02, 0x04, 0x06];
 fn a_duration_udt_field_decodes_and_consumes_exactly_its_three_vints() {
     let p = parser();
     let value = p
-        .parse_simple_udt_field_value(DURATION_1MO_2D_3NS, &CqlType::Duration)
+        .parse_simple_udt_field_value_at(DURATION_1MO_2D_3NS, &CqlType::Duration, 0)
         .expect("a well-formed duration field must decode");
     match unfrozen(&value) {
         Value::Duration {
@@ -859,11 +863,67 @@ fn trailing_bytes_after_a_duration_udt_field_are_refused() {
     let mut bytes = DURATION_1MO_2D_3NS.to_vec();
     bytes.push(0x7F); // a fourth VInt nobody declared
     let err = p
-        .parse_simple_udt_field_value(&bytes, &CqlType::Duration)
+        .parse_simple_udt_field_value_at(&bytes, &CqlType::Duration, 0)
         .expect_err("bytes after the third duration VInt are unaccounted for");
     assert!(
         err.to_string().contains("trailing byte"),
         "the scalar arm must MEASURE duration's consumption, not assume it: {}",
         err
     );
+}
+
+/// The limit must count FRAMING layers, not call hops — the false-refusal direction,
+/// which is the one a bound-tightening change breaks silently.
+///
+/// Unifying the five per-field dispatches (roborev round 3) routed every field through
+/// one entry, and with `frozen` and the field entry each charging a level, a canonical
+/// spelling from this repo's own corpus —
+/// `frozen<set<frozen<tuple<frozen<udt>, int>>>>`, the fixture's `stn` — cost five
+/// levels per LOGICAL layer and came within one of being refused. This case pins the
+/// accounting from the other side: a legitimately nested value decodes, and only real
+/// framing layers (collection elements, UDT boundaries) consume budget.
+#[test]
+fn a_legitimately_nested_frozen_spelling_is_not_refused_by_the_depth_limit() {
+    // `set<frozen<tuple<frozen<inner>, int>>>` where `inner` itself declares a
+    // `frozen<map<text,int>>` field: four `frozen` markers, three framing layers.
+    let p = parser_with_udt(
+        "inner",
+        &[(
+            "m",
+            CqlType::Frozen(Box::new(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::Int),
+            ))),
+        )],
+    );
+    let ty = CqlType::Frozen(Box::new(CqlType::Set(Box::new(CqlType::Frozen(Box::new(
+        CqlType::Tuple(vec![
+            CqlType::Frozen(Box::new(CqlType::Custom("inner".to_string()))),
+            CqlType::Int,
+        ]),
+    ))))));
+
+    let udt_body = udt_field(MAP_A_1_GOLDEN_BYTES);
+    let mut tuple_body = udt_field(&udt_body);
+    tuple_body.extend_from_slice(&udt_field(&30i32.to_be_bytes()));
+    let bytes = pack(&[tuple_body]);
+
+    let value = p
+        .parse_simple_udt_field_value_at(&bytes, &ty, 0)
+        .expect("a canonical nested frozen spelling must NOT hit the nesting limit");
+    let members = match unfrozen(&value) {
+        Value::Set(m) | Value::List(m) => m.clone(),
+        other => panic!("expected a set, got {other:?}"),
+    };
+    let components = match unfrozen(&members[0]) {
+        Value::Tuple(c) => c.clone(),
+        other => panic!("expected a tuple, got {other:?}"),
+    };
+    match unfrozen(&components[0]) {
+        Value::Udt(udt) => assert_eq!(
+            unfrozen(udt.fields[0].value.as_ref().expect("`m` must decode")),
+            &Value::Map(vec![(Value::text("a"), Value::Integer(1))])
+        ),
+        other => panic!("expected the inner UDT, got {other:?}"),
+    }
 }

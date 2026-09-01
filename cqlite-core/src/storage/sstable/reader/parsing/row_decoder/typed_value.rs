@@ -59,33 +59,41 @@ mod regression_3631_typed_value_tests;
 const I32_LEN: usize = 4;
 
 impl V5CompressedLegacyParser {
-    /// Parse a UDT field value without requiring an `SSTableReader`.
+    /// Parse a UDT field value from its declared `CqlType`, carrying an explicit
+    /// nesting `depth`.
     ///
-    /// The scalar arms below are kept BYTE-FOR-BYTE as they were before issue
-    /// #3631 (they encode measured, shipped behaviour — e.g. `CqlType::Float`
-    /// surfaces `Value::Float32`, which the type-string decoder spells as a widened
-    /// `Value::Float`; unifying the two is a separate change). What #3631 replaced is
-    /// the trailing `_ =>` arm, which used to hand back `Value::Blob` for EVERY
-    /// remaining type — including a `frozen<map<text,int>>` / `list` / `set` field of
-    /// a frozen UDT, whose declared type was in hand and unread. That silent
-    /// degradation is what #28 (no-heuristics) forbids, and it made a value
-    /// HASHABLE in the Python binding that should not have been (#3500).
-    pub(super) fn parse_simple_udt_field_value(
-        &self,
-        data: &[u8],
-        field_type: &CqlType,
-    ) -> Result<Value> {
-        self.parse_simple_udt_field_value_at(data, field_type, 0)
-    }
-
-    /// `parse_simple_udt_field_value` carrying an explicit nesting `depth`.
+    /// # THE one per-field entry point for every UDT field loop (issue #3631)
+    /// All FIVE field loops route here — `udt.rs`'s registry-resolved and inline
+    /// decoders, `raw_type_value.rs`'s two marshal-string loops, and
+    /// `udt.rs::parse_udt_field_value`'s structured arm. Each used to carry its own
+    /// ~100-line dispatch over the field's `CqlType`, and three consecutive review
+    /// rounds each found one more of those copies with one of the same three defects
+    /// (a reset nesting counter, a discarded consumed-byte count, a `Value::Blob`
+    /// fallback for an unresolved UDT name). One implementation is what makes the three
+    /// properties hold BY CONSTRUCTION instead of per call site.
     ///
-    /// Issue #3631 (roborev BLOCKER 2). The 0-depth wrapper above is the entry point
-    /// for every pre-existing caller. A field reached from INSIDE a collection, tuple
-    /// or another UDT must not restart the counter: the two UDT decoders recurse back
-    /// through here, so a reset at each UDT boundary makes
-    /// `MAX_TYPE_NESTING_DEPTH` bound nothing across alternating collection/UDT
-    /// layers, and a cyclic `UdtRegistry` then recurses until the stack is exhausted.
+    /// # There is deliberately NO zero-depth wrapper
+    /// A `depth = 0` overload is the thing a caller inside a decode picks by accident,
+    /// and that is precisely how the counter came to be reset at every frozen hop. An
+    /// entry point genuinely at the root — a test, or a column-level decode — writes the
+    /// `0` at the call site, where a reviewer can see it.
+    ///
+    /// The scalar arms below are kept BYTE-FOR-BYTE as they were before #3631 (they
+    /// encode measured, shipped behaviour — e.g. `CqlType::Float` surfaces
+    /// `Value::Float32`, which the type-string decoder spells as a widened
+    /// `Value::Float`; unifying the two is a separate change). Each validates its exact
+    /// width, so each consumes the whole slice. What #3631 replaced is the trailing
+    /// `_ =>` arm, which used to hand back `Value::Blob` for EVERY remaining type —
+    /// including a `frozen<map<text,int>>` field whose declared type was in hand and
+    /// unread. That silent degradation is what #28 forbids, and it made a value HASHABLE
+    /// in the Python binding that should not have been (#3500).
+    ///
+    /// Depth is checked on entry and threaded outward (roborev BLOCKER 2 / round 3): a
+    /// field reached from INSIDE a collection, tuple or another UDT must not restart the
+    /// counter, because the UDT decoders recurse back through here — so a reset at any
+    /// UDT boundary makes `MAX_TYPE_NESTING_DEPTH` bound nothing across alternating
+    /// collection/UDT layers, and a cyclic `UdtRegistry` (which the registry type
+    /// permits even though CQL does not) then recurses until the stack is exhausted.
     pub(super) fn parse_simple_udt_field_value_at(
         &self,
         data: &[u8],
@@ -381,10 +389,20 @@ impl V5CompressedLegacyParser {
             CqlType::Frozen(inner) => {
                 // `frozen<X>` is serialized EXACTLY as `X` in a nested position; the
                 // wrapper is a type-system marker. Mirrors the `Frozen` arms in
-                // `parse_nested_udt_from_registry` and `parse_value_from_raw_bytes`,
-                // which also surface `Value::Frozen`.
+                // `parse_nested_udt_from_registry_reporting` and
+                // `parse_value_from_raw_bytes`, which also surface `Value::Frozen`.
+                //
+                // It consumes NO nesting level, and that is load-bearing rather than
+                // tidy. The limit must count FRAMING layers — the things that make the
+                // decoder recurse over bytes — and `frozen` adds none. Counting it
+                // charged the canonical spellings in this repo's own corpus up to five
+                // levels per logical layer (`frozen<set<frozen<tuple<frozen<udt>,int>>>>`
+                // is the fixture's `stn`), which put real Cassandra-written data within
+                // one level of a FALSE REFUSAL. Termination does not depend on it: every
+                // recursion through a UDT boundary or a collection element still
+                // increments, so any cycle is strictly increasing and bounded.
                 let (inner_value, consumed) =
-                    self.parse_typed_value_reporting(data, inner, ctx, depth + 1)?;
+                    self.parse_typed_value_reporting(data, inner, ctx, depth)?;
                 Ok((Value::Frozen(Box::new(inner_value)), consumed))
             }
             CqlType::List(element) => {
@@ -611,12 +629,7 @@ impl V5CompressedLegacyParser {
             // `get_udt_qualified` owns "udt:" + keyspace-qualifier normalization
             // (issues #239 / #2807).
             if let Some(def) = registry.get_udt_qualified(&self.keyspace, name) {
-                return self.parse_nested_udt_from_registry_reporting(
-                    data,
-                    def,
-                    registry,
-                    depth + 1,
-                );
+                return self.parse_nested_udt_from_registry_reporting(data, def, depth + 1);
             }
         }
         if !inline_fields.is_empty() {

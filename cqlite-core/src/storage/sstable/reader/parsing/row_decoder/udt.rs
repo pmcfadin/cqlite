@@ -823,59 +823,31 @@ impl V5CompressedLegacyParser {
         Ok((total, consumed))
     }
 
-    /// Parse a nested UDT from registry definition (Issue #238)
-    /// Used when parsing UDT fields that are themselves UDTs
-    pub(super) fn parse_nested_udt_from_registry(
-        &self,
-        data: &[u8],
-        udt_def: &crate::types::UdtTypeDef,
-        registry: &UdtRegistry,
-    ) -> Result<Value> {
-        self.parse_nested_udt_from_registry_at(data, udt_def, registry, 0)
-    }
-
-    /// `parse_nested_udt_from_registry` carrying an explicit nesting `depth`, for a
-    /// caller that does not need the consumed length.
+    /// Decode a registry-resolved nested UDT, REPORTING how many bytes of `data` its
+    /// field loop consumed (issue #238; consumption added for #3631 roborev BLOCKER 6).
     ///
-    /// Issue #3631 (roborev BLOCKER 2). A UDT reached from INSIDE a collection or
-    /// tuple must not restart the counter: otherwise alternating collection/UDT layers
-    /// each reset it, `MAX_TYPE_NESTING_DEPTH` bounds nothing, and a cyclic
-    /// `UdtRegistry` — which the registry type permits even though CQL does not —
-    /// recurses once per layer of attacker-controlled framing until the stack is
-    /// exhausted. The limit is enforced at the UDT boundary itself, in the reporting
-    /// form below.
+    /// # There is deliberately NO zero-depth and no discarding wrapper
+    /// Three review rounds each found one more call site that had picked one: two arms
+    /// of this very loop called a `depth = 0` wrapper, so a cyclic `UdtRegistry` — which
+    /// the registry type permits even though CQL does not — reset the nesting counter at
+    /// every frozen hop and recursed to stack exhaustion on attacker-controlled framing.
+    /// A caller with no depth of its own must write `0` at the call site, where it is
+    /// visible, and a caller that does not want the consumed length must write `.0`,
+    /// which is a statement rather than an omission.
     ///
-    /// DISCARDING the consumed length is legal HERE and nowhere new: the callers are
-    /// the pre-#3631 marshal-string path in `raw_type_value.rs` and this file's own
-    /// nested-field arms, which bound each field by its own `[i32 len]` and whose
-    /// tolerance of a short read predates this issue. The `CqlType` path
-    /// (`typed_value.rs`) must NOT come through here — it asks for the length and
-    /// asserts on it, which is what roborev BLOCKER 6 required.
-    pub(super) fn parse_nested_udt_from_registry_at(
-        &self,
-        data: &[u8],
-        udt_def: &crate::types::UdtTypeDef,
-        registry: &UdtRegistry,
-        depth: usize,
-    ) -> Result<Value> {
-        self.parse_nested_udt_from_registry_reporting(data, udt_def, registry, depth)
-            .map(|(value, _consumed)| value)
-    }
-
-    /// `parse_nested_udt_from_registry_at` REPORTING how many bytes of `data` the
-    /// field loop consumed, so a caller framing `data` as exactly one UDT can require
-    /// the two to agree.
-    ///
-    /// The offset is the loop's own cursor, including the early exit that treats
-    /// fewer-than-four remaining bytes as omitted trailing fields — which is exactly
-    /// where an incomplete 1-3 byte field-length prefix hides. See
-    /// `typed_value.rs::parse_typed_udt` for the `TupleType.split` rules this makes
+    /// The reported offset is the loop's own cursor, INCLUDING the early exit that
+    /// treats fewer-than-four remaining bytes as omitted trailing fields — which is
+    /// exactly where an incomplete 1-3 byte field-length prefix hides. See
+    /// `typed_value.rs::parse_typed_udt` for the `TupleType.split` rules it makes
     /// checkable.
+    ///
+    /// The nested `UdtRegistry` is read from `self.udt_registry` (through
+    /// `parse_typed_udt`), which is what every caller of the old signature passed in
+    /// anyway — each obtained it as `if let Some(ref registry) = self.udt_registry`.
     pub(super) fn parse_nested_udt_from_registry_reporting(
         &self,
         data: &[u8],
         udt_def: &crate::types::UdtTypeDef,
-        registry: &UdtRegistry,
         depth: usize,
     ) -> Result<(Value, usize)> {
         if depth > MAX_TYPE_NESTING_DEPTH {
@@ -914,7 +886,7 @@ impl V5CompressedLegacyParser {
                 None
             } else if field_len == 0 {
                 let value =
-                    self.parse_simple_udt_field_value_at(&[], &field_def.field_type, depth + 1)?;
+                    self.parse_simple_udt_field_value_at(&[], &field_def.field_type, depth)?;
                 Some(value)
             } else {
                 let field_len = Self::checked_component_len(
@@ -927,111 +899,33 @@ impl V5CompressedLegacyParser {
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
 
-                // Handle deeply nested UDTs (including FROZEN<udt> types)
-                let value = match &field_def.field_type {
-                    CqlType::Custom(nested_type_name) => {
-                        // `get_udt_qualified` owns "udt:" + keyspace-qualifier
-                        // normalization (Issue #239 / #2807).
-                        if let Some(nested_udt) =
-                            registry.get_udt_qualified(&self.keyspace, nested_type_name)
-                        {
-                            self.parse_nested_udt_from_registry_at(
-                                field_data,
-                                nested_udt,
-                                registry,
-                                depth + 1,
-                            )?
-                        } else {
-                            Value::Blob(
-                                crate::storage::sstable::reader::value_borrow::borrow_active(
-                                    field_data,
-                                ),
-                            )
-                        }
-                    }
-                    CqlType::Udt(udt_name, inline_fields) => {
-                        // Inline UDT type - prefer registry, fall back to inline fields (Issue #239)
-                        if let Some(nested_udt) =
-                            registry.get_udt_qualified(&self.keyspace, udt_name)
-                        {
-                            self.parse_nested_udt_from_registry_at(
-                                field_data,
-                                nested_udt,
-                                registry,
-                                depth + 1,
-                            )?
-                        } else if !inline_fields.is_empty() {
-                            // Issue #239: Use inline field definitions for nested UDTs
-                            self.parse_inline_udt_value(
-                                field_data,
-                                udt_name,
-                                inline_fields,
-                                depth + 1,
-                            )?
-                        } else {
-                            Value::Blob(
-                                crate::storage::sstable::reader::value_borrow::borrow_active(
-                                    field_data,
-                                ),
-                            )
-                        }
-                    }
-                    CqlType::Frozen(inner) => {
-                        // Handle FROZEN<udt_type> - the inner type may be a UDT
-                        match inner.as_ref() {
-                            CqlType::Custom(nested_type_name) => {
-                                // `get_udt_qualified` owns "udt:" + keyspace-qualifier
-                                // normalization (Issue #239 / #2807).
-                                if let Some(nested_udt) =
-                                    registry.get_udt_qualified(&self.keyspace, nested_type_name)
-                                {
-                                    let inner_value = self.parse_nested_udt_from_registry(
-                                        field_data, nested_udt, registry,
-                                    )?;
-                                    Value::Frozen(Box::new(inner_value))
-                                } else {
-                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                }
-                            }
-                            CqlType::Udt(udt_name, inline_fields) => {
-                                // Prefer registry, fall back to inline fields (Issue #239)
-                                if let Some(nested_udt) =
-                                    registry.get_udt_qualified(&self.keyspace, udt_name)
-                                {
-                                    let inner_value = self.parse_nested_udt_from_registry(
-                                        field_data, nested_udt, registry,
-                                    )?;
-                                    Value::Frozen(Box::new(inner_value))
-                                } else if !inline_fields.is_empty() {
-                                    // Issue #239: Use inline field definitions
-                                    let inner_value = self.parse_inline_udt_value(
-                                        field_data,
-                                        udt_name,
-                                        inline_fields,
-                                        depth + 1,
-                                    )?;
-                                    Value::Frozen(Box::new(inner_value))
-                                } else {
-                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                }
-                            }
-                            _ => {
-                                // Other frozen types - parse as simple value
-                                let inner_value = self.parse_simple_udt_field_value_at(
-                                    field_data,
-                                    inner,
-                                    depth + 1,
-                                )?;
-                                Value::Frozen(Box::new(inner_value))
-                            }
-                        }
-                    }
-                    _ => self.parse_simple_udt_field_value_at(
-                        field_data,
-                        &field_def.field_type,
-                        depth + 1,
-                    )?,
-                };
+                // ONE per-field entry (issue #3631, roborev round 3). This loop used
+                // to carry its own ~100-line dispatch over the field's `CqlType` —
+                // registry-resolved UDT, inline UDT, frozen wrappers, scalars — and
+                // that duplicate is where all three defect families kept reappearing,
+                // one call site deeper each review round: two arms called the ZERO-DEPTH
+                // wrapper (so a cyclic registry reset the nesting counter at every
+                // frozen hop), every arm DISCARDED the nested decoder's consumed count
+                // (so trailing bytes inside a nested field were invisible to the outer
+                // frame's exhaustion check), and four arms fell back to `Value::Blob`
+                // for an unresolved UDT name.
+                //
+                // `parse_simple_udt_field_value_at` already expresses exactly this
+                // dispatch, with all three properties held BY CONSTRUCTION: it threads
+                // `depth`, it goes through `parse_typed_value`, which is the single
+                // exhaustion assert, and its UDT arm resolves registry-then-inline and
+                // returns an explicit `Error` NAMING the type when neither is available
+                // (#3631 acceptance criterion 5). The field slice is exactly framed by
+                // its own `[i32 len]`, so requiring the decode to consume all of it is
+                // `TupleType.split`'s rule, not a new one.
+                // `depth` UNCHANGED, not `depth + 1`: this field lives inside the UDT
+                // whose own boundary already consumed a level in `parse_typed_udt`.
+                // Charging the field again double-counts every UDT hop, which is how the
+                // effective limit fell to ~2 logical layers when the five dispatches were
+                // unified. Termination is unaffected — the UDT boundary and every
+                // collection element still increment.
+                let value =
+                    self.parse_simple_udt_field_value_at(field_data, &field_def.field_type, depth)?;
                 Some(value)
             };
 
@@ -1057,21 +951,9 @@ impl V5CompressedLegacyParser {
     /// This handles the case where a UDT contains a nested UDT field, and the
     /// nested UDT's field definitions are available inline in the CqlType structure
     /// (parsed from the Statistics.db type string) rather than from the UdtRegistry.
-    pub(super) fn parse_inline_udt_value(
-        &self,
-        data: &[u8],
-        type_name: &str,
-        inline_fields: &[(String, CqlType)],
-        depth: usize,
-    ) -> Result<Value> {
-        self.parse_inline_udt_value_reporting(data, type_name, inline_fields, depth)
-            .map(|(value, _consumed)| value)
-    }
-
-    /// `parse_inline_udt_value` REPORTING how many bytes of `data` the field loop
-    /// consumed. The sibling of `parse_nested_udt_from_registry_reporting`, for the
-    /// same reason (roborev BLOCKER 6 on issue #3631); the discarding wrapper above
-    /// exists only for the pre-#3631 callers.
+    /// REPORTING how many bytes of `data` the field loop consumed. The sibling of
+    /// `parse_nested_udt_from_registry_reporting`, and for the same reason: no
+    /// discarding wrapper, so dropping the count is written `.0` at the call site.
     pub(super) fn parse_inline_udt_value_reporting(
         &self,
         data: &[u8],
@@ -1117,7 +999,7 @@ impl V5CompressedLegacyParser {
                 None
             } else if field_len == 0 {
                 // Empty value
-                let value = self.parse_simple_udt_field_value_at(&[], field_type, depth + 1)?;
+                let value = self.parse_simple_udt_field_value_at(&[], field_type, depth)?;
                 Some(value)
             } else {
                 let field_len =
@@ -1126,37 +1008,14 @@ impl V5CompressedLegacyParser {
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
 
-                // Handle nested UDTs using inline field definitions (Issue #239)
-                let value = match field_type {
-                    CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                        // Recursively parse nested UDT using its inline fields
-                        self.parse_inline_udt_value(
-                            field_data,
-                            nested_name,
-                            nested_fields,
-                            depth + 1,
-                        )?
-                    }
-                    CqlType::Frozen(inner) => match inner.as_ref() {
-                        CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                            // Frozen nested UDT - unwrap and parse
-                            let inner_value = self.parse_inline_udt_value(
-                                field_data,
-                                nested_name,
-                                nested_fields,
-                                depth + 1,
-                            )?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                        _ => {
-                            // Other frozen types - parse as simple value
-                            let inner_value =
-                                self.parse_simple_udt_field_value_at(field_data, inner, depth + 1)?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                    },
-                    _ => self.parse_simple_udt_field_value_at(field_data, field_type, depth + 1)?,
-                };
+                // ONE per-field entry — the same collapse as the registry loop above,
+                // and for the same reason: this loop was the SECOND copy of that
+                // dispatch, so every fix to one left the other for the next reviewer.
+                // Registry-then-inline resolution now lives in ONE place
+                // (`parse_typed_udt`), which also means a nested name this loop could
+                // only resolve inline is resolved from the AUTHORITATIVE registry when
+                // the registry has it (#2807).
+                let value = self.parse_simple_udt_field_value_at(field_data, field_type, depth)?;
                 Some(value)
             };
 
