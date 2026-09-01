@@ -561,15 +561,48 @@ else
 fi
 
 # ===========================================================================
-case_begin 20-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
+case_begin 20-same-process-is-owned "the SAME process owns its own marker even with no session id — no false LIVE-PEER"
+# ===========================================================================
+# A guard that reds on correct input is the guard agents learn to waive. With CLAUDE_PID
+# set but CLAUDE_CODE_SESSION_ID UNSET the session axis is UNMEASURED, and before this
+# branch existed the writer's own next command was refused as a LIVE-PEER against itself.
+# Sameness is measured affirmatively (pid identity + intersecting start window), which is
+# strictly stronger than the session-id string it stands in for.
+L20=$(lane lane20)
+sp_w=$(run "$L20" CLAIM_MACHINE=boxA "CLAUDE_PID=$$" -- write 3822 --stage implement); sp_wrc=$?
+sp_v=$(run "$L20" CLAIM_MACHINE=boxA "CLAUDE_PID=$$" -- verify 3822); sp_vrc=$?
+if [ "$sp_wrc" -eq 0 ] && [ "$sp_vrc" -eq 0 ] && [ "$(verdict_of "$sp_v")" = OWNED ]; then
+  ok "an unrecorded session id does not make a process a peer to itself (write 0, verify OWNED)"
+else
+  bad "the same process was refused its own marker: write-rc=$sp_wrc verify-rc=$sp_vrc verdict=$(verdict_of "$sp_v")
+$sp_v"
+fi
+# NON-VACUITY: the branch is keyed on PID IDENTITY, not on 'the session id was unrecorded'.
+# A DIFFERENT live pid with an unrecorded session id must still be a LIVE-PEER.
+sleep 300 &
+sp_peer=$!
+L20B=$(lane lane20b)
+run "$L20B" CLAIM_MACHINE=boxA "CLAUDE_PID=$sp_peer" -- write 3822 >/dev/null 2>&1
+sp_p=$(run "$L20B" CLAIM_MACHINE=boxA "CLAUDE_PID=$$" -- verify 3822); sp_prc=$?
+kill "$sp_peer" 2>/dev/null; wait "$sp_peer" 2>/dev/null
+if [ "$sp_prc" -ne 0 ] && [ "$(verdict_of "$sp_p")" = LIVE-PEER ]; then
+  ok "NON-VACUITY: a DIFFERENT live pid is still a LIVE-PEER when neither side records a session id"
+else
+  bad "an unrecorded session id let a foreign live pid through: rc=$sp_prc verdict=$(verdict_of "$sp_p")
+$sp_p"
+fi
+
+# ===========================================================================
+case_begin 21-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
 5-foreign-worktree 6-session-gone-adoptable 7-session-live-peer 8-pid-unrecordable-unknown
 9-writer-refuses-sentinel-body 10-reader-refuses-duplicate-sentinel 11-machine-agrees-with-claim-sh
 12-placeholder-reason-refused 13-write-over-foreign-refuses 14-absent-is-distinct
 15-pid-reuse-recognised 16-closed-verdict-grammar 17-write-failure-emits-a-verdict
-18-control-chars-stay-anchored 19-control-char-worktree-refused 20-case-floor"
-CASE_FLOOR=20
+18-control-chars-stay-anchored 19-control-char-worktree-refused
+20-same-process-is-owned 21-case-floor"
+CASE_FLOOR=21
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""

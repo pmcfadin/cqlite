@@ -32,6 +32,12 @@
 #     copied tree, a foreign worktree means the file was copied.
 #
 #   SESSION AXIS — recorded (AC1), but NOT fail-closed on its own.
+#     A recorded session id equal to the current one (and recordable) is OWNED outright. So
+#     is a recorded pid that is ALIVE and EQUAL to our own session pid with an intersecting
+#     start window — a pid is unique among live processes, so that process IS us, and
+#     without this a session with CLAUDE_PID set but no CLAUDE_CODE_SESSION_ID would refuse
+#     its OWN marker as a live peer. It is an affirmative measurement of sameness (stronger
+#     than the id string it stands in for), never a permissive fallback.
 #     A session difference alone is resolved by the LIVENESS OF THE RECORDED WRITER,
 #     three-valued, on `claim-heartbeat.sh dead-lanes`' precedent:
 #       writer provably GONE  -> ADOPTABLE. `verify` still exits NON-ZERO: adoption is an
@@ -499,6 +505,19 @@ check_ownership() {
   fi
 
   writer_liveness
+
+  # SAME PROCESS => OWNED, EVEN WHEN THE SESSION ID DOES NOT MATCH. A pid is unique among
+  # LIVE processes, so a recorded pid that is alive AND equal to our own session pid (with
+  # its start window still intersecting) is not a peer — it IS us. Without this branch a
+  # session with CLAUDE_PID set but CLAUDE_CODE_SESSION_ID UNSET wrote a marker and then
+  # refused its OWN marker as a LIVE-PEER on the very next command: a guard that reds on
+  # correct input, which is the guard agents learn to waive. This is an AFFIRMATIVE
+  # measurement of sameness (pid identity + start-window intersection), strictly stronger
+  # than the session-id string it stands in for — never a fallback to permissiveness.
+  if [ "$LIVE_STATE" = alive ] && [ "$S_pid" = "$(this_session_pid)" ]; then
+    return 0
+  fi
+
   local why="axis=session recorded=$(sane "$S_session") current=$(sane "$session"); $LIVE_DETAIL"
   case "$LIVE_STATE" in
     alive)
