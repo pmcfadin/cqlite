@@ -440,10 +440,17 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
   # fixtures a disposition failure (STUB_GH_ISSUE_ERR) does not silently also break the probe read —
   # two independent questions must be independently failable or a case measures the wrong one.
   #
-  # The comment fixture is one multi-record string: a `\002<issue-number>` line opens a record, and
+  # The comment fixture is one multi-record string: a `\002#<issue-number>` line opens a record, and
   # the usual `\001<login>` + body lines follow, so the SAME converter produces the SAME
   # `{"comments":[{"author":{"login":…},"body":…}]}` shape the PR call produces — which is the
   # measured fact that licenses the wrapper reusing one scanner for both threads.
+  #
+  # THE `#` IS LOAD-BEARING, NOT DECORATION. `printf %b` reads `\0nnn` as up to THREE octal digits
+  # after the `\0`, so an opener written WITHOUT the `#` would read its first digit as part of the
+  # escape (a four-character `\0` + `023` = 0x13) and the rest as text — a silently WRONG record
+  # opener, and the fixture then declares a thread nobody can select. The existing `\001<login>`
+  # form is safe only because a login never starts with a digit. `#` is not an octal digit, so the
+  # escape terminates deterministically; the converter strips it.
   case " $* " in
     *" comments"*|*",comments"*|*"comments,"*)
       for _stub_fail in ${STUB_GH_ISSUE_COMMENTS_FAIL:-}; do
@@ -473,7 +480,7 @@ def flush():
 for line in raw.split("\n"):
     if line.startswith("\u0002"):
         flush()
-        current = line[1:].strip()
+        current = line[1:].strip().lstrip("#")
         author = None
         body = []
     elif line.startswith("\u0001"):
@@ -5841,6 +5848,390 @@ if sed_inplace_verified "$_dfk_dir/roborev-review-checks.sh" \
   assert_lacks 'case (df18) one authorization can never excuse a check nobody authorized' '^RESULT: PASS$'
 else
   bad 'case (df18): could not patch the copied checks file, so the misplaced-DEFERRED path was never exercised (a green run here would be a probe failing in the direction that looks like success)'
+fi
+reset_stub
+
+# =============================================================================================
+# (mp*) #3759: A MISPLACED AUTHORIZATION IS DIAGNOSED — AND GRANTS NOTHING
+# =============================================================================================
+# THE INCIDENT, measured. For PR #3710 the coordination lead granted BOTH authorizations —
+# field-perfect base/head/job, each the sole nonblank content of its own top-level comment, from an
+# allowlisted author — on ISSUE #3544, the thread where that lane's coordination had happened all
+# day. The wrapper reads PR comments only, so `--recheck-job 317` reported `waiver: NONE` /
+# `deferral: NONE`, which is TEXTUALLY IDENTICAL to "the lead refused" and to "nobody posted one".
+# Position 1 of a six-PR serial queue idled ~8 hours and blocked five lanes. `gh pr view 3710 --json
+# closingIssuesReferences` returns `[{"number":3544}]`, so the probe specified here WOULD have named
+# the right thread on the actual incident.
+#
+# WHAT THIS FAMILY PINS, in both directions:
+#   * an issue-side marker the channel WOULD have accepted ⇒ `MISPLACED` naming the issue and the
+#     remedy, with the underlying FAIL untouched and `RESULT: FAIL` — for BOTH kinds;
+#   * MISPLACED reaches NO granting path: `prompt-content:` never reads WAIVED, `findings:` never
+#     reads DEFERRED, and the structural asserts below pin that the granting gates are still the two
+#     token-exact `= "granted"` comparisons;
+#   * the escalation fires ONLY from `none` and ONLY from an issue-side `granted` — a PR-side STALE
+#     is not overwritten AND (measured against the stub's invocation log) is not even probed;
+#   * every `NONE` DECLARES what the probe did, from the closed rendering set, so "checked and it is
+#     not there either" and "never checked" can never read alike;
+#   * the linked issue comes from the STRUCTURED relation and nothing reads the PR body.
+mp_waive_grant="roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached"
+mp_defer_grant="roborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=$d_reason"
+# The fixture EVERY waiver-side case needs: the census paths absent from the prompt, so the absence
+# branch runs and there is a waiver to look for, and NOTHING on the PR.
+mp_waiver_fixture() {
+  STUB_ANNOUNCE_SHA="$w_head"
+  STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+}
+
+printf '== (mp1) #3759: a would-have-granted WAIVER on the linked issue ⇒ MISPLACED, FAIL ==\n'
+# THE ACCEPTANCE CASE FOR THE WAIVER HALF, and the incident reproduced hermetically.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp1)' FAIL 1
+assert_no_marker_form 'case (mp1)'
+assert_one_result_line 'case (mp1)'
+assert_says 'case (mp1) the waiver key reports MISPLACED, naming the linked issue it was found on' \
+  '^waiver: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544, not on the pull request'
+assert_says 'case (mp1) it claims only what the probe measured — accepted by the CHANNEL' \
+  'would have been ACCEPTED BY THE CHANNEL there'
+assert_says 'case (mp1) it states that it grants nothing and the FAIL stands' \
+  'IT GRANTS NOTHING AND THIS FAIL STANDS'
+assert_says 'case (mp1) and it carries the one operator action that fixes it' \
+  'REMEDY: the authorizer re-posts the IDENTICAL line as a TOP-LEVEL COMMENT ON THE PR'
+assert_says 'case (mp1) with the lead-side verification step named' \
+  "verifies with 'gh pr view <PR> --json comments' that it is there"
+# THE POSITIVE CONTROL FOR "GRANTS NOTHING" (R2). Behavioural, paired with the structural asserts.
+assert_says 'case (mp1) the absence FAIL is untouched' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (mp1) a misplaced waiver NEVER waives' '^prompt-content: WAIVED'
+assert_lacks 'case (mp1) and never reads as a certification' '^prompt-content: PASS'
+assert_lacks 'case (mp1) nor is it reported as if no authorization existed anywhere' '^waiver: NONE'
+assert_lacks 'case (mp1) nor as GRANTED' '^waiver: GRANTED'
+reset_stub
+
+printf '== (mp2) #3759: a would-have-granted DEFERRAL on the linked issue ⇒ MISPLACED, FAIL ==\n'
+# THE ACCEPTANCE CASE FOR THE DEFERRAL HALF. `findings:` must stay exactly as the run measured it —
+# never DEFERRED (that would be the grant) and never NONE (that would read as a clean review).
+reset_stub
+df_grant_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_defer_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (mp2)' FAIL 1
+assert_no_marker_form 'case (mp2)'
+assert_one_result_line 'case (mp2)'
+assert_says 'case (mp2) the deferral key reports MISPLACED, naming the linked issue' \
+  '^deferral: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544, not on the pull request'
+assert_says 'case (mp2) the count= match IS claimed, because the scanner decided it' \
+  'its count= matches the 2 observed finding\(s\)'
+# R3: THE RENDERING DOES NOT CLAIM MORE THAN THE PROBE MEASURED. The network disposition leg is
+# deliberately not run issue-side, and the value says so instead of implying a completed check.
+assert_says 'case (mp2) but the issue-disposition legs are declared NOT run issue-side' \
+  'are NOT run issue-side and still apply once it is on the PR'
+assert_says 'case (mp2) the findings stand exactly as measured' '^findings: PRESENT \(2\)$'
+assert_lacks 'case (mp2) a misplaced deferral NEVER defers' '^findings: DEFERRED'
+assert_lacks 'case (mp2) and NEVER reads as a clean review' '^findings: NONE'
+assert_lacks 'case (mp2) nor is it reported as if no authorization existed anywhere' '^deferral: NONE'
+# MEASURED AGAINST THE INVOCATION LOG, not inferred: the disposition leg asks
+# `gh issue view <N> --json number,state`, and the probe must not have run it issue-side.
+if grep -qF -- '--json number,state' "$INVOKED"; then
+  bad 'case (mp2): the issue-disposition leg RAN on the probe path — the rendering claims it does not, and a diagnostic that overstates what it measured is what stops the next person looking'
+else
+  ok 'case (mp2): the network disposition leg was NOT run issue-side (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp3) #3759: an issue-side STALE / MALFORMED / UNAUTHORIZED marker stays NONE ==\n'
+# R3, SECOND HALF: only an issue-side marker the channel WOULD HAVE ACCEPTED escalates. Each of these
+# is a DIFFERENT defect that happens to be on a different thread, and re-posting it would not help —
+# reporting MISPLACED for it would make the run FAIL after the operator followed the remedy, which
+# spends the diagnostic's credibility. Asserted PER SHAPE, never one standing for the family.
+for _mp3 in \
+  "stale:roborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review" \
+  "malformed:roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=<why>" \
+  "unauthorized:\001a-stranger" ; do
+  _mp3_kind="${_mp3%%:*}"
+  _mp3_body="${_mp3#*:}"
+  reset_stub
+  mp_waiver_fixture
+  STUB_GH_LINKED_ISSUES='3544'
+  if [ "$_mp3_kind" = unauthorized ]; then
+    STUB_GH_ISSUE_COMMENTS="\002#3544\n\001a-stranger\n$mp_waive_grant\n"
+  else
+    STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$_mp3_body\n"
+  fi
+  run_wrapper "$w_work"
+  assert_verdict "case (mp3/$_mp3_kind)" FAIL 1
+  assert_no_marker_form "case (mp3/$_mp3_kind)"
+  assert_says "case (mp3/$_mp3_kind) the state stays NONE with the probe's checked declaration" \
+    '^waiver: NONE \(no waiver comment for this review:.*; linked issue #3544 checked: no matching marker there either\)$'
+  assert_lacks "case (mp3/$_mp3_kind) MISPLACED is not reported for a marker that would not have been accepted" \
+    '^waiver: MISPLACED'
+  assert_lacks "case (mp3/$_mp3_kind) and nothing is waived" '^prompt-content: WAIVED'
+  reset_stub
+done
+# THE ALLOWLIST APPLIES IDENTICALLY ON BOTH THREADS, which is what stops a stranger's comment on a
+# PUBLIC issue thread even producing a diagnostic that names it as an authorization.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001a-stranger\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_lacks 'case (mp3/unauthorized) a stranger is never named as an authorizer' 'a-stranger'
+reset_stub
+
+printf '== (mp4) #3759: a PR-side STALE is NOT overwritten, and the probe is NOT EVEN CALLED ==\n'
+# R3, FIRST HALF, MEASURED RATHER THAN ASSUMED. `stale` is already specific and already actionable;
+# replacing it with MISPLACED would substitute a vaguer diagnosis for a precise one. And the probe is
+# NOT PERFORMED — not merely ignored — which is the only version an invocation log can measure. A
+# network call whose result is discarded is latency plus a future footgun.
+reset_stub
+mp_waiver_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review\n"
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp4)' FAIL 1
+assert_no_marker_form 'case (mp4)'
+assert_says 'case (mp4) the precise PR-side cause survives' '^waiver: STALE \(the marker names a different review'
+assert_lacks 'case (mp4) a perfect issue-side marker does NOT overwrite it' '^waiver: MISPLACED'
+if grep -qF 'closingIssuesReferences' "$INVOKED"; then
+  bad 'case (mp4): the linked-issue relation WAS fetched on a state that had already diagnosed — reachability must rest on the call not being made, not on where an if sits'
+else
+  ok 'case (mp4): no closingIssuesReferences call was made (checked against the stub invocation record)'
+fi
+if grep -qE 'gh issue view [0-9]+ --json comments' "$INVOKED"; then
+  bad 'case (mp4): a linked-issue comment read WAS made on an already-diagnosed state'
+else
+  ok 'case (mp4): no linked-issue comment read was made either'
+fi
+reset_stub
+
+printf '== (mp5) #3759: NO linked issue ⇒ NONE naming the no-subject rendering ==\n'
+# The absence of a check is STATED rather than looking like a completed one — the same reason the
+# gate prints `0 RECOGNISED` rather than a bare `0`.
+reset_stub
+mp_waiver_fixture
+run_wrapper "$w_work"
+assert_verdict 'case (mp5)' FAIL 1
+assert_no_marker_form 'case (mp5)'
+assert_says 'case (mp5) the NONE value declares that no linked-issue thread was checked' \
+  '^waiver: NONE \(no waiver comment for this review:.*; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
+reset_stub
+
+printf '== (mp5b) #3759: a PR body mentioning an unlinked #N is NOT a subject (R4) ==\n'
+# THE RELATION, NOT THE PROSE, IS WHAT BOUNDS AND ATTRIBUTES THE PROBE. #3626 DELETED a PR-body link
+# check because a body is editable at any time by anyone with write access with NO per-edit
+# attribution; reinstating a body scan for ANY purpose would be reinstating a deleted generation. So
+# an issue mentioned only in prose is not probed, even though its thread carries a perfect marker.
+reset_stub
+mp_waiver_fixture
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp5b)' FAIL 1
+assert_says 'case (mp5b) an unlinked issue is not a subject, whatever the body says' \
+  'no linked issue is declared on this PR, so no linked-issue thread was checked'
+assert_lacks 'case (mp5b) and its marker is not found' '^waiver: MISPLACED'
+if grep -qE 'gh issue view [0-9]+ --json comments' "$INVOKED"; then
+  bad 'case (mp5b): a thread was probed although the structured relation declared none'
+else
+  ok 'case (mp5b): no thread was probed (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp6) #3759: the probe unable to run ⇒ NONE with the could-not-check cause ==\n'
+# EVERY FAILURE IS A STATE WITH A CAUSE — never a two-valued return, which would re-import the very
+# collapse this change exists to remove — and the run still FAILs on the underlying key: the probe
+# can neither rescue nor fail anything.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/relation)' FAIL 1
+assert_no_marker_form 'case (mp6/relation)'
+assert_says 'case (mp6/relation) the relation failure is named as a could-not-check' \
+  "the linked-issue thread could NOT be checked: 'gh pr view --json closingIssuesReferences' failed"
+assert_lacks 'case (mp6/relation) and it never reads as a completed check' 'checked: no matching marker there either'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_FAIL='3544'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/thread)' FAIL 1
+assert_no_marker_form 'case (mp6/thread)'
+assert_says 'case (mp6/thread) an unreadable thread is a could-not-check naming the cause' \
+  'the linked-issue thread could NOT be checked: read with no matching marker: none; NOT read: #3544 \(HTTP 502: Bad gateway'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_GARBAGE='3544'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/unparseable)' FAIL 1
+assert_says 'case (mp6/unparseable) an unparseable comments payload is its own could-not-check cause' \
+  'NOT read: #3544 \(its comments payload could not be parsed\)'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[{"number":"not-a-number"}]}'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/non-numeric)' FAIL 1
+assert_says 'case (mp6/non-numeric) a non-numeric relation entry is a could-not-check, reported as a KIND' \
+  'NOT read: an entry that is not an issue number'
+assert_lacks 'case (mp6/non-numeric) and the raw value is NEVER interpolated' 'not-a-number'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='this is not json'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/unparseable-relation)' FAIL 1
+assert_says 'case (mp6/unparseable-relation) an unparseable relation payload names itself' \
+  'the closingIssuesReferences payload could not be parsed'
+reset_stub
+
+printf '== (mp7) #3759: a PARTIAL read is could-not-check naming BOTH halves, never checked ==\n'
+# A PARTIAL SCAN REPORTED AS A COMPLETE ONE IS WORSE THAN AN ADMITTED FAILURE, because it is the
+# version nobody re-checks. One thread read with no match, one unavailable.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing here\n"
+STUB_GH_ISSUE_COMMENTS_FAIL='3626'
+run_wrapper "$w_work"
+assert_verdict 'case (mp7)' FAIL 1
+assert_no_marker_form 'case (mp7)'
+assert_says 'case (mp7) both halves are named — what was read and what was not' \
+  'the linked-issue thread could NOT be checked: read with no matching marker: #3544; NOT read: #3626 \('
+assert_lacks 'case (mp7) a partial read NEVER takes the checked rendering' 'checked: no matching marker there either'
+reset_stub
+
+printf '== (mp8) #3759: MORE linked issues than the bound ⇒ the remainder is declared ==\n'
+# The probe is a diagnostic on a path that has already determined the run FAILs, so it is bounded —
+# and when the declared set exceeds the bound the rendering SAYS SO. The unprobed remainder is
+# visible rather than silent.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626 3312 3710'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing\n\002#3626\n\001pmcfadin\nnothing\n\002#3312\n\001pmcfadin\nnothing\n\002#3710\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp8)' FAIL 1
+assert_no_marker_form 'case (mp8)'
+assert_says 'case (mp8) the rendering declares declared / probed / bound' \
+  'linked issues #3544 #3626 #3312 checked — 3 of 4 declared, probe bounded at 3: no matching marker'
+assert_lacks 'case (mp8) the unprobed remainder is not silently claimed as checked' \
+  'checked: no matching marker there either'
+if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
+  bad 'case (mp8): the bound was not honoured — a fourth thread was read'
+else
+  ok 'case (mp8): the bound was honoured (the fourth declared thread was not read)'
+fi
+reset_stub
+
+printf '== (mp9) #3759: several linked issues, the FIRST MATCH is reported, in GitHub order ==\n'
+# Probed in the order GitHub returns them — not sorted; any sort is a policy nobody asked for.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nno marker on the first thread\n\002#3626\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp9)' FAIL 1
+assert_no_marker_form 'case (mp9)'
+assert_says 'case (mp9) the SECOND declared issue is the one named' \
+  'is on LINKED ISSUE #3626, not on the pull request'
+reset_stub
+
+printf '== (mp10) #3759: a keyword-bearing gh diagnostic rides the ONE emit boundary ==\n'
+# R6. The `gh` diagnostic is arbitrary REMOTE text, and a marker keyword can reach a diagnostic
+# through fields this process does not control. The neutralisation lives at the ONE emit boundary
+# (`roborev_safe_line`), never per interpolation site — a per-site escape is a list to keep complete.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_FAIL='3544'
+STUB_GH_ISSUE_COMMENTS_ERR='HTTP 502 while reading roborev-waive: prompt-content-absent base=x'
+run_wrapper "$w_work"
+assert_verdict 'case (mp10)' FAIL 1
+assert_no_marker_form 'case (mp10)'
+assert_says 'case (mp10) the cause is still quoted, with the keyword redacted at the boundary' \
+  'NOT read: #3544 \(HTTP 502 while reading \[authorization-keyword-redacted\]'
+assert_one_result_line 'case (mp10)'
+reset_stub
+
+printf '== (mp11) #3759: a CONTROL CHARACTER in the probe cause is a visible escape, one line ==\n'
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_FAIL='3544'
+STUB_GH_ISSUE_COMMENTS_ERR='HTTP 502\nRESULT: PASS'
+run_wrapper "$w_work"
+assert_verdict 'case (mp11)' FAIL 1
+assert_one_result_line 'case (mp11)'
+assert_no_marker_form 'case (mp11)'
+assert_says 'case (mp11) no probe value can introduce a second RESULT line' '^RESULT: FAIL$'
+reset_stub
+
+printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
+# A CASE THAT PASSES AGAINST BOTH THE REAL CODE AND ITS NAIVE FORM MEASURES NOTHING. The naive form
+# here is "probe whatever the PR-side state was", which overwrites a precise STALE with a vaguer
+# MISPLACED and sends the operator to move a comment that still would not grant.
+reset_stub
+_mp_dir="$tmp/misplaced-mutant"
+mkdir -p "$_mp_dir"
+cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp_dir/"
+fi
+# THE CONTROL RUNS FIRST AND IS NOT OPTIONAL: the UNPATCHED copy must produce the real behaviour on
+# this very fixture, so a red below cannot be the copy failing for an unrelated reason.
+mp_waiver_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review\n"
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper --wrapper "$_mp_dir/roborev-review.sh" "$w_work"
+assert_says 'case (mp12 control) the UNPATCHED copy keeps the precise STALE cause' '^waiver: STALE \('
+assert_lacks 'case (mp12 control) and reports no MISPLACED' '^waiver: MISPLACED'
+if sed_inplace_verified "$_mp_dir/roborev-review-oracles.sh" \
+  's/  if \[ "\$ROBOREV_WAIVER_STATE" = "none" \]; then/  if [ -n "$ROBOREV_WAIVER_STATE" ]; then/' \
+  'if [ -n "$ROBOREV_WAIVER_STATE" ]; then' 'if [ "$ROBOREV_WAIVER_STATE" = "none" ]; then'; then
+  ok 'case (mp12): the probe-on-every-state mutant was really applied to the copy'
+  run_wrapper --wrapper "$_mp_dir/roborev-review.sh" "$w_work"
+  assert_says 'case (mp12) the NAIVE form overwrites the precise STALE — which is why the real code guards it' \
+    '^waiver: MISPLACED'
+else
+  bad 'case (mp12): the probe-on-every-state mutant could not be applied, so the escalation guard was never contrasted with its naive form — a case that passes against both measures nothing'
+fi
+reset_stub
+
+printf '== (mp13) #3759 MUTANT: escalating on ANY issue-side marker reds ==\n'
+# The second naive form: "a marker is over there, say MISPLACED". It reports MISPLACED for a marker
+# that would NOT have been accepted, so the run FAILs after the operator followed the remedy.
+reset_stub
+_mp2_dir="$tmp/misplaced-mutant-2"
+mkdir -p "$_mp2_dir"
+cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp2_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp2_dir/"
+fi
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review\n"
+run_wrapper --wrapper "$_mp2_dir/roborev-review.sh" "$w_work"
+assert_says 'case (mp13 control) the UNPATCHED copy leaves a stale issue-side marker at NONE' \
+  '^waiver: NONE \(no waiver comment for this review:'
+assert_lacks 'case (mp13 control) and reports no MISPLACED' '^waiver: MISPLACED'
+if sed_inplace_verified "$_mp2_dir/roborev-review-oracles.sh" \
+  's/^    if \[ "\$state" = "granted" \]; then$/    if [ -n "$state" ] \&\& [ "$state" != "none" ]; then/' \
+  'if [ -n "$state" ] && [ "$state" != "none" ]; then' '    if [ "$state" = "granted" ]; then'; then
+  ok 'case (mp13): the escalate-on-any-marker mutant was really applied to the copy'
+  run_wrapper --wrapper "$_mp2_dir/roborev-review.sh" "$w_work"
+  assert_says 'case (mp13) the NAIVE form escalates a marker the channel would have REFUSED' \
+    '^waiver: MISPLACED'
+else
+  bad 'case (mp13): the escalate-on-any-marker mutant could not be applied, so the would-have-granted condition was never contrasted with its naive form'
 fi
 reset_stub
 
