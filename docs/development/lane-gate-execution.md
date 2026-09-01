@@ -1420,6 +1420,65 @@ mention as a live reference; a guard whose comment said *depend on* while it gre
 fix is never a rarer delimiter — it is to strip the channel that carries non-semantic occurrences, then
 require the shape that means what you are claiming, and to prove the requirement fires.
 
+## Four review findings the launcher's own doctrine did not prevent (roborev job 319)
+
+Recorded because the *pattern* outlived every individual fix, and three of the four are the same
+shape this document spends its length arguing against.
+
+**F1 — an uninspectable pid was scored as an affirmative "no gate."** `_unit_runs_a_gate` defaults
+`found=1`, so `continue`-ing past a pid whose `/proc/<pid>/cmdline` could not be read *returned*
+"affirmatively not a gate", and the caller reclaims a live gate's summary path on that answer. The
+skipped line's own comment said "not evidence either way" — true of the line, false of the function
+it sat in. Refusing on every unreadable pid was not the fix either: a genuinely dead owner's pids are
+unreadable too, and that is the job-196 permanent block. The distinction is `_pid_state`'s —
+**affirmatively GONE** (and a zombie, which has already exited and can run nothing) stays
+reclaimable; **PRESENT but unreadable** is the third value, and the caller refuses.
+
+There was a second instance the review did not name: **`-r` succeeds on an exiting or mid-exec
+process and the file then reads EMPTY**, so "no argv at all" was scored identically to "argv read,
+no gate in it". Not theoretical — two daemons read this way while instrumenting this issue, and a
+`/proc` sweep taken during the fix had ~10 pids vanish mid-loop. Inside this function the benign
+explanation does not apply: a kernel thread also has an empty `cmdline` but can never be in a
+`systemd-run --user` unit's cgroup.
+
+**F2 — one function was answering two questions with opposite safe answers.** `_unit_is_live`
+collapses *live* and *unmeasurable* onto `0`. At the reservation-reclamation site `0` means REFUSE,
+so lumping them is conservative and correct. At the two heartbeat-acceptance sites `0` means
+**ACCEPT** — and those sites exist specifically to reject a gate that published one beat and then
+died. Keying them on a predicate that says "live" when it cannot measure re-admitted exactly that
+case. The comment written at both sites — *"an unmeasurable unit still accepts (it can only weaken,
+never invent, liveness)"* — stated the permissive rationale as though it were the safe one.
+
+This was the **third round in this one function**: job 205 fixed its exit-code form, job 241 fixed
+its state-name form, job 318 introduced the acceptance-site use, job 319 found the polarity. When a
+claim fails at N stages, the claim's *form* is wrong — so the state is now three-valued
+(`_unit_state → live | terminal | unknown`) and **each caller names the polarity it needs**, rather
+than a fourth patch at a call site. `_unit_is_live` remains as the refuse-polarity wrapper over the
+one implementation, so the two cannot drift into two opinions about one unit.
+
+**F3 — the advertised default invocation was the broken one.** The script runs under `set -uo
+pipefail`, and this repository supports stock macOS `/bin/bash` 3.2, where an empty array expanded as
+`"${ARRAY[@]}"` counts as unbound and **aborts**. A bare `gate-detached.sh` — the documented
+full-gate form — leaves `GATE_ARGS` empty. Local bash is 5.2 and accepts it, which is why it
+survived review and testing; `agent-gate.sh` already carries the identical fix and citation
+(job-2108). **Limit stated: the abort itself was not reproduced here** — no bash < 4.4 on the host —
+so that half rests on the repo's precedent and documented bash semantics, not on a measurement.
+
+**F4 — a missing tool reported as a busy peer.** The global launch lock called `flock` with no
+availability check; the only `command -v flock` guard sits in the reclamation path, which a normal
+launch never reaches. On a host without `flock` the failure was reported as *"another launch holds
+the global launch lock"* — naming a peer that does not exist, with remedies (retry, use a distinct
+directory) that can never work. Demonstrated, then fixed as a named capability refusal.
+
+**The transferable part.** F1, F2 and F4 are one family: a **two-valued test standing in for a
+three-valued fact**, resolving the unmeasured case to whichever answer the surrounding control flow
+made convenient. F1 resolved it to "no gate" because `found` defaulted that way; F2 resolved it to
+"live" because that was conservative *at the other call site*; F4 resolved it to "contended" because
+that was the only other branch. In each case the code carried a correct-sounding comment. So the
+question to ask of a predicate is not *"is this the safe answer?"* but **"safe at WHICH call site,
+and does 0 here mean refuse or accept?"** — a predicate reused across an inverted polarity is not
+reused, it is reversed.
+
 ## Doctrine
 
 - A lane **may** run its own full gate, via `gate-detached.sh`. The claim "lanes cannot
