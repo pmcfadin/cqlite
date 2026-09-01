@@ -41,9 +41,13 @@
 //! Converging the whole writer would be wrong, so only the UDT arm is shared and
 //! each caller keeps its own field-value renderer.
 //!
-//! Call sites (both must stay on this helper):
-//! * `cqlite-cli/src/output/json.rs` — `JSONWriter::value_to_json`
-//! * `cqlite-core/src/query/result.rs` — `impl ToJson for Value`
+//! Call sites (both must stay on this rule):
+//! * `cqlite-cli/src/output/json_cell.rs` — `JsonCell::from_value`, through
+//!   [`udt_render_fields`] (its cell type is not a `serde_json::Value`, so it
+//!   shares the RULE rather than the return type)
+//! * `cqlite-core/src/query/result.rs` — `impl ToJson for Value`, through
+//!   [`udt_to_json_object`], which is itself a thin adapter over
+//!   [`udt_render_fields`]
 //!
 //! Coverage: `cqlite-cli/tests/issue_3629_cli_udt_json_namespace.rs` and
 //! `cqlite-core/tests/issue_3629_core_tojson_udt_namespace.rs` (independent per
@@ -69,12 +73,42 @@ where
     F: Fn(&Value) -> JsonValue,
 {
     let mut object = Map::with_capacity(udt.fields.len());
+    udt_render_fields(
+        udt,
+        render_field,
+        || JsonValue::Null,
+        |name, rendered: JsonValue| {
+            object.insert(name.to_string(), rendered);
+        },
+    );
+    JsonValue::Object(object)
+}
+
+/// The SAME rule as [`udt_to_json_object`], for a caller whose rendered field is
+/// not a [`JsonValue`].
+///
+/// `cqlite-cli`'s JSON egress renders a `decimal`/`varint` as a RAW JSON number
+/// fragment, which `serde_json::Value` cannot hold without `arbitrary_precision`
+/// (see `cqlite-cli/src/output/json_cell.rs`), so its field renderer produces its
+/// own cell type. Sharing the rule rather than the return type is what keeps
+/// "declared fields, nothing else, `null` for an absent one" in ONE place: this
+/// function IS the rule and [`udt_to_json_object`] is a thin adapter over it.
+///
+/// `absent` BUILDS the caller's spelling of JSON `null`, emitted for a field
+/// whose value is `None` — a null-valued field is still a declared field. It is a
+/// constructor rather than a value so the cell type need not be `Clone`
+/// (`cqlite-cli`'s carries a `Box`).
+pub fn udt_render_fields<T, F, A, E>(udt: &UdtValue, render_field: F, absent: A, mut emit: E)
+where
+    F: Fn(&Value) -> T,
+    A: Fn() -> T,
+    E: FnMut(&str, T),
+{
     for field in &udt.fields {
         let rendered = match &field.value {
             Some(value) => render_field(value),
-            None => JsonValue::Null,
+            None => absent(),
         };
-        object.insert(field.name.clone(), rendered);
+        emit(&field.name, rendered);
     }
-    JsonValue::Object(object)
 }

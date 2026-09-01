@@ -51,7 +51,18 @@ crossterm = { workspace = true, optional = true }
 
 # Serialization
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` (issue #3644 item 3) lets the JSON egress emit a `decimal`/`varint`
+# as an UNQUOTED JSON number of ARBITRARY precision — `serde_json::value::RawValue`
+# carries the already-rendered digits verbatim, which no `serde_json::Number` can
+# hold. Oracle: `cassandra-5.0.8` `DecimalType.toJSONString:314-317` and
+# `IntegerType.toJSONString:488-491` both return an unquoted `toString()`.
+# It is purely ADDITIVE: it adds a type and changes nothing about `Number`, so no
+# other serde_json user in this crate is affected. `arbitrary_precision` is the
+# other way to carry those digits and is deliberately NOT enabled, for the reason
+# already recorded on the dev-dependency below: it changes `Number`'s
+# representation, equality and serialization for EVERY serde_json user in this
+# crate — including the ~20 test files that assert on serialized JSON.
+serde_json = { workspace = true, features = ["raw_value"] }
 
 # Table formatting
 prettytable-rs = "0.10"

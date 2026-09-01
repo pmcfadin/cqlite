@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 pub mod csv;
 #[cfg(feature = "state_machine")]
 pub mod json;
+/// One CQL value rendered for the JSON egress (issue #3644 item 3).
+#[cfg(feature = "state_machine")]
+mod json_cell;
 #[cfg(feature = "state_machine")]
 pub mod parquet;
 #[cfg(feature = "state_machine")]
