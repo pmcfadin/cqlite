@@ -974,6 +974,14 @@ pub fn start_writable_session(
 /// **THE ONE PLACE A CHILD IS TORN DOWN ON A FAILURE PATH: KILL *AND* REAP**
 /// (#3652, roborev job 265 finding 4).
 ///
+/// THAT "ONE PLACE" IS A CLAIM, SO IT IS CHECKED AND NOT ASSERTED IN PROSE. The
+/// first pass of this fix routed the sites in THIS file and left four in
+/// `graceful_shutdown_tests.rs` — the ones that run against a real child —
+/// spelling the bare kill, while the commit message said every site had been
+/// converted. `no_failure_path_kills_a_child_without_reaping_it` in
+/// `harness_tests.rs` is what makes the claim answerable from source instead of
+/// from memory; read its own limits there before trusting it.
+///
 /// Every failure site in this harness used to spell this `let _ = child.kill();`,
 /// which sends the signal and never waits — so the child it was diagnosing was
 /// left as a ZOMBIE for the rest of the test binary, and its reader threads stayed
@@ -994,6 +1002,10 @@ pub fn start_writable_session(
 /// constant — exactly what #3515 removed from this harness — to buy nothing.
 pub fn kill_and_reap(child: &mut std::process::Child) -> String {
     let pid = child.id();
+    // kill-and-reap-allow: THE one signal, immediately followed by the reap below.
+    // Every other `.kill()` in this harness is a failure path that must come
+    // through here instead, which the structural guard in `harness_tests.rs`
+    // checks (#3652).
     let killed = child.kill();
     match child.wait() {
         Ok(status) => format!(

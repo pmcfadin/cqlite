@@ -505,6 +505,13 @@ fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
 #[cfg(test)]
 mod awaited_stream_tests;
 
+/// **THE HARNESS'S OWN SOURCE-LEVEL INVARIANTS** — properties about EVERY site,
+/// which no behavioural test can cover because it cannot see a site nobody has
+/// written yet (#3652). Split out under the campsite rule (#1135): with the
+/// teardown guard inline this file was 28 lines PAST the 1500-line test threshold.
+#[cfg(test)]
+mod source_guards;
+
 /// A pipe stand-in that yields one whole line and then FAILS — what a reader
 /// thread sees when a `read(2)` on the child's pipe errors mid-stream.
 ///

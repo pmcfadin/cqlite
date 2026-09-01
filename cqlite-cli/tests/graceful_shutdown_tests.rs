@@ -180,13 +180,15 @@ fn sigint_in_writable_session_flushes_before_exit() {
     let t_handler = match entered {
         Ok((_, took)) => took,
         Err(end) => {
-            let _ = child.kill();
+            // Killed AND REAPED, with the outcome carried into the message (#3652).
+            let teardown = kill_and_reap(&mut child);
             panic!(
             "stage (c) handler-entry: the shutdown handler's entry marker was not observed on the \
              child's stderr after SIGINT was delivered to pid {pid}.\n\
              awaited substring on stderr: {MARKER_HANDLER_ENTERED:?}\n\
              {}\n\
              {}\n\
+             {teardown}\n\
              CANDIDATE CAUSES (this measurement does NOT select between them):\n\
              \x20 1. the signal was not delivered to / not received by the child;\n\
              \x20 2. a shutdown handler was not entered (absent, or the interrupt lost a race);\n\
@@ -212,10 +214,11 @@ fn sigint_in_writable_session_flushes_before_exit() {
     let (status, _t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
-            let _ = child.kill();
+            let teardown = kill_and_reap(&mut child);
             panic!(
                 "stage (d) clean-exit: the shutdown flush did not complete before the deadline.\n\
                  {}\n\
+                 {teardown}\n\
                  WHAT THIS ESTABLISHES: the handler-entry marker {MARKER_HANDLER_ENTERED:?} WAS \
                  observed {:.3?} after SIGINT, so the shutdown handler exists, was entered, and \
                  the child was scheduled. This failure therefore establishes ONLY that the flush \
@@ -399,12 +402,13 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         }
     });
     if let Err(fail) = flushed {
-        let _ = child.kill();
+        let teardown = kill_and_reap(&mut child);
         panic!(
             "stage (c) mid-session-flush: no durable `-Data.db` artifact appeared under {} \
              while the session was still open, after {WRITES} acknowledged writes with \
              CQLITE_MEMTABLE_FLUSH_THRESHOLD=1.\n\
              {}\n\
+             {teardown}\n\
              WHAT THIS ESTABLISHES: only that no artifact was observed before the deadline. It \
              does NOT establish that the interactive loop skipped the threshold-flushing path \
              — a flush still in progress, or a child that was descheduled, produces the same \
@@ -449,10 +453,11 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     let (status, _t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
-            let _ = child.kill();
+            let teardown = kill_and_reap(&mut child);
             panic!(
                 "stage (d) eof-exit: the child had not exited after its stdin reached EOF.\n\
                  {}\n\
+                 {teardown}\n\
                  WHAT THIS ESTABLISHES: only that no exit was observed before the deadline. The \
                  EOF path flushes and finalizes the engine before returning, so a slow flush and \
                  a wedged one read the same here; the progress observation above reports whether \
