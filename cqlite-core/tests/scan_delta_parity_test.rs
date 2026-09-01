@@ -28,7 +28,14 @@
 //! Tests are gated on:
 //! - `#[cfg(feature = "delta-scan")]` — the feature must be enabled
 //! - `CQLITE_DATASETS_ROOT` environment variable pointing to the datasets directory
-//! - Presence of `Data.db` binary files in `test_deltas/` (skipped in CI until published)
+//! - Presence of `Data.db` binary files in `test_deltas/`. They ARE in the published
+//!   bundle (measured 2026-09-01: 9 `*-Data.db` under
+//!   `<CQLITE_DATASETS_ROOT>/sstables/test_deltas`, extracted from the pinned
+//!   `datasets-v3` / `cassandra5-small-full-v3.5.tar.gz` asset), so an absence is a
+//!   MISCONFIGURED ROOT, not an unpublished fixture. The previous wording here
+//!   ("skipped in CI until published") was stale, and it is what made the strict-flag gap
+//!   below look intentional. Under `CQLITE_REQUIRE_FIXTURES=1` an absence is a hard,
+//!   named failure; without it these cases print `[SKIP]` and pass.
 //!
 //! Run with:
 //! ```bash
@@ -98,6 +105,11 @@ struct JsonlLivenessInfo {
     /// Microseconds since Unix epoch, parsed from ISO-8601 with fractional seconds.
     tstamp_micros: i64,
     expires_at_micros: Option<i64>,
+    /// The row liveness TTL in SECONDS, exactly as sstabledump printed it
+    /// (`JsonTransformer.serializeRow`, cassandra-5.0.8). This — not `expires_at` — is the
+    /// authoritative value in Cassandra's per-cell suppression rule, which compares
+    /// `cell.ttl() != liveInfo.ttl()`.
+    ttl_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -394,9 +406,11 @@ fn parse_liveness_info(v: &JsonValue) -> Option<JsonlLivenessInfo> {
         .get("expires_at")
         .and_then(|s| s.as_str())
         .and_then(iso8601_to_micros);
+    let ttl_secs = v.get("ttl").and_then(|t| t.as_i64());
     Some(JsonlLivenessInfo {
         tstamp_micros,
         expires_at_micros,
+        ttl_secs,
     })
 }
 
@@ -659,6 +673,43 @@ async fn try_collect_delta_records(
 }
 
 // ============================================================================
+// Fixture presence: SKIP by default, HARD FAIL under CQLITE_REQUIRE_FIXTURES=1
+// ============================================================================
+
+/// `CQLITE_REQUIRE_FIXTURES=1` makes a missing fixture a HARD failure.
+///
+/// WHY THIS FILE NEEDED IT (roborev round 1 on #3725, High). Every fixture-absence path
+/// below used to `println!("[SKIP] …"); return`, unconditionally — so with `test_deltas`
+/// absent this target reported `14 passed` in 0.00s having compared NOTHING, and once
+/// #3725 gave it a merge-gating executor that vacuous run would have gated a merge. It is
+/// the same defect #3725 closed for `issue_1007_complex_type_parity` one target over, and
+/// the gate now REFUSES to run this lane strict while any of its targets ignores the flag
+/// (`feature-iso-delta-scan`'s fixture-blind FAIL), so this is not optional decoration.
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Skip when a fixture is absent — unless strict mode is on, in which case FAIL loudly.
+///
+/// `subject` NAMES the keyspace and table (or the whole keyspace) that could not be
+/// opened, deliberately: the gate's #2078 preflight probes only the CANONICAL keyspace
+/// (`test_basic`), so a generic "fixtures absent" sends the reader to a remedy that is
+/// already satisfied. The remedy for every case here is the same fetch, and it is in the
+/// message so nobody has to look it up.
+fn skip_or_fail(subject: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but {subject} fixture unavailable: {reason}. \
+             Remedy: bash test-data/scripts/fetch-datasets.sh (then export the \
+             CQLITE_DATASETS_ROOT it prints). These binaries ARE in the pinned bundle."
+        );
+    }
+    println!("[SKIP] {subject}: {reason}");
+}
+
+// ============================================================================
 // Parity assertion helpers
 // ============================================================================
 
@@ -687,19 +738,34 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 /// Assert optional expiry times match, honouring Cassandra's per-cell SUPPRESSION rule.
 ///
 /// sstabledump rounds `expires_at` to the nearest second (epoch-seconds * 1e6), as does
-/// scan_delta, so the two must agree within 1s.
+/// scan_delta, so a printed pair must agree within 1s.
 ///
-/// `row_liveness_expires_at` is the ENCLOSING ROW's liveness expiry, or `None` when the
+/// `row` is the enclosing row's liveness as sstabledump printed it, or `None` when the
 /// subject IS the row liveness. ORACLE — `JsonTransformer.serializeCell` at the pinned tag
-/// `cassandra-5.0.8`: `if (cell.isExpiring() && (liveInfo.isEmpty() || cell.ttl() !=
-/// liveInfo.ttl()))`. So sstabledump OMITS a cell's `ttl`/`expires_at` when it EQUALS the
-/// row's primary-key liveness TTL — the ordinary case for `INSERT ... USING TTL`, where
-/// every cell inherits the row's TTL and the row's `liveness_info` holds the only printed
-/// copy. It is the same rule the per-cell `tstamp` follows five lines earlier in that
-/// method, which is why the writetime comparison at the call site is already conditional on
-/// the field being present. The tolerance applies in that direction ONLY: `(None, Some(_))`
-/// stays strict, because an expiry sstabledump DID print and scan_delta did not is a real
-/// divergence, never a suppression.
+/// `cassandra-5.0.8`, line 501: `if (cell.isExpiring() && (liveInfo.isEmpty() ||
+/// cell.ttl() != liveInfo.ttl()))`. So sstabledump OMITS a cell's `ttl`/`expires_at` when
+/// the cell's TTL EQUALS the row's primary-key liveness TTL — the ordinary case for
+/// `INSERT ... USING TTL`, where every cell inherits the row TTL and the row's
+/// `liveness_info` holds the only printed copy. Line 497 applies the identical rule to the
+/// per-cell `tstamp`, which is why the writetime comparison at the call site has always
+/// been conditional on the field being present; that symmetry is what makes this
+/// principled rather than convenient.
+///
+/// THE COMPARISON IS ON TTL, NOT ON ABSOLUTE `expires_at` (roborev round 1, finding 3).
+/// An earlier cut accepted a suppressed cell whose `expires_at` was within 1s of the row's,
+/// which is a PROXY for TTL equality and only coincides with it when the cell and the row
+/// liveness share a write time (`expires_at` = localDeletionTime ≈ writetime + ttl). Two
+/// cells with the SAME TTL written seconds apart in one row — `UPDATE ... USING TTL` on
+/// individual columns — are suppressed by Cassandra and would have made the proxy PANIC: a
+/// false FAIL on correct data. Both authoritative TTLs are available, so the proxy is gone:
+/// the row's from sstabledump's own `liveness_info.ttl`, the cell's derived from the delta
+/// model's `expires_at` and `writetime` (Cassandra sets localDeletionTime from the cell's
+/// own timestamp, so `expires_at_secs - writetime_secs` IS the TTL, ±1s of seconds
+/// rounding). `CellDelta` carries no `ttl` field, and deriving it here is preferred to
+/// widening a public model for a test.
+///
+/// `(None, Some(_))` stays STRICT: an expiry sstabledump DID print and scan_delta did not
+/// is a real divergence, never a suppression. Do not loosen it.
 ///
 /// Wrong until #3725: this is one of the 13 crate-level `delta-scan`-gated targets that
 /// executed in no merge-gating lane, so `test_delta_parity_ttl_cells` FAILED against the
@@ -708,10 +774,12 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 fn assert_expires_at(
     context: &str,
     actual: Option<i64>,
+    actual_writetime_micros: i64,
     expected: Option<i64>,
-    row_liveness_expires_at: Option<i64>,
+    row: Option<&JsonlLivenessInfo>,
 ) {
     const TTL_TOLERANCE_MICROS: i64 = 1_000_000; // 1 second
+    const TTL_ROUNDING_SECS: i64 = 1; // writetime µs -> localDeletionTime s
     match (actual, expected) {
         (Some(a), Some(e)) => {
             let diff = (a - e).abs();
@@ -725,25 +793,100 @@ fn assert_expires_at(
             );
         }
         (None, None) => {}
-        (Some(a), None) => match row_liveness_expires_at {
-            Some(row_e) if (a - row_e).abs() <= TTL_TOLERANCE_MICROS => {}
-            Some(row_e) => panic!(
-                "{}: scan_delta cell expires_at={}µs, sstabledump printed none, and it does NOT \
-                 match the row liveness expires_at={}µs — sstabledump omits only a cell copy \
-                 EQUAL to the row TTL (JsonTransformer.serializeCell, cassandra-5.0.8)",
-                context, a, row_e
-            ),
-            None => panic!(
-                "{}: scan_delta has expires_at={}µs but sstabledump does not, and no row liveness \
-                 expiry exists for it to have been suppressed against",
-                context, a
-            ),
-        },
+        (Some(a), None) => {
+            // `div_euclid`, not `/`: truncation toward zero would misplace a pre-epoch
+            // timestamp by a second, and the sign of that error is not obvious at a glance.
+            let actual_ttl_secs =
+                a.div_euclid(1_000_000) - actual_writetime_micros.div_euclid(1_000_000);
+            match row.and_then(|r| r.ttl_secs) {
+                Some(row_ttl) if (actual_ttl_secs - row_ttl).abs() <= TTL_ROUNDING_SECS => {}
+                Some(row_ttl) => panic!(
+                    "{}: scan_delta reports a cell TTL of {}s (expires_at={}µs, writetime={}µs) \
+                     and sstabledump printed no cell copy — but the row liveness TTL is {}s, \
+                     and sstabledump omits ONLY a cell copy whose TTL EQUALS the row's \
+                     (JsonTransformer.serializeCell:501, cassandra-5.0.8)",
+                    context, actual_ttl_secs, a, actual_writetime_micros, row_ttl
+                ),
+                None => panic!(
+                    "{}: scan_delta has expires_at={}µs but sstabledump printed neither a cell \
+                     copy nor a row liveness TTL for it to have been suppressed against",
+                    context, a
+                ),
+            }
+        }
         (None, Some(e)) => panic!(
             "{}: sstabledump has expires_at={}µs but scan_delta does not",
             context, e
         ),
     }
+}
+
+/// The suppression rule's own regression cases, corpus-free.
+///
+/// The one that matters is `equal TTL, different write times`: it is the false FAIL the
+/// absolute-`expires_at` proxy produced, it does not occur in today's corpus (a single
+/// `INSERT ... USING TTL` cannot produce it), and without a case pinning it the next person
+/// would have no way to tell the fix from the proxy. The others pin the two directions that
+/// must NOT be tolerated.
+#[test]
+fn suppression_rule_compares_ttl_not_absolute_expiry() {
+    let sec = 1_000_000i64;
+    let row = |ttl: Option<i64>, exp: Option<i64>| JsonlLivenessInfo {
+        tstamp_micros: 1_000 * sec,
+        expires_at_micros: exp,
+        ttl_secs: ttl,
+    };
+
+    // Same TTL (3600s), cell written 5s after the row: Cassandra SUPPRESSES the cell copy
+    // (TTLs are equal), so this must be accepted. `expires_at` differs by 5s, which the
+    // retired proxy would have rejected — this case IS the fix.
+    let r = row(Some(3600), Some(4600 * sec));
+    assert_expires_at(
+        "case/equal-ttl-later-write",
+        Some(4605 * sec),
+        1_005 * sec,
+        None,
+        Some(&r),
+    );
+
+    // Different TTL (cell 7200s vs row 3600s) with the cell copy absent: unreachable from
+    // Cassandra (it would have PRINTED the copy), so a suppression may not be claimed.
+    let r = row(Some(3600), Some(4600 * sec));
+    assert!(std::panic::catch_unwind(|| {
+        assert_expires_at(
+            "case/different-ttl",
+            Some(8200 * sec),
+            1_000 * sec,
+            None,
+            Some(&r),
+        );
+    })
+    .is_err());
+
+    // A row with NO liveness TTL cannot have suppressed anything.
+    let r = row(None, None);
+    assert!(std::panic::catch_unwind(|| {
+        assert_expires_at(
+            "case/no-row-ttl",
+            Some(4600 * sec),
+            1_000 * sec,
+            None,
+            Some(&r),
+        );
+    })
+    .is_err());
+
+    // The strict direction, unchanged: sstabledump printed an expiry and scan_delta did not.
+    assert!(std::panic::catch_unwind(|| {
+        assert_expires_at(
+            "case/strict-none-some",
+            None,
+            1_000 * sec,
+            Some(4600 * sec),
+            None,
+        );
+    })
+    .is_err());
 }
 
 // ============================================================================
@@ -968,6 +1111,7 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                 assert_expires_at(
                                     &format!("{}.expires_at", ctx_lv),
                                     dl.expires_at,
+                                    dl.writetime,
                                     jl.expires_at_micros,
                                     None, // the subject IS the row liveness
                                 );
@@ -1052,10 +1196,9 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                     assert_expires_at(
                                         &ctx,
                                         cd.expires_at,
+                                        cd.writetime,
                                         jcell.expires_at_micros,
-                                        r.liveness_info
-                                            .as_ref()
-                                            .and_then(|jl| jl.expires_at_micros),
+                                        r.liveness_info.as_ref(),
                                     );
                                     result.cells_ok += 1;
                                 }
@@ -1343,19 +1486,18 @@ async fn test_scan_delta_parity_all_test_deltas() {
     let datasets_root = match datasets_root() {
         Some(r) => r,
         None => {
-            println!(
-                "[SKIP] CQLITE_DATASETS_ROOT not set — skipping scan_delta parity.\n\
-                 Set CQLITE_DATASETS_ROOT=$PWD/test-data/datasets and run:\n\
-                 bash test-data/scripts/generate-deltas.sh"
+            skip_or_fail(
+                "test_deltas (all fixtures)",
+                "CQLITE_DATASETS_ROOT is not set",
             );
             return;
         }
     };
 
     if !datasets_root.exists() {
-        println!(
-            "[SKIP] {:?} does not exist — skipping scan_delta parity tests.",
-            datasets_root
+        skip_or_fail(
+            "test_deltas (all fixtures)",
+            &format!("datasets root {datasets_root:?} does not exist"),
         );
         return;
     }
@@ -1363,10 +1505,11 @@ async fn test_scan_delta_parity_all_test_deltas() {
     let fixtures = find_delta_fixtures_with_data(&datasets_root);
 
     if fixtures.is_empty() {
-        println!(
-            "[SKIP] No test_deltas fixtures with Data.db found under {:?}.\n\
-             Run: bash test-data/scripts/generate-deltas.sh",
-            datasets_root
+        skip_or_fail(
+            "test_deltas (all fixtures)",
+            &format!(
+                "no fixture with a binary Data.db under {datasets_root:?}/sstables/test_deltas"
+            ),
         );
         return;
     }
@@ -1427,19 +1570,18 @@ macro_rules! delta_fixture_test {
             let root = match datasets_root() {
                 Some(r) => r,
                 None => {
-                    println!(
-                        "[SKIP] CQLITE_DATASETS_ROOT not set — skipping {}",
-                        stringify!($test_name)
+                    skip_or_fail(
+                        concat!("test_deltas.", $table),
+                        "CQLITE_DATASETS_ROOT is not set",
                     );
                     return;
                 }
             };
 
             if !root.exists() {
-                println!(
-                    "[SKIP] {:?} not found — skipping {}",
-                    root,
-                    stringify!($test_name)
+                skip_or_fail(
+                    concat!("test_deltas.", $table),
+                    &format!("datasets root {root:?} does not exist"),
                 );
                 return;
             }
@@ -1450,10 +1592,9 @@ macro_rules! delta_fixture_test {
             {
                 Some(d) => d,
                 None => {
-                    println!(
-                        "[SKIP] No Data.db for table '{}' — run: \
-                         bash test-data/scripts/generate-deltas.sh",
-                        $table
+                    skip_or_fail(
+                        concat!("test_deltas.", $table),
+                        "no binary Data.db for this table",
                     );
                     return;
                 }
@@ -1512,9 +1653,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     let root_env = match std::env::var("CQLITE_DATASETS_ROOT") {
         Ok(v) => PathBuf::from(v),
         Err(_) => {
-            println!(
-                "[SKIP] CQLITE_DATASETS_ROOT not set — skipping corpus parity for {}.{}",
-                keyspace, table
+            skip_or_fail(
+                &format!("{keyspace}.{table}"),
+                "CQLITE_DATASETS_ROOT is not set",
             );
             return;
         }
@@ -1522,7 +1663,10 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
 
     let ks_dir = root_env.join("sstables").join(keyspace);
     if !ks_dir.exists() {
-        println!("[SKIP] {:?} not found", ks_dir);
+        skip_or_fail(
+            &format!("{keyspace}.{table}"),
+            &format!("keyspace directory {ks_dir:?} does not exist"),
+        );
         return;
     }
 
@@ -1541,9 +1685,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     }) {
         Some(Ok(e)) => e.path(),
         _ => {
-            println!(
-                "[SKIP] No directory for {}.{} under {:?}",
-                keyspace, table, ks_dir
+            skip_or_fail(
+                &format!("{keyspace}.{table}"),
+                &format!("no table directory under {ks_dir:?}"),
             );
             return;
         }
@@ -1551,9 +1695,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
 
     // Ensure Data.db exists.
     if find_data_db(&fixture).is_none() {
-        println!(
-            "[SKIP] No Data.db for {}.{} — run: bash test-data/scripts/fetch-datasets.sh",
-            keyspace, table
+        skip_or_fail(
+            &format!("{keyspace}.{table}"),
+            "no binary Data.db (JSONL-only checkout)",
         );
         return;
     }
@@ -1561,9 +1705,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     let jsonl = match find_jsonl(&fixture) {
         Some(j) => j,
         None => {
-            println!(
-                "[SKIP] No JSONL golden for {}.{} in {:?}",
-                keyspace, table, fixture
+            skip_or_fail(
+                &format!("{keyspace}.{table}"),
+                &format!("no JSONL golden in {fixture:?}"),
             );
             return;
         }
