@@ -15195,6 +15195,29 @@ run_tooling_tests() {
     return 0
   fi
 
+  # lane-scratch ignore-namespace guard (#3760): hermetic (throwaway git fixture
+  # seeded from the committed .gitignore), no cargo/network/datasets, and it
+  # CREATES NO FILES IN THE WORKTREE UNDER TEST — writing scratch into the lane is
+  # the defect under repair, and this component runs inside the gate of record.
+  # Pins that the reserved `.lane-*` namespace covers novel scratch names at every
+  # depth, that every legacy enumerated name is still ignored, and — as a
+  # deliberate PAIR — that a `.lane-*` subtree is invisible to
+  # `git ls-files --others --exclude-standard` while a job-209 `!<path>/`-negated
+  # `.agent-gate-*` directory still exposes its contents. An unignored scratch name
+  # written mid-run is `tree-integrity: FAIL (tree-mutated-midrun)` (#2926), which
+  # VOIDS a gate of record — 40 minutes on #3414. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_lane_scratch_ignored.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_lane_scratch_ignored.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (lane-scratch ignore namespace); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_check_dockerfile_rust_pin.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
     status=FAIL
