@@ -261,6 +261,14 @@ impl V5CompressedLegacyParser {
                             break;
                         }
                     }
+                    // Issue #3723: the SAME one-variant discrimination as the
+                    // complex-column loop in `row_data.rs`. Without it the row-level
+                    // refusal died HERE — this block loop swallowed it and the scan
+                    // returned a partition with FEWER rows, so the refusal was
+                    // unobservable from a real read (the whole point of the issue).
+                    // `is_fatal_decode_error` names exactly one variant; every other
+                    // row-parse failure keeps the pre-#3723 tolerant `break` below.
+                    Err(e) if super::raw_value::is_fatal_decode_error(&e) => return Err(e),
                     Err(e) => {
                         tracing::debug!(
                             "V5CompressedLegacy: Row parse error in partition {} at offset {}: {}",

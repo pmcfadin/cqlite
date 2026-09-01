@@ -444,13 +444,6 @@ impl V5CompressedLegacyParser {
                                     );
                                 }
 
-                                debug!(
-                                    "V5CompressedLegacy: Parsed {} cells from row {} (is_static={})",
-                                    cells.len(),
-                                    row_count,
-                                    is_static
-                                );
-
                                 // Issue #480 FIX: Static row handling
                                 //
                                 // Static rows are stored once per partition and contain values for
@@ -590,6 +583,13 @@ impl V5CompressedLegacyParser {
                                     partition_index, row_count + 1, offset
                                 );
                             }
+                            // Issue #3723: this is the loop the stitched SCAN path runs
+                            // (`parse_block` → `parse_block_emit` → here), so it is where
+                            // the row-level refusal has to survive or the read reports
+                            // FEWER ROWS instead of an error. One variant only — see
+                            // `raw_value::fatal_decode_error`; every other row-parse
+                            // failure keeps the tolerant `break` below.
+                            Err(e) if super::raw_value::is_fatal_decode_error(&e) => return Err(e),
                             Err(e) => {
                                 // End of valid data in partition
                                 debug!(
