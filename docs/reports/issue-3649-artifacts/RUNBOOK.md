@@ -495,13 +495,23 @@ up:
 | `partial (M of N runs)` | the ceiling was read back for some runs and not others; the ones read agree | **fix the startup-log parse and re-run the affected pass, while the box is up.** Do not terminate first |
 | `none (0 of N runs)` | no startup line was readable at all — usually the whole parse is broken, not one run | as above, and suspect the server log format or `--merge-path`/flag plumbing before anything else |
 
-The analyzer says the same thing on a `verdict-detail … ADMISSION` line, and it
-does **not** withhold a verdict for it: partial corroboration is a reduction in
-independent confirmation, not evidence that the arms were served differently — a
-genuine disagreement is caught affirmatively by the driver, which dies on any
-per-run `observed ≠ requested` it can read. Treat it as a defect in **the
-measurement record**, which you can still repair, rather than a defect in the
-measurement.
+**The analyzer carries this in its own output, so you do not need this page in
+front of you** — and neither does whoever reads the block after you paste it. It
+prints the state on a `verdict-detail … ADMISSION` line and the fix on a separate
+`verdict-detail … ADMISSION-REMEDY` line, **whose first action differs by state**:
+with `partial`, some lines parsed, so the format is fine and the fault is
+specific to the runs that did not report; with `none`, nothing parsed anywhere,
+so the subject is the parse or the log format itself and no individual run is.
+That split is deliberate — a shared remedy would send an operator looking in the
+wrong place, the same reason the gate-pin verdict distinguishes `NOT-HONOURED`
+from `default`.
+
+It does **not** withhold a verdict for any of this: partial corroboration is a
+reduction in independent confirmation, not evidence that the arms were served
+differently — a genuine disagreement is caught affirmatively by the driver, which
+dies on any per-run `observed ≠ requested` it can read. Treat it as a defect in
+**the measurement record**, which you can still repair, rather than a defect in
+the measurement.
 
 ### The single-stream section — verdicted against the band
 

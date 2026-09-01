@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=183
+CASE_FLOOR=187
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -230,6 +230,21 @@ check_verdict() { # <description> <expected-token> <expected-exit> [quantity]
     return
   fi
   ok "$desc -> $want (exit $RC)"
+}
+
+check_remedy_shared() { # <description>
+  local line missing
+  line="$(grep '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt" || true)"
+  missing=''
+  case "$line" in *"ONLY while the rig is live"*) ;; *) missing="$missing time-window" ;; esac
+  case "$line" in *"server.log"*)                 ;; *) missing="$missing log-path" ;; esac
+  case "$line" in *"lost with the instance"*)     ;; *) missing="$missing logs-die-with-rig" ;; esac
+  case "$line" in *"not evidence the arms disagreed"*) ;; *) missing="$missing honest-scope" ;; esac
+  if [ -z "$missing" ]; then
+    ok "$1"
+  else
+    bad "$1 -- the remedy line has lost:$missing"
+  fi
 }
 
 check_cause() { # <description> <expected-cause>
@@ -939,6 +954,17 @@ if grep -q '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.
 else
   bad "the none-corroboration case named a state with no remedy"
 fi
+check_remedy_shared "the none remedy carries the time window, the log path and the honest scope"
+if grep -q 'ADMISSION-REMEDY.*the subject is the parse or the server log format itself' "$TMP/out.txt"; then
+  ok "the NONE remedy points at the parse, not at an individual run"
+else
+  bad "the none remedy does not distinguish itself from the partial one"
+fi
+if grep -q 'ADMISSION-REMEDY.*specific to the runs that did not report' "$TMP/out.txt"; then
+  bad "the none case printed the PARTIAL remedy, which would send an operator in a circle"
+else
+  ok "the two states print different first actions, as the gate-pin precedent requires"
+fi
 if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed NOT-OBSERVED ' "$TMP/out.txt"; then
   ok "requested and observed admission values are printed side by side"
 else
@@ -1191,16 +1217,14 @@ if grep -q '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.
 else
   bad "a partial corroboration named a state with no remedy -- the shape this repo's fail-closed diagnostics exist to correct"
 fi
-remedy_line="$(grep '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt" || true)"
-missing_bits=''
-case "$remedy_line" in *"ONLY while the rig is live"*) ;; *) missing_bits="$missing_bits time-window" ;; esac
-case "$remedy_line" in *"server.log"*)               ;; *) missing_bits="$missing_bits log-path" ;; esac
-case "$remedy_line" in *"parse-startup"*)            ;; *) missing_bits="$missing_bits parse-tool" ;; esac
-case "$remedy_line" in *"not evidence the arms disagreed"*) ;; *) missing_bits="$missing_bits honest-scope" ;; esac
-if [ -z "$missing_bits" ]; then
-  ok "the remedy line carries the time window, the log path, the tool and the honest scope"
+check_remedy_shared "the partial remedy carries the time window, the log path and the honest scope"
+# THE REMEDY DIFFERS BY STATE. The gate-pin verdict splits NOT-HONOURED from
+# default because a shared remedy sends an operator in a circle; the same applies
+# here, so the two states must not print the same first action.
+if grep -q 'ADMISSION-REMEDY.*specific to the runs that did not report' "$TMP/out.txt"; then
+  ok "the PARTIAL remedy points at the runs that did not report, not at the parser"
 else
-  bad "the remedy line has lost:$missing_bits"
+  bad "the partial remedy does not name the runs that did not report"
 fi
 if [ "$(grep -c '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt")" = "1" ]; then
   ok "the remedy is ONE line, not a paragraph in the output"

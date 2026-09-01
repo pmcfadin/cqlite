@@ -566,14 +566,36 @@ def report(mode, manifest, pairs, admission, opts, stats):
         # the first question a reviewer of a marginal result asks. Naming the
         # state without naming the fix is the shape `missing-fixtures`,
         # `missing-schemas` and the component-set verdict all exist to correct.
-        # ONE line, deliberately: the fuller guidance is RUNBOOK.md step 6.
+        #
+        # AND THE REMEDY DIFFERS BY STATE, which is the other half of that
+        # precedent: the gate-pin verdict splits `NOT-HONOURED` from `default`
+        # precisely because a shared remedy sends an operator in a circle. Here
+        # the first action genuinely differs -- with SOME lines parsed the format
+        # is fine and the fault is specific to the runs that did not report;
+        # with NONE parsed, no individual run is the subject and the parse or the
+        # log format itself is. One line per state, and the fuller guidance stays
+        # in RUNBOOK.md steps 5 and 6.
+        if admission.state == "none":
+            remedy = (
+                "NO startup line parsed anywhere, so the subject is the parse or "
+                "the server log format itself, not any one run: check that "
+                "<work-dir>/logs/<arm>-r<NN>.server.log holds a `cqlite-flight "
+                "starting` line at all, and run `ab_driver_support.py parse-startup` "
+                "against it"
+            )
+        else:
+            remedy = (
+                "some startup lines parsed and some did not, so the format is "
+                "fine and the fault is specific to the runs that did not report: "
+                "read those runs' <work-dir>/logs/<arm>-r<NN>.server.log and "
+                "compare with one that did"
+            )
         out(
             "verdict-detail %s ADMISSION-REMEDY fixable ONLY while the rig is "
-            "live -- read <work-dir>/logs/<arm>-r<NN>.server.log, check "
-            "`ab_driver_support.py parse-startup` against it, and re-run the "
-            "affected pass; the server logs are lost with the instance. This is "
-            "LESS CORROBORATION, not evidence the arms disagreed: the driver dies "
-            "affirmatively on any per-run observed != requested it can read" % mode
+            "live -- %s, then re-run the affected pass; the server logs are lost "
+            "with the instance. This is LESS CORROBORATION, not evidence the arms "
+            "disagreed: the driver dies affirmatively on any per-run observed != "
+            "requested it can read" % (mode, remedy)
         )
     if control:
         out(
