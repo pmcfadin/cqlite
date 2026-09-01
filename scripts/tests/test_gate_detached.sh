@@ -3002,6 +3002,11 @@ _neuter_release() {  # <copy-path>
 }
 # A LOCK IS A SYMLINK TO AN OWNER STRING, so its target does NOT exist and `-e` is FALSE for it.
 # Testing survival with `-e` alone would report every lock as already gone — a vacuous pass.
+# COUNTED WITH `grep -c .`, NOT `wc -l`: command substitution strips the trailing newline, so a
+# three-line result carries two newlines and `wc -l` answers 2 — which is how the first version of
+# 4b.212 FAILED while holding exactly the three markers it demanded. An off-by-one in a test's own
+# arithmetic is indistinguishable, in the log, from the defect it pins.
+_locks_count() { printf '%s\n' "$1" | grep -c . ; }
 _locks_left() {  # <summary> <log> -> prints the surviving reservation paths, one per line
   local l
   for l in "$1.launch-lock" "$1.heartbeat.launch-lock" "$2.launch-lock"; do
@@ -3099,7 +3104,7 @@ else
       _f3co=$(bash "$_f3c" --summary "$_f3cs" --log "$_f3cl" -- --only fmt 2>&1); _f3cr=$?
       _f3cleft=$(_locks_left "$_f3cs" "$_f3cl")
       if [ "$_f3cr" != 0 ] && [ -n "$_f3cleft" ]; then
-        ok "4b.208 control: with the release neutered the markers DO survive ($(printf '%s' "$_f3cleft" | wc -l | tr -d ' ') left)"
+        ok "4b.208 control: with the release neutered the markers DO survive ($(_locks_count "$_f3cleft") left)"
       else
         bad "4b.208 control: with the release neutered the markers survive" \
             "exit $_f3cr survived nothing — 4b.207 cannot detect the defect it pins"
@@ -3173,7 +3178,7 @@ else
     _f3eo=$(bash "$_f3e" --summary "$_f3es" --log "$_f3el" -- --only fmt 2>&1); _f3er=$?
     _f3eleft=$(_locks_left "$_f3es" "$_f3el")
     if [ "$_f3er" != 0 ] && [ -n "$_f3eleft" ]; then
-      ok "4b.211 a failed systemd-run KEEPS the reservation when the unit is live/unmeasurable ($(printf '%s' "$_f3eleft" | wc -l | tr -d ' ') held)"
+      ok "4b.211 a failed systemd-run KEEPS the reservation when the unit is live/unmeasurable ($(_locks_count "$_f3eleft") held)"
     else
       bad "4b.211 a failed systemd-run keeps the reservation when the unit is live/unmeasurable" \
           "exit $_f3er released everything: the rollback is unconditional, so a LIVE unit's paths go to a peer"
@@ -3196,7 +3201,7 @@ else
     # The copy stops the unit itself; record whatever it named so cleanup can still reach it.
     _f3fu=$(printf '%s' "$_f3fo" | sed -n 's/^unit:  *//p'); [ -n "$_f3fu" ] && echo "$_f3fu" >> "$UNITS_FILE"
     if [ "$_f3fr" != 0 ] && printf '%s' "$_f3fo" | grep -q 'published no readable liveness' \
-       && [ "$(printf '%s' "$_f3fleft" | wc -l | tr -d ' ')" = 3 ]; then
+       && [ "$(_locks_count "$_f3fleft")" = 3 ]; then
       ok "4b.212 the post-launch heartbeat refusal KEEPS all three markers (exit $_f3fr)"
     else
       bad "4b.212 the post-launch heartbeat refusal keeps the whole reservation" \
