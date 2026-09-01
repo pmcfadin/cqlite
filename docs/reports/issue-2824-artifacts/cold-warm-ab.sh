@@ -3,9 +3,11 @@
 #
 # WHAT THIS MEASURES, AND WHAT IT DOES NOT
 # ----------------------------------------
-# Runs `ws0-scan-bench` over a fixed corpus once per labelled binary, with the
-# page cache DROPPED before every run. Pass 1 of each run is the COLD arm; passes
-# 2..N are WARM. Two binaries -> a baseline-vs-patched A/B.
+# Runs `ws0-scan-bench` over a fixed corpus twice per labelled binary per round:
+# a COLD single-pass run (page cache dropped immediately before it) and a WARM
+# single-pass run (cache left resident). Each phase is timed by its OWN
+# `/usr/bin/time`, so every recorded number belongs to exactly one phase.
+# Two binaries -> a baseline-vs-patched A/B.
 #
 # It does NOT produce issue #2824's acceptance-criterion number. Four limits, all
 # recorded into the output so a reader of the artifact alone cannot miss them:
@@ -35,18 +37,17 @@
 # Requires: passwordless sudo for /proc/sys/vm/drop_caches (checked, fail-closed).
 set -euo pipefail
 
-CORPUS=""; PASSES=2; ROUNDS=5; OUT=""
+CORPUS=""; ROUNDS=5; OUT=""
 declare -a BINARIES=()
 
 usage() {
   cat <<'USAGE'
 usage: cold-warm-ab.sh --corpus <dir> --out <dir> --bin <label>=<path> --bin <label>=<path>
-                       [--passes N] [--rounds N]
+                       [--rounds N]
 
   --corpus   corpus directory (see tools/ws0-corpus-gen/README.md)
   --out      directory for the recorded artifacts (created)
   --bin      a labelled ws0-scan-bench binary; give it twice for an A/B
-  --passes   scan passes per run; pass 1 is COLD, 2..N are WARM (default 2)
   --rounds   alternating rounds over the whole arm set (default 5)
 USAGE
 }
@@ -56,7 +57,6 @@ while [ $# -gt 0 ]; do
     --corpus) CORPUS="${2:?--corpus needs a value}"; shift 2 ;;
     --out)    OUT="${2:?--out needs a value}"; shift 2 ;;
     --bin)    BINARIES+=("${2:?--bin needs label=path}"); shift 2 ;;
-    --passes) PASSES="${2:?--passes needs a value}"; shift 2 ;;
     --rounds) ROUNDS="${2:?--rounds needs a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "cold-warm-ab: unrecognized argument: $1" >&2; usage >&2; exit 2 ;;
@@ -86,7 +86,14 @@ for entry in "${BINARIES[@]}"; do
 done
 
 mkdir -p "$OUT"
-INSTANCE=$(curl -s -m 3 -H "X-aws-ec2-metadata-token: $(curl -s -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || echo UNKNOWN)
+IMDS_TOKEN=$(curl -sf -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null || true)
+INSTANCE=$(curl -sf -m 3 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true)
+# A garbled IMDS body must not be recorded as an instance type. Only accept the
+# shape AWS actually emits; anything else is UNKNOWN, which takes the non-i4i arm.
+case "$INSTANCE" in
+  [a-z0-9]*.[a-z0-9]*) : ;;
+  *) INSTANCE=UNKNOWN ;;
+esac
 
 {
   echo "host: $(hostname)"
@@ -101,7 +108,12 @@ INSTANCE=$(curl -s -m 3 -H "X-aws-ec2-metadata-token: $(curl -s -m 3 -X PUT -H '
   echo "loadavg-at-start: $(cut -d' ' -f1-3 /proc/loadavg)"
   echo "corpus: $CORPUS"
   echo "corpus-bytes: $(du -sb "$CORPUS" | cut -f1)"
-  echo "passes-per-run: $PASSES  (pass 1 = COLD, 2..$PASSES = WARM)"
+  _dev=$(findmnt -no SOURCE --target "$CORPUS" 2>/dev/null || echo UNKNOWN)
+  _base=$(lsblk -no PKNAME "$_dev" 2>/dev/null || basename "$_dev")
+  echo "corpus-device: $_dev"
+  echo "corpus-device-model: $(cat "/sys/block/${_base}/device/model" 2>/dev/null | tr -s ' ' || echo UNKNOWN)"
+  echo "corpus-device-read_ahead_kb: $(cat "/sys/block/${_base}/queue/read_ahead_kb" 2>/dev/null || echo UNKNOWN)"
+  echo "phases-per-arm-per-round: cold (cache dropped) + warm (cache resident), each --passes 1, each timed separately"
   echo "rounds: $ROUNDS  (arm order alternates on even rounds)"
   echo "primary-signal: major page faults (per-process, contention-immune)"
   echo "secondary-signal: wall seconds (contended; medians only)"
@@ -111,29 +123,39 @@ INSTANCE=$(curl -s -m 3 -H "X-aws-ec2-metadata-token: $(curl -s -m 3 -X PUT -H '
   done
 } | tee "$OUT/host.txt"
 
-echo "round,arm,wall_secs,max_rss_kb,major_faults,minor_faults" > "$OUT/summary.csv"
+echo "round,arm,phase,wall_secs,max_rss_kb,major_faults,minor_faults" > "$OUT/summary.csv"
+
+# One `/usr/bin/time` invocation per PHASE, each a single-pass run, so every
+# recorded number is attributable to exactly one phase. An earlier version wrapped
+# `--passes N` in ONE invocation, which summed cold+warm into a column the header
+# called cold — a mislabel that would have propagated into the artifact.
+run_phase() {
+  local round="$1" label="$2" path="$3" phase="$4"
+  local tm="$OUT/${label}.round${round}.${phase}.time"
+  local log="$OUT/${label}.round${round}.${phase}.json"
+  if ! /usr/bin/time -f "%e %M %F %R" -o "$tm" \
+      "$path" --corpus "$CORPUS" --passes 1 > "$log" 2> "$OUT/${label}.round${round}.${phase}.err"; then
+    echo "cold-warm-ab: round $round arm $label phase $phase FAILED; see $OUT/${label}.round${round}.${phase}.err" >&2
+    exit 4
+  fi
+  local wall rss majf minf
+  read -r wall rss majf minf < "$tm"
+  echo "$round,$label,$phase,$wall,$rss,$majf,$minf" >> "$OUT/summary.csv"
+  echo "  [$phase] wall=${wall}s max_rss=${rss}kB major_faults=$majf minor_faults=$minf"
+}
 
 for round in $(seq 1 "$ROUNDS"); do
-  # Flip arm order on even rounds so monotonic background drift cannot be
-  # attributed to whichever arm happens to run first.
   order=("${BINARIES[@]}")
   if [ $(( round % 2 )) -eq 0 ]; then
     rev=(); for (( i=${#BINARIES[@]}-1; i>=0; i-- )); do rev+=("${BINARIES[$i]}"); done; order=("${rev[@]}")
   fi
   for entry in "${order[@]}"; do
     label="${entry%%=*}"; path="${entry#*=}"
+    echo "--- round $round arm $label ---"
     sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
-    log="$OUT/${label}.round${round}.json"
-    tm="$OUT/${label}.round${round}.time"
-    echo "--- round $round arm $label (page cache dropped) ---"
-    if ! /usr/bin/time -f "%e %M %F %R" -o "$tm" \
-        "$path" --corpus "$CORPUS" --passes "$PASSES" > "$log" 2> "$OUT/${label}.round${round}.err"; then
-      echo "cold-warm-ab: round $round arm $label FAILED; see $OUT/${label}.round${round}.err" >&2
-      exit 4
-    fi
-    read -r wall rss majf minf < "$tm"
-    echo "$round,$label,$wall,$rss,$majf,$minf" >> "$OUT/summary.csv"
-    echo "  wall=${wall}s max_rss=${rss}kB major_faults=$majf minor_faults=$minf"
+    run_phase "$round" "$label" "$path" cold
+    # No drop here: the corpus is now resident, so this run is the WARM arm.
+    run_phase "$round" "$label" "$path" warm
   done
 done
 

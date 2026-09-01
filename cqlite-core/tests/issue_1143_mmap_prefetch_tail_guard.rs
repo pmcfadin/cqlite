@@ -29,7 +29,8 @@
 //! slowest scan, so a ratio-vs-ratio timing assert flakes nondeterministically on
 //! one scheduler pause even when the prefetch policy mapping is correct. The
 //! deterministic regression guard for the fix is the unit test
-//! `test_mmap_advice_for_auto_is_willneed_never_sequential` (`reader/tests.rs`),
+//! `test_mmap_advice_for_auto_is_willneed_never_sequential`
+//! (`reader/prefetch_advice_tests.rs`),
 //! which asserts `mmap_advice_for(Auto) != Some(Sequential)`; this test remains a
 //! never-flaking load-shape smoke that surfaces the tail shape in logs.
 //! Non-timing correctness IS still enforced: both backends must scan a non-zero
@@ -307,7 +308,7 @@ async fn mmap_auto_prefetch_tail_not_worse_than_buffered() {
     // pause makes a ratio-vs-ratio timing assert flake in CI even when the
     // prefetch policy mapping is correct. The deterministic regression guard is
     // the unit test asserting `mmap_advice_for(Auto) != Some(Sequential)`
-    // (`reader/tests.rs`, retargeted by #2824); this test stays a never-flaking
+    // (`reader/prefetch_advice_tests.rs`, retargeted by #2824); this test stays a never-flaking
     // load-shape smoke that logs the measured tail shape.
     eprintln!(
         "issue #1143 guard (observational): buffered p50={buf_p50:?} p99={buf_p99:?} \

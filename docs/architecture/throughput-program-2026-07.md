@@ -474,7 +474,10 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   central 1.35) pending M0. **L3's disposition is resolved conditionally** (§4): ~1.10× at the assumed
   central `o`, so it does **not** earn the #2 headline slot. **Dep:** none. **Unblocks:** M7 (#2822).
 
-- **M10 (#2824) — madvise(WILLNEED) respec (NEW, P3).** Flip `Auto` to issue the already-built
+- **M10 (#2824) — madvise(WILLNEED) respec (NEW, P3).** *[Updated 2026-09-01: the `WILLNEED` half has
+  SHIPPED as slice 1 — `Auto` no longer maps to `None`, so the "currently gated off" clause below is
+  stale. The `MADV_DONTNEED` half is sliced out to a follow-up; see issue #2824 REQ-2824-02. Priority
+  was raised P3 → P2 by the 2026-08-30 adjudication.]* Flip `Auto` to issue the already-built
   `madvise(MADV_WILLNEED)` at open (`reader/mod.rs:1052`, currently gated off by `PrefetchMode::Auto →
   None`) + `MADV_DONTNEED` post-scan-once; keep `posix_fadvise` only behind an explicit
   buffered/direct backend. **Do NOT reach for `MADV_SEQUENTIAL`** (the #1143 ~2× p99 drop-behind

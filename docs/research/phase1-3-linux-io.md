@@ -70,6 +70,12 @@ every field Data.db**, i.e. page-cache reads with **kernel-default read-ahead an
 
 ### 1c. The one real gap: no explicit read-ahead on the cold sequential scan
 
+> **SUPERSEDED IN PART, 2026-09-01 (issue #2824).** `Auto` now issues **`MADV_WILLNEED`** on the scan
+> mapping (`mmap_advice_for`, `cqlite-core/src/storage/sstable/reader/backend_resolve.rs`); the
+> `reader/mod.rs:316` anchor below is also stale. The `MADV_SEQUENTIAL` prohibition and its
+> drop-behind rationale are UNCHANGED and still binding. The paragraph is left as written because it
+> is a dated research snapshot, not live doctrine.
+
 `Auto` deliberately issues **no `madvise`** (`mmap_advice_for`, `reader/mod.rs:316`; issue #1143):
 `MADV_SEQUENTIAL` couples aggressive read-ahead with **drop-behind**, which evicts hot pages under
 concurrent write load and blew up the read p99 tail (~2×). So the cold mmap scan relies entirely on

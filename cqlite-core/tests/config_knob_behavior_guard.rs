@@ -221,7 +221,7 @@ const KNOBS: &[Knob] = &[
         field: "prefetch",
         evidence: Evidence::Reserved(
             "LIVE (madvise advice / direct-I/O read-ahead window) but performance-only. \
-             The advice mapping IS directly asserted: reader/tests.rs \
+             The advice mapping IS directly asserted: reader/prefetch_advice_tests.rs \
              test_mmap_advice_for_auto_is_willneed_never_sequential pins the default \
              Auto -> MADV_WILLNEED (#2824) and the durable Auto != MADV_SEQUENTIAL \
              invariant (#1143), and test_default_storage_config_advises_willneed pins \
