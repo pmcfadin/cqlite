@@ -602,6 +602,8 @@ manifest = {
         "path": env("AB_CORPUS", ""),
         "served_dir": env("AB_SERVED_DIR", ""),
         "compressed": env("AB_CORPUS_COMPRESSED", "") == "compressed",
+        "storage": env("AB_STORAGE", "NOT-RECORDED"),
+        "storage_detail": env("AB_STORAGE_DETAIL", "NOT-RECORDED"),
         "data_db_bytes": int(env("AB_CORPUS_BYTES", "0")),
         "data_db_files": int(env("AB_CORPUS_FILES", "0")),
         "min_bytes_required": int(env("AB_MIN_CORPUS_BYTES", "0")),
@@ -612,6 +614,8 @@ manifest = {
         "instance_type": env("AB_INSTANCE_TYPE", "NOT-RECORDED"),
         "nproc": int(env("AB_NPROC", "0")),
         "loadavg1": env("AB_LOADAVG1", "NOT-RECORDED"),
+        "load_limit": env("AB_LOAD_LIMIT", "NOT-RECORDED"),
+        "contention": env("AB_CONTENTION", "NOT-RECORDED"),
         "kernel": env("AB_KERNEL", "NOT-RECORDED"),
     },
     "runs": runs,
@@ -696,6 +700,37 @@ export AB_NPROC="$(nproc)"
 export AB_LOADAVG1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo NOT-RECORDED)"
 export AB_KERNEL="$(uname -sr)"
 say "host instance-type $AB_INSTANCE_TYPE nproc $AB_NPROC loadavg1 $AB_LOADAVG1 kernel $AB_KERNEL"
+# CHECK THE PROPERTY THE LABEL STOOD FOR. The acceptance criteria say "field i4i
+# rig", but they do not care about the string -- they care about what it stood
+# for, and one load-bearing part is an UNCONTENDED host. A co-scheduled build or
+# a peer lane steals exactly the CPU this measurement is denominated in, and it
+# steals it from whichever arm happens to be running, which is noise the pairing
+# cannot cancel. Judged against the core count rather than a constant: loadavg 3
+# is idle on 64 cores and saturated on 4.
+AB_LOAD_LIMIT="$(awk -v n="$AB_NPROC" 'BEGIN { l = n / 2; if (l < 2) l = 2; printf "%.2f", l }')"
+export AB_LOAD_LIMIT
+if [ "$AB_LOADAVG1" = "NOT-RECORDED" ]; then
+  AB_CONTENTION='NOT-MEASURABLE'
+  warn "host contention NOT-MEASURABLE -- /proc/loadavg could not be read, so this run cannot say whether the host was quiet. That is a different fact from a quiet host, and it is recorded as itself"
+elif awk -v l="$AB_LOADAVG1" -v m="$AB_LOAD_LIMIT" 'BEGIN { exit !(l > m) }'; then
+  AB_CONTENTION='CONTENDED'
+else
+  AB_CONTENTION='QUIET'
+fi
+export AB_CONTENTION
+say "host contention $AB_CONTENTION loadavg1 $AB_LOADAVG1 limit $AB_LOAD_LIMIT (nproc/2, floor 2)"
+if [ "$AB_CONTENTION" = "CONTENDED" ]; then
+  # DISCLOSED, NOT REFUSED, and the reason is a measured false-red path rather
+  # than a preference. loadavg1 is a DECAYING one-minute average, so it reports
+  # load this session has already finished causing: the driver builds three
+  # worktrees itself, and a re-run minutes later would be refused for the load
+  # its own previous attempt left behind. Refusing there reds a correct rig at
+  # the exact moment an operator is iterating on a metered box -- and the escape
+  # (--control) disclaims the whole verdict, so the refusal would buy nothing and
+  # cost the session. Observed directly: this threshold made a DETERMINISTIC test
+  # suite flaky on a shared host, crossing the limit between two cases of one run.
+  warn "host contention CONTENDED -- the 1-minute load average is $AB_LOADAVG1 on $AB_NPROC cores (limit $AB_LOAD_LIMIT), so something else was using this host at session start. Co-scheduled work steals CPU from whichever arm is running and the pairing cannot cancel it. This is RECORDED and reported beside the verdict, not refused; confirm the box is yours before reporting the result"
+fi
 
 [ -f "$TICKET_TEMPLATE" ] || die ticket-template-absent "$TICKET_TEMPLATE does not exist"
 # THE WORKLOAD MUST MATCH THE CLAIM THE REPORT WILL MAKE ABOUT IT. The #3649
@@ -743,6 +778,23 @@ say "corpus compression $CORPUS_COMPRESSED -- every served SSTable must have a u
 if [ "$CORPUS_COMPRESSED" != "compressed" ] && [ -z "$CONTROL" ]; then
   die corpus-uncompressed \
     "the served directory $SERVED_DIR holds SSTables with no usable CompressionInfo.db. The field is LZ4 (throughput-program-2026-07.md line 21) and removing LZ4 decode removes real CPU from the denominator, so an uncompressed corpus inflates the measured ratio -- the failure is in the direction that looks like success. Run it as a --control if you mean to measure an uncompressed corpus"
+fi
+# THE OTHER HALF OF WHAT `i4i` STOOD FOR: LOCAL NVMe, NOT NETWORK STORAGE. This
+# is what disqualified this lane's own host -- `lsblk` reports *Amazon Elastic
+# Block Store*. A network-backed corpus puts a variable-latency hop inside the
+# read path being measured, which is the confound the rig was chosen to remove.
+# A hostname pattern would red a correct rig the day someone uses i4i.2xlarge;
+# the device model does not.
+AB_STORAGE_RAW="$(python3 "$SUPPORT" probe-storage "$SERVED_DIR" 2>/dev/null || echo 'NOT-MEASURABLE - the probe failed')"
+AB_STORAGE="${AB_STORAGE_RAW%% *}"
+AB_STORAGE_DETAIL="${AB_STORAGE_RAW#* }"
+export AB_STORAGE AB_STORAGE_DETAIL
+say "corpus storage $AB_STORAGE ($AB_STORAGE_DETAIL)"
+if [ "$AB_STORAGE" = "NETWORK" ] && [ -z "$CONTROL" ]; then
+  die corpus-network-storage \
+    "the served directory $SERVED_DIR is backed by network storage ($AB_STORAGE_DETAIL). The #3649 rig is specified as a field i4i box for the property that its corpus is on LOCAL NVMe -- a network hop inside the read path is variable latency added to the quantity being measured. Move the corpus to instance storage, or pass --control <label>"
+elif [ "$AB_STORAGE" = "NOT-MEASURABLE" ]; then
+  warn "corpus storage NOT-MEASURABLE ($AB_STORAGE_DETAIL) -- this run cannot say whether the corpus is on local or network storage. That is a gap in the record, not a verified local disk; confirm it by hand before reporting the result"
 fi
 say "corpus census scope THE SERVED DIRECTORY ONLY -- unrelated tables, snapshots and hard-linked copies elsewhere under --data-dir are deliberately not counted"
 [ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "the served directory $SERVED_DIR holds no *-Data.db files"

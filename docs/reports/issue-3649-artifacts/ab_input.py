@@ -236,6 +236,24 @@ def load_manifest(path, mode):
     _require(manifest, "corpus", dict, "manifest")
     _require(manifest["corpus"], "data_db_bytes", int, "manifest.corpus")
     _require(manifest["corpus"], "data_db_files", int, "manifest.corpus")
+    _require(manifest, "host", dict, "manifest")
+    # THE RIG PROPERTIES MUST BE RECORDED, AND RECORDED AS A KNOWN TOKEN. A
+    # manifest SILENT about them is not the same as one recording
+    # NOT-MEASURABLE: the first did not ask, the second asked and could not tell.
+    # Silence therefore refuses here rather than inheriting the permissive branch
+    # downstream -- the sentinel rule this lane keeps re-learning. The token set
+    # is CLOSED for the same reason: `!= "NETWORK"` would accept a typo.
+    for holder, key, allowed in (
+        ("corpus", "storage", ("LOCAL", "NETWORK", "NOT-MEASURABLE")),
+        ("host", "contention", ("QUIET", "CONTENDED", "NOT-MEASURABLE")),
+    ):
+        value = _require(manifest[holder], key, str, "manifest.%s" % holder)
+        if value not in allowed:
+            raise Unmeasured(
+                "manifest-field",
+                "manifest.%s.%s is %r, which is not one of %s"
+                % (holder, key, value, "|".join(allowed)),
+            )
 
     # A manifest pasted into the wrong section is a real mistake, so it gets its
     # own cause rather than surfacing later as a confusing record-count refusal.

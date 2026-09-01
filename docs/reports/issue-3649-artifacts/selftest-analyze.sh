@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=348
+CASE_FLOOR=360
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -158,12 +158,16 @@ def main():
             "min_bytes_required": 268435456,
             "min_sstables_required": 2,
             "compressed": True,
+            "storage": "LOCAL",
+            "storage_detail": "nvme0n1 Amazon EC2 NVMe Instance Storage",
             "rows_declared": 3999890,
         },
         "host": {
             "instance_type": "i4i.xlarge",
             "nproc": 4,
             "loadavg1": "0.05",
+            "load_limit": "2.00",
+            "contention": "QUIET",
             "kernel": "selftest",
         },
         "runs": runs,
@@ -3123,6 +3127,7 @@ with open(path, encoding="utf-8") as handle:
     manifest = json.load(handle)
 manifest["host"]["instance_type"] = "c7i.4xlarge"
 manifest["host"]["loadavg1"] = "18.4"
+manifest["host"]["contention"] = "CONTENDED"
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
@@ -3138,16 +3143,143 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load aver
 else
   bad "a loaded host was not disclosed"
 fi
+# ---- the properties the `i4i` label stood for -------------------------------
+# CHECK THE PROPERTY, NOT THE LABEL. The acceptance criteria say "field i4i rig";
+# what that stood for is a corpus on LOCAL NVMe on an UNCONTENDED box. Neither is
+# derivable from a host string, and both are measurable. They are dispositioned
+# DIFFERENTLY on purpose -- storage is a stable device fact and is REFUSED;
+# contention is a decaying one-minute average and is DISCLOSED -- so each is
+# pinned to the disposition it actually has, not to a shared idea of rigour.
+for spec in \
+  "NETWORK:nvme0n1 Amazon Elastic Block Store:refuse" \
+  "NOT-MEASURABLE:- no device model:disclose"
+do
+  token="${spec%%:*}"; rest="${spec#*:}"
+  detail="${rest%%:*}"; want="${rest##*:}"
+  mkfixture "$TMP/storage-$want" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_TOKEN="$token" AB_DETAIL="$detail" python3 - "$TMP/storage-$want/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["storage"] = os.environ["AB_TOKEN"]
+manifest["corpus"]["storage_detail"] = os.environ["AB_DETAIL"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/storage-$want"
+  if [ "$want" = refuse ]; then
+    check_verdict "a corpus on network storage" UNMEASURED 7 single-stream
+    check_cause "a network-backed corpus" corpus-network-storage
+  else
+    check_verdict "a corpus whose storage could not be measured" MEETS-TARGET 0 single-stream
+    if grep -q '^AB-3649: verdict-detail single-stream STORAGE whether the corpus sits on local or network storage could not be measured' "$TMP/out.txt"; then
+      ok "an unmeasurable storage probe is disclosed as a gap, not scored as local"
+    else
+      bad "an unmeasurable storage probe was neither refused nor disclosed"
+    fi
+  fi
+done
+
+# A CLOSED TOKEN SET, because `!= "NETWORK"` accepts a typo -- and SILENCE is not
+# NOT-MEASURABLE: a manifest that never asked and one that asked and could not
+# tell are different facts, so the first refuses instead of inheriting the
+# permissive branch. This is the sentinel rule applied to the record itself.
+for spec in "corpus:storage:LOACL" "host:contention:probably fine"; do
+  holder="${spec%%:*}"; rest="${spec#*:}"; key="${rest%%:*}"; value="${rest##*:}"
+  mkfixture "$TMP/rigtok" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_H="$holder" AB_K="$key" AB_V="$value" python3 - "$TMP/rigtok/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest[os.environ["AB_H"]][os.environ["AB_K"]] = os.environ["AB_V"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rigtok"
+  check_cause "an unrecognised $holder.$key token is refused, not read as 'not the bad one'" manifest-field
+done
+for spec in "corpus:storage" "host:contention"; do
+  holder="${spec%%:*}"; key="${spec##*:}"
+  mkfixture "$TMP/rigmissing" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_H="$holder" AB_K="$key" python3 - "$TMP/rigmissing/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest[os.environ["AB_H"]][os.environ["AB_K"]]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rigmissing"
+  check_cause "a manifest silent about $holder.$key refuses rather than passing as unmeasurable" manifest-field
+done
+
+# The contention disclosure is keyed on the RECORDED TOKEN, so NOT-MEASURABLE
+# reports itself. The predecessor read it as a quiet box (`except ValueError:
+# busy = False`) -- a third value crammed into a two-valued test.
+mkfixture "$TMP/nocontention" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/nocontention/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["contention"] = "NOT-MEASURABLE"
+manifest["host"]["loadavg1"] = "NOT-RECORDED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/nocontention"
+if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was contended could not be measured' "$TMP/out.txt"; then
+  ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
+else
+  bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# The storage PROBE itself, against real paths. `/` on this box is EBS-backed, so
+# the NETWORK arm is exercised against a genuine device rather than a mock; a box
+# where it is not simply reports LOCAL or NOT-MEASURABLE, all three of which are
+# recognised tokens, which is the property under test.
+probe_out="$(python3 "$SUPPORT" probe-storage / 2>/dev/null || echo 'FAILED - -')"
+case "${probe_out%% *}" in
+  LOCAL|NETWORK|NOT-MEASURABLE)
+    ok "probe-storage answers with a recognised token for a real path" ;;
+  *)
+    bad "probe-storage answered '${probe_out%% *}', which is not a recognised token" ;;
+esac
+if python3 "$SUPPORT" probe-storage /no/such/path 2>/dev/null | grep -q '^NOT-MEASURABLE '; then
+  ok "probe-storage reports an unresolvable path as NOT-MEASURABLE, not as local"
+else
+  bad "probe-storage did not report an unresolvable path as NOT-MEASURABLE"
+fi
+
 run_analyzer "$TMP/meets"
 if grep -q '^AB-3649: verdict-detail single-stream HOST ' "$TMP/out.txt"; then
   bad "an i4i session on a quiet box printed a host disclosure it does not need"
 else
   ok "an i4i session on a quiet box carries no host disclosure"
 fi
-if grep -q '^AB-3649: sections-note only one quantity was supplied' "$TMP/out.txt"; then
-  ok "a single-section report says the criteria need both quantities"
+if [ "$(grep -c '^AB-3649: sections-coverage this run covers single-stream' "$TMP/out.txt")" = 2 ]; then
+  ok "a single-section report names the missing quantity, before AND after the verdict"
 else
-  bad "a single-section report did not note the missing quantity"
+  bad "a single-section report did not name the missing quantity twice"
+fi
+if grep -q '^AB-3649: sections-coverage .*does NOT cover utilization' "$TMP/out.txt"; then
+  ok "the coverage note names the quantity that is missing, not just that one is"
+else
+  bad "the coverage note did not name the absent quantity"
 fi
 
 echo

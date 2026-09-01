@@ -258,6 +258,25 @@ def render_common(manifest, mode, admission, session):
     # about the table under measurement.
     out("corpus served-dir %s" % field(manifest, "corpus", "served_dir"))
     out("corpus compressed %s" % field(manifest, "corpus", "compressed"))
+    # THE PROPERTIES THE `i4i` LABEL STOOD FOR, reported as themselves. A rig
+    # class is not reliably derivable from a hostname, but the two things the
+    # class was chosen FOR are measurable, and each is reported separately: a
+    # NOT-MEASURABLE storage probe and a verified local disk are different facts.
+    out(
+        "corpus storage %s (%s)"
+        % (
+            field(manifest, "corpus", "storage"),
+            field(manifest, "corpus", "storage_detail"),
+        )
+    )
+    out(
+        "host contention %s loadavg1 %s limit %s"
+        % (
+            field(manifest, "host", "contention"),
+            field(manifest, "host", "loadavg1"),
+            field(manifest, "host", "load_limit"),
+        )
+    )
     out(
         "corpus data-db-bytes %s data-db-files %s min-required-bytes %s"
         % (
@@ -405,6 +424,23 @@ def analyze(mode, path, opts):
             "measure",
         )
 
+    # THE RIG PROPERTIES, RE-CHECKED HERE FOR THE SAME REASON AS COMPRESSION: a
+    # manifest is data, and this analyzer does not get to assume which driver
+    # produced it. Both refusals are on an AFFIRMATIVE bad value -- `NETWORK` and
+    # `CONTENDED` -- never on the absence of a good one, because a probe that
+    # could not run is a gap in the record and reporting it as a gap is the
+    # honest answer. Refusing on NOT-MEASURABLE would red a correct rig whose
+    # corpus happens to sit on a device mapper.
+    if not control and manifest["corpus"].get("storage") == "NETWORK":
+        raise Unmeasured(
+            "corpus-network-storage",
+            "the manifest records the served corpus on network storage (%s). The "
+            "#3649 rig is a field i4i box for the property that its corpus is on "
+            "LOCAL NVMe; a network hop inside the read path is variable latency "
+            "added to the very quantity being measured. Label the session "
+            "--control if that is what you meant to measure"
+            % manifest["corpus"].get("storage_detail", "no detail recorded"),
+        )
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
     )
@@ -853,17 +889,38 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
             "so it is DISCLOSED: a verdict measured off the named rig is not the "
             "verdict the criteria ask for" % (mode, host_type)
         )
-    loadavg = field(manifest, "host", "loadavg1")
-    try:
-        busy = float(loadavg) > 2.0
-    except ValueError:
-        busy = False
-    if busy:
+    # CONTENTION, from the token the driver RECORDED rather than re-derived here.
+    # The previous form was `float(loadavg) > 2.0` under `except ValueError:
+    # busy = False`, which quietly read NOT-RECORDED as a quiet box -- a third
+    # value crammed into a two-valued test, the exact class this lane keeps
+    # finding. Each state now says what it is, and NOT-MEASURABLE is not a pass.
+    contention = field(manifest, "host", "contention")
+    if contention == "CONTENDED":
         out(
             "verdict-detail %s HOST the one-minute load average at session start "
-            "was %s. A contended box is the condition this issue exists because of "
-            "-- the proxy bench it rejected measured the box as much as the branch"
-            % (mode, loadavg)
+            "was %s against a limit of %s, so something else was using the box. A "
+            "contended host is the condition this issue exists because of -- the "
+            "proxy bench it rejected measured the box as much as the branch. This "
+            "is DISCLOSED, not refused: loadavg decays over a minute, so it also "
+            "reports load the session itself has finished causing, and refusing "
+            "would red a correct rig on an operator's second attempt"
+            % (mode, field(manifest, "host", "loadavg1"),
+               field(manifest, "host", "load_limit"))
+        )
+    elif contention == "NOT-MEASURABLE":
+        out(
+            "verdict-detail %s HOST whether the box was contended could not be "
+            "measured. That is a gap in the record, not a quiet host" % mode
+        )
+    # LOCAL STORAGE -- the other property the `i4i` label stood for. NETWORK is
+    # refused upstream; only the unmeasurable state reaches here, and it is
+    # reported as itself rather than as a verified local disk.
+    if field(manifest, "corpus", "storage") == "NOT-MEASURABLE":
+        out(
+            "verdict-detail %s STORAGE whether the corpus sits on local or "
+            "network storage could not be measured (%s). The rig is specified for "
+            "local NVMe; confirm it by hand before reporting this verdict"
+            % (mode, field(manifest, "corpus", "storage_detail"))
         )
     for line in non_exhaustive_lines(mode, len(pairs)):
         out("verdict-detail %s NON-EXHAUSTIVE %s" % (mode, line))
@@ -926,20 +983,30 @@ def _main(argv):
         requested.append((MODE_UTILIZATION, opts["utilization"]))
 
     out("=== issue #3649 -- served-path A/B throughput, #2820 batched merge fan-in ===")
-    out("sections %s" % ",".join(mode for mode, _ in requested))
-    if len(requested) < 2:
-        out(
-            "sections-note only one quantity was supplied. The acceptance criteria "
-            "name BOTH a single-stream target band and a utilization direction, so "
-            "one section cannot cover them; this is a statement about coverage, "
-            "not about the section that ran"
-        )
+    # A REPORT THAT COVERS ONE QUANTITY AND IS SILENT ABOUT THE OTHER IS HOW AN
+    # INCOMPLETE SESSION GETS READ AS A COMPLETE ANSWER -- the same class as a PR
+    # body over-claiming. So the coverage is stated in the report's OWN output,
+    # naming the quantity that is missing, at the top AND after the verdicts:
+    # a reader who scrolls to the verdict must not have to remember a header.
+    covered = [mode for mode, _ in requested]
+    missing = [m for m in (MODE_SINGLE_STREAM, MODE_UTILIZATION) if m not in covered]
+    out("sections %s" % ",".join(covered))
+    coverage_note = (
+        "sections-coverage this run covers %s. The acceptance criteria require "
+        "BOTH the single-stream target band and the utilization direction, so it "
+        "does NOT cover %s and does not discharge the criteria on its own"
+        % (",".join(covered), ",".join(missing))
+    )
+    if missing:
+        out(coverage_note)
     for mode, path in requested:
         out("manifest %s %s" % (mode, path))
 
     codes = []
     for mode, path in requested:
         codes.append(SECTION_EXIT[run_section(mode, path, opts)])
+    if missing:
+        out(coverage_note)
     return max(codes)
 
 

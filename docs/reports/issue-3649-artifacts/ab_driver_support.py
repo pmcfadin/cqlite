@@ -30,6 +30,7 @@ strip the wrong thing. It writes exactly one line: the value, or the literal
 import json
 import os
 import re
+import subprocess
 import sys
 
 from ab_common import MIN_CORPUS_BYTES_FLOOR, MIN_SSTABLES_FLOOR, err, out
@@ -44,6 +45,7 @@ USAGE = [
     "ab_driver_support.py resolve-session <batch> <maxbytes> <wait> <scans> "
     "<min-bytes> <min-sstables> <ramp> <control> <base-extra> <head-extra>",
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
+    "ab_driver_support.py probe-storage <path>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
     "ab_driver_support.py parse-duration <value>",
@@ -985,6 +987,48 @@ def _ansi_stripped(text):
     return _ANSI.sub("", text)
 
 
+def probe_storage(path):
+    """Is this path on LOCAL storage, or on the network?
+
+    CHECK THE PROPERTY THE LABEL STOOD FOR. The acceptance criteria name the
+    field i4i rig, but they do not care about the string `i4i` -- they care about
+    what it stood for, and the load-bearing part is **local NVMe rather than
+    network storage**. That is what disqualified this lane's host: `lsblk` reports
+    *Amazon Elastic Block Store* for its devices. A hostname pattern would red a
+    correct rig the day someone uses `i4i.2xlarge`; the device model does not.
+
+    THREE-VALUED, and the third value is not a pass. `NOT-MEASURABLE` on a
+    platform that exposes no device model is a different fact from `LOCAL`, and
+    only one of them is a gap.
+    """
+    try:
+        source = subprocess.run(
+            ["df", "--output=source", path],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "NOT-MEASURABLE", "-", "df failed: %s" % exc
+    lines = [l.strip() for l in source.stdout.splitlines() if l.strip()]
+    if source.returncode != 0 or len(lines) < 2:
+        return "NOT-MEASURABLE", "-", "df did not name a device"
+    device = os.path.basename(lines[-1])
+    # `nvme0n1p3` -> `nvme0n1`, `sda1` -> `sda`; a mapper/overlay name simply
+    # will not have a model file, which lands in NOT-MEASURABLE.
+    base = re.sub(r"(p?\d+)$", "", device) if not os.path.exists(
+        "/sys/block/%s" % device) else device
+    model_path = "/sys/block/%s/device/model" % base
+    try:
+        with open(model_path, encoding="utf-8", errors="replace") as handle:
+            model = handle.read().strip()
+    except OSError:
+        return "NOT-MEASURABLE", base, "no device model at %s" % model_path
+    if not model:
+        return "NOT-MEASURABLE", base, "the device model is empty"
+    if "elastic block store" in model.lower():
+        return "NETWORK", base, model
+    return "LOCAL", base, model
+
+
 def parse_startup(path, want):
     """The resolved admission ceiling, or its provenance, from the server's own
     startup line -- or the literal NOT-OBSERVED.
@@ -1014,6 +1058,13 @@ def main(argv):
             err(line)
         return 2
     command, rest = argv[0], argv[1:]
+    if command == "probe-storage":
+        if len(rest) != 1:
+            err("usage-error probe-storage needs <path>")
+            return 2
+        verdict, device, detail = probe_storage(rest[0])
+        sys.stdout.write("%s %s %s\n" % (verdict, device, detail))
+        return 0
     if command == "census-served":
         if len(rest) != 2:
             err("usage-error census-served needs <data-dir> <ticket.json>")
