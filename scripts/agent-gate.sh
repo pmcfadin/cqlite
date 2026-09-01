@@ -266,9 +266,12 @@
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   dep-duplicates     ADVISORY DUPLICATE-DEPENDENCY RATCHET
 #                      (scripts/ci/check-dep-duplicates.sh, issue #1700 AH7).
-#                      Measures `cargo tree -d --workspace` — the audit's own
-#                      invocation; the BARE `cargo tree -d` reads the ROOT PACKAGE
-#                      only and reports a small fraction of it — and compares the
+#                      Measures `cargo tree -d --workspace --target all` — the
+#                      audit's own invocation; the BARE `cargo tree -d` reads the
+#                      ROOT PACKAGE only and reports a small fraction of it, and
+#                      without `--target all` cargo measures the HOST target, so a
+#                      COMMITTED baseline would mean different things on a Linux
+#                      lane and a macOS one — and compares the
 #                      duplicate-instance / duplicated-crate counts against the
 #                      committed baseline scripts/ci/dep-duplicates-baseline.txt
 #                      (a generated file; one documented regeneration command,
@@ -6710,18 +6713,19 @@ _fm_component_class() {
     # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
     # command the component runs); the feature set is NOT claimed.
     python-bindings) printf 'indirect:maturin' ;;
-    # dep-duplicates: `cargo tree -d --workspace` runs inside
+    # dep-duplicates: `cargo tree -d --workspace --target all` runs inside
     # scripts/ci/check-dep-duplicates.sh — a CHILD PROCESS — and the interceptors above
     # are deliberately unexported, so class `cargo` would be an unexercisable claim of
     # observability (the roborev job 273 F2 defect) and would render UNDECLARED. There IS
     # one nameable driver whose reach is recordable from an EXPLICIT signal (the guard
-    # prints `dep-duplicates: probe cargo tree -d --workspace INVOKED (rc N)` before any
+    # prints `dep-duplicates: probe cargo tree -d --workspace --target all INVOKED
+    # (rc N)` before any
     # verdict, and run_dep_duplicates records reach from THAT line, never from the
     # terminal status), so this is `indirect:`, not `unobservable:`. The driver text names
     # the probe AND that it compiles nothing, because `cargo tree` is a metadata query:
     # _fm_describe_cargo rejects such invocations by design, so there is no feature set
     # anybody could have observed here even in the gate's own shell.
-    dep-duplicates)  printf 'indirect:check-dep-duplicates.sh (cargo tree -d --workspace; a metadata probe, compiles nothing)' ;;
+    dep-duplicates)  printf 'indirect:check-dep-duplicates.sh (cargo tree -d --workspace --target all; a metadata probe, compiles nothing)' ;;
     node-bindings)   printf 'indirect:npm run build (napi)' ;;
     fmt|clippy|core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'cargo' ;;
     byte-budget-guard|arrow-parity-guard|memory-budget|integration-tests) printf 'cargo' ;;
@@ -16267,12 +16271,15 @@ run_pub_surface() {
 }
 
 # dep-duplicates: the ADVISORY DUPLICATE-DEPENDENCY RATCHET (issue #1700 AH7).
-# scripts/ci/check-dep-duplicates.sh measures `cargo tree -d --workspace` and compares
-# the duplicate-instance / duplicated-crate counts against the committed baseline
-# scripts/ci/dep-duplicates-baseline.txt. `--workspace` is load-bearing: the bare
-# `cargo tree -d` reads the ROOT PACKAGE only (this workspace HAS a root package, so
-# cargo's default member set is that one package) and reports a small fraction of the
-# subject, so a ratchet over the bare form would be blind to most of it.
+# scripts/ci/check-dep-duplicates.sh measures `cargo tree -d --workspace --target all`
+# and compares the duplicate-instance / duplicated-crate counts against the committed
+# baseline scripts/ci/dep-duplicates-baseline.txt. BOTH flags are load-bearing:
+# `--workspace` because the bare `cargo tree -d` reads the ROOT PACKAGE only (this
+# workspace HAS a root package, so cargo's default member set is that one package) and a
+# ratchet over the bare form would be blind to most of the subject; `--target all`
+# because `cargo tree` otherwise measures the HOST target, so the COMMITTED baseline
+# would mean a different thing on a Linux lane than on a macOS one and each would report
+# a phantom advisory delta against the other's numbers.
 #
 # THIS COMPONENT NEVER EMITS FAIL, and that is a mandate rather than an oversight
 # (#1700 AC2). An increase in duplication is a signal to a human: a legitimate new

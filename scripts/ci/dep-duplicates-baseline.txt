@@ -3,7 +3,7 @@
 #
 #   bash scripts/ci/check-dep-duplicates.sh --regenerate
 #
-# WHAT IT IS. The duplicate-dependency census of `cargo tree -d --workspace`: one `instances` total,
+# WHAT IT IS. The duplicate-dependency census of `cargo tree -d --workspace --target all`: one `instances` total,
 # one `crates` total, and one `crate <name> <n>` line per duplicated crate. The gate's
 # ADVISORY `dep-duplicates` component re-measures and compares against it.
 #
@@ -14,11 +14,14 @@
 # pins `hashbrown` five ways — and pinning it away with `[patch]` is explicitly out of
 # scope.
 #
-# THE INVOCATION IS PINNED. `--workspace` is load-bearing: the bare `cargo tree -d`
-# reads the ROOT PACKAGE only and reports a small fraction of this. `--all-features`
-# reports a different, larger graph. Changing the invocation invalidates every number
-# below, so change it in scripts/ci/check-dep-duplicates.sh and regenerate here in one
-# commit.
+# THE INVOCATION IS PINNED, AND BOTH FLAGS ARE LOAD-BEARING. `--workspace`: the bare
+# `cargo tree -d` reads the ROOT PACKAGE only and reports a small fraction of this.
+# `--target all`: `cargo tree` otherwise defaults to the HOST target, so this COMMITTED
+# file would mean a different thing on a Linux lane than on a macOS one — a phantom
+# advisory delta with no dependency change at all. `--all-features` reports a different,
+# larger graph again and is deliberately not used. Changing the invocation invalidates
+# every number below, so change it in scripts/ci/check-dep-duplicates.sh and regenerate
+# here in one commit.
 #
 # GRAMMAR (closed; the reader REFUSES rather than guesses, and does not trim):
 #   `instances <N>`      exactly once
@@ -26,8 +29,8 @@
 #   `crate <name> <n>`   once per duplicated crate, n >= 2
 #   blank lines and lines whose FIRST character is `#` are skipped
 #   the `crate` lines must COHERE with the totals (count == crates, sum == instances)
-instances 73
-crates 32
+instances 114
+crates 46
 crate anstream 2
 crate anstyle-parse 2
 crate base64 2
@@ -35,11 +38,12 @@ crate bitflags 2
 crate console 2
 crate float-cmp 2
 crate foldhash 2
-crate getrandom 3
+crate getrandom 5
 crate hashbrown 5
 crate heck 2
 crate indexmap 2
 crate itertools 3
+crate jiff-core 2
 crate libc 2
 crate lru 2
 crate mio 2
@@ -47,6 +51,7 @@ crate nix 2
 crate nom 2
 crate predicates 2
 crate quick-xml 2
+crate r-efi 2
 crate rand 3
 crate rand_chacha 2
 crate rand_core 3
@@ -59,4 +64,16 @@ crate toml_datetime 2
 crate tower 2
 crate twox-hash 2
 crate unicode-width 2
+crate wasi 2
+crate windows-core 2
+crate windows-sys 5
+crate windows-targets 3
+crate windows_aarch64_gnullvm 3
+crate windows_aarch64_msvc 3
+crate windows_i686_gnu 3
+crate windows_i686_gnullvm 2
+crate windows_i686_msvc 3
+crate windows_x86_64_gnu 3
+crate windows_x86_64_gnullvm 3
+crate windows_x86_64_msvc 3
 crate winnow 2

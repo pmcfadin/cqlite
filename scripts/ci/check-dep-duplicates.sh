@@ -59,7 +59,7 @@
 #
 # # What is measured, pinned
 #
-#   cargo tree -d --workspace
+#   cargo tree -d --workspace --target all
 #
 # THE `--workspace` IS LOAD-BEARING and is the audit's own invocation. The BARE
 # `cargo tree -d` resolves the ROOT PACKAGE only (this workspace has a root package, so
@@ -67,6 +67,17 @@
 # workspace reports 88/37. A ratchet over the bare form would be blind to five sixths of
 # the subject. `--all-features` is deliberately NOT used: it reports a different, larger
 # graph (127/56 at the time of writing), and the baseline must pin ONE invocation.
+#
+# `--target all` IS LOAD-BEARING FOR A DIFFERENT REASON: THE BASELINE IS COMMITTED.
+# `cargo tree` defaults to the HOST target, so without it the census is a function of the
+# BOX — a Linux lane and a macOS lane measure different graphs from the same lockfile with
+# no dependency change at all, and one of them then reports a phantom ADVISORY delta
+# against a file the other committed. A committed baseline has to mean the same thing on
+# every gate host, and macOS is a first-class one here (the `gtimeout` handling below is
+# the same fact). `--target all` makes the subject the whole lockfile instead of whatever
+# this box happens to be. It necessarily reports MORE than the host-only form (73/32 ->
+# 114/46 on this workspace), which is the point: those rows were always in the lockfile,
+# they were merely invisible from one platform.
 #
 # An INSTANCE is one column-zero `<name> v<version>` line of that output — i.e. one
 # member of one duplicate group. A CRATE is one distinct name among them. (A crate can
@@ -95,7 +106,8 @@
 # # Stated boundary (do not overclaim)
 #
 # A clean result means: the duplicate-instance and duplicate-crate counts of
-# `cargo tree -d --workspace` are not GREATER than the committed baseline's. It says
+# `cargo tree -d --workspace --target all` are not GREATER than the committed
+# baseline's. It says
 # nothing about whether any duplication is justified, nothing about which versions are
 # resolved, nothing about security advisories (that is `cargo deny`/`cargo audit`), and
 # nothing about features. It is a RATCHET, not a target: the goal is "not worse", and a
@@ -119,7 +131,7 @@ MANIFEST="$REPO_ROOT/$MANIFEST_REL"
 
 # The ONE spelling of the measured invocation. Named once so the script, its diagnostics
 # and the baseline header cannot drift into three descriptions of two commands.
-readonly PROBE_DESC='cargo tree -d --workspace'
+readonly PROBE_DESC='cargo tree -d --workspace --target all'
 # THE BOUND ON THE PROBE, AND IT IS A REAL BOUND OR THERE IS NO PROBE.
 #
 # `timeout <n> cmd` sends SIGTERM ONLY. A cargo — or any child of it — that ignores,
@@ -137,8 +149,10 @@ usage() {
 Usage: scripts/ci/check-dep-duplicates.sh [--regenerate] [--help]
 
 The ADVISORY duplicate-dependency ratchet (issue #1700). Measures
-`cargo tree -d --workspace` and compares the duplicate-instance / duplicate-crate
-counts against scripts/ci/dep-duplicates-baseline.txt.
+`cargo tree -d --workspace --target all` and compares the duplicate-instance /
+duplicate-crate counts against scripts/ci/dep-duplicates-baseline.txt. `--target all`
+is what makes the COMMITTED baseline mean the same thing on every gate host: cargo
+tree otherwise defaults to the HOST target.
 
   (no flags)      Measure and compare. Exit 0 = compared (verdict NO-INCREASE or
                   ADVISORY-INCREASE — an increase is ADVISORY and never fails).
@@ -208,7 +222,8 @@ cleanup() { rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# 1) MEASURE. `cargo tree -d --workspace`, captured to a file, ANSI-stripped, parsed by
+# 1) MEASURE. `cargo tree -d --workspace --target all`, captured to a file,
+#    ANSI-stripped, parsed by
 #    redirection.
 # ---------------------------------------------------------------------------
 # `type -P`, NEVER `command -v` (agent-gate.sh's B6 rule): `command -v` finds shell
@@ -247,7 +262,7 @@ probe_rc=0
 # actually bounded by rather than leaving a reader to trust this comment.
 say "probe bound: $TIMEOUT_BIN ${PROBE_TIMEOUT_SECS}s then SIGKILL after a further ${PROBE_KILL_GRACE_SECS}s"
 CARGO_TERM_COLOR=never "$TIMEOUT_BIN" -k "$PROBE_KILL_GRACE_SECS" "$PROBE_TIMEOUT_SECS" \
-  "$CARGO_BIN" tree -d --workspace --manifest-path "$MANIFEST" \
+  "$CARGO_BIN" tree -d --workspace --target all --manifest-path "$MANIFEST" \
   >"$TREE_RAW" 2>"$TREE_ERR" || probe_rc=$?
 # The EXPLICIT REACH SIGNAL the gate component reads (#3453): "cargo was invoked, and
 # here is what it returned". Printed unconditionally, before any verdict, so a component
@@ -421,11 +436,14 @@ if [ "$MODE" = regenerate ]; then
 # pins \`hashbrown\` five ways — and pinning it away with \`[patch]\` is explicitly out of
 # scope.
 #
-# THE INVOCATION IS PINNED. \`--workspace\` is load-bearing: the bare \`cargo tree -d\`
-# reads the ROOT PACKAGE only and reports a small fraction of this. \`--all-features\`
-# reports a different, larger graph. Changing the invocation invalidates every number
-# below, so change it in scripts/ci/check-dep-duplicates.sh and regenerate here in one
-# commit.
+# THE INVOCATION IS PINNED, AND BOTH FLAGS ARE LOAD-BEARING. \`--workspace\`: the bare
+# \`cargo tree -d\` reads the ROOT PACKAGE only and reports a small fraction of this.
+# \`--target all\`: \`cargo tree\` otherwise defaults to the HOST target, so this COMMITTED
+# file would mean a different thing on a Linux lane than on a macOS one — a phantom
+# advisory delta with no dependency change at all. \`--all-features\` reports a different,
+# larger graph again and is deliberately not used. Changing the invocation invalidates
+# every number below, so change it in scripts/ci/check-dep-duplicates.sh and regenerate
+# here in one commit.
 #
 # GRAMMAR (closed; the reader REFUSES rather than guesses, and does not trim):
 #   \`instances <N>\`      exactly once

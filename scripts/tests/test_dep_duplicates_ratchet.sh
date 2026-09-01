@@ -263,8 +263,10 @@ new_tree() {
 plant_cargo() {
   local d="$1" rc="$2" writer="$3"
   "$writer" > "$d/planted-tree.txt"
+  rm -f "$d/cargo-argv.txt"
   cat > "$d/bin/cargo" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$d/cargo-argv.txt"
 if [ "\${1:-}" = tree ]; then
   cat "$d/planted-tree.txt"
   [ "$rc" -eq 0 ] || echo "error: planted cargo failure" >&2
@@ -379,7 +381,7 @@ esac
 # --- P8: cargo tree failed ------------------------------------------------
 d=$(new_tree p8); plant_cargo "$d" 101 tree_baseline; run_guard "$d"
 assert_case "P8: a non-zero cargo tree is UNMEASURABLE (exit 3), naming the cause and cargo's own first error line" \
-  3 'probe cargo tree -d --workspace INVOKED (rc 101)' 'SKIP-UNMEASURABLE cause=cargo-tree-failed' 'planted cargo failure'
+  3 'probe cargo tree -d --workspace --target all INVOKED (rc 101)' 'SKIP-UNMEASURABLE cause=cargo-tree-failed' 'planted cargo failure'
 
 # --- P9: cargo absent -----------------------------------------------------
 d=$(new_tree p9); plant_cargo "$d" 0 tree_baseline
@@ -480,6 +482,42 @@ assert_case "P18b: a FOREIGN column-zero line (a diagnostic on stdout) is UNMEAS
 d=$(new_tree p19); plant_cargo "$d" 0 tree_with_section_header; run_guard "$d"
 assert_case "P19: a real [dev-dependencies] section header is RECOGNISED, not called malformed (strictness must not red on correct cargo output)" \
   0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE (4/2 vs baseline 4/2)'
+
+# --- P20: THE MEASURED SUBJECT IS PLATFORM-INDEPENDENT --------------------
+# THE DEFECT THIS PINS (roborev, #1700): `cargo tree` defaults to the HOST target, so the
+# committed baseline drifted between Linux and macOS with no dependency change at all —
+# a misleading ADVISORY delta on every non-Linux lane, from a file that is COMMITTED and
+# therefore has to mean the same thing everywhere. `--target all` makes the subject the
+# whole lockfile rather than whatever this box happens to be.
+#
+# It also pins that the PRINTED DESCRIPTION IS NOT A FICTION: the guard names its probe in
+# the gate log, and a description that drifts from the argv is worse than none, because it
+# is what stops the next person looking. Every word of the described command must appear
+# in the argv the shim actually received.
+d=$(new_tree p20); plant_cargo "$d" 0 tree_baseline; run_guard "$d"
+p20_argv="$(cat "$d/cargo-argv.txt" 2>/dev/null || true)"
+p20_missing=""
+for _w in tree -d --workspace --target all; do
+  case " $p20_argv " in *" $_w "*) ;; *) p20_missing="$p20_missing $_w" ;; esac
+done
+if [ -z "$p20_missing" ]; then
+  ok "P20a: the probe is invoked with a PLATFORM-INDEPENDENT subject (tree -d --workspace --target all), so the committed baseline means the same thing on every gate host"
+else
+  bad "P20a: the probe's argv is missing$p20_missing — the measured subject is host-dependent (cargo tree defaults to the HOST target): argv was '$p20_argv'"
+fi
+# The described command, taken from the guard's own `probe … INVOKED` line, must be
+# covered by that argv — the description and the command may not drift apart.
+p20_desc="$(printf '%s\n' "$OUT" | sed -n 's/^dep-duplicates: probe \(.*\) INVOKED .*/\1/p' | head -1)"
+p20_undescribed=""
+for _w in $p20_desc; do
+  case "$_w" in cargo) continue ;; esac
+  case " $p20_argv " in *" $_w "*) ;; *) p20_undescribed="$p20_undescribed $_w" ;; esac
+done
+if [ -n "$p20_desc" ] && [ -z "$p20_undescribed" ]; then
+  ok "P20b: every word of the DESCRIBED probe ('$p20_desc') really appears in the argv cargo received — the gate log's description is not a fiction"
+else
+  bad "P20b: the described probe ('${p20_desc:-<none>}') claims$p20_undescribed, which cargo never received: argv was '$p20_argv'"
+fi
 
 # --- P12: --regenerate round trip ----------------------------------------
 d=$(new_tree p12 none); plant_cargo "$d" 0 tree_grew
@@ -691,8 +729,8 @@ else
     # asserted against an input this suite CONTROLS.
     COMPONENT_LOG="$TMPROOT/g1a.log"
     line=$(component_run '#!/usr/bin/env bash
-echo "dep-duplicates: probe cargo tree -d --workspace INVOKED (rc 0)"
-echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace"
+echo "dep-duplicates: probe cargo tree -d --workspace --target all INVOKED (rc 0)"
+echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace --target all"
 echo "dep-duplicates: 0 INCREASE RECOGNISED — 4 duplicate instance(s) / 2 duplicated crate(s) vs baseline 4/2"
 echo "dep-duplicates: verdict NO-INCREASE (4/2 vs baseline 4/2)"
 exit 0')
@@ -719,8 +757,8 @@ exit 0')
     # ADVISORY-INCREASE block echoed where a human will see it.
     COMPONENT_LOG="$TMPROOT/g1b.log"
     line=$(component_run '#!/usr/bin/env bash
-echo "dep-duplicates: probe cargo tree -d --workspace INVOKED (rc 0)"
-echo "dep-duplicates: MEASURED 6 duplicate instance(s) / 3 duplicated crate(s) from cargo tree -d --workspace"
+echo "dep-duplicates: probe cargo tree -d --workspace --target all INVOKED (rc 0)"
+echo "dep-duplicates: MEASURED 6 duplicate instance(s) / 3 duplicated crate(s) from cargo tree -d --workspace --target all"
 echo "dep-duplicates: ADVISORY-INCREASE the duplicate census GREW: 6 instance(s) vs baseline 4 (delta +2), 3 crate(s) vs baseline 2 (delta +1)"
 echo "dep-duplicates: ADVISORY-INCREASE crates newly duplicated: baz(2)"
 echo "dep-duplicates: verdict ADVISORY-INCREASE (6/3 vs baseline 4/2)"
@@ -741,7 +779,7 @@ exit 0')
     # defect the reach recording exists to fix.
     COMPONENT_LOG="$TMPROOT/g1c.log"
     line=$(component_run '#!/usr/bin/env bash
-echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace"
+echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace --target all"
 echo "dep-duplicates: 0 INCREASE RECOGNISED — 4 duplicate instance(s) / 2 duplicated crate(s) vs baseline 4/2"
 echo "dep-duplicates: verdict NO-INCREASE (4/2 vs baseline 4/2)"
 exit 0')
@@ -766,7 +804,7 @@ exit 3')
     fi
     COMPONENT_LOG="$TMPROOT/g2b.log"
     line=$(component_run '#!/usr/bin/env bash
-echo "dep-duplicates: probe cargo tree -d --workspace INVOKED (rc 0)"
+echo "dep-duplicates: probe cargo tree -d --workspace --target all INVOKED (rc 0)"
 echo "dep-duplicates: MEASURED 0 duplicate instance(s) / 0 duplicated crate(s)"
 exit 0')
     case "$line" in
@@ -832,10 +870,12 @@ echo
 echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # A CASE FLOOR beside the tally (#3544's lesson): a span-replacing edit that deletes cases
 # leaves a green "0 failed" over a shrunken suite, which certifies nothing. The floor sits
-# below the leanest host (no cargo, no timeout(1), no git worktree => P9/P14/P15/L1/G*
-# all skip, which still leaves 28 verdicts) so it reds on a structural loss and never on a
-# lean box.
-CASE_FLOOR=26
+# below the leanest host so it reds on a structural loss and never on a lean box. Since
+# the PLANTED cases became host-independent (plant_timeout, above) that floor can be much
+# tighter than it was: P1-P8, P10-P13 and P16-P20 produce 37 verdicts on ANY host, and
+# only P9/P14/P15/L1/G* depend on what is installed. Measured: 57 here, 51 on a simulated
+# host with no timeout(1) and no cargo.
+CASE_FLOOR=36
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2
