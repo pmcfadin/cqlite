@@ -239,6 +239,9 @@ summary_key_order() { # summary_key_order <file> <extended-regex-of-keys> -> "k1
 #                        returns the REAL review-row shape (id/prompt, no git_ref or
 #                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
+#   STUB_REVIEW_ROW_ID   top-level `id` of the `show --json` REVIEW row; empty => the job id
+#                        (the agreeing shape), a DIFFERENT number => the measured divergence
+#                        where only job_id / job.id name the job asked for (#3654)
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
 stubbin="$tmp/bin"
@@ -329,8 +332,13 @@ case "$cmd" in
     # `review-completed`, the vacuity tiers and `findings` against (#3312 job 24). Empty means the record
     # has none, which a recheck must read as "not re-establishable" rather than inherit.
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
-      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
-      # `id` (equal to the job id) that NESTS the job row under a "job" key.
+      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its OWN `id` that
+      # NESTS the job row under a "job" key. That top-level `id` is the REVIEW row's own sequence
+      # and NEED NOT equal the job asked for (#3654) — measured over records 1-10 on v0.61.2, six
+      # agree and two PAIRS swap (asking for 8 returns id=9, asking for 9 returns id=8), while
+      # `job_id` and the nested `job.id` name the requested job in every one. STUB_REVIEW_ROW_ID
+      # expresses that divergence; it defaults to the job id, so the AGREEING shape stays
+      # fixtured too and a case has to opt in to the divergent one.
       # `verdict_bool` is the SOURCE COLUMN the `verdict` letter is synthesised FROM, so the two
       # must AGREE or the fixture is a record roborev cannot emit: `P` <=> 1, `F` <=> 0 (measured —
       # job 154 clean/verdict_bool=1, job 162 findings-bearing/verdict_bool=0). Hard-coding 0 while
@@ -340,7 +348,7 @@ case "$cmd" in
       stub_verdict_bool=0
       [ "${STUB_VERDICT_FIELD:-}" != P ] || stub_verdict_bool=1
       printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":%s,"%s":"%s","prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
+        "${STUB_REVIEW_ROW_ID:-${STUB_JOB:-4600}}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -349,7 +357,7 @@ case "$cmd" in
       # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
       # git_ref / status / verdict / token_usage.
       printf '{"id":%s,"job_id":%s,"agent":"codex","prompt":"%s"}\n' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
+        "${STUB_REVIEW_ROW_ID:-${STUB_JOB:-4600}}" "${STUB_JOB:-4600}" "$(json_prompt)"
       exit 0
     fi
     emit_job_object; printf '\n'
@@ -1168,6 +1176,10 @@ export STUB_HAS_TOKEN_DATA=''
 export STUB_VERDICT_FIELD=''
 export STUB_RECORD_BLANK_FOR=0
 export STUB_PAYLOAD_JOB=''
+# #3654: the top-level `id` of a `show --json` REVIEW row. Defaults to the job id (the agreeing
+# shape); a case sets it to a DIFFERENT number to fixture the measured divergence, where only
+# `job_id` and the nested `job.id` name the job asked for.
+export STUB_REVIEW_ROW_ID=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
@@ -1206,6 +1218,7 @@ reset_stub() {
   STUB_VERDICT_FIELD=''
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
+  STUB_REVIEW_ROW_ID=''
   STUB_LIST_JSON=array
   STUB_RECORD_OUTPUT=''
   STUB_RECORD_OUTPUT_FIELD=''
@@ -3614,17 +3627,29 @@ assert_says 'case (w4) names the undefined check function' 'did not define robor
 assert_never_enqueued 'case (w4)'
 
 if [ "$HAVE_PYTHON3" -eq 1 ]; then
-printf '== case (x10): the NESTED job row in show --json is read as a first-class source ==\n'
+printf '== case (x10): the NESTED job row is selected even when the review row id DIVERGES ==\n'
 reset_stub
-# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row whose own `id`
-# equals the job id and which NESTS the job row — git_ref, status, model,
-# requested_model, token_usage, verdict — under a "job" key. Returning the FIRST id
-# match handed back the outer row, which has none of those fields; that looked like an
+# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row that NESTS the job row —
+# git_ref, status, model, requested_model, token_usage, verdict — under a "job" key. Returning the
+# FIRST id match handed back the outer row, which has none of those fields; that looked like an
 # async durability problem and silently downgraded sha-assert, tier 2 and model.
-# `list --json` is disabled here so `show` is the ONLY source.
+#
+# AND THE REVIEW ROW'S OWN `id` NEED NOT EQUAL THE JOB (#3654): measured over records 1-10 on
+# v0.61.2, six agree and two PAIRS swap (asking for 8 returns id=9, asking for 9 returns id=8),
+# while `job_id` and `job.id` name the requested job in every one. Every fixture here used
+# MATCHING ids, so the divergent shape roborev really emits executed NOWHERE. Under divergence the
+# two objects answer through DIFFERENT keys — the review row only through `job_id`, the nested job
+# row only through `id` — so this case pins that `find_job` still lands on the job row when the
+# match keys differ, which the equal-id shape cannot distinguish. Measured, not assumed: with the
+# "prefer the object carrying git_ref" arm removed, the outer row is selected and the facts come
+# back with NO git_ref, NO status and token_state=absent, which the wrapper reports as job-record
+# DEGRADED — so this case goes RED on job-record / sha-assert / tier 2 / model at once. (That
+# break reds the equal-id shape too; what is new here is the payload shape, not the tie-break.)
+# `list --json` is disabled so `show` is the ONLY source.
 work=$(make_fixture case_x10 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_SHOW_JSON=nested
+STUB_REVIEW_ROW_ID=$((STUB_JOB - 1))   # the measured divergence: review row 4655, job 4656
 STUB_LIST_JSON=none
 run_wrapper "$work"
 assert_verdict 'case (x10)' PASS 0
@@ -3632,6 +3657,19 @@ assert_says 'case (x10) the nested job row was used' '^job-record: PASS$'
 assert_says 'case (x10) the range oracle worked from the nested row' '^sha-assert: PASS$'
 assert_says 'case (x10) tokens came from the nested row' '^vacuity-tier2: PASS$'
 assert_says 'case (x10) the model was confirmed from the nested row' '^model: gpt-5\.6-sol$'
+
+printf '== case (x10b): the AGREEING review/job id shape still reads complete ==\n'
+reset_stub
+# The majority shape (six of the ten measured records), kept so the divergent fixture above does
+# not silently REPLACE the coverage it was derived from.
+work=$(make_fixture case_x10b pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_SHOW_JSON=nested
+STUB_LIST_JSON=none
+run_wrapper "$work"
+assert_verdict 'case (x10b)' PASS 0
+assert_says 'case (x10b) the nested job row was used' '^job-record: PASS$'
+assert_says 'case (x10b) the range oracle worked from the nested row' '^sha-assert: PASS$'
 fi  # HAVE_PYTHON3
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'

@@ -1298,11 +1298,17 @@ fact() { sed -n "s/^$1=//p" "$FACTS_FILE" | head -1; }
 #     requested_model / token_usage / verdict at TOP level.
 #   * `roborev show <id> --json` returns a REVIEW row — agent, closed, created_at, id,
 #     job, job_id, output, prompt, uuid, verdict_bool — that NESTS the job row under a
-#     `job` key. Its own `id` equals the job id, so a first-id-match lookup returned
-#     the OUTER row, which carries none of those fields; that looked like an empty
-#     record and silently weakened FOUR asserts at once on a NORMAL run (sha-assert
-#     fell back to prose, review-completed to the transcript alone, tier 2 to
-#     UNAVAILABLE, model to UNCONFIRMED).
+#     `job` key. Its `job_id` (and the nested `job.id`) equal the job asked for, so a
+#     first-match lookup returned the OUTER row, which carries none of those fields;
+#     that looked like an empty record and silently weakened FOUR asserts at once on a
+#     NORMAL run (sha-assert fell back to prose, review-completed to the transcript
+#     alone, tier 2 to UNAVAILABLE, model to UNCONFIRMED).
+#     ITS TOP-LEVEL `id` IS THE REVIEW ROW'S OWN SEQUENCE AND NEED NOT EQUAL THE JOB
+#     (#3654). Measured over records 1-10 on v0.61.2: six agree, and two PAIRS swap —
+#     asking for 8 returns `id=9`, asking for 9 returns `id=8`, likewise 6/7 — while
+#     `job_id` and `job.id` name the requested job in every one of the ten. This
+#     comment used to assert the top-level `id` equalled the job, which
+#     contradicted the help text one file over; doctrine decays exactly like a comment.
 # roborev-job-facts.py now prefers an id match that carries `git_ref`, so the record is
 # complete in ONE read. The loop below is therefore a short SANITY RETRY (it covers a
 # transient read failure and a not-yet-terminal status), never a wait on a write race.
