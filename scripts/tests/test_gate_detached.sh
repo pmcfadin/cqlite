@@ -2789,6 +2789,65 @@ fi
 
 
 
+# --- job 321 F1: a GLOBAL lock selected by caller-controlled env is not global ---------------------
+# The lock is only global if every launch on the box picks the SAME path. It was read from
+# ${XDG_RUNTIME_DIR:-...}, so two launchers with two individually VALID 0700 runtime directories took
+# two DIFFERENT locks and the artifact-set check plus reservation stopped being mutually exclusive.
+# Not an invoker's choice: the script's own refusal used to advertise "export XDG_RUNTIME_DIR to a
+# 0700 dir you own", so an operator following the printed remedy opted out of the lock BY ACCIDENT.
+if grep -qE '^_rundir="/run/user/\$\(id -u\)"$' "$LAUNCHER" \
+   && ! grep -qE '^_rundir=.*XDG_RUNTIME_DIR' "$LAUNCHER"; then
+  ok "4b.193 the global launch lock path is canonical per-UID, not read from XDG_RUNTIME_DIR"
+else
+  bad "4b.193 the global launch lock path is canonical per-UID" \
+      "$(grep -n '^_rundir=' "$LAUNCHER" | head -2)"
+fi
+if grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own' "$LAUNCHER"; then
+  bad "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass" "still advertised"
+else
+  ok "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass"
+fi
+
+# --- job 321 F2: a HARD LINK is an alias a pathname cannot show -----------------------------------
+# Reservations and the artifact-set check identify destinations BY PATH, so two launches naming two
+# hard links to ONE inode reserve separately and then write the same file. Second half of an axis the
+# script already closed for SYMLINKS (job 169) — same threat, different spelling.
+_lc_src=$(sed -n '/^_link_count_state() {/,/^}$/p' "$LAUNCHER")
+if [ -z "$_lc_src" ]; then
+  bad "4b.195 _link_count_state could be extracted" "extraction produced nothing"
+else
+  _lcd=$(mktemp -d "$TMP/lc.XXXXXX")
+  _lc() { ( eval "$_lc_src"; _link_count_state "$1" ); }
+  : > "$_lcd/one"
+  : > "$_lcd/real"; ln "$_lcd/real" "$_lcd/alias" 2>/dev/null
+  _lc_one=$(_lc "$_lcd/one"); _lc_multi=$(_lc "$_lcd/alias"); _lc_absent=$(_lc "$_lcd/nope")
+  if [ "$_lc_multi" = multi ] && [ "$_lc_one" = single ] && [ "$_lc_absent" = single ]; then
+    ok "4b.195 _link_count_state: hard-linked=multi, lone file=single, absent=single"
+  else
+    bad "4b.195 _link_count_state classifies links" \
+        "alias='$_lc_multi'(multi) lone='$_lc_one'(single) absent='$_lc_absent'(single)"
+  fi
+  # `find`, never `stat`: stat's format flags are GNU-vs-BSD incompatible and this script refuses to
+  # depend on them elsewhere. And the scan must be THREE-valued — `[ -z "$(find …)" ]` collapses "the
+  # scan FAILED" onto "no match", the shape this repo lints for (1699-find-tristate).
+  if printf '%s' "$_lc_src" | grep -q 'find ' \
+     && ! printf '%s' "$_lc_src" | grep -qE '\bstat ' \
+     && printf '%s' "$_lc_src" | grep -q "printf 'unknown'"; then
+    ok "4b.196 the link scan uses find (not stat) and has a third UNKNOWN answer"
+  else
+    bad "4b.196 the link scan uses find and is three-valued" \
+        "$(printf '%s' "$_lc_src" | grep -nE 'stat |find |unknown' | head -3)"
+  fi
+  _al_missing=""
+  for _dest in '"$LOGFILE" log' '"$SUMMARY" summary' '"$_hbdest" heartbeat'; do
+    grep -qF "_refuse_if_aliased $_dest" "$LAUNCHER" || _al_missing="$_al_missing [$_dest]"
+  done
+  [ -z "$_al_missing" ] \
+    && ok "4b.197 all three write destinations are alias-checked (log, summary, heartbeat)" \
+    || bad "4b.197 all three write destinations are alias-checked" "missing:$_al_missing"
+  rm -rf "$_lcd"
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1

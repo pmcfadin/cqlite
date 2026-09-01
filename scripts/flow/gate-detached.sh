@@ -471,11 +471,58 @@ for _o_name in summary heartbeat log; do
 $_res_paths
 _RESEOF
 done
+# A HARD LINK IS AN ALIAS A PATHNAME CANNOT SHOW (roborev job 321, Medium). The reservation and the
+# artifact-set check both identify destinations BY PATH, so two launches naming two different paths
+# that are hard links to ONE inode take two different reservations and then write the same file —
+# corrupting or silently discarding at least one run's verdict.
+#
+# This is not a new axis, it is the SECOND HALF of one this script already decided was in model: the
+# log/summary/heartbeat destinations are each refused when they are a SYMLINK (job 169). A hard link
+# is the same aliasing threat in a different spelling, and closing one spelling while leaving the
+# other is the "one axis closed, space declared done" error this file's comments name repeatedly.
+#
+# THREE-VALUED, and `find` rather than `stat`: stat's format flags are GNU-vs-BSD incompatible and
+# this script already refuses to depend on them (see the 0600 mode verification). `[ -z "$(find …)" ]`
+# would collapse "the scan FAILED" onto "no match" — a two-valued read of a three-valued signal, and
+# this repository LINTS for that shape (1699-find-tristate) — so a single link is confirmed
+# AFFIRMATIVELY and anything unmeasurable is its own answer.
+_link_count_state() {  # <path> -> multi | single | unknown
+  local out
+  [ -e "$1" ] || { printf 'single'; return 0; }        # nothing there yet: no alias to worry about
+  if out=$(find "$1" -maxdepth 0 -links +1 -print 2>/dev/null) && [ -n "$out" ]; then
+    printf 'multi'; return 0
+  fi
+  if out=$(find "$1" -maxdepth 0 -links 1 -print 2>/dev/null) && [ -n "$out" ]; then
+    printf 'single'; return 0
+  fi
+  printf 'unknown'
+}
+
+# Refuse <path> unless it is provably a single-link regular file. <what> names it for the operator.
+_refuse_if_aliased() {  # <path> <what>
+  case "$(_link_count_state "$1")" in
+    single) return 0 ;;
+    multi)
+      echo "gate-detached: the $2 path '$1' already exists with MORE THAN ONE HARD LINK, so another" >&2
+      echo "               name refers to the same file. Reservations identify PATHS, so a peer" >&2
+      echo "               launch using the other name would reserve successfully and then write" >&2
+      echo "               this same inode, discarding one run's verdict (roborev job 321)." >&2
+      echo "               Refusing. Use a fresh path, or remove the extra link." >&2
+      exit 1 ;;
+    *)
+      echo "gate-detached: could not determine the hard-link count of the $2 path '$1', so it cannot" >&2
+      echo "               be shown to be un-aliased. Refusing rather than writing a destination a" >&2
+      echo "               peer may also hold under another name (roborev job 321)." >&2
+      exit 1 ;;
+  esac
+}
+
 if [ -L "$LOGFILE" ] || { [ -e "$LOGFILE" ] && [ ! -f "$LOGFILE" ]; }; then
   echo "gate-detached: log path '$LOGFILE' is a symlink or not a regular file — refusing to" >&2
   echo "               truncate it (#3473)." >&2
   exit 1
 fi
+_refuse_if_aliased "$LOGFILE" log
 # NON-DESTRUCTIVE writability probe (roborev job 193, Low). The log used to be TRUNCATED here,
 # before the summary and heartbeat destinations were validated — so a later refusal (a bad summary
 # directory, say) destroyed the caller's previous log even though no gate ever started. The real
@@ -556,6 +603,7 @@ if [ -e "$SUMMARY" ] || [ -L "$SUMMARY" ]; then
     exit 1
   fi
 fi
+_refuse_if_aliased "$SUMMARY" summary
 # The probe deliberately NEVER touches $SUMMARY itself. Truncating it to test writability
 # would destroy whatever is at that path — and under #2874 that could be a LIVE PEER's
 # summary block, i.e. the probe would cause the very data loss the no-clobber contract
@@ -619,6 +667,7 @@ if [ -L "$_hbdest" ] || { [ -e "$_hbdest" ] && [ ! -f "$_hbdest" ]; }; then
   echo "               so this gate would be unmonitorable. Refusing (#3473)." >&2
   exit 1
 fi
+_refuse_if_aliased "$_hbdest" heartbeat
 
 # --collect reaps the unit record on exit; the SUMMARY FILE is the verdict artifact, so
 # nothing of record is lost with the unit. --same-dir keeps the gate in this worktree
@@ -968,7 +1017,7 @@ _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another
 # serialising unrelated launches costs nothing measurable against a 30-50 minute gate.
 #
 # Per-USER location, not shared /tmp: a lock every launch must take is a denial-of-service surface if any
-# local user can hold it, and XDG_RUNTIME_DIR is mode 0700. The 30s timeout means a held lock refuses
+# local user can hold it, and the canonical runtime directory is verified 0700 below. The 30s timeout means a held lock refuses
 # loudly rather than hanging.
 # REFUSE rather than fall back (roborev job 269, Medium). The paragraph above states the per-user
 # requirement, and the code then fell back to TMPDIR-or-/tmp — a shared, PREDICTABLE, fixed-NAME
@@ -980,7 +1029,24 @@ _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another
 # `systemd-run --user` + lingering, both required above, already imply /run/user/$(id -u) exists.
 # Measured AFFIRMATIVELY: a directory, owned by US, mode 0700. An UNMEASURABLE answer (no stat,
 # unreadable parent) is UNKNOWN and refuses — never "probably fine".
-_rundir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+#
+# THE LOCK LOCATION IS CANONICAL AND IGNORES `XDG_RUNTIME_DIR` (roborev job 321, Medium). A lock is
+# only global if every launch on the box picks the SAME path, and this one was selected through a
+# caller-controlled variable — so two launchers with two different, individually VALID 0700 runtime
+# directories take two different locks, and the artifact-set check plus reservation below stop being
+# mutually exclusive. Two gates then pass check-and-reserve on overlapping artifacts, which is
+# exactly what this lock exists to prevent.
+#
+# This is a defect and not an invoker's choice, because the script ITSELF used to advertise the
+# route: the refusal below told the operator to "export XDG_RUNTIME_DIR to a 0700 dir you own". An
+# operator following the printed remedy silently opted out of the global lock. Bypassable BY
+# ACCIDENT is the line between a hazard we record and a defect we fix.
+#
+# `/run/user/$(id -u)` is the right canonical choice rather than an arbitrary one: `systemd-run
+# --user` plus lingering are ALREADY required above, and both imply this directory exists — the
+# paragraph above says so. So nothing is lost by ignoring the variable, and refusing when the
+# canonical directory is unusable is the same posture as everywhere else in this script.
+_rundir="/run/user/$(id -u)"
 _rd_owner=""; _rd_mode=""
 if _rd_stat="$(stat -Lc '%u %a' "$_rundir" 2>/dev/null)"; then
   _rd_owner="${_rd_stat%% *}"; _rd_mode="${_rd_stat##* }"
@@ -991,7 +1057,10 @@ if [ ! -d "$_rundir" ] || [ "$_rd_owner" != "$(id -u)" ] || [ "$_rd_mode" != 700
   echo "               A lock every launch must take is a denial-of-service surface if any other" >&2
   echo "               local user can hold it, so this is NOT falling back to a shared directory." >&2
   echo "               Remedy: ensure a systemd user session exists (loginctl enable-linger '$(id -un)')," >&2
-  echo "               so /run/user/$(id -u) is present, or export XDG_RUNTIME_DIR to a 0700 dir you own." >&2
+  echo "               so /run/user/$(id -u) is present and 0700. NOTE: exporting XDG_RUNTIME_DIR" >&2
+  echo "               does NOT change this path any more (roborev job 321) — a lock selected by a" >&2
+  echo "               caller-controlled variable is not global, and two launches could then reserve" >&2
+  echo "               overlapping artifacts. Fix the canonical directory instead." >&2
   exit 69
 fi
 # VALIDATE `flock` BEFORE THE FIRST USE, NOT AFTER (roborev job 319, Low). This lock is taken by
