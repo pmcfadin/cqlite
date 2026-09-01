@@ -2798,6 +2798,88 @@ $o44e"
 fi
 
 # ===========================================================================
+case_begin 45-unknown-prologue-keys-survive "an UNRECOGNISED prologue key survives write AND adopt (roborev job 37 J3)"
+# ===========================================================================
+# The parser accepts an unknown key FOR FORWARD COMPATIBILITY. Until now the rewrite path
+# dropped it, so an OLDER copy of this script silently DELETED a field a NEWER one introduced —
+# the same durable-state erasure as a dropped `request-id`. PRESERVE was chosen over REFUSE
+# because refusing would make a newer marker unusable by an older script, bricking every
+# touched lane on a fleet mid-rollout; the header states the choice.
+L45=$(lane lane45)
+sleep 300 & p45=$!
+run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p45" -- \
+    write 3822 --stage implement --request-id req-7 --pr 3837 >/dev/null 2>&1
+# Inject two unknown keys the way a NEWER version of this script would have written them.
+LC_ALL=C awk '/^actor: /{print; print "future-field: keep-me"; print "x-9: v2"; next} {print}' \
+  "$L45/$MARKER" >"$T/45-injected" && cp "$T/45-injected" "$L45/$MARKER"
+u45_w=$(run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p45" -- \
+    write 3822 --stage review 2>&1); u45_wrc=$?
+u45_keep=$(LC_ALL=C grep -c '^future-field: keep-me$' "$L45/$MARKER" || true)
+u45_x=$(LC_ALL=C grep -c '^x-9: v2$' "$L45/$MARKER" || true)
+if [ "$u45_wrc" -eq 0 ] && [ "$(verdict_of "$u45_w")" = WRITTEN ] \
+   && [ "$u45_keep" = 1 ] && [ "$u45_x" = 1 ] \
+   && grep -q '^stage: review$' "$L45/$MARKER" \
+   && grep -q '^request-id: req-7$' "$L45/$MARKER" && grep -q '^pr: 3837$' "$L45/$MARKER"; then
+  ok "a write PRESERVES both unrecognised keys exactly once each, and the known durable fields still behave"
+else
+  bad "unknown keys did not survive a write: rc=$u45_wrc keep=$u45_keep x=$u45_x
+$(cat "$L45/$MARKER")"
+fi
+# A SECOND write must not ACCUMULATE them (the separator/body defect one field over).
+run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p45" -- write 3822 --stage gate >/dev/null 2>&1
+u45_keep2=$(LC_ALL=C grep -c '^future-field: keep-me$' "$L45/$MARKER" || true)
+u45_show=$(run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p45" -- show 3822 2>&1)
+if [ "$u45_keep2" = 1 ] \
+   && printf '%s\n' "$u45_show" | grep -q '^DRIVE-STATE: field unrecognised future-field=keep-me$' \
+   && printf '%s\n' "$u45_show" | grep -q '^DRIVE-STATE: field unrecognised x-9=v2$' \
+   && all_lines_anchored "$u45_show"; then
+  ok "repeated writes neither duplicate nor drop them, and 'show' reports each on an anchored 'field unrecognised' line"
+else
+  bad "accumulation or show gap: occurrences=$u45_keep2
+$u45_show"
+fi
+# ADOPT carries them across a hand-over too.
+kill "$p45" 2>/dev/null; wait "$p45" 2>/dev/null
+u45_a=$(run "$L45" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- \
+    adopt 3822 --reason j3-unknown-keys:cron-resume 2>&1); u45_arc=$?
+u45_keep3=$(LC_ALL=C grep -c '^future-field: keep-me$' "$L45/$MARKER" || true)
+u45_x3=$(LC_ALL=C grep -c '^x-9: v2$' "$L45/$MARKER" || true)
+if [ "$u45_arc" -eq 0 ] && [ "$(verdict_of "$u45_a")" = ADOPTED ] \
+   && [ "$u45_keep3" = 1 ] && [ "$u45_x3" = 1 ] \
+   && grep -q "^prior-session: $SESS_A\$" "$L45/$MARKER" \
+   && grep -q '^stage: gate$' "$L45/$MARKER"; then
+  ok "an adopt carries both unrecognised keys across the hand-over, alongside the provenance and the durable fields"
+else
+  bad "unknown keys did not survive an adopt: rc=$u45_arc keep=$u45_keep3 x=$u45_x3
+$u45_a
+$(cat "$L45/$MARKER")"
+fi
+# POSITIVE CONTROL, by artifact substitution: with the carry-forward reverted in a scratch copy,
+# the SAME sequence DELETES both keys — so the assertions above measure the fix, not the fixture.
+mkdir -p "$T/j3-scratch/lib"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$T/j3-scratch/lib/"
+j3_pre="$T/j3-scratch/drive-issue-state.sh"
+sed -e 's|^      unknown="\$S_unknown"$|      unknown=""|' \
+    -e 's|^  local unknown="\$S_unknown"$|  local unknown=""|' "$DS" >"$j3_pre"
+j3_pin=0
+grep -q '^      unknown=""$' "$j3_pre" || j3_pin=$((j3_pin + 1))
+grep -q '^  local unknown=""$' "$j3_pre" || j3_pin=$((j3_pin + 1))
+bash -n "$j3_pre" 2>/dev/null || j3_pin=$((j3_pin + 1))
+L45p=$(lane lane45p)
+( cd "$L45p" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$j3_pre" write 3822 --stage implement ) >/dev/null 2>&1
+LC_ALL=C awk '/^actor: /{print; print "future-field: keep-me"; next} {print}' \
+  "$L45p/$MARKER" >"$T/45p-injected" && cp "$T/45p-injected" "$L45p/$MARKER"
+( cd "$L45p" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$j3_pre" write 3822 --stage review ) >/dev/null 2>&1
+j3_left=$(LC_ALL=C grep -c '^future-field: keep-me$' "$L45p/$MARKER" || true)
+if [ "$j3_pin" -eq 0 ] && [ "$j3_left" = 0 ]; then
+  ok "POSITIVE CONTROL: with the carry-forward reverted, the same write DELETES the unrecognised key — the silent field loss is real"
+else
+  bad "the positive control did not reproduce the loss: pin-failures=$j3_pin remaining=$j3_left"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2819,8 +2901,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 39-body-bytes-survive-repeated-writes
 40-worktree-axis-must-be-measurable 41-body-without-trailing-newline
 42-verdict-emission-is-a-critical-section
-43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated 28-case-floor"
-CASE_FLOOR=44
+43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated
+45-unknown-prologue-keys-survive 28-case-floor"
+CASE_FLOOR=45
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2832,10 +2915,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 156 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 156)"
+if [ "$PASS" -ge 160 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 160)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 156)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 160)"
 fi
 
 # ===========================================================================

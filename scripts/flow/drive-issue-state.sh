@@ -175,6 +175,14 @@
 #              `--clear stage|request-id|pr|branch` (repeatable). Omitting a flag never
 #              erases durable state — dropping the open request id would make the next
 #              session re-ask, breaking "one marker, one wait".
+#              UNRECOGNISED PROLOGUE KEYS ARE PRESERVED VERBATIM, in order, across every
+#              rewrite (`write` and `adopt` alike). The parser accepts a key it does not know
+#              FOR FORWARD COMPATIBILITY, and an acceptance whose rewrite path silently DROPPED
+#              the field made an OLDER copy of this script DELETE a field a NEWER one had
+#              introduced — the same durable-state erasure as a dropped `request-id`. Preserving
+#              is chosen over REFUSING to mutate such a marker because refusal would make a
+#              newer marker unusable by an older script, bricking every touched lane on a fleet
+#              mid-rollout. They are written back byte-for-byte and are never re-sanitized.
 #              THE ADOPTION PROVENANCE IS DURABLE STATE TOO and is preserved the same way:
 #              `prior-session`, `prior-session-pid`, `prior-ts`, `adopt-reason`. There is no
 #              flag and no `--clear` for those four — only a LATER `adopt` replaces them (the
@@ -203,8 +211,9 @@
 #              still carrying an UNSUBSTITUTED `<…>` is a USAGE error (64), never a silent
 #              `reason=unspecified` — same gate, and same reasons, as claim.sh's.
 #   show   <N> print the recorded stamp fields, INCLUDING the adoption provenance when the
-#              marker carries it (`show` is the contract's window onto the marker, so it
-#              prints every field the reader parses). No ownership verdict.
+#              marker carries it, and any UNRECOGNISED keys this version preserves (on
+#              `field unrecognised <key>=<value>` lines) — `show` is the contract's window onto
+#              the marker, so it prints every field the reader parses. No ownership verdict.
 #   --help     this contract (authoritative)
 #
 # IDENTITY
@@ -807,6 +816,10 @@ S_request=''; S_pr=''; S_branch=''
 # durable state — the audit record of how this lane changed hands — so an ordinary `write` has
 # to be able to carry them forward, and carrying forward what is never read is impossible.
 S_prior_session=''; S_prior_pid=''; S_prior_ts=''; S_adopt_reason=''
+# UNRECOGNISED PROLOGUE KEYS, RETAINED VERBATIM (roborev job 37 J3). See the parser's `*)` arm
+# for the ruling; they are carried across `write` and `adopt` as raw `key: value` LINES, in the
+# order read, joined by newlines. Empty when the marker carries none.
+S_unknown=''
 
 marker_path() { printf '%s/%s\n' "$(this_worktree)" "$MARKER_NAME"; }
 
@@ -935,8 +948,26 @@ read_marker() {
       prior-session-pid)          dup="$S_prior_pid";      S_prior_pid="$val" ;;
       prior-ts)                   dup="$S_prior_ts";       S_prior_ts="$val" ;;
       adopt-reason)               dup="$S_adopt_reason";   S_adopt_reason="$val" ;;
-      *) dup='' ;;   # forward compatibility: an unrecognised KEY is ignored, but its
-                     # SHAPE was still enforced above, so it can never smuggle in a line.
+      # AN UNRECOGNISED KEY IS PRESERVED, NOT MERELY TOLERATED (roborev job 37 J3).
+      #
+      # THE CHOICE, AND WHY: accepting an unknown key "for forward compatibility" while the
+      # rewrite path DROPPED it was incoherent — an OLDER copy of this script would silently
+      # DELETE a field a NEWER one introduced, on the first stage update, which is the same
+      # durable-state-erasure defect as job 26 F3's dropped adoption provenance. The two
+      # coherent options were PRESERVE and REFUSE. PRESERVE wins: refusing would make a NEWER
+      # marker unusable by an OLDER script, so a fleet mid-rollout would brick every lane the
+      # new version had touched — strictly worse than the loss it prevents — and preservation is
+      # what the header's durable-field survival rule already promises everywhere else.
+      #
+      # SAFE BY CONSTRUCTION, not by trust: the line was read from the prologue, so it is ONE
+      # line (no newline can hide in it), its KEY passed the [a-z0-9-] gate, its VALUE is
+      # non-empty, and it cannot begin with '<' — so a preserved line can neither pose as a
+      # sentinel nor introduce a second grammar. It is written back BYTE-FOR-BYTE; nothing
+      # re-sanitizes it, because re-sanitizing a value we did not produce is exactly the lossy
+      # normalization J1 closes.
+      *) dup=''
+         if [ -z "$S_unknown" ]; then S_unknown="$line"; else S_unknown="$S_unknown
+$line"; fi ;;
     esac
     # A DUPLICATE identity key would let the PARSER's choice decide identity, which is the
     # forgery shape this whole prologue exists to remove. Refused, not first-wins.
@@ -1464,7 +1495,7 @@ cmd_write() {
   [ "$#" -eq 0 ] || shift
   require_numeric_issue "$issue" write
   local stage='' request='' pr='' branch='' bodyfile='' actor_raw='' clears=''
-  local prior_session='' prior_pid='' prior_ts='' adopt_reason=''
+  local prior_session='' prior_pid='' prior_ts='' adopt_reason='' unknown=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --stage)      [ "$#" -ge 2 ] || die_usage "--stage needs a value";      stage="$2";      shift 2 ;;
@@ -1575,6 +1606,9 @@ cmd_write() {
       # nothing invents them where no adoption happened.
       prior_session="$S_prior_session"; prior_pid="$S_prior_pid"
       prior_ts="$S_prior_ts";           adopt_reason="$S_adopt_reason"
+      # AND THE UNRECOGNISED KEYS (roborev job 37 J3) — see the parser's `*)` arm. Only on the
+      # OWNED path: the UNSTAMPED migration DISCARDS the file, so it has nothing to carry.
+      unknown="$S_unknown"
       if [ -z "$body_src" ]; then
       # Preserve an OWNED marker's body: `write` updates the stamp and the recorded stage,
       # not the author's notes.
@@ -1603,7 +1637,7 @@ cmd_write() {
   [ -z "$adopt_reason" ]  || f_ar="adopt-reason: $(sanitize_field "$adopt_reason")"
   COMMIT_VERDICT=WRITTEN
   if ! write_marker "$issue" "$actor" "$body_src" "$f_stage" "$f_request" "$f_pr" "$f_branch" \
-      "$f_ps" "$f_pp" "$f_pt" "$f_ar"; then
+      "$f_ps" "$f_pp" "$f_pt" "$f_ar" "$unknown"; then
     [ -z "$carried" ] || rm -f "$carried" 2>/dev/null || true
     refuse ERROR 1 "$WRITE_ERR"
   fi
@@ -1692,6 +1726,9 @@ cmd_adopt() {
   # cannot tell which request it awaits and re-asks. Ownership transfers; the state does not
   # evaporate.
   local request="$S_request" pr="$S_pr" branch="$S_branch"
+  # UNRECOGNISED KEYS SURVIVE AN ADOPT TOO (roborev job 37 J3): a hand-over transfers ownership,
+  # it does not discard fields a newer version of this script recorded.
+  local unknown="$S_unknown"
 
   # RE-ENTRANT FOR BOTH OWNERSHIP BASES (roborev job 34 H2). This used to test the SESSION ID
   # alone, which is only ONE of the two ways check_ownership says "already yours" — so the
@@ -1726,7 +1763,7 @@ cmd_adopt() {
       "prior-session: $prior_session" \
       "prior-session-pid: $prior_pid" \
       "prior-ts: $prior_ts" \
-      "adopt-reason: $reason_token"; then
+      "adopt-reason: $reason_token" "$unknown"; then
     rm -f "$carried" 2>/dev/null || true
     refuse ERROR 1 "$WRITE_ERR"
   fi
@@ -1769,6 +1806,18 @@ cmd_show() {
   [ -z "$S_prior_pid" ]     || emit "field prior-session-pid=$(sane "$S_prior_pid")"
   [ -z "$S_prior_ts" ]      || emit "field prior-ts=$(sane "$S_prior_ts")"
   [ -z "$S_adopt_reason" ]  || emit "field adopt-reason=$(sane "$S_adopt_reason")"
+  # AND THE UNRECOGNISED KEYS THIS VERSION PRESERVES (roborev job 37 J3). `show` is the window
+  # onto the marker and these are now RETAINED state, so hiding them would make a field this
+  # script carries forward readable only by opening the file.
+  if [ -n "$S_unknown" ]; then
+    local uline
+    while IFS= read -r uline; do
+      [ -n "$uline" ] || continue
+      emit "field unrecognised ${uline%%: *}=$(sane "${uline#*: }")"
+    done <<EOF
+$S_unknown
+EOF
+  fi
   verdict SHOWN
   detail "fields as recorded for issue $(sane "$issue"); SHOWN asserts NOTHING about ownership — use 'verify' for that"
 }
