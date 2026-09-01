@@ -175,6 +175,16 @@ die_usage() { echo "$prog: $*" >&2; exit 64; }
 note()      { echo "[review-stage] $*" >&2; }
 emit()      { echo "REVIEW-STAGE: $*"; }
 
+# THE REFUSAL MARKER OF THE RUNNING SUBCOMMAND (#3751 round 2, S2). `assert_ignored`,
+# `assert_no_symlink` and the write helpers are SHARED by `open` and
+# `record-author-performed`, and they hard-coded `OPEN-REFUSED` — so a
+# record-author-performed refusal was reported under the WRONG subcommand's marker while
+# every refusal raised in `cmd_record_author_performed` itself said `AUTHOR-REFUSED`. One
+# subcommand emitting two markers makes a grep answer about the wrong thing. Set ONCE per
+# subcommand; the default is the historical value, so a future subcommand that forgets to set
+# it gets a marker that is merely imprecise rather than empty.
+REFUSE_MARKER="OPEN-REFUSED"
+
 # The disclosure a hand-performed substitute MUST carry, verbatim (design.md §4, adopting
 # lane-3629's wording). `verdict` REQUIRES it to be present before it will report
 # AUTHOR-PERFORMED: the token means "a disclosed substitute with its working recorded", so a
@@ -434,11 +444,11 @@ assert_ignored() {
   local path="$1" what="$2" extra="${3:-}" rc=0
   git check-ignore -q -- "$path" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    emit "OPEN-REFUSED reason=path-not-gitignored what=$what path=$path check-ignore-rc=$rc"
-    emit "OPEN-REFUSED detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add the path to .gitignore (the default location .review-stage/ already is), or pass a --report path that is."
+    emit "$REFUSE_MARKER reason=path-not-gitignored what=$what path=$path check-ignore-rc=$rc"
+    emit "$REFUSE_MARKER detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add the path to .gitignore (the default location .review-stage/ already is), or pass a --report path that is."
     # An optional caller-supplied line, printed only on the refusal path: a refused TEMPORARY
     # path is confusing without it, because the caller never named that path.
-    [ -z "$extra" ] || emit "OPEN-REFUSED detail=$extra"
+    [ -z "$extra" ] || emit "$REFUSE_MARKER detail=$extra"
     exit 2
   fi
 }
@@ -491,26 +501,26 @@ assert_no_symlink() {
     # child answer FALSE for a component that may well be a symlink — a two-valued predicate
     # collapsing the unknown onto the permissive answer, which is the shape this repo pins.
     if [ -e "$parent" ] && [ ! -x "$parent" ]; then
-      emit "OPEN-REFUSED reason=path-unverifiable what=$what path=$path component=$parent"
-      emit "OPEN-REFUSED detail=this directory is not searchable, so whether the next component is a SYMLINK cannot be determined — and a write that follows a link lands outside the verified-gitignored path (#2926/#3648). Refusing rather than guessing: cannot-tell must not take the permissive branch."
+      emit "$REFUSE_MARKER reason=path-unverifiable what=$what path=$path component=$parent"
+      emit "$REFUSE_MARKER detail=this directory is not searchable, so whether the next component is a SYMLINK cannot be determined — and a write that follows a link lands outside the verified-gitignored path (#2926/#3648). Refusing rather than guessing: cannot-tell must not take the permissive branch."
       exit 2
     fi
     parent="$cur"
     cur="$cur/$comp"
     if [ -L "$cur" ]; then
-      emit "OPEN-REFUSED reason=path-is-symlink what=$what path=$path component=$cur"
-      emit "OPEN-REFUSED detail=git check-ignore verifies a LEXICAL path but a WRITE follows symlinks, so this write would land wherever the link points — possibly a TRACKED file or a path outside the repository — dirtying a running gate of record (tree-integrity FAIL, #2926) and making premerge-assert refuse on dirty: yes (#3648). Remove the link and let this tool create a regular file, or pass a --report path that is one."
+      emit "$REFUSE_MARKER reason=path-is-symlink what=$what path=$path component=$cur"
+      emit "$REFUSE_MARKER detail=git check-ignore verifies a LEXICAL path but a WRITE follows symlinks, so this write would land wherever the link points — possibly a TRACKED file or a path outside the repository — dirtying a running gate of record (tree-integrity FAIL, #2926) and making premerge-assert refuse on dirty: yes (#3648). Remove the link and let this tool create a regular file, or pass a --report path that is one."
       exit 2
     fi
     if [ -e "$cur" ] && [ ! -d "$cur" ] && [ "$cur" != "$path" ]; then
-      emit "OPEN-REFUSED reason=path-component-not-a-directory what=$what path=$path component=$cur"
-      emit "OPEN-REFUSED detail=an intermediate path component exists and is not a directory, so nothing can be written under it."
+      emit "$REFUSE_MARKER reason=path-component-not-a-directory what=$what path=$path component=$cur"
+      emit "$REFUSE_MARKER detail=an intermediate path component exists and is not a directory, so nothing can be written under it."
       exit 2
     fi
   done
   if [ -e "$cur" ] && [ ! -f "$cur" ]; then
-    emit "OPEN-REFUSED reason=path-not-a-regular-file what=$what path=$path"
-    emit "OPEN-REFUSED detail=this path exists and is not a regular file (a directory, a fifo, a device). This tool writes a text record; it will not write through anything else."
+    emit "$REFUSE_MARKER reason=path-not-a-regular-file what=$what path=$path"
+    emit "$REFUSE_MARKER detail=this path exists and is not a regular file (a directory, a fifo, a device). This tool writes a text record; it will not write through anything else."
     exit 2
   fi
 }
@@ -550,8 +560,8 @@ commit_write() {
   local dest="$1" what="$2"
   if ! mv -f "$WRITE_TMP" "$dest" 2>/dev/null; then
     rm -f "$WRITE_TMP" 2>/dev/null || true
-    emit "OPEN-REFUSED reason=write-failed what=$what path=$dest"
-    emit "OPEN-REFUSED detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
+    emit "$REFUSE_MARKER reason=write-failed what=$what path=$dest"
+    emit "$REFUSE_MARKER detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
     exit 2
   fi
   WRITE_TMP=""
@@ -574,6 +584,7 @@ now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # --- open --------------------------------------------------------------------
 cmd_open() {
   require_repo_root
+  REFUSE_MARKER="OPEN-REFUSED"
   local kind="" issue="" agent="" deadline="$DEFAULT_DEADLINE_SECS" report="" force=0
   kind="$(validate_kind "${1:-}")"; shift || true
   while [ $# -gt 0 ]; do
@@ -621,8 +632,8 @@ cmd_open() {
   if [ -f "$sfile" ]; then
     prior_iso="$(read_field "$sfile" spawned-at)"
     if [ "$force" -ne 1 ]; then
-      emit "OPEN-REFUSED reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$(read_field "$sfile" report)")"
-      emit "OPEN-REFUSED detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
+      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$(read_field "$sfile" report)")"
+      emit "$REFUSE_MARKER detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
       exit 2
     fi
     # --force RE-STAMPS THE REPORT AND KEEPS THE CLOCK. A re-spawn is exactly what a lane
@@ -959,6 +970,9 @@ cmd_status() {
 # --- record-author-performed -------------------------------------------------
 cmd_record_author_performed() {
   require_repo_root
+  # THIS subcommand's refusals — including those raised by the shared path/write helpers —
+  # report AUTHOR-REFUSED, never open's marker (S2).
+  REFUSE_MARKER="AUTHOR-REFUSED"
   local kind="" issue="" reason="" evidence="" performed_by="" force=0
   kind="$(validate_kind "${1:-}")"; shift || true
   while [ $# -gt 0 ]; do

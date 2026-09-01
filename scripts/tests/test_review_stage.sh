@@ -796,6 +796,43 @@ else
   bad "tempfile control: the custom report was not written"
 fi
 
+# --- 11d. A REFUSAL REPORTS ITS OWN SUBCOMMAND'S MARKER (round 2, S2) ---------------------
+# `assert_ignored` / `assert_no_symlink` / the write helpers are shared by `open` and
+# `record-author-performed`, and they hard-coded `OPEN-REFUSED` — so a record-author-performed
+# refusal was reported under the WRONG subcommand's marker, while every refusal raised in
+# `cmd_record_author_performed` itself said `AUTHOR-REFUSED`. One subcommand, two markers, is a
+# grep that answers about the wrong thing.
+R11D="$(newrepo)"
+rs "$R11D" open c --issue 820 --agent spec-auditor
+rc_is 0 "refuse-marker: the stage opens while .review-stage/ IS ignored"
+# Now make the path NOT ignored — the same fail-closed check `open` passed a moment ago.
+printf 'unrelated-pattern\n' >"$R11D/.gitignore"
+rs "$R11D" record-author-performed c --issue 820 \
+  --reason 'no peer agent available on this box; hand audit against the spec deltas' \
+  --evidence 'docs/round-artifacts/issue-820-hand.md' --performed-by author
+rc_is 2 "refuse-marker: a non-ignored report path is refused (exit 2)"
+has "AUTHOR-REFUSED reason=path-not-gitignored" "refuse-marker: the refusal carries THIS subcommand's marker"
+hasnt "OPEN-REFUSED" "refuse-marker: no 'OPEN-REFUSED' marker appears in a record-author-performed refusal"
+
+# And the SYMLINK refusal, from the other shared helper.
+printf '.review-stage/\n' >"$R11D/.gitignore"
+rm -f "$(REPORT_OF "$R11D" 820 c)"
+ln -s "$R11D/.gitignore" "$(REPORT_OF "$R11D" 820 c)"
+rs "$R11D" record-author-performed c --issue 820 \
+  --reason 'no peer agent available on this box; hand audit against the spec deltas' \
+  --evidence 'docs/round-artifacts/issue-820-hand.md' --performed-by author
+rc_is 2 "refuse-marker: a SYMLINKED report path is refused (exit 2)"
+has "AUTHOR-REFUSED reason=path-is-symlink" "refuse-marker: the symlink refusal also carries THIS subcommand's marker"
+hasnt "OPEN-REFUSED" "refuse-marker: the symlink refusal does not borrow open's marker either"
+
+# CONTROL: `open`'s OWN refusals still say OPEN-REFUSED — a fix that renamed the marker
+# globally, instead of making it per-subcommand, would pass both cases above.
+R11E="$(newrepo 'unrelated-pattern')"
+rs "$R11E" open c --issue 830 --agent spec-auditor
+rc_is 2 "refuse-marker CONTROL: open still refuses a non-ignored path"
+has "OPEN-REFUSED reason=path-not-gitignored" "refuse-marker CONTROL: open's own refusal still says OPEN-REFUSED"
+hasnt "AUTHOR-REFUSED" "refuse-marker CONTROL: open does not borrow the author marker"
+
 # --- 11c. THE report= FIELD GOES THROUGH THE SAME EMIT BOUNDARY (round 2, S1) -------------
 # The cause is neutralised at the emit boundary because a report-supplied `agent=peer` would put
 # a second, earlier `agent=` pair on a line consumers scan. `report=` is interpolated into that
