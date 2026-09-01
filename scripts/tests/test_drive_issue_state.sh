@@ -2139,6 +2139,67 @@ $w38_out"
 fi
 
 # ===========================================================================
+case_begin 39-body-bytes-survive-repeated-writes "the BODY survives an owned write BYTE-FOR-BYTE, repeatedly and across an adopt (roborev job 34 H3)"
+# ===========================================================================
+# THE DEFECT: `marker_body` returned everything after the end sentinel — INCLUDING the canonical
+# blank separator the WRITER emits — and `write_marker` then always emitted its own separator
+# before copying that body back. So every ordinary write added one blank line: measured 1, then
+# 2, then 3 across three successive writes of the SAME body. The header promises the body
+# SURVIVES an owned write; it survived but MUTATED, and it grew without bound over a long-running
+# lane. Asserted BYTE-FOR-BYTE with cmp, never as a line count — the finding is that the bytes
+# change.
+after_sentinel() {  # after_sentinel <marker> <out> — everything AFTER the end sentinel, verbatim
+  awk -v s="$sentinel_end" 'seen{print} $0==s{seen=1}' "$1" >"$2"
+}
+L39=$(lane lane39)
+body39="$T/body39.md"
+printf '## plan\n\n- step one\n- step two\n' >"$body39"
+run "$L39" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --body-file "$body39" >/dev/null 2>&1
+after_sentinel "$L39/$MARKER" "$T/39-r1"
+# The canonical shape, stated once: exactly ONE writer-owned blank separator, then the body bytes.
+{ printf '\n'; cat "$body39"; } >"$T/39-canonical"
+if cmp -s "$T/39-r1" "$T/39-canonical"; then
+  ok "the first write lays down exactly one writer-owned separator followed by the body verbatim"
+else
+  bad "the first write's post-sentinel bytes are not the canonical shape:
+$(cmp -l "$T/39-canonical" "$T/39-r1" | head -5)
+$(cat -A "$T/39-r1" | head -8)"
+fi
+b39_fail=0
+i=2
+while [ "$i" -le 4 ]; do
+  run "$L39" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage "round$i" >/dev/null 2>&1
+  after_sentinel "$L39/$MARKER" "$T/39-r$i"
+  cmp -s "$T/39-r1" "$T/39-r$i" || { b39_fail=1; printf 'note   write #%s changed the body bytes:\n%s\n' "$i" "$(cat -A "$T/39-r$i" | head -8)"; }
+  i=$((i + 1))
+done
+if [ "$b39_fail" -eq 0 ]; then
+  ok "FOUR successive owned writes leave the post-sentinel bytes IDENTICAL (no monotonic separator growth)"
+else
+  bad "the body mutated across repeated writes — the separator is owned twice"
+fi
+# ACROSS AN ADOPT, which carries the body through the same path.
+L39A=$(lane lane39-adopt)
+sleep 30 & dead39=$!
+run "$L39A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$dead39" -- write 3822 --body-file "$body39" >/dev/null 2>&1
+kill "$dead39" 2>/dev/null; wait "$dead39" 2>/dev/null
+after_sentinel "$L39A/$MARKER" "$T/39a-before"
+run "$L39A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason cron-reinvoke:writer-pid-gone >/dev/null 2>&1
+after_sentinel "$L39A/$MARKER" "$T/39a-after"
+if cmp -s "$T/39a-before" "$T/39a-after" && cmp -s "$T/39a-after" "$T/39-canonical"; then
+  ok "an adopt carries the body across BYTE-FOR-BYTE and adds no separator of its own"
+else
+  bad "the adopt mutated the body bytes:
+$(cat -A "$T/39a-after" | head -8)"
+fi
+# NON-VACUITY: the comparisons above are over a REAL body, not an empty one.
+if [ -s "$T/39-r1" ] && grep -q 'step two' "$T/39-r1"; then
+  ok "NON-VACUITY: the compared region is the real body ($(wc -c <"$T/39-r1" | tr -d ' ') bytes), not an empty file"
+else
+  bad "the compared region is empty — the byte comparisons above prove nothing"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2156,8 +2217,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 34-shift-never-leaks-bash-diagnostics 35-one-verdict-per-failure-mode
 36-anchor-holds-on-every-stream
 37-machine-axis-must-be-measurable
-38-adopt-never-calls-a-live-owner-gone 28-case-floor"
-CASE_FLOOR=38
+38-adopt-never-calls-a-live-owner-gone
+39-body-bytes-survive-repeated-writes 28-case-floor"
+CASE_FLOOR=39
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""

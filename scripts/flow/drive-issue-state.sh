@@ -151,7 +151,10 @@
 #              marker first passes the SAME ownership verification `verify` applies — you
 #              may not overwrite a live peer's plan either — so a foreign marker refuses
 #              with that marker's own verdict. The route past it is `adopt`, never a flag
-#              on `write`. Without --body-file an OWNED marker's body is PRESERVED.
+#              on `write`. Without --body-file an OWNED marker's body is PRESERVED
+#              BYTE-FOR-BYTE, across any number of writes and across an `adopt`: the blank
+#              separator between the prologue and the body is the WRITER's, and the reader
+#              skips it, so the body neither grows nor shrinks.
 #              ONE EXCEPTION — the MIGRATION case: an UNSTAMPED marker (the pre-#3822
 #              shape) asserts NO ownership, so `write` REPLACES it, DISCARDS its body (an
 #              unstamped plan may belong to any session and is never carried forward) and
@@ -775,13 +778,31 @@ read_marker() {
   return 0
 }
 
-# marker_body — the marker's body (everything AFTER the end sentinel) on stdout.
+# marker_body — the marker's body on stdout, EXCLUDING the writer-owned blank separator.
+#
+# THE WRITER OWNS THE SEPARATOR (roborev job 34 H3). `write_marker` ALWAYS emits exactly one
+# blank line after the end sentinel, so the canonical file is `<stamp>\n<END>\n\n<body>`. This
+# reader must therefore SKIP that one blank line, or the round trip that carries an owned
+# marker's body forward (write -> marker_body -> write_marker) adds a blank line on EVERY write:
+# measured 1, then 2, then 3 across three successive writes of the same body — unbounded growth
+# on a long-running lane, and a body that MUTATES under a contract promising it SURVIVES.
+# Exactly one of the two may own it; it is the WRITER, because the writer is what makes the
+# separator canonical (a body supplied by --body-file gets one too, so the shape does not depend
+# on where the body came from). Do NOT also strip it there, and do not add one here.
+# Only the FIRST blank line is skipped, and only when it is the one immediately after the
+# sentinel: a body that genuinely BEGINS with a blank line keeps it, because the separator is
+# consumed before the body starts.
+#
 # Returns NON-ZERO when the body could not be read, and its stderr is suppressed: every
 # caller must decide what an unreadable body means rather than inherit awk's unprefixed
 # diagnostic and an empty result (roborev job 26 F2).
 marker_body() {
   local path; path="$(marker_path)"
-  awk -v s="$STAMP_END" 'seen{print} $0==s{seen=1}' "$path" 2>/dev/null
+  awk -v s="$STAMP_END" '
+    body { print; next }
+    sep  { sep = 0; body = 1; if ($0 == "") next; print; next }
+    $0 == s { sep = 1 }
+  ' "$path" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -1135,6 +1156,10 @@ write_marker() {
     local kv
     for kv in "$@"; do [ -z "$kv" ] || printf '%s\n' "$kv"; done
     printf '%s\n' "$STAMP_END"
+    # THE WRITER OWNS THIS SEPARATOR — the one blank line between the prologue and the body
+    # (roborev job 34 H3). `marker_body` therefore SKIPS it when reading a body back; if both
+    # sides emit one, every carry-forward write grows the body by a line. Exactly one owner:
+    # change this only together with the reader, and read that function's comment first.
     printf '\n'
     # `cat`'s stderr is SUPPRESSED, not captured: inside a `{ ... } >"$tmp"` group there is
     # nowhere to capture it to, and the group's non-zero status already routes to the
