@@ -144,7 +144,8 @@
 #   LIVE-PEER           session differs and the recorded writer is provably ALIVE
 #   LIVENESS-UNKNOWN    session differs and liveness could NOT be measured
 #   ERROR               an I/O or internal failure, or an identity axis that could not be
-#                       MEASURED (axis=machine) — nothing was decided
+#                       MEASURED (axis=machine / axis=worktree) or could not be recorded
+#                       LOSSLESSLY (axis=machine / axis=session) — nothing was decided
 #   USAGE               the invocation itself was wrong — nothing was read and nothing written
 #
 # SUBCOMMANDS
@@ -221,6 +222,14 @@
 #             machine B. The refusal is at the USE SITE, never in the sanitizer: the shared
 #             placeholder is claim.sh's behaviour and stays pinned. Where no marker exists
 #             nothing is compared, so `verify`/`adopt` still report ABSENT.
+#             IT MUST ALSO BE RECORDABLE **LOSSLESSLY**, and that is the SAME rule one step on
+#             (`verdict ERROR`, exit 1, `axis=machine`). The sanitizer maps space -> '-',
+#             collapses runs of separators and TRUNCATES at 120 characters, so `build box` and
+#             `build-box` record ONE token and two names sharing a 120-character prefix record
+#             ONE token — after which two DISTINCT boxes are one owner, which is the same defect
+#             as the placeholder wearing different clothes. So the axis is required to ALREADY
+#             be what the sanitizer would make of it: recorded != measured is a refusal naming
+#             the axis. Again at the USE SITE — the sanitizer is claim.sh's and does not change.
 #   worktree  `pwd -P` — the physical directory holding the marker. IT MUST BE MEASURABLE:
 #             a failed `pwd -P` (a deleted or unreadable lane directory) is `verdict ERROR`,
 #             exit 1, naming `axis=worktree`, on write/verify/adopt AND on `show` — the marker
@@ -230,9 +239,21 @@
 #             wrong path, not a false OWNED.
 #   session   CLAUDE_CODE_SESSION_ID, sanitized. `unrecorded` when unset, which makes the
 #             session axis UNMEASURED and routes to the liveness resolution.
+#             IT TOO MUST BE RECORDABLE LOSSLESSLY (`verdict ERROR`, exit 1, `axis=session`).
+#             The session axis is not fail-closed on a MISMATCH, but an EQUAL session id is
+#             OWNED outright, so a lossy one lets two distinct sessions own each other's
+#             markers — the machine axis's defect one axis over. `unrecorded` is the ABSENCE of
+#             a value, not a lossy one, and is unaffected.
 #   actor     --actor, else CLAIM_ACTOR, else `flow` — as claim.sh resolves it. NOTE: the
 #             actor is RECORDED but is NOT an ownership axis here; #3810 (claim-actor
 #             collision) is a separate, open issue and is not fixed or widened by this file.
+#             It is therefore sanitized LOSSILY and DELIBERATELY NOT refused (roborev job 37
+#             J1's axis census): nothing compares it, so a collision cannot grant ownership,
+#             and refusing `--actor 'flow lead'` would red on input claim.sh accepts — a guard
+#             that reds on correct input is the guard agents learn to waive. The same holds for
+#             `stage`/`request-id`/`pr`/`branch` and the four `prior-*` provenance fields: they
+#             are recorded state, never compared, so lossiness there costs fidelity in the
+#             audit record and can never alias one lane onto another.
 #
 # ENV
 #   CLAIM_MACHINE           machine identity (default `hostname -s`) — shared with claim.sh
@@ -567,7 +588,8 @@ sanitize_field() {
 # `hostname`'s stderr is suppressed (roborev job 26 F2): its failure is reported through the
 # anchored refusal below, and an unprefixed 'hostname: not found' would break contract (a).
 MACHINE_AXIS_VALUE=''
-MACHINE_AXIS_STATE=''   # ok | unmeasured | unrecordable
+MACHINE_AXIS_STATE=''   # ok | unmeasured | unrecordable | lossy
+MACHINE_AXIS_RAW=''
 resolve_machine_axis() {
   [ -z "$MACHINE_AXIS_STATE" ] || return 0
   local raw
@@ -580,6 +602,7 @@ resolve_machine_axis() {
   # before the anchored refusal below could name the axis (measured: the EXIT-trap backstop's
   # generic ERROR, with no axis=machine detail). The value is unchanged either way: empty.
   raw="${CLAIM_MACHINE:-$(hostname -s 2>/dev/null || true)}"
+  MACHINE_AXIS_RAW="$raw"
   MACHINE_AXIS_VALUE="$(sanitize_field "$raw")"
   if [ -z "$raw" ]; then
     MACHINE_AXIS_STATE=unmeasured
@@ -588,6 +611,17 @@ resolve_machine_axis() {
     # CLAIM_MACHINE, or a host whose `tr` is broken, which is the fail-open case 30 used to
     # declare as a residual). Recorded, it is the same alias, so it is refused the same way.
     MACHINE_AXIS_STATE=unrecordable
+  elif [ "$MACHINE_AXIS_VALUE" != "$raw" ]; then
+    # AN IDENTITY THAT SURVIVES SANITIZATION ONLY IN PART IS AN ALIAS (roborev job 37 J1, the
+    # THIRD instance of one family: H1 committed the `unspecified` placeholder for an
+    # UNMEASURABLE axis, the round-7 class sweep found the same shape on the worktree axis, and
+    # this is a MEASURABLE identity committed LOSSILY). The sanitizer maps space -> '-',
+    # collapses runs and TRUNCATES at 120 characters, so `build box` and `build-box` record the
+    # SAME token and two boxes sharing a 120-character prefix record the same token — after
+    # which lane A's marker verifies as OWNED on machine B, the precise defect this file exists
+    # to prevent. Detected by requiring the recorded value to EQUAL the measured one: that one
+    # comparison covers charset AND length, and it needs no second copy of the sanitizer's rules.
+    MACHINE_AXIS_STATE=lossy
   else
     MACHINE_AXIS_STATE=ok
   fi
@@ -644,20 +678,60 @@ require_machine_axis() {
       refuse ERROR 1 "axis=machine could NOT BE MEASURED: CLAIM_MACHINE is unset or empty and \`hostname -s\` produced nothing. The machine axis is fail-closed identity, and recording the 'unspecified' placeholder would ALIAS every unmeasurable box onto ONE owner (this lane's marker would then verify as OWNED on any other box) — so nothing is written, nothing is compared and nothing was decided. Set CLAIM_MACHINE to this box's unique identity, or repair hostname resolution." ;;
     unrecordable)
       refuse ERROR 1 "axis=machine is NOT RECORDABLE: the machine identity resolved to a value that records as the 'unspecified' placeholder (it carries no recordable characters [A-Za-z0-9._:/#-], or the sanitizer itself could not run) and would ALIAS every such box onto ONE owner. Nothing was written, nothing was compared and nothing was decided. Set CLAIM_MACHINE to this box's unique identity." ;;
+    lossy)
+      refuse ERROR 1 "axis=machine is NOT RECORDABLE LOSSLESSLY: the machine identity '$(sane "$MACHINE_AXIS_RAW")' records as '$(sane "$MACHINE_AXIS_VALUE")', which is a DIFFERENT string. An identity that is normalized before it is compared ALIASES distinct machines onto one owner ('build box' and 'build-box' record the same token; so do two names sharing a 120-character prefix), and this lane's marker would then verify as OWNED on the other box. Nothing was written, nothing was compared and nothing was decided. Set CLAIM_MACHINE to a value that is already one token of [A-Za-z0-9._:/#-] and at most 120 characters." ;;
     *)
-      refuse ERROR 1 "internal: machine-axis state '$(sane "$MACHINE_AXIS_STATE")' is not one of ok|unmeasured|unrecordable — nothing was decided" ;;
+      refuse ERROR 1 "internal: machine-axis state '$(sane "$MACHINE_AXIS_STATE")' is not one of ok|unmeasured|unrecordable|lossy — nothing was decided" ;;
   esac
+}
+
+# THE SESSION AXIS, RESOLVED ONCE, WITH ITS LOSSLESSNESS CARRIED ALONGSIDE (roborev job 37 J1).
+#
+# The session axis is NOT fail-closed on a MISMATCH (see the header: a legitimate cron resume is
+# a new session id in the same lane, so a literal mismatch check would red every correct resume).
+# But an EQUAL session id is OWNED OUTRIGHT — basis `session`, the strongest verdict this script
+# emits — so the same lossy-normalization defect the machine axis has lands here with the same
+# consequence, one axis over: two DISTINCT session ids that sanitize to one token grant each
+# other ownership. The remedy is the same and lives at the USE SITE for the same reason: the
+# sanitizer is claim.sh's, pinned by the agreement case, and is not changed.
+#
+# `unrecorded` is not lossy — it is the ABSENCE of a value, which routes to the liveness
+# resolution rather than to any comparison.
+SESSION_AXIS_VALUE=''
+SESSION_AXIS_STATE=''   # ok | unrecorded | lossy
+SESSION_AXIS_RAW=''
+resolve_session_axis() {
+  [ -z "$SESSION_AXIS_STATE" ] || return 0
+  SESSION_AXIS_RAW="${CLAUDE_CODE_SESSION_ID:-}"
+  if [ -z "$SESSION_AXIS_RAW" ]; then
+    SESSION_AXIS_VALUE='unrecorded'
+    SESSION_AXIS_STATE=unrecorded
+    return 0
+  fi
+  SESSION_AXIS_VALUE="$(sanitize_field "$SESSION_AXIS_RAW")"
+  if [ "$SESSION_AXIS_VALUE" = "$SESSION_AXIS_RAW" ]; then
+    SESSION_AXIS_STATE=ok
+  else
+    SESSION_AXIS_STATE=lossy
+  fi
 }
 
 # this_session — the current session id, or the `unrecorded` sentinel. An unrecorded
 # session makes the session axis UNMEASURED (never "equal"), which routes to the liveness
 # resolution rather than to a false OWNED.
-this_session() {
-  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-    sanitize_field "$CLAUDE_CODE_SESSION_ID"
-  else
-    printf 'unrecorded\n'
-  fi
+this_session() { resolve_session_axis; printf '%s\n' "$SESSION_AXIS_VALUE"; }
+
+# require_session_axis — main shell only, same posture as require_machine_axis: called wherever
+# the session axis is about to be RECORDED or COMPARED.
+require_session_axis() {
+  resolve_session_axis
+  case "$SESSION_AXIS_STATE" in
+    ok | unrecorded) return 0 ;;
+    lossy)
+      refuse ERROR 1 "axis=session is NOT RECORDABLE LOSSLESSLY: CLAUDE_CODE_SESSION_ID '$(sane "$SESSION_AXIS_RAW")' records as '$(sane "$SESSION_AXIS_VALUE")', which is a DIFFERENT string. An equal session id grants OWNED outright, so two distinct session ids that normalize to one token would own each other's markers. Nothing was written, nothing was compared and nothing was decided. Set CLAUDE_CODE_SESSION_ID to a value that is already one token of [A-Za-z0-9._:/#-] and at most 120 characters." ;;
+    *)
+      refuse ERROR 1 "internal: session-axis state '$(sane "$SESSION_AXIS_STATE")' is not one of ok|unrecorded|lossy — nothing was decided" ;;
+  esac
 }
 
 # this_session_pid — the SESSION's pid, or the `unrecordable` sentinel. NO `$$` FALLBACK:
@@ -1090,6 +1164,9 @@ check_ownership() {
   # every marker recorded by another unmeasurable box. Refused before any comparison.
   require_machine_axis
   require_worktree_axis
+  # AND THE SESSION AXIS MUST BE LOSSLESS BEFORE IT IS COMPARED (roborev job 37 J1). An equal
+  # session id returns OWNED on the spot, so a lossy one aliases two sessions onto one owner.
+  require_session_axis
   machine="$(this_machine)"; session="$(this_session)"
 
   read_marker
@@ -1259,7 +1336,14 @@ write_marker() {
   # because a stamp with a placeholder identity is not a weaker stamp — it is an alias.
   resolve_machine_axis
   [ "$MACHINE_AXIS_STATE" = ok ] || {
-    WRITE_ERR="the machine axis is not recordable (state=$(sane "$MACHINE_AXIS_STATE")), so the stamp's \`machine\` field would record the 'unspecified' placeholder and alias this box onto every other unmeasurable one — nothing was written"; return 1; }
+    WRITE_ERR="the machine axis is not recordable (state=$(sane "$MACHINE_AXIS_STATE")), so the stamp's \`machine\` field would record a value that is not this box's measured identity — an 'unspecified' placeholder, or a LOSSILY normalized name — and either aliases this box onto another; nothing was written"; return 1; }
+  # THE SAME BACKSTOP FOR THE SESSION AXIS (roborev job 37 J1), at the site that ASSEMBLES the
+  # stamp: a lossily-recorded session id is an alias, not a weaker stamp.
+  resolve_session_axis
+  case "$SESSION_AXIS_STATE" in
+    ok | unrecorded) : ;;
+    *) WRITE_ERR="the session axis is not recordable losslessly (state=$(sane "$SESSION_AXIS_STATE")), so the stamp's \`session\` field would record a value that is not this session's id and could grant OWNED to a different session — nothing was written"; return 1 ;;
+  esac
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || {
     WRITE_ERR="cannot read the current time (\`date\` failed), so the stamp's \`ts\` field cannot be recorded — refusing rather than committing a stamp with an empty required field; nothing was written"; return 1; }
   [ -n "$ts" ] || {
@@ -1386,6 +1470,7 @@ cmd_write() {
   # COMMITTED as the 'unspecified' placeholder (roborev job 34 H1).
   require_machine_axis
   require_worktree_axis
+  require_session_axis
 
   local body_src=''
   if [ -n "$bodyfile" ]; then

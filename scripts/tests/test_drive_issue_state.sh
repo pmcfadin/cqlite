@@ -355,26 +355,76 @@ fi
 case_begin 11-machine-agrees-with-claim-sh "machine identity is the SAME notion claim.sh records (anti-drift pin)"
 # ===========================================================================
 L11=$(lane lane11)
-# Extract claim.sh's OWN machine resolution from the shipped script and run it in
-# this environment: the agreement is measured, never asserted by care.
+# Extract claim.sh's OWN machine resolution from the shipped script AND this script's own,
+# then run BOTH in one environment over a TABLE of inputs: the agreement is measured, never
+# asserted by care.
+#
+# WHY THE COMPARISON MOVED FROM THE MARKER TO THE FUNCTIONS (roborev job 37 J1): the USE SITE
+# now REFUSES a machine identity that does not survive sanitization unchanged, so a
+# space-bearing CLAIM_MACHINE never reaches the marker and the old single end-to-end value
+# could no longer be read out of it. The SANITIZER itself is untouched, and this pins strictly
+# MORE of it than one recorded value did — every row below compares claim.sh's answer with this
+# script's for the same input, INCLUDING the lossy and unrecordable ones. The end-to-end leg is
+# kept below, on a canonical value.
 cm_body="$T/claim-machine.sh"
 {
   sed -n '/^sanitize_field()/,/^}/p' "$CLAIM"
   sed -n '/^this_machine()/,/^}/p' "$CLAIM"
   printf 'this_machine\n'
 } >"$cm_body"
-claim_machine=$(CLAIM_MACHINE='build box' bash "$cm_body")
-run "$L11" "CLAIM_MACHINE=build box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
-ds_machine=$(sed -n 's/^machine: //p' "$L11/$MARKER" | head -1)
-if [ -n "$claim_machine" ] && [ "$claim_machine" = "$ds_machine" ]; then
-  ok "machine agrees with claim.sh's recorded machine in the same environment ('$ds_machine')"
+# This script's `this_machine` is a ONE-LINE function, so a `/^}/` range would swallow the rest
+# of the file: the two MULTI-LINE definitions it delegates to are extracted and driven directly.
+ds_body="$T/ds-machine.sh"
+{
+  sed -n '/^sanitize_field()/,/^}/p' "$DS"
+  sed -n '/^resolve_machine_axis()/,/^}/p' "$DS"
+  printf 'MACHINE_AXIS_VALUE=; MACHINE_AXIS_STATE=; MACHINE_AXIS_RAW=\n'
+  printf 'resolve_machine_axis\n'
+  printf 'printf "%%s %%s\\n" "$MACHINE_AXIS_VALUE" "$MACHINE_AXIS_STATE"\n'
+} >"$ds_body"
+long120=$(printf 'a%.0s' $(seq 1 120))
+long121a="${long120}X"
+long121b="${long120}Y"
+agree_fail=0
+# input <US> expected-state
+for row in "boxA:ok" "build box:lossy" "box@A:lossy" "$long120:ok" "$long121a:lossy" "***:unrecordable"; do
+  in_v="${row%:*}"; want_state="${row##*:}"
+  cm_v=$(CLAIM_MACHINE="$in_v" bash "$cm_body")
+  ds_pair=$(CLAIM_MACHINE="$in_v" bash "$ds_body")
+  ds_v="${ds_pair% *}"; ds_state="${ds_pair##* }"
+  if [ "$cm_v" != "$ds_v" ]; then
+    agree_fail=$((agree_fail + 1))
+    printf 'note   sanitizer drift for %q: claim.sh=%q drive-issue-state=%q\n' "$in_v" "$cm_v" "$ds_v"
+  fi
+  if [ "$ds_state" != "$want_state" ]; then
+    agree_fail=$((agree_fail + 1))
+    printf 'note   axis state for %q: got=%s want=%s\n' "$in_v" "$ds_state" "$want_state"
+  fi
+done
+if [ "$agree_fail" -eq 0 ]; then
+  ok "machine sanitizer agrees with claim.sh's on every table row, and each row's measurability state is classified as expected"
 else
-  bad "machine identity drifted from claim.sh: claim.sh='$claim_machine' drive-issue-state='$ds_machine'"
+  bad "machine identity drifted from claim.sh (or was misclassified) on $agree_fail check(s)"
 fi
-if [ "$ds_machine" != "build box" ]; then
-  ok "NON-VACUITY: the value is SANITIZED (a space-bearing CLAIM_MACHINE cannot forge a stamp line)"
+# NON-VACUITY of the table: the sanitizer really is LOSSY on these inputs (which is WHY the use
+# site refuses them), and the 120-character cut really does collide two distinct names.
+cm_space=$(CLAIM_MACHINE='build box' bash "$cm_body")
+cm_l121a=$(CLAIM_MACHINE="$long121a" bash "$cm_body")
+cm_l121b=$(CLAIM_MACHINE="$long121b" bash "$cm_body")
+if [ "$cm_space" = 'build-box' ] && [ "$cm_space" != 'build box' ] \
+   && [ -n "$cm_l121a" ] && [ "$cm_l121a" = "$cm_l121b" ]; then
+  ok "NON-VACUITY: the shared sanitizer maps 'build box' onto 'build-box' AND collapses two names differing only past 120 chars onto ONE token — the collisions the use site now refuses are real"
 else
-  bad "machine value was recorded unsanitized: '$ds_machine'"
+  bad "the sanitizer did not behave as the table assumes: space='$cm_space' l121a='$cm_l121a' l121b='$cm_l121b'"
+fi
+# END-TO-END, on a CANONICAL value: what the marker records IS what claim.sh would record.
+cm_canon=$(CLAIM_MACHINE='build-box' bash "$cm_body")
+run "$L11" "CLAIM_MACHINE=build-box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+ds_machine=$(sed -n 's/^machine: //p' "$L11/$MARKER" | head -1)
+if [ -n "$cm_canon" ] && [ "$cm_canon" = "$ds_machine" ]; then
+  ok "end-to-end: the value RECORDED in the marker equals claim.sh's this_machine in the same environment ('$ds_machine')"
+else
+  bad "recorded machine drifted from claim.sh: claim.sh='$cm_canon' marker='$ds_machine'"
 fi
 
 # ===========================================================================
@@ -1746,6 +1796,8 @@ duplicate-sentinel:DUPLICATE-SENTINEL:8
 foreign-issue:FOREIGN-ISSUE:4
 foreign-machine:FOREIGN-MACHINE:4
 unmeasurable-machine:ERROR:1
+lossy-machine:ERROR:1
+lossy-session:ERROR:1
 foreign-worktree:FOREIGN-WORKTREE:4
 adoptable:ADOPTABLE:5
 live-peer:LIVE-PEER:6
@@ -1825,6 +1877,15 @@ inv_run() {  # inv_run <row-name> — set the state up, run it, print output, re
       ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u CLAIM_MACHINE \
           "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd:$PATH" \
           bash "$DS" write 3822 2>&1 ) ;;
+    lossy-machine)
+      # roborev job 37 J1, added to the TABLE and not only to its own case: on this lane the
+      # class lesson is that a fix reaches one site and the next round finds the same defect one
+      # exit path over, so every new failure mode joins the one-verdict/anchor sweep.
+      ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID "CLAIM_MACHINE=build box" \
+          "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$DS" write 3822 2>&1 ) ;;
+    lossy-session)
+      ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+          "CLAUDE_CODE_SESSION_ID=sess a" "CLAUDE_PID=$$" bash "$DS" write 3822 2>&1 ) ;;
     foreign-worktree)
       other=$(lane "inv-$n-other")
       inv_exec "$other" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
@@ -1925,8 +1986,8 @@ else
 fi
 # ROW FLOOR, the same idea as the case floor: a span-replacing edit that silently drops rows
 # otherwise leaves a green tally over a shrunken table.
-if [ "$inv_count" -ge 30 ]; then
-  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 30) — including all four success verdicts, both signal phases and every refusal token"
+if [ "$inv_count" -ge 32 ]; then
+  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 32) — including all four success verdicts, both signal phases and every refusal token"
 else
   bad "table floor breached: only $inv_count rows ran"
 fi
@@ -2498,6 +2559,118 @@ $p42n"
 fi
 
 # ===========================================================================
+case_begin 43-identity-recorded-losslessly "an identity axis is recorded and compared LOSSLESSLY, or the run refuses (roborev job 37 J1)"
+# ===========================================================================
+# THE THIRD INSTANCE OF ONE FAMILY, pinned as a family rather than as a point fix: H1 committed
+# the `unspecified` PLACEHOLDER for an UNMEASURABLE axis, the round-7 class sweep found the same
+# shape on the worktree axis, and this is a MEASURABLE identity committed LOSSILY. Same
+# consequence every time — two distinct lanes alias onto ONE owner.
+L43=$(lane lane43)
+# (i) THE DEMONSTRATED COLLISION: CLAIM_MACHINE='build box' records as 'build-box', so a
+#     genuinely different box named 'build-box' used to verify as OWNED. The lossy write is now
+#     refused outright, so the alias cannot be created in the first place.
+lm_w=$(run "$L43" "CLAIM_MACHINE=build box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); lm_wrc=$?
+if [ "$lm_wrc" -eq 1 ] && [ "$(verdict_of "$lm_w")" = ERROR ] \
+   && [ "$(verdict_count "$lm_w")" = 1 ] \
+   && printf '%s\n' "$lm_w" | grep -q 'axis=machine' \
+   && all_lines_anchored "$lm_w" && [ ! -f "$L43/$MARKER" ]; then
+  ok "a LOSSY machine identity ('build box') is ERROR(1) naming axis=machine, exactly one verdict, and NOTHING is written"
+else
+  bad "lossy machine identity was not refused: rc=$lm_wrc marker=$([ -f "$L43/$MARKER" ] && echo present || echo absent)
+$lm_w"
+fi
+# The other direction of the SAME collision: a canonical 'build-box' marker must not be OWNED
+# by a session whose CLAIM_MACHINE is the distinct value 'build box'.
+run "$L43" "CLAIM_MACHINE=build-box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+lm_v=$(run "$L43" "CLAIM_MACHINE=build box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); lm_vrc=$?
+lm_ok=$(run "$L43" "CLAIM_MACHINE=build-box" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); lm_okrc=$?
+if [ "$lm_vrc" -ne 0 ] && [ "$(verdict_of "$lm_v")" != OWNED ] \
+   && [ "$lm_okrc" -eq 0 ] && [ "$(verdict_of "$lm_ok")" = OWNED ]; then
+  ok "THE COLLISION IS CLOSED: 'build box' does NOT verify as OWNED against a 'build-box' marker (got $(verdict_of "$lm_v")), while the genuine owner still does"
+else
+  bad "the machine collision is still reachable: lossy-rc=$lm_vrc/$(verdict_of "$lm_v") owner-rc=$lm_okrc/$(verdict_of "$lm_ok")"
+fi
+# (ii) THE LENGTH AXIS OF THE SAME DEFECT: two machines sharing a 120-character prefix.
+L43b=$(lane lane43b)
+l43_120=$(printf 'm%.0s' $(seq 1 120))
+la_out=$(run "$L43b" "CLAIM_MACHINE=${l43_120}A" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); la_rc=$?
+lb_out=$(run "$L43b" "CLAIM_MACHINE=${l43_120}B" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); lb_rc=$?
+if [ "$la_rc" -eq 1 ] && [ "$(verdict_of "$la_out")" = ERROR ] \
+   && [ "$lb_rc" -eq 1 ] && [ "$(verdict_of "$lb_out")" = ERROR ] \
+   && [ ! -f "$L43b/$MARKER" ]; then
+  ok "two machine names differing ONLY past the 120-character cut are BOTH refused, so they can never record the same owner"
+else
+  bad "the truncation collision is still reachable: a-rc=$la_rc/$(verdict_of "$la_out") b-rc=$lb_rc/$(verdict_of "$lb_out")"
+fi
+# A 120-character name is NOT lossy and must still work — a guard that reds on correct input is
+# the guard agents learn to waive.
+L43c=$(lane lane43c)
+l120_out=$(run "$L43c" "CLAIM_MACHINE=$l43_120" "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); l120_rc=$?
+if [ "$l120_rc" -eq 0 ] && [ "$(verdict_of "$l120_out")" = WRITTEN ]; then
+  ok "NON-VACUITY: a canonical 120-character machine name is ACCEPTED (the bound is refused only where it CHANGES the value)"
+else
+  bad "a canonical 120-character machine name was refused: rc=$l120_rc
+$l120_out"
+fi
+# (iii) THE SESSION AXIS, the same defect one axis over: an EQUAL session id is OWNED outright.
+L43d=$(lane lane43d)
+ls_w=$(run "$L43d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=sess a" "CLAUDE_PID=$$" -- write 3822 2>&1); ls_wrc=$?
+if [ "$ls_wrc" -eq 1 ] && [ "$(verdict_of "$ls_w")" = ERROR ] \
+   && [ "$(verdict_count "$ls_w")" = 1 ] \
+   && printf '%s\n' "$ls_w" | grep -q 'axis=session' \
+   && all_lines_anchored "$ls_w" && [ ! -f "$L43d/$MARKER" ]; then
+  ok "a LOSSY session id ('sess a') is ERROR(1) naming axis=session, exactly one verdict, and NOTHING is written"
+else
+  bad "lossy session id was not refused: rc=$ls_wrc
+$ls_w"
+fi
+run "$L43d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=sess-a" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+ls_v=$(run "$L43d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=sess a" "CLAUDE_PID=$$" -- verify 3822 2>&1); ls_vrc=$?
+if [ "$ls_vrc" -ne 0 ] && [ "$(verdict_of "$ls_v")" != OWNED ]; then
+  ok "THE SESSION COLLISION IS CLOSED: 'sess a' does NOT verify as OWNED against a 'sess-a' marker (got $(verdict_of "$ls_v"))"
+else
+  bad "the session collision is still reachable: rc=$ls_vrc verdict=$(verdict_of "$ls_v")"
+fi
+# An UNSET session id is the ABSENCE of a value, not a lossy one: it must still write.
+L43e=$(lane lane43e)
+lu_out=$(run "$L43e" CLAIM_MACHINE=boxA "CLAUDE_PID=$$" -- write 3822 2>&1); lu_rc=$?
+if [ "$lu_rc" -eq 0 ] && [ "$(verdict_of "$lu_out")" = WRITTEN ] \
+   && grep -q '^session: unrecorded$' "$L43e/$MARKER"; then
+  ok "NON-VACUITY: an UNSET session id still records the 'unrecorded' sentinel and writes (absence is not lossiness)"
+else
+  bad "an unset session id was misread as lossy: rc=$lu_rc
+$lu_out"
+fi
+# (iv) THE WORKTREE AXIS IS ALREADY VERBATIM — confirmed rather than assumed, because the
+#      census that named it has to be measurable. A space-bearing lane path must be recorded
+#      WITH its space and must NOT be owned from the '-'-substituted sibling.
+L43f=$(lane "lane43 f")
+L43g=$(lane "lane43-f")
+wv_w=$(run "$L43f" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); wv_wrc=$?
+wv_rec=$(sed -n 's/^worktree: //p' "$L43f/$MARKER" | head -1)
+cp "$L43f/$MARKER" "$L43g/$MARKER"
+wv_v=$(run "$L43g" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); wv_vrc=$?
+if [ "$wv_wrc" -eq 0 ] && [ "$wv_rec" = "$L43f" ] && [ "$wv_rec" != "$L43g" ] \
+   && [ "$wv_vrc" -eq 4 ] && [ "$(verdict_of "$wv_v")" = FOREIGN-WORKTREE ]; then
+  ok "the worktree axis is recorded VERBATIM (space preserved) and the '-'-substituted sibling is FOREIGN-WORKTREE, not an alias"
+else
+  bad "worktree axis lossiness: w-rc=$wv_wrc recorded='$wv_rec' expected='$L43f' sibling-rc=$wv_vrc/$(verdict_of "$wv_v")"
+fi
+# (v) THE ACTOR AXIS IS DECLARED LOSSY AND DELIBERATELY NOT REFUSED. Nothing compares it, so a
+#     collision there cannot grant ownership; refusing input claim.sh accepts would red on
+#     correct input. Asserted so the DECISION is measurable and cannot be undone silently.
+L43h=$(lane lane43h)
+ac_out=$(run "$L43h" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --actor 'flow lead' 2>&1); ac_rc=$?
+if [ "$ac_rc" -eq 0 ] && [ "$(verdict_of "$ac_out")" = WRITTEN ] \
+   && grep -q '^actor: flow-lead$' "$L43h/$MARKER"; then
+  ok "DECLARED: the actor is sanitized LOSSILY and accepted — it is recorded state, never an ownership axis (#3810 owns actor collisions)"
+else
+  bad "the actor axis decision changed without the contract changing: rc=$ac_rc
+$ac_out
+$(cat "$L43h/$MARKER" 2>/dev/null)"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2518,8 +2691,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 38-adopt-never-calls-a-live-owner-gone
 39-body-bytes-survive-repeated-writes
 40-worktree-axis-must-be-measurable 41-body-without-trailing-newline
-42-verdict-emission-is-a-critical-section 28-case-floor"
-CASE_FLOOR=42
+42-verdict-emission-is-a-critical-section
+43-identity-recorded-losslessly 28-case-floor"
+CASE_FLOOR=43
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2531,10 +2705,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 139 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 139)"
+if [ "$PASS" -ge 149 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 149)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 139)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 149)"
 fi
 
 # ===========================================================================
