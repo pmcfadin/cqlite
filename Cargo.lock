@@ -317,7 +317,7 @@ dependencies = [
  "arrow-schema 53.4.1",
  "arrow-select 53.4.1",
  "atoi",
- "base64 0.22.1",
+ "base64",
  "chrono",
  "comfy-table",
  "half",
@@ -338,7 +338,7 @@ dependencies = [
  "arrow-schema 54.3.1",
  "arrow-select 54.2.1",
  "atoi",
- "base64 0.22.1",
+ "base64",
  "chrono",
  "comfy-table",
  "half",
@@ -401,7 +401,7 @@ dependencies = [
  "arrow-cast 53.4.1",
  "arrow-ipc",
  "arrow-schema 53.4.1",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "futures",
  "paste",
@@ -711,12 +711,6 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.21.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
-
-[[package]]
-name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -797,7 +791,7 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0aed08d3adb6ebe0eff737115056652670ae290f177759aac19c30456135f94c"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bollard-stubs",
  "bytes",
  "futures-core",
@@ -1260,7 +1254,7 @@ dependencies = [
  "anyhow",
  "arrow 53.4.1",
  "assert_cmd",
- "base64 0.21.7",
+ "base64",
  "bytes",
  "cargo-llvm-cov",
  "chrono",
@@ -1324,7 +1318,7 @@ dependencies = [
  "arc-swap",
  "arrow 53.4.1",
  "async-trait",
- "base64 0.21.7",
+ "base64",
  "bincode",
  "bit-vec",
  "bytes",
@@ -1444,7 +1438,7 @@ version = "0.16.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "base64 0.21.7",
+ "base64",
  "chrono",
  "clap",
  "colored",
@@ -1477,7 +1471,7 @@ dependencies = [
 name = "cqlite-node"
 version = "0.16.1"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chrono",
  "cqlite-core",
  "cqlite-ffi-common",
@@ -1852,7 +1846,7 @@ checksum = "fd197f3b2975424d3a4898ea46651be855a46721a56727515dbd5c9e2fb597da"
 dependencies = [
  "arrow 53.4.1",
  "arrow-buffer 53.4.1",
- "base64 0.22.1",
+ "base64",
  "chrono",
  "datafusion-common",
  "datafusion-doc",
@@ -2835,7 +2829,7 @@ version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "byteorder",
  "crossbeam-channel",
  "flate2",
@@ -2992,7 +2986,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -4143,7 +4137,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema 53.4.1",
  "arrow-select 53.4.1",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "chrono",
  "half",
@@ -4886,7 +4880,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -5226,7 +5220,7 @@ version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76a5c54c7310e7b8b9577c286d7e399ddd876c3e12b3ed917a8aabc4b96e9e8c"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bs58",
  "chrono",
  "hex",
@@ -6114,7 +6108,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "h2",
  "http",
@@ -6142,7 +6136,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "http",
  "http-body",

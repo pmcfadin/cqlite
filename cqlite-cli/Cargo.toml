@@ -100,7 +100,7 @@ chrono = { workspace = true }
 regex = "1.10"
 
 # Base64 encoding for binary data display
-base64 = "0.21"
+base64 = "0.22"
 
 # System memory monitoring (cross-platform)
 sysinfo = "0.30"
