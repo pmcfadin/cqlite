@@ -779,7 +779,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   is now a closed set (PASS, SKIP) and everything else fails. Two states are DECLARED and
   deliberately NON-FATAL, because a lane that reds on correct input is the lane agents learn to
   waive: `NOT-MEASURED` (an unreadable log, a failed ANSI strip, an unrecognised driver report)
-  and `gap:<reason>` (15 components today — fmt, clippy, all-features-check, the shell/python
+  and `gap:<reason>` (14 components today — fmt, clippy, all-features-check, the shell/python
   guards, smoke, tooling-tests — each PRINTING its reason every run). Neither is ever read as
   verified: the aggregate line counts them separately and always as `N RECOGNISED`, never a bare
   `N`, and it DECLARES its own non-exhaustiveness, because the gap set is curated. One asymmetry

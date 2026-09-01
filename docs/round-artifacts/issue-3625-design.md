@@ -145,10 +145,15 @@ The design was followed. Four deltas, each with its reason:
 |---|---|---|
 | `libtest` | 18 | core-tests, tombstones-scan, scan-offload-guard, work-counters-guard, byte-budget-guard, arrow-parity-guard, memory-budget, format-compat, write-tests, cli-tests, compaction-byte-parity, bti-multiclustering, query-semantics-oracle, flight-query-semantics-oracle, flight-tests, legacy-heuristics, binding-rust-tests, kit-dashboard-drift |
 | `compile` | 3 | feature-iso-parquet, feature-iso-delta-scan, minimal-build |
-| `both` | 2 | integration-tests, scoped-tests |
+| `both` | 1 | integration-tests |
+| `runtime:<why>` | 1 | scoped-tests (moved off `both` by the census audit — see below) |
 | `indirect:<driver>` | 2 | python-bindings (pytest), node-bindings (jest) |
 | `self:<unit>` | 2 | node-tests, shell-selftests |
 | `gap:<reason>` | 14 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, file-size, roborev-lints, pub-surface, binding-unwind-profile, delivery-telemetry, tooling-tests, tree-selftest |
+
+> **These counts are DERIVED, and the derivation is the authority, not this table**: case A2
+> of `scripts/tests/test_agent_gate_census.sh` prints them from the shipped `_census_kind` on
+> every run. A number written in prose decays exactly like a stale comment.
 
 Every `libtest`/`compile`/`both` declaration was verified AT ITS CALL SITE to write its
 cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redirect, or (for
