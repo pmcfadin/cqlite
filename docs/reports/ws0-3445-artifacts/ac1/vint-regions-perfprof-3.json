@@ -1,0 +1,111 @@
+{
+  "binary": "/data/ws0-3445-build/perfprof/release/ws0-3299-scan-worker",
+  "fingerprint_vs_dwarf": {
+    "f2_anchors_total": 138,
+    "f2_anchors_inside_dwarf_vint": 133,
+    "f2_anchors_outside_dwarf_vint": 5,
+    "bswap_total": 315,
+    "bswap_inside_dwarf_vint": 122,
+    "anchors_outside_symbols": [
+      "cqlite_core::parser::repair_metadata::try_skip_improved_min_max",
+      "cqlite_core::storage::sstable::bti::parser::rows::read_unsigned_vint_from_slice"
+    ]
+  },
+  "cycle_weighted": {
+    "cycles_total_all_dsos": 87976583550,
+    "vint_cycles": 1580028440,
+    "vint_pct_of_total": 1.7959647627166808,
+    "by_opcode": [
+      {
+        "opcode": "bswap",
+        "cycles": 1124520241,
+        "pct_of_vint": 71.17088607594937
+      },
+      {
+        "opcode": "mov",
+        "cycles": 216003888,
+        "pct_of_vint": 13.670886075949367
+      },
+      {
+        "opcode": "cmp",
+        "cycles": 103001854,
+        "pct_of_vint": 6.518987341772152
+      },
+      {
+        "opcode": "lea",
+        "cycles": 47000846,
+        "pct_of_vint": 2.9746835443037973
+      },
+      {
+        "opcode": "movzbl",
+        "cycles": 34000612,
+        "pct_of_vint": 2.151898734177215
+      },
+      {
+        "opcode": "xor",
+        "cycles": 29000522,
+        "pct_of_vint": 1.8354430379746836
+      },
+      {
+        "opcode": "add",
+        "cycles": 14000252,
+        "pct_of_vint": 0.8860759493670886
+      },
+      {
+        "opcode": "not",
+        "cycles": 3500063,
+        "pct_of_vint": 0.22151898734177214
+      },
+      {
+        "opcode": "test",
+        "cycles": 3000054,
+        "pct_of_vint": 0.189873417721519
+      },
+      {
+        "opcode": "inc",
+        "cycles": 2500045,
+        "pct_of_vint": 0.15822784810126583
+      },
+      {
+        "opcode": "sub",
+        "cycles": 2000036,
+        "pct_of_vint": 0.12658227848101267
+      },
+      {
+        "opcode": "shl",
+        "cycles": 500009,
+        "pct_of_vint": 0.03164556962025317
+      },
+      {
+        "opcode": "bsr",
+        "cycles": 500009,
+        "pct_of_vint": 0.03164556962025317
+      },
+      {
+        "opcode": "je",
+        "cycles": 500009,
+        "pct_of_vint": 0.03164556962025317
+      }
+    ],
+    "by_caller": [
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_metadata",
+        "cycles": 850515309,
+        "pct_of_vint": 53.82911392405063,
+        "pct_of_total": 0.9667519181585678
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::read_vint_length_prefixed_bytes",
+        "cycles": 691512447,
+        "pct_of_vint": 43.765822784810126,
+        "pct_of_total": 0.7860187553282183
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_clustering_prefix",
+        "cycles": 38000684,
+        "pct_of_vint": 2.4050632911392404,
+        "pct_of_total": 0.04319408922989486
+      }
+    ]
+  }
+}

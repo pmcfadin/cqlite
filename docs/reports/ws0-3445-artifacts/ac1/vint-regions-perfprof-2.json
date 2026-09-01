@@ -1,0 +1,116 @@
+{
+  "binary": "/data/ws0-3445-build/perfprof/release/ws0-3299-scan-worker",
+  "fingerprint_vs_dwarf": {
+    "f2_anchors_total": 138,
+    "f2_anchors_inside_dwarf_vint": 133,
+    "f2_anchors_outside_dwarf_vint": 5,
+    "bswap_total": 315,
+    "bswap_inside_dwarf_vint": 122,
+    "anchors_outside_symbols": [
+      "cqlite_core::parser::repair_metadata::try_skip_improved_min_max",
+      "cqlite_core::storage::sstable::bti::parser::rows::read_unsigned_vint_from_slice"
+    ]
+  },
+  "cycle_weighted": {
+    "cycles_total_all_dsos": 101167320979,
+    "vint_cycles": 1689030402,
+    "vint_pct_of_total": 1.669541493888727,
+    "by_opcode": [
+      {
+        "opcode": "bswap",
+        "cycles": 1178521213,
+        "pct_of_vint": 69.77501480165779
+      },
+      {
+        "opcode": "mov",
+        "cycles": 229504131,
+        "pct_of_vint": 13.587921847246891
+      },
+      {
+        "opcode": "cmp",
+        "cycles": 109501971,
+        "pct_of_vint": 6.483126110124334
+      },
+      {
+        "opcode": "lea",
+        "cycles": 44000792,
+        "pct_of_vint": 2.605091770278271
+      },
+      {
+        "opcode": "movzbl",
+        "cycles": 37000666,
+        "pct_of_vint": 2.1906453522794553
+      },
+      {
+        "opcode": "xor",
+        "cycles": 36000648,
+        "pct_of_vint": 2.1314387211367674
+      },
+      {
+        "opcode": "add",
+        "cycles": 18000324,
+        "pct_of_vint": 1.0657193605683837
+      },
+      {
+        "opcode": "test",
+        "cycles": 14500261,
+        "pct_of_vint": 0.8584961515689757
+      },
+      {
+        "opcode": "not",
+        "cycles": 11000198,
+        "pct_of_vint": 0.6512729425695678
+      },
+      {
+        "opcode": "je",
+        "cycles": 4000072,
+        "pct_of_vint": 0.23682652457075193
+      },
+      {
+        "opcode": "sub",
+        "cycles": 3000054,
+        "pct_of_vint": 0.17761989342806395
+      },
+      {
+        "opcode": "bsr",
+        "cycles": 2000036,
+        "pct_of_vint": 0.11841326228537596
+      },
+      {
+        "opcode": "inc",
+        "cycles": 1000018,
+        "pct_of_vint": 0.05920663114268798
+      },
+      {
+        "opcode": "shl",
+        "cycles": 500009,
+        "pct_of_vint": 0.02960331557134399
+      },
+      {
+        "opcode": "or",
+        "cycles": 500009,
+        "pct_of_vint": 0.02960331557134399
+      }
+    ],
+    "by_caller": [
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_metadata",
+        "cycles": 866515597,
+        "pct_of_vint": 51.30254588513913,
+        "pct_of_total": 0.8565172909737016
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::read_vint_length_prefixed_bytes",
+        "cycles": 780514049,
+        "pct_of_vint": 46.21077560686797,
+        "pct_of_total": 0.7715080734044709
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_clustering_prefix",
+        "cycles": 42000756,
+        "pct_of_vint": 2.4866785079928952,
+        "pct_of_total": 0.041516129510554486
+      }
+    ]
+  }
+}

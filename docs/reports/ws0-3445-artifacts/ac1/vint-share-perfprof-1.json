@@ -1,0 +1,57 @@
+{
+  "perf_data": "/data/ws0-3445-build/ac1-perfprof-1/perf.data",
+  "binary": "/data/ws0-3445-build/perfprof/release/ws0-3299-scan-worker",
+  "cycles_total": 103303359427,
+  "cycles_outside_binary": 44625303241,
+  "pct_outside_binary": 43.19830786581027,
+  "rebase_selfcheck": {
+    "addresses_checked": 3430,
+    "mismatches": 0,
+    "mismatch_pct": 0.0,
+    "verdict": "PASS"
+  },
+  "skid_band": {
+    "k=0": {
+      "narrow_cycles": 1717030906,
+      "wide_cycles": 1750031500,
+      "write_vint_cycles": 0,
+      "narrow_pct": 1.6621249449427162,
+      "wide_pct": 1.6940702700348012,
+      "write_vint_pct": 0.0
+    },
+    "k=1": {
+      "narrow_cycles": 1757531635,
+      "wide_cycles": 1815032670,
+      "write_vint_cycles": 0,
+      "narrow_pct": 1.701330571192093,
+      "wide_pct": 1.756992880064665,
+      "write_vint_pct": 0.0
+    },
+    "k=2": {
+      "narrow_cycles": 1662529925,
+      "wide_cycles": 1745531419,
+      "write_vint_cycles": 0,
+      "narrow_pct": 1.609366756533061,
+      "wide_pct": 1.6897140893404259,
+      "write_vint_pct": 0.0
+    },
+    "k=3": {
+      "narrow_cycles": 1664029952,
+      "wide_cycles": 1747031446,
+      "write_vint_cycles": 0,
+      "narrow_pct": 1.6108188167645194,
+      "wide_pct": 1.6911661495718842,
+      "write_vint_pct": 0.0
+    }
+  },
+  "narrow_cycles": 1717030906,
+  "wide_cycles": 1750031500,
+  "write_vint_cycles": 0,
+  "narrow_pct": 1.6621249449427162,
+  "wide_pct": 1.6940702700348012,
+  "write_vint_pct": 0.0,
+  "narrow_pct_min": 1.609366756533061,
+  "narrow_pct_max": 1.701330571192093,
+  "wide_pct_min": 1.6897140893404259,
+  "wide_pct_max": 1.756992880064665
+}
