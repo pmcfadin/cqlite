@@ -443,8 +443,8 @@ Round 12 found a different kind of defect from the eleven before it. Not a
 mechanism that could be satisfied without evidence — **a domain requirement we
 established ourselves and never wired to a check.**
 
-§6 of this document records, with citations, that the corpus must be
-**compressed**: the field is LZ4, the plan of record flags *uncompressed* as a
+§5 (the corpus constraint the rig session inherits) records, with citations,
+that the corpus must be **compressed**: the field is LZ4, the plan of record flags *uncompressed* as a
 known artifact of the WS0 loopback measurements, and `ws0-corpus-gen` cannot
 supply one because CQLite's write surface is uncompressed by construction
 (#1406). The runbook tells the operator so. **The census asked about size and

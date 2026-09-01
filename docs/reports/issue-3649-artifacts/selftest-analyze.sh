@@ -2389,6 +2389,7 @@ PYINNER
   printf 'earlier replicate data\n' \
     > "$TMP/w-prior/run-EARLIER-SESSION/base-r01.jsonl"
   prior_before="$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)"
+  prior_files="$(find "$TMP/w-prior/run-EARLIER-SESSION" -type f | sort | tr '\n' ' ')"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-prior" --repo "$SCRATCH"
   check_driver "a re-used work directory whose new attempt fails pre-flight" 2 corpus-too-small
@@ -2404,10 +2405,15 @@ PYINNER
   fi
   # The replicate JSONLs live in the session directory too -- round 4 finding 2
   # was that the manifest was staged while the files it references were not.
-  if [ -z "$(find "$TMP/w-prior" -maxdepth 2 -name 'base-r01.jsonl' -newer "$TMP/w-prior/run-EARLIER-SESSION/manifest.json" 2>/dev/null)" ]; then
-    ok "no replicate file was written outside this session's own directory"
+  # Compared as a SET, not by mtime: the previous form asked whether any
+  # `base-r01.jsonl` was NEWER than the prior manifest, which depends on
+  # filesystem timestamp granularity and on the order the fixture happened to be
+  # created -- a case whose verdict moves with the filesystem is not a case.
+  if [ "$(find "$TMP/w-prior/run-EARLIER-SESSION" -type f | sort | tr '\n' ' ')" \
+       = "$prior_files" ]; then
+    ok "the earlier session's directory gained and lost no files"
   else
-    bad "a replicate file was written where another session could see it"
+    bad "a file appeared in or vanished from the earlier session's directory"
   fi
 
   # ALSO RESTRUCTURE DEBRIS: this checked `results/manifest.json`, a path the
@@ -3315,17 +3321,32 @@ for number, title in re.findall(r"§(\d+)\s*\(([^)]+)\)", flat):
         bad.append("§%d names no section" % number)
     elif title.strip().lower().rstrip(".") not in headings[number]:
         bad.append("§%d says %r but that section is %r" % (number, title, headings[number]))
-# Only the LESSON sections (9+) are checked for a title. The fact sections
-# 1-8 are stable, are referenced by number from RUNBOOK.md, and share their
-# numbering with other documents' sections quoted here (`phase2 ... 3.2`,
-# `RUNBOOK.md 2`), which a bare-number scan cannot tell apart. The lessons are
-# the ones that renumber, and they are the ones that went stale twice.
-bare = [
-    n for n in re.findall(r"\u00a7(\d+)(?!\s*\()", flat)
-    if int(n) in headings and int(n) >= 9
-]
+# EVERY INTERNAL reference needs a title, not only the lesson ones. Scoping this
+# to sections 9+ was my reasoning that the fact sections are stable -- and a bare
+# `\u00a76` pointing at what is actually \u00a75 got straight past it, because a
+# renumbering shifts fact sections too once one is inserted among them. What a
+# bare number is legitimately used for is a reference to ANOTHER document, which
+# always names it: `RUNBOOK.md \u00a72`, `phase2-verify-row-engine.md \u00a73.2`,
+# or a `>` quotation carrying someone else's numbering. So the exemption is
+# "names a document or is quoted", not "is a low number".
+lines = text.splitlines()
+bare = []
+for line in lines:
+    if line.lstrip().startswith(">") or ".md" in line:
+        continue
+    # `\u00a7(\d+)(?!\s*\()` BACKTRACKS: on `\u00a718 (title)` the greedy `\d+`
+    # takes 18, the lookahead fails, and it retries with `1` -- which passes,
+    # because the next character is `8`. So a correctly titled reference reported
+    # itself as a bare one, and `\u00a73.2` (another document's section) reported
+    # as `\u00a73`. `(?![\d.])` pins the number to its whole self and exempts a
+    # dotted foreign reference at the same time.
+    for n in re.findall(r"\u00a7(\d+)(?![\d.])(?!\s*\()", line):
+        if int(n) in headings:
+            bare.append(n)
 if bare:
-    bad.append("lesson references with no title: %s" % ", ".join(sorted(set(bare))))
+    bad.append(
+        "internal references with no title: %s -- a bare number cannot be checked "
+        "against the section it points at" % ", ".join(sorted(set(bare))))
 if not re.search(r"§\d+\s*\(", flat):
     bad.append("no titled cross-references found, so this guard proved nothing")
 for problem in bad:
