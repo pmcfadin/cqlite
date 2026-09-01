@@ -6801,6 +6801,16 @@ _record_status_detail() {
 # (run_file_size) renders paths git already quotes, so no REACHABLE input carries a
 # control character — this boundary exists so the NEXT writer cannot reintroduce the
 # row-injection route by not thinking about it.
+# NOT BEHAVIOURALLY TESTED ON THIS PLATFORM, and that is DECLARED rather than papered over
+# (roborev job 20, L2). A test was written for this pin and then DELETED: GNU `tr` is
+# byte-wise, so for every input any writer here can produce, `[:cntrl:]` selects the same
+# bytes with or without the pin — the rendering is identical, no mutant can distinguish the
+# two, and the case could not fail. It was ALSO flaky, comparing whole rows from two
+# separate runs with the elapsed `(Ns)` field included. A case that cannot fail but CAN
+# flake is strictly worse than none: it costs reds in a merge-gating suite and buys no
+# signal. The pin STAYS — free, and it removes a real environment dependence on any
+# platform where the class IS locale-sensitive — but it is defence in depth with NO
+# behavioural coverage, said plainly so nobody reads the neighbouring cases as evidence.
 # LOCALE-PINNED, and the CLAIM is narrowed to what the code delivers (roborev round 1, L2):
 # `[:cntrl:]` is evaluated in the CURRENT locale, so an unpinned `tr` makes this boundary's
 # coverage a property of the caller's environment rather than of this line. `LC_ALL=C`
@@ -6821,17 +6831,36 @@ _status_detail() {
   local f
   f=$(_status_detail_file "$1")
   [ -n "${LOG_DIR:-}" ] && [ -s "$f" ] || return 0
-  # …and `RESULT:` is neutralised at the SAME one boundary, for the same reason and with
-  # the same standing: the #2908/#3041 completion probe greps the summary FILE for
-  # `RESULT: (PASS|FAIL)`, and this detail lands on a component ROW inside that file, so a
-  # detail carrying the token would let a poller read a verdict off a row instead of off the
-  # terminal line. scripts/tests/test_agent_gate_summary.sh already guards the annotation
-  # half of that invariant (3453-annot-c); the detail is the other half of the same line.
-  # DEFENCE IN DEPTH on the same terms as the strip above — the nearest live route is a
-  # repository-controlled grown-file PATH, which no Rust path plausibly spells — and it is
-  # the boundary, not each writer, that has to hold. Display only: no decision anywhere
-  # reads this value, so a redaction can never grant what a parse would.
-  head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]' | sed 's/RESULT:/RESULT[redacted-token]:/g'
+  # …and a detail carrying the completion probe's verdict token is REFUSED, not rewritten
+  # (roborev job 19, L1). The #2908/#3041 probe greps the summary FILE for
+  # `RESULT: (PASS|FAIL)` and this detail lands on a component ROW inside that file, so the
+  # token must not appear here. The first attempt SUBSTITUTED it — and a blanket
+  # substitution edits the token wherever it occurs, INCLUDING inside a legitimate
+  # grown-file path such as `cqlite-core/src/RESULT: PASS.rs`, which the row would then name
+  # in a spelling that exists nowhere on disk. That is the SAME false-reporting defect this
+  # change exists to remove, reintroduced by its own guard, and strictly worse than the
+  # disclosure it was protecting: a reader cannot tell a rewritten name from a real one.
+  #
+  # So the value is WITHHELD WHOLE, loudly, and the reader is sent to the component log — a
+  # truthful degradation instead of a false statement. The row keeps its status token and
+  # its count; only the detail suffix is replaced, by a sentence that says it was withheld
+  # and why. The refusal names NO part of the token it refuses (the reason is described, not
+  # quoted), because a diagnostic reproducing the token it exists to keep off this row would
+  # forge the very row it prevents — the rule this repo already applies to the roborev
+  # waiver markers.
+  #
+  # THE TRIGGER IS DELIBERATELY BROADER THAN THE PROBE PATTERN. It fires on any `RESULT:`,
+  # not only `RESULT: PASS`/`RESULT: FAIL`, because narrowing it would require knowing every
+  # consumer's regex AND that it stays that way — and the consumers are not enumerable from
+  # here (pollers outside this repo read these blocks). The cost of the broad trigger is a
+  # withheld detail on a pathological filename; the cost of a narrow one is a forged verdict
+  # for a consumer nobody surveyed. Only one of those is recoverable by reading the log.
+  local _sd_v
+  _sd_v=$(head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
+  case "$_sd_v" in
+    *RESULT:*) printf '%s' "[detail WITHHELD: it contains the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
+    *)         printf '%s' "$_sd_v" ;;
+  esac
 }
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component

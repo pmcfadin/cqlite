@@ -565,39 +565,44 @@ has_re "case4e (#3402): the path is the FINAL field — not a stem with the rema
     "$sumrow4e" 'grown: cqlite-core/src/we: ird\.rs$'
 
 # ---------------------------------------------------------------------------
-# Case 4f (#3402, roborev round 1 L2) — the row must not depend on the caller's LOCALE.
-# `_status_detail` reduces the value with `tr -d '[:cntrl:]'`, and `[:cntrl:]` is evaluated
-# in the CURRENT locale, so an unpinned `tr` made this emit boundary's behaviour a property
-# of the invoker's environment rather than of the code. `LC_ALL=C` is pinned AT the call;
-# this case measures the resulting property directly — the SAME fixture rendered under a C
-# and a UTF-8 locale must produce a BYTE-IDENTICAL row.
-# A UTF-8 locale is not guaranteed to be generated on every host, so its half is a DECLARED
-# skip rather than a silent pass (one skip per skipped assert, the case-8 convention).
+# Case 4g (#3402, roborev job 19/20 L1) — a grown path CONTAINING the completion probe's
+# verdict token. The first guard SUBSTITUTED the token wherever it appeared, so a real file
+# `cqlite-core/src/RESULT: PASS.rs` was rendered in a spelling that exists nowhere on disk —
+# the SAME false-reporting defect this change removes, reintroduced by its own guard, and
+# worse than what it protected: a reader cannot tell a rewritten name from a real one.
+# The detail is now WITHHELD WHOLE, loudly, pointing at the component log.
+#
+# The three needles are complementary and none is satisfiable from another state: the named
+# withholding (emitted from this branch alone), the ABSENCE of the rewritten spelling (the
+# literal bytes the old guard produced), and — the property the guard exists for — the row
+# not matching the probe's own pattern, asserted against the ROW rather than the block,
+# since the block legitimately carries a terminal RESULT line of its own.
+#
+# NOTE ON WHAT IS *NOT* HERE: case 4f, a locale-independence test, was written and DELETED.
+# GNU `tr` is byte-wise, so `[:cntrl:]` selects the same bytes with or without the LC_ALL=C
+# pin for every input a writer here can produce — no mutant can distinguish them and the
+# case could not fail — while comparing whole rows from two runs made it flake on the
+# elapsed field. See the declaration at _status_detail: the pin stays, its coverage is
+# declared absent rather than simulated.
 # ---------------------------------------------------------------------------
-mkrepo localec cqlite-core/src/big.rs 900 950 main; r4f="$REPO"
-out4f="$tmp/locale-c.out"
-run_only_file_size "$r4f" "$out4f" CQLITE_ALLOW_FILE_GROWTH=1 LC_ALL=C
-sumrow4f_c="$tmp/locale-c.sumrow"
-fs_summary_row "$r4f/.sum" "$sumrow4f_c" ||
-  bad "case4f (#3402): no file-size row under LC_ALL=C — the locale comparison is UNMEASURED"
-has "case4f (#3402): under LC_ALL=C the row still carries the full detail" \
-    "$sumrow4f_c" "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
-fs_utf8=$(locale -a 2>/dev/null | grep -im1 -E '^(C|en_US)\.utf-?8$' || true)
-if [ -z "$fs_utf8" ]; then
-  skip "case4f: no UTF-8 locale generated on this host — the cross-locale comparison not run"
+mkrepo verdictpath 'cqlite-core/src/RESULT: PASS.rs' 900 950 main; r4g="$REPO"
+out4g="$tmp/verdictpath.out"
+run_only_file_size "$r4g" "$out4g" CQLITE_ALLOW_FILE_GROWTH=1
+d4g=$(logdir_of "$out4g") || bad "case4g: the run published no usable 'logs:' dir"
+sumrow4g="$tmp/verdictpath.sumrow"
+fs_summary_row "$r4g/.sum" "$sumrow4g" ||
+  bad "case4g (#3402): the run emitted no usable file-size row — the L1 asserts are UNMEASURED"
+assert_verdict "case4g: a verdict-token-bearing grown path is still an OPT-OUT" "$d4g" OPT-OUT
+has "case4g (#3402): the row NAMES the withholding instead of rendering a rewritten path" \
+    "$sumrow4g" "detail WITHHELD"
+lacks "case4g (#3402): the row carries NO rewritten spelling of the real filename" \
+    "$sumrow4g" "redacted-token"
+if [ ! -s "$sumrow4g" ]; then
+  bad "case4g (#3402): no file-size row captured — the forged-verdict check could not run"
+elif grep -Eq 'RESULT: (PASS|FAIL)' "$sumrow4g"; then
+  bad "case4g (#3402): the row matches the completion probe's own pattern — it would forge a verdict"
 else
-  mkrepo localeu cqlite-core/src/big.rs 900 950 main; r4g="$REPO"
-  out4g="$tmp/locale-u.out"
-  run_only_file_size "$r4g" "$out4g" CQLITE_ALLOW_FILE_GROWTH=1 LC_ALL="$fs_utf8"
-  sumrow4f_u="$tmp/locale-u.sumrow"
-  fs_summary_row "$r4g/.sum" "$sumrow4f_u" ||
-    bad "case4f (#3402): no file-size row under $fs_utf8 — the locale comparison is UNMEASURED"
-  if [ -s "$sumrow4f_c" ] && [ -s "$sumrow4f_u" ] && cmp -s "$sumrow4f_c" "$sumrow4f_u"; then
-    ok "case4f (#3402): the row is BYTE-IDENTICAL under LC_ALL=C and $fs_utf8"
-  else
-    bad "case4f (#3402): the row DIFFERS between LC_ALL=C and $fs_utf8 — the reduction is locale-dependent"
-    diff "$sumrow4f_c" "$sumrow4f_u" 2>/dev/null | head -4
-  fi
+  ok "case4g (#3402): the row does NOT match 'RESULT: (PASS|FAIL)' — no forged terminal verdict"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1024,10 +1029,10 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # misattributing one as the other.
 # 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
 # FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
-# 107 -> 112 on roborev round 1: +3 case4e (L3, delimiter-bearing path) and +2 case4f
-# (L2, locale independence — its second assert is a DECLARED skip on a host with no
-# UTF-8 locale, so the census total is the same either way).
-EXPECTED_CHECKS=112
+# 107 -> 112 on roborev round 1 (+3 case4e, +2 case4f), then 112 -> 114 on job 19/20:
+# case4f DELETED (-2: it could not fail and could flake — see case4g's note) and case4g
+# ADDED (+4). Every case4g assert is unconditional: no /dev/full, no locale, no network.
+EXPECTED_CHECKS=114
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
