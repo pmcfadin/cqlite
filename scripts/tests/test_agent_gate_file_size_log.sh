@@ -619,6 +619,12 @@ else
   # The mutant: stop the EMIT FUNNEL appending the table, which is the state before this fix.
   # The block still emits, so only the row can distinguish the two.
   #
+  # WRITE-AND-MOVE, never `sed -i` (roborev job 74): `sed -i EXPR FILE` is GNU-only — BSD and
+  # macOS sed require an argument to -i (`sed -i '' EXPR FILE`), so the GNU spelling makes
+  # this REGISTERED gate test fail on a platform the repo supports, and
+  # scripts/tests/test_agent_gate_tree_portability.sh lints for exactly this shape. The
+  # temp-file form needs no version sniff and is unambiguous on both.
+  #
   # THE GUARD ASSERTS THE MUTATION CHANGED SOMETHING, not that a pattern is now absent. The
   # first version sed'd `${_pf_rows:+…}` — the per-site wiring this fix REPLACED — and then
   # checked that pattern was gone, which is trivially true of a file that never contained it.
@@ -628,7 +634,9 @@ else
   pf_mut="$tmp/preflight-mutant"
   if cp -r "$pf_root" "$pf_mut" 2>/dev/null &&
      grep -q 'line=$(_recorded_component_rows_block)' "$pf_mut/scripts/agent-gate.sh" &&
-     sed -i 's/^\( *\)line=$(_recorded_component_rows_block)$/\1line=""/' "$pf_mut/scripts/agent-gate.sh" &&
+     sed 's/^\( *\)line=$(_recorded_component_rows_block)$/\1line=""/' \
+         "$pf_mut/scripts/agent-gate.sh" > "$pf_mut/scripts/agent-gate.sh.mut" &&
+     mv "$pf_mut/scripts/agent-gate.sh.mut" "$pf_mut/scripts/agent-gate.sh" &&
      ! cmp -s "$pf_root/scripts/agent-gate.sh" "$pf_mut/scripts/agent-gate.sh"; then
     pf_msum="$tmp/preflight-mutant.sum"
     ( cd "$pf_mut" && env -u AGENT_GATE_SUMMARY_FILE CQLITE_DATASETS_ROOT="${pf_empty%/sstables}" \

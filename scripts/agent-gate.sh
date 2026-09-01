@@ -1874,6 +1874,11 @@ CANONICAL_FIXTURE_KEYSPACE="test_basic"
 # Stamped into the SUMMARY when the opt-out (AGENT_GATE_ALLOW_MISSING_FIXTURES=1)
 # restores SKIP, so an intentional opt-out is visible in the pasted block.
 MISSING_FIXTURES_MARKER=""
+# #3402/job 74: set to 1 beside every site that BUILDS component rows into a meta array, and
+# read by _emit_meta_lines to decide whether the funnel must append them. Explicit state, so
+# the decision can never be spoofed by a caller-controlled value that happens to look like a
+# row (the defect this replaced). Declared here so it is bound under `set -u` at every emit.
+_SUMMARY_ROWS_BUILT=0
 
 # _missing_fixtures_marker: the machine-checkable OPT-OUT line stamped into the
 # SUMMARY. Single-sourced so the real preflight and the hidden --preflight-fixtures
@@ -9204,14 +9209,29 @@ fi
 # an acknowledged CQLITE_ALLOW_FILE_GROWTH=1 was invisible in whichever block the run
 # actually emitted.
 #
-# SUPPRESSED when the caller already passed rows, so the terminal emits — which build theirs
+# SUPPRESSED when the caller already built rows, so the terminal emits — which build theirs
 # from _fm_summary_line and carry the #3453 feature-matrix annotation — are unchanged rather
-# than doubled. The test is the block's OWN closed row grammar; a caller rendering rows some
-# other way would be a new dialect and a bug on its own terms.
+# than doubled.
+#
+# THE SUPPRESSION SIGNAL IS EXPLICIT STATE, NOT A GREP OF THE RENDERED TEXT (roborev job 74).
+# The first version decided by matching the block's own row grammar against the meta it was
+# about to print — inferring CONTROL from DATA, on a stream that carries caller-controlled
+# values. `datasets: N Data.db files under $CQLITE_DATASETS_ROOT` alone is enough: a root
+# whose name contains a row-shaped line suppresses the genuine rows and hides the very
+# disclosure this issue exists to publish. That is #3312's umbrella lesson committed inside
+# the fix for it, and the ruling there is to REMOVE THE SHARED CHANNEL rather than choose a
+# rarer pattern. `_SUMMARY_ROWS_BUILT` is set beside each row-append, in the same shell, and
+# nothing a caller can name reaches it.
+#
+# DELIBERATELY NOT RESET HERE: emit_summary renders this block up to THREE times (the
+# authoritative file write and both fallback sinks), so a consume-and-clear would make the
+# second and third renderings differ from the first — three sinks disagreeing about one
+# block, which is worse than the leak it would prevent. The flag means "this run's meta
+# arrays carry rows", which does not become false later in the run.
 _emit_meta_lines() {
   local line
   for line in ${@+"$@"}; do echo "$line"; done
-  if ! printf '%s\n' ${@+"$@"} | grep -qE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|OPT-OUT) \([0-9]+s\)'; then
+  if [ "${_SUMMARY_ROWS_BUILT:-0}" != 1 ]; then
     line=$(_recorded_component_rows_block)
     [ -z "$line" ] || printf '%s\n' "$line"
   fi
@@ -9394,14 +9414,22 @@ _integrity_fail_block() {
   # meta line is dropped, so exactly ONE authoritative line appears no matter which caller
   # supplied the meta (the --lite/--delta terminals push it into SUMMARY_META; the MAIN
   # foreground lane passes none).
+  # #3402/job 74: this block is hand-rolled (it is the no-clobber publish path), so it
+  # BYPASSED _emit_meta_lines and carried no recorded component rows — a `file-size: OPT-OUT`
+  # followed by a foreign-owner detection published a block with the disclosure missing from
+  # the private log, the sibling AND stdout at once. Same class as the boundary and preflight
+  # findings: a hand-built block is a hand-built omission. The filtered lines are collected
+  # and handed to the ONE renderer rather than echoed here.
   local line
+  local -a _ifb_meta=()
   for line in ${@+"$@"}; do
     case "$line" in
       tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
       component-set:*) continue ;;
     esac
-    echo "$line"
+    _ifb_meta+=("$line")
   done
+  _emit_meta_lines ${_ifb_meta[@]+"${_ifb_meta[@]}"}
   _tree_meta_lines
   printf '%s\n' "$(_component_set_meta)"
   echo "logs: $LOG_DIR"
@@ -10094,6 +10122,11 @@ _tree_boundary_fail() {
   # here, or it would overwrite this block's component-named verdict line.
   local -a _meta=()
   while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)
+  # The SECOND row dialect (#3402/job 74). _tree_boundary_meta_lines renders rows through
+  # _tree_boundary_row, not _fm_summary_line, so without this the funnel would append a
+  # duplicate table under a block that already has one. The read loop runs in THIS shell, so
+  # the assignment lands where _emit_meta_lines will see it.
+  _SUMMARY_ROWS_BUILT=1
   _meta+=("detected-after-component: $comp")
   _emit_terminal_summary FAIL "${_meta[@]}" || true
   exit 1
@@ -10394,6 +10427,7 @@ if [ "$SELFTEST" -eq 1 ]; then
   meta+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
   # through the real emit path so the self-test can assert it lands in the block.
@@ -18823,6 +18857,7 @@ run_lite() {
   SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -19238,6 +19273,7 @@ run_delta() {
     SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
+      _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
     done
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
     emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
@@ -19292,6 +19328,7 @@ run_delta() {
   SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -19491,6 +19528,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -20421,6 +20459,7 @@ fi
 SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
 done
 # #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
 # which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,
