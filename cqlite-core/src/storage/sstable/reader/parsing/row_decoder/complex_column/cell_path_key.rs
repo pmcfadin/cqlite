@@ -313,10 +313,13 @@
 //! abandoned. So there IS an availability difference between the single-generation
 //! readers and the merged read, and issue #2339 tracks closing it.
 //!
-//! (Do not cite `key_is_opaque_composite` for this: it decides ELEMENT ORDERING
-//! for the opaque case and is consulted only after the fail-closed check above,
-//! so it is the wrong symbol for the availability question. An earlier revision
-//! of this header cited it and claimed "NO availability difference" — both wrong.)
+//! (`key_is_opaque_composite` IS that fail-closed check's predicate: both guard
+//! sites — set element and map key — test it and return
+//! `composite_collection_unsupported`. Its one other consumer,
+//! `sort_elements_by_cell_path`'s raw-byte ordering arm, is DEFENSIVE only, because
+//! the guard fires first; do not read that arm as the outcome. An earlier revision
+//! of this header cited the predicate for "NO availability difference" — the symbol
+//! was right and the conclusion was exactly backwards.)
 //!
 //! They DIVERGE on CORRUPTION: only this path validates fixed widths and full
 //! consumption, so a multicell key with a wrong width or trailing bytes is
