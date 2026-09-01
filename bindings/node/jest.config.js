@@ -22,11 +22,12 @@
  *     before adding a second lane that selects this project: two executions where
  *     only one is affirmed is what the recomposition removed.
  *
- *     NO FILE COUNT IS QUOTED (issue #3772). This note used to end "measured via
- *     `jest --listTests`: 28 files, no duplicates", repeating a number
- *     `scripts/agent-gate.sh` carried in four more places; the suite grew and every
- *     copy went stale, so the sentence asserted a false measurement in the one place
- *     a reader checks this composition against. Nothing here needs the count: the
+ *     NO FILE COUNT IS QUOTED (issue #3772). This note used to end with a hard-coded
+ *     file count "measured via `jest --listTests`", asserted as duplicate-free —
+ *     repeating a number `scripts/agent-gate.sh` carried in four more places; the
+ *     suite grew and every copy went stale, so the sentence asserted a false
+ *     measurement in the one place a reader checks this composition against. Nothing
+ *     here needs the count: the
  *     `node-bindings` gate component DERIVES it every run from two independent
  *     oracles and prints `suite set RECONCILED: N`.
  *

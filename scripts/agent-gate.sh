@@ -1894,13 +1894,13 @@ _fixture_status() {
 # leak budgets exactly once, and the second invocation was pure duplication.
 #
 # NO FILE COUNT IS QUOTED HERE, DELIBERATELY (issue #3772). This argument used to rest
-# on a one-off measurement -- "the all-projects list is 28 files with NO duplicates" --
-# and the suite then grew past it while the sentence stayed at 28. A stale number inside
-# the rationale for a composition decision is the failure mode CLAUDE.md names: a false
+# on a one-off measurement -- a hard-coded file count, asserted as "no duplicates" -- and
+# the suite then grew past it while the sentence stood still. A stale number inside the
+# rationale for a composition decision is the failure mode CLAUDE.md names: a false
 # statement in a gate log (or in the comment a reader checks it against) is worse than
-# none, because it is what stops the next person looking. Replacing 28 with today's
-# count would only restart the same clock -- which is why no number, not even the
-# current one and not even in this explanation, appears here or in the census.
+# none, because it is what stops the next person looking. Writing today's count here
+# instead would only restart the same clock, so no number appears -- not the old one,
+# not the current one, and not as an illustration inside this explanation.
 #
 # The number was never load-bearing, because both halves of the claim are DERIVED and
 # ENFORCED on every run -- which is what makes deleting it safe rather than a loss:
@@ -10830,11 +10830,11 @@ run_node_bindings() {
   census+=("       quoted: the file count is reconciled and printed below as \"suite set")
   census+=("       RECONCILED: N\", and a DOUBLE execution would fail check_jest_suites_ran (jest")
   census+=("       reported total vs the DEDUPLICATED disk inventory) and the affirmation itself")
-  census+=("       (suites.length !== 1 at the leak path). This line used to state \"28 files with")
-  census+=("       no duplicates\" as a measurement; it had gone stale as the suite grew, and its")
-  census+=("       cited oracle could not see a duplicate anyway (jest --listTests DEDUPES across")
-  census+=("       projects — measured, #3772). No replacement count is quoted, here or in the")
-  census+=("       jest config: a fresh one would only restart the same decay.")
+  census+=("       (suites.length !== 1 at the leak path). This line used to carry a hard-coded")
+  census+=("       file count asserted as duplicate-free; it had gone stale as the suite grew,")
+  census+=("       and its cited oracle could not see a duplicate anyway (jest --listTests")
+  census+=("       DEDUPES across projects — measured, #3772). No count is printed here now, in")
+  census+=("       either direction: a fresh one would only restart the same decay.")
   census+=("       Budgets run STRICT here: CQLITE_LEAK_BUDGET_RELAX is UNSET for every node")
   census+=("       invocation of this component (#1465 V1), so no inherited value — including a")
   census+=("       CI runner env — can double a ceiling in the gate of record.")
