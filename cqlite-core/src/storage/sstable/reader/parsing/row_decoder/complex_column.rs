@@ -13,10 +13,12 @@ mod cell_path_key_tests;
 // UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
 // why it lives here).
 mod component_len;
-// Issue #3723 (round 5): the map-key / UDT-field decoders, shared by the live
-// path and by the #1741 shadow/TTL DROPPED path. Read its header first.
+// Issue #3723 (round 5): the DROPPED-path (#1741 shadow/TTL) width-validation
+// cases for both decoders below.
 #[cfg(test)]
 mod dropped_element_tests;
+// Issue #3723 (round 5): the map-key / UDT-field decoders, shared by the live
+// path and by the #1741 shadow/TTL DROPPED path. Read its header first.
 mod element_decode;
 
 /// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
