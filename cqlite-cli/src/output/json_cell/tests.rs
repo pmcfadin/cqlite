@@ -4,7 +4,6 @@
 //! #3644 item 3); the writer-level tests stayed there.
 
 use super::*;
-use cqlite_core::types::{UdtField, UdtValue};
 use cqlite_core::Value;
 
 /// The cell as a `serde_json::Value`, for assertions where the value's exact
