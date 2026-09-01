@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (295 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (301 cases).**
       It runs a **complete two-arm, five-pair session end to end** against stub
       `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, so a driver that cannot
       complete a session fails here rather than on the rig after both release
@@ -450,12 +450,15 @@ check it is the table you meant.
 
 ### What the driver refuses before it builds anything
 
-All of these are usage errors or named aborts that cost you seconds, not a
-session: `--shape` other than `full` without `--control`; a ticket that narrows
+`--work-dir` may be relative; it is canonicalised before anything is derived from
+it. All of the following are usage errors or named aborts that cost you seconds,
+not a session: `--shape` other than `full` without `--control`; a ticket that narrows
 the scan; `--batch-size 0` (the server clamps it to one row per batch, so the
 manifest would not record what ran); a `--step-duration` `flight-loadgen` would
 itself reject; a `--ramp` that is not strictly increasing or maps to no analyzer
-section; `--rows-declared` with separators. The step duration is **normalised at
+section; `--rows-declared` with separators; and **any arm's RESOLVED configuration** being
+out of range — the batch-size floor is checked on the value each arm will
+actually be given, so per-arm extras cannot route around it. The step duration is **normalised at
 pre-flight through the same grammar the load generator uses**, so a value it
 accepts — including a bare `60`, which means seconds — can never be refused later
 by the analyzer once the data exists.
@@ -778,7 +781,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     295 cases incl. full sessions under PATH shims; run it first
+  selftest-analyze.sh     301 cases incl. full sessions under PATH shims; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

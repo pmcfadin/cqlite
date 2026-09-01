@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=295
+CASE_FLOOR=301
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2106,6 +2106,34 @@ PYINNER
     --max-concurrent-scans 4 --ramp 2
   check_driver "the driver refuses a ramp that maps to no analyzer section" 3
 
+  # FINDING 3 (round 8): a RELATIVE --work-dir. `CARGO_TARGET_DIR` is read after
+  # the driver cds into the worktree, so a relative path put the target directory
+  # somewhere the driver then did not look -- both arms compiling, then
+  # `build-incomplete`, on a metered box. The e2e cases all pass absolute paths,
+  # which is the natural thing to write and therefore exactly what a harness does
+  # not cover by accident.
+  ( cd "$TMP" && bash "$DRIVER" --corpus "$TMP/tinycorpus" \
+      --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+      --work-dir ./relwd --repo "$SCRATCH" --min-corpus-bytes 1 --min-sstables 1 \
+      --base-ref HEAD~1 --head-ref HEAD ) > "$TMP/out.txt" 2>&1 || true
+  if grep -qE "^AB-3649: work-dir /" "$TMP/out.txt"; then
+    ok "a relative --work-dir is canonicalised to an absolute path before anything derives from it"
+  else
+    bad "a relative --work-dir was not canonicalised: $(grep -m1 '^AB-3649: work-dir' "$TMP/out.txt")"
+  fi
+
+  # FINDING 1 (round 8): per-arm extras are a SECOND route to the batch-size
+  # floor, and symmetric extras need no control label.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --base-server-extra '--batch-size 0' \
+    --head-server-extra '--batch-size 0'
+  check_driver "symmetric per-arm extras that zero the batch size" 3
+  if grep -q 'resolved --batch-size' "$TMP/err.txt"; then
+    ok "the floor is enforced on the RESOLVED value, so the extras route inherits it"
+  else
+    bad "the batch-size floor was bypassed through per-arm extras"
+  fi
+
   # FINDING 5: --batch-size 0 is silently clamped to one row per batch by the
   # server, so the manifest would not record the value that was used.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
@@ -2643,6 +2671,82 @@ PYINNER
   echo "          is covered structurally instead (the server-argv cases above assert no"
   echo "          option is emitted twice); nothing in this suite can reproduce Clap."
 fi
+
+echo
+echo "-- every shared field is reconciled, or excused by name --"
+
+# THE SWEEP, MECHANISED. Nine shared fields were reconciled one at a time, each
+# after a review found it missing; the tenth (`shape`) is what made the pattern
+# undeniable. These cases assert COMPLETENESS in both directions, so an
+# unreconciled field cannot join quietly: every key of a REAL step record must
+# appear in RECORD_FIELD_DISPOSITION, and every `workload` key of a REAL manifest
+# must appear in WORKLOAD_DISPOSITION.
+if [ -n "$E2E_DIR" ] && [ -f "$E2E_DIR/base-r01.jsonl" ]; then
+  RECON_RECORD="$E2E_DIR/base-r01.jsonl"
+  RECON_MANIFEST="$E2E_DIR/manifest.json"
+else
+  mkfixture "$TMP/recon" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  RECON_RECORD="$TMP/recon/base-r01.jsonl"
+  RECON_MANIFEST="$TMP/recon/manifest.json"
+fi
+if python3 - "$HERE" "$RECON_RECORD" "$RECON_MANIFEST" <<'PYINNER'
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_input as I
+
+problems = []
+with open(sys.argv[2], encoding="utf-8") as handle:
+    record = json.loads(handle.readline())
+for key in sorted(record):
+    if key not in I.RECORD_FIELD_DISPOSITION:
+        problems.append("step-record field %r has no disposition" % key)
+for key, (state, why) in sorted(I.RECORD_FIELD_DISPOSITION.items()):
+    if state not in ("reconciled", "checked", "excused"):
+        problems.append("record field %r has an unknown disposition %r" % (key, state))
+    if not why.strip():
+        problems.append("record field %r has an empty reason" % key)
+
+workload = json.load(open(sys.argv[3], encoding="utf-8"))["workload"]
+for key in sorted(workload):
+    if key not in I.WORKLOAD_DISPOSITION:
+        problems.append("workload field %r has no disposition" % key)
+for key, (state, why) in sorted(I.WORKLOAD_DISPOSITION.items()):
+    if state not in ("constrains", "excused"):
+        problems.append("workload field %r has an unknown disposition %r" % (key, state))
+    if not why.strip():
+        problems.append("workload field %r has an empty reason" % key)
+
+# A table that describes nothing would satisfy every check above.
+if len(I.RECORD_FIELD_DISPOSITION) < 15 or len(I.WORKLOAD_DISPOSITION) < 10:
+    problems.append("a disposition table has shrunk below its floor")
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "every field of a real step record and a real manifest carries a disposition"
+else
+  bad "a shared field has no recorded disposition (see stderr above)"
+fi
+
+# ...and `shape`, the field that prompted the table, is actually reconciled.
+mkfixture "$TMP/shape-drift" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/shape-drift/head-r03.jsonl" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["shape"] = "limit-k"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/shape-drift"
+check_verdict "a record produced under a shape the manifest does not declare" UNMEASURED 7 single-stream
+check_cause "a record whose shape contradicts the manifest" shape-record-mismatch
 
 echo
 echo "-- cross-references in FINDINGS.md name the section they point at --"

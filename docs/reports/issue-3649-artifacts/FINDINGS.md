@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 295 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `selftest-analyze.sh` | 301 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,54 @@ session, not by this lane.
 
 ---
 
-## 9. The sixth lesson: two correct rules can compose into an unusable whole
+## 9. The seventh lesson: guard the VALUE, and enumerate the SET
+
+Round 8's three findings are three shapes this lane keeps producing, and two of
+them were fixed by changing *where* a rule lives rather than adding another rule.
+
+**Guard the resolved value, not the entry point.** The batch-size floor was added
+in round 6 on the `--batch-size` flag. Per-arm extras are a second route to the
+same value, and **symmetric** extras (`--base-server-extra '--batch-size 0'` and
+the same on head) need no control label — so the floor was bypassable, the server
+clamped both arms to one row per batch, and the analyzer would have rendered a
+measurement verdict for a configuration nothing recorded. That is the fifth time
+a guard on one entry point has been reachable around through a route added later.
+The fix is not a second guard: the check now lives on the **resolved** value,
+computed in one place, so every present and future caller inherits it because
+there is only one place the resolved value exists.
+
+**Enumerate the set, or keep finding its members one at a time.** Ten fields
+appear in both the manifest and the step records, and nine had been reconciled
+individually, each after a review found it missing — `target_concurrency`,
+`duration_s`, `rows_total`, `round`, the admission ceiling, `max_batch_bytes`,
+the wait timeout, the CPU affinity, the pair order. The tenth was `shape`, and by
+then the pattern was the finding. So the set is now **enumerated in two
+committed tables** (`RECORD_FIELD_DISPOSITION`, `WORKLOAD_DISPOSITION`), every
+entry carrying `reconciled` / `checked` / `excused` with a reason, and the
+self-test asserts that **every key of a real step record and a real manifest
+appears in them**. A field added to either side is reconciled or explicitly
+excused; it cannot join quietly.
+
+**Declared residual, because the completeness is only as good as its direction:**
+these prove every field that *exists* is accounted for. Neither can know about a
+constraint nobody thought of — a manifest field that *should* bound a record but
+was never conceived of is invisible to both. The tables close the "added later
+and forgotten" hole, not the "never imagined" one.
+
+**And a defect that only appears after the expensive step is worth its own
+category.** A relative `--work-dir` broke both builds: `CARGO_TARGET_DIR` is read
+after the driver has `cd`-ed into the worktree, so cargo wrote beneath the
+worktree while the driver checked the original-relative path and died
+`build-incomplete`. Same economics as the round-5 exit-127 defect — both arms
+compile, on a box billed by the hour, and *then* it fails. Note why the harness
+missed it: every end-to-end case passes an **absolute** path, which is the
+natural thing to write and therefore precisely the input a harness will not cover
+by accident. **When a defect's cost is concentrated after an expensive step, ask
+what input your harness writes by habit rather than by choice.**
+
+---
+
+## 10. The sixth lesson: two correct rules can compose into an unusable whole
 
 Round 6's High was that **the runbook's own sensitivity control could not be
 analyzed**. Round 2 required the analyzer to refuse cross-arm server-config
@@ -364,7 +411,7 @@ Two things worth carrying:
 - **Only execution finds this class.** Two individually-correct rules, each with
   its own passing tests, composed into an unusable whole. The case that catches
   it runs the control end to end under the shims — and it exists because
-  §10 (the driver was never executed) had already made that possible.
+  §11 (the driver was never executed) had already made that possible.
 
 **A validator that disagrees with its consumer is now FIVE instances, and the
 count is the argument.** The duration grammar, the census enumeration, the census
@@ -403,7 +450,7 @@ blind here" does not.
 
 ---
 
-## 10. The fifth lesson, and the one that closes the class: the driver was never executed
+## 11. The fifth lesson, and the one that closes the class: the driver was never executed
 
 Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
 helper had been extracted into `ab_driver_support.py` and one call site was left
@@ -420,8 +467,8 @@ that could not complete a single session.
 
 This is the FIFTH instance of one class in this lane — the dead utilization path,
 ten environment-coupled cases, the silent passer among them, the inline parity
-rule, and now the driver itself. §14 (a green suite over an unexecuted subject)
-states the class; §11 (when one mechanism keeps producing findings) says that when a
+rule, and now the driver itself. §15 (a green suite over an unexecuted subject)
+states the class; §12 (when one mechanism keeps producing findings) says that when a
 mechanism keeps producing findings you remove the reason it can. **The reason was
 that the session loop needed a rig, so nothing could run it.** So it no longer
 needs one:
@@ -459,7 +506,7 @@ which is salted per process and would have made the suite non-deterministic.
 
 ---
 
-## 11. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+## 12. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
 
 Four review rounds produced findings in the driver's session lifecycle — the
 work directory, the port, readiness, the census — roughly seven of the last
@@ -491,10 +538,10 @@ improving the sequencing and **removed the shared resource instead**:
 defect.** Not the sequencing around it, not the guard in front of it. Ask what
 resource is being shared and whether it needs to be shared at all — the fix that
 ends the series is usually a deletion. Same shape as removing the second duration
-grammar rather than widening it -- §13 (a parameter accepted without being
+grammar rather than widening it -- §14 (a parameter accepted without being
 checked) -- one level up.
 
-**And a second instance of the mirroring rule from §13 (a parameter accepted
+**And a second instance of the mirroring rule from §14 (a parameter accepted
 without being checked).** The corpus census
 scanned the whole data root recursively while the server reads **one** resolved
 directory, flat. So both size gates could pass on files that are never served —
@@ -513,7 +560,7 @@ nowhere else to decide it.
 
 ---
 
-## 12. The third lesson: the dangerous defect is the one no test would have failed on
+## 13. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -548,7 +595,7 @@ count forces.
 
 ---
 
-## 13. The second lesson: a parameter accepted without being checked against the claim
+## 14. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -582,7 +629,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 14. The first lesson: a green suite over an unexecuted subject
+## 15. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -613,7 +660,7 @@ Two rules worth carrying:
 
 ---
 
-## 15. A process finding: cadence, not partition
+## 16. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -627,7 +674,7 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §14 (a green suite over an unexecuted subject)
+which is precisely the hole §15 (a green suite over an unexecuted subject)
 describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 
