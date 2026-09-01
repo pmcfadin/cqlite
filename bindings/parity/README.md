@@ -16,7 +16,7 @@ surface-layer sibling of the read-path differential
 | `fixtures.json` | The fixtures: query, schema, **declared CQL column types**, and an (empty) `known_divergence` key |
 | `canonical.py` | Canonical form — Python + CLI adapters |
 | `canonical.mjs` | Canonical form — Node adapter (independent twin of `canonical.py`) |
-| `canonical-vectors.json` | Differential pin: `vectors` both canonicalizers must reproduce exactly, `errors` both must REFUSE, and the `floor` block that stops the table shrinking |
+| `canonical-vectors.json` | Differential pin: `vectors` both canonicalizers must reproduce exactly, `rows` for the row-building path (hostile column names), `errors` both must REFUSE, and the `floor` block that stops any of them shrinking |
 | `vectors.py` / `vectors.mjs` | Vector runners for each language (`vectors.mjs --emit <path>` writes the JS canonical values THROUGH `JSON.stringify`) |
 | `driver.py` / `driver.mjs` | Per-leg runners; write `out/py.<fixture>.json` / `out/node.<fixture>.json` |
 | `out/` | Artifacts (gitignored) |
@@ -178,10 +178,13 @@ before reporting:
 
 * `fixtures.json` → `min_fixtures` **and** `required_names` (a count alone
   would let a fixture be swapped for a trivial substitute).
-* `canonical-vectors.json` → `min_vectors`, `min_errors`, `required_kinds`
-  (checked against the CQL kinds appearing anywhere in each vector's parsed
-  type tree, so deleting every blob vector reds the runners),
-  `require_nested_container` and `require_null_canonical`.
+* `canonical-vectors.json` → `min_vectors`, `min_errors`, `min_rows`,
+  `required_row_names`, `required_kinds` (checked against the CQL kinds
+  appearing anywhere in each vector's parsed type tree, so deleting every blob
+  vector reds the runners), `require_nested_container` and
+  `require_null_canonical`. `required_row_names` is named rather than counted
+  because the `__proto__` cases are the reason `rows` exists and a count alone
+  would let them be swapped for benign rows.
 
 Verified by planting the break: emptying either table, deleting the `floor`
 block, or removing every blob vector reds **both** `vectors.py` and
@@ -197,6 +200,44 @@ blob without its `0x` prefix or with non-hex digits, a malformed CLI map entry,
 and a non-decimal decimal string. A canonicalizer that guesses at malformed
 input is the heuristic issue #28 forbids, so "it refused" is a pinned property.
 
+## Hostile column NAMES (`__proto__`)
+
+`__proto__` is a **legal CQL column name** — expressible as the quoted
+identifier `"__proto__"`, and this repository already ships a fixture schema
+for it (`test-data/schemas/issue-3630-row-collision.cql`). On an ordinary
+JavaScript object, `obj["__proto__"] = v` runs the inherited **setter** on
+`Object.prototype` and replaces the prototype instead of creating an own
+property. It throws nothing: the column simply disappears from
+`Object.keys()` and from the emitted JSON — so the harness would have reported
+agreement about a column the Node leg had silently dropped, which is exactly
+the class of defect it exists to catch. The Node binding itself already
+defends this way (`bindings/node/src/value.rs` uses `Object.create(null)` for
+UDT fields and JSON objects); the harness now follows suit.
+
+Every column-name-keyed object in the JS half is therefore built with
+`Object.create(null)`: `typesFromColumns` (canonical.mjs, the one builder that
+`driver.mjs`'s `fixtureTypes` delegates to), `canonRowNode`'s output, and
+`materializeNodeRow` in the vector runner. Python is immune (a `dict` has no
+prototype), and `types_from_columns` exists there so both halves share one
+entry point into the row path.
+
+The pin is the **`rows` section of `canonical-vectors.json`**: whole-row cases
+with `columns` (name → CQL type) plus a per-leg row, driven by BOTH runners
+through the real row-building path. Four cases: an ordinary control, a row with
+`__proto__` / `constructor` / `toString` / `valueOf` / `prototype` columns, and
+the two null shapes (`__proto__` absent from the row, and explicitly null —
+`out["__proto__"] = null` also sets the prototype, so it vanishes just the
+same). The check is not only value equality: a canonical row that has LOST a
+declared column is reported by name.
+
+**No live 3-way fixture exists for this**: neither corpus root holds a
+`test_row_collision` SSTable, so there is nothing to `SELECT`. The row cases
+plus `test_canonicalizer_row_cases_python_leg`, the JS `checkRows`, and the
+JSON round-trip check below are the coverage — stated here rather than left to
+be assumed. Verified by planting: restoring the plain-object form reds three of
+the four row cases in `vectors.mjs`, `test_canonicalizer_vectors_node_leg` and
+`test_node_canonical_survives_the_json_round_trip`, each naming the lost column.
+
 ## The JSON boundary
 
 `vectors.mjs`'s in-memory check cannot see serialization:
@@ -206,10 +247,13 @@ correct input the first time the corpus grows an integral `double`. Two things
 close it: `shape_tag`/`shapeTag` collapse `int` and `float` to one `"number"`
 tag (JSON has one number type; `bool` is still checked first, so the rule the
 tag enforces — number vs string vs bool vs null — is intact), and
-`test_node_canonical_survives_the_json_round_trip` writes every vector's JS
-canonical value through `JSON.stringify`, re-reads it in Python and compares.
-Verified by planting the break: re-splitting `int`/`float` reds both that test
-and `test_comparator_accepts_an_integral_float_across_the_json_boundary`.
+`test_node_canonical_survives_the_json_round_trip` writes every vector AND
+every row case's JS canonical value through `JSON.stringify`, re-reads it in
+Python and compares — and, for row cases, asserts every declared column is
+still an OWN key, so a `__proto__` column that survived in memory but not
+through serialization is caught too. Verified by planting the break:
+re-splitting `int`/`float` reds both that test and
+`test_comparator_accepts_an_integral_float_across_the_json_boundary`.
 
 ## Fail-closed, never a silent skip
 

@@ -6,21 +6,50 @@ on:
     - cron: '35 3 * * *'
   push:
     branches: [main]
+    # THE RULE FOR THIS LIST (issue #1455): these are the INPUTS THIS WORKFLOW
+    # READS — above all the `cross-binding-parity` job, which compares the
+    # Python binding, the NODE binding and the CLI against one canonical form.
+    # A change to ANY of them must be able to trigger this workflow. Extending
+    # the harness means extending this list in the same edit.
+    #
+    # It is enumerated in full here because the SAME omission was found THREE
+    # times in review — `bindings/node/**` + `cqlite-cli/**`, then
+    # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
+    # single missing path rather than as the class. Each entry below says which
+    # step reads it, so the next reader can check the list against the job
+    # instead of guessing.
     paths:
-      - 'bindings/python/**'
-      - 'cqlite-core/**'
+      # --- the workflow itself -------------------------------------------
       - '.github/workflows/python-ci.yml'
-      # Issue #1455: the cross-binding-parity job compares the Python binding
-      # against the NODE binding and the CLI through the shared harness in
-      # bindings/parity, so a change to any of them is a change to this
-      # workflow's subject. Without these paths the harness would merge
-      # untested. cqlite-ffi-common is here for the same reason and is easy to
-      # miss: BOTH bindings depend on it for the decimal, varint, inet and
-      # JSON-number adapters — exactly the conversions this harness compares.
+      # The composite action the dataset step USES; a change to it changes how
+      # (or whether) the corpus is restored for every dataset-backed job here.
+      - '.github/actions/restore-canonical-datasets/**'
+      # --- the three surfaces under comparison ----------------------------
+      # The wheel under test, and the pytest that IS the comparator.
+      - 'bindings/python/**'
+      # The shared canonical form + fixtures + drivers (the harness itself).
       - 'bindings/parity/**'
+      # The Node native module: one of the three legs, built by `npm run build`.
       - 'bindings/node/**'
+      # The release CLI: the third leg, built by `cargo build -p cqlite-cli`.
       - 'cqlite-cli/**'
+      # --- what all three legs read through ------------------------------
+      - 'cqlite-core/**'
+      # BOTH bindings depend on cqlite-ffi-common for the decimal, varint, inet
+      # and JSON-number adapters — exactly the conversions this harness
+      # compares — and it is easy to miss because neither binding's own
+      # directory mentions it.
       - 'cqlite-ffi-common/**'
+      # --- committed test inputs -------------------------------------------
+      # Every fixture in bindings/parity/fixtures.json names a schema here, and
+      # `columns` (the authoritative type source for canonicalization) mirrors
+      # it. A schema-only change can alter a parity query's column shape, so
+      # without this path the harness runs on the OLD shape or not at all.
+      - 'test-data/schemas/**'
+      # The dataset steps EXECUTE check-dataset-manifest.sh and (via the
+      # composite action) fetch-datasets.sh; a change to either can decide
+      # whether the corpus this job compares against is complete.
+      - 'test-data/scripts/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -32,21 +61,50 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    # THE RULE FOR THIS LIST (issue #1455): these are the INPUTS THIS WORKFLOW
+    # READS — above all the `cross-binding-parity` job, which compares the
+    # Python binding, the NODE binding and the CLI against one canonical form.
+    # A change to ANY of them must be able to trigger this workflow. Extending
+    # the harness means extending this list in the same edit.
+    #
+    # It is enumerated in full here because the SAME omission was found THREE
+    # times in review — `bindings/node/**` + `cqlite-cli/**`, then
+    # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
+    # single missing path rather than as the class. Each entry below says which
+    # step reads it, so the next reader can check the list against the job
+    # instead of guessing.
     paths:
-      - 'bindings/python/**'
-      - 'cqlite-core/**'
+      # --- the workflow itself -------------------------------------------
       - '.github/workflows/python-ci.yml'
-      # Issue #1455: the cross-binding-parity job compares the Python binding
-      # against the NODE binding and the CLI through the shared harness in
-      # bindings/parity, so a change to any of them is a change to this
-      # workflow's subject. Without these paths the harness would merge
-      # untested. cqlite-ffi-common is here for the same reason and is easy to
-      # miss: BOTH bindings depend on it for the decimal, varint, inet and
-      # JSON-number adapters — exactly the conversions this harness compares.
+      # The composite action the dataset step USES; a change to it changes how
+      # (or whether) the corpus is restored for every dataset-backed job here.
+      - '.github/actions/restore-canonical-datasets/**'
+      # --- the three surfaces under comparison ----------------------------
+      # The wheel under test, and the pytest that IS the comparator.
+      - 'bindings/python/**'
+      # The shared canonical form + fixtures + drivers (the harness itself).
       - 'bindings/parity/**'
+      # The Node native module: one of the three legs, built by `npm run build`.
       - 'bindings/node/**'
+      # The release CLI: the third leg, built by `cargo build -p cqlite-cli`.
       - 'cqlite-cli/**'
+      # --- what all three legs read through ------------------------------
+      - 'cqlite-core/**'
+      # BOTH bindings depend on cqlite-ffi-common for the decimal, varint, inet
+      # and JSON-number adapters — exactly the conversions this harness
+      # compares — and it is easy to miss because neither binding's own
+      # directory mentions it.
       - 'cqlite-ffi-common/**'
+      # --- committed test inputs -------------------------------------------
+      # Every fixture in bindings/parity/fixtures.json names a schema here, and
+      # `columns` (the authoritative type source for canonicalization) mirrors
+      # it. A schema-only change can alter a parity query's column shape, so
+      # without this path the harness runs on the OLD shape or not at all.
+      - 'test-data/schemas/**'
+      # The dataset steps EXECUTE check-dataset-manifest.sh and (via the
+      # composite action) fetch-datasets.sh; a change to either can decide
+      # whether the corpus this job compares against is complete.
+      - 'test-data/scripts/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
