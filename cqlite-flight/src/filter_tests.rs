@@ -502,3 +502,105 @@ fn score_pred_on_missing() -> SSTablePredicate {
         token_columns: None,
     }
 }
+
+/// #3634: `ScanSpec::from_ticket` must DERIVE `TokenFilter`'s wrapping from the
+/// ticket's endpoints, never copy the ticket's `wraparound` wire flag.
+///
+/// `FlightTicket::wraparound` is `#[serde(default)]` and `validate()` never checks
+/// it against `token_start`/`token_end`, so a client can present either
+/// inconsistent shape — and Cassandra can express neither, because
+/// `Range.isWrapAround(left, right)` IS `left.compareTo(right) >= 0`
+/// (`cassandra-5.0.8:src/java/org/apache/cassandra/dht/Range.java`).
+///
+/// Copying the flag made the filter disagree with the core bound it lowers to:
+/// `to_scan_bound` derives, while `contains` gates FOUR serving paths that take no
+/// pushdown (producer_stream, producer_point, producer_drive, statics) and
+/// `overlaps` gates warm pruning. The same ticket then returned different rows
+/// depending on which path served it. Both shapes are pinned here BY OUTCOME, in
+/// both directions, so a re-copy of the flag reds this test.
+#[test]
+fn from_ticket_derives_wraparound_and_ignores_an_inconsistent_wire_flag() {
+    let schema = simple_schema();
+
+    // Shape 1: start > end with the flag FALSE (the shape a client reaches by
+    // merely OMITTING the optional flag). Cassandra wraps; so must we.
+    for wire_flag in [false, true] {
+        let mut t = ticket_with(vec![]);
+        t.token_start = Some(100);
+        t.token_end = Some(-100);
+        t.wraparound = wire_flag;
+        let spec = ScanSpec::from_ticket(&t, &schema).expect("spec");
+        let tf = spec.token.expect("token filter present");
+        for token in [i64::MIN, -1000, -100, 101, i64::MAX] {
+            assert!(
+                tf.contains(token),
+                "(100, -100] wraps whatever the wire flag says (was {wire_flag}), \
+                 so token {token} is in range"
+            );
+        }
+        for token in [-99, 0, 99, 100] {
+            assert!(
+                !tf.contains(token),
+                "(100, -100] excludes its interior gap; token {token} (wire flag \
+                 {wire_flag})"
+            );
+        }
+        // And the lowered core bound must agree with it, on every probe.
+        let bound = tf.to_scan_bound();
+        for token in [i64::MIN, -1000, -100, -99, 0, 99, 100, 101, i64::MAX] {
+            assert_eq!(
+                tf.contains(token),
+                bound.contains(token),
+                "filter and lowered bound must agree for token {token} (wire flag \
+                 {wire_flag})"
+            );
+        }
+    }
+
+    // Shape 2: start < end with the flag TRUE — the direction roborev caught.
+    // Cassandra does NOT wrap here, so the range is the narrow (10, 20], not the
+    // outer-ring superset the flag would have produced.
+    for wire_flag in [false, true] {
+        let mut t = ticket_with(vec![]);
+        t.token_start = Some(10);
+        t.token_end = Some(20);
+        t.wraparound = wire_flag;
+        let spec = ScanSpec::from_ticket(&t, &schema).expect("spec");
+        let tf = spec.token.expect("token filter present");
+        assert!(
+            !tf.contains(10),
+            "start is exclusive (wire flag {wire_flag})"
+        );
+        assert!(tf.contains(11), "wire flag {wire_flag}");
+        assert!(tf.contains(20), "end is inclusive (wire flag {wire_flag})");
+        assert!(
+            !tf.contains(21),
+            "(10, 20] must NOT become the outer-ring superset the flag would give \
+             (wire flag {wire_flag})"
+        );
+        assert!(
+            !tf.contains(i64::MIN),
+            "the outer ring is NOT in (10, 20] — this is the shape whose flag made \
+             the filter admit every token (wire flag {wire_flag})"
+        );
+        // Pruning must follow the same derivation, or a table gets kept/dropped
+        // on a rule the row filter disagrees with.
+        assert!(
+            !tf.overlaps(-1000, 0),
+            "a span wholly below (10, 20] must not overlap (wire flag {wire_flag})"
+        );
+        assert!(
+            tf.overlaps(15, 30),
+            "a span meeting (10, 20] must overlap (wire flag {wire_flag})"
+        );
+        let bound = tf.to_scan_bound();
+        for token in [i64::MIN, 0, 10, 11, 20, 21, 1000, i64::MAX] {
+            assert_eq!(
+                tf.contains(token),
+                bound.contains(token),
+                "filter and lowered bound must agree for token {token} (wire flag \
+                 {wire_flag})"
+            );
+        }
+    }
+}
