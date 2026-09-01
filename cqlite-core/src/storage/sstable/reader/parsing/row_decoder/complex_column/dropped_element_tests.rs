@@ -20,7 +20,7 @@
 //!   `validate(...)` lets that element-level `MarshalException` escape for the
 //!   whole value. Cassandra REFUSES; it does not drop the element and continue.
 //!
-//! ## Which declared length reaches the width guard (the calibration trap)
+//! ## Which declared length reaches the width guard — and the GAP that shapes it
 //!
 //! The map KEY is decoded by `parse_cell_path_key_reporting`, which for a
 //! TOP-LEVEL fixed-width key type first applies its own allowed-widths table and
@@ -31,6 +31,16 @@
 //! length **3** (`[count=1][len=3][3B]`). 3 rather than 5 deliberately: an
 //! over-long declaration can trip an outer framing bound first and surface as
 //! `Corruption` instead of the named variant.
+//!
+//! State that the other way round, because the first way is how a real gap got
+//! written down as a calibration note: a DIRECT fixed-width key (`map<int, …>`)
+//! is NOT covered by the four refusal cases below, and the cases avoid it
+//! BECAUSE it is not covered. That is the census's SIXTH tolerant site
+//! (`raw_value/fatal_decode_error.rs`), open under **#3778**, and it is declared
+//! and characterised — not endorsed — by
+//! `wrong_width_direct_map_key_is_tolerated_today_known_gap_3778` below. So the
+//! guard these cases pin is the NESTED one; the map branch's dropped-path
+//! validation is complete only for key types that reach the fixed-width arm.
 //!
 //! The UDT field value is decoded by `parse_value_from_raw_bytes` with the
 //! DECLARED field type, so a top-level 3-byte `int` reaches the guard directly.
@@ -295,24 +305,102 @@ fn a_well_formed_shadowed_udt_field_still_filters_with_the_same_accounting() {
     }
 }
 
-/// A dropped MAP entry whose key fails with a TOLERATED (non-fatal) class is
-/// still filtered SILENTLY. Validating dropped entries must not promote a
-/// tolerated error into a read failure: a top-level fixed-width key of the wrong
-/// width is `Error::Corruption` (the allowed-widths table in `cell_path_key`),
-/// which is NOT in the one-variant fatal set (`raw_value/fatal_decode_error.rs`).
+/// A DIRECT (top-level) fixed-width map key type, whose wrong-width refusal is
+/// `Error::Corruption` and therefore never reaches the fatal set.
+const DIRECT_MAP: &str = "map<int, int>";
+
+fn decode_direct_map(key: &[u8], filter: Option<ElementShadow>) -> Result<(Value, usize)> {
+    decode(
+        "my_map",
+        DIRECT_MAP,
+        DIRECT_MAP,
+        &[cell(key, &7i32.to_be_bytes())],
+        filter,
+    )
+}
+
+/// CHARACTERISATION of a KNOWN-TOLERATED GAP — the census's **SIXTH** site
+/// (`raw_value/fatal_decode_error.rs`), open under **#3778**. This is **not
+/// desired behaviour** and the assertions below are NOT a guard.
+///
+/// A map key whose declared type is fixed-width DIRECTLY (`map<int, …>`, not
+/// `map<frozen<list<int>>, …>`) never reaches the fixed-width arm at all:
+/// `parse_cell_path_key_reporting` applies its OWN allowed-widths table first
+/// and reports [`Error::Corruption`], the general pre-existing TOLERATED class.
+/// So a 3-byte `int` key is refused as a class every tolerant site absorbs —
+/// including [`is_fatal_decode_error`]'s dropped-entry arm here, which lets the
+/// entry be filtered and the read SUCCEED.
+///
+/// **Said plainly, because a previous round did not:** round 6's four refusal
+/// cases above use `map<frozen<list<int>>, int>` precisely BECAUSE a direct
+/// fixed-width key yields `Corruption` rather than the named variant. That was
+/// recorded as a calibration fact and routed around; it is a GAP the tests were
+/// steered past (roborev round 6, job 33), and this test is the declaration of
+/// it rather than an endorsement.
+///
+/// It is not fixed here, and the reason is specific rather than a scope excuse:
+/// the cause is the error VARIANT, not a missing guard, so closing it means
+/// making a top-level cell-path width failure fatal — i.e. promoting a
+/// `Corruption`. Assertion (a) below is why that is unsafe: the SAME bytes on
+/// the LIVE path also refuse as `Corruption`, which census site 1
+/// (`row_data.rs:614`) tolerates with a partial-row `break`. Renaming the
+/// variant would turn that live read into a hard failure — the exact defect
+/// already fixed once on this branch (the zero-length case), which had to be
+/// reverted to restore the zero-regression property.
+///
+/// It fails in BOTH directions:
+///
+/// * if either decode starts returning the fatal variant (someone made this
+///   fatal — a real behaviour change, which must be a deliberate #3778 commit
+///   updating the census and this test together, not a side effect);
+/// * if the dropped entry stops being filtered-and-counted exactly as it is
+///   today (someone made the tolerance silently worse — e.g. surfacing the
+///   entry under a salvaged key, which would additionally be a no-heuristics
+///   violation, or changing the drop accounting).
 #[test]
-fn a_tolerated_map_key_failure_on_a_shadowed_entry_still_filters_silently() {
+fn wrong_width_direct_map_key_is_tolerated_today_known_gap_3778() {
+    // Anti-empty-pass control: a WELL-FORMED 4-byte key of the same declared
+    // type decodes and surfaces. Without it every assertion below could hold
+    // because a `map<int, int>` cell path never decodes at all.
+    let (value, filtered) =
+        decode_direct_map(&7i32.to_be_bytes(), None).expect("control: a well-formed direct key");
+    assert_eq!(filtered, 0, "control: nothing is counted as dropped");
     assert_eq!(
-        decode(
-            "my_map",
-            "map<int, int>",
-            "map<int, int>",
-            &[cell(&[0x00, 0x00, 0x07], &7i32.to_be_bytes())],
-            Some(shadow_everything()),
-        )
-        .expect("a tolerated key failure on a dropped entry must not fail the read"),
+        value,
+        Value::Map(vec![(Value::Integer(7), Value::Integer(7))]),
+        "control: the well-formed entry is present"
+    );
+
+    // (a) The wrong-width bytes ARE refused — but as the TOLERATED class, which
+    // is the whole of the gap. Pinned on the LIVE path, where the refusal is
+    // visible as an `Err`, because that is what makes promotion unsafe: site 1
+    // absorbs this `Corruption` into a partial-row `break` today.
+    match decode_direct_map(&[0x00, 0x00, 0x07], None) {
+        Err(Error::Corruption(msg)) => assert!(
+            msg.contains("of type 'int' requires exactly 0 or 4 bytes, got 3"),
+            "the refusal must come from cell_path_key's allowed-widths table: {msg}"
+        ),
+        other => panic!(
+            "KNOWN-TOLERATED GAP (#3778): a 3-byte direct `int` map key refuses as \
+             Error::Corruption today, NOT as the fatal FixedWidthLengthMismatch. If \
+             this changed, the live path at row_data.rs:614 now FAILS reads it used \
+             to serve — update the census in raw_value/fatal_decode_error.rs and this \
+             test together. Got {other:?}"
+        ),
+    }
+
+    // (b) And on the DROPPED path that tolerated class is absorbed, so the read
+    // SUCCEEDS with the malformed entry silently filtered.
+    assert_eq!(
+        decode_direct_map(&[0x00, 0x00, 0x07], Some(shadow_everything())).expect(
+            "KNOWN-TOLERATED GAP (#3778): a dropped entry whose DIRECT fixed-width key \
+             has the wrong width is silently accepted today, because the refusal is \
+             Error::Corruption rather than the fatal variant"
+        ),
         (Value::Map(vec![]), 1),
-        "the entry is filtered and counted, and no error escapes"
+        "KNOWN-TOLERATED GAP (#3778): the malformed entry is filtered and counted and \
+         no error escapes. Not desired behaviour — characterised so a change of \
+         disposition in EITHER direction is visible"
     );
 }
 
