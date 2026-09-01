@@ -130,9 +130,15 @@ trap cleanup EXIT
   echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || :)"
 } > "$OUT/cotenancy-before.txt"
 
+# WORKER DEADLINE, DERIVED (roborev r6 finding 1). It was a fixed 900 s while the measurement
+# is SETTLE + SECS, so a long configuration could let the worker hit its own deadline and exit
+# SUCCESSFULLY in the middle of the perf window -- perf and this script would both still exit 0
+# and a partly idle observation would publish as a valid rep. Derived with generous headroom for
+# the untimed prewarm pass, which is not bounded by SECS.
+WORKER_MAX_SECS=$(( SETTLE + SECS + 1800 ))
 taskset -c "$CPU" "$BINARY" \
   --corpus "$CORPUS" --rundir "$RUNDIR" --worker-id 0 \
-  --prewarm-passes 1 --max-secs 900 --progress-ms 250 \
+  --prewarm-passes 1 --max-secs "$WORKER_MAX_SECS" --progress-ms 250 \
   > "$OUT/worker.stdout" 2> "$OUT/worker.stderr" &
 WPID=$!
 
@@ -174,6 +180,10 @@ fi
 SAMPLER=$!
 stop_sampler() { kill "$SAMPLER" 2>/dev/null || true; }
 
+# Window boundaries read from the SAME clock source the worker timestamps with (that is what
+# the worker's --print-monotonic-ns flag exists for), so the span check below compares like
+# with like rather than two unrelated clocks.
+T0=$("$BINARY" --print-monotonic-ns 2>/dev/null || echo 0)
 PERF_RC=0
 if [ "$MODE" = record ]; then
   # `|| true` here would report success for a perf that never recorded anything.
@@ -194,6 +204,7 @@ fi
 # undercutting the very "max across the WHOLE window, not endpoints" property this check exists
 # to establish. Take one synchronous, well-formed sample AFTER the measurement completes and
 # BEFORE stopping the sampler, so the closing interval is inside the adjudicated set.
+T1=$("$BINARY" --print-monotonic-ns 2>/dev/null || echo 0)
 NPEER_END=$(pgrep -c -f 'cargo|agent-gate|maturin|rustc' || :)
 echo "$(date -u +%H:%M:%S) $(cut -d' ' -f1 /proc/loadavg) ${NPEER_END:-0}" >> "$OUT/load-samples.txt"
 stop_sampler
@@ -280,6 +291,18 @@ trap - EXIT; rm -rf "$RUNDIR"
 # BLOCKER (review): previously the quiescence verdict was WRITTEN and then ignored, the
 # script printed "rep written" and exited 0, so a caller checking $? published a rep taken
 # at peak load 18. A recorded refusal that changes nothing observable is not a refusal.
+# LOST SAMPLES, ENFORCED (roborev r6 finding 2). `perf record` exiting 0 does not establish
+# that the ring buffer never overflowed, and buffer loss biases attribution silently. The
+# published reps' "0 lost samples" was an AD-HOC read taken during the validity audit, not a
+# control this harness implemented -- so it is implemented now, and the value is required to be
+# explicitly zero rather than merely absent from the output.
+LOST=
+if [ "$MODE" = record ] && [ -f "$OUT/perf.data" ]; then
+  LOST=$(perf report -i "$OUT/perf.data" --stdio 2>/dev/null \
+           | sed -n 's/^# Total Lost Samples: *\([0-9]*\).*/\1/p' | head -1)
+  printf 'lost_samples=%s\n' "${LOST:-UNREADABLE}" > "$OUT/lost-samples.txt"
+fi
+
 QV=$(sed -n 's/^verdict=//p' "$OUT/quiescence-verdict.txt" 2>/dev/null)
 # NB: written as `if` blocks, not `[ x ] && y`. Under `set -e` a bare `[ test ] && assign`
 # whose test is FALSE returns non-zero as a statement and kills the script -- so the
@@ -287,6 +310,29 @@ QV=$(sed -n 's/^verdict=//p' "$OUT/quiescence-verdict.txt" 2>/dev/null)
 FAIL=
 if [ "$WORKER_RC" -ne 0 ]; then FAIL="$FAIL worker-exit=$WORKER_RC"; fi
 if [ "$PERF_RC" -ne 0 ]; then FAIL="$FAIL perf-exit=$PERF_RC"; fi
+# Explicitly zero, or refuse. An unreadable count is NOT zero.
+if [ "$MODE" = record ]; then
+  case "$LOST" in
+    0) ;;
+    '') FAIL="$FAIL lost-samples=unreadable" ;;
+    *)  FAIL="$FAIL lost-samples=$LOST" ;;
+  esac
+fi
+# F1's real property: the worker must have been in steady state across the WHOLE window, which
+# is a fact about the worker, not a bound on the arguments. Its own summary records the interval.
+if [ -f "$OUT/worker-summary.json" ] && [ "${T0:-0}" -gt 0 ] && [ "${T1:-0}" -gt 0 ]; then
+  WS=$(sed -n 's/.*"t_start_ns":\([0-9]*\).*/\1/p' "$OUT/worker-summary.json" | head -1)
+  WE=$(sed -n 's/.*"t_end_ns":\([0-9]*\).*/\1/p' "$OUT/worker-summary.json" | head -1)
+  if [ -n "$WS" ] && [ -n "$WE" ]; then
+    if [ "$WS" -gt "$T0" ] || [ "$WE" -lt "$T1" ]; then
+      FAIL="$FAIL worker-did-not-span-window(worker=[$WS,$WE] window=[$T0,$T1])"
+    fi
+    printf 'worker_start_ns=%s\nworker_end_ns=%s\nwindow_start_ns=%s\nwindow_end_ns=%s\n' \
+      "$WS" "$WE" "$T0" "$T1" > "$OUT/window-span.txt"
+  else
+    FAIL="$FAIL worker-window-unmeasured"
+  fi
+fi
 # pct_running is the issue's own validity rule, so it is CHECKED here rather than left for
 # a human to eyeball in the CSV. Field 5 of `perf stat -x,`; any event below 100.00 means
 # the counters were multiplexed and the rep is not publishable.

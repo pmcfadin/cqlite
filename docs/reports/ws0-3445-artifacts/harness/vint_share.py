@@ -234,27 +234,40 @@ def instruction_addresses(binary: str) -> tuple[list[int], ParseAccounting]:
     return addrs, acct
 
 
-def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict[int, str], int, int, int]:
-    """(cycles by file address in `binary`, perf's symbol per address, total, off-binary, unparsed).
+def read_samples(perf_data: str, binary: str):
+    """Parse perf samples. Returns (by_addr, persym, total, other, acct, unattributable).
 
-    THE DENOMINATOR IS THE LARGEST JUDGEMENT CALL IN THIS SCRIPT, so it is returned in
-    parts rather than as one number the caller has to trust. `total` is EVERY sample in the
-    window, including libc and the kernel, because the question asked is a share of scan
-    ON-CPU. But 43-58% of that is off-binary and is UNREACHABLE by the numerator (only the
-    measured binary has DWARF for an inline chain), so a share against `total` and a share
-    against the in-binary subset are different quantities and BOTH are reported. Comparing
-    two shares taken against DIFFERENT denominators is how this script's first user
-    (me) published an AC2 ratio with the wrong sign.
+    SWEEP (b) EXTENDED TO THE LARGEST INPUT (roborev r6 finding 3). The round-6 sweep put `nm`,
+    `objdump` and the symbol-offset regex under enforced accounting and MISSED THE PERF SAMPLE
+    ROWS -- the primary parser, and the one whose output the whole report rests on. An audit
+    scoped by where the last bug was found is not exhaustive; recorded so the next sweep starts
+    from the biggest input rather than the most recent one.
 
-    `unparsed` exists because a line landing in neither `total` nor `other` would vanish
-    silently, which is an unmeasured quantity masquerading as zero.
+    Two defects are fixed here, and the second one moves cycles between the two DENOMINATORS
+    this issue's verdict is expressed against:
+
+      1. An unparseable row only incremented a `lines_unparsed` counter that nothing adjudicated.
+         It is now part of the enforced accounting and refused above a bound.
+      2. A row naming THIS BINARY whose instruction pointer would not parse was booked to
+         `other`, i.e. counted as OFF-BINARY. That is a false statement about where those cycles
+         ran, and because `pct_outside_binary` sets the in-binary denominator, it shifted weight
+         between the total basis and the in-binary basis. Such rows are now `unattributable`:
+         retained in `total` (they happened), excluded from `other` (we do not know that they
+         were off-binary) and excluded from the numerator (we cannot place them). Their cycle
+         weight is reported and bounded, so an unknown can never sit silently inside a published
+         share.
+
+    `total` remains EVERY sample in the window including libc and the kernel, because the
+    question asked is a share of scan ON-CPU.
     """
     map_vaddr, map_fileoff = mmap_record(perf_data, binary)
     base = pie_bias(binary, map_vaddr, map_fileoff)
     out = run(["perf", "script", "-i", perf_data, "-F", "ip,dso,sym,symoff,period"])
     by_addr: collections.Counter = collections.Counter()
-    persym: dict[int, str] = {}
-    total = other = unparsed = 0
+    persym: dict[int, tuple[str, int | None]] = {}
+    acct = ParseAccounting("perf sample rows")
+    total = other = 0
+    unattributable = 0
     for line in out.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -264,23 +277,26 @@ def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict
         try:
             period = int(parts[0])
         except (ValueError, IndexError):
-            unparsed += 1
+            acct.skip(line)
             continue
         total += period
+        acct.keep()
         if binary not in line:
             other += period
             continue
         try:
             ip = int(parts[1], 16)
         except (ValueError, IndexError):
-            other += period
+            # In-binary row we cannot place. NOT `other`: see (2) above.
+            unattributable += period
+            acct.skip(line)
             continue
         fa = ip - base
         by_addr[fa] += period
         if fa not in persym:
             m = re.match(r"^(.*)\+0x([0-9a-f]+)$", " ".join(parts[2:]).rsplit(" (", 1)[0])
             persym[fa] = (m.group(1), int(m.group(2), 16)) if m else ("", None)
-    return by_addr, persym, total, other, unparsed
+    return by_addr, persym, total, other, acct, unattributable
 
 
 def verify_base(persym: dict[int, tuple[str, int | None]], sym_addrs: list[int],
@@ -572,7 +588,8 @@ def main() -> int:
                          "is an unbounded UNDERCOUNT (default 20.0)")
     args = ap.parse_args()
 
-    by_addr, persym, total, other, unparsed = read_samples(args.perf_data, args.binary)
+    by_addr, persym, total, other, sample_acct, unattributable = read_samples(
+        args.perf_data, args.binary)
     in_binary = total - other
     if total == 0:
         print("vint_share.py: REFUSED — zero cycles sampled; a 0-sample window is a failure, "
@@ -585,7 +602,7 @@ def main() -> int:
 
     # Every accounting bound is enforced HERE, in one place, so a new parser cannot be added
     # without its skip rate being adjudicated (SWEEP (b)).
-    for acct in (nm_acct, vb_acct):
+    for acct in (sample_acct, nm_acct, vb_acct):
         msg = acct.require(args.max_unparseable)
         if msg:
             print(f"vint_share.py: REFUSED — {msg}", file=sys.stderr)
@@ -610,7 +627,9 @@ def main() -> int:
         "cycles_outside_binary": other,
         "cycles_in_binary": in_binary,
         "pct_outside_binary": 100.0 * other / total,
-        "lines_unparsed": unparsed,
+        "sample_rows": sample_acct.as_dict(),
+        "unattributable_cycles": unattributable,
+        "pct_unattributable": 100.0 * unattributable / total if total else 0.0,
         "denominator_note": (
             "narrow_pct/wide_pct are against cycles_total (ALL DSOs incl. libc and kernel) "
             "as the issue's 'share of scan on-CPU' wording requires. *_in_binary are against "
@@ -630,6 +649,16 @@ def main() -> int:
         shifted = skid_shift(by_addr, insns, k)
         chains = inline_chains(args.binary, sorted(shifted))
         result["skid_band"][f"k={k}"] = shares(shifted, chains, total, in_binary)
+
+    pct_unatt = 100.0 * unattributable / total if total else 0.0
+    if pct_unatt > args.max_unparseable:
+        print(
+            f"vint_share.py: REFUSED — {pct_unatt:.4f}% of sampled cycles are in-binary rows "
+            f"whose instruction pointer would not parse (> {args.max_unparseable}%). Those "
+            f"cycles cannot be placed in either basis, so no share is reported.",
+            file=sys.stderr,
+        )
+        return 1
 
     nc = result["skid_band"]["k=0"]["no_chain_pct_of_in_binary"]
     if nc > args.max_no_chain:

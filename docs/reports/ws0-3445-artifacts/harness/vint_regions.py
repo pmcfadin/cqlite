@@ -200,8 +200,25 @@ def main() -> int:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import vint_share as vsh  # the ONE sample reader, reused rather than re-implemented
 
-        by_addr, persym, total, other, _unparsed = vsh.read_samples(args.perf_data, args.binary)
+        # roborev r6 finding 3: this DISCARDED the sample accounting (`_unparsed`), so this
+        # tool could publish opcode/caller tables with unknown sample weight omitted. It is now
+        # adjudicated on the same bound as vint_share.py, and the unattributable in-binary
+        # weight is refused rather than silently dropped.
+        by_addr, persym, total, other, sample_acct, unattributable = vsh.read_samples(
+            args.perf_data, args.binary)
         in_binary = total - other
+        sa_msg = sample_acct.require(args.max_unparseable)
+        if sa_msg:
+            print(f"vint_regions.py: REFUSED — {sa_msg}", file=sys.stderr)
+            return 1
+        pct_unatt = 100.0 * unattributable / total if total else 0.0
+        if pct_unatt > args.max_unparseable:
+            print(
+                f"vint_regions.py: REFUSED — {pct_unatt:.4f}% of sampled cycles are in-binary "
+                f"rows whose IP would not parse (> {args.max_unparseable}%).",
+                file=sys.stderr,
+            )
+            return 1
         # The PIE rebase self-check is NOT optional here either. This script publishes a
         # cycle-weighted table, and a wrong rebase yields a complete, confident, WRONG one
         # exactly as it would in vint_share.py -- so it must REFUSE on the same terms rather
@@ -266,6 +283,8 @@ def main() -> int:
             "vint_cycles": vint_cycles,
             "no_chain_cycles": no_chain_cycles,
             "no_chain_pct_of_in_binary": 100.0 * no_chain_cycles / in_binary if in_binary else 0.0,
+            "sample_rows": sample_acct.as_dict(),
+            "unattributable_cycles": unattributable,
             "vint_pct_of_total": 100.0 * vint_cycles / total if total else 0.0,
             "vint_pct_of_in_binary": 100.0 * vint_cycles / in_binary if in_binary else 0.0,
             # This table is built from RAW, UNSHIFTED sample IPs, and this host has no PEBS

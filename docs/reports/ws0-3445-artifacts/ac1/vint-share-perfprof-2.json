@@ -5,7 +5,15 @@
   "cycles_outside_binary": 43860289471,
   "cycles_in_binary": 57307031508,
   "pct_outside_binary": 43.35420672067058,
-  "lines_unparsed": 0,
+  "sample_rows": {
+    "what": "perf sample rows",
+    "kept": 202331,
+    "skipped": 0,
+    "pct_skipped": 0.0,
+    "examples": []
+  },
+  "unattributable_cycles": 0,
+  "pct_unattributable": 0.0,
   "denominator_note": "narrow_pct/wide_pct are against cycles_total (ALL DSOs incl. libc and kernel) as the issue's 'share of scan on-CPU' wording requires. *_in_binary are against cycles_in_binary, the only cycles the DWARF numerator can reach. The two are DIFFERENT quantities: never divide one by the other, and never compare a share on one basis with a share on the other.",
   "rebase_selfcheck": {
     "addresses_checked": 3977,

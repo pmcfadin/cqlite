@@ -30,6 +30,14 @@
     "vint_cycles": 1689030402,
     "no_chain_cycles": 0,
     "no_chain_pct_of_in_binary": 0.0,
+    "sample_rows": {
+      "what": "perf sample rows",
+      "kept": 202331,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    },
+    "unattributable_cycles": 0,
     "vint_pct_of_total": 1.669541493888727,
     "vint_pct_of_in_binary": 2.947335357554183,
     "by_opcode_caveat": "UNSHIFTED, non-precise sample IPs (no PEBS on this host). Indicative of where cycles land within the region; NOT evidence of per-instruction concentration.",
