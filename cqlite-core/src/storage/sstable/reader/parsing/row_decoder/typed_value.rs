@@ -505,12 +505,35 @@ impl V5CompressedLegacyParser {
                     }
                 }
                 let value = self.parse_value_from_raw_bytes(data, short, ctx, depth)?;
-                // Every scalar arm consumes the WHOLE slice by construction: the
+                // `duration` is the ONE scalar whose decode can stop SHORT, so its
+                // consumption is measured rather than assumed. Its delegate reads three
+                // consecutive signed VInts (months, days, nanos —
+                // `cassandra-5.0.8:src/java/org/apache/cassandra/serializers/DurationSerializer.java`)
+                // and ignores whatever follows the third, so claiming `data.len()` here
+                // would re-open the silent-discard hole this whole contract exists to
+                // close — one arm, exactly the shape the arm-by-arm checklist keeps
+                // missing. The framing is re-walked from the same VInts (the VALUE still
+                // comes from the single decode above), which is what
+                // `complex_column/cell_path_key.rs::decode_reporting_consumption` does
+                // for the same type on the cell-path side.
+                if short == "duration" {
+                    let mut pos = 0usize;
+                    for component in ["months", "days", "nanos"] {
+                        let (rest, _) = parse_vint(&data[pos..]).map_err(|e| {
+                            Error::corruption(format!("{ctx}: duration {component} VInt: {e:?}"))
+                        })?;
+                        pos = data.len() - rest.len();
+                    }
+                    return Ok((value, pos));
+                }
+                // Every OTHER scalar arm consumes the whole slice by construction: the
                 // fixed-width ones are pinned to their exact width just above (or are
-                // the legal EMPTY buffer, `data.len() == 0`), and the variable-width
-                // ones (`text`, `blob`, `varint`, `decimal`, `duration`, `inet`) are
-                // defined over all of `data`. So there is no arm here whose
-                // consumption is unknown, and `None` never has to be modelled.
+                // the legal EMPTY buffer, `data.len() == 0`), and the remaining
+                // variable-width ones are defined over all of `data` — VERIFIED arm by
+                // arm in `parse_value_from_raw_bytes`, not assumed: `text`/`ascii`/
+                // `varchar` validate UTF-8 over all of it, `blob`, `varint` and `inet`
+                // borrow all of it, and `decimal` is `data[..4]` (scale) plus
+                // `data[4..]` (unscaled).
                 Ok((value, data.len()))
             }
         }

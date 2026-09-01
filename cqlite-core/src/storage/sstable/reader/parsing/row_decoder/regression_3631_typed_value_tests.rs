@@ -818,3 +818,52 @@ fn a_collection_field_of_a_top_level_frozen_udt_column_also_decodes_structurally
         other => panic!("expected Udt, got {:?}", other),
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// `duration` — the ONE scalar whose decode can stop SHORT.
+//
+// The scalar arm reports `data.len()` as consumed for every other type, and that is
+// verified arm by arm; `duration` is the exception. Its decode reads three signed
+// VInts (months, days, nanos — cassandra-5.0.8 DurationSerializer) and ignores what
+// follows, so its consumption is MEASURED from the same framing. Without that, a
+// duration-typed UDT field would accept trailing bytes silently — the exact
+// silent-discard shape the exhaustion contract exists to refuse, surviving in one arm.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The three-VInt body Cassandra writes for `1mo2d3ns`. Each value is ZIGZAG-encoded
+/// and then VInt-encoded; all three fit in one byte here, so the whole duration is
+/// three bytes.
+const DURATION_1MO_2D_3NS: &[u8] = &[0x02, 0x04, 0x06];
+
+#[test]
+fn a_duration_udt_field_decodes_and_consumes_exactly_its_three_vints() {
+    let p = parser();
+    let value = p
+        .parse_simple_udt_field_value(DURATION_1MO_2D_3NS, &CqlType::Duration)
+        .expect("a well-formed duration field must decode");
+    match unfrozen(&value) {
+        Value::Duration {
+            months,
+            days,
+            nanos,
+        } => {
+            assert_eq!((*months, *days, *nanos), (1, 2, 3));
+        }
+        other => panic!("expected Duration, got {:?}", other),
+    }
+}
+
+#[test]
+fn trailing_bytes_after_a_duration_udt_field_are_refused() {
+    let p = parser();
+    let mut bytes = DURATION_1MO_2D_3NS.to_vec();
+    bytes.push(0x7F); // a fourth VInt nobody declared
+    let err = p
+        .parse_simple_udt_field_value(&bytes, &CqlType::Duration)
+        .expect_err("bytes after the third duration VInt are unaccounted for");
+    assert!(
+        err.to_string().contains("trailing byte"),
+        "the scalar arm must MEASURE duration's consumption, not assume it: {}",
+        err
+    );
+}
