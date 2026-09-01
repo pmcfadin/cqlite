@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=187
+CASE_FLOOR=188
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -1444,6 +1444,34 @@ else
   mkdir -p "$TMP/emptycorpus"
   printf '{"version": 2, "keyspace": "ks", "table": "tbl"}\n' > "$TMP/ticket.json"
 
+  # A SCRATCH REPOSITORY, SO NO CASE DEPENDS ON WHERE THIS SUITE WAS RUN FROM.
+  # The driver resolves --repo before its corpus, lock, ref and CPU checks, so a
+  # case that omits --repo only reaches the guard it names when the suite happens
+  # to live inside a git checkout. Run from a copied directory that is not one,
+  # ten cases red for a reason that has nothing to do with what they test -- and
+  # one (the CPU-overlap case) went on PASSING, because both the guard it names
+  # and the repo refusal exit 3. A case that tests a property AND an environment
+  # will eventually be read as evidence about the property alone.
+  #
+  # Every case below that must get PAST repo resolution therefore names this
+  # repository explicitly. The two cases that test repo resolution itself
+  # deliberately do not.
+  SCRATCH="$TMP/scratchrepo"
+  mkdir -p "$SCRATCH"
+  (
+    cd "$SCRATCH"
+    git init -q .
+    git config user.email selftest@example.invalid
+    git config user.name selftest
+    printf 'one\n' > f.txt && git add f.txt && git commit -qm one
+    printf 'two\n' > f.txt && git commit -qam two
+  ) > /dev/null 2>&1
+  if [ "$(git -C "$SCRATCH" rev-list --count HEAD 2>/dev/null || echo 0)" -ge 2 ]; then
+    ok "the driver-guard cases have a scratch repository, so none of them depends on where this suite lives"
+  else
+    bad "the scratch repository was not created, so the driver cases below are testing their environment"
+  fi
+
   run_driver --help
   check_driver "the driver --help exits 3, never 0" 3
 
@@ -1463,24 +1491,29 @@ else
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --server-cpus 0,2
   check_driver "the driver refuses a server CPU set with no client CPU set" 3
 
+  # The CPU-set check runs AFTER ref resolution, so this case must name refs that
+  # exist in the scratch repository; the default arms (cfa93fe99 and its parent)
+  # do not. Getting this wrong is how the case previously reported the right exit
+  # code from the wrong guard.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1
+    --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD
   check_driver "the driver refuses overlapping server and client CPU sets" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-tpl"
+    --work-dir "$TMP/w-tpl" --repo "$SCRATCH"
   check_driver "an absent ticket template" 2 ticket-template-absent
 
   run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-empty" --min-corpus-bytes 1
+    --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --repo "$SCRATCH"
   check_driver "a corpus holding no Data.db files" 2 corpus-empty
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-small"
+    --work-dir "$TMP/w-small" --repo "$SCRATCH"
   check_driver "a corpus below the stated minimum size" 2 corpus-too-small
 
   run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1
+    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --repo "$SCRATCH"
   check_driver "a single-SSTable corpus, which #3058 would route past the merge" \
     2 corpus-too-few-sstables
 
@@ -1489,12 +1522,12 @@ else
   check_driver "an unrecognised --merge-path value" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-same" --min-corpus-bytes 1 --repo "$HERE" \
+    --work-dir "$TMP/w-same" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
     --base-ref HEAD --head-ref HEAD
   check_driver "two arm refs resolving to the same commit" 2 arm-refs-identical
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --repo "$HERE" \
+    --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
     --base-ref no-such-rev-3649 --head-ref HEAD
   check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable
 
@@ -1536,7 +1569,8 @@ else
   printf '{"arm":"base","replicate":1,"file":"base-r01.jsonl"}\n' \
     > "$TMP/w-locked/results/runs.jsonl"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --min-sstables 1
+    --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --min-sstables 1 \
+    --repo "$SCRATCH"
   check_driver "a second session in a work directory already in use" 2 work-dir-busy
   if [ -s "$TMP/w-locked/results/runs.jsonl" ]; then
     ok "the refused session did not truncate the running session's ledger"
@@ -1546,16 +1580,6 @@ else
 
   # P1-7: a worktree at the right commit but carrying uncommitted edits builds
   # code the manifest does not describe.
-  SCRATCH="$TMP/scratchrepo"
-  mkdir -p "$SCRATCH"
-  (
-    cd "$SCRATCH"
-    git init -q .
-    git config user.email selftest@example.invalid
-    git config user.name selftest
-    printf 'one\n' > f.txt && git add f.txt && git commit -qm one
-    printf 'two\n' > f.txt && git commit -qam two
-  ) > /dev/null 2>&1
   mkdir -p "$TMP/w-dirty"
   git -C "$SCRATCH" worktree add -q --detach "$TMP/w-dirty/wt-base" HEAD > /dev/null 2>&1
   printf 'uncommitted\n' >> "$TMP/w-dirty/wt-base/f.txt"
@@ -1566,7 +1590,7 @@ else
 
   # P1-6: `die` used to claim a manifest unconditionally. The claim must be true.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-claim"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-claim" --repo "$SCRATCH"
   if grep -q '^AB-3649: manifest .*records the runs that did complete$' "$TMP/out.txt" \
      && [ -f "$TMP/w-claim/results/manifest.json" ]; then
     ok "when an abort claims a manifest, the manifest is actually there"
