@@ -318,8 +318,9 @@ plant_id() {
 case "\$*" in
   '-un')  printf '%s\n' '$me' ;;
   '-u')   printf '%s\n' '$euid' ;;
-  "-u $ku") printf '%s\n' '$kuid' ;;
-  -u*)    printf 'id: unknown user\n' >&2; exit 1 ;;
+  "-u $ku")   printf '%s\n' '$kuid' ;;
+  "-un $kuid") printf '%s\n' '$ku' ;;
+  -u*|-n*) printf 'id: no such user\n' >&2; exit 1 ;;
   *)      printf 'id: unsupported in this stub: %s\n' "\$*" >&2; exit 1 ;;
 esac
 EOF
@@ -1850,7 +1851,7 @@ fi
 # reports VERIFIED about the wrong server, which is exactly the false certification.
 d33b=$(mkshim "$tmp/s33b"); plant_tmux "$d33b" complete; plant_id "$d33b" root 0 "$INVOKER" 4711
 plant_delegator "$d33b" runuser
-run_cap "$d33b" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' -- --tmux-env
+run_cap "$d33b" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' 'SUDO_UID=6553' -- --tmux-env
 if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
   bad "sudo posture: an unresolvable invoking identity certified the CURRENT UID's server: $out"
 elif printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
@@ -1874,11 +1875,34 @@ else
   bad "sudo posture: a conflicting sudo identity did not report UNMEASURED: $out"
 fi
 
+# SUDO_UID IS THE AUTHORITY AND SUDO_USER MUST AGREE — the rule bootstrap's gate-pin
+# retarget already follows (#3414 roborev round 8), reused rather than re-derived. Sudo sets
+# BOTH, so exactly one of them present is incomplete metadata (stale, hand-exported,
+# inherited), and incomplete metadata about WHICH SERVER TO ANSWER ABOUT is ambiguity.
+d33c2=$(mkshim "$tmp/s33c2"); plant_tmux "$d33c2" complete; plant_id "$d33c2" root 0 "$INVOKER" 4711
+plant_delegator "$d33c2" runuser
+run_cap "$d33c2" "$ef2" "SUDO_USER=$INVOKER" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "sudo posture: a SUDO_USER with no SUDO_UID is incomplete metadata, not a hint"
+else
+  bad "sudo posture: incomplete sudo metadata was acted on: $out"
+fi
+# ...and a uid that resolves to nobody is its own refusal, distinct from a name that does not
+# match it: they are different operator facts.
+d33c3=$(mkshim "$tmp/s33c3"); plant_tmux "$d33c3" complete; plant_id "$d33c3" root 0 "$INVOKER" 4711
+plant_delegator "$d33c3" runuser
+run_cap "$d33c3" "$ef2" "SUDO_USER=$INVOKER" 'SUDO_UID=6553' -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "sudo posture: a SUDO_UID that resolves to no account is UNMEASURED"
+else
+  bad "sudo posture: an unresolvable SUDO_UID was acted on: $out"
+fi
+
 # (c) THE REPAIR OBEYS THE SAME RULE. Seeding root's server while the agent's stays broken
 # is worse than not seeding: it reports success and changes nothing that matters.
 d33d=$(mkshim "$tmp/s33d"); plant_tmux "$d33d" missing; plant_id "$d33d" root 0 "$INVOKER" 4711
 plant_delegator "$d33d" runuser
-run_cap "$d33d" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' -- --fix-tmux-env
+run_cap "$d33d" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' 'SUDO_UID=6553' -- --fix-tmux-env
 if [ ! -f "$d33d/tmux-calls.log" ] || ! grep -q '^setenv' "$d33d/tmux-calls.log"; then
   ok "sudo posture: the repair REFUSES to seed when the target server is ambiguous"
 else

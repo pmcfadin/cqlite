@@ -330,8 +330,9 @@ claude_auth_tmux_run() {
 #               everything else (measured on this repo's own test suite); TMUX_TMPDIR is
 #               forwarded when set, since it is the only spelling of "not the default
 #               socket directory" available to us.
-#   ambiguous — SUDO_USER is set but unresolvable, or the record contradicts itself
-#               (SUDO_UID naming a different uid), or no delegation tool exists. The verdict
+#   ambiguous — the sudo record is incomplete (only one of SUDO_UID/SUDO_USER), or it
+#               contradicts itself, or the uid resolves to no account, or no delegation tool
+#               exists. The verdict
 #               is UNMEASURED and the repair REFUSES. FALLING BACK TO THE CURRENT UID IS THE
 #               PERMISSIVE BRANCH WEARING A DEFAULT'S CLOTHES — it is the very thing that
 #               produced the false VERIFIED.
@@ -346,60 +347,83 @@ CLAUDE_AUTH_TMUX_IDENTITY_WHY=''
 # claude_auth_resolve_tmux_identity: sets the three globals above and CLAUDE_AUTH_TMUX_PREFIX.
 # Always rc 0 — the STATE is the answer, and callers must read it rather than an exit code.
 claude_auth_resolve_tmux_identity() {
-  local __su="${SUDO_USER:-}" __me='' __uid='' __euid='' __rc=0
+  local __suid="${SUDO_UID:-}" __suser="${SUDO_USER:-}" __who='' __me='' __nuid='' __euid='' __rc=0
   local -a __p=()
   CLAUDE_AUTH_TMUX_IDENTITY=ambiguous
   CLAUDE_AUTH_TMUX_IDENTITY_USER=''
   CLAUDE_AUTH_TMUX_IDENTITY_WHY=''
   CLAUDE_AUTH_TMUX_PREFIX=()
 
-  if [ -z "$__su" ]; then CLAUDE_AUTH_TMUX_IDENTITY=self; return 0; fi
-  # A LOGIN NAME IS VALIDATED BEFORE IT IS USED AS AN ARGUMENT. `id -u -leading-dash` would
+  # NOT UNDER sudo AT ALL: nothing to retarget.
+  if [ -z "$__suid" ] && [ -z "$__suser" ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY=self
+    return 0
+  fi
+  # SUDO_UID IS THE AUTHORITY AND SUDO_USER MUST AGREE WITH IT. Not a fresh rule: this is
+  # the SAME rule bootstrap's gate-pin retarget already follows (#3414 roborev round 8),
+  # deliberately reused rather than re-derived, because two implementations of "who invoked
+  # me under sudo" in one codebase — with opposite authorities — is a divergence nobody can
+  # audit by reading either one. A NAME is subject to NSS mapping and to a shadowed `id`;
+  # the UID is what sudo recorded. Sudo sets BOTH, so exactly one of them present is
+  # incomplete metadata (stale, hand-exported, or inherited), and incomplete metadata about
+  # WHICH SERVER TO ANSWER ABOUT is ambiguity, not a hint.
+  if [ -z "$__suid" ] || [ -z "$__suser" ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY='the sudo record is incomplete (one of SUDO_UID/SUDO_USER is set and the other is not), so who invoked this cannot be established — sudo sets both'
+    return 0
+  fi
+  case "$__suid" in ''|*[!0-9]*)
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY='SUDO_UID is not numeric, so the invoking agent cannot be identified'
+    return 0 ;;
+  esac
+  # A LOGIN NAME IS VALIDATED BEFORE IT IS USED AS AN ARGUMENT: `id -u -leading-dash` would
   # be read as an option, and this value comes from the environment.
-  case "$__su" in
-    *[!A-Za-z0-9._-]*|-*|'')
+  case "$__suser" in
+    *[!A-Za-z0-9._-]*|-*)
       CLAUDE_AUTH_TMUX_IDENTITY_WHY='SUDO_USER is not a plain login name, so the invoking agent cannot be identified'
       return 0 ;;
   esac
+  __who=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -un "$__suid" 2>/dev/null)
+  __rc=$?
+  if [ "$__rc" -ne 0 ] || [ -z "$__who" ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY="SUDO_UID $__suid does not resolve to an account on this host, so which tmux server belongs to the invoking agent is UNKNOWN"
+    return 0
+  fi
+  __nuid=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -u "$__suser" 2>/dev/null)
+  __rc=$?
+  case "$__nuid" in ''|*[!0-9]*) __rc=1 ;; esac
+  if [ "$__rc" -ne 0 ] || [ "$__nuid" != "$__suid" ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY="INCONSISTENT sudo metadata — SUDO_USER does not resolve to SUDO_UID $__suid, so which account owns the tmux server is ambiguous and neither answer would be trustworthy"
+    return 0
+  fi
+
+  # THE NAME USED FROM HERE IS THE ONE RESOLVED FROM THE UID, not the raw SUDO_USER: they
+  # have just been proven to agree, and taking the uid's answer keeps the authority in one
+  # place.
   __me=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -un 2>/dev/null)
   __rc=$?
   if [ "$__rc" -ne 0 ] || [ -z "$__me" ]; then
     CLAUDE_AUTH_TMUX_IDENTITY_WHY='this process cannot name its own user (the id -un lookup did not answer), so it cannot tell whether it is already the invoking agent'
     return 0
   fi
-  if [ "$__su" = "$__me" ]; then CLAUDE_AUTH_TMUX_IDENTITY=self; return 0; fi
-
-  __uid=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -u "$__su" 2>/dev/null)
-  __rc=$?
-  case "$__uid" in ''|*[!0-9]*) __rc=1 ;; esac
-  if [ "$__rc" -ne 0 ]; then
-    CLAUDE_AUTH_TMUX_IDENTITY_WHY="SUDO_USER names a login this host cannot resolve to a user, so which tmux server belongs to the invoking agent is UNKNOWN"
-    return 0
-  fi
-  # THE TWO HALVES OF THE SUDO RECORD MUST AGREE. If they do not, one of them is wrong and
-  # nothing here can say which — so this is ambiguity, not a preference.
-  if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID:-}" != "$__uid" ]; then
-    CLAUDE_AUTH_TMUX_IDENTITY_WHY="SUDO_USER resolves to uid $__uid but SUDO_UID says ${SUDO_UID:-} — the sudo record contradicts itself, so the invoking agent cannot be identified"
-    return 0
-  fi
+  if [ "$__who" = "$__me" ]; then CLAUDE_AUTH_TMUX_IDENTITY=self; return 0; fi
 
   __euid=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -u 2>/dev/null)
   case "$__euid" in ''|*[!0-9]*) __euid='' ;; esac
   if [ "$__euid" = 0 ] && command -v runuser >/dev/null 2>&1; then
-    __p=(runuser -u "$__su" --)
+    __p=(runuser -u "$__who" --)
   elif command -v sudo >/dev/null 2>&1; then
     # `-n`, ALWAYS: a password prompt on a provisioning entry point is an unbounded wait
     # wearing an interactive prompt's clothes.
-    __p=(sudo -n -u "$__su" --)
+    __p=(sudo -n -u "$__who" --)
   else
-    CLAUDE_AUTH_TMUX_IDENTITY_WHY="the invoking agent is $__su but neither runuser nor sudo is available to run tmux as that login, so only the WRONG server could be reached"
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY="the invoking agent is $__who but neither runuser nor sudo is available to run tmux as that login, so only the WRONG server could be reached"
     return 0
   fi
   __p+=(env -u TMUX -u TMUX_PANE)
   [ -z "${TMUX_TMPDIR:-}" ] || __p+=("TMUX_TMPDIR=$TMUX_TMPDIR")
   CLAUDE_AUTH_TMUX_PREFIX=("${__p[@]}")
   CLAUDE_AUTH_TMUX_IDENTITY=delegate
-  CLAUDE_AUTH_TMUX_IDENTITY_USER="$__su"
+  CLAUDE_AUTH_TMUX_IDENTITY_USER="$__who"
   return 0
 }
 
