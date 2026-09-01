@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=261
+CASE_FLOOR=265
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -1575,10 +1575,40 @@ PYINNER
   check_cause "a differing $cfg_field" server-config-mismatch
 done
 run_analyzer "$TMP/meets"
-if grep -q '^AB-3649: server-observed batch-size 8192 max-batch-bytes 4194304 wait-timeout-ms 30000$' "$TMP/out.txt"; then
-  ok "the observed server configuration is reported, not merely checked"
+cfg_report_bad=''
+for expect in "batch-size value 8192" "max-batch-bytes value 4194304" "wait-timeout-ms value 30000"; do
+  grep -q "^AB-3649: server-observed $expect corroboration agreed (12 of 12 runs)\$" "$TMP/out.txt" \
+    || cfg_report_bad="$cfg_report_bad ${expect%% *}"
+done
+if [ -z "$cfg_report_bad" ]; then
+  ok "every readback reports its value AND its corroboration counts, through one type"
 else
-  bad "the observed server configuration was not reported"
+  bad "these readbacks were not reported with corroboration counts:$cfg_report_bad"
+fi
+# THE THIRD INSTANCE: a field observed for only some runs must not read as
+# agreement, and it must inherit that from the shared type rather than a
+# per-field guard.
+mkfixture "$TMP/cfg-partial" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/cfg-partial/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["max_batch_bytes_observed"] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/cfg-partial"
+check_verdict "a readback observed for only half the runs" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: server-observed max-batch-bytes value 4194304 corroboration partial (6 of 12 runs)$' "$TMP/out.txt" \
+   && grep -q '^AB-3649: verdict-detail single-stream READBACK max-batch-bytes was observed for 6 of 12 runs' "$TMP/out.txt"; then
+  ok "a partially observed readback is counted and disclosed, not read as agreement"
+else
+  bad "a partially observed readback was treated as agreement"
 fi
 
 echo
@@ -1776,9 +1806,23 @@ else
   mkdir -p "$TMP/tinycorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-Data.db"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-Data.db"
+  # Unrelated tables and a snapshot subtree that the census must NOT count: this
+  # is finding 1's shape, and without them the served-scope guard is untested.
+  mkdir -p "$TMP/tinycorpus/other/bigtable" "$TMP/tinycorpus/ks/tbl/snapshots/s1"
+  head -c 400000000 /dev/zero > "$TMP/tinycorpus/other/bigtable/nb-9-big-Data.db" 2>/dev/null || \
+    head -c 4096 /dev/zero > "$TMP/tinycorpus/other/bigtable/nb-9-big-Data.db"
+  head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/snapshots/s1/nb-8-big-Data.db"
   mkdir -p "$TMP/onesstcorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-Data.db"
-  mkdir -p "$TMP/emptycorpus"
+  # ...and the one-source corpus gets a SECOND file elsewhere, so the #3058 guard
+  # can only pass by counting the wrong directory.
+  mkdir -p "$TMP/onesstcorpus/ks/decoy"
+  head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/decoy/nb-2-big-Data.db"
+  # The census describes the SERVED directory, so an "empty corpus" is now a
+  # served directory that exists and holds no Data.db -- not an empty data root,
+  # which is a different (and separately named) refusal.
+  mkdir -p "$TMP/emptycorpus/ks/tbl"
+  mkdir -p "$TMP/nosuchtable/ks/other"
   printf '{"version": 2, "keyspace": "ks", "table": "tbl"}\n' > "$TMP/ticket.json"
 
   # A SCRATCH REPOSITORY, SO NO CASE DEPENDS ON WHERE THIS SUITE WAS RUN FROM.
@@ -1884,16 +1928,35 @@ PYINNER
 
   run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --repo "$SCRATCH"
-  check_driver "a corpus holding no Data.db files" 2 corpus-empty
+  check_driver "a served directory holding no Data.db files" 2 corpus-empty
+  run_driver --corpus "$TMP/nosuchtable" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-nodir" --min-corpus-bytes 1 --repo "$SCRATCH"
+  check_driver "a ticket naming a table that is not under the data root" 2 served-dir-absent
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-small" --repo "$SCRATCH"
   check_driver "a corpus below the stated minimum size" 2 corpus-too-small
 
+  # FINDING 1: the #3058 guard must count the SERVED directory. This corpus has a
+  # second Data.db under a DIFFERENT table, so the old whole-root census would
+  # have counted two and let a single-source served table through -- the exact
+  # phantom the guard exists to stop.
   run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --repo "$SCRATCH"
-  check_driver "a single-SSTable corpus, which #3058 would route past the merge" \
+  check_driver "a served table with one SSTable and a decoy elsewhere under the data root" \
     2 corpus-too-few-sstables
+  # ...and the size floor is likewise a claim about the served table: this corpus
+  # has a large Data.db under another table and a snapshot subtree, neither of
+  # which the server would read.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-scope" --repo "$SCRATCH"
+  check_driver "a served table below the size floor, with a large unrelated table alongside" \
+    2 corpus-too-small
+  if grep -q 'served-dir .*ks/tbl data-db-files 2 data-db-bytes 8192' "$TMP/out.txt"; then
+    ok "the census counts the served directory only, not the data root"
+  else
+    bad "the census did not scope itself to the served directory"
+  fi
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --merge-path sideways
@@ -1997,46 +2060,40 @@ PYINNER
     --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1
   check_driver "a reused worktree at the right commit but not clean" 2 worktree-dirty
 
-  # FINDING 4: A FAILED PRE-FLIGHT MUST NOT DESTROY AN EARLIER SESSION'S RECORD.
-  # The lock closed the concurrent case; this is the sequential one -- reusing a
-  # work directory for an attempt that then fails on a corpus, a port or a ref.
-  mkdir -p "$TMP/w-prior/results"
+  # ROUND 2 FINDING 4 / ROUND 3 FINDING 2 / ROUND 4 FINDING 2 -- one class, now
+  # closed by construction rather than by sequencing. Each session writes ONLY to
+  # `<work-dir>/run-<session-id>/`, a name no other session can produce, so an
+  # earlier session's results cannot be reached by any code path here: not a
+  # failed pre-flight, not a failed build, not a lost port, not a kill.
+  mkdir -p "$TMP/w-prior/run-EARLIER-SESSION"
   printf '{"arm":"base","replicate":1,"file":"base-r01.jsonl"}\n' \
-    > "$TMP/w-prior/results/runs.jsonl"
+    > "$TMP/w-prior/run-EARLIER-SESSION/runs.jsonl"
   printf '{"schema":"ab-3649.manifest/v1","note":"an earlier session"}\n' \
-    > "$TMP/w-prior/results/manifest.json"
+    > "$TMP/w-prior/run-EARLIER-SESSION/manifest.json"
+  printf 'earlier replicate data\n' \
+    > "$TMP/w-prior/run-EARLIER-SESSION/base-r01.jsonl"
+  prior_before="$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-prior" --repo "$SCRATCH"
   check_driver "a re-used work directory whose new attempt fails pre-flight" 2 corpus-too-small
-  if grep -q 'an earlier session' "$TMP/w-prior/results/manifest.json" \
-     && [ -s "$TMP/w-prior/results/runs.jsonl" ]; then
-    ok "the earlier session's ledger AND manifest survive a failed pre-flight"
+  if [ "$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)" = "$prior_before" ]; then
+    ok "an earlier session's manifest, ledger AND replicate files are byte-identical after a failed attempt"
   else
-    bad "a failed pre-flight destroyed an earlier session's record"
+    bad "a failed attempt altered an earlier session's results"
   fi
-  if grep -q 'belongs to an EARLIER session and has NOT been modified' "$TMP/out.txt"; then
-    ok "and the abort says so, rather than claiming a manifest it did not write"
+  if grep -q 'this session wrote only to ' "$TMP/out.txt"; then
+    ok "and the abort names the only directory it wrote to"
   else
-    bad "the abort did not disclose whose manifest is in the work directory"
+    bad "the abort did not name the directory it confined itself to"
   fi
-  # FINDING 2, THE STRUCTURAL HALF: the session's own record lives in a private
-  # staging directory until a replicate has completed, so no failure between
-  # pre-flight and the first served request can reach $RUN_DIR at all. The
-  # staging directory must also be cleaned up.
-  if [ -z "$(find "$TMP/w-prior/results" -maxdepth 1 -name '.staging-*' 2>/dev/null)" ]; then
-    ok "the staging directory is removed on exit, leaving no debris behind"
+  # The replicate JSONLs live in the session directory too -- round 4 finding 2
+  # was that the manifest was staged while the files it references were not.
+  if [ -z "$(find "$TMP/w-prior" -maxdepth 2 -name 'base-r01.jsonl' -newer "$TMP/w-prior/run-EARLIER-SESSION/manifest.json" 2>/dev/null)" ]; then
+    ok "no replicate file was written outside this session's own directory"
   else
-    bad "a staging directory survived the session"
-  fi
-  if grep -q 'still describes any EARLIER session until the first replicate completes' "$TMP/out.txt" \
-     || ! grep -q 'ledger staged' "$TMP/out.txt"; then
-    ok "the run says which session the work directory currently describes"
-  else
-    bad "the staging announcement did not say whose record is in the work directory"
+    bad "a replicate file was written where another session could see it"
   fi
 
-  # A refusal must still leave a manifest, so the analyzer sees the shortfall as
-  # a fact rather than as an absence.
   # Nothing under the run directory is written before pre-flight passes, so a
   # pre-flight abort in a FRESH work directory leaves no manifest at all -- and
   # the analyzer refuses that rather than reading a stale one.

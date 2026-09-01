@@ -243,6 +243,10 @@ def render_common(manifest, mode, admission, session):
         )
     )
     out("corpus path %s" % field(manifest, "corpus", "path"))
+    # The census describes the ONE directory the ticket is served from, not the
+    # data root -- so the size floor and the >=2-SSTable #3058 guard are claims
+    # about the table under measurement.
+    out("corpus served-dir %s" % field(manifest, "corpus", "served_dir"))
     out(
         "corpus data-db-bytes %s data-db-files %s min-required-bytes %s"
         % (
@@ -289,14 +293,20 @@ def render_common(manifest, mode, admission, session):
         )
     )
     out("thermal-state %s" % field(manifest, "workload", "temperature"))
-    out(
-        "server-observed batch-size %s max-batch-bytes %s wait-timeout-ms %s"
-        % (
-            session["server_config"].get("batch_size_observed", "NOT-OBSERVED"),
-            session["server_config"].get("max_batch_bytes_observed", "NOT-OBSERVED"),
-            session["server_config"].get("wait_timeout_ms_observed", "NOT-OBSERVED"),
+    # Every readback renders through the ONE type, with its own counts, so a
+    # field that was observed for only some runs cannot read as agreement.
+    for name in sorted(session["readbacks"]):
+        corroboration = session["readbacks"][name]
+        out(
+            "server-observed %s value %s corroboration %s (%d of %d runs)"
+            % (
+                name.replace("_observed", "").replace("_", "-"),
+                corroboration.value,
+                corroboration.state,
+                corroboration.observed,
+                corroboration.total,
+            )
         )
-    )
     out("merge-path %s" % field(manifest, "workload", "merge_path"))
 
 
@@ -594,6 +604,21 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
             "'merge', so the #3058 single-source fast path may have served some or "
             "all requests -- that path is not the one #2820 changed" % (mode, merge_path)
         )
+    for name in sorted(session["readbacks"]):
+        corroboration = session["readbacks"][name]
+        if not corroboration.corroborated:
+            out(
+                "verdict-detail %s READBACK %s was observed for %d of %d runs; the "
+                "observed values agree, but PARTIAL OBSERVATION IS NOT AGREEMENT -- "
+                "the unobserved runs corroborate nothing. Same remedy as the "
+                "admission ceiling, and the same window: only while the rig is live"
+                % (
+                    mode,
+                    name.replace("_observed", "").replace("_", "-"),
+                    corroboration.observed,
+                    corroboration.total,
+                )
+            )
     if not admission.corroborated:
         if admission.state == "none":
             out(

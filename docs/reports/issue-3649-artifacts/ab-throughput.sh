@@ -88,15 +88,12 @@ die() { # <cause> <detail>
   # the manifest is only claimed when writing it ACTUALLY SUCCEEDED and the file
   # is on disk. An abort before the run directory exists writes nothing, and
   # says so.
-  if [ "${LEDGER_ARMED:-0}" = "1" ] && write_manifest 2>/dev/null \
-     && [ "${PROMOTED:-0}" = "1" ] && promote_ledger \
-     && [ -f "${RUN_DIR:-}/manifest.json" ]; then
+  if write_manifest 2>/dev/null && [ -f "${RUN_DIR:-}/manifest.json" ]; then
     say "manifest $RUN_DIR/manifest.json records the runs that did complete"
-  elif [ -f "${RUN_DIR:-}/manifest.json" ]; then
-    say "manifest NOT WRITTEN -- this abort happened before any replicate completed; the manifest present in $RUN_DIR belongs to an EARLIER session and has NOT been modified"
   else
     say "manifest NOT WRITTEN -- this abort happened before a manifest could be produced"
   fi
+  say "earlier sessions in $WORK_DIR are untouched: this session wrote only to $RUN_DIR"
   exit 2
 }
 
@@ -127,7 +124,8 @@ ab-throughput.sh [options]
   --shape <s>               flight-loadgen shape                      (default full)
   --ramp <list>             flight-loadgen ramp                          (default 1)
   --step-duration <d>       per-step hold                              (default 60s)
-  --port <n>                loopback port for the server              (default 8815)
+  --port <n>                loopback port; 0 = EPHEMERAL, learned from the
+                            server's own `listening on` line             (default 0)
   --server-cpus <list>      taskset list for the server         (default unpinned)
   --client-cpus <list>      taskset list for the load generator (default unpinned)
   --min-corpus-bytes <n>    refuse below this many Data.db bytes  (default 268435456)
@@ -172,7 +170,7 @@ REPO=''
 SHAPE='full'
 RAMP='1'
 STEP_DURATION='60s'
-PORT=8815
+PORT=0
 SERVER_CPUS=''
 CLIENT_CPUS=''
 MIN_CORPUS_BYTES=268435456
@@ -244,7 +242,7 @@ done
 case "$REPLICATES" in ''|*[!0-9]*) usage_error "--replicates must be a positive integer" ;; esac
 [ "$REPLICATES" -ge 5 ] || usage_error \
   "--replicates must be at least 5. At n<=3 a 10000-draw percentile bootstrap is NOT an interval: the all-minimum resample has probability 1/n^n, which at n=3 is 3.7% and exceeds the 2.5% tail, so the reported bounds are exactly (min, max) of the observed ratios and three identical pairs yield a ZERO-WIDTH interval. 7 is the recommendation -- see RUNBOOK.md step 5"
-case "$PORT" in ''|*[!0-9]*) usage_error "--port must be an integer" ;; esac
+case "$PORT" in ''|*[!0-9]*) usage_error "--port must be an integer (0 = ephemeral)" ;; esac
 case "$MIN_CORPUS_BYTES" in ''|*[!0-9]*) usage_error "--min-corpus-bytes must be an integer" ;; esac
 case "$TEMPERATURE" in warm|cold) ;; *) usage_error "--temperature must be warm or cold" ;; esac
 case "$MIN_SSTABLES" in ''|*[!0-9]*) usage_error "--min-sstables must be an integer" ;; esac
@@ -307,69 +305,48 @@ REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$REPO_TOP" ] || usage_error \
   "--repo $REPO is not a git repository (or git cannot read it), so the two arm commits cannot be resolved"
 REPO="$REPO_TOP"
-RUN_DIR="$WORK_DIR/results"
-LOG_DIR="$WORK_DIR/logs"
+# ---------------------------------------------------------------------------
+# THE SESSION OWNS EVERYTHING IT WRITES. This replaces four successive attempts
+# to share `<work-dir>/results` safely -- unarmed ledgers, staging directories,
+# ordered promotion -- each of which fixed the instance in front of it and left
+# the next layer. Four findings in one path says the SHARED MUTABLE LOCATION is
+# the defect, not the sequencing around it.
+#
+# So there is no shared mutable location. Every session writes to its OWN
+# immutable directory, `<work-dir>/run-<session-id>/`, which no other session can
+# name. Nothing is ever promoted, overwritten or truncated, so:
+#
+#   * a failed pre-flight, a failed build, a lost port and a killed session all
+#     leave every earlier session's results byte-identical, because no code path
+#     writes outside this session's own directory;
+#   * "a manifest never references a file from another session" is true BY
+#     CONSTRUCTION -- the manifest and every JSONL it names are the only things
+#     in that directory, written by one process that owns it;
+#   * there is nothing to make atomic, because there is nothing shared.
+#
+# `<work-dir>/latest` is a convenience symlink, updated after each completed
+# replicate. It is the ONLY shared name, it holds no data, and its worst failure
+# is pointing at a complete EARLIER session -- coherent, never corrupt. The
+# analyzer command this script prints names the session directory explicitly, so
+# what gets certified is never the symlink.
+# ---------------------------------------------------------------------------
+SESSION_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$WORK_DIR/run-$SESSION_ID"
+LOG_DIR="$RUN_DIR/logs"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 RUNS_JSONL="$RUN_DIR/runs.jsonl"
+: > "$RUNS_JSONL"
+
+# The lock survives, RE-JUSTIFIED: it is no longer a data-integrity guard (per
+# session directories made that unnecessary) but a MEASUREMENT-VALIDITY one. Two
+# concurrent sessions on one box contend for CPU and page cache and invalidate
+# each other's numbers, which no amount of file isolation fixes.
 SESSION_LOCK="$WORK_DIR/.session-lock"
-# WORK_DIR and PORT both default to fixed values, so two sessions started in one
-# work directory used to truncate each other's ledger BEFORE either noticed the
-# port was occupied -- fail-closed downstream, but the first session's record was
-# already destroyed. `mkdir` is the atomic test-and-set; the ledger is not
-# touched until the lock is held AND the port is free.
 mkdir "$SESSION_LOCK" 2>/dev/null || {
   warn "cause work-dir-busy"
-  warn "cause-detail another session holds $SESSION_LOCK. If no session is running, remove that directory; otherwise pass a different --work-dir. Truncating this session's ledger would destroy the other's."
+  warn "cause-detail another session holds $SESSION_LOCK. This is not about files -- each session now writes only to its own directory -- it is about CPU: two measurement sessions on one box invalidate each other. If nothing is running, remove that directory."
   exit 2
 }
-# THE ORDERING IS THE SUBJECT HERE, NOT ANY ONE WRITE SITE. The lock closed the
-# CONCURRENT case; this closes the SEQUENTIAL one. Reusing a work directory for
-# an attempt that then fails -- an occupied port, a bad corpus, an unresolvable
-# ref, a build that will not compile -- used to truncate the previous session's
-# ledger and overwrite its manifest on the way past.
-#
-# So the invariant is stated once and enforced once: NOTHING under RUN_DIR is
-# written until pre-flight has passed AND both arms have built. Until then the
-# ledger is "unarmed", `write_manifest` is a no-op, and `die` says plainly that
-# any manifest present belongs to an earlier session and was not touched. There
-# is deliberately no per-site guard -- a second finding in one lifecycle path is
-# what says the ordering, not the site, is what needs fixing.
-# THE INVARIANT, STATED ONCE: this session writes NOTHING into $RUN_DIR until it
-# has a SERVING SERVER and a completed replicate. Not "until pre-flight passed"
-# -- that was the previous boundary, and the port can be taken during the two
-# release builds that follow it, so the truncation still happened and `run_one`
-# then aborted over an already-destroyed ledger.
-#
-# THIS IS THE THIRD FINDING IN THIS ONE PATH, so the fix is structural rather
-# than another recheck: the session's ledger and manifest live in a PRIVATE
-# STAGING DIRECTORY for their whole life, and are PROMOTED into $RUN_DIR by
-# atomic rename only after a run has actually completed. A fourth instance is
-# then not expressible -- there is no code path on which an incomplete session
-# can overwrite a previous one's record, because until the promotion the previous
-# one's files are the only ones there.
-LEDGER_ARMED=0
-STAGE_DIR=""
-
-stage_ledger() {
-  STAGE_DIR="$RUN_DIR/.staging-$$"
-  mkdir -p "$STAGE_DIR"
-  RUNS_JSONL="$STAGE_DIR/runs.jsonl"
-  : > "$RUNS_JSONL"
-  LEDGER_ARMED=1
-  write_manifest
-}
-
-# Atomic per file, and only ever called after a completed run.
-promote_ledger() {
-  [ "${LEDGER_ARMED:-0}" = "1" ] || return 0
-  [ -n "${STAGE_DIR:-}" ] || return 0
-  cp "$STAGE_DIR/runs.jsonl" "$RUN_DIR/.runs.tmp.$$" \
-    && mv "$RUN_DIR/.runs.tmp.$$" "$RUN_DIR/runs.jsonl"
-  cp "$STAGE_DIR/manifest.json" "$RUN_DIR/.manifest.tmp.$$" \
-    && mv "$RUN_DIR/.manifest.tmp.$$" "$RUN_DIR/manifest.json"
-  PROMOTED=1
-}
-PROMOTED=0
 
 # ---------------------------------------------------------------------------
 # Cleanup. Registered NOW, before the resources it frees can exist -- this repo
@@ -409,8 +386,6 @@ reap_server() {
 
 cleanup() {
   reap_server
-  [ -n "${STAGE_DIR:-}" ] && rm -rf "$STAGE_DIR" 2>/dev/null || true
-  [ -n "${SESSION_LOCK:-}" ] && rm -f "$RUN_DIR/.runs.tmp.$$" "$RUN_DIR/.manifest.tmp.$$" 2>/dev/null || true
   [ -n "${SESSION_LOCK:-}" ] && rmdir "$SESSION_LOCK" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -427,11 +402,9 @@ CORPUS_BYTES=0
 CORPUS_FILES=0
 
 write_manifest() {
-  # A no-op until the ledger is staged, and it writes into the STAGING directory
-  # -- never into $RUN_DIR, which still holds a previous session's record until
-  # `promote_ledger` runs.
-  [ "${LEDGER_ARMED:-0}" = "1" ] || return 1
-  python3 - "$STAGE_DIR/manifest.json" "$RUNS_JSONL" <<'PYEOF'
+  # Writes into THIS session's own directory, which nothing else can name, so it
+  # needs no arming, no staging and no promotion.
+  python3 - "$RUN_DIR/manifest.json" "$RUNS_JSONL" <<'PYEOF'
 import json
 import os
 import sys
@@ -499,6 +472,7 @@ manifest = {
     },
     "corpus": {
         "path": env("AB_CORPUS", ""),
+        "served_dir": env("AB_SERVED_DIR", ""),
         "data_db_bytes": int(env("AB_CORPUS_BYTES", "0")),
         "data_db_files": int(env("AB_CORPUS_FILES", "0")),
         "min_bytes_required": int(env("AB_MIN_CORPUS_BYTES", "0")),
@@ -601,30 +575,31 @@ else
 fi
 
 [ -d "$CORPUS" ] || die corpus-absent "$CORPUS is not a directory"
-# The census GATES the size floor, so a partial census is not an acceptable
-# answer -- and under `set -e -o pipefail` a find that hits one unreadable
-# directory used to abort the whole script with exit 1, no cause and no manifest.
-# find's status is captured and turned into a NAMED refusal instead. `-printf` is
-# GNU-only; a find without it fails here rather than reporting a zero-byte corpus.
-CORPUS_LIST="$LOG_DIR/corpus-census.txt"
-census_rc=0
-find "$CORPUS" -name '*-Data.db' -type f -printf '%s\n' > "$CORPUS_LIST" 2>"$LOG_DIR/corpus-census.err" || census_rc=$?
-if [ "$census_rc" -ne 0 ]; then
-  die corpus-census-failed \
-    "find over $CORPUS exited $census_rc; the census gates the minimum-size check, so a partial answer is refused rather than used. See $LOG_DIR/corpus-census.err (note: this driver needs GNU find for -printf)"
-fi
-CORPUS_FILES="$(wc -l < "$CORPUS_LIST" | tr -d ' ')"
-CORPUS_BYTES="$(awk 'BEGIN{s=0}{s+=$1}END{print s+0}' "$CORPUS_LIST")"
-export AB_CORPUS_BYTES="$CORPUS_BYTES" AB_CORPUS_FILES="$CORPUS_FILES"
-say "corpus path $CORPUS data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES"
-[ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "$CORPUS holds no *-Data.db files"
+# THE CENSUS DESCRIBES THE TABLE UNDER MEASUREMENT, NOT THE DISK. It used to
+# scan the whole data root recursively, so unrelated tables, `snapshots/`
+# subtrees and hard-linked copies all counted toward the size floor AND toward
+# the >=2-SSTable check -- the check that exists to stop the #3058 single-source
+# bypass. A green census over files the server never opens, with a single-source
+# served table underneath, is the exact phantom this harness was built to
+# prevent. The helper resolves the ticket the way `DirSource::resolve` does and
+# enumerates that ONE directory, flat, as the producer does.
+CENSUS="$(python3 "$SUPPORT" census-served "$CORPUS" "$TICKET_TEMPLATE")" \
+  || die corpus-census-failed "the served-directory census failed (the cause is named above)"
+CORPUS_FILES="${CENSUS%% *}"
+CENSUS_REST="${CENSUS#* }"
+CORPUS_BYTES="${CENSUS_REST%% *}"
+SERVED_DIR="${CENSUS_REST#* }"
+export AB_SERVED_DIR="$SERVED_DIR"
+say "corpus path $CORPUS served-dir $SERVED_DIR data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES"
+say "corpus census scope THE SERVED DIRECTORY ONLY -- unrelated tables, snapshots and hard-linked copies elsewhere under --data-dir are deliberately not counted"
+[ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "the served directory $SERVED_DIR holds no *-Data.db files"
 if [ "$CORPUS_BYTES" -lt "$MIN_CORPUS_BYTES" ]; then
   die corpus-too-small \
-    "$CORPUS_BYTES Data.db bytes is below the required $MIN_CORPUS_BYTES; a --shape full scan over a corpus this small measures request setup, not the read path (RUNBOOK.md states the floor and its basis)"
+    "the SERVED directory $SERVED_DIR holds $CORPUS_BYTES Data.db bytes, below the required $MIN_CORPUS_BYTES; a --shape full scan over a corpus this small measures request setup, not the read path (RUNBOOK.md states the floor and its basis)"
 fi
 if [ "$CORPUS_FILES" -lt "$MIN_SSTABLES" ]; then
   die corpus-too-few-sstables \
-    "$CORPUS_FILES Data.db files is below the required $MIN_SSTABLES; issue #3058 gives the Flight row route a single-source fast path that NEVER enters the k-way merge, so a one-source corpus measures a code path #2820 did not touch -- and it does so identically on both arms, producing a ratio of 1.0 by construction"
+    "the SERVED directory $SERVED_DIR holds $CORPUS_FILES Data.db file(s), below the required $MIN_SSTABLES; issue #3058 gives the Flight row route a single-source fast path that NEVER enters the k-way merge, so a one-source corpus measures a code path #2820 did not touch -- and it does so identically on both arms, producing a ratio of 1.0 by construction"
 fi
 say "merge-path $MERGE_PATH -- CQLITE_FLIGHT_MERGE_PATH is set to this on BOTH arms' servers"
 say "admission max-concurrent-scans $MAX_CONCURRENT_SCANS (pinned on both arms; ramp tops at $RAMP_TOP) batch-size $BATCH_SIZE"
@@ -684,10 +659,10 @@ fi
 # The ledger is truncated only now: the lock is held, every argument is
 # validated, and the port is free, so nothing that follows can destroy a peer
 # session's record before discovering it should not have started.
-if (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; then
-  die port-occupied \
-    "port $PORT is already bound before the session started; pass a different --port or stop what is listening. The run ledger has NOT been truncated"
-fi
+# NO PRE-FLIGHT PORT PROBE. With an ephemeral port there is no shared name to
+# probe, and the probe was never sound anyway: "something answered" is not "my
+# server owns it". Readiness is now established from THIS server's own
+# post-bind log line instead -- see `run_one`.
 
 # ---------------------------------------------------------------------------
 # Build: one worktree and one target directory per arm.
@@ -728,16 +703,36 @@ build_arm head "$HEAD_SHA"
 
 # Pre-flight passed and both arms exist: only now may this session claim the work
 # directory's ledger and manifest.
-stage_ledger
-say "ledger staged in $STAGE_DIR -- $RUN_DIR still describes any EARLIER session until the first replicate completes"
+say "session directory $RUN_DIR -- owned by this session alone; no earlier session's results can be reached from here"
 
 # ---------------------------------------------------------------------------
 # One replicate of one arm.
 # ---------------------------------------------------------------------------
-port_is_bound() { (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; }
-
-parse_startup() { # <server-log> <scans|source>  -- returns a VALUE, not a message
-  python3 "$SUPPORT" parse-startup "$1" "$2" 2>/dev/null || echo NOT-OBSERVED
+# Readiness is proved by OUR OWN server's post-bind line, never by a port probe.
+# `cli::log_listening` is emitted only once a listener exists
+# (cqlite-flight/src/cli.rs:228-241), so its presence proves this process owns
+# the socket. A probe could only ever prove that SOMETHING answered -- which on a
+# nine-lane box is how the loser of a race measures the winner's binary while its
+# own configuration asserts all pass against its own pre-bind log.
+wait_until_listening() { # <pid> <server-log> -> echoes host:port
+  local pid="$1" log="$2" waited=0 bound=''
+  while [ "$waited" -lt 90 ]; do
+    bound="$(python3 "$SUPPORT" parse-listening "$log")"
+    if [ "$bound" != "NOT-OBSERVED" ]; then
+      # The line exists AND the process that wrote it is still alive and is
+      # still ours: a log line from a server that has since died would otherwise
+      # hand the loadgen an address somebody else now owns.
+      if kill -0 "$pid" 2>/dev/null && is_our_server "$pid"; then
+        printf '%s\n' "$bound"
+        return 0
+      fi
+      return 1
+    fi
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
 }
 
 run_one() { # <arm> <replicate> <position-in-pair: 1|2>
@@ -746,10 +741,6 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   local bin="${ARM_BIN_DIR[$arm]}"
   local jsonl="$RUN_DIR/$tag.jsonl"
   local server_log="$LOG_DIR/$tag.server.log"
-
-  if port_is_bound; then
-    die port-occupied "port $PORT is already bound before $tag started; the previous server did not die, and a replicate served by the wrong arm's binary is worse than no replicate"
-  fi
 
   if [ "$TEMPERATURE" = "cold" ]; then
     sync
@@ -767,29 +758,20 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   [ -n "$MAX_BATCH_BYTES" ] && server_cmd+=(--max-batch-bytes "$MAX_BATCH_BYTES")
   [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ] \
     && server_cmd+=(--admission-wait-timeout-ms "$ADMISSION_WAIT_TIMEOUT_MS")
-  # Word-split on purpose: the value is an operator-supplied flag list, and it is
-  # recorded verbatim in the manifest so a reader of the report sees it.
   # shellcheck disable=SC2206
   [ -n "$extra" ] && server_cmd+=($extra)
   "${server_cmd[@]}" > "$server_log" 2>&1 &
   local srv=$!
-  # Registered BEFORE anything can fail, so every exit path -- die, set -e, a
-  # signal -- reaps it through `cleanup`.
   SRV_PID=$srv
 
-  local waited=0
-  while [ "$waited" -lt 90 ]; do
-    if port_is_bound; then break; fi
-    if ! kill -0 "$srv" 2>/dev/null; then
-      SRV_PID=''
-      die server-exited "the $tag server exited before binding port $PORT; see $server_log"
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  port_is_bound || die server-never-bound \
-    "the $tag server did not bind port $PORT within ${waited}s; see $server_log"
-  say "run $tag server pid $srv bound 127.0.0.1:$PORT after ${waited}s"
+  local endpoint_addr
+  endpoint_addr="$(wait_until_listening "$srv" "$server_log")" || {
+    SRV_PID=''
+    die server-never-listened \
+      "the $tag server never reported a post-bind listening line while alive; readiness is taken from ITS OWN post-bind line, not from a port probe, so a port answered by somebody else cannot satisfy it. See $server_log"
+  }
+  local endpoint="http://$endpoint_addr"
+  say "run $tag server pid $srv listening on $endpoint_addr (from its own post-bind line)"
 
   # PROVENANCE, READ FROM THE SERVER RATHER THAN ASSUMED. cli::log_startup emits
   # one `cqlite-flight starting` line carrying the RESOLVED admission ceiling and
@@ -849,7 +831,7 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   [ -n "$CLIENT_CPUS" ] && client_prefix+=(taskset -c "$CLIENT_CPUS")
 
   if [ "$PREWARM" -eq 1 ] && [ "$TEMPERATURE" = "warm" ]; then
-    "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "http://127.0.0.1:$PORT" \
+    "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "$endpoint" \
       --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
       --step-duration "$STEP_DURATION" --round "$tag-prewarm" --out /dev/null \
       > "$LOG_DIR/$tag.prewarm.log" 2>&1 \
@@ -861,7 +843,7 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   # has a null path for server_cpu_seconds and a silent zero would defeat it.
   cpu0="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || true)"
   local rc=0
-  "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "http://127.0.0.1:$PORT" \
+  "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "$endpoint" \
     --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
     --step-duration "$STEP_DURATION" --round "$tag" --out "$jsonl" \
     > "$LOG_DIR/$tag.loadgen.log" 2>&1 || rc=$?
@@ -872,15 +854,6 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   if kill -0 "$srv" 2>/dev/null && is_our_server "$srv"; then
     die server-would-not-die "the $tag server (pid $srv) survived TERM and KILL; the next replicate would bind a port served by this arm's binary"
   fi
-  local released=0
-  while [ "$released" -lt 30 ]; do
-    port_is_bound || break
-    sleep 1
-    released=$((released + 1))
-  done
-  port_is_bound && die port-not-released \
-    "port $PORT is still bound ${released}s after the $tag server was reaped"
-
   [ "$rc" -eq 0 ] || die loadgen-failed \
     "the $tag load generator exited $rc; see $LOG_DIR/$tag.loadgen.log"
 
@@ -930,15 +903,10 @@ with open(runs_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(entry, sort_keys=True) + "\n")
 PYEOF
   write_manifest
-  # The first promotion is the moment $RUN_DIR stops describing an earlier
-  # session -- and it happens only once a server has served and a replicate has
-  # been validated, which is the invariant stated at the top of this file.
-  if [ "${PROMOTED:-0}" = "0" ]; then
-    promote_ledger
-    say "ledger promoted -- $RUN_DIR now describes THIS session"
-  else
-    promote_ledger
-  fi
+  # A convenience pointer only. Atomic, holds no data, and its worst failure is
+  # naming a complete earlier session.
+  ln -sfn "$RUN_DIR" "$WORK_DIR/.latest.tmp.$$" 2>/dev/null \
+    && mv -T "$WORK_DIR/.latest.tmp.$$" "$WORK_DIR/latest" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -976,7 +944,6 @@ while [ "$rep" -le "$REPLICATES" ]; do
 done
 
 write_manifest
-promote_ledger
 say "session complete: $REPLICATES paired replicates in $RUN_DIR"
 # The section this session's ramp belongs to, decided by the same validator that
 # accepted the ramp rather than re-derived here.

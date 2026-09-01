@@ -28,6 +28,7 @@ strip the wrong thing. It writes exactly one line: the value, or the literal
 """
 
 import json
+import os
 import re
 import sys
 
@@ -37,6 +38,8 @@ NOT_OBSERVED = "NOT-OBSERVED"
 
 USAGE = [
     "ab_driver_support.py pair-order <replicate>",
+    "ab_driver_support.py census-served <data-dir> <ticket.json>",
+    "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
     "ab_driver_support.py parse-duration <value>",
     "ab_driver_support.py validate-ticket <template.json>",
@@ -253,6 +256,136 @@ def expand_cpu_list(spec):
     return cpus or None
 
 
+def resolve_served_dir(data_dir, keyspace, table, snapshot):
+    """MIRRORS `DirSource::resolve` / `table_base_dir`
+    (cqlite-flight/src/producer.rs:160-204).
+
+    `<data>/<ks>/<table>` when that is a directory; otherwise the
+    LEXICOGRAPHICALLY LARGEST `<data>/<ks>/<table>-*` directory; otherwise the
+    exact non-existent path. A non-empty snapshot resolves to
+    `<table-dir>/snapshots/<name>/`.
+
+    Mirrored for the same reason the duration grammar is: a census that answers a
+    different question from the server's is not a census of the measurement. The
+    old one scanned the WHOLE data root recursively, so unrelated tables,
+    snapshot directories and hard-linked copies all counted toward both the
+    256 MiB floor and the >=2-SSTable check -- and that second one exists
+    specifically to stop the #3058 single-source bypass. Green census,
+    single-source served table, both arms bypass the merger, ratio 1.0 by
+    construction, rendered as a confident verdict.
+    """
+    base = os.path.join(data_dir, keyspace)
+    exact = os.path.join(base, table)
+    table_dir = exact
+    if not os.path.isdir(exact):
+        prefix = table + "-"
+        best = None
+        try:
+            for name in os.listdir(base):
+                candidate = os.path.join(base, name)
+                if name.startswith(prefix) and os.path.isdir(candidate):
+                    if best is None or candidate > best:
+                        best = candidate
+        except OSError:
+            best = None
+        table_dir = best if best is not None else exact
+    if snapshot:
+        return os.path.join(table_dir, "snapshots", snapshot)
+    return table_dir
+
+
+def census_served(data_dir, ticket_path):
+    """Census the ONE directory the ticket will actually be served from.
+
+    Enumeration is FLAT, not recursive, because the producer's is
+    (cqlite-flight/src/producer.rs:210-220 reads the resolved dir and filters
+    `*-Data.db` directly in it). A recursive count would re-admit the
+    `snapshots/` subtree the server does not read for a live-dir ticket.
+
+    Prints `<files> <bytes> <dir>` as a VALUE.
+    """
+    try:
+        with open(ticket_path, encoding="utf-8") as handle:
+            ticket = json.load(handle)
+    except (OSError, ValueError) as exc:
+        err("cause ticket-template-unparseable")
+        err("cause-detail %s: %s" % (ticket_path, exc))
+        return 1
+    if not isinstance(ticket, dict):
+        err("cause ticket-template-unparseable")
+        err("cause-detail %s: top level is not an object" % ticket_path)
+        return 1
+    keyspace, table = ticket.get("keyspace"), ticket.get("table")
+    for name, value in (("keyspace", keyspace), ("table", table)):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_]+", value):
+            err("cause ticket-identifier-invalid")
+            err(
+                "cause-detail %s: %s is %r; cqlite-flight requires an unquoted "
+                "Cassandra identifier (cqlite-flight/src/ticket.rs:328-333)"
+                % (ticket_path, name, value)
+            )
+            return 1
+    snapshot = ticket.get("snapshot")
+    if snapshot is not None and (
+        not isinstance(snapshot, str) or not re.fullmatch(r"[A-Za-z0-9_-]*", snapshot)
+    ):
+        err("cause ticket-identifier-invalid")
+        err("cause-detail %s: snapshot is %r" % (ticket_path, snapshot))
+        return 1
+
+    served = resolve_served_dir(data_dir, keyspace, table, snapshot or None)
+    if not os.path.isdir(served):
+        err("cause served-dir-absent")
+        err(
+            "cause-detail the ticket resolves to %s, which does not exist under "
+            "--data-dir %s. The census must describe the directory the server "
+            "will read, not the disk it sits on" % (served, data_dir)
+        )
+        return 1
+    total = 0
+    count = 0
+    try:
+        for name in os.listdir(served):
+            if not name.endswith("-Data.db"):
+                continue
+            path = os.path.join(served, name)
+            if not os.path.isfile(path):
+                continue
+            total += os.path.getsize(path)
+            count += 1
+    except OSError as exc:
+        err("cause corpus-census-failed")
+        err("cause-detail %s: %s" % (served, exc))
+        return 1
+    sys.stdout.write("%d %d %s\n" % (count, total, served))
+    return 0
+
+
+def parse_listening(path):
+    """The address OUR OWN server reports having bound.
+
+    `cli::log_listening` is emitted only AFTER a listener exists
+    (cqlite-flight/src/cli.rs:228-241), so its presence is proof this process
+    owns the socket -- which "something answered on the port" never was. With
+    `--listen 127.0.0.1:0` it is also the only place the actual port appears.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    found = None
+    for line in text.splitlines():
+        if "listening on" not in line:
+            continue
+        match = re.search(r"listening_on[\"']?\s*[=:]\s*[\"']?(\S+?)[\"',\s]*$", line)
+        if not match:
+            match = re.search(r"listening on\s+(\S+)", line)
+        if match:
+            found = match.group(1).strip("\"' ,")
+    return found
+
+
 def pair_order(replicate):
     """Which arm runs FIRST in this replicate's pair.
 
@@ -452,6 +585,18 @@ def main(argv):
             err(line)
         return 2
     command, rest = argv[0], argv[1:]
+    if command == "census-served":
+        if len(rest) != 2:
+            err("usage-error census-served needs <data-dir> <ticket.json>")
+            return 2
+        return census_served(rest[0], rest[1])
+    if command == "parse-listening":
+        if len(rest) != 1:
+            err("usage-error parse-listening needs <server-log>")
+            return 2
+        bound = parse_listening(rest[0])
+        sys.stdout.write((bound or "NOT-OBSERVED") + "\n")
+        return 0
     if command == "pair-order":
         if len(rest) != 1 or not re.fullmatch(r"[0-9]+", rest[0]) or int(rest[0]) < 1:
             err("usage-error pair-order needs a positive integer <replicate>")

@@ -437,34 +437,50 @@ def admission_of(entry):
     )
 
 
-class Admission(object):
-    """What is actually known about the ceiling the arms were served under.
+class Corroboration(object):
+    """ONE type for every "the driver read this back from the server" fact.
 
-    THREE states, because two were not enough. `len(observed) > 1` refuses a
-    disagreement, but one arm observed and the other not is neither agreement nor
-    disagreement -- and it used to reduce to the single observed value and print
-    it with no caveat, i.e. an absence silently upgraded into corroboration. The
-    docstring of this module says the ceiling must agree across EVERY run; it now
-    says which runs it actually agreed across.
+    THREE INSTANCES OF ONE DEFECT SAID THE PER-FIELD APPROACH WAS THE PROBLEM.
+    Round 2 was admission provenance counted as agreement; round 3 was a readback
+    parsed and never compared; round 4 was a comparison run only over the subset
+    that happened to parse. Each was fixed where it was found, and the next field
+    inherited nothing. So the decision is made HERE, once, and every field is
+    constructed through it -- a new field cannot be added without getting the
+    partial case, because there is nowhere else to add one.
 
-    AND A VALUE IS NOT A PROVENANCE. A run counts as corroborated only when the
-    observed ceiling is present AND `admission_source == "flag"`. Without that,
-    a numeric ceiling paired with a `derived` or `env` source counted as full
-    corroboration, so this analyzer could print `agreed (N of N runs)` having
-    never established that the pin we passed is the pin that took effect.
+    THE POLICY, stated once:
 
-    The distinction matters because of what justifies disclosing rather than
-    refusing a partial observation: the argument is that the DRIVER asserts
-    `source = flag` affirmatively per run. That argument is about the driver, and
-    licenses nothing about this analyzer's own independent claim -- `agreed` is a
-    claim about provenance, and a claim has to be checked by whoever makes it.
+      * values that were observed and DISAGREE  -> the caller refuses; two arms
+        served under different configurations are not comparable;
+      * observed for EVERY run                  -> `agreed`;
+      * observed for SOME runs                  -> `partial`, disclosed with the
+        counts. Not a refusal: the driver already asserts per-run equality
+        against the requested value affirmatively and dies on a mismatch it can
+        read, so an unread line costs corroboration, not correctness;
+      * observed for NO run                     -> `none`, disclosed.
+
+    `qualified` is separate from "has a value" because one field needs more than
+    a value to corroborate anything: the admission ceiling also needs
+    `admission_source == "flag"`, since a numeric ceiling the server says it
+    DERIVED is not evidence that the pin we passed took effect.
     """
 
-    def __init__(self, value, observed, total):
-        self.value = value
-        #: runs with BOTH an observed ceiling and a `flag` provenance
-        self.observed = observed
-        self.total = total
+    def __init__(self, name, per_run):
+        #: `per_run`: {run_key: (value, qualified_bool)}
+        self.name = name
+        self.total = len(per_run)
+        self.values = sorted(
+            {value for value, _ in per_run.values() if value != NOT_OBSERVED}
+        )
+        self.observed = sum(1 for _, ok in per_run.values() if ok)
+
+    @property
+    def value(self):
+        return self.values[0] if len(self.values) == 1 else NOT_OBSERVED
+
+    @property
+    def disagrees(self):
+        return len(self.values) > 1
 
     @property
     def state(self):
@@ -477,6 +493,30 @@ class Admission(object):
     @property
     def corroborated(self):
         return self.state == "agreed"
+
+
+#: `MaxConcurrentScansSource::as_str` (cqlite-flight/src/admission.rs:183-193).
+#: Only `flag` means the value we passed is the value that took effect.
+ADMISSION_SOURCES = ("flag", "env", "derived", "derived-fallback")
+
+#: Every server field the driver reads back from its own startup line. Adding one
+#: here is all it takes: the Corroboration type supplies the rest.
+SERVER_READBACK_FIELDS = (
+    "batch_size_observed",
+    "max_batch_bytes_observed",
+    "wait_timeout_ms_observed",
+)
+
+
+def admission_of(entry):
+    """The admission ceiling OBSERVED at that run's server startup, and its
+    provenance. Either may be NOT-OBSERVED, and they are separate facts."""
+    value = entry.get("admission_observed")
+    source = entry.get("admission_source")
+    return (
+        NOT_OBSERVED if value is None else str(value),
+        NOT_OBSERVED if source is None else str(source),
+    )
 
 
 def collect_pairs(manifest, manifest_dir, mode, declared_steps):
@@ -543,30 +583,34 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
             )
         positions[key] = position
 
-        # Every server-config field the driver read back must agree across every
-        # run: two arms served under different effective configurations are not
-        # comparable, and an observation that is taken and then not compared is
-        # the same defect as one that is never taken.
-        for name in (
-            "batch_size_observed",
-            "max_batch_bytes_observed",
-            "wait_timeout_ms_observed",
-        ):
+        # Every readback field goes through the ONE type, including the runs
+        # where it was NOT observed -- which is the bug this replaces: comparing
+        # only the subset that parsed is how a partial observation became an
+        # agreement for the third time.
+        for name in SERVER_READBACK_FIELDS:
             observed = entry.get(name)
-            if observed is None or str(observed) == NOT_OBSERVED:
-                continue
-            server_config.setdefault(name, {})[key] = str(observed)
+            observed = NOT_OBSERVED if observed is None else str(observed)
+            server_config.setdefault(name, {})[key] = (
+                observed,
+                observed != NOT_OBSERVED,
+            )
 
     # Both arms must have been served under the SAME admission ceiling, or the
     # ratio is between two differently-throttled servers.
-    values = [v for v, _ in admissions.values() if v != NOT_OBSERVED]
-    observed = set(values)
-    if len(observed) > 1:
+    # The same type, with the extra qualification only this field needs.
+    admission = Corroboration(
+        "max_concurrent_scans",
+        {
+            key: (value, value != NOT_OBSERVED and source == "flag")
+            for key, (value, source) in admissions.items()
+        },
+    )
+    if admission.disagrees:
         raise Unmeasured(
             "admission-mismatch",
             "the runs record more than one observed --max-concurrent-scans value "
             "(%s); the arms were not served under the same admission ceiling, so "
-            "their throughputs are not comparable" % ", ".join(sorted(observed)),
+            "their throughputs are not comparable" % ", ".join(admission.values),
         )
 
     base_reps = sorted(rep for (arm, rep) in seen if arm == "base")
@@ -583,14 +627,17 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     if not base_reps:
         raise Unmeasured("unpaired-replicates", "manifest declares no runs at all")
 
-    for name, by_run in server_config.items():
-        distinct = sorted(set(by_run.values()))
-        if len(distinct) > 1:
+    readbacks = {
+        name: Corroboration(name, by_run) for name, by_run in server_config.items()
+    }
+    for name, corroboration in sorted(readbacks.items()):
+        if corroboration.disagrees:
             raise Unmeasured(
                 "server-config-mismatch",
                 "the runs report more than one observed %s (%s); the arms were not "
                 "served under the same configuration, so their throughputs are not "
-                "comparable" % (name.replace("_observed", ""), ", ".join(distinct)),
+                "comparable"
+                % (name.replace("_observed", ""), ", ".join(corroboration.values)),
             )
 
     pairs = []
@@ -605,17 +652,6 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
                 % (rep, list(base.ladder), list(head.ladder)),
             )
         pairs.append((rep, base, head))
-
-    # Corroborated == a value AND a `flag` provenance. Counting values alone is
-    # what let `agreed` mean less than it says.
-    corroborated = sum(
-        1
-        for value, source in admissions.values()
-        if value != NOT_OBSERVED and source == "flag"
-    )
-    admission = Admission(
-        observed.pop() if observed else NOT_OBSERVED, corroborated, len(admissions)
-    )
 
     # WHICH ARM RAN FIRST, per pair, and whether the counterbalancing happened.
     first_by_rep = {}
@@ -649,8 +685,6 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
         "order_by_replicate": first_by_rep,
         "base_first": base_first,
         "head_first": head_first,
-        "server_config": {
-            name: sorted(set(by_run.values()))[0] for name, by_run in server_config.items()
-        },
+        "readbacks": readbacks,
     }
     return pairs, admission, session
