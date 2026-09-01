@@ -62,6 +62,22 @@ fn ticket_bytes(columns: Option<serde_json::Value>) -> Vec<u8> {
     serde_json::to_vec(&t).expect("ticket json")
 }
 
+/// A ticket with an arbitrary extra JSON field set (point-read filter,
+/// aggregation, ...).
+fn ticket_with(extra: serde_json::Value) -> Vec<u8> {
+    let mut t = serde_json::json!({
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
+    });
+    if let Some(map) = extra.as_object() {
+        for (k, v) in map {
+            t[k] = v.clone();
+        }
+    }
+    serde_json::to_vec(&t).expect("ticket json")
+}
+
 /// Drive `do_get` in process and report `(rpc_ok, message_count, first_error)`.
 fn drive(data_dir: &std::path::Path, ticket: Vec<u8>) -> (bool, usize, Option<String>) {
     let rt = tokio::runtime::Runtime::new().expect("rt");
@@ -112,4 +128,53 @@ fn measure_zero_column_projection_over_do_get() {
     // (c) a real column, as a sanity control that projection works at all.
     let (ok_c, msgs_c, err_c) = drive(&data_dir, ticket_bytes(Some(serde_json::json!(["key"]))));
     eprintln!("MEASURE columns=[key]: rpc_ok={ok_c} msgs={msgs_c} err={err_c:?}");
+}
+
+/// MEASUREMENT (#3742): the POINT-READ route (a full-partition-key equality
+/// filter) shares `MergeProducer::output_columns()`, so an empty projection
+/// reaches it too.
+#[test]
+fn measure_zero_column_projection_on_the_point_read_route() {
+    let (_temp, data_dir) = build_fixture();
+    let filter = serde_json::json!({"type": "Compare", "column": "key", "op": "Equal", "value": "k1"});
+
+    let (ok, msgs, err) = drive(
+        &data_dir,
+        ticket_with(serde_json::json!({"filter": filter.clone()})),
+    );
+    eprintln!("MEASURE point-read control: rpc_ok={ok} msgs={msgs} err={err:?}");
+
+    let (ok_a, msgs_a, err_a) = drive(
+        &data_dir,
+        ticket_with(serde_json::json!({"filter": filter, "columns": []})),
+    );
+    eprintln!("MEASURE point-read columns=[]: rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
+}
+
+/// MEASUREMENT (#3742): the AGGREGATION route builds its output columns from
+/// `group_by + aggregates` (`agg.rs:239`). A ticket carrying an EMPTY
+/// aggregates list with no group_by therefore yields zero output columns by a
+/// route that has nothing to do with `columns`.
+#[test]
+fn measure_zero_output_columns_via_an_empty_aggregation() {
+    let (_temp, data_dir) = build_fixture();
+
+    // Control: a real global count(*).
+    let (ok, msgs, err) = drive(
+        &data_dir,
+        ticket_with(serde_json::json!({
+            "aggregation": {"group_by": [], "aggregates": [
+                {"func": "Count", "column": null, "output": "c"}
+            ]}
+        })),
+    );
+    eprintln!("MEASURE agg control count(*): rpc_ok={ok} msgs={msgs} err={err:?}");
+
+    let (ok_a, msgs_a, err_a) = drive(
+        &data_dir,
+        ticket_with(serde_json::json!({
+            "aggregation": {"group_by": [], "aggregates": []}
+        })),
+    );
+    eprintln!("MEASURE agg empty (no group_by, no aggregates): rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
 }
