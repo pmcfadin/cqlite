@@ -60,7 +60,9 @@ use super::super::*;
 /// same rule over `&CqlType` rather than over the type STRING dispatch. There
 /// must be ONE implementation of this rule, not two: when #3820 lands, this
 /// function becomes a one-line delegation to it (or is deleted in favour of it)
-/// and the two error message classes are unified.
+/// and the two error message classes are unified. Fold in at the same time
+/// `cell_path_key.rs`'s now-redundant `duration` consumption check, which this
+/// assert reaches first.
 impl V5CompressedLegacyParser {
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn require_fully_consumed_raw(
         consumed: usize,
@@ -96,9 +98,14 @@ impl V5CompressedLegacyParser {
     /// returns the decoded value AND the number of bytes of `data` it actually
     /// read.
     ///
-    /// Reach for this name only when a SHORT read is genuinely legitimate. The
-    /// short name asserts full consumption and is what every bounded call site
-    /// should keep using.
+    /// **This is NOT a general escape hatch, and the docs used to say it was.**
+    /// It is `pub(super)` inside `raw_value::reporting`, so `super` is `raw_value`
+    /// and NO other `row_decoder` child — not `frozen.rs`, not `complex_column.rs`,
+    /// not `cell_path_key.rs` — can name it. Every bounded caller outside this
+    /// module therefore reaches the asserting short name and CANNOT opt out, which
+    /// is stronger than the naming convention #3811's AC2 asked for. If a caller
+    /// elsewhere ever genuinely needs a short read, widening this visibility is the
+    /// deliberate, reviewable act — do not do it to silence a refusal.
     ///
     /// - Variable-width types (text, blob, varint, decimal, inet): consume the full slice
     /// - Fixed-width types (int, bigint, uuid, etc.): consume exactly their width
@@ -449,10 +456,23 @@ impl V5CompressedLegacyParser {
                 // correct for already-extracted cell value bytes.
                 // See Issue #481 regression fix.
                 if let Some(ref registry) = self.udt_registry {
-                    if registry.get_udt_qualified(&self.keyspace, other).is_some() {
+                    // ORIGINAL case (`type_str`), not the lowercased `other` match
+                    // binding: the delegation below re-looks-up with `type_str` and
+                    // `get_udt_qualified` bottoms out in a case-SENSITIVE map get, so
+                    // a lowercased probe would fire this guard on keys the callee
+                    // cannot resolve (and miss ones it can). The callee would then
+                    // fall into its "parse as blob" path, which reads a VInt length
+                    // prefix off UDT bytes — and since #3811 that returns a SHORT
+                    // consumption, so what used to be a silently wrong `Value::Blob`
+                    // becomes a refused (and therefore truncated) row. Same reasoning,
+                    // same wording as `complex_column/cell_path_key.rs`'s probe.
+                    if registry
+                        .get_udt_qualified(&self.keyspace, type_str)
+                        .is_some()
+                    {
                         tracing::debug!(
                             "parse_value_from_raw_bytes: type '{}' for '{}' resolved as UDT via registry, delegating to parse_raw_type_value",
-                            other,
+                            type_str,
                             column_name,
                         );
                         return self.parse_raw_type_value(data, 0, type_str, column_name, depth);
@@ -501,6 +521,21 @@ impl V5CompressedLegacyParser {
         if actual_end == blob_end {
             return Ok(());
         }
+        // Symmetric with `require_fully_consumed_raw` above: an OVER-read is
+        // unreachable today (every element loop is bounded by `blob_end`), but a
+        // `saturating_sub` would render it as "0 extraneous byte(s)", which is a
+        // false statement in a corruption message rather than a missing one.
+        if actual_end > blob_end {
+            return Err(Error::corruption(format!(
+                "Frozen {} '{}': decoded to offset {} but the declared blob ends at {} \
+                 (over-read of {} byte(s))",
+                kind,
+                column_name,
+                actual_end,
+                blob_end,
+                actual_end - blob_end
+            )));
+        }
         Err(Error::corruption(format!(
             "Frozen {} '{}': decoded to offset {} but the declared blob ends at {} \
              ({} extraneous byte(s) inside the cell value; Cassandra refuses this)",
@@ -508,7 +543,7 @@ impl V5CompressedLegacyParser {
             column_name,
             actual_end,
             blob_end,
-            blob_end.saturating_sub(actual_end)
+            blob_end - actual_end
         )))
     }
 
@@ -521,13 +556,22 @@ impl V5CompressedLegacyParser {
     /// [`require_fully_consumed_raw`] refuses it. That is what stops a 5-byte
     /// declared `int` decoding from its first four bytes.
     ///
-    /// **Deliberately still `<` and not `!=`.** Cassandra's legal widths are
-    /// `{n, 0}`, not `{n}` — `Int32Serializer.deserialize` accepts an EMPTY
+    /// **What the COMPOSED rule actually is — stated rather than inferred from
+    /// this function alone (issue #3847).** An earlier revision of this comment
+    /// claimed the `<` (rather than `!=`) spelling avoids falsely refusing a legal
+    /// empty value. Composed with the caller's consumption assert, that is FALSE:
+    /// `len == 0` → `0 < n` → `Err` here; `len == n` → `Ok`; `len == n + k` →
+    /// consumed `n` ≠ `n + k` → `Err` there. The accepted set is exactly `{n}`.
+    ///
+    /// Cassandra's is `{n, 0}` — `Int32Serializer.deserialize` accepts an EMPTY
     /// buffer (`cassandra-5.0.8:src/java/org/apache/cassandra/serializers/Int32Serializer.java:42-43`,
-    /// `size(value) != 4 && !isEmpty(value)`) — so a naive `!= n` here would be a
-    /// FALSE REFUSAL of a legal empty value. CQLite has always refused the empty
-    /// case on this path; that pre-existing narrowness is left exactly as it was
-    /// rather than widened or tightened under an issue about consumption.
+    /// `size(value) != 4 && !isEmpty(value)`). So CQLite REFUSES a legal empty
+    /// value on this path, by the under-width half above. That is **pre-existing
+    /// and unchanged by #3811** (the `< n` guard predates it, and the corpus
+    /// census measured no behaviour change); widening it is a behaviour change with
+    /// its own oracle and its own corpus measurement: **issue #3847**. Do not
+    /// "fix" it by relaxing this guard alone — the arm must also report
+    /// `data.len()` when empty, or the consumption assert would then reject it.
     fn require_fixed_width(data: &[u8], n: usize, what: &str, column_name: &str) -> Result<()> {
         if data.len() < n {
             return Err(Error::corruption(format!(

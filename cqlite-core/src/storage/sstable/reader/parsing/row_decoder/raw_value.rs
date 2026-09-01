@@ -103,9 +103,13 @@ impl V5CompressedLegacyParser {
     /// are `MarshalException`s.
     ///
     /// **Inheritance mechanism (AC2).** Every existing bounded call site keeps this
-    /// name and silently GAINS the check. A caller that genuinely needs a short
-    /// read must reach for the longer `_reporting` name — a visible, reviewable act
-    /// — rather than inheriting an opt-out by accident.
+    /// name and silently GAINS the check. The reporting twin is `pub(super)` inside
+    /// `raw_value::reporting`, so it is not nameable from any other `row_decoder`
+    /// child at all — a bounded caller elsewhere cannot opt out even deliberately
+    /// without first widening that visibility, which is the reviewable act. (An
+    /// earlier revision of this paragraph described reaching for the longer name as
+    /// something a caller could just do; it could not, and saying so invited the
+    /// next author to "fix" the privacy error by creating the opt-out.)
     pub(super) fn parse_value_from_raw_bytes(
         &self,
         data: &[u8],
