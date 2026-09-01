@@ -158,6 +158,16 @@ expect() {
   if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
     bad "$label" "output carries an AGENT-GATE block marker: $(printf '%s' "$out" | head -3)"; return
   fi
+  # (5) A VERDICT MAY NOT OPINE ON LIVENESS. This tool is not a completion probe and has no
+  # three-valued view of a running gate; `gate-liveness.sh` is the authority and the only one
+  # of the two that may be polled. A retryability claim here was measured to tell a lane `do
+  # not poll` about a LIVE gate whose beat was merely stale, whose obedient response is to
+  # relaunch it — two gates on one summary path, the outcome gate-ops.md exists to prevent.
+  # Asserted for EVERY case, so no branch can grow one back. Scoped to verdicts on purpose:
+  # --help legitimately EXPLAINS the boundary (section 11).
+  if printf '%s' "$out" | grep -qiE 'retryab|poll on exit|do not poll'; then
+    bad "$label" "verdict asserts a retryability claim it cannot support: $(printf '%s' "$out" | head -2)"; return
+  fi
   # (4) EVERY non-empty output line, stdout AND stderr, must carry the anchor, or the
   # output is not reliably attributable and a fragment of it could be pasted as
   # something else. Same property base-staleness.sh's `BASE-STALENESS: ` prefix has.
@@ -259,7 +269,7 @@ expect "3.3 a run RESULT of FAIL does NOT make a PASSing component not-pass" \
 
 echo "=== section 4: every unmeasurable input is COULD-NOT-MEASURE with a NAMED cause ==="
 expect "4.1 a summary file that does not exist" \
-  COULD-NOT-MEASURE 4 "" -- "$TMP/nope.txt" --mode only --component fmt
+  COULD-NOT-MEASURE 4 "summary-absent" -- "$TMP/nope.txt" --mode only --component fmt
 
 SC="$TMP/truncated.txt"
 { echo "==== AGENT-GATE SUMMARY ===="
@@ -268,23 +278,23 @@ SC="$TMP/truncated.txt"
   echo "RESULT: PARTIAL"
 } > "$SC"   # NO end marker: a permanently truncated artifact
 expect "4.2 a truncated block (no end marker) is never a verdict" \
-  COULD-NOT-MEASURE 4 "" -- "$SC" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "gate-liveness" -- "$SC" --mode only --component tooling-tests --run-id run-1
 
 SD="$TMP/foreign.txt"
 mk_only_summary "$SD" run-PEER PARTIAL tooling-tests "$(comp_line tooling-tests PASS 1112s)"
 expect "4.3 #2874: a block bearing a FOREIGN run-id answers about a peer, not us" \
-  COULD-NOT-MEASURE 4 "" -- "$SD" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "run-id" -- "$SD" --mode only --component tooling-tests --run-id run-1
 
 SE="$TMP/notasummary.txt"
 printf 'not a gate summary at all\n' > "$SE"
 expect "4.4 a file that is not a gate summary" \
-  COULD-NOT-MEASURE 4 "" -- "$SE" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "gate-liveness" -- "$SE" --mode only --component tooling-tests --run-id run-1
 
 SF="$TMP/dup.txt"
 mk_only_summary "$SF" run-1 PARTIAL tooling-tests \
   "$(comp_line tooling-tests PASS 1112s)" "$(comp_line tooling-tests SKIP 0s)"
 expect "4.5 two lines for one component is AMBIGUOUS, never resolved in favour of PASS" \
-  COULD-NOT-MEASURE 4 "" -- "$SF" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "ambiguous-component-line" -- "$SF" --mode only --component tooling-tests --run-id run-1
 
 echo "=== section 5: the accepted-verdict set is a PARAMETER OF THE RUN MODE ==="
 # The issue's own words: a shared polling helper must take the accepted-verdict set as a
@@ -298,11 +308,11 @@ expect "5.2 --mode record is REFUSED and names premerge-assert.sh as the authori
 expect "5.3 --mode lite is REFUSED (a lite PASS is a different claim entirely)" \
   USAGE 64 "lite" -- "$S2" --mode lite --component tooling-tests
 expect "5.4 an unknown mode is a refusal, never a default" \
-  USAGE 64 "" -- "$S2" --mode wibble --component tooling-tests
+  USAGE 64 "unknown --mode" -- "$S2" --mode wibble --component tooling-tests
 expect "5.5 --mode only REQUIRES --component" \
   USAGE 64 "component" -- "$S2" --mode only
 expect "5.6 a component name outside the closed grammar is refused, not injected" \
-  USAGE 64 "" -- "$S2" --mode only --component 'foo.*bar|baz'
+  USAGE 64 "closed grammar" -- "$S2" --mode only --component 'foo.*bar|baz'
 
 # --help must print the header COMMENT BLOCK and stop there. It used to be a fixed line
 # range, which bleeds into the code the moment the header changes length — and a --help
@@ -431,8 +441,15 @@ expect "8.3 control: the same line INSIDE the block still reads PASS" \
 # TWO openers: the extent is not unique, so no read can be bounded. Refuse.
 S8d="$TMP/two-blocks.txt"
 { cat "$S8c"; cat "$S8c"; } > "$S8d"
-expect "8.4 two blocks in one file => the extent is not unique, so refuse" \
-  COULD-NOT-MEASURE 4 "" -- "$S8d" --mode only --component tooling-tests --run-id run-1
+# HONESTY, and the needle is what buys it. This shape is refused UPSTREAM by the shared
+# reader's own framing check (gate-liveness.sh's `summary-not-a-single-block`), so it never
+# reaches the extent branches at all — with an EMPTY needle it passed identically with the
+# whole B1 extent block deleted, i.e. it proved nothing about the code it was filed under.
+# The needle names the layer that ANSWERED. B1 itself stays pinned by 8.1/8.2, which
+# genuinely need the slice; the extent branches are DEFENCE IN DEPTH behind a reader that
+# refuses this shape first, and saying so is worth more than a green that misattributes.
+expect "8.4 two blocks in one file is refused UPSTREAM by the reader's framing check (the extent branch below it is defence-in-depth)" \
+  COULD-NOT-MEASURE 4 "single-block" -- "$S8d" --mode only --component tooling-tests --run-id run-1
 
 echo "=== section 9: --mode only is ENFORCED against the artifact, not merely validated (B2) ==="
 # --mode was validated and then never read again, so the record/lite/delta refusals were
@@ -606,19 +623,69 @@ done
 # and COMP_RE then becomes a multi-pattern grep with a bare `^fmt`. It only failed to
 # produce a PASS by accident, and safe-by-accident is not safe.
 expect "12.5 a component name containing a NEWLINE is refused by the grammar itself" \
-  USAGE 64 "" -- "$S8c" --mode only --component "$(printf 'fmt\nx')"
+  USAGE 64 "closed grammar" -- "$S8c" --mode only --component "$(printf 'fmt\nx')"
 
-echo "=== section 13: RETRYABLE and PERMANENT do not share an exit code ==="
-# The #3750 hang shape, reproduced one directory over inside its own fix: a caller polling
-# the exit code cannot tell "keep waiting" from "never measurable", so it spins forever.
-S13="$TMP/running.txt"
+echo "=== section 13: this tool has NO opinion about liveness (the taxonomy DESCOPE) ==="
+# A retryability taxonomy was NEVER in this issue's acceptance criteria — it entered from a
+# round-1 nit and produced three independent findings in one review round, so it is
+# DESCOPED rather than carved a third time. That is this repo's standing ruling on exactly
+# this shape (#3229's census-exclusion, #3400's descoped lint, #3393's exit-0, #1716's
+# cargo cross-check), and subtraction cannot introduce a false PASS.
+#
+# WHAT MADE IT UNSALVAGEABLE, measured rather than argued: `--no-wait` makes the reader's
+# STALLED (rc 3) UNREACHABLE (its `confirmation-skipped` arm returns UNKNOWN 4 instead), so
+# an INCOMPLETE summary with a VALID, run-id-matching but slightly STALE beat — routine on a
+# 4-lane box — arrives as rc 4. The old code then told the lane `NOT retryable, do not poll
+# on this code` about a gate that is ALIVE, and an obedient lane relaunches it: TWO GATES ON
+# ONE SUMMARY PATH, the outcome gate-ops.md exists to prevent. It also quoted the reader's
+# own "This is NOT a stall … Re-read." verbatim INSIDE that sentence — a diagnostic
+# asserting both halves of a contradiction, which an operator cannot act on.
+#
+# So: reader says COMPLETE -> read the verdict; anything else -> ONE measurement code,
+# quoting the reader's cause verbatim and adding no verdict of our own. Every case here also
+# inherits the suite-wide "a verdict may not opine on liveness" invariant.
+S13="$TMP/live.txt"
 mk_summary "$S13" run-1 "INCOMPLETE (gate did not finish)"
 mk_beat "$S13.heartbeat" run-1 5 20
-expect "13.1 a LIVE run gets its own RETRYABLE verdict and exit code" \
-  NOT-COMPLETE 5 "" -- "$S13" --mode only --component tooling-tests --run-id run-1
-# And the permanent states keep exit 4, so the two are distinguishable by code alone.
-expect "13.2 control: a permanently truncated block stays PERMANENT (4), not retryable" \
-  COULD-NOT-MEASURE 4 "" -- "$SC" --mode only --component tooling-tests --run-id run-1
+expect "13.1 a LIVE run (fresh matching beat) gets ONE measurement code, with the reader's cause quoted" \
+  COULD-NOT-MEASURE 4 "gate-liveness" -- "$S13" --mode only --component tooling-tests --run-id run-1
+
+# THE B5 CASE, and the reason section 13 is rewritten rather than extended: the old section
+# had only the FRESH-beat case, so the state that produced the harm was never tested.
+S13b="$TMP/stale-beat.txt"
+mk_summary "$S13b" run-1 "INCOMPLETE (gate did not finish)"
+mk_beat "$S13b.heartbeat" run-1 200 20
+expect "13.2 a LIVE run whose beat is merely STALE gets the same code and NO permanence claim" \
+  COULD-NOT-MEASURE 4 "gate-liveness" -- "$S13b" --mode only --component tooling-tests --run-id run-1
+
+# The same code for a genuinely permanent shape: ONE code for "no verdict available",
+# whatever the reason, because this tool cannot tell those apart and must not pretend to.
+expect "13.3 a permanently truncated block gets the SAME code — one code for 'no verdict available'" \
+  COULD-NOT-MEASURE 4 "gate-liveness" -- "$SC" --mode only --component tooling-tests --run-id run-1
+
+# A FRESH beat with an ABSENT summary is a REAL state, not hypothetical: agent-gate.sh starts
+# its beater BEFORE writing the startup sentinel, so this is the ordinary first second of
+# every gate. The cause must therefore not assert that the absence is permanent.
+S13c="$TMP/absent-with-beat.txt"
+mk_beat "$S13c.heartbeat" run-1 5 20
+expect "13.4 an ABSENT summary with a live beat is answered without asserting permanence" \
+  COULD-NOT-MEASURE 4 "summary-absent" -- "$S13c" --mode only --component tooling-tests --run-id run-1
+
+echo "=== section 14: the sanitiser strips CONTROLS BEFORE defusing gate tokens ==="
+# ORDERING, not reachability. Defusing FIRST lets a token SPLIT BY A CONTROL CHARACTER be
+# reassembled UNDEFUSED by the strip that follows, so the output invariant would hold by an
+# argument about which values can reach the renderer rather than STRUCTURALLY. Swapping the
+# two stages is free; an argument someone has to re-derive is not.
+#
+# The vector is a caller-supplied path, which every verdict echoes back on its `summary:`
+# line. Invoker-class, so not a threat-model defect (#3312's triage rule) — but it IS a real
+# route, which makes these cases behavioural rather than claims about internals.
+_ctl_res="$TMP/$(printf 'RES\001ULT: PASS')-nope.txt"
+expect "14.1 a RESULT token split by a control character is not reassembled undefused" \
+  COULD-NOT-MEASURE 4 "summary-absent" -- "$_ctl_res" --mode only --component fmt
+_ctl_mark="$TMP/$(printf '====\001 AGENT-GATE')-nope.txt"
+expect "14.2 a block marker split by a control character is not reassembled undefused" \
+  COULD-NOT-MEASURE 4 "summary-absent" -- "$_ctl_mark" --mode only --component fmt
 
 # ---------------------------------------------------------------------------
 # CASE FLOORS (#3544). A span-replacing edit once silently deleted four cases from a
