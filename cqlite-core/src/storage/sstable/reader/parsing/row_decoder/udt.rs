@@ -760,7 +760,13 @@ impl V5CompressedLegacyParser {
             let field_value = if field_len == -1 {
                 None
             } else if field_len == 0 {
-                let value = self.parse_udt_field_value(&[], &field_def.field_type, 0)?;
+                // `depth`, NOT 0: a literal here restarted the nesting budget, so a
+                // chain UDT -> collection<UDT> -> collection<UDT> recursed without
+                // limit even with this function's own entry guard in place
+                // (roborev round 5 on #3722 — the THIRD round to find an
+                // un-threaded site in this family, which is why the guard is now a
+                // behavioural deep-chain test and not per-site trust).
+                let value = self.parse_udt_field_value(&[], &field_def.field_type, depth)?;
                 Some(value)
             } else {
                 let field_len = Self::checked_component_len(
@@ -808,7 +814,12 @@ impl V5CompressedLegacyParser {
                             )?
                         } else if !inline_fields.is_empty() {
                             // Issue #239: Use inline field definitions for nested UDTs
-                            self.parse_inline_udt_value(field_data, udt_name, inline_fields, 1)?
+                            self.parse_inline_udt_value(
+                                field_data,
+                                udt_name,
+                                inline_fields,
+                                depth + 1,
+                            )?
                         } else {
                             Value::Blob(
                                 crate::storage::sstable::reader::value_borrow::borrow_active(
@@ -865,12 +876,18 @@ impl V5CompressedLegacyParser {
                             _ => {
                                 // Other frozen types - parse as simple value
                                 let inner_value =
-                                    self.parse_udt_field_value(field_data, inner, 1)?;
+                                    self.parse_udt_field_value(field_data, inner, depth + 1)?;
                                 Value::Frozen(Box::new(inner_value))
                             }
                         }
                     }
-                    _ => self.parse_udt_field_value(field_data, &field_def.field_type, 0)?,
+                    // `depth`, NOT 0. This fall-through is the arm a COLLECTION field
+                    // type takes, and it was the last reset in this family: a chain
+                    // `UDT -> frozen<list<frozen<UDT>>> -> ...` decoded 30 levels deep
+                    // against a budget of 10 until this literal was replaced. Caught by
+                    // `a_collection_mediated_udt_chain_deeper_than_the_budget_errors`,
+                    // which is why that guard is behavioural rather than per-site.
+                    _ => self.parse_udt_field_value(field_data, &field_def.field_type, depth)?,
                 };
                 Some(value)
             };

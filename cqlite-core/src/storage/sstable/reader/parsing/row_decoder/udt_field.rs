@@ -264,8 +264,34 @@ impl V5CompressedLegacyParser {
             // restarted the nesting budget and carried a DIFFERENT public
             // identity (`_keyspace` in the bindings; part of `Udt` equality and
             // hashing, issue #3504) from the same UDT nested directly.
-            CqlType::Udt(name, field_defs) => {
+            CqlType::Udt(name, field_defs) if !field_defs.is_empty() => {
                 self.parse_inline_udt_value(data, name, field_defs, depth + 1)
+            }
+            // An EMPTY `field_defs` does not mean "a UDT with no fields" — it
+            // means the type was named without its definition, which is how a
+            // registry-backed UDT arrives. Treating it as an inline zero-field
+            // definition produced an EMPTY `Value::Udt` even when the full
+            // definition was sitting in `self.udt_registry` (roborev round 5 on
+            // #3722), which is a silent data loss rather than a decode error.
+            CqlType::Udt(name, _) => {
+                match self
+                    .udt_registry
+                    .as_ref()
+                    .and_then(|r| r.get_udt_qualified(&self.keyspace, name))
+                {
+                    Some(def) => {
+                        // `depth + 1`, and via the registry decoder so its own
+                        // entry guard applies too.
+                        let registry = self
+                            .udt_registry
+                            .as_ref()
+                            .ok_or_else(|| Error::corruption("UDT registry vanished"))?;
+                        self.parse_nested_udt_from_registry(data, def, registry, depth + 1)
+                    }
+                    // Genuinely unresolvable: no definition anywhere. Keep the
+                    // previous behaviour rather than inventing fields.
+                    None => self.parse_inline_udt_value(data, name, &[], depth + 1),
+                }
             }
             // An UNRESOLVED type string — a marshal class, or a UDT name to look
             // up in the registry. This is the only arm where a string is all we

@@ -513,4 +513,81 @@ mod tests {
              recursion: {past_budget:?}"
         );
     }
+
+    /// THE BEHAVIOURAL DEPTH GUARD — a real COLLECTION-MEDIATED chain.
+    ///
+    /// The depth family produced a roborev finding in THREE consecutive rounds
+    /// (round 2: the inline-UDT arm reset to 0; round 4:
+    /// `parse_nested_udt_from_registry` had no depth parameter; round 5: its field
+    /// decodes still passed a literal 0). Per-site review stopped being the guard,
+    /// so this builds a chain deeper than `MAX_TYPE_NESTING_DEPTH` and requires
+    /// the decode to ERROR.
+    ///
+    /// THE NESTING GOES THROUGH A COLLECTION AT EVERY LEVEL, and that is the whole
+    /// point. A first version chained UDT -> UDT directly and PASSED even with the
+    /// defect reintroduced, because that path recurses through
+    /// `parse_nested_udt_from_registry`'s own already-correct `depth + 1`. Only the
+    /// collection-mediated shape roborev actually named —
+    /// `UDT -> frozen<list<frozen<UDT>>> -> ...` — routes through the field
+    /// decoder whose depth argument was the defect. A test that passes before and
+    /// after proves nothing, so the shape is load-bearing, not incidental.
+    #[test]
+    fn a_collection_mediated_udt_chain_deeper_than_the_budget_errors() {
+        use crate::schema::UdtRegistry;
+
+        const CHAIN: usize = MAX_TYPE_NESTING_DEPTH * 3;
+        let ks = "test_ks";
+
+        let mut registry = UdtRegistry::new();
+        for i in 0..CHAIN {
+            // deep_i.f : frozen<list<frozen<deep_{i+1}>>>, the LAST one an int so
+            // the chain terminates if the budget somehow never fires.
+            let field_type = if i + 1 < CHAIN {
+                CqlType::List(Box::new(CqlType::Udt(format!("deep{}", i + 1), Vec::new())))
+            } else {
+                CqlType::Int
+            };
+            registry.register_udt(
+                crate::types::UdtTypeDef::new(ks.to_string(), format!("deep{i}")).with_field(
+                    "f".to_string(),
+                    field_type,
+                    true,
+                ),
+            );
+        }
+
+        // Build the payload BOTTOM-UP so every level is well-formed:
+        //   a UDT value  = [i32 field_len][field bytes]
+        //   a frozen list = [i32 count=1][i32 elem_len][elem bytes]
+        let mut payload = 7i32.to_be_bytes().to_vec(); // deep_{CHAIN-1}.f : int
+        for _ in 0..CHAIN.saturating_sub(1) {
+            let udt = {
+                let mut v = (payload.len() as i32).to_be_bytes().to_vec();
+                v.extend_from_slice(&payload);
+                v
+            };
+            let mut list = 1i32.to_be_bytes().to_vec();
+            list.extend_from_slice(&(udt.len() as i32).to_be_bytes());
+            list.extend_from_slice(&udt);
+            payload = list;
+        }
+
+        let parser = V5CompressedLegacyParser::new(ks.to_string(), "t".to_string(), 0, 0, None)
+            .with_udt_registry(registry.clone());
+        let root = registry
+            .get_udt_qualified(ks, "deep0")
+            .expect("deep0 was just registered");
+
+        let mut root_bytes = (payload.len() as i32).to_be_bytes().to_vec();
+        root_bytes.extend_from_slice(&payload);
+
+        let got = parser.parse_nested_udt_from_registry(&root_bytes, root, &registry, 0);
+        assert!(
+            got.is_err(),
+            "a {CHAIN}-deep collection-mediated UDT chain must be refused by \
+             MAX_TYPE_NESTING_DEPTH ({MAX_TYPE_NESTING_DEPTH}); Ok means some call on \
+             the path is restarting the budget — the defect three review rounds kept \
+             finding: {got:?}"
+        );
+    }
 }
