@@ -149,6 +149,11 @@ trap 'rm -rf "$tmp"' EXIT
 #     GNU-first/BSD-fallback pairs — a cross-cutting cleanup with its own review surface, which
 #     would red `roborev-lints` in every lane's --lite). So the set stays enumerated and DECLARES
 #     ITSELF AT RUN TIME rather than claiming a completeness it does not have.
+#     AND THE BOOTSTRAP PAIR IS ADDED HERE AND NOT ALSO TO test_agent_gate_tree_portability.sh,
+#     which carries its own `xargs-r` rule and named neither file either. One owner, deliberately:
+#     two lints scanning one file means two rule tables to keep in step and two identical findings
+#     for one defect, and this is the lint whose table the #3708 incident construct came from.
+#     That sibling's subject set is the GATE's tree-integrity functions and stays that.
 #   * SO THE COVERAGE CLAIM IS NARROW, AND THIS IS ITS HONEST FORM (#3296 round-9 finding 2, which
 #     CORRECTS the round-8 wording here — the earlier text called a missed spelling a "BOUNDED
 #     FALSE NEGATIVE with a backstop underneath it" without qualification, and that was WRONG):
