@@ -776,12 +776,26 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 /// and where the precondition does not hold it REFUSES BY NAME rather than guessing in
 /// either direction.
 ///
-/// MEASURED, so the refusal branch is known-defensive rather than dead: across all 162
-/// committed `*-Data.db.jsonl` goldens in the corpus (75016 live cells) there are 768
-/// suppressed expiring cells and ZERO where the cell also printed its own `tstamp`. No
-/// fixture exercises the refusal today — it is there for when one appears, which needs an
+/// MEASURED, at two scopes, because the number that matters is scope-sensitive and a bare
+/// count next to a test that reads a fraction of the corpus would mislead:
+///   * THIS TARGET'S OWN SUBJECT — the `test_deltas` fixtures that have a binary `Data.db`
+///     plus the four corpus tables `check_corpus_table` names: 27 goldens, 51048 live
+///     cells, **30** suppressed expiring cells (all in the one `ttl_cells` generation that
+///     ships binaries), **0** undecidable.
+///   * THE WHOLE COMMITTED CORPUS, as a wider check: 162 goldens, 75016 live cells, 768
+///     suppressed expiring cells across 8 ttl-bearing goldens, **0** undecidable.
+/// So the refusal branch is known-DEFENSIVE rather than dead, and the comparison it guards
+/// is EXACT for every cell this target actually compares. Reaching the refusal needs an
 /// `UPDATE ... USING TTL` (or `USING TIMESTAMP`) touching individual columns of a row at a
-/// different write time.
+/// different write time; no fixture does that. It is nonetheless PINNED at the unit level
+/// by `suppression_rule_requires_equal_writetimes_or_refuses` below, which drives the path
+/// with two synthetic values and needs no fixture — so "defensive" does not mean
+/// "unexercised".
+///
+/// One incidental fact from the same measurement, recorded because it bounds what the
+/// `(Some, Some)` cell arm is ever exercised by: **ZERO** cells in the entire corpus print
+/// their own `ttl`/`expires_at`. Every expiring cell there is suppressed, so the suppression
+/// path is the only one real data drives.
 ///
 /// `(None, Some(_))` stays STRICT: an expiry sstabledump DID print and scan_delta did not
 /// is a real divergence, never a suppression. Do not loosen it.
