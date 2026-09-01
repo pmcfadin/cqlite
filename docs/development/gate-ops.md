@@ -238,6 +238,17 @@ removes a finished issue's worktree; additionally prune stale worktrees' `target
 dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
 10-core machine).
 
+**A single `--lite` round can be the thing that exhausts the disk (issues
+#3763/#3764).** Measured: one `--lite` on a `cqlite-core/src/` diff grew
+`target/debug/deps` by **~18 GB in roughly ten minutes**, taking a box from 34 GB to
+16 GB free — because that diff shape triggers the issue #2658 dependent-crate leg,
+which runs `cargo test -p <pkg> --all-targets --no-run` for every workspace member
+depending on `cqlite-core`. So do not budget `--lite` as a cheap, disk-neutral round
+on a shared box. Worse, **`--lite` is EXEMPT from the issue #1825 gate-slot cap**, so
+nothing serialises that build against a peer's concurrent gate of record — the two
+compete for the same disk with no arbitration. There is no admission check for
+`--lite` today; issue #3763 owns that gap.
+
 **macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
 reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed
 blocks. If free space does not recover after deleting build artifacts, check and
