@@ -295,6 +295,15 @@ required-features = ["cli-helpers"]
 name = "issue_3721_column_decode_error_surface"
 required-features = ["cli-helpers"]
 
+# Column decoding must be bounded by the ROW's authoritative end, not by the length
+# of the whole parse unit (issue #3809, found reviewing #3721): a cell reading past
+# its row returns the NEXT row's bytes as a value, and a cell stopping short leaves
+# the body partly unaccounted for — both SILENT wrong answers. Same public surface
+# (`ingestion::ingest` + `Database::execute`), so the same `cli-helpers` gate.
+[[test]]
+name = "issue_3809_column_decode_row_bound"
+required-features = ["cli-helpers"]
+
 # Range-tombstone MARKER refusals must be OBSERVABLE too — the same swallow one
 # structural level up from the per-column one (issue #3721). Same public surface
 # (`ingestion::ingest` + `Database::execute`), so the same `cli-helpers` gate.

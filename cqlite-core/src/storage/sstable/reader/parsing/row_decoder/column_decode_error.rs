@@ -249,7 +249,10 @@ pub(super) fn row_body_exhausted(
 ///
 /// `bounds` is `(column_start, returned_offset, row_end)`; `progress` is
 /// `(col_idx, on_disk_column_count)`.
-pub(super) fn column_escaped_row_bound(
+///
+/// Built by [`row_bound_check`], the ONE entry point the two column arms call, so
+/// the predicate is written once rather than duplicated per arm.
+fn column_escaped_row_bound(
     column: &crate::schema::Column,
     header_type: Option<&str>,
     bounds: (usize, usize, usize),
@@ -267,6 +270,31 @@ pub(super) fn column_escaped_row_bound(
         column.name
     ));
     column_decode_failure(&column.name, &ty, column_start, cause)
+}
+
+/// The bound every per-column decode's RETURNED offset is checked against: this
+/// row's authoritative end. `Ok(())` when the decode stayed inside its own row;
+/// otherwise the refusal [`column_escaped_row_bound`] describes.
+///
+/// One function for both column arms (SIMPLE and COMPLEX) so the predicate cannot
+/// drift between them, and so `row_data`'s loop states the rule once per arm rather
+/// than restating the rationale.
+pub(super) fn row_bound_check(
+    column: &crate::schema::Column,
+    header_type: Option<&str>,
+    bounds: (usize, usize, usize),
+    progress: (usize, usize),
+) -> Result<()> {
+    let (_column_start, returned_offset, row_end) = bounds;
+    if returned_offset > row_end {
+        return Err(column_escaped_row_bound(
+            column,
+            header_type,
+            bounds,
+            progress,
+        ));
+    }
+    Ok(())
 }
 
 /// The per-column walk finished SHORT of the row's authoritative end: bytes inside
