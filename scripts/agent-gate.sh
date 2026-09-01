@@ -8938,6 +8938,13 @@ _tree_boundary_meta_lines() {
   printf '%s\n' "$(accelerators_line)"
   printf '%s\n' "$(cpu_budget_line)"
   [ -n "${SUMMARY_INTEGRITY_LINE:-}" ] && printf '%s\n' "$SUMMARY_INTEGRITY_LINE"
+  # #3800 DECLARED OMISSION, so it is a stated boundary and not a silent gap: this BOUNDARY
+  # block carries NO `disk-exhaustion:` line. Its cause is already named and is a DIFFERENT
+  # one -- a mid-run tree mutation (#2926) -- and the block is emitted from a component
+  # boundary that may be mid-run, where a start->emit free-space delta would be measuring a
+  # window the run has not finished. Every TERMINAL emit site (full, --lite, --delta incl. its
+  # REFUSED path, both selftest hooks) does carry the line; that set is derived from source
+  # and asserted in scripts/tests/test_agent_gate_disk_exhaustion.sh.
   _tree_meta_render_lines
   # The per-component verdict table, as far as the run got. Canonical order for the mode
   # ACTUALLY RUNNING (#2926 review J2 — this iterated the full gate's COMPONENTS, which does
@@ -17600,7 +17607,7 @@ run_lite() {
   done
   # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
   # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
-  _de_pairs=()
+  local _de_i; local -a _de_pairs=()
   for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
   SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
@@ -17978,7 +17985,7 @@ run_delta() {
     # retains, its component table can carry a non-PASS row (file-size/fmt/scoped-tests
     # run BEFORE the refusal), and a refusal caused by a disk-starved tier is exactly the
     # confusion this marker exists to remove -- so "inapplicable" would be a guess.
-    _de_pairs=()
+    local _de_i; local -a _de_pairs=()
     for _de_i in "${!DN[@]}"; do _de_pairs+=("${DN[$_de_i]}" "${DS[$_de_i]}"); done
     SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
@@ -18020,7 +18027,7 @@ run_delta() {
   done
   # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
   # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
-  _de_pairs=()
+  local _de_i; local -a _de_pairs=()
   for _de_i in "${!DN[@]}"; do _de_pairs+=("${DN[$_de_i]}" "${DS[$_de_i]}"); done
   SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
