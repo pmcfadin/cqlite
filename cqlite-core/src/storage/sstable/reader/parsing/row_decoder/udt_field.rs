@@ -1,12 +1,77 @@
-//! The SINGLE UDT-field value decoder (issue #3722).
+//! THE single UDT-field value decoder (issue #3722).
 //!
-//! Placeholder header for the RED step: this file currently holds the OLD
-//! `parse_udt_field_value` arms verbatim, moved out of `udt.rs`.
+//! # Why this module exists
+//!
+//! There used to be TWO shared UDT-field decoders with DIVERGENT arm sets, both
+//! ending in `_ => Value::Blob`: `udt.rs`'s `parse_udt_field_value` (method) and
+//! its `parse_simple_udt_field_value` (free fn). 14 CQL types fell through to an
+//! opaque blob in the first; the second additionally dropped `date`, `inet`,
+//! `frozen` and nested `udt` while being the ONLY one that handled `timeuuid`.
+//! The drift was BIDIRECTIONAL, so the decoded type of a UDT field depended on
+//! which route the value took through the reader. Both are deleted; this is the
+//! only UDT-field decoder, and all 13 former call sites go through it.
+//!
+//! It lives in its own file because `udt.rs` was 1777 lines against the 800-line
+//! campsite source target (epic #1116) — moving both decoders OUT is what shrinks
+//! it.
+//!
+//! # What stops the arm sets diverging again
+//!
+//! [`V5CompressedLegacyParser::parse_udt_field_value`] is TOTAL over `CqlType`
+//! with NO wildcard arm, pinned by `#[deny(clippy::wildcard_enum_match_arm)]`
+//! (the same device `bindings/python/src/value_hashable.rs` uses for this defect
+//! class, issue #3500). A new `CqlType` variant is therefore a COMPILE error
+//! here instead of a silent blob on somebody's data. That is strictly stronger
+//! than an equality test between two decoders' outputs: with one decoder,
+//! equality is trivially true and proves nothing, while totality is the property
+//! that actually prevents recurrence.
+//!
+//! # Deliberate differences from `parse_value_from_raw_bytes` (`raw_value.rs`)
+//!
+//! That function decodes an already-bounded value from a type STRING and looks
+//! like a candidate to route through; it is not, in three respects:
+//!
+//! * `float` there widens to `Value::Float(f as f64)`; a UDT field must stay a
+//!   lossless `Value::Float32` (issue #1884).
+//! * its fixed-width arms are `data.len() < N` and SLICE; the arms here are
+//!   strict `!= N`, so a 5-byte `int` or a 17-byte `uuid` field errors instead of
+//!   silently decoding from a prefix. Loosening an existing corruption check is
+//!   not a refactor.
+//! * it takes a type STRING, and a `CqlType::Udt(name, fields)` cannot be
+//!   rendered to one without DROPPING the inline field defs, which nothing
+//!   downstream can recover. The `Udt` arm here recurses structurally instead.
+//!
+//! The `Custom(s)` arm — an unresolved marshal class or a registry UDT name — is
+//! the one place a type string is genuinely all we have, and it routes there.
+//!
+//! # Collection element types
+//!
+//! The list/set/map/tuple arms delegate the payload framing to the existing
+//! parsers in `frozen.rs`, which take ELEMENT types as separate `&str`s. Only the
+//! element types are rendered (via [`CqlType::to_cql_string`]) — never an outer
+//! `list<…>`/`map<…>` string — which bypasses `extract_map_types` /
+//! `extract_tuple_element_types` entirely. Two consequences worth knowing:
+//! element values are decoded by `parse_value_from_raw_bytes`, so they follow ITS
+//! conventions (notably a `float` ELEMENT is `Value::Float(f64)`, unchanged from
+//! every other frozen-collection path), and a UDT ELEMENT resolves by NAME
+//! through the `UdtRegistry` rather than from inline field defs.
 
 use super::*;
 
 impl V5CompressedLegacyParser {
-    /// Parse a UDT field value based on its CqlType.
+    /// Decode ONE UDT field value from the exact bytes of that field.
+    ///
+    /// `data` is the whole field value: the caller has already consumed the
+    /// field's `[i32 BE len]` prefix and bounded the slice (a `-1` length is a
+    /// null field and never reaches here; a `0` length goes through
+    /// `create_empty_value_for_type` or arrives here as an empty slice).
+    ///
+    /// `depth` counts CQL type nesting, not bytes, and bounds this function's own
+    /// recursion (`frozen<...>` chains) the same way the sibling decoders bound
+    /// theirs.
+    ///
+    /// There is deliberately NO `_ =>` arm — see the module header.
+    #[deny(clippy::wildcard_enum_match_arm)]
     pub(super) fn parse_udt_field_value(
         &self,
         data: &[u8],
@@ -20,99 +85,15 @@ impl V5CompressedLegacyParser {
             )));
         }
         match field_type {
-            CqlType::Text | CqlType::Ascii => {
+            // ---------------------------------------------------------------
+            // Text-ish: the whole slice IS the value; UTF-8 is a hard error.
+            // ---------------------------------------------------------------
+            CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
                 std::str::from_utf8(data)
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
                 Ok(Value::Text(
                     crate::storage::sstable::reader::value_borrow::borrow_active(data),
                 ))
-            }
-            CqlType::Int => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Int field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-            CqlType::BigInt => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "BigInt field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-            CqlType::Float => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Float field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f32::from_bits(bits)))
-            }
-            CqlType::Double => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Double field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Float(f64::from_bits(bits)))
-            }
-            CqlType::Boolean => {
-                if data.len() != 1 {
-                    return Err(Error::corruption(format!(
-                        "Boolean field requires 1 byte, got {}",
-                        data.len()
-                    )));
-                }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            CqlType::Uuid => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "UUID field requires 16 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
-            }
-            CqlType::Timestamp => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Timestamp field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
-            CqlType::Date => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Date field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Date(days as i32))
             }
             CqlType::Blob => Ok(Value::Blob(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
@@ -120,15 +101,180 @@ impl V5CompressedLegacyParser {
             CqlType::Inet => Ok(Value::Inet(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
             )),
-            CqlType::Frozen(inner) => {
-                let inner_value = self.parse_udt_field_value(data, inner, depth + 1)?;
-                Ok(Value::Frozen(Box::new(inner_value)))
+            CqlType::Varint => Ok(Value::Varint(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
+
+            // ---------------------------------------------------------------
+            // Fixed-width integers/floats. Every length check is strict `!= N`.
+            // ---------------------------------------------------------------
+            CqlType::Boolean => {
+                Self::require_len(data, 1, "Boolean")?;
+                Ok(Value::Boolean(data[0] != 0))
             }
+            CqlType::TinyInt => {
+                Self::require_len(data, 1, "TinyInt")?;
+                Ok(Value::TinyInt(data[0] as i8))
+            }
+            CqlType::SmallInt => {
+                Self::require_len(data, 2, "SmallInt")?;
+                Ok(Value::SmallInt(i16::from_be_bytes([data[0], data[1]])))
+            }
+            CqlType::Int => {
+                Self::require_len(data, 4, "Int")?;
+                Ok(Value::Integer(i32::from_be_bytes([
+                    data[0], data[1], data[2], data[3],
+                ])))
+            }
+            CqlType::BigInt => {
+                Self::require_len(data, 8, "BigInt")?;
+                Ok(Value::BigInt(Self::be_i64(data)))
+            }
+            // A UDT field can never BE a counter in Cassandra 5.0: `CREATE TYPE`
+            // with a counter field is rejected server-side ("A user type cannot
+            // contain counters"), so this arm is UNREACHABLE from
+            // Cassandra-written data and is pinned by a unit test only, never by
+            // a fixture. It exists so the match stays total. Note
+            // `parse_value_from_raw_bytes` maps the STRING "counter" to
+            // `Value::BigInt`; here the type is `CqlType::Counter`, which has its
+            // own `Value` variant, so we use it.
+            CqlType::Counter => {
+                Self::require_len(data, 8, "Counter")?;
+                Ok(Value::Counter(Self::be_i64(data)))
+            }
+            CqlType::Float => {
+                Self::require_len(data, 4, "Float")?;
+                // Issue #1884: keep the lossless f32 variant.
+                Ok(Value::Float32(f32::from_bits(u32::from_be_bytes([
+                    data[0], data[1], data[2], data[3],
+                ]))))
+            }
+            CqlType::Double => {
+                Self::require_len(data, 8, "Double")?;
+                Ok(Value::Float(f64::from_bits(Self::be_i64(data) as u64)))
+            }
+            CqlType::Uuid | CqlType::TimeUuid => {
+                // There is no distinct `Value::TimeUuid`; a timeuuid is a UUID
+                // whose bytes encode the time. This is also the one arm the two
+                // former decoders disagreed about in the OTHER direction (only
+                // the free fn handled `TimeUuid`).
+                Self::require_len(data, 16, "UUID")?;
+                let uuid_bytes: [u8; 16] = data[0..16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                Ok(Value::Uuid(uuid_bytes))
+            }
+
+            // ---------------------------------------------------------------
+            // Temporal.
+            // ---------------------------------------------------------------
+            CqlType::Timestamp => {
+                Self::require_len(data, 8, "Timestamp")?;
+                Ok(Value::Timestamp(Self::be_i64(data)))
+            }
+            // Cassandra stores a `date` as an UNSIGNED day count offset by 2^31:
+            // `SimpleDateSerializer.dayToTimeInMillis(int days)` is
+            // `Duration.ofDays(days + Integer.MIN_VALUE)`, i.e. real
+            // days-since-epoch = stored + Integer.MIN_VALUE (authority:
+            // `git show cassandra-5.0.8:src/java/org/apache/cassandra/serializers/
+            // SimpleDateSerializer.java`). The pre-#3722 UDT-field arm did a bare
+            // `u32 as i32` with NO offset and was wrong by 2^31 days; it was the
+            // sole outlier among this tree's date decoders.
+            CqlType::Date => {
+                Self::require_len(data, 4, "Date")?;
+                let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Date(stored.wrapping_add(i32::MIN as u32) as i32))
+            }
+            CqlType::Time => {
+                Self::require_len(data, 8, "Time")?;
+                Ok(Value::Time(Self::be_i64(data)))
+            }
+            // DurationSerializer: three consecutive SIGNED VInts (months, days,
+            // nanos) over the whole slice — there is NO outer `[VInt len]` here,
+            // because the field's `[i32 BE len]` prefix already bounded `data`.
+            CqlType::Duration => Self::parse_udt_field_duration(data),
+
+            // ---------------------------------------------------------------
+            // Numeric with a prefix: `[i32 BE scale][unscaled BigInteger]`.
+            // ---------------------------------------------------------------
+            CqlType::Decimal => {
+                if data.len() < 4 {
+                    return Err(Error::corruption(format!(
+                        "Decimal field requires at least 4 bytes for the scale, got {}",
+                        data.len()
+                    )));
+                }
+                Ok(Value::Decimal {
+                    scale: i32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+                    unscaled: data[4..].to_vec(),
+                })
+            }
+
+            // ---------------------------------------------------------------
+            // Collections/tuple: delegate the payload framing to `frozen.rs`,
+            // passing ONLY the rendered ELEMENT types (module header).
+            // ---------------------------------------------------------------
+            CqlType::List(element) => {
+                let (value, _) = self.parse_frozen_list_value_raw(
+                    data,
+                    0,
+                    &element.to_cql_string(),
+                    "udt field",
+                    depth + 1,
+                )?;
+                Ok(value)
+            }
+            CqlType::Set(element) => {
+                let (value, _) = self.parse_frozen_set_value_raw(
+                    data,
+                    0,
+                    &element.to_cql_string(),
+                    "udt field",
+                    depth + 1,
+                )?;
+                Ok(value)
+            }
+            CqlType::Map(key, value) => {
+                let (decoded, _) = self.parse_frozen_map_value_raw(
+                    data,
+                    0,
+                    &key.to_cql_string(),
+                    &value.to_cql_string(),
+                    "udt field",
+                    depth + 1,
+                )?;
+                Ok(decoded)
+            }
+            CqlType::Tuple(element_types) => {
+                let rendered: Vec<String> =
+                    element_types.iter().map(|t| t.to_cql_string()).collect();
+                let mut offset = 0usize;
+                let elements = self.parse_tuple_elements_raw(
+                    data,
+                    &mut offset,
+                    data.len(),
+                    &rendered,
+                    "udt field",
+                    depth + 1,
+                )?;
+                Ok(Value::Tuple(elements))
+            }
+
+            // ---------------------------------------------------------------
+            // Composite.
+            // ---------------------------------------------------------------
+            CqlType::Frozen(inner) => Ok(Value::Frozen(Box::new(self.parse_udt_field_value(
+                data,
+                inner,
+                depth + 1,
+            )?))),
+            // Recurse STRUCTURALLY on the inline field defs. Rendering the name
+            // and re-resolving it would drop them (module header).
             CqlType::Udt(name, field_defs) => {
                 let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
-                for (field_name, field_type) in field_defs {
+                for (field_name, nested_type) in field_defs {
                     nested_def =
-                        nested_def.with_field(field_name.clone(), field_type.clone(), true);
+                        nested_def.with_field(field_name.clone(), nested_type.clone(), true);
                 }
                 let dummy_column = crate::schema::Column {
                     name: name.clone(),
@@ -140,17 +286,77 @@ impl V5CompressedLegacyParser {
                 let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
                 Ok(value)
             }
-            _ => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
+            // An UNRESOLVED type string — a marshal class, or a UDT name to look
+            // up in the registry. This is the only arm where a string is all we
+            // have, and it is the one place a genuinely unknown type may still
+            // land on that function's blob fallback.
+            CqlType::Custom(type_str) => {
+                self.parse_value_from_raw_bytes(data, type_str, "udt field", depth + 1)
+            }
         }
+    }
+
+    /// Strict fixed-width field length check: EXACTLY `expected` bytes.
+    ///
+    /// Not `<`: a wrong-length fixed-width field is corruption, and decoding from
+    /// a prefix would hide it.
+    fn require_len(data: &[u8], expected: usize, type_name: &str) -> Result<()> {
+        if data.len() != expected {
+            return Err(Error::corruption(format!(
+                "{} field requires {} byte{}, got {}",
+                type_name,
+                expected,
+                if expected == 1 { "" } else { "s" },
+                data.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Big-endian i64 from the first 8 bytes. Callers check the length first.
+    fn be_i64(data: &[u8]) -> i64 {
+        i64::from_be_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])
+    }
+
+    /// `duration` field: three consecutive SIGNED VInts over the whole slice.
+    ///
+    /// `months`/`days` are `i32` in Cassandra's `DurationType`, so an encoded
+    /// value outside the i32 range is REJECTED rather than truncated by `as i32`
+    /// (same rule as the frozen-element decoder, issue #1632 item b).
+    fn parse_udt_field_duration(data: &[u8]) -> Result<Value> {
+        let mut pos = 0usize;
+        let mut next = |component: &str| -> Result<i64> {
+            let (remaining, raw) = parse_vint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Duration field: failed to parse {}: {:?}",
+                    component, e
+                ))
+            })?;
+            pos = data.len() - remaining.len();
+            Ok(raw)
+        };
+        let months = next("months")?;
+        let days = next("days")?;
+        let nanos = next("nanos")?;
+
+        let months = i32::try_from(months)
+            .map_err(|_| Error::corruption("Duration field: months out of i32 range"))?;
+        let days = i32::try_from(days)
+            .map_err(|_| Error::corruption("Duration field: days out of i32 range"))?;
+        Ok(Value::Duration {
+            months,
+            days,
+            nanos,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_support::helpers::*;
+    use super::*;
 
     fn parser() -> V5CompressedLegacyParser {
         V5CompressedLegacyParser::new("test_ks".to_string(), "test_table".to_string(), 0, 0, None)
@@ -183,7 +389,10 @@ mod tests {
 
     #[test]
     fn control_int_field_stays_integer() {
-        assert_eq!(decode(&CqlType::Int, &7i32.to_be_bytes()), Value::Integer(7));
+        assert_eq!(
+            decode(&CqlType::Int, &7i32.to_be_bytes()),
+            Value::Integer(7)
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -417,7 +626,10 @@ mod tests {
     #[test]
     fn frozen_field_wraps_the_inner_decode() {
         assert_eq!(
-            decode(&CqlType::Frozen(Box::new(CqlType::Int)), &3i32.to_be_bytes()),
+            decode(
+                &CqlType::Frozen(Box::new(CqlType::Int)),
+                &3i32.to_be_bytes()
+            ),
             Value::Frozen(Box::new(Value::Integer(3)))
         );
     }
@@ -474,8 +686,14 @@ mod tests {
             (CqlType::Inet, vec![127, 0, 0, 1]),
             (CqlType::Duration, duration),
             (CqlType::Varint, vec![1]),
-            (CqlType::List(Box::new(CqlType::Int)), build_frozen_list_int(&[1])),
-            (CqlType::Set(Box::new(CqlType::Text)), build_frozen_list_text(&["a"])),
+            (
+                CqlType::List(Box::new(CqlType::Int)),
+                build_frozen_list_int(&[1]),
+            ),
+            (
+                CqlType::Set(Box::new(CqlType::Text)),
+                build_frozen_list_text(&["a"]),
+            ),
             (
                 CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int)),
                 build_frozen_map_text_int(&[("k", 1)]),

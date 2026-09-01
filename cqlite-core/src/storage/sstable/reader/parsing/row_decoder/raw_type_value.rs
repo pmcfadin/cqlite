@@ -1064,12 +1064,11 @@ impl V5CompressedLegacyParser {
                                             }
                                             _ => {
                                                 // Other frozen types - parse as simple value
-                                                let inner_value =
-                                                    self.parse_udt_field_value(
-                                                        field_data,
-                                                        inner,
-                                                        depth + 1,
-                                                    )?;
+                                                let inner_value = self.parse_udt_field_value(
+                                                    field_data,
+                                                    inner,
+                                                    depth + 1,
+                                                )?;
                                                 Value::Frozen(Box::new(inner_value))
                                             }
                                         }
