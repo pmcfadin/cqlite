@@ -2172,16 +2172,11 @@ apply_fixture_preflight() {
       echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
       echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      # #3402/job 26: carry the rows of components that ALREADY RAN (file-size runs before
-      # this preflight), so an acknowledged CQLITE_ALLOW_FILE_GROWTH=1 is not invisible in
-      # the one block this run emits.
-      _pf_rows=$(_preflight_component_rows)
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
-        ${_pf_rows:+"$_pf_rows"} \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
   esac
@@ -2610,11 +2605,9 @@ apply_schemas_preflight() {
       return 1
     fi
     _tree_meta_array   # #2926
-    _ps_rows=$(_preflight_component_rows)   # #3402/job 26 — see apply_fixture_preflight
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
-      ${_ps_rows:+"$_ps_rows"} \
       "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
@@ -2640,13 +2633,11 @@ apply_schemas_preflight() {
         return 1
       fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      _ps_rows=$(_preflight_component_rows)   # #3402/job 26 — see apply_fixture_preflight
-      emit_summary FAIL \
+        emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
-        ${_ps_rows:+"$_ps_rows"} \
         "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
       exit 1 ;;
   esac
@@ -9200,6 +9191,32 @@ fi
 # warning to STDERR (more likely to survive than stdout under a leaked-child/pty
 # capture). The caller's exit logic turns SUMMARY_WRITE_FAILED into a non-zero
 # exit so a green gate never silently lacks its summary file.
+# _emit_meta_lines <meta…> (#3402/job 30): the caller's meta lines, then the rows of every
+# component that has already RECORDED a verdict. Called by ALL THREE renderings inside
+# emit_summary (the authoritative file write and both fallback sinks) so they cannot diverge
+# — the same reason _fm_summary_line is the one row renderer.
+#
+# WHY AT THE FUNNEL. Three review rounds found the same defect at three different emit sites:
+# the tree-integrity boundary block, then the dataset/schemas preflights, then the `--only`
+# zero-dataset preflight and the summary-integrity paths. There are ~20 emit sites and each
+# hand-builds its own meta list, so each is an independent chance to omit the table and
+# enumerating them is a treadmill. `run_file_size` runs before every one of those exits, so
+# an acknowledged CQLITE_ALLOW_FILE_GROWTH=1 was invisible in whichever block the run
+# actually emitted.
+#
+# SUPPRESSED when the caller already passed rows, so the terminal emits — which build theirs
+# from _fm_summary_line and carry the #3453 feature-matrix annotation — are unchanged rather
+# than doubled. The test is the block's OWN closed row grammar; a caller rendering rows some
+# other way would be a new dialect and a bug on its own terms.
+_emit_meta_lines() {
+  local line
+  for line in ${@+"$@"}; do echo "$line"; done
+  if ! printf '%s\n' ${@+"$@"} | grep -qE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|OPT-OUT) \([0-9]+s\)'; then
+    line=$(_recorded_component_rows_block)
+    [ -z "$line" ] || printf '%s\n' "$line"
+  fi
+}
+
 emit_summary() {
   local result="$1"; shift
   # Write the complete block to the caller-known file FIRST, with plain
@@ -9220,8 +9237,7 @@ emit_summary() {
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      local line
-      for line in "$@"; do echo "$line"; done
+      _emit_meta_lines ${@+"$@"}
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE"
       # #3473: declare the liveness mechanism's state in the block itself. A pasted
@@ -9290,8 +9306,7 @@ emit_summary() {
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      local line
-      for line in "$@"; do echo "$line"; done
+      _emit_meta_lines ${@+"$@"}
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
@@ -9314,8 +9329,7 @@ emit_summary() {
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      local line
-      for line in "$@"; do echo "$line"; done
+      _emit_meta_lines ${@+"$@"}
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
@@ -9913,18 +9927,21 @@ _completed_component_rows() {
   done
 }
 
-# _preflight_component_rows (#3402): the same table as ONE meta argument for an early-exit
+# _recorded_component_rows_block (#3402): the table plus its count line, as ONE string, or
+# nothing when no component has recorded yet. The name says WHAT it renders rather than which
+# caller wanted it — it was `_preflight_component_rows` while three named preflights passed it
+# themselves, and that name became wrong the moment the emit funnel carried it for every block.
 # `emit_summary`, or nothing when no component has recorded yet. emit_summary echoes each
 # argument, so a captured multi-line block renders as the rows it contains. Empty output is
 # deliberately an EMPTY STRING and the callers guard on it, because a bare "" argument would
 # emit a blank line into the block.
-_preflight_component_rows() {
+_recorded_component_rows_block() {
   local _rows _n
   _rows=$(_completed_component_rows)
   [ -n "$_rows" ] || return 0
   # COUNT THE ROWS THAT WILL PRINT, never `_CCR_COUNT`. The capture above runs in a COMMAND
   # SUBSTITUTION — a subshell — so the count the helper assigns is discarded, and reading it
-  # here emitted `components-completed-before-exit: 0` beside one printed row. That is a
+  # here emitted a count of `0` beside one printed row. That is a
   # count contradicting its own table: the exact invariant
   # scripts/tests/test_agent_gate_tree_provenance.sh asserts for the boundary block, and it
   # was introduced here and caught by running the thing rather than by reading it. The
@@ -9932,7 +9949,11 @@ _preflight_component_rows() {
   # this caller cannot, and a shared global that is only valid on one of two call paths is
   # exactly the trap. Measure the artifact.
   _n=$(printf '%s\n' "$_rows" | grep -c '^')
-  printf 'components-completed-before-exit: %s (the run STOPPED at a preflight — the rest never ran)\n%s' \
+  # WORDING IS EMIT-SITE-NEUTRAL. It read "the run STOPPED at a preflight" — true of the three
+  # callers it had when written, false the moment the funnel carried it for every block, since a
+  # summary-integrity FAIL is not a preflight. A line naming a cause it cannot know is the
+  # false-claim class this whole issue is about.
+  printf 'components-recorded: %s when this block was emitted (a component not listed had recorded no verdict)\n%s' \
     "$_n" "$_rows"
 }
 

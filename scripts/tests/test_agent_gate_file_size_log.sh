@@ -610,18 +610,26 @@ else
   # contradicting its own table, which is the invariant
   # scripts/tests/test_agent_gate_tree_provenance.sh asserts for the boundary block.
   pf_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|OPT-OUT) \([0-9]+s\)' "$pf_sum" 2>/dev/null | tr -d ' ')
-  pf_said=$(sed -n 's/^components-completed-before-exit: \([0-9]*\) .*/\1/p' "$pf_sum" | head -1)
+  pf_said=$(sed -n 's/^components-recorded: \([0-9]*\) .*/\1/p' "$pf_sum" | head -1)
   if [ -n "$pf_said" ] && [ "$pf_said" = "${pf_rows:-x}" ]; then
-    ok "case4i (#3402): components-completed-before-exit ($pf_said) equals the rows printed — no contradicted count"
+    ok "case4i (#3402): components-recorded ($pf_said) equals the rows printed — no contradicted count"
   else
     bad "case4i (#3402): the block says '$pf_said' completed but printed ${pf_rows:-<unmeasured>} row(s)"
   fi
-  # The mutant: drop the rows argument from the corpus-preflight emit, which is the state
-  # before this fix. The block still emits, so only the row can distinguish the two.
+  # The mutant: stop the EMIT FUNNEL appending the table, which is the state before this fix.
+  # The block still emits, so only the row can distinguish the two.
+  #
+  # THE GUARD ASSERTS THE MUTATION CHANGED SOMETHING, not that a pattern is now absent. The
+  # first version sed'd `${_pf_rows:+…}` — the per-site wiring this fix REPLACED — and then
+  # checked that pattern was gone, which is trivially true of a file that never contained it.
+  # So it built an identical copy, "proved" nothing, and reported the row surviving as a
+  # failure of the check rather than of the mutant. A mutant that cannot be shown to differ
+  # from the original is a vacuous control, and `cmp` is the only thing that shows it.
   pf_mut="$tmp/preflight-mutant"
   if cp -r "$pf_root" "$pf_mut" 2>/dev/null &&
-     sed -i 's/^\( *\)\${_pf_rows:+"\$_pf_rows"} \\$/\1\\/' "$pf_mut/scripts/agent-gate.sh" &&
-     ! grep -q '_pf_rows:+' "$pf_mut/scripts/agent-gate.sh"; then
+     grep -q 'line=$(_recorded_component_rows_block)' "$pf_mut/scripts/agent-gate.sh" &&
+     sed -i 's/^\( *\)line=$(_recorded_component_rows_block)$/\1line=""/' "$pf_mut/scripts/agent-gate.sh" &&
+     ! cmp -s "$pf_root/scripts/agent-gate.sh" "$pf_mut/scripts/agent-gate.sh"; then
     pf_msum="$tmp/preflight-mutant.sum"
     ( cd "$pf_mut" && env -u AGENT_GATE_SUMMARY_FILE CQLITE_DATASETS_ROOT="${pf_empty%/sstables}" \
         CQLITE_ALLOW_FILE_GROWTH=1 CQLITE_GATE_DISABLE_CAP=1 AGENT_GATE_SUMMARY_FILE="$pf_msum" \
