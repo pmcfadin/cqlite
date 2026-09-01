@@ -2200,6 +2200,66 @@ else
 fi
 
 # ===========================================================================
+case_begin 40-worktree-axis-must-be-measurable "CLASS SWEEP of job 34 H1: an UNMEASURABLE worktree axis is refused by name, and derives no marker path at the filesystem root"
+# ===========================================================================
+# H1 is one instance of "a required identity axis silently degrades"; the sweep asked which OTHER
+# axis can degrade. `issue` is a validated CLI argument, `session`/`session-pid` have DELIBERATE
+# sentinels that route to the liveness resolution (never to a match), and `actor` is recorded but
+# is not an ownership axis. The worktree axis was the reachable one: with the lane's directory
+# deleted `pwd -P` fails, which (1) leaked bash's own unprefixed diagnostic, (2) killed the shell
+# under `set -e` so the run ended on the EXIT-trap's GENERIC ERROR naming no axis, and (3) made
+# marker_path compose "/$MARKER" — a read, and a would-be write, at the FILESYSTEM ROOT.
+wt_gone_run() {  # wt_gone_run <subcommand...> — run with a DELETED working directory
+  local g="$T/gone-$1-$RANDOM"
+  mkdir -p "$g"
+  ( cd "$g" && rmdir "$g" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$DS" "$@" 2>&1 )
+}
+wt_fail=0
+for sub in write verify show; do
+  g_out=$(wt_gone_run "$sub" 3822); g_rc=$?
+  if [ "$g_rc" -ne 0 ] && [ "$(verdict_of "$g_out")" = ERROR ] \
+     && printf '%s\n' "$g_out" | grep -q 'axis=worktree' \
+     && [ "$(verdict_count "$g_out")" = 1 ]; then
+    ok "'$sub' with a deleted worktree: exactly ONE verdict, ERROR, and it NAMES axis=worktree"
+  else
+    wt_fail=1
+    bad "'$sub' with a deleted worktree did not refuse by name: rc=$g_rc verdict=$(verdict_of "$g_out") count=$(verdict_count "$g_out")
+$g_out"
+  fi
+  # DECLARED RESIDUAL, MEASURED: bash prints `shell-init:` / `chdir:` for a deleted cwd BEFORE
+  # the script's first line runs, so those two are the INTERPRETER's and cannot be suppressed
+  # from inside the script. Every line the SCRIPT itself emits must still carry the anchor.
+  ours=$(printf '%s\n' "$g_out" | grep -v '^shell-init: ' | grep -v '^chdir: ' || true)
+  if all_lines_anchored "$ours"; then
+    ok "'$sub': every line the SCRIPT emits is anchored (bash's own pre-exec shell-init/chdir lines are a DECLARED, unsuppressable residual)"
+  else
+    bad "'$sub' leaked an unprefixed line of its own:
+$(printf '%s' "$ours" | cat -v)"
+  fi
+done
+# NOTHING IS DERIVED AT THE ROOT: a marker at / must never be consulted or created. Asserted by
+# the refusal above happening BEFORE any marker access — measured here as the absence of a
+# root-level marker after a write attempt (this test never has permission to create one, so the
+# assertion is that the attempt is not even made: rc/verdict above, plus this belt).
+if [ ! -e "/$MARKER" ]; then
+  ok "no marker was derived or created at the filesystem root"
+else
+  bad "/$MARKER exists — a root-level marker is in play and this case cannot distinguish it from one this run created"
+fi
+# NON-VACUITY: the same three subcommands work in a LIVE worktree.
+L40=$(lane lane40)
+run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+n40_v=$(run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); n40_vrc=$?
+n40_s=$(run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822); n40_src=$?
+if [ "$wt_fail" -eq 0 ] && [ "$n40_vrc" -eq 0 ] && [ "$(verdict_of "$n40_v")" = OWNED ] \
+   && [ "$n40_src" -eq 0 ] && [ "$(verdict_of "$n40_s")" = SHOWN ]; then
+  ok "NON-VACUITY: verify and show still work normally in a live worktree — the refusals are about the unmeasurable axis"
+else
+  bad "the live-worktree control regressed: v_rc=$n40_vrc v=$(verdict_of "$n40_v") s_rc=$n40_src s=$(verdict_of "$n40_s")"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2218,8 +2278,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 36-anchor-holds-on-every-stream
 37-machine-axis-must-be-measurable
 38-adopt-never-calls-a-live-owner-gone
-39-body-bytes-survive-repeated-writes 28-case-floor"
-CASE_FLOOR=39
+39-body-bytes-survive-repeated-writes
+40-worktree-axis-must-be-measurable 28-case-floor"
+CASE_FLOOR=40
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2231,10 +2292,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 100 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 100)"
+if [ "$PASS" -ge 125 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 125)"
 else
-  bad "assertion floor breached: only $PASS assertions passed"
+  bad "assertion floor breached: only $PASS assertions passed (floor 125)"
 fi
 
 # ===========================================================================

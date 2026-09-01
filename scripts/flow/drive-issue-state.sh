@@ -218,7 +218,13 @@
 #             machine B. The refusal is at the USE SITE, never in the sanitizer: the shared
 #             placeholder is claim.sh's behaviour and stays pinned. Where no marker exists
 #             nothing is compared, so `verify`/`adopt` still report ABSENT.
-#   worktree  `pwd -P` — the physical directory holding the marker.
+#   worktree  `pwd -P` — the physical directory holding the marker. IT MUST BE MEASURABLE:
+#             a failed `pwd -P` (a deleted or unreadable lane directory) is `verdict ERROR`,
+#             exit 1, naming `axis=worktree`, on write/verify/adopt AND on `show` — the marker
+#             PATH is derived from this axis, so an unmeasurable one would read or write at the
+#             filesystem root. Unlike the machine axis it cannot ALIAS (an empty value equals no
+#             recorded absolute path), so what this closes is a misattributed diagnostic and a
+#             wrong path, not a false OWNED.
 #   session   CLAUDE_CODE_SESSION_ID, sanitized. `unrecorded` when unset, which makes the
 #             session axis UNMEASURED and routes to the liveness resolution.
 #   actor     --actor, else CLAIM_ACTOR, else `flow` — as claim.sh resolves it. NOTE: the
@@ -528,6 +534,41 @@ resolve_machine_axis() {
 
 this_machine() { resolve_machine_axis; printf '%s\n' "$MACHINE_AXIS_VALUE"; }
 
+# THE WORKTREE AXIS, THE SAME SHAPE, FOUND BY SWEEPING THE CLASS (roborev job 34 H1's class).
+# H1 is one instance of "a required identity axis silently degrades"; this is the other axis on
+# which the degradation is REACHABLE. `pwd -P` FAILS when the lane's working directory has been
+# deleted or become unreadable, and three things followed: bash's own UNPREFIXED
+# `pwd: error retrieving current directory` line broke contract (a); the assignment's non-zero
+# status killed the shell under `set -e`, so the run ended on the EXIT-trap's GENERIC ERROR with
+# no axis named; and `marker_path` composed `"/$MARKER_NAME"` — a read (and a would-be write) at
+# the FILESYSTEM ROOT, i.e. a marker belonging to nobody being read as this lane's.
+# Unlike the machine axis this one cannot ALIAS (an empty value can never equal a recorded
+# absolute path, and the writer already refuses a non-absolute worktree), so the defect is a
+# misattributed diagnostic and a wrong path — not a false OWNED. It is fixed the same way: one
+# resolution, its measurability carried, and a refusal that NAMES THE AXIS at the use site.
+WORKTREE_AXIS_VALUE=''
+WORKTREE_AXIS_STATE=''   # ok | unmeasured
+resolve_worktree_axis() {
+  [ -z "$WORKTREE_AXIS_STATE" ] || return 0
+  local wd
+  # `|| true` for the same reason as the machine axis's, and `2>/dev/null` because a failing
+  # `pwd` prints its own unprefixed diagnostic (contract (a)).
+  wd="$(pwd -P 2>/dev/null || true)"
+  WORKTREE_AXIS_VALUE="$wd"
+  case "$wd" in
+    /*) WORKTREE_AXIS_STATE=ok ;;
+    *)  WORKTREE_AXIS_STATE=unmeasured ;;
+  esac
+}
+
+this_worktree() { resolve_worktree_axis; printf '%s\n' "$WORKTREE_AXIS_VALUE"; }
+
+# require_worktree_axis — main shell only, same posture as require_machine_axis.
+require_worktree_axis() {
+  resolve_worktree_axis
+  [ "$WORKTREE_AXIS_STATE" = ok ] || refuse ERROR 1 "axis=worktree could NOT BE MEASURED: \`pwd -P\` named no absolute directory (the lane's working directory has probably been deleted or become unreadable). The marker PATH is derived from this axis, so continuing would read or write a marker at the filesystem root that belongs to nobody — nothing was read, nothing was written and nothing was decided. cd into the lane's worktree and re-run."
+}
+
 # require_machine_axis — refuse unless this box's own machine identity was MEASURED.
 # Called from the main shell ONLY (never inside `$( )`, where the refusal would exit the
 # subshell and its verdict line would be captured into a variable — the defect case 17 pins),
@@ -597,7 +638,7 @@ MARKER_LOCK_FD=9
 
 lock_marker() {
   local wt lock
-  wt="$(pwd -P)"
+  wt="$(this_worktree)"
   lock="$(marker_path).lock"
   # Probed BEFORE `exec`, because a redirection failure on a bare `exec` terminates a
   # non-interactive shell with bash's own unprefixed diagnostic — which would break the
@@ -629,7 +670,7 @@ S_request=''; S_pr=''; S_branch=''
 # to be able to carry them forward, and carrying forward what is never read is impossible.
 S_prior_session=''; S_prior_pid=''; S_prior_ts=''; S_adopt_reason=''
 
-marker_path() { printf '%s/%s\n' "$(pwd -P)" "$MARKER_NAME"; }
+marker_path() { printf '%s/%s\n' "$(this_worktree)" "$MARKER_NAME"; }
 
 # count_sentinel <path> <sentinel> — column-zero, WHOLE-LINE occurrences on stdout, or a
 # NON-ZERO return when the scan itself could not be performed. `grep -Fx` is what makes this a
@@ -703,7 +744,7 @@ marker_class() {
 read_marker() {
   local path cls; path="$(marker_path)"
   cls="$(marker_class "$path")"
-  [ "$cls" != absent ] || refuse ABSENT 3 "no $MARKER_NAME in $(sane "$(pwd -P)") — nothing to resume; this is a legitimate FRESH START, not a refusal"
+  [ "$cls" != absent ] || refuse ABSENT 3 "no $MARKER_NAME in $(sane "$(this_worktree)") — nothing to resume; this is a legitimate FRESH START, not a refusal"
   [ "$cls" != not-regular ] || refuse ERROR 1 "$(sane "$path") exists but is not a readable regular file — nothing was decided"
   [ "$cls" != error ] || refuse ERROR 1 "$(sane "$path") exists but could NOT BE CLASSIFIED: reading its first line, or scanning it for column-zero stamp sentinels, FAILED. An unperformed scan is not an absence of sentinels, so nothing is inferred from it — NOTHING was decided and NOTHING was replaced."
   if [ "$cls" = displaced ]; then
@@ -949,6 +990,7 @@ check_ownership() {
   # the placeholder on both sides the axis comparison SUCCEEDS, so an unmeasurable box would own
   # every marker recorded by another unmeasurable box. Refused before any comparison.
   require_machine_axis
+  require_worktree_axis
   machine="$(this_machine)"; session="$(this_session)"
 
   read_marker
@@ -957,7 +999,7 @@ check_ownership() {
   # SESSION axis only.
   [ "$S_issue" = "$issue" ] || refuse FOREIGN-ISSUE 4 "axis=issue recorded=$(sane "$S_issue") current=$(sane "$issue") — $(sane "$(marker_path)") is the durable state of a DIFFERENT issue; this lane is being reused. Move or remove it deliberately; it is never adopted for issue $(sane "$issue")."
   [ "$S_machine" = "$machine" ] || refuse FOREIGN-MACHINE 4 "axis=machine recorded=$(sane "$S_machine") current=$(sane "$machine") — this marker was stamped on another box (a copied tree, or a marker that travelled with a branch). Machine identity is not transferable, so it is refused rather than adopted."
-  [ "$S_worktree" = "$(pwd -P)" ] || refuse FOREIGN-WORKTREE 4 "axis=worktree recorded=$(sane "$S_worktree") current=$(sane "$(pwd -P)") — this marker was stamped for a different worktree and has been COPIED here; a peer lane's plan is not this lane's."
+  [ "$S_worktree" = "$(this_worktree)" ] || refuse FOREIGN-WORKTREE 4 "axis=worktree recorded=$(sane "$S_worktree") current=$(sane "$(this_worktree)") — this marker was stamped for a different worktree and has been COPIED here; a peer lane's plan is not this lane's."
 
   # SESSION AXIS. Equal AND recordable => OWNED. Anything else is liveness-resolved.
   if [ "$S_session" = "$session" ] && [ "$session" != unrecorded ]; then
@@ -1095,7 +1137,7 @@ write_marker() {
   fi
   local issue="$1" actor="$2" bodyfile="$3"; shift 3
   local wt path tmp ts session pid win lo hi
-  wt="$(pwd -P)"
+  wt="$(this_worktree)"
   path="$(marker_path)"
 
   # The worktree path is recorded VERBATIM (a path must compare EXACTLY; sanitizing would
@@ -1244,6 +1286,7 @@ cmd_write() {
   # check_ownership, so this is the site that stops an unmeasurable machine axis being
   # COMMITTED as the 'unspecified' placeholder (roborev job 34 H1).
   require_machine_axis
+  require_worktree_axis
 
   local body_src=''
   if [ -n "$bodyfile" ]; then
@@ -1349,7 +1392,7 @@ cmd_write() {
   [ -z "$carried" ] || rm -f "$carried" 2>/dev/null || true
   verdict WRITTEN
   [ -z "$discarded" ] || detail "$discarded"
-  detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(pwd -P)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$WROTE_PATH")"
+  detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(this_worktree)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$WROTE_PATH")"
   settle_pending_signal
 }
 
@@ -1483,6 +1526,10 @@ cmd_show() {
   local issue="${1:-}"
   [ "$#" -eq 0 ] || shift
   require_numeric_issue "$issue" show
+  # `show` asserts nothing about OWNERSHIP, so it needs no machine axis — but it DERIVES THE
+  # MARKER PATH from the worktree axis, and an unmeasurable one would make it print a marker
+  # from the filesystem root as though it were this lane's.
+  require_worktree_axis
   read_marker
   emit "field issue=$(sane "$S_issue")"
   emit "field machine=$(sane "$S_machine")"
