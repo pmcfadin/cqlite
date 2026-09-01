@@ -788,14 +788,17 @@ else
 fi
 
 # The startup sweep reads every echoed field, not only the resolved one.
-printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_batch_bytes=4194304 max_concurrent_scans=16 max_concurrent_scans_source=flag admission_wait_timeout_ms=30000' > "$TMP/startup-full.log"
+printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_batch_bytes=4194304 max_inflight_egress_bytes=12582912 max_concurrent_scans=16 max_concurrent_scans_source=flag available_parallelism=4 admission_wait_timeout_ms=30000 max_concurrent_streams=100' > "$TMP/startup-full.log"
 sweep_bad=''
 for probe in "batch-size 8192" "max-batch-bytes 4194304" "wait-timeout-ms 30000"; do
   set -- $probe
   [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup-full.log" "$1")" = "$2" ] || sweep_bad="$sweep_bad $1"
 done
+if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup-full.log" scans)" != "16" ]; then
+  sweep_bad="$sweep_bad scans-adjacency"
+fi
 if [ -z "$sweep_bad" ]; then
-  ok "every echoed server field is read back from the one startup line"
+  ok "every echoed server field is read back from the real startup line, and max_concurrent_streams beside it is not mistaken for max_concurrent_scans"
 else
   bad "the startup sweep could not read:$sweep_bad"
 fi
@@ -855,7 +858,7 @@ else
   bad "--ramp 1 did not map to the single-stream section"
 fi
 
-printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_concurrent_scans=16 max_concurrent_scans_source=flag' > "$TMP/startup.log"
+printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_batch_bytes=4194304 max_inflight_egress_bytes=12582912 max_concurrent_scans=16 max_concurrent_scans_source=flag available_parallelism=4 admission_wait_timeout_ms=30000 max_concurrent_streams=100' > "$TMP/startup.log"
 if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.log" scans)" = "16" ] \
    && [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.log" source)" = "flag" ]; then
   ok "the startup parser reads the ceiling and its provenance from a real line"
@@ -2199,10 +2202,26 @@ sock.bind((host, int(port)))
 sock.listen(16)
 bound = "%s:%d" % (host, sock.getsockname()[1])
 
+# TRANSCRIBED FROM `cli::log_startup` (cqlite-flight/src/cli.rs:207-226), field
+# for field and IN ITS ORDER, not from what the parser happens to want. A stub
+# that prints what the parser expects rather than what the server emits passes
+# the test and fails on the rig -- #3042's round-trip lesson in a new place: a
+# stub I wrote agreeing with a parser I wrote proves self-consistency, not
+# correctness. The asymmetry that rescues it is that the contract is committed
+# source sitting right there, so it is transcribed and cited rather than
+# inferred. tracing's Full format renders the message first, then the fields.
+#
+# The three fields the driver does NOT read are printed anyway, because their
+# ABSENCE would make this an easier line to parse than the real one -- and
+# `max_concurrent_streams` in particular shares a prefix with
+# `max_concurrent_scans`, so leaving it out would hide an adjacency bug in the
+# regex rather than expose it.
 print(
     "INFO cqlite_flight: cqlite-flight starting listen=%s batch_size=%s "
-    "max_batch_bytes=%s max_concurrent_scans=%s max_concurrent_scans_source=flag "
-    "admission_wait_timeout_ms=%s"
+    "max_batch_bytes=%s max_inflight_egress_bytes=12582912 "
+    "max_concurrent_scans=%s max_concurrent_scans_source=flag "
+    "available_parallelism=4 admission_wait_timeout_ms=%s "
+    "max_concurrent_streams=100"
     % (
         listen,
         opt("--batch-size", "8192"),
@@ -2212,6 +2231,11 @@ print(
     ),
     flush=True,
 )
+# `cli::log_listening` (cqlite-flight/src/cli.rs:228-241) prints the address
+# ACTUALLY BOUND, which with `--listen 127.0.0.1:0` is the only place the real
+# port appears -- the startup line above still says `:0`. Printing the requested
+# address here instead would hide a driver that reads the wrong field, which is
+# the single bug the port-0 design depends on not having.
 print("INFO cqlite_flight: cqlite-flight listening on %s listening_on=%s" % (bound, bound), flush=True)
 while True:
     time.sleep(3600)
