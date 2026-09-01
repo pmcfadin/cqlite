@@ -1,7 +1,6 @@
 //! Core data types for CQLite
 
 pub mod comparator;
-mod comparator_custom;
 
 #[cfg(test)]
 mod comparator_test;

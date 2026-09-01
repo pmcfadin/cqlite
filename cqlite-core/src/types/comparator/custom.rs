@@ -1,5 +1,5 @@
 //! Value ordering for the CQL scalar types that map to
-//! [`ComparatorType::Custom`](super::comparator::ComparatorType) (issue #3790).
+//! [`ComparatorType::Custom`](super::ComparatorType) (issue #3790).
 //!
 //! `ComparatorType::from_cql_type` represents `CqlType::Time` as
 //! `Custom("time")` and `CqlType::Inet` as `Custom("inet")`. Both are legal

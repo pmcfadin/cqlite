@@ -5,6 +5,9 @@
 //! system ensures proper ordering and equality comparison that matches Cassandra's
 //! comparison semantics.
 
+// `Custom("inet")` / `Custom("time")` value ordering (issue #3790).
+mod custom;
+
 use crate::schema::{CqlType, UdtRegistry};
 use crate::types::Value;
 use crate::{Error, Result};
@@ -328,7 +331,7 @@ impl ComparatorType {
             ComparatorType::Frozen(inner_comparator) => {
                 self.compare_frozen(left, right, inner_comparator)
             }
-            ComparatorType::Custom(name) => super::comparator_custom::compare(name, left, right),
+            ComparatorType::Custom(name) => custom::compare(name, left, right),
         }
     }
 
@@ -421,7 +424,7 @@ impl ComparatorType {
             ComparatorType::Frozen(inner_comparator) => inner_comparator.supports_ordering(),
             // `inet` / `time` order by value (issue #3790); the residual
             // unresolved-UDT / unknown name does not.
-            ComparatorType::Custom(name) => super::comparator_custom::supports_ordering(name),
+            ComparatorType::Custom(name) => custom::supports_ordering(name),
         }
     }
 
