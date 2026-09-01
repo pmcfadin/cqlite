@@ -35,10 +35,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_signed_coll.signed_special_collections` fixture carries 33 significant
   digits), so a parser that maps every JSON number onto a `double` will LOSE
   digits it previously received intact inside the string. Use a parser that keeps
-  the literal (`json.loads(..., parse_float=decimal.Decimal)` in Python,
-  `JSON.parse` with a reviver or a bigint-aware parser in JavaScript,
-  `serde_json`'s `arbitrary_precision`/`RawValue` in Rust). The digits themselves
-  are unchanged — only the quotes are gone.
+  the LITERAL:
+
+  - **Python**: `json.loads(text, parse_float=decimal.Decimal)`. `parse_float`
+    receives the number's original lexeme, so no rounding has happened yet. A
+    `varint` needs nothing — it carries no `.`/`e`, so it goes through
+    `parse_int`, and a Python `int` is already arbitrary-precision.
+  - **JavaScript**: a bigint/decimal-aware parser such as `lossless-json` (every
+    number is kept as its original text) or `json-bigint`. **A plain
+    `JSON.parse` reviver does NOT work**: the reviver's `value` argument is an
+    already-parsed, already-rounded `Number`, so the digits are gone before it is
+    called and cannot be recovered from it. (The ES2025 source-text-access
+    reviver — the third `context.source` argument — *does* expose the original
+    lexeme, but it is not available in every engine — measured here, Node.js 20
+    has no `context.source` (it landed in V8 with Node.js 21) — so feature-detect
+    it and fall back to a dedicated parser.)
+  - **Rust**: `serde_json`'s `arbitrary_precision` feature (a `Number` then holds
+    the literal digits) or `serde_json::value::RawValue` (the raw fragment,
+    unparsed). Note `arbitrary_precision` is additive across the whole build, so
+    it changes `Number` for every `serde_json` user in your dependency graph;
+    `RawValue` is the local, non-invasive option.
+
+  The digits themselves are unchanged — only the quotes are gone.
 
   **Also changed, in `cqlite-core`'s text formatter and therefore in ALL text
   egress (`json`, `csv`, `table`): a `decimal` whose magnitude is ZERO at a
