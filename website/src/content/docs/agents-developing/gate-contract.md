@@ -682,6 +682,21 @@ paged once and deliberately does **not** stop the loop, because refusing to run 
 hygiene probe that could not run is a self-DoS. **That sweep is periodic, not per-read, which is why
 the emitted clause still says `TRUSTED, not verified`.**
 
+**The fatal verdict is affirmative, and it had to be made so.** A `git fsck` over a store up to
+eight peer lanes are concurrently writing prints `error:` lines on a **healthy** store (measured on
+this fleet: `invalid reflog entry` naming a different branch each run, on a quarter to a half of all
+runs), so recognising damage from the *text shape* of a diagnostic made a healthy box page high, stop
+its supervisor and fail `--strict` bootstrap. The class comes from fsck's exit **bitmask** — bits
+`1 ERROR_OBJECT`/`4 ERROR_PACK` are the subject; `2 ERROR_REACHABLE`/`8 ERROR_REFS`/
+`16 ERROR_COMMIT_GRAPH` are *not* demoted to clean (a genuinely missing object reports bit 2) but get
+their own non-passing `UNMEASURED` cause; a status outside `1..31` is not a bitmask at all. And no
+non-clean walk is fatal on one observation: it is re-run **once** as a discriminator — a concurrency
+artefact does not survive a second independent walk, damage does — never a retry-until-clean loop.
+The `CORRUPT` verdict is **persisted** in the box-wide throttle stamp, because a timestamp-only stamp
+let the detecting lane stop while its peers skipped their own sweep for the interval and kept
+spawning workers over the damaged store; the latch does not expire and is cleared by hand
+(`rm -f <stamp>`, named in the remedy).
+
 Three alternatives were **rejected** by the same ruling, recorded so they are not re-derived:
 per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing (the
 fourth carve into one pre-flight, charged to every `--lite` round); and removing the reuse

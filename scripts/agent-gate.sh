@@ -4998,7 +4998,9 @@ _component_set_probe_inner() {
     # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
     # NOT here: it is the periodic full `git fsck` sweep in
     # `scripts/check-object-store-integrity.sh`, run at bootstrap and on the worker supervisor's
-    # throttled cadence. The emitted `component-set:` line DECLARES this boundary on every run.
+    # throttled cadence. The emitted `component-set:` line DECLARES this boundary on every
+    # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
+    # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
     # made explicitly). It used to be dropped, because "nothing was fetched, so nothing needs an
     # isolated store" — and that left the ancestry walk running in the LIVE repository, where

@@ -457,6 +457,23 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   worker supervisor's throttled per-iteration cadence (default 6h; `CORRUPT` **stops that
   supervisor loudly** rather than holding, because corruption is non-self-clearing, while
   `UNMEASURED` is reported and deliberately does NOT stop the loop — refusing to run any worker
+  **THE FATAL VERDICT IS AFFIRMATIVE, AND IT HAD TO BE MADE SO (#3749 review).** A `git fsck` over
+  a store up to eight peer lanes are concurrently writing prints `error:` lines on a **healthy**
+  store — measured on this fleet: `invalid reflog entry` naming a DIFFERENT branch each run, on a
+  quarter to a half of all runs — so recognising damage from the TEXT SHAPE of a diagnostic
+  (`/^error/p`) made a healthy box page high, stop its supervisor and fail `--strict` bootstrap.
+  The class now comes from fsck's exit **BITMASK**: bits `1 ERROR_OBJECT` / `4 ERROR_PACK` are this
+  sweep's subject; `2 ERROR_REACHABLE` / `8 ERROR_REFS` / `16 ERROR_COMMIT_GRAPH` are **not demoted
+  to clean** (a genuinely MISSING object reports bit 2) but land on their own non-passing
+  `UNMEASURED` cause; a status outside `1..31` is not a bitmask at all (128 is git's `die()`) and is
+  unclassified. And **no non-clean walk is fatal on ONE observation**: it is re-run exactly ONCE as
+  a **discriminator** — a concurrency artefact does not survive a second independent walk, real
+  damage does — never a retry-until-clean loop, and a damage class seen once and not twice is
+  `UNMEASURED`, neither established damage nor a clean store. **The `CORRUPT` verdict is PERSISTED
+  in the box-wide throttle stamp**, because a timestamp-only stamp let the detecting lane stop while
+  its three peers saw a fresh stamp, skipped their own sweep for the whole interval and kept
+  spawning workers over the damaged store; the latch does not expire (corruption is
+  non-self-clearing) and is cleared by hand with the `rm -f <stamp>` the remedy names.
   because a hygiene probe could not run is a self-DoS). **That sweep is PERIODIC, NOT PER-READ, so
   the emitted clause still says `store TRUSTED, not verified (#3749)` — do not inflate it.**
   **THREE ALTERNATIVES WERE REJECTED and the reasons are recorded so they are not re-derived:**

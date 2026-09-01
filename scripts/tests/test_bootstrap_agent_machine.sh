@@ -38,10 +38,12 @@ skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
 # --- SECTION 5d IS OPTED OUT SUITE-WIDE, AND THE PUSH SANDBOXES OPT BACK IN (#3749) -
 # 5d rehashes the SHARED git object store with a full `git fsck`. Against the REAL
-# checkout that is 19.83s per invocation (measured on this fleet's 331M store) and this
-# suite drives bootstrap dozens of times — ~12 minutes added to a MANDATORY gate
-# component for a property most of these cases are not about. So the env opt-out is set
-# ONCE here.
+# checkout that is 13-24s per invocation warm and 47-80s cold or under concurrent gates
+# (two independent measurement sets on this fleet's 366M store, git 2.43.0), and this
+# suite drives bootstrap dozens of times — roughly 8 to 45 MINUTES added to a MANDATORY
+# gate component for a property most of these cases are not about. (An earlier revision
+# quoted a single "19.83s" from one warm run; a single number was what made that claim
+# wrong.) So the env opt-out is set ONCE here.
 #
 # THE OPT-OUT IS A [warn] BY DESIGN (it can never buy a vacuous green), so it would push
 # `base_warns` from 1 to 2 and silently turn block 7p's three end-to-end assertions into

@@ -130,7 +130,8 @@
 #                                                      #   `object-store: OPT-OUT` as a [warn], so
 #                                                      #   it withholds "All checks green." and can
 #                                                      #   never buy a vacuous green. The sweep
-#                                                      #   costs ~20s on a 331M store, so the
+#                                                      #   costs 13-24s warm and 47-80s cold on
+#                                                      #   this fleet's 366M store, so the
 #                                                      #   sibling self-suites (which drive
 #                                                      #   bootstrap dozens of times against the
 #                                                      #   real checkout) opt out via
@@ -176,10 +177,12 @@ fi
 #
 # THE ENV SPELLING IS NOT A CONVENIENCE, IT IS WHAT KEEPS THE SELF-SUITES USABLE.
 # scripts/tests/test_bootstrap_agent_machine.sh drives this script ~37 times against the
-# REAL checkout, whose shared store measures 19.83s per sweep — ~12 minutes added to a
-# MANDATORY gate component for a property those cases are not about. They export the
-# variable once; the cases that ARE about this section unset it and run against their own
-# small scratch repos.
+# REAL checkout, whose shared store measures 13-24s per sweep warm and 47-80s cold or
+# under concurrent gates (two independent measurement sets, 366M store, git 2.43.0) —
+# i.e. roughly 8 to 45 MINUTES added to a MANDATORY gate component for a property those
+# cases are not about. The single "19.83s" an earlier revision quoted was one warm run
+# and understated the cold case by 2.5-4x. They export the variable once; the cases that
+# ARE about this section unset it and run against their own small scratch repos.
 SKIP_OBJ_SWEEP=0
 SKIP_OBJ_SWEEP_HOW=""
 if [ "${CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP:-0}" = 1 ]; then
@@ -3056,8 +3059,13 @@ OBJ_SWEEP_SH="$REPO_ROOT/scripts/check-object-store-integrity.sh"
 # The sweep bounds its own fsck; this outer bound is belt, and it is LOOSER than the inner
 # one on purpose — a wrapper that expires first would report "the sweep produced no
 # verdict" for a run the sweep was about to classify itself.
-OBJ_SWEEP_INNER_BOUND=300
-OBJ_SWEEP_OUTER_BOUND=360
+#
+# THE INNER BOUND IS PER WALK, AND THE SWEEP TAKES TWO WHEN THE FIRST IS NOT CLEAN (the
+# #3749 reproduction discriminator), so the outer one has to clear 2x the inner one plus
+# process overhead — sized from a MEASURED range (13-24s warm, 47-80s cold on this
+# fleet's 366M store), not from the single warm number an earlier revision quoted.
+OBJ_SWEEP_INNER_BOUND=600
+OBJ_SWEEP_OUTER_BOUND=1320
 OBJ_STORE_CORRUPT=0
 if [ "$SKIP_OBJ_SWEEP" = 1 ]; then
   warn "object-store: OPT-OUT ($SKIP_OBJ_SWEEP_HOW) — this box's SHARED git object store was NOT swept"

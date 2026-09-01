@@ -192,22 +192,30 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 # place for the verdict to drift.
 #
 # OBJ_SWEEP_INTERVAL_HOURS — minimum hours between sweeps, throttled by a stamp file.
-#   Measured cost: 19.83s per sweep on this fleet's 331M store, and a box runs up to 4
-#   lanes, so an UNTHROTTLED sweep would burn ~80s of every iteration cycle across the
-#   box for a property that changes on the timescale of disk faults, not minutes.
+#   MEASURED COST IS A RANGE WITH CONDITIONS, NOT A NUMBER (#3749 review): on this
+#   fleet's shared store (366M, git 2.43.0) two independent measurement sets give 13-24s
+#   warm and 47-80s cold or under concurrent gates — the sweep is I/O-bound, so cache
+#   state and box load dominate. An earlier revision of this comment quoted a single
+#   "19.83s" from one warm run and was wrong by 2.5-4x. A box runs up to 4 lanes, so an
+#   UNTHROTTLED sweep would burn ~50-320s of every iteration cycle across the box for a
+#   property that changes on the timescale of disk faults, not minutes.
 #   A value of 0 DISABLES the sweep (same `<=0 disables` semantics as BUILD_HOLD_MAX),
 #   which is ANNOUNCED ONCE in the journal rather than left silent: a disabled hygiene
 #   probe must be visible in the log, not inferred from the absence of its lines. It buys
 #   no green anywhere — this sweep certifies nothing, it only refuses to run workers over
 #   a store known to be damaged.
-# OBJ_SWEEP_TIMEOUT_SECS — passed through as the sweep's own `--timeout`. STRICTLY
-#   POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe into a
-#   permanent UNMEASURED — a silently self-disabling bound, the shape validate_numeric_knobs
-#   exists for.
+# OBJ_SWEEP_TIMEOUT_SECS — passed through as the sweep's own `--timeout`, and it is the
+#   bound on EACH of the sweep's walks (a non-clean first walk is re-run once as a
+#   discriminator), so the worst-case wall time is twice it. 600s is ~7.5x the observed
+#   cold worst case above; the bound exists to stop a HANG, not to police duration, and a
+#   bound that expires on a healthy-but-busy box yields UNMEASURED noise nobody acts on.
+#   STRICTLY POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe
+#   into a permanent UNMEASURED — a silently self-disabling bound, the shape
+#   validate_numeric_knobs exists for.
 OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
-OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-300}"
+OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-600}"
 # Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
-# object store share one throttle.
+# object store share one throttle AND one cached verdict.
 OBJ_SWEEP_STAMP="${OBJ_SWEEP_STAMP:-}"
 # issue #2670 (roborev 1813): before escalating a non-merged PR state to a
 # mismatch, re-read gh a few times to absorb read-after-merge lag. Env-tunable so
@@ -3222,12 +3230,27 @@ acquire_lock() {
 OBJ_SWEEP_ANNOUNCED=0
 OBJ_SWEEP_UNMEASURED_NOTIFIED=0
 
-# obj_sweep_stamp_path — the throttle stamp. Keyed on the SHARED OBJECT STORE, not on
-# the lane, so four lanes of one box share one 6-hour cadence instead of sweeping four
-# times. An unresolvable store falls back to a fixed name: the stamp is a THROTTLE, and
-# every failure mode of it costs at most an extra sweep, never a missed one.
+# obj_sweep_stamp_path — the THROTTLE-AND-CACHED-VERDICT stamp. Keyed on the SHARED
+# OBJECT STORE, not on the lane, so four lanes of one box share one cadence instead of
+# sweeping four times — and, since #3749's review, so a CORRUPT verdict found by one lane
+# is seen by its peers instead of being throttled away.
+#
+# THE DIRECTORY IS DERIVED, NOT TAKEN FROM THE CALLER. Both facts this file records —
+# "this box swept recently" and "this box's shared store is damaged" — are BOX-wide facts
+# about a store every lane reads, so a per-lane `TMPDIR` would silently make them
+# per-lane: peers would keep their own cadence and, worse, never see a peer's CORRUPT.
+# `/tmp` when it is a writable directory, `${TMPDIR:-/tmp}` only as a fallback for a host
+# without one. OBJ_SWEEP_STAMP still overrides both (the self-suite pins it per case).
+#
+# AN UNRESOLVABLE STORE DOES NOT THROTTLE AT ALL — it prints the empty string, and the
+# caller then neither reads nor writes a stamp. The old fallback collapsed every
+# unresolvable store on a box onto ONE name, so two different checkouts shared a 6-hour
+# throttle and one suppressed the other's sweep: a MISSED sweep, not an extra one. Not
+# throttling costs nothing here, because the sweep resolves the same `--git-common-dir`
+# itself and fails FAST (a sub-second UNMEASURED) in exactly the states where this
+# resolution failed.
 obj_sweep_stamp_path() {
-  local common key
+  local common key dir
   if [[ -n "$OBJ_SWEEP_STAMP" ]]; then
     printf '%s' "$OBJ_SWEEP_STAMP"
     return 0
@@ -3236,16 +3259,34 @@ obj_sweep_stamp_path() {
   if [[ -n "$common" ]]; then
     common="$(cd "$REPO_ROOT" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P)" || common=""
   fi
-  key="${common:-unresolved-store}"
+  [[ -n "$common" ]] || return 0
+  key="$common"
   # Flatten to one path component; keep only characters that cannot surprise a shell or
   # a filesystem.
   key="${key//\//_}"
   key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
-  printf '%s' "${TMPDIR:-/tmp}/cqlite-object-store-sweep.${key}.stamp"
+  dir="/tmp"
+  [[ -d "$dir" && -w "$dir" ]] || dir="${TMPDIR:-/tmp}"
+  printf '%s' "${dir}/cqlite-object-store-sweep.${key}.stamp"
+}
+
+# obj_sweep_write_stamp <path> <verdict> — record WHEN this box last swept and WHAT it
+# found, as two lines: the epoch, then the verdict token.
+#
+# `2>/dev/null` PRECEDES the output redirection deliberately: bash applies redirections
+# LEFT TO RIGHT, so with the old order a failed `>"$stamp"` printed bash's own
+# UNANCHORED error before the suppression took effect, in addition to the intended log
+# line.
+obj_sweep_write_stamp() {
+  local path="$1" verdict="$2"
+  [[ -n "$path" ]] || return 0
+  printf '%s\n%s\n' "$(date +%s)" "$verdict" 2>/dev/null >"$path" ||
+    log "object-store sweep: could not write the throttle stamp $path — the sweep will re-run next iteration"
+  return 0
 }
 
 object_store_sweep() {
-  local script stamp now last rc out verdict
+  local script stamp now last rc out verdict cached stamp_ts stamp_verdict
   if [[ "$OBJ_SWEEP_INTERVAL_HOURS" -le 0 ]]; then
     # ANNOUNCED, never silent (the CLAIM_CMD-disabled precedent in main()): a hygiene
     # probe that is off must be visible in the journal rather than inferred from missing
@@ -3272,24 +3313,48 @@ object_store_sweep() {
   stamp="$(obj_sweep_stamp_path)"
   now="$(date +%s)"
   last=0
-  if [[ -r "$stamp" ]]; then
-    read -r last <"$stamp" 2>/dev/null || last=0
+  cached=""
+  if [[ -n "$stamp" && -r "$stamp" ]]; then
+    stamp_ts=""
+    stamp_verdict=""
+    { read -r stamp_ts || true; read -r stamp_verdict || true; } <"$stamp" 2>/dev/null || true
+    last="$stamp_ts"
+    cached="$stamp_verdict"
   fi
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
-  # A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not
-  # park the sweep forever: treat it as never-swept.
-  [[ "$last" -gt "$now" ]] && last=0
-  if [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]; then
+  # Only the exact token is honoured; anything else is treated as no cached verdict.
+  [[ "$cached" == "CORRUPT" ]] || cached=""
+
+  # A CACHED `CORRUPT` STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL.
+  #
+  # THE DEFECT THIS EXISTS FOR (#3749 review, BLOCKER A). The stamp is keyed on the
+  # SHARED store and lives in a box-wide directory, so it is genuinely box-wide. When it
+  # recorded only a timestamp, the lane that DETECTED corruption stopped — and its three
+  # peers then saw a FRESH stamp, skipped their own sweep for the whole interval, and kept
+  # spawning workers against a store known to be damaged. That is the exact harm this
+  # feature exists to prevent, delivered by the throttle.
+  #
+  # Persisting the VERDICT is the stronger fix of the two available: "don't stamp on
+  # CORRUPT" would merely make each peer re-run a 20-80s fsck to rediscover the same
+  # thing, and would leave a window between the write and the peer's next iteration.
+  #
+  # IT DOES NOT EXPIRE, and it is CLEARED BY HAND. Corruption is non-self-clearing, so an
+  # age-based expiry would resume workers over a still-damaged store; the operator who
+  # repairs the store removes the file, and the remedy line below NAMES the path and the
+  # command, because a latch nobody can clear bricks the box after the repair.
+  if [[ -n "$cached" ]]; then
+    notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (cached)" \
+      "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then remove $stamp."
+    log "object-store: CORRUPT (cached at $last by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
+    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it. THEN CLEAR THE LATCH: rm -f $stamp"
+    finalize_exit "object-store-corrupt" 1
+  fi
+
+  if [[ -n "$stamp" ]] && [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]; then
     return 0
   fi
   rc=0
   out="$(bash "$script" --repo "$REPO_ROOT" --timeout "$OBJ_SWEEP_TIMEOUT_SECS" 2>&1)" || rc=$?
-  # The stamp is written for EVERY outcome, including UNMEASURED: the throttle bounds how
-  # often this box SPENDS the sweep, and a box that cannot measure (no timeout binary, say)
-  # must not re-attempt it every iteration. The verdict is journalled either way, so
-  # nothing is hidden by the stamp.
-  printf '%s\n' "$(date +%s)" >"$stamp" 2>/dev/null ||
-    log "object-store sweep: could not write the throttle stamp $stamp — the sweep will re-run next iteration"
   # Read the verdict from the sweep's OWN anchored control line, never from loose text:
   # its output prints repository-controlled paths verbatim, so an unanchored match could
   # land on one. Both the line AND the exit status are required to agree for the two
@@ -3297,14 +3362,39 @@ object_store_sweep() {
   # `{ grep || true; }` ON EVERY PIPELINE BELOW, AND IT IS LOAD-BEARING, NOT DEFENSIVE.
   # This file runs under `set -euo pipefail`: a `grep` that matches NOTHING exits 1, and
   # with `pipefail` that status becomes the pipeline's — so an ASSIGNMENT from such a
-  # substitution, or a bare pipeline, KILLS THE SUPERVISOR with rc=1. And "no match" is
-  # exactly the reachable case here: a sweep killed at its bound prints no `verdict ` line
-  # at all, and an UNMEASURED one need not print an `unmeasured-cause` line. Caught by
-  # scripts/tests/test_worker_supervisor.sh's obj-sweep(UNMEASURED) case, which planted a
-  # verdict with no cause line and observed the whole loop exit 1.
+  # substitution, or a bare pipeline, KILLS THE SUPERVISOR with rc=1. TWO REACHABLE
+  # CAUSES, and neither is a hypothetical (an earlier version of this comment named two
+  # that are NOT reachable, which is worse than no comment because it is what stops the
+  # next person looking):
+  #   * `$script` IS WHATEVER THIS CHECKOUT HOLDS. An older, newer or stubbed sweep, or
+  #     one killed from OUTSIDE this process (an operator, the OOM killer), prints no
+  #     `verdict ` line and no `unmeasured-cause` line at all. This supervisor must not
+  #     depend on the current output shape of a sibling script to stay alive.
+  #   * `head -1`/`head -4`/`head -6` CLOSE THE PIPE EARLY, so grep dies of SIGPIPE (141)
+  #     whenever there are more matching lines than the head takes — which is the ORDINARY
+  #     case for the finding and cause pipelines. `|| true` INSIDE the brace group is what
+  #     absorbs that status before `pipefail` can promote it.
+  # Caught by scripts/tests/test_worker_supervisor.sh's obj-sweep(UNMEASURED) case, which
+  # planted a verdict with no cause line and observed the whole loop exit 1.
   verdict="$(printf '%s\n' "$out" | { grep '^OBJECT-STORE: verdict ' || true; } | head -1)"
   verdict="${verdict#OBJECT-STORE: verdict }"
   verdict="${verdict%% *}"
+
+  # THE STAMP IS WRITTEN FOR EVERY OUTCOME, AND IT CARRIES THE VERDICT. The throttle
+  # bounds how often this box SPENDS the sweep (a box that cannot measure — no timeout
+  # binary, say — must not re-attempt it every iteration), and the recorded verdict is
+  # what stops a peer lane throttling past a CORRUPT this lane just found. Only the exact
+  # token is recorded; anything unrecognised is recorded as UNMEASURED, which grants no
+  # authority to anyone.
+  if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
+    stamp_verdict=VERIFIED
+  elif [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
+    stamp_verdict=CORRUPT
+  else
+    stamp_verdict=UNMEASURED
+  fi
+  obj_sweep_write_stamp "$stamp" "$stamp_verdict"
+
   if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
     log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
     return 0
@@ -3315,7 +3405,7 @@ object_store_sweep() {
     notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
       "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
     log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
-    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it."
+    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it.${stamp:+ THEN CLEAR THE LATCH: rm -f $stamp}"
     finalize_exit "object-store-corrupt" 1
   fi
   # UNMEASURED (or no recognised verdict at all): REPORTED, and DELIBERATELY PERMISSIVE.

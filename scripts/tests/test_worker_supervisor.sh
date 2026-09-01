@@ -961,8 +961,9 @@ common_env() {
   export LOAD_PROBE_CMD="echo 0"
   export DISK_PROBE_CMD="echo 999999"
   # The #3749 shared-object-store sweep OFF by default: `REPO_ROOT` is the REAL lane
-  # checkout in these cases, so a sweep here would `git fsck` this box's 331M shared store
-  # (19.83s measured) once per case — minutes added to a MANDATORY gate component for a
+  # checkout in these cases, so a sweep here would `git fsck` this box's 366M shared store
+  # once per case — 13-24s warm and 47-80s cold or under concurrent gates (two independent
+  # measurement sets), i.e. MANY minutes added to a MANDATORY gate component for a
   # property these cases are not about. The dedicated cases below override it and point the
   # supervisor at their own scratch tree with a stub sweep, so the branch coverage is real
   # rather than mocked away.
@@ -9338,24 +9339,6 @@ t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 
 
 # ---------------------------------------------------------------------------
-# Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
-#
-# This is the assert the leak had no equivalent of: the fixtures were reaped per case, by pid, and
-# nothing ever CHECKED, so five-minute orphans accumulated invisibly behind a green summary on a
-# four-lane box. Cleanup that is not asserted is a comment.
-#
-# WHAT IT MEASURES. Every `fixture_bg` registers its pgid as OWNED; this runs the same reap the EXIT trap
-# runs and then asks each STILL-OWNED group whether any member is still alive (`kill -0` on a negative
-# pid). A group is the right unit: it sees an ORPHANED CHILD whose parent shell is already gone, which is
-# exactly the leak — a `sleep 300` inside `bash <script>`.
-#
-# THE COUNT AND THE SUBJECT SET ARE NOW DIFFERENT THINGS (#3549, roborev job 198 F2). `FIXTURE_OWNED`
-# SHRINKS: a group is released the moment it is proven gone, which is what stops a later reap signalling
-# a recycled pgid. So the non-vacuity floor is taken from `FIXTURE_STAGED`, the monotone count of groups
-# ever staged, and the leak set is what remains OWNED after the reap. A group released as `foreign`
-# (existing but unsignallable — the number now belongs to another user) is NOT a leak of ours and is
-# reported separately if it ever happens, because calling it a leak would blame this suite for a pid
-# ---------------------------------------------------------------------------
 # Tests (#3749): the THROTTLED shared-object-store sweep in the preflight path.
 #
 # Every case runs the supervisor from a SCRATCH TREE carrying a STUB sweep script — the
@@ -9397,6 +9380,18 @@ obj_sweep_tree() {
   } >"$root/scripts/check-object-store-integrity.sh"
   chmod +x "$root/scripts/check-object-store-integrity.sh"
   printf '%s' "$root"
+}
+
+# obj_sweep_calls <file> -> the number of recorded invocations, ALWAYS one integer.
+# `grep -c .` prints `0` AND EXITS 1 on an existing-but-empty file, so the idiom
+# `n=$(grep -c . f || echo 0)` yields the two-line value `0\n0` and the `[[ -eq ]]`
+# that follows ERRORS instead of comparing — a diagnostic garbled exactly on the
+# failing path, and the two-valued collapse this repo lints for elsewhere.
+obj_sweep_calls() {
+  local n
+  n="$(grep -c . "$1" 2>/dev/null || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
 }
 
 test_object_store_sweep_verdicts() {
@@ -9496,7 +9491,7 @@ test_object_store_sweep_throttle_and_disable() {
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/run1.log" 2>&1
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/run2.log" 2>&1
-  n=$(grep -c . "$calls" 2>/dev/null || echo 0)
+  n=$(obj_sweep_calls "$calls")
   if [[ "$n" -eq 1 ]]; then
     pass "obj-sweep(throttle): two runs inside the interval sweep exactly ONCE (measured invocations, not inferred)"
   else
@@ -9506,7 +9501,7 @@ test_object_store_sweep_throttle_and_disable() {
   # snapshot, a hand-edited file). ONE property apart from (a): the stamp's value.
   printf '%s\n' "$(( $(date +%s) + 86400 ))" >"$OBJ_SWEEP_STAMP"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/run3.log" 2>&1
-  n=$(grep -c . "$calls" 2>/dev/null || echo 0)
+  n=$(obj_sweep_calls "$calls")
   if [[ "$n" -eq 2 ]]; then
     pass "obj-sweep(throttle): a stamp in the FUTURE is treated as never-swept, not as a permanent skip"
   else
@@ -9571,6 +9566,99 @@ t test_object_store_sweep_verdicts
 t test_object_store_sweep_throttle_and_disable
 t test_object_store_sweep_knobs
 
+# THE THROTTLE MUST NOT SUPPRESS A PEER LANE'S CORRUPT (#3749 review, BLOCKER A).
+#
+# THE DEFECT: the stamp is keyed on the SHARED object store and lives in a box-wide
+# directory, and it used to record only a TIMESTAMP — written for every outcome. So the
+# lane that DETECTED corruption stopped, and its three peers then saw a fresh stamp,
+# skipped their own sweep for the whole 6-hour interval, and kept spawning workers against
+# a store known to be damaged: the exact harm the feature exists to prevent, delivered by
+# its own throttle.
+#
+# The two halves are asserted separately, because either alone can pass while the box is
+# still unprotected: (1) a CORRUPT run RECORDS the verdict, and (2) a later lane reading
+# that record STOPS — without re-sweeping, and while the interval is still fresh.
+test_object_store_corrupt_verdict_outlives_the_throttle() {
+  local d root counter calls rc stamp
+  # (1) A CORRUPT sweep records the VERDICT beside the timestamp.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-corrupt"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  stamp="$OBJ_SWEEP_STAMP"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/detect.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 ]] && [[ "$(sed -n 2p "$stamp" 2>/dev/null)" == "CORRUPT" ]] &&
+     grep -qE '^[0-9]+$' <(sed -n 1p "$stamp" 2>/dev/null); then
+    pass "obj-sweep(corrupt-latch): the detecting lane RECORDS 'CORRUPT' in the shared stamp, not just an epoch"
+  else
+    fail "obj-sweep(corrupt-latch): rc=$rc stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)' (wanted an epoch then CORRUPT)"
+  fi
+  # (2) THE PEER LANE. Same box, same stamp, INSIDE the interval — and ONE property
+  #     different from the run above: its sweep stub would report VERIFIED. It must still
+  #     stop, and it must NOT re-sweep (the stub records its invocations, so this is
+  #     measured, not inferred) and must name how to clear the latch.
+  calls="$d/calls-peer"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/peer.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -s "$calls" ]] &&
+     grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE" &&
+     grep -q 'object-store: CORRUPT (cached' "$d/peer.log"; then
+    pass "obj-sweep(corrupt-latch): a PEER lane inside the interval STOPS on the cached verdict instead of throttling past it — without re-sweeping"
+  else
+    fail "obj-sweep(corrupt-latch-peer): rc=$rc reswept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/peer.log)"
+  fi
+  if grep -q "rm -f $stamp" "$d/peer.log"; then
+    pass "obj-sweep(corrupt-latch): the remedy NAMES the file to remove — a latch nobody can clear bricks the box after the repair"
+  else
+    fail "obj-sweep(corrupt-latch): the stop gives no way to clear the latch (see $d/peer.log)"
+  fi
+  # (3) THE CONTROL, one property apart from (2): the SAME fresh stamp carrying VERIFIED.
+  #     The lane must proceed and, being inside the interval, must NOT sweep — so (2)'s
+  #     stop is attributable to the recorded verdict and not to the stamp's mere presence.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-control"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  printf '%s\nVERIFIED\n' "$(date +%s)" >"$OBJ_SWEEP_STAMP"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/control.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]]; then
+    pass "obj-sweep(corrupt-latch): the SAME stamp carrying VERIFIED throttles normally and the worker runs — the stop above is the recorded verdict, not the file"
+  else
+    fail "obj-sweep(corrupt-latch-control): rc=$rc swept=$([[ -s "$calls" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d)"
+  fi
+}
+
+t test_object_store_corrupt_verdict_outlives_the_throttle
+
+# ---------------------------------------------------------------------------
+# Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
+#
+# This is the assert the leak had no equivalent of: the fixtures were reaped per case, by pid, and
+# nothing ever CHECKED, so five-minute orphans accumulated invisibly behind a green summary on a
+# four-lane box. Cleanup that is not asserted is a comment.
+#
+# WHAT IT MEASURES. Every `fixture_bg` registers its pgid as OWNED; this runs the same reap the EXIT trap
+# runs and then asks each STILL-OWNED group whether any member is still alive (`kill -0` on a negative
+# pid). A group is the right unit: it sees an ORPHANED CHILD whose parent shell is already gone, which is
+# exactly the leak — a `sleep 300` inside `bash <script>`.
+#
+# THE COUNT AND THE SUBJECT SET ARE NOW DIFFERENT THINGS (#3549, roborev job 198 F2). `FIXTURE_OWNED`
+# SHRINKS: a group is released the moment it is proven gone, which is what stops a later reap signalling
+# a recycled pgid. So the non-vacuity floor is taken from `FIXTURE_STAGED`, the monotone count of groups
+# ever staged, and the leak set is what remains OWNED after the reap. A group released as `foreign`
+# (existing but unsignallable — the number now belongs to another user) is NOT a leak of ours and is
+# reported separately if it ever happens, because calling it a leak would blame this suite for a pid
 # number the kernel reassigned.
 #
 # IT MUST BE THE LAST `t`: a case running after it would register groups nobody checks.
