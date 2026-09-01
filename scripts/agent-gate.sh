@@ -285,16 +285,20 @@
 #                      [features] block contains (7 here), and a find(1) sweep
 #                      reaches non-member manifests cargo never builds. `fuzz/` is
 #                      its own excluded workspace and out of scope.
-#                      CONTRACT (#1698, roborev job 57): the scan is SOUND — it does
-#                      not report a LIVE feature dead, every ambiguity resolving
-#                      toward CREDITING — and explicitly INCOMPLETE: a dead feature
-#                      can escape. The guard prints a second success line stating
-#                      that and enumerating its known escape routes plus the one
-#                      remaining soundness LIMIT (a cfg whose feature name is
-#                      produced by MACRO EXPANSION, which no lexical scan can see),
-#                      and THIS COMPONENT
-#                      REQUIRES that line — a guard that quietly stopped declaring
-#                      its own incompleteness would imply coverage it lacks. The
+#                      CONTRACT (#1698, roborev jobs 57/60), and it is SCOPED: NO
+#                      FALSE FAIL for a gate written in a RECOGNISED spelling —
+#                      #[cfg], #![cfg], cfg!, cfg_attr (condition AND tail), with
+#                      whitespace and string escapes handled — and explicitly
+#                      INCOMPLETE: a dead feature can escape. A gate OUTSIDE that
+#                      set is NOT SEEN, and the two known such cases (a feature NAME
+#                      produced by macro expansion; a build-script env key built at
+#                      runtime) are named in the line. The unqualified version of
+#                      this claim was tried and RETRACTED: six review rounds each
+#                      produced another valid Rust spelling it did not recognise,
+#                      because Rust admits unboundedly many, so an absolute claim
+#                      recreated the recogniser treadmill one level up. THIS
+#                      COMPONENT REQUIRES that line — a guard that quietly stopped
+#                      declaring its own bounds would imply coverage it lacks. The
 #                      asymmetry is deliberate: a false PASS leaves a dead flag in
 #                      place (the status quo), a false FAIL reds correct input and
 #                      makes this the guard everyone waives.
@@ -14860,16 +14864,18 @@ run_features_load_bearing() {
     # vacuous measurement itself.
     local measured
     measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites$' "$log" || true)"
-    # THE CONTRACT LINE IS REQUIRED TOO (#1698, roborev job 57). The guard is SOUND-BY-DESIGN
-    # and INCOMPLETE, and it says so on its own second success line, enumerating the escape
-    # routes it knows about. A guard whose success text quietly stopped declaring its own
-    # incompleteness would be implying coverage it does not have, so a measurement without a
-    # contract line is NOT a PASS here.
+    # THE CONTRACT LINE IS REQUIRED TOO (#1698, roborev jobs 57/60). The guard makes a
+    # SCOPED no-false-FAIL claim over an ENUMERATED set of recognised cfg spellings, names
+    # the spellings it does NOT see, and lists the routes by which a dead feature can
+    # escape. A guard whose success text quietly stopped declaring those bounds would be
+    # implying coverage it does not have, so a measurement without a contract line is NOT a
+    # PASS here — and the pattern requires the SCOPED wording, so reverting to an
+    # unqualified soundness claim (retracted on job 60) reds this component.
     local contract
-    contract="$(grep -m1 -E '^features-load-bearing: CONTRACT: SOUND-BY-DESIGN \(.+\) and INCOMPLETE \(.+\)\. Escape routes: .+\. One soundness LIMIT, not an escape route: .+$' "$log" || true)"
+    contract="$(grep -m1 -E '^features-load-bearing: CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling .+ and INCOMPLETE \(.+\)\. A gate written in a spelling OUTSIDE that set is NOT SEEN; .+\. Escape routes: .+$' "$log" || true)"
     if [ -z "$contract" ]; then
       echo "❌ [$name] the guard printed its measurement but NOT its CONTRACT line:" >&2
-      echo "    expected \`features-load-bearing: CONTRACT: SOUND-BY-DESIGN (…) and INCOMPLETE (…). Escape routes: …. One soundness LIMIT, not an escape route: …\`" >&2
+      echo "    expected \`features-load-bearing: CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling … and INCOMPLETE (…). A gate written in a spelling OUTSIDE that set is NOT SEEN; …. Escape routes: …\`" >&2
       echo "    That line is where this guard declares what it cannot decide; without it a" >&2
       echo "    green implies coverage the guard does not have. Refusing to record PASS." >&2
       measured=""

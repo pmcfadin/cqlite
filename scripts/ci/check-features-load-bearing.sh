@@ -150,23 +150,40 @@
 # compile it), so it is out of this guard's scope — its features are neither
 # certified nor reported here.
 #
-# # THE CONTRACT: SOUND-BY-DESIGN, EXPLICITLY INCOMPLETE
+# # THE CONTRACT: A SCOPED NO-FALSE-FAIL CLAIM, AND EXPLICIT INCOMPLETENESS
 #
 # This is a LEXICAL scan over Rust, not a compiler, so it cannot be both complete and
-# sound. It chooses SOUNDNESS: wherever it cannot decide, it resolves toward CREDITING.
+# sound. It chooses to avoid FALSE FAILS — but the claim is SCOPED, and the scope is the
+# whole point:
 #
-#   * SOUND — it does not report a LIVE feature dead. No false FAILs.
-#   * INCOMPLETE — a DEAD feature can escape it. False PASSes are permitted, and
-#     DECLARED on the guard's own second success line.
+#   * NO FALSE FAIL for a gate written in a RECOGNISED spelling. The recognised set is
+#     enumerated in the printed contract line: `#[cfg]`, `#![cfg]`, `cfg!`, and
+#     `cfg_attr` (its condition AND a `cfg`/`cfg_attr` in its tail), with whitespace
+#     tolerated between `#`, `!` and `[`, and Rust string escapes decoded. Within that
+#     set every ambiguity — ownership, an undecodable escape, a build-script env key —
+#     resolves toward CREDITING.
+#   * A gate OUTSIDE that set is NOT SEEN, and such a feature would be reported DEAD.
+#     Two cases are known and neither is lexically resolvable: a cfg whose feature NAME
+#     is produced by MACRO EXPANSION, and a build-script env key CONSTRUCTED AT RUNTIME
+#     (a name joined from fragments).
+#   * INCOMPLETE — a DEAD feature can escape. False PASSes are permitted and DECLARED.
 #
-# The asymmetry is deliberate: a false PASS leaves a dead flag in place, which is merely
-# the status quo, while a false FAIL reds correct input and turns this into the guard
-# everyone waives. Three review rounds asked for scope-aware name resolution,
-# build-script module-graph traversal and macro expansion — in bash — which is the
-# unbounded-parsing problem this repo has already paid for and REMOVED a guard over
-# (#1712 deleted `pub-surface`'s rustdoc/public-API half precisely because a scanner
-# that must find declarations anywhere in arbitrary source cannot abstain). So the
-# remaining cases are resolved permissively and STATED, not implemented.
+# WHY THE CLAIM IS SCOPED RATHER THAN ABSOLUTE. It was written unqualified
+# ("SOUND-BY-DESIGN: a live feature is not reported dead") and six consecutive review
+# rounds produced six more valid spellings it did not recognise — `# [cfg(...)]` with
+# whitespace, a `cfg_attr` tail, an `\x66` escape, an aliased env import, an
+# out-of-tree `#[path]` module, a nested-member helper. Rust admits unboundedly many, so
+# the absolute claim can never be made true, and chasing it is the recogniser treadmill
+# this guard already escaped for false PASSes — recreated one level up. An unenforceable
+# claim gets NARROWED to what is enforceable, never dropped whole and never left
+# overstated: a false rationale printed in a gate log is worse than none, because it is
+# what stops the next person looking.
+#
+# IMPLEMENTING more of Rust is deliberately out of bounds: scope-aware name resolution,
+# module-graph traversal and macro expansion in bash are the unbounded-parsing problem
+# this repo has already paid for and REMOVED a guard over (#1712 deleted `pub-surface`'s
+# rustdoc/public-API half precisely because a scanner that must find declarations
+# anywhere in arbitrary source cannot abstain).
 #
 # THE DECLARED ESCAPE ROUTES (each pinned by a fixture in
 # scripts/tests/test_features_load_bearing_guard.sh, because a declaration nobody tests
@@ -182,6 +199,8 @@
 #     that feature — no API, module or scope analysis, comments and strings included —
 #     and a bare `CARGO_FEATURE_` prefix credits every feature of that package. Three
 #     narrower rules each reported a live feature dead (see E1); this one cannot.
+#   * AN UNDECODABLE STRING ESCAPE in a cfg predicate credits EVERY feature of the
+#     package, because recording a wrong name would report the real feature dead.
 #   * A `.rs` FILE WITH NO UNAMBIGUOUS OWNER credits EVERY candidate package — every
 #     member whose package directory contains it — and a file beneath a NESTED member's
 #     directory credits the OUTER member too. A module included from outside any target
@@ -190,14 +209,6 @@
 #   * INDIRECTLY redundant dependency-feature edges — `dep/x` where the declaration
 #     enables some feature that itself enables `x`. Deciding it needs the dependency's
 #     own feature table, which `--no-deps` does not carry for external crates.
-#
-# ONE SOUNDNESS LIMIT REMAINS, and it is declared as a LIMIT rather than an escape route
-# because it breaks the other way: a cfg whose feature NAME is produced by MACRO
-# EXPANSION (assembled by `concat!`, or emitted by an attribute macro) has no textual
-# `feature = "NAME"` to find, so such a feature would be reported DEAD. Nothing in this
-# workspace is written that way — 59/59 features are credited without it — and closing
-# it means expansion, which is out of bounds. It is stated on the success line so a
-# future false FAIL of that shape is diagnosable rather than mysterious.
 #
 # # FAIL-CLOSED, ALWAYS
 #
@@ -347,28 +358,42 @@ EXEMPT_FEATURES = {
 #   node_modules/ — vendored JS.
 SKIP_DIR_NAMES = {"target", ".git", "node_modules", "fuzz"}
 
-# THE CONTRACT, printed on every success — stated first, with its known instances under
-# it, because a growing list of caveats reads as an apology while a stated contract is
-# something a reader can act on. See the script header for the reasoning.
+# THE CONTRACT, printed on every success — SCOPED, because the unqualified version could
+# not be made true (roborev job 60). It read "SOUND-BY-DESIGN: a live feature is not
+# reported dead", an ABSOLUTE claim about a lexical scan of Rust — and Rust has
+# unboundedly many valid spellings of a gate, so six review rounds produced six more
+# witnesses and would have produced a seventh. That is the recogniser treadmill this
+# guard already escaped for false PASSes, recreated one level up by a universal claim.
 #
-# SOUND-BY-DESIGN: wherever this lexical scan cannot decide, it resolves toward
-# CREDITING, so it does not report a live feature dead. INCOMPLETE: a dead feature can
-# therefore escape. That asymmetry is deliberate — a false PASS leaves a dead flag in
-# place, which is the status quo, while a false FAIL reds correct input and makes this
-# the guard everyone waives.
+# So the claim is bounded by what the scanner RECOGNISES, and the recognised set is
+# enumerated in the line itself: no false FAIL for a gate written in one of those
+# spellings; a gate written outside that set is NOT SEEN, and the two known such cases
+# are named. Within the recognised set every ambiguity still resolves toward CREDITING.
+# The INCOMPLETE half is unchanged: a dead feature can escape, and the routes are listed.
+#
+# This repo's rule is that an unenforceable claim gets narrowed to what IS enforceable,
+# never dropped whole and never left overstated — a scoped claim that holds beats a
+# universal one that does not.
 CONTRACT_LINE = (
-    "CONTRACT: SOUND-BY-DESIGN (every ambiguity resolves toward CREDITING, so a live "
-    "feature is not reported dead) and INCOMPLETE (a dead feature can escape). Escape "
-    "routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target source "
-    "dir; any textual CARGO_FEATURE_* mention in a build-script package's sources (no "
-    "API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every feature of "
-    "that package); a .rs file with no unambiguous owner credits EVERY candidate package, "
-    "and one under a nested member's dir credits the outer member too; indirectly "
-    "redundant dependency edges. One soundness LIMIT, not an escape route: a cfg whose "
-    "feature name is produced by MACRO EXPANSION is not seen at all."
+    "CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling — #[cfg], "
+    "#![cfg], cfg!, and cfg_attr (its condition AND a cfg/cfg_attr in its tail), with "
+    "whitespace tolerated between # ! [ and Rust string escapes decoded — and INCOMPLETE "
+    "(a dead feature can escape). A gate written in a spelling OUTSIDE that set is NOT "
+    "SEEN; two such are known and are not lexically resolvable: a cfg whose feature NAME "
+    "is produced by MACRO EXPANSION, and a build-script env key CONSTRUCTED AT RUNTIME. "
+    "Escape routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target "
+    "source dir; any textual CARGO_FEATURE_* mention in a build-script package's sources "
+    "(no API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every "
+    "feature of that package); an undecodable string escape credits every feature of the "
+    "package; a .rs file with no unambiguous owner credits EVERY candidate package, and "
+    "one under a nested member's dir credits the outer member too; indirectly redundant "
+    "dependency edges."
 )
 
 STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
+# A feature value this scanner could not read confidently: credits EVERY feature of the
+# owning package (never one wrong name).
+AMBIGUOUS_NAME = "\x02ambiguous\x02"
 IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 
@@ -396,6 +421,59 @@ IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345678
 # LIFETIME (`'a`) is not a literal; its quote is blanked and its name left alone, which
 # is inert either way.
 # ---------------------------------------------------------------------------
+# STRING ESCAPES ARE DECODED, because the NAME matters: `#[cfg(feature = "\\x66oo")]`
+# gates the feature `foo`, and recording `x66oo` would report `foo` DEAD (roborev job 60).
+# An escape this decoder cannot read confidently makes the value AMBIGUOUS, and an
+# ambiguous value credits EVERY declared feature of the package rather than one wrong
+# name — ambiguity resolves toward crediting, as everywhere else here.
+def decode_escapes(raw):
+    HEX = "0123456789abcdefABCDEF"
+    out = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        c = raw[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            return "".join(out), True
+        e = raw[i + 1]
+        simple = {"n": "\n", "r": "\r", "t": "\t", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
+        if e in simple:
+            out.append(simple[e])
+            i += 2
+            continue
+        if e == "\n":
+            # Line continuation: the newline and the following whitespace vanish.
+            i += 2
+            while i < n and raw[i] in " \t\r\n":
+                i += 1
+            continue
+        if e == "x":
+            h = raw[i + 2:i + 4]
+            if len(h) == 2 and all(ch in HEX for ch in h):
+                out.append(chr(int(h, 16)))
+                i += 4
+                continue
+            return "".join(out), True
+        if e == "u" and i + 2 < n and raw[i + 2] == "{":
+            close = raw.find("}", i + 3)
+            digits = raw[i + 3:close] if close != -1 else ""
+            cleaned = digits.replace("_", "")
+            if close != -1 and cleaned and all(ch in HEX for ch in cleaned):
+                try:
+                    out.append(chr(int(cleaned, 16)))
+                except ValueError:
+                    return "".join(out), True
+                i = close + 1
+                continue
+            return "".join(out), True
+        return "".join(out), True
+    return "".join(out), False
+
+
 def lex(text):
     n = len(text)
     code = list(text)
@@ -456,28 +534,26 @@ def lex(text):
                             # rather than guess, so no structure is invented after it.
                             for k in range(fail_at, n):
                                 code[k] = STR_SENTINEL
-                            strings[fail_at] = text[j + 1:n]
+                            strings[fail_at] = (text[j + 1:n], False)
                             i = n
                             continue
                         content = text[j + 1:end]
+                        ambiguous = False
                         stop = end + len(term)
                     else:
                         k = j + 1
-                        buf = []
                         while k < n:
                             if text[k] == "\\" and k + 1 < n:
-                                buf.append(text[k + 1] if text[k + 1] != "n" else "\n")
                                 k += 2
                                 continue
                             if text[k] == '"':
                                 break
-                            buf.append(text[k])
                             k += 1
-                        content = "".join(buf)
+                        content, ambiguous = decode_escapes(text[j + 1:k])
                         stop = min(k + 1, n)
                     for k in range(start, stop):
                         code[k] = STR_SENTINEL
-                    strings[start] = content
+                    strings[start] = (content, ambiguous)
                     i = stop
                     continue
         # --- char literals ---------------------------------------------------
@@ -518,10 +594,15 @@ def lex(text):
 # tree, inside a `cfg_attr` TAIL — is deliberately not a site.
 # ---------------------------------------------------------------------------
 WS = "[ \t\r\n]*"
+# Rust permits whitespace between `#`, an optional `!` and `[` (`# [cfg(...)]`,
+# `# ! [cfg(...)]` are both valid), so the head is whitespace-tolerant at every joint
+# (roborev job 60): requiring `#[` contiguous meant a legal gate was NOT SEEN and its
+# feature reported dead.
 HEAD_RE = re.compile(
-    r'(?P<attr>\#!?\[' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\()'
+    r'(?P<attr>\#' + WS + r'!?' + WS + r'\[' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\()'
     r'|(?P<bang>(?<![A-Za-z0-9_])cfg' + WS + r'!' + WS + r'\()'
 )
+NESTED_CFG_RE = re.compile(r'^' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\(')
 FEATURE_EQ_RE = re.compile(r'(?<![A-Za-z0-9_])feature' + WS + r'=' + WS)
 
 
@@ -545,10 +626,12 @@ def balanced_span(code, open_idx):
     return None
 
 
-def first_top_level_arg(code, start, end):
-    """The first comma-separated argument of a predicate span, at depth 0."""
+def top_level_args(code, start, end):
+    """The comma-separated arguments of a span, split at depth 0."""
+    args = []
     depth = 0
     i = start
+    arg_start = start
     while i < end:
         c = code[i]
         if c in "([{":
@@ -556,26 +639,70 @@ def first_top_level_arg(code, start, end):
         elif c in ")]}":
             depth -= 1
         elif c == "," and depth == 0:
-            return (start, i)
+            args.append((arg_start, i))
+            arg_start = i + 1
         i += 1
-    return (start, end)
+    args.append((arg_start, end))
+    return args
+
+
+def _predicate_features(code, strings, start, end):
+    """Every feature named directly in a cfg predicate span."""
+    for fm in FEATURE_EQ_RE.finditer(code, start, end):
+        entry = strings.get(fm.end())
+        if entry is None:
+            continue
+        value, ambiguous = entry
+        if ambiguous:
+            # An escape this scanner could not decode: credit EVERY feature rather than
+            # record a wrong name (see decode_escapes).
+            yield AMBIGUOUS_NAME, fm.start()
+        elif value:
+            yield value, fm.start()
+
+
+def _cfg_span_features(code, strings, kind, start, end, depth=0):
+    """Features gated by a `cfg`/`cfg_attr` span, recursing into a cfg_attr TAIL.
+
+    A `cfg_attr` applies its TAIL attributes when its condition holds, so
+    `#[cfg_attr(unix, cfg(feature = "x"))]` is a REAL gate on `x` (roborev job 60) —
+    scanning only the condition reported such a feature dead. Only a DIRECT `cfg`/
+    `cfg_attr` item of the tail counts: a `cfg(...)` nested inside `doc(...)` is
+    documentation and stays excluded, which is what the depth-0 argument split gives.
+    """
+    if kind == "cfg":
+        for got in _predicate_features(code, strings, start, end):
+            yield got
+        return
+    args = top_level_args(code, start, end)
+    if not args:
+        return
+    cond_start, cond_end = args[0]
+    for got in _predicate_features(code, strings, cond_start, cond_end):
+        yield got
+    if depth >= 8:
+        return
+    for a_start, a_end in args[1:]:
+        m = NESTED_CFG_RE.match(code, a_start, a_end)
+        if not m:
+            continue
+        inner = balanced_span(code, m.end() - 1)
+        if inner is None:
+            continue
+        for got in _cfg_span_features(code, strings, m.group("kind"), inner[0], inner[1], depth + 1):
+            yield got
 
 
 def cfg_feature_sites(code, strings):
-    """Yield (feature_name, offset) for every feature named in a real cfg predicate."""
+    """Yield (feature_name, offset) for every feature named in a real cfg gate."""
     for m in HEAD_RE.finditer(code):
         kind = m.group("kind") if m.group("attr") else "cfg"
         span = balanced_span(code, m.end() - 1)
         if span is None:
             # Unbalanced: not compilable Rust. Left to rustc rather than guessed at.
             continue
-        start, end = span
-        if kind == "cfg_attr":
-            start, end = first_top_level_arg(code, start, end)
-        for fm in FEATURE_EQ_RE.finditer(code, start, end):
-            name = strings.get(fm.end())
-            if name:
-                yield name, fm.start()
+        for got in _cfg_span_features(code, strings, kind, span[0], span[1]):
+            yield got
 
 
 # ---------------------------------------------------------------------------
@@ -865,8 +992,13 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         for owner in owners:
             record = members[owner]["refsites"]
             for feat, off in sites:
+                line_no = code.count("\n", 0, off) + 1
+                if feat == AMBIGUOUS_NAME:
+                    for declared in members[owner]["features"]:
+                        record.setdefault(declared, "%s:%d (undecodable escape)" % (rel, line_no))
+                    continue
                 if feat not in record:
-                    record[feat] = "%s:%d" % (rel, code.count("\n", 0, off) + 1)
+                    record[feat] = "%s:%d" % (rel, line_no)
         if bs_owners:
             # RAW text, not the lexed code: a mention in a comment or a string counts too
             # (see the note above — the class is closed, not narrowed).
