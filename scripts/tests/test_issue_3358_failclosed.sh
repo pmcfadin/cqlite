@@ -102,7 +102,46 @@ case $tmp in
   /*) ;;
   *) echo "FATAL: scratch root '$tmp' is not absolute; refusing to run" >&2; exit 1 ;;
 esac
-trap 'rm -rf "$tmp"' EXIT
+# On FAILURE the scratch root is PRESERVED and every lane log EXCERPTED, because a
+# harness whose failure destroys its own evidence is the "defect that produces no
+# artifact" shape (roborev job 297, Low — reproduced before fixing: a planted absent-case
+# failure printed `see /tmp/i3358-failclosed.XXXXXX/absent.log` and the trap had already
+# deleted it).
+#
+# WHY THE EXCERPT AND NOT JUST THE PRESERVED PATH: this harness runs INSIDE the gate
+# (`bti-multiclustering`), and the only gate text an agent retains is the SUMMARY block —
+# doctrine says never read gate.log. A preserved directory therefore helps a STANDALONE
+# re-run and does nothing for the run that actually failed, so the diagnostics have to be
+# ON STDOUT to exist at all. The control case already did this at its one site
+# (`sed -n '1,40p'`); doing it in the trap covers EVERY site, including the absent and
+# empty cases the finding names, without touching eight message sites.
+#
+# Placed here so the function exists before the trap can fire; the trap is still armed
+# immediately after the scratch-root validation above, so `rm -rf ""` stays impossible.
+_i3358_cleanup() {
+  if [ "${FAIL:-0}" -gt 0 ]; then
+    printf '\n%s\n' "---------- FAILURE DIAGNOSTICS (the logs the messages above name) ----------"
+    for _log in "$tmp"/*.log; do
+      [ -f "$_log" ] || continue
+      _lines=$(wc -l < "$_log" 2>/dev/null || echo 0)
+      printf '\n===== %s (%s lines) =====\n' "$_log" "$_lines"
+      # Bounded, and it says WHERE it truncated. A cargo lane's cause can be at either
+      # end — compile errors at the top, panics and the `test result:` line at the
+      # bottom — so neither `head` nor `tail` alone is sufficient.
+      if [ "$_lines" -le 60 ]; then
+        cat "$_log"
+      else
+        sed -n '1,20p' "$_log"
+        printf '%s\n' "... [$((_lines - 50)) lines omitted] ..."
+        sed -n "$((_lines - 29)),\$p" "$_log"
+      fi
+    done
+    printf '\n%s\n' "PRESERVED for inspection (not deleted, because FAIL=$FAIL): $tmp"
+  else
+    rm -rf "$tmp"
+  fi
+}
+trap '_i3358_cleanup' EXIT
 
 # The committed fixture must be present for ANY of this to mean anything: the control's
 # expected behavior is "it runs", and both failure cases are defined relative to it.
