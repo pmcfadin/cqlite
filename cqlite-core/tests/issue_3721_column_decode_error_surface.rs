@@ -165,6 +165,31 @@ fn assert_column_decode(err: &Error, column: &str) {
     );
 }
 
+/// Roborev blocker 3: `column_type` must name the type the decode was DISPATCHED
+/// on — the SUPPLIED schema type for a matched column — and, where it differs, the
+/// on-disk header marshal type alongside it. Reporting only the header type
+/// misidentifies the cause exactly when the declaration is what is wrong.
+fn assert_dispatch_type(err: &Error, declared: &str, on_disk: &str) {
+    let Error::ColumnDecode { column_type, .. } = err else {
+        panic!("expected Error::ColumnDecode, got: {err:?}");
+    };
+    assert!(
+        column_type
+            .to_ascii_lowercase()
+            .contains(&declared.to_ascii_lowercase()),
+        "the reported type must name the DISPATCH type `{declared}` (the supplied \
+         schema type the failed decode ran on), got `{column_type}`"
+    );
+    assert!(
+        column_type
+            .to_ascii_lowercase()
+            .contains(&on_disk.to_ascii_lowercase()),
+        "the reported type must also name the on-disk header marshal type \
+         `{on_disk}`, so the report identifies both the dispatch that failed and \
+         the bytes it was pointed at; got `{column_type}`"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Schemas. Each pair is IDENTICAL except for the one declared type that provokes
 // a decode failure, so the difference in outcome is attributable to that type.
@@ -451,4 +476,275 @@ async fn fixture_identity_is_pinned() {
         "nb",
         "the complex-arm fixture must be the BIG `nb` format this file describes"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Roborev blocker 1 — the cell-flags byte is NOT an end-of-cells terminator.
+//
+// A revision of the fix kept a `not_a_cell` predicate: a simple column whose cell
+// flags byte exceeded `0x1F` `break`ed the column loop, so a SHORT ROW was again
+// reported as a successful read — the original defect in a narrower place.
+//
+// No such marker exists in the format. At `cassandra-5.0.8`,
+// `db/rows/UnfilteredSerializer.deserializeRowBody` fixes the column set BEFORE
+// any cell is read (`hasAllColumns ? headerColumns :
+// Columns.serializer.deserializeSubset(headerColumns, in)`) and iterates exactly
+// that set; cell reading is bounded by the columns bitmap / subset encoding, never
+// by a sentinel flags value. `db/rows/Cell.Serializer` defines five bits
+// (`0x01|0x02|0x04|0x08|0x10` = `0x1F`) and ignores the rest.
+//
+// Provoked WITHOUT forging bytes, exactly like every other case in this file: a
+// declared type WIDER than the on-disk one over-consumes, so the cursor lands
+// inside the following cell and the next flags byte carries a row-flag bit. Which
+// byte it lands on is data, but that a mis-sized dispatch misaligns the cursor is
+// the framing contract, not a byte pattern (issue #28).
+//
+// MEASURED at `feb5aee62` (the revision under review): each case below returned
+// `Ok` with 3 rows and the trailing on-disk columns silently absent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `active` is a 1-byte `boolean` on disk; declared `INT` the scalar decode
+/// consumes 4, leaving the cursor inside the next cell. `created` is the on-disk
+/// column after it (regulars are alphabetical: active, age, created, name,
+/// salary), so its flags byte is read from the middle of a value.
+const SIMPLE_TABLE_OVERWIDE: &str = "\
+CREATE TABLE IF NOT EXISTS test_da.simple_table (
+    id UUID PRIMARY KEY,
+    name TEXT,
+    age INT,
+    salary BIGINT,
+    active INT,
+    created TIMESTAMP
+);
+";
+
+#[tokio::test]
+async fn a_misaligning_cell_flags_byte_fails_the_read_instead_of_ending_the_row() {
+    let err = select_all(
+        SIMPLE_KEYSPACE,
+        SIMPLE_TABLE,
+        &simple_schema(SIMPLE_TABLE_OVERWIDE),
+    )
+    .await
+    .expect_err(
+        "a cell-flags byte outside Cassandra's five-bit set is a DECODE FAILURE, not \
+         an end-of-cells marker — at feb5aee62 this returned Ok with 3 rows and the \
+         trailing on-disk columns silently missing (roborev blocker 1)",
+    );
+    assert_column_decode(&err, "created");
+    // The condition really is the flags-byte one this case exists for, not some
+    // other failure that happens to abort the same read.
+    let Error::ColumnDecode { source, .. } = &err else {
+        unreachable!("assert_column_decode already matched the variant");
+    };
+    let cause = source.to_string();
+    assert!(
+        cause.contains("invalid cell flags"),
+        "the surfaced cause must be the misaligned cell-flags rejection \
+         (`cell_value.rs`, issue #191), got: {cause}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Roborev blocker 2 — an INDEX-POSITIONED walk may not answer with partial rows.
+//
+// `end_of_partition_or_bail` took a `resynchronising_walk` flag and, when set,
+// folded every `ColumnDecode` back into the `Ok(())` end-of-partition signal — so
+// the clustering-slice and reverse-index read paths returned PARTIAL RESULTS
+// SILENTLY. That is the original defect surviving on exactly the public paths a
+// wide-partition `SELECT` takes, and the 434-line first draft of this file never
+// reached them: its fixtures are single-block partitions with no promoted index.
+//
+// Fixture: the committed Cassandra `test_big.wide_partition` (`nb`), pk=1 holding
+// 290 live rows over ~600 KiB, for which Cassandra emitted a MULTI-BLOCK promoted
+// `IndexInfo` array — so `WHERE pk = 1 AND ck > … AND ck < …` engages the
+// promoted-index window and `ORDER BY ck DESC` the back-to-front block walk.
+//
+// MEASURED at `feb5aee62`, `payload` declared `INET`: the slice and the reverse
+// read each returned `Ok` with ZERO rows, while the SAME query without the index
+// narrowing (`WHERE pk = 1`) correctly returned `Error::ColumnDecode`. One query
+// therefore succeeded or failed according to which read path was chosen.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WIDE_KEYSPACE: &str = "test_big";
+const WIDE_TABLE: &str = "wide_partition";
+
+const WIDE_HEADER: &str = "\
+CREATE KEYSPACE IF NOT EXISTS test_big WITH replication = \
+{'class': 'SimpleStrategy', 'replication_factor': 1};
+USE test_big;
+";
+
+/// The fixture's real shape.
+const WIDE_TABLE_CORRECT: &str = "\
+CREATE TABLE IF NOT EXISTS test_big.wide_partition (
+    pk INT,
+    ck INT,
+    payload TEXT,
+    PRIMARY KEY (pk, ck)
+);
+";
+
+/// `payload` declared `INET`, whose decode enforces Cassandra's 4-or-16-byte
+/// address width against on-disk `text` values of ~2 KiB.
+const WIDE_TABLE_WRONG_TYPE: &str = "\
+CREATE TABLE IF NOT EXISTS test_big.wide_partition (
+    pk INT,
+    ck INT,
+    payload INET,
+    PRIMARY KEY (pk, ck)
+);
+";
+
+fn wide_schema(table: &str) -> String {
+    format!("{WIDE_HEADER}{table}")
+}
+
+const SLICE_QUERY: &str =
+    "SELECT * FROM test_big.wide_partition WHERE pk = 1 AND ck > 100 AND ck < 140";
+const REVERSE_QUERY: &str = "SELECT * FROM test_big.wide_partition WHERE pk = 1 ORDER BY ck DESC";
+const FULL_PARTITION_QUERY: &str = "SELECT * FROM test_big.wide_partition WHERE pk = 1";
+
+/// Run one query over the wide-partition fixture with `schema_body` declared.
+async fn wide_query(schema_body: &str, query: &str) -> Result<Vec<i32>, Error> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = fixture_root(WIDE_KEYSPACE, WIDE_TABLE);
+    let schema = write_schema(dir.path(), schema_body);
+    let db = open_db(&root, &schema, WIDE_KEYSPACE).await;
+    let result = db.execute(query).await?;
+    Ok(result
+        .rows
+        .iter()
+        .filter_map(|r| match r.values.get("ck") {
+            Some(cqlite_core::types::Value::Integer(i)) => Some(*i),
+            _ => None,
+        })
+        .collect())
+}
+
+#[tokio::test]
+async fn a_clustering_slice_read_surfaces_the_failure_instead_of_returning_partial_rows() {
+    let err = wide_query(&wide_schema(WIDE_TABLE_WRONG_TYPE), SLICE_QUERY)
+        .await
+        .expect_err(
+            "an index-positioned clustering-slice read must abandon the optimization \
+             and surface the decode failure — at feb5aee62 it returned Ok with ZERO \
+             rows (roborev blocker 2)",
+        );
+    assert_column_decode(&err, "payload");
+    assert_dispatch_type(&err, "inet", "text");
+}
+
+#[tokio::test]
+async fn a_reverse_index_read_surfaces_the_failure_instead_of_returning_partial_rows() {
+    let err = wide_query(&wide_schema(WIDE_TABLE_WRONG_TYPE), REVERSE_QUERY)
+        .await
+        .expect_err(
+            "the promoted-index reverse block walk must abandon the optimization and \
+             surface the decode failure — at feb5aee62 it returned Ok with ZERO rows",
+        );
+    assert_column_decode(&err, "payload");
+}
+
+/// The three read paths must AGREE. Without this the two cases above could be
+/// satisfied by a fix that failed every wide-partition read, and the property the
+/// issue is about — one query answering differently depending on which path was
+/// chosen — would still be untested from the other side.
+#[tokio::test]
+async fn every_wide_partition_read_path_answers_the_same_way() {
+    for query in [SLICE_QUERY, REVERSE_QUERY, FULL_PARTITION_QUERY] {
+        let err = wide_query(&wide_schema(WIDE_TABLE_WRONG_TYPE), query)
+            .await
+            .expect_err("every read path must surface the failure: {query}");
+        assert_column_decode(&err, "payload");
+    }
+}
+
+// ─── CONTROLS: the fallback must cost the ROWS nothing, only the fast path ───
+
+/// The correct-schema slice still returns exactly its rows. This is the case the
+/// earlier revision's `resynchronising_walk` suppression existed to protect, and
+/// the one a naive "propagate everywhere" fix breaks: the promoted-index window
+/// over-reads into a `text` value on this real fixture, so the windowed walk DOES
+/// fail here. Retracting the narrowing and re-reading the full partition returns
+/// the same 39 rows the pre-fix swallow returned — measured identical at
+/// `feb5aee62` and at HEAD.
+#[tokio::test]
+async fn a_correct_schema_clustering_slice_still_returns_every_row() {
+    let mut cks = wide_query(&wide_schema(WIDE_TABLE_CORRECT), SLICE_QUERY)
+        .await
+        .expect("correct-schema clustering slice must succeed");
+    cks.sort_unstable();
+    assert_eq!(
+        cks,
+        (101..140).collect::<Vec<i32>>(),
+        "ck in (100,140) must return 101..=139 — the fallback may cost the fast \
+         path, never a row"
+    );
+}
+
+#[tokio::test]
+async fn a_correct_schema_reverse_read_still_returns_every_row_in_order() {
+    let cks = wide_query(&wide_schema(WIDE_TABLE_CORRECT), REVERSE_QUERY)
+        .await
+        .expect("correct-schema reverse read must succeed");
+    let mut ascending = cks.clone();
+    ascending.sort_unstable();
+    assert_eq!(
+        cks.len(),
+        290,
+        "pk=1 holds 290 live rows (ck 0..299 minus the range tombstone over 30..39)"
+    );
+    assert_eq!(
+        cks,
+        ascending.iter().rev().copied().collect::<Vec<i32>>(),
+        "ORDER BY ck DESC must return the identical set in exact reverse order"
+    );
+}
+
+#[tokio::test]
+async fn a_correct_schema_full_partition_read_is_unchanged() {
+    let cks = wide_query(&wide_schema(WIDE_TABLE_CORRECT), FULL_PARTITION_QUERY)
+        .await
+        .expect("correct-schema full-partition read must succeed");
+    assert_eq!(cks.len(), 290, "pk=1 holds 290 live rows");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Roborev blocker 3 — the reported type is the DISPATCH type.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A matched SIMPLE column dispatches on the SUPPLIED schema type
+/// (`ColumnToParse.kind`, resolved from `schema.map(data_type)`), so reporting the
+/// on-disk header marshal type alone points a reader at the data when it is the
+/// DECLARATION that is wrong. Pre-fix this read `text`.
+#[tokio::test]
+async fn the_reported_type_is_the_simple_columns_dispatch_type() {
+    let err = select_all(
+        SIMPLE_KEYSPACE,
+        SIMPLE_TABLE,
+        &simple_schema(SIMPLE_TABLE_WRONG_TYPE),
+    )
+    .await
+    .expect_err("mis-declared `name` must fail the read");
+    assert_dispatch_type(&err, "inet", "text");
+}
+
+/// A COMPLEX column decodes its container from the on-disk header type (#1081)
+/// but its cell-path KEY and ELEMENT from the supplied schema type — and the
+/// key/element parameters a caller must fix live only in the latter. Pre-fix this
+/// reported the on-disk type alone, naming neither the declared `bigint` key nor
+/// the fact that the declaration was the failing dispatch. The two spellings must
+/// BOTH appear, because the whole point is to tell them apart: the report reads
+/// `map<BIGINT, TEXT> (on-disk map<int, text>)`.
+#[tokio::test]
+async fn the_reported_type_names_the_complex_columns_declared_key_type() {
+    let err = select_all(
+        COMPLEX_KEYSPACE,
+        COMPLEX_TABLE,
+        &complex_schema(COMPLEX_TABLE_WRONG_KEY),
+    )
+    .await
+    .expect_err("mis-declared map key must fail the read");
+    assert_dispatch_type(&err, "map<bigint, text>", "map<int, text>");
 }

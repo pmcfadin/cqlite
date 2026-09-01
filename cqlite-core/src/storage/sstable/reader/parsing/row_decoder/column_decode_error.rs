@@ -148,9 +148,9 @@ pub(crate) fn is_column_decode(e: &Error) -> bool {
 ///   (`complex_type`, authoritative for `UserType(...)`, issue #1081) but the
 ///   cell-path KEY and the ELEMENT are decoded from the supplied schema type
 ///   (`parse_complex_column_inner`'s `column`). A map whose key is mis-declared
-///   `BIGINT` therefore fails on the supplied type while the header says
-///   `MapType(Int32Type, UTF8Type)`, and the element/key type the caller has to fix
-///   appears only in the former.
+///   `BIGINT` therefore fails on the SUPPLIED type while the header describes the
+///   real on-disk `int` key, and the element/key type the caller has to fix appears
+///   only in the former (measured: `map<BIGINT, TEXT> (on-disk map<int, text>)`).
 ///
 /// Naming both when they differ is what makes the report complete: the declared
 /// type identifies the dispatch that failed (including its key/element parameters),
