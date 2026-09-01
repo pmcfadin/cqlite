@@ -231,6 +231,15 @@ the fix job 319 had just made**, and **five separate rounds have now landed in t
 reservation/locking subsystem alone** (183, 203, 261, 269, 321). That subsystem, not the file, is
 where the variant list refuses to close.
 
+**Declared host precondition: cgroup v2 unified (job 322).** `_unit_runs_a_gate` composes
+`/sys/fs/cgroup${ControlGroup}/cgroup.procs` directly. On a cgroup-v1 host `systemd-run --user`
+still works but that file lives under a controller-specific mount, so the helper answers `unknown`
+and every caller refuses. **That degrades SAFE** — a contended reservation is permanently refused
+rather than wrongly reclaimed, so two gates still cannot land on one summary path; the cost is that
+a stale reservation cannot self-heal and the operator must use a fresh path. Declared rather than
+fixed because every box on this fleet is measured `cgroup2fs` unified, and a mount-resolution guard
+for a host class we cannot test on is new executable code on a path nothing here takes.
+
 **Where the boundary now sits for output-path aliasing, stated so the next finding is triageable
 rather than automatically fixed.** Destinations are checked for **symlinks** (job 169) and for
 **multiple hard links** (job 321) — both cheap, both kept. Aliasing routes beyond those two —

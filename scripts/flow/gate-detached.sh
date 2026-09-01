@@ -881,6 +881,18 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
   # step. Caught by 4b.77/4b.86, which assert a dead owner does NOT block the path forever. A unit with no
   # control group has no processes; that is a positive fact about the unit.
   [ -n "$cg" ] || return 1
+  # DECLARED PRECONDITION: cgroup v2 UNIFIED (roborev job 322, Medium). This composes the unified
+  # path directly. On a cgroup-v1 host `systemd-run --user` still works, but `cgroup.procs` lives
+  # under a controller-specific mount, so this path is absent and the helper answers `unknown` (2) —
+  # which every caller refuses on. That direction is SAFE, not a hole: a contended reservation is
+  # permanently REFUSED rather than wrongly reclaimed, so two gates can never land on one summary.
+  # The cost is that a stale reservation cannot self-heal there and the operator must use a fresh path.
+  #
+  # DECLARED rather than fixed, deliberately. Resolving the mount from /proc/self/mountinfo is the
+  # general fix and it is NEW EXECUTABLE CODE on a path this fleet never takes — measured: every box
+  # here is `cgroup2fs` unified with `cgroup.controllers` present. A guard for an unreachable host
+  # class, written without a host to test it on, is how the next review round gets its finding. If a
+  # v1 host ever enters the fleet, resolve the mount here; until then this sentence is the boundary.
   procs="/sys/fs/cgroup${cg}/cgroup.procs"
   if [ ! -e "$procs" ]; then
     # Absent, or unlookable? `-e` is two-valued and collapses those. The scope genuinely vanishing is an

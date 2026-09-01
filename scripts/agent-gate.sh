@@ -7732,9 +7732,15 @@ _hb_start() {
 # misses us, an OOM reap of the smallest process) the beat goes stale under a LIVE
 # gate, and the reader would report STALLED about a gate that is still working — a false
 # death is expensive, it sends a lane off to re-run a gate that was about to PASS.
-# Component boundaries are the only cheap place to notice, and they are frequent
-# enough: the longest single component (tooling-tests, 687-849s) is bounded by one
-# boundary at each end, and a beater that survives a boundary keeps beating through it.
+# Component boundaries are ONE place to notice; the slot-wait loop is the other, because no
+# component boundary exists until the slot is granted (roborev job 322).
+#
+# "FREQUENT ENOUGH" WAS DERIVED FROM A FIGURE THAT HAS SINCE MORE THAN DOUBLED. This comment said
+# the longest single component was `tooling-tests` at 687-849s, and that number is what produced
+# the "~850s at the longest" wait bound stated in four places elsewhere. Gate of record #4 on this
+# branch measured `tooling-tests` at **2073s** — 2.4x it — because that component executes ~69
+# nested scripts and keeps acquiring more. Do not re-derive a bound from this sentence: read the
+# component table in an actual SUMMARY block, where it is a measurement.
 _hb_ensure() {
   [ "${BASHPID:-$$}" = "$$" ] || return 0   # pool subshells: not their job (cf. #1737)
   [ "$HEARTBEAT_STATE" = "on" ] || return 0
@@ -17677,6 +17683,20 @@ acquire_gate_slot() {
       printed=1
     fi
     waited=$(( waited + 1 ))
+    # RE-LAUNCH THE BEATER WHILE QUEUED TOO (roborev job 322, Medium). `_hb_ensure` was reachable
+    # only from `record_result`, i.e. at COMPONENT boundaries — and no component runs until the slot
+    # is granted. So a beater that died during the queue wait was never restarted: the reader
+    # reported STALLED about a gate that was merely QUEUED, and there was not even a component table
+    # yet to derive a wait bound from, so a closer following this repo's own guidance would relaunch
+    # a still-queued gate — two gates on one summary path, the outcome #3473 exists to prevent.
+    #
+    # The queue is not a short window. Under load the gate can sit 20+ minutes before it starts, and
+    # on a busy box longer, so this is the phase where an unrecovered beater does the most damage.
+    #
+    # Every ~20s (100 ticks x 0.2s), matching the beat interval, so recovery lands within about one
+    # beat rather than after a component. `_hb_ensure` respawns ONLY on an affirmative `gone` and
+    # self-guards on BASHPID / HEARTBEAT_STATE, so calling it often is cheap and cannot stack beaters.
+    if [ $(( waited % 100 )) -eq 0 ]; then _hb_ensure; fi
     sleep 0.2
   done
   [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)" >&2
