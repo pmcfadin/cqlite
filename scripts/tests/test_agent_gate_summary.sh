@@ -65,6 +65,16 @@ bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # so it can never be mistaken for a passing assertion (issue #3249 AC3).
 skipped() { printf 'skip - %s\n' "$1"; SKIPPED_TOOLING=$((SKIPPED_TOOLING + 1)); }
 
+# out_has <text> <grep-args...>: a SIGPIPE-SAFE text predicate (issue #3727 / #3862). Under
+# `set -o pipefail`, `out_has "$big" PAT` can return **141 with the match present**:
+# `grep -q` exits at the first match and CLOSES the pipe, so printf's next write dies — which makes
+# it a RACE at any payload above bash's ~4 KiB stdio chunk rather than a clean threshold (measured:
+# 64 KiB always fine, 128 KiB always 141, and a 41 KB whole-function payload in case 52 flaked once
+# under load, reporting `missing: counts` while the pattern was present in the text it printed). A
+# here-string is not a pipeline, so grep's own status is the answer and pipefail has nothing to
+# override. Any flags that followed `-q` are passed through unchanged.
+out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
+
 # assert_complete <label> <file>: file must contain start marker, end marker,
 # RESULT line, and a representative stage line.
 assert_complete() {
@@ -464,7 +474,7 @@ classify_out=$(printf '%s\n' \
   "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
   | bash "$GATE" --classify-test-targets 2>/dev/null)
 # Nested helper + module files must be EXCLUDED (testname is the middle field).
-if printf '%s\n' "$classify_out" | grep -qE '\|(data_multi|mod)\|'; then
+if out_has "$classify_out" -E '\|(data_multi|mod)\|'; then
   bad "classify: nested helper (write_read_roundtrip/data_multi.rs or common/mod.rs) wrongly picked as a --test target"
   echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
 else
@@ -472,7 +482,7 @@ else
 fi
 # A real direct integration-test target must still be picked, mapped to its pkg
 # (features field empty for a target with no required-features).
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite-core|compact_command|"; then
+if out_has "$classify_out" -xF "cqlite-core|compact_command|"; then
   ok "classify: real integration-test target (compact_command) picked with correct package"
 else
   bad "classify: real integration-test target compact_command was NOT picked"
@@ -481,8 +491,8 @@ fi
 # Finding 1: a top-level tests/*.rs target is owned by BOTH the workspace-root
 # `cqlite` package AND the cqlite-integration-tests crate; BOTH must be emitted
 # so the root package's target is never silently dropped from --lite selection.
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite|cassandra5_header_tests|" \
-   && printf '%s\n' "$classify_out" | grep -qxF "cqlite-integration-tests|cassandra5_header_tests|"; then
+if out_has "$classify_out" -xF "cqlite|cassandra5_header_tests|" \
+   && out_has "$classify_out" -xF "cqlite-integration-tests|cassandra5_header_tests|"; then
   ok "classify: root-cqlite + integration-tests BOTH emitted for a top-level tests/*.rs target (finding 1)"
 else
   bad "classify: top-level tests/*.rs target did NOT emit both owning packages (root cqlite dropped)"
@@ -490,7 +500,7 @@ else
 fi
 # Finding 2: a target that declares required-features must carry them through so
 # --lite compiles it WITH those features instead of invoking it feature-less.
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite-cli|issue_1388_compact_major_drop|write-support"; then
+if out_has "$classify_out" -xF "cqlite-cli|issue_1388_compact_major_drop|write-support"; then
   ok "classify: required-features (write-support) passed through for a feature-gated target (finding 2)"
 else
   bad "classify: required-features NOT passed through for issue_1388_compact_major_drop"
@@ -516,29 +526,29 @@ owners_out=$(printf '%s\n' \
   "docs/some-doc.md" \
   | bash "$GATE" --classify-package-owners 2>/dev/null)
 # A currently-missed tools/* member must resolve to ITS package (has a lib -> 1).
-if printf '%s\n' "$owners_out" | grep -qxF "format-validator|1"; then
+if out_has "$owners_out" -xF "format-validator|1"; then
   ok "owners: tools/format-validator resolves to its own package (was falling through)"
 else
   bad "owners: tools/format-validator/src/lib.rs did NOT resolve to format-validator"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 fi
 # A bindings/* member must resolve to its cdylib package (no lib target -> 0).
-if printf '%s\n' "$owners_out" | grep -qxF "cqlite-py|0" \
-   && printf '%s\n' "$owners_out" | grep -qxF "cqlite-node|0"; then
+if out_has "$owners_out" -xF "cqlite-py|0" \
+   && out_has "$owners_out" -xF "cqlite-node|0"; then
   ok "owners: bindings/{python,node} resolve to cqlite-py|0 / cqlite-node|0 (cdylib, no --lib)"
 else
   bad "owners: bindings/* did NOT resolve to their packages with has_lib=0"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 fi
 # The examples crate must resolve to its own package (has a lib -> 1).
-if printf '%s\n' "$owners_out" | grep -qxF "cqlite-examples|1"; then
+if out_has "$owners_out" -xF "cqlite-examples|1"; then
   ok "owners: examples/ resolves to cqlite-examples (was falling through)"
 else
   bad "owners: examples/basic.rs did NOT resolve to cqlite-examples"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 fi
 # A nested member (tests/format-compatibility) must win over its parent tests/.
-if printf '%s\n' "$owners_out" | grep -qxF "format-compatibility-tests|0"; then
+if out_has "$owners_out" -xF "format-compatibility-tests|0"; then
   ok "owners: nested tests/format-compatibility wins longest-prefix over tests/"
 else
   bad "owners: tests/format-compatibility did NOT resolve to format-compatibility-tests"
@@ -547,7 +557,7 @@ fi
 # The workspace-root `cqlite` package (manifest dir == repo root) is a degenerate
 # catch-all prefix and must NOT be a path owner — a docs-only change resolves to
 # NO package (falls through to the cqlite-core --lib default), not to root cqlite.
-if printf '%s\n' "$owners_out" | grep -q '^cqlite|'; then
+if out_has "$owners_out" '^cqlite|'; then
   bad "owners: repo-root 'cqlite' package wrongly claimed a path (degenerate catch-all)"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 else
@@ -593,9 +603,9 @@ fi
 #     message naming the missing tooling. Assert the message (a) names jq AND
 #     python3, and (b) does NOT advertise a narrowed `cqlite-core --lib` run.
 noparser_msg=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --scoped-noparser-fail-msg 2>/dev/null)
-if printf '%s\n' "$noparser_msg" | grep -qF 'jq' \
-   && printf '%s\n' "$noparser_msg" | grep -qF 'python3' \
-   && ! printf '%s\n' "$noparser_msg" | grep -qF -- '--lib'; then
+if out_has "$noparser_msg" -F 'jq' \
+   && out_has "$noparser_msg" -F 'python3' \
+   && ! out_has "$noparser_msg" -F -- '--lib'; then
   ok "no-parser: FAILS loudly naming jq+python3 (never silently narrows to cqlite-core --lib)"
 else
   bad "no-parser: fail message does not name the missing tools (or still advertises a --lib narrowing)"
@@ -624,14 +634,14 @@ py_only=$(printf '%s\n' \
 # The advertised plan string is COMPOSED from the same PYTHON_LITE_*_CMD component
 # constants the executor eval's (roborev job 1449), so asserting the exact canonical
 # command here pins what actually runs — not a parallel copy that can drift.
-if printf '%s\n' "$py_only" | grep -qxF \
+if out_has "$py_only" -xF \
      "python-tier: maturin develop --profile dev -m bindings/python/Cargo.toml && pytest bindings/python/tests -m 'not slow' -q"; then
   ok "py-route: python-only diff selects the maturin --profile dev + not-slow-pytest tier (exact canonical command)"
 else
   bad "py-route: python-only diff did NOT select the canonical python tier command"
   echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
 fi
-if printf '%s\n' "$py_only" | grep -q "^rust-pkg:"; then
+if out_has "$py_only" "^rust-pkg:"; then
   bad "py-route: python-only diff still selected a rust cargo package (cqlite-py run is the always-failing path)"
   echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
 else
@@ -643,15 +653,15 @@ mixed=$(printf '%s\n' \
   "bindings/python/src/value.rs" \
   "cqlite-core/src/storage/sstable/reader.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$mixed" | grep -qxF "rust-pkg: cqlite-core" \
-   && printf '%s\n' "$mixed" | grep -q "^python-tier: "; then
+if out_has "$mixed" -xF "rust-pkg: cqlite-core" \
+   && out_has "$mixed" "^python-tier: "; then
   ok "py-route: mixed diff selects BOTH cqlite-core AND the python tier"
 else
   bad "py-route: mixed diff did NOT select both rust + python tier"
   echo "------- plan -------"; printf '%s\n' "$mixed"; echo "--------------------"
 fi
 # cqlite-py must NEVER appear as a rust cargo package in the mixed plan either.
-if printf '%s\n' "$mixed" | grep -q "cqlite-py"; then
+if out_has "$mixed" "cqlite-py"; then
   bad "py-route: mixed diff plan referenced cqlite-py as a cargo package (must be python tier only)"
   echo "------- plan -------"; printf '%s\n' "$mixed"; echo "--------------------"
 else
@@ -662,8 +672,8 @@ fi
 node_only=$(printf '%s\n' \
   "bindings/node/src/database.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$node_only" | grep -qxF "rust-pkg: cqlite-node" \
-   && ! printf '%s\n' "$node_only" | grep -q "^python-tier:"; then
+if out_has "$node_only" -xF "rust-pkg: cqlite-node" \
+   && ! out_has "$node_only" "^python-tier:"; then
   ok "py-route: node diff unaffected (cqlite-node, no python tier)"
 else
   bad "py-route: node diff wrongly triggered the python tier or missed cqlite-node"
@@ -674,8 +684,8 @@ fi
 rust_only=$(printf '%s\n' \
   "cqlite-core/src/storage/sstable/reader.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$rust_only" | grep -qxF "rust-pkg: cqlite-core" \
-   && ! printf '%s\n' "$rust_only" | grep -q "^python-tier:"; then
+if out_has "$rust_only" -xF "rust-pkg: cqlite-core" \
+   && ! out_has "$rust_only" "^python-tier:"; then
   ok "py-route: rust-only diff unchanged (cqlite-core, no python tier)"
 else
   bad "py-route: rust-only diff behavior changed (unexpected python tier or missing cqlite-core)"
@@ -718,8 +728,8 @@ cc_core=$(printf '%s\n' \
   "cqlite-core/src/storage/sstable/reader.rs" \
   | bash "$GATE" --classify-core-dependent-compile-check 2>/dev/null)
 # The two acceptance-named dependent test crates must be compile-checked.
-if printf '%s\n' "$cc_core" | grep -qxF "compile-check-pkg: cqlite-integration-tests" \
-   && printf '%s\n' "$cc_core" | grep -qxF "compile-check-pkg: format-compatibility-tests"; then
+if out_has "$cc_core" -xF "compile-check-pkg: cqlite-integration-tests" \
+   && out_has "$cc_core" -xF "compile-check-pkg: format-compatibility-tests"; then
   ok "core-dep: core-src diff adds --no-run compile-check of integration-tests + format-compatibility-tests"
 else
   bad "core-dep: core-src diff did NOT add the dependent-crate compile-checks"
@@ -727,8 +737,8 @@ else
 fi
 # cqlite-core itself must NOT be in the compile-check set (its --lib already runs),
 # and cdylib bindings (no test targets) must not appear.
-if printf '%s\n' "$cc_core" | grep -qF "compile-check-pkg: cqlite-core" \
-   || printf '%s\n' "$cc_core" | grep -qE 'compile-check-pkg: (cqlite-py|cqlite-node)$'; then
+if out_has "$cc_core" -F "compile-check-pkg: cqlite-core" \
+   || out_has "$cc_core" -E 'compile-check-pkg: (cqlite-py|cqlite-node)$'; then
   bad "core-dep: compile-check set wrongly included cqlite-core or a cdylib binding"
   echo "------- plan -------"; printf '%s\n' "$cc_core"; echo "--------------------"
 else
@@ -1693,8 +1703,8 @@ fi
 # ...and the call site must consume the token through a VARIABLE: reading
 # `$(_perf_accel_token)` there would reintroduce the very fork the path excludes.
 accel_fn_text=$(fn_text "$GATE" accelerators_line)
-if printf '%s' "$accel_fn_text" | grep -q '_perf_accel_token_into' \
-   && ! printf '%s' "$accel_fn_text" | grep -q '\$(_perf_accel_token\|`_perf_accel_token'; then
+if out_has "$accel_fn_text" '_perf_accel_token_into' \
+   && ! out_has "$accel_fn_text" '\$(_perf_accel_token\|`_perf_accel_token'; then
   ok "perf-free: accelerators_line consumes the perf token through a variable, not a subshell"
 else
   bad "perf-free: accelerators_line reads the perf token through a command substitution"
@@ -3438,7 +3448,7 @@ n_meta_=$(printf '%s\n' "$meta_fns_" | grep -c . || true)
 # The derivation must contain the two helpers this finding was ABOUT. Anything else means the
 # extraction moved and the lint is measuring a set that no longer includes its own subject.
 for must_ in _package_unittest_srcs _package_test_targets_gated; do
-  if printf '%s\n' "$meta_fns_" | grep -qxF "$must_"; then
+  if out_has "$meta_fns_" -xF "$must_"; then
     ok "1699-r18-parser-derive: the derived cargo-metadata helper set includes $must_ ($n_meta_ helpers derived)"
   else
     bad "1699-r18-parser-derive: $must_ is ABSENT from the derived cargo-metadata helper set ($n_meta_ derived) — the derivation is broken, so every assert below it would pass having measured nothing"
@@ -4463,7 +4473,7 @@ else
       ok "1699-cfggate-noleak: the gate text does not leak onto the ungated sibling"
     fi
     # the child is still RESOLVED — the source set must stay complete, only its status is unknown
-    if printf '%s\n' "$cg_out" | grep -q 'gated_child.rs'; then
+    if out_has "$cg_out" 'gated_child.rs'; then
       ok "1699-cfggate-resolved: the gated child is still in the source set (reported, not dropped)"
     else
       bad "1699-cfggate-resolved: the gated child vanished from the source set — dropping it is the SILENT direction this fix exists to close"
@@ -4518,7 +4528,7 @@ else
       ok "1699-cfggate-multileak: the multiline gate does not leak onto the following ungated sibling"
     fi
     # the child must still RESOLVE through its #[path], i.e. the balance rule did not eat the path
-    if printf '%s\n' "$mc_out" | grep -q 'support/datasets_root.rs'; then
+    if out_has "$mc_out" 'support/datasets_root.rs'; then
       ok "1699-cfggate-multipath: the #[path] after a multiline cfg still resolves the child"
     else
       bad "1699-cfggate-multipath: the child did not resolve through its #[path] — the balance rule swallowed the path attribute, shrinking the source set"
@@ -4631,7 +4641,7 @@ else
 fi
 # and the truncation must be MARKED, tested on real multiline input rather than on the prefix alone
 cs_fn=$(awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE")
-if printf '%s' "$cs_fn" | grep -q 's/\$/+/'; then
+if out_has "$cs_fn" 's/\$/+/'; then
   ok "1699-cfgsite-marker: a continued attribute is marked with a truncation indicator"
 else
   bad "1699-cfgsite-marker: no truncation marker in the cfg-site report — a multiline attribute is silently reported as if complete"
@@ -4797,10 +4807,10 @@ else
 fi
 lh_fn48_code=$(printf '%s\n' "$lh_fn48" | sed 's/^[[:space:]]*#.*$//')
 sg_missing=""
-printf '%s\n' "$lh_fn48_code" | grep -qE '_sp_rc1=\$\?' || sg_missing="$sg_missing status-capture-1"
-printf '%s\n' "$lh_fn48_code" | grep -qE '_sp_rc2=\$\?' || sg_missing="$sg_missing status-capture-2"
-printf '%s\n' "$lh_fn48_code" | grep -qE '\[ "\$_sp_rc[12]" -ge 2 \]' || sg_missing="$sg_missing status-test"
-printf '%s\n' "$lh_fn48_code" | grep -qE '\[ ! -s "\$_mt_fatal" \].*\[ ! -s "\$_mt_gaps" \]' || sg_missing="$sg_missing both-empty-test"
+out_has "$lh_fn48_code" -E '_sp_rc1=\$\?' || sg_missing="$sg_missing status-capture-1"
+out_has "$lh_fn48_code" -E '_sp_rc2=\$\?' || sg_missing="$sg_missing status-capture-2"
+out_has "$lh_fn48_code" -E '\[ "\$_sp_rc[12]" -ge 2 \]' || sg_missing="$sg_missing status-test"
+out_has "$lh_fn48_code" -E '\[ ! -s "\$_mt_fatal" \].*\[ ! -s "\$_mt_gaps" \]' || sg_missing="$sg_missing both-empty-test"
 if [ -n "$sg_missing" ]; then
   bad "1699-split-grammar: the closed grammar is not IMPLEMENTED — missing:$sg_missing. Asserted on control flow (comments stripped), because grepping the diagnostic TEXT would stay green if the branch were deleted and its explanation left behind"
 else
@@ -4816,20 +4826,20 @@ fi
 # from its own fix. Asserted on the FUNCTION and on the CALL SITE, comments stripped.
 pol_fn=$(awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
 pol_missing=""
-printf '%s\n' "$pol_fn" | grep -qE 'return 2' || pol_missing="$pol_missing fn-returns-2"
-printf '%s\n' "$pol_fn" | grep -qE '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
-if printf '%s\n' "$pol_fn" | grep -qE "sed -E 's/not"; then
+out_has "$pol_fn" -E 'return 2' || pol_missing="$pol_missing fn-returns-2"
+out_has "$pol_fn" -E '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
+if out_has "$pol_fn" -E "sed -E 's/not"; then
   pol_missing="$pol_missing fn-still-strips"
 fi
-printf '%s\n' "$pol_fn" | grep -qE '_pc_allow=' || pol_missing="$pol_missing fn-has-allowlist"
-printf '%s\n' "$pol_fn" | grep -qE '_pc_sites.*-ne.*_pc_allowed' || pol_missing="$pol_missing fn-compares-sites-to-allowed"
-if printf '%s\n' "$pol_fn" | grep -qE '\|[[:space:]]*grep'; then
+out_has "$pol_fn" -E '_pc_allow=' || pol_missing="$pol_missing fn-has-allowlist"
+out_has "$pol_fn" -E '_pc_sites.*-ne.*_pc_allowed' || pol_missing="$pol_missing fn-compares-sites-to-allowed"
+if out_has "$pol_fn" -E '\|[[:space:]]*grep'; then
   pol_missing="$pol_missing fn-uses-a-pipeline"
 fi
 pol_caller=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
-printf '%s\n' "$pol_caller" | grep -qE '_lh_positive_in_closure "\$_mt_closure" "\$cfg_site" \|\| _pol_rc=\$\?' \
+out_has "$pol_caller" -E '_lh_positive_in_closure "\$_mt_closure" "\$cfg_site" \|\| _pol_rc=\$\?' \
   || pol_missing="$pol_missing caller-captures-status"
-printf '%s\n' "$pol_caller" | grep -qE '\[ "\$_pol_rc" -ge 2 \]' || pol_missing="$pol_missing caller-tests-ge2"
+out_has "$pol_caller" -E '\[ "\$_pol_rc" -ge 2 \]' || pol_missing="$pol_missing caller-tests-ge2"
 if [ -n "$pol_missing" ]; then
   bad "1699-polarity-tristate: the polarity scan or its caller collapses 'could not tell' onto 'no positive site' — missing:$pol_missing. A failed scan then routes the target into allow_zero and a positively-gated target can pass with zero tests"
 else
@@ -4887,9 +4897,9 @@ fi
 # the policy and the counts, which is what a reader needs to interpret an excusal at all.
 lh_fn52=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
 pol_cen_missing=""
-printf '%s\n' "$lh_fn52" | grep -qE 'lh_census\+=\("polarity: \$\{#allow_zero\[@\]\} of \$count' \
+out_has "$lh_fn52" -E 'lh_census\+=\("polarity: \$\{#allow_zero\[@\]\} of \$count' \
   || pol_cen_missing="$pol_cen_missing counts"
-printf '%s\n' "$lh_fn52" | grep -qF 'excusable ONLY when EVERY' || pol_cen_missing="$pol_cen_missing policy"
+out_has "$lh_fn52" -F 'excusable ONLY when EVERY' || pol_cen_missing="$pol_cen_missing policy"
 if [ -n "$pol_cen_missing" ]; then
   bad "1699-pol-census: the excusal policy/counts do not reach the census — missing:$pol_cen_missing. A reader of the component log would see an allowed-zero entry with no way to tell what earned it"
 else
@@ -4915,8 +4925,8 @@ fi
 nll_fn=$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")
 nll_component=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 if [ -n "$nll_fn" ] \
-   && ! printf '%s' "$nll_fn" | grep -qE 'npm (run )?test' \
-   && printf '%s' "$nll_component" | grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' \
+   && ! out_has "$nll_fn" -E 'npm (run )?test' \
+   && out_has "$nll_component" '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' \
    && [ "$(printf '%s' "$nll_component" | grep -cE '^[[:space:]]*npm (run )?test( |$)')" -eq 1 ]; then
   ok "1465-one-executor: the affirmation is wired to the component, runs no jest itself, and node-bindings invokes npm test exactly once"
 else
@@ -4942,7 +4952,7 @@ fi
 #        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
 #        ambiguous between "it ran" and "this gate predates the line".
 # SIGPIPE-FREE MATCH, DELIBERATELY NOT `printf | grep -q` (#3685). Measured at this site:
-#        `printf '%s' "$nll_component" | grep -q PATTERN` under this suite's `set -uo pipefail`
+#        `out_has "$nll_component" PATTERN` under this suite's `set -uo pipefail`
 #        returned **rc=141** in 30 of 80 runs (37.5%) — `grep -q` exits at the first match, closing
 #        the read end, and whichever of `printf`'s write(2) calls lands after that gets EPIPE. Over
 #        those 80 runs `rc=1` occurred ZERO times: the note was present EVERY time, so the pipeline
@@ -5102,7 +5112,7 @@ else
   # Y4: the in-lane strictness control keys on CQLITE_JEST_JSON as its "this is the gate"
   # marker. NOTHING otherwise pins the pairing, so a rename on either side would silently
   # turn the control into a no-op instead of reddening. Both halves asserted here.
-  printf '%s' "$nll_comp_v1" | grep -q 'CQLITE_JEST_JSON=' \
+  out_has "$nll_comp_v1" 'CQLITE_JEST_JSON=' \
     || { nll_v1_ok=0; echo "  node-bindings no longer EXPORTS CQLITE_JEST_JSON — the lane-side strictness control has no marker to read"; }
   grep -q 'process\.env\.CQLITE_JEST_JSON' "$nll_leakfile_v1" \
     || { nll_v1_ok=0; echo "  the lane no longer READS CQLITE_JEST_JSON — its gate-of-record strictness assertion cannot fire"; }
@@ -5175,16 +5185,16 @@ fi
 nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
 nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
 nll_e_ok=1
-printf '%s' "$nll_entered" | grep -q "REACHED" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
-printf '%s' "$nll_entered" | grep -q "NOT an earlier" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
-printf '%s' "$nll_entered" | grep -qE "UNKNOWN|unknown" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
+out_has "$nll_entered" "REACHED" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
+out_has "$nll_entered" "NOT an earlier" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
+out_has "$nll_entered" -E "UNKNOWN|unknown" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
 # No phrase may assert that the budgets ran. Each of these would be an overclaim.
 for _bad in "DID execute" "so the leak budgets ran" "the budgets ran" "budgets executed"; do
-  if printf '%s' "$nll_entered" | grep -qF "$_bad"; then
+  if out_has "$nll_entered" -F "$_bad"; then
     nll_e_ok=0; echo "  ENTERED-FAILED overclaims execution via: '$_bad'"
   fi
 done
-printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
+out_has "$nll_noaffirm" -E "named (#1465 )?budget test" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
 if [ "$nll_e_ok" -eq 1 ]; then
   ok "1465-failure-states: ENTERED-FAILED says REACHED + execution UNKNOWN + not-an-earlier-step and asserts no execution; NO-BUDGET-AFFIRMATION names the budget tests"
 else
@@ -5360,11 +5370,11 @@ else
   bad "3453-two-passes: found ${afc_n_cargo:-0} cargo check/clippy invocations, expected 2 — the owner ruling for #3453 is a check AND a clippy pass"
 fi
 afc_bad=""
-printf '%s\n' "$afc_cargo" | grep -q -- '--all-features' || afc_bad="$afc_bad no---all-features"
+out_has "$afc_cargo" -- '--all-features' || afc_bad="$afc_bad no---all-features"
 [ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-features' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-features"
 [ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-targets' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-targets"
-printf '%s\n' "$afc_cargo" | grep -q -- '--package cqlite-core' || afc_bad="$afc_bad not-package-scoped"
-printf '%s\n' "$afc_cargo" | grep -q -- '--workspace' && afc_bad="$afc_bad uses---workspace"
+out_has "$afc_cargo" -- '--package cqlite-core' || afc_bad="$afc_bad not-package-scoped"
+out_has "$afc_cargo" -- '--workspace' && afc_bad="$afc_bad uses---workspace"
 if [ -z "$afc_bad" ]; then
   ok "3453-invocation: both passes are \`--package cqlite-core --all-features --all-targets\` and neither is --workspace (which would build cqlite-cli's bundled duckdb from source — the #916 cost)"
 else
@@ -5375,17 +5385,17 @@ if [ "$(printf '%s\n' "$afc_cargo" | grep -c '_deny_warnings' || true)" = 2 ]; t
 else
   bad "3453-denywarn: a pass does not go through _deny_warnings — a bare \`env RUSTFLAGS=-D warnings\` is SILENTLY IGNORED when CARGO_ENCODED_RUSTFLAGS is set, even when empty"
 fi
-if printf '%s\n' "$afc_fn" | grep -q '_resolved_package_features cqlite-core --all-features'; then
+if out_has "$afc_fn" '_resolved_package_features cqlite-core --all-features'; then
   ok "3453-subject-derived: the declared feature set is read back from CARGO, not echoed from the flag this function passes"
 else
   bad "3453-subject-derived: run_all_features_check no longer derives its feature set via _resolved_package_features — a lane that prints its own arguments states nothing about the build that happened"
 fi
-if printf '%s\n' "$afc_fn" | grep -qE '^[^#]*status=SKIP'; then
+if out_has "$afc_fn" -E '^[^#]*status=SKIP'; then
   bad "3453-never-skips: run_all_features_check gained a SKIP branch — it needs nothing beyond cargo, and a SKIP here is a coverage hole wearing a SKIP's clothes (#3522)"
 else
   ok "3453-never-skips: run_all_features_check has no SKIP branch (it depends on nothing but cargo)"
 fi
-if printf '%s\n' "$afc_fn" | grep -q 'declaration="\[\$name\] subject:'; then
+if out_has "$afc_fn" 'declaration="\[\$name\] subject:'; then
   ok "3453-declares: the lane emits a subject declaration (package + feature set + targets), not a bare status token"
 else
   bad "3453-declares: the lane no longer declares what it measured — issue #3453's own remedy is 'report a measurement, not a decision'"
