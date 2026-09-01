@@ -696,12 +696,13 @@ case_begin 22-no-dead-letter-remedies "DERIVED: no refusal may name a subcommand
 # LITERALLY. Such a remedy must describe the STATE CHANGE and let the normal path follow —
 # which is how MALFORMED/DUPLICATE-SENTINEL are worded. This case caught two such texts
 # the moment it was written, in the same round as the UNSTAMPED dead letter itself.
-DL_STATES="absent unstamped malformed duplicate-sentinel foreign-issue foreign-machine foreign-worktree adoptable live-peer liveness-unknown error"
+DL_STATES="absent unstamped malformed displaced-sentinel duplicate-sentinel foreign-issue foreign-machine foreign-worktree adoptable live-peer liveness-unknown error"
 expected_for() {
   case "$1" in
     absent)             printf 'ABSENT\n' ;;
     unstamped)          printf 'UNSTAMPED\n' ;;
     malformed)          printf 'MALFORMED\n' ;;
+    displaced-sentinel) printf 'MALFORMED\n' ;;
     duplicate-sentinel) printf 'DUPLICATE-SENTINEL\n' ;;
     foreign-issue)      printf 'FOREIGN-ISSUE\n' ;;
     foreign-machine)    printf 'FOREIGN-MACHINE\n' ;;
@@ -724,6 +725,12 @@ setup_state() {
     malformed)
       run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
       grep -vFx -- "$sentinel_end" "$d/$MARKER" >"$T/dl-mal" && mv "$T/dl-mal" "$d/$MARKER" ;;
+    displaced-sentinel)
+      # The NEW refusal shape from B1: a valid stamp displaced off line 1. It must be covered
+      # by the dead-letter rule like every other refusal, not left to the states that existed
+      # when the case was written.
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+      { printf '\n'; cat "$d/$MARKER"; } >"$T/dl-disp" && mv "$T/dl-disp" "$d/$MARKER" ;;
     duplicate-sentinel)
       run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
       { printf '%s\n' "$sentinel"; printf 'issue: 3822\n'; } >>"$d/$MARKER" ;;
@@ -785,7 +792,7 @@ for st in $DL_STATES; do
   [ -z "$SLEEPER" ] || { kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null; }
 done
 if [ "$dl_fail" -eq 0 ]; then
-  ok "11 refusal states reproduce their expected verdict, and every remedy they NAME ($dl_named invocation(s)) escapes that refusal"
+  ok "12 refusal states reproduce their expected verdict, and every remedy they NAME ($dl_named invocation(s)) escapes that refusal"
 else
   bad "$dl_fail dead-letter/verdict failures across the refusal states"
 fi
@@ -954,7 +961,153 @@ $sc_show"
 fi
 
 # ===========================================================================
-case_begin 25-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
+case_begin 25-displaced-sentinel-is-not-legacy "a DISPLACED stamp is MALFORMED, never migrated — a one-byte mutation must not overwrite a live peer"
+# ===========================================================================
+# The migration path decided "carries no ownership stamp" from the FIRST LINE ALONE, so a
+# stamped marker with one prepended blank line or comment was classified legacy, DISCARDED
+# and REPLACED — overwriting a live peer's state, which is the defect this whole file exists
+# to close, reachable by a one-byte mutation. "No stamp at line 1 => no identity asserted" is
+# valid only if no sentinel exists ANYWHERE.
+disp_fail=0
+for disp_kind in blank comment; do
+  Ld=$(lane "lane25-$disp_kind")
+  dsleep=''
+  sleep 300 & dsleep=$!
+  run "$Ld" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$dsleep" -- \
+    write 3822 --stage peer-plan --request-id coord-3822-live >/dev/null 2>&1
+  case "$disp_kind" in
+    blank)   { printf '\n';                    cat "$Ld/$MARKER"; } >"$T/d25" ;;
+    comment) { printf '%s\n' '<!-- note -->';  cat "$Ld/$MARKER"; } >"$T/d25" ;;
+  esac
+  mv "$T/d25" "$Ld/$MARKER"
+  before=$(cksum <"$Ld/$MARKER")
+  dv=$(run "$Ld" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- verify 3822); dvrc=$?
+  dw=$(run "$Ld" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- write 3822 --stage my-plan); dwrc=$?
+  da=$(run "$Ld" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason displaced-probe:take-over); darc=$?
+  after=$(cksum <"$Ld/$MARKER")
+  kill "$dsleep" 2>/dev/null; wait "$dsleep" 2>/dev/null
+  if [ "$dvrc" -ne 0 ] && [ "$(verdict_of "$dv")" = MALFORMED ] \
+     && [ "$dwrc" -ne 0 ] && [ "$(verdict_of "$dw")" = MALFORMED ] \
+     && [ "$darc" -ne 0 ] && [ "$(verdict_of "$da")" = MALFORMED ] \
+     && [ "$before" = "$after" ]; then
+    ok "a stamp displaced by a prepended $disp_kind is MALFORMED on verify AND write AND adopt, and the peer's file is byte-identical afterwards"
+  else
+    disp_fail=$((disp_fail + 1))
+    bad "displaced-by-$disp_kind was mishandled: verify=$dvrc/$(verdict_of "$dv") write=$dwrc/$(verdict_of "$dw") adopt=$darc/$(verdict_of "$da") file-changed=$([ "$before" = "$after" ] && echo no || echo YES)
+$dw"
+  fi
+done
+# NON-VACUITY: a file with NO sentinel anywhere is still the migratable legacy shape, so the
+# fix narrowed the migration path rather than closing it.
+L25N=$(lane lane25n)
+printf 'legacy plan, no sentinel anywhere\n' >"$L25N/$MARKER"
+nv=$(run "$L25N" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822); nvrc=$?
+if [ "$nvrc" -eq 0 ] && [ "$(verdict_of "$nv")" = WRITTEN ]; then
+  ok "NON-VACUITY: a genuinely sentinel-free legacy marker still migrates (WRITTEN) — the migration path was narrowed, not closed"
+else
+  bad "the legacy migration path was closed by the displaced-sentinel fix: rc=$nvrc verdict=$(verdict_of "$nv")
+$nv"
+fi
+
+# ===========================================================================
+case_begin 26-unusable-start-window "an INVERTED or out-of-range start window is LIVENESS-UNKNOWN, never GONE"
+# ===========================================================================
+# The worst of the three: a false-permissive on the LIVENESS axis. Endpoints were only
+# digit-checked (and CONCATENATED, so one could hide behind the other), and an inverted or
+# out-of-range interval made `[` ERROR inside `if A && B` — an errored `[` reads as FALSE,
+# and the false branch was `gone`, so a LIVE PEER became adoptable. Unmeasurable must never
+# read as gone.
+uw_fail=0
+for uw_kind in inverted huge negative leading-zero; do
+  Lu=$(lane "lane26-$uw_kind")
+  sleep 300 & upid=$!
+  run "$Lu" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$upid" -- write 3822 >/dev/null 2>&1
+  case "$uw_kind" in
+    inverted)     ulo=2000000000; uhi=1000000000 ;;
+    huge)         ulo=999999999999999999999999;  uhi=999999999999999999999999 ;;
+    negative)     ulo=-5;         uhi=10 ;;
+    leading-zero) ulo=0000000001; uhi=0000000002 ;;
+  esac
+  sed -e "s/^session-pid-start-earliest: .*/session-pid-start-earliest: $ulo/" \
+      -e "s/^session-pid-start-latest: .*/session-pid-start-latest: $uhi/" \
+      "$Lu/$MARKER" >"$T/m26" && mv "$T/m26" "$Lu/$MARKER"
+  uv=$(run "$Lu" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- verify 3822 2>&1); uvrc=$?
+  ua=$(run "$Lu" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason unusable-window-probe 2>&1); uarc=$?
+  kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  uvv="$(verdict_of "$uv")"
+  # LIVENESS-UNKNOWN (the MEASUREMENT is unusable) — and specifically NOT ADOPTABLE, which
+  # is the false-permissive, and NOT MALFORMED, since the marker itself is well-formed.
+  if [ "$uvrc" -ne 0 ] && [ "$uvv" = LIVENESS-UNKNOWN ] \
+     && [ "$uarc" -ne 0 ] && [ "$(verdict_of "$ua")" = LIVENESS-UNKNOWN ]; then
+    ok "a $uw_kind start window yields LIVENESS-UNKNOWN on verify AND adopt — the live peer is not adoptable"
+  else
+    uw_fail=$((uw_fail + 1))
+    bad "a $uw_kind start window was mis-resolved: verify=$uvrc/$uvv adopt=$uarc/$(verdict_of "$ua") (ADOPTABLE here would mean a LIVE peer could be taken over)
+$uv"
+  fi
+done
+if [ "$uw_fail" -eq 0 ]; then
+  ok "all 4 unusable-interval shapes refuse on the UNKNOWN branch"
+else
+  bad "$uw_fail unusable-interval shapes were not refused as UNKNOWN"
+fi
+
+# ===========================================================================
+case_begin 27-pre-rename-validation "the ASSEMBLED bytes are validated immediately before the atomic rename"
+# ===========================================================================
+# `--body-file` was validated once and READ AGAIN at assembly, so a body changing in between
+# committed an unchecked sentinel — reachable by accident (an agent rewriting its own notes),
+# which makes it a defect, and the result is a marker every later read refuses: self-bricking.
+# The fix validates the committed bytes themselves, so it holds however the body arrived.
+#
+# THE RACE ITSELF IS NOT DETERMINISTICALLY REPRODUCIBLE, so this case measures the LAYER that
+# closes it: a scratch copy with the EARLY body check neutered must still refuse at the
+# pre-rename check. That proves the two layers are independent (defence in depth) rather than
+# one check moved. It does NOT prove a timed interleaving is caught — nothing cheap can.
+SCRATCH2="$T/scratch2"; mkdir -p "$SCRATCH2/lib"
+sed 's/^assert_body_safe() {$/assert_body_safe() { return 0; # NEUTERED for this case/' \
+  "$DS" >"$SCRATCH2/drive-issue-state.sh"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$SCRATCH2/lib/process-liveness.sh"
+if grep -q 'NEUTERED for this case' "$SCRATCH2/drive-issue-state.sh"; then
+  ok "the early-body-check neutering took in the scratch copy (so the pre-rename layer is what is being measured)"
+else
+  bad "could not neuter the early body check — this case would measure the early check, not the pre-rename one"
+fi
+L27=$(lane lane27)
+body27="$T/body27.md"
+{ printf 'notes\n'; printf '%s\n' "$sentinel"; printf 'issue: 1\n'; } >"$body27"
+pr_out=$( cd "$L27" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+  bash "$SCRATCH2/drive-issue-state.sh" write 3822 --body-file "$body27" 2>&1 ); pr_rc=$?
+# The `.lock` sidecar is a LEGITIMATE artifact of serialization, so the stray count must
+# exclude it — counting it made this assert fail on correct behaviour, which is the
+# "guard that reds on correct input" shape. What must be absent is an abandoned
+# atomic-replace TEMPORARY.
+stray27=$(find "$L27" -name "$MARKER.*" ! -name "$MARKER.lock" 2>/dev/null | wc -l | tr -d ' ')
+lock27=$([ -f "$L27/$MARKER.lock" ] && echo yes || echo no)
+if [ "$pr_rc" -ne 0 ] && [ "$(verdict_of "$pr_out")" = ERROR ] \
+   && [ ! -f "$L27/$MARKER" ] && [ "$stray27" = 0 ] && [ "$lock27" = yes ] \
+   && all_lines_anchored "$pr_out"; then
+  ok "with the early check bypassed, the pre-rename validation refuses (ERROR), commits nothing and leaves no abandoned temporary (the .lock sidecar is expected and present)"
+else
+  bad "the assembled marker was committed unvalidated: rc=$pr_rc verdict=$(verdict_of "$pr_out") marker=$([ -f "$L27/$MARKER" ] && echo yes || echo no) strays=$stray27
+$pr_out"
+fi
+# NON-VACUITY: the same neutered script writes a CLEAN body fine, so the refusal above is
+# about the sentinel and not about the neutering having broken the script.
+body27ok="$T/body27ok.md"; printf 'clean notes\n' >"$body27ok"
+pr_ok=$( cd "$L27" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+  bash "$SCRATCH2/drive-issue-state.sh" write 3822 --body-file "$body27ok" 2>&1 ); pr_okrc=$?
+if [ "$pr_okrc" -eq 0 ] && [ "$(verdict_of "$pr_ok")" = WRITTEN ]; then
+  ok "NON-VACUITY: the same scratch script writes a clean body successfully"
+else
+  bad "the scratch script cannot write at all, so the refusal above proves nothing: rc=$pr_okrc
+$pr_ok"
+fi
+
+# ===========================================================================
+case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
 5-foreign-worktree 6-session-gone-adoptable 7-session-live-peer 8-pid-unrecordable-unknown
@@ -963,8 +1116,10 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 15-pid-reuse-recognised 16-closed-verdict-grammar 17-write-failure-emits-a-verdict
 18-control-chars-stay-anchored 19-control-char-worktree-refused
 20-same-process-is-owned 21-write-over-unstamped-migrates
-22-no-dead-letter-remedies 23-durable-fields-survive 24-serialization 25-case-floor"
-CASE_FLOOR=25
+22-no-dead-letter-remedies 23-durable-fields-survive 24-serialization
+25-displaced-sentinel-is-not-legacy 26-unusable-start-window 27-pre-rename-validation
+28-case-floor"
+CASE_FLOOR=28
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -976,8 +1131,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 55 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 55)"
+if [ "$PASS" -ge 68 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 68)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
