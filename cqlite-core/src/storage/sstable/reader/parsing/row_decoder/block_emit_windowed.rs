@@ -673,6 +673,37 @@ impl V5CompressedLegacyParser {
                     }
 
                     partition_index += 1;
+
+                    // Issue #3721: a WINDOWED walk covers the FIRST partition and
+                    // STOPS. `row_body_window` is a byte extent inside that
+                    // partition's row body, resolved from its authoritative row
+                    // index, and it is applied to `partition_index == 0` alone — so
+                    // once that partition's window is done there is nothing further
+                    // this call was asked for. Every windowed caller
+                    // (`big_promoted::big_decode_clustering_window`, the
+                    // promoted-index reverse block walk, `bti_collect_partition_rows`)
+                    // keeps only rows whose key equals the target partition's, so
+                    // continuing costs work and yields nothing.
+                    //
+                    // It also costs CORRECTNESS, which is why this is a fix and not a
+                    // tidy-up. Stopping the row loop at `body_end` leaves the cursor
+                    // in the MIDDLE of a row — the block extent is a byte bound, not a
+                    // row bound — and the try-parse partition detector (issue #166)
+                    // then reads a "partition header" out of a cell value and starts
+                    // decoding a phantom partition from it. MEASURED on the #1184
+                    // fixture: the reverse block walk stopped at `body_end` 461014,
+                    // peeked a partition header there, and decoded a row whose
+                    // `payload` cell flags byte was `0x70` — the ASCII `p` of the
+                    // text value it was standing in. That phantom parse was harmless
+                    // only because its failure was swallowed; now that a per-column
+                    // decode failure is reported (as it must be), an over-run reads
+                    // as a corrupt SSTable. Not entering the phantom partition at all
+                    // is the fix; `column_decode_error::indexed_walk_falls_back`
+                    // remains as defence in depth for any over-run this does not
+                    // prevent.
+                    if row_body_window.is_some() {
+                        break;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
