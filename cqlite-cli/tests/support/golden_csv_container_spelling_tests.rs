@@ -437,13 +437,14 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
     // no per-value spelling there), and the required behaviour is that the seam
     // invents none: the text passes through VERBATIM, and in particular the
     // bare-hex spelling does NOT collect the `0x` a declared `blob` would get.
-    for decl in [
+    let container_decls = [
         "list<frozen<list<int>>>",
         "set<frozen<set<int>>>",
         "map<int, int>",
         "tuple<int, text>",
         "frozen<address>",
-    ] {
+    ];
+    for decl in container_decls {
         let ty = ty_of(decl);
         seen.insert(tag(&ty));
         let undecoded = Value::String("000000020000".to_string());
@@ -467,8 +468,8 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
     );
     assert_eq!(
         compared,
-        2 * cases.len() + 10,
-        "every case must be measured at BOTH kindings"
+        2 * (cases.len() + container_decls.len()),
+        "every case and every container decl must be measured at BOTH kindings"
     );
     for variant in VARIANTS {
         assert!(
