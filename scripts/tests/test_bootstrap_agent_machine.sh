@@ -345,6 +345,16 @@ export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 # here, exactly as the perf suite does for the pin section, so a case added later inherits
 # it. Section 5c's own coverage lives in scripts/tests/test_claude_auth_capability.sh.
 export CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1
+# ...with ONE deliberate exception, block 7p (below). Its three green-path cases assert an
+# ABSOLUTELY GREEN run, so a permanent extra [warn] from an opt-out would silently turn
+# them into `skip`s — the exact drift the base_warns assertion exists to catch, and which
+# section 5b caused four times. So `run_push` turns section 5c back ON and its sandbox
+# STAGES the section to VERIFIED/VERIFIED deterministically: a per-sandbox pam_env file
+# carrying this token, plus pinned `claude` and `tmux` shims. Those cases then EXERCISE
+# 5c's green path instead of skipping it, which is strictly better coverage than the
+# opt-out would have bought.
+PUSH_CLAUDE_TOKEN='sk-cqlite-sandbox-3733-not-a-real-credential'
+PUSH_CLAUDE_CONFIG_DIR='/sandbox/claude-config' 
 
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
@@ -1205,6 +1215,11 @@ mk_push_repo() {
   mkdir -p "$dir/scripts/lib" "$dir/test-data/datasets/sstables/ks/tbl" "$dir/.home/.cargo"
   cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
   cp "$SCRIPT_DIR/../perf-capability.sh" "$dir/scripts/perf-capability.sh"
+  # Staged for SECTION 5c for the same reason agent-gate.sh is staged for 5b: without it
+  # the section reports `claude-auth: UNMEASURED (capability script missing)` — one extra
+  # [warn] in EVERY case built on this helper, which is how base_warns drifts and the
+  # green-path cases below silently stop running.
+  cp "$SCRIPT_DIR/../claude-auth-capability.sh" "$dir/scripts/claude-auth-capability.sh"
   # agent-gate.sh is staged for SECTION 5b, not for the push probe (issue #3414 review B1).
   # 5b's verdict asks the gate what it will do with the probed value, so a sandbox without
   # it yields `gate-pin: UNMEASURED` — one extra [warn] in EVERY case built on this helper,
@@ -1224,6 +1239,12 @@ mk_push_repo() {
   # file is appended to by whichever earlier `--yes` case runs first, so what these cases
   # measured depended on suite ordering.
   printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$dir/etc-environment"
+  # The same per-sandbox file is section 5c's pam_env source (run_push points
+  # CQLITE_CLAUDE_AUTH_ENV_FILE at it), so a persisted credential exists to measure. Its
+  # own line with no inline comment, exactly as the production remedy instructs — pam_env
+  # takes a trailing `# ...` as part of the value.
+  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$PUSH_CLAUDE_TOKEN" >>"$dir/etc-environment"
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "$PUSH_CLAUDE_CONFIG_DIR" >>"$dir/etc-environment"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
 
@@ -1311,6 +1332,17 @@ exit 0'
   mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+  # Section 5c's two probes, pinned for the same reason as the `sudo` shim above: without
+  # them these sandboxes fall through to the REAL `claude` (a billed network call whose
+  # result depends on the HOST's credential) and the REAL tmux server (which the --yes
+  # cases would MUTATE). The claude stub answers the sentinel prompt by echoing its LAST
+  # WORD, which IS the sentinel — so it stays correct if the sentinel is ever re-spelled,
+  # rather than duplicating the constant here.
+  mk_stub "$dir" claude 'printf "%s\n" "${*##* }"'
+  mk_stub "$dir" tmux "case \"\${1:-}\" in
+  show-environment) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\nCLAUDE_CONFIG_DIR=%s\\n' '$PUSH_CLAUDE_TOKEN' '$PUSH_CLAUDE_CONFIG_DIR' ;;
+esac
+exit 0"
   mk_push_gh "$dir" "$setup"
 }
 
@@ -1326,6 +1358,7 @@ run_push() {
   push_rc=0
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
+    CQLITE_CLAUDE_AUTH_ENV_FILE="$repo/etc-environment" CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=0 \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
