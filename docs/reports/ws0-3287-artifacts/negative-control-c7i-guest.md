@@ -81,22 +81,22 @@ regenerated.)
 | `cycle_activity.stalls_l3_miss` | **exactly 0**, all arms, every rep | `arm-*-stalls.csv` |
 | `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*-offcore.csv` |
 | `cache-misses`, `cache-references` | **exactly 0**, all arms | `arm-*-cache.csv` |
-| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 80% of all cycles** (billions; 88.8 / 88.0 / 82.3% in the three captures) | `arm-hostile-2g-stalls.csv` |
+| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 80% of all cycles** (billions; 82.3–89.9% over five captures) | `arm-hostile-2g-stalls.csv` |
 | `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999–1.002 across reps; 1.00003 in the committed capture) | `arm-*-control.csv` |
-| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–295 ns** DRAM (range over three captures) | `arm-*.txt` |
+| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–315 ns** DRAM (range over five captures) | `arm-*.txt` |
 | stall-counter NESTING | **holds** in every arm — but see the declared limit below | `differential.txt` |
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
 serial data dependency cannot be L3-resident and the prefetcher cannot help it, so an honest
 L3-miss-stall counter must be large. Instead, **over 80% of all cycles are stalled with an L2-miss demand
 load outstanding and exactly zero of them are attributed to an L3 miss**, on a working set 19.5× the
-L3. (The bound is stated loosely on purpose: it measured 88.8%, 88.0% and 82.3% in three captures on
+L3. (The bound is stated loosely on purpose: it measured between 82.3% and 89.9% over five captures on
 a shared box. The exact figure moves with load; that it is most of the cycles does not, and the zero
 does not move at all.) That is not a small number; it is physically impossible.
 
 **The workload's behaviour is established by WALL CLOCK, not by the PMU, so it is not in doubt — only
-the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~165–295 ns in the DRAM
-arms across three captures — an access-latency spread of roughly **30× to 57×**, produced purely by
+the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~165–315 ns in the DRAM
+arms across five captures — an access-latency spread of roughly **28× to 64×**, produced purely by
 changing the working-set extent — while `instructions` differs by **≤0.2%** between those arms
 (0.003% in the committed capture): identical work, identical code path. An L3 hit
 is ~15–20 ns; ~200 ns is DRAM. No counter is needed to know these loads left the cache.
@@ -227,33 +227,35 @@ move with it. Three do not.
 A smoke test ("is the counter non-zero?") passes on the working ones and cannot distinguish the stuck
 ones from a genuinely memory-clean workload. Only a differential against a predicted behaviour can.
 
-## Replication — three independent captures, and the zeros never move
+## Replication — the zeros never move, and everything else does
 
-The committed `host/` artefacts have been **regenerated in full** whenever the probe changed, so
-every file under `host/` is reproducible by the committed script rather than by a revision of it that
-no longer exists. That has now happened three times on this box (`host/capability-probe.txt` stamps
-each one), which makes it three independent reps of the finding — and the contrast between what moved
-and what did not is the file's whole argument:
+The committed `host/` artefacts are regenerated in full whenever the probe changes, so every file
+under `host/` is reproducible by the committed script rather than by a revision of it that no longer
+exists. Over this branch's review rounds that happened **five times** on the same box
+(`host/capability-probe.txt` stamps each one, and the superseded captures are in this branch's git
+history). Five independent reps is more than the finding needed, and the contrast they draw is the
+file's whole argument:
 
-| `hostile-2g` arm | across the three captures |
+| `hostile-2g` arm | across all five captures |
 |---|---|
-| `cycle_activity.stalls_l3_miss:u` | **0, 0, 0 — bit-identical** |
-| `offcore_requests_outstanding.*:u` | **0, 0, 0 — bit-identical** |
-| `cache-misses:u` / `cache-references:u` | **0, 0, 0 — bit-identical** |
-| `cycle_activity.stalls_l2_miss:u` | 5.71e9 / 5.54e9 / 6.12e9 — spread ~10% |
-| `cycle_activity.stalls_total:u` | 6.27e9 / 6.10e9 / 6.74e9 — spread ~10% |
-| `ns_per_access` (slowest of the arm's five groups) | 248.8 / 248.8 / 291.1 — tracks box load |
+| `cycle_activity.stalls_l3_miss:u` | **0 in every one — bit-identical** |
+| `offcore_requests_outstanding.*:u` | **0 in every one — bit-identical** |
+| `cache-misses:u` / `cache-references:u` | **0 in every one — bit-identical** |
+| `cycle_activity.stalls_l2_miss:u` | 5.54e9 – 6.83e9 (varies 23%) |
+| `cycle_activity.stalls_total:u` | 6.10e9 – 7.50e9 (varies 23%) |
+| `ns_per_access` (slowest group) | 248.8 – 314.0 ns (tracks box load) |
 
-A counter that varies with load is measuring something. A counter that returns **exactly 0** across
-three captures of a workload doing billions of DRAM accesses, while its immediate neighbour in the
-same PMU group reads six billion, is not. Earlier captures are in this branch's git history if you
-want to check the numbers above rather than take them.
+A counter that varies with load is measuring something. A counter that returns **exactly 0** in five
+captures of a workload doing billions of DRAM accesses — while its immediate neighbour in the same
+PMU group reads six billion and the wall clock says every access went to memory — is not.
 
-**Read the absolutes here as illustration, not as data.** This file's authority is the committed
-CSVs, and a shared box moves every non-zero figure by several percent between runs — which is exactly
-why the argument is built on a zero and on a wall clock, neither of which is sensitive to that.
+**Read the non-zero absolutes as illustration, not as data.** This file's authority is the committed
+CSVs. A shared box moves every non-zero figure by tens of percent between runs, which is exactly why
+the argument rests on a zero and on a wall clock, neither of which is sensitive to that — and why
+the run-varying figures here are quoted as ranges over captures rather than as single values that
+would be wrong again by the next run.
 
-## Carried forward## Carried forward
+## Carried forward## Carried forward## Carried forward
 
 - #3287 needs a **bare-metal host** with core-PMU offcore support, `PERF_METRICS`/`slots`, and
   `uncore_*` devices. Preferably the same class as #3224's `i4i.metal` (Xeon 8375C, Ice Lake-SP), so
