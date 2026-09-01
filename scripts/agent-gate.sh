@@ -19079,6 +19079,11 @@ _DA_LAUNCH_RENDER=""
 _DA_POST_RENDER=""
 _DA_BAR=""
 _DA_BAR_SRC=""
+# How many times the predicate was actually EVALUATED this run (1 = launch only, i.e.
+# no slot was ever granted; 2 = launch + slot grant). Counted explicitly rather than
+# inferred from the rendered post-slot text: a verdict must not be derived by sniffing
+# a display string two other functions independently format.
+_DA_EVALUATIONS=0
 # Per-measurement outputs of _gate_disk_admission_measure.
 _DA_STATE=""
 _DA_VALUE=""
@@ -19195,7 +19200,10 @@ _gate_gib_to_kib() { awk -v g="$1" 'BEGIN { printf "%d", (g * 1048576) + 0.5 }' 
 # moments call THIS — that identity is the whole of AC1.
 _gate_disk_admission_measure() {
   local probe bar_kib
-  _DA_STATE=""; _DA_VALUE=""; _DA_MOUNT=""; _DA_WHY=""
+  # _DA_MOUNT is deliberately NOT cleared: it names the SUBJECT FILESYSTEM, which is the
+  # same one at both moments, so an UNMEASURED second reading must not erase the identity
+  # the first one established. It is an identity, never a verdict.
+  _DA_STATE=""; _DA_VALUE=""; _DA_WHY=""
   probe=$(_gate_disk_admission_probe)
   case "$probe" in
     'MEASURED '*)
@@ -19237,9 +19245,8 @@ _gate_disk_admission_render_state() {
 # (value observed, bar applied, verdict) and the admitted-once-vs-twice distinction
 # are present in every rendering, including the failing ones.
 _gate_disk_admission_line() {
-  local verdict="$1" detail="$2" evaluated=2
-  case "$_DA_POST_RENDER" in 'NOT MEASURED'*) evaluated=1 ;; esac
-  DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${evaluated}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown})"
+  local verdict="$1" detail="$2"
+  DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${_DA_EVALUATIONS}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown})"
   [ -n "$detail" ] && DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE — $detail"
   return 0
 }
@@ -19270,6 +19277,7 @@ _gate_disk_admission_launch() {
   bar=$(_gate_min_free_gb)
   _DA_BAR="${bar%% *}"; _DA_BAR_SRC="${bar##* }"
   _gate_disk_admission_measure
+  _DA_EVALUATIONS=1
   _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
   _DA_POST_RENDER='NOT MEASURED (the slot was never granted)'
   if [ "$_DA_STATE" = BELOW ]; then
@@ -19438,6 +19446,7 @@ acquire_gate_slot() {
   # FAIL-CLOSED here, unlike at launch: there is no peer left to free space for us (we
   # hold the slot), so a below-bar reading now is the reading the build would start on.
   _gate_disk_admission_measure
+  _DA_EVALUATIONS=2
   _DA_POST_RENDER=$(_gate_disk_admission_render_state)
   case "$_DA_STATE" in
     BELOW) _gate_disk_admission_refuse ;;   # exits 1
