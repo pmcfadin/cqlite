@@ -524,13 +524,93 @@ else
 fi
 
 # --- premerge-assert wiring --------------------------------------------------------
-# The binding must be REACHED by the shipped assert, and its refusal must refuse
-# the merge. A leg nothing calls is a guard that never fires.
+# A leg nothing calls is a guard that never fires, so the wiring is asserted
+# BEHAVIOURALLY (the shipped assert really refuses on an unbound review), not
+# just by grepping for the helper's name.
 if grep -q 'premerge-review-binding.sh' "$ASSERT"; then
   ok "wiring: premerge-assert.sh names the review-binding helper"
 else
   bad "wiring: premerge-assert.sh does not invoke premerge-review-binding.sh"
 fi
+if grep -q 'hold-check' "$ASSERT"; then
+  ok "wiring: premerge-assert.sh invokes the hold-check leg too"
+else
+  bad "wiring: premerge-assert.sh does not invoke the hold-check leg"
+fi
+
+# A minimal but REAL gate-of-record block at the certified sha, so the assert
+# gets past its own offline gate check and reaches the #3752 legs.
+gate_block() { # gate_block <out> <sha>
+  {
+    printf '==== AGENT-GATE SUMMARY ====\n'
+    printf 'run-id: /tmp/agent-gate.test3752\n'
+    printf 'commit: %.7s branch: issue-3752 dirty: no\n' "$2"
+    printf 'tree-start: %.12s dirty: no digest: 671a6275687c\n' "$2"
+    printf 'tree-end: %.12s dirty: no digest: 671a6275687c\n' "$2"
+    printf 'tree-integrity: PASS\n'
+    printf 'file-size:         PASS (0s)\n'
+    printf 'logs: /tmp/agent-gate.test3752\n'
+    printf 'RESULT: PASS\n'
+    printf '==== END AGENT-GATE SUMMARY ====\n'
+  } >"$1"
+}
+
+# The gh mock must also answer the assert's own head/state call.
+cat >"$BIN/gh" <<'GH2'
+#!/usr/bin/env bash
+d="${MOCK_GH_DIR:-}"
+case "$*" in
+  *closingIssuesReferences*) f="$d/pr-hold.json" ;;
+  *baseRefName*) f="$d/pr.json" ;;
+  *) f="" ;;
+esac
+case "$1" in api) f="$d/timeline.json" ;; esac
+case "$1 $2" in "issue view") f="$d/issue-$3.json" ;; esac
+if [ -z "$f" ]; then
+  printf '%s
+' "${MOCK_GH_OUT:-}"
+  exit 0
+fi
+[ -f "$f" ] || { echo "gh: no fixture $f" >&2; exit 1; }
+cat "$f"
+GH2
+chmod +x "$BIN/gh"
+
+E2E_GATE="$T/e2e-gate.txt"
+gate_block "$E2E_GATE" "$HEAD_AFTER"
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 304)"
+roborev_job 304 "$(cd "$WORK" && git rev-parse main~1)" "$REVIEWED_PRE"
+hold_payload "$MOCK_GH_DIR/pr-hold.json" '[]'
+printf '[]\n' >"$MOCK_GH_DIR/timeline.json"
+E2E=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+E2E_RC=$?
+if [ "$E2E_RC" -eq 2 ]; then
+  ok "wiring: the shipped assert REFUSES (exit 2) when the recorded review was rebased away"
+else
+  bad "wiring: the shipped assert did not refuse an unbound review (exit $E2E_RC): $E2E"
+fi
+case "$E2E" in
+  *"PREMERGE: REVIEW-UNBOUND — REFUSING TO MERGE"*)
+    ok "wiring: the refusal carries its own distinct marker" ;;
+  *) bad "wiring: the refusal did not carry the REVIEW-UNBOUND marker (got: $E2E)" ;;
+esac
+
+# And the success path: a bound review reaches PREMERGE: OK with both reports.
+roborev_job 304 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER"
+E2E_OK=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+E2E_OK_RC=$?
+if [ "$E2E_OK_RC" -eq 0 ]; then
+  ok "wiring: a bound review + a clear thread still reaches exit 0"
+else
+  bad "wiring: a bound review did not reach exit 0 (exit $E2E_OK_RC): $E2E_OK"
+fi
+case "$E2E_OK" in
+  *"PREMERGE: REVIEW-BINDING verdict BOUND"*"PREMERGE: HOLD-CHECK verdict NO-HOLD-RECOGNISED"*)
+    ok "wiring: BOTH legs' anchored reports travel to the merge point, in order" ;;
+  *) bad "wiring: the legs' reports did not both reach the success output (got: $E2E_OK)" ;;
+esac
 
 # --- the scanner's own contract -----------------------------------------------------
 scan_pr="$T/scan-pr.json"
@@ -555,7 +635,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=34
+CASE_FLOOR=37
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

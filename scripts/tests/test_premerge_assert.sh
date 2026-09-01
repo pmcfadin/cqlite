@@ -149,10 +149,38 @@ if [ "${MOCK_GH_FAIL:-0}" = "1" ]; then
   echo "gh: could not connect" >&2
   exit 1
 fi
+# The #3752 legs ask gh for STRUCTURED payloads, not the two-token head/state
+# line, so the mock answers by CALL SHAPE. Only the shipped-wiring case reaches
+# these branches (every other case runs against the neutral binding stub), and
+# each is driven by its own env var so a case can substitute a payload.
+case "$*" in
+  *closingIssuesReferences*)
+    printf '%s\n' "${MOCK_GH_HOLD_JSON:-{\"body\":\"\",\"comments\":[],\"closingIssuesReferences\":[]\}}"
+    exit 0 ;;
+  *baseRefName*)
+    printf '%s\n' "${MOCK_GH_PR_JSON:-{\"baseRefName\":\"main\",\"body\":\"\",\"comments\":[]\}}"
+    exit 0 ;;
+esac
+case "$1" in
+  api) printf '%s\n' "${MOCK_GH_TIMELINE_JSON:-[]}"; exit 0 ;;
+esac
 printf '%s\n' "${MOCK_GH_OUT:-}"
 exit 0
 MOCK
 chmod +x "$BIN/gh"
+
+# A `roborev` mock: the #3752 review-binding leg derives the reviewed head from
+# the JOB RECORD, never from stdout prose, so this emits the real payload shape
+# (the job row NESTED under a "job" key, measured in issue #2964).
+cat >"$BIN/roborev" <<'RBMOCK'
+#!/usr/bin/env bash
+[ -n "${MOCK_ROBOREV_JSON:-}" ] || exit 1
+case "$1" in
+  show | list) printf '%s\n' "$MOCK_ROBOREV_JSON" ;;
+  *) exit 1 ;;
+esac
+RBMOCK
+chmod +x "$BIN/roborev"
 
 # REAL_TO — the HOST's own supported timeout runner, resolved by the SAME
 # algorithm the script under test uses (`timeout` THEN `gtimeout`, each PROBED
@@ -244,6 +272,24 @@ if ! cp "$ASSERT" "$NEUTRAL_DIR/premerge-assert.sh"; then
 fi
 printf '%s\n' "$NEUTRAL_ADV" >"$NEUTRAL_DIR/base-staleness.sh"
 chmod +x "$NEUTRAL_DIR/base-staleness.sh"
+
+# THE #3752 REVIEW-BINDING / HOLD LEGS ALSO NEED A NEUTRAL STUB. They are
+# resolved from the assert's OWN directory with no override (#3312's enforcer
+# rule), so substituting the ARTIFACT is the only way to keep these cases about
+# what they are about. An ABSENT helper is a TOOL-FAILURE by design — which is
+# exactly what every success-path case here would become without this stub.
+# Their own subject is owned by scripts/tests/test_premerge_review_binding.sh.
+NEUTRAL_BINDING='#!/usr/bin/env bash
+case "$1" in
+  review-binding) printf "PREMERGE: REVIEW-BINDING neutral immediate stub\n"
+                  printf "PREMERGE: REVIEW-BINDING verdict NOT-APPLICABLE\n" ;;
+  hold-check)     printf "PREMERGE: HOLD-CHECK neutral immediate stub\n"
+                  printf "PREMERGE: HOLD-CHECK verdict NO-HOLD-RECOGNISED\n" ;;
+  *) exit 3 ;;
+esac
+exit 0'
+printf '%s\n' "$NEUTRAL_BINDING" >"$NEUTRAL_DIR/premerge-review-binding.sh"
+chmod +x "$NEUTRAL_DIR/premerge-review-binding.sh"
 NEUTRAL_ASSERT="$NEUTRAL_DIR/premerge-assert.sh"
 
 # run <expected-exit> <description> <args...> — invokes the NEUTRAL COPY of the
@@ -3100,6 +3146,10 @@ flow_copy() {
     printf '%s\n' "$body" >"$d/base-staleness.sh"
     chmod +x "$d/base-staleness.sh"
   fi
+  # The #3752 legs get the neutral stub in EVERY scratch copy: their absence is
+  # a TOOL-FAILURE by design, and these cases are about the advisory.
+  printf '%s\n' "$NEUTRAL_BINDING" >"$d/premerge-review-binding.sh"
+  chmod +x "$d/premerge-review-binding.sh"
   if [ ! -f "$d/premerge-assert.sh" ]; then
     bad "flow_copy($name): the scratch copy is missing after cp"
     return 1
@@ -3676,8 +3726,15 @@ if [ "$wire_shape" -eq 1 ]; then
   WIREGOOD="$T/wiring-full-pass.txt"
   emit_summary_block "$FULL_S" "$FULL_E" "-" \
     "$(printf '%.7s' "$WIRE_SHA")" "$(printf '%.12s' "$WIRE_SHA")" PASS PASS >"$WIREGOOD"
+  # The shipped #3752 legs run for real here too, so the case is given the
+  # payloads they need: a PR body recording a roborev block, and a job record
+  # whose git_ref head IS this fixture's certified sha. That makes this the one
+  # case where BOTH shipped helpers are exercised end to end.
+  WIRE_BASE=$(git -C "$WIRE_REPO" rev-parse refs/remotes/origin/main 2>/dev/null)
   WIRE_OUT=$(cd "$WIRE_REPO" &&
     PATH="$BIN:$PATH" MOCK_GH_OUT="$WIRE_SHA OPEN" MOCK_GH_FAIL=0 \
+    MOCK_GH_PR_JSON="{\"baseRefName\":\"mainline\",\"body\":\"==== ROBOREV REVIEW SUMMARY ====\\njob: 7\\n==== END ROBOREV REVIEW SUMMARY ====\",\"comments\":[]}" \
+    MOCK_ROBOREV_JSON="{\"id\":7,\"job\":{\"id\":7,\"git_ref\":\"$WIRE_BASE..$WIRE_SHA\",\"status\":\"done\"}}" \
     bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" 2>&1)
   WIRE_RC=$?
   if [ "$WIRE_RC" -ne 0 ]; then
@@ -3831,6 +3888,8 @@ chmod +x "$ORDBIN/gh"
 if ! cp "$ASSERT" "$ORDFLOW/premerge-assert.sh"; then
   bad "order: could not build the scratch copy of premerge-assert.sh"
 else
+  printf '%s\n' "$NEUTRAL_BINDING" >"$ORDFLOW/premerge-review-binding.sh"
+  chmod +x "$ORDFLOW/premerge-review-binding.sh"
   cat >"$ORDFLOW/base-staleness.sh" <<'ORDADV'
 #!/usr/bin/env bash
 printf 'ADV\n' >>"$PREMERGE_ORDER_LOG"
