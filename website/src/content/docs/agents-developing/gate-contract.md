@@ -87,7 +87,12 @@ carry).
   convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
   one full `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, no
   `nested-under:` line (#2874: a nested sub-gate runs at the SAME tree, so the sha binding provably
-  cannot see it) and `commit:`/`tree-start:` covering the certified sha. A `--lite` summary is refused
+  cannot see it), `dirty: no` (#3648) and `commit:`/`tree-start:` covering the certified sha. The
+  `dirty:` requirement is the third property the sha binding cannot see: a `dirty: yes` run certified
+  the sha PLUS uncommitted TRACKED edits (the gate's capture is `--exclude-standard`, so never a
+  gitignored log) and stamps the very same `commit:`/`tree-start:` it would have stamped clean. It is
+  matched AFFIRMATIVELY — an absent, empty or unrecognised value REFUSES rather than being read as
+  clean — and there is deliberately no env opt-out, because a dirty tree is always re-gateable. A `--lite` summary is refused
   by name anywhere, and a `--delta` summary as the THIRD argument (their headers are distinct by
   construction) — which is exactly the PR #3408 escape: 22 lite PASSes and no full gate.
   **The OPTIONAL fourth argument is how a `--delta` re-cert certifies a merge.** #1892 *mandates*
@@ -95,7 +100,9 @@ carry).
   `X`, and mandates the PR record BOTH blocks — so a 3-arg-only guard red on correct, mandated input.
   In that shape the third argument is the ANCHOR's full PASS (its sha need not be the certified sha)
   and the fourth is one `==== AGENT-GATE DELTA SUMMARY ====` block carrying `MODE: delta` (asserted
-  affirmatively, the inverse of the full block's belt), `RESULT: PASS`, `tree-integrity: PASS`, a
+  affirmatively, the inverse of the full block's belt), `RESULT: PASS`, `tree-integrity: PASS`,
+  `dirty: no` (#3648 — required of the anchor block too, since a dirty anchor hangs the whole chain
+  off a tree nobody can reconstruct), a
   `delta-anchor:` naming exactly that anchor — an `(UNRESOLVED)` anchor refuses — and its own
   `commit:`/`tree-start:` at the certified sha. The chain is closed end to end; a delta block ALONE
   is still the #3408 escape and still refused.

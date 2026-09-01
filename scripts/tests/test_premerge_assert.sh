@@ -219,16 +219,56 @@ C12="da9a7cb2abc0"
 # A "-" omits that line entirely. Line SHAPES are copied from a real full-gate
 # summary (/tmp/cqlite-gates/**/full-gate.txt), trailing fields included, so the
 # parser is exercised against the grammar the gate emits and not a simplification.
+#
+# The 8th parameter is the `dirty:` VALUE on the `commit:` line (#3648), which is
+# the field the assert now enforces. Defaults to `no` (via `${8-no}`, so an
+# EMPTY string is a value and not "unset"). Rendering is delegated to
+# `dirty_field`/`dirty_tree_start`, so a case can build the three shapes the
+# enforcement must refuse — absent field, present-but-empty value, unrecognised
+# value — as well as the two it must decide on.
+#
+# `tree-start:` MIRRORS the value only when it is `yes`/`no`; for the sentinel
+# shapes it stays a clean `dirty: no`. That disagreement is deliberate: it pins
+# that the check reads the value from the `commit:` line (which is where the
+# parser takes it from) and does NOT fall back to the clean-looking one below it.
+
+# dirty_field <value> — the ` dirty: <value>` suffix the gate writes on `commit:`.
+# "-" omits the field entirely; an EMPTY value renders the bare key.
+dirty_field() {
+  case "$1" in
+    -)  : ;;
+    '') printf ' dirty:' ;;
+    *)  printf ' dirty: %s' "$1" ;;
+  esac
+}
+
+# dirty_tree_start <value> — see the note above: mirror yes/no, else `no`.
+dirty_tree_start() {
+  case "$1" in
+    yes|no) printf '%s' "$1" ;;
+    *)      printf 'no' ;;
+  esac
+}
+
 emit_summary_block() {
-  local start="$1" end="$2" mode="$3" commit="$4" tstart="$5" ti="$6" result="$7"
+  local start="$1" end="$2" mode="$3" commit="$4" tstart="$5" ti="$6" result="$7" \
+        dirty="${8-no}" tsdirty="${9-__mirror__}"
+  # 9th param: tree-start:/tree-end:'s OWN dirty value, allowed to DIVERGE from
+  # commit:'s. Defaults to mirroring so every pre-existing caller is unchanged.
+  # The divergence is REAL, not synthetic: commit: renders the END capture, so a
+  # lockfile-settled run legally reads tree-start dirty:yes + commit dirty:no
+  # (#3648 roborev round 4).
+  [ "$tsdirty" = "__mirror__" ] && tsdirty="$dirty"
   printf '%s\n' "$start"
   printf 'run-id: /tmp/agent-gate.9cIQgX\n'
   [ "$mode" = "-" ] || printf '%s\n' "$mode"
-  [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record dirty: no\n' "$commit"
+  [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record%s\n' \
+    "$commit" "$(dirty_field "$dirty")"
   printf 'datasets: 144 Data.db files under /data/datasets\n'
   printf 'accelerators: sccache=on nextest=on lanes=on mold=absent perf=paranoid-4\n'
-  [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$tstart"
-  printf 'tree-end: %s dirty: no digest: 671a6275687c\n' "$tstart"
+  [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: %s digest: 671a6275687c\n' \
+    "$tstart" "$(dirty_tree_start "$tsdirty")"
+  printf 'tree-end: %s dirty: %s digest: 671a6275687c\n' "$tstart" "$(dirty_tree_start "$dirty")"
   [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
   printf 'file-size:         PASS (0s)\n'
   printf 'smoke:             PASS (193s)\n'
@@ -244,17 +284,17 @@ LITE_E="==== END AGENT-GATE LITE SUMMARY ===="
 DELTA_S="==== AGENT-GATE DELTA SUMMARY ===="
 DELTA_E="==== END AGENT-GATE DELTA SUMMARY ===="
 
-# full_block [commit] [tree-start] [tree-integrity] [result] -> STDOUT.
+# full_block [commit] [tree-start] [tree-integrity] [result] [dirty] -> STDOUT.
 # Separate from full_summary because composing two blocks into one file cannot go
 # through a `>"$f"` helper: `full_summary /dev/stdout` inside a `{ } > file` group
 # TRUNCATES the file, which silently produced a ONE-block fixture for a
 # two-block case (found while writing these tests — the case passed vacuously).
 full_block() {
   emit_summary_block "$FULL_S" "$FULL_E" "-" \
-    "${1:-$C7}" "${2:-$C12}" "${3:-PASS}" "${4:-PASS}"
+    "${1:-$C7}" "${2:-$C12}" "${3:-PASS}" "${4:-PASS}" "${5-no}" "${6-__mirror__}"
 }
 
-# full_summary <file> [commit] [tree-start] [tree-integrity] [result]
+# full_summary <file> [commit] [tree-start] [tree-integrity] [result] [dirty]
 full_summary() {
   local f="$1"
   shift
@@ -602,22 +642,215 @@ if run 0 "ANSI-coloured full summary -> still parsed -> exit 0" \
   ok "ansi: escapes are stripped before marker/verdict matching (#3400)"
 fi
 
-# --- Case 25: dirty: is REPORTED, not enforced -------------------------------
-# Deliberate: failing on `dirty: yes` is not in the #3465 ruling. It must be
-# VISIBLE at the merge point, but it does not block.
-{
-  printf '%s\n' "$FULL_S"
-  printf 'commit: %s branch: main dirty: yes\n' "$C7"
-  printf 'tree-start: %s dirty: yes digest: 671a6275687c\n' "$C12"
-  printf 'tree-integrity: PASS\n'
-  printf 'RESULT: PASS\n'
-  printf '%s\n' "$FULL_E"
-} >"$T/dirty.txt"
-if run 0 "dirty: yes -> still exit 0 (reported, not enforced)" 2421 "$CERTIFIED" "$T/dirty.txt"; then
+# --- Case 25: dirty: is REPORTED **AND ENFORCED** (#3648) --------------------
+# A gate that ran with `dirty: yes` certified sha PLUS uncommitted NON-IGNORED
+# content (tracked edits and/or non-ignored untracked files)
+# (the gate's capture is --exclude-standard, so never a gitignored log), and
+# `commit:`/`tree-start:` name the same sha either way — so this is the one
+# property of that hazard the sha binding provably cannot see. It was REPORTED
+# and not enforced until #3648; these cases pin the enforcement.
+#
+# The POSITIVE CONTROL comes first on purpose: without it a suite that refused
+# everything would look green while proving nothing about the accepted shape.
+
+# 25(a) POSITIVE CONTROL — `dirty: no` still passes, and is still reported.
+full_summary "$T/dirty-no.txt" "$C7" "$C12" PASS PASS no
+if run 0 "dirty: no -> exit 0 (the clean tree is still accepted)" \
+  2421 "$CERTIFIED" "$T/dirty-no.txt"; then
   case "$OUT" in
-    *"dirty: yes"*) ok "dirty: a dirty gate of record is REPORTED in the evidence line" ;;
-    *) bad "dirty: the evidence line must report dirty: yes (got: $OUT)" ;;
+    *"tree-integrity: PASS dirty: no"*)
+      ok "dirty: a clean gate of record is still REPORTED in the evidence line" ;;
+    *) bad "dirty: the evidence line must still report dirty: no (got: $OUT)" ;;
   esac
+fi
+
+# 25(b) THE AC'S NAMED TEST — a full PASS identical BUT FOR `dirty: yes`.
+# Built from the same builder as 25(a) with only that one field changed, so the
+# case cannot pass by differing somewhere else.
+full_summary "$T/dirty-yes.txt" "$C7" "$C12" PASS PASS yes
+if diff <(full_block "$C7" "$C12" PASS PASS no | grep -v 'dirty:') \
+        <(full_block "$C7" "$C12" PASS PASS yes | grep -v 'dirty:') >/dev/null; then
+  ok "dirty fixture: the yes/no fixtures differ ONLY in their dirty: fields"
+else
+  bad "dirty fixture: the yes/no fixtures differ somewhere other than dirty:"
+fi
+refused "dirty: yes -> REFUSE (the run certified sha + uncommitted edits, #3648)" \
+  "$T/dirty-yes.txt" "records 'dirty: yes'"
+case "$OUT" in
+  *"commit the edits (or discard them), then re-run the FULL gate"*)
+    ok "dirty: the refusal names the REMEDY (commit or discard, then re-gate)" ;;
+  *) bad "dirty: the refusal must name the remedy (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"NO opt-out"*)
+    ok "dirty: the refusal states there is no opt-out (a dirty tree is re-gateable)" ;;
+  *) bad "dirty: the refusal must state that there is no opt-out (got: $OUT)" ;;
+esac
+# 25(b2) THE DIAGNOSTIC MUST DESCRIBE THE GATE'S ACTUAL DIRTY IDENTITY (#3648
+# roborev round 1, finding 2). It previously said "uncommitted TRACKED edits",
+# which is FALSE: agent-gate.sh pairs the tracked-side diff with
+# `git ls-files --others --exclude-standard`, so a non-ignored UNTRACKED file makes
+# the tree dirty too. An operator told "tracked" looks for a modified file, finds
+# none, and concludes the gate is broken.
+case "$OUT" in
+  *"NON-IGNORED content"*) ok "dirty: the refusal describes NON-IGNORED content, not tracked-only" ;;
+  *) bad "dirty: the refusal must not narrow the dirty identity to tracked files (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"UNTRACKED files"*) ok "dirty: the refusal names UNTRACKED files as a dirty cause" ;;
+  *) bad "dirty: the refusal must name untracked files as a dirty cause (got: $OUT)" ;;
+esac
+
+# 25(c) ABSENT `dirty:` field -> REFUSE. Never skipped, never read as clean:
+# the same discipline as a non-hex commit:/tree-start: placeholder.
+full_summary "$T/dirty-absent.txt" "$C7" "$C12" PASS PASS -
+if grep -q '^commit: .* dirty:' "$T/dirty-absent.txt"; then
+  bad "dirty fixture: the absent-field fixture still carries a dirty: on commit:"
+else
+  ok "dirty fixture: the absent-field fixture really omits dirty: from commit:"
+fi
+refused "commit: line with NO dirty: field -> refuse (nothing was measured)" \
+  "$T/dirty-absent.txt" "records NO 'dirty:' value"
+
+# 25(c2) DUPLICATED `dirty:` FIELD -> REFUSE, and refuse on the AMBIGUITY rather
+# than on either value (#3648 roborev round 2, finding 1 -- Medium). The parser
+# used to assign on EVERY `dirty:` token, so the LAST one won: a commit: line
+# reading `dirty: yes dirty: no` reduced to `no` and CERTIFIED a dirty run. That
+# is precisely the "last one wins" reading assert_single_key refuses for whole
+# keys, one field down, and it is a false PASS in a merge gate. The refusal must
+# fire BEFORE the `= no` compare, so a trailing clean value cannot short-circuit.
+full_summary "$T/dirty-dup.txt"
+sed -i 's/^\(commit: .* dirty: no\)$/\1 dirty: yes/' "$T/dirty-dup.txt"
+if grep -qE '^commit: .* dirty: no dirty: yes$' "$T/dirty-dup.txt"; then
+  ok "dirty fixture: the duplicate-field fixture really carries TWO dirty: tokens"
+else
+  bad "dirty fixture: expected two dirty: tokens on the commit: line"
+fi
+refused "commit: line with TWO dirty: fields -> refuse (AMBIGUOUS, not last-wins)" \
+  "$T/dirty-dup.txt" "AMBIGUOUS"
+# And the mirror image: a clean value LAST must not rescue a dirty value first.
+full_summary "$T/dirty-dup-clean-last.txt" "$C7" "$C12" PASS PASS yes
+sed -i 's/^\(commit: .* dirty: yes\)$/\1 dirty: no/' "$T/dirty-dup-clean-last.txt"
+if grep -qE '^commit: .* dirty: yes dirty: no$' "$T/dirty-dup-clean-last.txt"; then
+  ok "dirty fixture: the clean-last fixture is dirty FIRST, clean LAST"
+else
+  bad "dirty fixture: expected 'dirty: yes dirty: no' on the commit: line"
+fi
+refused "commit: dirty: yes then dirty: no -> refuse (a trailing clean value cannot rescue it)" \
+  "$T/dirty-dup-clean-last.txt" "AMBIGUOUS"
+
+# 25(c3) THE LOCKFILE-SETTLED HOLE (#3648 roborev round 4, Medium). `commit:`
+# renders the END capture (agent-gate.sh:8810), so reading cleanliness from it
+# ALONE is not enough: a gate that STARTED against a dirty Cargo.lock and
+# finished clean emits `tree-start: ... dirty: yes` + `commit: ... dirty: no`,
+# and `tree-integrity:` is a NON-FATAL `PASS (lockfile-settled: ...)`
+# (agent-gate.sh:8754) -- a legal, real PASS. Checking commit: only would certify
+# a run that executed against uncommitted content, which is this issue's own
+# defect one capture down. BOTH captures must read clean.
+full_summary "$T/dirty-start-only.txt" "$C7" "$C12" \
+  "PASS (lockfile-settled: Cargo.lock)" PASS no yes
+if grep -qE '^tree-start: .* dirty: yes ' "$T/dirty-start-only.txt" \
+   && grep -qE '^commit: .* dirty: no$' "$T/dirty-start-only.txt"; then
+  ok "dirty fixture: the lockfile-settled fixture is dirty at START, clean at commit:"
+else
+  bad "dirty fixture: expected tree-start dirty: yes with commit: dirty: no"
+fi
+if grep -q 'tree-integrity: PASS (lockfile-settled' "$T/dirty-start-only.txt"; then
+  ok "dirty fixture: the lockfile-settled fixture carries the NON-FATAL integrity PASS"
+else
+  bad "dirty fixture: expected a lockfile-settled tree-integrity PASS"
+fi
+refused "tree-start: dirty: yes with a clean commit: -> refuse (lockfile-settled run)" \
+  "$T/dirty-start-only.txt" "tree-start:"
+
+# 25(d) PRESENT KEY, EMPTY VALUE -> REFUSE. Distinct from an absent field: the
+# gate said something and it reduced to nothing.
+full_summary "$T/dirty-empty.txt" "$C7" "$C12" PASS PASS ""
+if grep -q '^commit: .* dirty:$' "$T/dirty-empty.txt"; then
+  ok "dirty fixture: the empty-value fixture ends its commit: line at the bare key"
+else
+  bad "dirty fixture: expected a bare trailing 'dirty:' on the commit: line"
+fi
+refused "commit: dirty: with an EMPTY value -> refuse" \
+  "$T/dirty-empty.txt" "records NO 'dirty:' value"
+
+# 25(e) UNRECOGNISED values -> REFUSE. `unknown` is pinned by name because it is
+# the literal this script used to substitute for a missing value while `dirty:`
+# was merely reported. `YES`/`No` are pinned because the compare is TOKEN-EXACT
+# and case-sensitive: a near-miss spelling is an unestablished state, not a clean
+# one. (`unverified` is a REAL emitted value and gets its own case below.)
+for _d in maybe unknown YES No; do
+  full_summary "$T/dirty-$_d.txt" "$C7" "$C12" PASS PASS "$_d"
+  refused "dirty: $_d (unrecognised) -> refuse, never read as clean" \
+    "$T/dirty-$_d.txt" "records 'dirty: $_d'"
+done
+unset _d
+
+# 25(g) `dirty: unverified` — A REAL EMITTED VALUE, refused as DEFENCE IN DEPTH.
+# scripts/agent-gate.sh:8814 writes `commit: unverified branch: <b> dirty:
+# unverified` deliberately, when no validated tree capture exists (the start
+# capture failed, or there is no worktree at the terminal emit): the run is
+# already fail-closed there and must not name a sha nothing verified. So this arm
+# closes NO live hole — a real such block is refused by `RESULT: FAIL` and by the
+# non-hex `commit:` placeholder as well. It is tested BY NAME anyway, and the
+# fixture deliberately keeps RESULT: PASS and a VALID hex commit: so that the
+# refusal can only be the `dirty:` one: a value meaning "never measured" must not
+# survive on the strength of a neighbouring key, and an untested correct
+# behaviour is one refactor away from an untested wrong one.
+full_summary "$T/dirty-unverified.txt" "$C7" "$C12" PASS PASS unverified
+refused "dirty: unverified (the gate's own not-measured value) -> refuse on its OWN merit" \
+  "$T/dirty-unverified.txt" "records 'dirty: unverified'"
+
+# 25(h) A FOLLOWING KEY IS NOT A VALUE. scripts/agent-gate.sh renders these lines
+# by unquoted interpolation of variables initialised to the empty string
+# (TREE_START_DIRTY/TREE_END_DIRTY), so a block really can carry a `dirty:` key
+# with nothing of its own after it — and on a space-joined line the NEXT KEY then
+# sits where the value would be. Reading `digest:` as the dirty state would be a
+# two-valued read of a multi-state signal one layer down: it is neither `no` nor
+# absent, so it must REFUSE, naming what it actually found.
+full_summary "$T/dirty-next-key.txt" "$C7" "$C12" PASS PASS "digest: a7743efe8d80"
+if grep -q "^commit: .* dirty: digest: a7743efe8d80" "$T/dirty-next-key.txt"; then
+  ok "dirty fixture: the following-key fixture puts another key where the value goes"
+else
+  bad "dirty fixture: expected 'dirty: digest: ...' on the commit: line"
+fi
+refused "dirty: followed by another KEY -> refuse (a key is not a value)" \
+  "$T/dirty-next-key.txt" "records 'dirty: digest:'"
+
+# 25(i) A SELFTEST-SHAPED block cannot certify a merge. The gate's selftest emits
+# `commit: selftest branch: selftest dirty: no`, `tree-start: selftest ... digest:
+# selftest` and `tree-integrity: PASS (selftest)` (scripts/agent-gate.sh:7826,
+# :8921). Token-exactly that block reads `tree-integrity: PASS`, `RESULT: PASS`
+# and `dirty: no` — so the ONE key refusing it is the hex check on
+# `commit:`/`tree-start:`. That is correct and sufficient, and it is ONE key
+# holding the door; pointing this script at a selftest summary is a plausible
+# accident, so pin the property rather than leave it incidental. UNLIKE every
+# other case in this group it is green BEFORE and AFTER #3648 — it characterises
+# behaviour that already existed, and is recorded as such rather than counted as
+# evidence for the new enforcement.
+full_summary "$T/selftest-block.txt" selftest selftest "PASS (selftest)" PASS no
+if grep -q '^commit: selftest ' "$T/selftest-block.txt" &&
+   grep -q '^tree-integrity: PASS (selftest)' "$T/selftest-block.txt" &&
+   grep -q '^RESULT: PASS' "$T/selftest-block.txt"; then
+  ok "selftest fixture: the block really is a PASS with the selftest placeholders"
+else
+  bad "selftest fixture: expected a selftest-shaped PASS block"
+fi
+refused "a SELFTEST-shaped full block -> refuse (it certifies the gate, not this PR)" \
+  "$T/selftest-block.txt" "is not lowercase hex"
+
+# 25(f) The check reads the `commit:` line, NOT the clean-looking `tree-start:`
+# one below it. The 25(b) fixture disagrees between the two on purpose.
+if grep -q '^tree-start: .* dirty: yes' "$T/dirty-yes.txt"; then
+  ok "dirty: the refused fixture's tree-start: mirrors yes (the gate's real shape)"
+else
+  bad "dirty: expected the yes fixture's tree-start: to mirror the value"
+fi
+if grep -q '^tree-start: .* dirty: no' "$T/dirty-maybe.txt" &&
+   grep -q "^commit: .* dirty: maybe" "$T/dirty-maybe.txt"; then
+  ok "dirty: an unrecognised commit: value refuses despite a clean tree-start: line"
+else
+  bad "dirty: the sentinel fixture should disagree between commit: and tree-start:"
 fi
 
 # --- Case 26: the mutated-path commit: parenthetical parses ------------------
@@ -676,23 +909,33 @@ fi
 DELTA_MODE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $ANCHOR)"
 
 # delta_block [anchor] [commit] [tree-start] [tree-integrity] [result] [mode] \
-#             [anchor-parenthetical] -> STDOUT.  "-" omits a line entirely.
+#             [anchor-parenthetical] [dirty] -> STDOUT.  "-" omits a line entirely.
+# The 8th parameter is the delta run's OWN `dirty:` value (#3648), rendered by the
+# same helpers as the full block's.
 # Line SHAPES are copied from scripts/agent-gate.sh's delta emit site
 # (anchor_meta + SUMMARY_MODE_LINE), trailing fields included.
 delta_block() {
   local anchor="${1:-$ANCHOR}" commit="${2:-$C7}" tstart="${3:-$C12}" \
         ti="${4:-PASS}" result="${5:-PASS}" mode="${6:-$DELTA_MODE}" \
-        paren="${7:-(full-gate PASS commit)}"
+        paren="${7:-(full-gate PASS commit)}" dirty="${8-no}" \
+        tsdirty="${9-__mirror__}"
+  # 9th param, mirroring by default: the delta block's tree-start: dirty value,
+  # allowed to DIVERGE from its commit: one for the lockfile-settled case
+  # (#3648 roborev round 5 -- without it the delta tree-start: assertion was
+  # uncovered, since every delta fixture mirrored a single value into both).
+  [ "$tsdirty" = "__mirror__" ] && tsdirty="$dirty"
   printf '%s\n' "$DELTA_S"
   printf 'run-id: /tmp/agent-gate.dLt4Qx\n'
   [ "$mode" = "-" ] || printf '%s\n' "$mode"
-  [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record dirty: no\n' "$commit"
+  [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record%s\n' \
+    "$commit" "$(dirty_field "$dirty")"
   [ "$anchor" = "-" ] || printf 'delta-anchor: %s %s\n' "$anchor" "$paren"
   printf 'delta-anchor-run-id: /tmp/agent-gate.9cIQgX\n'
   printf 'gate-of-record: full agent-gate.sh run at %s (this DELTA re-certifies a test/docs-only diff; it is NOT a substitute for the full gate)\n' "$anchor"
   printf 'delta-executors: cargo test -p cqlite-core --test issue_3465 (3), docs (2)\n'
-  [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$tstart"
-  printf 'tree-end: %s dirty: no digest: 671a6275687c\n' "$tstart"
+  [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: %s digest: 671a6275687c\n' \
+    "$tstart" "$(dirty_tree_start "$tsdirty")"
+  printf 'tree-end: %s dirty: %s digest: 671a6275687c\n' "$tstart" "$(dirty_tree_start "$dirty")"
   [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
   printf 'logs: /tmp/agent-gate.dLt4Qx\n'
   [ "$result" = "-" ] || printf 'RESULT: %s\n' "$result"
@@ -860,6 +1103,85 @@ refused_pair "a LITE-only file as the ANCHOR -> refuse (the #3408 case, 4-arg fo
 full_summary "$T/anchor-nonhex.txt" "unverified" "$A12" PASS PASS
 refused_pair "anchor commit: non-hex -> refuse (a real sha is still required)" \
   "$T/anchor-nonhex.txt" "$GOODDELTA" "is not lowercase hex"
+
+# --- Case 33(x): `dirty: no` is required of BOTH blocks in Case B (#3648) ----
+# The delta run is the one that covers the tree being MERGED, and the anchor is
+# the full PASS the whole chain hangs from. A dirty tree in either place breaks
+# the same property, so both are held to the requirement.
+
+# 33(x)(a) POSITIVE CONTROL — both clean -> exit 0, both evidence lines report it.
+if run 0 "delta pair with BOTH blocks dirty: no -> exit 0" \
+  2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA"; then
+  case "$OUT" in
+    *"GATE-OF-RECORD commit: $A7"*"dirty: no"*"DELTA-RECERT anchor:"*"dirty: no"*)
+      ok "dirty (case B): BOTH evidence lines report the clean tree" ;;
+    *) bad "dirty (case B): both evidence lines must report dirty: no (got: $OUT)" ;;
+  esac
+fi
+
+# 33(x)(b) the DELTA block dirty -> refuse, naming the delta block.
+delta_summary "$T/delta-dirty-yes.txt" "$ANCHOR" "$C7" "$C12" PASS PASS \
+  "$DELTA_MODE" "(full-gate PASS commit)" yes
+refused_pair "delta block dirty: yes -> refuse (it covers the MERGED tree)" \
+  "$ANCHORFULL" "$T/delta-dirty-yes.txt" "The delta block records 'dirty: yes'"
+# 33(x)(b2) THE REMEDY IS PER-ARTIFACT (#3648 roborev round 1, finding 1). A dirty
+# DELTA block must send the operator back to the `--delta` re-certification, NOT to
+# a repeat full gate: #1892 mandates `--delta` for a test/docs-only diff on top of a
+# full PASS and forbids re-running the full gate. A refusal naming the wrong remedy
+# routes a correct operator down a path doctrine forbids.
+case "$OUT" in
+  *"re-run the --delta re-certification on the clean tree"*)
+    ok "dirty (delta): the refusal names the DELTA remedy, not a repeat full gate" ;;
+  *) bad "dirty (delta): the refusal must name the --delta remedy (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"re-run the FULL gate"*)
+    bad "dirty (delta): the delta refusal must NOT tell the operator to re-run the FULL gate (got: $OUT)" ;;
+  *) ok "dirty (delta): the delta refusal does NOT misdirect to a repeat full gate" ;;
+esac
+case "$OUT" in
+  *"anchor's own full-gate PASS is unaffected"*)
+    ok "dirty (delta): the refusal states the anchor's full PASS still stands" ;;
+  *) bad "dirty (delta): the refusal should say the anchor PASS is unaffected (got: $OUT)" ;;
+esac
+
+# 33(x)(c) the ANCHOR (full) block dirty -> refuse, naming the full-gate block.
+# The delta here is the GOOD one, so the refusal cannot be the delta's.
+full_summary "$T/anchor-dirty-yes.txt" "$A7" "$A12" PASS PASS yes
+refused_pair "anchor block dirty: yes -> refuse even with a clean delta re-cert" \
+  "$T/anchor-dirty-yes.txt" "$GOODDELTA" "The full-gate block records 'dirty: yes'"
+
+# 33(x)(c2) THE DELTA HALF OF THE LOCKFILE-SETTLED CASE (#3648 roborev round 5).
+# 33(x)(b)/(c) mirror ONE dirty value into both commit: and tree-start:, so they
+# would still pass with the delta-specific tree-start: assertion deleted -- i.e.
+# that assertion was uncovered. (My own round-4 RED-verify showed it: removing
+# BOTH tree-start assertions red only ONE case.) These two pin each block's
+# tree-start: independently, with commit: clean so the refusal cannot be its.
+delta_summary "$T/delta-start-only.txt" "$ANCHOR" "$C7" "$C12" \
+  "PASS (lockfile-settled: Cargo.lock)" PASS "$DELTA_MODE" "(full-gate PASS commit)" no yes
+if grep -qE '^tree-start: .* dirty: yes ' "$T/delta-start-only.txt" \
+   && grep -qE '^commit: .* dirty: no$' "$T/delta-start-only.txt"; then
+  ok "dirty fixture (delta): dirty at START, clean at commit: -- values are INDEPENDENT"
+else
+  bad "dirty fixture (delta): expected tree-start dirty: yes with commit: dirty: no"
+fi
+refused_pair "delta tree-start: dirty: yes with a clean commit: -> refuse" \
+  "$ANCHORFULL" "$T/delta-start-only.txt" "tree-start:"
+
+# And the ANCHOR's own tree-start:, with a wholly clean delta beside it.
+full_summary "$T/anchor-start-only.txt" "$A7" "$A12" \
+  "PASS (lockfile-settled: Cargo.lock)" PASS no yes
+refused_pair "anchor tree-start: dirty: yes with a clean commit: and a clean delta -> refuse" \
+  "$T/anchor-start-only.txt" "$GOODDELTA" "tree-start:"
+
+# 33(x)(d) an ABSENT dirty: field in either block -> refuse (never read as clean).
+delta_summary "$T/delta-dirty-absent.txt" "$ANCHOR" "$C7" "$C12" PASS PASS \
+  "$DELTA_MODE" "(full-gate PASS commit)" -
+refused_pair "delta block with NO dirty: field -> refuse" \
+  "$ANCHORFULL" "$T/delta-dirty-absent.txt" "The delta block records NO 'dirty:' value"
+full_summary "$T/anchor-dirty-absent.txt" "$A7" "$A12" PASS PASS -
+refused_pair "anchor block with NO dirty: field -> refuse" \
+  "$T/anchor-dirty-absent.txt" "$GOODDELTA" "The full-gate block records NO 'dirty:' value"
 
 # =============================================================================
 # #3465 review — the remaining refusal branches

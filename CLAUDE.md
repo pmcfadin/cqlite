@@ -1672,8 +1672,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   launch the gate — #2874's reader contract needs the launcher) and it cannot prove the summary came
   from a real run rather than a hand-written file: a **hostile invoker is out of the threat model**;
   what this closes is **accident and drift** — a diligent worker with no step in its path telling it
-  the gate of record was never run. `dirty:` is REPORTED in the success line, not enforced (failing on it
-  is proposed separately in #3648). **The FOURTH argument is optional and is the ONLY way a `--delta`
+  the gate of record was never run. `dirty:` is REPORTED in the success line **and ENFORCED** (#3648): the gate of record's
+  block — and, in Case B, the delta block's too — must read `dirty: no`, matched AFFIRMATIVELY, so an
+  absent or unrecognised value REFUSES rather than being read as clean. A `dirty: yes` run certified the
+  sha PLUS uncommitted tracked edits (the capture is `--exclude-standard`, so never a gitignored log) and
+  `commit:`/`tree-start:` cannot see the difference. There is deliberately NO opt-out — a dirty tree is
+  always re-gateable, so an override could only buy a vacuous green. **The FOURTH argument is optional and is the ONLY way a `--delta`
   re-cert can certify a merge** — because #1892 *mandates* `--delta`, "never a repeat full gate", for a
   test/docs-only diff on top of a full PASS at anchor `X`, and mandates that the PR record BOTH blocks.
   A 3-arg-only guard therefore red on correct, doctrine-mandated input, which is the guard agents learn
