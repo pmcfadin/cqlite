@@ -14406,7 +14406,21 @@ run_feature_iso_delta_scan() {
   local start end status
   start=$(date +%s)
   local feat=delta-scan
-  local iso_features="all-compression,$feat"
+  # `write-support` IS IN THE SET, on the lane's OWN stated rule for `all-compression`
+  # ("it stays because it is in `default`; dropping it would change what the lane measures
+  # from FEATURE ISOLATION to NO-COMPRESSION support"). MEASURED consequence of omitting
+  # it: 3 of the 13 derived targets are gated
+  # `#![cfg(all(feature = "delta-scan", feature = "write-support"))]` and compiled to ZERO
+  # tests, so the census declared the delta-scan family "closed" while a quarter of it
+  # executed nothing (roborev round 1, finding 2). Including it converts 3 declared gaps
+  # into 3 EXECUTED targets and does not weaken the only isolation this lane asserts,
+  # which is parquet-vs-delta-scan.
+  #
+  # `state_machine` is the ONE remaining divergence from `default`, and it is DECLARED
+  # rather than quietly inherited: 143 cqlite-core test targets reference it, but NONE of
+  # the delta-scan-gated 13 does (measured), so it changes nothing this lane executes.
+  # Adding it would enlarge the lane's compile for no measured coverage.
+  local iso_features="all-compression,write-support,$feat"
 
   # ---- fixture posture, decided from THIS script's own state -----------------------
   local _full=0
@@ -14652,12 +14666,18 @@ EOF
   census+=("       derivation rather than falling back to an empty set.")
   census+=("  fixtures: $_fx_note")
   if [ "$_fx_blind_n" -gt 0 ]; then
-    census+=("       NOT COVERED BY THAT FLAG — $_fx_blind_n derived target(s) read neither")
-    census+=("       CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS, so the strict")
-    census+=("       posture cannot be claimed for them:$_fx_blind")
+    census+=("       FIXTURE-BLIND — $_fx_blind_n derived target(s) read neither")
+    census+=("       CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS. In STRICT mode")
+    census+=("       (the full gate) this is a FAIL, not a note: a target that ignores the flag")
+    census+=("       can return successfully having compared nothing:$_fx_blind")
   else
     census+=("       every derived target reads a strict-fixture variable: 0 RECOGNISED gaps")
   fi
+  census+=("       WHICH corpus is missing is named BY THE TARGET, not by this lane: each strict")
+  census+=("       failure prints the KEYSPACE and TABLE it could not open (test_types,")
+  census+=("       test_deltas, …), because the #2078 preflight only probes the CANONICAL")
+  census+=("       keyspace (test_basic) and would otherwise send the reader to the wrong")
+  census+=("       remedy. Remedy for all of them: bash test-data/scripts/fetch-datasets.sh")
   if [ -n "$rf_unmet" ]; then
     census+=("  NOT INVOKED — cargo REJECTS an explicit --test whose required-features are unmet,")
     census+=("       so naming these would be a false red on correct code. DECLARED coverage")
@@ -14701,6 +14721,33 @@ EOF
     for _cl in "${census[@]}"; do echo "$_cl"; done
     echo "==== end census ===="
   } > "$log"
+
+  # A FIXTURE-BLIND TARGET IS A GATE FAILURE IN STRICT MODE, NOT A CENSUS LINE (roborev
+  # round 1, finding 1). Reporting it informationally was this issue's OWN defect one target
+  # over: `scan_delta_parity_test` ignored CQLITE_REQUIRE_FIXTURES, returned successfully
+  # with `test_deltas` absent, and could therefore merge-gate as "passed" having compared
+  # NOTHING — exactly the vacuous pass #3725 exists to remove, relocated next door. The
+  # strict flag is only worth exporting if every target it is exported FOR honours it, so
+  # the gate of record refuses a lane it cannot make strict.
+  #
+  # ONLY in strict mode: under `--only`/`--lite` (or the documented #2078 opt-out) the flag
+  # is deliberately unset for every target, so blindness changes nothing about that run and
+  # failing on it would red a probe on correct code.
+  if [ "$_fx_mode" = strict ] && [ "$_fx_blind_n" -gt 0 ]; then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: $_fx_blind_n derived target(s) read NEITHER" \
+      "        CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS, so this run" \
+      "        exports the strict flag and those targets IGNORE it — with their corpus" \
+      "        absent they return successfully having compared NOTHING, and the lane would" \
+      "        report PASS. That is the vacuous pass this lane exists to remove (#3725)." \
+      "        FIXTURE-BLIND:$_fx_blind" \
+      "        Remedy: make each named target honour CQLITE_REQUIRE_FIXTURES=1 — an absent" \
+      "        fixture must FAIL by name (the skip_or_fail shape in" \
+      "        cqlite-core/tests/issue_1007_complex_type_parity.rs). There is deliberately" \
+      "        NO lane-specific opt-out: #2078's AGENT_GATE_ALLOW_MISSING_FIXTURES=1 is the" \
+      "        one sanctioned escape hatch and it already turns this lane lenient."
+    return 0
+  fi
 
   echo ">>> [$name] RUSTFLAGS=-D warnings cargo test --no-fail-fast -p cqlite-core --no-default-features --features $iso_features --lib + $count target(s)"
   # --no-fail-fast for the reason legacy-heuristics carries it: cargo test stops after the
