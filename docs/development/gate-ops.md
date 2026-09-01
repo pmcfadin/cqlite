@@ -232,11 +232,38 @@ mode (both path seams mandatory, no production fallback).
 
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
-Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
-worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
-removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
-10-core machine).
+**A full gate's `target/` dir is ~100–145GB per active worktree, NOT the ~25–30GB
+this section claimed until #3800.** That figure was 4–5x low and is exactly what made
+current fleet capacity look adequate. Measured, twice, on two different boxes:
+
+- **#3800, `ip-172-31-1-216`** (295G `/data`): `lane-3634/target` at **101G mid-full-gate,
+  peaking at 143G**, with two other active lanes at **68G** and **57G** — **0 bytes free**
+  at the failure.
+- **2026-09-01, `ip-172-31-6-169`** (independent corroboration): `lane-3731/target` at
+  **108G**, alongside a 15G `/data/sccache`.
+
+**What moved it:** the feature-matrix lanes. `feature-iso-parquet`, `feature-iso-delta-scan`,
+`legacy-heuristics`, `all-features-check` and the `--all-features` clippy matrix each compile
+a **distinct feature profile**, and cargo never evicts a stale profile's artifacts — so the
+per-worktree peak grew with the component set while this paragraph did not.
+
+**The consequence to plan around:** three concurrent full gates need roughly **430G** of
+`target/` on a **295G** disk. They do not fit. `flow-finalize` removes a finished issue's
+worktree; additionally prune stale worktrees' `target/` dirs and size the shared cache with
+`SCCACHE_CACHE_SIZE` (recommend `30G` on the 10-core machine).
+
+**When it happens anyway, the SUMMARY now says so (#3800).** ENOSPC used to surface as a
+bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
+doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
+minimal-features build that was never broken. Every terminal block now carries a
+`disk-exhaustion:` line naming a recognised signature, the component and the log line, plus a
+start→emit free-space delta; see the gate section of `CLAUDE.md` for its closed value set. It
+is an **attribution, never a verdict**: it never changes `RESULT`.
+
+**This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
+queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per
+box. That capacity-management work is tracked under **#3434 / #3763 / #3755** — do not read
+this section as solved.
 
 **macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
 reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed
