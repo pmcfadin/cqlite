@@ -1096,6 +1096,54 @@ fn a_key_spelled_differently_by_the_two_sides_still_finds_its_guide() {
     }
 }
 
+/// THE DUPLICATE-RENDERING REFUSAL IS WHOLE-NODE, AND THAT COSTS THE ENTRY VALUES —
+/// pinned executably as a known hole (roborev job 34, issue #3726).
+///
+/// When two container keys render alike the node is refused, `decode_shape` returns the
+/// un-split body, and NOTHING inside is compared: not the entry count, not the pair shape,
+/// not the values. Measured — a value corrupted 20 -> 999 inside such a cell is invisible.
+///
+/// It is the same shape as the gap that suppressed a whole map (fixed earlier in this
+/// issue), one module over, and the same answer would work: entry boundaries and emitted
+/// order ARE still recoverable, so the entries could be paired POSITIONALLY with only the
+/// ambiguous KEY suppressed.
+///
+/// NOT FIXED HERE, and the reasons are worth stating rather than implying:
+///   * this refusal was itself the FIX for a false divergence (two keys sharing a spelling
+///     used to select the wrong decode guide), so the current behaviour trades coverage for
+///     the FAIL-CLOSED direction — it loses checks, it does not produce wrong verdicts;
+///   * no committed fixture has colliding container-key renderings, so nothing in the
+///     corpus exercises it;
+///   * doing it properly needs KEY-SCOPED suppression inside `csv_container`'s refusal
+///     model, which is a design change in a module already at its size ceiling.
+///
+/// This test asserts the hole ON PURPOSE. When key-scoped refusal lands it will RED, and
+/// that is the signal to delete it — a residual that reds beats a paragraph nobody re-reads.
+#[test]
+fn a_duplicate_rendering_refusal_also_costs_the_entry_values() {
+    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
+    let golden = json!({
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    // The SECOND entry's value is corrupted 20 -> 999.
+    let csv = "{{label: null, rank: 1}: 10, {label: null, rank: 1}: 999}";
+    assert!(
+        node_refusal(&golden, Some(&ty)).is_some(),
+        "premise: colliding renderings refuse the node"
+    );
+    let decoded = match decode(&golden, csv, &ty) {
+        Ok(decoded) => decoded,
+        Err(why) => panic!("a refused node decodes to its un-split body, not an error: {why}"),
+    };
+    assert!(
+        decoded.is_string(),
+        "KNOWN HOLE: the whole cell comes back as raw text, so the corrupted value is never \
+         compared. If this now fails, key-scoped refusal has landed — delete this test and \
+         update the residual note on `decode_does_not_recover`."
+    );
+}
+
 /// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
 /// is REFUSED rather than decoded against the wrong guide (roborev finding, #3726).
 ///
