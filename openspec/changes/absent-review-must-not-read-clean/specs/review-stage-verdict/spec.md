@@ -69,15 +69,21 @@ nothing was produced. The deadline SHALL NOT change the verdict.
 ### Requirement: The merge point fails closed on a missing C verdict
 
 `scripts/flow/premerge-assert.sh` SHALL accept `--c-verdict <path|AUTO>`, SHALL treat its absence as a
-usage failure (exit 3), and SHALL determine whether C is required by MEASURING the branch — an
-`openspec/changes/<slug>/` present ⇒ C required; absent ⇒ C not applicable, reported affirmatively.
+usage failure (exit 3), and SHALL determine whether C is required by MEASURING WHAT THE BRANCH DOES:
+the branch's own DIFF between merge-base(`origin/main`, `<certified>`) and `<certified>`, excluding
+`openspec/changes/archive/**` — non-empty ⇒ design-routed ⇒ C required; empty ⇒ C not applicable,
+reported affirmatively. A plain LISTING of `openspec/changes/` SHALL NOT be used: `origin/main` carries
+`archive` plus sibling lanes' in-flight change directories, so a listing reads design-routed for EVERY
+branch and measures nothing. The base SHALL be the MERGE-BASE, never `origin/main`'s tip (#3392), and
+any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 
 #### Scenario: an absent C verdict cannot reach a merge on a design-routed branch
-- **WHEN** the branch carries an OpenSpec change and the C verdict is absent or `NOT-RUN`
+- **WHEN** the branch's diff against the merge-base touches `openspec/changes/` outside `archive/**`
+  and the C verdict is absent or `NOT-RUN`
 - **THEN** `premerge-assert.sh` REFUSES, naming the stage and the cause
 
 #### Scenario: routing is measured, not asserted by the caller
-- **WHEN** no OpenSpec change exists on the branch
+- **WHEN** the branch's diff against the merge-base touches no `openspec/changes/` path outside `archive/**`
 - **THEN** the script reports `c-verdict: NOT-APPLICABLE (no openspec change on branch)` affirmatively
 - **AND** no caller-supplied flag value can declare C inapplicable on a branch that carries one
 
