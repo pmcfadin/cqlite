@@ -223,6 +223,69 @@ claude_auth_resolve_timeout() {
   return 1
 }
 
+# ---- identity of a delivered credential: A DIGEST, NEVER A LENGTH ------------------
+# The cold-start probe reports what a would-be tmux server DELIVERS to a pane, and the
+# delivered token used to be checked against `${#persisted}` alone. LENGTH EQUALITY IS NOT
+# VALUE EQUALITY: one `set-environment CLAUDE_CODE_OAUTH_TOKEN <other>` line in a tmux
+# config substitutes a different value, and if it is the same length the probe reported
+# VERIFIED — the verdict that certifies a fresh box as able to start a lane.
+#
+# COMPARED WITHOUT EVER PRINTING EITHER VALUE, which is this file's standing rule. The pane
+# writes a SALTED SHA-256 of what it received; the parent hashes the persisted value with
+# the same salt and compares the two hex strings. The salt is generated per run, so what is
+# written into the probe's private working directory is not a stable fingerprint of the
+# credential either. Neither the digest nor the salt is ever rendered into a verdict.
+#
+# THE DIGEST TOOL IS A PRECONDITION, NOT A NICETY: with none available the probe REFUSES
+# (UNMEASURED-class, cause named) rather than falling back to the length comparison this
+# exists to replace. A missing capability must not inherit the permissive branch.
+# `sha256sum` (coreutils) and `shasum -a 256` (perl) both print `<hex>  <file>`, so the
+# first whitespace-separated field is the digest for either.
+CLAUDE_AUTH_DIGEST_CMD=''
+claude_auth_resolve_digest() {
+  local cand out
+  CLAUDE_AUTH_DIGEST_CMD=''
+  for cand in 'sha256sum' 'shasum -a 256'; do
+    # PROBED BY RUNNING IT, never taken from its name: the same rule as the timeout
+    # resolver. A candidate that does not produce 64 hex characters is not a sha256.
+    # NOT A PIPE WHOSE rc WE READ: the value is captured, then the SHAPE is tested.
+    out=$(printf '%s' cqlite | $cand 2>/dev/null)
+    out=${out%% *}
+    case "$out" in
+      *[!0-9a-f]*|'') continue ;;
+    esac
+    [ "${#out}" -eq 64 ] || continue
+    CLAUDE_AUTH_DIGEST_CMD="$cand"
+    return 0
+  done
+  return 1
+}
+
+# claude_auth_digest_into <outvar> <salt> <value>: rc 1 when no digest could be computed.
+# `$CLAUDE_AUTH_DIGEST_CMD` is deliberately UNQUOTED — it is a resolved command WORD LIST
+# (`shasum -a 256`), chosen from the closed literal set above and from nowhere else.
+claude_auth_digest_into() {
+  local __o="$1" __salt="$2" __val="$3" __d=''
+  eval "$__o="
+  [ -n "$CLAUDE_AUTH_DIGEST_CMD" ] || return 1
+  # The pipe is safe here for the reason the matcher block gives: the SIGPIPE hazard is an
+  # early-exiting consumer, and a digest tool reads to EOF by construction.
+  __d=$(printf '%s' "$__salt$__val" | $CLAUDE_AUTH_DIGEST_CMD 2>/dev/null)
+  __d=${__d%% *}
+  case "$__d" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  [ "${#__d}" -eq 64 ] || return 1
+  eval "$__o=\$__d"
+}
+
+# claude_auth_probe_salt_into <outvar>: a per-run salt. It is not a secret and needs no
+# cryptographic source — its only job is to keep the digest from being a stable
+# fingerprint of the credential across runs.
+claude_auth_probe_salt_into() {
+  eval "$1=\"cqlite-3733-\$\$-\${RANDOM}\${RANDOM}-\${SECONDS}\""
+}
+
 # ---- shell tracing: OFF ACROSS EVERY SECRET-BEARING PATH ---------------------------
 # `bash -x` (or an inherited `set -x`) prints every expanded assignment and every
 # command's ARGV *before* the command runs — which is before the redaction boundary can
@@ -727,19 +790,33 @@ claude_auth_probe_arm_traps() {
   trap 'claude_auth_probe_signal HUP' HUP
 }
 
-# claude_tmux_cold_probe_into <ov_ok> <ov_tok> <ov_toklen> <ov_cfg> <ov_why> <tok> <cfg>
+# claude_tmux_cold_probe_into <ov_ok> <ov_tok> <ov_toklen> <ov_match> <ov_cfg> <ov_why>
+#                             <tok> <cfg>
 # ov_ok is 1 only when a pane actually reported. An EMPTY <tok>/<cfg> means "a cold session
 # would receive nothing here", so the variable is left UNSET for the probe — which is what
 # pam_env does with an absent assignment.
+# ov_match is the IDENTITY of the delivered token, three-valued: `match` (its salted digest
+# equals the persisted value's), `differs`, or `unmeasured` (no digest could be computed on
+# one side or the other). `unmeasured` is never read as `match` — see the caller.
 claude_tmux_cold_probe_into() {
-  local __ok="$1" __otok="$2" __olen="$3" __ocfg="$4" __owhy="$5" __ptok="$6" __pcfg="$7"
-  local __dir='' __res='' __sock='' __rc=0
-  eval "$__ok=0"; eval "$__otok=unset"; eval "$__olen=0"; eval "$__ocfg="; eval "$__owhy="
+  local __ok="$1" __otok="$2" __olen="$3" __omatch="$4" __ocfg="$5" __owhy="$6"
+  local __ptok="$7" __pcfg="$8"
+  local __dir='' __res='' __sock='' __rc=0 __salt='' __expdig=''
+  eval "$__ok=0"; eval "$__otok=unset"; eval "$__olen=0"; eval "$__omatch=unmeasured"
+  eval "$__ocfg="; eval "$__owhy="
 
   if ! claude_auth_resolve_timeout; then
     eval "$__owhy='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to start a tmux probe whose bound could not kill a wedged child'"
     return 0
   fi
+  # THE IDENTITY COMPARISON IS A PRECONDITION OF THE PROBE, not a step inside it: without a
+  # digest tool the only available comparison is by LENGTH, which a same-length
+  # substitution satisfies. Refusing is the non-permissive answer and the cause is named.
+  if ! claude_auth_resolve_digest; then
+    eval "$__owhy='no sha256 digest tool (sha256sum / shasum -a 256) on PATH, so what a pane RECEIVES could not be compared to the persisted value by VALUE — refusing rather than falling back to a LENGTH comparison, which a same-length substitution satisfies'"
+    return 0
+  fi
+  claude_auth_probe_salt_into __salt
   if ! __dir=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-tmux-probe.XXXXXX") || [ ! -d "$__dir" ]; then
     eval "$__owhy='could not create a private working directory for the isolated probe'"
     return 0
@@ -773,16 +850,26 @@ claude_tmux_cold_probe_into() {
   cat >"$__dir/probe.sh" <<'CLAUDE_AUTH_PROBE'
 #!/bin/sh
 t="${CLAUDE_CODE_OAUTH_TOKEN-}"
+# THE PANE REPORTS DELIVERY, NEVER THE VALUE: set/unset, a length, a SALTED DIGEST, and the
+# config directory (a path, not a secret). $CQLITE_AUTH_PROBE_DIGEST is unquoted because it
+# is a command WORD LIST (`shasum -a 256`) resolved by the parent from a closed literal set.
+d=''
+if [ -n "$t" ] && [ -n "${CQLITE_AUTH_PROBE_DIGEST-}" ]; then
+  d=$(printf '%s' "${CQLITE_AUTH_PROBE_SALT-}$t" | $CQLITE_AUTH_PROBE_DIGEST 2>/dev/null)
+  d=${d%% *}
+fi
 {
   printf 'tok=%s\n' "${CLAUDE_CODE_OAUTH_TOKEN+set}"
   printf 'toklen=%s\n' "${#t}"
+  printf 'tokdig=%s\n' "$d"
   printf 'cfg=%s\n' "${CLAUDE_CONFIG_DIR-}"
   printf 'end\n'
 } >"$1"
 CLAUDE_AUTH_PROBE
 
   local -a __e=(env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u TMUX -u TMUX_PANE
-                -u "$CLAUDE_AUTH_TOKEN_KEY" -u "$CLAUDE_AUTH_CONFIG_KEY")
+                -u "$CLAUDE_AUTH_TOKEN_KEY" -u "$CLAUDE_AUTH_CONFIG_KEY"
+                "CQLITE_AUTH_PROBE_SALT=$__salt" "CQLITE_AUTH_PROBE_DIGEST=$CLAUDE_AUTH_DIGEST_CMD")
   [ -z "$__ptok" ] || __e+=("$CLAUDE_AUTH_TOKEN_KEY=$__ptok")
   [ -z "$__pcfg" ] || __e+=("$CLAUDE_AUTH_CONFIG_KEY=$__pcfg")
   # NOT A PIPE: the command runs on its own line and $? is read on the next.
@@ -807,12 +894,20 @@ CLAUDE_AUTH_PROBE
     return 0
   fi
 
-  local __rtok='' __rlen='' __rcfg=''
+  local __rtok='' __rlen='' __rcfg='' __rdig='' __match=unmeasured
   __rtok=$(sed -n 's/^tok=//p' "$__res" 2>/dev/null | tail -1)
   __rlen=$(sed -n 's/^toklen=//p' "$__res" 2>/dev/null | tail -1)
+  __rdig=$(sed -n 's/^tokdig=//p' "$__res" 2>/dev/null | tail -1)
   __rcfg=$(sed -n 's/^cfg=//p' "$__res" 2>/dev/null | tail -1)
   claude_auth_probe_cleanup; claude_auth_probe_restore_traps
   case "$__rlen" in ''|*[!0-9]*) __rlen=0 ;; esac
+  # THE IDENTITY, decided here rather than by the caller, so no caller can read a
+  # could-not-tell as a match. Both digests are salted with the SAME per-run salt; an empty
+  # or unhashable side stays `unmeasured`, which is UNMEASURED-class upstream.
+  if [ -n "$__ptok" ] && [ -n "$__rdig" ] && claude_auth_digest_into __expdig "$__salt" "$__ptok"; then
+    if [ "$__rdig" = "$__expdig" ]; then __match=match; else __match=differs; fi
+  fi
+  eval "$__omatch=\$__match"
   eval "$__otok=\${__rtok:-unset}"; eval "$__olen=\$__rlen"; eval "$__ocfg=\$__rcfg"
   eval "$__ok=1"
 }
@@ -828,7 +923,7 @@ claude_tmux_cold_verdict_into() {
   local __tok='' __state='' __cfg='' __cfgstate=''
   # The out-var names here must NOT collide with the callee's own local parameter names:
   # `eval "$__ok=1"` on a shadowed `__ok` evaluates `0=1`. Hence the `__pr*` prefix.
-  local __prok=0 __prtok='' __prlen=0 __prcfg='' __prwhy=''
+  local __prok=0 __prtok='' __prlen=0 __prmatch='' __prcfg='' __prwhy=''
   eval "$__ov=UNMEASURED"; eval "$__od="
 
   claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
@@ -847,7 +942,7 @@ claude_tmux_cold_verdict_into() {
       return 0 ;;
   esac
 
-  claude_tmux_cold_probe_into __prok __prtok __prlen __prcfg __prwhy "$__tok" "$__cfg"
+  claude_tmux_cold_probe_into __prok __prtok __prlen __prmatch __prcfg __prwhy "$__tok" "$__cfg"
   if [ "$__prok" != 1 ]; then
     eval "$__ov=NO-SERVER"
     eval "$__od=\"no tmux server is running, and the isolated cold-start probe could not run: \$(claude_auth_redact \"\$__prwhy\") — UNMEASURED-class, never an ok\""
@@ -859,11 +954,21 @@ claude_tmux_cold_verdict_into() {
     eval "$__od=\"no tmux server is running, and a throwaway one started from \$__file handed its pane NO \$CLAUDE_AUTH_TOKEN_KEY — so the NEXT real server will not either, and every lane it spawns lands on the first-run login chooser\""
     return 0
   fi
-  # A delivered value of unexpected length is not a pass and not a failure of the box: the
-  # measurement itself is untrustworthy, so it degrades to the UNMEASURED-class verdict.
-  if [ "$__prlen" -ne "${#__tok}" ]; then
-    eval "$__ov=NO-SERVER"
-    eval "$__od='the isolated pane received a CLAUDE_CODE_OAUTH_TOKEN of unexpected length, so the probe measured something other than the persisted value — UNMEASURED-class'"
+  # THE DELIVERED VALUE MUST BE THE PERSISTED VALUE, COMPARED AS A VALUE. This was a LENGTH
+  # comparison, and length equality is not value equality: one `set-environment` line in a
+  # tmux config substituting a different token of the same length yielded VERIFIED — the
+  # verdict that certifies a fresh box. The comparison is by salted digest and neither value
+  # is printed (see the digest block near the top). `unmeasured` — no digest computable on
+  # one side — is NOT read as a match: an unmeasured identity is UNMEASURED-class, and this
+  # branch says which of the two it was.
+  if [ "$__prmatch" != match ]; then
+    if [ "$__prmatch" = differs ]; then
+      eval "$__ov=NO-SERVER"
+      eval "$__od=\"the isolated pane received a \$CLAUDE_AUTH_TOKEN_KEY that does not match the persisted value (compared by salted digest; neither value printed) — something between \$__file and the pane SUBSTITUTES the credential, so this measured something other than the persisted source — UNMEASURED-class\""
+    else
+      eval "$__ov=NO-SERVER"
+      eval "$__od=\"the isolated pane's \$CLAUDE_AUTH_TOKEN_KEY could not be compared to the persisted value at all (no digest was computable on one side), so whether a new server would deliver the RIGHT credential is UNKNOWN — UNMEASURED-class\""
+    fi
     return 0
   fi
   if [ -z "$__prcfg" ]; then

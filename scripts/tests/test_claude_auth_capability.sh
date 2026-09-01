@@ -225,6 +225,10 @@ EOF
 #   complete    — matching token AND CLAUDE_CONFIG_DIR
 #   broken      — an error that is NOT "no server running"
 #   probefail   — no server AND the isolated cold-start probe cannot be started
+#   substitute  — no server, and a would-be server SUBSTITUTES a DIFFERENT token of the
+#                 SAME LENGTH into the pane (a `set-environment` in a tmux config does
+#                 exactly this). The delivered value is wrong; every length-derived
+#                 measurement of it is indistinguishable from the right one.
 # `setenv` is always accepted and RECORDED — as key plus VALUE LENGTH, never the value, so
 # the recording file cannot become the leak this suite forbids.
 #
@@ -261,6 +265,11 @@ case "\$1" in
     printf 'new-session sock=%s\n' "\$sock" >>"\$log"
     case '$mode' in
       probefail) printf 'error connecting to socket\n' >&2; exit 1 ;;
+      substitute)
+        # A server-side substitution, which is what a \`set-environment\` line in a tmux
+        # config does. The pane receives a DIFFERENT value of the SAME LENGTH.
+        env CLAUDE_CODE_OAUTH_TOKEN='$TOK_OTHER' sh -c "\$cmd"
+        exit \$? ;;
     esac
     sh -c "\$cmd"
     exit \$? ;;
@@ -269,7 +278,7 @@ case "\$1" in
     exit 0 ;;
   show-environment)
     case '$mode' in
-      no-server|probefail) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
+      no-server|probefail|substitute) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
       stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
@@ -297,8 +306,14 @@ EOF
 # and `tmux` are genuinely ABSENT rather than stubbed. A stub exiting 127 is not the same
 # FACT as a missing binary, and this suite asserts the missing-binary verdict.
 MINPATH="$tmp/minpath"; mkdir -p "$MINPATH"
-for t in bash sh uname grep sed tail cut tr mktemp rm env cat head sort comm find chmod ln mkdir timeout; do
-  src=$(command -v "$t" 2>/dev/null) || continue
+for t in bash sh uname grep sed tail cut tr mktemp rm env cat head sort comm find chmod ln mkdir timeout true id; do
+  # `type -P`, NOT `command -v`: for a name that is ALSO a shell builtin (`true`) the
+  # latter answers with the bare word, and `ln -sf true "$MINPATH/true"` then plants a
+  # SELF-REFERENTIAL symlink — measured, and it made `timeout … true` fail 126 ("too many
+  # levels of symbolic links"), so the timeout resolver refused and every case on this PATH
+  # reported the wrong cause. `type -P` searches PATH only. The absolute-path guard is belt.
+  src=$(type -P "$t" 2>/dev/null) || continue
+  case "$src" in /*) ;; *) continue ;; esac
   ln -sf "$src" "$MINPATH/$t"
 done
 # The SAME Linux pin as mkshim: MINPATH is a PATH in its own right, so a case that used it
@@ -1550,6 +1565,62 @@ if printf '%s' "$bs30b" | grep -q 'claude-tmux-env: VERIFIED'; then
 else
   bad "seed gate: the seeded server did not re-measure VERIFIED: $(printf '%s' "$bs30b" | grep 'claude-tmux-env:')"
 fi
+
+# =====================================================================================
+# 31. THE COLD-START PROBE MUST COMPARE THE VALUE, NOT ITS LENGTH.
+#     The probe reports what a would-be server DELIVERS to a pane, and the delivered token
+#     was checked only against `${#persisted}`. A tmux configuration that substitutes a
+#     DIFFERENT value of the same length — one `set-environment` line, and every fleet box
+#     has a tmux config — therefore produced `VERIFIED`, which is the verdict that
+#     certifies a fresh box as able to start a lane. Length equality is not value equality.
+#     THE SUBSTITUTED FIXTURE IS ASSERTED TO BE THE SAME LENGTH FIRST, because the case is
+#     only evidence about VALUE comparison if a LENGTH comparison would have passed it: a
+#     different-length fixture would red against the defect too, for the wrong reason.
+#     The comparison itself is by SALTED DIGEST and neither value is printed — see the
+#     no-leak assert over the whole transcript at the end of this file.
+# =====================================================================================
+if [ "${#TOK}" -eq "${#TOK_OTHER}" ]; then
+  ok "cold-start probe: the substitution fixture is the SAME LENGTH as the persisted token"
+else
+  bad "cold-start probe: the substitution fixture differs in LENGTH (${#TOK} vs ${#TOK_OTHER}) — the case below would pass against a length comparison and proves nothing"
+fi
+d31=$(mkshim "$tmp/s31"); plant_tmux "$d31" substitute
+run_cap "$d31" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+  bad "cold-start probe: a same-length SUBSTITUTED token was certified VERIFIED: $out"
+elif printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER'; then
+  ok "cold-start probe: a same-length substituted token is NOT verified (UNMEASURED-class)"
+else
+  bad "cold-start probe: unexpected verdict for a substituted token: $out"
+fi
+if [ "$rc" -ne 0 ]; then
+  ok "cold-start probe: the substituted-token verdict exits non-zero"
+else
+  bad "cold-start probe: a substituted token exited 0"
+fi
+if printf '%s' "$out" | grep -qi 'does not match the persisted'; then
+  ok "cold-start probe: the detail says the DELIVERED value does not match the persisted one"
+else
+  bad "cold-start probe: the detail does not name a value mismatch: $out"
+fi
+# ...and the identity comparison must not have broken the honest path: the unmodified
+# cold-start case (section 21) still VERIFIES, which is asserted there.
+# ...and the identity comparison is a PRECONDITION, not a nicety: with no digest tool on
+# PATH the only comparison left is by length, so the probe REFUSES rather than falling back
+# to it. MINPATH deliberately links no sha256sum/shasum. A missing capability must not
+# inherit the permissive branch — the same rule the timeout resolver already obeys.
+d31b=$(mkshim "$tmp/s31b"); plant_tmux "$d31b" no-server
+rc=0
+out=$(PATH="$d31b:$MINPATH" env -u SUDO_USER -u SUDO_UID CQLITE_BOOTSTRAP_TEST_MODE=1 \
+      CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" bash "$CAPLIB" --tmux-env 2>&1) || rc=$?
+printf '%s\n' "$out" >>"$TRANSCRIPT"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER' \
+   && printf '%s' "$out" | grep -qi 'digest'; then
+  ok "cold-start probe: no digest tool on PATH is a NAMED refusal, never a length fallback"
+else
+  bad "cold-start probe: a missing digest tool did not refuse: $out"
+fi
+
 
 # =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
