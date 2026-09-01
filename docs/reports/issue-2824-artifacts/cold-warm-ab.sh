@@ -66,6 +66,12 @@ done
 [ -n "$CORPUS" ] || { echo "cold-warm-ab: --corpus is required" >&2; exit 2; }
 [ -n "$OUT" ]    || { echo "cold-warm-ab: --out is required" >&2; exit 2; }
 [ "${#BINARIES[@]}" -ge 2 ] || { echo "cold-warm-ab: an A/B needs at least two --bin arms" >&2; exit 2; }
+# A round count that is not a positive integer would complete "successfully" having
+# recorded nothing — a vacuous pass wearing a green exit code.
+case "$ROUNDS" in
+  ''|*[!0-9]*) echo "cold-warm-ab: --rounds must be a positive integer, got '$ROUNDS'" >&2; exit 2 ;;
+esac
+[ "$ROUNDS" -ge 1 ] || { echo "cold-warm-ab: --rounds must be at least 1, got '$ROUNDS'" >&2; exit 2; }
 [ -d "$CORPUS" ] || { echo "cold-warm-ab: corpus not a directory: $CORPUS" >&2; exit 2; }
 [ -x /usr/bin/time ] || { echo "cold-warm-ab: /usr/bin/time is required for major-fault counts" >&2; exit 3; }
 
@@ -77,15 +83,52 @@ if ! sudo -n sh -c 'echo 1 > /proc/sys/vm/drop_caches' 2>/dev/null; then
   exit 3
 fi
 
+# The label is interpolated into BOTH a filename and a CSV field, so it is
+# constrained to a charset safe for both, and required unique. Unvalidated:
+# a duplicate silently overwrites another arm's artifacts and makes its CSV rows
+# indistinguishable, a comma corrupts the CSV, and a slash writes outside --out.
+_seen_labels=""
 for entry in "${BINARIES[@]}"; do
   label="${entry%%=*}"; path="${entry#*=}"
   if [ "$label" = "$entry" ] || [ -z "$label" ] || [ -z "$path" ]; then
     echo "cold-warm-ab: --bin needs label=path, got: $entry" >&2; exit 2
   fi
+  case "$label" in
+    *[!A-Za-z0-9._-]*) echo "cold-warm-ab: --bin label must match [A-Za-z0-9._-]+, got '$label'" >&2; exit 2 ;;
+    .|..)              echo "cold-warm-ab: --bin label '$label' is not a usable filename" >&2; exit 2 ;;
+  esac
+  case " $_seen_labels " in
+    *" $label "*) echo "cold-warm-ab: duplicate --bin label '$label'; labels must be unique" >&2; exit 2 ;;
+  esac
+  _seen_labels="$_seen_labels $label"
   [ -x "$path" ] || { echo "cold-warm-ab: not executable: $path" >&2; exit 2; }
 done
 
 mkdir -p "$OUT"
+
+# Device discovery runs BEFORE anything is claimed, because the i4i verdict depends
+# on it: an i4i instance whose corpus sits on EBS has NOT measured the i4i criterion.
+_dev=$(findmnt -no SOURCE --target "$CORPUS" 2>/dev/null || true)
+[ -n "$_dev" ] || _dev=UNKNOWN
+# `lsblk -no PKNAME` EXITS 0 AND PRINTS NOTHING for a whole disk (no parent), so a
+# `|| basename` fallback never fires and every whole-disk device silently recorded
+# UNKNOWN — an unmeasured value taking the permissive branch. Resolve affirmatively.
+_base=$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 | tr -d ' ')
+[ -n "$_base" ] || _base=$(basename "$_dev")
+_model=UNKNOWN; _ra=UNKNOWN
+if [ -r "/sys/block/${_base}/device/model" ]; then
+  _model=$(tr -s ' ' < "/sys/block/${_base}/device/model" | sed 's/ *$//')
+fi
+if [ -r "/sys/block/${_base}/queue/read_ahead_kb" ]; then
+  _ra=$(cat "/sys/block/${_base}/queue/read_ahead_kb")
+fi
+# Positive identification only. An unrecognised model is NOT local storage for the
+# purposes of this claim — the permissive branch here would be a false MEASURED.
+case "$_model" in
+  *"Instance Storage"*) _local_store=yes ;;
+  UNKNOWN)              _local_store=unknown ;;
+  *)                    _local_store=no ;;
+esac
 IMDS_TOKEN=$(curl -sf -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null || true)
 INSTANCE=$(curl -sf -m 3 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true)
 # A garbled IMDS body must not be recorded as an instance type. Only accept the
@@ -98,34 +141,26 @@ esac
 {
   echo "host: $(hostname)"
   echo "instance-type: $INSTANCE"
-  case "$INSTANCE" in
-    i4i.*) echo "i4i-magnitude: MEASURED (this host is an i4i)" ;;
-    *)     echo "i4i-magnitude: UNMEASURED (this host is '$INSTANCE', not an i4i) — AC1's i4i clause is NOT satisfied by this run" ;;
-  esac
+  # AC1's clause is "a cold i4i scan". That needs an i4i instance AND the corpus on
+  # its LOCAL NVMe: an i4i reading from EBS measures EBS. Both are required, and an
+  # unidentified device is never read as satisfying either.
+  if [ "$_local_store" = yes ] && case "$INSTANCE" in i4i.*) true ;; *) false ;; esac; then
+    echo "i4i-magnitude: MEASURED (i4i instance '$INSTANCE' AND corpus on local instance storage: '$_model')"
+  elif case "$INSTANCE" in i4i.*) true ;; *) false ;; esac; then
+    echo "i4i-magnitude: UNMEASURED (instance is i4i, but the corpus device is '$_model' [local-instance-storage=$_local_store], not positively identified local NVMe) — AC1's i4i clause is NOT satisfied by this run"
+  else
+    echo "i4i-magnitude: UNMEASURED (this host is '$INSTANCE', not an i4i) — AC1's i4i clause is NOT satisfied by this run"
+  fi
   echo "kernel: $(uname -r)"
   echo "cores: $(nproc)"
   echo "mem-total-kb: $(awk '/MemTotal/{print $2}' /proc/meminfo)"
   echo "loadavg-at-start: $(cut -d' ' -f1-3 /proc/loadavg)"
   echo "corpus: $CORPUS"
   echo "corpus-bytes: $(du -sb "$CORPUS" | cut -f1)"
-  _dev=$(findmnt -no SOURCE --target "$CORPUS" 2>/dev/null || true)
-  [ -n "$_dev" ] || _dev=UNKNOWN
   echo "corpus-device: $_dev"
-  # `lsblk -no PKNAME` EXITS 0 AND PRINTS NOTHING for a whole disk (no parent), so
-  # `|| basename` never fires and every whole-disk device silently recorded
-  # UNKNOWN — an unmeasured value taking the permissive branch. Resolve the base
-  # device affirmatively: parent if there is one, else the device itself.
-  _base=$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 | tr -d ' ')
-  [ -n "$_base" ] || _base=$(basename "$_dev")
-  _model=UNKNOWN; _ra=UNKNOWN
-  if [ -r "/sys/block/${_base}/device/model" ]; then
-    _model=$(tr -s ' ' < "/sys/block/${_base}/device/model" | sed 's/ *$//')
-  fi
-  if [ -r "/sys/block/${_base}/queue/read_ahead_kb" ]; then
-    _ra=$(cat "/sys/block/${_base}/queue/read_ahead_kb")
-  fi
   echo "corpus-device-base: $_base"
   echo "corpus-device-model: $_model"
+  echo "corpus-device-local-instance-storage: $_local_store"
   echo "corpus-device-read_ahead_kb: $_ra"
   if [ "$_model" = UNKNOWN ] || [ "$_ra" = UNKNOWN ]; then
     echo "corpus-device-note: NOT MEASURED — a read-ahead A/B whose device is unknown cannot be interpreted; treat the result as UNATTRIBUTED"
