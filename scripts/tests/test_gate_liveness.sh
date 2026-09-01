@@ -1923,7 +1923,11 @@ echo "=== section 11u: ONE grammar for the post-wait re-decision (job 231) ==="
 # There is no second parser now: if the summary changed during the wait, the script re-execs itself with
 # the caller's original request plus --no-wait, so the whole framing grammar, run-id binding and terminal
 # dispatch apply exactly as on a first read, and --no-wait guarantees termination.
-if grep -q 'exec bash "$0" "${GL_ORIG_ARGS\[@\]}" --no-wait' "$READER"; then
+# The PROPERTY is: re-exec THIS script with the CALLER'S ORIGINAL request plus --no-wait — not one
+# spelling of the array expansion. Job 319 rewrote it to the bash-3.2-safe ${A[@]+"${A[@]}"} form
+# (empty "${A[@]}" is unbound and aborts under `set -u` on bash < 4.4), and this test FAILED on that
+# correct change — the seventh implementation-literal test in this change to red on a right answer.
+if grep -qE 'exec bash "\$0" ("\$\{GL_ORIG_ARGS\[@\]\}"|\$\{GL_ORIG_ARGS\[@\]\+"\$\{GL_ORIG_ARGS\[@\]\}"\}) --no-wait' "$READER"; then
   ok "11u.1 the post-wait re-decision re-execs the real grammar (no second parser)"
 else
   bad "11u.1 the post-wait re-decision re-execs the real grammar" "a second parser may have returned"
