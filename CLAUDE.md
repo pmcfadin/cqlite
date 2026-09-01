@@ -2006,7 +2006,19 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `classify-docs-only.sh`, the reviewed head being derived from the JOB RECORD's `git_ref`
   (`<base40>..<head40>`), never from the `Enqueued job <N> for <sha>` line, which for a range review
   names only the BASE; a **code-free PR diff** is a loudly DECLARED `NOT-APPLICABLE`, since a
-  code-free diff cannot be roborev-certified at all. **`PREMERGE: HOLD-CHECK`** — the machine-readable
+  code-free diff cannot be roborev-certified at all. **BOTH HALVES of `git_ref` bind, and the base
+  half is the T4 vacuity class one level down**: a `<head~1>..<head>` record has a head EQUAL to the
+  certified sha, so it passes every head test there is while leaving every earlier commit on the
+  branch unreviewed — the leg therefore requires the reviewed base, PROJECTED onto the branch as
+  `merge-base(recorded-base, certified)`, to be at or before the PR's **merge-base** (never the base
+  ref's tip, #3392), or the skipped prefix to be code-free. That projection is the difference between
+  a check and a false FAIL: a base recorded OFF the branch skips none of the PR's own commits, so the
+  skipped prefix is a COMMIT SET and never a path diff against the recorded base. **ANY recorded
+  round that covers suffices** — every job on the PR is examined and one unretrievable record cannot
+  end the scan (coverage wins outright; an unresolved record decides only when nothing bound, as
+  `UNMEASURED`). The disarm half is read with `gh api --paginate` and EVERY page is decoded before
+  any verdict: one page of 100 events is not the timeline, and a `clear` derived from a partially
+  read signal is a false clearance on exactly the scenario this leg exists for. **`PREMERGE: HOLD-CHECK`** — the machine-readable
   half of the `HOLD:` re-read (below). **The third argument is
   REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
   certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
