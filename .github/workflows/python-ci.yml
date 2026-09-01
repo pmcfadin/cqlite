@@ -12,15 +12,18 @@ on:
     # A change to ANY of them must be able to trigger this workflow. Extending
     # the harness means extending this list in the same edit.
     #
-    # It is enumerated in full here because the SAME omission was found FOUR
+    # It is enumerated in full here because the SAME omission was found FIVE
     # times in review — `bindings/node/**` + `cqlite-cli/**`, then
     # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
     # single missing path rather than as the class. Each entry below says which
     # step reads it, so the next reader can check the list against the job
     # instead of guessing.
     #
-    # DECLARED RESIDUAL, because the FOURTH instance landed AFTER this list was
-    # called complete: this is a CURATED list and nothing mechanically checks it
+    # DECLARED RESIDUAL, and the count keeps rising: FIVE instances so far, the
+    # last two AFTER this list was called complete (`test-data/datasets/**`,
+    # then `rust-toolchain.toml`, the latter having been deliberately EXCLUDED
+    # on the incorrect reasoning that a literal action ref makes the pin file a
+    # non-input). This is a CURATED list and nothing mechanically checks it
     # against what the jobs actually read. GitHub path filters cannot be derived
     # from the steps, so completeness rests on review alone — an input added to a
     # step but not to this list fails SILENTLY, by the job never running. Treat
@@ -71,6 +74,13 @@ on:
       # running them, and the floor claim's own premise changes untested.
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # Issue #1990: every product-validation lane HONORS this pin — rustup
+      # applies it at each cargo invocation, and each `dtolnay/rust-toolchain@…`
+      # ref above is a hand-kept MIRROR of its `channel`. So a toolchain-only
+      # change alters what every job here builds with, and must be able to
+      # trigger them. (Whether the literal refs stay SYNCHRONIZED with this file
+      # is a separate pin-drift guard, owned by #1990, not by this list.)
+      - 'rust-toolchain.toml'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -80,15 +90,18 @@ on:
     # A change to ANY of them must be able to trigger this workflow. Extending
     # the harness means extending this list in the same edit.
     #
-    # It is enumerated in full here because the SAME omission was found FOUR
+    # It is enumerated in full here because the SAME omission was found FIVE
     # times in review — `bindings/node/**` + `cqlite-cli/**`, then
     # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
     # single missing path rather than as the class. Each entry below says which
     # step reads it, so the next reader can check the list against the job
     # instead of guessing.
     #
-    # DECLARED RESIDUAL, because the FOURTH instance landed AFTER this list was
-    # called complete: this is a CURATED list and nothing mechanically checks it
+    # DECLARED RESIDUAL, and the count keeps rising: FIVE instances so far, the
+    # last two AFTER this list was called complete (`test-data/datasets/**`,
+    # then `rust-toolchain.toml`, the latter having been deliberately EXCLUDED
+    # on the incorrect reasoning that a literal action ref makes the pin file a
+    # non-input). This is a CURATED list and nothing mechanically checks it
     # against what the jobs actually read. GitHub path filters cannot be derived
     # from the steps, so completeness rests on review alone — an input added to a
     # step but not to this list fails SILENTLY, by the job never running. Treat
@@ -139,6 +152,13 @@ on:
       # running them, and the floor claim's own premise changes untested.
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # Issue #1990: every product-validation lane HONORS this pin — rustup
+      # applies it at each cargo invocation, and each `dtolnay/rust-toolchain@…`
+      # ref above is a hand-kept MIRROR of its `channel`. So a toolchain-only
+      # change alters what every job here builds with, and must be able to
+      # trigger them. (Whether the literal refs stay SYNCHRONIZED with this file
+      # is a separate pin-drift guard, owned by #1990, not by this list.)
+      - 'rust-toolchain.toml'
   workflow_dispatch:
 
 concurrency:
