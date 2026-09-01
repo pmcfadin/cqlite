@@ -244,8 +244,28 @@ module GatingRegistry
   # aggregator (workflow + job), never from a hard-coded job name, so renaming
   # `pr-gate-core` moves this with it.
   def required_gate_step_names(registry, workflows)
-    workflow_name = registry.dig("aggregator", "workflow").to_s
-    job_name = registry.dig("aggregator", "job").to_s
+    # THE SCHEMA VALIDATOR MUST NOT CRASH ON THE SCHEMA IT VALIDATES (roborev round
+    # 2). `Hash#dig` raises TypeError the moment an intermediate value is not
+    # diggable, so a registry with a NON-MAPPING `aggregator` (`aggregator:
+    # pr-gate.yml`, or a list) used to abort this whole run with an uncaught ruby
+    # backtrace — and it did so from INSIDE schema validation, pre-empting the
+    # named `aggregator must be a mapping` error that aggregator_schema_errors was
+    # about to produce for the very same key. The operator learned that something
+    # blew up, not which key was wrong.
+    #
+    # Same rule as the unparseable-YAML and empty-document branches in
+    # gating_policy_rules.rb, one layer up: input this code cannot interpret gets a
+    # NAMED refusal. `nil` needs no guard — `Hash#dig` returns nil through a nil
+    # intermediate — but it is covered by the same predicate anyway, so there is
+    # one condition rather than a list of shapes to keep complete.
+    aggregator = registry["aggregator"]
+    unless aggregator.is_a?(Hash)
+      return [[], "the registry's `aggregator` is #{aggregator.class}, not a mapping naming the " \
+                  "aggregating workflow and job, so no `required-gate-step` claim can be verified"]
+    end
+
+    workflow_name = aggregator["workflow"].to_s
+    job_name = aggregator["job"].to_s
     workflow = workflows[workflow_name]
     return [[], "aggregator workflow #{workflow_name} is not readable, so no `required-gate-step` " \
                 "claim can be verified"] unless workflow.is_a?(Hash)

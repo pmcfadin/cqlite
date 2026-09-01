@@ -278,6 +278,28 @@ expect_exact_errors() {
   ok "$label (exactly $want error(s)${needle:+, names '$needle'})"
 }
 
+# A NAMED REFUSAL IS NOT MERELY A NON-ZERO EXIT (roborev round 2). An uncaught ruby
+# exception ALSO exits non-zero, so `expect_fail_named` cannot tell a crash from a
+# refusal — it would go green on a stack trace whose needle happened to appear in
+# the interpreter's own output. This asserts the third thing: no backtrace.
+#
+# The whole point of the registry rules is that a validator produces a NAMED
+# diagnosis for input it cannot interpret. A stack trace is the same two-valued
+# collapse one layer up: the operator learns that something blew up, not WHICH KEY
+# was wrong.
+policy_output_has_backtrace() {
+  printf '%s\n' "$OUT" | grep -qE '\.rb:[0-9]+:in |\((TypeError|NoMethodError|ArgumentError|NameError)\)'
+}
+
+expect_named_not_crash() {
+  local label="$1" needle="$2"
+  if policy_output_has_backtrace; then
+    bad "$label: CRASHED with a ruby backtrace instead of a named refusal — $OUT"
+    return
+  fi
+  expect_fail_named "$label" "$needle"
+}
+
 expect_fail_named() {
   local label="$1" needle="$2"
   if [ "$RC" -eq 0 ]; then
@@ -911,6 +933,46 @@ printf -- '- not\n- a\n- workflow\n' >"$DIR/workflows/listy-lane.yml"
 run_policy "$DIR"
 expect_fail_named "a workflow that is not a mapping is a NAMED error" "listy-lane.yml"
 
+echo "== the schema validator must not CRASH on the schema it validates (#3725) =="
+# roborev round 2, Low. `required_gate_step_names` did `registry.dig("aggregator",
+# "workflow")`, which raises TypeError when `aggregator` is a NON-MAPPING — and
+# because a `kind: required-gate-step` claim is resolved during SCHEMA validation,
+# the operator got an uncaught ruby stack trace instead of the named schema error
+# `aggregator_schema_errors` was about to produce for the very same key.
+#
+# Same rule as the unparseable-YAML and empty-document fixes, one layer up: input
+# the validator cannot interpret must yield a NAMED refusal. Both non-mapping
+# shapes an author would plausibly write are pinned — the fix is one `is_a?(Hash)`
+# predicate, but a future refactor that special-cases only one of them must red.
+malformed_aggregator_case() {
+  # malformed_aggregator_case <case-name> <aggregator-yaml-value>
+  local dir="$1" value="$2"
+  {
+    printf '%s\n' 'version: 1'
+    printf 'aggregator: %s\n' "$value"
+    printf '%s\n' 'defaults: { wait_minutes: 60 }'
+    printf '%s\n' 'tiers:'
+    printf '%s\n' '  - { id: alpha, workflow: alpha.yml, context: Alpha gate }'
+    printf '%s\n' 'exempt:'
+    printf '%s\n' '  - workflow: advisory.yml'
+    printf '%s\n' '    reason: Advisory docs lane that must never block a merge.'
+    printf '%s\n' '    issue: "#2910"'
+    printf '%s\n' '    merge_gating_half:'
+    printf '%s\n' '      - kind: required-gate-step'
+    printf '%s\n' '        step: Validate workflow policy'
+  } >"$dir/registry.yml"
+}
+
+DIR=$(new_case aggregator-scalar)
+malformed_aggregator_case "$DIR" 'pr-gate.yml'
+run_policy "$DIR"
+expect_named_not_crash "a SCALAR aggregator is a named refusal, not a TypeError" "aggregator"
+
+DIR=$(new_case aggregator-list)
+malformed_aggregator_case "$DIR" '[pr-gate.yml, required]'
+run_policy "$DIR"
+expect_named_not_crash "a LIST aggregator is a named refusal, not a TypeError" "aggregator"
+
 echo "== the parse-error fix must not INFLATE a well-formed tree's error set (#3725) =="
 # THE DIRECTION THAT GETS SKIPPED. The fail direction is asserted above; this is the
 # other half. `load_workflows_with_parse_errors` returns errors alongside the
@@ -1512,7 +1574,8 @@ count_rule_rejections() {
              "$WORK"/case-exempt-half-none-no-ground "$WORK"/case-exempt-half-none-not-sole \
              "$WORK"/case-unparseable-workflow "$WORK"/case-non-mapping-workflow \
              "$WORK"/case-registered-tier-broken-yaml \
-             "$WORK"/case-empty-workflow "$WORK"/case-comment-only-workflow; do
+             "$WORK"/case-empty-workflow "$WORK"/case-comment-only-workflow \
+             "$WORK"/case-aggregator-scalar "$WORK"/case-aggregator-list; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -1525,10 +1588,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 34 ]; then
-  ok "the real rule rejects all 34 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 36 ]; then
+  ok "the real rule rejects all 36 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/34"
+  bad "the real rule rejected only $REAL_REJECTIONS/36"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"
@@ -1551,7 +1614,7 @@ fi
 # deliberately a FLOOR and not an equality, so adding one does not red the suite
 # before its author gets to the bottom of the file. The number counts the cases
 # decided BEFORE this assertion — this one is not in its own subject set.
-CASE_FLOOR=94
+CASE_FLOOR=96
 if [ "$((PASS + FAIL))" -ge "$CASE_FLOOR" ]; then
   ok "the suite ran at least its declared floor of $CASE_FLOOR cases"
 else
