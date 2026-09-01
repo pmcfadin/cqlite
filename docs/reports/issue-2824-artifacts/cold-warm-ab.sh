@@ -136,14 +136,6 @@ fi
 [ -d "$CORPUS" ] || { echo "cold-warm-ab: corpus not a directory: $CORPUS" >&2; exit 2; }
 [ -x /usr/bin/time ] || { echo "cold-warm-ab: /usr/bin/time is required for major-fault counts" >&2; exit 3; }
 
-# Fail CLOSED on drop_caches: a "cold" arm that silently ran warm is worse than no
-# measurement, because in the output it is indistinguishable from a real one.
-if ! sudo -n sh -c 'echo 1 > /proc/sys/vm/drop_caches' 2>/dev/null; then
-  echo "cold-warm-ab: cannot drop the page cache (passwordless sudo required)." >&2
-  echo "cold-warm-ab: refusing to run — a warm run labelled COLD is not a measurement." >&2
-  exit 3
-fi
-
 # The label is interpolated into BOTH a filename and a CSV field, so it is
 # constrained to a charset safe for both, and required unique. Unvalidated:
 # a duplicate silently overwrites another arm's artifacts and makes its CSV rows
@@ -183,6 +175,19 @@ if [ -e "$OUT" ]; then
     exit 2
   fi
 fi
+# Fail CLOSED on drop_caches: a "cold" arm that silently ran warm is worse than no
+# measurement, because in the output it is indistinguishable from a real one.
+#
+# Placed AFTER all static validation. This probe drops the SYSTEM-WIDE page cache,
+# which on a shared box costs every other workload on it — so a rejectable
+# invocation (bad label, duplicate binary, non-empty --out) must be rejected on
+# argument inspection alone, before anything global is disturbed.
+if ! sudo -n sh -c 'echo 1 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+  echo "cold-warm-ab: cannot drop the page cache (passwordless sudo required)." >&2
+  echo "cold-warm-ab: refusing to run — a warm run labelled COLD is not a measurement." >&2
+  exit 3
+fi
+
 mkdir -p "$OUT"
 
 # Device discovery runs BEFORE anything is claimed, because the i4i verdict depends
@@ -381,12 +386,15 @@ done
   fi
 } | tee "$OUT/advice-census.txt"
 
-trap - EXIT
-# Replace the sentinel in place — appending would leave BOTH `run:` lines and a
-# reader grepping `run:` could not tell which one is current.
-sed -i 's/^run: INCOMPLETE .*$/run: COMPLETE/' "$OUT/host.txt"
+# Order matters: append the closing metadata while the abort trap is STILL ARMED,
+# then flip the sentinel, and only then disarm. Clearing the trap first would let a
+# failed append exit non-zero with host.txt already claiming COMPLETE.
 {
   echo "finished-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "loadavg-at-end: $(cut -d' ' -f1-3 /proc/loadavg)"
 } | tee -a "$OUT/host.txt"
+# Replace the sentinel in place — appending would leave BOTH `run:` lines and a
+# reader grepping `run:` could not tell which one is current.
+sed -i 's/^run: INCOMPLETE .*$/run: COMPLETE/' "$OUT/host.txt"
+trap - EXIT
 echo "artifacts: $OUT"
