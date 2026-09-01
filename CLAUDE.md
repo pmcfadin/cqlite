@@ -1966,7 +1966,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   STATE: an ordinary `write` preserves it exactly as it preserves stage/request-id/pr/branch,
   because a mandatory, validated `--reason` that the next stage update erases is no audit
   record — and carrying a field forward requires READING it, so all four are parsed under the
-  same duplicate-key refusal as the identity keys.
+  same duplicate-key refusal as the identity keys. (4) And the marker CLASSIFIER read `grep`
+  two-valued: an unperformable scan counted as ZERO sentinels, so a DISPLACED stamp classified
+  as `legacy` and `write`'s migration path — the ONE branch licensed to discard a marker —
+  overwrote what may be a LIVE PEER's state. Every sentinel/field scan here is now three-valued
+  and an unmeasurable classification is its own `ERROR` class every caller refuses on, which is
+  CLAUDE.md's standing rule (a positive verdict requires an AFFIRMATIVE MEASUREMENT; never
+  derive a pass from the ABSENCE of a bad signal) applied where its permissive branch DELETES
+  DATA.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

@@ -442,14 +442,39 @@ S_prior_session=''; S_prior_pid=''; S_prior_ts=''; S_adopt_reason=''
 
 marker_path() { printf '%s/%s\n' "$(pwd -P)" "$MARKER_NAME"; }
 
-# count_sentinel <path> <sentinel> — column-zero, WHOLE-LINE occurrences. `grep -Fx` is
-# what makes this a column-zero test: a sentinel appearing inside a `key: value` value or
-# mid-sentence in the body is not a whole line and cannot pose as a stamp boundary.
+# count_sentinel <path> <sentinel> — column-zero, WHOLE-LINE occurrences on stdout, or a
+# NON-ZERO return when the scan itself could not be performed. `grep -Fx` is what makes this a
+# column-zero test: a sentinel appearing inside a `key: value` value or mid-sentence in the
+# body is not a whole line and cannot pose as a stamp boundary.
+#
+# THREE-VALUED, BECAUSE grep IS (roborev job 30 G1). `grep -c` exits 0 when it matched, 1 when
+# it did not, and >1 when the scan COULD NOT BE PERFORMED. The first cut wrote
+# `... || true` + `case "$n" in *[!0-9]*) n=0`, collapsing those three onto two and taking the
+# PERMISSIVE answer for the error: an unperformed scan counted as ZERO sentinels. With a
+# DISPLACED sentinel that made `marker_class` answer `legacy`, and `write`'s MIGRATION path
+# then DISCARDED AND REPLACED a file that may be a LIVE PEER's stamped state — the exact defect
+# this script exists to prevent, arriving through the one branch allowed to destroy a marker.
+# CLAUDE.md's standing rule: a positive verdict requires an AFFIRMATIVE MEASUREMENT, and a pass
+# is never derived from the ABSENCE of a bad signal (`1699-find-tristate` lints the sibling
+# `[ -z "$(find …)" ]` shape). Callers must therefore branch on the RETURN, never on the text.
 count_sentinel() {
-  local n
-  n="$(LC_ALL=C grep -Fxc -- "$2" "$1" 2>/dev/null || true)"
-  case "$n" in '' | *[!0-9]*) n=0 ;; esac
+  local n rc=0
+  n="$(LC_ALL=C grep -Fxc -- "$2" "$1" 2>/dev/null)" || rc=$?
+  [ "$rc" -le 1 ] || return 1
+  case "$n" in '' | *[!0-9]*) return 1 ;; esac
   printf '%s\n' "$n"
+  return 0
+}
+
+# count_matching_lines <basic-regexp> — reads STDIN; the same three-valued discipline as
+# count_sentinel, for the assembled-prologue field census.
+count_matching_lines() {
+  local n rc=0
+  n="$(LC_ALL=C grep -c -- "$1" 2>/dev/null)" || rc=$?
+  [ "$rc" -le 1 ] || return 1
+  case "$n" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$n"
+  return 0
 }
 
 # marker_class <path> — echo absent | not-regular | stamped | displaced | legacy.
@@ -467,15 +492,20 @@ count_sentinel() {
 #             DOES assert an identity, which merely cannot be READ, and an unreadable
 #             identity may be a live peer's => MALFORMED, never migratable.
 #   legacy    no sentinel anywhere => genuinely the pre-#3822 shape => UNSTAMPED
+#   error     the classification could NOT BE MEASURED (roborev job 30 G1). It is its own
+#             class rather than a fall-through to `legacy`, because `legacy` is the ONE class
+#             whose handler DESTROYS the file. Every caller must refuse on it.
 marker_class() {
-  local path="$1" nb ne
+  local path="$1" nb ne first rc=0
   [ -e "$path" ] || { printf 'absent\n'; return 0; }
   { [ -f "$path" ] && [ -r "$path" ]; } || { printf 'not-regular\n'; return 0; }
-  if [ "$(head -1 "$path" 2>/dev/null || true)" = "$STAMP_BEGIN" ]; then
+  first="$(head -1 "$path" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || { printf 'error\n'; return 0; }
+  if [ "$first" = "$STAMP_BEGIN" ]; then
     printf 'stamped\n'; return 0
   fi
-  nb="$(count_sentinel "$path" "$STAMP_BEGIN")"
-  ne="$(count_sentinel "$path" "$STAMP_END")"
+  nb="$(count_sentinel "$path" "$STAMP_BEGIN")" || { printf 'error\n'; return 0; }
+  ne="$(count_sentinel "$path" "$STAMP_END")"   || { printf 'error\n'; return 0; }
   if [ "$nb" -gt 0 ] || [ "$ne" -gt 0 ]; then printf 'displaced\n'; else printf 'legacy\n'; fi
 }
 
@@ -486,6 +516,7 @@ read_marker() {
   cls="$(marker_class "$path")"
   [ "$cls" != absent ] || refuse ABSENT 3 "no $MARKER_NAME in $(sane "$(pwd -P)") — nothing to resume; this is a legitimate FRESH START, not a refusal"
   [ "$cls" != not-regular ] || refuse ERROR 1 "$(sane "$path") exists but is not a readable regular file — nothing was decided"
+  [ "$cls" != error ] || refuse ERROR 1 "$(sane "$path") exists but could NOT BE CLASSIFIED: reading its first line, or scanning it for column-zero stamp sentinels, FAILED. An unperformed scan is not an absence of sentinels, so nothing is inferred from it — NOTHING was decided and NOTHING was replaced."
   if [ "$cls" = displaced ]; then
     refuse MALFORMED 8 "$(sane "$path") contains a stamp sentinel at column zero but NOT as its first line, so it DOES assert an ownership identity and that identity cannot be READ — it is NOT treated as an unstamped legacy marker and is never replaced for you, because an unreadable identity may be a LIVE PEER's (a single prepended blank line or comment produces this shape). INSPECT it, and if it is genuinely corrupt remove it or move it aside (e.g. 'mv $MARKER_NAME $MARKER_NAME.corrupt'); with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally."
   fi
@@ -494,8 +525,8 @@ read_marker() {
   fi
 
   local nb ne
-  nb="$(count_sentinel "$path" "$STAMP_BEGIN")"
-  ne="$(count_sentinel "$path" "$STAMP_END")"
+  nb="$(count_sentinel "$path" "$STAMP_BEGIN")" || refuse ERROR 1 "$(sane "$path") could not be SCANNED for stamp-begin sentinels, so how many identities it claims is unmeasured — NOTHING was decided and NOTHING was replaced."
+  ne="$(count_sentinel "$path" "$STAMP_END")" || refuse ERROR 1 "$(sane "$path") could not be SCANNED for stamp-end sentinels, so the extent of its prologue is unmeasured — NOTHING was decided and NOTHING was replaced."
   if [ "$nb" -ne 1 ] || [ "$ne" -gt 1 ]; then
     refuse DUPLICATE-SENTINEL 8 "$(sane "$path") carries $nb stamp-begin and $ne stamp-end sentinels at column zero (exactly one of each is legal) — a second stamp cannot be told apart from the first, so no identity is read from this file. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
   fi
@@ -746,11 +777,18 @@ check_ownership() {
 # cannot see what a RUNTIME value injects. Refused, never escaped — an escaped sentinel is
 # a second grammar, and two grammars is how a reader and a writer come to disagree.
 assert_body_safe() {
-  local f="$1" s
+  local f="$1" s rc
   for s in "$STAMP_BEGIN" "$STAMP_END"; do
-    if LC_ALL=C grep -Fxq -- "$s" "$f" 2>/dev/null; then
-      die_usage "the body carries a stamp sentinel as a whole line at column zero. It is REFUSED, not escaped: the stamp prologue is the only place identity is read from, and a body line that can pose as a boundary would break that. Remove the line (indent it, or drop the '<!--' comment) and retry. NOTHING was written."
-    fi
+    rc=0
+    LC_ALL=C grep -Fxq -- "$s" "$f" 2>/dev/null || rc=$?
+    # THREE-VALUED (roborev job 30 G1): 0 = the body carries a sentinel, 1 = it provably does
+    # not, >1 = the scan could not be performed. The last is NOT the second: assuming a body
+    # nobody could read carries no sentinel is a pass derived from the ABSENCE of a bad signal.
+    case "$rc" in
+      0) die_usage "the body carries a stamp sentinel as a whole line at column zero. It is REFUSED, not escaped: the stamp prologue is the only place identity is read from, and a body line that can pose as a boundary would break that. Remove the line (indent it, or drop the '<!--' comment) and retry. NOTHING was written." ;;
+      1) : ;;
+      *) refuse ERROR 1 "the body file $(sane "$f") could not be SCANNED for stamp sentinels, so whether it carries a line that can pose as a stamp boundary is UNMEASURED — refusing rather than assuming it does not; NOTHING was written." ;;
+    esac
   done
 }
 
@@ -771,14 +809,20 @@ assert_body_safe() {
 # second, independent layer — `assert_body_safe` stays, because it gives the common case a
 # clear usage error before any work is done.
 assert_assembled_marker() {
-  local tmp="$1" nb ne first
-  first="$(head -1 "$tmp" 2>/dev/null || true)"
+  local tmp="$1" nb ne first rc=0
+  first="$(head -1 "$tmp" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    WRITE_ERR="the assembled marker $(sane "$tmp") could not be READ back before the commit, so the bytes about to replace the marker are unverified — nothing was written"
+    return 1
+  fi
   if [ "$first" != "$STAMP_BEGIN" ]; then
     WRITE_ERR="internal: the assembled marker's first line is not the stamp sentinel — refusing to commit a file that every later read would refuse"
     return 1
   fi
-  nb="$(count_sentinel "$tmp" "$STAMP_BEGIN")"
-  ne="$(count_sentinel "$tmp" "$STAMP_END")"
+  nb="$(count_sentinel "$tmp" "$STAMP_BEGIN")" || {
+    WRITE_ERR="the assembled marker $(sane "$tmp") could not be SCANNED for stamp-begin sentinels, so it is UNVERIFIED — refusing to commit unverified bytes over the marker; nothing was written"; return 1; }
+  ne="$(count_sentinel "$tmp" "$STAMP_END")" || {
+    WRITE_ERR="the assembled marker $(sane "$tmp") could not be SCANNED for stamp-end sentinels, so it is UNVERIFIED — refusing to commit unverified bytes over the marker; nothing was written"; return 1; }
   if [ "$nb" -ne 1 ] || [ "$ne" -ne 1 ]; then
     WRITE_ERR="the assembled marker carries $nb stamp-begin and $ne stamp-end sentinels at column zero (exactly one of each is legal) — the body supplied at COMMIT time contains a line that can pose as a stamp boundary. Nothing was written. If a --body-file was named, it changed between validation and assembly, or it carries a sentinel at column zero: remove that line."
     return 1
@@ -792,11 +836,12 @@ assert_assembled_marker() {
   # Checked HERE because this is the only place that sees the committed bytes, and scoped to
   # the PROLOGUE (a free-form body may legitimately contain a `stage: ...` line).
   local pro k n
-  pro="$(awk -v e="$STAMP_END" 'NR==1{next} $0==e{exit} {print}' "$tmp" 2>/dev/null || true)"
+  pro="$(awk -v e="$STAMP_END" 'NR==1{next} $0==e{exit} {print}' "$tmp" 2>/dev/null)" || {
+    WRITE_ERR="the assembled marker's stamp prologue could not be EXTRACTED from $(sane "$tmp"), so its required fields are UNMEASURED — refusing to commit; nothing was written"; return 1; }
   for k in issue machine worktree session session-pid session-pid-start-earliest \
            session-pid-start-latest actor ts; do
-    n="$(printf '%s\n' "$pro" | LC_ALL=C grep -c "^$k: ." 2>/dev/null || true)"
-    case "$n" in '' | *[!0-9]*) n=0 ;; esac
+    n="$(printf '%s\n' "$pro" | count_matching_lines "^$k: .")" || {
+      WRITE_ERR="the assembled marker's stamp prologue could not be SCANNED for the required '$k:' field, so it is UNMEASURED — refusing to commit; nothing was written"; return 1; }
     if [ "$n" -ne 1 ]; then
       WRITE_ERR="the assembled marker records $n non-empty '$k:' line(s) in its stamp prologue (exactly one is required) — an incomplete stamp is not a weaker stamp, it is NO stamp, and every later read would refuse it, bricking this lane. The usual cause is a helper this writer depends on (date, tr, hostname) failing. NOTHING was written."
       return 1
@@ -946,6 +991,11 @@ cmd_write() {
   mcls="$(marker_class "$mpath")"
   if [ "$mcls" != absent ]; then
     [ "$mcls" != not-regular ] || refuse ERROR 1 "$(sane "$mpath") exists but is not a readable regular file — nothing was decided"
+    # THE ONE PLACE WHERE A PERMISSIVE MISCLASSIFICATION DESTROYS DATA (roborev job 30 G1):
+    # below, `legacy` DISCARDS and REPLACES the file. An unmeasurable classification must
+    # therefore never arrive here as `legacy` (it no longer can) and must never be treated as
+    # one — it could be a LIVE PEER's stamped marker whose sentinels simply could not be read.
+    [ "$mcls" != error ] || refuse ERROR 1 "$(sane "$mpath") exists but could NOT BE CLASSIFIED: reading its first line, or scanning it for column-zero stamp sentinels, FAILED. Refusing rather than taking the UNSTAMPED migration path, which DISCARDS and REPLACES the file: an unmeasurable classification may be a LIVE PEER's stamped marker. NOTHING was written."
     # ONLY the `legacy` class migrates. A `displaced` sentinel means the file DOES assert an
     # identity (see marker_class), so it goes down the ownership path, where read_marker
     # refuses it MALFORMED — never discarded as though it asserted nothing.

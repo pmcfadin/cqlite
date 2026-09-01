@@ -1416,6 +1416,91 @@ else
 fi
 
 # ===========================================================================
+case_begin 32-failed-scan-is-not-no-match "a FAILING sentinel scan is ERROR, never a permissive 'legacy' that overwrites a peer"
+# ===========================================================================
+# roborev job 30 G1. `count_sentinel` collapsed grep's THREE outcomes (0 = matched,
+# 1 = no match, >1 = the scan could not be performed) onto TWO and took the PERMISSIVE
+# answer for the error case: an errored scan counted as ZERO sentinels. With a DISPLACED
+# sentinel that made `marker_class` answer `legacy`, and `write`'s MIGRATION path then
+# DISCARDED AND REPLACED the file — which may be a LIVE PEER's stamped state. That is the
+# exact defect this whole script exists to prevent, arriving through the one branch that is
+# allowed to destroy a marker. CLAUDE.md states the rule this violates: a positive verdict
+# requires an AFFIRMATIVE MEASUREMENT, and a pass is never derived from the ABSENCE of a bad
+# signal (`1699-find-tristate` lints the sibling `[ -z "$(find …)" ]` shape).
+#
+# THE ARTIFACT IS SUBSTITUTED, never a seam: a PATH-shim `grep` that fails ONLY when the file
+# it is asked to scan is the marker itself. A blanket failing `grep` would red the assembled-
+# marker validation instead and never reach the migration branch, i.e. it would pass for the
+# wrong reason.
+G1SHIM="$T/g1bin"; mkdir -p "$G1SHIM"
+{ printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do last="$a"; done\n'
+  printf 'case "$last" in *%s) exit 2 ;; esac\n' "$MARKER"
+  printf 'exec %s "$@"\n' "$(command -v grep)"; } >"$G1SHIM/grep"
+chmod +x "$G1SHIM/grep"
+g1_run() {  # g1_run <dir> <path-prefix|''> <args...>
+  local d="$1" pfx="$2"; shift 2
+  ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" ${pfx:+"PATH=$pfx:$PATH"} \
+      bash "$DS" "$@" 2>&1 )
+}
+# The state: a VALID stamp displaced off line 1 (case 25's shape) — the file DOES assert an
+# identity, so misclassifying it as `legacy` is what destroys a peer's plan.
+L32=$(lane lane32)
+run "$L32" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage implement >/dev/null 2>&1
+{ printf '\n'; cat "$L32/$MARKER"; } >"$T/m32" && mv "$T/m32" "$L32/$MARKER"
+cp "$L32/$MARKER" "$T/m32.expected"
+g32_w=$(g1_run "$L32" "$G1SHIM" write 3822 --stage groom); g32_wrc=$?
+if [ "$g32_wrc" -ne 0 ] && [ "$(verdict_of "$g32_w")" = ERROR ] && all_lines_anchored "$g32_w"; then
+  ok "an UNPERFORMABLE sentinel scan makes 'write' REFUSE with an anchored ERROR — the scan's failure is not read as 'no sentinels'"
+else
+  bad "a failed sentinel scan did not refuse: rc=$g32_wrc verdict=$(verdict_of "$g32_w")
+$g32_w"
+fi
+# THE ASSERTION THAT MATTERS: the peer's bytes are still there.
+if cmp -s "$T/m32.expected" "$L32/$MARKER"; then
+  ok "the marker is BYTE-IDENTICAL after the refusal — an unmeasurable classification never reaches the DESTRUCTIVE migration branch"
+else
+  bad "the marker was MODIFIED while its classification was unmeasurable (a peer's state would have been destroyed):
+$(cat "$L32/$MARKER" 2>/dev/null | cat -v)"
+fi
+# The same signal on the READ path: `verify` must not report UNSTAMPED (which tells the caller
+# to run `write`, i.e. to destroy it) when the scan never ran.
+g32_v=$(g1_run "$L32" "$G1SHIM" verify 3822); g32_vrc=$?
+if [ "$g32_vrc" -eq 1 ] && [ "$(verdict_of "$g32_v")" = ERROR ]; then
+  ok "'verify' reports ERROR(1) rather than UNSTAMPED(8) when the scan could not be performed"
+else
+  bad "verify derived a classification from an unperformed scan: rc=$g32_vrc verdict=$(verdict_of "$g32_v")
+$g32_v"
+fi
+# The genuinely UNSTAMPED file takes the same route: the migration branch is entered only on a
+# MEASURED absence of sentinels.
+L32L=$(lane lane32-legacy); printf 'legacy hand-written plan\n' >"$L32L/$MARKER"
+cp "$L32L/$MARKER" "$T/m32l.expected"
+g32_l=$(g1_run "$L32L" "$G1SHIM" write 3822); g32_lrc=$?
+if [ "$g32_lrc" -ne 0 ] && [ "$(verdict_of "$g32_l")" = ERROR ] && cmp -s "$T/m32l.expected" "$L32L/$MARKER"; then
+  ok "the UNSTAMPED migration branch is entered only on a MEASURED absence of sentinels — an unmeasurable one leaves the file untouched"
+else
+  bad "the migration branch ran on an unmeasured scan: rc=$g32_lrc verdict=$(verdict_of "$g32_l")
+$g32_l"
+fi
+# NON-VACUITY: with a WORKING grep the same two states reach their real verdicts, so the
+# refusals above are about the failed scan and not about a broken fixture. FRESH lanes, because
+# a probe that ran against a state an earlier probe may have destroyed proves nothing.
+L32N=$(lane lane32-nv)
+run "$L32N" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+{ printf '\n'; cat "$L32N/$MARKER"; } >"$T/m32n" && mv "$T/m32n" "$L32N/$MARKER"
+L32NL=$(lane lane32-nv-legacy); printf 'legacy hand-written plan\n' >"$L32NL/$MARKER"
+g32_nv=$(g1_run "$L32N" "" verify 3822); g32_nvrc=$?
+g32_nl=$(g1_run "$L32NL" "" write 3822); g32_nlrc=$?
+if [ "$g32_nvrc" -eq 8 ] && [ "$(verdict_of "$g32_nv")" = MALFORMED ] \
+   && [ "$g32_nlrc" -eq 0 ] && [ "$(verdict_of "$g32_nl")" = WRITTEN ]; then
+  ok "NON-VACUITY: with a working grep the displaced file is MALFORMED(8) and the unstamped one still MIGRATES — only the unmeasurable case changed"
+else
+  bad "the fixture is broken independently of the shim: displaced rc=$g32_nvrc/$(verdict_of "$g32_nv") legacy rc=$g32_nlrc/$(verdict_of "$g32_nl")"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1429,6 +1514,7 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 25-displaced-sentinel-is-not-legacy 26-unusable-start-window 27-pre-rename-validation
 29-missing-liveness-library 30-native-diagnostics-stay-anchored
 31-adoption-provenance-survives
+32-failed-scan-is-not-no-match
 28-case-floor"
 CASE_FLOOR=31
 executed=0
