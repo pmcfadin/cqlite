@@ -64,9 +64,23 @@
 //!   is labelled with which one, rather than being allowed to imply it covers this
 //!   issue's assert. `rule3_overrun_*` is the only one of these.
 //!
-//! The labels were PROVED, not asserted: the assert was commented out, the suite
-//! re-run, and the observed red set recorded in the PR. A test whose claim exceeds
-//! what it exercises is the defect class this labelling exists to prevent.
+//! The labels were PROVED, not asserted. `require_fully_consumed_raw`'s call in
+//! `raw_value.rs` was disabled (the defect reintroduced) and this suite re-run:
+//! **14 failed, 10 passed**, and the red set is EXACTLY the 14 cases labelled
+//! DISCRIMINATING — the 8 CONTROL cases and the 2 DISCRIMINATING-ELSEWHERE cases
+//! all stayed green. A test whose claim exceeds what it exercises is the defect
+//! class this labelling exists to prevent, so the labels are a measurement and not
+//! a description.
+//!
+//! **What that experiment does NOT cover, declared rather than implied:** census
+//! finding F's CELL-level sites (`parse_frozen_sequence_value`,
+//! `parse_frozen_map_value`, `parse_tuple_value`, all guarded by
+//! `require_frozen_extent`) are not reachable from this file — they need a real
+//! `crate::schema::Column` AND an `SSTableReader`, which is why frozen.rs's own
+//! tests say "full parsing tests require a reader, done via integration tests".
+//! Disabling those three guards changes nothing here. The BOUNDED tuple path
+//! (`bounded_tuple_*` below) IS covered; the cell-level trio is covered only by
+//! the corpus/integration path.
 //!
 //! These carry NO dataset, reader or feature-flag dependency: the subject is a
 //! `pub(super)` method on a plainly-constructed parser, so they run in every
