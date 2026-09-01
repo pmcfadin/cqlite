@@ -46,8 +46,15 @@ pass=0; fail=0
 # Incremented in the TOP-LEVEL shell only. Never wrap a case in `( … )` — a subshell's
 # increments are discarded and the suite reports failed:0 while printing FAILs (a real
 # incident in this repo's tooling tests).
-ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
-bad() { fail=$((fail+1)); printf 'FAIL %s\n' "$1"; [ $# -ge 2 ] && printf '     %s\n' "$2"; }
+# Cases are counted PER SECTION as well as in total — see the floor block at the end for
+# why a total alone is not enough. The section is the label's leading digits.
+_count_section() {
+  local sec=${1%%[^0-9]*}
+  [ -n "$sec" ] || return 0
+  eval "SEC_$sec=\$(( \${SEC_$sec:-0} + 1 ))"
+}
+ok()  { pass=$((pass+1)); _count_section "$1"; printf 'ok   %s\n' "$1"; }
+bad() { fail=$((fail+1)); _count_section "$1"; printf 'FAIL %s\n' "$1"; [ $# -ge 2 ] && printf '     %s\n' "$2"; }
 
 # ---------------------------------------------------------------------------
 # Fixtures. Written directly with the content they mean — no in-place `sed`, which
@@ -235,8 +242,8 @@ echo "=== section 3: COMPLETION is a precondition, and the verdict is never DERI
 # component lines alone could report a verdict for a run still in flight.
 S9="$TMP/incomplete.txt"
 mk_summary "$S9" run-1 "INCOMPLETE (gate did not finish)" "$(comp_line tooling-tests PASS 1112s)"
-expect "3.1 a PASS component line in an INCOMPLETE block => COULD-NOT-MEASURE" \
-  COULD-NOT-MEASURE 4 "run-not-complete" -- "$S9" --mode only --component tooling-tests --run-id run-1
+expect "3.1 a PASS component line in an INCOMPLETE block (no beat) => COULD-NOT-MEASURE" \
+  COULD-NOT-MEASURE 4 "run-not-terminal" -- "$S9" --mode only --component tooling-tests --run-id run-1
 
 # Direction 2 — the one the lead's correction is about: the run's terminal token may not
 # stand in for the component's verdict, in EITHER direction.
@@ -302,7 +309,7 @@ expect "5.6 a component name outside the closed grammar is refused, not injected
 # that prints `set -uo pipefail` is a reader being shown the wrong thing.
 _h=$(bash "$VERDICT" --help 2>&1); _hrc=$?
 _hlast=$(printf '%s\n' "$_h" | grep -v '^$' | tail -1)
-if [ "$_hrc" -eq 0 ] && [ -n "$_h" ] && printf '%s' "$_hlast" | grep -q '^#'; then
+if [ "$_hrc" -eq 0 ] && [ -n "$_h" ] && printf '%s' "$_hlast" | grep -q '^gate-verdict: #'; then
   ok "5.7 --help exits 0 and stops at the header boundary (never bleeds into the code)"
 else
   bad "5.7 --help exits 0 and stops at the header boundary (never bleeds into the code)" \
@@ -374,11 +381,11 @@ else
       "rc=$_glrc out=$(printf '%s' "$_gl" | head -1)"
 fi
 _gl=$(bash "$READER" "$S9" --run-id run-1 --no-wait 2>&1); _glrc=$?
-if [ "$_glrc" -ne 0 ]; then
-  ok "7.2 control: gate-liveness.sh does NOT report COMPLETE for an INCOMPLETE block"
+if [ "$_glrc" -eq 4 ] && printf '%s' "$_gl" | grep -q '^gate-liveness: UNKNOWN '; then
+  ok "7.2 control: gate-liveness.sh reports UNKNOWN (4), not COMPLETE, for an INCOMPLETE block"
 else
-  bad "7.2 control: gate-liveness.sh does NOT report COMPLETE for an INCOMPLETE block" \
-      "out=$(printf '%s' "$_gl" | head -1)"
+  bad "7.2 control: gate-liveness.sh reports UNKNOWN (4), not COMPLETE, for an INCOMPLETE block" \
+      "rc=$_glrc out=$(printf '%s' "$_gl" | head -1)"
 fi
 
 echo "=== section 8: every read is BOUNDED BY THE VALIDATED BLOCK (B1) ==="
@@ -593,7 +600,7 @@ echo "=== section 12: a missing OPTION VALUE is an anchored USAGE refusal, not a
 # anchored USAGE refusal at 64. The suite had no case per option, which is why it shipped.
 for _o in --mode --component --run-id --heartbeat; do
   expect "12[$_o] a missing value is an anchored USAGE refusal at 64" \
-    USAGE 64 "$(printf '%s' "$_o" | tr -d '-')" -- "$S8c" "$_o"
+    USAGE 64 "${_o#--}" -- "$S8c" "$_o"
 done
 # The closed name grammar must be NEWLINE-SAFE: a line-based check validates $'fmt\nx',
 # and COMP_RE then becomes a multi-pattern grep with a bare `^fmt`. It only failed to
@@ -614,11 +621,26 @@ expect "13.2 control: a permanently truncated block stays PERMANENT (4), not ret
   COULD-NOT-MEASURE 4 "" -- "$SC" --mode only --component tooling-tests --run-id run-1
 
 # ---------------------------------------------------------------------------
-# CASE FLOOR (#3544). A span-replacing edit once silently deleted four cases from a
+# CASE FLOORS (#3544). A span-replacing edit once silently deleted four cases from a
 # sibling suite and it reported `failed: 0` at 102 instead of 105 for a whole round — a
-# green tally over a shrunken suite. Assert the count, not just the failures.
+# green tally over a shrunken suite.
+#
+# A TOTAL FLOOR ALONE IS NOT ENOUGH, and this suite's own first version proved it: at 33
+# cases with FLOOR=28 there was room to delete ALL FIVE of section 4 — the
+# affirmative-measurement core, where every unmeasurable input must land on a named
+# non-pass — without redding. So each section carries its own floor, and the total is
+# EXACT rather than slack: a deliberate addition updates one number, while a deletion
+# anywhere reds.
 # ---------------------------------------------------------------------------
-FLOOR=28
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:2"
+FLOOR=63
+for _sf in $SECTION_FLOORS; do
+  _sec=${_sf%%:*}; _min=${_sf##*:}
+  eval "_got=\${SEC_$_sec:-0}"
+  if [ "$_got" -lt "$_min" ]; then
+    bad "section floor: section $_sec ran $_got cases, expected at least $_min (cases deleted?)"
+  fi
+done
 total=$((pass + fail))
 if [ "$total" -lt "$FLOOR" ]; then
   bad "case floor: ran $total cases, expected at least $FLOOR (cases deleted?)"
