@@ -64,24 +64,31 @@
 //!   is labelled with which one, rather than being allowed to imply it covers this
 //!   issue's assert. `rule3_overrun_*` is the only one of these.
 //!
-//! The labels were PROVED, not asserted — and proved PER GUARD, because there are
-//! now three independent ones and a single blanket disable could not tell which
-//! test pins which. Each guard was disabled ALONE and the suite (33 cases) re-run:
+//! The labels were PROVED, not asserted — and proved per guard, with each guard
+//! disabled **ALONE**. There are now four, and an earlier revision of this table
+//! disabled two of them TOGETHER, which was a real methodological error and is
+//! recorded rather than quietly corrected: the joint disable produced 2 reds, all
+//! from the REGISTRY path, and would have read identically if the inline guard had
+//! had no test at all — which is exactly what was true (roborev round 2 / F2).
+//! **A guard with no test is indistinguishable from a guard whose test passes**,
+//! so a joint disable cannot attribute either. Independently:
 //!
-//! | disabled guard | red set |
+//! | disabled ALONE | red set |
 //! |---|---|
-//! | the outer wrapper assert in `raw_value.rs` | **14** — exactly the original DISCRIMINATING set |
-//! | the two nested self-checks (`parse_nested_udt_from_registry`, `parse_inline_udt_value`) | **2** — exactly `nested_udt_*_is_refused` |
+//! | the outer wrapper assert in `raw_value.rs` | **15** |
+//! | `parse_nested_udt_from_registry`'s guard | **2** — exactly `nested_udt_*_is_refused` |
+//! | `parse_inline_udt_value`'s guard (`udt/inline.rs`) | **2** — exactly `inline_udt_*_is_refused` |
 //! | the four `parse_udt_value` caller checks | **2** — exactly `frozen_udt_header_path_*_is_refused` |
 //!
-//! 18 DISCRIMINATING in total, each attributed to the one guard it pins. The 12
-//! CONTROL cases and the 2 DISCRIMINATING-ELSEWHERE cases stayed green in ALL
-//! THREE runs. That attribution is the point: it is what shows the four
-//! `nested_udt_*` cases exercise the NESTED contract and are not merely re-testing
-//! the outer assert through a deeper value — the outer value in those vectors is
-//! well-formed by construction, and the measurement confirms the outer disable
-//! leaves them green. A test whose claim exceeds what it exercises is the defect
-//! class this labelling exists to prevent, so the labels are a measurement.
+//! 21 DISCRIMINATING, each attributed to the ONE guard it pins and to no other.
+//! The 14 CONTROL cases, the 2 DISCRIMINATING-ELSEWHERE cases and the
+//! `require_frozen_extent` helper case stayed green in ALL FOUR runs.
+//!
+//! That separation is what the `inline_udt_*` cases exist for. They red under the
+//! inline disable and NOT under the registry one, which is the only evidence that
+//! they take the inline arm at all — the arm is reached only when
+//! `self.udt_registry` is `None`, so the registry-carrying `parser()` used by the
+//! `nested_udt_*` cases can never reach it, however deeply nested the value.
 //!
 //! **What that experiment does NOT cover, declared rather than implied, and
 //! narrowed since the first statement of it.** Two groups of call sites need an
@@ -816,4 +823,129 @@ fn require_frozen_extent_accepts_only_the_exact_extent() {
         "over-read wording: {msg}"
     );
     assert!(!msg.contains("0 extraneous"), "must not claim zero: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// Census finding C — the INLINE-field UDT decoder (`udt/inline.rs`)
+//
+// roborev round 2 / F2: the four `nested_udt_*` cases above configure a registry,
+// so they resolve through `parse_nested_udt_from_registry` and NEVER reach
+// `parse_inline_udt_value`. That guard had zero coverage, and disabling the two
+// nested guards TOGETHER could not have revealed it — a guard with no test is
+// indistinguishable from a guard whose test passes. These cases force the inline
+// arm, and the attribution below is re-run with the two disabled INDEPENDENTLY.
+//
+// The route, read off `raw_type_value.rs`: the inline arm is reached only from
+// the `} else {` branch taken when `self.udt_registry` is **None** — with a
+// registry present, every nested field resolves through the registry instead. So
+// the parser here deliberately carries NO registry, and the nested field's type
+// comes from the marshal string, which `parse_udt_type_definition` turns into
+// `CqlType::Udt(name, inline_fields)` with the inline defs the arm requires.
+// ---------------------------------------------------------------------------
+
+/// A parser with **no UDT registry**, which is what forces inline field
+/// resolution. `parser()` above cannot reach the inline arm at all.
+fn parser_no_registry() -> V5CompressedLegacyParser {
+    V5CompressedLegacyParser::new(KEYSPACE.to_string(), "t".to_string(), 0, 0, None)
+}
+
+fn decode_inline(data: &[u8]) -> Result<Value> {
+    parser_no_registry().parse_value_from_raw_bytes(data, MARSHAL_OUTER, "col", 0)
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — and it does double duty: if this ever
+/// stops returning a fully-populated nested UDT, the route has drifted and the
+/// three cases below would be vacuous rather than failing.
+#[test]
+fn inline_udt_exact_decodes_ok() {
+    let value = decode_inline(&outer_with_nested(&case1_exact()))
+        .expect("a well-formed inline-resolved nested UDT decodes");
+    match value {
+        Value::Udt(udt) => {
+            assert_eq!(udt.fields.len(), 2, "outer field count");
+            // Proves the INLINE arm ran: with no registry the nested field still
+            // materialises as a UDT with both of its own fields, which only the
+            // inline field definitions can produce.
+            match udt.fields[1].value.as_ref().expect("addr field present") {
+                Value::Udt(inner) => {
+                    assert_eq!(inner.fields.len(), 2, "inline nested field count");
+                    assert_eq!(
+                        inner.fields[0].value,
+                        Some(Value::Text("main st".into())),
+                        "inline nested street"
+                    );
+                }
+                other => panic!("expected an inline-decoded nested Udt, got {other:?}"),
+            }
+        }
+        other => panic!("expected Value::Udt, got {other:?}"),
+    }
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — `TupleType.split` rule 1 at the inline
+/// level. The inline guard must not turn a short nested encoding into an error.
+#[test]
+fn inline_udt_legally_short_decodes_ok() {
+    decode_inline(&outer_with_nested(&case4_legally_short()))
+        .expect("a legally short INLINE nested encoding is accepted (rule 1)");
+}
+
+/// **DISCRIMINATING for the inline guard specifically.** Trailing garbage inside
+/// the inline-resolved nested field; the outer framing counts it exactly.
+#[test]
+fn inline_udt_trailing_garbage_is_refused() {
+    assert_refused_short(
+        decode_inline(&outer_with_nested(&case2_trailing_garbage())),
+        18,
+        19,
+        "inline/trailing (rule 4)",
+    );
+}
+
+/// **DISCRIMINATING for the inline guard specifically** — rule 2, one byte from
+/// `inline_udt_legally_short_decodes_ok`.
+#[test]
+fn inline_udt_partial_prefix_is_refused() {
+    assert_refused_short(
+        decode_inline(&outer_with_nested(&case3_partial_prefix())),
+        11,
+        12,
+        "inline/partial (rule 2)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// roborev F1 — a multicell SET member whose cell path carries trailing bytes
+// ---------------------------------------------------------------------------
+
+/// The set path decodes the member from `cell.path_bytes`, which ARE the member
+/// in full. **DISCRIMINATING**: before the F1 fix the refusal was caught and
+/// mapped to `None`, so the member was silently DROPPED from the set and two
+/// distinct serialized cells produced sets that differed only in size.
+///
+/// Driven at the same bounded entry point the set path calls, with the same
+/// arguments (`&cell.path_bytes, &element_type, &column.name, 0`), because
+/// `parse_complex_column` itself needs an `SSTableReader`. So this pins the
+/// REFUSAL the set path now propagates; that it propagates rather than discards
+/// is a one-expression property visible in the diff and asserted by the corpus
+/// census, not by this test.
+#[test]
+fn set_member_path_bytes_with_trailing_garbage_are_refused() {
+    let p = parser();
+    // A well-formed `int` set member: exactly 4 bytes of path.
+    let clean: &[u8] = &7i32.to_be_bytes();
+    assert_eq!(
+        p.parse_value_from_raw_bytes(clean, "int", "s", 0)
+            .expect("a 4-byte int set member decodes"),
+        Value::Integer(7)
+    );
+    // The same member with one trailing byte in the cell path.
+    let mut corrupt = clean.to_vec();
+    corrupt.push(0xAA);
+    assert_refused_short(
+        p.parse_value_from_raw_bytes(&corrupt, "int", "s", 0),
+        4,
+        5,
+        "set member path bytes with trailing garbage",
+    );
 }
