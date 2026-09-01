@@ -960,6 +960,13 @@ common_env() {
   export LOCK_CMD=""
   export LOAD_PROBE_CMD="echo 0"
   export DISK_PROBE_CMD="echo 999999"
+  # The #3749 shared-object-store sweep OFF by default: `REPO_ROOT` is the REAL lane
+  # checkout in these cases, so a sweep here would `git fsck` this box's 331M shared store
+  # (19.83s measured) once per case — minutes added to a MANDATORY gate component for a
+  # property these cases are not about. The dedicated cases below override it and point the
+  # supervisor at their own scratch tree with a stub sweep, so the branch coverage is real
+  # rather than mocked away.
+  export OBJ_SWEEP_INTERVAL_HOURS=0
   # roborev 1839: preflight bounds the two leftover families separately, so it reads
   # per-family probes (the old combined PROC_PROBE_CMD is gone). Default both to clear;
   # leftover-hold tests override the family they exercise.
@@ -987,7 +994,8 @@ common_env() {
   # next test in this shared shell and cause a spurious pass/fail.
   unset MAX_HOURS_SECS DISK_FLOOR_GB PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS \
         BUILD_HOLD_MAX LEFTOVER_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES \
-        MISMATCH_GRACE_CAP_SECS PROC_LIST_WORKER_CMD PROC_LIST_BUILD_CMD 2>/dev/null || true
+        MISMATCH_GRACE_CAP_SECS PROC_LIST_WORKER_CMD PROC_LIST_BUILD_CMD \
+        OBJ_SWEEP_STAMP OBJ_SWEEP_TIMEOUT_SECS 2>/dev/null || true
   # Claim stamping (issue #2655) OFF by default so most tests stay focused; the
   # dedicated claim tests set a hermetic CLAIM_CMD stub that logs its args.
   export CLAIM_CMD=""
@@ -9347,6 +9355,216 @@ t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 # ever staged, and the leak set is what remains OWNED after the reap. A group released as `foreign`
 # (existing but unsignallable — the number now belongs to another user) is NOT a leak of ours and is
 # reported separately if it ever happens, because calling it a leak would blame this suite for a pid
+# ---------------------------------------------------------------------------
+# Tests (#3749): the THROTTLED shared-object-store sweep in the preflight path.
+#
+# Every case runs the supervisor from a SCRATCH TREE carrying a STUB sweep script — the
+# artifact is SUBSTITUTED rather than reached through a path variable, because a test-only
+# seam is one more thing a real invoker can set (CLAUDE.md's #3312 corollary), and because
+# the real sweep's own behaviour belongs to
+# scripts/tests/test_check_object_store_integrity.sh. What these assert is the
+# SUPERVISOR's half: which verdict stops the loop, which one does not, and that the
+# throttle throttles.
+#
+# RED-ARM DISCIPLINE: the three verdict cases differ from one another in EXACTLY ONE
+# property — the stub's verdict line and exit status — and each stub RECORDS its
+# invocations, so a case cannot pass against a sweep that never ran.
+# ---------------------------------------------------------------------------
+# obj_sweep_tree <dir> <verdict-line> <exit> [call-log] -> scratch repo root
+obj_sweep_tree() {
+  local d="$1" verdict="$2" rc="$3" calllog="${4:-}" root="$d/root"
+  mkdir -p "$root/scripts/local" "$root/scripts/lib"
+  git -C "$root" init -q 2>/dev/null
+  git -C "$root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  cp "$SUPERVISOR" "$root/scripts/local/worker-supervisor.sh"
+  # scripts/lib is needed by the default notify path (an incomplete scratch tree produces
+  # an unattributable failure — learned by the lane-identity cases above).
+  cp "$REPO_ROOT/scripts/lib/gate-notify.sh" "$root/scripts/lib/" 2>/dev/null || true
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '# STUB sweep: record the invocation, print one anchored verdict, exit with its code.\n'
+    [[ -n "$calllog" ]] && printf 'printf "called\\n" >>%s\n' "$(printf '%q' "$calllog")"
+    printf 'printf "OBJECT-STORE: measured stub\\n"\n'
+    printf 'printf "OBJECT-STORE: object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\n"\n'
+    printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
+    printf 'exit %s\n' "$rc"
+  } >"$root/scripts/check-object-store-integrity.sh"
+  chmod +x "$root/scripts/check-object-store-integrity.sh"
+  printf '%s' "$root"
+}
+
+test_object_store_sweep_verdicts() {
+  local d root counter rc calls
+  # (a) VERIFIED: the sweep runs, is journalled, and the iteration proceeds normally.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-verified"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -s "$calls" && -f "$counter" ]] &&
+     grep -q 'object-store: VERIFIED' "$d/stdout.log"; then
+    pass "obj-sweep(VERIFIED): the sweep ran, was journalled, and the worker still ran"
+  else
+    fail "obj-sweep(VERIFIED): rc=$rc swept=$([[ -s "$calls" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d)"
+  fi
+  # The stamp is written, which is what the throttle reads.
+  if [[ -s "$OBJ_SWEEP_STAMP" ]] && grep -qE '^[0-9]+$' "$OBJ_SWEEP_STAMP"; then
+    pass "obj-sweep(VERIFIED): the throttle stamp records an epoch"
+  else
+    fail "obj-sweep(stamp): no usable stamp at $OBJ_SWEEP_STAMP"
+  fi
+
+  # (b) CORRUPT: ONE property different from (a) — the stub's verdict. It must STOP the
+  # loop (corruption is non-self-clearing, so a HOLD would spin to the budget) and NO
+  # worker may run: a worker must never certify against a damaged shared store.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-corrupt"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && -s "$calls" && ! -f "$counter" ]] &&
+     grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE" &&
+     grep -q 'object-store: CORRUPT' "$d/stdout.log"; then
+    pass "obj-sweep(CORRUPT): stops the loop loudly (rc=1, own reason) and spawns NO worker"
+  else
+    fail "obj-sweep(CORRUPT): rc=$rc swept=$([[ -s "$calls" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d)"
+  fi
+  if grep -q 'OBJECT STORE CORRUPT' "$NOTIFY_LOG" 2>/dev/null &&
+     grep -q 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' "$d/stdout.log"; then
+    pass "obj-sweep(CORRUPT): pages high AND carries the sweep's own findings (object ids) into the journal"
+  else
+    fail "obj-sweep(CORRUPT): no high page, or the findings were dropped (see $NOTIFY_LOG)"
+  fi
+  # AND IT IS NOT A HOLD REASON. A HOLD would have logged `HOLD:` and repolled until the
+  # wall-clock budget with no useful action — the latch #2670 bounded the leftover families
+  # to avoid. Asserted directly, because "it stopped" alone cannot distinguish the two.
+  if ! grep -q 'HOLD: object-store' "$d/stdout.log"; then
+    pass "obj-sweep(CORRUPT): it is NOT a hold reason (non-self-clearing: a repoll loop would spin to the budget)"
+  else
+    fail "obj-sweep(CORRUPT): corruption was treated as a HOLD"
+  fi
+
+  # (c) UNMEASURED: again ONE property different — reported, paged once, and DELIBERATELY
+  # NOT a stop: refusing to run any worker because a hygiene probe could not run is a
+  # self-DoS. The permissive branch is asserted here so a future "tighten it" edit reds.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unmeasured"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" UNMEASURED 5 "$calls")"
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -s "$calls" && -f "$counter" ]] &&
+     grep -q 'object-store: UNMEASURED' "$d/stdout.log" &&
+     grep -q 'UNKNOWN, not clean' "$d/stdout.log"; then
+    pass "obj-sweep(UNMEASURED): reported as UNKNOWN-not-clean, paged, and the loop CONTINUES (a hygiene probe must not stop the fleet)"
+  else
+    fail "obj-sweep(UNMEASURED): rc=$rc swept=$([[ -s "$calls" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d)"
+  fi
+}
+
+test_object_store_sweep_throttle_and_disable() {
+  local d root counter calls rc n
+  # (a) THE THROTTLE: two runs sharing one stamp sweep ONCE. The stub counts invocations,
+  # so this measures the throttle rather than inferring it from absent log lines.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/run1.log" 2>&1
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/run2.log" 2>&1
+  n=$(grep -c . "$calls" 2>/dev/null || echo 0)
+  if [[ "$n" -eq 1 ]]; then
+    pass "obj-sweep(throttle): two runs inside the interval sweep exactly ONCE (measured invocations, not inferred)"
+  else
+    fail "obj-sweep(throttle): the sweep ran $n time(s) across two runs, wanted 1 (see $calls)"
+  fi
+  # (b) A STAMP IN THE FUTURE must not park the sweep forever (clock skew, a restored
+  # snapshot, a hand-edited file). ONE property apart from (a): the stamp's value.
+  printf '%s\n' "$(( $(date +%s) + 86400 ))" >"$OBJ_SWEEP_STAMP"
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/run3.log" 2>&1
+  n=$(grep -c . "$calls" 2>/dev/null || echo 0)
+  if [[ "$n" -eq 2 ]]; then
+    pass "obj-sweep(throttle): a stamp in the FUTURE is treated as never-swept, not as a permanent skip"
+  else
+    fail "obj-sweep(future-stamp): invocations=$n, wanted 2"
+  fi
+  # (c) DISABLED (interval 0) — announced in the journal, and the sweep really does not run.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-off"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=0
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && ! -s "$calls" ]] &&
+     grep -q 'object-store sweep DISABLED' "$d/stdout.log"; then
+    pass "obj-sweep(disabled): interval 0 skips the sweep and ANNOUNCES it (a disabled hygiene probe must be visible, not inferred)"
+  else
+    fail "obj-sweep(disabled): rc=$rc swept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d)"
+  fi
+}
+
+test_object_store_sweep_knobs() {
+  local d rc page
+  # A malformed interval must FAIL CLOSED like its siblings: a bare word would evaluate to
+  # 0 in `-le 0` and SILENTLY DISABLE the sweep — the `MAX_HOURS=abc → 0` hazard, one knob
+  # over.
+  d="$(new_case_dir)"
+  common_env "$d"
+  export WORKER_CMD="$d/bin/worker.sh"
+  write_finalize_stub "$d/bin/worker.sh" "$d/counter"
+  export OBJ_SWEEP_INTERVAL_HOURS="abc"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  page=$(grep -c 'bad config' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 2 && ! -f "$d/counter" && "$page" -ge 1 ]]; then
+    pass "obj-sweep(knob): a malformed OBJ_SWEEP_INTERVAL_HOURS pages and exits 2 (never a silently-disabled sweep)"
+  else
+    fail "obj-sweep(knob-interval): rc=$rc page=$page spawned=$([[ -f "$d/counter" ]] && echo yes || echo no)"
+  fi
+  # ZERO is not a lax bound for the TIMEOUT: the sweep REJECTS 0 as a usage error, so a 0
+  # would make every run UNMEASURED forever — a bound that disables the probe rather than
+  # loosening it. Strictly positive, and the message has to say so.
+  d="$(new_case_dir)"
+  common_env "$d"
+  export WORKER_CMD="$d/bin/worker.sh"
+  write_finalize_stub "$d/bin/worker.sh" "$d/counter"
+  export OBJ_SWEEP_TIMEOUT_SECS=0
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 2 && ! -f "$d/counter" ]] &&
+     grep -q 'OBJ_SWEEP_TIMEOUT_SECS' "$d/stdout.log"; then
+    pass "obj-sweep(knob): OBJ_SWEEP_TIMEOUT_SECS=0 fails closed naming the knob (0 would make every sweep UNMEASURED)"
+  else
+    fail "obj-sweep(knob-timeout): rc=$rc spawned=$([[ -f "$d/counter" ]] && echo yes || echo no) (see $d/stdout.log)"
+  fi
+}
+
+t test_object_store_sweep_verdicts
+t test_object_store_sweep_throttle_and_disable
+t test_object_store_sweep_knobs
+
 # number the kernel reassigned.
 #
 # IT MUST BE THE LAST `t`: a case running after it would register groups nobody checks.

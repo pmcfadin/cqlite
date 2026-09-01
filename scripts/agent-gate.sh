@@ -16510,6 +16510,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # shared-object-store sweep guard (#3749): ABOVE the python3 gate on purpose. This suite
+  # needs nothing beyond bash + git, and folding a never-SKIPping suite into a SKIP-aware
+  # block would be a coverage hole wearing a SKIP's clothes (#3522's ruling). A failure
+  # here FAILs the component, mirroring the two guards above.
+  echo ">>> [$name] bash scripts/tests/test_check_object_store_integrity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"

@@ -36,6 +36,22 @@ $1"; }
 # instead, by the base_warns assertion in block 7p.
 skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
+# --- SECTION 5b-obj IS OPTED OUT SUITE-WIDE, AND THE PUSH SANDBOXES OPT BACK IN (#3749) -
+# 5b-obj rehashes the SHARED git object store with a full `git fsck`. Against the REAL
+# checkout that is 19.83s per invocation (measured on this fleet's 331M store) and this
+# suite drives bootstrap dozens of times — ~12 minutes added to a MANDATORY gate
+# component for a property most of these cases are not about. So the env opt-out is set
+# ONCE here.
+#
+# THE OPT-OUT IS A [warn] BY DESIGN (it can never buy a vacuous green), so it would push
+# `base_warns` from 1 to 2 and silently turn block 7p's three end-to-end assertions into
+# skips — the exact drift the comments in that block record happening FOUR times. Hence
+# `run_push` sets it back to 0 and `mk_push_repo` stages the sweep script: in those
+# sandboxes the subject is the sandbox's OWN tiny repo, so the sweep runs in milliseconds,
+# reports VERIFIED, and contributes ZERO warnings. The dedicated 5b-obj cases below then
+# get a real end-to-end verdict instead of a mocked one.
+export CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=1
+
 # --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
 # OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
 # Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
@@ -1206,6 +1222,13 @@ mk_push_repo() {
   # running. Staging it here plus the pinned `sudo` shim in mk_push_bin makes 5b contribute
   # ZERO warnings deterministically — on a pinned host and an unpinned one alike.
   cp "$SCRIPT_DIR/../agent-gate.sh" "$dir/scripts/agent-gate.sh"
+  # Staged for SECTION 5b-obj (#3749), for the same reason agent-gate.sh is staged above:
+  # without it the section reports `object-store: UNMEASURED (no
+  # scripts/check-object-store-integrity.sh ...)` — one extra [warn] in EVERY case built on
+  # this helper, which is precisely how base_warns has drifted before. With it staged, the
+  # subject is this sandbox's own (objectless, therefore trivially intact) repo, so the
+  # section contributes ZERO warnings deterministically.
+  cp "$SCRIPT_DIR/../check-object-store-integrity.sh" "$dir/scripts/check-object-store-integrity.sh"
   # A PER-SANDBOX system env file carrying the pin, pointed at by run_push. Section 5b's
   # VERIFIED now requires BOTH the file line and a session that sees it (roborev round 2),
   # so without this the sandboxes would take the new NOT-SYSTEM-WIDE branch, base_warns
@@ -1317,6 +1340,7 @@ run_push() {
   push_rc=0
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
+    CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=0 \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
@@ -1395,6 +1419,102 @@ if [ "$base_warns" -eq 1 ]; then
 else
   skip "push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
   printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
+fi
+
+# ---------------------------------------------------------------------------
+# 7o. SECTION 5b-obj — the SHARED OBJECT-STORE INTEGRITY SWEEP (issue #3749)
+#
+# Four cases, all end-to-end through the real section: the affirmative verdict, the
+# opt-out, a PLANTED CORRUPTION, and the unmeasurable case. The sweep script's own
+# behaviour is covered by scripts/tests/test_check_object_store_integrity.sh; what these
+# assert is BOOTSTRAP's half — that VERIFIED is the only [ok], that CORRUPT is loud, and
+# that neither the opt-out nor an unmeasured host can buy a green.
+# ---------------------------------------------------------------------------
+# 7o-a. THE AFFIRMATIVE VERDICT, on the same run block 7p just proved goes fully green.
+#   Its zero-warning baseline is the second half of the assertion: a section that reported
+#   ok while warning would have shown up as base_warns drift.
+if printf '%s' "$out7pa" | grep -q '\[ok\].*object-store: VERIFIED' &&
+  printf '%s' "$out7pa" | grep -q 'point-in-time'; then
+  ok "obj: a clean store is reported VERIFIED as [ok], declared as a POINT-IN-TIME sweep (not a per-read guarantee)"
+else
+  bad "obj: section 5b-obj did not report VERIFIED as [ok] on a clean sandbox"
+  push_plain "$out7pa" | grep -F 'object-store:' | head -4
+fi
+
+# 7o-b. THE OPT-OUT: loud, non-passing, and it names WHICH spelling was used. One property
+#   apart from 7o-a — the flag.
+run_push "$repo7pa" "$bin7pa" "$gc7pa" --skip-push-probe --skip-object-store-sweep --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: OPT-OUT (--skip-object-store-sweep)' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: --skip-object-store-sweep is a LOUD [warn] OPT-OUT that withholds green and fails --strict"
+else
+  bad "obj: the opt-out was silent, reported ok, or bought a green (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+
+# 7o-c. PLANTED CORRUPTION, one property apart from a clean sandbox: a hash-path mismatch
+#   in the sandbox's OWN object store. The construction is ASSERTED with git before
+#   bootstrap runs — `cat-file` must hand back the WRONG content without complaint — so
+#   this cannot pass against an intact fixture, and the [warn] cannot be attributed to
+#   some unrelated breakage.
+repo7oc="$tmp/repo7oc"; mk_push_repo "$repo7oc" "file://$bare7pa"
+(
+  cd "$repo7oc" || exit 1
+  printf 'aaa\n' >objf1
+  printf 'bbb\n' >objf2
+  git -c user.email=t@t -c user.name=t add objf1 objf2 >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -q -m obj-fixture >/dev/null 2>&1
+) || true
+oc_a=$(git -C "$repo7oc" rev-parse HEAD:objf1 2>/dev/null)
+oc_b=$(git -C "$repo7oc" rev-parse HEAD:objf2 2>/dev/null)
+if [ -n "$oc_a" ] && [ -n "$oc_b" ] && [ "$oc_a" != "$oc_b" ]; then
+  oc_pa="$repo7oc/.git/objects/${oc_a:0:2}/${oc_a:2}"
+  oc_pb="$repo7oc/.git/objects/${oc_b:0:2}/${oc_b:2}"
+  chmod 644 "$oc_pa" 2>/dev/null
+  cp "$oc_pb" "$oc_pa" 2>/dev/null
+fi
+if [ -n "$oc_a" ] && [ "$(git -C "$repo7oc" cat-file -p "$oc_a" 2>/dev/null)" = "bbb" ]; then
+  ok "obj: the plant IS the defect described (git returns objf2's content for objf1's sha, no error)"
+else
+  bad "obj: the corruption plant did not take — the case below would prove nothing"
+fi
+run_push "$repo7oc" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: a corrupt shared store is reported CORRUPT, withholds green and fails --strict"
+else
+  bad "obj: a corrupt store did not produce a CORRUPT verdict (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+if [ -n "$oc_a" ] && printf '%s' "$push_out" | grep -q "object $oc_a"; then
+  ok "obj: the CORRUPT report NAMES the affected object id ($oc_a)"
+else
+  bad "obj: the affected object id is not named in the bootstrap output"
+fi
+if printf '%s' "$push_out" | grep -q 'REMEDY' &&
+  printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT'; then
+  ok "obj: CORRUPT carries a remedy AND is restated in the summary banner (one [warn] among many is missable)"
+else
+  bad "obj: CORRUPT lacks a remedy line or the summary restatement"
+fi
+
+# 7o-d. UNMEASURABLE: the sweep script absent from the checkout. Must be a [warn] naming
+#   what could not be measured — never an [ok], because an [ok] is what --strict reads.
+repo7od="$tmp/repo7od"; mk_push_repo "$repo7od" "file://$bare7pa"
+rm -f "$repo7od/scripts/check-object-store-integrity.sh"
+if [ ! -e "$repo7od/scripts/check-object-store-integrity.sh" ]; then
+  ok "obj: the unmeasurable plant IS the property described (the sweep script is absent from that checkout)"
+else
+  bad "obj: could not remove the sweep script from the sandbox"
+fi
+run_push "$repo7od" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED' &&
+  ! printf '%s' "$push_out" | grep -q '\[ok\].*object-store:' &&
+  ! push_green "$push_out"; then
+  ok "obj: an unmeasurable store is a [warn] UNMEASURED with no [ok] anywhere — unmeasured is never certified"
+else
+  bad "obj: an unmeasurable store did not warn, or produced an [ok]"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
 fi
 
 # 7p-b. PUSH FAILS, credential-shaped. The bare repo's pre-receive hook speaks the
