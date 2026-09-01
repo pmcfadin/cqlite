@@ -74,7 +74,20 @@ TOKEN_CONTAINER_KEYS = ("token_usage", "tokenUsage", "usage", "token_counts")
 # ADDING IT CANNOT CHANGE WHICH ROW `find_job` SELECTS: that function looks only at the
 # id-bearing keys and then prefers a match carrying `git_ref`; STRING_FACTS is read solely
 # by the output loop below, after the row has been chosen.
-STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict", "source_machine_id")
+# `branch` is exported for ONE reason (#3654 round 2): the daemon's job list is
+# BRANCH-FILTERED, so a supplementary lookup must be scoped to the branch the JOB was
+# enqueued for — asking about the ambient current branch answers about a DIFFERENT branch,
+# which is how a `--recheck-job` of an older job silently reported no daemon at all.
+# Measured: `roborev show <id> --json` carries it at `.job.branch`, `list` rows at top level.
+STRING_FACTS = (
+    "git_ref",
+    "status",
+    "model",
+    "requested_model",
+    "verdict",
+    "source_machine_id",
+    "branch",
+)
 
 
 def objects(node):

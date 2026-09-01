@@ -267,6 +267,13 @@ emit_job_object() {
   if [ "${STUB_TOKEN_USAGE:-NONE}" != "NONE" ]; then
     usage=",\"token_usage\":\"${STUB_TOKEN_USAGE}\""
   fi
+  # THE JOB'S OWN BRANCH (#3654 round 2). Real payloads carry it — `.job.branch` on `show`, top
+  # level on `list` — and the supplementary machine lookup is scoped BY IT rather than by the
+  # branch the invocation happens to be on. `none` suppresses it, which is how the
+  # "record does not name its branch" state is fixtured.
+  if [ -n "${STUB_JOB_BRANCH:-}" ] && [ "${STUB_JOB_BRANCH:-}" != none ]; then
+    extra="$extra,\"branch\":\"${STUB_JOB_BRANCH}\""
+  fi
   local git_ref="${STUB_GIT_REF:-${STUB_ANNOUNCE_SHA:-}}"
   if [ "${STUB_GIT_REF:-}" = none ]; then git_ref=""; fi
   if [ -n "${STUB_VERDICT_FIELD:-}" ]; then
@@ -368,6 +375,17 @@ case "$cmd" in
   list)
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_LIST_JSON:-array}" != none ] || { printf 'null\n'; exit 0; }
+    # ===== `roborev list` IS BRANCH-FILTERED, AND THE STUB HONOURS THAT (#3654 round 2) =====
+    # Measured: a bare list from a branch with no jobs returns `null` while `--branch <other>`
+    # returns that branch's rows. Modelling it is what makes the branch-scoping cases REAL — a stub
+    # that answered whatever branch it was asked would pass both before and after the fix, i.e. the
+    # cases would test nothing. STUB_LIST_BRANCH is the branch this daemon has jobs for.
+    if [ -n "${STUB_LIST_BRANCH:-}" ]; then
+      case " $* " in
+        *" --branch ${STUB_LIST_BRANCH} "*|*" --branch ${STUB_LIST_BRANCH}") ;;
+        *" --branch "*) printf 'null\n'; exit 0 ;;
+      esac
+    fi
     _EMIT_MACHINE=1
     printf '['; emit_job_object; printf ']\n'
     exit 0
@@ -1056,6 +1074,11 @@ run_wrapper() { # run_wrapper [--wrapper <path>] <work-dir> [extra wrapper args.
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
   # case pinned git_ref itself (or asked for it to be absent with `none`).
   if [ -z "${STUB_GIT_REF:-}" ]; then STUB_GIT_REF=$(range_ref "$work"); fi
+  # The job row reports the branch it was enqueued for, and the daemon lists that branch's jobs —
+  # which, for an ordinary run, is the fixture's own branch (#3654 round 2). Defaulted here, beside
+  # STUB_GIT_REF, for the same reason: a case pins it only when the DIVERGENCE is the subject.
+  if [ -z "${STUB_JOB_BRANCH:-}" ]; then STUB_JOB_BRANCH=$(git -C "$work" rev-parse --abbrev-ref HEAD); fi
+  if [ -z "${STUB_LIST_BRANCH:-}" ]; then STUB_LIST_BRANCH="$STUB_JOB_BRANCH"; fi
   # HOME is redirected to a throwaway directory: nothing in the wrapper reads a roborev
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
@@ -1204,6 +1227,12 @@ export STUB_ON_REVIEW=''
 # #3654: the DAEMON-ID knob. Empty by default, and the stub emits it on the `list` payload ONLY,
 # which is where roborev v0.61.2 actually carries `source_machine_id`.
 export STUB_SOURCE_MACHINE_ID=''
+# #3654 round 2: the BRANCH knobs. STUB_JOB_BRANCH is the branch the job row reports as its own
+# (`none` suppresses the field); STUB_LIST_BRANCH is the branch the daemon's list will answer for.
+# Both default, in run_wrapper, to the fixture's own current branch — the ordinary case — so a case
+# that wants them to DIVERGE has to say so.
+export STUB_JOB_BRANCH=''
+export STUB_LIST_BRANCH=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1234,6 +1263,8 @@ reset_stub() {
   # No daemon id by default: the FAIL-CLOSED direction for the `job-machine:` key (#3654) — a case
   # that wants the uuid arm has to SAY so, so no case passes because the double happened to answer.
   STUB_SOURCE_MACHINE_ID=''
+  STUB_JOB_BRANCH=''
+  STUB_LIST_BRANCH=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -6146,6 +6177,77 @@ assert_says 'case (jm10) --help records that the marker grammar is unchanged' \
 # — so a run of it necessarily carries the stem.
 reset_stub
 
+printf '== (jm13) #3654 r2: the lookup is scoped to the JOB record'"'"'s branch, not the ambient one ==\n'
+# THE DAEMON'S JOB LIST IS BRANCH-FILTERED, so the branch used to scope the supplementary read
+# decides whether the key resolves at all. Scoping by the branch the INVOCATION is on answers about
+# a DIFFERENT branch whenever the job was enqueued under another name — and then `job-machine:`
+# reads NOT RECORDED for a record that HAS a source_machine_id. Fixtured by making the two diverge:
+# the daemon holds jobs for the RECORD's branch only, and the fixture is checked out on another.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+STUB_JOB_BRANCH='issue-earlier-lane'
+STUB_LIST_BRANCH='issue-earlier-lane'
+run_wrapper "$jm_work"
+assert_verdict 'case (jm13)' PASS 0
+assert_says 'case (jm13) the daemon is still named when the job'"'"'s branch is not the current one' \
+  "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
+reset_stub
+
+printf '== (jm14) #3654 r2: --recheck-job of an OLDER job on another branch still names the daemon ==\n'
+# THE MODE THE MITIGATION IS DOCUMENTED FOR, and the one most likely to miss: a waiver is applied
+# by rechecking a job that may have been enqueued before a rename or a rebase. Before the fix this
+# rendered NOT RECORDED and the documented "compare job-machine: between the request and the
+# recheck" would silently not work in the only mode it exists for — a claim the implementation did
+# not deliver, which is worse than claiming nothing.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+STUB_JOB_BRANCH='issue-earlier-lane'
+STUB_LIST_BRANCH='issue-earlier-lane'
+STUB_VERDICT_FIELD='P'
+STUB_RECORD_OUTPUT="$CLEAN_TEXT"
+run_wrapper "$jm_work" --recheck-job 4656
+assert_verdict 'case (jm14)' PASS 0
+assert_says 'case (jm14) a recheck of an older, differently-branched job names its daemon' \
+  "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
+assert_says 'case (jm14) and it is still a recheck' '^MODE: recheck '
+reset_stub
+
+printf '== (jm15) #3654 r2: NO ambient-branch fallback when the record does not name its branch ==\n'
+# THE FALLBACK THAT MUST NOT EXIST. Here the daemon WOULD answer for the fixture's own branch, so a
+# retry against it would produce a uuid — one belonging to whatever that branch's job is, presented
+# as this job's daemon. Silently answering about a different branch is the same defect one layer
+# down, so the state must say what it could not do instead.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+STUB_JOB_BRANCH='none'
+STUB_LIST_BRANCH=$(git -C "$jm_work" rev-parse --abbrev-ref HEAD)
+run_wrapper "$jm_work"
+assert_verdict 'case (jm15) an unscopeable lookup never fails a clean run' PASS 0
+assert_says 'case (jm15) the state names what could not be scoped' \
+  '^job-machine: NOT RECORDED \(the job record does not name its own branch'
+assert_says 'case (jm15) and says the ambient fallback was refused, with the reason' \
+  'deliberately NOT retried against the branch this invocation is on, which would answer about a different branch'
+assert_lacks 'case (jm15) no uuid is invented from the ambient branch' "^job-machine: $JM_UUID"
+reset_stub
+
+printf '== (jm16) #3654 r2: a record that WAS read but is incomplete is NOT RECORDED, not UNAVAILABLE ==\n'
+# THE STATE THAT COULD LIE. The rendering used to branch on `record_required_present`, which asks
+# about COMPLETENESS — so a record that was read and is merely nonterminal rendered
+# 'UNAVAILABLE (no job record could be read)', which is FALSE: one was read. The three states are
+# only worth having if each is an affirmative TRUE statement about what happened.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_STATUS='running'
+run_wrapper "$jm_work"
+assert_verdict 'case (jm16)' FAIL 1
+assert_says 'case (jm16) an incomplete-but-READ record is NOT RECORDED' '^job-machine: NOT RECORDED \('
+assert_lacks 'case (jm16) it never claims no record could be read' '^job-machine: UNAVAILABLE'
+assert_says 'case (jm16) the job-record key independently reports the incompleteness' '^job-record: DEGRADED'
+reset_stub
+
 printf '== (jm11) #3654: a `show` payload whose TOP-LEVEL id is NOT the asked job ==\n'
 # MEASURED SHAPE (ten records): top-level `id` is the REVIEW row's own sequence and can differ from
 # the job asked for — asking for 9 returns id=8, job_id=9, job.id=9. Two things must hold, and the
@@ -6181,10 +6283,19 @@ printf '== (jm12) #3654 structural: the supplementary machine read NAMES THE BRA
 _jm_supp=$(sed -n '/^read_machine_fact() {/,/^}/p' "$WRAPPER_REAL")
 if [ -z "$_jm_supp" ]; then
   bad 'case (jm12) could not locate read_machine_fact to inspect'
-elif printf '%s\n' "$_jm_supp" | grep -qE 'roborev list --json .*--branch "\$BRANCH"'; then
-  ok 'case (jm12) the supplementary machine read is scoped to the branch under review'
+elif printf '%s\n' "$_jm_supp" | grep -qE 'roborev list --json .*--branch "\$job_branch"'; then
+  ok 'case (jm12) the supplementary machine read is scoped to the RECORD'"'"'s own branch'
+  # AND NEVER TO THE AMBIENT ONE. `$BRANCH` is the branch this invocation is running on, which is
+  # not the job's fact; scoping by it answers about a different branch on exactly the recheck path
+  # the operator mitigation is documented for. A fallback to it is as wrong as using it outright,
+  # so the function must not mention it at all.
+  if printf '%s\n' "$_jm_supp" | grep -q 'BRANCH'; then
+    bad 'case (jm12) read_machine_fact still refers to the ambient $BRANCH — scoping (or falling back) to it answers about a branch other than the job own'
+  else
+    ok 'case (jm12) it never falls back to the ambient $BRANCH'
+  fi
 else
-  bad 'case (jm12) the supplementary machine read does not name --branch "$BRANCH" — it would inherit roborev list'"'"'s current-branch default and resolve nothing whenever cwd is not on the branch under review'
+  bad 'case (jm12) the supplementary machine read is not scoped to the record'"'"'s own branch ($job_branch) — it would answer about whatever branch the invocation happens to be on'
 fi
 # AND THE RECORD READ IS DELIBERATELY LEFT ALONE: `sha-assert` depends on it, and naming the branch
 # there is behaviour-neutral only while the invoking cwd's branch equals $BRANCH. Pinned so a future

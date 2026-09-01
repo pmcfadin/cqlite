@@ -828,6 +828,9 @@ TOKENS="UNAVAILABLE"
 # record is actually in — never blank, and never a bare `-`, which would read as "no daemon" rather
 # than "nothing was read". Recomputed once, below, from the facts the record read produced.
 JOB_MACHINE="UNAVAILABLE (no job record was read — job-record: SKIP)"
+# Was a job record READ at all (any payload, complete or not)? Distinct from `record_required_present`,
+# which answers about COMPLETENESS — see the `job-machine:` state selection below (#3654 round 2).
+JOB_RECORD_READ=0
 # Populated by roborev_census (in the sourced oracles file); declared here so the
 # array always exists even if that oracle ever returns before filling it.
 # shellcheck disable=SC2034 # read in roborev-review-oracles.sh, not here
@@ -1394,6 +1397,12 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
       list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
     esac
     extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE" || continue
+    # A RECORD WAS READ. Tracked SEPARATELY from `record_required_present`, which answers a
+    # DIFFERENT question — completeness — and answering "was anything read?" with it made
+    # `job-machine:` state that no record could be read when one had been (#3654 round 2). Two
+    # questions, two signals; a state that is not an affirmative true statement about what
+    # happened is the diagnostic that stops the next person looking.
+    JOB_RECORD_READ=1
     if record_required_present; then
       rm -f "$best_facts"
       return 0
@@ -1423,34 +1432,59 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
 # transient-read modelling above it. A failure here is not an error — it yields no id, and the key
 # says so affirmatively.
 #
-# IT NAMES THE BRANCH, AND THE RECORD READ ABOVE DOES NOT. `roborev list` filters by the CURRENT
-# BRANCH by default, and this wrapper is invoked from arbitrary directories with an explicit
-# `--repo` — so a default-scoped read here would resolve nothing whenever the invoking cwd's branch
-# is not the branch under review, and `job-machine:` would read `NOT RECORDED` for a reason that has
-# nothing to do with the record. Naming `$BRANCH` removes that dependence. It is safe HERE and not
-# above precisely because this read is new and informational: nothing asserts on its result, and its
-# worst case is the affirmative `NOT RECORDED` state.
+# IT IS SCOPED TO THE RECORD'S OWN BRANCH, NOT TO THE AMBIENT ONE (#3654 round 2). `roborev list`
+# is BRANCH-FILTERED, and `$BRANCH` is merely the branch this invocation is running on — so scoping
+# by it answers about a DIFFERENT branch whenever the job was enqueued under another name, and
+# `--recheck-job` is exactly where that happens (an older job, a renamed or rebased lane). That
+# would have rendered `NOT RECORDED` for a record that HAS a `source_machine_id`, silently defeating
+# the operator mitigation this key exists for — the documented "compare `job-machine:` between the
+# request and the recheck" — in the one mode it is documented for. So the branch comes from the
+# JOB RECORD (`.job.branch` on `show`, top level on `list`), which is the job's own fact.
+#
+# AND THERE IS NO AMBIENT FALLBACK. When the record does not name its branch the lookup is NOT
+# retried against `$BRANCH`: that would answer about a different branch while looking like an
+# answer about this job — the same defect one layer down. The state says so instead.
+#
+# `--limit 50` IS SOUND ONCE THE BRANCH IS RIGHT, and the bound is per-branch rather than
+# per-daemon: measured on this fleet, the whole daemon database held 31 records across all
+# branches, so 50 jobs on ONE branch is far past anything observed. If it were ever exceeded the
+# result is the affirmative `NOT RECORDED` state with a named cause — never a wrong id, because the
+# extractor matches the job id and returns nothing when it is absent.
 #
 # BOUNDED CASES WHERE IT LEGITIMATELY DOES NOT RESOLVE, so the state is read as information and not
-# as a defect: a roborev build whose `list` rows do not carry `source_machine_id`; a branch with more
-# than `--limit 50` jobs, which pushes this record off the read; and a `--recheck-job` of a job that
-# was enqueued for a DIFFERENT branch. Each lands on `NOT RECORDED`, which is why that value names
-# the payload that carries the field rather than merely reporting an absence.
-read_machine_fact() { # read_machine_fact <job> -> prints the daemon uuid, or nothing
-  local mfacts="$FACTS_FILE.machine" mprompt="$FACTS_FILE.machine.prompt" json="" id=""
+# as a defect: a roborev build whose `list` rows do not carry `source_machine_id`; a record that
+# does not name its own branch; and a branch holding more than `--limit 50` jobs. Each lands on
+# `NOT RECORDED` with its own cause named, which is why that value explains itself rather than
+# merely reporting an absence.
+JOB_MACHINE_MISS=""
+read_machine_fact() { # read_machine_fact <job> -> prints the daemon uuid, or nothing (+ JOB_MACHINE_MISS)
+  local mfacts="$FACTS_FILE.machine" mprompt="$FACTS_FILE.machine.prompt" json="" id="" job_branch=""
+  JOB_MACHINE_MISS=""
   id=$(fact source_machine_id)
   if [ -n "$id" ]; then printf '%s' "$id"; return 0; fi
-  json=$(roborev list --json --limit 50 --repo "$REPO" --branch "$BRANCH" 2>/dev/null || printf '')
-  [ -n "$json" ] || return 1
+  job_branch=$(fact branch)
+  if [ -z "$job_branch" ]; then
+    JOB_MACHINE_MISS="the job record does not name its own branch, and the daemon's job list is branch-filtered, so the lookup could not be scoped to this job; it was deliberately NOT retried against the branch this invocation is on, which would answer about a different branch"
+    return 1
+  fi
+  json=$(roborev list --json --limit 50 --repo "$REPO" --branch "$job_branch" 2>/dev/null || printf '')
+  if [ -z "$json" ]; then
+    JOB_MACHINE_MISS="the daemon returned no job list for this job's own branch '$job_branch'"
+    return 1
+  fi
   : >"$mfacts"
   : >"$mprompt"
   if ! extract_job_facts "$1" "$json" "$mfacts" "$mprompt"; then
     rm -f "$mfacts" "$mprompt"
+    JOB_MACHINE_MISS="job '$1' is not in the daemon's latest 50 jobs for its own branch '$job_branch'"
     return 1
   fi
   id=$(sed -n 's/^source_machine_id=//p' "$mfacts" | head -1)
   rm -f "$mfacts" "$mprompt"
-  [ -n "$id" ] || return 1
+  if [ -z "$id" ]; then
+    JOB_MACHINE_MISS="neither the job record nor the daemon's job list for branch '$job_branch' carries source_machine_id"
+    return 1
+  fi
   printf '%s' "$id"
 }
 
@@ -1528,12 +1562,17 @@ JOB_MACHINE_ID=""
 if [ "$announce_ok" -eq 1 ]; then
   JOB_MACHINE_ID=$(read_machine_fact "$JOB" || printf '')
 fi
+# THE SPLIT IS "WAS A RECORD READ", NOT "IS IT COMPLETE" (#3654 round 2). This used to branch on
+# `record_required_present`, which asks about COMPLETENESS — so a record that WAS read but is
+# nonterminal or incomplete rendered `UNAVAILABLE (no job record could be read)`, a state that is
+# simply FALSE about what happened. Each of the three states has to be an affirmative TRUE statement
+# or the key is worse than absent, so the read is tracked on its own signal.
 if [ -n "$JOB_MACHINE_ID" ]; then
   JOB_MACHINE="$JOB_MACHINE_ID (source_machine_id; job ids are per-daemon)"
-elif record_required_present; then
-  JOB_MACHINE="NOT RECORDED (a job record was read but carries no source_machine_id; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not. Identify the review by the record's git_ref, never by the id alone)"
+elif [ "${JOB_RECORD_READ:-0}" -eq 1 ]; then
+  JOB_MACHINE="NOT RECORDED (${JOB_MACHINE_MISS:-a job record was read but carries no source_machine_id}; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not. Identify the review by the record's git_ref, never by the id alone)"
 else
-  JOB_MACHINE="UNAVAILABLE (no job record could be read, so the issuing daemon is unknown — job-record: $JOB_RECORD)"
+  JOB_MACHINE="UNAVAILABLE (no job record could be read at all, so the issuing daemon is unknown — job-record: $JOB_RECORD)"
 fi
 
 # The sanctioned form reviews a RANGE, so the job record's `git_ref` is
