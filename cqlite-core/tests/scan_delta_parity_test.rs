@@ -678,6 +678,12 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
     );
 }
 
+// FILE-SIZE NOTE (#1135, campsite rule): this file is 1755 lines, over the 1500-line test
+// threshold, and #3725 grew it by 40 to fix the oracle defect below. Splitting it — the
+// JSONL parsing half (~450 lines) is the obvious seam — is #1135's scope, not a parity
+// fix's, so that round of the gate ran with CQLITE_ALLOW_FILE_GROWTH=1 as the file-size
+// component's own remedy text instructs. Do not add to it without splitting.
+
 /// Assert optional expiry times match, honouring Cassandra's per-cell SUPPRESSION rule.
 ///
 /// sstabledump rounds `expires_at` to the nearest second (epoch-seconds * 1e6), as does
