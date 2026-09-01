@@ -395,13 +395,30 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     # TIP (#3392): a tip-expecting assert false-FAILs deterministically on any
     # branch whose main advanced, and that was misdiagnosed as a race twice.
     #
-    # A reviewed base at OR BEFORE the merge-base reviewed MORE of this branch,
-    # not less, so it is covered outright — that arm is what keeps a legitimate
-    # superset review from reading as a gap.
-    if git merge-base --is-ancestor "$RH_BASE" "$merge_base" >/dev/null 2>&1; then
+    # THE SKIPPED PREFIX IS A COMMIT SET, NOT A PATH DIFF AGAINST THE RECORDED
+    # BASE — and getting that wrong is a FALSE FAIL, caught by the sibling
+    # suite's end-to-end fixture. A recorded base OFF this branch (the base
+    # ref's tip, say) skips NONE of the PR's own commits: none of them is an
+    # ancestor of it. What the review actually skipped is the part of the PR
+    # range that IS an ancestor of the recorded base, i.e. everything from the
+    # merge-base up to `merge-base(recorded-base, certified)`. So that
+    # projection is computed first, and a projection at or before the PR's
+    # merge-base means the round started at or before this branch's first
+    # commit and skipped nothing — which is also what keeps a legitimate
+    # SUPERSET review from reading as a gap.
+    local review_start
+    review_start=$(git merge-base "$RH_BASE" "$certified" 2>/dev/null) || review_start=""
+    if [ -z "$review_start" ]; then
+      say "job $(sane "$job") reviewed BASE $(sane "$RH_BASE") could not be located"
+      say "job $(sane "$job") relative to the certified head in this checkout, so how much"
+      say "job $(sane "$job") of the branch the round covered is unknown"
+      unclassifiable_base=1
+      continue
+    fi
+    if git merge-base --is-ancestor "$review_start" "$merge_base" >/dev/null 2>&1; then
       :
     else
-      classify_paths "$merge_base" "$RH_BASE"
+      classify_paths "$merge_base" "$review_start"
       case "$?" in
         0)
           say "job $(sane "$job") starts after this PR's merge-base, but the omitted"

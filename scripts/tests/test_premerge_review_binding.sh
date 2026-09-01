@@ -760,9 +760,11 @@ fi
   printf 'fn f() {}\n' >>src/lib.rs
   git add -A && git commit -qm "b1 mb-branch code"
   git rev-parse HEAD >"$T/b1-mb-head"
+  # main's later advance carries CODE on purpose: it is what makes the
+  # `base-off-branch` case below non-vacuous.
   git checkout -q main
-  printf 'main moves again\n' >>README.md
-  git add -A && git commit -qm "main advances again"
+  printf 'fn on_main() {}\n' >>src/lib.rs
+  git add -A && git commit -qm "main advances again, with code"
 ) >/dev/null 2>&1
 B1_MB=$(cat "$T/b1-mb")
 B1_MID=$(cat "$T/b1-mid")
@@ -827,6 +829,25 @@ if run_binding 0 "base-superset: a base BEHIND the merge-base is more coverage, 
   case "$OUT" in
     *"verdict BOUND"*) ok "base-superset: verdict BOUND" ;;
     *) bad "base-superset: a superset review was refused (got: $OUT)" ;;
+  esac
+fi
+
+# --- base-off-branch: a base OFF this branch skips NONE of its commits --------
+# The skipped prefix is a COMMIT SET, not a path diff against the recorded base.
+# A round recorded against the base ref's TIP skips none of the PR's own
+# commits — none of them is an ancestor of it — even though the diff between
+# the merge-base and that tip is full of main's code. Measuring the path diff
+# directly refuses this shape, which is a FALSE FAIL on a merge gate; the
+# sibling suite's end-to-end fixture caught exactly that, and it is pinned here
+# too so the property lives in the leg's own suite.
+MAIN_TIP=$(cd "$WORK" && git rev-parse main)
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 606)"
+roborev_job 606 "$MAIN_TIP" "$B1_MB_HEAD"
+if run_binding 0 "base-off-branch: a base off the branch skips none of its commits" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*) ok "base-off-branch: verdict BOUND (main's own code is not a skipped prefix)" ;;
+    *) bad "base-off-branch: a round covering the whole branch was refused (got: $OUT)" ;;
   esac
 fi
 
@@ -994,7 +1015,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=60
+CASE_FLOOR=61
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
