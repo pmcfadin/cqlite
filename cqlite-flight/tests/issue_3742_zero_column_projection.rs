@@ -117,17 +117,45 @@ fn measure_zero_column_projection_over_do_get() {
     // (a) explicitly empty projection list
     let (ok_a, msgs_a, err_a) = drive(&data_dir, ticket_bytes(Some(serde_json::json!([]))));
     eprintln!("MEASURE columns=[]: rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
+    assert_zero_column_outcome("columns=[]", ok_a, msgs_a, err_a.as_deref());
 
-    // (b) projection naming only a column the table does not have
+    // (b) projection naming only a column the table does not have. `retain`
+    // cannot fail, so an unknown name is not a bad-request — it silently empties
+    // the projection and lands in exactly the same place as (a).
     let (ok_b, msgs_b, err_b) = drive(
         &data_dir,
         ticket_bytes(Some(serde_json::json!(["no_such_col"]))),
     );
     eprintln!("MEASURE columns=[no_such_col]: rpc_ok={ok_b} msgs={msgs_b} err={err_b:?}");
+    assert_zero_column_outcome("columns=[no_such_col]", ok_b, msgs_b, err_b.as_deref());
 
     // (c) a real column, as a sanity control that projection works at all.
     let (ok_c, msgs_c, err_c) = drive(&data_dir, ticket_bytes(Some(serde_json::json!(["key"]))));
     eprintln!("MEASURE columns=[key]: rpc_ok={ok_c} msgs={msgs_c} err={err_c:?}");
+    assert!(ok_c && err_c.is_none(), "single-column control: {err_c:?}");
+}
+
+/// The measured outcome of a zero-column projection on the streaming routes:
+/// the RPC is ACCEPTED, the Arrow schema message (zero fields) is sent, and the
+/// stream then FAILS with arrow's refusal wrapped as `Status::Internal`.
+///
+/// This is recorded, not endorsed. What it establishes for issue #3742 is that
+/// the shape is REACHABLE and that it fails LOUDLY — it is not a silent
+/// 0-rows-when-present answer on this path.
+fn assert_zero_column_outcome(what: &str, ok: bool, msgs: usize, err: Option<&str>) {
+    assert!(
+        ok,
+        "{what}: do_get itself must be accepted (no up-front rejection)"
+    );
+    assert_eq!(
+        msgs, 1,
+        "{what}: only the zero-field schema message arrives"
+    );
+    let err = err.unwrap_or_else(|| panic!("{what}: expected a terminal stream error"));
+    assert!(
+        err.contains("must either specify a row count or at least one column"),
+        "{what}: unexpected terminal error: {err}"
+    );
 }
 
 /// MEASUREMENT (#3742): the POINT-READ route (a full-partition-key equality
@@ -150,6 +178,7 @@ fn measure_zero_column_projection_on_the_point_read_route() {
         ticket_with(serde_json::json!({"filter": filter, "columns": []})),
     );
     eprintln!("MEASURE point-read columns=[]: rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
+    assert_zero_column_outcome("point-read columns=[]", ok_a, msgs_a, err_a.as_deref());
 }
 
 /// MEASUREMENT (#3742): the AGGREGATION route builds its output columns from
