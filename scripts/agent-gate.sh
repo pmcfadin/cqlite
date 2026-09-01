@@ -8992,6 +8992,13 @@ _gate_atexit() {
   if declare -F _gate_release_slot >/dev/null 2>&1; then
     _gate_release_slot
   fi
+  # #3755/job 349: belt for the capture triple. Guarded on the definition for the same
+  # reason `_gate_release_slot` is — bash defines functions as it reads the file, and the
+  # early-exit paths run this trap long before that block is parsed. Normally a no-op:
+  # both owners close on their own return path, and the files live in $LOG_DIR anyway.
+  if declare -F _gate_admission_capture_close >/dev/null 2>&1; then
+    _gate_admission_capture_close
+  fi
 }
 
 # Synthetic-identity modes run against a stubbed rundir and never certify a real tree;
@@ -19339,6 +19346,73 @@ _gate_disk_admission_clears_bar() {
 # `cargo metadata` is a PROBE, not a build/test invocation: `_fm_describe_cargo` rejects
 # `metadata`/`tree`/`--version`, so this cannot pollute a component's `[…]` feature-matrix
 # annotation (pinned by test_agent_gate_feature_matrix_annotation.sh).
+# ---- EXTERNAL COMMANDS ON THE ADMISSION PATH: THE COMPLETE AUDIT (roborev job 349) ----
+#
+# The rule this list exists to enforce: ANY command on this path that touches a
+# FILESYSTEM must be bounded, because the path runs at slot grant WHILE HOLDING THE
+# MACHINE-WIDE SLOT, and a stalled NFS/FUSE mount turns a measurement into a held slot
+# producing nothing — #3755's own failure recreated inside its fix. It is written out
+# because this family has now recurred twice: `cargo metadata` was bounded in round 5
+# while its sibling `df` was not, and fixing only what a review names is how the third
+# instance arrives.
+#
+#   FILESYSTEM-TOUCHING — every one BOUNDED via `_component_set_bounded`:
+#     cargo metadata   the target-dir resolution        (_GATE_TARGET_DIR_BOUND_SECS)
+#     python3 -c       reads the metadata payload       (_GATE_TARGET_DIR_BOUND_SECS)
+#     test -e          the existing-ancestor walk       (_GATE_DF_BOUND_SECS)
+#     df -Pk           the free-space reading           (_GATE_DF_BOUND_SECS)
+#
+#   NO FILESYSTEM ACCESS — deliberately NOT bounded, and each stated so the next reader
+#   does not have to re-derive it:
+#     dirname          pure string arithmetic on its argument
+#     awk              reads a shell STRING through a pipe (df output, or nothing at all
+#                      in the two BEGIN-block comparators) — never a path
+#     tr, cut          pure string filters over a variable, in the stderr WARN only
+#
+# A new command on this path belongs in one of those two lists, with its reason.
+_GATE_DF_BOUND_SECS=15
+
+# ---- CAPTURE OWNERSHIP FOR THE BOUNDED CALLS (roborev job 349, Low) -------------------
+#
+# THE LEAK. `_component_set_bounded` lazily mktemps a capture TRIPLE into $TMPDIR and
+# memoizes the paths in `_CS_CAP_*`. Every bounded call on this path is made from inside a
+# `$( … )` — `_gate_disk_admission_probe`, `_gate_resolve_target_dir` — so the memo landed
+# in a SUBSHELL and evaporated while the three files stayed on disk. Result: three
+# `agent-gate-bcap.*` files per resolution, multiplied by every nested gate this issue's
+# own suite launches on every `tooling-tests` run.
+#
+# THE FIX IS OWNERSHIP OUTSIDE THE SUBSTITUTION, and it also removes the signal exposure
+# rather than adding handlers for it: the paths are ASSIGNED (never mktemp'd) inside
+# `$LOG_DIR`, this run's own artifact directory. `_component_set_capture_paths` then
+# returns early — all three globals are non-empty — so nothing is created in $TMPDIR at
+# all, and a SIGKILLed gate leaves the files inside the log bundle it was always going to
+# leave, not as strays. Registration therefore genuinely PRECEDES creation (this repo's
+# standing rule from the gate-detached work): the names exist in the globals before the
+# bounded runner's `: > "$file"` brings them into being, so the cleanup can act on a
+# half-created state.
+#
+# OWNERSHIP IS CONDITIONAL. If a triple is already live — the #3544 pre-flight owns one
+# while it runs — we take no ownership and touch nothing; that pre-flight clears the
+# globals when it drops its own files, so by the time this path runs they are free.
+_DA_CAP_OWNER=0
+_gate_admission_capture_open() {
+  [ -n "${_CS_CAP_OUT:-}" ] && { _DA_CAP_OWNER=0; return 0; }
+  _DA_CAP_OWNER=1
+  _CS_CAP_OUT="$LOG_DIR/disk-admission.bcap.out"
+  _CS_CAP_ERR="$LOG_DIR/disk-admission.bcap.err"
+  _CS_CAP_RC="$LOG_DIR/disk-admission.bcap.rc"
+  return 0
+}
+# Reuses the pre-flight's own dropper so the two cannot disagree about what "release"
+# means — notably that `_CS_BOUND_MECH` is memoized WITH those files and must not outlive
+# them.
+_gate_admission_capture_close() {
+  [ "${_DA_CAP_OWNER:-0}" -eq 1 ] || return 0
+  _DA_CAP_OWNER=0
+  _component_set_drop_capture_files
+  return 0
+}
+
 _GATE_TARGET_DIR_BOUND_SECS=30
 # The resolved build-output directory and how it was obtained — reported in the SUMMARY,
 # because WHICH directory was measured is now the whole question.
@@ -19406,7 +19480,7 @@ sys.stdout.write(p)
 # SAME filesystem, so the collapse costs nothing here — unlike the verdict predicates,
 # where it would.)
 _gate_disk_admission_subject() {
-  local r d td
+  local r d td e
   r=$(_gate_resolve_target_dir)
   case "$r" in
     'OK '*) td="${r#OK }" ;;
@@ -19414,10 +19488,23 @@ _gate_disk_admission_subject() {
   esac
   d="$td"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -e "$d" ] && { printf 'OK\t%s\t%s' "$d" "$td"; return 0; }
+    # BOUNDED, for the same reason `df` is: `[ -e ]` STATS the path, and a stat on a
+    # stalled mount hangs exactly as `df` does. `test` is used as an EXTERNAL command so
+    # the bound applies to a real process. rc 0 exists / 1 absent / anything else is a
+    # third state that must not be collapsed onto "absent" — the walk would then climb
+    # past a hung mount and measure a filesystem that is not the subject.
+    _component_set_bounded "$_GATE_DF_BOUND_SECS" test -e "$d"; e=$?
+    case "$e" in
+      0) printf 'OK\t%s\t%s' "$d" "$td"; return 0 ;;
+      1) ;;
+      124|137) printf 'UNRESOLVED\ttarget-dir-stat-timeout'; return 0 ;;
+      "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-stat-unboundable'; return 0 ;;
+      *) printf 'UNRESOLVED\ttarget-dir-stat-failed'; return 0 ;;
+    esac
     d="$(dirname "$d")"
   done
-  [ -e "/" ] && { printf 'OK\t/\t%s' "$td"; return 0; }
+  _component_set_bounded "$_GATE_DF_BOUND_SECS" test -e "/"; e=$?
+  [ "$e" -eq 0 ] && { printf 'OK\t/\t%s' "$td"; return 0; }
   printf 'UNRESOLVED\ttarget-dir-no-existing-ancestor'
   return 0
 }
@@ -19507,9 +19594,17 @@ _gate_disk_admission_probe() {
       printf 'UNMEASURED\t%s\t' "${subj#UNRESOLVED$'\t'}"; return 0 ;;
     *) printf 'UNMEASURED\ttarget-dir-resolver-unrecognised\t'; return 0 ;;
   esac
-  out=$(df -Pk "$path" 2>/dev/null); rc=$?
+  # BOUNDED (roborev job 349): a stalled NFS/FUSE mount hangs `df` forever, and this runs
+  # at slot grant while the machine-wide slot is HELD. A hang and a parse failure are
+  # different operator situations, so they get different causes.
+  out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" df -Pk "$path" 2>/dev/null); rc=$?
   if [ "$rc" -ne 0 ]; then
-    [ "$rc" -eq 127 ] && { printf 'UNMEASURED\tdf-unavailable\t%s' "$td"; return 0; }
+    case "$rc" in
+      127) printf 'UNMEASURED\tdf-unavailable\t%s' "$td"; return 0 ;;
+      124|137) printf 'UNMEASURED\tdf-timeout\t%s' "$td"; return 0 ;;
+      "$_CS_UNBOUNDABLE_RC") printf 'UNMEASURED\tdf-unboundable\t%s' "$td"; return 0 ;;
+      "$_CS_REPLAY_RC") printf 'UNMEASURED\tdf-output-truncated\t%s' "$td"; return 0 ;;
+    esac
     printf 'UNMEASURED\tdf-failed\t%s' "$td"; return 0
   fi
   # The LAST line, not `NR==2`: `-P` guarantees one line per operand, and taking the
@@ -19562,7 +19657,12 @@ _gate_disk_admission_measure() {
   # block, because the mount is DISPLAY AND REMEDY only — no verdict has ever depended on
   # it — whereas every value a verdict does depend on is re-measured outright.
   _DA_STATE=""; _DA_VALUE=""; _DA_WHY=""
+  # Ownership is taken HERE, in the main shell, because the probe below runs inside a
+  # `$( … )` where the bounded runner's lazily-created capture triple would be memoized
+  # in a subshell and leak (roborev job 349).
+  _gate_admission_capture_open
   probe=$(_gate_disk_admission_probe)
+  _gate_admission_capture_close
   case "$probe" in
     MEASURED$'\t'*)
       probe="${probe#MEASURED$'\t'}"
@@ -19627,6 +19727,28 @@ _gate_disk_admission_line() {
   fi
   DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${_DA_EVALUATIONS}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown}; target-dir $td)"
   [ -n "$detail" ] && DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE — $detail"
+  # ---- THE SUBJECT SET IS NON-EXHAUSTIVE, AND SAYS SO ON EVERY RENDERING (#3886) ----
+  #
+  # This probe measures ONE filesystem: the build-output directory cargo resolved. The
+  # gate also writes a python venv (`<target>/agent-gate-venv`) and
+  # `bindings/node/node_modules`, and node_modules is under the REPOSITORY whatever
+  # cargo's target dir says — so with an EXTERNAL target dir a run can be admitted on the
+  # build volume while the repository volume is below the floor. That is a
+  # COUNTING-completeness question, split to #3886; #3755 is the TIMING half.
+  #
+  # It is DECLARED rather than left implicit because a bare `disk-admission: PASS` invites
+  # a reader to infer a completeness this check does not deliver, and a check that claims
+  # nothing false is worth more than one claiming a closure it does not have. The count is
+  # AFFIRMATIVE (`1 RECOGNISED`, never a bare number in prose) for the reason the
+  # `cfg-gated-subtree … N RECOGNISED` form exists: a bare figure in a gate log reads as a
+  # verified all-clear from a scan that is documented as incomplete.
+  #
+  # MEASURED SCOPE OF THE EXPOSURE, stated as a measurement and not as a reassurance: with
+  # NO external target dir configured — every lane on this fleet today — cargo resolves
+  # the build output to `$REPO_ROOT/target`, which is on the repository filesystem, so the
+  # venv and node_modules are covered INCIDENTALLY by the one reading. The gap opens only
+  # when an operator points the target dir at another volume.
+  DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE; subjects 1 RECOGNISED (the cargo-resolved BUILD-OUTPUT filesystem only) — NON-EXHAUSTIVE: other filesystems this gate writes to (the python venv, bindings/node/node_modules) are NOT measured (#3886)"
   return 0
 }
 
@@ -20731,7 +20853,9 @@ _gate_side_target_base_init() {
   fi
   # No probe verdict: `--only` self-exempts from the slot cap and therefore from the probe,
   # and it still runs components. Ask the SAME resolver rather than reintroducing the model.
+  _gate_admission_capture_open
   r=$(_gate_resolve_target_dir)
+  _gate_admission_capture_close
   case "$r" in
     'OK '*)
       _GATE_SIDE_BASE="${r#OK }"

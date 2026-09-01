@@ -1211,6 +1211,136 @@ m_case m-moved   /td-A /td-B unknown \
 m_case m-same    /td-A /td-A /shimfs \
   "the mount is RETAINED when the re-resolved subject is PROVEN identical"
 
+# ===========================================================================
+# Case N (roborev job 349): the SUBJECT SET declares itself NON-EXHAUSTIVE, on
+# every rendering, naming #3886.
+#
+# This probe measures ONE filesystem. The venv and bindings/node/node_modules are
+# not measured, and node_modules is under the REPOSITORY whatever cargo's target
+# dir says — a counting-completeness gap split to #3886. A bare
+# `disk-admission: PASS` would invite a reader to infer a closure this check does
+# not deliver. A declaration nothing tests is a comment, so it is tested here.
+# ===========================================================================
+n_declares() {
+  local label="$1" text="$2"
+  case "$text" in
+    *'subjects 1 RECOGNISED'*'NON-EXHAUSTIVE'*'(#3886)'*)
+      ok "non-exhaustive/$label: declares an AFFIRMATIVE count, its incompleteness, and #3886" ;;
+    *) bad "non-exhaustive/$label: missing or malformed declaration: ${text:-<none>}" ;;
+  esac
+  # The affirmative form is the point: `1 RECOGNISED`, never a bare figure, for the same
+  # reason the cfg-gated-subtree census spells `0 RECOGNISED`.
+  case "$text" in
+    *'subjects 1 RECOGNISED (the cargo-resolved BUILD-OUTPUT filesystem only)'*)
+      ok "non-exhaustive/$label: names WHAT the one measured subject is" ;;
+    *) bad "non-exhaustive/$label: does not name the measured subject" ;;
+  esac
+}
+# PASS rendering.
+n_pass_script=$(df_script n-pass "$HIGH")
+run_stub_gate n-pass "$n_pass_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/n-pass-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+n_pass_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; assert_no_timeout "n-pass"
+n_declares PASS "$(grep_line "$n_pass_err" '^agent-gate: disk-admission: ')"
+# FAIL-CLOSED rendering — a refusal must not lose the declaration.
+n_fail_script=$(df_script n-fail "$LOW")
+run_stub_gate n-fail "$n_fail_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/n-fail-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+n_fail_sum=$RS_SUMMARY
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; assert_no_timeout "n-fail"
+n_declares FAIL-CLOSED "$(grep_line "$n_fail_sum" '^disk-admission: ')"
+# UNMEASURED rendering.
+n_unm_script=$(df_script n-unm FAIL)
+run_stub_gate n-unm "$n_unm_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/n-unm-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+n_unm_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; assert_no_timeout "n-unm"
+n_declares UNMEASURED "$(grep_line "$n_unm_err" '^agent-gate: disk-admission: ')"
+
+# ===========================================================================
+# Case O (roborev job 349, Low): the bounded runner's capture TRIPLE is owned and
+# released — no `agent-gate-bcap.*` strays.
+#
+# Every bounded call on the admission path is made from inside a `$( … )`, where
+# the runner's lazily-mktemp'd triple was memoized in a subshell and left three
+# files behind per resolution — multiplied by every nested gate this suite runs.
+# Counted in a PRIVATE TMPDIR so a peer lane on the same box cannot perturb it.
+# ===========================================================================
+o_tmp="$tmp/o-tmpdir"; mkdir -p "$o_tmp"
+o_count() { local c=0 f; for f in "$o_tmp"/agent-gate-bcap.*; do [ -e "$f" ] && c=$((c+1)); done; printf '%s' "$c"; }
+# PROVE THE COUNTER DISCRIMINATES before trusting a zero from it — a counter that can
+# never see a leak reports "no leak" on a leaking build (four instances of that family on
+# this branch already).
+: > "$o_tmp/agent-gate-bcap.control"
+if [ "$(o_count)" -eq 1 ]; then
+  ok "capture-leak CONTROL: the counter SEES a planted bcap file (a zero from it means something)"
+else
+  bad "capture-leak CONTROL: the counter cannot see a planted bcap file — its zero would prove nothing"
+fi
+rm -f "$o_tmp/agent-gate-bcap.control"
+o_before=$(o_count)
+o_script=$(df_script o "$HIGH")
+run_stub_gate o "$o_script" \
+  TMPDIR="$o_tmp" CQLITE_GATE_SLOTS_DIR="$tmp/o-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+  CQLITE_GATE_STUB_SLEEP=1
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; assert_no_timeout "o"
+o_after=$(o_count)
+if [ "$o_after" -eq "$o_before" ]; then
+  ok "capture-leak: a full-gate run left 0 stray bcap files in its TMPDIR (before=$o_before after=$o_after)"
+else
+  bad "capture-leak: the run leaked $((o_after - o_before)) bcap file(s) (before=$o_before after=$o_after)"
+fi
+
+# ===========================================================================
+# Case P (roborev job 349, Medium): `df` is BOUNDED.
+#
+# A stalled NFS/FUSE mount hangs `df` indefinitely — at the post-grant
+# measurement, while the machine-wide slot is HELD. That is #3755's own failure
+# recreated inside its fix. The bound firing is reported with a cause DISTINCT
+# from a parse failure, because a hang and a bad payload are different operator
+# situations. The proof that nothing hangs is that this case returns at all.
+# ===========================================================================
+mkdir -p "$tmp/p-hangbin"
+cat > "$tmp/p-hangbin/df" <<'PHANG'
+#!/usr/bin/env bash
+# Hangs on the FIRST call only, longer than _GATE_DF_BOUND_SECS; answers normally
+# afterwards, so the case costs one bound rather than two.
+n=$(cat "$DF_SHIM_STATE" 2>/dev/null || printf '0')
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+n=$((n + 1)); printf '%s' "$n" > "$DF_SHIM_STATE"
+if [ "$n" -eq 1 ]; then sleep 120; fi
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/shim 999999999 1 209715200 1%% /shimfs\n'
+PHANG
+chmod +x "$tmp/p-hangbin/df"
+p_script=$(df_script p "$HIGH")
+RS_PATH_PREFIX="$tmp/p-hangbin"
+run_stub_gate p "$p_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/p-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+p_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; p_status=$WX_STATUS; p_markers=$WX_MARKERS
+assert_no_timeout "p bounded df"
+p_line=$(grep_line "$p_err" '^agent-gate: disk-admission: ')
+case "$p_line" in
+  *'launch UNMEASURED(df-timeout)'*)
+    ok "bounded-df: a hanging df is CUT OFF and reported as df-timeout, distinct from df-failed" ;;
+  *'launch UNMEASURED(df-failed)'*)
+    bad "bounded-df: a hang is reported as a generic df-failed — a hang and a parse failure are different situations: $p_line" ;;
+  *) bad "bounded-df: expected a df-timeout launch reading, got: ${p_line:-<none>}" ;;
+esac
+case "$p_line" in
+  *'post-slot 200.0GiB'*)
+    ok "bounded-df CONTROL: the run continued and the SECOND (fast) reading was taken normally" ;;
+  *) bad "bounded-df CONTROL: the run did not recover after the bound fired: ${p_line:-<none>}" ;;
+esac
+if [ "$p_status" -eq 0 ] && [ "$p_markers" -ge 1 ]; then
+  ok "bounded-df: the gate did not hang holding the slot — it measured, declared and proceeded"
+else
+  bad "bounded-df: the run did not complete normally (exit $p_status, markers $p_markers)"
+fi
+
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ] || exit 1
