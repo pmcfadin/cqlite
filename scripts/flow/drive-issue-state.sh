@@ -139,10 +139,18 @@
 #              refusal names. MALFORMED / DUPLICATE-SENTINEL get no exception: they CLAIM
 #              an identity that cannot be READ, which may be a live peer's, so a human
 #              moves the file aside deliberately and `write` then takes the ABSENT path.
+#              An OWNED marker's recorded `stage`/`request-id`/`pr`/`branch` are PRESERVED
+#              unless this call overrides them; erasing one is the explicit
+#              `--clear stage|request-id|pr|branch` (repeatable). Omitting a flag never
+#              erases durable state — dropping the open request id would make the next
+#              session re-ask, breaking "one marker, one wait".
 #   verify <N> [--actor <id>]      the rehydrate gate (see the axes above)
 #   adopt  <N> --reason <why> [--actor <id>]
 #              The explicit adopt gesture. Resolves the SESSION axis ONLY: a fail-closed
 #              axis mismatch still refuses, and so does a live or unmeasurable writer.
+#              The body and the durable fields (stage/request-id/pr/branch) SURVIVE: this is
+#              THE normal cron-resume path, so dropping them would destroy the open
+#              coordination request on every legitimate resume.
 #              --reason is REQUIRED and RECORDED. An empty/whitespace reason, one with
 #              nothing recordable in it, a bare PLACEHOLDER (`why`, `todo`, `tbd`, …) or one
 #              still carrying an UNSUBSTITUTED `<…>` is a USAGE error (64), never a silent
@@ -188,7 +196,9 @@
 #
 # CONSTRAINTS
 #   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile). No network, no
-#   gh, no git. `set -euo pipefail`, shellcheck-clean.
+#   gh, no git. `set -euo pipefail`, shellcheck-clean. The MUTATING subcommands additionally
+#   require `flock` (util-linux): they refuse without it rather than mutate unserialized, so
+#   on a host without flock `write`/`adopt` are unavailable while `verify`/`show` still work.
 #
 # ---END-HELP---
 set -euo pipefail
@@ -201,6 +211,12 @@ P='DRIVE-STATE:'
 MARKER_NAME='.drive-issue-state.md'
 STAMP_BEGIN='<!-- drive-issue-state:stamp:v1 -->'
 STAMP_END='<!-- drive-issue-state:stamp:end -->'
+
+# How long a mutating subcommand waits for the marker lock. HARD-CODED, no env override
+# (the constrained party must not choose its own enforcer); a test that needs a different
+# value SUBSTITUTES THE ARTIFACT — it rewrites this line in its own scratch copy of the
+# script — which is the repo's rule for exactly this situation.
+MARKER_LOCK_WAIT_SECS=30
 
 # Rounding tolerance when intersecting the recorded start window with the live one. Both
 # come from the SAME host and the SAME clock (`now - elapsed`, bracketed), so the only
@@ -247,20 +263,30 @@ print_help() {
 # `.drive-issue-state.md.XXXXXX` in the lane, which is exactly the kind of unexplained file
 # a later session reads as state. The handlers cover signals too: bash runs no EXIT trap
 # for a signal with its default disposition.
-TMP_FILES=''
+# An INDEXED ARRAY, not a space-separated string: `for f in $TMP_FILES` word-SPLITS and
+# GLOBS, so a path containing whitespace or a metacharacter would expand into several words
+# — and these words are fed to `rm -f`. `TMPDIR` is caller-influenced and shared on this
+# fleet, and this very script refuses a newline-bearing worktree path precisely because
+# paths here are not tame, so the one destructive command in the file must not depend on the
+# shape of a path. (Indexed arrays are bash 3.2; only ASSOCIATIVE arrays need 4.0.)
+TMP_FILES=()
 cleanup_tmp() {
   local f
-  for f in $TMP_FILES; do [ -z "$f" ] || rm -f "$f"; done
-  TMP_FILES=''
+  # `${#arr[@]}` is safe under `set -u` for an EMPTY array, whereas `"${arr[@]}"` is not on
+  # bash 3.2/4.3 — hence the count guard rather than an unguarded expansion.
+  if [ "${#TMP_FILES[@]}" -gt 0 ]; then
+    for f in "${TMP_FILES[@]}"; do [ -z "$f" ] || rm -f "$f"; done
+  fi
+  TMP_FILES=()
 }
 trap cleanup_tmp EXIT
 trap 'cleanup_tmp; exit 130' INT
 trap 'cleanup_tmp; exit 143' TERM
 trap 'cleanup_tmp; exit 129' HUP
 
-# register_tmp <path> — remember a temp file for cleanup. Paths here are always mktemp
-# output (no spaces, no newlines), so a space-separated list is safe.
-register_tmp() { TMP_FILES="$TMP_FILES $1"; }
+# register_tmp <path> — remember a temp file for cleanup. Stored as an array ELEMENT, so no
+# assumption is made about the path's shape (see TMP_FILES above).
+register_tmp() { TMP_FILES+=("$1"); }
 
 # The shared three-valued process-liveness primitives (#3822). A MISSING library is fatal
 # and NAMED — never a silent continue with the predicates undefined, which would make
@@ -328,11 +354,43 @@ require_numeric_issue() {
 }
 
 # ---------------------------------------------------------------------------
+# Serialization. A verify-then-replace sequence that is not atomic is a guard with a hole:
+# two sessions in ONE lane — the exact scenario this file exists for — can BOTH pass
+# ownership verification and the second can clobber the first's stamp. The ownership check
+# is sound; it just has to be indivisible from the replacement. So every MUTATING subcommand
+# holds an exclusive `flock` on a sidecar lockfile across existence-probe -> ownership-verify
+# -> body-capture -> replace, and `mv` remains the atomic commit INSIDE it.
+#
+# READERS (`verify`, `show`) deliberately take no lock: the commit is a rename, so a reader
+# sees either the whole old file or the whole new one, never a torn one.
+#
+# NO flock => REFUSE. An unserialized mutation is an UNMEASURABLE guarantee, and the rule
+# throughout this script is that an unknown is never read as satisfied. Consequence, stated
+# rather than discovered: this makes the mutating half LINUX/util-linux-only (macOS ships no
+# flock). The fleet is Linux; a host without flock gets a named refusal, not a silent race.
+# ---------------------------------------------------------------------------
+MARKER_LOCK_FD=9
+
+lock_marker() {
+  local wt lock
+  wt="$(pwd -P)"
+  lock="$(marker_path).lock"
+  # Probed BEFORE `exec`, because a redirection failure on a bare `exec` terminates a
+  # non-interactive shell with bash's own unprefixed diagnostic — which would break the
+  # output anchor every consumer rests on, and emit no verdict at all.
+  [ -w "$wt" ] || refuse ERROR 1 "the worktree directory $(sane "$wt") is not writable, so the marker lock cannot be taken — nothing was decided and nothing was written"
+  command -v flock >/dev/null 2>&1 || refuse ERROR 1 "flock is not available on this host, so the ownership-verify -> replace sequence cannot be SERIALIZED. Refusing rather than mutating unserialized: two sessions in one lane could both pass verification and one clobber the other's stamp, which is the defect this marker exists to prevent. An unmeasurable guarantee is never read as satisfied."
+  : >>"$lock" 2>/dev/null || refuse ERROR 1 "cannot create the marker lock file $(sane "$lock") — nothing was decided"
+  eval "exec ${MARKER_LOCK_FD}>>\"\$lock\""
+  flock -w "$MARKER_LOCK_WAIT_SECS" "$MARKER_LOCK_FD" || refuse ERROR 1 "another process holds the marker lock $(sane "$lock") (waited ${MARKER_LOCK_WAIT_SECS}s) — refusing rather than racing it; nothing was decided"
+}
+
+# ---------------------------------------------------------------------------
 # Marker reading. Sets S_* globals. Refuses (and exits) on any structural fault.
 # ---------------------------------------------------------------------------
 S_issue=''; S_machine=''; S_worktree=''; S_session=''; S_pid=''
 S_start_lo=''; S_start_hi=''; S_actor=''; S_ts=''; S_stage=''
-S_prior_session=''
+S_request=''; S_pr=''; S_branch=''; S_prior_session=''
 
 marker_path() { printf '%s/%s\n' "$(pwd -P)" "$MARKER_NAME"; }
 
@@ -395,6 +453,9 @@ read_marker() {
       actor)                      dup="$S_actor";          S_actor="$val" ;;
       ts)                         dup="$S_ts";             S_ts="$val" ;;
       stage)                      dup="$S_stage";          S_stage="$val" ;;
+      request-id)                 dup="$S_request";        S_request="$val" ;;
+      pr)                         dup="$S_pr";             S_pr="$val" ;;
+      branch)                     dup="$S_branch";         S_branch="$val" ;;
       prior-session)              dup="$S_prior_session";  S_prior_session="$val" ;;
       *) dup='' ;;   # forward compatibility: an unrecognised KEY is ignored, but its
                      # SHAPE was still enforced above, so it can never smuggle in a line.
@@ -623,7 +684,7 @@ write_marker() {
 cmd_write() {
   local issue="${1:-}"; shift || true
   require_numeric_issue "$issue" write
-  local stage='' request='' pr='' branch='' bodyfile='' actor_raw=''
+  local stage='' request='' pr='' branch='' bodyfile='' actor_raw='' clears=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --stage)      stage="${2:-}";      shift 2 || die_usage "--stage needs a value" ;;
@@ -632,9 +693,16 @@ cmd_write() {
       --branch)     branch="${2:-}";     shift 2 || die_usage "--branch needs a value" ;;
       --body-file)  bodyfile="${2:-}";   shift 2 || die_usage "--body-file needs a value" ;;
       --actor)      actor_raw="${2:-}";  shift 2 || die_usage "--actor needs a value" ;;
+      --clear)
+        case "${2:-}" in
+          stage | request-id | pr | branch) clears="$clears ${2}" ;;
+          *) die_usage "--clear takes one of stage|request-id|pr|branch (got '$(sane "${2:-<none>}")') — the field set is CLOSED so a typo erases nothing silently" ;;
+        esac
+        shift 2 || die_usage "--clear needs a field name" ;;
       *) die_usage "write: unknown option '$(sane "$1")'" ;;
     esac
   done
+  cleared() { case " $clears " in *" $1 "*) return 0 ;; esac; return 1; }
   local actor; actor="$(resolve_actor "$actor_raw")"
 
   local body_src=''
@@ -658,6 +726,9 @@ cmd_write() {
   # notes is unacceptable even where refusing is worse. A MALFORMED or DUPLICATE-SENTINEL
   # marker gets NO such exception: it CLAIMS an identity that merely cannot be read, and an
   # unreadable identity may be a live peer's, so it is moved aside by a human deliberately.
+  # From here to the `mv` is ONE critical section (see Serialization above).
+  lock_marker
+
   local carried='' discarded=''
   if [ -e "$(marker_path)" ]; then
     local mpath; mpath="$(marker_path)"
@@ -671,6 +742,17 @@ cmd_write() {
       # branch below is UNREACHABLE from here, which is the point.
     else
       check_ownership "$issue" strict
+      # PRESERVE THE RECORDED DURABLE FIELDS unless this call overrides or --clear's them.
+      # drive-issue.md's Delta 3 names "stage reached, open request ID, PR/branch" as the
+      # durable state, so a `write --stage x` that silently dropped the OPEN REQUEST ID
+      # would leave the next session unable to tell which request it is waiting on — it
+      # would re-ask, breaking "one marker, one wait", the rule the whole cron design rests
+      # on. Erasing a field is therefore an EXPLICIT gesture (`--clear <field>`), never a
+      # side effect of omitting a flag.
+      [ -n "$stage" ]   || cleared stage      || stage="$S_stage"
+      [ -n "$request" ] || cleared request-id || request="$S_request"
+      [ -n "$pr" ]      || cleared pr         || pr="$S_pr"
+      [ -n "$branch" ]  || cleared branch     || branch="$S_branch"
       if [ -z "$body_src" ]; then
       # Preserve an OWNED marker's body: `write` updates the stamp and the recorded stage,
       # not the author's notes.
@@ -754,8 +836,15 @@ cmd_adopt() {
   reason_token="$(assert_reason "$reason")"
   actor="$(resolve_actor "$actor_raw")"
 
+  lock_marker
   check_ownership "$issue" adopt
   local prior_session="$S_session" prior_pid="$S_pid" prior_ts="$S_ts" stage="$S_stage"
+  # THE DURABLE FIELDS SURVIVE AN ADOPT. `adopt` is THE normal cron-resume path (a new
+  # session id in the same lane), so dropping `request-id`/`pr`/`branch` here destroyed the
+  # open coordination request on EVERY legitimate resume — after which the resuming session
+  # cannot tell which request it awaits and re-asks. Ownership transfers; the state does not
+  # evaporate.
+  local request="$S_request" pr="$S_pr" branch="$S_branch"
 
   if [ "$prior_session" = "$(this_session)" ] && [ "$prior_session" != unrecorded ]; then
     verdict ADOPTED
@@ -769,7 +858,11 @@ cmd_adopt() {
   marker_body >"$carried"
   assert_body_safe "$carried"
   [ -z "$stage" ] || f_stage="stage: $stage"
-  if ! write_marker "$issue" "$actor" "$carried" "$f_stage" \
+  local f_request='' f_pr='' f_branch=''
+  [ -z "$request" ] || f_request="request-id: $request"
+  [ -z "$pr" ]      || f_pr="pr: $pr"
+  [ -z "$branch" ]  || f_branch="branch: $branch"
+  if ! write_marker "$issue" "$actor" "$carried" "$f_stage" "$f_request" "$f_pr" "$f_branch" \
       "prior-session: $prior_session" \
       "prior-session-pid: $prior_pid" \
       "prior-ts: $prior_ts" \
@@ -795,6 +888,9 @@ cmd_show() {
   emit "field actor=$(sane "$S_actor")"
   emit "field ts=$(sane "$S_ts")"
   emit "field stage=$(sane "${S_stage:-none}")"
+  emit "field request-id=$(sane "${S_request:-none}")"
+  emit "field pr=$(sane "${S_pr:-none}")"
+  emit "field branch=$(sane "${S_branch:-none}")"
   [ -z "$S_prior_session" ] || emit "field prior-session=$(sane "$S_prior_session")"
   verdict SHOWN
   detail "fields as recorded for issue $(sane "$issue"); SHOWN asserts NOTHING about ownership — use 'verify' for that"
