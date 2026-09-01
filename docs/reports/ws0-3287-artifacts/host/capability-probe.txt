@@ -1,6 +1,6 @@
 
 == date -u ==
-Tue Sep  1 19:23:26 UTC 2026
+Tue Sep  1 19:34:08 UTC 2026
 [rc=0] date -u
 
 == uname -a ==
@@ -11,9 +11,9 @@ Linux ip-172-31-6-169 7.0.0-1011-aws #11~24.04.1-Ubuntu SMP PREEMPT Mon Aug 10 1
 perf version 7.0.12
 [rc=0] perf --version
 
-== perf_event_paranoid (permission layer, INDEPENDENT of the capability layer) ==
+== perf_event_paranoid (permission layer, INDEPENDENT of capability) ==
 -1
-[rc=0] perf_event_paranoid (permission layer, INDEPENDENT of the capability layer)
+[rc=0] perf_event_paranoid (permission layer, INDEPENDENT of capability)
 
 == kptr_restrict ==
 0
@@ -30,7 +30,7 @@ tracepoint
 uprobe
 [rc=0] sysfs PMUs (AUTHORITATIVE uncore test; never grep perf list)
 
-== lscpu (topology + cache) ==
+== lscpu ==
 Architecture:                            x86_64
 CPU op-mode(s):                          32-bit, 64-bit
 Address sizes:                           46 bits physical, 48 bits virtual
@@ -74,19 +74,25 @@ Vulnerability Srbds:                     Not affected
 Vulnerability Tsa:                       Not affected
 Vulnerability Tsx async abort:           Not affected
 Vulnerability Vmscape:                   Not affected
-[rc=0] lscpu (topology + cache)
+[rc=0] lscpu
 
 == numactl --hardware ==
 available: 1 nodes (0)
 node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 node 0 size: 31549 MB
-node 0 free: 13879 MB
+node 0 free: 19095 MB
 node distances:
 node   0 
   0:  10 
 [rc=0] numactl --hardware
 
-== uncore devices ==
-[uncore: ABSENT — no uncore_* device in sysfs. This is a measured ANSWER,
- not a probe failure: AC3's bandwidth source and AC5's saturation verdict
- are unreachable on this host.]
+== uncore devices (Gate C) ==
+[uncore: ABSENT — AC3's bandwidth source and AC5's saturation verdict are unreachable here. A measured ANSWER, not a probe failure.]
+
+== Gate D: pinned CPU set ==
+cpuset: 0,8  (derived from cpu0/topology/thread_siblings_list)
+NOTE: this is ONE complete sibling group, enough for the capability
+differential. #3224's measurement GEOMETRY needs 6 complete cores for the
+server plus 2 for the client, EXCLUSIVELY; that is a separate requirement
+this probe reports but cannot satisfy on a shared box.
+physical-core count: 8

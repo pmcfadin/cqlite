@@ -1,0 +1,5 @@
+# started on Tue Sep  1 19:34:32 2026
+
+6387885131,,cycle_activity.stalls_total:u,1763612940,100.00,,
+5838924652,,cycle_activity.stalls_l2_miss:u,1763612940,100.00,,
+0,,cycle_activity.stalls_l3_miss:u,1763612940,100.00,,

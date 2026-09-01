@@ -1,15 +1,51 @@
-== #3287 capability probe ==
-L3 as this host sees it: 105 MiB (1 instance)
-window: control-FIFO gated to the chase (-D -1 --control fifo:), events counted :u
-gate-integrity: MEASURED-OK — instruction scaling 1e3 -> 1e5 accesses = 95.33x (need >= 10x; ideal ~100x)
+== #3287 capability probe — gate verdicts ==
+host L3: 105 MiB (1 instance)
+cpuset:  0,8 (derived from cpu0/topology/thread_siblings_list)
+window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED
+gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10x, ideal ~100x)
   absolute, REPORTED not asserted: 6297 instructions for 1e3 accesses
-  (#3224 used a tuned ceiling of 1e6 here; this probe asserts the host-independent
-   scaling property instead, so it cannot false-FAIL on a different machine.)
+  (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)
 
-Prediction BEFORE measuring: the 2048MiB arm's working set is many times L3,
-a random single-dependency chase, so it cannot be L3-resident. Any honest
-L3-miss-stall or offcore counter MUST be large there. A zero is a silent
-instrument, not a measurement -- and a zero is invariant to the window,
-since contamination can only ADD counts.
+-- GATE A: TMA --
+  perf stat -M TopdownL1 : ABSENT
+  perf stat -M TopdownL2 : ABSENT   <-- #3287 AC1 needs this RESOLVED
+  (per-event detail in tma-probe.txt; ABSENT is a capability ANSWER, ERROR is not)
 
-VERDICT: COMPLETE (all steps measured; read host/arm-*.csv for values)
+-- GATE B: offcore / prefetch-stall term (the one #3287 exists for) --
+  offcore_requests_outstanding.all_data_rd:u : STUCK (0 in both arms)
+  offcore_requests_outstanding.cycles_with_data_rd:u : STUCK (0 in both arms)
+  offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
+  offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
+
+-- GATE C: reproduce #3224's own baseline counters --
+  cycle_activity.stalls_l3_miss:u : STUCK (0 in both arms)
+  cycle_activity.stalls_l2_miss:u : MOVING (7420 -> 10526624796)
+  cycle_activity.stalls_total:u : MOVING (280771661 -> 11825588086)
+  LLC-loads:u : ABSENT/UNMEASURED
+  LLC-load-misses:u : ABSENT/UNMEASURED
+  cache-references:u : STUCK (0 in both arms)
+  cache-misses:u : STUCK (0 in both arms)
+  NESTING (stalls_l3_miss <= stalls_l2_miss <= stalls_total), per arm:
+    DECLARED LIMIT: nesting HOLDS TRIVIALLY when stalls_l3_miss is STUCK at 0,
+    so a HOLDS here is NOT evidence that counter works — read its line above.
+    This check catches a nesting VIOLATION (which would invalidate #3224's
+    difference-based partition); it cannot catch a silent zero. Only the
+    differential can, which is why both are reported.
+    friendly-L2resident: HOLDS (0 <= 7420 <= 280771661)
+    hostile-512m: HOLDS (0 <= 10526624796 <= 11825588086)
+    hostile-2g: HOLDS (0 <= 5838924652 <= 6387885131)
+
+-- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
+  see capability-probe.txt
+
+-- events EXCLUDED from the differential, and why (never silently dropped) --
+  cache:LLC-loads=ABSENT-FROM-PMU
+  cache:LLC-load-misses=ABSENT-FROM-PMU
+
+Prediction, written BEFORE measuring: the 2 GiB arm's working set is many
+times L3 and is a random single-dependency chase, so it cannot be L3-resident.
+Any honest L3-miss-stall or offcore counter MUST be large there. A zero is a
+silent instrument -- and a zero is invariant to the window, since
+contamination can only ADD counts.
+
+VERDICT: COMPLETE (every step measured; the gate lines above are the answer)

@@ -18,11 +18,21 @@ time.
 | Probed | 2026-09-01 |
 
 Reproduce: `bash docs/reports/ws0-3287-artifacts/capability-probe.sh <outdir>`.
-Raw captures: [`host/`](host/) — `capability-probe.txt`, `tma-probe.txt`,
-`event-disposition.txt`, `counter-semantics-verification.txt`, `gate-probe.{csv,txt}`,
-`arm-{friendly,hostile-512m,hostile-2g,hostile-2g-nomux}.{csv,txt}`, `differential.txt` (the
-run's verdict). The probe **exits non-zero and stamps `VERDICT: UNMEASURED`** if any step failed, so
-a `VERDICT: COMPLETE` is an affirmative statement that every capture was taken.
+**The probe's own output is the verdict.** [`host/differential.txt`](host/differential.txt) answers
+Gates A–D per counter, classifying each as `ABSENT` (not on this PMU — a legitimate capability answer),
+`STUCK` (programs and reads 0 in both arms — a silent instrument) or `MOVING` (usable). It exits
+non-zero and stamps `VERDICT: UNMEASURED` if any step failed, so `VERDICT: COMPLETE` is an affirmative
+statement that every capture was taken.
+
+Raw captures: [`host/`](host/) — `capability-probe.txt` (inventory + Gate D topology), `tma-probe.txt`,
+`event-disposition.txt`, `counter-semantics-verification.txt`, `gate-probe-{1000,100000}.{csv,txt}`
+(window-closure differential), `gate-guard-positive-control.txt`, and
+`arm-<arm>-<group>.{csv,txt}` for arms `friendly-L2resident` / `hostile-512m` / `hostile-2g` × groups
+`control` / `stalls` / `offcore` / `cache` / `prefetch`.
+
+**Every group is small enough to avoid multiplexing, and 100.00% enabled is REQUIRED** — the probe
+FAILs rather than publish a scaled estimate as a count. That is why the numbers here are counts, not
+estimates, and it replaced an earlier 12-event group that time-shared at 65–75%.
 
 ---
 
@@ -42,9 +52,9 @@ counter the attribution itself is built from.** It is worse than the events alre
 because a run that reached for "just re-measure *both* endpoints on the cheap box, self-consistently"
 would be using it.
 
-The differential is in `host/arm-hostile-2g-nomux.csv` — **4-event group, `enabled%=100.00` on every
-row, asserted by the probe itself** (it FAILs rather than publish a multiplexed value where it claims
-an unmultiplexed one), window gated to the chase, counted user-only.
+The differential is in `host/arm-hostile-2g-stalls.csv` and `-offcore.csv` — small groups,
+`enabled%=100.00` on every row **asserted by the probe itself**, window gated to the chase, counted
+user-only.
 
 **Deliberately stated as rep-invariants, not as absolutes.** These counts vary run to run — the box is
 shared, the 12-event group time-shares, and the friendly arm's small counts swing by orders of
@@ -55,12 +65,13 @@ regenerated.)
 
 | property | every rep | authority |
 |---|---|---|
-| `cycle_activity.stalls_l3_miss` | **exactly 0**, all arms, mux and no-mux | `arm-*.csv` |
-| `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*.csv` |
-| `cache-misses` | **exactly 0**, all arms | `arm-*.csv` |
-| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 85% of all cycles** (billions of cycles) | `arm-hostile-2g-nomux.csv` |
-| `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999 and 1.002 observed) | `arm-*.csv` |
+| `cycle_activity.stalls_l3_miss` | **exactly 0**, all arms, every rep | `arm-*-stalls.csv` |
+| `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*-offcore.csv` |
+| `cache-misses`, `cache-references` | **exactly 0**, all arms | `arm-*-cache.csv` |
+| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 85% of all cycles** (billions) | `arm-hostile-2g-stalls.csv` |
+| `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999 and 1.002 observed) | `arm-*-control.csv` |
 | `ns_per_access` | **~5–6 ns** L2-resident vs **~180–270 ns** DRAM | `arm-*.txt` |
+| stall-counter NESTING | **holds** in every arm — but see the declared limit below | `differential.txt` |
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
 serial data dependency cannot be L3-resident and the prefetcher cannot help it, so an honest
@@ -84,6 +95,13 @@ verbatim verified encoding, and the *same event select* with a *different umask*
 
 Same PMU, same event select, adjacent umask. The `umask=0x6` sub-event is unimplemented in this guest
 and reports a measurement-shaped zero.
+
+**Declared limit of the nesting check.** `differential.txt` reports
+`stalls_l3_miss <= stalls_l2_miss <= stalls_total` and it **HOLDS in every arm** — *because*
+`stalls_l3_miss` is stuck at 0. A `HOLDS` is therefore **not** evidence that the counter works. The
+nesting check exists to catch a *violation*, which would invalidate #3224's difference-based partition;
+it is structurally blind to a silent zero. Only the differential catches that, which is why the probe
+prints both and says so at the point of use.
 
 ## Finding 2 — the offcore term #3287 exists to add is the same silent zero
 
@@ -286,10 +304,15 @@ check it against the table below — before any corpus staging, and certainly be
 is spent on a capture.
 
 **The pass criterion is never "it programs without error".** That is the whole lesson of this file:
-three of the counters below program cleanly on a `c7i` guest and return measurement-shaped zeros.
+four of the counters below program cleanly on a `c7i` guest and return measurement-shaped zeros.
 Every requirement is therefore stated as **"NONZERO and moving on the differential"** — the
 `hostile` arm versus the `friendly` arm of `cache-hostile.c`, whose behaviour is known before it is
 measured. A counter that does not MOVE has not been validated, whatever it printed.
+
+**The probe evaluates these gates itself.** You do not have to apply the tables below by hand: it
+classifies every Gate B and Gate C counter as `ABSENT` / `STUCK` / `MOVING` and prints a
+`GATE A` / `GATE B` / `GATE C` / `GATE D` block in `host/differential.txt`. The tables here say what
+each verdict *means for #3287*, and record what this host answered.
 
 ## Gate A — TMA level-2 (#3287 AC1)
 

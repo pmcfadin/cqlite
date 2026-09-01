@@ -3,21 +3,23 @@ event syntax error: 'topdown-retiring/metric-id=topdown!1retiring/,TOPDOWN.SL..'
                      \___ Bad event or PMU
 
 Unable to find PMU or event on a PMU of 'topdown-retiring'
+[rc=1 class=ABSENT]
 
 == perf stat -M TopdownL2 ==
 event syntax error: 'topdown-retiring/metric-id=topdown!1retiring/,TOPDOWN.SL..'
                      \___ Bad event or PMU
 
 Unable to find PMU or event on a PMU of 'topdown-retiring'
+[rc=1 class=ABSENT]
 
-== topdown.slots ==
+== event topdown.slots ==
 Error:
 No supported events found.
 The sys_perf_event_open() syscall failed for event (topdown.slots): Invalid argument
 "dmesg | grep -i perf" may provide additional information.
+[rc=1 class=ABSENT]
 
-
-== slots ==
+== event slots ==
 event syntax error: 'slots'
                      \___ Bad event name
 
@@ -27,8 +29,9 @@ Run 'perf list' for a list of valid events
  Usage: perf stat [<options>] [<command>]
 
     -e, --event <event>   event selector. use 'perf list' to list available events
+[rc=129 class=ABSENT]
 
-== topdown-retiring ==
+== event topdown-retiring ==
 event syntax error: 'topdown-retiring'
                      \___ Bad event name
 
@@ -38,8 +41,9 @@ Run 'perf list' for a list of valid events
  Usage: perf stat [<options>] [<command>]
 
     -e, --event <event>   event selector. use 'perf list' to list available events
+[rc=129 class=ABSENT]
 
-== topdown-fe-bound ==
+== event topdown-fe-bound ==
 event syntax error: 'topdown-fe-bound'
                      \___ Bad event name
 
@@ -49,8 +53,9 @@ Run 'perf list' for a list of valid events
  Usage: perf stat [<options>] [<command>]
 
     -e, --event <event>   event selector. use 'perf list' to list available events
+[rc=129 class=ABSENT]
 
-== topdown-be-bound ==
+== event topdown-be-bound ==
 event syntax error: 'topdown-be-bound'
                      \___ Bad event name
 
@@ -60,8 +65,9 @@ Run 'perf list' for a list of valid events
  Usage: perf stat [<options>] [<command>]
 
     -e, --event <event>   event selector. use 'perf list' to list available events
+[rc=129 class=ABSENT]
 
-== topdown-bad-spec ==
+== event topdown-bad-spec ==
 event syntax error: 'topdown-bad-spec'
                      \___ Bad event name
 
@@ -71,3 +77,5 @@ Run 'perf list' for a list of valid events
  Usage: perf stat [<options>] [<command>]
 
     -e, --event <event>   event selector. use 'perf list' to list available events
+[rc=129 class=ABSENT]
+

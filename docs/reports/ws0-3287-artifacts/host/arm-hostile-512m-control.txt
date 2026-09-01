@@ -2,15 +2,15 @@ Events disabled
 Events enabled
 Events disabled
 mode=chase
-arm=hostile-512m
+arm=hostile-512m-control
 gate=fifo
 buffer_bytes=536870912
 working_set_bytes=536870912
 nodes=8388608
 accesses=20000000
-init_s=0.3611
-chase_s=3.5708
-ns_per_access=178.540
+init_s=0.3977
+chase_s=3.2486
+ns_per_access=162.431
 checksum=83888746007914
 init_overrun=0
-arm-rc: hostile-512m = 0
+arm-rc: hostile-512m-control = 0

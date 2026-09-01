@@ -22,3 +22,13 @@
 == offcore_requests_outstanding.all_data_rd ==
 [semantics: NOT-LISTED on this host — no definition to verify against]
 
+== LLC-load-misses ==
+[semantics: NOT-LISTED on this host — no definition to verify against]
+
+== cache-references ==
+  cache-references
+       [Cache accesses. Usually this indicates Last Level Cache accesses but
+        this may vary depending on your CPU. This may include prefetches and
+        coherency messages; again this depends on the design of your CPU.
+[semantics: FOUND]
+

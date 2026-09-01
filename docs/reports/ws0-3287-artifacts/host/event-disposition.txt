@@ -1,22 +1,22 @@
 EVENT                                                DISPOSITION
-cycles                                               PROGRAMS (value=1445864)
-instructions                                         PROGRAMS (value=715655)
-cycle_activity.stalls_total                          PROGRAMS (value=692093)
-cycle_activity.stalls_l2_miss                        PROGRAMS (value=126373)
-cycle_activity.stalls_l3_miss                        PROGRAMS (value=0)
-offcore_requests_outstanding.all_data_rd             PROGRAMS (value=0)
-offcore_requests_outstanding.cycles_with_data_rd     PROGRAMS (value=0)
+cycles                                               PROGRAMS
+instructions                                         PROGRAMS
+cycle_activity.stalls_total                          PROGRAMS
+cycle_activity.stalls_l2_miss                        PROGRAMS
+cycle_activity.stalls_l3_miss                        PROGRAMS
+offcore_requests_outstanding.all_data_rd             PROGRAMS
+offcore_requests_outstanding.cycles_with_data_rd     PROGRAMS
 offcore_requests.all_data_rd                         ABSENT-FROM-PMU
 offcore_requests_buffer.sq_full                      ABSENT-FROM-PMU
-l1d_pend_miss.pending                                PROGRAMS (value=399631)
-l1d_pend_miss.fb_full                                PROGRAMS (value=29003)
-l1d_pend_miss.l2_stall                               PROGRAMS (value=55)
-idq_uops_not_delivered.core                          PROGRAMS (value=2127228)
-int_misc.recovery_cycles                             PROGRAMS (value=36050)
-exe_activity.bound_on_stores                         PROGRAMS (value=32491)
+l1d_pend_miss.pending                                PROGRAMS
+l1d_pend_miss.fb_full                                PROGRAMS
+l1d_pend_miss.l2_stall                               PROGRAMS
+idq_uops_not_delivered.core                          PROGRAMS
+int_misc.recovery_cycles                             PROGRAMS
+exe_activity.bound_on_stores                         PROGRAMS
 cycle_activity.stalls_mem_any                        ABSENT-FROM-PMU
 topdown.slots                                        ABSENT-FROM-PMU
 LLC-loads                                            ABSENT-FROM-PMU
 LLC-load-misses                                      ABSENT-FROM-PMU
-cache-references                                     PROGRAMS (value=0)
-cache-misses                                         PROGRAMS (value=0)
+cache-references                                     PROGRAMS
+cache-misses                                         PROGRAMS
