@@ -1829,6 +1829,20 @@ delta_classify_stdin() {
 # through as RESULT: FAIL). Pure: reads the allowed set on stdin, no cargo/git/side
 # effects — exposed via the hidden --delta-python-gap hook so scripts/tests can assert
 # the SAME decision run_delta consumes (single-source; drift is impossible).
+# _python_tier_ran <PYTHON_TIER_NOTE>: did the --lite/--delta python tier actually EXECUTE?
+# The gate's own convention, in ONE place because two readers now depend on it
+# (_delta_python_tier_gap's refusal, and _census_scoped_record's choice of census kind — a
+# second spelling of this discrimination would be a second thing to drift): the tier writes
+# `python-tier: PASS`/`FAIL` when it RAN and `python-tier: SKIPPED (...)` when it did not,
+# and an EMPTY note means it was never in scope. Affirmative — only the two ran-states
+# return 0, so an unrecognised or absent note is "did not run", never the permissive answer.
+_python_tier_ran() {
+  case "${1:-}" in
+    "python-tier: PASS"*|"python-tier: FAIL"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _delta_python_tier_gap() {
   local note="${1:-}" line py_tests=0
   while IFS= read -r line; do
@@ -1837,9 +1851,7 @@ _delta_python_tier_gap() {
     esac
   done
   [ "$py_tests" -eq 1 ] || return 1
-  case "$note" in
-    "python-tier: PASS"*|"python-tier: FAIL"*) return 1 ;;
-  esac
+  _python_tier_ran "$note" && return 1
   return 0
 }
 
@@ -6816,6 +6828,11 @@ _census_sidecar() { printf '%s/%s.census' "${LOG_DIR:-}" "$1"; }
 #   self:<unit>    the component knows its own count and records it directly with
 #                  _census_declare, because its output never reaches a $LOG_DIR log
 #                  this measurer could read.
+#   runtime:<why>  the component has NO statically correct kind — its subject depends on
+#                  what the run routed to — so it writes its OWN complete record before
+#                  its verdict is finalized. `scoped-tests` is the case: a python-only
+#                  diff dispatches no cargo at all, so a static `both` measured ZERO and
+#                  reddened a CORRECT --lite/--delta (#3625 census audit BLOCKER 1).
 #   indirect:<drv> the subject count comes from a DRIVER's own report in the component
 #                  log (pytest's `N passed`, jest's `Tests: … N passed`). ONE RULE
 #                  DIFFERS HERE and it is deliberate: an ABSENT tally is NOT-MEASURED,
@@ -6842,10 +6859,17 @@ _census_kind() {
     legacy-heuristics|binding-rust-tests|kit-dashboard-drift)          printf 'libtest' ;;
     feature-iso-parquet|feature-iso-delta-scan|minimal-build)          printf 'compile' ;;
     # integration-tests: `cargo test --package X --no-run` then a named-target run pass.
-    # scoped-tests (--lite/--delta): per-package `cargo test`, which degrades to
-    # `--no-run` for a test-only crate with no changed --test target, so BOTH subjects
-    # are legitimate there and neither alone may be required.
-    integration-tests|scoped-tests)                                    printf 'both' ;;
+    integration-tests)                                                 printf 'both' ;;
+    # scoped-tests has NO statically correct kind, and declaring one was a HIGH defect
+    # (#3625 census audit BLOCKER 1). Its subject depends on what the diff ROUTED to: a
+    # diff confined to bindings/python/** dispatches NO cargo at all (classify_scoped_plan
+    # diverts cqlite-py, sets the python-tier flag, and the cqlite-core fallback is
+    # deliberately guarded on `python_diff -eq 0`), so its log holds only maturin + pytest
+    # output — no `test result:`, no `N tests run:`, no `Executable`. Declared `both`, that
+    # measured ZERO and made a CORRECT --lite fix round, and a CORRECT --delta (a
+    # CERTIFYING mode), report VACUOUS. So the lane chooses its census at run time from
+    # what it actually dispatched; see _census_scoped_record.
+    scoped-tests) printf 'runtime:the subject depends on what the diff ROUTED to (cargo, the python tier, or neither)' ;;
     # tree-selftest: the #2926 hidden self-test hook records a verdict under this name
     # (`record_result "tree-selftest" PASS 0`), so it reaches a SUMMARY component line and
     # must be declared — a name that can be printed and cannot be classified is the hole
@@ -6942,9 +6966,18 @@ _census_libtest_tally() {
         sub(/ passed$/, "", seg)
         total += seg + 0; seen += 1
       } else if (match($0, /[0-9]+ tests run:/)) {
-        seg = substr($0, RSTART, RLENGTH)
-        sub(/ tests run:$/, "", seg)
-        total += seg + 0; seen += 1
+        # nextest reports `N tests run: X passed, Y failed`, where N = X + Y — so N is
+        # tests RUN, not tests PASSED, and summing it under a `COUNT %d tests passed`
+        # label was a FALSE LABEL (#3625 census audit, LOW 2). Only reachable on a PASS
+        # today, where the two are equal, which is exactly why it would have decayed
+        # unnoticed. Read X off the same line; a summary with no `passed` field
+        # contributes 0 rather than its run count.
+        if (match($0, /[0-9]+ passed/)) {
+          seg = substr($0, RSTART, RLENGTH)
+          sub(/ passed$/, "", seg)
+          total += seg + 0
+        }
+        seen += 1
       }
     }
     END { printf "%d %d\n", total + 0, seen + 0 }
@@ -6952,6 +6985,13 @@ _census_libtest_tally() {
 }
 
 # _census_compile_tally <stripped-log> -> "<cargo Executable status lines>"
+#
+# `cargo test -q` SUPPRESSES the `Executable` status line while leaving libtest's
+# `test result:` intact (measured, #3625 census audit LOW 3). So a `-q` lane can be
+# declared `libtest` safely and can NEVER be declared `compile` or `both`: adding a
+# `--no-run` pass to a quiet lane would silently measure ZERO test binaries and render a
+# healthy component VACUOUS. `kit-dashboard-drift` is the only `-q` lane in the gate today
+# and is correctly `libtest`; this note exists so it stays that way.
 _census_compile_tally() {
   awk '$1 == "Executable" { n += 1 } END { printf "%d\n", n + 0 }' < "$1"
 }
@@ -7019,35 +7059,23 @@ _census_driver_tally() {
   esac
 }
 
-# _census_measure <component> <status>: take the census and RETURN the record line on
-# stdout (the caller needs the value even if the sidecar write fails), writing it to
-# the sidecar for the parent's renderer.
-_census_measure() {
-  local comp="$1" st="$2" kind line log src tally total seen bins
-  if ! kind=$(_census_kind "$comp"); then
-    line="UNDECLARED no census kind is declared for '$comp' in _census_kind (#3625)"
-    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
-  fi
-  case "$kind" in
-    gap:*)
-      line="GAP ${kind#gap:}"
-      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
-    self:*)
-      # The component records its own count. Reaching here with nothing recorded is a
-      # RECORDING GAP, named as such -- never a licence to claim a count.
-      if line=$(_census_read "$comp"); then printf '%s' "$line"; return 0; fi
-      line="NOT-MEASURED '$comp' records its own subject count and recorded none (unit: ${kind#self:})"
-      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
-  esac
-  if [ "$st" != PASS ]; then
-    line="NOT-APPLICABLE component ended $st, so there is no PASS to affirm"
-    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
-  fi
+# _census_measure_kind <component> <concrete-kind> — the MEASURING CORE: take the census
+# of <component>'s log AS the named kind, write it to the sidecar and print it. Split out
+# of _census_measure (#3625, census audit BLOCKER 1) because `scoped-tests` has to choose
+# its kind AT RUN TIME from what the diff routed to, and a second copy of the measuring
+# logic would be a second place for it to drift. <concrete-kind> is one of the measurable
+# kinds only — libtest / compile / both / indirect:<driver> — never a declaration form.
+_census_measure_kind() {
+  local comp="$1" kind="$2" line log src tally total seen bins
   log="${LOG_DIR:-}/$comp.log"
   src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
   if [ -z "$src" ] || [ ! -r "$src" ]; then
-    # #3400: a failed strip is NEVER a fallback to the coloured original -- that turns a
+    # #3400: a failed strip is NEVER a fallback to the coloured original — that turns a
     # normalisation failure into a wrong count. NOT-MEASURED, and it never reads verified.
+    # This is also where DISK PRESSURE lands: the strip writes a full COPY of the log, so
+    # an ENOSPC inside $LOG_DIR costs a NOT-MEASURED rather than a wrong number. Declared
+    # rather than defended against, because the alternative — parsing the coloured original
+    # — is the defect this routing exists to prevent.
     line="NOT-MEASURED could not read or ANSI-normalise $comp.log, so nothing was counted"
     _census_write "$comp" "$line"; printf '%s' "$line"; return 0
   fi
@@ -7084,7 +7112,7 @@ _census_measure() {
         _census_write "$comp" "$line"; printf '%s' "$line"; return 0
       fi ;;
   esac
-  # The derived `<log>.ansi-stripped` sibling is a FULL COPY of the component log, and
+  # The derived `<log>.ansi-stripped` sibling is a full COPY of the component log, and
   # core-tests' runs to tens of MB — retained, it would silently double the size of the
   # `logs:` bundle every gate keeps. Removed as soon as both tallies are taken; a failed
   # removal is not the census's business.
@@ -7114,6 +7142,88 @@ _census_measure() {
       line="NOT-MEASURED census kind '$kind' has no measurer" ;;
   esac
   _census_write "$comp" "$line"; printf '%s' "$line"
+}
+
+# _census_measure <component> <status>: resolve the DECLARED kind and take the census,
+# RETURNING the record line on stdout (the caller needs the value even if the sidecar
+# write fails) as well as writing it to the sidecar for the parent's renderer.
+_census_measure() {
+  local comp="$1" st="$2" kind line
+  # The DECLARATION is resolved first, and its absence is fatal REGARDLESS OF STATUS: an
+  # undeclared name is a fact about the table, not about this run, and letting a SKIP hide
+  # it would put the completeness guarantee at the mercy of which components happened to
+  # run.
+  if ! kind=$(_census_kind "$comp"); then
+    line="UNDECLARED no census kind is declared for '$comp' in _census_kind (#3625)"
+    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+  fi
+  # STATUS SECOND, and ABOVE the kind dispatch (#3625 census audit, LOW 1). A component
+  # that did not PASS has no PASS to affirm, and that is true whatever its kind. This check
+  # used to sit BELOW the gap:/self: early returns, so a FAILing `fmt` rendered its gap
+  # reason and was counted under DECLARED-GAP rather than not-applicable. No verdict
+  # changed — but the aggregate line miscounted, and a miscounted census line is exactly
+  # what stops the next person looking.
+  if [ "$st" != PASS ]; then
+    line="NOT-APPLICABLE component ended $st, so there is no PASS to affirm"
+    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+  fi
+  case "$kind" in
+    gap:*)
+      line="GAP ${kind#gap:}"
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+    self:*|runtime:*)
+      # The component records its own census (a count, via _census_declare; or a whole
+      # record, via _census_scoped_record). Reaching here with nothing recorded is a
+      # RECORDING GAP, named as such — never a licence to claim a count.
+      if line=$(_census_read "$comp"); then printf '%s' "$line"; return 0; fi
+      case "$kind" in
+        self:*) line="NOT-MEASURED '$comp' records its own subject count and recorded none (unit: ${kind#self:})" ;;
+        *)      line="NOT-MEASURED '$comp' chooses its census at run time and recorded none" ;;
+      esac
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+  esac
+  _census_measure_kind "$comp" "$kind"
+}
+
+
+# _census_scoped_record <component> <n-rust-packages> <python-diff> <PYTHON_TIER_NOTE>
+# — the run-time census choice for the `runtime:` lane (#3625 census audit BLOCKER 1).
+#
+# THE SUBJECT IS WHATEVER THE DIFF ROUTED TO, and this function is the only place that
+# knows. It is called from run_scoped_tests with the SAME variables the dispatch was made
+# from (`pkgs[]`, `python_diff`, `PYTHON_TIER_NOTE`), so the census describes what
+# EXECUTED and not what the lane might have executed — the #3453 execution-vs-intent rule.
+#
+# THREE ROUTES, THREE CENSUSES:
+#   rust packages dispatched  -> measure `both`, exactly as before. (`--no-run` is a
+#       legitimate outcome here: a test-only crate with no changed --test target is
+#       compile-checked, so binaries alone affirm the lane.) A python tier running
+#       ALONGSIDE cargo is not folded in: its own verdict already has a dedicated
+#       `python-tier:` line in the block, and the cargo subject is the one this lane's
+#       name is about.
+#   python tier ONLY, and it RAN -> the subject is the pytest tally sitting in this same
+#       log, measured through the SAME `indirect:pytest` path python-bindings uses (so it
+#       inherits the corrected present-and-zero rule: an all-skipped suite is ZERO, hence
+#       VACUOUS, while an ABSENT tally is NOT-MEASURED).
+#   nothing executable dispatched -> an affirmative NOT-APPLICABLE record NAMING that. Not
+#       a silent PASS, and deliberately NOT `VACUOUS`: the lane did not fail to verify its
+#       subject, it HAD no executable subject, and reddening a correct `--lite` round is
+#       the failure this whole fix exists to remove.
+_census_scoped_record() {
+  local comp="$1" npkgs="$2" pydiff="$3" note="${4:-}"
+  if [ "${npkgs:-0}" -gt 0 ]; then
+    _census_measure_kind "$comp" both >/dev/null
+    return 0
+  fi
+  if [ "${pydiff:-0}" -eq 1 ]; then
+    if _python_tier_ran "$note"; then
+      _census_measure_kind "$comp" indirect:pytest >/dev/null
+    else
+      _census_write "$comp" "NOT-APPLICABLE the diff routed ONLY to the python tier and the tier did not run (${note:-python-tier: not run}), so this lane had no executable subject"
+    fi
+    return 0
+  fi
+  _census_write "$comp" "NOT-APPLICABLE the diff routed to no rust package and no python tier, so this lane had no executable subject"
 }
 
 # _census_status_for <status> <census-line>: the AC2 coupling. AFFIRMATIVE by
@@ -17765,6 +17875,11 @@ run_scoped_tests() {
   # count is zero becomes VACUOUS, and — because this function owns its own OVERALL
   # bookkeeping rather than going through the aggregation that reads .result files —
   # the run must be failed HERE.
+  #
+  # The RECORD comes first, from the same routing variables the dispatch was made from
+  # (#3625 census audit BLOCKER 1): this lane's census kind is `runtime:`, so nothing else
+  # can know whether its subject was cargo, the python tier, or nothing at all.
+  _census_scoped_record "$name" "${#pkgs[@]}" "$python_diff" "$PYTHON_TIER_NOTE"
   status=$(_census_finalize "$name" "$status")
   _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
@@ -17936,6 +18051,15 @@ run_delta_node_tests() {
   # but it already holds an exact affirmative subject count, so it records its own
   # (census kind `self:` in _census_kind).
   _census_declare node-tests "$n_targets" "changed jest test file(s)"
+  # …and COUPLE it (#3625 census audit BLOCKER 2). This used to push the RAW status, so a
+  # ZERO census rendered `{verified NOTHING: …}` beside a PASS, was counted as VACUOUS on
+  # the aggregate line, and the run stayed GREEN. Unreachable today only because this lane
+  # early-returns on an empty target set — i.e. the coupling was absent and something
+  # unrelated was holding the line, which is the decay shape CLAUDE.md names ("ask of every
+  # key what fails the run if THIS key alone goes bad"). This function owns its own OVERALL
+  # bookkeeping, so the flip happens here.
+  status=$(_census_finalize node-tests "$status")
+  _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("node-tests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }node-tests($n_targets)"
   echo ">>> [node-tests] $status ($((end - start))s)"
@@ -17958,6 +18082,10 @@ run_delta_shell_selftests() {
   # #3625: same as node-tests — this lane's children write to the run log, not to a
   # per-component log, and it already holds its exact subject count.
   _census_declare shell-selftests "$n_targets" "changed scripts/tests/*.sh executed"
+  # …and COUPLE it, for the reason spelled out on node-tests above (#3625 census audit
+  # BLOCKER 2).
+  status=$(_census_finalize shell-selftests "$status")
+  _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
   echo ">>> [shell-selftests] $status ($((end - start))s)"

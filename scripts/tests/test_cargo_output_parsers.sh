@@ -745,11 +745,13 @@ def extract(start_re, end_re):
 helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
 lt = extract(r'^_census_libtest_tally\(\) \{', r'^\}')
 cp = extract(r'^_census_compile_tally\(\) \{', r'^\}')
-meas = extract(r'^_census_measure\(\) \{', r'^\}')
+# The strip lives in the MEASURING CORE (_census_measure_kind), which _census_measure
+# delegates to — split out on #3625 so `scoped-tests` can choose its kind at run time.
+meas = extract(r'^_census_measure_kind\(\) \{', r'^\}')
 for name, body, needle in (('_ansi_stripped_log', helper, 'sed -E'),
                            ('_census_libtest_tally', lt, 'test result:'),
                            ('_census_compile_tally', cp, 'Executable'),
-                           ('_census_measure', meas, '_ansi_stripped_log')):
+                           ('_census_measure_kind', meas, '_ansi_stripped_log')):
     if not body.strip() or needle not in body:
         print('EXTRACT-FAIL: %s' % name, file=sys.stderr)
         sys.exit(2)
@@ -757,7 +759,7 @@ for name, body, needle in (('_ansi_stripped_log', helper, 'sed -E'),
 # would otherwise satisfy a substring test, and _census_measure's comment block names it.
 if not any('_ansi_stripped_log' in l for l in meas.split('\n')
            if not l.lstrip().startswith('#')):
-    print('EXTRACT-FAIL: _census_measure has no NON-COMMENT call to _ansi_stripped_log - '
+    print('EXTRACT-FAIL: _census_measure_kind has no NON-COMMENT call to _ansi_stripped_log - '
           'it would parse the raw log and this suite would certify the defect',
           file=sys.stderr)
     sys.exit(2)
@@ -766,7 +768,7 @@ CENSUSPY
 if [ "$cen_rc" -ne 0 ]; then
   bad "A7: extraction of the #3625 census parsers from agent-gate.sh FAILED (rc=$cen_rc) — cannot certify their colour handling"
 else
-  ok "A7: extracted _census_libtest_tally + _census_compile_tally (and verified _census_measure routes through _ansi_stripped_log from a non-comment line)"
+  ok "A7: extracted _census_libtest_tally + _census_compile_tally (and verified the measuring core _census_measure_kind routes through _ansi_stripped_log from a non-comment line)"
   # The escape bytes are the SAME real ones the provenance cases at the top of this file
   # already proved are real; ESC is that variable.
   {

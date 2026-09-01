@@ -60,7 +60,8 @@ trap _on_exit EXIT
 # ---------------------------------------------------------------------------
 for fn in _ansi_stripped_log _census_sidecar _census_kind _census_write _census_read \
           _census_declare _census_libtest_tally _census_compile_tally \
-          _census_driver_tally _census_measure \
+          _census_driver_tally _census_measure_kind _census_measure \
+          _census_scoped_record _python_tier_ran \
           _census_status_for _census_finalize _census_record _census_annotate \
           census_summary_line _status_is_nonfailing; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
@@ -116,7 +117,7 @@ fi
 
 undeclared=()
 badkind=()
-n_libtest=0; n_compile=0; n_both=0; n_self=0; n_indirect=0; n_gap=0
+n_libtest=0; n_compile=0; n_both=0; n_self=0; n_indirect=0; n_runtime=0; n_gap=0
 for c in ${comps_arr[@]+"${comps_arr[@]}"} $dyn_names; do
   if k=$(_census_kind "$c"); then
     case "$k" in
@@ -125,6 +126,7 @@ for c in ${comps_arr[@]+"${comps_arr[@]}"} $dyn_names; do
       both)     n_both=$((n_both + 1)) ;;
       self:?*)     n_self=$((n_self + 1)) ;;
       indirect:?*) n_indirect=$((n_indirect + 1)) ;;
+      runtime:?*)  n_runtime=$((n_runtime + 1)) ;;
       gap:?*)      n_gap=$((n_gap + 1)) ;;
       *)        badkind+=("$c=$k") ;;
     esac
@@ -138,9 +140,9 @@ else
   bad "A1: undeclared in _census_kind — a component cannot join the gate with a blank census (#3625): ${undeclared[*]}"
 fi
 if [ "${#badkind[@]}" -eq 0 ]; then
-  ok "A2: every declared kind is in the CLOSED set (libtest=$n_libtest compile=$n_compile both=$n_both self=$n_self indirect=$n_indirect gap=$n_gap)"
+  ok "A2: every declared kind is in the CLOSED set (libtest=$n_libtest compile=$n_compile both=$n_both self=$n_self indirect=$n_indirect runtime=$n_runtime gap=$n_gap)"
 else
-  bad "A2: declared with a kind outside the closed set {libtest,compile,both,self:<unit>,indirect:<driver>,gap:<reason>}: ${badkind[*]}"
+  bad "A2: declared with a kind outside the closed set {libtest,compile,both,self:<unit>,indirect:<driver>,runtime:<why>,gap:<reason>}: ${badkind[*]}"
 fi
 # The subject the ISSUE names must actually be measured, not gapped away. These are the
 # components the two-run comparison caught at 0s, plus the lane doctrine already records
@@ -545,7 +547,7 @@ leftover=$(grep -nE '^\s*\[ "\$[A-Za-z_{}\[\]$#@]*" = FAIL \] && OVERALL=FAIL' "
 if [ -z "$leftover" ]; then
   ok "E3: no aggregation in the gate still keys OVERALL on the single literal FAIL token"
 else
-  bad "E3: a `!= <bad>` aggregation survives: $leftover"
+  bad "E3: a '!= <bad>' aggregation survives: $leftover"
 fi
 n_agg=$(grep -c '_status_is_nonfailing ' "$GATE")
 if [ "$n_agg" -ge 6 ]; then
@@ -724,8 +726,12 @@ fi
 # The measurer must go through the strip, from a NON-COMMENT line: a comment naming the
 # helper would otherwise satisfy a bare substring test (#3312's shape, and the reason
 # test_cargo_output_parsers.sh's own extraction is comment-blind).
-sed -n '/^_census_measure() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#' | grep -q '_ansi_stripped_log' \
-  || h_bad+=("_census_measure-has-no-non-comment-call-to-_ansi_stripped_log")
+# The strip lives in the MEASURING CORE, which _census_measure delegates to; assert BOTH
+# links, or a future refactor could leave the core routed and nothing calling it.
+sed -n '/^_census_measure_kind() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#' | grep -q '_ansi_stripped_log' \
+  || h_bad+=("_census_measure_kind-has-no-non-comment-call-to-_ansi_stripped_log")
+sed -n '/^_census_measure() {/,/^}$/p' "$GATE" | grep -v '^[[:space:]]*#' | grep -q '_census_measure_kind ' \
+  || h_bad+=("_census_measure-does-not-delegate-to-the-measuring-core")
 # Both parsers must read by REDIRECTION. A pipe into awk is survivable for a counter, but
 # a pipe into a `while read` accumulator is the #3400 silent-verdict shape, and the rule
 # is applied uniformly rather than case by case.
@@ -746,6 +752,224 @@ else
   bad "H2: scripts/tests/test_agent_gate_census.sh is not invoked by agent-gate.sh — an unregistered guard runs nowhere"
 fi
 
+# ---------------------------------------------------------------------------
+# (K) THE RUN-TIME CENSUS FOR `scoped-tests` — #3625 census audit BLOCKER 1.
+#
+# THE DEFECT, which was a HIGH: `scoped-tests` was declared `both`, but a diff confined to
+# bindings/python/** dispatches NO cargo at all — classify_scoped_plan diverts cqlite-py
+# and sets the python-tier flag, and the cqlite-core fallback is deliberately guarded on
+# `python_diff -eq 0` — so the lane's log holds only maturin + pytest output. `both`
+# requires BOTH subjects to be zero before it says ZERO, and both were: no `test result:`,
+# no `N tests run:`, no `Executable`. Result: ZERO -> VACUOUS -> OVERALL=FAIL on a CORRECT
+# `--lite` fix round, and on a CORRECT `--delta`, which is a CERTIFYING mode. "A lane that
+# reds on correct input is the lane agents learn to waive" — this file's own subject.
+#
+# THE FIX IS DERIVED, NOT A RE-DECLARATION: the lane chooses its census from what it
+# actually dispatched. So every ROUTE gets a case — a suite that only exercised the cargo
+# branch would prove nothing about a routing bug.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/scopedlogs"; mkdir -p "$LOG_DIR"
+k=$(_census_kind scoped-tests) || k="(undeclared)"
+case "$k" in
+  runtime:*) ok "K0: scoped-tests is declared 'runtime:' — it has no statically correct kind, because its subject depends on what the diff routed to" ;;
+  *) bad "K0: scoped-tests is declared '$k'; a static kind cannot be right for a lane whose subject depends on routing (this is how BLOCKER 1 happened)" ;;
+esac
+# ---- ROUTE 1: rust packages dispatched -> measure `both`, as before.
+printf '     Running tests/x.rs (target/debug/deps/x-1)\ntest result: ok. 41 passed; 0 failed; 0 ignored\n' > "$LOG_DIR/scoped-tests.log"
+_census_scoped_record scoped-tests 1 0 ""
+got=$(_census_measure scoped-tests PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'COUNT 41 tests passed and 0 test binaries built/verified|PASS') ok "K1 (route: rust): a diff that dispatched cargo measures 'both' and affirms its count" ;;
+  *) bad "K1: got '$got' / '$st'" ;;
+esac
+# ---- ROUTE 2: python tier ONLY and it RAN -> the pytest tally in the SAME log is the
+# subject, measured through the same indirect:pytest path python-bindings uses.
+printf 'Compiling cqlite-py v0.1.0\n    Finished `dev` profile in 41.05s\n576 passed, 61 skipped in 62.30s\n' > "$LOG_DIR/scoped-tests.log"
+_census_scoped_record scoped-tests 0 1 "python-tier: PASS (maturin develop … && pytest …)"
+got=$(_census_measure scoped-tests PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'COUNT 576 pytest tests passed|PASS') ok "K2 (route: python tier RAN): the pytest tally in the same log is the affirmative subject — the lane is measured, not gapped" ;;
+  *) bad "K2: got '$got' / '$st'" ;;
+esac
+# ...and it inherits the corrected present-and-zero rule from batch 1: an all-skipped
+# pytest run through THIS route is still ZERO, hence VACUOUS. The routing fix must not
+# have bought back the vacuous pass it was fixing somewhere else.
+printf 'Compiling cqlite-py v0.1.0\n61 skipped in 1.20s\n' > "$LOG_DIR/scoped-tests.log"
+_census_scoped_record scoped-tests 0 1 "python-tier: PASS (…)"
+got=$(_census_measure scoped-tests PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'ZERO pytest tests'*'|VACUOUS') ok "K3 (route: python tier RAN, all skipped): still ZERO -> VACUOUS — the routing fix did not buy back a vacuous pass" ;;
+  *) bad "K3: got '$got' / '$st'" ;;
+esac
+# ---- ROUTE 3: THE BLOCKER ITSELF. Python tier in scope but SKIPPED, and the
+# nothing-dispatched case. Both must PRESERVE PASS with an affirmative record NAMING that
+# there was no executable subject — never VACUOUS, which is what red a correct run.
+r3_bad=()
+r3_n=0
+printf 'maturin build output only, no pytest summary anywhere\n' > "$LOG_DIR/scoped-tests.log"
+for spec in \
+  '0|1|python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run' \
+  '0|1|python-tier: SKIPPED (toolchain: cargo/rustc absent) — …' \
+  '0|1|' \
+  '0|0|'; do
+  r3_n=$((r3_n + 1))
+  np=${spec%%|*}; rest=${spec#*|}; pd=${rest%%|*}; nt=${rest#*|}
+  rm -f "$(_census_sidecar scoped-tests)"
+  _census_scoped_record scoped-tests "$np" "$pd" "$nt"
+  g=$(_census_measure scoped-tests PASS); s2=$(_census_status_for PASS "$g")
+  case "$g|$s2" in
+    'NOT-APPLICABLE the diff routed'*'no executable subject|PASS') ;;
+    *) r3_bad+=("[np=$np pd=$pd note='${nt:-(empty)}']->$g/$s2") ;;
+  esac
+done
+if [ "$r3_n" -ne 4 ]; then
+  bad "K4: only $r3_n of the 4 no-executable-subject routes were exercised — the loop is not iterating"
+elif [ "${#r3_bad[@]}" -eq 0 ]; then
+  ok "K4 (BLOCKER 1, the regression): all 4 routes that dispatch NO executable subject — python tier SKIPPED (x2), an empty tier note, and nothing routed at all — record an affirmative NOT-APPLICABLE and PRESERVE PASS. Declared 'both', every one of these measured ZERO and reddened a correct --lite/--delta"
+else
+  bad "K4: a no-executable-subject route did not preserve PASS: ${r3_bad[*]}"
+fi
+# _python_tier_ran is the ONE discrimination both this recorder and _delta_python_tier_gap
+# depend on, and it must be AFFIRMATIVE: only the two ran-states may answer yes.
+p_bad=()
+for n in 'python-tier: PASS (cmd)' 'python-tier: FAIL (pytest failure — a real code failure)'; do
+  _python_tier_ran "$n" || p_bad+=("ran-state '$n' read as not-run")
+done
+for n in 'python-tier: SKIPPED (no python3 on PATH)' 'python-tier: SKIPPED (toolchain: venv/pip setup failed — offline?)' '' 'python-tier: something new' 'PASS'; do
+  _python_tier_ran "$n" && p_bad+=("non-ran state '$n' read as RAN")
+done
+if [ "${#p_bad[@]}" -eq 0 ]; then
+  ok "K5: _python_tier_ran admits exactly the two ran-states (PASS/FAIL); every SKIPPED spelling, an empty note and an unplanned one answer 'did not run' — a could-not-tell never takes the permissive branch"
+else
+  bad "K5: ${p_bad[*]}"
+fi
+# ONE definition, two readers. A second spelling of this discrimination in
+# _delta_python_tier_gap is a second thing to drift.
+if grep -q '_python_tier_ran "$note"' <<<"$(sed -n '/^_delta_python_tier_gap() {/,/^}$/p' "$GATE")"; then
+  ok "K6: _delta_python_tier_gap asks the SAME _python_tier_ran predicate rather than re-spelling the PASS/FAIL test"
+else
+  bad "K6: _delta_python_tier_gap carries its own copy of the ran-state test — two spellings, one concept"
+fi
+# The WIRING: run_scoped_tests must call the recorder with the ROUTING variables, and
+# before it finalizes. A recorder nothing calls is the same defect one layer out.
+scoped_body=$(sed -n '/^run_scoped_tests() {/,/^}$/p' "$GATE")
+if [ -z "$scoped_body" ]; then
+  bad "K7: run_scoped_tests not found — renamed or reshaped; the wiring cannot be judged"
+elif grep -q '_census_scoped_record "$name" "${#pkgs\[@\]}" "$python_diff" "$PYTHON_TIER_NOTE"' <<<"$scoped_body"; then
+  ok "K7: run_scoped_tests records its run-time census from the SAME routing variables the dispatch was made from (pkgs[], python_diff, PYTHON_TIER_NOTE)"
+else
+  bad "K7: run_scoped_tests does not call _census_scoped_record with the routing variables — the runtime: kind would render a recording gap on every run"
+fi
+
+# ---------------------------------------------------------------------------
+# (L) THE `self:` LANES ARE COUPLED TO AC2 — #3625 census audit BLOCKER 2.
+#
+# THE DEFECT: run_delta_node_tests and run_delta_shell_selftests called _census_declare and
+# then pushed the RAW $status, never routing through _census_status_for. A ZERO there
+# rendered `{verified NOTHING: …}` beside a PASS, was counted as VACUOUS on the aggregate
+# line, and the run stayed GREEN. Unreachable today only because both early-return on an
+# empty target set — the coupling was ABSENT and something unrelated was holding the line,
+# which is precisely CLAUDE.md's "ask of every key what fails the run if THIS key alone
+# goes bad".
+#
+# DRIVEN THROUGH THE REAL FUNCTION, with ONE declared substitution. The production path
+# cannot currently emit a ZERO (an empty target set returns before _census_declare), so the
+# ZERO is INJECTED by substituting `_census_declare` alone — the collaborator whose value
+# is under test — while the function's own status handling, the real _census_finalize, the
+# real _census_status_for and the real _status_is_nonfailing all run unmodified. That is
+# the wiring the defect was in, and it is stated as a substitution rather than dressed up
+# as an end-to-end run.
+# ---------------------------------------------------------------------------
+l_bad=()
+l_n=0
+for fn in run_delta_node_tests run_delta_shell_selftests; do
+  body=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
+  if [ -z "$body" ]; then l_bad+=("$fn-not-found"); continue; fi
+  l_n=$((l_n + 1))
+  # STRUCTURAL: finalize + the closed-set OVERALL flip must both precede the STATUSES push.
+  grep -q 'status=$(_census_finalize ' <<<"$body" || l_bad+=("$fn-does-not-route-its-status-through-_census_finalize")
+  grep -q '_status_is_nonfailing "$status" || OVERALL=FAIL' <<<"$body" || l_bad+=("$fn-does-not-flip-OVERALL-on-a-non-passing-census")
+done
+[ "$l_n" -eq 2 ] || l_bad+=("only-$l_n-of-2-self-lanes-inspected")
+if [ "${#l_bad[@]}" -eq 0 ]; then
+  ok "L1: both self: lanes route their status through _census_finalize AND flip OVERALL through the closed set — they own their own OVERALL bookkeeping, so the coupling has to be local"
+else
+  bad "L1: ${l_bad[*]}"
+fi
+# BEHAVIOURAL: the composition the wiring performs. A ZERO census must turn a PASS into
+# VACUOUS and a VACUOUS must be a failing status — asserted on the REAL functions.
+LOG_DIR="$tmp/selflogs"; mkdir -p "$LOG_DIR"
+_census_declare node-tests 0 'changed jest test file(s)'
+zst=$(_census_finalize node-tests PASS)
+if [ "$zst" = VACUOUS ] && ! _status_is_nonfailing "$zst"; then
+  ok "L2: a self: lane's ZERO census turns its PASS into VACUOUS, and VACUOUS is a FAILING status — so the flip the wiring performs really fails the run"
+else
+  bad "L2: a ZERO self: census yielded '$zst' (want VACUOUS, and it must be failing)"
+fi
+_census_declare node-tests 4 'changed jest test file(s)'
+nst=$(_census_finalize node-tests PASS)
+if [ "$nst" = PASS ]; then
+  ok "L3 (control): a self: lane with a real count keeps its PASS — L2 is the ZERO, not the coupling reddening everything"
+else
+  bad "L3: a COUNT self: census yielded '$nst' (want PASS)"
+fi
+
+# ---------------------------------------------------------------------------
+# (M) TRUTH IN THE AGGREGATE LINE — #3625 census audit LOW 1 and LOW 2.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/truthlogs"; mkdir -p "$LOG_DIR"
+# LOW 1: the status check must sit ABOVE the kind dispatch. A FAILing gap component used to
+# render its gap reason and be counted under DECLARED-GAP rather than not-applicable. No
+# verdict changed — but a miscounted census line is what stops the next person looking.
+m_bad=()
+for spec in 'fmt|FAIL' 'fmt|SKIP' 'node-tests|FAIL' 'scoped-tests|SKIP'; do
+  c=${spec%%|*}; st=${spec##*|}
+  rm -f "$(_census_sidecar "$c")"
+  g=$(_census_measure "$c" "$st")
+  case "$g" in "NOT-APPLICABLE component ended $st"*) ;; *) m_bad+=("[$c/$st]->$g") ;; esac
+done
+if [ "${#m_bad[@]}" -eq 0 ]; then
+  ok "M1 (LOW 1): a gap:, self: or runtime: component that did NOT pass records NOT-APPLICABLE, not its declared reason — the aggregate line counts it under not-applicable (SKIP/FAIL) where it belongs"
+else
+  bad "M1: ${m_bad[*]}"
+fi
+# ...and the control: the same components on a PASS still render their declared state.
+if [ "$(_census_measure fmt PASS)" != "${_census_measure_fmt_pass:-}" ] \
+   && case "$(_census_measure fmt PASS)" in 'GAP cargo fmt'*) true ;; *) false ;; esac; then
+  ok "M2 (control): the same component on a PASS still records its declared GAP — M1 is the status check, not the gap arm being lost"
+else
+  bad "M2: a PASSing gap component no longer records GAP: $(_census_measure fmt PASS)"
+fi
+# LOW 2: nextest's `N tests run: X passed, Y failed` has N = X + Y, so summing N under a
+# `COUNT %d tests passed` label is a FALSE LABEL. Only reachable on a PASS today, where the
+# two are equal — which is exactly why it would have decayed unnoticed.
+printf '     Summary [   4.567s] 10 tests run: 8 passed, 2 failed\n' > "$tmp/nx2.log"
+if [ "$(_census_libtest_tally "$tmp/nx2.log")" = "8 1" ]; then
+  ok "M3 (LOW 2): the nextest arm counts tests PASSED (8), not tests RUN (10) — the label 'N tests passed' is true rather than merely equal on the happy path"
+else
+  bad "M3: expected '8 1' from a nextest summary with failures, got '$(_census_libtest_tally "$tmp/nx2.log")'"
+fi
+printf '     Summary [   4.567s] 3562 tests run: 3562 passed, 2 skipped\n' > "$tmp/nx3.log"
+if [ "$(_census_libtest_tally "$tmp/nx3.log")" = "3562 1" ]; then
+  ok "M4 (control): an all-passing nextest summary is unchanged at 3562 — M3 narrowed the label, it did not change the happy-path number"
+else
+  bad "M4: got '$(_census_libtest_tally "$tmp/nx3.log")'"
+fi
+# LOW 3: `cargo test -q` suppresses `Executable` but NOT `test result:` (measured). A `-q`
+# lane is therefore safe as `libtest` and can never be `compile`/`both`. kit-dashboard-drift
+# is the only -q lane; this pins the pairing so a future --no-run pass cannot silently make
+# it measure ZERO test binaries.
+kd=$(_census_kind kit-dashboard-drift) || kd="(undeclared)"
+q_doc=$(sed -n '/^# _census_compile_tally <stripped-log>/,/^_census_compile_tally() {/p' "$GATE")
+q_ok=0
+if grep -qi 'suppresses' <<<"$q_doc" && grep -q 'Executable' <<<"$q_doc" && grep -q 'test result:' <<<"$q_doc"; then
+  q_ok=1
+fi
+if [ "$kd" = libtest ] && [ "$q_ok" -eq 1 ]; then
+  ok "M5 (LOW 3): the only 'cargo test -q' lane is declared libtest, and the -q trap (which suppresses Executable while leaving test result: intact) is recorded at the compile parser"
+else
+  bad "M5: kit-dashboard-drift is '$kd' (want libtest) and/or the -q trap is not recorded at _census_compile_tally (q_ok=$q_ok)"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -753,7 +977,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=38
+CENSUS_CASE_FLOOR=52
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
