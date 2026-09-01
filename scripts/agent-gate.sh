@@ -137,9 +137,14 @@
 #   node-bindings      napi build + the WHOLE jest suite (`npm test`) in
 #                      bindings/node; SKIPs (never silently PASSes) if node/npm is
 #                      unavailable. WIDENED from 1 of 27 jest files to all of them
-#                      (#3522, superseding the #1255 narrowing): node-ci.yml is
+#                      (#3522, superseding the #1255 narrowing): node-ci.yml WAS
 #                      `required`-EXEMPT on the stated grounds that this component is
-#                      the merge-gating half, which was true of one file. Measured
+#                      the merge-gating half, which was true of one file. Since #3640
+#                      that workflow is an ENROLLED TIER (`Node.js CI Quality Gate`,
+#                      all three platforms), because the same wording was also false
+#                      about PLATFORMS — this component is Linux. So the two are now
+#                      complementary, not deferring: whole jest suite here on Linux,
+#                      ubuntu/macOS/Windows in CI. Measured
 #                      before widening: the slow half (npm ci + the release-unwind
 #                      napi build) is already paid here, and the full suite adds
 #                      ~15-35s — 504 tests / 27 suites, green on two consecutive runs.
@@ -10600,11 +10605,14 @@ EOF
 # SCOPE — WIDENED FROM ONE FILE TO THE WHOLE SUITE (issue #3522; supersedes the
 # #1255 narrowing). This component used to run `npx jest write-readback-content`,
 # i.e. ONE of the 27 jest suites, guaranteeing only the #1231 write→read content
-# proof. The other 26 executed nowhere that gates a merge: node-ci.yml's PR lane is
-# path-filtered to bindings/node/** (a cqlite-core-only diff does not trigger it) and
-# is `required`-EXEMPT, and the full `npm test` there is label/schedule gated — while
-# .github/ci-gating-tiers.yml justifies that exemption with "the merge-gating half is
+# proof. The other 26 executed nowhere that gates a merge: node-ci.yml's PR lane was
+# path-filtered to bindings/node/** (a cqlite-core-only diff did not trigger it) and
+# was `required`-EXEMPT, and the full `npm test` there was label/schedule gated — while
+# .github/ci-gating-tiers.yml justified that exemption with "the merge-gating half is
 # the local gate's node-bindings component". That claim was true of 1 file in 27.
+# NOTE (#3640): node-ci.yml is no longer exempt — it is an enrolled gating tier whose
+# three-platform `test` matrix runs on every mandating diff. This component remains the
+# LINUX half of the coverage and is no longer anyone's excuse for a CI exemption.
 # Among the 26 were shared-vectors.test.js (the cross-binding SHA-256 EXACT oracles,
 # whose whole value is that Python, Node and Rust agree byte-for-byte) and
 # prepared.test.js (export-surface named-set assertions).
@@ -10751,8 +10759,10 @@ run_node_bindings() {
   # #1465 V1: the leak budgets must NEVER be relaxed in the gate of record, and that is
   # now a PROPERTY of this component rather than an assumption about the environment.
   # `bindings/node/__test__/leak-paths.test.js` doubles its four ceilings when
-  # CQLITE_LEAK_BUDGET_RELAX holds its exact opt-in token; node-ci.yml's exempt legs set
-  # it deliberately. This array UNSETS it for every node invocation below, in every mode,
+  # CQLITE_LEAK_BUDGET_RELAX holds its exact opt-in token; node-ci.yml's cross-platform
+  # legs set it deliberately (still, and now on a GATING tier — #3640: no budget in that
+  # file has ever been measured on macOS or Windows, so an unmeasured ceiling there would
+  # red a merge). This array UNSETS it for every node invocation below, in every mode,
   # so an inherited export (a shell profile, a workflow `env:`, a re-used runner) cannot
   # weaken the gate — the same `env -u` reasoning, and the same B2 lesson, as the
   # strict-fixture variables: plain `env` INHERITS an exported value.
@@ -10779,8 +10789,9 @@ run_node_bindings() {
 
   local -a census=()
   census+=("npm ci + npm run build + npm run typecheck + check-dataset-manifest.sh + npm test — the WHOLE jest suite, #3522/#3493")
-  census+=("  supersedes the #1255 narrowing to 1 of 27 files; node-ci.yml is required-EXEMPT on the")
+  census+=("  supersedes the #1255 narrowing to 1 of 27 files; node-ci.yml WAS required-EXEMPT on the")
   census+=("  grounds that THIS component is the merge-gating half, which was true of 1 file in 27.")
+  census+=("  Since #3640 node-ci.yml is an ENROLLED TIER on all 3 platforms; this is the LINUX half.")
   census+=("  fixtures: $fixture_note")
   census+=("  RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0} — 2 tests opt in (publish.test.js 'npm pack --dry-run';")
   census+=("       streaming.test.js 'memory stays bounded for large result sets'). At 0 they skip;")
@@ -10861,9 +10872,10 @@ run_node_bindings() {
       # (No apostrophes in this comment -- see the note below.)
       _fm_observe_driver node-bindings "npm run build (napi)"
       npm run build
-      # npm run typecheck (#3493). node-ci.yml runs it as an ALWAYS-RUN PR smoke job, and
-      # this component is the declared merge-gating half of that workflow -- so leaving it
-      # out left the same kind of hole #3522 closed for the jest suite, one job over. It
+      # npm run typecheck (#3493). node-ci.yml runs it in its PR smoke job (which since
+      # #3640 runs whenever the diff mandates that tier), and this component was the
+      # declared merge-gating half of that workflow -- so leaving it out left the same kind
+      # of hole #3522 closed for the jest suite, one job over. It
       # also COMPILES against the SHIPPED index.d.ts (it is tsc --noEmit over the examples
       # project), so a binding cannot pass every runtime test while its published types
       # fail to typecheck.

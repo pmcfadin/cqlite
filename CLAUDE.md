@@ -166,12 +166,27 @@ compiles, runs **zero** tests and exits 0 — the only plant that exercises the 
 **A CI exemption that defers to a local gate component is only as true as that component's SCOPE
 (#3493).** `.github/ci-gating-tiers.yml` excuses a workflow from `required` by naming the local
 component that supposedly owns its merge-gating half — and nothing checks that the named component
-actually covers it. Measured instance, since FIXED by #3522/#3574: the `node-ci.yml` exemption read
-*"the merge-gating half is the local gate's node-bindings component"* while `node-bindings` ran ONE
-of the Node suite's 27 test files (`npx jest write-readback-content`, narrowed for speed under
-#1255), so **26 files were gated by neither side** — and a deterministic export-surface red sat on
-`main` for ~2 days across 4 Node contexts without blocking a merge. Its sibling is the control:
-`python-bindings` runs the whole pytest suite, so the identically-worded Python exemption was true.
+actually covers it. Measured instance, and the reason the rule exists: the `node-ci.yml` **exemption**
+(which no longer exists — see below) read *"the merge-gating half is the local gate's node-bindings
+component"* while `node-bindings` ran ONE of the Node suite's 27 test files (`npx jest
+write-readback-content`, narrowed for speed under #1255), so **26 files were gated by neither side** —
+and a deterministic export-surface red sat on `main` for ~2 days across 4 Node contexts without
+blocking a merge. Its sibling is the control: `python-bindings` runs the whole pytest suite, so the
+identically-worded Python exemption was true.
+**AND THE SAME EXEMPTION FAILED A SECOND TIME ON A DIFFERENT AXIS — THE SCOPE IN QUESTION WAS THE
+PLATFORM (#3640).** #3522/#3574 widened `node-bindings` to the whole jest suite, which made the
+exemption's wording true about FILES and left it false about PLATFORMS: the local gate runs on Linux,
+`node-ci.yml` tests `ubuntu-latest`, `macos-14` and `windows-latest`, so a deterministic macOS- or
+Windows-only Node red still could not block a merge (and the windows leg additionally carried
+`continue-on-error`, greening it whatever its tests did — #1979). **So `node-ci.yml` is now an
+ENROLLED TIER, not an exemption**: context `Node.js CI Quality Gate`, always-fire trigger + a
+diff-based `classify` job, and all three platforms gating per owner ruling (2026-08-31 — the local
+gate covers the Linux content, so the value of enrolment is precisely macOS and Windows; a known-flake
+red gets `gh run rerun --failed`, never a bypass). Two DECLARED residuals live in the registry entry:
+two jest suites are excluded on the Windows leg BY NAME (#1979, they fail deterministically on Windows
+filesystem semantics in the harness), and the leak budgets still run 2x-relaxed there (#1465). The
+transferable lesson: **when you satisfy a deferral's wording, ask which OTHER axis it was silently
+quantified over** — file count and platform were two, and one fix did not touch the other.
 This is the **circular-deferral** shape #3544 records for `ci-minimal-features.yml` — each side's
 coverage justified by the other's, the content exercised by neither, **with a documented rationale
 on both sides explaining why that is fine** — and it is a confirmed family, not a one-off. Two rules

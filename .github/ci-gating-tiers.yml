@@ -220,7 +220,9 @@ exempt:
       Python binding lane. For the PYTEST SUITE the merge-gating half is the local
       gate's python-bindings component, which runs the WHOLE pytest suite (contrast
       node-ci.yml, whose identically-worded exemption was false for ~2 days because
-      node-bindings ran 1 file of 27 — #3493).
+      node-bindings ran 1 file of 27 — #3493 — and which is no longer an exemption at
+      all: it is an enrolled tier above, because the same wording was ALSO false about
+      PLATFORMS, the local gate being Linux-only — #3640).
       TWO PARTS OF THIS WORKFLOW ARE MERGE-GATED BY NOTHING, AND THEY ARE NAMED HERE
       RATHER THAN LEFT TO BE DISCOVERED.
       (1) THE cross-binding-parity JOB (issue #1455): it runs the SAME SELECT through
