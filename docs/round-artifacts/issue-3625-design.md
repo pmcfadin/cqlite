@@ -108,3 +108,54 @@ verified all-clear.
   precedent (#1716/#3522). A component can declare `libtest` and count a suite that asserts
   nothing; that is not this guard's subject.
 - `gap:` entries are a real, declared reduction in coverage, printed on every run.
+
+---
+
+## What SHIPPED, and how it differs from the design above
+
+The design was followed. Four deltas, each with its reason:
+
+1. **`indirect:<driver>` measures a tally; an ABSENT tally is `NOT-MEASURED`, not `ZERO`.**
+   The design listed `indirect:<driver>` as a kind but did not say what an unrecognised
+   driver report means. It matters: for `libtest`/`compile` the subject markers are
+   *cargo's own guaranteed output*, so their absence really does mean nothing ran — but a
+   third-party driver's report format is not ours, and reading its absence as proof of
+   vacuity would red a healthy lane the day pytest or jest changes a line. A tally that is
+   PRESENT and says zero is still `ZERO`. The rule is stated in code beside the class.
+
+2. **A fifth kind, `self:<unit>`.** `node-tests` and `shell-selftests` (the dynamic
+   `--delta` entries) DELETE their log before returning, so no log-reading measurer could
+   ever census them — but each already holds an exact affirmative subject count, so they
+   record it directly via `_census_declare`. Without this they would have been gaps for a
+   reason that is not a real limitation.
+
+3. **`UNDECLARED` is fatal (status → `FAIL`), not a `VACUOUS`.** The design said
+   fail-closed but did not name the terminal state. `VACUOUS` means *measured, and the
+   subject count is zero*; an undeclared component was never measured at all, so calling it
+   vacuous would be a false statement. It is a named FAIL instead.
+
+4. **The derived `<log>.ansi-stripped` sibling is removed after the tally.** Not in the
+   design, and not optional at scale: it is a full COPY of the component log, and
+   `core-tests.log` runs to tens of MB — retaining one per component would silently double
+   the `logs:` bundle every gate keeps.
+
+### The census, as declared today (37 components + 3 dynamic delta names)
+
+| kind | n | components |
+|---|---|---|
+| `libtest` | 18 | core-tests, tombstones-scan, scan-offload-guard, work-counters-guard, byte-budget-guard, arrow-parity-guard, memory-budget, format-compat, write-tests, cli-tests, compaction-byte-parity, bti-multiclustering, query-semantics-oracle, flight-query-semantics-oracle, flight-tests, legacy-heuristics, binding-rust-tests, kit-dashboard-drift |
+| `compile` | 3 | feature-iso-parquet, feature-iso-delta-scan, minimal-build |
+| `both` | 2 | integration-tests, scoped-tests |
+| `indirect:<driver>` | 2 | python-bindings (pytest), node-bindings (jest) |
+| `self:<unit>` | 2 | node-tests, shell-selftests |
+| `gap:<reason>` | 13 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, file-size, roborev-lints, pub-surface, binding-unwind-profile, delivery-telemetry, tooling-tests |
+
+Every `libtest`/`compile`/`both` declaration was verified AT ITS CALL SITE to write its
+cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redirect, or (for
+`binding-rust-tests`) via an unconditional `cat` of its per-package logs into `$log` before
+`record_result`. A mis-declaration is the one failure mode this subsystem must not have: it
+would make a legitimately green component measure `ZERO` and read `VACUOUS`.
+
+The 13 gaps are a real, declared reduction in coverage. They print their reason on every
+run and are counted separately on the aggregate `census:` line as `N DECLARED-GAP
+(RECOGNISED)`; none of them is one of the components the issue's two-run table names.
