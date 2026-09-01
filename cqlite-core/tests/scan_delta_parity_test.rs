@@ -437,7 +437,14 @@ fn parse_cell(v: &JsonValue) -> Option<JsonlCell> {
     // guess about what the oracle said.
     let decode_micros = |field: &str| -> Option<i64> {
         match v.get(field) {
-            None | Some(JsonValue::Null) => None,
+            // ONLY A MISSING KEY IS ABSENCE (roborev round 7). The previous cut also mapped an
+            // explicit `null` to `None`, which is the SAME collapse this closure exists to
+            // prevent, one value over: sstabledump expresses "field omitted" by NOT EMITTING
+            // THE KEY, so `"tstamp": null` is not something the oracle produces — it is
+            // malformed data, and admitting it as absence re-opens the suppression path this
+            // whole check gates. A present `null` is therefore rejected like any other
+            // present-but-undecodable value.
+            None => None,
             Some(raw) => {
                 let text = raw.as_str().unwrap_or_else(|| {
                     panic!("{name}: golden field `{field}` is present but not a string: {raw}")
