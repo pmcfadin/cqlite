@@ -16,7 +16,7 @@ impl V5CompressedLegacyParser {
     /// decode the corresponding scalar UDT field values — e.g. `ShortType`/
     /// `ByteType` are needed to read `smallint`/`tinyint` UDT fields, which
     /// otherwise fall through to the blob default.
-    fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
+    pub(super) fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
         // Composite marshal forms carry a `(` after the type name; primitives do
         // not. Reject anything parameterised so we never misread a collection /
         // UDT as a scalar.
@@ -204,8 +204,10 @@ impl V5CompressedLegacyParser {
                         data.len()
                     )));
                 }
+                // CQL `float` is `Value::Float32`, not the f64 `Value::Float`; the column
+                // path and both UDT field decoders already agree (roborev round 10 F1).
                 let f = f32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float(f as f64))
+                Ok(Value::Float32(f))
             }
             "double" => {
                 if data.len() < 8 {
@@ -603,15 +605,12 @@ mod tests {
             .unwrap();
         assert_eq!(val, Value::Boolean(false));
 
-        // float (parse_value_from_raw_bytes promotes f32 to f64 via Float)
+        // float -> `Value::Float32`; used to pin the f32->f64 widening (round 10).
         let data = 1.5f32.to_be_bytes();
         let val = parser
             .parse_value_from_raw_bytes(&data, "float", "col", 0)
             .unwrap();
-        match val {
-            Value::Float(f) => assert!((f - 1.5).abs() < 0.001),
-            other => panic!("Expected Float, got {:?}", other),
-        }
+        assert_eq!(val, Value::Float32(1.5), "float is Float32");
 
         // double
         let data = 9.876f64.to_be_bytes();

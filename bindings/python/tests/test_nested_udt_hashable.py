@@ -728,34 +728,6 @@ def kp_hashable(label, rank) -> cqlite.Udt:
     return kp(label, rank)
 
 
-def _component(payload) -> bytes:
-    """One Cassandra composite component: int32 BE length + bytes; -1 = null."""
-    if payload is None:
-        return b"\xff\xff\xff\xff"
-    return len(payload).to_bytes(4, "big") + payload
-
-
-def _key_part_serialized(label, rank) -> bytes:
-    """``frozen<key_part>`` as Cassandra serializes it (label text, rank int)."""
-    label_bytes = None if label is None else label.encode("utf-8")
-    rank_bytes = None if rank is None else rank.to_bytes(4, "big", signed=True)
-    return _component(label_bytes) + _component(rank_bytes)
-
-
-def tuple_udt_int_serialized(label, rank, trailing) -> bytes:
-    """``tuple<frozen<key_part>, int>`` as Cassandra serializes it.
-
-    Used ONLY for ``m_tuple_udt``'s documented-gap expectations — its own class
-    :class:`TestTupleBorneUdtAsMapKey` and the ``SELECT *`` whole-row check —
-    because that map key currently arrives as these OPAQUE bytes instead of a
-    structured tuple. Cross-checks against the golden's ``path`` values byte for
-    byte.
-    """
-    return _component(_key_part_serialized(label, rank)) + _component(
-        trailing.to_bytes(4, "big", signed=True)
-    )
-
-
 # =============================================================================
 # The four issue shapes + the frozen-outer column
 # =============================================================================
@@ -1050,93 +1022,91 @@ class TestFrozenOuterSetOfTupleBorneUdt:
 class TestTupleBorneUdtAsMapKey:
     """``m_tuple_udt`` — ``map<frozen<tuple<frozen<key_part>, int>>, int>``.
 
-    A DOCUMENTED GAP, NOT DESIRED BEHAVIOUR — this test pins what CQLite does
-    TODAY so that fixing the core reds it.
+    **FIXED by #3612.** This class was a DOCUMENTED GAP pinning opaque ``bytes``
+    keys, written so that fixing cqlite-core would red it; #3612 did, and these
+    are now the positive assertions. Converted rather than deleted, so the shapes
+    it was pinning — key DISTINCTNESS, the null-and-empty-field pair, the
+    single-key partition, the absent column — keep their coverage.
 
     Issue #3500's shape 3 is the tuple-borne UDT in the MAP-KEY position, and it
-    is **not reachable through the Python binding today**: the map key never
-    arrives as a structured ``Value::Tuple``. ``parse_cell_path_key``
-    (``cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs``)
-    is a scalar-only allowlist whose catch-all arm returns ``Value::Blob``, so a
-    composite map key decodes as the RAW SERIALIZED KEY BYTES. A ``bytes`` object
-    is hashable, so there is no ``TypeError`` here — the value is silently WRONG
-    instead: opaque bytes where a structured ``(dict, int)`` tuple belongs.
+    IS now reachable through the Python binding. Previously it was not: the map
+    key never arrived as a structured ``Value::Tuple``, because
+    ``parse_cell_path_key`` was a scalar-only allowlist whose catch-all arm
+    returned ``Value::Blob``, so a composite map key decoded as the RAW SERIALIZED
+    KEY BYTES. ``bytes`` is hashable, so there was no ``TypeError`` — the value
+    was silently WRONG instead: opaque bytes where a structured ``(Udt, int)``
+    tuple belongs.
 
-    That is a separate cqlite-core defect, deliberately OUT OF SCOPE for #3500,
-    which is a Python-binding fix. CONSEQUENCE, stated plainly: the hashable
-    projection for MULTICELL tuple-borne map keys is currently UNEXERCISED by
-    any fixture in this repository — this class pins the ``bytes`` it gets
-    instead. The ``Tuple`` arm itself IS covered, by ``f_map_tuple_udt``
-    (:class:`TestFrozenMapWithTupleBorneUdtKey`); why this column and the
-    set-element columns do not cover it is in the ROUTING section of
-    ``value_hashable.rs``.
+    #3612 moved that decode to
+    ``cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs``,
+    which delegates to the structural decoder, so the key now arrives as
+    ``Value::Tuple([Frozen(Udt), Integer])`` and ``map_to_py`` projects it through
+    ``value_to_hashable_key``'s ``Tuple`` arm — the SAME arm and the SAME output
+    shape as the frozen sibling :class:`TestFrozenMapWithTupleBorneUdtKey`, whose
+    expectations these now mirror exactly. That the two spellings agree is the
+    property worth having, and it is asserted here by using the identical
+    ``(kp_hashable(...), int)`` expectation rather than a hand-written one.
 
-    AC SHAPE 3 IS DISCHARGED BY THIS PINNED GAP TEST PLUS #3612 — BY LEAD
-    RULING, not by a worker descope. Issue #3500's acceptance criteria expect
-    shape 3 to raise ``TypeError``; it cannot, because the key never becomes a
-    ``dict`` in the first place (see above). The lead amended the AC accordingly
-    (#3500 thread, 2026-08-30) and raised #3612 to P1. A later spec audit should
-    read shape 3 as AMENDED-AND-SATISFIED, not unmet.
+    So the hashable projection for MULTICELL tuple-borne map keys is EXERCISED by
+    this class, where before it was exercised by no fixture in the repository.
 
-    The expected bytes below are built from Cassandra's composite framing
-    (int32 BE length per component, ``-1`` for null) and cross-check against the
-    golden's ``path`` values.
+    AC SHAPE 3: previously AMENDED-AND-SATISFIED by lead ruling (#3500 thread,
+    2026-08-30) because the key could not become a ``dict`` and so could not raise
+    ``TypeError``. With #3612 landed it is satisfied on the merits — the key is
+    structured and hashable — so a spec audit should read shape 3 as SATISFIED,
+    and the amendment as no longer load-bearing.
 
-    EVERY ASSERTION IN THIS CLASS CARRIES THE SAME MESSAGE, AND THAT IS
-    DELIBERATE: the day ``parse_cell_path_key`` learns composites — i.e. when
-    **#3612** is fixed — these assertions FAIL, and a bare dict diff would say
-    nothing about why. A gap assertion that cannot explain its own failure is a
-    comment with a test harness around it. Each message therefore names #3612 as
-    the trigger, says the failure is the EXPECTED signal that #3612 landed, and
-    says what to do: re-pin the expectation to the structured ``(dict, int)``
-    tuple key that the frozen-map columns already produce, and finish the
-    map-key half of the hashable projection
-    (``bindings/python/src/value_hashable.rs``, where #3500 put it). #3500 is cited only as WHERE the projection lives — it
-    is this PR and will be closed, and a gap marker pointing at a closed issue
-    is how a gap becomes permanent.
+    Values are cross-checked against the golden's ``path`` renderings, and the
+    same bytes are asserted structurally on the Rust side by
+    ``cqlite-core/tests/issue_3612_multicell_map_composite_key.rs``
+    (``multicell_tuple_keys_match_the_sstabledump_golden``).
     """
 
-    #: Attached to every assertion in this class. See the class docstring.
-    _GAP = (
-        "m_tuple_udt: DOCUMENTED GAP #3612 (multicell map keys decode as opaque "
-        "Value::Blob via the scalar-only parse_cell_path_key). A FAILURE HERE IS "
-        "THE EXPECTED SIGNAL THAT #3612 HAS BEEN FIXED, not a regression of this "
-        "test: re-pin the expectation to the structured (dict, int) tuple key the "
-        "frozen-map columns already produce, and finish the map-key half of the "
-        "hashable projection in bindings/python/src/value_hashable.rs (#3500, "
-        "which is closed — #3612 is the live issue)."
-    )
+    def test_map_key_projects_as_a_structured_tuple(self, db):
+        """id=1: two composite keys, each a structured ``(Udt, int)`` tuple.
 
-    def test_map_key_is_currently_opaque_bytes(self, db):
-        """id=1: two composite keys, each an opaque ``bytes`` blob."""
+        Was ``test_map_key_is_currently_opaque_bytes``. The second assertion is
+        the one that carried the gap: it required ``type(k) is bytes``, and now
+        requires the opposite, so a regression to opaque keys reds here rather
+        than only in the mapping diff.
+        """
         value = _rows_by_id(db, "m_tuple_udt")[1].get("m_tuple_udt")
         assert value == {
-            tuple_udt_int_serialized("charlie", 3, 8): 80,
-            tuple_udt_int_serialized("delta", 4, 9): 90,
-        }, self._GAP
-        assert all(type(k) is bytes for k in value), self._GAP
+            (kp_hashable("charlie", 3), 8): 80,
+            (kp_hashable("delta", 4), 9): 90,
+        }
+        assert not any(type(k) is bytes for k in value), (
+            "a multicell tuple-borne map key must not regress to opaque bytes "
+            "(issue #3612)"
+        )
+        assert all(isinstance(k, tuple) and isinstance(k[0], cqlite.Udt) for k in value)
 
     def test_map_key_with_null_and_empty_udt_fields(self, db):
-        """id=2: null-both-fields and empty-string-label keys stay distinct."""
+        """id=2: null-both-fields and empty-string-label keys stay distinct.
+
+        The distinctness is the assertion, and it survives the flip: two keys
+        that differ only in null-vs-empty must remain TWO entries, which is the
+        shape a collapsing decode would break.
+        """
         value = _rows_by_id(db, "m_tuple_udt")[2].get("m_tuple_udt")
         assert value == {
-            tuple_udt_int_serialized(None, None, 0): 1,
-            tuple_udt_int_serialized("", 0, 0): 2,
-        }, self._GAP
+            (kp_hashable(None, None), 0): 1,
+            (kp_hashable("", 0), 0): 2,
+        }
+        assert len(value) == 2, "null-field and empty-field keys must stay distinct"
 
     def test_single_key_partition(self, db):
         """id=3: one composite key."""
         value = _rows_by_id(db, "m_tuple_udt")[3].get("m_tuple_udt")
-        assert value == {tuple_udt_int_serialized("solo", 99, 42): 7}, self._GAP
+        assert value == {(kp_hashable("solo", 99), 42): 7}
 
     def test_absent_in_sparse_row(self, db):
         """id=4 never wrote this column.
 
-        Carries the gap message too: #3612 does not change this expectation (an
-        absent column is ``None`` either way), so if THIS one ever reds, #3612 is
-        not the explanation and the message says which parts to re-pin.
+        Unchanged by #3612 — an absent column is ``None`` either way — and it was
+        the one assertion in this class that stayed green through the fix.
         """
-        assert _rows_by_id(db, "m_tuple_udt")[4].get("m_tuple_udt") is None, self._GAP
+        assert _rows_by_id(db, "m_tuple_udt")[4].get("m_tuple_udt") is None
 
 
 class TestFrozenMapWithTupleBorneUdtKey:
@@ -1665,9 +1635,10 @@ class TestSelectStarWholeRow:
         assert row.get("s_set_udt") == [[kp("solo", 99)]]
         assert row.get("s_list_udt") == [[kp("solo", 99)]]
         assert row.get("f_set_tuple_udt") == [(kp("solo", 99), 42)]
-        assert row.get("m_tuple_udt") == {
-            tuple_udt_int_serialized("solo", 99, 42): 7
-        }
+        # FIXED by #3612: identical to `f_map_tuple_udt` on the line below, which
+        # is the point — the multicell and frozen spellings of the same map now
+        # project the same key.
+        assert row.get("m_tuple_udt") == {(kp_hashable("solo", 99), 42): 7}
         assert row.get("f_map_tuple_udt") == {(kp_hashable("solo", 99), 42): 7}
         assert row.get("f_map_set_udt") == {
             frozenset({kp_hashable("solo", 99)}): 7

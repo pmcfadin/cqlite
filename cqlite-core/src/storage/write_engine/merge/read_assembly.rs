@@ -424,10 +424,25 @@ fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType
 /// non-scalar `Custom`).
 ///
 /// Such a key/element is decoded STRUCTURALLY from its `cell_path` by
-/// `composite::decode_composite` and ordered by
-/// `compare_composite`, Cassandra's own type comparator (issue #2339). The set of decodable scalars is kept in
-/// lockstep with `deserialize_value_bytes`; branching on the DECLARED type only,
-/// never a byte pattern (no-heuristics, issue #28).
+/// `composite::decode_composite` and ORDERED by `composite::compare_composite`,
+/// which implements Cassandra's own type comparators (issue #2339). Decoding and
+/// ordering are deliberately separate concerns.
+///
+/// This predicate is therefore no longer a fail-closed guard: it SELECTS the
+/// structural path. It still fails closed for one case only — a UDT reference
+/// that the table's `UdtRegistry` cannot resolve has no field list to decode
+/// into, and is refused by name (see [`composite_collection_unsupported`], whose
+/// doc records why the opaque-blob route was abandoned).
+///
+/// The set of decodable scalars is kept in lockstep with
+/// `deserialize_value_bytes`; branching on the DECLARED type only, never a byte
+/// pattern (no-heuristics, issue #28).
+///
+/// The SINGLE-generation reader's behaviour per type is stated ONCE in
+/// `cell_path_key.rs`'s asymmetry section (issue #3612) — cite, never restate.
+/// That asymmetry is now CLOSED for the shapes #2339 covers: both arms decode a
+/// composite cell-path key/element structurally, so the outcome no longer depends
+/// on SSTable generation count.
 #[cfg(feature = "write-support")]
 fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
     match cmp {

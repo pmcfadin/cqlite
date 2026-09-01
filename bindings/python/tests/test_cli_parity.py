@@ -938,10 +938,13 @@ class TestCollectionIdentityContract:
     observe it nor certify its fix. What remains observable HERE is the shape
     those fixes produce, asserted below.
 
-    The residual gap is core-side and out of this file's reach: a MULTICELL map's
-    composite key decodes as an opaque `Blob` (`parse_cell_path_key` has a
-    scalar-only allowlist), filed as #3612. A FROZEN map decodes its keys
-    structurally and does not have that gap.
+    That core-side gap is CLOSED: a MULTICELL map's composite key used to decode
+    as an opaque `Blob` because `parse_cell_path_key` had a scalar-only allowlist
+    (#3612). It now delegates to the structural decoder, so the multicell and
+    frozen spellings of one map decode their keys the same way. The residual is
+    narrower and tracked separately — a nested element's declared width is not
+    checked exactly (#3723), which only bites on input Cassandra itself refuses
+    to read.
 
     These tests are intentionally pure: they feed the normalizer the host values
     the Python binding is documented to produce (`bindings/python/src/value.rs`:
@@ -1102,8 +1105,10 @@ class TestCollectionIdentityContract:
         The sibling shapes that used to RAISE
         (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`)
         now read successfully and are pinned end-to-end in
-        `bindings/python/tests/test_nested_udt_hashable.py`; the residual gap is
-        core-side multicell map keys (#3612).
+        `bindings/python/tests/test_nested_udt_hashable.py`. Core-side multicell
+        map keys (#3612) are decoded structurally too, so they are no longer a
+        gap; the residual there is the narrower nested-element width check
+        (#3723).
         """
         # What the binding hands over for a map KEY of `map<frozen<list<frozen<udt>>>, int>`:
         # a tuple (the projected inner list) holding the projected inner UDT, which

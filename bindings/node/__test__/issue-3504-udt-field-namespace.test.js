@@ -364,18 +364,40 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     );
   });
 
-  test('RECORDED GAP: a non-frozen map keyed by a UDT decodes to a Buffer key', () => {
-    // Decode-level, out of #3504's scope. A NON-frozen `map<frozen<udt>, int>`
-    // is multicell, so its key lives in the CELL PATH, and `parse_cell_path_key`
-    // (cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs)
-    // matches a closed set of PRIMITIVE cell-path types and falls back to
-    // `Value::Blob` for a frozen UDT. Pinned as characterization, not as a
-    // desirable shape: `cm` is the spelling a user would most naturally write,
-    // and without this a reader would reasonably assume it covers the key path.
-    // Details: test-data/fixtures/issue_3504/README.md.
-    for (const column of ['cm', 'tm']) {
-      const [key] = soleEntry(rows.get(1)[column]);
-      expect(Buffer.isBuffer(key)).toBe(true);
+  test('FIXED (#3612): a non-frozen map keyed by a UDT decodes structurally', () => {
+    // This test used to pin the DEFECT. A NON-frozen `map<frozen<udt>, int>` is
+    // multicell, so its key lives in the CELL PATH, and `parse_cell_path_key`
+    // (cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs)
+    // used to match a closed set of PRIMITIVE cell-path types and fall back to
+    // `Value::Blob` for a frozen UDT — so `cm`/`tm` keys arrived as a Buffer. It
+    // now delegates to the structural decoder.
+    //
+    // Asserted AGAINST the frozen control rather than against literals: `cm` and
+    // `fcm` are the two legal spellings of the same map and the fixture stores
+    // the same key in both, so the strongest statement is that they agree.
+    // Mirrors 'a frozen map keyed by a colliding UDT keeps the key identity'.
+    const expectedFields = fieldsOf([
+      ['_type', 'key-type-marker'],
+      ['_keyspace', 'key-keyspace-marker'],
+      ['__proto__', 'key-proto-marker'],
+      ['real_field', 100],
+    ]);
+    for (const [column, control, typeName] of [
+      ['cm', 'fcm', 'collide'],
+      ['tm', 'ftm', 'collide_twin'],
+    ]) {
+      const [key, value] = soleEntry(rows.get(1)[column]);
+      expect(Buffer.isBuffer(key)).toBe(false);
+      expect(key.typeName).toBe(typeName);
+      expect(key.keyspace).toBe('test_udt_collision');
+      expect(key.fields).toEqual(expectedFields);
+      expect(value).toBe(column === 'cm' ? 1 : 2);
+      // The parity statement: the multicell and frozen spellings of one map
+      // present the same key, so a caller cannot tell them apart.
+      const [controlKey] = soleEntry(rows.get(1)[control]);
+      expect(key.typeName).toBe(controlKey.typeName);
+      expect(key.keyspace).toBe(controlKey.keyspace);
+      expect(key.fields).toEqual(controlKey.fields);
     }
   });
 

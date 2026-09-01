@@ -46,16 +46,18 @@
 --   * c  frozen<collide>            — site 3 (the rendered UDT value).
 --   * p  frozen<plain>              — the non-colliding contrast.
 --   * cm map<frozen<collide>, int>  — a UDT used as the KEY of a NON-FROZEN
---                                     (multicell) map. MEASURED: CQLite decodes
---                                     such a key as `Value::Blob`, not
---                                     `Value::Udt` — `parse_cell_path_key` in
---                                     row_decoder/complex_column.rs matches a
---                                     closed set of PRIMITIVE cell-path types and
---                                     falls back to Blob for a frozen UDT. So this
---                                     column does NOT reach the Python hashable
---                                     projection's Udt arm. It is kept because it
---                                     is the shape a user would most naturally
---                                     write, and it documents that gap.
+--                                     (multicell) map, so the key lives in the
+--                                     CELL PATH. It USED to decode as
+--                                     `Value::Blob`: `parse_cell_path_key`
+--                                     matched a closed set of PRIMITIVE
+--                                     cell-path types and fell back to Blob for
+--                                     a frozen UDT. FIXED by #3612 — the site
+--                                     (now row_decoder/complex_column/cell_path_key.rs)
+--                                     delegates to the structural decoder, so
+--                                     this column decodes to `Value::Udt` and
+--                                     DOES reach the Python hashable
+--                                     projection's Udt arm, identically to the
+--                                     frozen `fcm` below.
 --   * tm map<frozen<collide_twin>, int>
 --                                   — the same, one type over.
 --   * fcm frozen<map<frozen<collide>, int>>
