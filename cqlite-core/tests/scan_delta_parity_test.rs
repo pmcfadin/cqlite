@@ -769,12 +769,47 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 ///      to a production model to serve a test is out of this issue's scope and REJECTED by
 ///      the lead; it is proposed as a follow-up.
 ///
-/// So: `expires_at = localDeletionTime ≈ writetime + ttl`. When the cell and the row
-/// liveness share a writetime, `expires_at` equality is EQUIVALENT to TTL equality — not a
-/// proxy for it — and that precondition is exactly what an absent cell `tstamp` certifies
-/// (`:497` above). The check therefore compares `expires_at` ONLY under that precondition,
-/// and where the precondition does not hold it REFUSES BY NAME rather than guessing in
-/// either direction.
+/// WHAT THIS CHECK ACTUALLY VERIFIES — corrected (roborev round 4, F2). An earlier
+/// revision of this comment claimed `expires_at ≈ writetime + ttl`, and therefore that
+/// equal writetimes make expiry equality EQUIVALENT to TTL equality. **That was false**,
+/// and the pinned source says so directly:
+///
+///   * `BufferCell.java:79-82` — `expiring(column, timestamp, ttl, nowInSec, …)` builds the
+///     cell with `computeLocalExpirationTime(nowInSec, ttl)`. `timestamp` is a SEPARATE
+///     parameter and is not an input to the expiry at all.
+///   * `LivenessInfo.java:68-72` — the row liveness is built the same way, from the same
+///     helper.
+///   * `ExpirationDateOverflowHandling.java:120-125` — that helper is
+///     `min(nowInSec + ttl, cellMaxDeletionTime)`.
+///
+/// So `expires_at` is a function of the WRITE STATEMENT's wall clock and the TTL, never of
+/// the writetime. What this check verifies is therefore cell/row expiry CONSISTENCY — a
+/// real property of the decoded data — and that coincides with Cassandra's TTL-equality
+/// rule under a precondition about the WRITE, not about the timestamp: when the cell and
+/// the row liveness were written by the SAME operation they share one `nowInSec`, and then
+/// expiry equality is exactly TTL equality.
+///
+/// THE GATE IS THE ABSENT CELL `tstamp`, AND ITS TWO DIRECTIONS ARE DIFFERENT:
+///   * SOUND DIRECTION — one operation always yields equal timestamps, so an absent cell
+///     `tstamp` (`:497`) admits EVERY same-operation cell. The check never over-refuses a
+///     cell that Cassandra's own rule covers.
+///   * RESIDUAL — equal timestamps are NECESSARY but not SUFFICIENT for one operation. Two
+///     writes carrying the SAME explicit `USING TIMESTAMP` at different wall-clock times,
+///     with the same TTL, are suppressed by Cassandra (TTLs equal) yet carry DIFFERENT
+///     expiries here, so this comparison would FAIL on a VALID SSTable. That is a false
+///     FAIL, it is loud and named rather than silent, and it is unreachable in the current
+///     corpus: no fixture uses `USING TIMESTAMP`, and the measurement below found ZERO
+///     cells where a suppressed expiry accompanies a printed cell `tstamp`.
+///   * SECOND RESIDUAL, the worse direction, named because this list is meant to be
+///     exhaustive: the `min(…, cellMaxDeletionTime)` clamp means two DIFFERENT TTLs that
+///     both saturate produce EQUAL expiries, which this check would ACCEPT. It needs a TTL
+///     large enough to clamp (decades), and no fixture has one.
+///
+/// The authoritative fix is to carry `ttl_seconds` through the delta model so the TTLs
+/// themselves can be compared; that is a public-type change, ESCALATED and deliberately
+/// not made here. Until it lands, this comment is the record of what the check does and
+/// does not establish — do NOT re-derive it, and do not widen the tolerance to silence the
+/// residual, which would trade a loud false FAIL for a silent false PASS.
 ///
 /// MEASURED, at two scopes, because the number that matters is scope-sensitive and a bare
 /// count next to a test that reads a fraction of the corpus would mislead:
@@ -839,17 +874,19 @@ fn assert_expires_at(
                     "{}: SUPPRESSION NOT VERIFIABLE — sstabledump omitted this cell's \
                      expires_at (so per JsonTransformer:501 the cell TTL equals the row TTL \
                      of {:?}s), but it PRINTED the cell's tstamp, so per :497 the cell and \
-                     row-liveness writetimes DIFFER and expires_at equality is no longer \
-                     equivalent to TTL equality. The authoritative cell TTL is not \
-                     available: CellDelta carries expires_at={}µs but no ttl_seconds. \
-                     Refusing to decide (#3725; surfacing ttl_seconds on the delta model is \
-                     the follow-up).",
+                     row-liveness timestamps DIFFER — which means they may not come from one \
+                     write operation, and expiry equality only tracks TTL equality within \
+                     one operation (BufferCell:79-82 computes the expiry from nowInSec, not \
+                     from the timestamp). The authoritative cell TTL is not available: \
+                     CellDelta carries expires_at={}µs but no ttl_seconds. Refusing to \
+                     decide (#3725; surfacing ttl_seconds on the delta model is escalated).",
                     context, r.ttl_secs, a
                 );
             }
             match r.expires_at_micros {
-                // Equal writetimes (certified by the absent cell tstamp), so this IS the
-                // TTL comparison Cassandra makes, spelled in the units we have.
+                // Same-operation cells share one `nowInSec`, so their expiries agree iff
+                // their TTLs do. The absent cell `tstamp` admits every same-operation cell
+                // (necessary, not sufficient — see the residual in the doc comment).
                 Some(row_e) if (a - row_e).abs() <= TTL_TOLERANCE_MICROS => {}
                 Some(row_e) => panic!(
                     "{}: scan_delta has cell expires_at={}µs and sstabledump printed no cell \
@@ -904,8 +941,9 @@ fn suppression_rule_requires_equal_writetimes_or_refuses() {
         );
     }
 
-    // PRECONDITION HOLDS (cell tstamp absent => equal writetimes) and the expiries agree:
-    // this is the ordinary `INSERT ... USING TTL` shape, 768 of them in the corpus.
+    // GATE OPEN (cell tstamp absent => equal timestamps, so the cell may come from the
+    // row's own write operation) and the expiries agree: the ordinary
+    // `INSERT ... USING TTL` shape, 30 of them in this target's subject.
     let r = row(Some(3600), Some(4600 * sec));
     assert_expires_at(
         "case/suppressed-equal",
@@ -915,9 +953,10 @@ fn suppression_rule_requires_equal_writetimes_or_refuses() {
         false,
     );
 
-    // PRECONDITION FAILS (cell printed its own tstamp): the check must REFUSE by name, not
-    // compare. This is the case a derived `expires_at - writetime` TTL got wrong under
-    // `USING TIMESTAMP` (roborev R2-F1); no corpus fixture reaches it today.
+    // GATE CLOSED (cell printed its own tstamp => the timestamps differ, so the two may
+    // not share one write operation and the expiries need not track the TTLs): the check
+    // must REFUSE BY NAME rather than compare. No corpus fixture reaches this today; the
+    // authoritative fix is a `ttl_seconds` on the delta model, which is escalated.
     let r = row(Some(3600), Some(4600 * sec));
     refuses("SUPPRESSION NOT VERIFIABLE", || {
         assert_expires_at(
@@ -929,8 +968,8 @@ fn suppression_rule_requires_equal_writetimes_or_refuses() {
         )
     });
 
-    // Precondition holds but the expiries disagree: unreachable from Cassandra, so no
-    // suppression may be claimed.
+    // Gate open but the expiries disagree. Within one write operation that cannot happen
+    // (one nowInSec, equal TTLs => equal expiries), so no suppression may be claimed.
     let r = row(Some(3600), Some(4600 * sec));
     refuses("row liveness expiry", || {
         assert_expires_at(
