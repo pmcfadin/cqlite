@@ -444,4 +444,115 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(ownField(expected['row1.c'].fields, '__proto__')).toBe('user-supplied-proto');
     expect(expected['row1.c'].typeName).toBe('collide');
   });
+
+  // ==========================================================================
+  // AC5 — the committed fixture resolves CHECKOUT-RELATIVE, never through
+  // CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
+  // ==========================================================================
+
+  test('the fixture and the parity reference resolve checkout-relative, not via CQLITE_DATASETS_ROOT', async () => {
+    // The file docstring and the reference's `note_on_paths` DOCUMENT this
+    // contract; nothing ASSERTED it. `assertFixturePresent` cannot: it checks
+    // existence at the ALREADY-RESOLVED path, so it would pass unchanged if
+    // resolution became env-routed and the env root happened to hold the file.
+    // Committed fixtures are committed SOURCE; the corpus resolvers are an
+    // EITHER/OR on the variable (`setup.js:23-25`), so a fixture reached
+    // through one is invisible exactly where the suite runs, because every gate
+    // run sets it.
+    const os = require('os');
+
+    // Half 1 — AFFIRMATIVE EQUALITY against a `__dirname`-derived repo root. A
+    // "the env value is not a prefix" check would go vacuous whenever the
+    // variable is unset or coincidentally equals the checkout: a pass derived
+    // from the absence of a bad signal.
+    const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+    const expectedRoot = path.join(REPO_ROOT, 'test-data', 'fixtures', 'issue_3504');
+    expect(FIXTURE_ROOT).toBe(expectedRoot);
+    expect(PARITY_FACTS).toBe(path.join(expectedRoot, 'binding-parity-facts.json'));
+    // SCHEMA is pinned to the RESOLVED schemas dir, not to the checkout:
+    // `CQLITE_SCHEMAS_ROOT` legitimately relocates that directory
+    // (`setup.js:67-102`, the gate-validated #3148 contract), so pinning it to
+    // the checkout would red on a correct out-of-tree run. Only the FIXTURE
+    // corpus and the parity facts are in AC5's scope.
+    expect(SCHEMA).toBe(path.join(global.testPaths.SCHEMAS_DIR, 'issue-3504-udt-collision.cql'));
+
+    // Half 2 — BEHAVIOURAL INVARIANCE under a datasets root holding no corpus.
+    //
+    // ASYMMETRY WITH THE PYTHON SUITE, STATED BECAUSE IT BOUNDS WHAT THIS HALF
+    // PROVES: the Python case re-evaluates ITS OWN module under the bogus root
+    // (`importlib` gives it a throwaway module object), so it catches even a
+    // resolution that reads the variable directly at load time. Here that is
+    // unavailable — re-requiring this file would re-register its `describe`/
+    // `test` blocks mid-run, which jest forbids — so the probe re-evaluates the
+    // RESOLVER (`setup.js`) instead and pins the ANCHOR. The two mutants that
+    // matters for: one anchored on the env-routed constant reds
+    // UNCONDITIONALLY, because `TEST_DATA_ROOT`/`SSTABLES_DIR` never equals
+    // `PROJECT_ROOT` even with the variable unset; one reading the variable
+    // directly at load time reds in half 1 on every gate run, since every gate
+    // run sets it.
+    const savedTestPaths = global.testPaths;
+    const savedEnv = {
+      CQLITE_DATASETS_ROOT: process.env.CQLITE_DATASETS_ROOT,
+      CQLITE_REQUIRE_FIXTURES: process.env.CQLITE_REQUIRE_FIXTURES,
+      CQLITE_PARITY_REQUIRE_DATASETS: process.env.CQLITE_PARITY_REQUIRE_DATASETS,
+    };
+    const bogus = fs.mkdtempSync(path.join(os.tmpdir(), 'cqlite-3724-no-corpus-'));
+    try {
+      process.env.CQLITE_DATASETS_ROOT = bogus;
+      // The two strict-fixture flags are cleared for the re-evaluation ONLY:
+      // `setup.js:246-251` THROWS under a corpus-less root when either is set
+      // (as the gate's node-bindings lane sets them), which would make this
+      // probe unable to run rather than able to measure.
+      delete process.env.CQLITE_REQUIRE_FIXTURES;
+      delete process.env.CQLITE_PARITY_REQUIRE_DATASETS;
+
+      // Re-evaluate the path resolver in a FRESH module registry, so its
+      // constants are recomputed against the bogus root.
+      jest.isolateModules(() => {
+        require('./setup.js');
+      });
+      const fresh = global.testPaths;
+
+      // Non-vacuity: the env-routed constant really DID move onto the bogus
+      // root — otherwise the invariance below would prove only that the
+      // variable is ignored everywhere.
+      expect(fresh).not.toBe(savedTestPaths);
+      expect(fresh.SSTABLES_DIR).toBe(path.join(bogus, 'sstables'));
+      expect(fs.readdirSync(bogus)).toEqual([]);
+
+      // THE INVARIANT: the anchor this file's paths are built from is
+      // env-INDEPENDENT, byte-identical under the bogus root, and equal to the
+      // `__dirname`-derived checkout root.
+      expect(fresh.PROJECT_ROOT).toBe(savedTestPaths.PROJECT_ROOT);
+      expect(fresh.PROJECT_ROOT).toBe(REPO_ROOT);
+      expect(FIXTURE_ROOT).toBe(
+        path.join(fresh.PROJECT_ROOT, 'test-data', 'fixtures', 'issue_3504')
+      );
+
+      // ...and the committed artifacts still OPEN and READ while the variable
+      // points at an empty directory.
+      const probeDb = await Database.open(FIXTURE_ROOT, { schema: SCHEMA });
+      try {
+        const result = await probeDb.executeNative(QUERY);
+        expect(result.rows.map((row) => row.id).sort()).toEqual([1, 2, 3]);
+      } finally {
+        await probeDb.close();
+      }
+      const reference = JSON.parse(fs.readFileSync(PARITY_FACTS, 'utf8'));
+      expect(reference.udts['row1.c'].typeName).toBe('collide');
+    } finally {
+      // Restore BEFORE anything else can observe the probe's state: the
+      // re-required setup.js reassigns `global.testPaths`, and three env vars
+      // were changed. No sibling test may see either.
+      global.testPaths = savedTestPaths;
+      for (const [name, value] of Object.entries(savedEnv)) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+      fs.rmSync(bogus, { recursive: true, force: true });
+    }
+  });
 });
