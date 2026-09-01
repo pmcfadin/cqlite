@@ -207,10 +207,14 @@ pub enum Divergence {
     /// at it, a malformed `{key,value}` entry, and a differing entry COUNT. Each of
     /// those is reported as an ordinary diff naming this gap.
     ///
-    /// DECLARED RESIDUAL, and it is the whole of what this gap costs: the map's
-    /// VALUES are not compared, because the entries can only be paired by their
-    /// keys and neither side's key is a value this lane can read. Nor is what the
-    /// blob's bytes DECODE TO — recovering that would mean re-implementing
+    /// DECLARED RESIDUAL, and it is the whole of what this gap costs: the KEY's
+    /// CONTENT is not compared, because neither side's key is a value this lane can
+    /// read. The entry VALUES are — `super::map::compare_map` pairs the entries
+    /// POSITIONALLY (emitted order is a map's order here, and both sides preserve
+    /// it), reports each unpairable key at its own node where this gap suppresses
+    /// it, and compares the value beside it like any other. Suppressing those too
+    /// was roborev job 28: measured, a value changed 90 -> 999 produced ZERO diffs.
+    /// Nor is what the blob's bytes DECODE TO recovered — that would mean re-implementing
     /// Cassandra's tuple and UDT value serializers here, exactly as
     /// [`Divergence::NestedFrozenUdtRendersAsBlobHex`] declares one level down. The
     /// egress-side defect (a real `SELECT` returns the decoded tuple) is a
@@ -274,8 +278,9 @@ impl Divergence {
                 "the golden leaves a MULTICELL map's container-typed key UNDECODED as \
                  getString's flat cell-path text (writeString, not toJSONString) while \
                  the egress renders the key's raw bytes as a CQL blob literal (`0x` + \
-                 hex digits) — neither side decodes it, so the entries cannot be \
-                 paired and the map's VALUES are not compared"
+                 hex digits) — neither side decodes it, so the KEY's content cannot be \
+                 compared; the entries are still paired in emitted order and their \
+                 VALUES compared"
             }
         }
     }

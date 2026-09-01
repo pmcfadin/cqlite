@@ -739,7 +739,7 @@ const CASES: &[Case] = &[
                 path: "m_tuple_udt",
                 formats: BOTH,
                 divergence: Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
-                why: "the ONE multicell map here: golden leaves the key as sstabledump's colon-joined getString cell-path text while the CLI renders the key's raw bytes as a 0x blob literal — neither side decodes it, so the entries cannot be paired and the map's VALUES are NOT compared (the key spellings, the entry count and the {key,value} shape ARE checked)",
+                why: "the ONE multicell map here: golden leaves the key as sstabledump's colon-joined getString cell-path text while the CLI renders the key's raw bytes as a 0x blob literal — neither side decodes it, so only the KEY'S CONTENT is uncompared; the entry count, the {key,value} shape, both key SPELLINGS and every entry VALUE (paired in emitted order) ARE compared",
             },
         ],
     },
