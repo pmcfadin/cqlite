@@ -416,7 +416,23 @@ add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
 # including all four named across those three rounds — and 5 of 5 guard/redirection/assignment
 # forms CLEAN. Widening the numeric syntax again is impossible by construction, because no
 # numeric syntax is written down any more.
-RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9.][^[:space:]|;&<>()]*([[:space:]]|$)'
+#
+# AND THE DURATION DOES NOT HAVE TO SIT NEXT TO `timeout` (#3756 roborev round 4). The rule
+# required it to be the FIRST token, so `timeout -s KILL 300 …` was invisible — and there was
+# one, UNGUARDED, in a file this very issue had just brought into scope
+# (test_bootstrap_agent_machine.sh, the notify-root helper). The widening's own promise was
+# therefore not being kept for a real instance sitting inside the newly scanned set.
+#
+# The run admits an option token plus, optionally, ONE following non-option token (its argument),
+# which is what reaches the duration in `-s KILL 300` and `-k 5 30`. That shape is safe HERE and
+# is deliberately NOT what residual 4a refuses for xargs: timeout's operand after the options is
+# a DURATION, recognisable by shape, whereas xargs's is a COMMAND that looks like anything — so
+# `xargs -0 rm -rf` is ambiguous and `timeout -s KILL 300` is not. Measured: 7 of 7 option-bearing
+# and bare spellings FLAGGED, 0 of 7 guard/redirection/assignment/prose forms flagged, and a sweep
+# of the whole scanned set surfaced exactly three real sites — the one roborev named plus two in
+# bootstrap that ARE correctly guarded by `have timeout` and now say so with a marker.
+_TIMEOUT_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+([[:space:]]+[^-[:space:]|;&<>()][^[:space:]|;&<>()]*)?)*'
+RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout'"$_TIMEOUT_OPT_RUN"'[[:space:]]+[0-9.][^[:space:]|;&<>()]*([[:space:]]|$)'
 add_construct "$RE_TIMEOUT_UNGUARDED" \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -1203,10 +1219,13 @@ printf '%s\n' \
   '  if [ "$(command -v timeout 2>/dev/null)" != "" ]; then' \
   '  exec 2>/dev/null' \
   '  x=$(command -v timeout 2>&1)' \
-  '  timeout=5' >"$tmp/timeout-ok.sh"
+  '  timeout=5' \
+  '  B=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)' \
+  '  run=${pin_ax_timeout:+"$pin_ax_timeout" -s KILL 120}' \
+  '  echo "timeout after 30s"' >"$tmp/timeout-ok.sh"
 scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-ok.sh"
 case $? in
-  1) ok 'structural control: the guard this rule RECOMMENDS (`command -v timeout 2>/dev/null`, `2>&1`), a bare `exec 2>/dev/null` and a `timeout=5` ASSIGNMENT are not flagged — a digit that begins a REDIRECTION is not a duration' ;;
+  1) ok 'structural control: the guards this rule RECOMMENDS (`command -v timeout 2>/dev/null`, the `|| command -v gtimeout` fallback, a `${var:+"$var" -s KILL 120}` expansion), a bare `exec 2>/dev/null`, a `timeout=5` ASSIGNMENT and prose (`echo "timeout after 30s"`) are not flagged — a digit that begins a REDIRECTION is not a duration, and neither is a word' ;;
   0) bad "structural control: the timeout rule flags its own recommended guard — a lint that reds on the remedy it prints is the lint agents learn to waive: $(scan_all_hits)" ;;
   *) : ;; # already counted by scan_found
 esac
@@ -1220,7 +1239,10 @@ printf '%s\n' \
   '  timeout 1e2 flaky-command' \
   '  timeout 1.5e2s flaky-command' \
   '  timeout 1. flaky-command' \
-  '  t=$(timeout 20 bash -c x)' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+  '  t=$(timeout 20 bash -c x)' \
+  '  timeout -s KILL 300 "$PIN_BS" run' \
+  '  timeout -k 5 30 cmd' \
+  '  timeout --preserve-status 30 cmd' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
 _timeout_missed=''
 _timeout_broke=0
 while IFS= read -r _tl; do
@@ -1236,7 +1258,7 @@ done <"$tmp/timeout-bad.sh"
 if [ "$_timeout_broke" -eq 1 ]; then
   : # already counted by scan_found
 elif [ -z "$_timeout_missed" ]; then
-  ok 'structural control: every real `timeout <duration> cmd` spelling is FLAGGED — integer, GNU suffix, and the FRACTIONAL / LEADING-DOT / EXPONENT / TRAILING-DOT forms (0.5, .5, 1.5s, 1e2, 1.5e2s, 1.) named across three review rounds, which the original [0-9] rule caught and a numeric grammar kept losing. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
+  ok 'structural control: every real `timeout <duration> cmd` spelling is FLAGGED — bare and OPTION-BEARING (-s KILL 300, -k 5 30, --preserve-status 30), plus the FRACTIONAL / LEADING-DOT / EXPONENT / TRAILING-DOT forms (0.5, .5, 1.5s, 1e2, 1.5e2s, 1.) named across three review rounds, which the original [0-9] rule caught and a numeric grammar kept losing. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
 else
   bad "structural control: the timeout rule no longer detects:$_timeout_missed — the false-positive fix narrowed it past its subject, which is a coverage loss dressed as a fix"
 fi

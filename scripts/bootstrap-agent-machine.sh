@@ -3045,8 +3045,8 @@ else
     # measured in #3119, the pristine upstream copy HANGS when it inherits a tty
     # stdin, and bootstrap must never wedge on an optional version probe.
     NOTIFY_ADJUNCT_VER=""
-    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then
-      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1)
+    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then # portability-lint-allow: GUARDED by `have timeout` AND a functional probe on the same line — this IS the remedy the rule recommends
+      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1) # portability-lint-allow: inside the `have timeout &&` guard above; the lint is line-oriented and cannot see an enclosing if
     fi
     info "optional local adjunct: ${NOTIFY_ADJUNCT_VER:-agent-notify (version not probed)} — desktop/sound only, no version requirement"
   else

@@ -2830,10 +2830,21 @@ MUT
   fi
   return 0
 }
+# THE RUNAWAY BOUND IS RESOLVED, NOT ASSUMED (#3756 roborev round 4). `timeout(1)` is not on
+# stock macOS — which is the platform class this whole file's portability work is about — so an
+# unguarded `timeout -s KILL 300` here would fail for the HARNESS's reason on exactly the hosts
+# the suite exists to protect. Resolve once, try the coreutils `gtimeout` spelling too, and
+# degrade to an UNBOUNDED run when neither exists: the bound is a runaway guard, not the property
+# under test, and losing it is better than a case that cannot run. Same `${var:+…}` idiom the
+# gate-pin cases already use for their own bound.
+NOTIFY_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+[ -n "$NOTIFY_TIMEOUT_BIN" ] \
+  || echo "note: no timeout(1)/gtimeout on this host — the notify-capability cases run UNBOUNDED"
 runnotifyroot() { # runnotifyroot <dir> [env assignments...]
   local dir="$1"; shift
   env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
-    timeout -s KILL 300 "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
+    ${NOTIFY_TIMEOUT_BIN:+"$NOTIFY_TIMEOUT_BIN" -s KILL 300} \
+    "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
 }
 
 # (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
