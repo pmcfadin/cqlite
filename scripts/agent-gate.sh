@@ -1634,6 +1634,10 @@ PYTHON_LITE_TIER_CMD="$PYTHON_LITE_MATURIN_CMD && $PYTHON_LITE_PYTEST_CMD"
 # run_scoped_tests; rendered by run_lite as a `python-tier:` line. Empty (no line)
 # when the diff has no python-binding change.
 PYTHON_TIER_NOTE=""
+# #3625 (roborev job 368, low): the FINALIZED component status, published by record_result
+# for the caller's progress line. Initialised here so `set -u` is satisfied on any path
+# that reads it, and so it can never carry a value in from the environment.
+RECORDED_STATUS=""
 
 # Read changed repo-relative paths on stdin; emit the deduped set of owning Cargo
 # workspace packages (one per line) — the union of path-owners + changed
@@ -6984,16 +6988,41 @@ _census_libtest_tally() {
   ' < "$1"
 }
 
-# _census_compile_tally <stripped-log> -> "<cargo Executable status lines>"
+# _census_compile_tally <stripped-log> -> "<Executable lines> <cargo status lines>"
 #
-# `cargo test -q` SUPPRESSES the `Executable` status line while leaving libtest's
-# `test result:` intact (measured, #3625 census audit LOW 3). So a `-q` lane can be
-# declared `libtest` safely and can NEVER be declared `compile` or `both`: adding a
-# `--no-run` pass to a quiet lane would silently measure ZERO test binaries and render a
-# healthy component VACUOUS. `kit-dashboard-drift` is the only `-q` lane in the gate today
-# and is correctly `libtest`; this note exists so it stays that way.
+# TWO FIELDS, BECAUSE "no Executable line" HAS TWO CAUSES AND ONLY ONE OF THEM IS A ZERO
+# (roborev job 368, blocker 1). This is #3400 GENERALIZED: that rule is about a cargo-output
+# parse keyed on a PRESENTATION property, colour was one instance, and QUIET is another.
+# `Executable` is suppressed not only by a `-q` on the command line (#3625 census audit
+# LOW 3) but by `CARGO_TERM_QUIET=true` in the ENVIRONMENT and by `[term] quiet = true` in
+# any `.cargo/config.toml` — neither of which is visible at the call site, so a box carrying
+# either would have made `feature-iso-parquet` and `minimal-build` measure ZERO and read
+# VACUOUS on every gate, on correct input.
+#
+# MEASURED (2026-09-01, throwaway crate, both mechanisms):
+#   * quiet suppresses EVERY cargo status line — `Compiling`, `Finished`, `Running`,
+#     `Executable`. A `cargo test --lib --no-run` under quiet produces a COMPLETELY EMPTY
+#     log. That is what makes the presence probe possible and reliable: there is no partial
+#     state to misread.
+#   * libtest's `running N tests` / `test result:` are UNAFFECTED by either mechanism, so
+#     the `libtest` kind needs no equivalent probe. (That asymmetry is also why a `-q` lane
+#     is safe declared `libtest` and can never be `compile`/`both`; `kit-dashboard-drift` is
+#     the only `-q` lane today and is correctly `libtest`.)
+#
+# So the second field counts cargo STATUS lines of any kind. `Finished` is its load-bearing
+# member — every successful cargo invocation prints one unless quiet is in force — and the
+# rest are carried so a run that dies mid-compile still probes as "status output present".
+# Both anchors are the STATUS WORD ALONE (`$1` after the strip), never `<status> <payload>`,
+# for the #3400 reason. Erring NARROW is deliberate: an unrecognised status word makes the
+# probe say "suppressed", which routes to the NON-FATAL NOT-MEASURED, while erring wide
+# would route a suppressed log to the FATAL ZERO.
 _census_compile_tally() {
-  awk '$1 == "Executable" { n += 1 } END { printf "%d\n", n + 0 }' < "$1"
+  awk '
+    $1 == "Executable" { n += 1 }
+    $1 == "Compiling" || $1 == "Checking" || $1 == "Finished" || $1 == "Fresh" ||
+    $1 == "Building"  || $1 == "Running"  || $1 == "Executable" { st += 1 }
+    END { printf "%d %d\n", n + 0, st + 0 }
+  ' < "$1"
 }
 
 # _census_driver_tally <driver> <stripped-log> -> "COUNT <n>" | "ZERO" | "NONE"
@@ -7066,7 +7095,9 @@ _census_driver_tally() {
 # logic would be a second place for it to drift. <concrete-kind> is one of the measurable
 # kinds only — libtest / compile / both / indirect:<driver> — never a declaration form.
 _census_measure_kind() {
-  local comp="$1" kind="$2" line log src tally total seen bins
+  local comp="$1" kind="$2" line log src tally total seen bins ctally cargo_status=0
+  # THE ONE SPELLING of "cargo printed nothing we could count, and that is not a zero".
+  local quiet_note="cargo status output is SUPPRESSED in this log (CARGO_TERM_QUIET, a [term] quiet=true in some .cargo/config.toml, or a -q on the invocation), so no 'Executable' line could exist — this is NOT a measured zero. Remedy: unset the quiet setting on this box" 
   log="${LOG_DIR:-}/$comp.log"
   src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
   if [ -z "$src" ] || [ ! -r "$src" ]; then
@@ -7105,12 +7136,13 @@ _census_measure_kind() {
   esac
   case "$kind" in
     compile|both)
-      bins=$(_census_compile_tally "$src" 2>/dev/null) || bins=""
-      if [ -z "$bins" ]; then
+      ctally=$(_census_compile_tally "$src" 2>/dev/null) || ctally=""
+      if [ -z "$ctally" ]; then
         rm -f "$src" 2>/dev/null || true
         line="NOT-MEASURED the cargo Executable tally over $comp.log could not be computed"
         _census_write "$comp" "$line"; printf '%s' "$line"; return 0
-      fi ;;
+      fi
+      bins=${ctally%% *}; cargo_status=${ctally##* } ;;
   esac
   # The derived `<log>.ansi-stripped` sibling is a full COPY of the component log, and
   # core-tests' runs to tens of MB — retained, it would silently double the size of the
@@ -7127,14 +7159,25 @@ _census_measure_kind() {
         line="COUNT $total tests passed (across $seen result line(s))"
       fi ;;
     compile)
-      if [ "$bins" -eq 0 ]; then
-        line="ZERO test binaries — $comp.log carries no cargo 'Executable' status line, so nothing was built or verified fresh"
+      if [ "$cargo_status" -eq 0 ]; then
+        line="NOT-MEASURED $quiet_note"
+      elif [ "$bins" -eq 0 ]; then
+        line="ZERO test binaries — $comp.log carries cargo status output but no 'Executable' line, so nothing was built or verified fresh"
       else
         line="COUNT $bins test binaries built/verified"
       fi ;;
     both)
-      if [ "$total" -eq 0 ] && [ "$bins" -eq 0 ]; then
-        line="ZERO tests and test binaries — $comp.log carries neither a libtest tally nor a cargo 'Executable' status line"
+      # The two subjects are probed INDEPENDENTLY: libtest output survives quiet, cargo
+      # status output does not, so a quiet box must not turn a lane's measurable half into
+      # a claim about its unmeasurable one.
+      if [ "$cargo_status" -eq 0 ]; then
+        if [ "$total" -eq 0 ]; then
+          line="NOT-MEASURED no libtest tally in $comp.log, and $quiet_note"
+        else
+          line="COUNT $total tests passed (test binaries NOT MEASURED: $quiet_note)"
+        fi
+      elif [ "$total" -eq 0 ] && [ "$bins" -eq 0 ]; then
+        line="ZERO tests and test binaries — $comp.log carries cargo status output but neither a libtest tally nor an 'Executable' line"
       else
         line="COUNT $total tests passed and $bins test binaries built/verified"
       fi ;;
@@ -7229,14 +7272,35 @@ _census_scoped_record() {
 # _census_status_for <status> <census-line>: the AC2 coupling. AFFIRMATIVE by
 # construction -- a PASS survives only on a state that is explicitly non-fatal;
 # anything unrecognised is FAIL, never the permissive branch.
+#
+# THE CENSUS STATE IS JUDGED BEFORE THE STATUS, AND THAT ORDER IS THE FIX FOR A REAL HOLE
+# (roborev job 368, blocker 2). This used to return every non-PASS status untouched, so
+# `UNDECLARED` — the fail-closed state that is supposed to make "a new component cannot
+# join the gate with a blank census" true — was NOT fatal when the component SKIPped. That
+# is the completeness guarantee failing exactly where it is least likely to be noticed: a
+# NEW component that SKIPs on the box where it is first run. Ask the standing question of
+# this key — what fails the run if THIS key alone goes bad? — and the answer had been
+# "nothing, on a SKIP".
+#
+# So there are two independent judgements, in this order:
+#   (1) is the RECORD itself sound? `UNDECLARED` and any unrecognised/empty state are
+#       facts about the TABLE and about our own machinery, not about this run's outcome, so
+#       they are FATAL at ANY status.
+#   (2) only then does the run's own status decide, with ZERO promoting a PASS to VACUOUS.
 _census_status_for() {
   local st="$1" state
-  [ "$st" = PASS ] || { printf '%s' "$st"; return 0; }
   state=${2%% *}
   case "$state" in
-    COUNT|GAP|NOT-MEASURED|NOT-APPLICABLE) printf 'PASS' ;;
-    ZERO)                                  printf 'VACUOUS' ;;
-    *)                                     printf 'FAIL' ;;
+    # (1) An unsound record fails the run whatever the component did.
+    UNDECLARED) printf 'FAIL'; return 0 ;;
+    COUNT|ZERO|GAP|NOT-MEASURED|NOT-APPLICABLE) ;;
+    *)          printf 'FAIL'; return 0 ;;
+  esac
+  # (2) A non-PASS component keeps its own status: there is no PASS to promote or demote.
+  [ "$st" = PASS ] || { printf '%s' "$st"; return 0; }
+  case "$state" in
+    ZERO) printf 'VACUOUS' ;;
+    *)    printf 'PASS' ;;
   esac
 }
 
@@ -9827,6 +9891,20 @@ record_result() { # <name> <status> <seconds>
   local _rr_status
   _hb_ensure
   _rr_status=$(_census_finalize "$1" "$2")
+  # THE FINALIZED STATUS, PUBLISHED FOR THE CALLER'S PROGRESS LINE (roborev job 368, low).
+  # record_result can turn a PASS into VACUOUS (a measured-zero census) or FAIL (an
+  # undeclared one), and every caller used to print its OWN unchanged local `$status`
+  # afterwards — so a no-op component printed `>>> [x] PASS` to the run log while the
+  # SUMMARY reported failure. A gate log that makes an affirmatively false statement is
+  # worse than silence: it is the first thing a human reads when triaging, and it is what
+  # stops the next person looking. A GLOBAL rather than a return value because ~115 call
+  # sites already print a line of their own after this call and each is in a different
+  # function; `scripts/tests/test_agent_gate_census.sh` asserts structurally that no
+  # progress line prints a raw `$status` after record_result, so a new caller cannot
+  # reintroduce the lie. The two paths that never reach record_result (run_scoped_tests'
+  # terminal paths) reassign their own `$status` from _census_finalize and are correct
+  # without it.
+  RECORDED_STATUS="$_rr_status"
   printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"
   # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
   # reader, which would silently absorb a third into $_secs. The feature matrix rides a
@@ -11151,7 +11229,7 @@ run_component() { # run_component <name> <cmd...>
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # python-bindings: build the extension with maturin and run pytest. Unlike the
@@ -11228,7 +11306,7 @@ run_python_bindings() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # _node_bindings_corpus_present: does CQLITE_DATASETS_ROOT hold a corpus the node jest
@@ -11589,7 +11667,7 @@ run_node_bindings() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   if [ ! -r "$list_file" ]; then
@@ -11601,7 +11679,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   # ORACLE A — jest's own list, normalised. Both sides are reduced to their path RELATIVE
@@ -11633,7 +11711,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11654,7 +11732,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   # `-print0` and a NUL-vs-line count assert: a filename containing a newline would be
@@ -11674,7 +11752,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   _nb_nuls=$(find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
@@ -11692,7 +11770,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11710,7 +11788,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   if [ -n "$only_disk" ] || [ -n "$only_jest" ]; then
@@ -11737,7 +11815,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11758,7 +11836,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   echo ">>> [$name] suite set RECONCILED: $suite_n *.test.js file(s) — two INDEPENDENT oracles agree (recursive find over __test__/ vs ./node_modules/.bin/jest --listTests); neither alone could detect a config exclusion (#3522 D1)"
@@ -11813,7 +11891,7 @@ run_node_bindings() {
     _node_leak_lane_note SKIP-OPTOUT > "$(_node_leak_lane_note_file)"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   if [ "$_dm_rc" -ne 0 ]; then
@@ -11835,7 +11913,7 @@ run_node_bindings() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   echo ">>> [$name] corpus complete: check-dataset-manifest.sh verified every expected table under $CQLITE_DATASETS_ROOT/sstables (#3493)"
@@ -11903,7 +11981,7 @@ run_node_bindings() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # Partition a package's DERIVED integration targets into the ones cargo can actually
@@ -12206,7 +12284,7 @@ EOF
     cat "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -12394,7 +12472,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # delivery-telemetry: run the delivery-pipeline telemetry tool's unit test
@@ -12444,7 +12522,7 @@ run_delivery_telemetry() {
     echo "     failed derivation, never a pass over nothing)"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   status=PASS
@@ -12523,7 +12601,7 @@ run_delivery_telemetry() {
   done
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # oom-audit: the STREAM_RETURNS_VEC static AST audit (issue #2012) run in
@@ -12580,7 +12658,7 @@ run_oom_audit() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # compaction-byte-parity: the PR-VISIBLE proxy for the nightly-only Java
@@ -12658,7 +12736,7 @@ run_compaction_byte_parity() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032, extended
@@ -12762,7 +12840,7 @@ run_bti_multiclustering() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # query-semantics-oracle: the QUERY-SEMANTICS parity lane (issue #1742), DISTINCT
@@ -12810,7 +12888,7 @@ run_query_semantics_oracle() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # flight-query-semantics-oracle: the QUERY-SEMANTICS parity lane routed through the
@@ -12875,7 +12953,7 @@ run_flight_query_semantics_oracle() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # _resolved_package_features <package> [cargo-feature-flag…]: print " a b c " — the
@@ -13227,7 +13305,7 @@ run_flight_tests() {
       } | tee "$log"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
     echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
@@ -13251,7 +13329,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -13274,7 +13352,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -13309,7 +13387,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -13347,7 +13425,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   while IFS=$'\t' read -r gname grel ggate; do
@@ -13444,7 +13522,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # legacy-heuristics: BUILD cqlite-core at `default + legacy-heuristics` AND EXECUTE
@@ -14244,7 +14322,7 @@ run_legacy_heuristics() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   # HOISTED ABOVE THE TARGET LOOP (roborev round-36). It used to be resolved here, ~200 lines
@@ -14263,7 +14341,7 @@ run_legacy_heuristics() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id _mt_cnt _mt_rc _pol_rc
@@ -14318,7 +14396,7 @@ run_legacy_heuristics() {
         } | tee "$log"
         end=$(date +%s)
         record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
         return 0
       fi
       if [ -s "$_mt_fatal" ]; then
@@ -14332,7 +14410,7 @@ run_legacy_heuristics() {
         } | tee "$log"
         end=$(date +%s)
         record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
         return 0
       fi
       # BUFFERED, not emitted here (roborev job 97, Medium + Low). Two reasons, and both were
@@ -14378,7 +14456,7 @@ run_legacy_heuristics() {
             echo "        zero-tests guard, so an empty run would pass."
           } | tee -a "$log"
           end=$(date +%s); record_result "$name" "$status" "$((end - start))"
-          echo ">>> [$name] $status ($((end - start))s)"; return 0
+          echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"; return 0
         fi
         if [ "${_mt_cnt:-0}" -gt 0 ]; then _mt_hit=1; break; fi
       done <<EOF
@@ -14515,7 +14593,7 @@ EOF
         } | tee "$log"
         end=$(date +%s)
         record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
         return 0
       fi
     fi
@@ -14567,7 +14645,7 @@ EOF
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -14651,7 +14729,7 @@ EOF
       echo "        clean zero gap. A census that could not be taken is never reported as empty."
     } | tee -a "$log"
     end=$(date +%s); record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"; return 0
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"; return 0
   fi
   while IFS= read -r _libsrc; do
     [ -n "$_libsrc" ] || continue
@@ -14680,7 +14758,7 @@ EOF
       } | tee "$log"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
     # A census that CANNOT be taken is never reported as empty (the lane's standing rule):
@@ -14694,7 +14772,7 @@ EOF
       } | tee "$log"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
     while IFS=$'\t' read -r _k _ln _ms; do
@@ -14823,7 +14901,7 @@ EOF
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -14862,7 +14940,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # run_feature_iso <feature>: ONE isolation lane, parameterized by the feature under
@@ -15124,7 +15202,7 @@ run_all_features_check() {
     echo "--- end of $name output ---"
   fi
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # parity-report: verify the committed derived parity report is not stale vs its
@@ -15182,7 +15260,7 @@ run_parity_report() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # operator-metrics-doc: verify the committed operator-facing Flight metrics
@@ -15239,7 +15317,7 @@ run_operator_metrics_doc() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # kit-dashboard-drift: verify the kit Grafana dashboard
@@ -15297,7 +15375,7 @@ run_kit_dashboard_drift() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # pub-surface: the CRATE-ROOT DECLARATION-CONSISTENCY guard for cqlite-core (issue
@@ -15436,7 +15514,7 @@ run_pub_surface() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
@@ -15557,7 +15635,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15573,7 +15651,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15592,7 +15670,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15609,7 +15687,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15621,7 +15699,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15641,7 +15719,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15663,7 +15741,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15684,7 +15762,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15705,7 +15783,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15724,7 +15802,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15742,7 +15820,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15767,7 +15845,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15792,7 +15870,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15815,7 +15893,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15852,7 +15930,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15906,7 +15984,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15931,7 +16009,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15947,7 +16025,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15973,7 +16051,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15999,7 +16077,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16029,7 +16107,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16053,7 +16131,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16104,7 +16182,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16142,7 +16220,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16208,7 +16286,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16220,7 +16298,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16232,7 +16310,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16279,7 +16357,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16311,7 +16389,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16342,7 +16420,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16372,7 +16450,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16402,7 +16480,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16436,7 +16514,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16497,7 +16575,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16532,7 +16610,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16556,7 +16634,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16595,7 +16673,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16615,7 +16693,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16629,7 +16707,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16646,7 +16724,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16661,7 +16739,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16678,7 +16756,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16694,7 +16772,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16710,7 +16788,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16732,7 +16810,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16749,7 +16827,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16765,7 +16843,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16784,7 +16862,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16802,7 +16880,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16823,7 +16901,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16841,7 +16919,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16859,7 +16937,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16876,7 +16954,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16904,7 +16982,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16918,7 +16996,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16935,7 +17013,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16953,7 +17031,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16970,7 +17048,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16987,7 +17065,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17004,7 +17082,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17028,7 +17106,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17051,7 +17129,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17071,7 +17149,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17093,7 +17171,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17114,7 +17192,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17141,7 +17219,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17165,7 +17243,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17203,7 +17281,7 @@ run_tooling_tests() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # file-size: the campsite-rule ratchet (epic #1116 / #1135). Two parts:
@@ -17519,9 +17597,19 @@ run_file_size() {
   # check becomes implementable, and THIS REJECTION IS VOID: re-examine the finding on its
   # merits rather than citing this comment, which would then be arguing for a constraint
   # that no longer exists.
-  printf '%s\n' ">>> [$name] $status ($((end - start))s)" 2>/dev/null >>"$log"
+  # ORDER CHANGED BY #3625 (roborev job 368, low), and it does NOT touch the rejection
+  # above. Both sinks now print the FINALIZED status, so `record_result` has to run first.
+  # Re-checking that comment's own falsification test: (a) this line's content is still the
+  # component verdict, and (b) it still depends on the persistence decision computed above —
+  # neither condition is broken, so the rejection stands as written. What the move costs is
+  # bounded and worth naming: if a mid-run tree-integrity detection makes record_result emit
+  # and exit, this component log loses its terminal verdict LINE. That is strictly better
+  # than the alternative, which was printing a verdict the census may have just changed —
+  # the SUMMARY carries the real one either way, and a log that states a FALSE verdict is
+  # what stops the next person looking.
   record_result "$name" "$status" "$((end - start))"
-  printf '%s\n' ">>> [$name] $status ($((end - start))s)"
+  printf '%s\n' ">>> [$name] $RECORDED_STATUS ($((end - start))s)" 2>/dev/null >>"$log"
+  printf '%s\n' ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.

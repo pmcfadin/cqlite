@@ -777,10 +777,16 @@ else
   } > "$tmp/census-colour.log"
   cen_raw=$( set +e; . "$tmp/census_parsers.sh"; _census_compile_tally "$tmp/census-colour.log" )
   cen_stripped=$( set +e; . "$tmp/census_parsers.sh"; s=$(_ansi_stripped_log "$tmp/census-colour.log"); _census_compile_tally "$s" )
-  if [ "$cen_raw" = 0 ] && [ "$cen_stripped" = 1 ]; then
-    ok "A7a: _census_compile_tally counts 0 'Executable' lines on the COLOURED log and 1 after _ansi_stripped_log — the strip carries the correctness (an unrouted call would report a healthy --no-run lane as having built nothing)"
+  # TWO FIELDS since #3625/roborev job 368: "<Executable lines> <cargo status lines>". The
+  # second is a SUPPRESSION PROBE — quiet removes every cargo status line, and a log with
+  # none is NOT-MEASURED rather than a measured zero. Colour breaks BOTH fields, which is
+  # why the raw parse reads '0 0': it under-counts the binaries AND reports the log as
+  # carrying no cargo output at all, i.e. it would misroute a healthy coloured run into the
+  # suppression branch.
+  if [ "$cen_raw" = "0 0" ] && [ "$cen_stripped" = "1 1" ]; then
+    ok "A7a: _census_compile_tally reads '0 0' on the COLOURED log and '1 1' after _ansi_stripped_log — the strip carries the correctness for the Executable count AND for the cargo-status suppression probe"
   else
-    bad "A7a: expected raw=0 stripped=1 from the census compile tally, got raw='$cen_raw' stripped='$cen_stripped'"
+    bad "A7a: expected raw='0 0' stripped='1 1' from the census compile tally, got raw='$cen_raw' stripped='$cen_stripped'"
   fi
   cen_lt=$( set +e; . "$tmp/census_parsers.sh"; s=$(_ansi_stripped_log "$tmp/census-colour.log"); _census_libtest_tally "$s" )
   if [ "$cen_lt" = "4 1" ]; then

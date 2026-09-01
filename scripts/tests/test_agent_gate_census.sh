@@ -246,17 +246,21 @@ else
   bad "C0b: the fixture does not reproduce the colour placement, so C1's RED means nothing"
 fi
 
+# The tally is TWO-FIELD since #3625/job 368: "<Executable lines> <cargo status lines>".
+# BOTH fields are colour-sensitive — every cargo status word carries the same escapes —
+# which makes the raw parse doubly wrong: it under-counts the binaries AND reports the log
+# as carrying no cargo output at all.
 raw_bins=$(_census_compile_tally "$tmp/c.log")
-if [ "$raw_bins" = 0 ]; then
-  ok "C1 (RED, pinned defect): parsing the COLOURED log RAW counts 0 test binaries — the measured-ZERO that would render a healthy --no-run lane VACUOUS"
+if [ "$raw_bins" = "0 0" ]; then
+  ok "C1 (RED, pinned defect): parsing the COLOURED log RAW yields '0 0' — 0 test binaries AND 0 cargo status lines, so an unrouted parse would report a healthy --no-run lane as carrying no cargo output whatsoever"
 else
-  bad "C1 (RED): the coloured log parsed raw already yields $raw_bins — the fixture no longer reproduces the #3400 hazard, so C2 proves nothing"
+  bad "C1 (RED): the coloured log parsed raw already yields '$raw_bins' — the fixture no longer reproduces the #3400 hazard, so C2 proves nothing"
 fi
 src=$(_ansi_stripped_log "$tmp/c.log") || src=""
-if [ -n "$src" ] && [ "$(_census_compile_tally "$src")" = 2 ]; then
-  ok "C2 (GREEN): routed through _ansi_stripped_log the SAME coloured log counts 2 test binaries — the strip carries the correctness"
+if [ -n "$src" ] && [ "$(_census_compile_tally "$src")" = "2 4" ]; then
+  ok "C2 (GREEN): routed through _ansi_stripped_log the SAME coloured log counts 2 test binaries across 4 cargo status lines — the strip carries the correctness for BOTH fields"
 else
-  bad "C2 (GREEN): expected 2 test binaries after the strip, got '$(_census_compile_tally "${src:-/dev/null}")'"
+  bad "C2 (GREEN): expected '2 4' after the strip, got '$(_census_compile_tally "${src:-/dev/null}")'"
 fi
 if [ "$(_census_libtest_tally "$tmp/p.log")" = "5 2" ]; then
   ok "C3: the libtest tally SUMS every result line (5 + a 0-passed doc-test line = 5 across 2 lines) — a normal 0-passed doc-test cannot by itself make a lane read vacuous"
@@ -277,7 +281,7 @@ fi
 # `test result:`. That is what makes a 0s lane's re-verification measurable at all.
 printf '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n  Executable unittests src/lib.rs (target/debug/deps/dw-e20e08564b117d3a)\n' > "$tmp/warm-norun.log"
 printf '     Running unittests src/lib.rs (target/debug/deps/dw-e20e08564b117d3a)\ntest result: ok. 3 passed; 0 failed; 0 ignored\n' > "$tmp/warm-run.log"
-if [ "$(_census_compile_tally "$tmp/warm-norun.log")" = 1 ] \
+if [ "$(_census_compile_tally "$tmp/warm-norun.log")" = "1 2" ] \
    && [ "$(_census_libtest_tally "$tmp/warm-run.log")" = "3 1" ]; then
   ok "C5 (AC4 oracle): a WARM --no-run log still yields 1 binary and a WARM run log still yields 3 tests — cargo caches COMPILATION, never EXECUTION, so a 0s lane has something affirmative to say"
 else
@@ -970,6 +974,187 @@ if [ "$kd" = libtest ] && [ "$q_ok" -eq 1 ]; then
 else
   bad "M5: kit-dashboard-drift is '$kd' (want libtest) and/or the -q trap is not recorded at _census_compile_tally (q_ok=$q_ok)"
 fi
+# ---------------------------------------------------------------------------
+# (N) QUIET IS #3400's SECOND DIMENSION — roborev job 368, blocker 1.
+#
+# #3400 is about a cargo-output parse keyed on a PRESENTATION property. Colour was one
+# instance; QUIET is another, and the `Executable` anchor was colour-immune and still
+# presentation-dependent in that second dimension. `-q` on the command line was already
+# noted (census audit LOW 3), but `CARGO_TERM_QUIET=true` in the ENVIRONMENT and
+# `[term] quiet = true` in ANY `.cargo/config.toml` are invisible at the call site, so a box
+# carrying either would have made `feature-iso-parquet` and `minimal-build` measure ZERO and
+# read VACUOUS on EVERY gate — reddening correct input, fleet-wide.
+#
+# FIXTURE PROVENANCE, measured 2026-09-01 against real cargo, BOTH mechanisms:
+#   * quiet suppresses EVERY cargo status line — `Compiling`, `Finished`, `Running`,
+#     `Executable` — so `cargo test --lib --no-run` under quiet emits a COMPLETELY EMPTY
+#     log. There is no partial state to misread, which is what makes a presence probe sound.
+#   * libtest's `running N tests` / `test result:` are UNAFFECTED by either mechanism.
+# Both facts are asserted below as fixture properties, so a future cargo that changed either
+# would red HERE rather than silently invalidate the probe.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/quietlogs"; mkdir -p "$LOG_DIR"
+: > "$tmp/quiet-norun.log"                       # what quiet really produces: nothing
+printf '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n  Executable unittests src/lib.rs (target/debug/deps/dw-1)\n  Executable tests/foo.rs (target/debug/deps/foo-1)\n' > "$tmp/loud-norun.log"
+if [ "$(_census_compile_tally "$tmp/quiet-norun.log")" = "0 0" ] \
+   && [ "$(_census_compile_tally "$tmp/loud-norun.log")" = "2 3" ]; then
+  ok "N0: the compile tally is TWO-FIELD — a quiet --no-run log measures '0 executables, 0 cargo status lines' while the same run non-quiet measures '2 executables, 3 status lines'. Zero-executables and no-cargo-output-at-all are now different facts"
+else
+  bad "N0: expected '0 0' quiet and '2 3' loud, got '$(_census_compile_tally "$tmp/quiet-norun.log")' / '$(_census_compile_tally "$tmp/loud-norun.log")'"
+fi
+# THE VERDICT SPLIT, driven through the real measurer on a real `compile` component.
+cp "$tmp/quiet-norun.log" "$LOG_DIR/feature-iso-parquet.log"
+got=$(_census_measure feature-iso-parquet PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'NOT-MEASURED cargo status output is SUPPRESSED'*'|PASS')
+    ok "N1 (BLOCKER 1): a quiet-suppressed compile log is NOT-MEASURED and PRESERVES PASS — 'could not measure' does not take the branch reserved for 'measured, and it is zero'" ;;
+  *) bad "N1: got '$got' / '$st'" ;;
+esac
+case "$got" in
+  *'NOT a measured zero'*'Remedy: unset the quiet setting'*)
+    ok "N2: the NOT-MEASURED text NAMES the cause (CARGO_TERM_QUIET / [term] quiet / -q), says it is NOT a measured zero, and carries the remedy — the coverage loss is DECLARED rather than silent" ;;
+  *) bad "N2: the suppression record does not name its cause and remedy: $got" ;;
+esac
+# ...and the POSITIVE CONTROL: the same lane, non-quiet, measures its binaries.
+cp "$tmp/loud-norun.log" "$LOG_DIR/feature-iso-parquet.log"
+got=$(_census_measure feature-iso-parquet PASS)
+case "$got" in
+  'COUNT 2 test binaries built/verified') ok "N3 (positive control): the SAME lane on a non-quiet log measures 2 test binaries — N1 is the suppression, not the probe disabling the census" ;;
+  *) bad "N3: got '$got'" ;;
+esac
+# ...and a GENUINE zero is still fatal: cargo status output PRESENT, no Executable line.
+printf '   Compiling dw v0.1.0 (/tmp/dw)\n    Finished `test` profile in 1.32s\n' > "$LOG_DIR/feature-iso-parquet.log"
+got=$(_census_measure feature-iso-parquet PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'ZERO test binaries'*'carries cargo status output but no'*"'Executable'"*'|VACUOUS')
+    ok "N4: a log that DEMONSTRABLY carries cargo status output and no 'Executable' line is still a real ZERO -> VACUOUS. The fix narrowed what counts as a measured zero; it did not remove the state" ;;
+  *) bad "N4: got '$got' / '$st'" ;;
+esac
+# `both` probes its two subjects INDEPENDENTLY: libtest survives quiet, cargo status does
+# not, so a quiet box must not turn a lane's measurable half into a claim about the other.
+printf '\nrunning 6 tests\n\ntest result: ok. 6 passed; 0 failed; 0 ignored\n' > "$LOG_DIR/integration-tests.log"
+got=$(_census_measure integration-tests PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'COUNT 6 tests passed (test binaries NOT MEASURED:'*'|PASS')
+    ok "N5: a quiet 'both' lane reports its 6 measured tests AND names the binary count as NOT MEASURED — it neither claims '0 binaries' (false) nor discards the half it could measure" ;;
+  *) bad "N5: got '$got' / '$st'" ;;
+esac
+: > "$LOG_DIR/integration-tests.log"
+got=$(_census_measure integration-tests PASS); st=$(_census_status_for PASS "$got")
+case "$got|$st" in
+  'NOT-MEASURED no libtest tally'*'SUPPRESSED'*'|PASS')
+    ok "N6: a 'both' lane with NEITHER subject readable under quiet is NOT-MEASURED, not ZERO — under quiet an empty log is exactly what a healthy --no-run-only route produces" ;;
+  *) bad "N6: got '$got' / '$st'" ;;
+esac
+# The libtest kind needs no equivalent probe, and this is the measured reason why: quiet
+# does not touch libtest's own output. Pinned as a FIXTURE PROPERTY so a cargo that changed
+# it reds here instead of silently invalidating the asymmetry the design rests on.
+printf '\nrunning 3 tests\n...\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' > "$LOG_DIR/tombstones-scan.log"
+got=$(_census_measure tombstones-scan PASS)
+case "$got" in
+  'COUNT 3 tests passed'*) ok "N7: a QUIET log — no cargo status line anywhere — still measures its libtest tally, because quiet suppresses cargo's status output and not the harness's. That asymmetry is why only the compile half needed a presence probe" ;;
+  *) bad "N7: got '$got'" ;;
+esac
+# STRUCTURAL: the probe must be anchored on the STATUS WORD ALONE ($1), never on
+# `<status> <payload>` — the #3400 rule, which applies to the new probe exactly as it does
+# to the Executable anchor it sits beside.
+compile_body=$(sed -n '/^_census_compile_tally() {/,/^}$/p' "$GATE")
+if grep -q '\$1 == "Finished"' <<<"$compile_body" && ! grep -qE '\$0 ~ /(Finished|Executable) ' <<<"$compile_body"; then
+  ok "N8: the suppression probe anchors on the cargo STATUS WORD alone (\$1), never on '<status> <payload>' — colour puts a reset between the two (#3400)"
+else
+  bad "N8: the suppression probe is not status-word-anchored"
+fi
+
+# ---------------------------------------------------------------------------
+# (O) `UNDECLARED` IS FATAL AT ANY STATUS — roborev job 368, blocker 2.
+#
+# _census_status_for returned every non-PASS status without inspecting the census state, so
+# the fail-closed state that makes "a new component cannot join the gate with a blank
+# census" TRUE was not fatal when the component SKIPped — the completeness guarantee
+# failing exactly where it is least likely to be noticed, on a NEW component that SKIPs on
+# the box where it is first run. The standing question — what fails the run if THIS key
+# alone goes bad? — had the answer "nothing, on a SKIP".
+# ---------------------------------------------------------------------------
+o_bad=()
+o_n=0
+for spec in \
+  'PASS|UNDECLARED no census kind is declared|FAIL' \
+  'SKIP|UNDECLARED no census kind is declared|FAIL' \
+  'FAIL|UNDECLARED no census kind is declared|FAIL' \
+  'PASS|WHATEVER an unplanned token|FAIL' \
+  'SKIP|WHATEVER an unplanned token|FAIL' \
+  'SKIP||FAIL' \
+  'SKIP|NOT-APPLICABLE component ended SKIP|SKIP' \
+  'SKIP|GAP nothing derivable|SKIP' \
+  'FAIL|COUNT 12 tests passed|FAIL' \
+  'PASS|ZERO tests|VACUOUS' \
+  'PASS|COUNT 12 tests passed|PASS'; do
+  o_n=$((o_n + 1))
+  in_st=${spec%%|*}; rest=${spec#*|}; rec=${rest%|*}; want=${rest##*|}
+  g=$(_census_status_for "$in_st" "$rec")
+  [ "$g" = "$want" ] || o_bad+=("($in_st,'$rec')->$g want $want")
+done
+if [ "$o_n" -ne 11 ]; then
+  bad "O1: only $o_n of 11 status/record pairs were exercised"
+elif [ "${#o_bad[@]}" -eq 0 ]; then
+  ok "O1 (BLOCKER 2): an UNDECLARED or unrecognised census record FAILs the run at EVERY status — SKIP included — while a sound record still lets a non-PASS status pass through unchanged"
+else
+  bad "O1: ${o_bad[*]}"
+fi
+# End to end: an undeclared component that SKIPs. _census_measure resolves the DECLARATION
+# before the status precisely so the record is UNDECLARED rather than NOT-APPLICABLE, and
+# the coupling then fails the run.
+LOG_DIR="$tmp/undeclogs"; mkdir -p "$LOG_DIR"
+g=$(_census_measure a-brand-new-component SKIP)
+st=$(_census_status_for SKIP "$g")
+case "$g|$st" in
+  'UNDECLARED no census kind is declared'*"'a-brand-new-component'"*'|FAIL')
+    ok "O2 (BLOCKER 2, end to end): a NEW component that SKIPs is still refused BY NAME and FAILs — the completeness guarantee does not depend on the component happening to run" ;;
+  *) bad "O2: got '$g' / '$st'" ;;
+esac
+if ! _status_is_nonfailing "$(_census_status_for SKIP "$g")"; then
+  ok "O3: …and that FAIL reaches the aggregation's closed set, so the run really fails rather than merely printing FAIL on one row"
+else
+  bad "O3: the undeclared-SKIP status was treated as non-failing by _status_is_nonfailing"
+fi
+
+# ---------------------------------------------------------------------------
+# (P) THE PROGRESS LINE MUST NOT LIE — roborev job 368, low.
+#
+# record_result can turn a PASS into VACUOUS or FAIL, and every caller printed its OWN
+# unchanged local `$status` afterwards, so a no-op component wrote `>>> [x] PASS` to the run
+# log while the SUMMARY reported failure. A gate log that makes an affirmatively false
+# statement is worse than silence — it is the first thing a human reads when triaging.
+# ---------------------------------------------------------------------------
+if grep -q 'RECORDED_STATUS="$_rr_status"' <<<"$(sed -n '/^record_result() {/,/^}$/p' "$GATE")"; then
+  ok "P1: record_result publishes the FINALIZED status for its caller's progress line"
+else
+  bad "P1: record_result does not publish the finalized status — every caller's progress line would keep printing the pre-census one"
+fi
+# EVERY caller, not just run_component. The two legitimate exceptions are run_scoped_tests'
+# own terminal paths, which never reach record_result and reassign `$status` from
+# _census_finalize themselves — so they are excluded BY FUNCTION, not by count.
+p_raw=$(python3 - "$GATE" <<'PYX'
+import sys
+lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
+start = next(i for i, l in enumerate(lines) if l == 'run_scoped_tests() {')
+end = next(i for i in range(start, len(lines)) if lines[i] == '}')
+bad = [i + 1 for i, l in enumerate(lines)
+       if '>>> [$name] $status (' in l and not (start <= i <= end)]
+print(' '.join(str(b) for b in bad))
+PYX
+)
+if [ -z "$p_raw" ]; then
+  ok "P2: no progress line outside run_scoped_tests prints the pre-census \$status — all ~115 print the finalized RECORDED_STATUS"
+else
+  bad "P2: progress line(s) still printing the PRE-census status at line(s): $p_raw"
+fi
+p_fin=$(grep -c 'RECORDED_STATUS (\$((end - start))s)' "$GATE")
+if [ "$p_fin" -ge 100 ]; then
+  ok "P3: $p_fin progress lines print the finalized status — the fix reached the bespoke runners, not only run_component"
+else
+  bad "P3: only $p_fin progress line(s) print RECORDED_STATUS; the rewrite did not reach every caller"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -977,7 +1162,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=52
+CENSUS_CASE_FLOOR=68
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
