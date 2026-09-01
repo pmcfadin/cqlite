@@ -79,8 +79,9 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
   `bash scripts/flow/drive-issue-state.sh verify <N>` (#3822) — never read the marker's prose
   first. `--help` is the authoritative contract; act on the `verdict` token:
   - `OWNED` (0) → read the marker + the issue thread and resume from the recorded stage. If a
-    pairing response newer than your open request exists → `CronDelete drive-issue-<N>`, `write`
-    the marker again with the cleared request, and continue. If not → beat the heartbeat, post
+    pairing response newer than your open request exists → `CronDelete drive-issue-<N>`,
+    `drive-issue-state.sh write <N> --stage <stage> --clear request-id` (omitting a flag
+    PRESERVES the recorded field — `--clear` is the only eraser), and continue. If not → beat the heartbeat, post
     nothing, end the turn (the cron persists). Never re-ask an unanswered question.
   - `ABSENT` (3) → no durable state; treat as a fresh start of this stage and `write` one.
   - `ADOPTABLE` (5) → the recorded writer is provably gone (the normal cron re-invoke on a new

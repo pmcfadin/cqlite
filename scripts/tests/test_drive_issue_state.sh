@@ -83,6 +83,16 @@ all_lines_anchored() {
 SESS_A="sess-aaaaaaaa"
 SESS_B="sess-bbbbbbbb"
 
+# ENVIRONMENT PRECONDITIONS, asserted rather than assumed. The case FLOOR counts cases
+# EXECUTED, which does not prove each one reached its subject — so anything this suite needs
+# from the host is named here and FAILS loudly if absent, instead of surfacing as a puzzling
+# verdict mismatch ten cases later (or, worse, as a case that quietly proves nothing).
+if command -v flock >/dev/null 2>&1; then
+  ok "precondition: flock is available, so the MUTATING subcommands can run at all"
+else
+  bad "precondition: flock is MISSING — write/adopt refuse by design without it, so most cases below cannot reach their subject. NOTHING here is measured."
+fi
+
 # ===========================================================================
 case_begin 1-write-verify-owned "write then verify in the SAME lane and session -> OWNED"
 # ===========================================================================
@@ -289,6 +299,14 @@ L9=$(lane lane9)
 body="$T/body9.md"
 sentinel=$(sed -n 's/^STAMP_BEGIN=.\(.*\).$/\1/p' "$DS" | head -1)
 sentinel_end=$(sed -n 's/^STAMP_END=.\(.*\).$/\1/p' "$DS" | head -1)
+# BOTH sentinels are load-bearing for cases 9, 10, 21 and 22. An empty extraction would make
+# `grep -vFx ""` strip blank lines instead of the end sentinel, so the state under test would
+# not be the state named — a case passing for the wrong reason. Asserted, not assumed.
+if [ -n "$sentinel" ] && [ -n "$sentinel_end" ] && [ "$sentinel" != "$sentinel_end" ]; then
+  ok "both stamp sentinels were extracted from the shipped script and are distinct"
+else
+  bad "sentinel extraction failed (begin='$sentinel' end='$sentinel_end') — the cases that plant them measure nothing"
+fi
 {
   printf 'plan notes\n'
   printf '%s\n' "$sentinel"
@@ -515,6 +533,24 @@ else
   bad "write failure did not surface a verdict ($wf_probe): rc=$wf_rc verdict=$(verdict_of "$wf_out")
 $wf_out"
 fi
+# THE PROBE ABOVE IS UID-DEPENDENT, so it is not the only one. A directory permission is
+# bypassed by root and, since the flock pre-probe now refuses an unwritable worktree before
+# `write_marker` is entered, that probe no longer reaches the WRITE path it is named for on
+# ANY uid. This one does, on every uid: a PATH-shimmed failing `mktemp` fails inside
+# `write_marker` itself, which is where the swallowed-verdict defect lived.
+L17B=$(lane lane17b)
+wf_bin="$T/fakebin17"; mkdir -p "$wf_bin"
+printf '#!/bin/sh\nexit 1\n' >"$wf_bin/mktemp"; chmod +x "$wf_bin/mktemp"
+wf2_out=$(run "$L17B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+  "PATH=$wf_bin:$PATH" -- write 3822 2>/dev/null); wf2_rc=$?
+if [ "$wf2_rc" -ne 0 ] && [ "$(verdict_of "$wf2_out")" = ERROR ] \
+   && printf '%s\n' "$wf2_out" | grep -q 'temporary file' \
+   && all_lines_anchored "$wf2_out" && [ ! -f "$L17B/$MARKER" ]; then
+  ok "a failing mktemp inside write_marker yields ERROR(rc=$wf2_rc) naming the cause, on stdout, with nothing written — the path the uid-dependent probe cannot reach"
+else
+  bad "the injected mktemp failure did not reach write_marker's error path: rc=$wf2_rc verdict=$(verdict_of "$wf2_out")
+$wf2_out"
+fi
 
 # ===========================================================================
 case_begin 18-control-chars-stay-anchored "a hand-edited stamp value carrying control characters cannot break the output anchor"
@@ -524,13 +560,12 @@ case_begin 18-control-chars-stay-anchored "a hand-edited stamp value carrying co
 # DRIVE-STATE: prefix — which every consumer and every case above rests on.
 L17=$(lane lane17)
 run "$L17" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
-python3 - "$L17/$MARKER" <<'PYEOF'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-s = s.replace('machine: boxA', 'machine: box\x1b[31mA\x07\x0b')
-open(p, 'w').write(s)
-PYEOF
+# Built with printf + awk rather than python3: a missing interpreter would leave the marker
+# UNEDITED, the verdict would be OWNED, and this case would report a failure whose cause is
+# nowhere in its message. No interpreter, no dependency.
+cc_val=$(printf 'box\033[31mA\007\013')
+awk -v new="machine: $cc_val" '/^machine: /{print new; next} {print}' "$L17/$MARKER" >"$T/m17cc" \
+  && mv "$T/m17cc" "$L17/$MARKER"
 cc_out=$(run "$L17" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); cc_rc=$?
 if [ "$cc_rc" -ne 0 ] && [ "$(verdict_of "$cc_out")" = FOREIGN-MACHINE ] && all_lines_anchored "$cc_out" \
    && ! printf '%s' "$cc_out" | grep -q $'\x1b'; then
@@ -773,7 +808,153 @@ else
 fi
 
 # ===========================================================================
-case_begin 23-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
+case_begin 23-durable-fields-survive "stage/request-id/pr/branch survive a later write AND an adopt; --clear is the only eraser"
+# ===========================================================================
+# drive-issue.md's Delta 3 names "stage reached, open request ID, PR/branch" as THE durable
+# state, and `adopt` is the normal cron-resume path — so silently dropping request-id on a
+# resume left the next session unable to tell which request it awaits, and it would re-ask,
+# breaking "one marker, one wait". Omitting a flag must never erase state.
+L23=$(lane lane23)
+run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- \
+  write 3822 --stage implement --request-id coord-3822-7 --pr 4001 --branch issue-3822-slug >/dev/null 2>&1
+run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- \
+  write 3822 --stage review >/dev/null 2>&1
+fp_show=$(run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822)
+if printf '%s\n' "$fp_show" | grep -q 'request-id=coord-3822-7' \
+   && printf '%s\n' "$fp_show" | grep -q 'pr=4001' \
+   && printf '%s\n' "$fp_show" | grep -q 'branch=issue-3822-slug' \
+   && printf '%s\n' "$fp_show" | grep -q 'stage=review'; then
+  ok "a later 'write --stage' PRESERVES request-id/pr/branch and updates the stage"
+else
+  bad "a write with one flag erased the other durable fields:
+$fp_show"
+fi
+run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- \
+  write 3822 --clear request-id >/dev/null 2>&1
+fp_show2=$(run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822)
+fp_bad=$(run "$L23" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --clear frobnicate 2>&1); fp_badrc=$?
+if printf '%s\n' "$fp_show2" | grep -q 'request-id=none' \
+   && printf '%s\n' "$fp_show2" | grep -q 'pr=4001' && [ "$fp_badrc" -eq 64 ]; then
+  ok "'--clear request-id' erases exactly that field (pr survives), and an unknown field name is exit 64 — the field set is CLOSED"
+else
+  bad "--clear misbehaved: unknown-field rc=$fp_badrc
+$fp_show2"
+fi
+# ADOPT is the cron-resume path: the durable fields must cross it.
+L23B=$(lane lane23b)
+sleep 30 & fp_dead=$!
+run "$L23B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$fp_dead" -- \
+  write 3822 --stage implement --request-id coord-3822-9 --pr 4002 --branch issue-3822-b >/dev/null 2>&1
+kill "$fp_dead" 2>/dev/null; wait "$fp_dead" 2>/dev/null
+fp_ad=$(run "$L23B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- \
+  adopt 3822 --reason cron-reinvoke:writer-pid-gone); fp_adrc=$?
+fp_show3=$(run "$L23B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- show 3822)
+if [ "$fp_adrc" -eq 0 ] && printf '%s\n' "$fp_show3" | grep -q 'request-id=coord-3822-9' \
+   && printf '%s\n' "$fp_show3" | grep -q 'pr=4002' \
+   && printf '%s\n' "$fp_show3" | grep -q 'branch=issue-3822-b' \
+   && printf '%s\n' "$fp_show3" | grep -q 'stage=implement' \
+   && printf '%s\n' "$fp_show3" | grep -q "prior-session=$SESS_A"; then
+  ok "an adopt carries stage/request-id/pr/branch across the ownership transfer (and still records the prior session)"
+else
+  bad "adopt destroyed durable state: rc=$fp_adrc
+$fp_show3"
+fi
+
+# ===========================================================================
+case_begin 24-serialization "the verify->replace sequence is SERIALIZED: the lock is really taken, and two racers produce one winner"
+# ===========================================================================
+# The ownership check is sound but was not ATOMIC with the replacement, so two sessions in
+# ONE lane — the scenario this file exists for — could both pass verification and one clobber
+# the other. Demonstrated here on BEHAVIOUR, never on "a lock file appeared".
+L24=$(lane lane24)
+# (a) A SHORTENED wait proves the lock is genuinely acquired and waited on. The timeout is a
+# hard-coded constant with no env override, so the test SUBSTITUTES THE ARTIFACT: a scratch
+# copy of the script with the constant rewritten (and its sibling library alongside, which
+# the script sources from its own directory), with the substitution VERIFIED.
+SCRATCH="$T/scratch"; mkdir -p "$SCRATCH/lib"
+sed 's/^MARKER_LOCK_WAIT_SECS=30$/MARKER_LOCK_WAIT_SECS=1/' "$DS" >"$SCRATCH/drive-issue-state.sh"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$SCRATCH/lib/process-liveness.sh"
+if grep -q '^MARKER_LOCK_WAIT_SECS=1$' "$SCRATCH/drive-issue-state.sh"; then
+  ok "the shortened-wait pin took in the scratch copy (a test-only env seam is deliberately not offered)"
+else
+  bad "the scratch copy still carries the shipped wait — the contention case below would measure nothing"
+fi
+lock24="$L24/$MARKER.lock"
+: >>"$lock24"
+held24="$T/held24"
+flock -x "$lock24" -c "touch '$held24'; sleep 5" &
+holder24=$!
+i=0
+while [ ! -f "$held24" ] && [ "$i" -lt 60 ]; do i=$((i + 1)); sleep 0.1; done
+if [ -f "$held24" ]; then
+  ok "the external holder confirmed it holds the lock (handshake on a flag file, not a sleep)"
+else
+  bad "the external lock holder never confirmed acquisition — the contention case measures nothing"
+fi
+ser_out=$( cd "$L24" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$SCRATCH/drive-issue-state.sh" write 3822 2>&1 ); ser_rc=$?
+if [ "$ser_rc" -ne 0 ] && [ "$(verdict_of "$ser_out")" = ERROR ] \
+   && printf '%s\n' "$ser_out" | grep -q 'holds the marker lock' && [ ! -f "$L24/$MARKER" ]; then
+  ok "with the lock held elsewhere, write REFUSES (rc=$ser_rc) rather than mutating unserialized, and writes nothing"
+else
+  bad "write ignored a held lock: rc=$ser_rc verdict=$(verdict_of "$ser_out")
+$ser_out"
+fi
+kill "$holder24" 2>/dev/null; wait "$holder24" 2>/dev/null
+# (b) NON-VACUITY: once the lock is free the very same call succeeds, so the refusal above is
+# about CONTENTION and not about the lock being permanently unobtainable.
+ser_ok=$(run "$L24" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822); ser_okrc=$?
+if [ "$ser_okrc" -eq 0 ] && [ "$(verdict_of "$ser_ok")" = WRITTEN ]; then
+  ok "NON-VACUITY: with the lock free the same write succeeds"
+else
+  bad "write cannot take a free lock: rc=$ser_okrc
+$ser_ok"
+fi
+# (c) TWO CONCURRENT ADOPTERS OF ONE ADOPTABLE LANE -> exactly ONE winner. Deterministic
+# whether or not the two overlap in time: serialized, the loser re-verifies INSIDE the lock,
+# sees the winner's live session and refuses.
+#
+# MEASURED, not assumed: run against a copy of the shipped script with `lock_marker`
+# neutered, this exact scenario produced ADOPTED / ADOPTED — both adopters winning and one
+# clobbering the other's stamp. So the assertion below discriminates the fix rather than
+# passing for free.
+L24C=$(lane lane24c)
+sleep 30 & sc_dead=$!
+run "$L24C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$sc_dead" -- write 3822 --stage implement >/dev/null 2>&1
+kill "$sc_dead" 2>/dev/null; wait "$sc_dead" 2>/dev/null
+sleep 300 & sc_p1=$!
+sleep 300 & sc_p2=$!
+( run "$L24C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$sc_p1" -- \
+    adopt 3822 --reason race-probe:adopter-one >"$T/race1.out" 2>&1 ) &
+sc_j1=$!
+( run "$L24C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=sess-cccccccc" "CLAUDE_PID=$sc_p2" -- \
+    adopt 3822 --reason race-probe:adopter-two >"$T/race2.out" 2>&1 ) &
+sc_j2=$!
+wait "$sc_j1" 2>/dev/null; wait "$sc_j2" 2>/dev/null
+kill "$sc_p1" "$sc_p2" 2>/dev/null; wait "$sc_p1" 2>/dev/null; wait "$sc_p2" 2>/dev/null
+sc_v1=$(verdict_of "$(cat "$T/race1.out")"); sc_v2=$(verdict_of "$(cat "$T/race2.out")")
+sc_won=0
+[ "$sc_v1" = ADOPTED ] && sc_won=$((sc_won + 1))
+[ "$sc_v2" = ADOPTED ] && sc_won=$((sc_won + 1))
+if [ "$sc_won" -eq 1 ] && verdict_in_set "$sc_v1" && verdict_in_set "$sc_v2"; then
+  ok "two concurrent adopters of one adoptable lane produce EXACTLY ONE ADOPTED (verdicts: $sc_v1 / $sc_v2)"
+else
+  bad "concurrent adopters produced $sc_won winners (verdicts: $sc_v1 / $sc_v2) — the verify->replace sequence is not serialized
+$(cat "$T/race1.out")
+$(cat "$T/race2.out")"
+fi
+# The surviving stamp must be ONE coherent record: the winner's session, and the durable
+# stage it inherited. A clobber would show as a lost stage or a torn prologue.
+sc_show=$(run "$L24C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- show 3822 2>&1); sc_shrc=$?
+if [ "$sc_shrc" -eq 0 ] && printf '%s\n' "$sc_show" | grep -q 'stage=implement'; then
+  ok "the surviving marker is one coherent stamp and kept the inherited stage — no torn or clobbered record"
+else
+  bad "the surviving marker is not readable/coherent: rc=$sc_shrc
+$sc_show"
+fi
+
+# ===========================================================================
+case_begin 25-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
 5-foreign-worktree 6-session-gone-adoptable 7-session-live-peer 8-pid-unrecordable-unknown
@@ -782,8 +963,8 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 15-pid-reuse-recognised 16-closed-verdict-grammar 17-write-failure-emits-a-verdict
 18-control-chars-stay-anchored 19-control-char-worktree-refused
 20-same-process-is-owned 21-write-over-unstamped-migrates
-22-no-dead-letter-remedies 23-case-floor"
-CASE_FLOOR=23
+22-no-dead-letter-remedies 23-durable-fields-survive 24-serialization 25-case-floor"
+CASE_FLOOR=25
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -795,8 +976,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 40 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 40)"
+if [ "$PASS" -ge 55 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 55)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
