@@ -779,16 +779,37 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   is now a closed set (PASS, SKIP) and everything else fails. Two states are DECLARED and
   deliberately NON-FATAL, because a lane that reds on correct input is the lane agents learn to
   waive: `NOT-MEASURED` (an unreadable log, a failed ANSI strip, an unrecognised driver report)
-  and `gap:<reason>` (14 components today — fmt, clippy, all-features-check, the shell/python
+  and `gap:<reason>` (15 components today — fmt, clippy, all-features-check, the shell/python
   guards, smoke, tooling-tests — each PRINTING its reason every run). Neither is ever read as
   verified: the aggregate line counts them separately and always as `N RECOGNISED`, never a bare
   `N`, and it DECLARES its own non-exhaustiveness, because the gap set is curated. One asymmetry
   worth knowing: for a cargo lane the subject markers are cargo's OWN guaranteed output, so their
   absence really does mean nothing ran — but for `indirect:<driver>` (python-bindings/pytest,
   node-bindings/jest) an ABSENT tally is `NOT-MEASURED`, since a third-party report format is not
-  ours and its absence is a measurement failure, not proof of vacuity. Declaration site:
+  ours and its absence is a measurement failure, not proof of vacuity. **#3400 HAS A SECOND
+  DIMENSION, AND QUIET IS IT**: that rule is about a cargo-output parse keyed on a
+  PRESENTATION property, and an anchor can be perfectly colour-immune while still depending
+  on another one. `CARGO_TERM_QUIET=true` in the environment, or `[term] quiet = true` in any
+  `.cargo/config.toml`, suppresses EVERY cargo status line — measured: a
+  `cargo test --lib --no-run` under quiet emits a COMPLETELY EMPTY log — while leaving
+  libtest's `running N tests`/`test result:` untouched. Neither is visible at the call site,
+  so a box carrying either would have made `feature-iso-parquet` and `minimal-build` measure
+  a *zero* `Executable` count and read VACUOUS on every gate, fleet-wide, on correct input.
+  The fix is THREE-VALUED, not an env override (#3400 records that moving correctness into a
+  setting far from the parse is the worse coupling): the tally reports
+  `<Executable lines> <cargo status lines>`, and a log with **no cargo status output at all**
+  is `NOT-MEASURED (suppressed)` while only a log that demonstrably carries status output
+  *and* zero `Executable` lines is a real `ZERO`. Generalise: **"the marker is absent" and
+  "the marker could not have been printed" are different facts, and a fatal state may only
+  be derived from the first.** Declaration site:
   `_census_kind` (a CLOSED set; an undeclared component is a named FAIL, so a new component
-  cannot join with a blank census). **BUT A STATIC DECLARATION IS NOT ALWAYS POSSIBLE, AND
+  cannot join with a blank census) — **and that guarantee is only as strong as WHERE the
+  state is judged**: the verdict coupling used to return every non-`PASS` status untouched,
+  so `UNDECLARED` was not fatal when the component SKIPped, i.e. the completeness rule failed
+  exactly on a NEW component that SKIPs on the box where it is first run. The census RECORD
+  is now judged before the run's status (an unsound record is a fact about the TABLE, not
+  about this run), and only then does the status decide. **BUT A STATIC DECLARATION IS NOT
+  ALWAYS POSSIBLE, AND
   ASSUMING IT WAS COST A HIGH**: `scoped-tests` was declared `both`, and a diff confined to
   `bindings/python/**` dispatches NO cargo at all (`classify_scoped_plan` diverts `cqlite-py`
   and the `cqlite-core` fallback is deliberately guarded on `python_diff -eq 0`), so its log

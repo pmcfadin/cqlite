@@ -304,3 +304,62 @@ after the tallies, it lives inside the per-run `mktemp -d`, and its failure mode
 non-fatal `NOT-MEASURED`. The disk-pressure consequence — an `ENOSPC` inside `$LOG_DIR` now also
 costs a `NOT-MEASURED` — is stated in the code comment rather than defended against, because the
 alternative (parsing the coloured original) is the defect the routing exists to prevent.
+
+---
+
+## roborev round 2 (job 368) — three findings, all fixed
+
+### BLOCKER 1 — quiet suppresses the compile census: #3400's second dimension
+
+`Executable` was colour-immune and still **presentation-dependent in a second dimension**.
+Measured 2026-09-01 against real cargo, both mechanisms:
+
+| mechanism | cargo status lines (`Compiling`/`Finished`/`Running`/`Executable`) | libtest (`running N tests`, `test result:`) |
+|---|---|---|
+| `CARGO_TERM_QUIET=true` (env) | **all suppressed** — a `--no-run` run emits a COMPLETELY EMPTY log | unaffected |
+| `[term] quiet = true` (`.cargo/config.toml`) | **all suppressed**, identically | unaffected |
+
+Neither is visible at the call site, so a box carrying either would have made
+`feature-iso-parquet` and `minimal-build` measure zero and read `VACUOUS` on **every** gate.
+
+**Fix: three-valued, at the parse site.** `_census_compile_tally` now returns
+`<Executable lines> <cargo status lines>`; a log with **no cargo status output at all** is
+`NOT-MEASURED` naming quiet and its remedy, and only a log that demonstrably carries status
+output *and* zero `Executable` lines is a real `ZERO`. `both` probes its two subjects
+independently, so a quiet lane reports its measured tests and names the binary count as NOT
+MEASURED rather than claiming `0`. **No env belt was added**: #3400 explicitly records that
+moving correctness into a setting far from the parse is the worse coupling, and a belt would
+have made the three-valued read look optional.
+
+The suppression probe is anchored on the cargo **status word alone** (`$1` after the strip),
+the same #3400 rule as the `Executable` anchor beside it, and errs **narrow** on purpose — an
+unrecognised status word routes to the non-fatal `NOT-MEASURED`, never to the fatal `ZERO`.
+
+*The generalisation:* **"the marker is absent" and "the marker could not have been printed"
+are different facts, and a fatal state may only be derived from the first.**
+
+### BLOCKER 2 — `UNDECLARED` was not fatal at a non-`PASS` status
+
+`_census_status_for` returned every non-`PASS` status without inspecting the census state, so
+the fail-closed state that makes *"a new component cannot join the gate with a blank census"*
+true was **not fatal when the component SKIPped** — the completeness guarantee failing exactly
+where it is least likely to be noticed. Two judgements now, in order: (1) is the RECORD sound?
+`UNDECLARED` and any unrecognised/empty state are facts about the TABLE and are fatal at any
+status; (2) only then does the run's status decide.
+
+### LOW — the progress line lied
+
+`record_result` can turn a `PASS` into `VACUOUS` or `FAIL`, and ~115 callers printed their own
+unchanged local `$status` afterwards, so a no-op component wrote `>>> [x] PASS` to the run log
+while the SUMMARY reported failure. `record_result` now publishes `RECORDED_STATUS` and every
+progress line prints it. Two sites legitimately keep `$status` — `run_scoped_tests`' terminal
+paths, which never reach `record_result` and reassign from `_census_finalize` themselves — and
+the guard excludes them **by function, not by count**.
+
+`run_file_size` needed a small reorder (its log-sink verdict line moved below `record_result`).
+That comment block's own falsification test was re-checked and still holds; the bounded cost —
+a mid-run tree-integrity exit would drop that log's last line — is named in place.
+
+**Fallout worth recording:** the FM annotation guard stubs `record_result`, and an incomplete
+stub aborted the real `run_python_bindings` under `set -u`. A stub must honour the *published
+contract*, not only the part the case needs.
