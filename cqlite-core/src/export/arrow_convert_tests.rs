@@ -1246,3 +1246,48 @@ fn the_trusted_path_returns_the_same_batch_as_the_validating_path() {
         );
     }
 }
+
+// ===== TEMPORARY MEASUREMENT (#3742) — delete before reporting =====
+#[test]
+fn tmp_3742_measure_arrow_zero_column() {
+    use arrow::datatypes::Schema as ASchema;
+    use arrow::record_batch::RecordBatchOptions;
+    let schema = Arc::new(ASchema::empty());
+    let r = RecordBatch::try_new(schema.clone(), vec![]);
+    eprintln!("MEASURE try_new(empty schema, vec![]) => {r:?}");
+    let r2 = RecordBatch::try_new_with_options(
+        schema.clone(),
+        vec![],
+        &RecordBatchOptions::new().with_row_count(Some(3)),
+    );
+    eprintln!(
+        "MEASURE try_new_with_options(row_count=3) => ok={} num_rows={:?} err={:?}",
+        r2.is_ok(),
+        r2.as_ref().map(|b| b.num_rows()).ok(),
+        r2.as_ref().err().map(|e| e.to_string())
+    );
+    let r3 = RecordBatch::try_new_with_options(
+        schema,
+        vec![],
+        &RecordBatchOptions::new().with_row_count(Some(0)),
+    );
+    eprintln!(
+        "MEASURE try_new_with_options(row_count=0) => ok={} num_rows={:?}",
+        r3.is_ok(),
+        r3.as_ref().map(|b| b.num_rows()).ok()
+    );
+    // Also: Schema::new(vec![]) vs Schema::empty()
+    let s2 = Arc::new(ASchema::new(Vec::<Field>::new()));
+    let r4 = RecordBatch::try_new(s2, vec![]);
+    eprintln!("MEASURE try_new(Schema::new(vec![]), vec![]) => {r4:?}");
+    // And the crate's own path
+    let cols: Vec<ColumnInfo> = Vec::new();
+    let rows: Vec<QueryRow> = (0..3).map(|_| row_one("a", Value::Integer(1))).collect();
+    let r5 = rows_to_record_batch(&cols, &rows);
+    eprintln!(
+        "MEASURE rows_to_record_batch(0 cols, 3 rows) => ok={} num_rows={:?} err={:?}",
+        r5.is_ok(),
+        r5.as_ref().map(|b| b.num_rows()).ok(),
+        r5.as_ref().err().map(|e| e.to_string())
+    );
+}
