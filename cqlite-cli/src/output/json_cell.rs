@@ -249,6 +249,18 @@ impl JsonCell {
             // field-value renderer.
             Value::Udt(udt) => {
                 let mut entries: Vec<(String, JsonCell)> = Vec::with_capacity(udt.fields.len());
+                // Name → index into `entries`, so the dedupe below is O(1) per
+                // field rather than a scan of everything already emitted.
+                //
+                // This is NOT extra cost over what it displaced: the rendering
+                // this `Vec` replaced built a `serde_json::Map`, and `serde_json`
+                // is built here with `preserve_order` (workspace `Cargo.toml`),
+                // which makes that type an `IndexMap` — i.e. a `Vec` plus a hash
+                // index, exactly the pair below. A wide UDT over many rows
+                // therefore pays the same shape of allocation it always did,
+                // instead of the quadratic scan a positional search would cost.
+                let mut index: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::with_capacity(udt.fields.len());
                 udt_render_fields(
                     udt,
                     Self::from_value,
@@ -261,9 +273,14 @@ impl JsonCell {
                     // `UdtValue` is public, so it IS constructible — and two
                     // JSON keys of one name is an ambiguous document that
                     // parsers resolve differently.
-                    |name, rendered| match entries.iter().position(|(k, _)| k == name) {
-                        Some(i) => entries[i].1 = rendered,
-                        None => entries.push((name.to_string(), rendered)),
+                    |name, rendered| match index.get(name) {
+                        // FIRST position kept (the entry stays where it is),
+                        // LAST value written.
+                        Some(&i) => entries[i].1 = rendered,
+                        None => {
+                            index.insert(name.to_string(), entries.len());
+                            entries.push((name.to_string(), rendered));
+                        }
                     },
                 );
                 JsonCell::Object(entries)
