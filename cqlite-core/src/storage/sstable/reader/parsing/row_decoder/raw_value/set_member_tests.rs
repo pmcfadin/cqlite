@@ -14,7 +14,9 @@
 //!   the whole value rather than dropping the element, which is why the error is
 //!   fatal here.
 //! * The zero-length case is where this decoder is deliberately STRICTER than
-//!   `Int32Serializer.validate` — rationale in `fixed_width.rs`.
+//!   `Int32Serializer.validate` — rationale in `fixed_width.rs`. It is refused
+//!   but TOLERATED (its pre-#3723 disposition), so the "fatal" reasoning above
+//!   applies to a WRONG width only; see `fatal_decode_error.rs`.
 
 use super::super::test_support::helpers::build_set_cell_bytes;
 use super::*;

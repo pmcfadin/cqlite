@@ -18,13 +18,14 @@
 //!    must refuse a zero-length fixed-width element (rationale, including why
 //!    Cassandra's own `Int32Serializer.validate` admits `4 or 0` while this
 //!    decoder does not, is in `fixed_width.rs`).
-//! 2. **A fatal decode error propagates.** A `FixedWidthLengthMismatch` is input
-//!    Cassandra REFUSES outright (`SetSerializer.validate` lets the element-level
-//!    `MarshalException` escape and additionally throws on extraneous bytes), so
-//!    surfacing it as a set that is quietly missing a member is not an option.
-//!    Every OTHER decode error keeps its pre-#3723 tolerant `None` — see
-//!    [`super::is_fatal_decode_error`] for why the fatal set is exactly one
-//!    variant.
+//! 2. **A fatal decode error propagates.** A WRONG-WIDTH
+//!    `FixedWidthLengthMismatch` is input Cassandra REFUSES outright
+//!    (`SetSerializer.validate` lets the element-level `MarshalException` escape
+//!    and additionally throws on extraneous bytes), so surfacing it as a set
+//!    that is quietly missing a member is not an option. Every OTHER decode
+//!    error keeps its pre-#3723 tolerant `None` — INCLUDING a zero-length
+//!    mismatch, which is refused and named but was already tolerated before this
+//!    issue. See [`super::is_fatal_decode_error`] for both halves.
 //! 3. **The path is decoded BEFORE the legacy cell-value fallback.** The first
 //!    #3723 revision returned a non-empty cell value early, so the two guards
 //!    above were reachable only when the cell carried no value — a correctly
@@ -62,8 +63,9 @@
 //!   this issue's signature is fixed).
 //!
 //! Tolerance is unchanged in both directions: a dropped member whose path fails
-//! with a TOLERATED class still yields `Ok(None)` and is filtered silently, and
-//! the drop accounting (`shadow_filtered_element_count`) is untouched.
+//! with a TOLERATED class (a zero length included) still yields `Ok(None)` and
+//! is filtered silently, and the drop accounting
+//! (`shadow_filtered_element_count`) is untouched.
 
 use super::*;
 

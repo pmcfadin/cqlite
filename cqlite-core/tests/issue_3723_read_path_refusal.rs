@@ -36,9 +36,13 @@
 //! The zero-length case is the one place this decoder is deliberately STRICTER
 //! than `Int32Serializer.validate` (which admits `0`, deserializing to Java
 //! `null`): there is no `Value` here meaning "this set member deserialized to
-//! null", so issue #3723's AC2 refuses it. That decision, its four reasons, and
-//! the exact remedy if a real Cassandra-written fixture is ever found carrying
-//! one are recorded in `raw_value/fixed_width.rs`.
+//! null", so issue #3723's AC2 refuses it. That decision, its reasons, and the
+//! exact remedy if a real Cassandra-written fixture is ever found carrying one
+//! are recorded in `raw_value/fixed_width.rs`. Its DISPOSITION differs from a
+//! wrong width's — refused, but TOLERATED, because these bytes already errored
+//! (as `Error::Corruption`) before this branch and both call sites absorbed it.
+//! `raw_value/fatal_decode_error.rs` holds that split; the two cases are pinned
+//! separately below.
 //!
 //! Needs `write-support` for the `SSTableWriter` that synthesizes the fixture
 //! (the corpus has no deliberately-corrupt SSTable). The default feature set

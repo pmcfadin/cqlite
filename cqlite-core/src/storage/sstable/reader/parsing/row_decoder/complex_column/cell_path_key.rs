@@ -173,10 +173,11 @@
 //!
 //! * **fixed-width scalars — CLOSED by #3723.** The guards were `data.len() < N`,
 //!   so a 5-byte `int` element decoded from its first 4 bytes. They are now
-//!   `!= N`, returning [`Error::FixedWidthLengthMismatch`] — the ONE class
-//!   `raw_value::is_fatal_decode_error` names, so it is NOT absorbed by the
-//!   tolerant `break`/`None` handlers above and reaches the public read path.
-//!   Relevant here because this file routes scalar cell-path keys through that arm.
+//!   `!= N`, returning [`Error::FixedWidthLengthMismatch`], which
+//!   `raw_value::is_fatal_decode_error` makes FATAL for a WRONG width (a zero
+//!   length is refused but stays TOLERATED), so it escapes the tolerant
+//!   `break`/`None` handlers above and reaches the public read path. Relevant
+//!   here because this file routes scalar cell-path keys through that arm.
 //! * **nested tuples and UDTs — OPEN.** The decoders iterate the DECLARED
 //!   components and stop, leaving extra components unread.
 //! * **nested collections — OPEN.** The element loop runs the DECLARED count and
@@ -755,6 +756,11 @@ impl V5CompressedLegacyParser {
     ///
     /// Kept as a single table so the marshal and short-form routes cannot drift
     /// into two different opinions about a family's width.
+    ///
+    /// It is NOT the reader's only width table, deliberately: for a NESTED
+    /// element/field (framed by a SIGNED `[i32 BE len]`, where null is `-1`)
+    /// `raw_value::fixed_width::fixed_width_admissible_width` admits `N` ONLY.
+    /// Read that module's header before "fixing" either to match (#3723).
     fn cql_short_allowed_widths(short: &str) -> &'static [usize] {
         match short {
             // --- `N` OR `0`: `size != N && !isEmpty` throws, so EMPTY is legal ---
