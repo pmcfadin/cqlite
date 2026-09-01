@@ -1,4 +1,4 @@
 # madvise census per arm, --setup-only, CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap
 baseline: WILLNEED=0 RANDOM=1 SEQUENTIAL=0 DONTNEED=4
-patched: WILLNEED=1 RANDOM=1 SEQUENTIAL=0 DONTNEED=4
+patched: WILLNEED=1 RANDOM=1 SEQUENTIAL=0 DONTNEED=5
 # note: MADV_DONTNEED here is the runtime releasing thread stacks, not the reader.

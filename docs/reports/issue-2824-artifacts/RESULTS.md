@@ -38,12 +38,21 @@ a cold cache. `scan_major_faults = cold - floor`.
 
 | signal | baseline median [values] | patched median [values] |
 |---|---|---|
-| **scan-attributable major faults** | **3.0** [3, 2, 3, 5] | **3.0** [7, 3, 3, 3] |
-| raw cold major faults | 54 | 52 |
-| floor major faults (startup only, `prefetch=off`) | 51 | 48 |
+| **scan-attributable major faults** (bounds, does not resolve — see residual) | **3.5** [4, 5, 3, 3] | **3.0** [3, 3, 4, 3] |
+| raw cold major faults | 54 | 53 |
+| floor major faults (startup only, `prefetch=off`) | 50.5 | 49.5 |
 | warm major faults | 0 | 0 |
-| warm wall secs | 18.66 | 18.23 |
-| cold wall secs (**not quotable**, see below) | 24.23 | 22.48 |
+| page-cache drain before every cold phase | 16/16 `DRAINED` | 16/16 `DRAINED` |
+
+**The attribution residual, stated because it is the same size as the difference.**
+`scan_major_faults = cold(auto) - floor(off) = scan(auto) + [setup(auto) - setup(off)]`. The bracketed
+term is not zero for an arm whose `auto` setup issues advice, and the advice census below shows the
+patched arm does exactly that (`WILLNEED=1` on a `--setup-only` run at `auto`). It is arm-asymmetric and
+of the same order as the 0.5-fault median difference, so **this column bounds the scan cost; it does not
+resolve it.** Read it as "single digits in both arms", never as a between-arm signal. The floor is
+measured at `off` deliberately — at `auto` the patched floor's asynchronous whole-file read-ahead
+outlives its process and pre-warms the cold phase that follows, a far larger and equally
+one-sided bias. Both options carry a residual; this one is smaller and is declared.
 
 Advice census (`ab/advice-census.txt`, taken after all rounds so it cannot pollute one):
 
@@ -59,12 +68,13 @@ identical in both arms, and not from the reader.
 
 ## Reading it
 
-**Scan-attributable major faults are identical: median 3.0 in both arms, across ~630,000 file pages.** The
+**Scan-attributable major faults are single digits in both arms — medians 3.5 and 3.0 across ~630,000
+file pages — and the 0.5 difference is inside the declared residual above, so it is not a signal.** The
 kernel's default read-ahead was already converting essentially everything to minor faults in both arms.
 There was nothing for `MADV_WILLNEED` to convert.
 
 **The attribution matters, and it corrected an earlier misreading of this same data.** Raw cold counts
-are 54 vs 52, which looks like a small improvement. It is not: the difference sits in the
+are 54 vs 53, which looks like a small improvement. It is not: the difference sits in the
 **startup floor** (51 vs 48 — the two binaries differ slightly in size, so they fault in a slightly
 different number of executable pages), i.e. faulting in the executable and its shared libraries,
 which are cold too because the global page cache is dropped, and `%F` counts them. `%F` is per-process,
@@ -72,6 +82,11 @@ so it is immune to the neighbours; it is **not** isolated to the scan mapping, a
 unqualified attributes process-startup faults to the scan. Subtracting the floor removed a spurious
 directional signal and left a clean null. The subtraction is an estimate, not per-mapping accounting,
 which `/usr/bin/time` cannot provide.
+
+**The page cache was verified drained before all 16 cold phases** (`ab/drain.csv`), so the cross-arm
+hazard — one arm's whole-file read-ahead outliving its process and surviving the next `drop_caches` —
+did not occur in this run. That is measured, not assumed; on a busier device it could report `TIMEOUT`
+instead, and the artifact would say so.
 
 **Warm shows no regression**, and warm major faults are 0 in every run, which also confirms the warm
 phase really was warm.

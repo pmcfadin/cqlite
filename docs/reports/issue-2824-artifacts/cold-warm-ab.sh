@@ -265,7 +265,7 @@ esac
 } | tee "$OUT/host.txt"
 # Replaced with COMPLETE at the end; an aborted run therefore leaves a NEGATIVE
 # statement rather than well-formed CSVs that look finished.
-trap 'echo "run: ABORTED (exit $?)" >> "$OUT/host.txt"' EXIT
+trap 'sed -i "s/^run: INCOMPLETE .*$/run: ABORTED (exit $?)/" "$OUT/host.txt" 2>/dev/null || true' EXIT
 
 echo "round,arm,phase,wall_secs,max_rss_kb,major_faults,minor_faults" > "$OUT/summary.csv"
 echo "round,arm,floor_major_faults,cold_major_faults,scan_major_faults" > "$OUT/scan-attributable.csv"
@@ -382,8 +382,10 @@ done
 } | tee "$OUT/advice-census.txt"
 
 trap - EXIT
+# Replace the sentinel in place — appending would leave BOTH `run:` lines and a
+# reader grepping `run:` could not tell which one is current.
+sed -i 's/^run: INCOMPLETE .*$/run: COMPLETE/' "$OUT/host.txt"
 {
-  echo "run: COMPLETE"
   echo "finished-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "loadavg-at-end: $(cut -d' ' -f1-3 /proc/loadavg)"
 } | tee -a "$OUT/host.txt"
