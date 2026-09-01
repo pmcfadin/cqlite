@@ -117,6 +117,12 @@ mod point_read_tests;
 #[cfg(test)]
 mod point_read_streaming_tests;
 
+// Issue #2339 (roborev F1): the effective UDT keyspace is one answer, shared by
+// the Arrow column metadata and merged-read reassembly. In-crate because
+// `with_udt_keyspace`/`udt_scope` are `pub(crate)`.
+#[cfg(test)]
+mod producer_udt_scope_tests;
+
 // Issue #2162 OTel-level assertions (phase histograms, bounded attributes,
 // rpc.rows presence via the shared `observability-testing` capture harness) live
 // in `tests/metrics_capture_test.rs` — a SEPARATE integration-test binary/process

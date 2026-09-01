@@ -515,7 +515,14 @@ impl MergeProducer {
     /// no-op — column types and reader posture are unchanged. Consumes and returns
     /// `self` for chaining.
     pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
-        let keyspace = self.schema.keyspace.clone();
+        // Issue #2339 (roborev F1): resolve against the EFFECTIVE UDT keyspace, not
+        // `schema.keyspace`. A ticket's unqualified `CREATE TABLE` parses to the
+        // placeholder keyspace `"default"`, so resolving column types under it MISSES
+        // every UDT the ticket declared — leaving a `frozen<UDT>` collection element
+        // as `Custom`/`Utf8` in the Arrow metadata while merged-read reassembly (which
+        // consults `udt_scope`, the same effective keyspace) now emits a structured
+        // `Value::Udt`: a silent Arrow schema/array disagreement.
+        let keyspace = self.effective_udt_keyspace().to_string();
         Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
         // If aggregation was already attached (a caller that chained
         // `with_aggregation` BEFORE `with_udt_registry`), the PARTIAL output columns
@@ -535,7 +542,36 @@ impl MergeProducer {
     /// merged-read reassembly (issue #2339) — see [`Self::udt_keyspace`].
     pub(crate) fn with_udt_keyspace(mut self, keyspace: &str) -> Self {
         self.udt_keyspace = Some(keyspace.to_string());
+        // Order-independence (issue #2339, roborev F1): production chains
+        // `with_udt_keyspace` BEFORE `with_udt_registry`, but a caller that attached
+        // the registry first would have resolved its columns under `schema.keyspace`.
+        // Re-resolve against the now-authoritative keyspace so BOTH orders produce the
+        // same Arrow metadata. `UdtRegistry::resolve_type` is idempotent on an
+        // already-resolved tree, so this can never un-resolve a column.
+        if let Some(registry) = self.udt_registry.clone() {
+            let keyspace = self.effective_udt_keyspace().to_string();
+            Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
+            if let Some(partial) = self.partial_columns.as_mut() {
+                Self::resolve_columns_udts(&registry, &keyspace, partial);
+            }
+        }
         self
+    }
+
+    /// The keyspace an UNQUALIFIED UDT reference resolves under: the explicitly
+    /// established [`Self::udt_keyspace`] when present, else `schema.keyspace`
+    /// (issue #2339, roborev F1).
+    ///
+    /// The SINGLE source of that answer for every consumer — Arrow column metadata
+    /// ([`Self::with_udt_registry`]), aggregation/partial column metadata
+    /// ([`Self::with_aggregation`]) and merged-read reassembly plus the bypass
+    /// divergence predicate ([`Self::udt_scope`]) — so the Arrow schema a client is
+    /// promised and the values the reassembler produces cannot resolve under
+    /// different keyspaces.
+    pub(crate) fn effective_udt_keyspace(&self) -> &str {
+        self.udt_keyspace
+            .as_deref()
+            .unwrap_or(self.schema.keyspace.as_str())
     }
 
     /// The UDT resolution scope handed to the merged-read reassembler and to the
@@ -547,10 +583,7 @@ impl MergeProducer {
         self.udt_registry.as_ref().map(|registry| {
             cqlite_core::storage::write_engine::merge::UdtScope {
                 registry,
-                keyspace: self
-                    .udt_keyspace
-                    .as_deref()
-                    .unwrap_or(self.schema.keyspace.as_str()),
+                keyspace: self.effective_udt_keyspace(),
             }
         })
     }
@@ -628,7 +661,12 @@ impl MergeProducer {
         // (roborev job 1925 item 1). Resolve the partial columns against the already-
         // attached registry so both are `Struct`.
         if let Some(registry) = self.udt_registry.clone() {
-            Self::resolve_columns_udts(&registry, &self.schema.keyspace, &mut partial);
+            // Issue #2339 (roborev F1): the EFFECTIVE UDT keyspace, matching
+            // `with_udt_registry` and `udt_scope` — a ticket keyspace other than the
+            // `"default"` placeholder would otherwise leave a UDT group-by column
+            // unresolved here while the full-row columns resolved.
+            let keyspace = self.effective_udt_keyspace().to_string();
+            Self::resolve_columns_udts(&registry, &keyspace, &mut partial);
         }
         self.agg = Some(plan);
         self.partial_columns = Some(partial);

@@ -491,12 +491,16 @@ impl CqliteFlightService {
             // Issue #2825: the configured byte-cap reaches every producer this
             // service builds, on every route.
             .with_max_batch_bytes(self.max_batch_bytes)
-            .with_udt_registry(registry)
-            // Issue #2339: the registry above is keyed by the TICKET's keyspace, and
+            // Issue #2339: the registry is keyed by the TICKET's keyspace, and
             // `parse_cql_schema` gives an unqualified `CREATE TABLE` (every connector
-            // ticket) the placeholder keyspace `"default"` — so the reassembler must
-            // be told the real one or it misses every UDT and fails closed.
-            .with_udt_keyspace(&ticket.keyspace);
+            // ticket) the placeholder keyspace `"default"` — so the effective UDT
+            // keyspace is established FIRST (roborev F1) and `with_udt_registry`,
+            // `with_aggregation` and `udt_scope` all resolve under it. Applying the
+            // registry first would resolve the ARROW column metadata under `"default"`,
+            // leaving a `frozen<UDT>` collection element as `Custom`/`Utf8` while the
+            // reassembler (which uses the effective keyspace) emits a structured UDT.
+            .with_udt_keyspace(&ticket.keyspace)
+            .with_udt_registry(registry);
         // Aggregation pushdown (issue #841): when the ticket carries an
         // aggregation spec, the producer emits PARTIAL aggregate rows under the
         // partial schema instead of full rows.
