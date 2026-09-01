@@ -654,17 +654,26 @@ const CASES: &[Case] = &[
             ("s_map_udt_key", Multicell::Set),
             ("s_map_udt_val", Multicell::Set),
         ],
-        // EVERY column except `id` and `f_set_tuple_udt` is excluded, in TWO
-        // distinct classes. Stated as the SURVIVING SET rather than as a count of
-        // the excluded: a count here drifted once already (roborev job 308 caught
-        // "Eight" after a ninth skip was added), and it drifted even though it sits
-        // in the same file as the `Skip` list that invalidates it — co-location is
-        // not enough when the edit that changes the number is not the edit that
-        // reads it. The surviving set is also what a reader needs: `f_set_tuple_udt`
-        // is a genuinely nested frozen column that IS compared, which is why this is
-        // a CASES entry rather than a NOT_COMPARABLE one. The authoritative count is
-        // emitted by the census line itself ("N cells compared, M of them
-        // containers") and needs no prose duplicate.
+        // COMPARED IN FULL: `id`, `f_set_tuple_udt`, and — since issue #3726 gave
+        // `Canon` a container representation — the three frozen container-keyed maps
+        // `f_map_tuple_udt`, `f_map_set_udt` and `f_map_tuple_list_udt`. Everything
+        // else is excluded, in TWO distinct classes.
+        //
+        // Stated as the SURVIVING SET rather than as a count of the excluded: a count
+        // here drifted once already (roborev job 308 caught "Eight" after a ninth skip
+        // was added), and it drifted even though it sits in the same file as the `Skip`
+        // list that invalidates it — co-location is not enough when the edit that
+        // changes the number is not the edit that reads it.
+        //
+        // AND THE SURVIVING SET DRIFTED TOO, one issue later: #3726 removed three skips
+        // and this sentence still read "every column except `id` and
+        // `f_set_tuple_udt`" until roborev job 14 caught it. So the lesson generalises
+        // past the count — ANY prose census of this list decays, because the edit that
+        // changes it is the `Skip` array below and nothing makes you re-read this. The
+        // authoritative figure is emitted by the census line itself ("N cells compared,
+        // M of them containers"), which is DERIVED and cannot drift; this prose exists
+        // only to say WHICH columns and WHY, and must be re-read whenever a `Skip` is
+        // added or removed.
         //
         // CLASS 1 — the golden leaves the nested frozen element UNDECODED (raw
         // bytes as hex for a collection, colon-joined text for a tuple) while the
