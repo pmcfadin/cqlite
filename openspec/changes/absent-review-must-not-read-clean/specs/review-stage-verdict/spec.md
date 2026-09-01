@@ -90,6 +90,18 @@ nothing was produced. The deadline SHALL NOT change the verdict.
 - **WHEN** a stage is sentinel-only past its deadline
 - **THEN** `status` names the elapsed time and that no report was produced
 
+#### Scenario: each status state names its own cause
+- **WHEN** `status` reports a stage whose report is unreadable, or whose report RECORDS a `NOT-RUN`
+  of its own with a stated cause
+- **THEN** `state=` names THAT cause (`report-unreadable`, `not-run-self-reported`) and never
+  `report-ungrammatical` — the operator action differs per cause (`chmod` / act on what the agent
+  said / re-write the verdict line), and a wrong remediation signal is worse than a vague one, since
+  it is what stops the operator looking
+- **AND** the state set is CLOSED and enumerated, with the several `report ungrammatical: <what>`
+  variants deliberately sharing ONE state because their operator action is the same
+- **AND** the enumeration is checked against the cause literals DERIVED from the source, so a new
+  cause that is not mapped reds the suite instead of being mislabelled as self-reported
+
 #### Scenario: a late report is still a report
 - **WHEN** a real report is written after the deadline
 - **THEN** the verdict is derived from its content, not from the deadline

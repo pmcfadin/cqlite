@@ -198,7 +198,19 @@
 #         clause for the spawn prompt, so the contract reaches the agent VERBATIM rather
 #         than being paraphrased per lane.
 #   status <kind> --issue <N>
-#         Elapsed / deadline / state. ADVISORY ONLY — never changes the verdict.
+#         Elapsed / deadline / state. ADVISORY ONLY — never changes the verdict. `state=` is a
+#         CLOSED set, ONE VALUE PER CAUSE, because the operator action differs per cause:
+#           reported                a verdict is recorded (PASS/FINDINGS/AUTHOR-PERFORMED)
+#           sentinel-only           the report is still the pre-spawn sentinel
+#           report-absent           the report file is GONE
+#           report-unreadable       it exists and cannot be READ (fix: chmod / the filesystem)
+#           report-empty            it exists and holds nothing recordable
+#           report-ungrammatical    its verdict line is absent, ambiguous or unrecognised
+#           not-run-self-reported   it RECORDS a NOT-RUN of its own, and names why
+#           never-opened            no stage was ever opened for this kind
+#         Two of these were added in round 4 (H4): `report unreadable` and a self-recorded cause
+#         both used to be reported as `report-ungrammatical`, i.e. a WRONG remediation signal and,
+#         for the second, a false claim about a file that is perfectly grammatical.
 #   verdict <kind> --issue <N>
 #         EXACTLY ONE line of the closed grammar above. Exit 0/4/5/6.
 #   record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact>
@@ -1187,18 +1199,40 @@ cmd_status() {
   cls="$(classify_report "$STAGE_REPORT" "$STAGE_OPEN")"
   token="${cls%%|*}"
   cause="${cls#*|}"
+  # --- STATUS-CAUSE-MAP-BEGIN -------------------------------------------------------------
+  # ONE STATE PER CAUSE, BECAUSE THE OPERATOR ACTION DIFFERS PER CAUSE (#3751 round 4, H4). That
+  # is the entire justification for `classify_report` naming six causes, and this mapper used to
+  # throw two of them away: EVERY unenumerated cause fell through to `report-ungrammatical`, so
+  #   * `report unreadable` — fix: `chmod` — was reported as a complaint about CONTENT THAT WAS
+  #     NEVER OBSERVED, sending the operator to the agent; and
+  #   * a SELF-RECORDED `result: NOT-RUN (ran out of context)` — a perfectly GRAMMATICAL report in
+  #     which the agent said WHY — was called ungrammatical, which is affirmatively false about the
+  #     file and hides the one piece of information that was actionable.
+  # A wrong remediation signal is worse than a vague one, because it is what stops the operator
+  # looking.
+  #
+  # THE BUILT-IN CAUSES ARE ENUMERATED, AND THE FALL-THROUGH IS THE REPORT'S OWN CAUSE. That is
+  # sound only while this enumeration covers every cause `classify_report` can emit: a NEW built-in
+  # cause added there and not here would be mislabelled `not-run-self-reported`. It is not left to
+  # care — `scripts/tests/test_review_stage.sh` §7b DERIVES the built-in cause literals from this
+  # file and asserts each one is matched by an arm below, so the drift reds the suite. The several
+  # `report ungrammatical: <what>` variants deliberately share ONE state: the operator action is
+  # the same for all of them (the agent wrote a bad verdict line).
   case "$token" in
     NOT-RUN)
       case "$cause" in
         "no report written") state=sentinel-only ;;
         "report absent") state=report-absent ;;
+        "report unreadable") state=report-unreadable ;;
         "report empty") state=report-empty ;;
+        "report ungrammatical"*) state=report-ungrammatical ;;
         "stage never opened") state=never-opened ;;
-        *) state=report-ungrammatical ;;
+        *) state=not-run-self-reported ;;
       esac
       ;;
     *) state=reported ;;
   esac
+  # --- STATUS-CAUSE-MAP-END ---------------------------------------------------------------
   case "$STAGE_ELAPSED:$STAGE_DEADLINE" in
     unknown:* | *:unknown) past=unknown ;;
     *) if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi ;;
@@ -1212,6 +1246,13 @@ cmd_status() {
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE PAST DEADLINE: ${STAGE_ELAPSED}s elapsed against a ${STAGE_DEADLINE}s deadline and NOTHING has been produced — the report is still the pre-spawn sentinel. This is ADVISORY: the deadline never changes the verdict, and a report arriving later is still a report. Read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = sentinel-only ]; then
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE inside deadline: ${STAGE_ELAPSED}s of ${STAGE_DEADLINE}s elapsed and nothing produced yet — the report is still the pre-spawn sentinel, which is NOT a verdict."
+  elif [ "$state" = not-run-self-reported ]; then
+    # THE AGENT'S OWN CAUSE IS THE ACTIONABLE PART, so it is passed through — via `field_value`,
+    # the one emit boundary, because it is report-supplied DATA on a line carrying `key=value`
+    # fields (#3312's rule, same as the verdict line's cause).
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the report RECORDS a NOT-RUN of its own, naming: $(field_value "$cause") — the file is grammatical and the agent said WHY, so the next action is what that cause names, not a chmod and not a re-written verdict line. ADVISORY, as always: read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
+  elif [ "$state" = report-unreadable ]; then
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the report file EXISTS but could not be READ, so nothing is claimed about its content — the fix is a permission or an I/O one (chmod / the filesystem), NOT a re-spawn: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = never-opened ]; then
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE no stage was ever opened for this kind — there is nothing to wait for. Open one BEFORE spawning: $prog open $KI_KIND --issue $KI_ISSUE --agent <type>"
   fi

@@ -466,6 +466,118 @@ rc_is 0 "status: a never-opened stage is exit 0 (advisory)"
 has "state=never-opened" "status: names the never-opened state"
 has "no stage was ever opened" "status: says what to do about a never-opened stage"
 
+# --- 7b. EVERY NOT-RUN CAUSE MAPS TO ITS OWN `state=` (round 4, H4) --------------
+# THE FINDING: `status` mapped `report unreadable` onto `state=report-ungrammatical` — the wrong
+# REMEDIATION SIGNAL (`chmod`, not "your agent wrote a bad verdict line"), and a claim about
+# CONTENT THAT WAS NEVER OBSERVED. `classify_report` already distinguishes the cause, so the
+# collapse was purely in the status mapper.
+#
+# AND THE CLASS IS "ONE STATE COLLAPSING SEVERAL CAUSES", NOT THIS ONE INSTANCE, so all SEVEN
+# reachable NOT-RUN causes are asserted here, each against its own state AND against the ABSENCE
+# of the state it used to be confused with. Two were wrong: `report unreadable` (the named one)
+# and a SELF-RECORDED cause (`result: NOT-RUN (ran out of context)`), which also fell through to
+# `report-ungrammatical` — affirmatively false, since such a report is perfectly grammatical and
+# is the one case where the AGENT told us why. `report ungrammatical: <what>` keeps ONE state for
+# all its variants deliberately: the operator action is the same for every one of them.
+R7B="$(newrepo)"
+
+# (1) sentinel-only
+rs "$R7B" open c --issue 480 --agent spec-auditor
+rc_is 0 "status-map: the stage opened"
+rs "$R7B" status c --issue 480
+has "state=sentinel-only" "status-map: 'no report written' -> sentinel-only"
+
+# (2) report absent
+rm -f "$(REPORT_OF "$R7B" 480 c)"
+rs "$R7B" status c --issue 480
+has "state=report-absent" "status-map: 'report absent' -> report-absent"
+
+# (3) report empty
+: >"$(REPORT_OF "$R7B" 480 c)"
+rs "$R7B" status c --issue 480
+has "state=report-empty" "status-map: 'report empty' -> report-empty"
+
+# (4) report UNREADABLE — the named finding. Mode 000 is not effective for root, so the case
+#     asserts the mapping only where the read really is refused, and says which branch it took;
+#     BOTH branches emit the same number of assertions, so the exact case floor does not move.
+UNREAD="$(REPORT_OF "$R7B" 480 c)"
+printf 'result: PASS\n\nreviewed.\n' >"$UNREAD"
+chmod 000 "$UNREAD" 2>/dev/null || true
+if ( : <"$UNREAD" ) 2>/dev/null; then
+  ok "status-map: SKIPPED the unreadable mapping — this user can read a mode-000 file (root); nothing is asserted about a state that was not reached"
+  ok "status-map: (the same, second half — the case emits a fixed number of assertions either way)"
+else
+  rs "$R7B" status c --issue 480
+  has "state=report-unreadable" "status-map: 'report unreadable' -> report-unreadable (NOT report-ungrammatical: the fix is chmod)"
+  hasnt "state=report-ungrammatical" "status-map: an unreadable report is no longer reported as ungrammatical — a claim about content never observed"
+fi
+chmod 644 "$UNREAD" 2>/dev/null || true
+
+# (5) report ungrammatical — ONE state for every variant, which is correct: same operator action.
+printf 'reviewed, but no verdict line.\n' >"$UNREAD"
+rs "$R7B" status c --issue 480
+has "state=report-ungrammatical" "status-map: 'report ungrammatical: no result line' -> report-ungrammatical"
+printf 'result: PASS\nresult: FINDINGS\n' >"$UNREAD"
+rs "$R7B" status c --issue 480
+has "state=report-ungrammatical" "status-map: the AMBIGUOUS (several records) variant maps to the same state"
+printf 'result: MAYBE\n' >"$UNREAD"
+rs "$R7B" status c --issue 480
+has "state=report-ungrammatical" "status-map: the unrecognised-token variant maps to the same state"
+
+# (6) A SELF-RECORDED NOT-RUN CAUSE: the report is GRAMMATICAL and the agent said why. This used
+#     to fall through to report-ungrammatical, which is false about the file and points the
+#     operator at the wrong thing.
+printf 'result: NOT-RUN (ran out of context before reading the diff)\n\nsee above.\n' >"$UNREAD"
+rs "$R7B" status c --issue 480
+rc_is 0 "status-map: a self-recorded NOT-RUN is advisory like every other state"
+has "state=not-run-self-reported" "status-map: a self-recorded cause -> not-run-self-reported"
+hasnt "state=report-ungrammatical" "status-map: a grammatical self-recorded NOT-RUN is NOT reported as ungrammatical"
+has "ran out of context" "status-map: and the STATUS-NOTE passes the agent's own cause through, since that is the actionable part"
+
+# (7) never opened
+rs "$R7B" status coverage --issue 480
+has "state=never-opened" "status-map: 'stage never opened' -> never-opened"
+
+# STRUCTURAL DRIFT GUARD, DERIVED FROM THE SOURCE RATHER THAN CURATED. The mapper's fall-through
+# means "this cause came from the report itself", which is true only while every BUILT-IN cause is
+# enumerated: a new one added to `classify_report` and not to the mapper would be mislabelled
+# `not-run-self-reported` — a false statement about where the cause came from, and exactly the
+# class this item is about, one round later. So the built-in cause literals are EXTRACTED from the
+# shipped script and each is required to be matched by an arm of the mapper block. Derived, so a
+# new cause adds an assertion instead of needing this list edited.
+MAPPER_BLOCK="$(LC_ALL=C sed -n '/STATUS-CAUSE-MAP-BEGIN/,/STATUS-CAUSE-MAP-END/p' "$RS")"
+if [ -n "$MAPPER_BLOCK" ]; then
+  ok "status-map/drift: the mapper block was located in the shipped script"
+else
+  bad "status-map/drift: could not locate the mapper block — the assertions below would be vacuous"
+fi
+BUILTIN_CAUSES="$(LC_ALL=C grep -o "NOT-RUN|[a-z][a-z' -]*" "$RS" \
+  | LC_ALL=C sed -e "s/^NOT-RUN|//" -e "s/[ ]*$//" | LC_ALL=C sort -u)"
+NCAUSES="$(printf '%s\n' "$BUILTIN_CAUSES" | LC_ALL=C grep -c . || true)"
+if [ "${NCAUSES:-0}" -ge 5 ]; then
+  ok "status-map/drift: $NCAUSES built-in cause literals were extracted (>= the 5 known ones, so the extraction is not empty)"
+else
+  bad "status-map/drift: only ${NCAUSES:-0} cause literal(s) extracted — the extraction broke and the guard is vacuous"
+fi
+printf '%s\n' "$BUILTIN_CAUSES" | while IFS= read -r CAUSE_LIT; do
+  [ -n "$CAUSE_LIT" ] || continue
+  case "$MAPPER_BLOCK" in
+    *"\"$CAUSE_LIT\""*) printf 'ok   - status-map/drift: the mapper enumerates the built-in cause %s\n' "'$CAUSE_LIT'" ;;
+    *) printf 'FAIL - status-map/drift: the built-in cause %s is NOT enumerated by the status mapper, so it would be mislabelled as self-reported\n' "'$CAUSE_LIT'" ;;
+  esac
+done >"$T/drift.out"
+DRIFT_OK="$(LC_ALL=C grep -c '^ok   - ' "$T/drift.out" || true)"
+DRIFT_BAD="$(LC_ALL=C grep -c '^FAIL - ' "$T/drift.out" || true)"
+LC_ALL=C cat "$T/drift.out"
+PASS=$((PASS + DRIFT_OK))
+FAIL=$((FAIL + DRIFT_BAD))
+
+# CONTROL: a real verdict is still `state=reported`, so the mapping did not turn every state into
+# a named NOT-RUN one.
+printf 'result: PASS\n\nreviewed.\n' >"$UNREAD"
+rs "$R7B" status c --issue 480
+has "state=reported" "status-map CONTROL: a recorded verdict is still state=reported"
+
 # --- 8. record-author-performed: the full form ---------------------------------
 R7="$(newrepo)"
 rs "$R7" open c --issue 500 --agent spec-auditor --deadline-secs 600
@@ -1493,7 +1605,16 @@ rc_is 64 "derived/issue: an issue carrying a NEWLINE is refused"
 # passes), verified to still RED when the emit boundary is removed. Section 13 then adds the
 # derived-path and strict kind/issue cases. Every assertion added is unconditional, so the EXACT
 # floor still holds by the two shapes recorded above.
-ASSERT_FLOOR=350
+#
+# ROUND 4's THIRD ITEM (H4) ADDS 22 (350 -> 372): section 7b maps all SEVEN reachable NOT-RUN
+# causes to their own `state=`, asserts the ABSENCE of the state each was confused with, and adds
+# the DERIVED drift guard (the built-in cause literals are extracted from the shipped script, so a
+# new cause adds an assertion here rather than needing this list edited — which can only RAISE the
+# count, while a broken extraction is caught by its own >= 5 floor). One case is host-conditional
+# and takes the FIRST shape the two rules above allow: the mode-000 unreadable case emits the SAME
+# NUMBER of assertions whether or not this user can read a mode-000 file (root can), so the count
+# does not move.
+ASSERT_FLOOR=372
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

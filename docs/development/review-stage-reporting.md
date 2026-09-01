@@ -160,6 +160,18 @@ Three further declared limits of the mechanism itself:
   exists to detect). Judging whether the working is
   real is a human's job — and for the author-performed substitute, requiring the working to be
   recorded is the whole point.
+- **`status`'s `state=` is one value PER CAUSE (round 4, H4).** The six-cause contract exists
+  because the operator action differs per cause, and the status mapper was throwing two of them
+  away: every unenumerated cause fell through to `report-ungrammatical`, so `report unreadable`
+  (fix: `chmod`) sent the operator to the agent, and a SELF-RECORDED
+  `result: NOT-RUN (ran out of context)` — a perfectly grammatical report in which the agent said
+  WHY — was called ungrammatical, hiding the one actionable fact. Both now have their own state
+  (`report-unreadable`, `not-run-self-reported`) and their own STATUS-NOTE. All SEVEN reachable
+  causes were checked, not just the reported one: the five that were already right are pinned, the
+  `report ungrammatical: <what>` variants deliberately keep ONE state (same operator action), and
+  the enumeration is guarded against drift by a test that DERIVES the built-in cause literals from
+  the script and requires each to be mapped — a new cause added to the classifier and not to the
+  mapper reds the suite rather than being mislabelled.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage
   silent inside its deadline is still `NOT-RUN`. Letting a clock decide would add a clock to a
   question already answerable from content, and would fail a slow-but-real review.
