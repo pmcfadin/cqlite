@@ -56,7 +56,13 @@ BLOCK_END = "==== END ROBOREV REVIEW SUMMARY ===="
 # Column-zero anchored, and the key must be followed by whitespace: `job:` and
 # `job-record:` are different keys, and a prefix match would read the second as
 # the first and then fail to parse its value.
-JOB_KEY = re.compile(r"^(?:job|recheck-of):[ \t]+([0-9]{1,12})[ \t]*$")
+#
+# THE VALUE MAY BE FOLLOWED BY MORE FIELDS, because the real block packs three
+# onto one line — `job: 27      model: gpt-5.6-sol      census: 14 files` — so a
+# `$`-anchored value matched NOTHING on any genuine block (measured against the
+# block recorded on PR #3801). The digit run is still terminated by whitespace
+# or end of line, so `job: 27x` is not a job id.
+JOB_KEY = re.compile(r"^(?:job|recheck-of):[ \t]+([0-9]{1,12})(?:[ \t].*)?$")
 # The terminal verdict key, assembled rather than written literally so this
 # file's own text cannot be grepped as a certification (the needle-split idiom
 # `scripts/tests/test_base_staleness.sh` Case 18 pins for the shell side).
