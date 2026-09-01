@@ -348,7 +348,11 @@ pub enum Side {
     Cli,
 }
 
-/// A canonical scalar: the unit of value equality.
+/// A canonical VALUE: the unit of value equality.
+///
+/// Scalar-only until issue #3726, which added the container variants so that a `map`
+/// whose declared KEY type is a container can be paired at all. The recursive arms
+/// live in [`container`]; the scalar arms stay in [`canon_typed`] below.
 ///
 /// `Ord` is derived so a collection of canonical values can be SORTED — the
 /// row-order check compares the two sides' key multisets that way (see
@@ -466,7 +470,11 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
     })
 }
 
-/// Canonicalize a scalar whose declared CQL type is KNOWN — the comparison path.
+/// Canonicalize a value whose declared CQL type is KNOWN — the comparison path.
+///
+/// A CONTAINER type is dispatched to [`container::canon_container`], which recurses
+/// back through here for each member (issue #3726); everything below this dispatch is
+/// the SCALAR half, and the numeric/kinding rules it states are scalar rules.
 ///
 /// This, not [`canon_scalar`], decides value equality. Two things bound the
 /// numeric normalization, and both are needed:
