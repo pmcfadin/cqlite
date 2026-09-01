@@ -774,6 +774,17 @@ impl V5CompressedLegacyParser {
 
                         // Parse field value - handle nested UDTs specially (Issue #238)
                         let value = if let Some(ref registry) = self.udt_registry {
+                            // Issue #3722: one adapter so threading `depth` does not reflow 8
+                            // deeply-nested call sites (this file is over the campsite target).
+                            let decode_registry_udt =
+                                |data: &[u8], def: &crate::types::UdtTypeDef| {
+                                    self.parse_nested_udt_from_registry(
+                                        data,
+                                        def,
+                                        registry,
+                                        depth + 1,
+                                    )
+                                };
                             match &field_def.field_type {
                                 CqlType::Custom(nested_type_name) => {
                                     // `get_udt_qualified` owns "udt:" + keyspace-
@@ -781,9 +792,7 @@ impl V5CompressedLegacyParser {
                                     if let Some(nested_udt) =
                                         registry.get_udt_qualified(&self.keyspace, nested_type_name)
                                     {
-                                        self.parse_nested_udt_from_registry(
-                                            field_data, nested_udt, registry,
-                                        )?
+                                        decode_registry_udt(field_data, nested_udt)?
                                     } else {
                                         decode_udt_field(field_data, &field_def.field_type)?
                                     }
@@ -793,9 +802,7 @@ impl V5CompressedLegacyParser {
                                     if let Some(nested_udt) =
                                         registry.get_udt_qualified(&self.keyspace, udt_name)
                                     {
-                                        self.parse_nested_udt_from_registry(
-                                            field_data, nested_udt, registry,
-                                        )?
+                                        decode_registry_udt(field_data, nested_udt)?
                                     } else if !inline_fields.is_empty() {
                                         self.parse_inline_udt_value(
                                             field_data,
@@ -814,9 +821,8 @@ impl V5CompressedLegacyParser {
                                         if let Some(nested_udt) = registry
                                             .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
-                                            let inner_value = self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?;
+                                            let inner_value =
+                                                decode_registry_udt(field_data, nested_udt)?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
                                             decode_udt_field(field_data, &field_def.field_type)?
@@ -827,9 +833,8 @@ impl V5CompressedLegacyParser {
                                         if let Some(nested_udt) =
                                             registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
-                                            let inner_value = self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?;
+                                            let inner_value =
+                                                decode_registry_udt(field_data, nested_udt)?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else if !inline_fields.is_empty() {
                                             let inner_value = self.parse_inline_udt_value(
@@ -903,6 +908,11 @@ impl V5CompressedLegacyParser {
                 // Try to look up as UDT in registry by short name (Issue #238)
                 // This handles cases like "address_type" which aren't in full marshal format
                 if let Some(ref registry) = self.udt_registry {
+                    // Issue #3722: one adapter so threading `depth` does not reflow 8
+                    // deeply-nested call sites (this file is over the campsite target).
+                    let decode_registry_udt = |data: &[u8], def: &crate::types::UdtTypeDef| {
+                        self.parse_nested_udt_from_registry(data, def, registry, depth + 1)
+                    };
                     if let Some(udt_def) = registry.get_udt_qualified(&self.keyspace, type_str) {
                         tracing::debug!(
                             "Frozen element '{}': found UDT '{}' in registry, parsing {} fields",
@@ -973,9 +983,7 @@ impl V5CompressedLegacyParser {
                                             .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
                                             // Recursively parse nested UDT
-                                            self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?
+                                            decode_registry_udt(field_data, nested_udt)?
                                         } else {
                                             // Unknown custom type - parse as blob
                                             Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
@@ -986,9 +994,7 @@ impl V5CompressedLegacyParser {
                                         if let Some(nested_udt) =
                                             registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
-                                            self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?
+                                            decode_registry_udt(field_data, nested_udt)?
                                         } else if !inline_fields.is_empty() {
                                             self.parse_inline_udt_value(
                                                 field_data,
@@ -1013,7 +1019,10 @@ impl V5CompressedLegacyParser {
                                                 {
                                                     let inner_value = self
                                                         .parse_nested_udt_from_registry(
-                                                            field_data, nested_udt, registry,
+                                                            field_data,
+                                                            nested_udt,
+                                                            registry,
+                                                            depth + 1,
                                                         )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else {
@@ -1027,7 +1036,10 @@ impl V5CompressedLegacyParser {
                                                 {
                                                     let inner_value = self
                                                         .parse_nested_udt_from_registry(
-                                                            field_data, nested_udt, registry,
+                                                            field_data,
+                                                            nested_udt,
+                                                            registry,
+                                                            depth + 1,
                                                         )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else if !inline_fields.is_empty() {

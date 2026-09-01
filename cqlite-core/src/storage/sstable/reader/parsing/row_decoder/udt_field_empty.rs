@@ -108,38 +108,20 @@ impl V5CompressedLegacyParser {
                 depth + 1,
             )?))),
 
-            // `Custom` is an UNRESOLVED type string, and it is NOT rare: on a
-            // schema-less read the field types come from the marshal header, and
-            // `parse_cassandra_type_with_depth` (udt.rs) has no arm for
-            // `ShortType`, `ByteType`, `DurationType`, `CounterColumnType`,
-            // `VarcharType` or `LexicalUUIDType` — they all land here.
+            // `Custom` now means what it says: a type string this reader could not
+            // resolve. It no longer carries primitive marshal forms, because
+            // `parse_cassandra_type_with_depth` names ShortType/ByteType/
+            // VarcharType/DurationType directly (issue #3722), so both SPELLINGS
+            // arrive here as the same concrete `CqlType` and there is nothing to
+            // re-normalize at this site.
             //
-            // So this arm has to NORMALIZE before dispatching, or the two
-            // SPELLINGS DISAGREE about the same value, which is the defect class
-            // #3722 exists to remove. Measured (roborev round 3): an empty
-            // `smallint` field is `CqlType::SmallInt` under the CQL-short
-            // spelling and answers `Value::Null`, but under the marshal spelling
-            // it is `Custom("…ShortType")`, and handing an EMPTY slice to
-            // `parse_value_from_raw_bytes` reaches its `"smallint"` arm, whose
-            // `data.len() < 2` check ERRORS — failing the row rather than
-            // decoding it.
-            //
-            // Normalization reuses the existing marshal->CQL-short mapping and
-            // `CqlType::parse`, so no third type mapping is introduced. A string
-            // it does not recognise keeps the previous behaviour: the same single
-            // route a non-empty payload takes, where a `blob` fallback is the
-            // documented carve-out for a genuinely unknown type.
+            // An earlier revision DID normalize here, by suffix-matching the
+            // marshal name. It was deleted rather than hardened: roborev showed it
+            // misclassified a registry UDT named e.g. `udt:ShortType` as a
+            // primitive, and the fix for that would have been a namespace check —
+            // a rarer delimiter on a channel that should not have been shared.
+            // Naming the types at the parser removes the channel instead.
             CqlType::Custom(type_str) => {
-                if let Some(short) = Self::primitive_marshal_to_cql_short(type_str) {
-                    if let Ok(resolved) = CqlType::parse(short) {
-                        // Guard against a mapping that resolved back to `Custom`
-                        // (it cannot today, but a future arm must not recurse
-                        // forever here).
-                        if !matches!(resolved, CqlType::Custom(_)) {
-                            return self.empty_udt_field_value(&resolved, depth);
-                        }
-                    }
-                }
                 self.parse_value_from_raw_bytes(&[], type_str, "udt field", depth + 1)
             }
         }
@@ -278,57 +260,75 @@ mod tests {
         }
     }
 
-    /// roborev round 3: an empty field must decode IDENTICALLY under both
-    /// spellings. On a schema-less read the field type comes from the marshal
-    /// header, and `ShortType`/`ByteType`/`DurationType`/`CounterColumnType`/
-    /// `VarcharType`/`LexicalUUIDType` have no arm in
-    /// `parse_cassandra_type_with_depth`, so they arrive as `CqlType::Custom`.
+    /// The two SPELLINGS must resolve to the SAME `CqlType`, so nothing
+    /// downstream can decode them differently.
     ///
-    /// Before the fix, the CQL-short spelling answered `Value::Null` while the
-    /// marshal spelling ERRORED (an empty slice reaching
-    /// `parse_value_from_raw_bytes`'s `"smallint"` arm fails its `len < 2`
-    /// check) — the two spellings disagreeing about one value, which is the
-    /// defect class this whole issue exists to remove.
+    /// This test has been through three shapes, and the history is the point.
+    /// roborev found an empty `smallint` field ERRORING under the marshal
+    /// spelling while returning `Value::Null` under CQL-short. The first fix
+    /// normalized the marshal string inside the empty arm and this test asserted
+    /// the two DECODES agreed. roborev then found that normalization
+    /// misclassifying a registry UDT named `udt:ShortType`, and separately found
+    /// the same divergence on the NON-empty path — the family regenerating one
+    /// site over.
+    ///
+    /// So the property was moved UPSTREAM: `parse_cassandra_type_with_depth` now
+    /// names `ShortType`/`ByteType`/`VarcharType`/`DurationType`, and the two
+    /// spellings are the same `CqlType` before any decoder runs. That is what
+    /// this test asserts now — the equality of the TYPES, not of two decode
+    /// results — because with one type there is only one decode and a
+    /// decode-comparison would be trivially true.
     #[test]
-    fn an_empty_field_decodes_the_same_under_both_spellings() {
-        let p = parser();
+    fn both_spellings_resolve_to_the_same_cql_type() {
         const M: &str = "org.apache.cassandra.db.marshal.";
-        // (marshal form that lands in `Custom`, the concrete CQL-short type)
         let pairs = [
             (format!("{M}ShortType"), CqlType::SmallInt),
             (format!("{M}ByteType"), CqlType::TinyInt),
-            (format!("{M}DurationType"), CqlType::Duration),
-            (format!("{M}CounterColumnType"), CqlType::Counter),
             (format!("{M}VarcharType"), CqlType::Text),
-            // NOT LexicalUUIDType: it ends with `UUIDType`, so
-            // `parse_cassandra_type` resolves it to `CqlType::Uuid` and it never
-            // reaches the `Custom` arm. The precondition assert below caught that
-            // when it was listed here, which is why the assert exists.
+            (format!("{M}DurationType"), CqlType::Duration),
+            // NOT missing, and asserted so nobody "fixes" it: LexicalUUIDType
+            // ends with `UUIDType` and already resolves on that arm.
+            (format!("{M}LexicalUUIDType"), CqlType::Uuid),
         ];
-        for (marshal, concrete) in pairs {
-            // Precondition: this marshal form really does land in `Custom`,
-            // otherwise the case proves nothing about the arm under test.
-            let via_header = Self_parse_cassandra(&marshal);
-            assert!(
-                matches!(via_header, CqlType::Custom(_)),
-                "{marshal} no longer resolves to CqlType::Custom, so this case \
-                 no longer exercises the Custom arm — re-point it"
-            );
-
-            let short = p
-                .parse_udt_field_value(&[], &concrete, 0)
-                .unwrap_or_else(|e| panic!("empty {concrete:?} (CQL-short) must decode: {e}"));
-            let marsh = p
-                .parse_udt_field_value(&[], &via_header, 0)
-                .unwrap_or_else(|e| panic!("empty {marshal} (marshal) must decode: {e}"));
+        for (marshal, want) in pairs {
+            let got = Self_parse_cassandra(&marshal);
             assert_eq!(
-                short, marsh,
-                "empty field decoded DIFFERENTLY per spelling: {concrete:?} -> {short:?} \
-                 but {marshal} -> {marsh:?}"
+                got, want,
+                "{marshal} must resolve to {want:?}; a `Custom` here means the two \
+                 spellings diverge before any decoder runs, which is the defect \
+                 family #3722 closed at the parser"
             );
+        }
+
+        // CounterColumnType is DELIBERATELY still `Custom` — a counter cell holds
+        // a CounterContext, not a raw i64, and Cassandra refuses `counter` as a
+        // UDT field anyway. Pinned so the exclusion is a decision, not a gap.
+        let counter = Self_parse_cassandra(&format!("{M}CounterColumnType"));
+        assert!(
+            matches!(counter, CqlType::Custom(_)),
+            "CounterColumnType is deliberately left unresolved here; if that \
+             changed, re-read the comment at the arm before accepting it"
+        );
+    }
+
+    /// And the decode must still be Blob-free for both, which is AC1's property
+    /// at the length-0 branch regardless of how the type was spelled.
+    #[test]
+    fn an_empty_field_of_either_spelling_is_never_a_blob() {
+        let p = parser();
+        const M: &str = "org.apache.cassandra.db.marshal.";
+        for marshal in [
+            format!("{M}ShortType"),
+            format!("{M}ByteType"),
+            format!("{M}DurationType"),
+        ] {
+            let t = Self_parse_cassandra(&marshal);
+            let got = p
+                .parse_udt_field_value(&[], &t, 0)
+                .unwrap_or_else(|e| panic!("empty {marshal} must decode, not error: {e}"));
             assert!(
-                !matches!(short, Value::Blob(_)),
-                "empty {concrete:?} decoded to Value::Blob"
+                !matches!(got, Value::Blob(_)),
+                "empty {marshal} decoded to Value::Blob"
             );
         }
     }

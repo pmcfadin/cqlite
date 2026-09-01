@@ -476,4 +476,41 @@ mod tests {
             );
         }
     }
+
+    /// roborev round 4: `parse_nested_udt_from_registry` had NO depth parameter,
+    /// so its recursive sites bypassed `MAX_TYPE_NESTING_DEPTH` and a chain of
+    /// registry-resolved UDTs recursed to stack exhaustion. Reachable from a
+    /// schema-less read of hostile bytes, since the chain comes from the marshal
+    /// header.
+    ///
+    /// Asserted at the boundary rather than by building a deep chain: calling it
+    /// AT the budget must work and one PAST it must error, which is what proves
+    /// the guard is the thing firing rather than nested registry UDTs failing
+    /// generally.
+    #[test]
+    fn registry_nested_udt_recursion_is_bounded() {
+        use crate::schema::UdtRegistry;
+        let p = parser();
+        let registry = UdtRegistry::new();
+        let mut def = crate::types::UdtTypeDef::new("test_ks".to_string(), "deep".to_string());
+        def = def.with_field("a".to_string(), CqlType::Int, true);
+        // One i32 field length of -1 (null) is a complete, valid payload.
+        let data = (-1i32).to_be_bytes().to_vec();
+
+        let at_budget =
+            p.parse_nested_udt_from_registry(&data, &def, &registry, MAX_TYPE_NESTING_DEPTH);
+        assert!(
+            at_budget.is_ok(),
+            "AT the depth budget must still decode, else the guard rejects valid \
+             input: {at_budget:?}"
+        );
+
+        let past_budget =
+            p.parse_nested_udt_from_registry(&data, &def, &registry, MAX_TYPE_NESTING_DEPTH + 1);
+        assert!(
+            past_budget.is_err(),
+            "one PAST the depth budget must be a corruption error, not unbounded \
+             recursion: {past_budget:?}"
+        );
+    }
 }

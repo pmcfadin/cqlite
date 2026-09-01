@@ -386,6 +386,40 @@ impl V5CompressedLegacyParser {
             s if s.ends_with("IntegerType") => CqlType::Varint,
             s if s.ends_with("BytesType") => CqlType::Blob,
             s if s.ends_with("InetAddressType") => CqlType::Inet,
+            // Issue #3722: these four resolved to `Custom` and were the ROOT of a
+            // recurring defect family, not a cosmetic gap.
+            //
+            // On a schema-less read the field types come from the marshal header,
+            // so a `smallint` field's type was `Custom("…ShortType")` while under
+            // the CQL-short spelling it was `CqlType::SmallInt`. The two SPELLINGS
+            // therefore became DIFFERENT `CqlType`s before any decoder ran, and
+            // every decode site had to re-normalize — which is where three
+            // separate roborev findings landed across two review rounds (the empty
+            // path diverging, the non-empty path taking the lenient decoder, and a
+            // suffix-normalization workaround misclassifying a registry UDT named
+            // `udt:ShortType`). Naming the types here makes both spellings the SAME
+            // `CqlType` before dispatch and removes the need for any normalization
+            // at a decode site, so the family is eliminated rather than narrowed.
+            //
+            // `BytesType` does NOT shadow `ByteType` and vice versa (neither string
+            // ends with the other), so arm order is not load-bearing here.
+            s if s.ends_with("ShortType") => CqlType::SmallInt,
+            s if s.ends_with("ByteType") => CqlType::TinyInt,
+            s if s.ends_with("VarcharType") => CqlType::Text,
+            s if s.ends_with("DurationType") => CqlType::Duration,
+            // DELIBERATELY NOT `CounterColumnType`, which also falls through to
+            // `Custom`. A counter cell stores a CounterContext, not a raw i64 (see
+            // `parse_counter_context`), so resolving it to `CqlType::Counter` here
+            // could make a schema-less counter COLUMN read 8 raw bytes instead of
+            // parsing the context — a behaviour change on a path this issue does
+            // not touch, for no benefit: Cassandra refuses `counter` as a UDT
+            // field outright ("A user type cannot contain counters", measured
+            // against 5.0.2), so it is unreachable as a UDT field type.
+            //
+            // `LexicalUUIDType` is likewise absent because it is NOT missing: it
+            // ends with `UUIDType` and so already resolves to `CqlType::Uuid` on
+            // the arm above. Stated because an earlier count of this gap said
+            // "six" and the real number is four.
             _ => CqlType::Custom(type_str.to_string()),
         })
     }
@@ -678,12 +712,25 @@ impl V5CompressedLegacyParser {
 
     /// Parse a nested UDT from registry definition (Issue #238)
     /// Used when parsing UDT fields that are themselves UDTs
+    /// `depth` counts CQL type nesting and is checked on ENTRY, because this
+    /// function recurses into itself for a registry-resolved nested UDT. Without
+    /// it a chain of registry types recursed until stack exhaustion — reachable
+    /// from a schema-less read of hostile bytes, since the chain comes from the
+    /// marshal header (roborev round 4 on #3722; the same class as the reset-to-0
+    /// defect round 2 found in the inline-UDT arm).
     pub(super) fn parse_nested_udt_from_registry(
         &self,
         data: &[u8],
         udt_def: &crate::types::UdtTypeDef,
         registry: &UdtRegistry,
+        depth: usize,
     ) -> Result<Value> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::corruption(format!(
+                "Nested UDT '{}': type nesting depth {} exceeds maximum {}",
+                udt_def.name, depth, MAX_TYPE_NESTING_DEPTH
+            )));
+        }
         let mut current_offset = 0;
         let mut fields = Vec::with_capacity(udt_def.fields.len());
 
@@ -734,7 +781,12 @@ impl V5CompressedLegacyParser {
                         if let Some(nested_udt) =
                             registry.get_udt_qualified(&self.keyspace, nested_type_name)
                         {
-                            self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
+                            self.parse_nested_udt_from_registry(
+                                field_data,
+                                nested_udt,
+                                registry,
+                                depth + 1,
+                            )?
                         } else {
                             Value::Blob(
                                 crate::storage::sstable::reader::value_borrow::borrow_active(
@@ -748,7 +800,12 @@ impl V5CompressedLegacyParser {
                         if let Some(nested_udt) =
                             registry.get_udt_qualified(&self.keyspace, udt_name)
                         {
-                            self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
+                            self.parse_nested_udt_from_registry(
+                                field_data,
+                                nested_udt,
+                                registry,
+                                depth + 1,
+                            )?
                         } else if !inline_fields.is_empty() {
                             // Issue #239: Use inline field definitions for nested UDTs
                             self.parse_inline_udt_value(field_data, udt_name, inline_fields, 1)?
@@ -770,7 +827,10 @@ impl V5CompressedLegacyParser {
                                     registry.get_udt_qualified(&self.keyspace, nested_type_name)
                                 {
                                     let inner_value = self.parse_nested_udt_from_registry(
-                                        field_data, nested_udt, registry,
+                                        field_data,
+                                        nested_udt,
+                                        registry,
+                                        depth + 1,
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else {
@@ -783,7 +843,10 @@ impl V5CompressedLegacyParser {
                                     registry.get_udt_qualified(&self.keyspace, udt_name)
                                 {
                                     let inner_value = self.parse_nested_udt_from_registry(
-                                        field_data, nested_udt, registry,
+                                        field_data,
+                                        nested_udt,
+                                        registry,
+                                        depth + 1,
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else if !inline_fields.is_empty() {
