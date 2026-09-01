@@ -1,6 +1,6 @@
 == #3287 capability probe — gate verdicts ==
 host L3: 105 MiB (1 instance)
-cpuset:  0,8 (derived from cpu0/topology/thread_siblings_list)
+cpuset:  0,8 (complete sibling group from cpu0, all members online AND in this process's Cpus_allowed_list)
 window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED
 gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10x, ideal ~100x)
   absolute, REPORTED not asserted: 6296 instructions for 1e3 accesses
@@ -16,13 +16,13 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
   offcore_requests_outstanding.cycles_with_data_rd:u : STUCK (0 in both arms)
   offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
   offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
-  l1d_pend_miss.fb_full:u : MOVING (3114 -> 421700)
-  l1d_pend_miss.pending:u : MOVING (140096539 -> 9969422234)
+  l1d_pend_miss.fb_full:u : MOVING (4365 -> 139970)
+  l1d_pend_miss.pending:u : MOVING (140089187 -> 9834242721)
 
 -- GATE C: reproduce #3224's own baseline counters --
   cycle_activity.stalls_l3_miss:u : STUCK (0 in both arms)
-  cycle_activity.stalls_l2_miss:u : MOVING (25651 -> 9580988073)
-  cycle_activity.stalls_total:u : MOVING (280902272 -> 10888290974)
+  cycle_activity.stalls_l2_miss:u : MOVING (23290 -> 9432096854)
+  cycle_activity.stalls_total:u : MOVING (280802426 -> 10740670688)
   LLC-loads:u : ABSENT (ABSENT-FROM-PMU)
   LLC-load-misses:u : ABSENT (ABSENT-FROM-PMU)
   cache-references:u : STUCK (0 in both arms)
@@ -33,9 +33,9 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 25651 <= 280902272)
-    hostile-512m: HOLDS (0 <= 9580988073 <= 10888290974)
-    hostile-2g: HOLDS (0 <= 5913220369 <= 6468498965)
+    friendly-L2resident: HOLDS (0 <= 23290 <= 280802426)
+    hostile-512m: HOLDS (0 <= 9432096854 <= 10740670688)
+    hostile-2g: HOLDS (0 <= 5713954044 <= 6269821419)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt

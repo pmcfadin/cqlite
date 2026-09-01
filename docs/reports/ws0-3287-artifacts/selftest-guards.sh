@@ -216,13 +216,43 @@ if [ "$rc" != 0 ] && grep -q 'nesting violated' "$d/stderr.txt"; then
   ok "stalls_l3_miss > stalls_total -> nesting VIOLATED and the run fails"
 else bad "a nesting violation was not caught (rc=$rc)" "$d"; fi
 
+# --- 9. Gate D: a CPU set outside this process's affinity must be refused -----
+# The fix for job 313 f3 intersects candidate sibling groups with BOTH the online
+# set and /proc/self/status Cpus_allowed_list. Driving it needs no shim: run the
+# probe under a taskset that permits ONE cpu, so no COMPLETE sibling group can be
+# both online and allowed, and the probe must refuse rather than pin blind.
+d="$TMP/c9"; mkdir -p "$d"
+bin9=$(mk_env "$d")
+onecpu=$(awk -F- '/^Cpus_allowed_list:/{print $1}' /proc/self/status | awk '{print $2}')
+if [ -n "$onecpu" ] && command -v taskset >/dev/null 2>&1; then
+  # NOTE: the shim `taskset` inside $bin9 would defeat this, so the REAL taskset is
+  # used to launch, and the shim dir is put on PATH only for the probe's children.
+  ( export PATH="$bin9:$PATH"; exec /usr/bin/taskset -c "$onecpu" bash "$PROBE" "$d/out" "$HERE/../ws0-3224-artifacts/cache-hostile.c" ) \
+      > "$d/stdout.txt" 2> "$d/stderr.txt"
+  rc9=$?
+  if [ "$rc9" != 0 ] && grep -q "affinity mask" "$d/stderr.txt"; then
+    ok "single-CPU affinity -> Gate D refuses to pin (job 313 f3: was 'file is readable' only)"
+  else
+    bad "a CPU set outside the process's affinity was accepted (rc=$rc9)" "$d"
+  fi
+else
+  echo "   SKIP  Gate D affinity case (no taskset or unreadable Cpus_allowed_list)"
+fi
+
+# --- 10. Gate D: the healthy host must still be accepted ----------------------
+d="$TMP/c10"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
+if [ "$rc" = 0 ] && grep -qE 'cpuset: +[0-9]+(,[0-9]+)*' "$d/out/host/differential.txt" \
+   && grep -q 'all members online AND in this process' "$d/out/host/capability-probe.txt"; then
+  ok "unrestricted host -> a complete, online, allowed sibling group IS derived (good input accepted)"
+else bad "Gate D rejected a healthy host (rc=$rc)" "$d"; fi
+
 # =============================================================================
 echo
 echo "cases: PASS=$PASS FAIL=$FAIL"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=11
+FLOOR=12
 if [ $((PASS+FAIL)) -lt $FLOOR ]; then
   echo "FAIL: only $((PASS+FAIL)) cases ran, floor is $FLOOR — cases were deleted, not fixed"
   exit 1

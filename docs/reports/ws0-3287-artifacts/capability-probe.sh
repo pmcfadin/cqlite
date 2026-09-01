@@ -131,38 +131,65 @@ inv "numactl --hardware" numactl --hardware
 
 # ------------------------------------------------- Gate D: derive the pinned CPUs
 # A COMPLETE SMT sibling group, read from sysfs. Correct on any topology.
-CPUSET=""; CPU_TOPO_NOTE=""
-for c in /sys/devices/system/cpu/cpu[0-9]*; do
-  f="$c/topology/thread_siblings_list"
-  [ -r "$f" ] || continue
-  sibs=$(tr -d '[:space:]' < "$f")
-  [ -n "$sibs" ] || continue
-  # Accept only a comma list (a range like 0-1 is expanded); every member must be
-  # online, and the group must be complete -- i.e. every sibling's own list agrees.
-  case "$sibs" in *-*) sibs=$(python3 - "$sibs" <<'PY' 2>/dev/null
-import sys
-out=[]
-for part in sys.argv[1].split(','):
-    if '-' in part:
-        a,b=part.split('-'); out += [str(x) for x in range(int(a),int(b)+1)]
-    else: out.append(part)
-print(','.join(out))
-PY
-) ;; esac
-  [ -n "$sibs" ] || continue
-  ok=1
-  for m in ${sibs//,/ }; do
-    [ -r "/sys/devices/system/cpu/cpu$m/topology/thread_siblings_list" ] || { ok=0; break; }
+CPUSET=""; CPU_TOPO_NOTE=""; CPUSET_OK=0
+
+# A COMPLETE, ONLINE, PROCESS-ALLOWED SMT sibling group, read from sysfs.
+# Revision 5 claimed to validate a complete group and only checked that each
+# member's topology FILE WAS READABLE -- it compared no sibling lists, and checked
+# neither online status nor the process's own affinity mask, so it could select an
+# offline or cgroup-forbidden CPU and report the group as complete. On this fleet
+# every lane runs under a restricted affinity mask, so that is not hypothetical.
+# (#3287 roborev job 313, finding 3.)
+expand_list() { # "0-3,8" -> "0 1 2 3 8"
+  local out="" part a b
+  local IFS=,
+  for part in $1; do
+    case "$part" in
+      *-*) a=${part%-*}; b=${part#*-}
+           case "$a$b" in *[!0-9]*) return 1;; esac
+           while [ "$a" -le "$b" ]; do out="$out $a"; a=$((a+1)); done ;;
+      '')  ;;
+      *)   case "$part" in *[!0-9]*) return 1;; esac; out="$out $part" ;;
+    esac
   done
-  [ "$ok" = 1 ] || continue
-  CPUSET="$sibs"; CPU_TOPO_NOTE="derived from cpu${c##*cpu}/topology/thread_siblings_list"
-  break
-done
-if [ -z "$CPUSET" ]; then
-  note_fail "Gate D: could not derive a complete SMT sibling group from sysfs — refusing to guess a CPU set (the #3217 hardcoded-core-table defect)"
-  CPUSET_OK=0
+  echo $out
+}
+set_eq() { # two space-separated lists, order-insensitive
+  local x y
+  x=$(printf '%s\n' $1 | sort -n | tr '\n' ' ')
+  y=$(printf '%s\n' $2 | sort -n | tr '\n' ' ')
+  [ "$x" = "$y" ]
+}
+ONLINE=$(expand_list "$(cat /sys/devices/system/cpu/online 2>/dev/null)" 2>/dev/null) || ONLINE=""
+# The process's OWN allowed set. Without this a pinned taskset either fails or is
+# silently widened by the kernel, and the L2-resident control arm can migrate.
+ALLOWED=$(expand_list "$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status 2>/dev/null)" 2>/dev/null) || ALLOWED=""
+in_list() { local n="$1" l="$2" m; for m in $l; do [ "$m" = "$n" ] && return 0; done; return 1; }
+
+if [ -z "$ONLINE" ] || [ -z "$ALLOWED" ]; then
+  note_fail "Gate D: could not read the online CPU set and/or this process's allowed CPU set — refusing to pin blind"
 else
-  CPUSET_OK=1
+  for c in /sys/devices/system/cpu/cpu[0-9]*; do
+    f="$c/topology/thread_siblings_list"; [ -r "$f" ] || continue
+    grp=$(expand_list "$(cat "$f" 2>/dev/null)" 2>/dev/null) || continue
+    [ -n "$grp" ] || continue
+    ok=1
+    for m in $grp; do
+      # every member must be ONLINE, ALLOWED, and agree on the group membership
+      in_list "$m" "$ONLINE"  || { ok=0; break; }
+      in_list "$m" "$ALLOWED" || { ok=0; break; }
+      mf="/sys/devices/system/cpu/cpu$m/topology/thread_siblings_list"
+      [ -r "$mf" ] || { ok=0; break; }
+      mgrp=$(expand_list "$(cat "$mf" 2>/dev/null)" 2>/dev/null) || { ok=0; break; }
+      set_eq "$mgrp" "$grp" || { ok=0; break; }
+    done
+    [ "$ok" = 1 ] || continue
+    CPUSET=$(printf '%s\n' $grp | sort -n | paste -sd,)
+    CPU_TOPO_NOTE="complete sibling group from cpu${c##*cpu}, all members online AND in this process's Cpus_allowed_list"
+    CPUSET_OK=1
+    break
+  done
+  [ "$CPUSET_OK" = 1 ] || note_fail "Gate D: no COMPLETE sibling group is both online and permitted by this process's affinity mask — refusing to guess a CPU set (the #3217 hardcoded-core-table defect)"
 fi
 { echo; echo "== Gate D: pinned CPU set =="
   echo "cpuset: ${CPUSET:-<UNDERIVED>}  (${CPU_TOPO_NOTE:-no source})"
