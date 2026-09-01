@@ -265,7 +265,7 @@ case "\$1" in
     exit 0 ;;
   show-environment)
     case '$mode' in
-      no-server|probefail) printf 'no server running on /tmp/tmux-1000/default\n' >&2; exit 1 ;;
+      no-server|probefail) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
       stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
@@ -836,7 +836,7 @@ plant_bootstrap_quiet_stubs "$d18"
 # run_bootstrap <args...> -> $bs_out. The board identity is PINNED so the run cannot vary
 # with the host operator's exported CQLITE_PROJECT_* values.
 run_bootstrap() {
-  PATH="$d18:/tmp/claude-1000/-data-lanes-lane-3733/79e9ae65-0d74-43a4-8eec-94f951c28acf/scratchpad/rec:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
+  PATH="$d18:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
     CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" HOME="$tmp/home" \
     CQLITE_PROJECT_ACCOUNT="$BS_ACCOUNT" CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
     bash "$bs_root/scripts/bootstrap-agent-machine.sh" "$@" 2>&1
@@ -1092,6 +1092,66 @@ else
 fi
 
 # =====================================================================================
+# 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
+#     `tooling-tests` is a MANDATORY gate component, so a path that exists on ONE box —
+#     or in ONE agent session — makes the gate host-dependent, and if that directory
+#     happens to exist it executes uncontrolled content ahead of everything else. The
+#     shipped instance was a recording-shim directory left behind by a measurement round:
+#       PATH="$d18:/tmp/claude-1000/<session-uuid>/scratchpad/rec:$PATH"
+#     inside `run_bootstrap`, i.e. a PATH entry naming one agent session's scratchpad in
+#     the invocation of the REAL bootstrap. It is a CLASS — a measurement seam left behind
+#     — not a line, so it is asserted structurally over BOTH files rather than by
+#     remembering to delete the one that was found.
+#
+#     THE RULE, stated so it can be obeyed: every path this suite uses must be derived at
+#     RUN TIME — from `mktemp` (`$tmp/...`), from `$REPO_ROOT`, or from `command -v` —
+#     never written as a literal rooted at a session/host-specific prefix. The ONE
+#     permitted spelling of such a prefix is the `${TMPDIR:-/tmp}` default idiom, which is
+#     a FALLBACK ROOT handed to `mktemp`, not a path: every temp path here goes through it.
+#     Whole-line comments are excluded — this paragraph names the defect, and a guard that
+#     reds on the text describing it is the guard agents learn to delete (the same
+#     exclusion, for the same reason, as the eval guard in section 23b).
+# =====================================================================================
+# scan_abs_path_literals <file>: prints `<lineno>:<text>` for every violating line. Blanks
+# whole-line comments IN PLACE (never deletes them) so the reported line numbers are the
+# file's own, and strips the permitted `${TMPDIR:-/tmp}` idiom before looking.
+scan_abs_path_literals() {
+  sed -e 's/^[[:space:]]*#.*$//' -e 's|${TMPDIR:-/tmp}||g' "$1" \
+    | grep -nE '(^|[^A-Za-z0-9_./-])/(tmp|data|home|Users|var/folders)/'
+}
+# POSITIVE CONTROL FIRST. A scanner that matches nothing reports every file clean, and this
+# one's whole job is to find a needle nobody has planted yet — so it must find a KNOWN one
+# before its silence about the real files means anything (the standing rule: a sweep needs a
+# positive control). The planted line is the shipped defect's own shape.
+ctl_dir="$tmp/pathscan-control"; mkdir -p "$ctl_dir"
+# THE PLANTED LINE IS ASSEMBLED, never written out: a control containing the literal it
+# tests for would make this suite violate its own rule and red the very case below. Same
+# split-the-needle idiom the roborev guard uses so it cannot match its own source.
+ctl_root='/tmp'
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '# a comment mentioning %s/claude-1000/session/scratchpad/rec must NOT red\n' "$ctl_root"
+  printf '%s\n' 'safe=$(mktemp -d "${TMPDIR:-/tmp}/ok.XXXXXX")'
+  printf 'PATH="$d:%s/claude-1000/dead-session/scratchpad/rec:$PATH"\n' "$ctl_root"
+} >"$ctl_dir/planted.sh"
+ctl_hits=$(scan_abs_path_literals "$ctl_dir/planted.sh")
+if printf '%s' "$ctl_hits" | grep -q 'dead-session' \
+   && [ "$(printf '%s\n' "$ctl_hits" | grep -c .)" -eq 1 ]; then
+  ok "abs-path guard: the scanner finds a planted session-scratchpad PATH entry (and only it)"
+else
+  bad "abs-path guard: the scanner did not isolate the planted violation: $ctl_hits"
+fi
+# ...and now the real files, which must be clean.
+for pathscan_f in "$0" "$CAPLIB"; do
+  pathscan_hits=$(scan_abs_path_literals "$pathscan_f")
+  if [ -z "$pathscan_hits" ]; then
+    ok "abs-path guard: ${pathscan_f##*/} names no host- or session-specific absolute path"
+  else
+    bad "abs-path guard: ${pathscan_f##*/} carries a host/session-specific absolute path: $pathscan_hits"
+  fi
+done
+
+# =====================================================================================
 # 23b. STRUCTURAL: NO LIVE COMMAND SUBSTITUTION INSIDE A DOUBLE-QUOTED `eval` STRING.
 #      Backticks and `$(...)` are LIVE inside "..." — including inside a single-quoted
 #      run nested in it, because the OUTER quotes are the double ones. The shipped defect:
@@ -1137,7 +1197,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=57
+CASE_FLOOR=60
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
