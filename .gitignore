@@ -348,6 +348,36 @@ trino-connector/docker/field-repro-artifacts/
 # worktree is deleted at finalize which would destroy a sampler meant to outlive the issue.
 .ws0-3248/
 
+# RESERVED LANE-SCRATCH NAMESPACE (#3760). Every NEW lane-local agent scratch file
+# MUST be named `.lane-<name>` (or live under a `.lane-<name>/` directory), and
+# SOURCE MAY NEVER BE PLACED UNDER A `.lane-*` PATH. That reservation is what makes
+# the next scratch name covered BY CONSTRUCTION instead of by someone remembering to
+# extend the enumerated list above. The list only ever caught the names already
+# thought of: #3414 created `.gate-of-record-sha.txt` — matched by nothing here —
+# while its gate of record was running, which under #2926 is
+# `tree-integrity: FAIL (tree-mutated-midrun)` and VOIDS the run. 40 minutes, and the
+# rule against it had been written an hour earlier. Un-anchored on purpose, so it
+# holds at every depth, not just the repo root.
+#
+# THERE IS DELIBERATELY NO `!.lane-*/` NEGATION, unlike the
+# `.agent-gate-*.launch-lock` / `.heartbeat` entries above, and the difference is the
+# point rather than an oversight. Those negations exist (roborev job 209) because
+# those names are FILES THE GATE CREATES whose same-named DIRECTORY would be a
+# plausible SOURCE location — and since git does not descend into an ignored
+# directory, source placed there was invisible to
+# `git ls-files --others --exclude-standard`, i.e. a subtree-wide false-clean.
+# `.lane-*` is the opposite case: a lane scratch DIRECTORY (`.lane-3760/`, cf.
+# `.ws0-3248/` above) is a legitimate container and swallowing its whole subtree is
+# exactly what is wanted. Re-including it would surface its contents as untracked,
+# stamping `dirty: yes` / `tree-mutated-midrun` — reproducing this issue's own defect
+# through the negation meant to prevent a different one. The reserved namespace (no
+# source under it, EVER) is what makes the subtree swallow safe. Both behaviours are
+# pinned together by scripts/tests/test_lane_scratch_ignored.sh (tooling-tests), so
+# a blanket-negation edit here reds.
+#
+# Before writing anything into a worktree while a gate runs: git check-ignore -v <path>
+.lane-*
+
 # Cross-binding parity harness artifacts (issue #1455)
 bindings/parity/out/
 
