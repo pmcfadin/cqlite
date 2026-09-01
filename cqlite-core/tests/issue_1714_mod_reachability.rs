@@ -8,11 +8,15 @@
 //! previous lexer-equivalence design and closed its PR #3368): this is a
 //! deliberately SMALL textual walker. It does NOT model, and must not grow to
 //! model, shebang lines, non-ASCII or raw (`r#`) identifiers, a table of Rust
-//! literal prefixes, byte-char/escaped-quote spans, `#[path]` inside an inline
-//! `mod` block, `mod` declarations that do not begin their own (trimmed) source
-//! line, escape sequences inside a `#[path]` value, or a `mod` produced by macro
-//! expansion. There is deliberately **no exception list**: an orphan is a
-//! failure to fix, never an entry to add.
+//! literal prefixes, byte-char/escaped-quote spans (a `'{'` is guarded for
+//! explicitly, not lexed), `#[path]` ON an inline `mod` block (that form sets the
+//! directory its children resolve in), `mod` declarations that do not begin
+//! their own (trimmed) source line, escape sequences inside a `#[path]` value,
+//! or a `mod` produced by macro expansion. `#[cfg_attr(…, path = …)]` is
+//! DETECTED and refused loudly, never resolved. It DOES model out-of-line
+//! modules nested in inline `mod` blocks, `#[path]` on those, and attributes
+//! broken across lines. There is deliberately **no exception list**: an orphan
+//! is a failure to fix, never an entry to add.
 //!
 //! The vacuity floor (>= 400 enumerated files) is checked BEFORE the orphan
 //! assertion, so on a tree far smaller than today's it reds on the floor rather
@@ -140,6 +144,12 @@ fn strip(src: &str) -> Stripped {
 struct ModDecl {
     name: String,
     path_attr: Option<String>,
+    /// Names of the enclosing inline `mod` blocks, outermost first. rustc
+    /// resolves such a child under `<moddir>/<name1>/…/<namen>/`.
+    scope: Vec<String>,
+    /// A `#[cfg_attr(…, path = "…")]` preceded this declaration. That form is
+    /// NOT modeled; the walk refuses loudly rather than resolve it wrongly.
+    cfg_attr_path: bool,
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -147,8 +157,14 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Consume leading `#[...]` / `#![...]` attributes from a trimmed line,
-/// recording any `#[path = "..."]` value in `pending`. Returns the remainder.
-fn eat_attrs<'a>(mut t: &'a str, s: &Stripped, pending: &mut Option<String>) -> &'a str {
+/// recording any `#[path = "..."]` value in `pending` and flagging any
+/// `#[cfg_attr(…, path = …)]` in `cfg_attr_path`. Returns the remainder.
+fn eat_attrs<'a>(
+    mut t: &'a str,
+    s: &Stripped,
+    pending: &mut Option<String>,
+    cfg_attr_path: &mut bool,
+) -> &'a str {
     while t.starts_with('#') {
         let after_hash = t[1..].trim_start();
         let after_hash = after_hash.strip_prefix('!').unwrap_or(after_hash);
@@ -172,8 +188,11 @@ fn eat_attrs<'a>(mut t: &'a str, s: &Stripped, pending: &mut Option<String>) -> 
             }
         }
         let Some(close) = close else { break };
-        if let Some(v) = parse_path_attr(t[open + 1..close].trim(), s) {
+        let inner = t[open + 1..close].trim();
+        if let Some(v) = parse_path_attr(inner, s) {
             *pending = Some(v);
+        } else if inner.starts_with("cfg_attr") && mentions_path_assignment(inner) {
+            *cfg_attr_path = true;
         }
         t = t[close + 1..].trim_start();
     }
@@ -186,6 +205,79 @@ fn parse_path_attr(inner: &str, s: &Stripped) -> Option<String> {
     let rest = rest.strip_prefix('=')?.trim();
     let body = rest.strip_prefix('"')?.strip_suffix('"')?;
     s.literal(body).map(str::to_owned)
+}
+
+/// Does this attribute interior contain a `path = ...` assignment? Used only to
+/// DETECT the unmodeled `#[cfg_attr(…, path = …)]` form, never to resolve it.
+fn mentions_path_assignment(inner: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(idx) = inner[from..].find("path") {
+        let at = from + idx;
+        let before_ok = at == 0 || !is_ident_char(inner[..at].chars().next_back().unwrap_or(' '));
+        if before_ok && inner[at + 4..].trim_start().starts_with('=') {
+            return true;
+        }
+        from = at + 4;
+    }
+    false
+}
+
+/// Newlines inside `[...]` become spaces, so an attribute broken across lines
+/// (e.g. a multi-line `#[path = "..."]`) is still ONE logical line for the
+/// line-anchored scan below.
+fn join_bracketed_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '[' => {
+                depth += 1;
+                out.push(c);
+            }
+            ']' => {
+                depth = depth.saturating_sub(1);
+                out.push(c);
+            }
+            '\n' if depth > 0 => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Track `{}` nesting across one logical line, maintaining the stack of
+/// enclosing inline-module names. `inline_name`, when set, is the module opened
+/// by the FIRST brace on this line.
+fn scan_braces(
+    line: &str,
+    depth: &mut usize,
+    stack: &mut Vec<(usize, String)>,
+    inline_name: &mut Option<String>,
+) {
+    let b = line.as_bytes();
+    for i in 0..b.len() {
+        if b[i] != b'{' && b[i] != b'}' {
+            continue;
+        }
+        // A char literal `'{'` is not a block delimiter, and char literals are
+        // deliberately not stripped (out of scope). 13 such literals live in
+        // cqlite-core/src today, so without this guard the depth would skew
+        // permanently and mis-scope every later declaration in the file.
+        if i > 0 && b[i - 1] == b'\'' && b.get(i + 1) == Some(&b'\'') {
+            continue;
+        }
+        if b[i] == b'{' {
+            *depth += 1;
+            if let Some(n) = inline_name.take() {
+                stack.push((*depth, n));
+            }
+        } else {
+            *depth = depth.saturating_sub(1);
+            while stack.last().map(|(d, _)| *d > *depth).unwrap_or(false) {
+                stack.pop();
+            }
+        }
+    }
 }
 
 /// `[pub[(..)]] mod NAME (;|{)` at the start of a trimmed line.
@@ -222,26 +314,40 @@ fn parse_mod_decl(t: &str) -> Option<(String, bool)> {
 /// All out-of-line module declarations in one source file.
 fn mod_decls(src: &str) -> Vec<ModDecl> {
     let s = strip(src);
+    let joined = join_bracketed_lines(&s.text);
     let mut out = Vec::new();
     let mut pending: Option<String> = None;
-    for line in s.text.lines() {
+    let mut pending_cfg_attr_path = false;
+    let mut depth = 0usize;
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    for line in joined.lines() {
         let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let rest = eat_attrs(t, &s, &mut pending);
-        if rest.is_empty() {
-            continue;
-        }
-        match parse_mod_decl(rest) {
-            Some((name, inline)) => {
-                let path_attr = pending.take();
-                if !inline {
-                    out.push(ModDecl { name, path_attr });
+        let mut inline_name: Option<String> = None;
+        if !t.is_empty() {
+            let rest = eat_attrs(t, &s, &mut pending, &mut pending_cfg_attr_path);
+            if !rest.is_empty() {
+                match parse_mod_decl(rest) {
+                    // An inline `mod x { … }` declares no file, but it DOES
+                    // scope every out-of-line child inside it.
+                    Some((name, true)) => {
+                        pending = None;
+                        pending_cfg_attr_path = false;
+                        inline_name = Some(name);
+                    }
+                    Some((name, false)) => out.push(ModDecl {
+                        name,
+                        path_attr: pending.take(),
+                        scope: stack.iter().map(|(_, n)| n.clone()).collect(),
+                        cfg_attr_path: std::mem::take(&mut pending_cfg_attr_path),
+                    }),
+                    None => {
+                        pending = None;
+                        pending_cfg_attr_path = false;
+                    }
                 }
             }
-            None => pending = None,
         }
+        scan_braces(line, &mut depth, &mut stack, &mut inline_name);
     }
     out
 }
@@ -301,6 +407,27 @@ impl Walk {
             base.join(&stem)
         };
         for decl in mod_decls(&src) {
+            assert!(
+                !decl.cfg_attr_path,
+                "{}: `mod {};` is preceded by a #[cfg_attr(…, path = …)] attribute — an \
+                 unmodeled attribute form. This guard refuses it rather than resolve the \
+                 module to the wrong file (issue #1714); wire the module with a plain \
+                 #[path] instead, or extend this walker deliberately",
+                file.display(),
+                decl.name,
+            );
+            // An out-of-line module inside inline `mod` blocks resolves under
+            // `<moddir>/<block1>/…/<blockn>/`, and a `#[path]` on it is relative
+            // to that same directory rather than to the declaring file's dir.
+            let scoped = decl
+                .scope
+                .iter()
+                .fold(moddir.clone(), |d, name| d.join(name));
+            let path_base = if decl.scope.is_empty() {
+                base.clone()
+            } else {
+                scoped.clone()
+            };
             if let Some(rel) = &decl.path_attr {
                 // `#[path]` on an out-of-line module resolves relative to the
                 // directory containing the DECLARING FILE, never to `<stem>/`.
@@ -313,7 +440,7 @@ impl Walk {
                     file.display(),
                     decl.name,
                 );
-                let target = normalize(&base.join(rel));
+                let target = normalize(&path_base.join(rel));
                 if target.is_file() {
                     self.visit(&target);
                 } else {
@@ -326,8 +453,8 @@ impl Walk {
                 }
                 continue;
             }
-            let flat = moddir.join(format!("{}.rs", decl.name));
-            let dir = moddir.join(&decl.name).join("mod.rs");
+            let flat = scoped.join(format!("{}.rs", decl.name));
+            let dir = scoped.join(&decl.name).join("mod.rs");
             if flat.is_file() {
                 self.visit(&flat);
             } else if dir.is_file() {
