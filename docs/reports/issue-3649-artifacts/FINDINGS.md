@@ -184,13 +184,55 @@ hardest to notice.
 
 ---
 
-## 6. What this lane delivered instead
+## 6. The trap that would have wasted the rig session: #3058's single-source bypass
+
+**Found while building the instrument, not previously recorded on #3649.**
+
+`cqlite-flight` has a single-source fast path on the `do_get` row route, added by
+[#3058](https://github.com/pmcfadin/cqlite/issues/3058) in `680abd0d2`
+(2026-07-29, "single-SSTable merge bypass on the Flight do_get data plane —
+3.32x"). When a request has **one** post-prune source and no static column, no
+`dropped_columns`, and no aggregation, the request **never enters the k-way
+merger** — and the k-way merger's egress fan-in is the entire subject of #2820.
+
+`680abd0d2` predates **both** arms (verified: `cqlite-flight/src/bypass.rs` is
+present at `cfa93fe99^` and at `cfa93fe99`). So on a **single-SSTable** corpus:
+
+> both arms take the fast path, neither arm executes the code #2820 changed, and
+> the measured ratio is **1.0 by construction** — a `BELOW-TARGET` verdict that
+> looks exactly like a measured no-effect and is in fact a measurement of
+> nothing.
+
+Two mechanical guards close it, and both are exercised by the self-test:
+
+1. **`ab-throughput.sh` pins the merge arm.** `--merge-path` defaults to `merge`
+   and is exported as `CQLITE_FLIGHT_MERGE_PATH` into **both** arms' servers.
+   `merge` is documented as absolute — "never take the fast path"
+   (`cqlite-flight/src/bypass.rs`). It is recorded in the manifest, printed by
+   the analyzer, and anything other than `merge` produces a disclosure line
+   beside the verdict.
+2. **`ab-throughput.sh` refuses a corpus below `--min-sstables` (default 2)**,
+   cause `corpus-too-few-sstables`, and **`analyze-ab.py` refuses**, cause
+   `merge-path-bypassed`, when the manifest records fewer than two `*-Data.db`
+   files *and* the merge arm was not pinned. Fewer than two files on disk means
+   at most one source, so that refusal is sound in the direction it fires; with
+   two or more the arm cannot be settled from the manifest, so the unpinned case
+   is disclosed rather than refused.
+
+Note the asymmetry that makes this worth guarding twice: `bypass` is documented
+as *"`auto` with an explicit, assertable name"* — it never overrides a
+correctness precondition — so only `merge` actually guarantees the path under
+test is the path that ran.
+
+---
+
+## 7. What this lane delivered instead
 
 | artifact | what it is |
 |---|---|
 | `ab-throughput.sh` | the interleaved paired A/B driver — two worktrees, two target dirs, fail-closed pre-flight, per-run validation, a manifest rewritten after every completed run |
 | `analyze-ab.py` | the paired bootstrap statistics and the closed-set verdict, anchored so it cannot be pasted as a certification |
-| `selftest-analyze.sh` | 59 deterministic cases over synthetic fixtures, with a case floor |
+| `selftest-analyze.sh` | 72 deterministic cases over synthetic fixtures, with a case floor |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
