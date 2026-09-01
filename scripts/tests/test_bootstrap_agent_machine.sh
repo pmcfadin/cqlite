@@ -36,8 +36,8 @@ $1"; }
 # instead, by the base_warns assertion in block 7p.
 skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
-# --- SECTION 5b-obj IS OPTED OUT SUITE-WIDE, AND THE PUSH SANDBOXES OPT BACK IN (#3749) -
-# 5b-obj rehashes the SHARED git object store with a full `git fsck`. Against the REAL
+# --- SECTION 5d IS OPTED OUT SUITE-WIDE, AND THE PUSH SANDBOXES OPT BACK IN (#3749) -
+# 5d rehashes the SHARED git object store with a full `git fsck`. Against the REAL
 # checkout that is 19.83s per invocation (measured on this fleet's 331M store) and this
 # suite drives bootstrap dozens of times — ~12 minutes added to a MANDATORY gate
 # component for a property most of these cases are not about. So the env opt-out is set
@@ -48,7 +48,7 @@ skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 # skips — the exact drift the comments in that block record happening FOUR times. Hence
 # `run_push` sets it back to 0 and `mk_push_repo` stages the sweep script: in those
 # sandboxes the subject is the sandbox's OWN tiny repo, so the sweep runs in milliseconds,
-# reports VERIFIED, and contributes ZERO warnings. The dedicated 5b-obj cases below then
+# reports VERIFIED, and contributes ZERO warnings. The dedicated 5d cases below then
 # get a real end-to-end verdict instead of a mocked one.
 export CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=1
 
@@ -1222,7 +1222,7 @@ mk_push_repo() {
   # running. Staging it here plus the pinned `sudo` shim in mk_push_bin makes 5b contribute
   # ZERO warnings deterministically — on a pinned host and an unpinned one alike.
   cp "$SCRIPT_DIR/../agent-gate.sh" "$dir/scripts/agent-gate.sh"
-  # Staged for SECTION 5b-obj (#3749), for the same reason agent-gate.sh is staged above:
+  # Staged for SECTION 5d (#3749), for the same reason agent-gate.sh is staged above:
   # without it the section reports `object-store: UNMEASURED (no
   # scripts/check-object-store-integrity.sh ...)` — one extra [warn] in EVERY case built on
   # this helper, which is precisely how base_warns has drifted before. With it staged, the
@@ -1422,7 +1422,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7o. SECTION 5b-obj — the SHARED OBJECT-STORE INTEGRITY SWEEP (issue #3749)
+# 7o. SECTION 5d — the SHARED OBJECT-STORE INTEGRITY SWEEP (issue #3749)
 #
 # Four cases, all end-to-end through the real section: the affirmative verdict, the
 # opt-out, a PLANTED CORRUPTION, and the unmeasurable case. The sweep script's own
@@ -1437,7 +1437,7 @@ if printf '%s' "$out7pa" | grep -q '\[ok\].*object-store: VERIFIED' &&
   printf '%s' "$out7pa" | grep -q 'point-in-time'; then
   ok "obj: a clean store is reported VERIFIED as [ok], declared as a POINT-IN-TIME sweep (not a per-read guarantee)"
 else
-  bad "obj: section 5b-obj did not report VERIFIED as [ok] on a clean sandbox"
+  bad "obj: section 5d did not report VERIFIED as [ok] on a clean sandbox"
   push_plain "$out7pa" | grep -F 'object-store:' | head -4
 fi
 

@@ -453,7 +453,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   its control is a periodic full-rehash sweep: `scripts/check-object-store-integrity.sh` (full
   `git fsck`, never `--connectivity-only`, which does not rehash content), emitting an anchored
   three-valued `VERIFIED`/`CORRUPT`/`UNMEASURED` verdict — run at machine onboarding
-  (`bootstrap-agent-machine.sh` section 5b-obj, where VERIFIED is the ONLY `[ok]`) and on the
+  (`bootstrap-agent-machine.sh` section 5d, where VERIFIED is the ONLY `[ok]`) and on the
   worker supervisor's throttled per-iteration cadence (default 6h; `CORRUPT` **stops that
   supervisor loudly** rather than holding, because corruption is non-self-clearing, while
   `UNMEASURED` is reported and deliberately does NOT stop the loop — refusing to run any worker

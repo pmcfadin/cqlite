@@ -9371,6 +9371,12 @@ t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 # invocations, so a case cannot pass against a sweep that never ran.
 # ---------------------------------------------------------------------------
 # obj_sweep_tree <dir> <verdict-line> <exit> [call-log] -> scratch repo root
+#
+# The runs below pass `LANE_ID` EXPLICITLY (per invocation, never exported, so nothing
+# leaks into a later case): the supervisor refuses to start with
+# `FATAL: lane-identity-unprovable` when it cannot derive a per-lane identity, and a
+# plain scratch repo is not a lane worktree. Supplying the identity is what the refusal
+# itself recommends, and it keeps the fixture a one-`git init` tree.
 obj_sweep_tree() {
   local d="$1" verdict="$2" rc="$3" calllog="${4:-}" root="$d/root"
   mkdir -p "$root/scripts/local" "$root/scripts/lib"
@@ -9404,7 +9410,7 @@ test_object_store_sweep_verdicts() {
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
   rc=$?
   if [[ "$rc" -eq 0 && -s "$calls" && -f "$counter" ]] &&
      grep -q 'object-store: VERIFIED' "$d/stdout.log"; then
@@ -9430,7 +9436,7 @@ test_object_store_sweep_verdicts() {
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
   root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
   rc=$?
   if [[ "$rc" -eq 1 && -s "$calls" && ! -f "$counter" ]] &&
      grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE" &&
@@ -9465,7 +9471,7 @@ test_object_store_sweep_verdicts() {
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
   root="$(obj_sweep_tree "$d" UNMEASURED 5 "$calls")"
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
   rc=$?
   if [[ "$rc" -eq 0 && -s "$calls" && -f "$counter" ]] &&
      grep -q 'object-store: UNMEASURED' "$d/stdout.log" &&
@@ -9488,8 +9494,8 @@ test_object_store_sweep_throttle_and_disable() {
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/run1.log" 2>&1
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/run2.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/run1.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/run2.log" 2>&1
   n=$(grep -c . "$calls" 2>/dev/null || echo 0)
   if [[ "$n" -eq 1 ]]; then
     pass "obj-sweep(throttle): two runs inside the interval sweep exactly ONCE (measured invocations, not inferred)"
@@ -9499,7 +9505,7 @@ test_object_store_sweep_throttle_and_disable() {
   # (b) A STAMP IN THE FUTURE must not park the sweep forever (clock skew, a restored
   # snapshot, a hand-edited file). ONE property apart from (a): the stamp's value.
   printf '%s\n' "$(( $(date +%s) + 86400 ))" >"$OBJ_SWEEP_STAMP"
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/run3.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/run3.log" 2>&1
   n=$(grep -c . "$calls" 2>/dev/null || echo 0)
   if [[ "$n" -eq 2 ]]; then
     pass "obj-sweep(throttle): a stamp in the FUTURE is treated as never-swept, not as a permanent skip"
@@ -9515,7 +9521,7 @@ test_object_store_sweep_throttle_and_disable() {
   export OBJ_SWEEP_INTERVAL_HOURS=0
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
-  bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
   rc=$?
   if [[ "$rc" -eq 0 && ! -s "$calls" ]] &&
      grep -q 'object-store sweep DISABLED' "$d/stdout.log"; then

@@ -5351,7 +5351,7 @@ _component_set_line() {
   # THE POINTER SURVIVES: `scripts/check-object-store-integrity.sh` rehashes the whole shared store
   # with a full `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not
   # detect this), reporting VERIFIED / CORRUPT / UNMEASURED. It runs at machine onboarding
-  # (`scripts/bootstrap-agent-machine.sh` section 5b-obj) and on the worker supervisor's throttled
+  # (`scripts/bootstrap-agent-machine.sh` section 5d) and on the worker supervisor's throttled
   # per-iteration cadence (`scripts/local/worker-supervisor.sh`, default every 6h; a CORRUPT verdict
   # stops that supervisor loudly rather than letting a worker certify against a damaged store).
   # THAT IS PERIODIC, NOT PER-READ — which is exactly why the emitted clause still says TRUSTED,

@@ -187,7 +187,7 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 # issue #3749: the SHARED git object store on this box (every lane here is a worktree of
 # ONE `.git`) is rehashed with `git fsck` on a THROTTLED cadence from the per-iteration
 # preflight path. This is the recurring half of #3749's control; the one-shot half is
-# scripts/bootstrap-agent-machine.sh section 5b-obj. Both go through the SAME script,
+# scripts/bootstrap-agent-machine.sh section 5d. Both go through the SAME script,
 # scripts/check-object-store-integrity.sh — a second implementation would be a second
 # place for the verdict to drift.
 #
@@ -3294,16 +3294,24 @@ object_store_sweep() {
   # its output prints repository-controlled paths verbatim, so an unanchored match could
   # land on one. Both the line AND the exit status are required to agree for the two
   # actionable verdicts.
-  verdict="$(printf '%s\n' "$out" | grep '^OBJECT-STORE: verdict ' | head -1)"
+  # `{ grep || true; }` ON EVERY PIPELINE BELOW, AND IT IS LOAD-BEARING, NOT DEFENSIVE.
+  # This file runs under `set -euo pipefail`: a `grep` that matches NOTHING exits 1, and
+  # with `pipefail` that status becomes the pipeline's — so an ASSIGNMENT from such a
+  # substitution, or a bare pipeline, KILLS THE SUPERVISOR with rc=1. And "no match" is
+  # exactly the reachable case here: a sweep killed at its bound prints no `verdict ` line
+  # at all, and an UNMEASURED one need not print an `unmeasured-cause` line. Caught by
+  # scripts/tests/test_worker_supervisor.sh's obj-sweep(UNMEASURED) case, which planted a
+  # verdict with no cause line and observed the whole loop exit 1.
+  verdict="$(printf '%s\n' "$out" | { grep '^OBJECT-STORE: verdict ' || true; } | head -1)"
   verdict="${verdict#OBJECT-STORE: verdict }"
   verdict="${verdict%% *}"
   if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
-    log "object-store: VERIFIED — $(printf '%s\n' "$out" | grep '^OBJECT-STORE: measured ' | head -1)"
+    log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
     return 0
   fi
   if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
     local findings
-    findings="$(printf '%s\n' "$out" | grep -E '^OBJECT-STORE: (finding|object) ' | head -6 | tr '\n' ';' | cut -c1-600)"
+    findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
     notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
       "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
     log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
@@ -3319,7 +3327,7 @@ object_store_sweep() {
   # journalled every time and paged ONCE per run — loud enough to fix, never a silent
   # swallow and never a latch.
   log "object-store: UNMEASURED (rc=$rc verdict='${verdict:-<none>}') — the shared store was NOT rehashed, so its integrity is UNKNOWN, not clean. Continuing: a hygiene probe that cannot run must not stop the fleet (#3749)."
-  printf '%s\n' "$out" | grep '^OBJECT-STORE: unmeasured-cause ' | head -4 | while IFS= read -r obj_line; do
+  printf '%s\n' "$out" | { grep '^OBJECT-STORE: unmeasured-cause ' || true; } | head -4 | while IFS= read -r obj_line; do
     log "object-store: $obj_line"
   done
   if [[ "$OBJ_SWEEP_UNMEASURED_NOTIFIED" -eq 0 ]]; then

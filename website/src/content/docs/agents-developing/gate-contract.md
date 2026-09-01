@@ -673,7 +673,7 @@ pack data; no check inside a process defends against the party that controls the
 `scripts/check-object-store-integrity.sh` runs a full `git fsck` (never `--connectivity-only`, which
 does not rehash content) over the shared store and emits an anchored three-valued
 `VERIFIED`/`CORRUPT`/`UNMEASURED` verdict — exit 0/4/5, and **a consumer must not read `UNMEASURED`
-as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5b-obj, where
+as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5d, where
 `VERIFIED` is the only `[ok]`, so an unmeasured host cannot pass `--strict`) and on the worker
 supervisor's throttled per-iteration cadence (default every 6h). There, `CORRUPT` **stops the
 supervisor loudly** instead of holding — corruption is non-self-clearing, so a hold-and-repoll loop
