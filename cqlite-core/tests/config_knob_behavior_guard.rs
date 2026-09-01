@@ -220,9 +220,14 @@ const KNOBS: &[Knob] = &[
         declared_on: "StorageConfig",
         field: "prefetch",
         evidence: Evidence::Reserved(
-            "LIVE (madvise advice / direct-I/O read-ahead window) but performance-only; \
-             the p99 property it exists for is pinned by \
-             tests/issue_1143_mmap_prefetch_tail_guard.rs. Owning issue: #1143.",
+            "LIVE (madvise advice / direct-I/O read-ahead window) but performance-only. \
+             The advice mapping IS directly asserted: reader/tests.rs \
+             test_mmap_advice_for_auto_is_willneed_never_sequential pins the default \
+             Auto -> MADV_WILLNEED (#2824) and the durable Auto != MADV_SEQUENTIAL \
+             invariant (#1143), and test_default_storage_config_advises_willneed pins \
+             that THIS field's default travels it. The p99 tail shape it exists for \
+             stays observational in tests/issue_1143_mmap_prefetch_tail_guard.rs. \
+             Owning issues: #1143, #2824.",
         ),
     },
     Knob {
