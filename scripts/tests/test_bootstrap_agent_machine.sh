@@ -44,15 +44,28 @@ skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 # cases into failures whose own debug output showed the matching text. A here-string is not a
 # pipeline, so grep's own status is the answer and pipefail has nothing to override.
 #
+# NO `grep -q` PIPELINE PREDICATE REMAINS IN THIS FILE (issue #3727 roborev round 8, f1). The
+# round-5 pass converted only sites whose argument was a SIMPLE VARIABLE, and I judged the survivors
+# — `"$(scc_slice …)"`, a `git config` read, two two-stage chains, one tiny literal — safe because
+# their payloads were small. That judgement was the wrong SHAPE of argument: "demonstrably bounded"
+# is a claim about a payload that grows every round, and it had already been falsified once in this
+# very file (the four instances that fired did so BECAUSE the output grew). The corrected mechanism
+# makes it worse than a size argument: `grep -q` CLOSES the pipe at the first match, so the failure
+# is a RACE above bash's ~4 KiB stdio chunk, not a 64 KiB threshold. Conversion is free; a
+# measurement that has to be redone whenever the output changes is not. So there is nothing left to
+# bound: every predicate reads through out_has.
+#
 # THE WHOLE FILE IS CONVERTED, and it was done because leaving it declared did not hold: three
 # separate cases fired this way across four runs as the output grew (7p-b2 — RED on pristine
 # origin/main, 7p-k, 12b-k, then the section-presence loop's CQLITE_DATASETS_ROOT), each reporting
 # the opposite of what it measured. 286 `printf … | grep -q` predicates and 2 `push_plain … |
-# grep -q` ones now route through here. What remains on purpose: pipelines whose leftmost stage is
-# NOT a whole-output printf (`git config … | grep -qF`, and two `push_plain … | grep -E … | grep -q`
-# chains whose final stage receives only a handful of lines) — those payloads cannot approach the
-# pipe buffer. If a new predicate is added, use out_has: the pipeline form is a latent false verdict,
-# not a style preference.
+# grep -q` ones route through here, and since round 8 so do the last stragglers (a `git config`
+# read, two two-stage `push_plain | grep -E | grep -q` chains, two `$(scc_slice …)` payloads and one
+# tiny literal). NOTHING is left "on purpose": the earlier exemption was a size argument about a
+# payload that grows every round, and the corrected mechanism is not about size at all — `grep -q`
+# CLOSES the pipe at its first match, so the failure is a RACE above bash's ~4 KiB stdio chunk. If a
+# new predicate is added, use out_has: the pipeline form is a latent false verdict, not a style
+# preference.
 out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
 
 # --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
@@ -972,8 +985,8 @@ fi
 # anything answering 401) — and `gh auth setup-git`, the path this falls back FROM,
 # scopes per host, so an unscoped fallback is strictly less safe than the preferred one.
 if [ -f "$gc7b" ] \
-   && git config --file "$gc7b" --get-all 'credential.https://github.com.helper' 2>/dev/null | grep -qF 'x-access-token' \
-   && ! git config --file "$gc7b" --get-all credential.helper 2>/dev/null | grep -qF 'x-access-token'; then
+   && out_has "$(git config --file "$gc7b" --get-all 'credential.https://github.com.helper' 2>/dev/null)" -F 'x-access-token' \
+   && ! out_has "$(git config --file "$gc7b" --get-all credential.helper 2>/dev/null)" -F 'x-access-token'; then
   ok "cred: fallback helper is HOST-SCOPED (credential.https://github.com.helper), not a bare credential.helper"
 else
   bad "cred: fallback helper is host-UNSCOPED — the token would be offered to every https host"
@@ -1515,7 +1528,7 @@ fi
 # https path is 7p-q below.
 if out_has "$out7pb" "remote 'origin' is a 'other' remote" \
    && out_has "$out7pb" 'credential helper may not apply' \
-   && ! push_plain "$out7pb" | grep -E '^ *fix:' | grep -q 'gh auth setup-git'; then
+   && ! out_has "$(push_plain "$out7pb" | grep -E '^ *fix:')" 'gh auth setup-git'; then
   ok "push: a file:// remote's auth-shaped failure gets protocol-neutral advice, NOT https credential advice"
 else
   bad "push: a non-https remote was given https credential advice"
@@ -1535,8 +1548,9 @@ run_push "$repo7pb2" "$bin7pb2" "$gc7pb2"; out7pb2=$push_out; rc7pb2=$push_rc
 # claim.sh had just been fixed to report. So the assertion is that the ORIGINAL verdict
 # line survives into bootstrap's output, and that bootstrap adds no cause of its own.
 # Predicates via out_has (see its note): MEASURED on a pristine origin/main worktree at
-# 8cfaea852, this case FAILS — `printf | grep -q` returned 141 on a >64 KiB payload while the
-# matching text was present, so the case reported the opposite of what it measured. That red is
+# 8cfaea852, this case FAILS — `printf | grep -q` returned 141 while the matching text was present
+# (this payload is over 64 KiB, where the race is effectively certain), so the case reported the
+# opposite of what it measured. That red is
 # on `main` and is NOT caused by this branch's diff; it is converted here because the fix is one
 # line of the idiom this file already documents, and leaving a known-false red in place is worse
 # than a slightly wider diff.
@@ -1734,7 +1748,8 @@ fi
 # bootstrap may name one — and in particular bootstrap must not fall back to credential
 # advice, which was the wrong-remedy defect one round earlier.
 # Predicates via out_has, NOT `printf | grep -q`: this output is over 64 KiB, where the pipeline
-# form returns 141 and the case reports the opposite of what it measured (see out_has).
+# form's race is effectively certain and the case reports the opposite of what it measured (see
+# out_has).
 if ! out_has "$out7pk" 'gh auth setup-git' \
    && ! out_has "$out7pk" -- '--fix-credentials' \
    && ! out_has "$out7pk" -i 'ref-deletion policy' \
@@ -1864,7 +1879,7 @@ run_push "$repo7pn" "$bin7pn" "$gc7pn"; out7pn=$push_out
 if out_has "$out7pn" '\[warn\].*git-push: FAILED' \
    && out_has "$out7pn" 'authenticates with your SSH KEY' \
    && out_has "$out7pn" 'ssh-add -l' \
-   && ! push_plain "$out7pn" | grep -E '^ *fix:|^ *  *then re-run' | grep -q 'gh auth setup-git'; then
+   && ! out_has "$(push_plain "$out7pn" | grep -E '^ *fix:|^ *  *then re-run')" 'gh auth setup-git'; then
   ok "push: an SSH remote's push failure advises SSH keys, NOT 'gh auth setup-git' (which cannot affect key auth)"
 else
   bad "push: SSH push failure got https credential advice"
@@ -4226,7 +4241,7 @@ fi
 pin_profile="$SCRIPT_DIR/../../.agent-ami/profile.yaml"
 if [ ! -r "$pin_profile" ]; then
   bad "gate-pin: .agent-ami/profile.yaml is not readable — cannot check verify.run carries --fix-gate-pin"
-elif grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | grep -q -- '--fix-gate-pin'; then
+elif out_has "$(grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile")" -- '--fix-gate-pin'; then
   ok "gate-pin: .agent-ami/profile.yaml's verify.run persists the pin on a launched box (--fix-gate-pin)"
 else
   bad "gate-pin: verify.run no longer passes --fix-gate-pin — launched boxes will arrive UNPINNED"
@@ -4693,7 +4708,7 @@ else
   scc_log_live="$tmp/scc-stub-argv-live.log"; : >"$scc_log_live"
   scc_out_live=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=10737418240 \
     SCC_STUB_STATE="$scc_state_l" SCC_STUB_LOG="$scc_log_live" --fix-sccache-cap)
-  if printf '%s\n' "$(scc_slice "$scc_out_live")" | grep -qE '\[warn\].*sccache-cap: NOT-HONOURED' \
+  if out_has "$(scc_slice "$scc_out_live")" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
      && ! grep -qE -- '--start-server|--stop-server' "$scc_log_live" \
      && [ ! -s "$scc_state_l" ]; then
     ok "sccache-cap: a LIVE server with the wrong cap is NOT-HONOURED and is neither started nor stopped (a peer lane may be compiling against it)"
@@ -4923,7 +4938,7 @@ else
   # The precondition that makes this case meaningful: the planted literal must be one the SHAPE test
   # would wave through. If it were shape-rejected the case would pass for the wrong reason.
   if [ "$scc_big_val" = '999999999999999999999G' ] \
-     && printf '%s' "$scc_big_val" | grep -qE '^[0-9]+[KkMmGgTt]$'; then
+     && out_has "$scc_big_val" -E '^[0-9]+[KkMmGgTt]$'; then
     ok "sccache-cap: the oversized-literal fixture is planted AND is shape-valid (so only the oracle can refuse it)"
   else
     bad "sccache-cap: could not plant a shape-valid oversized literal — the case below would test nothing"
@@ -4970,7 +4985,7 @@ else
   fi
   scc_out_envfix=$(runscc "$scc_bs_sub" "$scc_shims_w" "$scc_env_w" \
     CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1 SCC_STUB_MAX=32212254720 --fix-sccache-cap)
-  if ! printf '%s\n' "$(scc_slice "$scc_out_envfix")" | grep -q 'OPT-OUT'; then
+  if ! out_has "$(scc_slice "$scc_out_envfix")" 'OPT-OUT'; then
     ok "sccache-cap: an env opt-out cannot neuter an explicit --fix-sccache-cap"
   else
     bad "sccache-cap: CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1 overrode an explicit --fix-sccache-cap"
@@ -5032,7 +5047,7 @@ fi
 # And verify.run must actually pass the flag: a repair nothing calls is a repair that does not
 # happen (the same reasoning as the --fix-gate-pin case above).
 if [ -r "$scc_profile" ] \
-   && grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$scc_profile" | grep -q -- '--fix-sccache-cap'; then
+   && out_has "$(grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$scc_profile")" -- '--fix-sccache-cap'; then
   ok "sccache-cap: .agent-ami/profile.yaml's verify.run persists the cap on a launched box (--fix-sccache-cap)"
 else
   bad "sccache-cap: verify.run no longer passes --fix-sccache-cap — launched boxes will arrive UNCAPPED"
