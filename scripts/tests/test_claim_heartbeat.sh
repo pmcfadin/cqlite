@@ -3307,17 +3307,35 @@ else
   for _pair in "--help:$help83n" "fleet-runbook.md:$rb83n" "CLAUDE.md:$cl83n" "website delivery-pipeline.md:$wb83n"; do
     _who="${_pair%%:*}"; _txt="${_pair#*:}"
     _leaked=""
+    # SYMMETRIC ACROSS BOTH SIGNATURES (roborev job 55). Until this round the negative half forbade
+    # definite labels for (b) ONLY, so a file could satisfy every positive clause and still carry a
+    # contradictory definite label for (a) — which is exactly what happened: two runbook sites survived
+    # job 52 calling a held claim the "lane-DEATH signal" and signature (a) "the unambiguous one",
+    # while the guard added in job 47 reported the file clean. That asymmetry is the class; closing it
+    # is the point of this round.
+    #
+    # THE NEEDLES ARE GREPPED, NOT INVENTED, AND DELIBERATELY NARROW. A bare 'unambiguous' would red on
+    # correct prose — the runbook and CLAUDE.md each carry two unrelated uses (a supervisor-death alarm,
+    # a should-reap grammar note) — so each needle is bound to signature (a)'s own subject, and the
+    # definite article matters: 'is THE lane-death signal' is forbidden while the correct sentence
+    # "neither reading is A lane-DEATH verdict" must keep passing. Every needle was checked against the
+    # four files' CURRENT text before being added, so none of them reds on correct input today.
     for _refuse in \
       'is the #3436 unclaimed-work signature' \
       'no claim ref is the dead-lane signal' \
       'as the signature of a lost lane' \
-      'no live session is the dead-lane signal'; do
+      'is the dead-lane signal' \
+      'is the lane-death signal' \
+      'that one is a held claim ref with no live session' \
+      'for that, look for a held claim ref' \
+      'signature (a) is the unambiguous one' \
+      'that one is not ambiguous'; do
       grep -Fqi -- "$_refuse" <<<"$_txt" && _leaked="$_leaked | $_refuse"
     done
     if [ -z "$_leaked" ]; then
       ok "$_who asserts no definite label for signature (a) or (b)"
     else
-      bad "$_who RE-ASSERTS a definite signature label (#3548, jobs 38/40/41/47/52):$_leaked"
+      bad "$_who RE-ASSERTS a definite signature label (#3548, jobs 38/40/41/47/52/55):$_leaked"
     fi
   done
 fi
