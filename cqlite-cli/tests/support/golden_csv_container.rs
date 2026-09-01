@@ -466,6 +466,34 @@ fn decode_does_not_recover(
                 .keys()
                 .map(|key| entry_key_rendering(ty, key))
                 .collect::<Option<Vec<String>>>()?;
+            // TWO DISTINCT KEYS THAT RENDER ALIKE make this node's rendering
+            // ambiguous, so it is refused (roborev finding, issue #3726).
+            //
+            // This is the EMPTY-CONTAINER refusal's sibling and is bounded the same
+            // way. The module doc declines the general question "could another value
+            // have rendered these bytes" — CSV members are unquoted, so a
+            // `list<text>` holding `["a", "b"]` and one holding `["a, b"]` render
+            // identically and refusing on mere non-uniqueness would refuse most of
+            // the corpus. This asks the NARROWER, OBSERVED question: do two keys
+            // PRESENT IN THIS GOLDEN collide? A container map key makes that
+            // reachable — a UDT key with `label` null and one with the text `"null"`
+            // both render `{label: null, …}` — and it cannot be reached by a scalar
+            // key, whose CSV text is the key itself.
+            //
+            // It is also the PRECONDITION that makes `decode_object`'s `.find()`
+            // correct: a refused node never reaches the decode (`decode_shape`
+            // returns the un-split body first), so by the time a key is looked up by
+            // its rendering, the renderings are known distinct.
+            for (i, key) in keys.iter().enumerate() {
+                if let Some(j) = keys.iter().take(i).position(|earlier| earlier == key) {
+                    return Some(format!(
+                        "entries {j} and {i} of the golden render the SAME key text {} — \
+                         the CSV rendering cannot tell them apart, so no reading of it \
+                         recovers which entry is which",
+                        brief(key)
+                    ));
+                }
+            }
             let want = fields
                 .iter()
                 .zip(keys.iter())
@@ -1238,6 +1266,10 @@ fn decode_object<'t>(
         } else {
             format!("{path}.{key}")
         };
+        // UNAMBIGUOUS BY PRECONDITION: `decode_shape` asks `node_refusal` before it
+        // reaches this decode, and that refuses a node whose golden keys do not all
+        // render distinctly (see `decode_does_not_recover`). So this lookup cannot be
+        // the "first of several identical spellings" it would otherwise be.
         let golden_key = rendered_golden_keys
             .iter()
             .find(|(rendered, _)| rendered == key)

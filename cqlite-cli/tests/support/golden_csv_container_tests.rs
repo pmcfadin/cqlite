@@ -1042,6 +1042,51 @@ fn a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused() {
     assert_eq!(node_refusal(&golden, Some(&ty)), None);
 }
 
+/// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
+/// is REFUSED rather than decoded against the wrong guide (roborev finding, #3726).
+///
+/// CSV is unquoted, so a `key_part` whose `label` is NULL and one whose `label` is
+/// the TEXT `"null"` both render `{label: null, rank: 1}`. The decoder looks a CSV
+/// entry's key text up among the golden's rendered keys, so without this refusal both
+/// entries would resolve to the FIRST golden key: the second is then decoded against
+/// the wrong type guide and CORRECT egress is reported as a divergence — a false
+/// divergence, which this lane treats as a defect in its own right (#1491 finding T1).
+///
+/// Refusing is the fail-closed answer AND the precondition that makes the decoder's
+/// lookup single-valued. It is the EMPTY-CONTAINER refusal's sibling: an OBSERVED
+/// ambiguity between two keys actually present in this golden, not the general
+/// "could another value have rendered these bytes", which the module doc declines.
+#[test]
+fn two_container_keys_that_render_alike_are_refused() {
+    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
+    let golden = json!({
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    // Both keys DO render — individually they are perfectly legal spellings.
+    assert_eq!(
+        entry_key_rendering(&ty, "{\"label\": null, \"rank\": 1}"),
+        entry_key_rendering(&ty, "{\"label\": \"null\", \"rank\": 1}"),
+        "the premise of this test: the two distinct keys render identically"
+    );
+    let why = match node_refusal(&golden, Some(&ty)) {
+        Some(why) => why,
+        None => panic!("a node whose two keys render alike cannot be decoded"),
+    };
+    assert!(
+        why.contains("SAME key text"),
+        "the refusal must name the collision: {why}"
+    );
+
+    // And the control: two keys that render DIFFERENTLY are not refused, so this
+    // narrows rather than refusing every container-keyed map.
+    let distinct = json!({
+        "{\"label\": \"a\", \"rank\": 1}": 10,
+        "{\"label\": \"b\", \"rank\": 1}": 20
+    });
+    assert_eq!(node_refusal(&distinct, Some(&ty)), None);
+}
+
 /// A UDT entry's key is a FIELD NAME, not a value, and stays verbatim — the one
 /// thing that must NOT change with the map rule above.
 #[test]
