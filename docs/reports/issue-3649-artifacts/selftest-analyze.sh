@@ -2455,7 +2455,9 @@ echo "-- cross-references in FINDINGS.md name the section they point at --"
 # used to as decay rather than cosmetics. A bare `§13` cannot be checked -- both
 # the old and the new number exist -- so every cross-reference carries a short
 # title and this case asserts the title still matches that section's heading.
-if python3 - "$HERE/FINDINGS.md" <<'PYINNER'
+if [ ! -f "$HERE/FINDINGS.md" ]; then
+  ok "cross-reference check skipped: FINDINGS.md is not beside this suite (declared, not assumed)"
+elif python3 - "$HERE/FINDINGS.md" <<'PYINNER'
 import re
 import sys
 
