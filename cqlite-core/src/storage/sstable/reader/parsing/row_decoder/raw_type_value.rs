@@ -778,29 +778,14 @@ impl V5CompressedLegacyParser {
 
                         // Parse field value - handle nested UDTs specially (Issue #238)
                         let value = if let Some(ref registry) = self.udt_registry {
-                            // Issue #3722: one adapter so threading `depth` does not reflow 8
-                            // deeply-nested call sites (this file is over the campsite target).
-                            let decode_registry_udt =
-                                |data: &[u8], def: &crate::types::UdtTypeDef| {
-                                    self.parse_nested_udt_from_registry(
-                                        data,
-                                        def,
-                                        registry,
-                                        depth + 1,
-                                    )
-                                };
-                            // A MANUAL `Frozen<Udt>` unwrap consumes TWO nesting levels
-                            // — the `Frozen` and the `Udt` — so it must charge both, as
-                            // the consolidated decoder does (roborev round 8).
-                            let decode_registry_udt_frozen =
-                                |data: &[u8], def: &crate::types::UdtTypeDef| {
-                                    self.parse_nested_udt_from_registry(
-                                        data,
-                                        def,
-                                        registry,
-                                        depth + 2,
-                                    )
-                                };
+                            // #3722: ONE adapter, with the nesting charge passed
+                            // explicitly at each site so it is visible there. A manual
+                            // `Frozen<Udt>` unwrap consumes TWO levels (the `Frozen` and
+                            // the `Udt`) and passes `depth + 2`; a direct `Udt` passes
+                            // `depth + 1` (roborev rounds 7-8).
+                            let reg_udt = |data: &[u8], def: &crate::types::UdtTypeDef, d| {
+                                self.parse_nested_udt_from_registry(data, def, registry, d)
+                            };
                             match &field_def.field_type {
                                 CqlType::Custom(nested_type_name) => {
                                     // `get_udt_qualified` owns "udt:" + keyspace-
@@ -808,7 +793,7 @@ impl V5CompressedLegacyParser {
                                     if let Some(nested_udt) =
                                         registry.get_udt_qualified(&self.keyspace, nested_type_name)
                                     {
-                                        decode_registry_udt(field_data, nested_udt)?
+                                        reg_udt(field_data, nested_udt, depth + 1)?
                                     } else {
                                         decode_udt_field(field_data, &field_def.field_type)?
                                     }
@@ -818,7 +803,7 @@ impl V5CompressedLegacyParser {
                                     if let Some(nested_udt) =
                                         registry.get_udt_qualified(&self.keyspace, udt_name)
                                     {
-                                        decode_registry_udt(field_data, nested_udt)?
+                                        reg_udt(field_data, nested_udt, depth + 1)?
                                     } else if !inline_fields.is_empty() {
                                         self.parse_inline_udt_value(
                                             field_data,
@@ -838,7 +823,7 @@ impl V5CompressedLegacyParser {
                                             .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
                                             let inner_value =
-                                                decode_registry_udt_frozen(field_data, nested_udt)?;
+                                                reg_udt(field_data, nested_udt, depth + 2)?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
                                             decode_udt_field(field_data, &field_def.field_type)?
@@ -850,7 +835,7 @@ impl V5CompressedLegacyParser {
                                             registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
                                             let inner_value =
-                                                decode_registry_udt_frozen(field_data, nested_udt)?;
+                                                reg_udt(field_data, nested_udt, depth + 2)?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else if !inline_fields.is_empty() {
                                             let inner_value = self.parse_inline_udt_value(
@@ -874,11 +859,8 @@ impl V5CompressedLegacyParser {
                                 CqlType::Udt(udt_name, inline_fields)
                                     if !inline_fields.is_empty() =>
                                 {
-                                    // `+ 1`, not `+ 2`: this is a DIRECT `Udt`, with no
-                                    // `Frozen` wrapper to charge. A round-7 fix applied
-                                    // `+ 2` here by over-broad edit, which made valid
-                                    // nesting fail one level early and disagree with the
-                                    // registry route (roborev round 8).
+                                    // `+ 1`: a DIRECT `Udt` has no `Frozen` wrapper to
+                                    // charge (roborev round 8).
                                     self.parse_inline_udt_value(
                                         field_data,
                                         udt_name,
@@ -929,10 +911,9 @@ impl V5CompressedLegacyParser {
                 // Try to look up as UDT in registry by short name (Issue #238)
                 // This handles cases like "address_type" which aren't in full marshal format
                 if let Some(ref registry) = self.udt_registry {
-                    // Issue #3722: one adapter so threading `depth` does not reflow 8
-                    // deeply-nested call sites (this file is over the campsite target).
-                    let decode_registry_udt = |data: &[u8], def: &crate::types::UdtTypeDef| {
-                        self.parse_nested_udt_from_registry(data, def, registry, depth + 1)
+                    // Same explicit-charge adapter as the loop above (#3722).
+                    let reg_udt = |data: &[u8], def: &crate::types::UdtTypeDef, d| {
+                        self.parse_nested_udt_from_registry(data, def, registry, d)
                     };
                     if let Some(udt_def) = registry.get_udt_qualified(&self.keyspace, type_str) {
                         tracing::debug!(
@@ -980,11 +961,9 @@ impl V5CompressedLegacyParser {
                                 // Null field
                                 None
                             } else if field_len == 0 {
-                                // Empty field - parse with empty data, and normalize a
-                                // decoded `Value::Null` to `None` like every other UDT
-                                // construction path, so a 0-length null and a -1 null are
-                                // ONE representation (roborev round 8; this route was
-                                // missed when the normalizer was introduced).
+                                // Empty field. `udt_field_value` normalizes a decoded
+                                // `Value::Null` to `None`, so a 0-length null and a -1
+                                // null are ONE representation (roborev round 8).
                                 let value = decode_udt_field(&[], &field_def.field_type)?;
                                 Self::udt_field_value(value)
                             } else {
@@ -1008,7 +987,7 @@ impl V5CompressedLegacyParser {
                                             .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
                                             // Recursively parse nested UDT
-                                            decode_registry_udt(field_data, nested_udt)?
+                                            reg_udt(field_data, nested_udt, depth + 1)?
                                         } else {
                                             // Unknown custom type - parse as blob
                                             Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
@@ -1019,7 +998,7 @@ impl V5CompressedLegacyParser {
                                         if let Some(nested_udt) =
                                             registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
-                                            decode_registry_udt(field_data, nested_udt)?
+                                            reg_udt(field_data, nested_udt, depth + 1)?
                                         } else if !inline_fields.is_empty() {
                                             self.parse_inline_udt_value(
                                                 field_data,
