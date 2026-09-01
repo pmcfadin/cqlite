@@ -61,26 +61,49 @@ omission from a corruption, and the two are one byte apart.
 | 3 | `position + size > length` (declared field length overruns) | **`MarshalException`** — same message | |
 | 4 | all `numberOfElements` read and `position < length` (trailing bytes) | **`MarshalException`** — `"Expected N value(s) for <type> column, but got more"` | exhaustion is REQUIRED, not optional |
 
-## What this means for CQLite, stated as two distinct defects
+## What this means for CQLite — TWO SYMPTOMS, ONE ENFORCEMENT POINT
 
-They are distinct because they live in different places and neither fix
-implies the other.
+An earlier draft of this file called these two independent defects needing two
+fixes. That is WRONG, and the correction is the most useful thing here, so it is
+recorded rather than quietly overwritten.
 
-- **Defect A — partial prefix accepted (in the CALLEE).** CQLite's frozen-UDT
-  loop guards with `if current_offset + 4 > udt_data.len() { /* trailing fields
-  omitted (implicit null) */ }`, which collapses rows 1 and 2 of the table onto
-  the legal answer. Cassandra distinguishes them: only `== length` is an
-  omission; 1–3 leftover bytes are `MarshalException`. So CQLite accepts a
-  truncated field header as a well-formed short UDT.
-- **Defect B — trailing bytes accepted (at the BOUNDED CALLER).** Row 4 requires
-  full consumption. `parse_raw_type_value` returns a possibly-SHORT offset and
-  the bounded caller `parse_value_from_raw_bytes` discards it (`let (val,
-  _offset) = ...`, both the marshal-form and registry-resolved UDT arms), so
-  trailing bytes are silently dropped.
+- **Symptom A — partial prefix accepted.** CQLite's frozen-UDT loop guards with
+  `if current_offset + 4 > udt_data.len() { /* trailing fields omitted (implicit
+  null) */ break; }`, which collapses rows 1 and 2 of the table above onto the
+  legal answer. Cassandra distinguishes them: only `== length` is an omission;
+  1-3 leftover bytes are `MarshalException`.
+- **Symptom B — trailing bytes accepted.** Row 4 requires full consumption.
+  `parse_raw_type_value` returns a possibly-SHORT offset and the bounded caller
+  `parse_value_from_raw_bytes` DISCARDS it (`let (val, _offset) = ...`) on BOTH
+  the marshal-form and the registry-resolved UDT arm.
 
-`parse_value_from_raw_bytes`'s own doc comment already STATES the contract it
-does not enforce — *"Parse a value from a complete, bounded byte slice … The
-entire `data` slice IS the value."* The property is not new; the enforcement is.
+**They share one enforcement point.** On the partial-prefix path the loop
+`break`s WITHOUT advancing `current_offset` past the 1-3 stray bytes, so the
+returned offset is short by exactly those bytes — the same observable as trailing
+garbage. So a single `consumed == slice.len()` test at the bounded caller refuses
+BOTH, and no change to the callee's loop guard is required. This is not inferred
+here; #3612 already established it one module over and says so in
+`complex_column/cell_path_key.rs:414-425`:
+
+> "This one comparison subsumes three separate behaviours ... trailing bytes
+> after the components (`pos < len`) are REFUSED; a partial 1-3 byte
+> component-length header (also `pos < len`, because the decoders treat it as
+> 'trailing fields omitted' and do NOT advance past it) is REFUSED; and a
+> genuinely SHORT encoding, whose omitted components leave `pos == len`, is
+> ACCEPTED"
+
+That is the whole design of the fix, and it is why the issue says the property
+must be established **structurally** rather than site by site: the check is one
+comparison, and the entire difficulty is making every bounded caller inherit it.
+
+### The reference implementation, and what is wrong with copying it
+
+`cell_path_key.rs` enforces exactly this — but only for cell-path keys, and via
+a local `decode_reporting_consumption` whose `Ok((value, None))` arm means "this
+arm consumes the whole slice by construction, nothing to compare". **That `None`
+is the opt-out a new call site inherits by accident.** Hoisting the rule must not
+hoist a silent `None`: a new arm that forgets to report must fail closed, not
+land in the branch that skips the check.
 
 ## Consequence for AC4 (two values must not collapse)
 
