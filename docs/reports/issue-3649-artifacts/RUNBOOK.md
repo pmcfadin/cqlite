@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (261 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (265 cases).**
       Seconds, `python3` only, no rig and no root, so there is no excuse for
       skipping it — and it is the cheapest step in this runbook by four orders of
       magnitude. It drives every fail-closed guard with the bad input that guard
@@ -394,6 +394,27 @@ the analyzer requires the two arms of each pair to have the **same** surviving
 ladder. Each pass costs `2 × replicates × (steps × step-duration + prewarm +
 server start/stop)`, so budget 5b at roughly four times 5a for a four-step ramp.
 
+### The port is ephemeral, and readiness comes from the server's own log
+
+`--port` defaults to **0**: each server binds an ephemeral port and the driver
+learns the real one from that server's own post-bind `listening on` line
+(`cqlite-flight/src/cli.rs:228-241`, which is emitted only once a listener
+exists). There is no fixed port, so two sessions on one box cannot collide, and
+no probe — "something answered on 8815" was never the same claim as "my server
+owns 8815", and on a nine-lane box the difference is one session measuring
+another's binary. `--port <n>` remains available if you need a fixed one.
+
+### The census describes the SERVED table, not the disk
+
+`--min-corpus-bytes` and `--min-sstables` are claims about the one directory the
+ticket resolves to, enumerated the way the server enumerates it — flat, in
+`<data>/<keyspace>/<table>[-<uuid>][/snapshots/<name>]`. Unrelated tables,
+snapshot subtrees and hard-linked copies elsewhere under `--data-dir` are
+deliberately **not** counted, because a green census over files the server never
+opens would let a single-source served table through the #3058 guard, which is
+the phantom that guard exists to stop. The run prints the resolved `served-dir`;
+check it is the table you meant.
+
 ### What the driver refuses before it builds anything
 
 All of these are usage errors or named aborts that cost you seconds, not a
@@ -503,14 +524,21 @@ truthful short manifest — and the analyzer will refuse it with
 
 ## Step 6 — the analysis, and the verdict
 
+**Each session writes to its own directory**, `<work-dir>/run-<session-id>/`,
+which nothing else can name — so no session can ever overwrite another's results,
+and a failed attempt leaves every earlier one byte-identical. The driver prints
+the exact analyzer invocation on its `next` line when it finishes; copy it rather
+than composing the path. `<work-dir>/latest` is a convenience symlink to the most
+recent completed session and is deliberately **not** what you certify.
+
 One invocation, both manifests, two clearly separated sections:
 
 ```bash
 python3 analyze-ab.py \
-  --single-stream /data/ab-3649/measure-single/results/manifest.json \
-  --utilization   /data/ab-3649/measure-util/results/manifest.json \
+  --single-stream /data/ab-3649/measure-single/run-<session-id>/manifest.json \
+  --utilization   /data/ab-3649/measure-util/run-<session-id>/manifest.json \
   --profile narrow \
-  | tee results/analysis.txt
+  | tee analysis.txt
 echo "exit=$?"
 ```
 
@@ -661,6 +689,10 @@ EBS volume on terminate and **it bills until deleted**.
       instance store is gone the moment the instance is.
 - [ ] Terminate the instance.
 - [ ] **Delete the `/data` EBS volume.**
+- [ ] If you ran the driver against a **persistent checkout** rather than a
+      throwaway rig, remove the two build worktrees it registered — the run names
+      them on its last line. They outlive the process and a killed session leaves
+      them behind.
 - [ ] **Read back that BOTH are gone**: the volume listing shows no lingering
       data volume, and the instance shows `shutting-down`/`terminated`.
       **A state written but not observed is not a state.**
@@ -710,7 +742,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     261 deterministic cases + a case floor; run it first
+  selftest-analyze.sh     265 deterministic cases + a case floor; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

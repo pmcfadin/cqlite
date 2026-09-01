@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 261 deterministic cases over synthetic fixtures, with a case floor |
+| `selftest-analyze.sh` | 265 deterministic cases over synthetic fixtures, with a case floor |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,59 @@ session, not by this lane.
 
 ---
 
-## 9. The third lesson: the dangerous defect is the one no test would have failed on
+## 9. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+
+Four review rounds produced findings in the driver's session lifecycle — the
+work directory, the port, readiness, the census — roughly seven of the last
+eight. Each round's fix was correct about the instance in front of it and left
+the next layer:
+
+| round | the fix | what it left |
+|---|---|---|
+| 2 | truncate the ledger only after the lock is held | the *sequential* case: a failed re-use still truncated |
+| 3 | don't write until pre-flight passes and both arms build | the port could be taken *during* the builds |
+| 4 | stage the manifest and promote it atomically | the replicate JSONLs it references were never staged |
+
+Three fixes, three approximations of one property. The fourth attempt stopped
+improving the sequencing and **removed the shared resource instead**:
+
+- **The work directory.** Every session writes to `<work-dir>/run-<session-id>/`,
+  a name no other session can produce. Nothing is promoted, truncated or
+  overwritten, so *"a manifest never references a file from another session"* is
+  true **by construction** rather than by ordering — the manifest and the files
+  it names are the only things in a directory one process owns.
+- **The port.** `--port` defaults to 0; each server binds an ephemeral port and
+  the driver reads the real one from **that server's own** post-bind line. A
+  probe could only ever establish that *something* answered, which on a nine-lane
+  box is how the loser of a race measures the winner's binary while its own
+  configuration asserts all pass against its own pre-bind log. With no shared
+  port there is no race to detect.
+
+**The rule: when successive findings land in one mechanism, the mechanism is the
+defect.** Not the sequencing around it, not the guard in front of it. Ask what
+resource is being shared and whether it needs to be shared at all — the fix that
+ends the series is usually a deletion. Same shape as removing the second duration
+grammar rather than widening it (§11), one level up.
+
+**And a second instance of the mirroring rule from §11.** The corpus census
+scanned the whole data root recursively while the server reads **one** resolved
+directory, flat. So both size gates could pass on files that are never served —
+including the ≥2-SSTable gate that exists to stop the #3058 single-source bypass,
+i.e. the guard against this harness's own headline phantom could be satisfied by
+files the measurement never touches. The census now mirrors `DirSource::resolve`
+and the producer's flat enumeration. **A validator must mirror the grammar *and
+the scope* of whatever consumes the value.**
+
+**A third instance of partial-observation-as-agreement closed the per-field
+approach too.** Rounds 2, 3 and 4 each found one field where an observation was
+counted, dropped or compared over a subset. They are now one `Corroboration`
+type carrying observed/total and a state, constructed for every readback field,
+so a new field cannot be added without inheriting the partial case — there is
+nowhere else to decide it.
+
+---
+
+## 10. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -346,7 +398,7 @@ count forces.
 
 ---
 
-## 10. The second lesson: a parameter accepted without being checked against the claim
+## 11. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -380,7 +432,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 11. The first lesson: a green suite over an unexecuted subject
+## 12. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -411,7 +463,7 @@ Two rules worth carrying:
 
 ---
 
-## 12. A process finding: cadence, not partition
+## 13. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -425,7 +477,7 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §11 describes. Reflexively partitioning by layer
+which is precisely the hole §12 describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 
 **There was one real seam, and it was a requirement-sequencing error rather than

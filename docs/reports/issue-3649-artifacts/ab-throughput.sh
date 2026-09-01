@@ -945,6 +945,11 @@ done
 
 write_manifest
 say "session complete: $REPLICATES paired replicates in $RUN_DIR"
+# The two build worktrees are REGISTERED IN THE REPOSITORY and outlive this
+# process. On a rig that is torn down it does not matter; on a persistent
+# checkout a killed session leaves them behind, so name them rather than let the
+# operator discover it from `git worktree list` weeks later.
+say "worktrees left registered in $REPO: $WORK_DIR/wt-base $WORK_DIR/wt-head -- remove with 'git -C $REPO worktree remove --force <path>' when you are done with this work directory"
 # The section this session's ramp belongs to, decided by the same validator that
 # accepted the ramp rather than re-derived here.
 say "next python3 $(dirname "$SUPPORT")/analyze-ab.py --$RAMP_SECTION $RUN_DIR/manifest.json"
