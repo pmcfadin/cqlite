@@ -250,7 +250,35 @@ fi
 # line of `cargo tree` output is an indented tree branch (`├──`, `│`, `└──`) or blank.
 # Read BY REDIRECTION, never a pipe: a piped `while read` runs in a subshell and its
 # accumulated counts would be discarded.
-declare -A NOW_COUNT=()
+# THE PER-CRATE CENSUS IS A FILE, NOT AN ASSOCIATIVE ARRAY. `declare -A` is bash 4 and
+# macOS ships bash 3.2 — a first-class gate host, and the gate's own portability lint
+# (`portability-8c` in scripts/tests/test_agent_gate_summary.sh) FAILs on it. Two
+# `<name> <count>` files plus a linear lookup is portable and, at ~30 crates, free.
+NOW_CENSUS="$WORK_DIR/now.census"
+: >"$NOW_CENSUS"
+
+# census_get <file> <name>: print the recorded count for <name>, or nothing. rc 1 when
+# absent, so a caller can tell "recorded zero" from "not recorded" — the same
+# three-valued discipline the rest of this script keeps.
+census_get() {
+  local n c
+  while read -r n c; do
+    if [ "$n" = "$2" ]; then printf '%s' "$c"; return 0; fi
+  done <"$1"
+  return 1
+}
+# census_bump <file> <name>: increment <name>'s count, appending it at 1 if new.
+census_bump() {
+  local cur
+  if cur=$(census_get "$1" "$2"); then
+    local tmpc="$1.next"
+    awk -v want="$2" '{ if ($1 == want) { print $1, $2 + 1 } else { print } }' "$1" >"$tmpc" \
+      && mv "$tmpc" "$1"
+  else
+    printf '%s 1\n' "$2" >>"$1"
+  fi
+}
+
 now_instances=0
 now_names=""
 nonblank=0
@@ -265,12 +293,8 @@ while IFS= read -r line || [ -n "$line" ]; do
       nm="${line%% *}"
       case "$nm" in *[!A-Za-z0-9_-]*) continue ;; esac
       now_instances=$((now_instances + 1))
-      if [ -z "${NOW_COUNT[$nm]:-}" ]; then
-        NOW_COUNT["$nm"]=1
-        now_names="$now_names $nm"
-      else
-        NOW_COUNT["$nm"]=$(( NOW_COUNT[$nm] + 1 ))
-      fi
+      census_get "$NOW_CENSUS" "$nm" >/dev/null || now_names="$now_names $nm"
+      census_bump "$NOW_CENSUS" "$nm"
       ;;
   esac
 done <"$TREE_TXT"
@@ -330,7 +354,7 @@ HEADER
     printf 'instances %s\n' "$now_instances"
     printf 'crates %s\n' "$now_crates"
     for _n in $now_names; do
-      printf 'crate %s %s\n' "$_n" "${NOW_COUNT[$_n]}"
+      printf 'crate %s %s\n' "$_n" "$(census_get "$NOW_CENSUS" "$_n")"
     done
   } >"$tmp"
   # Atomic publish, beside the destination (the same reason agent-gate.components is
@@ -350,7 +374,8 @@ fi
 [ -f "$BASELINE" ] || baseline_unusable baseline-missing "$BASELINE_REL does not exist"
 [ -r "$BASELINE" ] || baseline_unusable baseline-missing "$BASELINE_REL is not readable"
 
-declare -A BASE_COUNT=()
+BASE_CENSUS="$WORK_DIR/base.census"
+: >"$BASE_CENSUS"
 base_instances=""
 base_crates=""
 base_names=""
@@ -387,8 +412,8 @@ while IFS= read -r line || [ -n "$line" ]; do
       case "$2" in ''|*[!A-Za-z0-9_.-]*) baseline_unusable baseline-garbage "line $lineno: '$2' is not a crate name" ;; esac
       case "$3" in ''|*[!0-9]*) baseline_unusable baseline-garbage "line $lineno: '$3' is not a count" ;; esac
       [ "$3" -ge 2 ] || baseline_unusable baseline-garbage "line $lineno: '$2' is recorded $3 time(s) — a DUPLICATE needs at least 2"
-      [ -z "${BASE_COUNT[$2]:-}" ] || baseline_unusable baseline-garbage "line $lineno: '$2' is recorded twice"
-      BASE_COUNT["$2"]="$3"
+      census_get "$BASE_CENSUS" "$2" >/dev/null && baseline_unusable baseline-garbage "line $lineno: '$2' is recorded twice"
+      printf '%s %s\n' "$2" "$3" >>"$BASE_CENSUS"
       base_names="$base_names $2"
       base_crate_lines=$((base_crate_lines + 1))
       base_sum=$((base_sum + $3))
@@ -417,17 +442,20 @@ done <"$BASELINE"
 grew=""
 newly=""
 for _n in $now_names; do
-  b="${BASE_COUNT[$_n]:-}"
-  if [ -z "$b" ]; then
-    newly="$newly $_n(${NOW_COUNT[$_n]})"
-  elif [ "${NOW_COUNT[$_n]}" -gt "$b" ]; then
-    grew="$grew $_n($b->${NOW_COUNT[$_n]})"
+  now_n="$(census_get "$NOW_CENSUS" "$_n")"
+  if b="$(census_get "$BASE_CENSUS" "$_n")"; then
+    if [ "$now_n" -gt "$b" ]; then
+      grew="$grew $_n($b->$now_n)"
+    fi
+  else
+    newly="$newly $_n($now_n)"
   fi
 done
 shrank=0
 for _n in $base_names; do
-  n="${NOW_COUNT[$_n]:-0}"
-  [ "$n" -lt "${BASE_COUNT[$_n]}" ] && shrank=$((shrank + 1))
+  base_n="$(census_get "$BASE_CENSUS" "$_n")"
+  now_n="$(census_get "$NOW_CENSUS" "$_n")" || now_n=0
+  [ "$now_n" -lt "$base_n" ] && shrank=$((shrank + 1))
 done
 
 if [ "$now_instances" -gt "$base_instances" ] || [ "$now_crates" -gt "$base_crates" ]; then

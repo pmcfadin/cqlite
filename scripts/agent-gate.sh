@@ -16498,6 +16498,13 @@ run_dep_duplicates() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
+# for the ADVISORY dep-duplicates component: 33 cases drive
+# scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
+# scratch copy of the guard, no test seam) and assert the emitted TOKENS, and its last
+# three substitute a stub guard in a detached worktree to prove the COMPONENT records SKIP
+# — never PASS — when nothing was measured. Offline; SKIP-aware where cargo or
+# `git worktree` is unavailable.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -17902,6 +17909,32 @@ run_tooling_tests() {
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
+  # which for an always-non-failing guard is the harder property: 33 cases drive
+  # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (a shim `cargo` on
+  # PATH and a scratch copy of the guard — there is no test seam) and assert the emitted
+  # TOKENS, not exit statuses: NO-INCREASE / ADVISORY-INCREASE naming who grew /
+  # RATCHET-LOOSE / colour-immunity with a positive control that the fixture really carries
+  # escapes / an empty-but-legitimate ZERO kept distinct from an unparseable read / every
+  # UNMEASURABLE and baseline-garbage refusal / the --regenerate round trip. Its last three
+  # cases (G2) substitute a stub guard in a detached scratch worktree and assert the GATE
+  # COMPONENT records SKIP — never PASS — for an unmeasurable exit, for a zero exit with no
+  # verdict line, and for an unexpected status: the vacuous-pass guard for the one component
+  # that may never FAIL. Cheap and offline (the only cargo is a warm metadata probe); it
+  # SKIPs its live/gate cases where cargo or `git worktree` is unavailable. A failure FAILs
+  # the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_dep_duplicates_ratchet.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_dep_duplicates_ratchet.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (dep-duplicates ratchet self-test #1700); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
 
