@@ -1,0 +1,170 @@
+-- issue-3790-comparator-ordering.cql — Cassandra 5.0 reference schema for the
+-- INET / TIME multicell-collection ORDERING fixture (issue #3790).
+--
+-- WHY THIS EXISTS
+-- `ComparatorType::compare` (cqlite-core/src/types/comparator.rs) routes
+-- `Custom("inet")` and `Custom("time")` through `compare_custom`, which compares
+-- `format!("{}", value)` — the FORMATTED STRING — instead of the serialized
+-- bytes. Cassandra 5.0.8 constructs both `InetAddressType` and `TimeType` with
+-- `ComparisonType.BYTE_ORDER` (verified at the pinned tag:
+--   InetAddressType() {super(ComparisonType.BYTE_ORDER);}
+--   private TimeType() {super(ComparisonType.BYTE_ORDER);}
+-- ), i.e. unsigned byte-wise comparison of the serialized value, shorter value
+-- first on a prefix tie. For a non-frozen (multicell) collection the element /
+-- map key IS the cell path, so that comparator decides the on-disk order — which
+-- makes the divergence observable in real Cassandra-written bytes.
+--
+-- NO COMMITTED SCHEMA COULD SERVE THIS. `collections.cql:88` declares
+-- `MAP<TEXT, INET>`, where inet is the map VALUE and therefore never
+-- participates in ordering. There is no `SET<INET>`, no `SET<TIME>` and no MAP
+-- KEYED by either type anywhere under test-data/schemas/.
+--
+-- CASSANDRA-WRITTEN, NOT CQLITE-WRITTEN — this is acceptance criterion 3 of
+-- #3790 and the reason this fixture exists at all. A CQLite-written +
+-- CQLite-read round-trip is INVARIANT to a uniform ordering error: the writer
+-- and the reader make the identical mistake, the round-trip closes, and the test
+-- stays green while real Cassandra data reads misordered (CLAUDE.md, #3042).
+-- Produced by test-data/scripts/generate-issue-3790-comparator-ordering.sh
+-- (cqlsh INSERT + `nodetool flush` inside cassandra:5.0.2).
+--
+-- ============================================================================
+-- WHAT EACH COLUMN EXERCISES — the five are NOT interchangeable
+--
+--   inet_set  SET<INET>        Set elements are cell paths, so the element
+--                              ordering IS the inet comparator. Carries the
+--                              issue's own falsifying pair AND the IPv4-vs-IPv6
+--                              differing-length case (4 vs 16 bytes).
+--
+--   inet_map  MAP<INET, TEXT>  inet in the ORDERING position (the map KEY) —
+--                              the position `collections.cql` does not have.
+--                              The text values are self-describing so a
+--                              displaced key is visible, not merely absent.
+--
+--   time_set  SET<TIME>        Same cell-path mechanism for `time`. See the
+--                              HONEST SCOPE note below: this pins value order
+--                              and falsifies a DECIMAL-nanosecond string
+--                              comparison, but it CANNOT falsify CQLite's
+--                              current `fmt_time` rendering.
+--
+--   time_map  MAP<TIME, TEXT>  time in the map-KEY ordering position.
+--
+--   pair_set  SET<FROZEN<TUPLE<INET, TIME>>>
+--                              The composite case (#3790 AC4): a frozen tuple
+--                              CONTAINING both types as a set element, so
+--                              `compare_composite`'s scalar-leaf delegation to
+--                              `ComparatorType::compare` is exercised end to
+--                              end. Two tuples share an inet and differ only in
+--                              the time component, so the SECOND component's
+--                              comparator is load-bearing and not merely
+--                              carried along.
+--
+-- All four scalar-keyed collections are NON-FROZEN (multicell) BY DESIGN: a
+-- frozen collection is one opaque blob with no per-element cell path, and the
+-- element order would then be decided by the WRITER at insert time rather than
+-- being an on-disk property the reader must reproduce.
+-- ============================================================================
+--
+-- ============================================================================
+-- THE ORACLE — inet. Computed from the address bytes; CONFIRMED against the
+-- generated sstabledump golden (see test-data/fixtures/issue_3790/README.md,
+-- which is the authority; this comment is a convenience copy).
+--
+--   Cassandra BYTE_ORDER (correct)      | CQLite formatted-string (the defect)
+--   ------------------------------------+------------------------------------
+--   ::1           00000000...0001 (16B) | ::1           0000:0000:...:0001
+--   9.0.0.1       09000001         (4B) | 10.0.0.2      10.0.0.2
+--   10.0.0.2      0a000002         (4B) | 192.168.0.1   192.168.0.1
+--   2001:db8::1   20010db8...0001 (16B) | 2001:db8::1   2001:0db8:...:0001
+--   192.168.0.1   c0a80001         (4B) | 9.0.0.1       9.0.0.1
+--   fe80::1       fe800000...0001 (16B) | fe80::1       fe80:0000:...:0001
+--
+-- `9.0.0.1` sits at position 2 by bytes and at position 5 by string. Three
+-- distinct falsifying pairs are present, and they are deliberately not one
+-- pattern repeated:
+--   * 9.0.0.1 < 10.0.0.2 by bytes (0x09 < 0x0a) but "10.0.0.2" < "9.0.0.1" as
+--     strings ('1' < '9'). This is the pair named in the issue.
+--   * 2001:db8::1 < 192.168.0.1 by bytes (0x20 < 0xc0) but "192.168.0.1" <
+--     "2001:..." as strings — a length-4-vs-16 pair that inverts.
+--   * 9.0.0.1 < 2001:db8::1 by bytes but "2001:..." < "9.0.0.1" as strings.
+-- A single pair could be satisfied by a coincidence; three, inverting in both
+-- the v4/v4 and the v4/v6 direction, cannot.
+--
+-- THE ORACLE — time, AND ITS HONEST SCOPE. This is the paragraph not to skip.
+-- CQLite renders `time` as `TIME(HH:MM:SS.nnnnnnnnn)` (types.rs::fmt_time),
+-- which is FIXED-WIDTH and ZERO-PADDED, so over the whole valid range
+-- 0..=86399999999999 the string order and the nanosecond order COINCIDE. There
+-- is therefore NO time value pair that falsifies the current formatted-string
+-- implementation, and this fixture does not claim one. What the time columns do:
+--   (a) PIN nanosecond ordering as the correct answer over Cassandra-written
+--       bytes, so a future re-implementation that breaks it reds; and
+--   (b) FALSIFY a DECIMAL-NANOSECOND string comparison, the other plausible
+--       wrong implementation: 9000000000 < 10000000000 numerically, while
+--       "9000000000" > "10000000000" lexicographically. Hence the deliberate
+--       inclusion of 00:00:09 and 00:00:10.
+-- Stating this rather than implying a falsifying case matters: an overclaim in a
+-- committed fixture comment is worse than an omission, because it is what stops
+-- the next reader checking.
+--
+--   time BYTE_ORDER == nanosecond order (correct, and what the fixture pins):
+--     00:00:00.000000000 (0)  <  00:00:09.000000000 (9000000000)
+--                             <  00:00:10.000000000 (10000000000)
+--                             <  12:00:00.000000000 (43200000000000)
+--                             <  23:59:59.999999999 (86399999999999)
+-- ============================================================================
+--
+-- TINY, UNCOMPRESSED AND TIME-PROOF, all three deliberately:
+--   * TWO partitions, six inet values, five time values. It is a committed
+--     binary; small is the point.
+--   * `compression = {'enabled': 'false'}` => NO CompressionInfo.db. A
+--     zero-length or absent CompressionInfo.db makes SELECT return 0 rows
+--     SILENTLY, which is the "0-rows-when-present" failure this repo says must
+--     never pass, and the property under test here is ABOVE decode anyway.
+--   * NO TTL anywhere and an explicit `default_time_to_live = 0`. Fixtures in
+--     this repo have been time-bombed by a TTL more than once (see the comments
+--     in time-series.cql and oa-test.cql) — every row later reads as expired and
+--     the fixture silently stops testing anything.
+--   * Every INSERT carries `USING TIMESTAMP 1000`, which pins
+--     liveness_info.tstamp in the committed sstabledump JSONL golden. No cell is
+--     ever written as an explicit CQL NULL, so — unlike issue-3630's fixture —
+--     there is no cell tombstone carrying an unpinnable wall-clock
+--     local_delete_time, and this golden IS byte-reproducible.
+--
+-- COMMITTED CHECKOUT-RELATIVE under test-data/fixtures/issue_3790/, NOT under
+-- test-data/datasets/sstables/. That directory is itself an "sstables root" (it
+-- directly contains the KEYSPACE directory), so a consumer opens it exactly the
+-- way the dataset lanes open `$CQLITE_DATASETS_ROOT/sstables`. See the README
+-- beside the fixture for why it is not in the dataset corpus: a newly-committed
+-- keyspace there is auto-enrolled as ENFORCED by the #1229 corpus enumeration
+-- and reds the python/node enumeration guards until three harnesses outside
+-- test-data/** are edited in lockstep. Precedent for the fixtures/ location:
+-- test-data/fixtures/issue_3504/ and test-data/fixtures/issue_3630/.
+--
+-- THE TWO ROWS:
+--   id=1 — THE FULL CASE. All five collections populated with the complete
+--          six-inet / five-time value sets above. This is the row the ordering
+--          oracle is stated over.
+--   id=2 — THE MINIMAL FALSIFYING PAIR. Exactly two elements per collection,
+--          {10.0.0.2, 9.0.0.1} and {00:00:09, 00:00:10}, so a two-element
+--          comparison is enough to catch the defect. It also pins that the
+--          divergence is a property of the COMPARATOR and not of collection
+--          size or of the surrounding partition.
+--
+-- Backs: issue #3790.
+
+CREATE KEYSPACE IF NOT EXISTS test_comparator_order WITH replication = {
+  'class': 'SimpleStrategy',
+  'replication_factor': 1
+} AND durable_writes = true;
+
+USE test_comparator_order;
+
+CREATE TABLE IF NOT EXISTS collection_order (
+    id       int PRIMARY KEY,
+    inet_set set<inet>,
+    inet_map map<inet, text>,
+    time_set set<time>,
+    time_map map<time, text>,
+    pair_set set<frozen<tuple<inet, time>>>
+) WITH compression = {'enabled': 'false'}
+  AND compaction = {'class': 'SizeTieredCompactionStrategy'}
+  AND default_time_to_live = 0;
