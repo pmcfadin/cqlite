@@ -729,22 +729,28 @@ def test_a_full_scan_of_the_shapes_table_reads_every_row():
     assert isinstance(by_id[2]["ssu"], list) and len(by_id[2]["ssu"]) == 1
 
 
-def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
-    """RECORDED GAP + the residual: a `map`-typed UDT field decodes to `bytes`.
+def test_a_udt_with_a_collection_field_projects_with_that_field_as_a_dict():
+    """The recorded decode gap is FIXED (#3631 instance B) — and the projection
+    STILL succeeds, which is the part that had to be measured rather than
+    predicted.
 
-    The obvious prediction — a UDT declaring a `frozen<map<text,int>>` field
-    stays unprojectable, because `Udt.__hash__` hashes its field values and a
-    `dict` is unhashable — is FALSE here, and measurement is the only reason we
-    know: CQLite decodes a collection field inside a frozen UDT as `Value::Blob`,
-    so the field arrives as `bytes`, which IS hashable, and the projection
-    succeeds. Recorded as CHARACTERIZATION, not as a desirable rendering: the
-    correct value would be `{"a": 1}`. It is a decode-level gap, orthogonal to
-    #3504, and pinned here so a future fix to it does not look like a regression
-    in this file — it will red HERE, with this comment attached.
+    HISTORY, kept because it is what this case was for: the field used to arrive
+    as `bytes` (a collection field inside a frozen UDT decoded to `Value::Blob`),
+    and this test pinned that as characterization, predicting that fixing the
+    decode "may raise again" because `Udt.__hash__` hashes its field values and a
+    `dict` is unhashable.
 
-    The `Udt.__hash__` residual is real all the same, and is asserted on a
-    HAND-BUILT value because no decoder path currently reaches it: a `Udt` whose
-    field value genuinely is unhashable still propagates `TypeError`.
+    RE-MEASURED after the fix, against the same committed corpus: `m` is now
+    `{"a": 1}` and the projection SUCCEEDS anyway. The prediction was wrong for a
+    reason that has nothing to do with the decode — #3500 made a UDT-bearing set
+    render as a Python `list` (`contains_udt` traverses the whole subtree), and
+    building a `list` never hashes its elements. So `Udt.__hash__` is not reached
+    on this path at all, and no hashable projection of `m` is required.
+
+    The `Udt.__hash__` residual is real all the same, and is STILL asserted on a
+    HAND-BUILT value: the decoder now produces a `Udt` with a `dict` field, but no
+    decoder path puts one where hashing is required. That is a statement about the
+    CONTAINER, not about the field, which is why the hand-built assert stays.
     """
     stn = _shapes_row(3)["stn"]
     # `list`, not `frozenset`: the same #3500 container change as the `stu`
@@ -755,11 +761,13 @@ def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
     assert position == 30
     assert udt.type_name == "unhashable_fields"
     assert udt.fields["label"] == "unhashable"
-    # THE GAP: bytes, not {"a": 1}. Asserted as bytes so the pin is exact.
-    assert isinstance(udt.fields["m"], bytes), (
-        f"expected the recorded decode gap (bytes), got {type(udt.fields['m']).__name__} "
-        "— if a collection field inside a frozen UDT now decodes properly, this "
-        "projection may raise again; see the docstring"
+    # FIXED (#3631 instance B): the structured value, not the 20 serialized bytes.
+    # Pinned by VALUE and not merely by type, because a `dict` of the wrong content
+    # would satisfy an isinstance check while proving nothing about the decode.
+    assert udt.fields["m"] == {"a": 1}, (
+        f"expected the golden's {{'a': 1}}, got "
+        f"{type(udt.fields['m']).__name__}={udt.fields['m']!r} — a `frozen<map<text,int>>` "
+        "field of a frozen UDT must decode structurally (issue #3631 instance B)"
     )
 
     # The residual, at the only layer that can reach it today.
