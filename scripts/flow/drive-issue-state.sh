@@ -97,7 +97,16 @@
 # OUTPUT CONTRACT (mirrors scripts/flow/base-staleness.sh)
 #   (a) EVERY line of a verdict-bearing invocation, stdout AND stderr, begins
 #       `DRIVE-STATE: `. `--help` is the one exemption: it emits no verdict line, so no
-#       consumer parses it.
+#       consumer parses it. THAT COVERS THE EXTERNAL COMMANDS THIS SCRIPT RUNS: every one of
+#       them (mktemp, mv, rm, cat, date, wc, tr, hostname, flock, and the sourced liveness
+#       library's ps/date/tr/cut) has its stderr either CAPTURED and FOLDED into the anchored
+#       message — preferred where the native text names the cause, as with mktemp and mv — or
+#       SUPPRESSED where the anchored message already names the failure fully. A native
+#       `mktemp: failed to create file via template ...` line carries no prefix, and the
+#       failure itself is ALREADY reported through the anchored WRITE_ERR/refuse path, so the
+#       native line is pure contract breakage. Cleanup commands additionally carry `|| true`:
+#       they run AFTER the verdict, and a failing command in a bash EXIT trap under `set -e`
+#       aborts the trap AND replaces the exit status.
 #   (b) Every dynamic field is CONTROL-CHARACTER SANITIZED for display. Load-bearing: git
 #       and the filesystem PERMIT NEWLINES IN PATHS, and an unsanitized path printed
 #       verbatim emits a second line carrying no prefix, breaking the anchor everything
@@ -241,8 +250,10 @@ die_usage()  { printf '%s USAGE %s\n' "$P" "$*" >&2; exit 64; }
 # NEWLINE, and printed verbatim that emits a second line with no `DRIVE-STATE: ` prefix.
 # Control characters ONLY are masked; everything else is printed verbatim, because
 # mangling a path for the reader buys nothing once the anchor holds.
+# `tr`'s OWN stderr is suppressed: a diagnostic from the tool that exists to PROTECT the
+# anchor would be the one line breaking it (roborev job 26 F2).
 sane() {
-  printf '%s' "${1:-}" | LC_ALL=C tr -c '\040-\176\200-\377' '?'
+  printf '%s' "${1:-}" | LC_ALL=C tr -c '\040-\176\200-\377' '?' 2>/dev/null
 }
 
 # verdict <TOKEN> — contract (c): the ONE verdict line, one closed-set token, nothing else.
@@ -278,7 +289,12 @@ cleanup_tmp() {
   # `${#arr[@]}` is safe under `set -u` for an EMPTY array, whereas `"${arr[@]}"` is not on
   # bash 3.2/4.3 — hence the count guard rather than an unguarded expansion.
   if [ "${#TMP_FILES[@]}" -gt 0 ]; then
-    for f in "${TMP_FILES[@]}"; do [ -z "$f" ] || rm -f "$f"; done
+    # `2>/dev/null || true`: cleanup is BEST-EFFORT and runs AFTER the verdict, so it may
+    # neither emit an unprefixed line nor change the outcome. MEASURED, not assumed — a
+    # failing command in a bash EXIT trap under `set -e` aborts the trap and REPLACES the
+    # exit status, so a broken `rm` turned a legitimate WRITTEN(0) into an unexplained
+    # non-zero (roborev job 26 F2).
+    for f in "${TMP_FILES[@]}"; do [ -z "$f" ] || rm -f "$f" 2>/dev/null || true; done
   fi
   TMP_FILES=()
 }
@@ -321,14 +337,16 @@ register_tmp() { TMP_FILES+=("$1"); }
 # failure inside a command substitution kills the script with no verdict line at all.
 sanitize_field() {
   local s
-  s="$(printf '%s' "${1:-}" | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
+  s="$(printf '%s' "${1:-}" | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' 2>/dev/null | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//' 2>/dev/null)"
   s="$(LC_ALL=C printf '%.120s' "$s")"
   s="${s%-}"
   [ -n "$s" ] || s="unspecified"
   printf '%s\n' "$s"
 }
 
-this_machine() { sanitize_field "${CLAIM_MACHINE:-$(hostname -s)}"; }
+# `hostname`'s stderr is suppressed (roborev job 26 F2): its failure is already visible as a
+# degraded machine value, and an unprefixed 'hostname: not found' would break the anchor.
+this_machine() { sanitize_field "${CLAIM_MACHINE:-$(hostname -s 2>/dev/null)}"; }
 
 # this_session — the current session id, or the `unrecorded` sentinel. An unrecorded
 # session makes the session axis UNMEASURED (never "equal"), which routes to the liveness
@@ -389,7 +407,11 @@ lock_marker() {
   command -v flock >/dev/null 2>&1 || refuse ERROR 1 "flock is not available on this host, so the ownership-verify -> replace sequence cannot be SERIALIZED. Refusing rather than mutating unserialized: two sessions in one lane could both pass verification and one clobber the other's stamp, which is the defect this marker exists to prevent. An unmeasurable guarantee is never read as satisfied."
   : >>"$lock" 2>/dev/null || refuse ERROR 1 "cannot create the marker lock file $(sane "$lock") — nothing was decided"
   eval "exec ${MARKER_LOCK_FD}>>\"\$lock\""
-  flock -w "$MARKER_LOCK_WAIT_SECS" "$MARKER_LOCK_FD" || refuse ERROR 1 "another process holds the marker lock $(sane "$lock") (waited ${MARKER_LOCK_WAIT_SECS}s) — refusing rather than racing it; nothing was decided"
+  # flock's own stderr is SUPPRESSED rather than captured: capturing it would mean running
+  # flock inside a command substitution, i.e. in a subshell, which is not a place to be
+  # subtle about which open file description holds the lock. The anchored detail below names
+  # both causes instead (roborev job 26 F2).
+  flock -w "$MARKER_LOCK_WAIT_SECS" "$MARKER_LOCK_FD" 2>/dev/null || refuse ERROR 1 "another process holds the marker lock $(sane "$lock") (waited ${MARKER_LOCK_WAIT_SECS}s), or it could not be acquired — refusing rather than racing it; nothing was decided. (flock's own diagnostic is suppressed: it carries no DRIVE-STATE: prefix, and an unprefixed line breaks the output anchor every consumer rests on.)"
 }
 
 # ---------------------------------------------------------------------------
@@ -515,9 +537,12 @@ read_marker() {
 }
 
 # marker_body — the marker's body (everything AFTER the end sentinel) on stdout.
+# Returns NON-ZERO when the body could not be read, and its stderr is suppressed: every
+# caller must decide what an unreadable body means rather than inherit awk's unprefixed
+# diagnostic and an empty result (roborev job 26 F2).
 marker_body() {
   local path; path="$(marker_path)"
-  awk -v s="$STAMP_END" 'seen{print} $0==s{seen=1}' "$path"
+  awk -v s="$STAMP_END" 'seen{print} $0==s{seen=1}' "$path" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -736,6 +761,25 @@ assert_assembled_marker() {
     WRITE_ERR="the assembled marker carries $nb stamp-begin and $ne stamp-end sentinels at column zero (exactly one of each is legal) — the body supplied at COMMIT time contains a line that can pose as a stamp boundary. Nothing was written. If a --body-file was named, it changed between validation and assembly, or it carries a sentinel at column zero: remove that line."
     return 1
   fi
+  # AND THE REQUIRED FIELDS MUST BE THERE, NON-EMPTY (roborev job 26 F2, found by its own
+  # test). The identity values are produced by external helpers — `date`, `tr` inside
+  # sanitize_field, `hostname` — and write_marker is called from `if ! write_marker`, which
+  # SUPPRESSES `set -e` for its whole subtree, so a helper failing inside a command
+  # substitution yielded an EMPTY value and the marker committed anyway. Every later read
+  # then refuses it MALFORMED: the lane BRICKS ITSELF, which is the dead-letter family again.
+  # Checked HERE because this is the only place that sees the committed bytes, and scoped to
+  # the PROLOGUE (a free-form body may legitimately contain a `stage: ...` line).
+  local pro k n
+  pro="$(awk -v e="$STAMP_END" 'NR==1{next} $0==e{exit} {print}' "$tmp" 2>/dev/null || true)"
+  for k in issue machine worktree session session-pid session-pid-start-earliest \
+           session-pid-start-latest actor ts; do
+    n="$(printf '%s\n' "$pro" | LC_ALL=C grep -c "^$k: ." 2>/dev/null || true)"
+    case "$n" in '' | *[!0-9]*) n=0 ;; esac
+    if [ "$n" -ne 1 ]; then
+      WRITE_ERR="the assembled marker records $n non-empty '$k:' line(s) in its stamp prologue (exactly one is required) — an incomplete stamp is not a weaker stamp, it is NO stamp, and every later read would refuse it, bricking this lane. The usual cause is a helper this writer depends on (date, tr, hostname) failing. NOTHING was written."
+      return 1
+    fi
+  done
   return 0
 }
 
@@ -763,7 +807,14 @@ write_marker() {
     *)  WRITE_ERR="the worktree path '$(sane "$wt")' is not absolute — refusing to write a stamp whose worktree axis cannot be compared"; return 1 ;;
   esac
 
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # A FAILING `date` is a REFUSAL, not an empty `ts`. Its stderr is suppressed (unprefixed)
+  # and its failure is reported through WRITE_ERR: `set -e` cannot be relied on here because
+  # every caller invokes this function as `if ! write_marker ...`, which suppresses it for the
+  # whole subtree (roborev job 26 F2).
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || {
+    WRITE_ERR="cannot read the current time (\`date\` failed), so the stamp's \`ts\` field cannot be recorded — refusing rather than committing a stamp with an empty required field; nothing was written"; return 1; }
+  [ -n "$ts" ] || {
+    WRITE_ERR="\`date\` exited 0 but produced no timestamp, so the stamp's \`ts\` field cannot be recorded — nothing was written"; return 1; }
   session="$(this_session)"
   pid="$(this_session_pid)"
   lo=unmeasured; hi=unmeasured
@@ -772,8 +823,16 @@ write_marker() {
     if [ -n "$win" ]; then lo="${win%% *}"; hi="${win##* }"; fi
   fi
 
-  tmp="$(mktemp "$path.XXXXXX")" || {
-    WRITE_ERR="cannot create a temporary file next to $(sane "$path") — nothing was written"; return 1; }
+  # mktemp's NATIVE text is CAPTURED and FOLDED into the anchored detail rather than
+  # suppressed: "failed to create file via template" names the cause (a full disk, a
+  # read-only lane) and the anchored message alone cannot. `2>&1` merges the streams, so a
+  # SUCCESS that nevertheless printed something is not trusted as a path either.
+  local mkout
+  mkout="$(mktemp "$path.XXXXXX" 2>&1)" || {
+    WRITE_ERR="cannot create a temporary file next to $(sane "$path") — nothing was written (mktemp: $(sane "$mkout"))"; return 1; }
+  tmp="$mkout"
+  { [ -n "$tmp" ] && [ -f "$tmp" ]; } || {
+    WRITE_ERR="mktemp exited 0 next to $(sane "$path") but named no usable temporary file (it emitted: $(sane "$mkout")) — nothing was written"; return 1; }
   register_tmp "$tmp"
   {
     printf '%s\n' "$STAMP_BEGIN"
@@ -790,11 +849,19 @@ write_marker() {
     for kv in "$@"; do [ -z "$kv" ] || printf '%s\n' "$kv"; done
     printf '%s\n' "$STAMP_END"
     printf '\n'
-    if [ -n "$bodyfile" ] && [ -s "$bodyfile" ]; then cat "$bodyfile"; fi
-  } >"$tmp" || { rm -f "$tmp"; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced"; return 1; }
+    # `cat`'s stderr is SUPPRESSED, not captured: inside a `{ ... } >"$tmp"` group there is
+    # nowhere to capture it to, and the group's non-zero status already routes to the
+    # anchored WRITE_ERR below (roborev job 26 F2).
+    if [ -n "$bodyfile" ] && [ -s "$bodyfile" ]; then cat "$bodyfile" 2>/dev/null; fi
+  } >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced (the body could not be read, or the temporary file could not be written)"; return 1; }
   # The last thing before the atomic commit, over the committed bytes themselves.
-  assert_assembled_marker "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$path" || { rm -f "$tmp"; WRITE_ERR="failed replacing $(sane "$path")"; return 1; }
+  assert_assembled_marker "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  # mv's NATIVE text is CAPTURED and FOLDED for the same reason as mktemp's: "cannot move ...
+  # Permission denied" vs "Device or resource busy" are different operator actions.
+  local mverr
+  mverr="$(mv -f "$tmp" "$path" 2>&1)" || {
+    rm -f "$tmp" 2>/dev/null || true
+    WRITE_ERR="failed replacing $(sane "$path")${mverr:+ (mv: $(sane "$mverr"))}"; return 1; }
   WROTE_PATH="$path"
   return 0
 }
@@ -861,8 +928,10 @@ cmd_write() {
     # refuses it MALFORMED — never discarded as though it asserted nothing.
     if [ "$mcls" = legacy ]; then
       local dl dbytes
-      dl="$(LC_ALL=C wc -l <"$mpath" 2>/dev/null | tr -d ' ')"
-      dbytes="$(LC_ALL=C wc -c <"$mpath" 2>/dev/null | tr -d ' ')"
+      # `tr`'s stderr is suppressed alongside `wc`'s: an unreadable count degrades to the
+      # '?' the message already prints, and neither tool may emit an unprefixed line.
+      dl="$(LC_ALL=C wc -l <"$mpath" 2>/dev/null | tr -d ' ' 2>/dev/null || true)"
+      dbytes="$(LC_ALL=C wc -c <"$mpath" 2>/dev/null | tr -d ' ' 2>/dev/null || true)"
       discarded="replaced an UNSTAMPED marker of unknown provenance and DISCARDED its body (${dl:-?} lines, ${dbytes:-?} bytes): an unstamped plan may belong to ANY session, so it is never carried forward"
       # body_src stays as the caller supplied it (empty unless --body-file): the preserve
       # branch below is UNREACHABLE from here, which is the point.
@@ -882,9 +951,10 @@ cmd_write() {
       if [ -z "$body_src" ]; then
       # Preserve an OWNED marker's body: `write` updates the stamp and the recorded stage,
       # not the author's notes.
-        carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
+        carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the carried body under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$carried"))"
+        { [ -n "$carried" ] && [ -f "$carried" ]; } || refuse ERROR 1 "mktemp exited 0 for the carried body but named no usable temporary file (it emitted: $(sane "$carried")) — nothing was written"
         register_tmp "$carried"
-        marker_body >"$carried"
+        marker_body >"$carried" || refuse ERROR 1 "cannot read the existing marker's body from $(sane "$(marker_path)"), so it cannot be carried forward — refusing rather than silently replacing a plan with an empty one; nothing was written"
         assert_body_safe "$carried"
         body_src="$carried"
       fi
@@ -900,10 +970,10 @@ cmd_write() {
   [ -z "$pr" ]      || f_pr="pr: $(sanitize_field "$pr")"
   [ -z "$branch" ]  || f_branch="branch: $(sanitize_field "$branch")"
   if ! write_marker "$issue" "$actor" "$body_src" "$f_stage" "$f_request" "$f_pr" "$f_branch"; then
-    [ -z "$carried" ] || rm -f "$carried"
+    [ -z "$carried" ] || rm -f "$carried" 2>/dev/null || true
     refuse ERROR 1 "$WRITE_ERR"
   fi
-  [ -z "$carried" ] || rm -f "$carried"
+  [ -z "$carried" ] || rm -f "$carried" 2>/dev/null || true
   verdict WRITTEN
   [ -z "$discarded" ] || detail "$discarded"
   detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(pwd -P)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$WROTE_PATH")"
@@ -937,7 +1007,7 @@ assert_reason() {
   if [ "$tok" = unspecified ] || [ "${#tok}" -lt 3 ]; then
     die_usage "adopt: --reason must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$(sane "$raw")' records as '$(sane "$tok")', which is indistinguishable from no reason at all"
   fi
-  case "$(printf '%s' "$tok" | LC_ALL=C tr 'A-Z' 'a-z')" in
+  case "$(printf '%s' "$tok" | LC_ALL=C tr 'A-Z' 'a-z' 2>/dev/null)" in
     why | reason | todo | tbd | tba | xxx | xxxx | placeholder | fixme | none | foo | bar | baz | n/a)
       die_usage "adopt: --reason '$(sane "$raw")' records as the PLACEHOLDER '$(sane "$tok")' — as uninformative as no reason at all. Say what the resume IS, e.g. --reason cron-reinvoke:writer-pid-gone" ;;
   esac
@@ -979,9 +1049,10 @@ cmd_adopt() {
   fi
 
   local carried f_stage=''
-  carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
+  carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the carried body under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$carried"))"
+  { [ -n "$carried" ] && [ -f "$carried" ]; } || refuse ERROR 1 "mktemp exited 0 for the carried body but named no usable temporary file (it emitted: $(sane "$carried")) — nothing was written"
   register_tmp "$carried"
-  marker_body >"$carried"
+  marker_body >"$carried" || refuse ERROR 1 "cannot read the existing marker's body from $(sane "$(marker_path)"), so it cannot be carried across the adoption — refusing rather than transferring ownership onto an empty plan; nothing was written"
   assert_body_safe "$carried"
   [ -z "$stage" ] || f_stage="stage: $stage"
   local f_request='' f_pr='' f_branch=''
@@ -993,10 +1064,10 @@ cmd_adopt() {
       "prior-session-pid: $prior_pid" \
       "prior-ts: $prior_ts" \
       "adopt-reason: $reason_token"; then
-    rm -f "$carried"
+    rm -f "$carried" 2>/dev/null || true
     refuse ERROR 1 "$WRITE_ERR"
   fi
-  rm -f "$carried"
+  rm -f "$carried" 2>/dev/null || true
   verdict ADOPTED
   detail "issue=$(sane "$issue") prior-session=$(sane "$prior_session") prior-session-pid=$(sane "$prior_pid") new-session=$(sane "$(this_session)") reason=$(sane "$reason_token") -> $(sane "$WROTE_PATH"); the recorded writer was provably gone: $LIVE_DETAIL"
 }

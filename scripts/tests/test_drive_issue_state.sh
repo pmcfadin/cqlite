@@ -1165,6 +1165,149 @@ $ml_u"
 fi
 
 # ===========================================================================
+case_begin 30-native-diagnostics-stay-anchored "a FAILING external command's NATIVE stderr never reaches the terminal unprefixed"
+# ===========================================================================
+# roborev job 26 F2. `mktemp`, `mv`, `rm`, `cat`, `date`, `wc`, `tr`, `hostname` were invoked
+# with their stderr unredirected, so on failure the NATIVE diagnostic ("mktemp: failed to
+# create file via template ...") reached the terminal with NO `DRIVE-STATE: ` prefix — pure
+# contract-(a) breakage, since the failure itself is already reported through the anchored
+# WRITE_ERR/refuse path.
+#
+# THE SHIM MUST WRITE TO STDERR AND THEN FAIL. Case 17's shim exits SILENTLY, which is why it
+# could not see this: a silent failure exercises the error PATH without exercising the output
+# CONTRACT. Each command is shimmed ON ITS OWN (shimming all of them at once would kill the
+# script before it reached most of the sites) and the property is asserted over BOTH STREAMS
+# COMBINED, because contract (a) is about stdout AND stderr.
+LEAK='NATIVE-LEAK-MARKER'
+shim_dir_for() {  # shim_dir_for <cmd> — a PATH dir whose <cmd> is noisy AND failing
+  local c="$1" d="$T/leakbin-$1"
+  mkdir -p "$d"
+  { printf '#!/bin/sh\n'
+    printf 'echo "%s: %s simulated failure" >&2\n' "$c" "$LEAK"
+    printf 'exit 1\n'; } >"$d/$c"
+  chmod +x "$d/$c"
+  printf '%s\n' "$d"
+}
+leak_fail=0; leak_probed=0
+# probe <cmd> <lane-setup-fn> <extra-args...> — run `write` with <cmd> shimmed and assert the
+# combined output is fully anchored.
+leak_probe() {
+  local c="$1" d="$2"; shift 2
+  local sd out rc
+  sd="$(shim_dir_for "$c")"
+  out=$( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd:$PATH" \
+    bash "$DS" "$@" 2>&1 ); rc=$?
+  leak_probed=$((leak_probed + 1))
+  LEAK_OUT="$out"; LEAK_RC="$rc"
+  if all_lines_anchored "$out"; then
+    return 0
+  fi
+  leak_fail=$((leak_fail + 1))
+  printf 'note   LEAK via %s (rc=%s):\n%s\n' "$c" "$rc" "$(printf '%s' "$out" | cat -v)"
+  return 1
+}
+# mktemp / mv / date / tr / hostname: reached by an ordinary write in a fresh lane.
+for lc in mktemp mv date tr; do
+  leak_probe "$lc" "$(lane "leak-$lc")" write 3822 || true
+done
+# hostname is only consulted when CLAIM_MACHINE is UNSET, so it needs its own invocation.
+lh_dir="$(shim_dir_for hostname)"; L30H=$(lane leak-hostname)
+lh_out=$( cd "$L30H" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u CLAIM_MACHINE \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$lh_dir:$PATH" \
+  bash "$DS" write 3822 2>&1 ) || true
+leak_probed=$((leak_probed + 1))
+if all_lines_anchored "$lh_out"; then :; else
+  leak_fail=$((leak_fail + 1))
+  printf 'note   LEAK via hostname:\n%s\n' "$(printf '%s' "$lh_out" | cat -v)"
+fi
+# cat: only reached with a non-empty --body-file.
+L30C=$(lane leak-cat); body30="$T/body30.md"; printf 'lane notes\n' >"$body30"
+leak_probe cat "$L30C" write 3822 --body-file "$body30" || true
+# wc: only reached on the UNSTAMPED migration branch.
+L30W=$(lane leak-wc); printf 'legacy hand-written plan\n' >"$L30W/$MARKER"
+leak_probe wc "$L30W" write 3822 || true
+if [ "$leak_fail" -eq 0 ]; then
+  ok "no native diagnostic escaped the anchor across $leak_probed failing-command probes (both streams combined)"
+else
+  bad "$leak_fail of $leak_probed failing-command probes leaked an unprefixed native diagnostic"
+fi
+if [ "$leak_probed" -ge 7 ]; then
+  ok "NON-VACUITY: $leak_probed distinct external commands were actually shimmed and reached"
+else
+  bad "only $leak_probed probes ran — the sweep cannot have covered the named call sites"
+fi
+# CAPTURE, NOT MERELY SUPPRESSION, where the native text is diagnostically useful: a failing
+# mktemp's own words must be FOLDED into the anchored ERROR detail, so the operator still
+# learns WHY. Suppression alone would satisfy the anchor and lose the diagnosis.
+if leak_probe mktemp "$(lane leak-mktemp2)" write 3822; then :; fi
+if [ "$LEAK_RC" -ne 0 ] && [ "$(verdict_of "$LEAK_OUT")" = ERROR ] \
+   && printf '%s\n' "$LEAK_OUT" | grep -q "$LEAK"; then
+  ok "a failing mktemp's NATIVE text is FOLDED into the anchored ERROR detail (captured, not merely suppressed)"
+else
+  bad "the failing mktemp's native diagnostic was lost entirely: rc=$LEAK_RC verdict=$(verdict_of "$LEAK_OUT")
+$LEAK_OUT"
+fi
+if leak_probe mv "$(lane leak-mv2)" write 3822; then :; fi
+if [ "$LEAK_RC" -ne 0 ] && [ "$(verdict_of "$LEAK_OUT")" = ERROR ] \
+   && printf '%s\n' "$LEAK_OUT" | grep -q "$LEAK"; then
+  ok "a failing mv's NATIVE text is FOLDED into the anchored ERROR detail"
+else
+  bad "the failing mv's native diagnostic was lost entirely: rc=$LEAK_RC verdict=$(verdict_of "$LEAK_OUT")
+$LEAK_OUT"
+fi
+# `rm` is the one whose failure lands in the EXIT TRAP, AFTER the verdict. MEASURED, not
+# assumed: a failing command in a bash EXIT trap under `set -e` aborts the trap AND replaces
+# the exit status (verified: a successful body plus a failing trap exits 1). So a broken `rm`
+# turned a legitimate WRITTEN(0) into an unexplained non-zero with an unprefixed line after
+# the verdict — cleanup is best-effort and must not be able to change either.
+rm_dir="$(shim_dir_for rm)"; L30R=$(lane leak-rm)
+rm_out=$( cd "$L30R" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$rm_dir:$PATH" \
+  bash "$DS" write 3822 2>&1 ); rm_rc=$?
+if [ "$rm_rc" -eq 0 ] && [ "$(verdict_of "$rm_out")" = WRITTEN ] && all_lines_anchored "$rm_out" \
+   && [ -f "$L30R/$MARKER" ]; then
+  ok "a failing (noisy) rm in the cleanup trap neither leaks a line nor changes the WRITTEN(0) verdict"
+else
+  bad "the cleanup trap's rm changed the outcome or leaked: rc=$rm_rc verdict=$(verdict_of "$rm_out")
+$(printf '%s' "$rm_out" | cat -v)"
+fi
+# A FAILING `date` MUST NOT COMMIT A SELF-BRICKING MARKER. Found by this very case: because
+# every caller invokes write_marker as `if ! write_marker ...`, `set -e` is suppressed for its
+# whole subtree, so a failing `date` inside `$( )` left `ts` EMPTY and the marker committed —
+# after which every read refuses it MALFORMED (missing required field). The lane bricks itself.
+date_dir="$(shim_dir_for date)"; L30D=$(lane leak-date2)
+d30_out=$( cd "$L30D" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$date_dir:$PATH" \
+  bash "$DS" write 3822 2>&1 ); d30_rc=$?
+if [ "$d30_rc" -ne 0 ] && [ "$(verdict_of "$d30_out")" = ERROR ] && all_lines_anchored "$d30_out" \
+   && [ ! -f "$L30D/$MARKER" ]; then
+  ok "a failing 'date' refuses with an anchored ERROR and commits NOTHING — no marker with an empty required field"
+else
+  bad "a failing date committed a self-bricking marker or emitted no verdict: rc=$d30_rc verdict=$(verdict_of "$d30_out")
+$(printf '%s' "$d30_out" | cat -v)"
+fi
+# DECLARED RESIDUAL, MEASURED rather than implied: with `tr` shimmed the identity sanitizer
+# cannot run, and because it is called from inside `$( )` it CANNOT refuse (a `refuse` there is
+# captured, the defect case 17 pins) — so every sanitized field degrades to sanitize_field's
+# `unspecified` sentinel and the write SUCCEEDS. That is a fail-open on the machine/session
+# axes, reachable only on a host whose `tr` is broken, and it is NOT what job 26 F2 is about:
+# the sentinel is mirrored from claim.sh (case 11 pins that agreement), so changing it is a
+# separate decision. What THIS case owns is the anchor, which must hold either way.
+tr_dir="$(shim_dir_for tr)"; L30T=$(lane leak-tr2)
+tr_out=$( cd "$L30T" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$tr_dir:$PATH" \
+  bash "$DS" write 3822 2>&1 ) || true
+if all_lines_anchored "$tr_out" \
+   && grep -q '^machine: unspecified$' "$L30T/$MARKER" 2>/dev/null; then
+  ok "DECLARED RESIDUAL: a failing 'tr' leaks nothing, and the identity fields degrade to the 'unspecified' sentinel rather than to an empty (self-bricking) value"
+else
+  bad "a failing tr leaked a line, or the degraded marker is not the shape this residual declares:
+$(printf '%s' "$tr_out" | cat -v)
+$(cat "$L30T/$MARKER" 2>/dev/null | cat -v)"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1176,9 +1319,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 20-same-process-is-owned 21-write-over-unstamped-migrates
 22-no-dead-letter-remedies 23-durable-fields-survive 24-serialization
 25-displaced-sentinel-is-not-legacy 26-unusable-start-window 27-pre-rename-validation
-29-missing-liveness-library
+29-missing-liveness-library 30-native-diagnostics-stay-anchored
 28-case-floor"
-CASE_FLOOR=29
+CASE_FLOOR=30
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -1190,8 +1333,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 71 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 71)"
+if [ "$PASS" -ge 78 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 78)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi

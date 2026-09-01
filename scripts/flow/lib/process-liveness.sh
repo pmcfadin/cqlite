@@ -31,6 +31,11 @@
 #   macOS bash 3.2 compatible. SOURCED, never executed: it defines functions and nothing
 #   else — no `set -e`, no side effects, no output at source time — so it cannot change a
 #   sourcing script's shell options or emit an unanchored line into its output.
+#
+#   EVERY external tool here has its stderr SUPPRESSED (#3822, roborev job 26 F2). Both callers
+#   publish a strictly ANCHORED output (`DRIVE-STATE: ` / claim-heartbeat's own prefix), and a
+#   native `date:`/`tr:`/`cut:` diagnostic from inside a sourced function is a line with no
+#   prefix on the caller's stream — breaking an anchor these functions cannot see.
 
 # process_start_window <pid> — echo `<earliest> <latest>` epoch seconds bracketing when <pid>
 # started, or EMPTY when it cannot be determined. Empty is a THIRD answer and is never folded
@@ -52,8 +57,8 @@
 # caller must decide UNKNOWN when the interval straddles its decision boundary.
 process_start_window() {
   local pid="$1" secs t0 t1
-  t0="$(date -u +%s)"
-  secs="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+  t0="$(date -u +%s 2>/dev/null)"
+  secs="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' 2>/dev/null)"
   case "$secs" in
     '' | *[!0-9]*) secs="" ;;
   esac
@@ -61,14 +66,14 @@ process_start_window() {
     # Fall back to `etime` ([[DD-]HH:]MM:SS), which POSIX ps provides where `etimes` is
     # absent. Still elapsed, still timezone-free.
     local et d hms h m sec
-    et="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
+    et="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ' 2>/dev/null)"
     [ -n "$et" ] || return 0
     case "$et" in
       *-*) d="${et%%-*}"; hms="${et#*-}" ;;
       *)   d=0;           hms="$et" ;;
     esac
     case "$hms" in
-      *:*:*) h="${hms%%:*}"; m="$(printf '%s' "$hms" | cut -d: -f2)"; sec="${hms##*:}" ;;
+      *:*:*) h="${hms%%:*}"; m="$(printf '%s' "$hms" | cut -d: -f2 2>/dev/null)"; sec="${hms##*:}" ;;
       *:*)   h=0;            m="${hms%%:*}";                          sec="${hms##*:}" ;;
       *)     return 0 ;;
     esac
@@ -77,7 +82,7 @@ process_start_window() {
     esac
     secs=$(( (10#$d * 86400) + (10#$h * 3600) + (10#$m * 60) + 10#$sec ))
   fi
-  t1="$(date -u +%s)"
+  t1="$(date -u +%s 2>/dev/null)"
   # The elapsed reading was taken at some instant in [t0, t1], so the start lies in
   # [t0 - secs, t1 - secs]. Earliest first.
   printf '%s %s\n' "$((t0 - secs))" "$((t1 - secs))"
@@ -180,7 +185,7 @@ process_presence() {
 # healthy fleet is how a monitor gets ignored) and not `running` (that is the false-clean).
 process_state_class() {
   local st
-  st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
+  st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ' 2>/dev/null)"
   case "$st" in
     '') printf 'unreadable\n' ;;
     Z*) printf 'zombie\n' ;;
