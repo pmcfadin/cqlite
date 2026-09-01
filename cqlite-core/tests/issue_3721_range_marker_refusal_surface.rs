@@ -316,7 +316,20 @@ async fn run(query: &str, patch_bound_kind: bool) -> Result<Vec<Vec<(String, Str
 /// partition and both offsets — the marker's own and the resume point whose
 /// existence is what proves this is not the end of the partition body.
 fn assert_marker_refusal(err: &Error, query: &str) {
-    let rendered = err.to_string();
+    assert_marker_refusal_text(&err.to_string(), query);
+    assert_eq!(
+        err.category(),
+        ErrorCategory::Data,
+        "an unrepresentable on-disk marker classifies as damaged data"
+    );
+}
+
+/// The refusal MESSAGE, asserted apart from the category because one surface
+/// cannot carry the category: the streaming merge flattens every non-`Cancelled`
+/// producer error into `Error::Storage(String)`
+/// (`merge::producer_msg::MergeProducerError::to_error`), so the compaction case
+/// below asserts the text only. The text survives verbatim.
+fn assert_marker_refusal_text(rendered: &str, query: &str) {
     for needle in [
         "range-tombstone marker",
         "could not be represented faithfully",
@@ -329,13 +342,8 @@ fn assert_marker_refusal(err: &Error, query: &str) {
     }
     assert!(
         rendered.contains("bound kind"),
-        "the report must carry the shadow FSM's own cause (the unrepresentable bound \
+        "the report must carry the parser's own cause (the unrepresentable bound \
          kind); got: {rendered}"
-    );
-    assert_eq!(
-        err.category(),
-        ErrorCategory::Data,
-        "an unrepresentable on-disk marker classifies as damaged data"
     );
 }
 
@@ -430,5 +438,283 @@ async fn d5_streaming_scan_surfaces_the_marker_refusal() {
              count reported as success (issue #3721). Rows: {rows:#?}"
         ),
         Err(e) => assert_marker_refusal(&e, &query),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D6 (issue #3808) — `compaction::CompactionPolicy`: the COMPACTION read path,
+// whose unknown-bound-kind arm skipped the marker and returned
+// `MarkerOutcome::Advanced`. This is the most consequential instance of the same
+// swallow, because this policy's output is WRITTEN: dropping an unrepresentable
+// deletion marker resurrects the rows it shadowed DURABLY, on disk.
+//
+// The fixture partition holds no rows inside its deleted `[10, 25]` clustering
+// range, so the resurrection is made observable by compacting the fixture
+// TOGETHER with a second, OLDER SSTable that reintroduces two covered rows
+// (ck = 15, 20 at timestamp 1 µs — the real Cassandra tombstone is ~10^15 µs
+// newer). Pre-fix, the patched input compacted to `Ok` with those rows present in
+// the output; post-fix the compaction REFUSES and no output is adopted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "write-support")]
+mod d6_compaction {
+    use std::path::{Path, PathBuf};
+
+    use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+    use cqlite_core::storage::write_engine::merge::{
+        compact_sstables, KWayMerger, MergeStep, RowData,
+    };
+    use cqlite_core::storage::write_engine::mutation::{
+        CellOperation, ClusteringKey, Mutation, PartitionKey, TableId,
+    };
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+    use cqlite_core::types::Value;
+
+    use super::{assert_marker_refusal_text, stage, KEYSPACE, LIVE_CLUSTERING, TABLE};
+
+    /// Clustering keys covered by the PATCHED marker's range and by NO other
+    /// marker of the fixture — which is what makes the resurrection observable.
+    ///
+    /// The committed golden's marker sequence (`nb-3-big-Data.db.jsonl`) is:
+    ///
+    /// ```text
+    /// bound     INCL_START [10]            deleted at 3000 µs   <-- the patched marker
+    /// boundary  EXCL_END [15] / INCL_START [15]  (3000 / 3001 µs)
+    /// bound     INCL_END   [25]            deleted at 3001 µs
+    /// ```
+    ///
+    /// So the deletion is TWO ranges, `[10, 15)` and `[15, 25]`, and only the
+    /// FIRST is opened by the marker this lane patches. Rows at `ck = 11, 12` are
+    /// therefore covered by the patched range ALONE: skipping that marker leaves
+    /// them unshadowed, while the surviving boundary/end markers still cover
+    /// `[15, 25]`. (Picking a `ck` inside `[15, 25]` would have measured nothing —
+    /// the sibling markers cover it with or without the fix.)
+    const COVERED_CLUSTERING: [i32; 2] = [11, 12];
+    /// The older input's write timestamp, in µs — older than BOTH range
+    /// tombstones (3000 / 3001 µs) and than both live rows, so a correct
+    /// compaction shadows these rows entirely.
+    const OLDER_TS: i64 = 1;
+
+    /// The fixture's schema, as `TableSchema` (the compaction surface takes the
+    /// struct, not CQL text). Mirrors the committed
+    /// `test_compaction_tombstone_ttl.rt_cross_gen` DDL.
+    fn schema() -> TableSchema {
+        let col = |name: &str, ty: &str| Column {
+            name: name.to_string(),
+            data_type: ty.to_string(),
+            nullable: name == "v",
+            default: None,
+            is_static: false,
+        };
+        TableSchema {
+            keyspace: KEYSPACE.to_string(),
+            table: TABLE.to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![col("id", "int"), col("ck", "int"), col("v", "text")],
+            comments: Default::default(),
+            dropped_columns: Default::default(),
+        }
+    }
+
+    /// The staged fixture's `Data.db` (the patched or unpatched copy `stage` wrote).
+    fn staged_data_db(data_root: &Path) -> PathBuf {
+        let ks = data_root.join(KEYSPACE);
+        let table_dir = std::fs::read_dir(&ks)
+            .unwrap_or_else(|e| panic!("read {}: {e}", ks.display()))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+            .unwrap_or_else(|| panic!("no staged table directory under {}", ks.display()));
+        let data = std::fs::read_dir(&table_dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", table_dir.display()))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with("-Data.db"))
+            .unwrap_or_else(|| panic!("no staged Data.db under {}", table_dir.display()));
+        data
+    }
+
+    /// Write ONE CQLite SSTable holding the covered rows at [`OLDER_TS`], and
+    /// return its `Data.db`.
+    fn write_older_input(dir: &Path, schema: &TableSchema) -> PathBuf {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let data_dir = dir.join("older");
+        let mut engine = WriteEngine::new(WriteEngineConfig::new(
+            data_dir.clone(),
+            dir.join("older-wal"),
+            schema.clone(),
+        ))
+        .expect("WriteEngine::new");
+        for ck in COVERED_CLUSTERING {
+            engine
+                .write(Mutation::new(
+                    TableId::new(KEYSPACE, TABLE),
+                    PartitionKey::single("id", Value::Integer(1)),
+                    Some(ClusteringKey::single("ck", Value::Integer(ck))),
+                    vec![CellOperation::Write {
+                        column: "v".to_string(),
+                        value: Value::text(format!("covered-{ck}")),
+                    }],
+                    OLDER_TS,
+                    None,
+                ))
+                .expect("write covered row");
+        }
+        rt.block_on(engine.flush())
+            .expect("flush")
+            .expect("sstable info");
+        rt.block_on(engine.close()).expect("close");
+
+        fn find(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    find(&path, out);
+                } else if path.to_string_lossy().ends_with("-Data.db") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        find(&data_dir, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one written input SSTable; got {found:#?}"
+        );
+        found.remove(0)
+    }
+
+    /// Read `data_path` back through the COMPACTION read contract: the surviving
+    /// live clustering keys and the number of surviving range markers.
+    fn read_back(data_path: PathBuf, schema: &TableSchema) -> (Vec<i32>, usize) {
+        let mut merger = KWayMerger::new(vec![data_path], schema).expect("KWayMerger::new");
+        let mut live = Vec::new();
+        let mut markers = 0usize;
+        loop {
+            match merger.step().expect("merger step") {
+                MergeStep::Complete => break,
+                MergeStep::Partition { rows, .. } => {
+                    for entry in rows {
+                        if entry.range_deletion.is_some() {
+                            markers += 1;
+                            continue;
+                        }
+                        if let RowData::Live { cells } = &entry.row_data {
+                            let has_data =
+                                cells.iter().any(|c| c.column != "ck" && c.column != "id");
+                            if !has_data {
+                                continue;
+                            }
+                            if let Some(Value::Integer(ck)) = entry
+                                .clustering_key
+                                .as_ref()
+                                .and_then(|k| k.columns.first().map(|(_, v)| v.clone()))
+                            {
+                                live.push(ck);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        live.sort_unstable();
+        (live, markers)
+    }
+
+    /// Compact the staged fixture (patched or not) together with the older input
+    /// holding the covered rows. Returns the compaction outcome and the output
+    /// directory, so a spurious `Ok` can be inspected for resurrected rows.
+    fn compact_with_fixture(
+        patch_bound_kind: bool,
+    ) -> (
+        tempfile::TempDir,
+        TableSchema,
+        Result<PathBuf, cqlite_core::Error>,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_root = stage(tmp.path(), patch_bound_kind);
+        let schema = schema();
+        // Run index 0 = newest: the Cassandra fixture carries the tombstone.
+        let inputs = vec![
+            staged_data_db(&data_root),
+            write_older_input(tmp.path(), &schema),
+        ];
+        let out_dir = tmp.path().join("out");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let outcome = rt
+            .block_on(compact_sstables(
+                inputs, &out_dir, &schema, 9001, None, None, /* purge_safe */ true,
+            ))
+            .map(|report| report.output.data_path);
+        (tmp, schema, outcome)
+    }
+
+    /// The CONTROL, and it is load-bearing twice over: a RECOGNISED bound kind
+    /// must still be paired and applied normally (a fix that refused every marker
+    /// would fail here), and the covered rows must be SHADOWED in the output —
+    /// which is the property the patched half proves cannot be silently lost.
+    #[test]
+    fn d6_recognised_bound_kind_still_compacts_and_shadows_the_covered_rows() {
+        let (_tmp, schema, outcome) = compact_with_fixture(false);
+        let output = outcome.expect("compaction over the UNPATCHED fixture must succeed");
+        let (live, markers) = read_back(output, &schema);
+        assert_eq!(
+            live,
+            LIVE_CLUSTERING.iter().map(|ck| *ck as i32).collect::<Vec<_>>(),
+            "the compaction output must hold exactly the rows outside the deleted \
+             [10, 15) + [15, 25] ranges — the covered rows {COVERED_CLUSTERING:?} from the older input must be \
+             shadowed, and both live rows must survive"
+        );
+        assert!(
+            markers > 0,
+            "the surviving range marker must be PERSISTED to the output, or a later \
+             compaction against a non-compacted SSTable resurrects the covered rows (#933)"
+        );
+    }
+
+    /// The defect (#3808): an unrepresentable bound kind must make COMPACTION
+    /// fail, so no output is ever adopted. Pre-fix it returned `Ok` and the
+    /// output durably resurrected the covered rows.
+    #[test]
+    fn d6_compaction_refuses_an_unrepresentable_bound_kind_and_resurrects_nothing() {
+        let (_tmp, schema, outcome) = compact_with_fixture(true);
+        match outcome {
+            // Text only, not the category: see `assert_marker_refusal_text`.
+            Err(e) => assert_marker_refusal_text(&e.to_string(), "compact_sstables"),
+            Ok(output) => {
+                let (live, markers) = read_back(output, &schema);
+                let resurrected: Vec<i32> = live
+                    .iter()
+                    .copied()
+                    .filter(|ck| COVERED_CLUSTERING.contains(ck))
+                    .collect();
+                panic!(
+                    "compaction returned Ok over a fixture whose range-tombstone marker carries \
+                     an unrepresentable bound kind: the marker was SKIPPED (issue #3808), so its \
+                     output holds rows {resurrected:?} that the deletion covered — resurrected \
+                     durably, on disk. Output rows: {live:?}, markers: {markers}"
+                );
+            }
+        }
     }
 }

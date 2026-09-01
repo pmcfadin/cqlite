@@ -227,12 +227,14 @@ impl V5CompressedLegacyParser {
                     }
                     return Ok(PartitionStreamStep::NeedMore);
                 }
-                // Issue #3721: a marker that PARSED but cannot be represented is
-                // corruption at a known resume point — no refill fixes it, and
-                // ending the partition here would report `Ok` with rows missing.
-                // `CompactionPolicy::on_range_marker` never produces this today
-                // (it advances past an unknown bound kind); the arm is here so a
-                // policy that does can never be silently truncated instead.
+                // Issue #3721/#3808: a marker that PARSED but cannot be
+                // represented is corruption at a known resume point — no refill
+                // fixes it, and ending the partition here would report `Ok` with
+                // rows missing. `CompactionPolicy::on_range_marker` produces this
+                // for an unrecognised bound kind (#3808): the kind byte is real
+                // in-window on-disk data whenever the marker parsed at all, so a
+                // larger window cannot change it, and this policy's rows are
+                // WRITTEN — skipping the marker resurrects what it shadowed.
                 MarkerOutcome::Refused(e) => return Err(e),
             }
         }

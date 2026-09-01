@@ -629,9 +629,31 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 let new_start = self.make_bound(schema, bound_values, bound_kind == 2, true);
                 self.pending_range_start = Some((new_start, new_mfda, new_ldt));
             }
-            _ => {
-                // Unknown bound kind: skip it rather than mis-parse the partition
-                // (the offset already advanced past the marker).
+            unknown => {
+                // Issue #3808: an unrecognised `ClusteringPrefix.Kind` ordinal is
+                // NOT skippable here, and skipping it was the worst instance of the
+                // #3721 swallow: this policy's output is WRITTEN, so omitting an
+                // unrepresentable deletion marker resurrects the rows it shadowed
+                // durably, on disk. `row_framing` returns `bound_kind` unvalidated,
+                // so an arbitrary byte reaches this match; giving it a permissive
+                // default meaning is the byte-pattern inference issue #28 forbids.
+                // Both sibling readers of the same byte already refuse
+                // (`partition_shadow::feed_range_marker`, delta-scan
+                // `block_emit`), so this arm was the lone fail-open.
+                //
+                // The marker PARSED — `next_offset` is bound and the partition body
+                // continues there — so this is `Refused`, never the `Stop` a marker
+                // PARSE failure earns above.
+                let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                return MarkerOutcome::Refused(range_marker_error::range_marker_refused(
+                    Error::corruption(format!(
+                        "compaction: unknown range tombstone bound kind {unknown} — cannot \
+                         represent faithfully (no-heuristics mandate, issue #28)"
+                    )),
+                    &partition,
+                    offset,
+                    next_offset,
+                ));
             }
         }
         MarkerOutcome::Advanced(next_offset)

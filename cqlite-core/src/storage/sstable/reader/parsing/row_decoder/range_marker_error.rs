@@ -12,7 +12,15 @@
 //! block_emit.rs           if sh.feed_range_marker(..).is_err() { break; }
 //! block_emit_windowed.rs  if let Err(e) = sh.feed_range_marker(..) { .. break; }
 //! timestamp_policy.rs     if sh.feed_range_marker(..).is_err() { MarkerOutcome::Stop }
+//! compaction.rs           _ => { /* Unknown bound kind: skip it */ }   (#3808)
 //! ```
+//!
+//! The fourth site is the COMPACTION policy, and it is the most consequential of
+//! the four (issue #3808): its rows are WRITTEN, so omitting an unrepresentable
+//! deletion marker resurrects the rows that marker shadowed DURABLY, on disk —
+//! and it was the lone fail-open reader of that byte, since
+//! [`super::partition_shadow::PartitionShadow::feed_range_marker`] and delta-scan
+//! `block_emit` already refuse it.
 //!
 //! Each `break`/`Stop` left the partition's row loop and the read then reported
 //! `Ok` — so the marker AND every remaining row of that partition silently
@@ -31,12 +39,15 @@
 //!    "no further row parses here" signal the loops use to detect the end of a
 //!    partition body (that signal is a PARSE failure, which yields no resume
 //!    point — see [`super::column_decode_error::end_of_partition_or_bail`]).
-//! 2. **`feed_range_marker` fails on exactly ONE condition** — a bound kind the
+//! 2. **Each site fails on exactly ONE condition** — a bound kind the
 //!    read-side shadow FSM has no faithful representation for
 //!    ([`super::partition_shadow::PartitionShadow::feed_range_marker`]'s
-//!    `unknown =>` arm, the only `Err` it returns). Every kind a well-formed
-//!    marker can carry is represented; a kind outside that set is evidence the
-//!    cursor or the data is wrong.
+//!    `unknown =>` arm, the only `Err` it returns; the compaction policy's own
+//!    `unknown =>` arm is the same predicate over the same byte). Every kind a
+//!    well-formed marker can carry is represented; a kind outside that set is
+//!    evidence the cursor or the data is wrong. `row_framing` returns the bound
+//!    kind UNVALIDATED, so an arbitrary byte reaches these matches and giving it a
+//!    permissive default meaning is the inference issue #28 forbids.
 //!
 //! # Why it is not skippable either
 //!

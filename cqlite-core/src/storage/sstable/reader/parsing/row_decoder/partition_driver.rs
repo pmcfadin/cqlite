@@ -55,11 +55,15 @@ pub(super) fn row_write_timestamp(row_header_opt: &Option<RowHeader>) -> i64 {
 ///   a genuine framing terminator: on a non-final chunk it means "the marker body
 ///   is truncated here, refill", and on the final chunk it means the body is only
 ///   partly observed. `compaction::CompactionPolicy::on_range_marker` produces
-///   exactly this case and MUST keep its meaning.
+///   this case from its marker-PARSE-failure arm and MUST keep its meaning — it
+///   is the only outcome a refill can fix.
 /// * `Refused` — the marker WAS parsed (a resume offset exists and the partition
 ///   body continues there) and the policy cannot represent it. Corruption with a
 ///   valid resume point, which no refill can fix; reporting it as `Stop` truncated
-///   the partition and returned `Ok`.
+///   the partition and returned `Ok`. Both policies produce it: the timestamps
+///   policy when the read-side shadow FSM refuses a bound kind, and the compaction
+///   policy for an unrecognised bound kind of its own (#3808) — where a SKIP is
+///   worse still, because that policy's rows are written to a new SSTable.
 pub(super) enum MarkerOutcome {
     /// The marker was consumed; continue the row loop at this offset.
     Advanced(usize),
