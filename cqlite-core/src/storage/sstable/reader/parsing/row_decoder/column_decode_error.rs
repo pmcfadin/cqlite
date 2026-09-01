@@ -158,13 +158,40 @@ pub(crate) fn is_column_decode(e: &Error) -> bool {
 /// * anything else — the ordinary "no further row parses here" signal that marks
 ///   the end of the partition body. Logged exactly as before and reported as
 ///   `Ok(())`, so the caller continues to `break` out of its row loop.
+///
+/// # `resynchronising_walk`: the ONE caller class that keeps the old behaviour
+///
+/// A walk that positions its cursor from an INDEX rather than by parsing forward
+/// from a partition header may start, or run past, a byte that is not a row
+/// boundary — and then "decode" a row out of the middle of a cell value. The
+/// promoted-index reverse read and the clustering-slice window read
+/// (`data_access::big_promoted`, issue #954/#1184) are exactly that: they hand
+/// `parse_block_emit_windowed` a row-index block extent and let it resynchronise,
+/// and the reader's own code says so (`bti_point`: "the parser resynced onto
+/// garbage"). A decode failure there is evidence about the CURSOR, not about a
+/// real row, so it stays the stop signal it has always been.
+///
+/// MEASURED, which is why this parameter exists rather than a blanket propagate:
+/// making that class fatal turned CLEAN reads of the committed
+/// `test_comp.uncompressed_table` / `test_big.wide_partition` fixtures into hard
+/// errors — `text length 210241672 exceeds maximum` and `invalid UTF-8`, both read
+/// out of the middle of a `text` value — i.e. a large availability regression on
+/// every wide-partition reverse/slice read.
+///
+/// The COST is stated rather than implied: a genuine per-column decode failure
+/// inside an index-positioned walk is still swallowed there, exactly as before.
+/// Closing that needs the resynchronising walk to stop over-running a real row
+/// boundary — a defect of those read paths, not of row assembly — and is left to a
+/// follow-up. Every non-resynchronising read (the ordinary full scan, the
+/// point/partition read, and both compaction drivers) propagates.
 pub(super) fn end_of_partition_or_bail(
     e: Error,
     partition_index: usize,
     row_count: usize,
     offset: usize,
+    resynchronising_walk: bool,
 ) -> Result<()> {
-    if is_column_decode(&e) {
+    if is_column_decode(&e) && !resynchronising_walk {
         return Err(e);
     }
     tracing::debug!(

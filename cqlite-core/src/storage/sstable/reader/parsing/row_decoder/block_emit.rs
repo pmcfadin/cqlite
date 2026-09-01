@@ -265,11 +265,14 @@ impl V5CompressedLegacyParser {
                         // Issue #3721: `Err` here is normally the end-of-partition
                         // signal; a per-column decode failure is NOT, and only
                         // `column_decode_error` decides which is which.
+                        // Never resynchronising: this walk parses forward from the
+                        // partition header over the whole block.
                         column_decode_error::end_of_partition_or_bail(
                             e,
                             partition_index,
                             row_count,
                             offset,
+                            false,
                         )?;
                         break;
                     }

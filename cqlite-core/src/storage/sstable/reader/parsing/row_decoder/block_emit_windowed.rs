@@ -600,6 +600,7 @@ impl V5CompressedLegacyParser {
                                     partition_index,
                                     row_count,
                                     offset,
+                                    row_body_window.is_some(),
                                 )?;
                                 break; // End of valid data in partition
                             }
