@@ -135,6 +135,20 @@ Both collapses were asserted directly (`collapse_case1_vs_case2_yields_one_value
 - **Nothing here measures the other census findings (A's collection arms, C, D, E, F,
   G, H).** Only §5-B's two named UDT arms were driven.
 
+## 5b. Run record
+
+```
+$ CQLITE_DATASETS_ROOT=/data/datasets cargo test -p cqlite-core --lib issue_3811 -- --nocapture
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3624 filtered out; finished in 0.00s
+```
+
+12 = 10 case tests (5 vectors x 2 arms) + 2 AC4 collapse tests. **They pass because they
+pin the DEFECT.** Six of the twelve (`*_is_accepted_today_*` x4, `collapse_*` x2) assert
+the accepting behaviour that Cassandra refuses; they are designed to go RED the moment
+#3811's fix lands, and the file header carries the flip-on-fix checklist. The four
+control tests (cases 1 and 4 on each arm) must stay green through the fix — case 4 in
+particular is what a naive "all declared fields must be present" fix would break.
+
 ## 6. Consequence for the fix
 
 The demonstration matches the oracle's analysis exactly: `current_offset` goes short by
