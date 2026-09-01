@@ -630,15 +630,74 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     readbacks = {
         name: Corroboration(name, by_run) for name, by_run in server_config.items()
     }
+    # A DECLARED DIFFERENCE IS NOT A MISMATCH -- but only exactly the declared
+    # one, and only under a control label. Two individually-correct rules
+    # collided here: "refuse cross-arm config differences" and "asymmetric
+    # per-arm flags require --control". Together they made the runbook's own
+    # sensitivity control unrunnable, which is worse than most defects in this
+    # harness, because that control is what distinguishes "no effect" from "this
+    # box cannot measure". The reconciliation is a structured expectation the
+    # driver records as data, not a blanket rule with an exception.
+    control = manifest.get("control")
+    control = control if isinstance(control, str) and control else None
+    expected = manifest.get("expected_server_config")
+    expected = expected if isinstance(expected, dict) else {}
+
+    def declared(arm, field):
+        arm_expected = expected.get(arm)
+        if not isinstance(arm_expected, dict):
+            return None
+        value = arm_expected.get(field)
+        return None if value in (None, "", "NOT-REQUESTED") else str(value)
+
     for name, corroboration in sorted(readbacks.items()):
-        if corroboration.disagrees:
-            raise Unmeasured(
-                "server-config-mismatch",
-                "the runs report more than one observed %s (%s); the arms were not "
-                "served under the same configuration, so their throughputs are not "
-                "comparable"
-                % (name.replace("_observed", ""), ", ".join(corroboration.values)),
-            )
+        by_arm = {}
+        # NOT named `seen`: that is the outer dict of loaded run points, and
+        # shadowing it here made `seen[("base", rep)]` index a bool further down.
+        for (arm, _rep), (value, was_observed) in server_config[name].items():
+            if was_observed:
+                by_arm.setdefault(arm, set()).add(value)
+        # Within one arm there is never a licensed difference.
+        for arm, values in sorted(by_arm.items()):
+            if len(values) > 1:
+                raise Unmeasured(
+                    "server-config-mismatch",
+                    "the %s arm's runs report more than one observed %s (%s); one "
+                    "arm was not served consistently, so nothing built on it is "
+                    "comparable"
+                    % (arm, name.replace("_observed", ""), ", ".join(sorted(values))),
+                )
+        # An arm that was observed must match what the manifest DECLARED for it.
+        for arm, values in sorted(by_arm.items()):
+            want = declared(arm, name)
+            observed_value = next(iter(values))
+            if want is not None and observed_value != want:
+                raise Unmeasured(
+                    "server-config-unexpected",
+                    "the %s arm reports %s=%s but the manifest declares %s for it; "
+                    "the server was not configured the way this session recorded"
+                    % (arm, name.replace("_observed", ""), observed_value, want),
+                )
+        if not corroboration.disagrees:
+            continue
+        base_want, head_want = declared("base", name), declared("head", name)
+        difference_declared = (
+            base_want is not None and head_want is not None and base_want != head_want
+        )
+        if control and difference_declared:
+            continue
+        raise Unmeasured(
+            "server-config-mismatch",
+            "the arms report different observed %s (%s)%s; two arms served under "
+            "different configurations are not comparable"
+            % (
+                name.replace("_observed", ""),
+                ", ".join(corroboration.values),
+                ""
+                if difference_declared
+                else " and the manifest declares no such difference",
+            ),
+        )
 
     pairs = []
     for rep in base_reps:

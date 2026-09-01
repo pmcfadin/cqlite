@@ -150,10 +150,13 @@ one measures THE ADMISSION CEILING -- which looks like a plateau, exactly the
 shape someone would misread as saturation. Pin it AT OR ABOVE the top of your
 ramp.
 
-Then, for a --ramp 1 session:
-  python3 analyze-ab.py --single-stream <work-dir>/results/manifest.json
-and for a concurrency-ramp session:
-  python3 analyze-ab.py --utilization  <work-dir>/results/manifest.json
+Each session writes to its OWN directory, <work-dir>/run-<session-id>/, and this
+script prints the exact analyzer command on its `next` line when it finishes.
+Copy that rather than composing a path; <work-dir>/latest is a convenience
+symlink to the most recent completed session and is not what you certify.
+
+  python3 analyze-ab.py --single-stream <work-dir>/run-<session-id>/manifest.json
+  python3 analyze-ab.py --utilization   <work-dir>/run-<session-id>/manifest.json
 USAGE
 }
 
@@ -402,8 +405,12 @@ CORPUS_BYTES=0
 CORPUS_FILES=0
 
 write_manifest() {
-  # Writes into THIS session's own directory, which nothing else can name, so it
-  # needs no arming, no staging and no promotion.
+  # ATOMIC. Truncating and rewriting in place means a crash mid-write leaves a
+  # half-written manifest where a complete earlier one was -- which contradicts
+  # the guarantee that an interrupted session leaves a TRUTHFUL SHORT manifest,
+  # the property the whole per-session design exists to provide. Write to a temp
+  # file in the same directory, flush, then rename; a failure anywhere before the
+  # rename leaves the previous manifest exactly as it was.
   python3 - "$RUN_DIR/manifest.json" "$RUNS_JSONL" <<'PYEOF'
 import json
 import os
@@ -448,7 +455,14 @@ manifest = {
         "shape": env("AB_SHAPE", ""),
         "ramp": env("AB_RAMP", ""),
         "step_duration": env("AB_STEP_DURATION", ""),
-        "prewarm": env("AB_PREWARM", "0") == "1",
+        # The EFFECTIVE value, not the requested one: the warming pass runs only
+        # for a warm session, so a cold run recording `prewarm: true` describes a
+        # pass that never happened. Same requested-versus-actual distinction as
+        # the admission ceiling, the batch size, the CPU affinity and the pair
+        # order -- one field further on.
+        "prewarm": env("AB_PREWARM", "0") == "1"
+        and env("AB_TEMPERATURE", "") == "warm",
+        "prewarm_requested": env("AB_PREWARM", "0") == "1",
         "server_cpus": env("AB_SERVER_CPUS", "none-unpinned"),
         "client_cpus": env("AB_CLIENT_CPUS", "none-unpinned"),
         "temperature": env("AB_TEMPERATURE", ""),
@@ -466,6 +480,17 @@ manifest = {
         "step_duration_seconds": float(env("AB_STEP_DURATION_SECONDS", "0")),
     },
     "control": env("AB_CONTROL") or None,
+    # DECLARED, so the analyzer can permit exactly these differences under a
+    # control label and nothing else. Recorded as data rather than inferred from
+    # the extras string, which would be a second implementation of the rule.
+    "expected_server_config": {
+        arm: {
+            "batch_size_observed": env("AB_EXPECT_%s_BATCH" % arm.upper()),
+            "max_batch_bytes_observed": env("AB_EXPECT_%s_MAXBYTES" % arm.upper()),
+            "wait_timeout_ms_observed": env("AB_EXPECT_%s_WAIT" % arm.upper()),
+        }
+        for arm in ("base", "head")
+    },
     "server_extra": {
         "base": env("AB_BASE_SERVER_EXTRA", ""),
         "head": env("AB_HEAD_SERVER_EXTRA", ""),
@@ -487,9 +512,13 @@ manifest = {
     },
     "runs": runs,
 }
-with open(out_path, "w", encoding="utf-8") as handle:
+tmp_path = out_path + ".tmp.%d" % os.getpid()
+with open(tmp_path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
     handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp_path, out_path)
 PYEOF
 }
 
@@ -613,6 +642,28 @@ if [ "$CORPUS_FILES" -lt "$MIN_SSTABLES" ]; then
   die corpus-too-few-sstables \
     "the SERVED directory $SERVED_DIR holds $CORPUS_FILES Data.db file(s), below the required $MIN_SSTABLES; issue #3058 gives the Flight row route a single-source fast path that NEVER enters the k-way merge, so a one-source corpus measures a code path #2820 did not touch -- and it does so identically on both arms, producing a ratio of 1.0 by construction"
 fi
+# EACH ARM'S EFFECTIVE CONFIGURATION, COMPUTED ONCE AND RECORDED AS DATA. The
+# per-run asserts below and the analyzer's cross-arm comparison both read these,
+# so a control that deliberately serves one arm differently is EXPECTED rather
+# than merely excused -- and a measurement, which declares no difference, still
+# gets strict equality.
+eff() { # <flag> <global> <extra>
+  python3 "$SUPPORT" effective-flag "$1" "$2" "$3"
+}
+for _arm in base head; do
+  if [ "$_arm" = "base" ]; then _extra="$BASE_SERVER_EXTRA"; else _extra="$HEAD_SERVER_EXTRA"; fi
+  eval "EXPECT_${_arm}_BATCH=\"$(eff --batch-size "$BATCH_SIZE" "$_extra")\""
+  eval "EXPECT_${_arm}_MAXBYTES=\"$(eff --max-batch-bytes "${MAX_BATCH_BYTES:-NOT-REQUESTED}" "$_extra")\""
+  eval "EXPECT_${_arm}_WAIT=\"$(eff --admission-wait-timeout-ms "${ADMISSION_WAIT_TIMEOUT_MS:-NOT-REQUESTED}" "$_extra")\""
+  eval "EXPECT_${_arm}_SCANS=\"$(eff --max-concurrent-scans "$MAX_CONCURRENT_SCANS" "$_extra")\""
+done
+export AB_EXPECT_BASE_BATCH="$EXPECT_base_BATCH" AB_EXPECT_HEAD_BATCH="$EXPECT_head_BATCH"
+export AB_EXPECT_BASE_MAXBYTES="$EXPECT_base_MAXBYTES" AB_EXPECT_HEAD_MAXBYTES="$EXPECT_head_MAXBYTES"
+export AB_EXPECT_BASE_WAIT="$EXPECT_base_WAIT" AB_EXPECT_HEAD_WAIT="$EXPECT_head_WAIT"
+export AB_EXPECT_BASE_SCANS="$EXPECT_base_SCANS" AB_EXPECT_HEAD_SCANS="$EXPECT_head_SCANS"
+say "expected-config base batch-size $EXPECT_base_BATCH max-batch-bytes $EXPECT_base_MAXBYTES wait-timeout-ms $EXPECT_base_WAIT max-concurrent-scans $EXPECT_base_SCANS"
+say "expected-config head batch-size $EXPECT_head_BATCH max-batch-bytes $EXPECT_head_MAXBYTES wait-timeout-ms $EXPECT_head_WAIT max-concurrent-scans $EXPECT_head_SCANS"
+
 say "merge-path $MERGE_PATH -- CQLITE_FLIGHT_MERGE_PATH is set to this on BOTH arms' servers"
 say "admission max-concurrent-scans $MAX_CONCURRENT_SCANS (pinned on both arms; ramp tops at $RAMP_TOP) batch-size $BATCH_SIZE"
 if [ "$MERGE_PATH" != "merge" ]; then
@@ -820,19 +871,29 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   observed_maxbytes="$(parse_startup "$server_log" max-batch-bytes)"
   observed_wait="$(parse_startup "$server_log" wait-timeout-ms)"
   say "run $tag server batch-size observed $observed_batch max-batch-bytes observed $observed_maxbytes wait-timeout-ms observed $observed_wait"
-  if [ "$observed_batch" != "NOT-OBSERVED" ] && [ "$observed_batch" != "$BATCH_SIZE" ]; then
+  # Compared against THIS ARM's declared expectation, not the global request: a
+  # control that sets --head-server-extra '--max-batch-bytes 1' expects the head
+  # server to report 1, and a driver that called that a mismatch would make the
+  # sensitivity control unrunnable.
+  local expect_batch expect_maxbytes expect_wait
+  if [ "$arm" = "base" ]; then
+    expect_batch="$EXPECT_base_BATCH"; expect_maxbytes="$EXPECT_base_MAXBYTES"; expect_wait="$EXPECT_base_WAIT"
+  else
+    expect_batch="$EXPECT_head_BATCH"; expect_maxbytes="$EXPECT_head_MAXBYTES"; expect_wait="$EXPECT_head_WAIT"
+  fi
+  if [ "$observed_batch" != "NOT-OBSERVED" ] && [ "$observed_batch" != "$expect_batch" ]; then
     die batch-size-mismatch \
-      "$tag: the server reports batch_size=$observed_batch but $BATCH_SIZE was requested; the Arrow batch row cap is the mechanism #2820 changed, so a measurement whose effective value is unknown is not a measurement"
+      "$tag: the server reports batch_size=$observed_batch but this arm expects $expect_batch; the Arrow batch row cap is the mechanism #2820 changed, so a measurement whose effective value is unknown is not a measurement"
   fi
-  if [ -n "$MAX_BATCH_BYTES" ] && [ "$observed_maxbytes" != "NOT-OBSERVED" ] \
-     && [ "$observed_maxbytes" != "$MAX_BATCH_BYTES" ]; then
+  if [ "$expect_maxbytes" != "NOT-REQUESTED" ] && [ "$observed_maxbytes" != "NOT-OBSERVED" ] \
+     && [ "$observed_maxbytes" != "$expect_maxbytes" ]; then
     die max-batch-bytes-mismatch \
-      "$tag: the server reports max_batch_bytes=$observed_maxbytes but $MAX_BATCH_BYTES was requested"
+      "$tag: the server reports max_batch_bytes=$observed_maxbytes but this arm expects $expect_maxbytes"
   fi
-  if [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ] && [ "$observed_wait" != "NOT-OBSERVED" ] \
-     && [ "$observed_wait" != "$ADMISSION_WAIT_TIMEOUT_MS" ]; then
+  if [ "$expect_wait" != "NOT-REQUESTED" ] && [ "$observed_wait" != "NOT-OBSERVED" ] \
+     && [ "$observed_wait" != "$expect_wait" ]; then
     die wait-timeout-mismatch \
-      "$tag: the server reports admission_wait_timeout_ms=$observed_wait but $ADMISSION_WAIT_TIMEOUT_MS was requested; the shed threshold decides which steps the analyzer must exclude"
+      "$tag: the server reports admission_wait_timeout_ms=$observed_wait but this arm expects $expect_wait; the shed threshold decides which steps the analyzer must exclude"
   fi
 
   # Requested pinning and EFFECTIVE pinning are different facts too: a server

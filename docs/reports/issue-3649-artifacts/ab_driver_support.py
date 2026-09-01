@@ -38,6 +38,7 @@ NOT_OBSERVED = "NOT-OBSERVED"
 
 USAGE = [
     "ab_driver_support.py pair-order <replicate>",
+    "ab_driver_support.py effective-flag <flag> <global-value> <extra-string>",
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
@@ -400,6 +401,34 @@ def parse_listening(path):
     return found
 
 
+def effective_flag(flag, global_value, extra):
+    """The value a server will actually use for `flag`, given this arm's extras.
+
+    ONE implementation of "what did this arm really get", because two rules that
+    were each correct produced an unusable whole: round 2 required the analyzer
+    to refuse cross-arm server-config differences, round 5 required asymmetric
+    per-arm flags to carry `--control`, and nothing reconciled them -- so the
+    runbook's own sensitivity control, which deliberately sets the head arm's
+    `--max-batch-bytes 1`, was refused as a mismatch before the control label was
+    even looked at. The control that tells you whether an INCONCLUSIVE means "no
+    effect" or "this box cannot measure" could not be run.
+
+    The fix is a DECLARED, STRUCTURED EXPECTATION rather than a blanket rule with
+    an exception: each arm's effective configuration is computed here, recorded
+    in the manifest as data, and the analyzer permits exactly the differences the
+    manifest declares -- under a control label, and only where the observed
+    values match the declared ones.
+
+    The LAST occurrence wins, as it does on a real command line.
+    """
+    words = extra.split()
+    value = global_value
+    for index, word in enumerate(words):
+        if word == flag and index + 1 < len(words):
+            value = words[index + 1]
+    return value
+
+
 def pair_order(replicate):
     """Which arm runs FIRST in this replicate's pair.
 
@@ -610,6 +639,12 @@ def main(argv):
             return 2
         bound = parse_listening(rest[0])
         sys.stdout.write((bound or "NOT-OBSERVED") + "\n")
+        return 0
+    if command == "effective-flag":
+        if len(rest) != 3:
+            err("usage-error effective-flag needs <flag> <global-value> <extra-string>")
+            return 2
+        sys.stdout.write(effective_flag(rest[0], rest[1], rest[2]) + "\n")
         return 0
     if command == "pair-order":
         if len(rest) != 1 or not re.fullmatch(r"[0-9]+", rest[0]) or int(rest[0]) < 1:
