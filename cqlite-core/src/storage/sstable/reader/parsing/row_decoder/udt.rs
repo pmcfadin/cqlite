@@ -1506,6 +1506,75 @@ mod tests {
         assert_eq!(name, "person");
     }
 
+    /// A `UserType(test_ks, wide_u, i int, vi varint)` marshal string, plus the
+    /// bytes of a value whose `i` is 7 and whose `vi` is ZERO LENGTH.
+    fn udt_with_an_empty_field() -> (String, Vec<u8>) {
+        let type_str = format!(
+            "org.apache.cassandra.db.marshal.UserType(test_ks,{},{}:org.apache.cassandra.db.marshal.Int32Type,{}:org.apache.cassandra.db.marshal.IntegerType)",
+            hex::encode("wide_u"),
+            hex::encode("i"),
+            hex::encode("vi")
+        );
+        let mut data = 4i32.to_be_bytes().to_vec();
+        data.extend_from_slice(&7i32.to_be_bytes());
+        data.extend_from_slice(&0i32.to_be_bytes());
+        (type_str, data)
+    }
+
+    fn assert_empty_varint_field_is_null(value: &Value, ctx: &str) {
+        match value {
+            Value::Udt(udt) => {
+                assert_eq!(udt.fields[0].value, Some(Value::Integer(7)), "{ctx}: i");
+                assert_eq!(
+                    udt.fields[1].value,
+                    Some(Value::Null),
+                    "{ctx}: an EMPTY varint field is null (IntegerSerializer.java:33), \
+                     and never an opaque Value::Blob (#3722 AC1)"
+                );
+            }
+            other => panic!("{ctx}: expected a Udt, got {other:?}"),
+        }
+    }
+
+    /// BLOCKER B (roborev, #3722): a field of length 0 bypassed THE decoder at
+    /// BOTH UDT call sites, answering from a `create_empty_value_for_type`
+    /// helper whose fallback arm was `Value::Blob`. These two cases pin the CALL
+    /// SITES (the helper's own per-type semantics are pinned in
+    /// `udt_field_empty`), because a total empty-value arm nothing routes to
+    /// would leave the defect exactly where it was.
+    #[test]
+    fn empty_fields_route_through_the_decoder_at_both_udt_call_sites() {
+        let parser = V5CompressedLegacyParser::new(
+            "test_ks".to_string(),
+            "test_table".to_string(),
+            0,
+            0,
+            None,
+        );
+        let (type_str, data) = udt_with_an_empty_field();
+        let udt_def = V5CompressedLegacyParser::parse_udt_type_definition(&type_str)
+            .expect("UserType marshal string must parse");
+
+        // Site 1 — `udt.rs::parse_udt_value` (the frozen-UDT column reader).
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "udt".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        let (value, _) = parser
+            .parse_udt_value(&data, 0, &udt_def, &column)
+            .expect("UDT with an empty field must decode");
+        assert_empty_varint_field_is_null(&value, "parse_udt_value");
+
+        // Site 2 — `raw_type_value.rs`'s frozen-UDT arm.
+        let (value, _) = parser
+            .parse_raw_type_value(&data, 0, &type_str, "c", 0)
+            .expect("UDT with an empty field must decode");
+        assert_empty_varint_field_is_null(&value, "parse_raw_type_value");
+    }
+
     /// `udt{f: udt{f: ...}}` nested `levels` deep, with the matching bytes:
     /// each level frames its single field as `[i32 BE len][bytes]`.
     fn nested_udt_type_and_bytes(levels: usize) -> (CqlType, Vec<u8>) {
