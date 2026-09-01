@@ -833,16 +833,23 @@ impl V5CompressedLegacyParser {
         self.parse_nested_udt_from_registry_at(data, udt_def, registry, 0)
     }
 
-    /// `parse_nested_udt_from_registry` carrying an explicit nesting `depth`.
+    /// `parse_nested_udt_from_registry` carrying an explicit nesting `depth`, for a
+    /// caller that does not need the consumed length.
     ///
-    /// Issue #3631 (roborev BLOCKER 2). The 0-depth wrapper above is the entry point
-    /// for every pre-existing caller. A UDT reached from INSIDE a collection or tuple
-    /// must not restart the counter: otherwise alternating collection/UDT layers each
-    /// reset it, `MAX_TYPE_NESTING_DEPTH` bounds nothing, and a cyclic `UdtRegistry`
-    /// — which the registry type permits even though CQL does not — recurses once per
-    /// layer of attacker-controlled framing until the stack is exhausted.
-    /// `parse_typed_value` therefore calls THIS function with its own depth, and the
-    /// limit is enforced here, at the UDT boundary itself.
+    /// Issue #3631 (roborev BLOCKER 2). A UDT reached from INSIDE a collection or
+    /// tuple must not restart the counter: otherwise alternating collection/UDT layers
+    /// each reset it, `MAX_TYPE_NESTING_DEPTH` bounds nothing, and a cyclic
+    /// `UdtRegistry` — which the registry type permits even though CQL does not —
+    /// recurses once per layer of attacker-controlled framing until the stack is
+    /// exhausted. The limit is enforced at the UDT boundary itself, in the reporting
+    /// form below.
+    ///
+    /// DISCARDING the consumed length is legal HERE and nowhere new: the callers are
+    /// the pre-#3631 marshal-string path in `raw_type_value.rs` and this file's own
+    /// nested-field arms, which bound each field by its own `[i32 len]` and whose
+    /// tolerance of a short read predates this issue. The `CqlType` path
+    /// (`typed_value.rs`) must NOT come through here — it asks for the length and
+    /// asserts on it, which is what roborev BLOCKER 6 required.
     pub(super) fn parse_nested_udt_from_registry_at(
         &self,
         data: &[u8],
@@ -850,6 +857,26 @@ impl V5CompressedLegacyParser {
         registry: &UdtRegistry,
         depth: usize,
     ) -> Result<Value> {
+        self.parse_nested_udt_from_registry_reporting(data, udt_def, registry, depth)
+            .map(|(value, _consumed)| value)
+    }
+
+    /// `parse_nested_udt_from_registry_at` REPORTING how many bytes of `data` the
+    /// field loop consumed, so a caller framing `data` as exactly one UDT can require
+    /// the two to agree.
+    ///
+    /// The offset is the loop's own cursor, including the early exit that treats
+    /// fewer-than-four remaining bytes as omitted trailing fields — which is exactly
+    /// where an incomplete 1-3 byte field-length prefix hides. See
+    /// `typed_value.rs::parse_typed_udt` for the `TupleType.split` rules this makes
+    /// checkable.
+    pub(super) fn parse_nested_udt_from_registry_reporting(
+        &self,
+        data: &[u8],
+        udt_def: &crate::types::UdtTypeDef,
+        registry: &UdtRegistry,
+        depth: usize,
+    ) -> Result<(Value, usize)> {
         if depth > MAX_TYPE_NESTING_DEPTH {
             return Err(Error::corruption(format!(
                 "Nested UDT '{}': type nesting depth {} exceeds maximum {}",
@@ -1013,11 +1040,14 @@ impl V5CompressedLegacyParser {
             });
         }
 
-        Ok(Value::Udt(Box::new(UdtValue {
-            type_name: udt_def.name.clone(),
-            keyspace: udt_def.keyspace.clone(),
-            fields,
-        })))
+        Ok((
+            Value::Udt(Box::new(UdtValue {
+                type_name: udt_def.name.clone(),
+                keyspace: udt_def.keyspace.clone(),
+                fields,
+            })),
+            current_offset,
+        ))
     }
 
     /// Parse a UDT using inline field definitions from CqlType::Udt
@@ -1033,6 +1063,21 @@ impl V5CompressedLegacyParser {
         inline_fields: &[(String, CqlType)],
         depth: usize,
     ) -> Result<Value> {
+        self.parse_inline_udt_value_reporting(data, type_name, inline_fields, depth)
+            .map(|(value, _consumed)| value)
+    }
+
+    /// `parse_inline_udt_value` REPORTING how many bytes of `data` the field loop
+    /// consumed. The sibling of `parse_nested_udt_from_registry_reporting`, for the
+    /// same reason (roborev BLOCKER 6 on issue #3631); the discarding wrapper above
+    /// exists only for the pre-#3631 callers.
+    pub(super) fn parse_inline_udt_value_reporting(
+        &self,
+        data: &[u8],
+        type_name: &str,
+        inline_fields: &[(String, CqlType)],
+        depth: usize,
+    ) -> Result<(Value, usize)> {
         if depth > MAX_TYPE_NESTING_DEPTH {
             return Err(Error::corruption(format!(
                 "UDT nesting depth {} exceeds maximum {}",
@@ -1120,11 +1165,14 @@ impl V5CompressedLegacyParser {
             });
         }
 
-        Ok(Value::Udt(Box::new(UdtValue {
-            type_name: type_name.to_string(),
-            keyspace: self.keyspace.clone(),
-            fields,
-        })))
+        Ok((
+            Value::Udt(Box::new(UdtValue {
+                type_name: type_name.to_string(),
+                keyspace: self.keyspace.clone(),
+                fields,
+            })),
+            current_offset,
+        ))
     }
 
     /// Returns true if the column type is a complex column (non-frozen collection).

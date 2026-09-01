@@ -328,11 +328,20 @@ impl V5CompressedLegacyParser {
     }
 
     /// Decode `data` — the COMPLETE value, with no outer length prefix — as the
-    /// declared `ty`.
+    /// declared `ty`, requiring EVERY byte to be accounted for.
     ///
     /// This is the `CqlType`-driven sibling of `parse_value_from_raw_bytes` (which is
     /// driven by a marshal / CQL type STRING). It never degrades to `Value::Blob` for
     /// a non-`blob` declared type: a type it cannot express is an explicit `Error`.
+    ///
+    /// # This is the ONE place the exhaustion rule is written (roborev BLOCKER 6)
+    /// Every caller — and every future caller — inherits it, because the only way to
+    /// decode a `CqlType` here is through this function, and the only way to get a
+    /// value WITHOUT the assert is to ask [`Self::parse_typed_value_reporting`] for
+    /// the consumed length and take responsibility for it explicitly. Round 1 of
+    /// review added the check to the collection arms, round 2 found the UDT arms
+    /// still bypassing it; a per-arm checklist does not close, so consumption is now
+    /// part of the decode SIGNATURE instead of a thing each arm remembers to do.
     pub(super) fn parse_typed_value(
         &self,
         data: &[u8],
@@ -340,6 +349,28 @@ impl V5CompressedLegacyParser {
         ctx: &str,
         depth: usize,
     ) -> Result<Value> {
+        let (value, consumed) = self.parse_typed_value_reporting(data, ty, ctx, depth)?;
+        Self::require_fully_consumed(consumed, data, ctx)?;
+        Ok(value)
+    }
+
+    /// [`Self::parse_typed_value`] WITHOUT the exhaustion assert, reporting how many
+    /// bytes of `data` the decode actually consumed.
+    ///
+    /// `Ok((value, consumed))` where `consumed <= data.len()`. Only two kinds of
+    /// caller may use this instead of the asserting entry point above: the arms
+    /// BELOW, which thread the count outward, and a caller that has a
+    /// Cassandra-derived reason for a short read — of which there is exactly one, a
+    /// UDT/tuple whose trailing components are omitted, and even there
+    /// `TupleType.split` requires the decode to have ended exactly at the end of the
+    /// buffer, which is what the assert in the wrapper checks.
+    pub(super) fn parse_typed_value_reporting(
+        &self,
+        data: &[u8],
+        ty: &CqlType,
+        ctx: &str,
+        depth: usize,
+    ) -> Result<(Value, usize)> {
         if depth > MAX_TYPE_NESTING_DEPTH {
             return Err(Error::corruption(format!(
                 "{ctx}: type nesting depth {depth} exceeds maximum {MAX_TYPE_NESTING_DEPTH}"
@@ -352,15 +383,20 @@ impl V5CompressedLegacyParser {
                 // wrapper is a type-system marker. Mirrors the `Frozen` arms in
                 // `parse_nested_udt_from_registry` and `parse_value_from_raw_bytes`,
                 // which also surface `Value::Frozen`.
-                let inner_value = self.parse_typed_value(data, inner, ctx, depth + 1)?;
-                Ok(Value::Frozen(Box::new(inner_value)))
+                let (inner_value, consumed) =
+                    self.parse_typed_value_reporting(data, inner, ctx, depth + 1)?;
+                Ok((Value::Frozen(Box::new(inner_value)), consumed))
             }
-            CqlType::List(element) => Ok(Value::List(
-                self.parse_typed_collection_elements(data, element, ctx, depth)?,
-            )),
-            CqlType::Set(element) => Ok(Value::Set(
-                self.parse_typed_collection_elements(data, element, ctx, depth)?,
-            )),
+            CqlType::List(element) => {
+                let (elements, consumed) =
+                    self.parse_typed_collection_elements(data, element, ctx, depth)?;
+                Ok((Value::List(elements), consumed))
+            }
+            CqlType::Set(element) => {
+                let (elements, consumed) =
+                    self.parse_typed_collection_elements(data, element, ctx, depth)?;
+                Ok((Value::Set(elements), consumed))
+            }
             CqlType::Map(key_type, value_type) => {
                 let (count, header) = Self::read_collection_count(data, ctx)?;
                 // A map ENTRY costs two `[i32 size]` prefixes, so 8 bytes minimum.
@@ -391,8 +427,7 @@ impl V5CompressedLegacyParser {
                         };
                     entries.push((key, value));
                 }
-                Self::require_fully_consumed(pos, data, ctx)?;
-                Ok(Value::Map(entries))
+                Ok((Value::Map(entries), pos))
             }
             CqlType::Tuple(element_types) => {
                 if element_types.is_empty() {
@@ -428,12 +463,12 @@ impl V5CompressedLegacyParser {
                         },
                     );
                 }
-                // A tuple written with FEWER components than declared is legal
-                // (`TupleType.split` stops at the end of the buffer, and the loop
-                // above null-pads), but bytes left after the LAST declared component
-                // are trailing garbage.
-                Self::require_fully_consumed(pos, data, ctx)?;
-                Ok(Value::Tuple(elements))
+                // A tuple written with FEWER components than declared is legal —
+                // `TupleType.split` returns early on `position == length` and the loop
+                // above null-pads — but bytes left after the LAST declared component
+                // are trailing garbage (`if (position < length) throw`), which the
+                // caller's one exhaustion assert refuses.
+                Ok((Value::Tuple(elements), pos))
             }
             // A UDT nested inside a collection / tuple / another UDT. Delegated so
             // the per-field `[i32 size][bytes]` framing has ONE implementation.
@@ -469,19 +504,28 @@ impl V5CompressedLegacyParser {
                         )));
                     }
                 }
-                self.parse_value_from_raw_bytes(data, short, ctx, depth)
+                let value = self.parse_value_from_raw_bytes(data, short, ctx, depth)?;
+                // Every scalar arm consumes the WHOLE slice by construction: the
+                // fixed-width ones are pinned to their exact width just above (or are
+                // the legal EMPTY buffer, `data.len() == 0`), and the variable-width
+                // ones (`text`, `blob`, `varint`, `decimal`, `duration`, `inet`) are
+                // defined over all of `data`. So there is no arm here whose
+                // consumption is unknown, and `None` never has to be modelled.
+                Ok((value, data.len()))
             }
         }
     }
 
-    /// The `[i32 count]` + `[i32 size][bytes]`× body shared by `list` and `set`.
+    /// The `[i32 count]` + `[i32 size][bytes]`× body shared by `list` and `set`,
+    /// reporting the offset it reached so the caller's one exhaustion assert can see
+    /// a zero-count header with a payload behind it.
     fn parse_typed_collection_elements(
         &self,
         data: &[u8],
         element_type: &CqlType,
         ctx: &str,
         depth: usize,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<(Vec<Value>, usize)> {
         let (count, header) = Self::read_collection_count(data, ctx)?;
         // One element costs at least its own `[i32 size]` prefix, so 4 bytes.
         let mut elements = Vec::with_capacity(Self::bounded_capacity(count, data.len(), I32_LEN));
@@ -504,8 +548,7 @@ impl V5CompressedLegacyParser {
                 },
             );
         }
-        Self::require_fully_consumed(pos, data, ctx)?;
-        Ok(elements)
+        Ok((elements, pos))
     }
 
     /// Decode a nested UDT named by the declared type, preferring the authoritative
@@ -513,6 +556,21 @@ impl V5CompressedLegacyParser {
     /// `CqlType::Udt` (issue #239). An unresolvable name is an explicit `Error`: the
     /// bytes cannot be interpreted without a field list, and handing back a blob
     /// would discard the declared type name (#3631 criterion 5).
+    ///
+    /// # Why both delegates are the CONSUMPTION-REPORTING forms (roborev BLOCKER 6)
+    /// A UDT's field loop STOPS as soon as fewer than four bytes remain, treating the
+    /// undeclared remainder as omitted trailing fields — so a bare `Value` return
+    /// hides both trailing garbage AND an incomplete 1-3 byte field-length prefix.
+    /// `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/TupleType.java`
+    /// `split` (which `UserType extends TupleType` inherits and calls, `UserType.java`
+    /// line 263) is explicit about all three cases: `if (position == length) return
+    /// Arrays.copyOfRange(components, 0, i)` — omitted trailing components are legal
+    /// ONLY when the decode ended exactly at the end of the buffer;
+    /// `if (position + 4 > length) throw new MarshalException("Not enough bytes to read
+    /// %dth component")` — a partial length prefix is corruption; and, after the loop,
+    /// `if (position < length) throw ... "but got more"` — trailing bytes are
+    /// corruption. Reporting the offset is what lets the ONE assert in
+    /// `parse_typed_value` express exactly that rule.
     fn parse_typed_udt(
         &self,
         data: &[u8],
@@ -520,7 +578,7 @@ impl V5CompressedLegacyParser {
         inline_fields: &[(String, CqlType)],
         ctx: &str,
         depth: usize,
-    ) -> Result<Value> {
+    ) -> Result<(Value, usize)> {
         // Crossing a UDT boundary CONSUMES a level: both decoders below recurse back
         // into `parse_simple_udt_field_value_at`, so passing `depth + 1` (never `0`
         // or `1`) is what makes ONE limit hold across alternating collection/UDT
@@ -530,11 +588,16 @@ impl V5CompressedLegacyParser {
             // `get_udt_qualified` owns "udt:" + keyspace-qualifier normalization
             // (issues #239 / #2807).
             if let Some(def) = registry.get_udt_qualified(&self.keyspace, name) {
-                return self.parse_nested_udt_from_registry_at(data, def, registry, depth + 1);
+                return self.parse_nested_udt_from_registry_reporting(
+                    data,
+                    def,
+                    registry,
+                    depth + 1,
+                );
             }
         }
         if !inline_fields.is_empty() {
-            return self.parse_inline_udt_value(data, name, inline_fields, depth + 1);
+            return self.parse_inline_udt_value_reporting(data, name, inline_fields, depth + 1);
         }
         Err(Error::unsupported_format(format!(
             "{ctx}: nested user-defined type '{name}' is declared but its field list is \
