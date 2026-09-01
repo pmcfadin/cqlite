@@ -2494,19 +2494,19 @@ fi
 #
 # /proc is redirected at a fake tree so the uninspectable states are CONSTRUCTIBLE: `kill -0` and
 # `ps` still see the real pid, so _pid_state and _proc_is_zombie answer about a real process.
-_f1_src=$( sed -n '/^_pid_state() {/,/^}$/p'        "$LAUNCHER"
+_j319f1_src=$( sed -n '/^_pid_state() {/,/^}$/p'        "$LAUNCHER"
            sed -n '/^_proc_is_zombie() {/,/^}$/p'   "$LAUNCHER"
            sed -n '/^_pid_ruled_out() {/,/^}$/p'    "$LAUNCHER"
            sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" )
-if ! printf '%s' "$_f1_src" | grep -q '_pid_ruled_out()' \
-   || ! printf '%s' "$_f1_src" | grep -q '^_unit_runs_a_gate()'; then
+if ! printf '%s' "$_j319f1_src" | grep -q '_pid_ruled_out()' \
+   || ! printf '%s' "$_j319f1_src" | grep -q '^_unit_runs_a_gate()'; then
   bad "4b.177 job-319 F1 helpers could be extracted" "extraction produced nothing usable"
 else
   _f1d="$TMP/f1"; mkdir -p "$_f1d/fs/unit" "$_f1d/proc"
   _f1_run() {  # <procs-content> -> rc
     local content="$1" src rc
     printf '%s\n' "$content" > "$_f1d/fs/unit/cgroup.procs"
-    src=${_f1_src//\/sys\/fs\/cgroup/$_f1d\/fs}
+    src=${_j319f1_src//\/sys\/fs\/cgroup/$_f1d\/fs}
     src=${src//\/proc/$_f1d\/proc}
     ( eval "$src"
       systemctl() { printf '/unit\n'; }
