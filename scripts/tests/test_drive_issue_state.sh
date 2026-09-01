@@ -71,8 +71,13 @@ verdict_in_set() {
 }
 
 # all_lines_anchored <output> — 0 iff every non-empty line begins `DRIVE-STATE: `.
+# COUNTED, NOT PIPED THROUGH grep -q: `grep -c` exits 1 when it selects nothing, and
+# under this file's `pipefail` that makes a CLEAN result read as a failed condition —
+# the #3387 shape, and it cost a round here.
 all_lines_anchored() {
-  printf '%s\n' "$1" | grep -v '^$' | grep -cv '^DRIVE-STATE: ' | grep -q '^0$'
+  local bad
+  bad="$(printf '%s\n' "$1" | grep -v '^$' | grep -cv '^DRIVE-STATE: ' || true)"
+  [ "${bad:-1}" = 0 ]
 }
 
 SESS_A="sess-aaaaaaaa"
