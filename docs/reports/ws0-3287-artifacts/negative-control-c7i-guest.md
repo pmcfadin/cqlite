@@ -239,7 +239,11 @@ directory that did not exist.
 # RESUME NOTE — the exact capability gate a metal box must pass before #3287 is attempted
 
 **Park record.** #3287 was parked 2026-09-01 by lead ruling (option (b)) awaiting a bare-metal
-window. This section is the pre-flight gate for whoever picks it up. Run
+window. **That window is FUNDED (owner, 2026-09-01): [#3855](https://github.com/pmcfadin/cqlite/issues/3855)
+is the co-scheduling bundle — this issue plus #3305/#3306/#3288 in ONE pass, and it carries a
+counter-verification AC derived from the finding above.** So the question for whoever picks this up
+is not *"can we afford a metal box"* but *"does the box #3855 provisions actually expose the
+counters"* — which is what the gates below answer, before any metered hour is spent. Run
 `bash docs/reports/ws0-3287-artifacts/capability-probe.sh <outdir>` on the candidate host FIRST and
 check it against the table below — before any corpus staging, and certainly before any metered hour
 is spent on a capture.
