@@ -299,6 +299,16 @@ claude_tmux_env_verdict_into() {
     eval "$__od='the TEST-ONLY seam CQLITE_CLAUDE_AUTH_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1 — refusing to answer about an env-chosen file (details on stderr)'"
     return 0
   fi
+  # LINUX-SCOPED, and the reason is the BASELINE, not tmux (tmux runs on macOS fine): this
+  # verdict is defined RELATIVE to the persisted /etc/environment + pam_env source, and
+  # without that source there is nothing to compare a server's environment against. The
+  # header block has always documented both lines as UNMEASURED off Linux; the guard was
+  # missing here, so a macOS host could emit VERIFIED — and an [ok] is what `--strict`
+  # reads (#3414: scoping a platform out is not the same as passing it).
+  if ! claude_auth_platform_linux; then
+    eval "$__od=\"/etc/environment + pam_env is a Linux mechanism; on \$(uname -s 2>/dev/null) there is no persisted baseline a tmux server could be compared against, so pane reachability cannot be measured\""
+    return 0
+  fi
   if ! command -v tmux >/dev/null 2>&1; then
     eval "$__od='no `tmux` on PATH — there is no server environment to inspect'"
     return 0

@@ -492,6 +492,37 @@ else
 fi
 
 # =====================================================================================
+# 20. THE PLATFORM GUARD APPLIES TO **BOTH** VERDICTS. /etc/environment + pam_env is a
+#     Linux mechanism, and the header block has always documented both lines as UNMEASURED
+#     off Linux — but the guard was applied only to `claude-auth:`, so a macOS host could
+#     emit `claude-tmux-env: VERIFIED` and recommend Linux-only /etc/environment remedies.
+#     A false VERIFIED is an [ok], and [ok] is what `--strict` reads (#3414: scoping a
+#     platform out is not the same as passing it).
+# =====================================================================================
+REAL_UNAME=$(command -v uname 2>/dev/null)
+if [ -z "$REAL_UNAME" ]; then
+  skip "platform guard: both verdicts UNMEASURED off Linux" "no uname on PATH to stub"
+else
+  d20=$(mkshim "$tmp/s20"); plant_claude_probe_env "$d20"; plant_tmux "$d20" complete
+  cat >"$d20/uname" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in -s) printf 'Darwin\n' ;; *) exec "$REAL_UNAME" "\$@" ;; esac
+EOF
+  chmod +x "$d20/uname"
+  run_cap "$d20" "$ef2" -- --report
+  if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+    ok "platform: claude-auth is UNMEASURED off Linux (never an [ok])"
+  else
+    bad "platform: claude-auth off Linux gave: $out"
+  fi
+  if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+    ok "platform: claude-tmux-env is UNMEASURED off Linux, matching its documented contract"
+  else
+    bad "platform: claude-tmux-env off Linux gave a measured verdict: $out"
+  fi
+fi
+
+# =====================================================================================
 # 19. NO RUN PRINTS A TOKEN-SHAPED VALUE. Asserted over the WHOLE suite transcript, not
 #     per case: the property is about every emit path, and a per-case check only covers
 #     the paths someone remembered.
@@ -506,8 +537,11 @@ fi
 
 printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # A CASE FLOOR (#3544's lesson): a span-replacing edit that silently deletes cases would
-# otherwise report a green tally over a shrunken suite.
-CASE_FLOOR=28
+# otherwise report a green tally over a shrunken suite. It is the count of cases that
+# ALWAYS run — a floor set to the TOTAL would red whenever a legitimately skippable case
+# (the uname stub, the real-tmux isolation case) skips, and a floor that reds on correct
+# input is the floor agents learn to delete.
+CASE_FLOOR=30
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
