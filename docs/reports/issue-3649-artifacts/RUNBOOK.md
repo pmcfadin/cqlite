@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (178 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (229 cases).**
       Seconds, `python3` only, no rig and no root, so there is no excuse for
       skipping it — and it is the cheapest step in this runbook by four orders of
       magnitude. It drives every fail-closed guard with the bad input that guard
@@ -247,8 +247,20 @@ says so in its own output.
 
 Copy `docs/reports/ws0-3026-artifacts/ws0-h2h/ws0-events-template.json` and edit
 the `keyspace` / `table` / `ddl` to match your corpus. Full ring, no `limit`, no
-predicates — `--shape full` uses the template as-is. The driver refuses an absent
-or unparseable template before it builds anything.
+predicates — `--shape full` uses the template as-is.
+
+**The driver now checks the ticket's CONTENT, not just that it is JSON.** The
+#3649 target band and the utilization direction are both defined for a full-ring
+scan of every column (the AC's first line is `flight-loadgen --shape full`), so a
+ticket carrying a `limit`, a `filter`, an `aggregation`, a column projection, a
+token bound or `wraparound` is refused with `ticket-not-full-ring` — and
+`--shape` other than `full` is a usage error — **before either arm is built**. A
+narrowed workload scored against that band is a wrong answer wearing a
+right-looking shape.
+
+If you genuinely want another shape, pass `--control <label>`: the ticket check
+is then skipped and the analyzer disclaims the verdict on a
+`verdict-detail … SHAPE` line rather than scoring it against the band.
 
 Commit the template you actually used, and the corpus census, to
 `docs/reports/issue-3649-artifacts/corpus/`.
@@ -382,6 +394,24 @@ the analyzer requires the two arms of each pair to have the **same** surviving
 ladder. Each pass costs `2 × replicates × (steps × step-duration + prewarm +
 server start/stop)`, so budget 5b at roughly four times 5a for a four-step ramp.
 
+### What the driver refuses before it builds anything
+
+All of these are usage errors or named aborts that cost you seconds, not a
+session: `--shape` other than `full` without `--control`; a ticket that narrows
+the scan; `--batch-size 0` (the server clamps it to one row per batch, so the
+manifest would not record what ran); a `--step-duration` `flight-loadgen` would
+itself reject; a `--ramp` that is not strictly increasing or maps to no analyzer
+section; `--rows-declared` with separators. The step duration is **normalised at
+pre-flight through the same grammar the load generator uses**, so a value it
+accepts — including a bare `60`, which means seconds — can never be refused later
+by the analyzer once the data exists.
+
+**Re-using a work directory is safe now.** Nothing under `<work-dir>/results` is
+written until pre-flight has passed **and both arms have built**; until then the
+ledger is unarmed, and an abort says plainly that any manifest present belongs to
+an earlier session and was not modified. The run prints `ledger armed` at the
+moment the directory starts describing the current session.
+
 ### ⏱ Check the corroboration line after EACH pass, not at the end
 
 Run the analyzer once against each pass as soon as that pass finishes — before
@@ -491,9 +521,17 @@ up:
 
 | corroboration | what it says | what to do |
 |---|---|---|
-| `agreed (N of N runs)` | every server's startup line was read and every one reported the ceiling you requested | nothing; proceed |
+| `agreed (N of N runs)` | every server's startup line was read, every one reported the ceiling you requested, **and every one reported it came from the flag** (`max_concurrent_scans_source=flag`) | nothing; proceed |
 | `partial (M of N runs)` | the ceiling was read back for some runs and not others; the ones read agree | **fix the startup-log parse and re-run the affected pass, while the box is up.** Do not terminate first |
 | `none (0 of N runs)` | no startup line was readable at all — usually the whole parse is broken, not one run | as above, and suspect the server log format or `--merge-path`/flag plumbing before anything else |
+
+A **value without a `flag` provenance does not count toward corroboration** — a
+numeric ceiling that the server says it *derived* is not evidence that the pin
+you passed took effect. And an explicitly non-`flag` source (`env`, `derived`,
+`derived-fallback`) is not a downgrade at all: it is a refusal
+(`admission-provenance`), because the run was served under a configuration this
+session did not choose. Check for a stray `CQLITE_MAX_CONCURRENT_SCANS` in the
+environment if you see it.
 
 **The analyzer carries this in its own output, so you do not need this page in
 front of you** — and neither does whoever reads the block after you paste it. It
@@ -661,7 +699,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     178 deterministic cases + a case floor; run it first
+  selftest-analyze.sh     229 deterministic cases + a case floor; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

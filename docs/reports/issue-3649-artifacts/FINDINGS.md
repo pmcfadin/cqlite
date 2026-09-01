@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 178 deterministic cases over synthetic fixtures, with a case floor |
+| `selftest-analyze.sh` | 229 deterministic cases over synthetic fixtures, with a case floor |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,41 @@ session, not by this lane.
 
 ---
 
-## 9. The lesson this lane paid for: a green suite over an unexecuted subject
+## 9. The second lesson: a parameter accepted without being checked against the claim
+
+Round 1's review asked whether the instrument *works*. Round 2's asked whether it
+measures *the right thing*, and three of its five findings were one shape: **an
+option accepted because it parsed, never checked against the claim the report
+would go on to make about it.**
+
+- `--shape limit-k` with a `limit`-bearing ticket was accepted because the file
+  was valid JSON — and would then have been scored against a band defined for
+  `--shape full`.
+- `--batch-size 0` was accepted as a non-negative integer; the server clamps it
+  to one row per batch, so the manifest would have recorded a value that never
+  ran — of the Arrow batch row cap, which is the very mechanism #2820 changed.
+- `--step-duration 60` was accepted by the driver and **refused by the analyzer
+  afterwards**, because the analyzer had grown a second, stricter duration
+  grammar. That one fails in the expensive direction: both arms built, every
+  replicate run, a metered rig — declined over a missing unit suffix, on input
+  that cannot be regenerated.
+
+The fix in each case is the same question asked earlier: *what will the report
+claim about this value, and has anything checked that the claim is true?* Hence
+the ticket-content check, the batch-size floor, and one canonical duration
+normalised at pre-flight through the load generator's own grammar. A fourth
+finding — corroboration counting values without provenance — is the same shape
+one level up: `agreed` is a claim about where the ceiling came from, made by
+code that was only checking what it was.
+
+**And the transferable rule: a validator must mirror the grammar of whatever will
+consume the value, and it must run before the expensive step.** Stricter than the
+consumer rejects completed work; looser lets a bad value through to fail later.
+Both are worse than the same grammar, applied early.
+
+---
+
+## 10. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
