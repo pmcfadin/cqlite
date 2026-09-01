@@ -722,9 +722,15 @@ classify_report() {
   # REDUCE TO THE FIRST WORD AND MATCH BY STRING EQUALITY — never a prefix test. This is the
   # whole closure: `PASS-BUT-UNMEASURED` reduces to `PASS-BUT-UNMEASURED`, which equals
   # nothing in the set, so it is NOT-RUN. A `case` glob or a `grep ^PASS` would accept it.
-  # shellcheck disable=SC2086
-  set -- $value
-  tok="$1"
+  #
+  # A PARAMETER EXPANSION, NOT `set -- $value` (#3751 round 2, B5). The old form was an
+  # UNQUOTED expansion, so the AUTHOR-CONTROLLED value went through PATHNAME EXPANSION as well
+  # as word splitting: `result: *`, read from a directory holding a file named `PASS`, globbed
+  # to that filename and reported PASS — a false PASS produced by the shell, in the one
+  # function whose entire job is a closed grammar. `${value%% *}` neither splits nor globs, and
+  # needs no positional clobber; `one_line` has already mapped every tab/newline to a space and
+  # squeezed runs, so the first space really is the first word boundary.
+  tok="${value%% *}"
   # The recorded cause, when the report names one, is preferred over a guess: an agent that
   # legitimately records `result: NOT-RUN (could not read the diff)` is telling us something
   # more precise than "no report written".

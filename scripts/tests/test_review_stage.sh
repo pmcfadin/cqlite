@@ -288,6 +288,31 @@ printf 'Result: FINDINGS\n' >"$R4B_REPORT"
 rs "$R4B" verdict c --issue 700
 rc_is 4 "column-zero CONTROL: 'Result:' at column zero is still recognised (case-insensitive, anchored)"
 
+# --- 4c. THE TOKEN REDUCTION DOES NOT GLOB (round 2, B5) -------------------------
+# `set -- $value` was an UNQUOTED expansion, so the value went through PATHNAME EXPANSION as
+# well as word splitting: a report recording `result: *`, read from a directory holding a file
+# named `PASS`, expanded to that filename and read PASS — a FALSE PASS produced by globbing,
+# in the one function whose entire job is a closed grammar. The reduction is now a parameter
+# expansion, which neither splits nor globs and needs no positional clobber.
+R4C="$(newrepo)"
+rs "$R4C" open c --issue 710 --agent spec-auditor
+rc_is 0 "noglob: the stage opens"
+printf 'result: *\n' >"$(REPORT_OF "$R4C" 710 c)"
+: >"$R4C/PASS"        # the cwd of every `rs` call is the repo root
+: >"$R4C/FINDINGS"    # both tokens present, so the glob has more than one candidate to sort
+rs "$R4C" verdict c --issue 710
+rc_is 5 "noglob: 'result: *' with files named PASS/FINDINGS in the cwd is NOT-RUN, not a glob-expanded pass"
+hasnt "RESULT: PASS " "noglob: pathname expansion cannot produce a passing token"
+has "unrecognised result token '*'" "noglob: the refusal names the token the author actually wrote, VERBATIM"
+rm -f "$R4C/PASS" "$R4C/FINDINGS"
+
+# CONTROL: the reduction still reduces. A first-word reduction that stopped working would
+# make every multi-word value ungrammatical, so the documented behaviour is pinned here.
+printf 'result: PASS reviewed the whole diff\n' >"$(REPORT_OF "$R4C" 710 c)"
+rs "$R4C" verdict c --issue 710
+rc_is 0 "noglob CONTROL: a multi-word value still reduces to its FIRST WORD (PASS)"
+has "RESULT: PASS " "noglob CONTROL: the reduced token is PASS"
+
 # --- 5. the path is verified gitignored, fail-closed ----------------------------
 # (a) an explicit --report that git does NOT confirm ignored.
 R3="$(newrepo)"
