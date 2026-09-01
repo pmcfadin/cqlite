@@ -3001,6 +3001,23 @@ if all_lines_anchored "$d46_w" && all_lines_anchored "$d46_v" && all_lines_ancho
 else
   bad "a symlink refusal leaked an unprefixed line"
 fi
+# CLASS SWEEP, SAME ROUND: the lock sidecar is a SCRIPT-OWNED path too, and `: >>"$lock"`
+# FOLLOWS a link — so a link planted there (by a peer lane, not only by the invoker) would have
+# this script create a file OUTSIDE the lane. Refused by name, link intact, target not created.
+L46c=$(lane lane46c)
+K46C_TARGET="$T/no-such-lock-target-46"
+ln -s "$K46C_TARGET" "$L46c/$MARKER.lock"
+c46_w=$(run "$L46c" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); c46_wrc=$?
+c46_link_after=$(readlink "$L46c/$MARKER.lock" 2>/dev/null || true)
+if [ "$c46_wrc" -ne 0 ] && [ "$(verdict_of "$c46_w")" = ERROR ] \
+   && printf '%s\n' "$c46_w" | grep -q 'lock path .* is a SYMLINK' \
+   && [ -L "$L46c/$MARKER.lock" ] && [ "$c46_link_after" = "$K46C_TARGET" ] \
+   && [ ! -e "$K46C_TARGET" ] && [ ! -e "$L46c/$MARKER" ]; then
+  ok "a SYMLINK at the lock path is refused by name; the link survives, its target was NOT created, and no marker was written"
+else
+  bad "the lock-path symlink sweep regressed: rc=$c46_wrc verdict=$(verdict_of "$c46_w") readlink='$c46_link_after' target-created=$([ -e "$K46C_TARGET" ] && echo yes || echo no) marker=$([ -e "$L46c/$MARKER" ] && echo yes || echo no)
+$c46_w"
+fi
 # POSITIVE CONTROL, by ARTIFACT SUBSTITUTION: with the `-L` existence handling reverted in a
 # scratch copy, the same write DESTROYS the dangling symlink — so the assertions above measure
 # the fix and not the fixture. (A test-only seam is never used for this; the artifact is
@@ -3064,10 +3081,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 170 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 170)"
+if [ "$PASS" -ge 172 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 172)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 170)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 172)"
 fi
 
 # ===========================================================================

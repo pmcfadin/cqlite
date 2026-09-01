@@ -796,6 +796,13 @@ lock_marker() {
   # non-interactive shell with bash's own unprefixed diagnostic — which would break the
   # output anchor every consumer rests on, and emit no verdict at all.
   [ -w "$wt" ] || refuse ERROR 1 "the worktree directory $(sane "$wt") is not writable, so the marker lock cannot be taken — nothing was decided and nothing was written"
+  # THE LOCK PATH IS SCRIPT-OWNED, SO A SYMLINK THERE IS REFUSED TOO (roborev job 43 K1's class,
+  # swept rather than waited for). The `: >>"$lock"` below FOLLOWS a link, so a link planted at
+  # this path — by a peer lane, not only by the invoker — would make this script create a file
+  # OUTSIDE the lane, and a DANGLING one is invisible to `-e` exactly as the marker's was. Same
+  # ruling as the marker's: a link is a deliberate artifact, and this script neither follows one
+  # nor replaces one.
+  [ ! -L "$lock" ] || refuse ERROR 1 "the marker lock path $(sane "$lock") is a SYMLINK (dangling or not) — this script owns that path and neither follows nor replaces a link there, so the ownership-verify -> replace sequence cannot be serialized on it; nothing was decided and nothing was written"
   command -v flock >/dev/null 2>&1 || refuse ERROR 1 "flock is not available on this host, so the ownership-verify -> replace sequence cannot be SERIALIZED. Refusing rather than mutating unserialized: two sessions in one lane could both pass verification and one clobber the other's stamp, which is the defect this marker exists to prevent. An unmeasurable guarantee is never read as satisfied."
   # THE `2>/dev/null` COMES FIRST, AND THAT ORDER IS THE WHOLE POINT (roborev job 30, found by
   # sweeping G3's class rather than by the finding). Bash applies redirections LEFT TO RIGHT, so
