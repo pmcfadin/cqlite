@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 319 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `selftest-analyze.sh` | 334 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -483,8 +483,34 @@ which is precisely what made the clear-first trick unnecessary. **A fix that was
 load-bearing under an older design can become the thing preventing the simple
 one; when a guard is revised twice, check whether a later guard has subsumed it.**
 
-**Two stub-fidelity failures in one round, both found by an assertion I wrote
-against the real behaviour.** The stub `cargo` ignored `-p` and produced both
+**AND THE FOURTH STUB-FIDELITY FAILURE WAS A FORMAT, WHICH IS A DIFFERENT KIND OF
+QUESTION.** `tracing-subscriber`'s fmt layer has ANSI **on by default**, and this
+repository already records from #3400 that **colour survives redirection to a
+file** — so the real server's log is coloured even captured with `> file 2>&1`,
+and tracing styles the field NAME and the `=`, which makes a `name=value` pattern
+match nothing. Left unfixed this was **total**: every startup field
+`NOT-OBSERVED`, corroboration `none`, and — after the `none` ruling — **every
+real rig session refused as UNMEASURED.** The instrument would have refused every
+session it was ever pointed at.
+
+The first three stub-fidelity failures were a missing field, a permissive argv
+and an ignored `-p`: all things **enumerable from `cli.rs`**. This one is not in
+`cli.rs` at all. **You only get it by asking what the real thing's output looks
+like ON THE WIRE** — which is a different question from "what does the producer
+declare", and the one a stub author is least likely to ask, because the stub
+author writes the output they intend to parse.
+
+Fixed at the parse site (`_ansi_stripped`, this repository's own idiom), with
+`NO_COLOR=1` in the server environment as a **verified** second control —
+tracing-subscriber 0.3.23 reads it in `Layer::default()`, checked in the locked
+source rather than assumed — and the stripping is still the fix, because the env
+var depends on a crate version and a construction path this harness does not own.
+A coloured-log end-to-end case now runs a stub that emits real escape sequences,
+and asserts the captured log **actually contains them** before asserting the
+readback survives: a colour case whose log is not coloured proves nothing.
+
+**Two stub-fidelity failures in the previous round, both found by an assertion I
+wrote against the real behaviour.** The stub `cargo` ignored `-p` and produced both
 binaries whatever was asked for, which made "each arm builds its own client"
 indistinguishable from "one shared client" on disk; and the misnamed cold case
 ran `--temperature warm` into a directory called `e2e-cold` and inspected the

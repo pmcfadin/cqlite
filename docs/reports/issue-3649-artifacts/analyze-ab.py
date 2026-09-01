@@ -494,24 +494,53 @@ def collect_pairs_checked(manifest, manifest_dir, mode, declared_steps):
     pairs, admission, session = collect_pairs(
         manifest, manifest_dir, mode, declared_steps
     )
+    # THE RULE IS ABOUT CORROBORATION AS SUCH, NOT ABOUT ADMISSION. It was applied
+    # to the field we happened to be discussing, so a session whose admission
+    # ceiling parsed but whose BATCH SIZE was never observed still rendered a
+    # verdict -- and the batch size is the mechanism under measurement. Every
+    # required readback gets it, independently; `partial` stays a disclosure for
+    # all of them, because there the observed runs constrain the unobserved.
+    unobserved = []
     if admission.state == "none":
+        unobserved.append("max_concurrent_scans")
+    for name in sorted(session["readbacks"]):
+        if session["readbacks"][name].state == "none":
+            unobserved.append(name.replace("_observed", ""))
+    if unobserved:
         raise Unmeasured(
             "startup-unobserved",
-            "no server's startup line was read for any of the %d runs, so the "
-            "admission ceiling, the batch size and the provenance of all three are "
-            "unverified. A disclosure is the right answer to a PARTIAL "
-            "observation, where the runs that were read constrain the ones that "
-            "were not; it is the wrong answer to no observation at all, which "
-            "leaves the verdict resting on absence" % admission.total,
+            "these server settings were not observed for ANY of the %d runs: %s. "
+            "A disclosure is the right answer to a PARTIAL observation, where the "
+            "runs that were read constrain the ones that were not; it is the wrong "
+            "answer to no observation at all, which leaves the verdict resting on "
+            "absence" % (admission.total, ", ".join(sorted(set(unobserved)))),
         )
     # ONE CLIENT FOR BOTH ARMS, CHECKED RATHER THAN ASSUMED. The driver builds a
     # single load generator, but a manifest is data and this analyzer does not
     # get to assume which driver produced it.
+    # SATISFIABLE BY ABSENCE IS NOT SATISFIED. Collecting only the runs that
+    # HAVE a commit means one arm omitting it -- or every run omitting it --
+    # leaves at most one value in the set and the guard passes with no evidence
+    # that both arms used the same client. Same sentinel class as every other
+    # instance in this lane: a missing value inheriting the permissive branch.
+    missing = [
+        "%s-r%02d" % (e.get("arm"), e.get("replicate"))
+        for e in manifest["runs"]
+        if not e.get("loadgen_commit")
+    ]
+    if missing:
+        raise Unmeasured(
+            "loadgen-provenance-absent",
+            "%d run(s) record no load-generator commit (%s); the confound this "
+            "checks for -- a client that varies with the server commit -- cannot "
+            "be ruled out by runs that say nothing about which client drove them"
+            % (len(missing), ", ".join(missing[:4]) + ("…" if len(missing) > 4 else "")),
+        )
     commits = {}
     for entry in manifest["runs"]:
-        commit = entry.get("loadgen_commit")
-        if commit:
-            commits.setdefault(str(commit), set()).add(entry.get("arm"))
+        commits.setdefault(str(entry["loadgen_commit"]), set()).add(entry.get("arm"))
+    declared = manifest.get("loadgen")
+    declared = declared.get("commit") if isinstance(declared, dict) else None
     if len(commits) > 1:
         raise Unmeasured(
             "loadgen-provenance-mismatch",
@@ -521,6 +550,14 @@ def collect_pairs_checked(manifest, manifest_dir, mode, declared_steps):
             "would reveal it"
             % ", ".join("%s used by %s" % (c, ",".join(sorted(a)))
                         for c, a in sorted(commits.items())),
+        )
+    if not declared or declared not in commits:
+        raise Unmeasured(
+            "loadgen-provenance-mismatch",
+            "the runs name load-generator %s but the manifest declares %r; the "
+            "session's own record of which client it built does not match the "
+            "client the runs say drove them"
+            % (", ".join(sorted(commits)), declared),
         )
     return pairs, admission, session
 

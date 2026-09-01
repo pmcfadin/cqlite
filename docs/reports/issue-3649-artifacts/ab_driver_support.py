@@ -441,7 +441,7 @@ def parse_listening(path):
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+            text = _ansi_stripped(handle.read())
     except OSError:
         return None
     found = None
@@ -899,6 +899,36 @@ def validate_replicate(path, tag, raw_ramp):
     return 0
 
 
+#: CSI / SGR escape sequences, as `tracing_subscriber::fmt` emits them.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _ansi_stripped(text):
+    """Colour is stripped AT THE PARSE SITE, which is the only place it can be.
+
+    `tracing-subscriber`'s fmt layer has ANSI ON by default (`ansi` is a default
+    feature and cqlite-flight does not disable it), and this repository already
+    records the consequence from #3400: **colour SURVIVES redirection to a file**,
+    so a log captured with `> file 2>&1` is coloured too. Worse, tracing styles
+    the FIELD NAME and the `=`, so a pattern spanning `name=value` matches
+    NOTHING -- which is the exact shape #3400 describes one subsystem over, where
+    a pattern anchored on a status word survived and one spanning
+    `<status> <payload>` did not.
+
+    Left unfixed this was total: every `STARTUP_FIELDS` regex failing means every
+    field NOT-OBSERVED, corroboration `none`, and -- after round 10's ruling --
+    every real rig session refused as UNMEASURED.
+
+    The driver ALSO sets `NO_COLOR=1` in the server's environment, which
+    tracing-subscriber 0.3.23 honours in `Layer::default()` (verified in the
+    locked source). That is a real control rather than a hopeful one, but it is
+    still the belt: it depends on the crate version and on the server continuing
+    to build its layer from `default()`, and neither is this harness's to
+    guarantee. Stripping here works whatever the producer does.
+    """
+    return _ANSI.sub("", text)
+
+
 def parse_startup(path, want):
     """The resolved admission ceiling, or its provenance, from the server's own
     startup line -- or the literal NOT-OBSERVED.
@@ -909,7 +939,7 @@ def parse_startup(path, want):
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+            text = _ansi_stripped(handle.read())
     except OSError:
         return NOT_OBSERVED
     line = ""

@@ -978,6 +978,13 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
     "HOME=${HOME:-/tmp}"                          # some libs probe it on start
     "TMPDIR=${TMPDIR:-/tmp}"
     "RUST_LOG=info"                               # the readiness line is INFO
+    # tracing-subscriber's fmt layer has ANSI on by DEFAULT and colour survives
+    # redirection to a file, so an uncoloured log is not something to assume.
+    # 0.3.23 reads NO_COLOR in `Layer::default()` (verified in the locked
+    # source), so this is a real control -- but the parse site strips ANSI
+    # anyway, because this depends on a crate version and a construction path
+    # that are not ours to guarantee.
+    "NO_COLOR=1"
     "RUST_BACKTRACE=1"                            # a crash is diagnosable
     "CQLITE_FLIGHT_MERGE_PATH=$MERGE_PATH"        # pinned, recorded, #3058
   )

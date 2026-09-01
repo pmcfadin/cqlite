@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=319
+CASE_FLOOR=334
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2477,6 +2477,66 @@ while True:
     time.sleep(3600)
 STUBEOF
 
+  # --- a SECOND stub server: identical, but ANSI-COLOURED the way
+  # --- `tracing_subscriber::fmt` colours -- the FIELD NAME and the `=` styled,
+  # --- which is what makes a `name=value` pattern match nothing. Colour is on by
+  # --- default and survives redirection to a file, so an uncoloured log is not
+  # --- what a rig produces. The first three stub-fidelity failures were a
+  # --- missing field, a permissive argv and an ignored `-p`, all enumerable from
+  # --- cli.rs; this one is a FORMAT, and you only get it by asking what the real
+  # --- output looks like on the wire.
+  cat > "$SHIMBIN/stub-cqlite-flight-ansi" <<'STUBEOF'
+#!/usr/bin/env python3
+import re
+import socket
+import sys
+import time
+
+args = sys.argv[1:]
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def emit(line):
+    coloured = re.sub(
+        r"([a-z_]+)=",
+        lambda m: "\x1b[3m" + m.group(1) + "\x1b[0m\x1b[2m=\x1b[0m",
+        line,
+    )
+    print("\x1b[2m2026-09-01T10:00:00Z\x1b[0m \x1b[32m INFO\x1b[0m " + coloured,
+          flush=True)
+
+
+listen = opt("--listen", "127.0.0.1:0")
+host, _, port = listen.partition(":")
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((host, int(port)))
+sock.listen(16)
+bound = "%s:%d" % (host, sock.getsockname()[1])
+
+emit(
+    "cqlite_flight: cqlite-flight starting listen=%s batch_size=%s "
+    "max_batch_bytes=%s max_inflight_egress_bytes=12582912 "
+    "max_concurrent_scans=%s max_concurrent_scans_source=flag "
+    "available_parallelism=4 admission_wait_timeout_ms=%s "
+    "max_concurrent_streams=100"
+    % (
+        listen,
+        opt("--batch-size", "8192"),
+        opt("--max-batch-bytes", "4194304"),
+        opt("--max-concurrent-scans", "16"),
+        opt("--admission-wait-timeout-ms", "30000"),
+    )
+)
+emit("cqlite_flight: cqlite-flight listening on %s listening_on=%s" % (bound, bound))
+while True:
+    time.sleep(3600)
+STUBEOF
+  chmod +x "$SHIMBIN/stub-cqlite-flight-ansi"
+
   # --- the stub load generator: CONNECTS to the endpoint it was handed, so a
   # --- wrong or stale address fails the run rather than passing quietly, and
   # --- writes one internally-consistent record per ramp step.
@@ -2681,6 +2741,37 @@ PYINNER
       ok "the admission ceiling was read back from every real server start"
     else
       bad "the admission readback did not survive a real session"
+    fi
+  fi
+
+  # THE COLOURED-LOG SESSION. Left unfixed this was total: every startup regex
+  # failing means every field NOT-OBSERVED, corroboration `none`, and -- after
+  # round 10's ruling -- every real rig session refused as UNMEASURED.
+  cp "$SHIMBIN/stub-cqlite-flight" "$SHIMBIN/stub-cqlite-flight.plain"
+  cp "$SHIMBIN/stub-cqlite-flight-ansi" "$SHIMBIN/stub-cqlite-flight"
+  run_e2e "$TMP/e2e-ansi" --ramp 1 --no-prewarm
+  cp "$SHIMBIN/stub-cqlite-flight.plain" "$SHIMBIN/stub-cqlite-flight"
+  if [ "$RC" = "0" ]; then
+    ok "a session whose server logs are ANSI-coloured completes"
+  else
+    bad "a coloured server log broke the session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  ANSI_DIR="$(find "$TMP/e2e-ansi" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$ANSI_DIR" ] && grep -q $'\x1b\[' "$ANSI_DIR/logs/base-r01.server.log" 2>/dev/null; then
+    ok "...and the captured log really does contain escape sequences"
+  else
+    bad "the coloured-log case did not actually produce a coloured log, so it proved nothing"
+  fi
+  if [ -n "$ANSI_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --single-stream "$ANSI_DIR/manifest.json" > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token single-stream)" != "UNMEASURED" ] \
+       && grep -q 'corroboration agreed' "$TMP/out.txt"; then
+      ok "every server field is still read back through the colour"
+    else
+      bad "colour defeated the startup readback: $(grep -m1 '^AB-3649: cause single-stream' "$TMP/err.txt")"
     fi
   fi
 
@@ -2892,6 +2983,70 @@ if grep -q '^AB-3649: loadgen commit 2222222222222222222222222222222222222222 re
 else
   bad "the load-generator provenance was not reported"
 fi
+
+# A guard satisfiable by ABSENCE is not satisfied. One arm omitting its commit --
+# or every run omitting it -- used to leave at most one value in the set, so the
+# confound check passed with no evidence at all.
+for absence in one all; do
+  mkfixture "$TMP/lg-$absence" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/lg-$absence/manifest.json" "$absence" <<'PYINNER'
+import json
+import sys
+
+path, absence = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if absence == "all" or entry["arm"] == "head":
+        entry.pop("loadgen_commit", None)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/lg-$absence"
+  check_verdict "loadgen provenance missing from $absence run(s)" UNMEASURED 7 single-stream
+  check_cause "provenance absent ($absence)" loadgen-provenance-absent
+done
+# ...and a commit the manifest does not itself declare is a mismatch, not a pass.
+mkfixture "$TMP/lg-undecl" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/lg-undecl/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["loadgen"]["commit"] = "8" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/lg-undecl"
+check_verdict "runs naming a client the manifest does not declare" UNMEASURED 7 single-stream
+check_cause "a client the manifest does not declare" loadgen-provenance-mismatch
+
+echo
+echo "-- the none refusal covers EVERY readback, not just admission --"
+
+# The ruling was about corroboration as such; it had been applied to the one
+# field under discussion, so a session whose batch size was never observed still
+# rendered a verdict -- and the batch size is the mechanism under measurement.
+for field in batch_size_observed max_batch_bytes_observed wait_timeout_ms_observed; do
+  mkfixture "$TMP/none-$field" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/none-$field/manifest.json" "$field" <<'PYINNER'
+import json
+import sys
+
+path, field = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    entry[field] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/none-$field"
+  check_verdict "a session where $field was never observed" UNMEASURED 7 single-stream
+  check_cause "no observation of $field" startup-unobserved
+done
 
 echo
 echo "-- the analyzer enforces the DOCUMENTED floors, not the recorded ones --"
