@@ -417,7 +417,7 @@ _ti=$(_key_token tree-integrity "$BLOCK")
 case "$_ti" in
   PASS) ;;
   FAIL)
-    notpass "tree-integrity FAIL — the gate declared this run NON-CERTIFYING (a mid-run tree mutation invalidates EVERY component in the block, #2926), so this component's own PASS line cannot be read as a pass" ;;
+    notpass "tree-integrity FAIL — the gate declared this run NON-CERTIFYING (a mid-run tree mutation invalidates EVERY component in the block, #2926), so NO component verdict in this block can be read as a pass — including this one, whose own line this check deliberately has not read" ;;
   SKIP|PENDING)
     cnm "tree-integrity '$_ti' — the tree check never ran (SKIP) or the run never reached its terminal emit (PENDING), so tree stability is UNMEASURED. Deliberately NOT a FAIL: an unmeasured check is not a failed one" ;;
   *)
@@ -433,15 +433,28 @@ if [ "$_n_si" -eq 1 ]; then
   # its mere PRESENCE is the non-certifying signal. An unexpected token is still not a pass.
   _si=$(_key_token summary-integrity "$BLOCK")
   case "$_si" in
-    FAIL) notpass "summary-integrity FAIL — a mid-run summary clobber was detected (#2874), so the block is non-certifying and this component's PASS line cannot be read as a pass" ;;
+    FAIL) notpass "summary-integrity FAIL — a mid-run summary clobber was detected (#2874), so the block is non-certifying and NO component verdict in it can be read as a pass — including this one, whose own line this check deliberately has not read" ;;
     *)    cnm "summary-integrity token '${_si:-<unreadable>}' is unrecognised; the gate emits this line only on detection, so its presence is never benign" ;;
   esac
 fi
 
-# Run context ONLY (never the verdict): the terminal token, rendered so it can never be
-# grepped as a gate verdict.
+# THE READER GAVE US COMPLETION; THE MODE FILTER IS OURS (#3750 review round 4, F1).
+# gate-liveness.sh's terminal set is MODE-INVARIANT BY DESIGN — it answers "is there a
+# verdict", not "for which mode" — so it accepts `--delta`'s ERROR and REFUSED. THE READER
+# IS RIGHT TO BE MODE-INVARIANT AND THIS SCRIPT IS RIGHT TO BE MODE-SPECIFIC: that is the
+# same completion/verdict division one level down, and delegating the first does not
+# delegate the second. So the token is required to be IN the set this script PUBLISHES for
+# `--mode only` (see the three grammars in the header) — keyed on the AFFIRMATIVE value,
+# never on "not one of the bad ones", which is the one rule this whole script is built on.
+#
+# Probably unreachable today: the gate emits ERROR/REFUSED only from `run_delta`, whose DELTA
+# opener the mode check above already refuses. Enforced anyway — "unreachable today" is an
+# argument someone has to re-derive, not a property the code holds.
 RUN_TOKEN=$(_key_token RESULT "$BLOCK")
-[ -n "$RUN_TOKEN" ] || RUN_TOKEN="unreadable"
+case "$RUN_TOKEN" in
+  PASS|FAIL|PARTIAL) ;;
+  *) cnm "run-token-outside-mode-set '${RUN_TOKEN:-<unreadable>}'; --mode only accepts PASS|FAIL|PARTIAL, the set this script publishes for that mode. ERROR and REFUSED are --delta-only terminal tokens, which the shared completion reader accepts because ITS set is mode-invariant by design — filtering it for this mode is this script's job, not the reader's" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # ASSERTION 2 — THE VERDICT, from the component's OWN line, inside the block.
@@ -459,7 +472,29 @@ RUN_TOKEN=$(_key_token RESULT "$BLOCK")
 # be discarded in a subshell (#3400), and grep's status is CHECKED: rc >= 2 is a failed
 # measurement, not "no match".
 # ---------------------------------------------------------------------------
-_COMP_LINE_RE="^${COMP_RE}: +[A-Za-z][A-Za-z-]* \([0-9]+s\)"
+# FULLY ANCHORED, AND AN ALTERNATION OVER THE **TWO** REAL EMITTED SHAPES.
+# Validating only a PREFIX accepted `fmt: PASS (1s) arbitrary text` as a genuine component
+# verdict (F2). Anchored at BOTH ends now — and the alternation is load-bearing, so do NOT
+# "tidy" it into one branch:
+#
+#   annotated    agent-gate.sh's `_fm_summary_line`:        printf '%-18s %s (%s)  %s'
+#                -> TWO spaces after the duration, then a non-empty annotation
+#   unannotated  agent-gate.sh's `_tree_boundary_meta_lines`: printf '%-18s %s (%ss)\n'
+#                -> NOTHING after the duration; this is the shape a tree-integrity
+#                   BOUNDARY block carries, and it is a legitimate component line
+#
+# Requiring the annotation — the obvious tightening, since `_fm_summary_line` always emits
+# one — assumes a single emitter and would REJECT every boundary-emitted component line: a
+# false FAIL on correct input, and a tool that reds on correct input is the tool lanes learn
+# to waive. The suite's 17.3 is the regression guard for exactly that, and 17.5 asserts BY
+# DERIVATION that the shipped gate still has exactly these two formats, so a THIRD emitter
+# reds rather than silently matching neither branch.
+#
+# DECLARED RESIDUAL: the annotation is FREE TEXT containing spaces (`[test cqlite-core
+# --features cli-helpers]`), so garbage APPENDED to an annotation is indistinguishable from
+# annotation content and the annotated branch must stay permissive after the two spaces.
+# What the anchoring closes is the SINGLE-space tail, which no emitter can produce.
+_COMP_LINE_RE="^${COMP_RE}: +[A-Za-z][A-Za-z-]* \([0-9]+s\)(  .+)?$"
 COMP_LINES=$(grep -E "$_COMP_LINE_RE" "$BLOCK"); _grc=$?
 if [ "$_grc" -ge 2 ]; then
   cnm "component-scan-failed; the scan for this component's line failed (rc=$_grc), and a failed measurement is never reported as an absence"

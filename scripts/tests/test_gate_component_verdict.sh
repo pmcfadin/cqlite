@@ -842,7 +842,9 @@ expect "16.3 control: a full-gate PASS token is IN --only's set and still reache
 # PUBLISHES for this mode, read out of the shipped script at run time (the 15.10 idiom), so
 # a token added to one and not the other reds instead of drifting.
 _only_pub=$(printf '%s' "$_pub_only" | sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p')
-_only_code=$(sed -n 's/^[[:space:]]*\(PASS|FAIL|PARTIAL\))[[:space:]]*$/\1/p' "$VERDICT" | head -1)
+# The ENFORCING case arm, as it is really written (`  PASS|FAIL|PARTIAL) ;;`): the trailing
+# `;;` is part of the arm, so the extractor must allow it rather than require end-of-line.
+_only_code=$(sed -n 's/^[[:space:]]*\([A-Z|]\{1,\}\))[[:space:]]*;;[[:space:]]*$/\1/p' "$VERDICT" | grep -m1 '^PASS|')
 if [ -n "$_only_pub" ] && [ "$_only_pub" = "$_only_code" ]; then
   ok "16.4 the ENFORCED --only token set is DERIVED-equal to the one the header publishes"
 else
@@ -908,11 +910,13 @@ fi
 # from memory is a floor that silently drifts low. Round 2 moved section 13 from 2 to 4
 # (the taxonomy descope replaced one code-taxonomy case with four liveness-silence ones)
 # and added section 14, so the total rose 63 -> 67; round 3 added section 15 (the third
-# per-mode completion grammar), 67 -> 78. Raised DELIBERATELY each time: the total is a
+# per-mode completion grammar), 67 -> 78; round 4 added sections 16 (the mode filter over
+# the reader's token) and 17 (the anchored two-emitter line shape), 78 -> 87. Raised
+# DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11"
-FLOOR=78
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11 16:4 17:5"
+FLOOR=87
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"
