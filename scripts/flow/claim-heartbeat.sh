@@ -254,30 +254,26 @@
 #   The subject set is `refs/lane-claims/<machine>/<lane-id>` plus the legacy
 #   `refs/machine-claims/<machine>`, and the ONLY writer of either in this tree is
 #   `scripts/local/worker-supervisor.sh` (through `stamp`). So lane-granular dead-lane
-#   detection APPLIES TO SUPERVISOR FLEETS ONLY. On a supervisor-less `/drive-issue` fleet
-#   the subject set is EMPTY — measured on all three boxes: lane-claims=0,
-#   machine-claims=0, production supervisors ZERO — so this command reports nothing and
-#   exits 1. That reinforces the rule above rather than softening it: EXIT 1 MEANS
-#   "NOTHING WAS REPORTED", NEVER a clean bill of health (#3467). On such a fleet lane liveness
-#   rests on the coordination sweep plus TWO BOARD SIGNATURES THAT MEAN DIFFERENT THINGS AND MUST
-#   NOT BE MERGED — and NEITHER signature is a verdict. Both are prompts to look. Four rounds of review
-#   each replaced one definite label with another (jobs 38, 40, 41 on (b); job 52 on (a)), so neither
-#   shape is classified any more. Wording below is shared verbatim with
-#   docs/development/fleet-runbook.md so the two cannot drift.
-#   (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS NOT A VERDICT EITHER: /drive-issue's
-#   park-and-resume protocol produces exactly that shape for HEALTHY work — a lane blocked on a lead or
-#   owner answer keeps its claim, arms a `drive-issue-<N>` cron, refreshes its heartbeat and ends its turn.
-#   It is a dead-lane CANDIDATE only if, in addition, there is no active `drive-issue-<N>` cron, no waiting
-#   marker (`.drive-issue-state.md`, or an open `coord:*` request on the issue), and the heartbeat and
-#   branch activity are stale. Without those checks a parked lane and a dead one are indistinguishable, and
-#   adopting the claim takes it out from under a live lane that is waiting for an answer.
-#   (b) `Ready` + pushed branch + NO claim ref is AMBIGUOUS and is deliberately NOT classified here: the
-#   same shape fits parked-by-design work, the #3436 unclaimed-work case, and a lane that died before
-#   claiming. Nothing distinguishes them mechanically today, so check the branch's last commit time and
-#   whether a session is driving it; it is not by itself evidence of a lane death, and the rule is to
-#   treat the signature as a prompt to look, never as a verdict.
-#   All of these are operating mechanisms, NOT committed commands. See
-#   docs/development/fleet-runbook.md.
+#   detection is a SUPERVISOR-FLEET capability.
+#
+#   WHAT WAS MEASURED, AND WHAT IT DOES NOT IMPLY (roborev job 58). On 2026-09-01 this fleet's
+#   three boxes each reported `lane-claims=0 machine-claims=0` with ZERO production supervisors,
+#   so `dead-lanes` had no subject and exited 1. That is a POINT-IN-TIME MEASUREMENT OF THIS
+#   FLEET, not a property of supervisor-less fleets in general: refs PERSIST after supervisors
+#   stop, the legacy per-machine refs are deliberately still read so pre-ruling ones drain, and
+#   `stamp` is a documented subcommand anyone can call directly — so a migrated, previously
+#   supervised or manually stamped fleet can legitimately produce rows. Either way the
+#   operational conclusion is unchanged: EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill
+#   of health (#3467).
+#
+#   WHAT LANE LIVENESS RESTS ON HERE — the coordination sweep plus TWO BOARD SIGNATURES, NEITHER
+#   OF WHICH IS A VERDICT; both are prompts to look. THE CANONICAL STATEMENT OF BOTH SIGNATURES —
+#   what each shape is, why neither is a verdict, and the checks that turn signature (a) into an
+#   actionable candidate — LIVES IN ONE PLACE: docs/development/fleet-runbook.md, section "Lane
+#   liveness on a supervisor-less `/drive-issue` fleet". READ IT THERE; it is deliberately NOT
+#   restated here. Five review rounds (jobs 38, 40, 41, 47, 55) were all propagation failures of
+#   one duplicated statement, so the duplication was removed rather than guarded. These are
+#   operating mechanisms, NOT committed commands.
 #
 #   THE TWO POPULATED NAMESPACES ARE DELIBERATELY NOT READ, measured rather than priced
 #   from the shape (#3548). Do NOT "fix" the empty subject set by pointing this command at

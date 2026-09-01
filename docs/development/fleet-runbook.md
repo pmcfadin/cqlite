@@ -881,10 +881,9 @@ machine + heartbeat age (issue #2089). Interpretation:
   team) — pickup is *resume that branch*, never a fresh claim. **This exact signal is AMBIGUOUS and the
   ambiguity is unresolved**: #3436 reads *Ready + pushed branch + no claim ref* as UNCLAIMED WORK (a
   session driving an issue it never claimed), and this bullet reads the same shape as benign. Neither
-  reading is a lane-DEATH verdict, and neither is signature (a) (a HELD claim ref with no live session),
-  which is a dead-lane **candidate** only with no active `drive-issue-<N>` cron, no waiting marker and
-  stale heartbeat/branch activity — see *Lane liveness on a supervisor-less `/drive-issue` fleet* below.
-  Nothing mechanical tells these apart today — check the branch's last commit
+  reading is a lane-DEATH verdict; for what the two board signatures do and do not establish, read the
+  one canonical statement in *Lane liveness on a supervisor-less `/drive-issue` fleet* below. Nothing
+  mechanical tells these apart today — check the branch's last commit
   time and whether a session is actually driving it before deciding
 
 ## Recovery scenarios (all safe by construction)
@@ -900,7 +899,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 | `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 | **SSH accepts TCP but sends no banner** (from inside the VPC) | **Check `dmesg` for an OOM kill BEFORE concluding the instance is broken** — see the diagnostic order below. This is a memory symptom far more often than a broken box, and a soft reboot may be silently ignored. |
-| A lane vanished — worktree clean, claim held, nothing reported | **On a `/drive-issue` fleet, `dead-lanes` is a DEAD END — read *Lane liveness on a supervisor-less `/drive-issue` fleet* below first (#3548).** Its subject set is `refs/lane-claims/*` (+ legacy `refs/machine-claims/*`), written by `worker-supervisor.sh` ALONE, and this fleet runs no supervisors: measured `lane-claims=0` on all three boxes, so the command reports nothing and exits 1 — which means *nothing was reported*, never *nothing is dead*. What to do instead: check `dmesg` for an OOM kill (diagnostic order below), then reconcile the board against the branch. **Two DIFFERENT signatures that mean different things — and NEITHER signature is a verdict; both are prompts to look. Do not conflate them.** (a) **Held claim ref + no live session** — a `Ready`/`In Progress` item with a pushed branch, a HELD `refs/claims/issue-<N>` and nothing driving it — is the shape this row is about, but it is **NOT a verdict either**: `/drive-issue`'s park-and-resume produces it for HEALTHY work (a lane blocked on an answer keeps its claim, arms a `drive-issue-<N>` cron, refreshes its heartbeat and ends its turn). It is a dead-lane **candidate** only if there is also no active `drive-issue-<N>` cron, no waiting marker (`.drive-issue-state.md` or an open `coord:*` request), and stale heartbeat/branch activity — otherwise you would adopt a claim out from under a live waiting lane. (b) **NO claim ref + pushed branch + `Ready`** is **AMBIGUOUS and is not classified**: parked-by-design work, #3436's unclaimed-work case (its subject is that the claim ref cannot stop a session that ignores it) and a lane that died BEFORE it claimed all look identical, and nothing separates them mechanically — check the branch's last commit time and whether a session is driving it, and treat it as **a prompt to look, never as a verdict** (full statement in *Lane liveness on a supervisor-less `/drive-issue` fleet* below). So (b) is neither a lane-death verdict nor an all-clear. Signature (a) is not #3436's, and it is not a verdict either — both signatures are prompts to look. **On a SUPERVISOR fleet** the command is the right tool: `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. **Exit 3 = a dead lane was found; exit 1 = none was found.** This slice is positive-detection only and **never exits 0** (#3393 split): act on 3, never read 1 as a clean bill of health. Per-lane refs do make a sound clean verdict possible — a surviving lane's stamp no longer overwrites a dead sibling's — but it is tracked separately. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
+| A lane vanished — worktree clean, claim held, nothing reported | **On a `/drive-issue` fleet, `dead-lanes` is a DEAD END — read *Lane liveness on a supervisor-less `/drive-issue` fleet* below first (#3548).** Its subject set is `refs/lane-claims/*` (+ legacy `refs/machine-claims/*`), written by `worker-supervisor.sh` ALONE. Measured on this fleet on 2026-09-01: `lane-claims=0` on all three boxes, no production supervisors, so the command had no subject and exited 1 — which means *nothing was reported*, never *nothing is dead*. (Leftover refs from a previously supervised box, or ones created directly with `stamp`, can still produce rows — see the section below.) What to do instead: check `dmesg` for an OOM kill (diagnostic order below), then reconcile the board against the branch using **the two board signatures, NEITHER of which is a verdict** — stated in full, once, in *Lane liveness on a supervisor-less `/drive-issue` fleet* below, and deliberately not restated here. **On a SUPERVISOR fleet** the command is the right tool: `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. **Exit 3 = a dead lane was found; exit 1 = none was found.** This slice is positive-detection only and **never exits 0** (#3393 split): act on 3, never read 1 as a clean bill of health. Per-lane refs do make a sound clean verdict possible — a surviving lane's stamp no longer overwrites a dead sibling's — but it is tracked separately. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
 
 
 ### Lane liveness on a supervisor-less `/drive-issue` fleet (#3548)
@@ -908,12 +907,23 @@ machine + heartbeat age (issue #2089). Interpretation:
 **Lane-granular dead-lane detection does not run on this fleet, and we say so rather than pretend
 otherwise** — owner ruling 2026-09-01 on #3548 (option C, descope and document; completes #3393).
 
+**This section is the CANONICAL statement of the two board signatures.** Every other site — the
+`dead-lanes` `--help`, the recovery table above, `CLAUDE.md`, the website delivery-pipeline page —
+carries at most a one-line summary and a pointer here. Five review rounds on #3548 (jobs 38, 40, 41,
+47, 55) were all propagation failures of one duplicated statement, so the duplication was removed
+rather than guarded. Edit the signatures HERE and nowhere else.
+
 Why: `dead-lanes` enumerates `refs/lane-claims/<machine>/<lane-id>` plus the legacy
 `refs/machine-claims/<machine>`, and **the only writer of either in the whole tree is
-`scripts/local/worker-supervisor.sh`**. This fleet runs `/drive-issue` lanes, not supervisors —
-measured on all three boxes: `lane-claims=0 machine-claims=0`, production supervisors ZERO, while
-`claims=6 heartbeats=20`. So the detector answers about the empty set. **Exit 1 means "nothing was
-reported", never a clean bill of health.**
+`scripts/local/worker-supervisor.sh`**. This fleet runs `/drive-issue` lanes, not supervisors.
+**Measured on 2026-09-01, on all three boxes:** `lane-claims=0 machine-claims=0`, production
+supervisors ZERO, while `claims=6 heartbeats=20` — so the detector had no subject and exited 1.
+**That is a point-in-time measurement of THIS fleet, not a property of supervisor-less fleets in
+general:** refs persist after supervisors stop, the legacy per-machine refs are deliberately still
+read so pre-ruling ones drain, and `stamp` is a documented subcommand that can create a lane ref
+directly — so a migrated, previously supervised or manually stamped fleet can legitimately produce
+rows. The operational conclusion holds either way: **exit 1 means "nothing was reported", never a
+clean bill of health.**
 
 The two populated namespaces were **measured** and rejected as substitutes, so do not expect a
 read-side "fix":
@@ -965,9 +975,8 @@ something in `scripts/` actually implements it.
 being performed without a claim**. That conflict is real and unresolved: nothing mechanical
 distinguishes them, so an operator has to check the branch's last commit time and whether a session is
 driving it. Until #3436 lands a mechanism, treat that signature as a prompt to look, never as a verdict
-— and note that neither reading makes it a lane-death verdict. Signature (a) is where a suspected death
-is investigated, but it is a **candidate** on the same terms: only with no active `drive-issue-<N>` cron,
-no waiting marker and stale heartbeat/branch activity.
+— and note that neither reading makes it a lane-death verdict. Signature (a), stated in full in item 2
+above, is where a suspected death is investigated.
 
 **Known non-lane artifacts a naive lane-liveness scan calls dead (#3548).** Measured, from the ad-hoc
 `lane-watchdog.sh` — **not** from `dead-lanes`, which enumerates only claim refs and therefore cannot
