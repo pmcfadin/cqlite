@@ -90,20 +90,24 @@ enum Expect {
 ///
 /// # What this case deliberately does NOT assert, and why
 ///
-///   * **`duration`.** MEASURED DIVERGENCE THAT THE CENSUS DOES NOT DECLARE, so it
-///     is reported rather than excused: Cassandra's `Duration.toString()`
+///   * **`duration`.** A MEASURED, DECLARED MATERIAL DIVERGENCE — reported by both
+///     sides, excused by neither: Cassandra's `Duration.toString()`
 ///     decomposes into `y/mo/w/d/h/m/s/ms/us/ns` — the committed
 ///     `test_basic.simple_table` golden carries `"12h58m22s"` and `"1h20m44s"` —
 ///     while `ValueFormatter::format_duration` prints months/days/NANOS only, i.e.
 ///     `46702000000000ns` for that same value. Same value, materially different
-///     text, and the census's "`duration` … spelled by the same function on both
-///     sides" is false for it. The repository already records the same divergence
-///     for the sibling #1490 lane
-///     (`tests/support/parquet_parity/spelling.rs`, module doc). No case is added
-///     here in either direction until the census is corrected: an exception entry
-///     would document the defect as itself, and a `Same` case would simply fail.
-///     No committed fixture in THIS lane's case list carries a `duration` column,
-///     so nothing is suppressed by leaving it out.
+///     text. The repository already records the same divergence for the sibling
+///     #1490 lane (`tests/support/parquet_parity/spelling.rs`, module doc). The
+///     census that this differential measures NOW DECLARES it, as a MATERIAL
+///     divergence (`stringified_csv_text`'s doc in
+///     `tests/support/golden_csv_container.rs`), so
+///     the two no longer disagree — and no case is added here even so, in either
+///     direction: an [`Expect::Narrowed`] entry would document a DEFECT as itself
+///     (that variant is for a declared narrowing the value comparison closes, and
+///     nothing closes this one), and an [`Expect::Same`] case would simply fail.
+///     It is withheld pending the `format_duration` follow-up, not because the
+///     divergence is in doubt. No committed fixture in THIS lane's case list
+///     carries a `duration` column, so nothing is suppressed by leaving it out.
 ///   * **a NON-FINITE `double`.** `DoubleType.toJSONString` writes the literal
 ///     `null` at a natural position (see
 ///     `gap::Divergence::NonFiniteFloatRendersAsJsonNull`), so the golden has no

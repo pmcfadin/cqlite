@@ -663,7 +663,7 @@ fn scalar_csv_text(scalar: &Value, ty: Option<&CqlType>, kinding: Kinding) -> St
 /// `cqlite_core::util::value_fmt::ValueFormatter::format_value`, which is
 /// legitimate for the same reason [`member_can_render_empty`] states at length.
 ///
-/// # Why only `blob`
+/// # Why only `blob` is TRANSLATED
 ///
 /// Walked over every type that can occupy a stringified position (a partition-key
 /// component, a multicell set's element, a map key). `getString` is
@@ -683,13 +683,25 @@ fn scalar_csv_text(scalar: &Value, ty: Option<&CqlType>, kinding: Kinding) -> St
 ///     narrowing and this function does not close it; it cannot move a `, `, a
 ///     `: ` (the pattern's colons are digit-flanked) or a bracket, and neither
 ///     spelling is ever empty, so the structural question is unaffected;
+///   * **`duration` — DIFFERS, and MATERIALLY.** MEASURED, not reasoned:
+///     Cassandra's `Duration.toString()` decomposes into `y/mo/w/d/h/m/s/ms/us/ns`
+///     — the committed `test_basic.simple_table` golden carries `"12h58m22s"` and
+///     `"1h20m44s"` — while `ValueFormatter::format_duration` prints
+///     months/days/NANOS only, i.e. `46702000000000ns` for that same value. Same
+///     value, materially different text. This function does NOT translate it, so a
+///     `duration` at a stringified position is compared untranslated and will
+///     diverge. The sibling #1490 lane records the same divergence
+///     (`tests/support/parquet_parity/spelling.rs`, module doc). Correcting
+///     `format_duration` is a follow-up, not this lane's business; what belongs
+///     here is that the census says so rather than claiming a match it does not
+///     have;
 ///   * **every other type — IDENTICAL text.** `boolean` is `Boolean.toString()` on
 ///     both sides; the integer family is `String.valueOf` / `BigInteger.toString(10)`
 ///     against `to_string()`; `float`/`double`/`decimal` differ only in the
 ///     narrowings this lane already declares (trailing zeros, exponent form), which
 ///     like the timestamp cannot carry a separator, a bracket or an empty spelling;
-///     `text`/`varchar`/`ascii`, `uuid`/`timeuuid`, `date`, `time`, `duration` and
-///     `inet` are spelled by the same function on both sides.
+///     `text`/`varchar`/`ascii`, `uuid`/`timeuuid`, `date`, `time` and `inet` are
+///     spelled by the same function on both sides.
 ///
 /// A CONTAINER type cannot be reached: this is called for a scalar golden only,
 /// and a frozen container at a stringified position is the case [`Kinding`] names

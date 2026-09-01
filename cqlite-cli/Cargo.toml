@@ -56,12 +56,15 @@ serde = { workspace = true }
 # carries the already-rendered digits verbatim, which no `serde_json::Number` can
 # hold. Oracle: `cassandra-5.0.8` `DecimalType.toJSONString:314-317` and
 # `IntegerType.toJSONString:488-491` both return an unquoted `toString()`.
-# It is purely ADDITIVE: it adds a type and changes nothing about `Number`, so no
-# other serde_json user in this crate is affected. `arbitrary_precision` is the
-# other way to carry those digits and is deliberately NOT enabled, for the reason
-# already recorded on the dev-dependency below: it changes `Number`'s
-# representation, equality and serialization for EVERY serde_json user in this
-# crate — including the ~20 test files that assert on serialized JSON.
+# It is purely ADDITIVE: it adds a type and changes nothing about `Number`. Cargo
+# UNIFIES features across the dependency graph, so enabling it here turns it on
+# for every serde_json user in the build, not just this crate — which is harmless
+# precisely because it is additive. `arbitrary_precision` is the other way to
+# carry those digits and is deliberately NOT enabled, for the reason already
+# recorded on the dev-dependency below, and unification is exactly why: it changes
+# `Number`'s representation, equality and serialization for EVERY serde_json user
+# in the build — including the ~20 test files in this crate that assert on
+# serialized JSON.
 serde_json = { workspace = true, features = ["raw_value"] }
 
 # Table formatting

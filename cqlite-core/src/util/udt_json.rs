@@ -2,8 +2,9 @@
 //!
 //! # Why this exists (issue #3629, parent class #3504)
 //!
-//! Two JSON renderers — `cqlite-cli`'s `JSONWriter::value_to_json` and
-//! `cqlite-core`'s `impl ToJson for Value` — each used to `insert("_type", …)`
+//! Two JSON renderers — `cqlite-cli`'s per-cell JSON rendering (then
+//! `JSONWriter::value_to_json`, now `JsonCell::from_value`) and `cqlite-core`'s
+//! `impl ToJson for Value` — each used to `insert("_type", …)`
 //! into the SAME `serde_json` object that then received the UDT's own declared
 //! fields. That makes type identity (our control data) and the user's field names
 //! (their data) share ONE channel, which is a defect twice over:
@@ -38,8 +39,12 @@
 //! The two callers deliberately render field VALUES by DIFFERENT rules — 11 arms
 //! differ (blobs/uuids/inet as CLI hex vs core base64, timestamps as human
 //! strings vs raw integers, maps as `[{key,value}]` vs a Display-keyed object).
-//! Converging the whole writer would be wrong, so only the UDT arm is shared and
-//! each caller keeps its own field-value renderer.
+//! `decimal` and `varint` are two of those 11 and were divergent BEFORE #3644 (a
+//! quoted display string against core's `{scale, unscaled: <base64>}` and a
+//! base64 string); #3644 changed the KIND of the CLI side — an unquoted JSON
+//! number — without changing the count. Converging the whole writer would be
+//! wrong, so only the UDT arm is shared and each caller keeps its own field-value
+//! renderer.
 //!
 //! Call sites (both must stay on this rule):
 //! * `cqlite-cli/src/output/json_cell.rs` — `JsonCell::from_value`, through
