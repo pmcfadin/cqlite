@@ -75,18 +75,43 @@ corpus. Two reasons, and the second is the load-bearing one:
    documenting, not regressing.
 
 The skip-set must be stated **identically in four places** (policy + three
-harnesses). Done here:
+harnesses), and all four are done:
 
 - [x] `test-data/corpus-coverage-policy.md` — skip-set table row
 - [x] `test-data/scripts/smoke-test-all-tables.sh` — `SKIP_KEYSPACE_NAMES` + reason
-- [ ] `bindings/python/tests/corpus.py` — `SKIP_KEYSPACES`
-- [ ] `bindings/node/__test__/parity-utils.js` — `SKIP_KEYSPACES`
+- [x] `bindings/python/tests/corpus.py` — `SKIP_KEYSPACES`
+- [x] `bindings/node/__test__/parity-utils.js` — `SKIP_KEYSPACES`
 
-**The two unchecked boxes are outstanding and they are gate-affecting**: until
-they are added, `python-bindings` and `node-bindings` red on
-`test_comparator_order` as an unclassified committed keyspace. They were left to
-the issue owner deliberately — `bindings/**` is outside the fixture-generation
-mandate — and are one map entry each with the reason string from the policy row.
+### The enrollment is MEASURED, not assumed — and the before/after is the evidence
+
+The question "does committing a keyspace here actually red the enumeration
+guards, or is that only plausible?" was answered by running the guards' own
+assertion bodies against the same inputs they use, once **before** the binding
+entries existed and once **after**:
+
+| guard | root | before enrollment | after enrollment |
+|---|---|---|---|
+| `corpus.py::unclassified_keyspaces` (asserted by `test_parity.py::TestCoverageSummary::test_every_discovered_keyspace_is_classified`) | checkout `test-data/datasets/sstables` | **RED** — `['test_comparator_order']` | GREEN — `[]` |
+| same | `/data/datasets/sstables` (fleet corpus) | GREEN — keyspace not present there | GREEN |
+| `parity-utils.js::unclassifiedKeyspaces` (asserted by `parity.test.js`) | both roots | n/a (entry already present when measured) | GREEN — `[]` |
+
+Two facts worth keeping:
+
+1. **The RED is real, and it is the DEFAULT.** `scripts/agent-gate.sh:928` resolves
+   `CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"`,
+   so on any box that does not export the variable the gate points the binding
+   suites at **this checkout** — where the keyspace is present with 10 tracked
+   files. `corpus.py`'s zero-tracked-files exemption (#1319) therefore does NOT
+   apply to it. Without the two binding entries this fixture would be a latent,
+   environment-dependent red: green wherever `CQLITE_DATASETS_ROOT` names a
+   corpus that lacks the keyspace, red wherever it does not.
+2. **The measurement is the guard's assertion body, not the full suite.**
+   `bindings/python/tests/conftest.py` imports `cqlite`, and the Node suite
+   imports the native module, so running the real pytest/jest cases needs the
+   maturin/napi build this lane does not have. The predicates were evaluated
+   directly, with `DATASETS`/`global.testPaths.SSTABLES_DIR` computed exactly as
+   `conftest.py` and `setup.js` compute them, and those two lines are the entire
+   content of both tests.
 
 ## Exactly how it was produced
 
