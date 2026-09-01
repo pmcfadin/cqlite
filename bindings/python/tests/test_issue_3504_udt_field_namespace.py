@@ -43,6 +43,7 @@ fixtures are `must_run`).
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -794,6 +795,44 @@ def _probe_stream(value: Any) -> str:
     return str(value)
 
 
+def _probe_completion_failure(proc: Any, out_path: Path) -> str | None:
+    """Why the probe did not complete, as a message naming the cause — or `None`.
+
+    Mirrors the Node side's state set exactly (`probeCompletionFailure`), so the
+    two bindings cannot report a different set of causes for the same probe. The
+    two states that arrive as EXCEPTIONS rather than a result — a timeout and an
+    unspawnable child — are named at the call site; the three visible in a
+    completed `CompletedProcess` are named here.
+    """
+    detail = (
+        f"--- child stdout ---\n{_probe_stream(proc.stdout)}\n"
+        f"--- child stderr ---\n{_probe_stream(proc.stderr)}"
+    )
+    if proc.returncode < 0:
+        # A negative returncode IS the signal number negated; `Signals` names it
+        # when the platform knows it, and an unknown number is reported as-is
+        # rather than guessed at.
+        try:
+            killed_by = signal.Signals(-proc.returncode).name
+        except ValueError:
+            killed_by = f"signal {-proc.returncode}"
+        return (
+            f"resolution probe was KILLED by {killed_by} "
+            f"(bound {_PROBE_TIMEOUT_SECS}s)\n{detail}"
+        )
+    if proc.returncode != 0:
+        return (
+            f"resolution probe exited {proc.returncode} "
+            f"(bound {_PROBE_TIMEOUT_SECS}s)\n{detail}"
+        )
+    if not out_path.is_file():
+        return (
+            f"resolution probe exited 0 but wrote no payload to {out_path} — nothing "
+            f"was measured, so no path comparison below would mean anything\n{detail}"
+        )
+    return None
+
+
 # The child-process probe for the behavioural half below. It re-evaluates THIS
 # module — and `conftest` — from scratch in a fresh interpreter whose
 # `CQLITE_DATASETS_ROOT` points at an empty directory, then records BOTH the
@@ -820,15 +859,30 @@ payload = {
     # The POSITIVE CONTROL pair: what the child actually saw, and a constant
     # whose documented contract IS to follow it.
     "env_seen": os.environ.get("CQLITE_DATASETS_ROOT"),
-    "control_env_routed": str(conftest.DATASETS),
-    # The INVARIANT: this suite's own resolved constants.
+    # CONTROL: env-routed BY CONTRACT — the positive control, never a consumer.
+    "control_env_routed": str(conftest.DATASETS),  # CONTROL
+    # The INVARIANT: this suite's own resolved constants. `SCHEMAS`/`SCHEMA` are
+    # deliberately NOT recorded: AC5 is about the DATASETS root, and the schemas
+    # root is a separate contract that the Node side legitimately lets
+    # `CQLITE_SCHEMAS_ROOT` relocate — pinning it here would certify Python's
+    # non-honouring as correct and would red, with a fixture-resolution message,
+    # the day `conftest` gains the #3148 override.
     "fixture_root": str(module.FIXTURE_ROOT),
     "parity_facts": str(module.PARITY_FACTS),
-    "schemas": str(module.SCHEMAS),
-    "schema": str(module.SCHEMA),
     "row_ids": None,
     "read_error": None,
+    "parity_facts_udts": None,
+    "parity_facts_error": None,
 }
+
+# AC5 covers the parity-facts FILE as much as the corpus, so the probe OPENS it
+# rather than only recording its path — otherwise that half is path-equality
+# only while the corpus half is path-equality PLUS a read-back.
+try:
+    with open(module.PARITY_FACTS, encoding="utf-8") as handle:
+        payload["parity_facts_udts"] = len(json.load(handle)["udts"])
+except Exception as exc:  # noqa: BLE001 -- reported to the parent, not handled
+    payload["parity_facts_error"] = f"{type(exc).__name__}: {exc}"
 
 # The read is attempted AFTER the paths are recorded, and its failure is
 # REPORTED rather than raised: an env-routed resolution makes the open fail, and
@@ -894,21 +948,36 @@ def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(tmp_
     import subprocess
     import sys
 
+    # FIRST, and before anything can be misattributed: a checkout missing the
+    # committed fixture must fail as a BROKEN CHECKOUT, naming the absent
+    # artifact. Without this the probe's read failure below would be reported
+    # under a corpus-less-root heading it has not established — the Node case
+    # gets this from the `beforeAll` that its `describe` runs.
+    _assert_fixture_present()
+
     # UNCANONICALIZED, to match `conftest.PROJECT_ROOT`'s own derivation.
     repo_root = Path(__file__).parents[3]
     expected_root = repo_root / "test-data" / "fixtures" / "issue_3504"
     expected_facts = expected_root / "binding-parity-facts.json"
-    expected_schemas = repo_root / "test-data" / "schemas"
-    expected_schema = expected_schemas / "issue-3504-udt-collision.cql"
 
-    # Half 1 — the resolved constants ARE the checkout-derived paths.
-    assert FIXTURE_ROOT == expected_root
-    assert PARITY_FACTS == expected_facts
-    assert SCHEMAS == expected_schemas
-    assert SCHEMA == expected_schema
+    # The AMBIENT value, recorded in every failure below. Half 1's discriminating
+    # power depends on it: SET (as every gate run has it) and an env-routed
+    # resolution reds on the equality alone; UNSET (the usual local run) and only
+    # Half 2 can see it. A maintainer reading a failure needs to know which run
+    # they are looking at, and neither state is the "right" one to run under.
+    ambient = os.environ.get("CQLITE_DATASETS_ROOT")
+    ambient_note = (
+        "ambient CQLITE_DATASETS_ROOT: "
+        f"{ambient if ambient is not None else '(unset)'}"
+    )
+
+    # Half 1 — the resolved constants ARE the checkout-derived paths. SCHEMAS and
+    # SCHEMA are deliberately NOT pinned here (see the probe payload comment).
+    assert FIXTURE_ROOT == expected_root, ambient_note
+    assert PARITY_FACTS == expected_facts, ambient_note
     # ...and equal canonicalized too, both sides canonicalized.
-    assert FIXTURE_ROOT.resolve() == expected_root.resolve()
-    assert PARITY_FACTS.resolve() == expected_facts.resolve()
+    assert FIXTURE_ROOT.resolve() == expected_root.resolve(), ambient_note
+    assert PARITY_FACTS.resolve() == expected_facts.resolve(), ambient_note
 
     # Half 2 — a fresh interpreter under a datasets root holding no corpus.
     bogus = tmp_path / "no-corpus-here"
@@ -949,43 +1018,134 @@ def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(tmp_
             f"resolution probe TIMED OUT after {_PROBE_TIMEOUT_SECS}s. It normally "
             "completes in well under a second, so this is a hang, not a slow box — "
             "nothing about path resolution was measured.\n"
-            f"--- stdout ---\n{_probe_stream(expired.stdout)}\n"
-            f"--- stderr ---\n{_probe_stream(expired.stderr)}",
+            f"{ambient_note}\n"
+            f"--- child stdout ---\n{_probe_stream(expired.stdout)}\n"
+            f"--- child stderr ---\n{_probe_stream(expired.stderr)}",
             pytrace=False,
         )
-    assert proc.returncode == 0, (
-        f"resolution probe exited {proc.returncode} (bound {_PROBE_TIMEOUT_SECS}s)\n"
-        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
-    )
-    assert out_path.is_file(), (
-        f"resolution probe exited 0 but wrote no payload to {out_path} — nothing was "
-        "measured, so no path comparison below would mean anything\n"
-        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
-    )
+    except OSError as spawn_error:
+        # The unspawnable state, which used to surface as a raw traceback.
+        pytest.fail(
+            "resolution probe could not be spawned: "
+            f"{spawn_error.__class__.__name__}: {spawn_error} "
+            f"(bound {_PROBE_TIMEOUT_SECS}s)\n{ambient_note}",
+            pytrace=False,
+        )
+    failure = _probe_completion_failure(proc, out_path)
+    assert failure is None, f"{failure}\n{ambient_note}"
     payload = json.loads(out_path.read_text())
 
     # POSITIVE CONTROL — the perturbation really was in effect, and a constant
     # whose contract is to follow the variable really did move onto it.
     assert payload["env_seen"] == str(bogus), (
         "the probe did not see the perturbed CQLITE_DATASETS_ROOT — the "
-        "invariance below would prove nothing"
+        f"invariance below would prove nothing\n{ambient_note}"
     )
     assert payload["control_env_routed"] == str(bogus), (
         "conftest.DATASETS did not follow the perturbed CQLITE_DATASETS_ROOT — "
         f"got {payload['control_env_routed']}; the control is broken, so the "
-        "invariance below is unmeasured"
+        f"invariance below is unmeasured\n{ambient_note}"
     )
     assert payload["control_env_routed"] != str(expected_root)
 
-    # THE INVARIANT — unmoved, checkout-derived, and still readable.
-    assert payload["fixture_root"] == str(expected_root)
-    assert payload["parity_facts"] == str(expected_facts)
-    assert payload["schemas"] == str(expected_schemas)
-    assert payload["schema"] == str(expected_schema)
+    # THE INVARIANT — unmoved, checkout-derived, and both artifacts still read.
+    assert payload["fixture_root"] == str(expected_root), ambient_note
+    assert payload["parity_facts"] == str(expected_facts), ambient_note
+
+    # A read failure is REPORTED without a cause being claimed. `_assert_fixture_present`
+    # above has already ruled out the broken-checkout case, but a decoder
+    # regression, a schema-parse change or a force-added binary lost to a
+    # gitignore would all look identical here, and a message naming one of them
+    # would be asserting what this test has not established.
     assert payload["read_error"] is None, (
-        "the fixture would not open under a corpus-less datasets root: "
-        f"{payload['read_error']}"
+        "the probe could not read the fixture through the re-resolved paths "
+        f"(cause NOT established by this test)\n{ambient_note}\n"
+        f"child error: {payload['read_error']}"
     )
     assert payload["row_ids"] == [1, 2, 3], (
-        f"fixture unreadable under a corpus-less datasets root: {payload['row_ids']}"
+        f"unexpected fixture row ids through the re-resolved paths: "
+        f"{payload['row_ids']}\n{ambient_note}"
+    )
+    assert payload["parity_facts_error"] is None, (
+        "the probe could not read the parity reference through the re-resolved "
+        f"path (cause NOT established by this test)\n{ambient_note}\n"
+        f"child error: {payload['parity_facts_error']}"
+    )
+    # Non-vacuity: an emptied or renamed reference would otherwise let the
+    # path-equality half stand in for a file nobody opened. Asserted NON-ZERO
+    # rather than at an exact count, which is #3724's own subject to widen.
+    assert payload["parity_facts_udts"] > 0, (
+        "the parity reference parsed but carries no `udts` entries — the path "
+        f"equality above would then be comparing a path to an empty file\n{ambient_note}"
+    )
+
+
+def test_this_module_names_no_env_routed_corpus_constant():
+    """SCENARIO: nothing in this file builds a path from an env-routed corpus root.
+
+    THE CLASS THIS CLOSES, WHICH THE ENVIRONMENT CASES ONLY SAMPLE. The test
+    above pins the CONSTANTS this module resolves today. A future test added to
+    this file that builds its OWN path from `conftest`'s env-routed corpus
+    constant is invisible to it: that path would resolve through
+    `CQLITE_DATASETS_ROOT` while every assertion above stayed green, because
+    those assertions are about `FIXTURE_ROOT`/`PARITY_FACTS` and not about the
+    file's other consumers. This repository has ALREADY paid for exactly that
+    defect one binding over — `bindings/node/__test__/setup.js`'s round-10 note
+    records `write.test.js` and `write-smoke.test.js` building the schemas path
+    themselves and BYPASSING the resolver, so the variable was honoured by part
+    of the suite and ignored by the rest.
+
+    Answered from THIS FILE'S OWN SOURCE, TOKENIZED. Only `NAME` tokens count, so
+    a mention in a docstring or a comment is not a consumer — which matters here,
+    because this file discusses the env-routed constant at length in prose. The
+    needles are SPLIT so the scan cannot match its own source; with an
+    exact-token comparison a self-match is already structurally impossible (a
+    literal in this function is a `STRING` token, never a `NAME`), so the split is
+    belt-and-braces rather than the mechanism.
+
+    DECLARED BOUND, because a guard that overstates its reach is worse than none:
+    a consumer reading `os.environ` DIRECTLY names no constant and is invisible
+    here. That half is what the child-process probe above measures, so the two
+    are complementary rather than overlapping, and neither alone closes the class.
+    """
+    import io
+    import tokenize
+
+    # Split, per the note above.
+    forbidden = {
+        "DATA" + "SETS",
+        "SSTABLES" + "_DIR",
+        "TEST_DATA" + "_ROOT",
+        "DATASETS" + "_AVAILABLE",
+    }
+
+    names = {
+        token.string
+        for token in tokenize.tokenize(io.BytesIO(Path(__file__).read_bytes()).readline)
+        if token.type == tokenize.NAME
+    }
+    offenders = sorted(forbidden & names)
+    assert not offenders, (
+        f"this module names the env-routed corpus constant(s) {offenders} in CODE. "
+        "The committed fixture is committed SOURCE and resolves checkout-relative "
+        "from `PROJECT_ROOT` (#3131/#3148); a path built from an env-routed root "
+        "is invisible exactly where this suite runs, because every gate run sets "
+        "CQLITE_DATASETS_ROOT. Build the path from `PROJECT_ROOT` instead."
+    )
+
+    # The probe's SOURCE is a string literal, so the token scan above cannot see
+    # it — and it legitimately names the env-routed constant, ONCE, as the
+    # positive control. That one line is therefore required to SAY it is the
+    # control, so the exemption cannot silently grow into a consumer.
+    control_needle = "conftest." + "DATA" + "SETS"
+    control_lines = [
+        line for line in _RESOLUTION_PROBE.splitlines() if control_needle in line
+    ]
+    assert len(control_lines) == 1, (
+        f"expected exactly one control reference to {control_needle} in the probe "
+        f"source, got {len(control_lines)}: {control_lines}"
+    )
+    assert "CONTROL" in control_lines[0], (
+        "the probe's reference to the env-routed constant must declare itself the "
+        f"positive CONTROL, or it is indistinguishable from a consumer: {control_lines[0]!r}"
     )
