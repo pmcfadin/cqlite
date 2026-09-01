@@ -272,6 +272,16 @@ emit_job_object() {
   if [ -n "${STUB_VERDICT_FIELD:-}" ]; then
     extra="$extra,\"verdict\":\"${STUB_VERDICT_FIELD}\""
   fi
+  # ===== `source_machine_id` IS CARRIED BY `list` ROWS ONLY (#3654) =====
+  # MEASURED on roborev v0.61.2: `roborev list --json` rows carry it at top level, and
+  # `roborev show <id> --json` does not carry it ANYWHERE — not at top level, not in its nested
+  # `job` object. The stub reproduces that asymmetry rather than emitting the field everywhere,
+  # because it is exactly what makes `NOT RECORDED` a REAL state and what forces the wrapper's
+  # supplementary `list` read: a stub that answered on `show` too would make the `list` path
+  # untested and the key look correct while reporting nothing on a real run.
+  if [ -n "${STUB_SOURCE_MACHINE_ID:-}" ] && [ "${_EMIT_MACHINE:-0}" = 1 ]; then
+    extra="$extra,\"source_machine_id\":\"${STUB_SOURCE_MACHINE_ID}\""
+  fi
   # The review TEXT the record carries (#3312 job 24). On the JOB row as well as the review row, so every
   # payload shape a recheck may read from carries it, exactly as roborev's own payloads do.
   if [ -n "${STUB_RECORD_OUTPUT:-}" ]; then
@@ -358,6 +368,7 @@ case "$cmd" in
   list)
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_LIST_JSON:-array}" != none ] || { printf 'null\n'; exit 0; }
+    _EMIT_MACHINE=1
     printf '['; emit_job_object; printf ']\n'
     exit 0
     ;;
@@ -1190,6 +1201,9 @@ export STUB_GH_ISSUES=''
 export STUB_GH_ISSUES_CLOSED=''
 export STUB_GH_ISSUE_ERR=''
 export STUB_ON_REVIEW=''
+# #3654: the DAEMON-ID knob. Empty by default, and the stub emits it on the `list` payload ONLY,
+# which is where roborev v0.61.2 actually carries `source_machine_id`.
+export STUB_SOURCE_MACHINE_ID=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1217,6 +1231,9 @@ reset_stub() {
   STUB_GH_ISSUES_CLOSED=''
   STUB_GH_ISSUE_ERR=''
   STUB_ON_REVIEW=''
+  # No daemon id by default: the FAIL-CLOSED direction for the `job-machine:` key (#3654) — a case
+  # that wants the uuid arm has to SAY so, so no case passes because the double happened to answer.
+  STUB_SOURCE_MACHINE_ID=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -5839,6 +5856,262 @@ assert_says 'case (mb8b) the tip-bound marker is STALE' \
 assert_lacks 'case (mb8b) and it grants nothing' '^prompt-content: WAIVED'
 assert_says 'case (mb8b) the absence FAIL stands' \
   '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
+reset_stub
+
+# ============================================================================
+# (jm*) #3654: ROBOREV JOB IDS ARE PER-DAEMON, AND THE BLOCK SAYS WHICH DAEMON
+# ----------------------------------------------------------------------------
+# THE INCIDENT: two lanes on two boxes requested absence waivers 50 minutes apart, both
+# naming `job=265` for DIFFERENT reviews (different ranges, branches and token counts).
+# Both were correct — ids are sequential PER DAEMON — but the coordination lead read the
+# repetition as a collision and WITHHELD a valid waiver. So the block now NAMES the
+# issuing daemon beside the id it disambiguates.
+#
+# THE KEY IS INFORMATIONAL AND THAT IS THE PROPERTY MOST WORTH PINNING: it is in neither
+# the verdict-grammar scan nor the affirmation backstop, so none of its three states can
+# red an otherwise-clean run. A decorative key that can fail a correct review is the guard
+# agents learn to waive.
+JM_UUID='db07281a-b8e0-4c8f-99dc-37ca88a0a54c'
+jm_work=$(make_fixture case_jm pushed)
+jm_head=$(git -C "$jm_work" rev-parse HEAD)
+# The three renderings OBSERVED by the cases below, collected for the closed-set assert
+# (jm6). Collected rather than predicted: a closed set asserted against literals someone
+# typed proves only that the literals were typed.
+jm_seen_uuid=''
+jm_seen_not_recorded=''
+jm_seen_unavailable=''
+jm_render() { grep -E '^job-machine: ' "$OUT" | head -1 || printf ''; }
+
+printf '== (jm1) #3654: the daemon id is surfaced even when `show` alone answered the record ==\n'
+# THE CASE THAT MAKES THE KEY MORE THAN DECORATION. `read_job_record` STOPS at the first payload
+# that carries the required fields, and on a healthy daemon that is `show` — which does not carry
+# `source_machine_id` at all. Read only through that loop the key would be `NOT RECORDED` on EVERY
+# real run: a key reporting nothing while looking like it reports something. So the wrapper takes
+# one supplementary `list` read, and this case is the only thing that proves it happens.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+run_wrapper "$jm_work"
+assert_verdict 'case (jm1)' PASS 0
+assert_says 'case (jm1) the block names the issuing daemon' "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
+assert_says 'case (jm1) it sits beside the id it disambiguates' '^job: 4656$'
+jm_seen_uuid=$(jm_render)
+reset_stub
+
+printf '== (jm2) #3654: the same id when the RECORD ITSELF came from the `list` payload ==\n'
+# The other route to the fact: a `show` that returns the REVIEW row (no git_ref) makes the record
+# loop fall through to `list`, so `source_machine_id` is already in the facts file and no
+# supplementary read is needed. Both routes must render identically — otherwise the value a reader
+# sees would depend on which payload happened to answer.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+STUB_SHOW_JSON=review-row
+run_wrapper "$jm_work"
+assert_verdict 'case (jm2)' PASS 0
+assert_says 'case (jm2) the daemon id is the same on the record-from-list route' "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
+reset_stub
+
+printf '== (jm3) #3654: NO daemon id anywhere is NOT RECORDED — and still PASSes ==\n'
+# A REAL state, not a defensive one: a roborev build whose payloads carry no `source_machine_id`
+# reaches it on every run. It must therefore be AFFIRMATIVE (never blank, never a bare `-`) and it
+# must never cost a correct review its PASS — this case asserts both at once.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+run_wrapper "$jm_work"
+assert_verdict 'case (jm3) an unrecorded daemon never fails a clean run' PASS 0
+assert_says 'case (jm3) the state is affirmative and names the payload that carries the field' \
+  "^job-machine: NOT RECORDED \(a job record was read but carries no source_machine_id; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not\. Identify the review by the record's git_ref, never by the id alone\)$"
+assert_lacks 'case (jm3) the key is never blank' '^job-machine: *$'
+jm_seen_not_recorded=$(jm_render)
+reset_stub
+
+printf '== (jm4) #3654: the key is emitted in --recheck-job mode too ==\n'
+# THE MODE THAT MATTERS MOST: `--recheck-job` is the only path an absence waiver travels, and the
+# waiver names a job id — so this is precisely where a reader has to know WHICH daemon issued it.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+STUB_VERDICT_FIELD='P'
+STUB_RECORD_OUTPUT="$CLEAN_TEXT"
+run_wrapper "$jm_work" --recheck-job 4656
+assert_verdict 'case (jm4)' PASS 0
+assert_says 'case (jm4) a recheck names the issuing daemon' "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
+assert_says 'case (jm4) and the recheck mode is still declared' '^MODE: recheck '
+reset_stub
+
+printf '== (jm5) #3654: NO readable record at all is UNAVAILABLE, naming what it inherits ==\n'
+# Distinct from (jm3) BECAUSE THEY ARE DIFFERENT OPERATOR ACTIONS: "this roborev build does not
+# record the field" and "no record could be read" send a reader to different places. The run FAILs
+# here — sha-assert cannot verify a range with no record — and the assert below pins that the FAIL
+# is NOT attributed to this key.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SHOW_JSON=none
+STUB_LIST_JSON=none
+run_wrapper "$jm_work"
+assert_verdict 'case (jm5)' FAIL 1
+assert_says 'case (jm5) the key names the job-record state it inherits' \
+  '^job-machine: UNAVAILABLE \(no job record could be read, so the issuing daemon is unknown — job-record: DEGRADED'
+assert_says 'case (jm5) the FAIL belongs to sha-assert, not to job-machine' \
+  '^sha-assert: FAIL \(job record unavailable'
+assert_lacks 'case (jm5) no diagnostic blames the informational key' 'ERROR: job-machine'
+jm_seen_unavailable=$(jm_render)
+reset_stub
+
+printf '== (jm6) #3654: the renderings are a CLOSED SET OF THREE, matched on the state token ==\n'
+# PINNED AS A SET, NOT AS ONE LITERAL, which is the idiom this repo already uses for the gate's
+# component-set `src_note`: pinning ONE literal reds on correct input (which arm fires depends on
+# which payload answered), and pinning NOTHING lets a wording pass delete the key. So all three
+# observed values are reduced to their STATE TOKEN and the set is compared by string equality.
+jm_token() { # jm_token <rendered "job-machine: <value>" line> -> the state token
+  local v="${1#job-machine: }"
+  case "$v" in
+    "$JM_UUID "*) printf '<uuid>' ;;
+    'NOT RECORDED ('*) printf 'NOT RECORDED' ;;
+    'UNAVAILABLE ('*) printf 'UNAVAILABLE' ;;
+    '') printf '<absent>' ;;
+    *) printf '<unrecognised:%s>' "${v%% *}" ;;
+  esac
+}
+jm_set="$(jm_token "$jm_seen_uuid")|$(jm_token "$jm_seen_not_recorded")|$(jm_token "$jm_seen_unavailable")"
+if [ "$jm_set" = '<uuid>|NOT RECORDED|UNAVAILABLE' ]; then
+  ok 'case (jm6) the observed renderings are exactly the closed set {<uuid>, NOT RECORDED, UNAVAILABLE}'
+else
+  bad "case (jm6) the job-machine: renderings are not the closed set of three: observed '$jm_set' (expected '<uuid>|NOT RECORDED|UNAVAILABLE')"
+fi
+# AND EVERY ONE OF THEM CARRIES A REASON, never a bare token: an operator reading a pasted block
+# has to be able to act on it without opening this file.
+for _jm_r in "$jm_seen_uuid" "$jm_seen_not_recorded" "$jm_seen_unavailable"; do
+  case "$_jm_r" in
+    'job-machine: '*' ('*')'*) ok "case (jm6) the rendering carries its own explanation: ${_jm_r%% (*} (...)" ;;
+    *) bad "case (jm6) a job-machine: rendering carries no parenthesised explanation: '$_jm_r'" ;;
+  esac
+done
+
+printf '== (jm7) #3654 structural: job-machine is in NEITHER failing-capable key set ==\n'
+# A BEHAVIOURAL CASE ONLY COVERS THE VALUES SOMEONE THOUGHT OF. (jm3)/(jm5) show that the two
+# non-uuid states do not red a run TODAY; only a structural assert stops a future edit registering
+# the key in the verdict scan or the affirmation backstop, where a `NOT RECORDED` — a routine state
+# on a roborev build that does not carry the field — would fail every review on the fleet.
+# Read from the two STATEMENTS, never from a file-wide grep: `emit_kv 'job-machine' "$JOB_MACHINE"`
+# would satisfy a file-wide search with the key registered in both scans.
+_jm_scan_keys=$(sed -n '/^[[:space:]]*for scan_keyed in /,/; do$/p' "$WRAPPER_REAL")
+_jm_aff_keys=$(sed -n '/^[[:space:]]*for keyed in "push-assert=/,/; do$/p' "$WRAPPER_REAL")
+if [ -z "$_jm_scan_keys" ] || [ -z "$_jm_aff_keys" ]; then
+  bad 'case (jm7) could not extract the verdict-scan and affirmation key lists to inspect'
+else
+  if printf '%s\n' "$_jm_scan_keys" | grep -q 'job-machine'; then
+    bad 'case (jm7) job-machine is registered in the failing-capable verdict scan — an informational key would then red a correct run whenever the daemon id is NOT RECORDED (a routine state)'
+  else
+    ok 'case (jm7) job-machine is absent from the failing-capable verdict scan'
+  fi
+  if printf '%s\n' "$_jm_aff_keys" | grep -q 'job-machine'; then
+    bad 'case (jm7) job-machine is registered in the affirmation backstop — a PASS would then require it to read PASS, which it never does'
+  else
+    ok 'case (jm7) job-machine is absent from the affirmation backstop'
+  fi
+fi
+# AND IT IS ACTUALLY EMITTED, unconditionally. Without this the two asserts above are satisfied by
+# DELETING the key, which is the decorative-assert trap this suite has ruled on before.
+if grep -qE "^[[:space:]]*emit_kv 'job-machine' \"\\\$JOB_MACHINE\"" "$WRAPPER_REAL"; then
+  ok 'case (jm7) the key is emitted through the ONE value boundary (emit_kv), unconditionally'
+else
+  bad 'case (jm7) job-machine is not emitted via emit_kv — either it is gone, or its value bypasses the neutralisation boundary'
+fi
+
+printf '== (jm8) #3654 structural: NO machine field was added to either marker grammar ==\n'
+# ASK 4 OF THE ISSUE, PINNED. The authorizer would have to know the value, it is derivable from the
+# record, and every field in a hand-typed control line is one more way for a legitimate
+# authorization to read MALFORMED. The two marker patterns are the grammar, so they are the subject.
+_jm_scan_py="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
+if [ ! -f "$_jm_scan_py" ]; then
+  bad 'case (jm8) the waiver scanner is missing, so the marker grammar could not be inspected'
+else
+  _jm_patterns=$(grep -nE '^[[:space:]]*r"' "$_jm_scan_py" || printf '')
+  if [ -z "$_jm_patterns" ]; then
+    bad 'case (jm8) no marker pattern fragments found in the scanner — the extraction is stale'
+  elif printf '%s\n' "$_jm_patterns" | grep -qiE 'machine'; then
+    bad 'case (jm8) a machine field appears in a marker pattern — the marker grammar must stay unchanged (#3654 ask 4)'
+  else
+    ok 'case (jm8) neither marker pattern names a machine field — the grammar is unchanged'
+  fi
+fi
+
+printf '== (jm9) #3654: the facts tool extracts source_machine_id from `list`, and NOTHING from `show` ==\n'
+# THE PAYLOAD ASYMMETRY AT ITS SOURCE. A `show`-shaped payload must yield NO fact rather than an
+# empty-string one: `source_machine_id=` in the facts file would render as a BLANK uuid, which is
+# the unmeasured-value-as-a-value defect this repository fails runs for.
+_jm_tool="$SCRIPT_DIR/../flow/roborev-job-facts.py"
+_jm_facts="$tmp/jm-facts.txt"
+_jm_prompt="$tmp/jm-facts-prompt.txt"
+if [ ! -f "$_jm_tool" ] || ! command -v python3 >/dev/null 2>&1; then
+  printf 'SKIP - roborev-job-facts.py or python3 unavailable; the fact-extraction cases did not run\n'
+else
+  printf '[{"id":4656,"git_ref":"aaa..bbb","status":"done","source_machine_id":"%s"}]' "$JM_UUID" \
+    | python3 "$_jm_tool" 4656 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+  if [ "$(sed -n 's/^source_machine_id=//p' "$_jm_facts" | head -1)" = "$JM_UUID" ]; then
+    ok 'case (jm9) a list-shaped row yields source_machine_id as a string fact'
+  else
+    bad "case (jm9) the list-shaped row did not yield source_machine_id (facts: $(tr '\n' ' ' <"$_jm_facts"))"
+  fi
+  printf '{"id":4656,"job_id":4656,"agent":"codex","prompt":"p","job":{"id":4656,"git_ref":"aaa..bbb","status":"done"}}' \
+    | python3 "$_jm_tool" 4656 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+  if grep -q '^source_machine_id=' "$_jm_facts"; then
+    bad "case (jm9) a show-shaped payload emitted a source_machine_id fact — an empty one renders as a blank uuid (facts: $(tr '\n' ' ' <"$_jm_facts"))"
+  else
+    ok 'case (jm9) a show-shaped payload yields NO source_machine_id fact at all, not an empty one'
+  fi
+  # AND THE ROW SELECTION IS UNCHANGED: adding a string fact must not be able to move `find_job`
+  # onto a different row. The review row here answers to the same id and carries no git_ref, so a
+  # regression that let the new fact influence selection would surface as the wrong git_ref.
+  printf '{"id":4656,"job_id":4656,"source_machine_id":"decoy","job":{"id":4656,"git_ref":"aaa..bbb","status":"done","model":"m"}}' \
+    | python3 "$_jm_tool" 4656 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+  if [ "$(sed -n 's/^git_ref=//p' "$_jm_facts" | head -1)" = 'aaa..bbb' ]; then
+    ok 'case (jm9) the git_ref-bearing row is still the one selected (the new fact cannot move find_job)'
+  else
+    bad 'case (jm9) adding source_machine_id changed which row find_job selects — the required facts now come from the wrong object'
+  fi
+fi
+
+printf '== (jm10) #3654: --help documents the per-daemon scope, a WORKING check, and the prompt evidence ==\n'
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+bash "$WRAPPER_REAL" --help >"$OUT" 2>"$tmp/jm-help-err.txt"
+if [ -s "$tmp/jm-help-err.txt" ]; then
+  bad "case (jm10) --help wrote to stderr: $(head -2 "$tmp/jm-help-err.txt")"
+else
+  ok 'case (jm10) --help is clean on stderr'
+fi
+assert_says 'case (jm10) --help states that job ids are per-daemon' 'JOB IDS ARE PER-DAEMON, NOT GLOBAL'
+assert_says 'case (jm10) --help says to verify git_ref, never the id alone' "VERIFY THE RECORD'S git_ref AND NEVER THE ID"
+# THE PRESCRIBED COMMAND MUST BE ONE THAT WORKS. The issue and its addendum both prescribed
+# `roborev show <id> --json | jq '{id, git_ref, branch, source_machine_id, token_usage}'`, which
+# MEASURES four nulls: show nests those fields under `.job` and carries no source_machine_id at all.
+# Documenting it unchanged would reproduce the very defect the addendum diagnoses.
+assert_says 'case (jm10) --help reads git_ref from the payload that HAS it (.job on show)' \
+  "roborev show <id> --json \| jq '\.job \| \{id, git_ref"
+assert_says 'case (jm10) --help reads the daemon id from the LIST payload' \
+  "roborev list --json --repo <abs-repo> --branch <branch>"
+assert_lacks 'case (jm10) --help does NOT prescribe the top-level jq that measures nulls' \
+  "show <id> --json \| jq '\{id, git_ref"
+assert_says 'case (jm10) --help warns that list defaults to the current branch' \
+  'filters by the CURRENT BRANCH by default'
+assert_says 'case (jm10) --help states that a local row count proves nothing' \
+  'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
+assert_says 'case (jm10) --help names the failure class the row count belongs to' \
+  'IDENTICAL under the two states it claims'
+assert_says 'case (jm10) --help makes the stored prompt the PREFERRED absence evidence' \
+  "stored prompt is the PREFERRED"
+assert_says 'case (jm10) --help names the retrieval command' 'roborev show <id> --prompt'
+assert_says 'case (jm10) --help keeps token accounting as the FALLBACK' 'the FALLBACK, for when the prompt cannot be retrieved'
+assert_says 'case (jm10) --help says why this is not the deleted classifier' \
+  'RESURRECTS NOTHING OF THE DELETED DELIVERY CLASSIFIER'
+assert_says 'case (jm10) --help records that the marker grammar is unchanged' \
+  'THE MARKER GRAMMAR IS DELIBERATELY UNCHANGED'
+# NOTE: `assert_no_marker_form` is deliberately NOT applied here. `--help` is the ONE sanctioned
+# place the marker form is written out — the diagnostics refuse to print it and point here instead
+# — so a run of it necessarily carries the stem.
 reset_stub
 
 printf '== the summary header is distinct from every agent-gate header ==\n'
