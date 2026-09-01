@@ -683,8 +683,8 @@ if AGENT_GATE_SUMMARY_FILE="$selftest_sum" bash "$GATE" --emit-summary-selftest 
     case "$line" in
       *'[UNDECLARED]'*|*UNCLASSIFIED*) missing+=("$line") ;;
     esac
-  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP)' "$selftest_sum")
-  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP) \([0-9]+s\)  \[.+\]' "$selftest_sum")
+  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS)' "$selftest_sum")
+  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[.+\]' "$selftest_sum")
   if [ "$n_annot" -eq 4 ] && [ "${#missing[@]}" -eq 0 ]; then
     ok "B4: --emit-summary-selftest emits 4 annotated component lines, none UNDECLARED"
   else
@@ -826,6 +826,14 @@ describe_shim_log() {
 # invoker can set (#3312 job 27's corollary), and the caller here is this file.
 # FM_LAST_EXEC_COUNT is set to the number of cargo invocations the shim actually saw, so a
 # caller can prove a short-circuit happened instead of assuming it.
+# fm_strip_census <annotation-tail>: remove the #3625 component-census suffix, which
+# _fm_summary_line appends AFTER the feature-matrix annotation (`…]  {verified: N tests}`).
+# This file's subject is the FEATURE MATRIX, so the census must not enter its comparisons —
+# and it must not be matched by the `*UNDECLARED*` screens below either, since the census
+# has an UNDECLARED state of its own that means something different. `%` (shortest match
+# from the END) so a `{` inside a feature descriptor could not truncate the annotation.
+fm_strip_census() { printf '%s' "${1%  \{*}"; }
+
 FM_LAST_EXEC_COUNT=0
 run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-dir] [tag]
   local c="$1" mode="$2" why="${3:-}" use_shim="${4:-$shim_dir}" tag="${5:-}"
@@ -838,12 +846,13 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
   PATH="$use_shim:$PATH" \
     bash "$GATE" --only "$c" > "$log" 2>&1
   local line ann
-  line=$(grep -E "^$c: +(PASS|FAIL|SKIP)" "$sum" 2>/dev/null | head -1)
+  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$sum" 2>/dev/null | head -1)
   if [ -z "$line" ]; then
     bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
   fi
   ann=${line#*\[}; ann="[${ann}"
+  ann=$(fm_strip_census "$ann")
   case "$ann" in
     '[UNDECLARED]'|*UNCLASSIFIED*|'[]') bad "C-$c$tag: annotation is '$ann'"; return ;;
   esac
@@ -1189,10 +1198,11 @@ for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
   AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
   PATH="$shim_dir:$PATH" \
     bash "$GATE" --only "$c" > "$e2_log" 2>&1
-  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP)" "$e2_sum" 2>/dev/null | head -1)
+  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$e2_sum" 2>/dev/null | head -1)
   if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
   e2_ran=$((e2_ran + 1))
   e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"
+  e2_ann=$(fm_strip_census "$e2_ann")
   case "$e2_ann" in
     *UNDECLARED*|*UNCLASSIFIED*|'[]') e2_bad+=("$c=$e2_ann") ;;
     *'no cargo build/test invoked'*)  ;;   # a NAMED terminal state, not a gap
