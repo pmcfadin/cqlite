@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=72
+CASE_FLOOR=110
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -564,6 +564,252 @@ else
 fi
 
 echo
+echo "-- the UTILIZATION quantity: a direction, never an attainment --"
+
+# The ramp fixtures put the peak at the top of the ladder, so peak SELECTION is
+# exercised rather than trivially satisfied by a one-element ladder.
+RAMP='1,2,4,8'
+
+mkfixture "$TMP/util-rise" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+run_util "$TMP/util-rise"
+check_verdict "utilization throughput that rose measurably" RISES 0 utilization
+if grep -q '^AB-3649: pair 1 ladder-compared 1,2,4,8 base-peak-at-concurrency 8 head-peak-at-concurrency 8$' "$TMP/out.txt"; then
+  ok "the utilization section reports the ladder compared and where each peak fell"
+else
+  bad "the utilization section did not report the ladder and peak concurrency"
+fi
+if grep -q '^AB-3649: excluded-steps 0 RECOGNISED$' "$TMP/out.txt"; then
+  ok "a clean ramp reports 0 RECOGNISED exclusions, never a bare 0"
+else
+  bad "a clean ramp did not print an affirmative zero-exclusion line"
+fi
+
+mkfixture "$TMP/util-fall" 6 \
+  "100000:88000,100000:87000,100000:87000,100000:86000,100000:86000,100000:85000" "$RAMP"
+run_util "$TMP/util-fall"
+check_verdict "utilization throughput that fell measurably" FALLS 4 utilization
+
+mkfixture "$TMP/util-flat" 6 \
+  "100000:85000,100000:99000,100000:118000,100000:132000,100000:92000,100000:145000" "$RAMP"
+run_util "$TMP/util-flat"
+check_verdict "utilization throughput with no established direction" INCONCLUSIVE 6 utilization
+
+# THE STRUCTURAL SEPARATION. The 1.5-1.9x ceiling is not a target, so the
+# utilization section must be incapable of emitting a band verdict, and the
+# single-stream section incapable of emitting a direction verdict.
+run_util "$TMP/util-rise"
+if grep -qE '^AB-3649: verdict utilization (MEETS-TARGET|ABOVE-TARGET|BELOW-TARGET)$' "$TMP/out.txt"; then
+  bad "the utilization section emitted a target-band verdict token"
+else
+  ok "the utilization section cannot emit a target-band verdict token"
+fi
+if grep -q '^AB-3649: target NONE-BY-DESIGN ' "$TMP/out.txt"; then
+  ok "the utilization section states that no band or ceiling reaches its rule"
+else
+  bad "the utilization section did not declare its rule threshold-free"
+fi
+if grep -q '^AB-3649: ceiling 1.5-1.9x is a rig-narrow UTILIZATION ceiling' "$TMP/out.txt"; then
+  ok "the ceiling is NAMED in the utilization section"
+else
+  bad "the utilization section did not name the ceiling"
+fi
+if grep -qE 'MEETS-CEILING|CEILING-MET|REACHES-CEILING|ceiling-attained' "$TMP/out.txt"; then
+  bad "the utilization output invented a ceiling-attainment token"
+else
+  ok "no ceiling-attainment token exists anywhere in the utilization output"
+fi
+run_analyzer "$TMP/meets"
+if grep -qE '^AB-3649: verdict single-stream (RISES|FALLS)$' "$TMP/out.txt"; then
+  bad "the single-stream section emitted a direction verdict token"
+else
+  ok "the single-stream section cannot emit a direction verdict token"
+fi
+
+# A manifest handed to the wrong section is a real mistake and gets its own cause.
+run_util "$TMP/meets"
+check_verdict "a --ramp 1 manifest supplied as the utilization section" UNMEASURED 7 utilization
+check_cause "ramp-1 manifest in the utilization section" mode-manifest-mismatch
+run_analyzer "$TMP/util-rise"
+check_verdict "a ramp manifest supplied as the single-stream section" UNMEASURED 7 single-stream
+check_cause "ramp manifest in the single-stream section" mode-manifest-mismatch
+
+echo
+echo "-- admission control (#2420) cannot be silently averaged into a throughput --"
+
+shed_step() { # <dir> <arm> <replicate> <0-based-step> <count>
+  python3 - "$1/$2-r$(printf '%02d' "$3").jsonl" "$4" "$5" <<'PYINNER'
+import json
+import sys
+
+path, step, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(path, encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+records[step]["requests_unavailable"] = count
+with open(path, "w", encoding="utf-8") as handle:
+    for record in records:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+}
+
+# Shed the top step on BOTH arms of every replicate: the ladder stays matched,
+# the shed steps are excluded, and each exclusion is named.
+mkfixture "$TMP/util-shed" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+for r in 1 2 3 4 5 6; do
+  shed_step "$TMP/util-shed" base "$r" 3 7
+  shed_step "$TMP/util-shed" head "$r" 3 7
+done
+run_util "$TMP/util-shed"
+check_verdict "a ramp whose top step was admission-shed on both arms" RISES 0 utilization
+if grep -q '^AB-3649: excluded-step replicate 1 arm base concurrency 8 requests-unavailable 7 reason admission-shed-2420$' "$TMP/out.txt"; then
+  ok "each admission-shed step is excluded and reported as an explicit fact"
+else
+  bad "an admission-shed step was not reported as an explicit exclusion"
+fi
+if grep -q '^AB-3649: excluded-steps 12 RECOGNISED$' "$TMP/out.txt"; then
+  ok "the exclusion count is reported, so a silently shrunken ladder is visible"
+else
+  bad "the exclusion count was not reported"
+fi
+if grep -q '^AB-3649: pair 1 ladder-compared 1,2,4 base-peak-at-concurrency 4 ' "$TMP/out.txt"; then
+  ok "the peak is taken over the SURVIVING ladder, not the declared one"
+else
+  bad "the peak was not taken over the surviving ladder"
+fi
+
+# Shed a DIFFERENT step on each arm: the ladders no longer match, so a peak
+# taken over them is not a ratio.
+mkfixture "$TMP/util-asym" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+for r in 1 2 3 4 5 6; do
+  shed_step "$TMP/util-asym" base "$r" 3 7
+done
+run_util "$TMP/util-asym"
+check_verdict "arms whose surviving ladders differ" UNMEASURED 7 utilization
+check_cause "mismatched surviving ladders" ramp-steps-not-comparable
+
+# Every step shed: the run measured the admission ceiling and nothing else.
+mkfixture "$TMP/util-allshed" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+for r in 1 2 3 4 5 6; do
+  for step in 0 1 2 3; do
+    shed_step "$TMP/util-allshed" base "$r" "$step" 3
+    shed_step "$TMP/util-allshed" head "$r" "$step" 3
+  done
+done
+run_util "$TMP/util-allshed"
+check_verdict "a ramp in which every step was shed" UNMEASURED 7 utilization
+check_cause "a fully shed ramp" ramp-fully-shed
+
+# At single-stream concurrency a shed can only mean something is badly wrong, so
+# there it is a refusal rather than an exclusion.
+run_analyzer "$TMP/shed"
+check_verdict "a shed at single-stream concurrency" UNMEASURED 7 single-stream
+check_cause "shed at concurrency 1" run-shed
+
+# The arms must have been served under the SAME admission ceiling.
+mkfixture "$TMP/adm-mismatch" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/adm-mismatch/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_observed"] = "8"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/adm-mismatch"
+check_verdict "arms served under different admission ceilings" UNMEASURED 7 single-stream
+check_cause "differing admission ceilings" admission-mismatch
+
+# An unobservable ceiling is disclosed, not assumed to agree.
+mkfixture "$TMP/adm-unobs" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/adm-unobs/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    entry["admission_observed"] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/adm-unobs"
+check_verdict "an admission ceiling the driver could not observe" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: verdict-detail single-stream ADMISSION ' "$TMP/out.txt"; then
+  ok "an unobserved admission ceiling is disclosed as uncorroborated, not assumed"
+else
+  bad "an unobserved admission ceiling was passed off as corroborated"
+fi
+if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed NOT-OBSERVED ' "$TMP/out.txt"; then
+  ok "requested and observed admission values are printed side by side"
+else
+  bad "the admission line did not print requested and observed separately"
+fi
+
+echo
+echo "-- both sections in one report --"
+
+run_both "$TMP/meets" "$TMP/util-flat"
+if [ "$(grep -c '^AB-3649: verdict ' "$TMP/out.txt")" = "2" ]; then
+  ok "a two-section report carries exactly two verdict lines"
+else
+  bad "a two-section report did not carry exactly two verdict lines"
+fi
+if [ "$(verdict_token single-stream)" = "MEETS-TARGET" ] \
+   && [ "$(verdict_token utilization)" = "INCONCLUSIVE" ]; then
+  ok "each section's verdict is keyed by its own quantity"
+else
+  bad "the two sections' verdicts are not separately addressable"
+fi
+if [ "$RC" = "6" ]; then
+  ok "with both sections the exit is the largest, so the least affirmative governs"
+else
+  bad "a two-section exit was $RC, expected 6 (the larger of 0 and 6)"
+fi
+if [ "$(grep -c '^AB-3649: ==== section ' "$TMP/out.txt")" = "2" ] \
+   && [ "$(grep -c '^AB-3649: ---- end section ' "$TMP/out.txt")" = "2" ]; then
+  ok "the two sections are delimited so neither can be read as the other"
+else
+  bad "the two sections are not delimited"
+fi
+
+# One unusable session must never suppress the other.
+run_both "$TMP/malformed" "$TMP/util-rise"
+if [ "$(verdict_token single-stream)" = "UNMEASURED" ] \
+   && [ "$(verdict_token utilization)" = "RISES" ] && [ "$RC" = "7" ]; then
+  ok "an UNMEASURED section does not suppress the section that did measure"
+else
+  bad "an UNMEASURED section suppressed the other section (rc=$RC)"
+fi
+
+run_both "$TMP/meets" "$TMP/util-rise"
+cp "$TMP/out.txt" "$TMP/both.first"
+run_both "$TMP/meets" "$TMP/util-rise"
+if cmp -s "$TMP/both.first" "$TMP/out.txt"; then
+  ok "a two-section report is deterministic too"
+else
+  bad "a two-section report is not deterministic"
+fi
+
+set +e
+python3 "$ANALYZER" --profile narrow > "$TMP/out.txt" 2> "$TMP/err.txt"
+RC=$?
+set -e
+if [ "$RC" = "3" ] && anchored; then
+  ok "neither section requested is a usage error, not an empty report"
+else
+  bad "an invocation naming no section did not exit 3 (exit $RC)"
+fi
+
+echo
 echo "-- the #3058 single-source fast path cannot silently null the measurement --"
 
 # With one source on disk and no pinned merge arm, #3058 routes every request
@@ -716,6 +962,13 @@ else
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 2
   check_driver "the driver refuses fewer than 3 replicates" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json"
+  check_driver "the driver refuses to run without a pinned admission ceiling" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,2,4,8
+  check_driver "the driver refuses a ramp that tops out above the admission pin" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --server-cpus 0,2
   check_driver "the driver refuses a server CPU set with no client CPU set" 3
