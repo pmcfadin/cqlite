@@ -1128,7 +1128,13 @@ FAKESELF
     LOG_DIR="$scratch"
     REPO_ROOT="$scratch"
     GATE_SELF="$scratch/fake-gate-self"
-    record_result() { _fm_note_if_no_cargo_observed "$1" "$2"; }
+    # The stub must honour record_result's PUBLISHED CONTRACT, not just the one thing this
+    # case needs from it. Since #3625 (roborev job 368) record_result also publishes the
+    # FINALIZED status in RECORDED_STATUS, which every caller's progress line then prints —
+    # including run_python_bindings' — so a stub that omits it aborts the real function
+    # under `set -u` before this case can read its annotation. An incomplete double is a
+    # test that stops measuring its subject and says nothing about why.
+    record_result() { RECORDED_STATUS="$2"; _fm_note_if_no_cargo_observed "$1" "$2"; }
     export AGENT_GATE_FM_DIR="$scratch/side"
     AGENT_GATE_FM_COMPONENT=python-bindings
     run_python_bindings >/dev/null 2>&1
