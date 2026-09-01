@@ -936,6 +936,119 @@ else
   bad "the end-to-end job's condition ('$FULL_IF') differs from the --lib job's ('$TEST_IF'); a diff can reach one and not the other"
 fi
 
+# ---------------------------------------------- the Node tier (issue #3640) ---
+# node-ci.yml was `required`-EXEMPT on the grounds that the local agent gate's
+# node-bindings component covers the merge-relevant content — true, and true ON
+# LINUX ONLY, while this workflow tests ubuntu-latest, macos-14 and
+# windows-latest. Owner ruling (2026-08-31): enrol with ALL THREE platforms
+# gating. The structural rules above already prove the SHAPE of the enrolment
+# (always-fire trigger, one unconditional emitter, closure over every job, one
+# applicability output, mandate_paths <-> classifier agreement); what they cannot
+# see is whether the three platform legs actually GATE, which is the entire point
+# of the enrolment. So that is asserted here, against the real workflow.
+
+echo "== the real Node tier gates all three platforms (issue #3640) =="
+NODE_WF="$REPO_ROOT/.github/workflows/node-ci.yml"
+if [ -f "$NODE_WF" ]; then
+  ok "node-ci.yml exists"
+else
+  bad "node-ci.yml not found at $NODE_WF"
+fi
+
+NODE_TEST_JSON=$(ruby -ryaml -rjson -e '
+  wf = YAML.load_file(ARGV[0], aliases: true)
+  job = wf.dig("jobs", "test") || {}
+  oses = Array(job.dig("strategy", "matrix", "include")).map { |e| e["os"].to_s }
+  print JSON.generate("if" => job["if"].to_s.gsub(/\s+/, " ").strip,
+                      "coe" => job.key?("continue-on-error"),
+                      "oses" => oses,
+                      "needs" => Array(job["needs"]).map(&:to_s))
+' "$NODE_WF" 2>/dev/null)
+
+for platform in ubuntu-latest macos-14 windows-latest; do
+  if contains "$NODE_TEST_JSON" "\"$platform\""; then
+    ok "the Node tier's test matrix covers $platform"
+  else
+    bad "the Node tier's test matrix does NOT cover $platform; the enrolment gates fewer platforms than ruled"
+  fi
+done
+
+# THE DEFECT THE RULING NAMES. `continue-on-error` greens a matrix leg whatever
+# its tests did, so a workflow can carry a windows leg, report it, and gate on
+# nothing — exactly "gating one platform would add nothing". No structural rule
+# can see it: the gate job reads `needs.test.result`, which continue-on-error has
+# already turned into `success`.
+if contains "$NODE_TEST_JSON" '"coe":false'; then
+  ok "the Node tier's test job carries no continue-on-error, so a platform red reds the tier"
+else
+  bad "the Node tier's test job carries continue-on-error; a failing platform leg would report success"
+fi
+
+# A LABEL-GATED MERGE GATE IS NOT A MERGE GATE: on a routine unlabeled pull
+# request a label condition skips every platform, so the tier would report success
+# having tested nothing on macOS or Windows. The condition must be the diff verdict.
+if contains "$NODE_TEST_JSON" "\"if\":\"needs.classify.outputs.run_tier == 'true'\""; then
+  ok "the Node tier's test job is gated on the diff verdict, not on ci:bindings-full"
+else
+  bad "the Node tier's test job condition is not the classifier verdict: $NODE_TEST_JSON"
+fi
+
+echo "== the real Node tier's mandate reaches the binding and the engine =="
+NODE_MANDATE_RE=$(sed -n "s/^ *mandate_regex='\(.*\)'$/\1/p" "$NODE_WF")
+if [ -n "$NODE_MANDATE_RE" ]; then
+  ok "the Node classifier exposes a single extractable mandate regex"
+else
+  bad "could not extract mandate_regex from $NODE_WF"
+fi
+for mandated in bindings/node/src/lib.rs bindings/node/__test__/database.test.js \
+                cqlite-core/src/storage/sstable/reader.rs Cargo.toml Cargo.lock \
+                .github/workflows/node-ci.yml; do
+  if printf '%s\n' "$mandated" | grep -Eq "$NODE_MANDATE_RE"; then
+    ok "a diff touching $mandated mandates the Node tier"
+  else
+    bad "$mandated does NOT mandate the Node tier"
+  fi
+done
+# The complement, or the cases above would prove nothing: an indiscriminate
+# mandate matches everything and runs the cross-platform matrix on every docs PR.
+for unmandated in docs/README.md cqlite-cli/src/main.rs bindings/python/src/lib.rs; do
+  if printf '%s\n' "$unmandated" | grep -Eq "$NODE_MANDATE_RE"; then
+    bad "$unmandated mandates the Node tier; the mandate is indiscriminate"
+  else
+    ok "a diff touching $unmandated does not mandate the Node tier"
+  fi
+done
+
+# The label-rule exception that lets the merge-gating matrix job be diff-gated is
+# scoped to a workflow that is ACTUALLY enrolled (issue #3640). Un-enrol it and
+# the ci:bindings-full requirement must come back, or the registry entry and the
+# workflow's applicability conditions could drift apart silently.
+echo "== the binding-matrix label exception is scoped to real enrolment =="
+DIR=$(new_case node-unenrolled)
+cp "$NODE_WF" "$DIR/workflows/node-ci.yml"
+cp "$REPO_ROOT/.github/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml"
+ruby -ryaml -e '
+  reg = YAML.load_file(ARGV[0], aliases: true)
+  reg["tiers"] = reg["tiers"].reject { |t| t["workflow"].to_s == "node-ci.yml" }
+  (reg["exempt"] ||= []) << { "workflow" => "node-ci.yml",
+                              "reason" => "temporarily un-enrolled by this test case",
+                              "issue" => "#3640" }
+  File.write(ARGV[1], YAML.dump(reg))
+' "$REPO_ROOT/.github/ci-gating-tiers.yml" "$DIR/registry.yml"
+UNENROLLED_OUT=$(cd "$REPO_ROOT" && ruby scripts/ci/validate-workflows.rb \
+  --workflows-dir "$DIR/workflows" --gating-registry "$DIR/registry.yml" 2>&1 || true)
+if contains "$UNENROLLED_OUT" "binding matrix job test must be gated on PR label ci:bindings-full"; then
+  ok "un-enrolling node-ci.yml restores the ci:bindings-full requirement on its matrix job"
+else
+  bad "an un-enrolled node-ci.yml kept the tier-gated matrix exception: $UNENROLLED_OUT"
+fi
+ENROLLED_OUT=$(cd "$REPO_ROOT" && ruby scripts/ci/validate-workflows.rb 2>&1 || true)
+if contains "$ENROLLED_OUT" "binding matrix job test must be gated"; then
+  bad "the real, ENROLLED tree reports the label error; the exception does not work"
+else
+  ok "the real, enrolled tree accepts the diff-gated matrix job (the case discriminates)"
+fi
+
 # ------------------------------------------------------------- the wiring ---
 # The rule only bites if validate-workflows.rb actually calls it, because THAT is
 # what runs in `pr-gate-core` — the job `required` needs and refuses to pass

@@ -105,6 +105,14 @@ results =
   when "inapplicable", "claimed-but-skipped"
     needs.each_with_object({}) { |n, h| h[n] = n == "classify" ? "success" : "skipped" }
   when "one-failed"   then needs.each_with_object({}) { |n, h| h[n] = n == "classify" ? "success" : "failure" }
+  # ONE named job failed and everything else succeeded (issue #3640). This is what
+  # makes a "the gate is blind to job X" mutant discriminating: under `one-failed`
+  # every leg fails, so a gate that ignored one of them would still red for the
+  # others and the mutant would prove nothing.
+  when /\Aonly-(.+)-failed\z/
+    target = Regexp.last_match(1)
+    abort("simulate: #{target.inspect} is not a dependency of #{context.inspect}") unless needs.include?(target)
+    needs.each_with_object({}) { |n, h| h[n] = n == target ? "failure" : "success" }
   else abort("simulate: unknown scenario #{scenario.inspect}")
   end
 # The classifier's applicability verdict. `claimed-but-skipped` is the shape
@@ -266,6 +274,97 @@ if [ "$MUTANT_CLAIMED" = "success" ]; then
   ok "MUTANT: without the consistency check run_tier=true with skipped work also passes"
 else
   bad "MUTANT: the unvalidated gate concluded '$MUTANT_CLAIMED' for the claimed-but-skipped shape"
+fi
+
+# ------------------------------------- the Node tier's gate job (issue #3640) --
+# node-ci.yml was enrolled as a second registered tier, so the SAME chain has to
+# hold for its gate job. This is not a copy of the assertions above with a
+# different filename: the two gate jobs have different dependency sets (the Node
+# one carries three label-gated release jobs that legitimately report `skipped` on
+# a routine pull request) and therefore different consistency logic, and the model
+# executes the REAL shell of whichever workflow it is pointed at.
+NODE_WF="$REPO_ROOT/.github/workflows/node-ci.yml"
+NODE_CONTEXT="Node.js CI Quality Gate"
+if [ ! -f "$NODE_WF" ]; then
+  bad "$NODE_WF not found (the Node tier cannot be simulated)"
+else
+  echo "== the Node tier gate job reproduces the ordinary conclusions =="
+  for pair in "all-success:success" "one-failed:failure" "inapplicable:success"; do
+    scenario="${pair%%:*}"
+    expected="${pair#*:}"
+    got=$(simulate "$NODE_WF" "$NODE_CONTEXT" "$scenario")
+    if [ "$got" = "$expected" ]; then
+      ok "Node scenario '$scenario' concludes '$got' (the model executes the real gate script)"
+    else
+      bad "Node scenario '$scenario' concluded '$got', expected '$expected': $(cat "$WORK/simulate.err")"
+    fi
+  done
+
+  echo "== a CANCELLED run must not conclude 'failure' for the Node tier either =="
+  NODE_CANCELLED=$(simulate "$NODE_WF" "$NODE_CONTEXT" cancelled)
+  if [ "$NODE_CANCELLED" = "not-run" ]; then
+    ok "the real Node tier gate does not run during a cancellation, so it cannot report 'failure'"
+  else
+    bad "the real Node tier gate concluded '$NODE_CANCELLED' under cancellation: $(cat "$WORK/simulate.err")"
+  fi
+
+  # The same silent-green shape as the Flight tier: every downstream job is
+  # `skipped`, which the gate reads as a pass — legitimate ONLY if the classifier
+  # actually said the tier does not apply. An unreadable verdict must red.
+  echo "== an unreadable Node applicability verdict reds the tier =="
+  for verdict in "" "maybe" "TRUE" "1"; do
+    got=$(simulate "$NODE_WF" "$NODE_CONTEXT" inapplicable "$verdict")
+    if [ "$got" = "failure" ]; then
+      ok "Node run_tier='${verdict}' concludes 'failure' (unknown is not inapplicability)"
+    else
+      bad "Node run_tier='${verdict}' concluded '$got'; an unreadable verdict passed as 'not applicable'"
+    fi
+  done
+  # run_tier=true with the platform legs skipped is the shape a mandating diff
+  # must never report green on — that IS the hole #3640 closed.
+  NODE_CLAIMED=$(simulate "$NODE_WF" "$NODE_CONTEXT" inapplicable "true")
+  if [ "$NODE_CLAIMED" = "failure" ]; then
+    ok "Node run_tier=true with skipped platform legs concludes 'failure'"
+  else
+    bad "Node run_tier=true with skipped platform legs concluded '$NODE_CLAIMED'"
+  fi
+  NODE_INAPPLICABLE=$(simulate "$NODE_WF" "$NODE_CONTEXT" inapplicable "false")
+  if [ "$NODE_INAPPLICABLE" = "success" ]; then
+    ok "Node run_tier=false reports the inapplicable tier as an explicit SUCCESS, not as absence"
+  else
+    bad "Node run_tier=false concluded '$NODE_INAPPLICABLE'; an inapplicable tier must report success"
+  fi
+
+  # THE PROPERTY THE WHOLE ENROLMENT RESTS ON: a failure of the three-platform
+  # `test` job — and of that job ALONE — must red the context. That is what the
+  # deleted `continue-on-error: ${{ matrix.os == 'windows-latest' }}` prevented,
+  # one layer down.
+  echo "== a platform-leg failure alone reds the Node tier =="
+  NODE_TEST_ONLY=$(simulate "$NODE_WF" "$NODE_CONTEXT" only-test-failed)
+  if [ "$NODE_TEST_ONLY" = "failure" ]; then
+    ok "the Node gate reds when only the three-platform test job failed"
+  else
+    bad "the Node gate concluded '$NODE_TEST_ONLY' when only the test job failed: a platform red would not block a merge"
+  fi
+
+  # THE MUTANT: bind TEST_RESULT to a constant `success` — the gate-job form of
+  # `continue-on-error` — and the assertion above must go green again. Without
+  # this, that assertion could be satisfied by a gate that reds for some other
+  # reason entirely.
+  cp "$NODE_WF" "$WORK/node-blind.yml"
+  ruby -e '
+    path = ARGV[0]
+    text = File.read(path)
+    needle = "          TEST_RESULT: ${{ needs.test.result }}\n"
+    abort("mutant: #{path} no longer binds needs.test.result") unless text.include?(needle)
+    File.write(path, text.sub(needle, "          TEST_RESULT: success\n"))
+  ' "$WORK/node-blind.yml" || bad "could not build the blind-to-test mutant"
+  NODE_BLIND=$(simulate "$WORK/node-blind.yml" "$NODE_CONTEXT" only-test-failed)
+  if [ "$NODE_BLIND" = "success" ]; then
+    ok "MUTANT: with TEST_RESULT hard-coded the same failure reports SUCCESS (the assertion discriminates)"
+  else
+    bad "MUTANT: the blinded gate concluded '$NODE_BLIND'; this suite would not catch a gate blind to the platform legs"
+  fi
 fi
 
 # ------------------------------------- the other half of the chain: required --
