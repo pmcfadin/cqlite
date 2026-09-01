@@ -493,9 +493,11 @@ def decode_escapes(raw):
             i += 2
             continue
         if e == "\n":
-            # Line continuation: the newline and the following whitespace vanish.
+            # Line continuation: the newline and the following whitespace vanish. Rust's
+            # whitespace set, not ASCII's — RUST_WS is bound at module level below and this
+            # runs only from the scan loop at the bottom of the file.
             i += 2
-            while i < n and raw[i] in " \t\r\n":
+            while i < n and raw[i] in RUST_WS:
                 i += 1
             continue
         if e == "x":
@@ -640,7 +642,13 @@ def lex(text):
 # A `cfg(...)` anywhere else — inside `doc(...)`, inside another attribute's token
 # tree, inside a `cfg_attr` TAIL — is deliberately not a site.
 # ---------------------------------------------------------------------------
-WS = "[ \t\r\n]*"
+# RUST'S WHITESPACE SET, not ASCII's (roborev job 71). Rust accepts any character with
+# the Unicode `Pattern_White_Space` property between tokens — including vertical tab, form
+# feed, NEL, the LEFT-TO-RIGHT/RIGHT-TO-LEFT marks and the line/paragraph separators — so a
+# gate written with one of them is a RECOGNISED spelling and must not be missed. Matched
+# exactly and completely, so nothing has to be added to the NOT SEEN list.
+RUST_WS = " \t\n\v\f\r\u0085\u200e\u200f\u2028\u2029"
+WS = "[" + RUST_WS + "]*"
 # Rust permits whitespace between `#`, an optional `!` and `[` (`# [cfg(...)]`,
 # `# ! [cfg(...)]` are both valid), so the head is whitespace-tolerant at every joint
 # (roborev job 60): requiring `#[` contiguous meant a legal gate was NOT SEEN and its

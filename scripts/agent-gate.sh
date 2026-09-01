@@ -716,7 +716,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 48 cases over throwaway
+#                      features-load-bearing component: 54 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -15045,7 +15045,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 48 cases over throwaway fixture
+# proof for the features-load-bearing component: 54 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16538,7 +16538,13 @@ run_tooling_tests() {
   # directory is a NAMED refusal rather than a silent omission (os.walk swallowed the
   # error, so a live feature whose only site lived there was reported dead), and cargo's
   # env-name normalization is matched exactly, so a punctuation-bearing feature name is
-  # credited. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # credited. Round 10 (job 71) makes that traversal case EUID-INDEPENDENT — it induced
+  # the error with mode bits, which ROOT IGNORES, so this mandatory suite red in a root
+  # container while the guard was correct; it now exceeds PATH_MAX instead, verified to
+  # behave identically as root and as an unprivileged user. Also: Rust's whitespace set is
+  # Pattern_White_Space, not ASCII's, and each of the six CARGO_FEATURE_* spellings is now
+  # counted as its own case with the LIST asserted, since one shared `ok` let a deleted
+  # spelling escape the exact-count protection. Every fixture is a LOCAL path workspace with no registry dependency and every
   # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
   # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
   # and must depend on neither a network nor a GNU userland.

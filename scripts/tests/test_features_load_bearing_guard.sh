@@ -58,11 +58,13 @@
 #                cqlite-ffi-common/src/json_number.rs only inside doc comments.
 #  13.  GREEN  — a genuine `CARGO_FEATURE_<NAME>` env read in the package's BUILD
 #                SCRIPT is an effect (it is how a build script sees a feature).
-#  14.  GREEN  — SOUNDNESS, six spellings in one loop: an aliased import, a constant
-#                argument, `env::vars()` iteration, a local wrapper, a `my_env` module
-#                and a bare textual mention ALL credit. Each was, at some revision, not
-#                recognised and its feature reported DEAD; the rule is now textual and
-#                maximal, and the contract line declares it.
+#  14.  GREEN  — SOUNDNESS, six spellings, EACH COUNTED AS ITS OWN CASE and the LIST
+#                itself asserted (a shared `ok` let a deleted spelling escape the
+#                exact-count protection — #3544 inside the assert built to prevent it):
+#                an aliased import, a constant argument, `env::vars()` iteration, a local
+#                wrapper, a `my_env` module and a bare textual mention ALL credit. Each
+#                was, at some revision, not recognised and its feature reported DEAD; the
+#                rule is now textual and maximal, and the contract line declares it.
 #  15.  GREEN  — a BARE `CARGO_FEATURE_` prefix (environment iteration names no
 #                individual feature) credits EVERY feature of that package.
 #  16.  RED    — a package with NO build script gets no env credit at all, even for a
@@ -181,6 +183,9 @@
 #                silent omission. `os.walk` swallowed directory errors, so a live feature
 #                whose only site lived there was reported dead — the guard contradicting
 #                its own fail-closed promise.
+#  50.  GREEN  — SOUNDNESS: Rust's whitespace set is Pattern_White_Space, not ASCII's, so
+#                vertical tab, form feed, NEL and LINE SEPARATOR between `#` and `[` are
+#                recognised — the contract line advertises whitespace tolerance.
 #  49.  GREEN  — SOUNDNESS: cargo's env spelling is uppercase with ONLY `-` -> `_`, so
 #                `plus+feat` is read as `CARGO_FEATURE_PLUS+FEAT`. Mapping all punctuation
 #                to `_` made that read never match.
@@ -575,7 +580,14 @@ ok "a CARGO_FEATURE_<NAME> env read in the package's build script is an effect"
 # The class review kept re-opening. Each of these was, at some revision, NOT recognised
 # and its feature reported DEAD — a false FAIL, which the contract forbids. The rule is
 # now textual and maximal, so all six credit, and the contract line says so.
-for spelling in aliased-import constant-argument env-vars-iteration local-wrapper my-env-module bare-string-mention; do
+# EVERY ITERATION IS ITS OWN CASE, and the LIST is asserted too (roborev job 71). Six
+# fixtures used to share one `ok`, so deleting a spelling left the exact-count assert
+# unchanged — #3544's shrunken-suite defect occurring INSIDE the assert built to prevent
+# it. Now each spelling increments the count AND the exercised set is compared to this
+# literal list, so adding or removing one must be a deliberate edit in two places.
+FLB_SPELLINGS="aliased-import constant-argument env-vars-iteration local-wrapper my-env-module bare-string-mention"
+spellings_seen=""
+for spelling in $FLB_SPELLINGS; do
   D="$(fixture "textual-$spelling")"
   cat >"$D/a/tests/t.rs" <<'EOF'
 #[test]
@@ -655,8 +667,11 @@ EOF
   esac
   expect_green "$D" "case 14 ($spelling)"
   assert_contract_declares "any textual CARGO_FEATURE_* mention in a build-script package's sources" "case 14 ($spelling)"
+  spellings_seen="$spellings_seen $spelling"
+  ok "SOUNDNESS: the CARGO_FEATURE_* spelling '$spelling' credits its feature (and the contract declares the textual scan)"
 done
-ok "SOUNDNESS: all six CARGO_FEATURE_* spellings credit (aliased import, constant, env::vars(), local wrapper, my_env module, bare mention) — and the contract declares the textual scan"
+[ "$(echo $spellings_seen)" = "$(echo $FLB_SPELLINGS)" ] \
+  || fail_case "case 14: exercised spellings '$(echo $spellings_seen)' do not match the declared list '$(echo $FLB_SPELLINGS)' — a spelling was added or dropped without updating the list, and the count alone cannot see that"
 
 # --- 15. GREEN (DECLARED): a BARE CARGO_FEATURE_ prefix credits every feature -
 # Environment ITERATION names no individual feature, so there is nothing to match and
@@ -1267,31 +1282,51 @@ EOF
 expect_green "$D" "case 47"
 ok "SOUNDNESS: cfg!(...), cfg![...] and cfg! { ... } are all recognised, as the contract line advertises"
 
-# --- 48. RED (FAIL-CLOSED): an UNREADABLE source directory is not an empty one -
-# os.walk swallows directory errors by default, so an unreadable source dir was silently
-# omitted and a live feature whose only site lived there was reported DEAD. The guard must
-# now REFUSE, naming the directory.
-D="$(fixture unreadable-source-dir)"
-append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'hiddenfeat = []'
-mkdir -p "$D/a/src/locked"
-cat >"$D/a/src/locked/mod.rs" <<'EOF'
-#[cfg(feature = "hiddenfeat")]
-pub fn only_site_of_hiddenfeat() {}
-EOF
-chmod 000 "$D/a/src/locked"
-if [ -r "$D/a/src/locked" ]; then
-  # Running as root (or on a filesystem ignoring mode bits): the case cannot be staged,
-  # and a case that cannot stage its own subject must say so rather than pass vacuously.
-  chmod 755 "$D/a/src/locked"
-  fail_case "case 48: could not make a directory unreadable (running as root?), so this case cannot exercise the traversal-error path — refusing to report it as passed"
-fi
-run_guard "$D" && { chmod 755 "$D/a/src/locked"; cat "$TMPROOT/out.txt"; fail_case "case 48: an UNREADABLE source directory was silently omitted — the guard reported a verdict over sources it could not read"; }
-chmod 755 "$D/a/src/locked"
+# --- 48. RED (FAIL-CLOSED): a traversal error is a NAMED refusal -------------
+# os.walk swallows every directory error by default, so an unreadable/untraversable
+# directory was silently OMITTED and a live feature whose only site lived there was
+# reported DEAD. The guard must REFUSE instead.
+#
+# THE MECHANISM IS EUID-INDEPENDENT, and that matters (roborev job 71): the first version
+# of this case made a directory unreadable with mode bits, which ROOT IGNORES — so it
+# could never fail-as-expected in a root container, a normal CI posture, and this
+# MANDATORY suite red while the guard was correct. A fix that adds a resource inherits
+# that resource's environment assumptions. So the error induced here is ENAMETOOLONG: a
+# directory chain built with RELATIVE mkdirs (each component short, so creation succeeds)
+# whose ABSOLUTE path exceeds PATH_MAX, which os.walk hits when it scandirs it. That is a
+# kernel limit, not a permission — measured identical as an unprivileged user and as root.
+D="$(fixture untraversable-source-dir)"
+python3 - "$D/a/src" <<'PYEOF'
+import os, sys
+root = sys.argv[1]
+deep = os.path.join(root, "deep")
+os.mkdir(deep)
+cwd = os.getcwd()
+os.chdir(deep)
+seg = "d" * 200
+made = 0
+try:
+    for _ in range(40):
+        os.mkdir(seg)
+        os.chdir(seg)
+        made += 1
+finally:
+    os.chdir(cwd)
+if made < 21:                     # 21 * 201 > PATH_MAX (4096)
+    sys.stderr.write("only %d levels created; PATH_MAX cannot be exceeded here\n" % made)
+    sys.exit(1)
+PYEOF
+[ $? -eq 0 ] || fail_case "case 48: could not build a path longer than PATH_MAX, so this case cannot exercise the traversal-error path — refusing to report it as passed"
+run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 48: an UNTRAVERSABLE source directory was silently omitted — the guard reported a verdict over sources it could not read"; }
 grep -q 'could not traverse' "$TMPROOT/out.txt" \
   || { cat "$TMPROOT/out.txt"; fail_case "case 48: the guard failed but did not NAME the traversal error"; }
-grep -q 'locked' "$TMPROOT/out.txt" \
-  || { cat "$TMPROOT/out.txt"; fail_case "case 48: the diagnostic does not name the directory it could not read"; }
-ok "FAIL-CLOSED: an unreadable source directory is a NAMED refusal, never a silent omission"
+grep -q 'declared feature(s) are DEAD' "$TMPROOT/out.txt" \
+  && { cat "$TMPROOT/out.txt"; fail_case "case 48: the guard reported features DEAD over a tree it could not fully read — a refusal was required, not a verdict"; }
+# POSITIVE CONTROL: remove the untraversable tree and the SAME fixture certifies, so the
+# red above is the traversal error and nothing else about the fixture.
+rm -rf "$D/a/src/deep"
+expect_green "$D" "case 48 (control)"
+ok "FAIL-CLOSED: an untraversable source directory is a NAMED refusal (euid-independent), never a silent omission; removing it restores the PASS"
 
 # --- 49. GREEN (SOUNDNESS): cargo's own env-name normalization ---------------
 # Cargo permits `+`, `-`, `.` in a feature name and its env spelling uppercases while
@@ -1320,13 +1355,37 @@ EOF
 expect_green "$D" "case 49"
 ok "SOUNDNESS: cargo's env spelling is matched exactly (uppercase, only \`-\` -> \`_\`), so punctuation-bearing feature names are credited"
 
+# --- 50. GREEN (SOUNDNESS): Rust's whitespace set, not ASCII's ---------------
+# Rust accepts any Pattern_White_Space character between tokens, so a vertical tab, form
+# feed, NEL or LINE SEPARATOR between `#` and `[` is a RECOGNISED spelling the contract
+# line advertises. Matching only space/tab/CR/LF missed them and reported their features
+# dead. The characters are written by python3 rather than typed into this file, so the
+# fixture cannot be silently mangled by an editor, a diff viewer or a copy-paste.
+D="$(fixture rust-whitespace-set)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'vtabfeat = []
+ffeedfeat = []
+nelfeat = []
+lsfeat = []'
+python3 - "$D/a/src/exotic.rs" <<'PYEOF'
+import sys
+VT, FF, NEL, LS = chr(11), chr(12), chr(0x85), chr(0x2028)
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write("#" + VT + '[cfg(feature = "vtabfeat")]\npub fn vtab() {}\n\n')
+    fh.write("#" + FF + '[cfg(feature = "ffeedfeat")]\npub fn ffeed() {}\n\n')
+    fh.write("#" + NEL + '[cfg(feature = "nelfeat")]\npub fn nel() {}\n\n')
+    fh.write("#" + LS + '[cfg(feature = "lsfeat")]\npub fn ls() {}\n')
+PYEOF
+append_after_line "$D/a/src/lib.rs" 'pub fn always() {}' 'pub mod exotic;'
+expect_green "$D" "case 50"
+ok "SOUNDNESS: vertical tab, form feed, NEL and LINE SEPARATOR between \`#\` and \`[\` are Rust whitespace and are recognised"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=48
+CASE_COUNT_EXPECTED=54
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
