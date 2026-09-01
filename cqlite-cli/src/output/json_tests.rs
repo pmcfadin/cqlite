@@ -560,6 +560,14 @@ fn json_text(value: &Value) -> String {
     serde_json::to_string(&JSONWriter::value_to_json(value)).expect("serialize")
 }
 
+/// Significant digits of a decimal rendering: sign, decimal point, exponent,
+/// leading zeros and trailing zeros carry no precision.
+fn significant_digits(s: &str) -> usize {
+    let mantissa = s.split(['e', 'E']).next().unwrap_or(s);
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.trim_start_matches('0').trim_end_matches('0').len()
+}
+
 /// Issue #3777: a CQL `float` must serialize as the shortest decimal that
 /// round-trips the **f32**, which is what `sstabledump` prints (Cassandra
 /// `FloatSerializer` → `Float.toString`).
@@ -635,12 +643,14 @@ fn float32_json_round_trips_through_f32_for_a_spread_of_values() {
             f.to_bits(),
             "emitted {text} does not round-trip {f}"
         );
-        // No more significant digits than `f32`'s own shortest spelling.
-        let digits = |s: &str| s.chars().filter(|c| c.is_ascii_digit()).count();
+        // No more SIGNIFICANT digits than `f32`'s own shortest spelling. Counted
+        // rather than string-compared because JSON float notation legitimately
+        // differs from Rust's `Display` in ways that carry no precision: ryu
+        // renders `1e10` as `10000000000.0` (a trailing `.0`) and `f32::MAX` in
+        // exponent form (`3.4028235e38`) where `Display` writes it out in full.
         assert!(
-            digits(&text) <= digits(&f.to_string()),
-            "emitted {text} carries more digits than the f32 shortest form {}",
-            f
+            significant_digits(&text) <= significant_digits(&f.to_string()),
+            "emitted {text} carries more significant digits than the f32 shortest form {f}"
         );
     }
 }

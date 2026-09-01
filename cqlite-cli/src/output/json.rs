@@ -72,6 +72,53 @@ impl Serialize for RowObj<'_> {
     }
 }
 
+/// Serialize a CQL `float` as the shortest decimal that round-trips the **f32**.
+///
+/// Issue #3777. `Number::from_f64(f as f64)` widens the f32 to its
+/// exact-but-imprecise f64 first, so the emitted decimal is the shortest one
+/// round-tripping THAT f64 (`1.6699999570846558`) instead of the f32 (`1.67`).
+/// The oracle is `sstabledump`, whose `float` cells carry the f32 spelling
+/// (Cassandra `FloatSerializer` -> `Float.toString`); the CSV and table writers
+/// already agree with it via `ValueFormatter::format_float32`.
+///
+/// # Why this and not `serde_json`'s `float_roundtrip`
+///
+/// MEASURED, not assumed (see
+/// `json_tests.rs::serde_json_value_from_f32_still_widens_so_the_fix_must_be_local`):
+/// `float_roundtrip` is a DESERIALIZATION feature — it appears only in
+/// serde_json's `src/de.rs` and `src/value/de.rs`, never in `ser.rs`/`number.rs` —
+/// so it cannot reach this arm at all. And `serde_json::Number` stores an `f64`
+/// unconditionally (`Number::from_f32` is itself `N::Float(f as f64)`), so no
+/// `Number`/`Value` constructor can carry f32 precision. Only the streaming
+/// `Serializer::serialize_f32` path preserves it, and this writer builds a
+/// `JsonValue`. So the conversion is done here, locally, with no new dependency
+/// and no feature flag whose absence would silently change release output.
+///
+/// Rust's `f32` `Display` emits the shortest round-tripping decimal for the f32
+/// (at most 9 significant digits, never in exponent form). Re-parsing that text
+/// as `f64` is lossless — f64 recovers any decimal of up to 15 significant
+/// digits, so the nearest f64 to that text is the only f64 whose own shortest
+/// form is that same text — and the `Number` therefore serializes the f32
+/// spelling. Verified over a spread of values by
+/// `json_tests.rs::float32_json_round_trips_through_f32_for_a_spread_of_values`.
+fn float32_to_json(f: f32) -> JsonValue {
+    // Non-finite floats stay JSON `null`: JSON has no literal for NaN or
+    // +/-Infinity. That is a DECLARED divergence (CLAUDE.md `bindings/parity`
+    // gap 4, AD2's `Divergence::NonFiniteFloatRendersAsJsonNull`), deliberately
+    // NOT changed here — pinned by
+    // `json_tests.rs::nonfinite_float_renders_as_json_null_unchanged`.
+    if !f.is_finite() {
+        return JsonValue::Null;
+    }
+    let shortest = f.to_string();
+    match shortest.parse::<f64>() {
+        Ok(widened) => serde_json::Number::from_f64(widened)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        Err(_) => JsonValue::Null,
+    }
+}
+
 /// JSON writer for QueryResult
 #[allow(dead_code)]
 pub struct JSONWriter;
@@ -156,9 +203,7 @@ impl JSONWriter {
             Value::Float(f) => serde_json::Number::from_f64(*f)
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null),
-            Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null),
+            Value::Float32(f) => float32_to_json(*f),
             Value::Text(s) => JsonValue::String(String::from_utf8_lossy(s).into_owned()),
             // Use ValueFormatter for human-readable Blob formatting (0x... hex)
             Value::Blob(_) => JsonValue::String(ValueFormatter::format_value(value)),
