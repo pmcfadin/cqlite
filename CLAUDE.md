@@ -1973,7 +1973,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   and an unmeasurable classification is its own `ERROR` class every caller refuses on, which is
   CLAUDE.md's standing rule (a positive verdict requires an AFFIRMATIVE MEASUREMENT; never
   derive a pass from the ABSENCE of a bad signal) applied where its permissive branch DELETES
-  DATA.
+  DATA. (5) Correction (1) reached ONE exit path, and the SIGNAL traps and USAGE errors still
+  exited with no token — the fix not reaching every site of its own class — so contract (c) is
+  now enforced by a FLAG rather than by reviewing each `exit`: `verdict()` records that it
+  fired, an EXIT-trap backstop emits `ERROR` for any path that would leave with none, `USAGE`
+  joins the closed set, and the signal handlers pick their one token from an explicit
+  COMMIT_PHASE (`ERROR` before the atomic rename, the run's own success token after it,
+  DEFERRED across it). That phase is only OBSERVABLE because the rename moved OUT of a `$( )`:
+  measured on bash 5.2, a trapped signal arriving while the shell waits for a COMMAND
+  SUBSTITUTION inside a FUNCTION is DISCARDED — the trap never runs — while the same signal
+  during a plain command is delivered normally.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

@@ -116,7 +116,11 @@
 #       token is not a thing this script can print — the set is the grammar. EVERY exit
 #       carries one, INCLUDING a fatal start-up failure: callers branch on the TOKEN, so a
 #       prefixed line with no token is unreadable by every one of them and its `case` falls
-#       through — (a) does not imply (c), and only (c) is what a consumer reads.
+#       through — (a) does not imply (c), and only (c) is what a consumer reads. That includes a
+#       USAGE error and a SIGNAL: an EXIT-trap backstop emits `verdict ERROR` for any path that
+#       would otherwise leave with none, and the INT/TERM/HUP handlers emit exactly one token
+#       chosen by COMMIT_PHASE — ERROR before the atomic rename, the run's own success token
+#       after it, and a DEFERRED delivery across it.
 #
 # VERDICT TOKENS (closed set)
 #   OWNED               this lane, this issue, this session — proceed
@@ -134,6 +138,7 @@
 #   LIVE-PEER           session differs and the recorded writer is provably ALIVE
 #   LIVENESS-UNKNOWN    session differs and liveness could NOT be measured
 #   ERROR               an I/O or internal failure — nothing was decided
+#   USAGE               the invocation itself was wrong — nothing was read and nothing written
 #
 # SUBCOMMANDS
 #   write  <N> [--stage <s>] [--request-id <r>] [--pr <n>] [--branch <b>]
@@ -215,7 +220,7 @@
 #   6   LIVE-PEER — a live peer owns this lane; do NOT proceed
 #   7   LIVENESS-UNKNOWN — could not measure; do NOT proceed
 #   8   UNSTAMPED / MALFORMED / DUPLICATE-SENTINEL
-#   64  usage error
+#   64  USAGE — usage error
 #
 # CONSTRAINTS
 #   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile). No network, no
@@ -251,9 +256,23 @@ START_SLACK_SECS=2
 # ---------------------------------------------------------------------------
 # Output. Contract (a): every line, stdout and stderr, carries the ONE prefix.
 # ---------------------------------------------------------------------------
+# CONTRACT (c) IS ENFORCED BY A FLAG, NOT BY DISCIPLINE (roborev job 30 G2). Every exit must
+# carry exactly ONE `verdict <TOKEN>` line: zero makes a consumer's `case` fall through every
+# arm (round 5's F1, at the liveness-library guard), and two lets a consumer read whichever its
+# parser picks first. `verdict()` records that it fired, the signal handlers consult the flag so
+# they cannot add a second, and the EXIT trap consults it so no path can leave with none.
+VERDICT_EMITTED=0
+# `--help` is contract (a)'s stated exemption: it emits no verdict line because no consumer
+# parses it. It is the ONLY exemption, and it is a flag rather than an inference.
+VERDICT_EXEMPT=0
+
 emit()       { printf '%s %s\n' "$P" "$*"; }
 note()       { printf '%s note %s\n' "$P" "$*" >&2; }
-die_usage()  { printf '%s USAGE %s\n' "$P" "$*" >&2; exit 64; }
+# A USAGE error is an EXIT, so contract (c) covers it: it carries the `USAGE` token (a member of
+# the closed set) as well as the human-readable line. Before job 30 G2 it carried the anchored
+# line alone, so `drive-issue-state.sh write <N> --stage` — a plain typo — was unreadable by
+# every caller the doctrine tells to branch on the token.
+die_usage()  { verdict USAGE; printf '%s USAGE %s\n' "$P" "$*" >&2; exit 64; }
 
 # sane <string> — the string with every C0 control character and DEL replaced by '?'.
 # Applied to EVERY dynamic field before it is printed (contract (b)). This is the
@@ -268,11 +287,23 @@ sane() {
 }
 
 # verdict <TOKEN> — contract (c): the ONE verdict line, one closed-set token, nothing else.
-verdict() { printf '%s verdict %s\n' "$P" "$1"; }
+# It records that it fired so nothing downstream can print a second one, and so the EXIT trap
+# can tell "decided" from "left without deciding". NEVER call it inside `$( )`: the flag would
+# be set in the subshell and the line captured into a variable (the defect case 17 pins).
+verdict() { VERDICT_EMITTED=1; printf '%s verdict %s\n' "$P" "$1"; }
 detail()  { printf '%s verdict-detail %s\n' "$P" "$*"; }
 
 # refuse <TOKEN> <exit-code> <detail...> — emit a named refusal and exit.
 refuse() {
+  # ARGUMENT-COUNT GUARD BEFORE THE SHIFT (roborev job 30 G3, internal site): a `shift` past the
+  # end prints bash's own UNPREFIXED `shift count out of range` under `shift_verbose`/POSIX mode,
+  # which breaks contract (a) from inside the function that exists to satisfy contract (c).
+  if [ "$#" -lt 2 ]; then
+    VERDICT_EMITTED=1
+    printf '%s verdict ERROR\n' "$P"
+    printf '%s verdict-detail internal: refuse was called with %s argument(s); a token and an exit code are required\n' "$P" "$#"
+    exit 1
+  fi
   local token="$1" code="$2"; shift 2
   verdict "$token"
   [ "$#" -eq 0 ] || detail "$@"
@@ -284,6 +315,7 @@ refuse() {
 # exemption — so there is no anchor to protect here, and a HUMAN who asks for the contract and
 # gets nothing is better served by awk's own diagnostic than by silence.
 print_help() {
+  VERDICT_EXEMPT=1
   awk 'NR>=2 && /^# ---END-HELP---/{exit} NR>=2 {sub(/^# ?/,""); print}' "$0"
 }
 
@@ -313,10 +345,77 @@ cleanup_tmp() {
   fi
   TMP_FILES=()
 }
-trap cleanup_tmp EXIT
-trap 'cleanup_tmp; exit 130' INT
-trap 'cleanup_tmp; exit 143' TERM
-trap 'cleanup_tmp; exit 129' HUP
+# ---------------------------------------------------------------------------
+# SIGNAL AND EXIT HANDLING (roborev job 30 G2).
+#
+# The traps used to be `cleanup_tmp; exit 130|143|129`, which satisfied nothing: no verdict
+# token at all, so a consumer branching on the token (drive-issue.md's Delta 4 mandates it) got
+# an empty string — the SAME shape as round 5's F1 at the liveness-library guard, one exit path
+# over. And they were PHASE-BLIND: a signal arriving after the atomic rename left the marker
+# CHANGED while the caller was told nothing whatsoever.
+#
+# COMMIT_PHASE is set immediately around the one rename that changes durable state:
+#   idle       nothing has been committed -> the honest verdict is ERROR, nothing was written
+#   committing the rename is in flight -> the signal is DEFERRED across it (below)
+#   committed  the rename returned -> the run's own success token is the honest verdict
+# COMMIT_VERDICT is the success token the CURRENT mutating subcommand would emit (WRITTEN /
+# ADOPTED), set by the subcommand rather than guessed by the handler.
+COMMIT_PHASE=idle
+COMMIT_VERDICT=''
+SIG_PENDING=''
+
+# on_signal <name> <exit-code>
+on_signal() {
+  local sig="$1" code="$2"
+  if [ "$COMMIT_PHASE" = committing ]; then
+    # DEFERRED, NOT IGNORED. The commit is a single rename; letting it finish costs one syscall
+    # and lets the run report the outcome it ACHIEVED instead of an "undetermined". The exit
+    # code is still the signal's — settle_pending_signal delivers it once the verdict is out.
+    SIG_PENDING="$sig:$code"
+    return 0
+  fi
+  trap '' INT TERM HUP     # no second entry, and therefore no second verdict
+  if [ "$VERDICT_EMITTED" -eq 0 ]; then
+    if [ "$COMMIT_PHASE" = committed ] && [ -n "$COMMIT_VERDICT" ]; then
+      verdict "$COMMIT_VERDICT"
+      detail "SIG$sig arrived AFTER the atomic rename COMPLETED: the marker WAS replaced and records what this run assembled. Exiting $code."
+    else
+      verdict ERROR
+      detail "SIG$sig arrived before any atomic rename: NOTHING was written and NOTHING was decided. Exiting $code."
+    fi
+  fi
+  exit "$code"
+}
+trap 'on_signal INT 130'  INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129'  HUP
+
+# settle_pending_signal — deliver a signal that was deferred across the commit, AFTER the
+# verdict is out. Called at the end of every mutating subcommand.
+settle_pending_signal() {
+  [ -n "$SIG_PENDING" ] || return 0
+  local sig="${SIG_PENDING%%:*}" code="${SIG_PENDING##*:}"
+  SIG_PENDING=''
+  trap '' INT TERM HUP
+  detail "SIG$sig arrived DURING the atomic rename and was DEFERRED across it, so the verdict above is the TRUE outcome rather than an 'undetermined'. Exiting $code."
+  exit "$code"
+}
+
+# THE BACKSTOP. Contract (c) says EVERY exit carries a token, and a rule enforced only by
+# reviewing each `exit` is the rule that grows a new exception every round — that is precisely
+# how the signal traps came to have none. Any path that leaves without deciding now says so.
+# NOTHING IN THIS TRAP MAY FAIL: a failing command in a bash EXIT trap under `set -e` aborts the
+# trap AND REPLACES the exit status (measured on roborev job 26 F2).
+on_exit() {
+  local rc=$?
+  if [ "$VERDICT_EXEMPT" -eq 0 ] && [ "$VERDICT_EMITTED" -eq 0 ]; then
+    verdict ERROR || true
+    detail "the run ended at exit $rc without reaching any decision point, so NOTHING was decided and NOTHING was written. This is a defect in $(sane "$prog"), not a state of the marker: report it with the command you ran." || true
+  fi
+  cleanup_tmp
+  return 0
+}
+trap on_exit EXIT
 
 # register_tmp <path> — remember a temp file for cleanup. Stored as an array ELEMENT, so no
 # assumption is made about the path's shape (see TMP_FILES above).
@@ -923,12 +1022,34 @@ write_marker() {
   } >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced (the body could not be read, or the temporary file could not be written)"; return 1; }
   # The last thing before the atomic commit, over the committed bytes themselves.
   assert_assembled_marker "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
-  # mv's NATIVE text is CAPTURED and FOLDED for the same reason as mktemp's: "cannot move ...
-  # Permission denied" vs "Device or resource busy" are different operator actions.
-  local mverr
-  mverr="$(mv -f "$tmp" "$path" 2>&1)" || {
-    rm -f "$tmp" 2>/dev/null || true
-    WRITE_ERR="failed replacing $(sane "$path")${mverr:+ (mv: $(sane "$mverr"))}"; return 1; }
+  # THE COMMIT. mv's NATIVE text is CAPTURED and FOLDED for the same reason as mktemp's:
+  # "cannot move ... Permission denied" vs "Device or resource busy" are different operator
+  # actions. It is captured to a FILE and run as a PLAIN command rather than inside `$( )`,
+  # which is the roborev job 30 G2 change and is load-bearing: MEASURED on bash 5.2, a trapped
+  # signal arriving while the shell waits for a COMMAND SUBSTITUTION inside a FUNCTION is
+  # DISCARDED — the trap never runs at all — while the same signal during a plain command is
+  # delivered normally. The one window whose interruption changes durable state must be
+  # signal-OBSERVABLE, or the phase machinery below can never see it.
+  local mverrf="$tmp.err" mverr=''
+  register_tmp "$mverrf"
+  COMMIT_PHASE=committing
+  if mv -f "$tmp" "$path" >"$mverrf" 2>&1; then
+    COMMIT_PHASE=committed
+  else
+    COMMIT_PHASE=idle
+    mverr="$(cat "$mverrf" 2>/dev/null || true)"
+    rm -f "$tmp" "$mverrf" 2>/dev/null || true
+    WRITE_ERR="failed replacing $(sane "$path")${mverr:+ (mv: $(sane "$mverr"))}"; return 1
+  fi
+  # RESIDUAL, STATED RATHER THAN CLAIMED AWAY: bash defers a trap until the current command
+  # completes, so a signal arriving during the rename runs the handler HERE — with the phase
+  # still `committing` — and the deferral above is what makes that report the truth. The window
+  # between `mv` returning and the phase assignment above is NOT eliminated, only narrowed to
+  # two shell assignments; a signal landing exactly there is reported as a completed write,
+  # which is correct, because the rename HAS returned. What is genuinely NOT atomic is the pair
+  # (rename, phase update) when the rename FAILS: a pending signal is then dropped in favour of
+  # the anchored ERROR verdict above, so the exit status is 1 rather than the signal's.
+  rm -f "$mverrf" 2>/dev/null || true
   WROTE_PATH="$path"
   return 0
 }
@@ -1056,6 +1177,7 @@ cmd_write() {
   [ -z "$prior_pid" ]     || f_pp="prior-session-pid: $(sanitize_field "$prior_pid")"
   [ -z "$prior_ts" ]      || f_pt="prior-ts: $(sanitize_field "$prior_ts")"
   [ -z "$adopt_reason" ]  || f_ar="adopt-reason: $(sanitize_field "$adopt_reason")"
+  COMMIT_VERDICT=WRITTEN
   if ! write_marker "$issue" "$actor" "$body_src" "$f_stage" "$f_request" "$f_pr" "$f_branch" \
       "$f_ps" "$f_pp" "$f_pt" "$f_ar"; then
     [ -z "$carried" ] || rm -f "$carried" 2>/dev/null || true
@@ -1065,6 +1187,7 @@ cmd_write() {
   verdict WRITTEN
   [ -z "$discarded" ] || detail "$discarded"
   detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(pwd -P)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$WROTE_PATH")"
+  settle_pending_signal
 }
 
 cmd_verify() {
@@ -1086,6 +1209,7 @@ cmd_verify() {
 # `resume:<branch>` sanitizes to a non-sentinel token and would otherwise record an
 # unresolved placeholder as the audit reason. These commands are read by agents that run
 # printed text LITERALLY.
+REASON_TOKEN=''
 assert_reason() {
   local raw="$1" tok
   case "$raw" in
@@ -1099,7 +1223,7 @@ assert_reason() {
     why | reason | todo | tbd | tba | xxx | xxxx | placeholder | fixme | none | foo | bar | baz | n/a)
       die_usage "adopt: --reason '$(sane "$raw")' records as the PLACEHOLDER '$(sane "$tok")' — as uninformative as no reason at all. Say what the resume IS, e.g. --reason cron-reinvoke:writer-pid-gone" ;;
   esac
-  printf '%s\n' "$tok"
+  REASON_TOKEN="$tok"
 }
 
 cmd_adopt() {
@@ -1117,7 +1241,12 @@ cmd_adopt() {
   # whatever the lane looks like — a usage error must not depend on the marker's state.
   [ "$reason_given" -eq 1 ] || die_usage "adopt requires --reason saying what the resume IS (it is recorded in the stamp next to who took it), e.g. --reason cron-reinvoke:writer-pid-gone"
   local reason_token actor
-  reason_token="$(assert_reason "$reason")"
+  # REPORTED THROUGH A GLOBAL, NEVER `$( )`. assert_reason can `die_usage`, and a die/refuse
+  # inside a command substitution exits only the SUBSHELL: its `verdict USAGE` line would be
+  # CAPTURED into this variable instead of reaching stdout, leaving the run with no verdict at
+  # all — exactly the defect case 17 pins for write_marker.
+  assert_reason "$reason"
+  reason_token="$REASON_TOKEN"
   actor="$(resolve_actor "$actor_raw")"
 
   lock_marker
@@ -1147,6 +1276,7 @@ cmd_adopt() {
   [ -z "$request" ] || f_request="request-id: $request"
   [ -z "$pr" ]      || f_pr="pr: $pr"
   [ -z "$branch" ]  || f_branch="branch: $branch"
+  COMMIT_VERDICT=ADOPTED
   if ! write_marker "$issue" "$actor" "$carried" "$f_stage" "$f_request" "$f_pr" "$f_branch" \
       "prior-session: $prior_session" \
       "prior-session-pid: $prior_pid" \
@@ -1158,6 +1288,7 @@ cmd_adopt() {
   rm -f "$carried" 2>/dev/null || true
   verdict ADOPTED
   detail "issue=$(sane "$issue") prior-session=$(sane "$prior_session") prior-session-pid=$(sane "$prior_pid") new-session=$(sane "$(this_session)") reason=$(sane "$reason_token") -> $(sane "$WROTE_PATH"); the recorded writer was provably gone: $LIVE_DETAIL"
+  settle_pending_signal
 }
 
 cmd_show() {

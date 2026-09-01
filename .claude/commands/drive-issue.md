@@ -97,6 +97,11 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
     report the `verdict-detail` line to the lead. **Every** exit of that script carries a verdict
     token, a fatal start-up failure included, so an EMPTY token means you are not reading its
     output (redirection, a shell wrapper) — never that the run was fine.
+  - `USAGE` (64) → the invocation itself was wrong (a bad issue number, an option with no
+    value, an unknown subcommand). NOTHING was read and NOTHING was written; fix the command.
+  - A signal (`INT`/`TERM`/`HUP`, exit 130/143/129) still carries exactly ONE token, chosen by
+    how far the write got: `ERROR` before the atomic rename (nothing written), and the run's own
+    `WRITTEN`/`ADOPTED` after it (the marker WAS replaced — do not re-run blindly).
   - `FOREIGN-ISSUE`/`FOREIGN-MACHINE`/`FOREIGN-WORKTREE` (4) → this marker is not about this
     lane's work (a reused lane, a copied tree, a marker that travelled with a branch). Escalate to
     the lead rather than adopting or deleting it.

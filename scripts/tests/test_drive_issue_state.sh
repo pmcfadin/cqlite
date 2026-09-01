@@ -60,9 +60,14 @@ verdict_of() {
   printf '%s\n' "$1" | sed -n 's/^DRIVE-STATE: verdict \([^ ]*\).*/\1/p' | head -1
 }
 
+# verdict_count <output> — how many `verdict ` lines the run emitted. Contract (c) says
+# EXACTLY ONE, so both zero (a consumer's `case` falls through every arm) and two (a consumer
+# reads whichever its parser picks first) are failures.
+verdict_count() { printf '%s\n' "$1" | grep -c '^DRIVE-STATE: verdict ' || true; }
+
 # The CLOSED verdict token set (the script's own grammar). An unrecognised token is
 # a refusal, so the test pins the set rather than accepting whatever is printed.
-VERDICT_SET="OWNED WRITTEN ADOPTED SHOWN ABSENT UNSTAMPED MALFORMED DUPLICATE-SENTINEL FOREIGN-ISSUE FOREIGN-MACHINE FOREIGN-WORKTREE ADOPTABLE LIVE-PEER LIVENESS-UNKNOWN ERROR"
+VERDICT_SET="OWNED WRITTEN ADOPTED SHOWN ABSENT UNSTAMPED MALFORMED DUPLICATE-SENTINEL FOREIGN-ISSUE FOREIGN-MACHINE FOREIGN-WORKTREE ADOPTABLE LIVE-PEER LIVENESS-UNKNOWN ERROR USAGE"
 verdict_in_set() {
   local v="$1" t
   [ -n "$v" ] || return 1
@@ -696,7 +701,7 @@ case_begin 22-no-dead-letter-remedies "DERIVED: no refusal may name a subcommand
 # LITERALLY. Such a remedy must describe the STATE CHANGE and let the normal path follow —
 # which is how MALFORMED/DUPLICATE-SENTINEL are worded. This case caught two such texts
 # the moment it was written, in the same round as the UNSTAMPED dead letter itself.
-DL_STATES="absent unstamped malformed displaced-sentinel duplicate-sentinel foreign-issue foreign-machine foreign-worktree adoptable live-peer liveness-unknown error"
+DL_STATES="absent unstamped malformed displaced-sentinel duplicate-sentinel foreign-issue foreign-machine foreign-worktree adoptable live-peer liveness-unknown error usage"
 expected_for() {
   case "$1" in
     absent)             printf 'ABSENT\n' ;;
@@ -711,13 +716,14 @@ expected_for() {
     live-peer)          printf 'LIVE-PEER\n' ;;
     liveness-unknown)   printf 'LIVENESS-UNKNOWN\n' ;;
     error)              printf 'ERROR\n' ;;
+    usage)              printf 'USAGE\n' ;;
     *)                  printf '\n' ;;
   esac
 }
 # setup_state <state> <dir> — build the state and set PROBE_* (+ SLEEPER when a live process
 # is part of the state).
 setup_state() {
-  PROBE_MACHINE=boxA; PROBE_SESSION="$SESS_A"; PROBE_PID=$$; SLEEPER=''
+  PROBE_MACHINE=boxA; PROBE_SESSION="$SESS_A"; PROBE_PID=$$; SLEEPER=''; PROBE_ARGS_BAD=0
   local st="$1" d="$2" other
   case "$st" in
     absent) : ;;
@@ -756,10 +762,19 @@ setup_state() {
       run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" -- write 3822 >/dev/null 2>&1
       PROBE_SESSION="$SESS_B" ;;
     error) mkdir -p "$d/$MARKER" ;;
+    # USAGE is an ARGUMENT-shaped refusal, not a marker state (roborev job 30 G2 added the
+    # token). It still belongs in this table: the completeness assert below requires EVERY
+    # non-success verdict to be reachable from a state here, so a token that joins the closed
+    # set without a state would silently escape the dead-letter rule.
+    usage) PROBE_ARGS_BAD=1 ;;
   esac
 }
 dl_probe() {  # dl_probe <dir> <subcommand-or-verify>
   local d="$1" sub="$2"
+  if [ "${PROBE_ARGS_BAD:-0}" = 1 ]; then
+    run "$d" "CLAIM_MACHINE=$PROBE_MACHINE" "CLAUDE_CODE_SESSION_ID=$PROBE_SESSION" "CLAUDE_PID=$PROBE_PID" -- "$sub" 3822 --actor 2>&1
+    return
+  fi
   case "$sub" in
     adopt) run "$d" "CLAIM_MACHINE=$PROBE_MACHINE" "CLAUDE_CODE_SESSION_ID=$PROBE_SESSION" "CLAUDE_PID=$PROBE_PID" -- adopt 3822 --reason no-dead-letter-probe:derived 2>&1 ;;
     write) run "$d" "CLAIM_MACHINE=$PROBE_MACHINE" "CLAUDE_CODE_SESSION_ID=$PROBE_SESSION" "CLAUDE_PID=$PROBE_PID" -- write 3822 2>&1 ;;
@@ -792,7 +807,7 @@ for st in $DL_STATES; do
   [ -z "$SLEEPER" ] || { kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null; }
 done
 if [ "$dl_fail" -eq 0 ]; then
-  ok "12 refusal states reproduce their expected verdict, and every remedy they NAME ($dl_named invocation(s)) escapes that refusal"
+  ok "13 refusal states reproduce their expected verdict, and every remedy they NAME ($dl_named invocation(s)) escapes that refusal"
 else
   bad "$dl_fail dead-letter/verdict failures across the refusal states"
 fi
@@ -1501,6 +1516,121 @@ else
 fi
 
 # ===========================================================================
+case_begin 33-signals-emit-one-verdict "a SIGNAL emits exactly ONE anchored verdict describing what is KNOWN about the commit"
+# ===========================================================================
+# roborev job 30 G2, and the SECOND instance of round 5's F1 class: that round made the
+# missing-liveness-library guard emit a verdict TOKEN, and left the three SIGNAL traps exiting
+# 130/143/129 with no token at all — the same guarantee stopping short of what a consumer
+# reads, one exit path over. Worse, the traps were phase-blind: a signal arriving AFTER the
+# atomic rename left the state CHANGED while the caller was told nothing at all.
+#
+# EVERY PROBE IS DETERMINISTIC, NOT TIMED. A PATH-shimmed external command signals the script
+# itself (`kill -TERM $PPID`, which inside a command substitution IS the script — measured), so
+# the signal lands at a KNOWN point in the sequence rather than after a sleep the scheduler may
+# reorder. The artifact is substituted; no seam is added to the shipped script.
+sig_shim() {  # sig_shim <cmd> <when: before|after> [<arg-substring-filter>]
+  local c="$1" when="$2" filt="${3:-}" d="$T/sigbin-$1-$2"
+  mkdir -p "$d"
+  { printf '#!/bin/sh\n'
+    if [ -n "$filt" ]; then
+      printf 'case "$*" in *%s*) : ;; *) exec %s "$@" ;; esac\n' "$filt" "$(command -v "$c")"
+      printf '[ ! -f "%s/fired" ] || exec %s "$@"\n' "$d" "$(command -v "$c")"
+      printf ': >"%s/fired"\n' "$d"
+    fi
+    if [ "$when" = before ]; then
+      printf 'kill -TERM "$PPID"\n'
+      printf 'exec %s "$@"\n' "$(command -v "$c")"
+    else
+      printf '%s "$@"; rc=$?\n' "$(command -v "$c")"
+      printf 'kill -TERM "$PPID"\n'
+      printf 'exit "$rc"\n'
+    fi; } >"$d/$c"
+  chmod +x "$d/$c"
+  printf '%s\n' "$d"
+}
+# sig_run <dir> <shimdir> <args...> — prints the combined output and RETURNS the run's exit
+# status. Deliberately not a global: this function is called inside `$( )`, so a global set
+# here would be set in the SUBSHELL and lost — the same shape the script's own case 17 pins.
+sig_run() {
+  local d="$1" sd="$2"; shift 2
+  local out rc
+  out=$( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd:$PATH" \
+    bash "$DS" "$@" 2>&1 ); rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
+}
+# PHASE 1 — BEFORE the rename. `flock` is the last external command before any bytes are
+# assembled, so nothing has been committed: the honest verdict is ERROR and the lane must be
+# untouched. It is chosen over `mktemp` for the reason the DECLARED RESIDUAL below measures —
+# `flock` is a PLAIN command, so the trap actually runs.
+L33A=$(lane lane33-pre)
+s33a=$(sig_run "$L33A" "$(sig_shim flock before)" write 3822 --stage implement); r33a=$?
+if [ "$r33a" -eq 143 ] && [ "$(verdict_count "$s33a")" = 1 ] && [ "$(verdict_of "$s33a")" = ERROR ] \
+   && all_lines_anchored "$s33a" && [ ! -f "$L33A/$MARKER" ]; then
+  ok "SIGTERM BEFORE the atomic rename: exactly one anchored 'verdict ERROR', exit 143, and NOTHING written"
+else
+  bad "pre-rename signal: rc=$r33a verdicts=$(verdict_count "$s33a") token=$(verdict_of "$s33a") marker=$([ -f "$L33A/$MARKER" ] && echo present || echo absent)
+$s33a"
+fi
+# PHASE 2 — DURING the rename. The signal is DEFERRED across the single commit so the run can
+# report the outcome it actually achieved, instead of an 'undetermined'. Exactly one verdict,
+# and it is the TRUE one; the exit code is still the signal's.
+L33B=$(lane lane33-mid)
+s33b=$(sig_run "$L33B" "$(sig_shim mv after)" write 3822 --stage implement); r33b=$?
+if [ "$r33b" -eq 143 ] && [ "$(verdict_count "$s33b")" = 1 ] && [ "$(verdict_of "$s33b")" = WRITTEN ] \
+   && all_lines_anchored "$s33b" && [ -f "$L33B/$MARKER" ]; then
+  ok "SIGTERM DURING the atomic rename is DEFERRED across it: one anchored 'verdict WRITTEN', exit 143, and the marker IS on disk"
+else
+  bad "mid-rename signal: rc=$r33b verdicts=$(verdict_count "$s33b") token=$(verdict_of "$s33b") marker=$([ -f "$L33B/$MARKER" ] && echo present || echo absent)
+$s33b"
+fi
+# PHASE 3 — AFTER the rename, before the verdict. This is the window the finding names: the
+# state is CHANGED and the caller used to be told nothing. The `rm` of the carried body runs
+# there, and only on a write over an ALREADY-OWNED marker, so the lane is primed first.
+L33C=$(lane lane33-post)
+run "$L33C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage groom >/dev/null 2>&1
+s33c=$(sig_run "$L33C" "$(sig_shim rm before drive-issue-body)" write 3822 --stage implement); r33c=$?
+if [ "$r33c" -eq 143 ] && [ "$(verdict_count "$s33c")" = 1 ] && [ "$(verdict_of "$s33c")" = WRITTEN ] \
+   && all_lines_anchored "$s33c" && grep -q '^stage: implement$' "$L33C/$MARKER"; then
+  ok "SIGTERM AFTER the atomic rename reports the COMPLETED write: one anchored 'verdict WRITTEN', exit 143, and the new stage is on disk"
+else
+  bad "post-rename signal: rc=$r33c verdicts=$(verdict_count "$s33c") token=$(verdict_of "$s33c")
+$s33c
+$(cat "$L33C/$MARKER" 2>/dev/null)"
+fi
+# DECLARED RESIDUAL, MEASURED RATHER THAN REASONED ABOUT. On bash 5.2 a trapped signal that
+# arrives while the shell waits for a COMMAND SUBSTITUTION inside a FUNCTION is DISCARDED: the
+# trap never runs, and the only trace is that the substitution reports failure — so a TERM
+# during `mkout="$(mktemp ...)"` surfaces as a spurious "cannot create a temporary file". This
+# is a bash property, not something this script can fix from inside, and it is why the ONE
+# window that changes durable state (the rename) was moved OUT of a command substitution. What
+# is asserted here is that the CONTRACT still holds on that path: exactly one anchored verdict,
+# and nothing written.
+L33D=$(lane lane33-substitution)
+s33d=$(sig_run "$L33D" "$(sig_shim mktemp before)" write 3822); r33d=$?
+if [ "$(verdict_count "$s33d")" = 1 ] && [ "$(verdict_of "$s33d")" = ERROR ] \
+   && all_lines_anchored "$s33d" && [ ! -f "$L33D/$MARKER" ]; then
+  ok "DECLARED RESIDUAL: a signal during a command substitution is swallowed by bash (rc=$r33d, not 143) — the contract still holds: one anchored ERROR, nothing written"
+else
+  bad "the swallowed-signal path broke the contract: rc=$r33d verdicts=$(verdict_count "$s33d") token=$(verdict_of "$s33d")
+$s33d"
+fi
+# NON-VACUITY: the same shim WITHOUT the kill lets the write complete normally, so the three
+# results above are about the signal and not about a shim that breaks the command.
+L33N=$(lane lane33-nv)
+nv33="$T/sigbin-nokill"; mkdir -p "$nv33"
+{ printf '#!/bin/sh\n'; printf 'exec %s "$@"\n' "$(command -v mktemp)"; } >"$nv33/mktemp"
+chmod +x "$nv33/mktemp"
+s33n=$(sig_run "$L33N" "$nv33" write 3822); r33n=$?
+if [ "$r33n" -eq 0 ] && [ "$(verdict_of "$s33n")" = WRITTEN ] && [ "$(verdict_count "$s33n")" = 1 ]; then
+  ok "NON-VACUITY: the same PATH shim without the kill writes normally (rc 0, one WRITTEN verdict)"
+else
+  bad "the signal fixture is broken independently of the signal: rc=$r33n token=$(verdict_of "$s33n")
+$s33n"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1514,7 +1644,7 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 25-displaced-sentinel-is-not-legacy 26-unusable-start-window 27-pre-rename-validation
 29-missing-liveness-library 30-native-diagnostics-stay-anchored
 31-adoption-provenance-survives
-32-failed-scan-is-not-no-match
+32-failed-scan-is-not-no-match 33-signals-emit-one-verdict
 28-case-floor"
 CASE_FLOOR=31
 executed=0
