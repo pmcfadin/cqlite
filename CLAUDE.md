@@ -1048,6 +1048,30 @@ Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_ma
 (#65), and the unimplemented `Storage::put`/`delete` stubs (#175)). Build recipes:
 `docs/development/dev-cookbook.md`.
 
+**Every declared feature must be LOAD-BEARING, and the full gate's
+`features-load-bearing` component enforces it (#1698).**
+`scripts/ci/check-features-load-bearing.sh` derives every feature declared by every
+workspace member from `cargo metadata --no-deps` (never a textual manifest sweep — cargo
+SYNTHESISES implicit features from optional deps that no `[features]` block contains, and
+`find`ing manifests reaches non-members cargo never builds) and asserts each one changes
+something: it, or something in its feature CLOSURE, has a cfg reference site in its
+DECLARING package's sources, enables an optional dependency, enables a feature of an
+external dependency, or is named in a target's `required-features`. **CREDIT FLOWS UP FROM
+EFFECTS, NEVER DOWN FROM A PARENT** — a leaf named only by an aggregator is DEAD, which is
+exactly how four `test-*` leaves survived for months behind `test-infrastructure`, while
+the legitimate `all-compression` stays green through its four dep-pulling leaves. **Being
+ENUMERATED is not an effect**: the gate's own clippy feature lists, a workflow
+`--features` argument and a doc table all NAME features without enabling anything, so
+deleting a dead flag means cleaning those enumerations IN THE SAME DIFF. Only `default` is
+exempt (cargo defines its meaning; an empty `default = []` is legitimate). Fail-closed on
+every derivation failure, and there is deliberately **no bypass flag and no env opt-out** —
+a dead flag is always deletable, so an escape hatch could only buy a vacuous green.
+Deleted by #1698: `events`, `ci_zero_tolerance` (5 manifests), the four
+`test-infrastructure` leaves, `sstable-writer`, cqlite-cli `interactive` (it sat in
+`default`), `cqlite-core/unit-tests-only` (the cqlite-integration-tests feature of the
+same name keeps its 25 cfg sites) and `wasm` with its three wasm32-only deps — the 27
+`cfg(target_arch = "wasm32")` sites stay, they gate on target, not on that feature.
+
 ## Troubleshooting
 
 - **Missing test data / 0 rows**: `bash test-data/scripts/fetch-datasets.sh`, then export the
