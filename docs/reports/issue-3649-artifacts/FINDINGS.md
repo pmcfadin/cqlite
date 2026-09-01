@@ -87,7 +87,7 @@ to.**
 
 ---
 
-## 3. The target, and the thing that is not the target
+## 3. TWO quantities, verdicted differently — the issue's warning box collapses them
 
 **Target: ~1.1–1.25× narrow single-stream, ~1.05–1.1× wide.**
 `docs/research/phase2-verify-row-engine.md` §3.2 line 107:
@@ -104,11 +104,33 @@ aggregate-CPU-headroom upper bound realized as throughput **only** because that
 tax is what collapses `C(N)`". §3.2's own heading calls the whole slice
 "over-quoted and unmeasured".
 
-`analyze-ab.py` therefore **names** 1.5–1.9× on every single run and **tests
-against it never**. A run whose interval lands in that region renders
-`ABOVE-TARGET` against the 1.10–1.25 band; there is deliberately no verdict token
-that endorses the ceiling, and `selftest-analyze.sh` asserts that no such token
-appears in the output.
+### They are different measurements and they are reported separately
+
+| quantity | how it is run | how it is verdicted |
+|---|---|---|
+| **single-stream** | `--ramp 1` | against the **~1.1–1.25× narrow / ~1.05–1.1× wide** band |
+| **utilization** | a concurrency ramp | as a **direction with an interval** — "rises measurably" |
+
+The plan of record states the M2 acceptance criterion as util throughput
+*"rises measurably toward the 1.5–1.9× ceiling"*
+(`docs/architecture/throughput-program-2026-07.md` line 371, verified). "Toward"
+is the whole of it: the criterion is a **direction**, not an attainment.
+
+The harness therefore emits **two sections and two verdict lines**
+(`verdict single-stream <TOKEN>` / `verdict utilization <TOKEN>`) with disjoint
+affirmative token sets, and:
+
+- 1.5–1.9× is **named on every run of both sections** and **tested against in
+  neither**;
+- `ab_stats.decide_utilization(ci_low, ci_high)` **is not given a threshold
+  argument at all**, so a comparison against the ceiling is not expressible —
+  which is stronger than a promise not to make one;
+- `selftest-analyze.sh` asserts that no ceiling-attainment token appears in
+  either section, that the utilization section cannot emit a band token, and that
+  the single-stream section cannot emit a direction token.
+
+A single-stream interval landing in the 1.5–1.9× region renders `ABOVE-TARGET`
+**against the 1.10–1.25 band**, with the ceiling merely named.
 
 ---
 
@@ -226,13 +248,61 @@ test is the path that ran.
 
 ---
 
-## 7. What this lane delivered instead
+## 7. Admission control (#2420) will confound the ramp unless it is pinned
+
+`cqlite-flight` admits a bounded number of concurrent `do_get` scans
+(`cqlite-flight/src/cli.rs:59-73`, verified). Past the ceiling a request waits
+`--admission-wait-timeout-ms` (`DEFAULT_WAIT_TIMEOUT_MS = 30_000`,
+`cqlite-flight/src/admission.rs:84`) and is then **shed with gRPC `UNAVAILABLE`**
+— which `flight-loadgen` counts separately as `requests_unavailable`
+(`tools/flight-loadgen/src/record.rs`).
+
+**Unset, the ceiling is DERIVED** from the parallelism the process may use
+(`clamp(2 × hardware threads, 2, 64)`, #3225, honouring the affinity mask and the
+cgroup quota). On a 4-vCPU `i4i.xlarge` that is 8 — and pinning the server to two
+hardware threads with `taskset` changes it again. So unpinned it is a property of
+*the box and the pinning*, not of the experiment.
+
+**The failure mode is not a visible error.** A ramp step above the ceiling
+measures *the admission ceiling*, and it presents as a **plateau** — exactly the
+shape someone would read as saturation and attribute to the engine.
+
+Three mechanical responses, all exercised by the self-test:
+
+1. `ab-throughput.sh` **requires** `--max-concurrent-scans`, pins it on both
+   arms, and **refuses a `--ramp` topping out above it**.
+2. It reads the resolved value **and its provenance** back from the server's own
+   startup line — `cli::log_startup` logs `max_concurrent_scans` and
+   `max_concurrent_scans_source` (`flag` | `env` | `derived` | `derived-fallback`,
+   `cqlite-flight/src/admission.rs:183-193`) — and dies on `admission-mismatch`
+   or `admission-provenance`. A value we passed and a value the server resolved
+   are different facts; only the second is a measurement. An unreadable line is
+   `NOT-OBSERVED` and is disclosed beside the verdict, never assumed to agree.
+3. `analyze-ab.py` refuses `admission-mismatch` across arms; refuses any shed at
+   single-stream concurrency (`run-shed`); and in the utilization section
+   **excludes** each shed step, **reports every exclusion as an explicit fact**
+   (`excluded-step …` plus `excluded-steps N RECOGNISED`, affirmative at zero),
+   and requires the two arms of a pair to have the **same surviving ladder**
+   (`ramp-steps-not-comparable`) — a peak taken over different ladders is not a
+   ratio.
+
+`--batch-size` (default 8192 rows per Arrow record batch,
+`cqlite-flight/src/cli.rs:56-57`) is pinned and recorded on both arms for the
+same reason in miniature: it is the record-batch row cap, so it interacts
+directly with the egress batching #2820 changed.
+
+---
+
+## 8. What this lane delivered instead
 
 | artifact | what it is |
 |---|---|
-| `ab-throughput.sh` | the interleaved paired A/B driver — two worktrees, two target dirs, fail-closed pre-flight, per-run validation, a manifest rewritten after every completed run |
-| `analyze-ab.py` | the paired bootstrap statistics and the closed-set verdict, anchored so it cannot be pasted as a certification |
-| `selftest-analyze.sh` | 72 deterministic cases over synthetic fixtures, with a case floor |
+| `ab-throughput.sh` | the interleaved paired A/B driver — two worktrees, two target dirs, pinned merge arm and admission ceiling, fail-closed pre-flight, per-run validation, a manifest rewritten after every completed run |
+| `analyze-ab.py` | the CLI and the two-section report, anchored so it cannot be pasted as a certification |
+| `ab_stats.py` | the statistics and **both** verdict rules, with their citations beside them |
+| `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
+| `ab_common.py` | the anchored, sanitized emission every module writes through |
+| `selftest-analyze.sh` | 110 deterministic cases over synthetic fixtures, with a case floor |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig

@@ -10,7 +10,25 @@ judgment call that has not already been made below.**
 | Provisioning | **Fresh instance, run, terminate.** There is no persistent rig and no ssh alias to one. Spend is owner-authorized. |
 | Hard stop | Set one **before you start**, write it down, and treat an extension as a fresh ask on #3649 — a cheap ask. The time box exists to stop a forgotten instance, not to rush the measurement. |
 | Branch | `issue-3649-measure-2820-merge-fanin` |
-| What discharges the AC | One completed measurement session whose analyzer output is pasted into #3649, **plus** the two controls in step 4 |
+| What discharges the AC | **TWO** completed measurement sessions — a single-stream one and a concurrency-ramp one — whose analyzer output is pasted into #3649, **plus** the two controls in step 4 |
+
+## The two quantities. Read this before step 5.
+
+The acceptance criteria carry **two** measurements, and the sources verdict them
+differently. Collapsing them is the mistake this runbook exists to prevent.
+
+| quantity | how it is run | how it is verdicted | source |
+|---|---|---|---|
+| **Single-stream throughput** | `--ramp 1` | against the **~1.1–1.25× narrow / ~1.05–1.1× wide** target band | `docs/research/phase2-verify-row-engine.md` line 107: *"Revised: ~1.1–1.25× narrow single-stream, ~1.05–1.1× wide"* |
+| **Utilization throughput** | a concurrency ramp | as a **direction with an interval** — "rises measurably" — and **never** against 1.5–1.9× | `docs/architecture/throughput-program-2026-07.md` line 371 states the M2 criterion as util throughput *"rises measurably toward the 1.5–1.9× ceiling"*; `phase2` line 115: *"Keep 1.5–1.9× as a **rig-narrow ceiling**, not a field figure"* |
+
+So there are **two driver runs and two analyzer sections**, with two separate
+verdict lines. The 1.5–1.9× figure is a **rig-narrow utilization ceiling recorded
+as unmeasured**; it is named on every run of both sections and **tested against
+in neither**. `ab_stats.decide_utilization` is not even *given* a threshold — the
+comparison is not expressible, which is stronger than a promise not to make it.
+Testing against the ceiling and falling short would file a phantom regression
+against #2820, which is a correct change.
 
 **Binding ordering: the two CONTROLS first, the measurement second, the full
 `agent-gate.sh` of record LAST.** A gate compiling while you measure invalidates
@@ -41,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green.**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (110 cases).**
       Seconds, `python3` only, no rig and no root, so there is no excuse for
       skipping it — and it is the cheapest step in this runbook by four orders of
       magnitude. It drives every fail-closed guard with the bad input that guard
@@ -98,6 +116,46 @@ other; unpinned is permitted but is recorded as an explicit
 
 Two physical cores is genuinely narrow, which is the point: the AC says **field
 i4i narrow rig**, and the target band is the *narrow single-stream* band.
+
+### The admission ceiling, which you must pin
+
+`cqlite-flight` admits a bounded number of concurrent `do_get` scans (#2420, WS4;
+`cqlite-flight/src/cli.rs:59-73`). Past the ceiling a request waits
+`--admission-wait-timeout-ms` (server default 30000) and is then **shed with gRPC
+`UNAVAILABLE`**, which `flight-loadgen` counts separately as
+`requests_unavailable`.
+
+**Unset, the ceiling is DERIVED** — `clamp(2 x hardware threads, 2, 64)`,
+honouring the affinity mask and cgroup quota. On a 4-vCPU `i4i.xlarge` that is
+**8**, and pinning the server to two hardware threads changes it again. So
+unpinned it is a property of *the box and your `taskset`*, not of the experiment,
+and two sessions can silently differ.
+
+**Why this is a correctness issue and not tidiness: a ramp step above the ceiling
+measures the admission ceiling, not merge throughput — and it looks like a
+plateau, which is exactly the shape someone would misread as saturation.**
+
+`ab-throughput.sh` therefore **requires `--max-concurrent-scans`** (usage error
+without it), pins it on **both** arms, and **refuses a `--ramp` whose top step
+exceeds it**. It then reads the server's own startup line
+(`cli::log_startup`, which logs `max_concurrent_scans` **and**
+`max_concurrent_scans_source`) and dies on `admission-mismatch` if the resolved
+value differs from the requested one, or on `admission-provenance` if the source
+is not `flag` — a value we passed and a value the server resolved are different
+facts, and only the second is a measurement. An unreadable startup line is
+recorded as `NOT-OBSERVED` and disclosed beside the verdict, never assumed to
+agree.
+
+**Set the pin at or above the top of your ramp** (`--max-concurrent-scans 16` for
+a `1,2,4,8` ramp is comfortable). Any shedding at all means the pin was too low;
+the analyzer's exclusion machinery is a backstop for JSONL produced some other
+way, not the plan.
+
+Also pinned and recorded on both arms: **`--batch-size` (default 8192)**, because
+it is the Arrow record-batch row cap and therefore interacts directly with the
+egress batching #2820 changed. `--max-batch-bytes` and
+`--admission-wait-timeout-ms` are optional; unset, the server default applies and
+the resolved value appears in the captured startup line.
 
 ---
 
@@ -230,9 +288,10 @@ bash ab-throughput.sh \
   --corpus   /data/ab-3649/corpus/sstables \
   --ticket-template ./corpus/ticket.json \
   --work-dir /data/ab-3649/control-null \
-  --replicates 5 --step-duration 60s \
+  --ramp 1 --replicates 5 --step-duration 60s \
+  --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3
-python3 analyze-ab.py --manifest /data/ab-3649/control-null/results/manifest.json \
+python3 analyze-ab.py --single-stream /data/ab-3649/control-null/results/manifest.json \
   | tee control-null.txt
 ```
 
@@ -261,9 +320,10 @@ bash ab-throughput.sh \
   --corpus   /data/ab-3649/corpus/sstables \
   --ticket-template ./corpus/ticket.json \
   --work-dir /data/ab-3649/control-sens \
-  --replicates 5 --step-duration 60s \
+  --ramp 1 --replicates 5 --step-duration 60s \
+  --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3
-python3 analyze-ab.py --manifest /data/ab-3649/control-sens/results/manifest.json \
+python3 analyze-ab.py --single-stream /data/ab-3649/control-sens/results/manifest.json \
   | tee control-sensitivity.txt
 ```
 
@@ -278,19 +338,45 @@ discharge the acceptance criteria — so neither can be pasted as the answer.
 
 ---
 
-## Step 5 — the measurement
+## Step 5 — the measurement, in TWO passes
+
+### 5a. Single-stream (`--ramp 1`) — the quantity the target band applies to
 
 ```bash
 bash ab-throughput.sh \
   --base-ref cfa93fe99^ --head-ref cfa93fe99 \
   --corpus   /data/ab-3649/corpus/sstables \
   --ticket-template ./corpus/ticket.json \
-  --work-dir /data/ab-3649/measure \
-  --replicates 7 --step-duration 60s \
+  --work-dir /data/ab-3649/measure-single \
+  --ramp 1 --replicates 7 --step-duration 60s \
+  --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3 \
   --rows-declared <the corpus row count you recorded> \
-  | tee measure-driver.txt
+  | tee measure-single-driver.txt
 ```
+
+### 5b. Utilization (a concurrency ramp) — the quantity the ceiling relates to
+
+```bash
+bash ab-throughput.sh \
+  --base-ref cfa93fe99^ --head-ref cfa93fe99 \
+  --corpus   /data/ab-3649/corpus/sstables \
+  --ticket-template ./corpus/ticket.json \
+  --work-dir /data/ab-3649/measure-util \
+  --ramp 1,2,4,8 --replicates 7 --step-duration 60s \
+  --max-concurrent-scans 16 --batch-size 8192 \
+  --server-cpus 0,2 --client-cpus 1,3 \
+  --rows-declared <the corpus row count you recorded> \
+  | tee measure-util-driver.txt
+```
+
+On the ramp: it must top out **at or below** `--max-concurrent-scans` (the driver
+refuses otherwise) and, on a 2-physical-core server pin, `1,2,4,8` already runs
+well past the core count — which is the point of a utilization curve. The
+comparison quantity is the **peak `rows_per_s` over the surviving ladder**, and
+the analyzer requires the two arms of each pair to have the **same** surviving
+ladder. Each pass costs `2 × replicates × (steps × step-duration + prewarm +
+server start/stop)`, so budget 5b at roughly four times 5a for a four-step ramp.
 
 **On `--replicates`.** The floor is 3 (the driver refuses below it: a percentile
 bootstrap over two pairs reports an interval it cannot support). **5 is the
@@ -318,37 +404,60 @@ truthful short manifest — and the analyzer will refuse it with
 
 ## Step 6 — the analysis, and the verdict
 
+One invocation, both manifests, two clearly separated sections:
+
 ```bash
 python3 analyze-ab.py \
-  --manifest /data/ab-3649/measure/results/manifest.json \
+  --single-stream /data/ab-3649/measure-single/results/manifest.json \
+  --utilization   /data/ab-3649/measure-util/results/manifest.json \
   --profile narrow \
-  | tee results/analysis-narrow.txt
+  | tee results/analysis.txt
 echo "exit=$?"
 ```
 
-Every line is prefixed `AB-3649: `; the verdict is on exactly one
-`AB-3649: verdict <TOKEN>` line. **Paste the whole output into #3649** — it is
-built to be pasted, and it names its own limits.
+Every line is prefixed `AB-3649: `. Each section is bracketed by
+`==== section <quantity> ====` / `---- end section <quantity> ----` and carries
+exactly one `AB-3649: verdict <quantity> <TOKEN>` line, so the two can never be
+confused for one another. **Paste the whole output into #3649** — it is built to
+be pasted, and it names its own limits.
+
+Handing a manifest to the wrong section is a named refusal
+(`mode-manifest-mismatch`), not a silently wrong answer: a `--ramp 1` manifest is
+rejected by `--utilization` and a ramp manifest by `--single-stream`.
+
+### The single-stream section — verdicted against the band
 
 | token | exit | what it means | what to do |
 |---|--:|---|---|
-| `MEETS-TARGET` | 0 | the whole interval lies inside the profile's band | report it; the AC is discharged |
-| `ABOVE-TARGET` | 5 | the whole interval lies above the band | report it **against the band**. Do **not** write it up as reaching a 1.5–1.9× ceiling — see below |
+| `MEETS-TARGET` | 0 | the whole interval lies inside the profile's band | report it |
+| `ABOVE-TARGET` | 5 | the whole interval lies above the band | report it **against the band**. Do **not** write it up as reaching a 1.5–1.9× ceiling |
 | `BELOW-TARGET` | 4 | the whole interval lies below the band; the target is **ruled out** by the data | go to step 7 **before** writing anything that reads as a regression |
 | `INCONCLUSIVE` | 6 | the interval overlaps the band without being contained in it | report it **as a non-result**. Do not round it into a number. This is the correct outcome when the box and the effect are the same size |
 | `UNMEASURED` | 7 | nothing was measured; the `cause` line on stderr names why | fix the cause and re-run. **Never** read this as a permissive default |
 
-**The ceiling.** The analyzer names 1.5–1.9× on every run and tests against it
-never, because `docs/research/phase2-verify-row-engine.md` §3.2 records it as a
-rig-narrow **utilization** ceiling, explicitly unmeasured (line 115: "Keep
-1.5–1.9× as a **rig-narrow ceiling**, not a field figure"). Testing against it
-and falling short would file a phantom regression against #2820, which is a
-correct change. There is no verdict token that endorses the ceiling and none may
-be added.
+### The utilization section — a direction, and nothing else
+
+| token | exit | what it means |
+|---|--:|---|
+| `RISES` | 0 | the whole interval lies above 1.0: utilization throughput rose measurably. **This is the M2 criterion.** It is a direction; it claims no attainment of the ceiling |
+| `FALLS` | 4 | the whole interval lies below 1.0 |
+| `INCONCLUSIVE` | 6 | the interval covers 1.0; no direction is established |
+| `UNMEASURED` | 7 | as above |
+
+**No token in this section can express having met the 1.5–1.9× ceiling, and the
+rule that produces it is never given the figure to compare against.** The
+interval itself is the "toward" in "rises measurably toward"; a reader who wants
+to know how far can read the numbers. The report does not compute that
+comparison, deliberately.
+
+With both sections present the process exit is the **larger** of the two, so the
+least affirmative outcome governs. One unusable session never suppresses the
+other — each section is analysed independently.
 
 **Also run the wide profile** if your corpus has a wide-row table, as a separate
-invocation with its own corpus — `--profile wide` tests the 1.05–1.10 band. Do
-not run `--profile wide` over a narrow corpus and present it as the wide result.
+invocation with its own corpus — `--profile wide` tests the 1.05–1.10 band on the
+single-stream section. Do not run `--profile wide` over a narrow corpus and
+present it as the wide result.
 
 ---
 
@@ -371,6 +480,8 @@ Then, before any regression language reaches #3649, confirm all four:
 - [ ] `merge-path merge` appears in the analyzer output (the k-way merge actually
       ran — `FINDINGS.md` §6);
 - [ ] `corpus data-db-files` is ≥ 2 and the corpus is compressed;
+- [ ] `admission ... observed <n>` equals the requested value and no
+      `excluded-step` line appears (nothing was admission-shed — `FINDINGS.md` §7);
 - [ ] both controls in step 4 behaved.
 
 If all four hold and the verdict is `BELOW-TARGET`, the finding is *"the
@@ -429,11 +540,13 @@ is the phantom this issue exists to prevent.
 
 | # | AC (from issue #3649) | artifact that satisfies it |
 |---|---|---|
-| 1 | `flight-loadgen --shape full` run **server-direct** on the **field i4i narrow rig** (not a lane box), against `main` at/after #2820's merge vs the immediately preceding commit | `ab-throughput.sh` — `--shape full` server-direct over loopback, arms defaulting to `cfa93fe99` / `cfa93fe99^`, run on the `i4i.xlarge` M0 profile per step 1. The manifest records the resolved shas and the host. **Discharged by the session, not by this lane** (`FINDINGS.md` §2). |
+| 1 | `flight-loadgen --shape full` run **server-direct** on the **field i4i narrow rig** (not a lane box), against `main` at/after #2820's merge vs the immediately preceding commit | `ab-throughput.sh` — `--shape full` server-direct over loopback, arms defaulting to `cfa93fe99` / `cfa93fe99^`, run on the `i4i.xlarge` M0 profile per step 1, **twice**: `--ramp 1` (5a) and a concurrency ramp (5b). The manifest records the resolved shas, the host, and the pinned admission ceiling. **Discharged by the session, not by this lane** (`FINDINGS.md` §2). |
 | 2 | Report util throughput with **dispersion, not just a point estimate** — CIs or percentiles | `analyze-ab.py` — per-pair ratios, a seeded percentile bootstrap over the pairs, each arm's own mean/median/min/max plus its own interval, and the latency percentiles per arm. The replicate design exists because `flight-loadgen` throughput is a point estimate (`FINDINGS.md` §4). |
 | 2b | A point estimate with overlapping CIs is **inconclusive** and must be reported as such, not rounded into a verdict | The `INCONCLUSIVE` token and its rule, pinned by `selftest-analyze.sh` with a fixture whose point estimate sits **inside** the band and whose interval does not. |
 | 3 | Corpus large enough that `--shape full` is meaningful. **State the corpus size used.** | `--min-corpus-bytes` (default 256 MiB, refuses below, cause `corpus-too-small`), plus `--min-sstables` for the #3058 trap. The census is in the manifest and is printed on the analyzer's `corpus` lines, so a pasted report always states it. Step 2 of this runbook. |
-| 4 | Verdict recorded against **~1.1–1.25× narrow / ~1.05–1.1× wide**, with 1.5–1.9× named as a ceiling | `TARGET_BANDS` + `CEILING_TEXT` in `analyze-ab.py`: the band is printed with its source on every run, the ceiling is named on every run and tested against never, and `selftest-analyze.sh` asserts that no ceiling-endorsing token can appear. |
+| 4 | Verdict recorded against **~1.1–1.25× narrow / ~1.05–1.1× wide**, with 1.5–1.9× named as a ceiling | `ab_stats.TARGET_BANDS` + `decide_single_stream` for the band, printed with its source in the single-stream section; `CEILING_TEXT` names 1.5–1.9× in **both** sections. `decide_utilization` takes no threshold argument, so a comparison against the ceiling is not expressible, and `selftest-analyze.sh` asserts that no ceiling-attainment token appears in either section and that neither section can emit the other's tokens. |
+| 4b | The M2 criterion — util throughput *"rises measurably toward the 1.5–1.9× ceiling"* (`throughput-program-2026-07.md:371`) | The utilization section's `RISES` token: a direction with an interval, exit 0. Run 5b. |
+| 4c | Admission control must not be mistaken for saturation (#2420) | `--max-concurrent-scans` is required and pinned on both arms, the ramp is refused above it, the resolved value **and its provenance** are read back from the server's own startup line, a mismatch between arms is `UNMEASURED`, and any shed step is excluded with the exclusion reported as an explicit fact. |
 | 5 | If below target, triage **before** filing a regression: confirm the send-reduction oracle still passes | Already run and recorded in `FINDINGS.md` §1 (2 passed at `d23403d1e`); re-run on the rig as step 7, which also checks the three conditions the oracle alone does not cover. |
 
 ### What this artifact set does NOT discharge
@@ -450,13 +563,16 @@ docs/reports/issue-3649-artifacts/
   RUNBOOK.md              this file
   FINDINGS.md             what is established in-lane, with citations
   ab-throughput.sh        the interleaved paired A/B driver
-  analyze-ab.py           the paired bootstrap statistics + the closed-set verdict
-  selftest-analyze.sh     72 deterministic cases + a case floor; run it first
+  analyze-ab.py           the CLI and the two-section report
+  ab_stats.py             the statistics and BOTH verdict rules, with their citations
+  ab_input.py             manifest/JSONL loading; every refusal, named
+  ab_common.py            the anchored, sanitized emission every module writes through
+  selftest-analyze.sh     110 deterministic cases + a case floor; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output
   control-sensitivity.txt step 4b output
-  results/                manifests, per-replicate JSONL, analysis-*.txt
+  results/                both manifests, per-replicate JSONL, analysis.txt
 ```
 
 Logs live under `<work-dir>/logs/` on the rig and are **never** read into an agent
