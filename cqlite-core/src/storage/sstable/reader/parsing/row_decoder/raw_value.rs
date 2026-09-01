@@ -5,7 +5,6 @@ use super::*;
 // as a CHILD of this module (rather than a sibling registered in `mod.rs`)
 // because it is an implementation detail of this one function.
 mod reporting;
-use reporting::require_fully_consumed_raw;
 
 #[cfg(test)]
 mod issue_3811_consumption_demo_tests;
@@ -97,7 +96,7 @@ impl V5CompressedLegacyParser {
     /// [`Self::parse_value_from_raw_bytes_reporting`], which threads a REAL
     /// consumption count out of every arm; the wrapper then requires the decode to
     /// have consumed every byte of `data`
-    /// ([`require_fully_consumed_raw`]). The rule is
+    /// ([`Self::require_fully_consumed_raw`]). The rule is
     /// `cassandra-5.0.8` `TupleType.split`: a genuinely SHORT encoding leaves
     /// `position == length` and is legal, while trailing bytes (rule 4) and a
     /// partial 1-3 byte component-length prefix (rule 2) both leave it short and
@@ -116,7 +115,7 @@ impl V5CompressedLegacyParser {
     ) -> Result<Value> {
         let (value, consumed) =
             self.parse_value_from_raw_bytes_reporting(data, type_str, column_name, depth)?;
-        require_fully_consumed_raw(consumed, data.len(), column_name, type_str)?;
+        Self::require_fully_consumed_raw(consumed, data.len(), column_name, type_str)?;
         Ok(value)
     }
 }

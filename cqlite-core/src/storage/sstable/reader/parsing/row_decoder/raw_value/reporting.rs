@@ -61,31 +61,33 @@ use super::super::*;
 /// must be ONE implementation of this rule, not two: when #3820 lands, this
 /// function becomes a one-line delegation to it (or is deleted in favour of it)
 /// and the two error message classes are unified.
-pub(super) fn require_fully_consumed_raw(
-    consumed: usize,
-    len: usize,
-    column_name: &str,
-    type_str: &str,
-) -> Result<()> {
-    if consumed == len {
-        return Ok(());
-    }
-    if consumed < len {
-        // Wording deliberately SHARED with `cell_path_key.rs`'s existing
-        // consumption refusal ("decoded only N of M byte(s)"): it is the same
-        // rule, and a caller matching on the message must not have to know which
-        // of the two layers refused. #3820 folds the two into one function.
-        return Err(Error::corruption(format!(
-            "Bounded value '{}' of type '{}' decoded only {} of {} byte(s); the whole \
+impl V5CompressedLegacyParser {
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn require_fully_consumed_raw(
+        consumed: usize,
+        len: usize,
+        column_name: &str,
+        type_str: &str,
+    ) -> Result<()> {
+        if consumed == len {
+            return Ok(());
+        }
+        if consumed < len {
+            // Wording deliberately SHARED with `cell_path_key.rs`'s existing
+            // consumption refusal ("decoded only N of M byte(s)"): it is the same
+            // rule, and a caller matching on the message must not have to know which
+            // of the two layers refused. #3820 folds the two into one function.
+            return Err(Error::corruption(format!(
+                "Bounded value '{}' of type '{}' decoded only {} of {} byte(s); the whole \
              slice must be the value (trailing bytes, or a partial trailing component \
              header, are corruption — Cassandra TupleType.split rules 2 and 4)",
-            column_name, type_str, consumed, len
-        )));
-    }
-    Err(Error::corruption(format!(
+                column_name, type_str, consumed, len
+            )));
+        }
+        Err(Error::corruption(format!(
         "Bounded value '{}' (type '{}'): decoder reported {} bytes consumed but only {} were available",
         column_name, type_str, consumed, len
     )))
+    }
 }
 
 impl V5CompressedLegacyParser {
