@@ -316,7 +316,24 @@ for tool in git cargo python3; do
   command -v "$tool" >/dev/null 2>&1 || die preflight-tool "$tool is not on PATH"
 done
 
-AB_INSTANCE_TYPE="$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true)"
+# IMDSv2 first (a token-required endpoint answers nothing to a bare GET), then
+# IMDSv1, then the DMI product name. An unobtainable value is NOT-RECORDED, never
+# a guess: the AC asks for the host to be stated, and a wrong instance type is
+# worse than an absent one.
+imds_instance_type() {
+  local token
+  token="$(curl -s --max-time 2 -X PUT \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+    http://169.254.169.254/latest/api/token 2>/dev/null || true)"
+  if [ -n "$token" ]; then
+    curl -s --max-time 2 -H "X-aws-ec2-metadata-token: $token" \
+      http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null && return 0
+  fi
+  curl -s --max-time 2 http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true
+}
+AB_INSTANCE_TYPE="$(imds_instance_type)"
+[ -n "$AB_INSTANCE_TYPE" ] && [ "${AB_INSTANCE_TYPE#*<}" = "$AB_INSTANCE_TYPE" ] \
+  || AB_INSTANCE_TYPE="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || true)"
 [ -n "$AB_INSTANCE_TYPE" ] || AB_INSTANCE_TYPE='NOT-RECORDED'
 export AB_INSTANCE_TYPE
 export AB_NPROC="$(nproc)"
