@@ -795,6 +795,21 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   first two rendered its row `FAIL` in a real self-test block. Guard: `scripts/tests/test_agent_gate_census.sh`
   (`tooling-tests`), which plants a no-op in a real component under `--only`, requires the block
   to NAME it, and carries a positive control on the same lane differing in ONE property.
+  **Two lessons from its review worth carrying elsewhere. (1) A "present-and-zero" tally has more
+  than one spelling, and keying on the GOOD word misses all the others**: the pytest reader matched
+  `N passed`, so every terminal summary reporting zero passed WITHOUT that word — `61 skipped in
+  1.20s`, `1 xfailed in …`, `2 deselected in …`, `3 errors in …` — fell into the ABSENT branch,
+  which is `NOT-MEASURED` and therefore PRESERVES `PASS`. A suite whose every test was skipped is
+  the vacuous pass this mechanism exists to catch, so RECOGNISE THE SUMMARY LINE FIRST (an outcome
+  pair from the driver's own closed vocabulary **plus** a duration tail) and read the count off it
+  second. **(2) A near-miss in a FORMAT STRING can hide an entire emit path from a uniformity
+  guard**: #3453's B1 grepped for the literal `printf '%-18s %s (%s)'` while the tree-integrity
+  BOUNDARY printer spelled its format `(%ss)` — one character — so a whole mode rendered component
+  rows with neither annotation and the guard reported zero bypasses. The needle is now the `%-18s`
+  NAME FIELD (comment-blind), whose only legitimate occurrence is the renderer's own definition.
+  Generalise: **when you assert "everything goes through ONE X", key the assert on the narrowest
+  thing that MAKES it an X, never on a whole literal a caller can spell differently** — and
+  re-derive the emit-site set from the code rather than from a count someone wrote in a report.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a

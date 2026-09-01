@@ -171,3 +171,64 @@ rendered a real self-test block's row as `FAIL`, caught by
 — it exercises the guard and has no codebase subject to count) and the completeness derivation in
 `scripts/tests/test_agent_gate_census.sh` reads BOTH emit sources, with a floor of 4 derived
 names so a broken derivation cannot silently shrink the domain back toward `COMPONENTS`.
+
+---
+
+## roborev round 1 (job 360) — two Medium findings, both fixed
+
+### F1 — the pytest reader missed every present-and-zero spelling
+
+The design's rule was right and the parser did not implement it. Residual 2 says an *absent*
+driver tally is `NOT-MEASURED` (non-fatal) while *"a tally that is PRESENT and says zero is still
+`ZERO`"* — but the reader recognised a summary only by the word `passed`, so
+`61 skipped in 1.20s`, `1 xfailed in 0.10s`, `2 deselected in 0.02s` and `3 errors in 0.40s` were
+all classified ABSENT. Since `NOT-MEASURED` preserves `PASS`, **a pytest run in which every test
+was skipped passed the gate** — the exact vacuous-pass route this issue exists to close.
+
+The fix inverts the order: **recognise the summary LINE first, then read the count off it.** A line
+is a pytest terminal summary iff it carries a `<N> <outcome>` pair from pytest's own closed outcome
+vocabulary (`passed|failed|error|errors|skipped|xfailed|xpassed|deselected`) AND a
+` in <duration>s` tail; `no tests ran` is matched separately because it carries no count.
+Requiring BOTH keeps it off cargo's `Finished … target(s) in 41.05s` (duration, no outcome pair),
+and libtest's `test result: ok. 5 passed; … finished in 0.00s` — which satisfies both — is excluded
+BY NAME, because counting it would attribute rust tests to pytest. (The old parser did exactly
+that; case D24 now pins it.)
+
+**The jest sibling was already correct, and is now pinned.** Its recogniser keys on the `Tests:`
+line's PRESENCE and treats a line with no `N passed` as zero, so an all-skipped run — which jest
+reports as a PASSED suite (CLAUDE.md, #3522 roborev F1) — already measured `ZERO`. That was true by
+accident and asserted nowhere; case D25 pins both spellings.
+
+RED arm (measured, in a scratch worktree differing in ONE property — the parser reverted): D23
+fails naming each spelling with `…/PASS`, and D24 fails with `libtest-test-result-line-counted-as-pytest`.
+
+### F2 — the tree-integrity boundary block bypassed the ONE renderer
+
+`_tree_boundary_meta_lines` printed its truncated component table with
+`printf '%-18s %s (%ss)\n'` directly and emitted no aggregate line, so a run that STOPPED at a
+boundary produced rows carrying neither the #3453 feature matrix nor the #3625 census. That is the
+one thing both designs' safety argument forbids.
+
+Fixed: both loops route through `_fm_summary_line`, the names are collected, and
+`census_summary_line` is emitted above the table (even when the table is EMPTY — `census: 0/0 …` is
+a true statement about a run that got nowhere, and omitting it would make a stopped block
+indistinguishable from a pre-contract one).
+
+**The corrected emit-site count is SEVEN blocks / EIGHT `_fm_summary_line` call sites** — full,
+lite, 2× delta, lite-agg selftest, emit-summary-selftest, and the boundary printer (two loops, one
+block). My round-1 report said six; the count came from a grep at the time rather than from the
+emit path, which is how the boundary printer stayed invisible.
+
+**Why #3453's own uniformity guard did not catch it, which is the transferable part.** Its needle
+was the literal `printf '%-18s %s (%s)'`; the boundary printer spelled the same row `(%ss)`. One
+character. A near-miss in a format string was enough to hide an entire emit path from a guard whose
+whole purpose is to find exactly that. The needle is now the `%-18s` NAME FIELD (comment-blind,
+`^[^#]*printf '%-18s`), whose only legitimate occurrence is the renderer's own definition — so the
+expected count is exactly 1 and anything above it is a bypass. **When you assert "everything goes
+through ONE X", key the assert on the narrowest thing that MAKES it an X, not on a whole literal a
+caller can spell differently.**
+
+RED arm (measured, scratch worktree, boundary fix reverted and nothing else): the two new
+behavioural cases in `test_agent_gate_tree_provenance.sh` fail —
+`only 0 of 1 boundary row(s) are fully annotated` and `the boundary block has no aggregate census:
+line` — and the other 40 cases stay green.
