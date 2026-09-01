@@ -4,19 +4,21 @@ i4i-magnitude: UNMEASURED (this host is 'c7i.4xlarge', not an i4i) — AC1's i4i
 kernel: 6.17.0-1019-aws
 cores: 16
 mem-total-kb: 32308512
-loadavg-at-start: 23.94 53.49 46.67
+loadavg-at-start: 57.03 71.77 77.81
 corpus: /data/ws0-2824
 corpus-bytes: 2779188457
 corpus-device: /dev/nvme1n1
 corpus-device-base: nvme1n1
 corpus-device-model: Amazon Elastic Block Store
+corpus-device-local-instance-storage: no
 corpus-device-read_ahead_kb: 128
-phases-per-arm-per-round: cold (cache dropped) + warm (cache resident), each --passes 1, each timed separately
+phases-per-arm-per-round: floor (--setup-only, cache dropped) + cold (cache dropped, --passes 1) + warm (cache resident, --passes 1), each timed separately
 rounds: 3  (arm order alternates on even rounds)
-primary-signal: major page faults (per-process, contention-immune)
+primary-signal: scan-attributable major page faults = cold(major_faults) - floor(major_faults)
+primary-signal-note: %F is per-process (immune to neighbours) but NOT isolated to the scan mapping; the floor phase estimates the non-scan startup cost. The subtraction is an ESTIMATE, not per-mapping accounting.
 secondary-signal: wall seconds (contended; medians only)
-started-utc: 2026-09-01T17:54:42Z
+started-utc: 2026-09-01T18:49:38Z
 arm: baseline  sha256=3542103a02b4fbf7ded59f75d0cff8660fa07d943177ccaafb744ffa61a79068
 arm: patched  sha256=4488b5bc5973d15ae8dbc489eefd017f06baf1f5c6d45bf514eff34f2164eda7
-finished-utc: 2026-09-01T17:59:36Z
-loadavg-at-end: 22.25 30.67 38.44
+finished-utc: 2026-09-01T18:55:37Z
+loadavg-at-end: 42.87 50.32 65.87

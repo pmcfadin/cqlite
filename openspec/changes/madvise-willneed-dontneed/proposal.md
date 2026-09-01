@@ -59,7 +59,10 @@ Found by roborev job 340 (High) and independently verified against the source be
 ## Why the benefit could not be demonstrated either
 
 `docs/reports/issue-2824-artifacts/RESULTS.md`. On this lane the flip measured **no effect and no
-regression**: cold major faults 52 -> 50 across ~630,000 file pages, warm unchanged. But the corpus
+regression**. Scan-attributable major faults (cold minus a `--setup-only` cold floor) are **4 in both
+arms** across ~630,000 file pages, and warm is unchanged. The raw cold counts (51 vs 49) look like a
+small win, but the whole difference is in the process-startup floor (47 vs 45), not the scan — `%F`
+counts faulting in the executable and libraries, which are cold too once the page cache is dropped. But the corpus
 device is **EBS**, measured at **132 MB/s** with a **128 KiB** read-ahead window, so the default window
 already saturates the device and the read is bandwidth-bound. There is **no headroom to detect the
 effect in either direction**, and a null result here says nothing about i4i — whose local NVMe at

@@ -4,8 +4,8 @@
 # WHAT THIS MEASURES, AND WHAT IT DOES NOT
 # ----------------------------------------
 # Runs `ws0-scan-bench` over a fixed corpus twice per labelled binary per round:
-# a COLD single-pass run (page cache dropped immediately before it) and a WARM
-# single-pass run (cache left resident). Each phase is timed by its OWN
+# a FLOOR run (`--setup-only`, cold), a COLD single-pass run (page cache dropped
+# immediately before it) and a WARM single-pass run (cache left resident). Each phase is timed by its OWN
 # `/usr/bin/time`, so every recorded number belongs to exactly one phase.
 # Two binaries -> a baseline-vs-patched A/B.
 #
@@ -28,11 +28,23 @@
 # a correctness oracle (#3042).
 #
 # The load-bearing signal here is not wall clock but **major page faults** (`%F`
-# from `/usr/bin/time`), which is per-process and therefore immune to the
-# neighbours. MADV_WILLNEED's whole mechanism is converting synchronous major
-# faults on the reading thread into kernel-initiated async read-ahead, so a real
-# effect must show up as a major-fault reduction on the cold pass. Wall clock is
-# reported alongside it as corroboration, not as the primary evidence.
+# from `/usr/bin/time`): MADV_WILLNEED's whole mechanism is converting synchronous
+# major faults on the reading thread into kernel-initiated async read-ahead, so a
+# real effect must show up as a major-fault reduction on the cold read.
+#
+# `%F` is per-process, so it is immune to the neighbours — but it is NOT isolated
+# to the scan mapping. It counts every major fault the process takes, including
+# faulting in its own executable and shared libraries, and because the global page
+# cache is dropped first those are cold too. Reporting it unqualified would
+# attribute process-startup faults to the scan.
+#
+# So each arm also runs a **FLOOR** phase: the same binary, cold, with
+# `--setup-only` — it opens the reader and reads the index/summary but performs no
+# scan. Its fault count is the non-scan cost of starting this process on a cold
+# cache, and `scan_major_faults = cold - floor` is the scan-attributable figure.
+# That is an ESTIMATE, not true per-mapping accounting (`/usr/bin/time` cannot do
+# per-mapping), and the raw `major_faults` column is kept beside it so the
+# subtraction is always visible rather than baked in.
 #
 # Requires: passwordless sudo for /proc/sys/vm/drop_caches (checked, fail-closed).
 set -euo pipefail
@@ -165,9 +177,10 @@ esac
   if [ "$_model" = UNKNOWN ] || [ "$_ra" = UNKNOWN ]; then
     echo "corpus-device-note: NOT MEASURED — a read-ahead A/B whose device is unknown cannot be interpreted; treat the result as UNATTRIBUTED"
   fi
-  echo "phases-per-arm-per-round: cold (cache dropped) + warm (cache resident), each --passes 1, each timed separately"
+  echo "phases-per-arm-per-round: floor (--setup-only, cache dropped) + cold (cache dropped, --passes 1) + warm (cache resident, --passes 1), each timed separately"
   echo "rounds: $ROUNDS  (arm order alternates on even rounds)"
-  echo "primary-signal: major page faults (per-process, contention-immune)"
+  echo "primary-signal: scan-attributable major page faults = cold(major_faults) - floor(major_faults)"
+  echo "primary-signal-note: %F is per-process (immune to neighbours) but NOT isolated to the scan mapping; the floor phase estimates the non-scan startup cost. The subtraction is an ESTIMATE, not per-mapping accounting."
   echo "secondary-signal: wall seconds (contended; medians only)"
   echo "started-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for entry in "${BINARIES[@]}"; do
@@ -176,17 +189,21 @@ esac
 } | tee "$OUT/host.txt"
 
 echo "round,arm,phase,wall_secs,max_rss_kb,major_faults,minor_faults" > "$OUT/summary.csv"
+echo "round,arm,floor_major_faults,cold_major_faults,scan_major_faults" > "$OUT/scan-attributable.csv"
 
 # One `/usr/bin/time` invocation per PHASE, each a single-pass run, so every
 # recorded number is attributable to exactly one phase. An earlier version wrapped
 # `--passes N` in ONE invocation, which summed cold+warm into a column the header
 # called cold — a mislabel that would have propagated into the artifact.
+# Set by run_phase so the caller can derive the scan-attributable fault count.
+LAST_MAJF=""
+
 run_phase() {
-  local round="$1" label="$2" path="$3" phase="$4"
+  local round="$1" label="$2" path="$3" phase="$4"; shift 4
   local tm="$OUT/${label}.round${round}.${phase}.time"
   local log="$OUT/${label}.round${round}.${phase}.json"
   if ! /usr/bin/time -f "%e %M %F %R" -o "$tm" \
-      "$path" --corpus "$CORPUS" --passes 1 > "$log" 2> "$OUT/${label}.round${round}.${phase}.err"; then
+      "$path" --corpus "$CORPUS" "$@" > "$log" 2> "$OUT/${label}.round${round}.${phase}.err"; then
     echo "cold-warm-ab: round $round arm $label phase $phase FAILED; see $OUT/${label}.round${round}.${phase}.err" >&2
     exit 4
   fi
@@ -194,6 +211,7 @@ run_phase() {
   read -r wall rss majf minf < "$tm"
   echo "$round,$label,$phase,$wall,$rss,$majf,$minf" >> "$OUT/summary.csv"
   echo "  [$phase] wall=${wall}s max_rss=${rss}kB major_faults=$majf minor_faults=$minf"
+  LAST_MAJF="$majf"
 }
 
 for round in $(seq 1 "$ROUNDS"); do
@@ -204,10 +222,18 @@ for round in $(seq 1 "$ROUNDS"); do
   for entry in "${order[@]}"; do
     label="${entry%%=*}"; path="${entry#*=}"
     echo "--- round $round arm $label ---"
+    # FLOOR: same binary, cold, opens the reader but does not scan. Its faults are
+    # the non-scan cost of starting this process on a cold cache.
     sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
-    run_phase "$round" "$label" "$path" cold
+    run_phase "$round" "$label" "$path" floor --setup-only
+    local_floor="$LAST_MAJF"
+    sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+    run_phase "$round" "$label" "$path" cold --passes 1
+    local_cold="$LAST_MAJF"
+    echo "$round,$label,$local_floor,$local_cold,$(( local_cold - local_floor ))" >> "$OUT/scan-attributable.csv"
+    echo "  [scan-attributable] major_faults=$(( local_cold - local_floor )) (cold $local_cold - floor $local_floor)"
     # No drop here: the corpus is now resident, so this run is the WARM arm.
-    run_phase "$round" "$label" "$path" warm
+    run_phase "$round" "$label" "$path" warm --passes 1
   done
 done
 

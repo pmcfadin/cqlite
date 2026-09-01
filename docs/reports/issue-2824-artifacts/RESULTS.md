@@ -14,44 +14,55 @@
 structurally incapable of exhibiting the effect AC1 asks about.** The lever is neither
 validated nor invalidated here. AC1's cold-i4i clause remains **UNMEASURED**.
 
-Raw artifacts: `ab/summary.csv`, `ab/host.txt`, `ab/construction.md`,
+Raw artifacts: `ab/summary.csv`, `ab/scan-attributable.csv`, `ab/host.txt`, `ab/construction.md`,
 `ab/strace-madvise.{baseline,patched}.txt`. Harness: `cold-warm-ab.sh`.
 
 ## What ran
 
-3 rounds x 2 arms x 2 phases, arm order alternating per round, page cache dropped
-immediately before every cold phase, each phase a separate single-pass run with its own
-`/usr/bin/time`. Corpus: the `ws0.events` fixture, 2,779,188,457 bytes, `Data.db`
-2,774,760,422 bytes. Both arms built from ONE tree differing by one match arm and verified
-by `strace` to differ by exactly one `madvise` call — see `ab/construction.md`.
+3 rounds x 2 arms x **3 phases**, arm order alternating per round, page cache dropped immediately
+before both the floor and the cold phase, each phase a separate run with its own `/usr/bin/time`.
+Corpus: the `ws0.events` fixture, `Data.db` 2,774,760,422 bytes (~630,000 pages). Both arms built from
+ONE tree differing by one match arm and verified by `strace` to differ by exactly one `madvise` call —
+see `ab/construction.md`.
 
-| phase | signal | baseline median [min-max] | patched median [min-max] | delta |
-|---|---|---|---|---|
-| cold | **major faults** | 52 [51-53] | 50 [50-52] | -3.8% |
-| cold | wall secs | 23.76 [22.54-31.01] | 22.22 [21.35-30.59] | -6.5% |
-| warm | **major faults** | 0 [0-0] | 0 [0-0] | 0 |
-| warm | wall secs | 18.95 [18.18-20.18] | 18.53 [17.46-19.19] | -2.2% |
+The **floor** phase is the same binary run cold with `--setup-only`: it opens the reader and reads the
+index/summary but performs no scan, so its fault count is the non-scan cost of starting this process on
+a cold cache. `scan_major_faults = cold - floor`.
+
+| signal | baseline median [min-max] | patched median [min-max] |
+|---|---|---|
+| **scan-attributable major faults** (`cold - floor`) | **4** [2-5] | **4** [3-6] |
+| raw cold major faults | 51 [50-52] | 49 [49-51] |
+| floor major faults (startup only) | 47 [47-48] | 45 [45-46] |
+| warm major faults | 0 | 0 |
+| cold wall secs | 28.46 [22.41-31.32] | 32.52 [23.39-32.59] |
+| warm wall secs | 18.12 [17.50-19.24] | 17.54 [17.39-17.72] |
 
 ## Reading it
 
-**Major faults is the primary signal and it says nothing happened.** It is per-process and
-therefore immune to the neighbours, and it is the mechanism `MADV_WILLNEED` acts on: the
-advice exists to convert synchronous major faults on the reading thread into kernel-initiated
-asynchronous read-ahead. A 52 -> 50 median difference is **2 faults across ~630,000 file
-pages**. There is nothing there.
+**Scan-attributable major faults are identical: 4 and 4, across ~630,000 file pages.** The kernel's
+default read-ahead was already converting essentially everything to minor faults, in *both* arms. There
+was nothing for `MADV_WILLNEED` to convert.
 
-**Warm shows no regression**, on either signal. Warm major faults are 0 in every single run,
-which also confirms the warm phase really was warm.
+**This attribution corrected an earlier misreading of my own data, and it is the reason the floor phase
+exists.** The raw cold counts are 51 vs 49, which reads as a small improvement. It is not: the whole
+difference sits in the **startup floor** (47 vs 45), i.e. in faulting the executable and its shared
+libraries — because the global page cache is dropped, those are cold too and `%F` counts them. `%F` is
+per-process, so it is immune to the neighbours; it is **not** isolated to the scan mapping, and
+reporting it unqualified attributed process-startup faults to the scan. Subtracting the floor removes a
+spurious directional signal and leaves a clean null. (The subtraction is an estimate, not per-mapping
+accounting, which `/usr/bin/time` cannot provide.)
 
-**Wall clock is not usable from this box and the -6.5%/-2.2% figures must not be quoted.**
-`loadavg` was 23.9 at start and 22.3 at end, peaking above 60, against 16 cores — three peer
-lanes were building concurrently. Within-arm spread (22.5-31.0 s baseline, 21.4-30.6 s
-patched) swamps the between-arm difference. An earlier run made this unambiguous: in **both**
-orderings the arm that ran **first** was faster (round 1, baseline first: 20.9 s vs 50.1 s;
-round 4, patched first: 38.8 s vs 22.4 s). That is load drift, not an arm effect, and it is
-exactly what alternating the order exists to expose — run all of one arm and then all of the
-other, and that same drift would have produced a clean-looking, entirely false "patched is
-2.4x slower".
+**Warm shows no regression**, and warm major faults are 0 in every run, which also confirms the warm
+phase really was warm.
+
+**Wall clock is not usable from this box and none of these figures should be quoted.** Three peer lanes
+were building concurrently; within-arm spread (22.4-31.3 s baseline, 23.4-32.6 s patched) swamps any
+between-arm difference. An earlier run made the confound unambiguous: in **both** orderings the arm that
+ran **first** was faster (round 1, baseline first: 20.9 s vs 50.1 s; round 4, patched first: 38.8 s vs
+22.4 s). That is load drift, not an arm effect, and it is exactly what alternating the order exists to
+expose — run all of one arm then all of the other and that same drift would have produced a
+clean-looking, entirely false "patched is 2.4x slower".
 
 ## Why this host cannot exhibit the effect
 
