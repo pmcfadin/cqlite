@@ -56,6 +56,13 @@ const TBL: &str = "items";
 /// always offset 0, so even the OLD forward-only walk would "accidentally"
 /// start at the beginning).
 const N: usize = 400;
+/// The default `min_index_interval` a flush writes `Summary.db` with. Used only
+/// to prove the full-ring case below is discriminating, never to predict a
+/// sample position.
+const DEFAULT_MIN_INDEX_INTERVAL: usize = 128;
+/// Token rank the full-ring case picks: several sample intervals into the token
+/// order, so the floor sample for it is provably not offset 0.
+const FULL_RING_RANK: usize = 250;
 
 fn schema() -> TableSchema {
     TableSchema {
@@ -229,6 +236,97 @@ fn wraparound_range_emits_partitions_from_both_segments() {
         expected_low.len(),
         expected_high.len(),
         got.len()
+    );
+}
+
+/// The FULL RING (`start_excl == end_incl`, the #2228 convention) must emit
+/// EVERY partition — end to end, through the same public surface.
+///
+/// This pins a behaviour the flag-carrying `ScanTokenBound` got WRONG, and is a
+/// SUPERSET of #3634's stated acceptance criteria: #3634 asks only that wrapping
+/// be derived from the endpoints, and this data-loss fix falls out of it.
+///
+/// Under the old form a full ring was built with `wraparound: false` (flight's
+/// single-token topology, `query_rows_panic_tests::full_ring()`), so it took the
+/// NON-wrapping arm of the walk's start-offset choice and began at
+/// `scan_start_position_for_token(start_excl)`. That is the FLOOR SAMPLE's
+/// position, not the beginning: `summary_reader/mod.rs`'s
+/// `scan_start_position_for_token` takes `partition_point(token <= start_excl)`
+/// and then `saturating_sub(1)`, i.e. the last sample AT OR BELOW the token. Yet
+/// `contains` answered `true` for every token (the `#2228` early-return), so
+/// every partition sorting below that sample was silently dropped — a partial
+/// result set with no error, the failure mode that reads as "the range is empty".
+///
+/// Deriving wrapping from `start_excl >= end_incl` puts the full ring on the
+/// wrapping arm, where the walk starts at offset 0 and the filter admits
+/// everything: a full walk, unfiltered in effect.
+///
+/// The chosen token sits at rank `FULL_RING_RANK`, several `min_index_interval`
+/// intervals into the token order, so the old floor-sample start was provably
+/// PAST the beginning and provably dropped partitions.
+#[test]
+fn full_ring_emits_every_partition_not_just_those_past_the_floor_sample() {
+    let mut by_token: Vec<(i32, i64)> = (0..N as i32)
+        .map(|id| (id, cassandra_murmur3_token(&key_bytes(id))))
+        .collect();
+    by_token.sort_by_key(|(_, tok)| *tok);
+
+    // Non-vacuity, part 1: the fixture must actually hold partitions, and the
+    // chosen token must sit far enough into the token order that AT LEAST one
+    // whole summary sample interval precedes it — otherwise the floor sample IS
+    // offset 0 and the old behaviour is indistinguishable from the new one.
+    assert_eq!(by_token.len(), N, "fixture must hold all {N} partitions");
+    assert!(
+        FULL_RING_RANK > DEFAULT_MIN_INDEX_INTERVAL,
+        "the full-ring token must sort above at least one whole sample interval \
+         ({DEFAULT_MIN_INDEX_INTERVAL}), or the floor sample is offset 0 and this \
+         case cannot discriminate; rank is {FULL_RING_RANK}"
+    );
+    let token = by_token[FULL_RING_RANK].1;
+
+    // Every partition, because the full ring admits every token (#2228).
+    let mut expected: Vec<i32> = by_token.iter().map(|(id, _)| *id).collect();
+    expected.sort_unstable();
+    assert_eq!(expected.len(), N);
+
+    let (_temp, data_path) = build_single_gen();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reader = rt.block_on(open_reader(&data_path));
+
+    let bound = ScanTokenBound {
+        start_excl: token,
+        end_incl: token,
+    };
+    assert!(
+        bound.is_wraparound(),
+        "equal endpoints must wrap (Range.isWrapAround\'s `>=`, #3634) — that is \
+         what routes the walk to offset 0"
+    );
+    let got = rt.block_on(emitted_ids(&reader, Some(bound)));
+
+    // Non-vacuity, part 2: an empty emit is never a pass here.
+    assert!(
+        !got.is_empty(),
+        "the full ring emitted NOTHING — the fixture or the walk is broken, and \
+         an empty result must never read as agreement"
+    );
+    let dropped: Vec<i32> = expected
+        .iter()
+        .copied()
+        .filter(|id| !got.contains(id))
+        .collect();
+    assert_eq!(
+        got,
+        expected,
+        "a FULL-RING bound ({token}, {token}] must emit all {} partitions; got \
+         {} and dropped {} of them. This is the flag-carrying form\'s data loss: \
+         the walk started at the FLOOR SAMPLE for the token (rank \
+         {FULL_RING_RANK} of {N}) instead of offset 0, so every partition sorting \
+         BELOW that sample was skipped while `contains` still admitted every \
+         token",
+        expected.len(),
+        got.len(),
+        dropped.len()
     );
 }
 
