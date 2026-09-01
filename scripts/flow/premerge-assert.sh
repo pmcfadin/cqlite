@@ -388,11 +388,76 @@ refuse_tool_failure() {
 # very shape this check is about. It is a state probe, not an object read, and it
 # cannot be redirected by a graft.
 #
-# THE READS ARE DELIBERATELY **NOT** WRAPPED IN `env -i` + an allowlist, unlike
-# agent-gate.sh's pre-flight. That wrapper exists where a git call can REACH A
-# REMOTE and the answer's provenance is a fetch. Here nothing is fetched and
-# every read is BY A SHA against a config-less object source, so there is no
-# transport an environment could bend. Do not "fix" this by adding one.
+# EVERY GIT CALL RUNS UNDER `env -i` + AN ALLOWLIST — AND THE COMMENT THAT USED
+# TO SAY THE OPPOSITE WAS FALSE ONCE THE SCRATCH EXISTED (roborev job 358, High).
+# The earlier text argued that these reads need no environment control because
+# they are lane-local and addressed BY A SHA, so nothing an environment can set
+# changes which bytes a sha resolves to. That argument is CORRECT for a read in
+# the lane repository and WRONG for this design, and the difference is the whole
+# finding: **an environment variable here does not bend the OBJECT, it bends
+# WHICH REPOSITORY ANSWERS.** A scratch whose entire purpose is isolation has a
+# load-bearing environment. Two measured routes, both of which manufacture
+# `BOUND` (git 2.43.0):
+#   * `GIT_DIR` OVERRIDES `-C`. `GIT_DIR=<grafted>/.git git -C <scratch>
+#     rev-parse --git-dir` answers `<grafted>/.git`; under `env -i` it answers
+#     `.git`. So an inherited `GIT_DIR`/`GIT_COMMON_DIR` redirects the walk
+#     straight back into a grafted repository.
+#   * A TEMPLATE SEEDS `info/grafts` INTO THE SCRATCH. `git init
+#     --template=<dir>` and `GIT_TEMPLATE_DIR=<dir> git init` both copy a planted
+#     `info/grafts` into the new repo (measured: content `x` present in both);
+#     `env -i … git init --template=` produces none.
+# So the isolated hop's environment is an ALLOWLIST (CLAUDE.md job 258: allowlist
+# the safe shape, never blocklist the dangerous one — a denylist of git variables
+# recedes), and it reaches EVERY site, including the lane DISCOVERY reads (job
+# 276: the migrated reads ran under a bare `env` and the earlier hole re-opened
+# at the NEW sites). An inherited `GIT_DIR` on a discovery read would make
+# `--git-path objects`, `--git-common-dir` and `--is-shallow-repository` answer
+# about a DIFFERENT repository, poisoning the alternate and the shallowness
+# verdict alike.
+#   ADMIT  only what git needs to RUN AT ALL. There is no network here, so —
+#          unlike agent-gate.sh's pre-flight — nothing needs HOME for key or
+#          `known_hosts` discovery, nothing needs SSH_AUTH_SOCK, and no proxy
+#          variable is admitted. The list is PATH and TMPDIR.
+#   CLEAR  everything else, BY DEFAULT via `env -i`, which is what makes this
+#          closed: a git variable nobody has thought of is cleared without
+#          needing to be discovered.
+# THE CONFIG FILES ARE NOT SANITISABLE BY THE ENVIRONMENT — `/etc/gitconfig` and
+# `~/.gitconfig` are FILES, so clearing `GIT_CONFIG_*` alone does not stop an
+# `init.templateDir` set in one of them. They are neutralised by pointing
+# `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` at `/dev/null` AND by passing an
+# explicit empty `--template=` to `git init`.
+#   HOW THOSE TWO ACTUALLY RELATE, MEASURED RATHER THAN ASSERTED, because an
+#   earlier draft of this paragraph claimed "neither alone closes it" and the
+#   suite falsifies that: remove ONLY the `--template=` and the template arm
+#   still refuses (`env -i` cleared `GIT_TEMPLATE_DIR`); remove ONLY the `env -i`
+#   and it still refuses (the explicit flag beats the inherited variable); remove
+#   BOTH and the attack lands — `exit 0`, a false acceptance. So against every
+#   route this suite can construct they are REDUNDANT WITH EACH OTHER, kept as
+#   defence in depth rather than because each is separately necessary. What the
+#   flag uniquely covers is a config-FILE `init.templateDir` — which the two
+#   `/dev/null` neutralisers also cover, and which no test here constructs,
+#   because doing so would mean writing to `/etc/gitconfig`.
+# A side effect worth stating: clearing `GIT_DIR` makes this file's standing
+# claim — "the repository is the CURRENT WORKING DIRECTORY's, with no env
+# override" — true, where before a caller's `GIT_DIR` silently won.
+#
+# THE READS ARE ALSO BOUNDED (roborev job 358, Medium). They read the SHARED
+# object store, so a malformed loose object (a FIFO) or a stalled filesystem read
+# would hang the merge guard forever instead of producing the documented
+# `ANCHOR-UNVERIFIABLE`. In model on both halves: a peer lane can plant into that
+# store, and a stalled mount is the accident route. The bound is the runner this
+# script ALREADY resolves for the advisory (`resolve_advisory_timeout`, probed
+# for `--kill-after` because a TERM-only bound bounds nothing) at the same
+# `ADVISORY_TIMEOUT_SECS`/`ADVISORY_KILL_GRACE`; no second timing implementation
+# is written, and `timeout(1)` owns and reaps its own child, so job 279's rule
+# against signalling a process group you no longer own is not in play here.
+# WHERE NO RUNNER EXISTS the reads run UNBOUNDED and SAY SO on the evidence line
+# (`anchor-reads: UNBOUNDED(...)`) — they are NOT refused. This is a LIVENESS
+# property, not a correctness one: a hang produces NO verdict, where the graft
+# produced a WRONG one, and an unbounded read cannot manufacture a false pass.
+# Turning "this box has no `timeout`" into a merge refusal would be the guard
+# that reds on correct input. What must never happen is the bounded path
+# silently becoming unbounded, hence the affirmative token rather than silence.
 export GIT_NO_LAZY_FETCH=1
 export GIT_NO_REPLACE_OBJECTS=1
 
@@ -427,6 +492,73 @@ refuse_anchor_unverifiable() {
   printf '========================================================\n' >&2
   exit 3
 }
+
+# --- THE ISOLATED HOP'S ENVIRONMENT (roborev job 358) -----------------------
+# See the header for the two measured routes and the ADMIT/CLEAR line. Built
+# once, used by every git call below — lane discovery included.
+ANCHOR_GIT_ENV=()
+_anchor_build_git_env() {
+  ANCHOR_GIT_ENV=()
+  # PATH: find `git` itself, and the bounding `timeout`/`gtimeout`.
+  ANCHOR_GIT_ENV+=("PATH=${PATH:-/usr/bin:/bin}")
+  # TMPDIR: git's own temporary files. Also where the scratch is created.
+  [ -n "${TMPDIR:-}" ] && ANCHOR_GIT_ENV+=("TMPDIR=$TMPDIR")
+  # THE NEUTRALISERS, LAST so nothing above can shadow them. The two config
+  # variables are what make the FILE-based `init.templateDir` route inert; the
+  # explicit `--template=` at the init call is the other half. No prompt: an
+  # interactive credential prompt is one of the ways this could hang. Replace
+  # refs and lazy fetch off as belt — the structural control is that no object
+  # read runs in the live repository at all.
+  ANCHOR_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" \
+                   "GIT_TERMINAL_PROMPT=0" "GIT_NO_REPLACE_OBJECTS=1" "GIT_NO_LAZY_FETCH=1")
+  return 0
+}
+_anchor_build_git_env
+
+# --- THE BOUND (roborev job 358) --------------------------------------------
+# Resolved ONCE, from the runner this script already has. `ANCHOR_READS` is the
+# affirmative token published on the evidence line; it is never silently empty.
+ANCHOR_BOUND_RUNNER=""
+ANCHOR_READS="UNRECORDED"
+_anchor_resolve_bound() {
+  local name
+  if name=$(resolve_advisory_timeout) && ANCHOR_BOUND_RUNNER=$(command -v "$name" 2>/dev/null) &&
+     [ -n "$ANCHOR_BOUND_RUNNER" ]; then
+    ANCHOR_READS="bounded-${ADVISORY_TIMEOUT_SECS}s+${ADVISORY_KILL_GRACE}s"
+  else
+    ANCHOR_BOUND_RUNNER=""
+    ANCHOR_READS="UNBOUNDED(no-timeout-runner-supporting--kill-after)"
+  fi
+  return 0
+}
+
+# _anchor_run <git-args...> — ONE place every git call in this check goes
+# through: `env -i` + the allowlist, bounded when a runner exists. Callers add
+# location-specific variables by exporting them in a subshell (see _anchor_git).
+# A timeout is reported through the exit code (124 from timeout(1), or 137 when
+# the SIGKILL escalation was needed) and every caller maps those to UNVERIFIABLE.
+_anchor_run() {
+  if [ -n "$ANCHOR_BOUND_RUNNER" ]; then
+    env -i "${ANCHOR_GIT_ENV[@]}" "$ANCHOR_BOUND_RUNNER" \
+      --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" git "$@"
+  else
+    env -i "${ANCHOR_GIT_ENV[@]}" git "$@"
+  fi
+}
+
+# _anchor_timed_out <rc> — TRUE when the runner terminated the call rather than
+# git answering. Only meaningful when a runner is in use; with none, no exit code
+# means "timed out" and the test is simply never true.
+_anchor_timed_out() {
+  [ -n "$ANCHOR_BOUND_RUNNER" ] || return 1
+  [ "$1" = 124 ] || [ "$1" = 137 ]
+}
+
+# _anchor_lane <git-args...> — a DISCOVERY read of the lane repository (cwd).
+# Same isolation: an inherited GIT_DIR would make discovery answer about another
+# repository, which poisons the alternate and the shallowness verdict (job 276:
+# the allowlist has to reach the sites a later change adds).
+_anchor_lane() { _anchor_run --no-replace-objects "$@"; }
 
 # --- THE ISOLATED SCRATCH REPOSITORY (roborev job 355) ----------------------
 # CLEANUP IS REGISTERED BEFORE THE RESOURCE EXISTS. CLAUDE.md's recurring lesson
@@ -471,8 +603,8 @@ _anchor_build_scratch() {
   # pre-check answers about the path as it resolved a moment ago, so what was
   # ACTUALLY CREATED is re-validated, because a symlink swapped in between lands
   # the real directory somewhere else.
-  repo_canon=$(_anchor_canon "$(git rev-parse --show-toplevel 2>/dev/null || true)")
-  common_canon=$(_anchor_canon "$(git rev-parse --git-common-dir 2>/dev/null || true)")
+  repo_canon=$(_anchor_canon "$(_anchor_lane rev-parse --show-toplevel 2>/dev/null || true)")
+  common_canon=$(_anchor_canon "$(_anchor_lane rev-parse --git-common-dir 2>/dev/null || true)")
   if [ -z "$repo_canon" ] || [ -z "$common_canon" ]; then
     ANCHOR_SCRATCH_ERR="the work-tree root and/or git common directory could not be resolved, so a scratch location cannot be proven outside them"
     return 1
@@ -513,7 +645,7 @@ _anchor_build_scratch() {
   # (measured here: `--git-path objects` = /…/repo/.git/objects while
   # `--git-dir` = /…/repo/.git/worktrees/<lane>). It reads no object and reaches
   # no network; a graft cannot redirect a path.
-  lane_objects=$(git rev-parse --git-path objects 2>/dev/null) || lane_objects=""
+  lane_objects=$(_anchor_lane rev-parse --git-path objects 2>/dev/null) || lane_objects=""
   # MADE ABSOLUTE: `--git-path` answers RELATIVE TO THE WORK-TREE ROOT for a
   # plain clone (`.git/objects`) and absolute only for a worktree. A relative
   # value would be resolved against the SCRATCH, a different directory, and the
@@ -532,7 +664,15 @@ _anchor_build_scratch() {
   fi
 
   ANCHOR_SCRATCH_REPO="$ANCHOR_SCRATCH/repo"
-  if ! git init -q "$ANCHOR_SCRATCH_REPO" >/dev/null 2>&1 ||
+  # `--template=` (EMPTY). `git init --template=<dir>` and `GIT_TEMPLATE_DIR=<dir>
+  # git init` BOTH copy a planted `info/grafts` into the new repository
+  # (measured), which would make the scratch born grafted and the isolation
+  # worthless. This flag and the allowlist's cleared environment are REDUNDANT
+  # with each other against that route — measured: removing either alone still
+  # refuses, removing both lets the attack land at exit 0 (see the header). Kept
+  # as defence in depth, and because the flag additionally beats a config-FILE
+  # `init.templateDir` that no environment can clear.
+  if ! _anchor_run init -q --template= "$ANCHOR_SCRATCH_REPO" >/dev/null 2>&1 ||
      [ ! -d "$ANCHOR_SCRATCH_REPO/.git" ]; then
     ANCHOR_SCRATCH_ERR="could not initialise an isolated scratch repository at $ANCHOR_SCRATCH_REPO"
     return 1
@@ -564,8 +704,17 @@ _anchor_build_scratch() {
 # with the lane's objects supplied as an alternate. This is the only place the
 # ancestry reads happen; nothing here consults the lane's config.
 _anchor_git() {
-  GIT_ALTERNATE_OBJECT_DIRECTORIES="$ANCHOR_ALT" \
-    git --no-replace-objects -C "$ANCHOR_SCRATCH_REPO" "$@"
+  # The alternate is the one location-specific value layered on top of the
+  # allowlist — appended AFTER it, so it cannot be shadowed by a neutraliser and
+  # cannot smuggle anything else in.
+  if [ -n "$ANCHOR_BOUND_RUNNER" ]; then
+    env -i "${ANCHOR_GIT_ENV[@]}" "GIT_ALTERNATE_OBJECT_DIRECTORIES=$ANCHOR_ALT" \
+      "$ANCHOR_BOUND_RUNNER" --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" \
+      git --no-replace-objects -C "$ANCHOR_SCRATCH_REPO" "$@"
+  else
+    env -i "${ANCHOR_GIT_ENV[@]}" "GIT_ALTERNATE_OBJECT_DIRECTORIES=$ANCHOR_ALT" \
+      git --no-replace-objects -C "$ANCHOR_SCRATCH_REPO" "$@"
+  fi
 }
 
 # assert_anchor_on_history <anchor-40-hex> <certified-40-hex> — the #3653
@@ -578,7 +727,10 @@ assert_anchor_on_history() {
     refuse_anchor_unverifiable "$anchor" "$head" "git is not on PATH" \
       "REMEDY: install git, or run this assert from a box that has it."
   fi
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  # Resolve the bound BEFORE the first read, so no read is ever unbounded by
+  # accident rather than by the measured absence of a runner.
+  _anchor_resolve_bound
+  if ! _anchor_lane rev-parse --git-dir >/dev/null 2>&1; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the current directory is not inside a git work tree (cwd: $(pwd))" \
       "REMEDY: run this assert from the ISSUE'S WORKTREE. The repository whose" \
@@ -616,7 +768,19 @@ assert_anchor_on_history() {
   # (or 1 in a repository this check then refuses to call complete) and the
   # verdict is UNVERIFIABLE either way. A false "present" costs a less specific
   # diagnostic, never a pass.
-  if ! _anchor_git cat-file -e "$anchor^{commit}" >/dev/null 2>&1; then
+  rc=0
+  _anchor_git cat-file -e "$anchor^{commit}" >/dev/null 2>&1 || rc=$?
+  if _anchor_timed_out "$rc"; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "reading the ANCHOR object timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
+      "The object store did not answer. A malformed loose object (a FIFO) or a" \
+      "stalled filesystem will do this, and both are reachable here: the store is" \
+      "SHARED between lanes and a stalled mount is an accident, not an attack." \
+      "A hang would give NO verdict at all, so the bound turns it into this one." \
+      "REMEDY: check the object store under this repository's objects directory" \
+      "and the mount it lives on, then re-run this assert."
+  fi
+  if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the ANCHOR commit is not present in this repository" \
       "An absent object cannot be shown to lie on any history, and its absence is" \
@@ -624,7 +788,16 @@ assert_anchor_on_history() {
       "REMEDY: fetch the branch that carries it (git fetch origin <branch>) and" \
       "re-run this assert."
   fi
-  if ! _anchor_git cat-file -e "$head^{commit}" >/dev/null 2>&1; then
+  rc=0
+  _anchor_git cat-file -e "$head^{commit}" >/dev/null 2>&1 || rc=$?
+  if _anchor_timed_out "$rc"; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "reading the CERTIFIED object timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
+      "See the ANCHOR timeout cause above: a shared object store that does not" \
+      "answer is UNMEASURED, never a pass." \
+      "REMEDY: check the object store and its mount, then re-run this assert."
+  fi
+  if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the CERTIFIED commit is not present in this repository" \
       "REMEDY: fetch the PR branch (git fetch origin <branch>) and re-run this" \
@@ -637,6 +810,14 @@ assert_anchor_on_history() {
     ANCHOR_ANCESTRY=BOUND
     _anchor_cleanup
     return 0
+  fi
+  if _anchor_timed_out "$rc"; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "the ancestry walk timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
+      "merge-base did not finish. The walk reads the SHARED object store, where a" \
+      "malformed object or a stalled mount stops it; a hang here would leave the" \
+      "merge guard with no verdict at all, which the bound converts into this one." \
+      "REMEDY: check the object store and its mount, then re-run this assert."
   fi
   if [ "$rc" -ne 1 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -659,7 +840,7 @@ assert_anchor_on_history() {
   # unconditionally and turn this guard into a vacuous pass — the exact shape
   # this whole check exists to refuse. It is a STATE probe, not an object read,
   # so the graft route job 355 closed does not apply to it.
-  shallow=$(git --no-replace-objects rev-parse --is-shallow-repository 2>/dev/null) || shallow=""
+  shallow=$(_anchor_lane rev-parse --is-shallow-repository 2>/dev/null) || shallow=""
   if [ "$shallow" != false ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "--is-ancestor said 'no', but this repository is NOT PROVEN COMPLETE (git rev-parse --is-shallow-repository = '$shallow')" \
@@ -1465,7 +1646,12 @@ if [ -n "$delta_file" ]; then
   # `anchor-ancestry:` is the AFFIRMATIVE record that the #3653 binding RAN. After
   # assert_anchor_on_history it can only ever read BOUND — which is the point: a
   # silent pass is indistinguishable from a check that was never reached.
-  printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-    "$delta_anchor" "$ANCHOR_ANCESTRY" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
+  # `anchor-reads:` is AFFIRMATIVE in both directions (job 358): `bounded-<n>s+<g>s`
+  # or `UNBOUNDED(no-timeout-runner-supporting--kill-after)`. An unbounded run is
+  # legitimate — a hang cannot manufacture a false pass, and refusing a box with
+  # no `timeout` would red correct input — but it must never be SILENT, because a
+  # bounded path degrading into an unbounded one unnoticed is the real hazard.
+  printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s anchor-reads: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
+    "$delta_anchor" "$ANCHOR_ANCESTRY" "$ANCHOR_READS" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
 fi
 exit 0

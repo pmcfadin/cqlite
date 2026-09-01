@@ -1099,9 +1099,18 @@ if run_anc 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
     *) bad "delta pair: GATE-OF-RECORD line must name the anchor (got: $OUT)" ;;
   esac
   case "$OUT" in
-    *"PREMERGE: DELTA-RECERT anchor: $R_ANCHOR anchor-ancestry: BOUND commit: $RC7 tree-start: $RC12"*)
+    *"PREMERGE: DELTA-RECERT anchor: $R_ANCHOR anchor-ancestry: BOUND anchor-reads: "*"commit: $RC7 tree-start: $RC12"*)
       ok "delta pair: a DISTINCT DELTA-RECERT line names the anchor + the merged tree" ;;
     *) bad "delta pair: missing the DELTA-RECERT evidence line (got: $OUT)" ;;
+  esac
+  # `anchor-reads:` must be AFFIRMATIVE, never silent (job 358). The suite always
+  # puts a `--kill-after`-capable runner on PATH via the $BIN shim, so the bounded
+  # value is the only correct one here; the UNBOUNDED spelling is asserted by its
+  # own arm below, which constructs a PATH without one.
+  case "$OUT" in
+    *"anchor-reads: bounded-"*)
+      ok "delta pair: the evidence line AFFIRMS the reads were bounded" ;;
+    *) bad "delta pair: expected an affirmative bounded anchor-reads: token (got: $OUT)" ;;
   esac
   case "$OUT" in
     *"summary: $RGOODDELTA"*) ok "delta pair: the DELTA-RECERT line names the delta summary file" ;;
@@ -1725,6 +1734,185 @@ else
   printf 'ARM NOT TAKEN: UNEXERCISED on this run. Non-fatal by design: git support for grafts is\n'
   printf 'ARM NOT TAKEN: deprecated and may be removed, which is a host property, not a defect here.\n'
   ok "graft: SKIPPED (positive control did not fire — see the ARM NOT TAKEN lines; arm UNEXERCISED, declared not silent)"
+fi
+
+# --- 44(g): THE SCRATCH'S ENVIRONMENT IS LOAD-BEARING (roborev job 358) ------
+#
+# The scratch isolates the walk from the LANE's repository state — but only if
+# the environment cannot point git back at a grafted repository, or seed a graft
+# into the scratch as it is created. Two routes, each with a POSITIVE CONTROL
+# proving the attack executes (CLAUDE.md job 264: assert unreachability, with a
+# control, or the green means nothing).
+#
+# Both arms reuse Case 44(f)'s GRAFT_REPO, so they need its fixture.
+
+# --- 44(g)(1): an inherited GIT_DIR OVERRIDES `-C` --------------------------
+if [ "$graft_shape" -eq 1 ] && [ "$graft_attack" -eq 1 ]; then
+  # CONTROL: under this GIT_DIR a plain git call, given `-C` pointing at the
+  # CLEAN repository, still answers about the GRAFTED one — and the grafted
+  # ancestry answer comes with it.
+  gd_control=0
+  if [ "$(GIT_DIR="$GRAFT_REPO/.git" git -C "$ANC_REPO" rev-parse --git-dir 2>/dev/null)" = "$GRAFT_REPO/.git" ] &&
+     GIT_DIR="$GRAFT_REPO/.git" git -C "$ANC_REPO" merge-base --is-ancestor "$R_FOREIGN" "$R_CERT" >/dev/null 2>&1; then
+    gd_control=1
+  fi
+  if [ "$gd_control" -eq 1 ]; then
+    ok "GIT_DIR POSITIVE CONTROL: an inherited GIT_DIR overrides -C and carries the grafted ancestry answer"
+    OUT=$(cd "$ANC_REPO" && PATH="$BIN:$PATH" GIT_DIR="$GRAFT_REPO/.git" \
+      MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+      bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+    RC=$?
+    if [ "$RC" -ne 2 ]; then
+      bad "GIT_DIR: an inherited GIT_DIR redirected the guard (exit $RC, wanted 2) — the env allowlist is not reaching every git call (job 358) (got: $OUT)"
+    else
+      ok "GIT_DIR: an inherited GIT_DIR cannot redirect the guard — still refused (exit 2)"
+      case "$OUT" in
+        *"anchor-ancestry: BOUND"*) bad "GIT_DIR: the run claims BOUND (got: $OUT)" ;;
+        *) ok "GIT_DIR: no BOUND token appears in the redirected run's output" ;;
+      esac
+    fi
+    # NON-VACUITY: a genuine ancestor must still be BOUND with that GIT_DIR set,
+    # or the arm above would "pass" because nothing is ever BOUND any more.
+    OUT=$(cd "$ANC_REPO" && PATH="$BIN:$PATH" GIT_DIR="$GRAFT_REPO/.git" \
+      MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+      bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+    RC=$?
+    if [ "$RC" -eq 0 ] && [ "${OUT#*anchor-ancestry: BOUND}" != "$OUT" ]; then
+      ok "GIT_DIR: NON-VACUITY — a genuine ancestor is still BOUND with GIT_DIR set"
+    else
+      bad "GIT_DIR: the genuine ancestor stopped being BOUND (exit $RC) — the refusal above proves nothing (got: $OUT)"
+    fi
+  else
+    printf 'ARM NOT TAKEN: GIT_DIR redirect (job 358) — the control did not fire: this git did not let\n'
+    printf 'ARM NOT TAKEN: an inherited GIT_DIR override -C, so a passing refusal would prove nothing.\n'
+    ok "GIT_DIR: SKIPPED (positive control did not fire — arm UNEXERCISED, declared not silent)"
+  fi
+else
+  printf 'ARM NOT TAKEN: GIT_DIR redirect (job 358) — depends on the graft fixture of 44(f), which was\n'
+  printf 'ARM NOT TAKEN: not built on this host.\n'
+  ok "GIT_DIR: SKIPPED (graft fixture unavailable — arm UNEXERCISED, declared not silent)"
+fi
+
+# --- 44(g)(2): a TEMPLATE seeds info/grafts INTO the scratch ----------------
+# `git init --template=<dir>` and `GIT_TEMPLATE_DIR=<dir> git init` both copy a
+# planted `info/grafts` into the NEW repository — so without an empty
+# `--template=` and a cleared environment, the scratch is born grafted and the
+# isolation buys nothing.
+#
+# WHAT THIS ARM CAN AND CANNOT SEPARATE, so nobody reads a green here as proof
+# that both closures are individually necessary. The two are REDUNDANT against
+# the route this arm constructs: removing ONLY the empty `--template=` still
+# refuses (the allowlist cleared GIT_TEMPLATE_DIR), removing ONLY the `env -i`
+# still refuses (the explicit flag beats the inherited variable), and removing
+# BOTH lands the attack at exit 0 — which is what this arm detects. The flag's
+# unique contribution, a config-FILE `init.templateDir`, is NOT exercised here:
+# constructing it would mean writing to /etc/gitconfig.
+TPL="$T/anchor-template"
+tpl_shape=0
+if [ "$anc_shape" -eq 1 ] && mkdir -p "$TPL/info" 2>/dev/null &&
+   printf '%s %s\n' "$R_CERT" "$R_FOREIGN" >"$TPL/info/grafts" 2>/dev/null; then
+  tpl_shape=1
+fi
+# CONTROL: build a scratch the NAIVE way (inherited GIT_TEMPLATE_DIR, no empty
+# --template=) over the lane's objects, and show the walk there answers 0. This
+# is the strongest available control: it proves the attack reaches the SCRATCH,
+# not merely that templates copy files.
+tpl_control=0
+if [ "$tpl_shape" -eq 1 ]; then
+  NAIVE="$T/anchor-naive-scratch"
+  if GIT_TEMPLATE_DIR="$TPL" git init -q "$NAIVE/repo" >/dev/null 2>&1 &&
+     [ -f "$NAIVE/repo/.git/info/grafts" ] &&
+     GIT_ALTERNATE_OBJECT_DIRECTORIES="$ANC_REPO/.git/objects" \
+       git -C "$NAIVE/repo" merge-base --is-ancestor "$R_FOREIGN" "$R_CERT" >/dev/null 2>&1; then
+    tpl_control=1
+  fi
+fi
+if [ "$tpl_control" -eq 1 ]; then
+  ok "TEMPLATE POSITIVE CONTROL: GIT_TEMPLATE_DIR seeds info/grafts into a naive scratch AND the walk there answers 0"
+  OUT=$(cd "$ANC_REPO" && PATH="$BIN:$PATH" GIT_TEMPLATE_DIR="$TPL" \
+    MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 2 ]; then
+    bad "TEMPLATE: a templated graft reached the scratch (exit $RC, wanted 2) — the empty --template= and/or the env allowlist is missing (job 358) (got: $OUT)"
+  else
+    ok "TEMPLATE: a templated graft cannot reach the scratch — still refused (exit 2)"
+    case "$OUT" in
+      *"anchor-ancestry: BOUND"*) bad "TEMPLATE: the run claims BOUND (got: $OUT)" ;;
+      *) ok "TEMPLATE: no BOUND token appears in the templated run's output" ;;
+    esac
+  fi
+  OUT=$(cd "$ANC_REPO" && PATH="$BIN:$PATH" GIT_TEMPLATE_DIR="$TPL" \
+    MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ] && [ "${OUT#*anchor-ancestry: BOUND}" != "$OUT" ]; then
+    ok "TEMPLATE: NON-VACUITY — a genuine ancestor is still BOUND with GIT_TEMPLATE_DIR set"
+  else
+    bad "TEMPLATE: the genuine ancestor stopped being BOUND (exit $RC) — the refusal above proves nothing (got: $OUT)"
+  fi
+else
+  printf 'ARM NOT TAKEN: template-seeded graft (job 358) — this host could not build the fixture, or a\n'
+  printf 'ARM NOT TAKEN: naive scratch built with GIT_TEMPLATE_DIR did NOT inherit the graft, so the\n'
+  printf 'ARM NOT TAKEN: positive control did not fire and a passing refusal would prove nothing.\n'
+  ok "TEMPLATE: SKIPPED (positive control did not fire — arm UNEXERCISED, declared not silent)"
+fi
+
+# --- 44(h): NO BOUNDED RUNNER -> UNBOUNDED, AFFIRMED, NOT REFUSED (job 358) --
+# A hang is a LIVENESS failure, not a correctness one: it produces NO verdict,
+# where a graft produced a WRONG one, and an unbounded read cannot manufacture a
+# false pass. So a box with no `timeout`/`gtimeout` must still MERGE — refusing
+# would be the guard that reds on correct input — but the degradation must be
+# VISIBLE, because a bounded path silently becoming unbounded is the real hazard.
+NOTO="$T/bin-no-timeout"
+mkdir -p "$NOTO"
+noto_ok=1
+# `dirname`/`basename` are the script's own helpers (advisory-path resolution and
+# the usage banner), not the ancestry check's — they are here so the run reaches
+# the check at all rather than dying at line 1.
+# `bash` is here for the gh MOCK's own `#!/usr/bin/env bash` shebang, not for the
+# script under test; without it the mock cannot start and the case fails on a
+# GH-FAILURE that says nothing about bounding.
+for _tool in git awk tr env mktemp rm dirname basename bash; do
+  _tp=$(command -v "$_tool" 2>/dev/null) || _tp=""
+  if [ -n "$_tp" ]; then ln -sf "$_tp" "$NOTO/$_tool"; else noto_ok=0; fi
+done
+cp "$BIN/gh" "$NOTO/gh" 2>/dev/null || noto_ok=0
+# NON-VACUITY: the fixture PATH must really have NEITHER runner on it.
+if [ "$noto_ok" -eq 1 ]; then
+  for _t in timeout gtimeout; do
+    if PATH="$NOTO" command -v "$_t" >/dev/null 2>&1; then noto_ok=0; fi
+  done
+fi
+if [ "$noto_ok" -ne 1 ]; then
+  printf 'ARM NOT TAKEN: unbounded-reads token (job 358) — could not build a PATH holding git/awk/tr/\n'
+  printf 'ARM NOT TAKEN: env/mktemp/rm/gh but NEITHER timeout nor gtimeout.\n'
+  ok "unbounded: SKIPPED (fixture unbuildable — arm UNEXERCISED, declared not silent)"
+else
+  ok "unbounded fixture: the fixture PATH has git but NEITHER timeout nor gtimeout"
+  OUT=$(cd "$ANC_REPO" && PATH="$NOTO" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    "${BASH:-/bin/bash}" "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "unbounded: a box with no timeout runner must still MERGE, not be refused (exit $RC) (got: $OUT)"
+  else
+    ok "unbounded: with no bounded runner the merge is NOT refused (exit 0)"
+    case "$OUT" in
+      *"anchor-reads: UNBOUNDED("*)
+        ok "unbounded: the evidence line AFFIRMS the degradation instead of staying silent" ;;
+      *) bad "unbounded: expected an affirmative anchor-reads: UNBOUNDED(...) token (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"anchor-reads: bounded-"*)
+        bad "unbounded: the line claims the reads were bounded on a box with no runner (got: $OUT)" ;;
+      *) ok "unbounded: the line does NOT claim a bound it did not have" ;;
+    esac
+    case "$OUT" in
+      *"anchor-ancestry: BOUND"*)
+        ok "unbounded: the ancestry verdict is still produced (the bound is liveness, not correctness)" ;;
+      *) bad "unbounded: the ancestry verdict should be unaffected by the missing runner (got: $OUT)" ;;
+    esac
+  fi
 fi
 
 # =============================================================================

@@ -194,9 +194,17 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   object storage, no config, hence no grafts, no replace refs, no promisor — and a scratch that cannot
   be built is UNVERIFIABLE, never a fall-back to the live repository. `--is-shallow-repository` still
   reads the LANE on purpose (a fresh scratch is never shallow, so probing it there would turn the
-  shallow guard into a vacuous pass). No env override (#3312); the pins stay as belt. Residual: it
-  proves ancestry **in the local object store only** — not that the anchor is on the PR as GitHub sees
-  it.
+  shallow guard into a vacuous pass). **And the scratch's environment is load-bearing where a lane
+  read's is not** (job 358): a variable there does not bend the object, it bends WHICH REPOSITORY
+  ANSWERS — measured, `GIT_DIR` overrides `-C`, and `GIT_TEMPLATE_DIR`/`--template=` seed a planted
+  `info/grafts` into the new repository. So every git call, the lane discovery reads included, runs under
+  `env -i` + an allowlist admitting only `PATH` and `TMPDIR` (no network here, so no `HOME`/`SSH_*`/proxy)
+  plus `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` and an explicit empty `--template=`. The reads
+  are bounded by the runner the advisory already resolves; where none exists they run unbounded and the
+  evidence line affirms it (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) rather than refusing — a hang is
+  a liveness failure yielding no verdict, and refusing a box with no `timeout` would red correct input.
+  Residual: it proves ancestry **in the local object store only** — not that the anchor is on the PR as
+  GitHub sees it.
   **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
   `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
   PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A

@@ -128,8 +128,14 @@ carry).
   config, hence no grafts, no replace refs, no promisor), and failing to build it is UNVERIFIABLE,
   never a fall-back to the live repository. `--is-shallow-repository` deliberately still reads the
   LANE: a fresh scratch is never shallow, so probing it there would make the shallow guard a vacuous
-  pass. No env override (#3312); the pins remain as belt. Residual, stated: it proves ancestry **in the
-  local object store only** — not that the anchor is on the PR as GitHub sees it.
+  pass. **The scratch's environment is load-bearing** (job 358) — measured, `GIT_DIR` overrides `-C`, and
+  `GIT_TEMPLATE_DIR`/`--template=` seed a planted `info/grafts` into the new repository — so every git
+  call, discovery reads included, runs under `env -i` + an allowlist (`PATH`, `TMPDIR`, then
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`) with an explicit empty `--template=`. The reads are
+  bounded by the advisory's own runner; with no `timeout`/`gtimeout` they run unbounded and the evidence
+  line affirms it (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) instead of refusing, because a hang yields
+  no verdict rather than a false pass. Residual, stated: it proves ancestry **in the local object store
+  only** — not that the anchor is on the PR as GitHub sees it.
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
   It does not prove the change was certified against the `main` it will join: a squash-merge composes

@@ -1757,8 +1757,20 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   the live repository. Two reads stay in the lane on purpose: resolving its object directory
   (`rev-parse --git-path objects`, no object read, no network) and `--is-shallow-repository`, because a
   fresh scratch is NEVER shallow and probing it there would answer `false` unconditionally, making the
-  shallow guard a vacuous pass. No env override anywhere (#3312); the pins stay as belt. It proves
-  ancestry **in the local object store only** — not that the anchor is on the PR as GitHub sees it.
+  shallow guard a vacuous pass. **A SCRATCH'S ENVIRONMENT IS LOAD-BEARING IN A WAY A LANE READ'S IS NOT**
+  (roborev job 358): the old rationale — "these reads are addressed BY A SHA, so no environment can bend
+  them" — is right about a read in the lane and WRONG here, because an environment variable does not bend
+  the OBJECT, it bends WHICH REPOSITORY ANSWERS. Measured on git 2.43.0: `GIT_DIR` **overrides `-C`**, and
+  both `git init --template=<dir>` and `GIT_TEMPLATE_DIR` seed a planted `info/grafts` INTO the new
+  scratch. So every git call — the lane DISCOVERY reads included (job 276: the allowlist has to reach the
+  sites a later change adds) — runs under `env -i` + an allowlist ADMITting only `PATH` and `TMPDIR`
+  (tighter than the pre-flight's: no network here, so no `HOME`, no `SSH_*`, no proxy), with
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` plus an explicit empty `--template=`. The reads are
+  also **bounded** by the runner this script already resolves for the advisory; where no
+  `timeout`/`gtimeout` exists they run UNBOUNDED and the evidence line SAYS so
+  (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) rather than refusing — a hang is a LIVENESS failure that
+  yields no verdict, not a false pass, and refusing a box without `timeout` would red correct input. It
+  proves ancestry **in the local object store only** — not that the anchor is on the PR as GitHub sees it.
   **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
   It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
   tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge
