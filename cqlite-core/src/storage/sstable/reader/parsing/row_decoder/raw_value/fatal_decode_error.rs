@@ -3,13 +3,50 @@
 //!
 //! ## Why a discrimination exists at all
 //!
-//! Two call sites in this decoder have historically been TOLERANT of a failed
-//! decode: the complex-column loop in `row_data.rs` (`break`, keeping the cells
-//! decoded so far) and the multicell-`set` member decode in `complex_column.rs`
-//! (`None`, omitting the member). That tolerance predates issue #3723 and
-//! covers a large, unaudited surface of partially-readable rows; converting
-//! every decode error into a hard read failure would change behaviour for every
-//! one of those paths, far beyond this issue.
+//! Call sites in this decoder have historically been TOLERANT of a failed
+//! decode — they log at `debug!` and drop something (a cell, a set member, a
+//! row), returning an apparently-successful partial result. That tolerance
+//! predates issue #3723 and covers a large, unaudited surface of
+//! partially-readable rows; converting every decode error into a hard read
+//! failure would change behaviour for every one of those paths, far beyond this
+//! issue. Hence a predicate naming ONE class instead of a blanket `?`.
+//!
+//! ## The census: FIVE tolerant sites, FOUR of them guarded
+//!
+//! Complete as of this commit, `file:line` verified by reading each site. The
+//! first four take an `is_fatal_decode_error` arm placed ABOVE their pre-existing
+//! tolerant arm; the fifth deliberately does not (see below).
+//!
+//! | # | Site | Tolerant disposition | #3723 arm |
+//! |---|------|----------------------|-----------|
+//! | 1 | `row_data.rs:614` — the COMPLEX-column loop | `break`, keeping the cells decoded so far (a SHORT cell list) | yes |
+//! | 2 | `raw_value/set_member.rs:104` — the multicell-`set` member path decode | `None`, omitting the member | yes |
+//! | 3 | `block_emit.rs:271` — the per-partition row loop | `break`, returning a partition with FEWER rows | yes |
+//! | 4 | `block_emit_windowed.rs:592` — the stitched SCAN path's row loop | `break`, same shape as 3 | yes |
+//! | 5 | `row_data.rs:777` — the SIMPLE (non-multicell) cell arm | `break`, dropping this column and every LATER on-disk column | **NO — declared, not fixed** |
+//!
+//! ### Site 5: declared, NOT fixed, and why (issue #3778)
+//!
+//! A frozen collection/tuple is a SIMPLE cell, so a wrong-width element inside
+//! one routes `cell_value_complex.rs:62` -> `frozen.rs:123` `?` ->
+//! `parse_cell_value_schema_order` -> site 5's tolerant `break`. OBSERVABLE
+//! CONSEQUENCE: on corrupt input a `frozen<list<int>>` column is SILENTLY ABSENT
+//! from an otherwise-successful row — the same unobservable-refusal shape sites
+//! 1-4 close, at the five nesting positions issue #3723's AC1 enumerates.
+//!
+//! This is PRE-EXISTING TOLERANCE, not a regression of issue #3723: site 5's
+//! `break` is untouched by this branch, and before it these bytes produced
+//! `Error::Corruption` at the same arm with the same outcome. What #3723 changed
+//! is the error's NAME, not this site's disposition.
+//!
+//! It is not fixed here on a standing ruling: a sixth, seventh, ... guard arm
+//! does not converge, because each one only makes ONE consumer of a nested
+//! decode observable. The class — refusal propagation out of nested consumption
+//! — closes as a whole in **issue #3778**. Today's disposition is pinned at the
+//! public surface by `tests/issue_3723_read_path_refusal.rs`
+//! `wrong_width_in_a_frozen_column_is_tolerated_today_known_gap_3778`, which is
+//! CHARACTERISATION (it fails if the disposition changes in EITHER direction),
+//! never a statement that the behaviour is desirable.
 //!
 //! Issue #3723 added ONE error class that must NOT be tolerated: a
 //! [`Error::FixedWidthLengthMismatch`] reporting a WRONG WIDTH — a fixed-width
@@ -54,9 +91,9 @@
 //!
 //! 1. **It is not a class this branch introduced.** Before issue #3723 every
 //!    fixed-width arm already refused an empty slice (`data.len() < N` /
-//!    `data.is_empty()`), as `Error::Corruption` — which BOTH tolerant call
-//!    sites absorbed, so the member was omitted / the loop broke and the read
-//!    continued. Making the same bytes a hard read failure would change the
+//!    `data.is_empty()`), as `Error::Corruption` — which EVERY tolerant site in
+//!    the census absorbed, so the member was omitted / the loop broke and the
+//!    read continued. Making the same bytes a hard read failure would change the
 //!    behaviour of a PRE-EXISTING path, which is exactly what this issue's
 //!    zero-regression argument (below) promises not to do. #3723's subject is a
 //!    wrong width being SILENTLY TRUNCATED, not an empty element.
@@ -79,7 +116,7 @@
 //! This predicate makes ONE decision on purpose. It is not a general
 //! "is this corruption" test: `Error::Corruption`, `Error::InvalidInput`,
 //! truncation and every other decode failure keep their pre-#3723 tolerant
-//! handling at both call sites — as does a zero-length mismatch. So this change
+//! handling at every site in the census — as does a zero-length mismatch. So this change
 //! cannot alter the behaviour of any path that did not already produce a
 //! WRONG-WIDTH `FixedWidthLengthMismatch`, an outcome no path could produce
 //! before issue #3723 (the pre-#3723 guards were `< N`, so an over-long element
@@ -104,7 +141,7 @@ pub(in crate::storage::sstable::reader::parsing::row_decoder) fn is_fatal_decode
         // A ZERO LENGTH (`actual == 0`): still REFUSED — the caller gets this
         // same named error — but TOLERATED, keeping the disposition these bytes
         // had before issue #3723, when the arms returned `Error::Corruption`
-        // and both call sites absorbed it.
+        // and every tolerant site absorbed it.
         Error::FixedWidthLengthMismatch { .. } => false,
         // Every other class keeps its pre-#3723 tolerant handling.
         _ => false,

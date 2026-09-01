@@ -13,8 +13,12 @@
 //! * the multicell-`set` member decode mapped any error to `None`, OMITTING the
 //!   member, and an EMPTY cell path never reached the decoder at all.
 //!
-//! So the refusal was unobservable from a real read. Every case below therefore
-//! goes through the PUBLIC reader surface
+//! So the refusal was unobservable from a real read. (Those are two of FIVE
+//! tolerant sites; the complete census, including the FIFTH that is deliberately
+//! left tolerant under issue #3778, is in `raw_value/fatal_decode_error.rs` and
+//! is characterised by section 4 below.)
+//!
+//! Every case below therefore goes through the PUBLIC reader surface
 //! (`SSTableReader::open` + `iterate_all_partitions`) over a byte-patched
 //! `Data.db`.
 //!
@@ -40,7 +44,8 @@
 //! exact remedy if a real Cassandra-written fixture is ever found carrying one
 //! are recorded in `raw_value/fixed_width.rs`. Its DISPOSITION differs from a
 //! wrong width's — refused, but TOLERATED, because these bytes already errored
-//! (as `Error::Corruption`) before this branch and both call sites absorbed it.
+//! (as `Error::Corruption`) before this branch and every tolerant site absorbed
+//! it.
 //! `raw_value/fatal_decode_error.rs` holds that split; the two cases are pinned
 //! separately below.
 //!
