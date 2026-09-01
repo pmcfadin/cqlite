@@ -13,6 +13,10 @@ mod cell_path_key_tests;
 // UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
 // why it lives here).
 mod component_len;
+// Issue #3723 (round 5): a MAP entry's key / a UDT field's value that the
+// #1741 shadow/TTL filter drops is still width-validated.
+#[cfg(test)]
+mod dropped_element_tests;
 
 /// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
 /// element's expiry, as input to [`ExpiryHomogeneity::fold`].
