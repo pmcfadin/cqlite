@@ -4673,10 +4673,28 @@ fi
 scc_profile="$SCRIPT_DIR/../../.agent-ami/profile.yaml"
 scc_bs_val=$(sed -n "s/^SCC_ENV_VALUE='\\(.*\\)'\$/\\1/p" "$BOOTSTRAP" | head -1)
 scc_prof_val=$(sed -n 's/^[[:space:]]*SCCACHE_CACHE_SIZE:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$scc_profile" | head -1)
+#
+#        AGREEMENT IS NOT SUFFICIENT ON ITS OWN, AND THAT GAP WAS REAL (issue #3727 roborev round
+#        2, f1): two matching PLACEHOLDERS satisfied an equality test, so the guard greened a
+#        fleet cap sccache would silently discard — leaving the only defence a human noticing a
+#        TODO. Both halves are now required to be a REAL <digits>[KkMmGgTt] value, so the suite,
+#        not a reader, is what stops an unsubstituted placeholder shipping. It is expected to be
+#        RED until the measured cap is substituted in BOTH files, and the failure text says so:
+#        that red is the mechanism working, not a broken test. (Deliberately the SAME shape check
+#        bootstrap applies to its own literal before persisting it — a bare integer is refused
+#        too, because sccache reads one as BYTES.)
+scc_lit_ok() {   # <literal> -> 0 if sccache would accept it as a cap
+  case "$1" in
+    ''|*[!0-9KkMmGgTt]*|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*|*[0-9]) return 1 ;;
+  esac
+  return 0
+}
 if [ ! -r "$scc_profile" ]; then
   bad "sccache-cap: .agent-ami/profile.yaml is not readable — cannot check the cap literal or verify.run"
-elif [ -n "$scc_bs_val" ] && [ "$scc_bs_val" = "$scc_prof_val" ]; then
-  ok "sccache-cap: bootstrap's SCC_ENV_VALUE and profile.yaml's SCCACHE_CACHE_SIZE are the SAME literal ('$scc_bs_val')"
+elif ! scc_lit_ok "$scc_bs_val" || ! scc_lit_ok "$scc_prof_val"; then
+  bad "sccache-cap: the fleet cap literal is NOT a value sccache accepts — bootstrap says '$scc_bs_val', profile.yaml says '$scc_prof_val'; both must be <digits>[KkMmGgTt] (e.g. 30G). This is EXPECTED to fail while the measured cap is unsubstituted (issue #3727): substitute it in scripts/bootstrap-agent-machine.sh (SCC_ENV_VALUE), .agent-ami/profile.yaml and docs/development/gate-ops.md. Matching placeholders must NOT satisfy this guard — sccache discards them silently and bootstrap then refuses to persist anything"
+elif [ "$scc_bs_val" = "$scc_prof_val" ]; then
+  ok "sccache-cap: bootstrap's SCC_ENV_VALUE and profile.yaml's SCCACHE_CACHE_SIZE are the SAME, sccache-ACCEPTED literal ('$scc_bs_val')"
 else
   bad "sccache-cap: the fleet cap literal DRIFTED — bootstrap says '$scc_bs_val', profile.yaml says '$scc_prof_val'"
 fi
