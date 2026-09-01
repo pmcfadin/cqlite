@@ -235,6 +235,59 @@ rs "$R2" verdict c --issue 100
 rc_is 5 "injection: an unrecognised token carrying '=' is NOT-RUN"
 hasnt "RESULT: PASS " "injection: 'PASS=really' is not reported as PASS"
 
+# --- 4b. THE RESULT LINE IS READ AT COLUMN ZERO, AND THE TEMPLATE IS INERT (round 2, B1) --
+# The sentinel `open` writes CONTAINS example `result: PASS` / `result: FINDINGS` lines, by
+# design: the agent has to be told the exact spelling. While the parser allowed leading
+# whitespace those examples were GRAMMATICALLY VALID verdict lines, and the only thing
+# keeping them from being read was ORDER (`grep -m1` took the real line first). Order is not
+# inertness: an agent that DELETES the sentinel line at column zero and appends its own
+# verdict at the end got the TEMPLATE's PASS. That is #3312's family — "an artifact that
+# DESCRIBED the escape hatch BECAME it" — reproduced inside the mechanism built to close it.
+# Two independent properties are asserted, because either alone would leave a route.
+R4B="$(newrepo)"
+rs "$R4B" open c --issue 700 --agent spec-auditor
+rc_is 0 "column-zero: a fresh stage opens"
+R4B_REPORT="$(REPORT_OF "$R4B" 700 c)"
+
+# (a) THE TEMPLATE CARRIES EXACTLY ONE candidate result line — the sentinel — even under the
+#     OLD, loosened `^[[:space:]]*result:` pattern. This is the inertness half: it holds even
+#     if the anchoring below were ever relaxed again.
+N_LOOSE=$(LC_ALL=C grep -c -i '^[[:space:]]*result:' "$R4B_REPORT" 2>/dev/null || true)
+if [ "$N_LOOSE" = "1" ]; then
+  ok "column-zero: the pre-stamped template holds exactly ONE whitespace-tolerant 'result:' candidate (the sentinel), so its own examples cannot pose as the record"
+else
+  bad "column-zero: the template holds $N_LOOSE whitespace-tolerant 'result:' candidates; its examples are grammatically valid verdict lines and the only protection is grep -m1 ORDER (out: $(LC_ALL=C grep -i -n '^[[:space:]]*result:' "$R4B_REPORT"))"
+fi
+
+# (b) THE REVIEWER'S EXACT REPRODUCTION. Delete the column-zero sentinel (leaving the
+#     template intact, which is what `sed -i '/^result:/d'` does) and append FINDINGS.
+#     A portable equivalent of that sed is used: same effect, no BSD/GNU -i divergence.
+LC_ALL=C grep -v '^result:' "$R4B_REPORT" >"$R4B_REPORT.tmp" && mv -f "$R4B_REPORT.tmp" "$R4B_REPORT"
+printf 'result: FINDINGS\n' >>"$R4B_REPORT"
+rs "$R4B" verdict c --issue 700
+rc_is 4 "column-zero (B1 reproduction): a deleted sentinel + an APPENDED FINDINGS reads FINDINGS, not the template's PASS"
+has "RESULT: FINDINGS " "column-zero (B1 reproduction): the token is the AGENT's, not the template's"
+hasnt "RESULT: PASS " "column-zero (B1 reproduction): the indented template example is NOT read as the record"
+
+# (c) AN INDENTED result line ALONE is not a record. "cannot tell" must not take the
+#     permissive branch: an indented copy is DATA, so there is no result line at all.
+printf '# report\n\n    result: PASS\n\nbody\n' >"$R4B_REPORT"
+rs "$R4B" verdict c --issue 700
+rc_is 5 "column-zero: an INDENTED 'result: PASS' alone is NOT-RUN, never a pass"
+has "NOT-RUN (report ungrammatical: no 'result:' line)" "column-zero: the cause names the absent result line rather than inventing a verdict"
+hasnt "RESULT: PASS " "column-zero: an indented result line cannot be read as PASS"
+
+# (d) POSITIVE CONTROL for the anchor — without this, a parser that read NOTHING would pass
+#     (b) and (c). An ordinary column-zero record still works, and so does the documented
+#     case-insensitivity at column zero.
+printf 'result: PASS\n\nreviewed, no blocking finding\n' >"$R4B_REPORT"
+rs "$R4B" verdict c --issue 700
+rc_is 0 "column-zero CONTROL: an ordinary column-zero 'result: PASS' still reads PASS"
+has "RESULT: PASS " "column-zero CONTROL: the token is exactly PASS"
+printf 'Result: FINDINGS\n' >"$R4B_REPORT"
+rs "$R4B" verdict c --issue 700
+rc_is 4 "column-zero CONTROL: 'Result:' at column zero is still recognised (case-insensitive, anchored)"
+
 # --- 5. the path is verified gitignored, fail-closed ----------------------------
 # (a) an explicit --report that git does NOT confirm ignored.
 R3="$(newrepo)"

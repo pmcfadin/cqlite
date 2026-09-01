@@ -27,7 +27,15 @@ non-verdict sentinel recording `spawned-at`, `agent`, `issue`, and a `deadline`.
 `REVIEW-STAGE: <kind> RESULT: <token> elapsed=<secs> deadline=<secs> agent=<type> report=<path>`
 with `<token>` from `{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}`, matched by string equality on the
 first word, and with any unrecognised, empty, sentinel-only, ungrammatical, absent, or never-opened
-state reported as `NOT-RUN`.
+state reported as `NOT-RUN`. The recorded result SHALL be read from a `result:` line ANCHORED AT
+COLUMN ZERO: the report body is author-controlled text that carries example verdict lines BY DESIGN
+(the pre-stamped sentinel has to show the agent the spelling, and a review report quotes other
+reports), so an indented, quoted or bulleted copy is DATA and not the record.
+
+#### Scenario: the result line is read at column zero only
+- **WHEN** the report's only `result:` line is indented, quoted or bulleted
+- **THEN** the verdict is `NOT-RUN`, naming the absent result line — never the value that copy carries
+- **AND** an ordinary column-zero `result:` line is still read (the anchor is not a refusal of all input)
 
 #### Scenario: a stage that produced nothing is never clean and never empty-findings
 - **WHEN** the stage's report is sentinel-only

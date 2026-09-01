@@ -56,6 +56,19 @@
 # reduced to its FIRST WORD and matched by STRING EQUALITY, and any unrecognised value is
 # `NOT-RUN`, never passed through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
 #
+# AND THE `result:` LINE IS READ AT COLUMN ZERO ONLY (#3751 round 2, B1)
+# ---------------------------------------------------------------------
+# The report body is AUTHOR-CONTROLLED text that CONTAINS example verdict lines by design —
+# the sentinel has to show the agent the exact spelling, and a review report routinely quotes
+# another report's line. An INDENTED, quoted or bulleted `result: PASS` is therefore DATA, and
+# only a line beginning at column zero is the record. This is #3312's rule (anchor the control
+# token where the payload cannot reach; never pick a rarer delimiter) and the same anchor
+# `premerge-assert.sh`'s `_c_verdict_awk` already uses. Before it, the sentinel's own indented
+# examples were valid records held off only by `grep -m1` ORDER, so deleting the column-zero
+# sentinel and appending a verdict read the TEMPLATE's `PASS` (measured). Belt as well as
+# braces: the template now renders those examples behind a `| ` gutter, so they do not begin
+# with the token even if this anchor were ever loosened again.
+#
 # `NOT-RUN` carries one of FIVE named causes, because the operator action differs per cause
 # and one token for five states is the collapse this issue is about:
 #   no report written          the stage is open and the report is still the sentinel
@@ -610,14 +623,22 @@ cmd_open() {
     printf '## How to complete this stage\n'
     printf '\n'
     printf 'THIS FILE is your report of record, not your returned message. Replace the\n'
-    printf '`result:` line above with EXACTLY ONE of:\n'
+    printf '`result:` line above -- AT COLUMN ZERO, the only place this tool reads it -- with\n'
+    printf 'EXACTLY ONE of the two values in the gutter below (write the value, not the\n'
+    printf 'leading "| "):\n'
     printf '\n'
-    printf '    result: PASS        # you reviewed the subject and found no blocking finding\n'
-    printf '    result: FINDINGS    # you reviewed the subject and found >=1 blocking finding\n'
+    printf '    | result: PASS        # you reviewed the subject and found no blocking finding\n'
+    printf '    | result: FINDINGS    # you reviewed the subject and found >=1 blocking finding\n'
     printf '\n'
     printf 'then write your findings below. The token is matched by STRING EQUALITY on its\n'
     printf 'first word against a closed set, so an invented value (e.g. PASS-BUT-UNMEASURED)\n'
     printf 'is read as NOT-RUN, never as a pass.\n'
+    printf '\n'
+    printf 'THE GUTTER IS DELIBERATE, and it is defence in depth: this file is AUTHOR-CONTROLLED\n'
+    printf 'text that has to SHOW you the verdict spelling, so an example rendered as a valid\n'
+    printf '`result:` line would be an escape hatch -- an artifact that DESCRIBES the record\n'
+    printf 'becoming the record (#3312). The parser is anchored at column zero, and these two\n'
+    printf 'lines do not begin with the token either, so neither protection alone is load-bearing.\n'
     printf '\n'
     printf 'If this line still says NOT-RUN when you finish, this stage is recorded as\n'
     printf 'NOT-RUN and cannot reach a merge: an absent review is not a clean one (#3751).\n'
@@ -640,9 +661,10 @@ cmd_open() {
 REPORT OF RECORD (mandatory): write your report to
   $rpath
 That FILE is your report of record, not your returned message. Write it INCREMENTALLY as
-you go, not at the end. When you finish, replace its \`result:\` line with exactly one of
-\`result: PASS\` (no blocking finding) or \`result: FINDINGS\` (>=1 blocking finding), and
-put your findings below it. If that line still reads \`result: NOT-RUN\` when you stop, this
+you go, not at the end. When you finish, replace its \`result:\` line — the one at COLUMN
+ZERO, which is the only place this is read; an indented or quoted copy is data — with exactly
+one of \`result: PASS\` (no blocking finding) or \`result: FINDINGS\` (>=1 blocking finding),
+and put your findings below it. If that line still reads \`result: NOT-RUN\` when you stop, this
 stage is recorded as NOT-RUN and BLOCKS the merge — an absent review is not a clean one, and
 no returned message, idle notice or verbal summary substitutes for the file.
 --- end clause ---
@@ -670,7 +692,20 @@ classify_report() {
     printf 'NOT-RUN|report empty\n'; return 0
   fi
 
-  line="$(LC_ALL=C grep -m1 -i '^[[:space:]]*result:' "$rpath" 2>/dev/null || true)"
+  # ANCHORED AT COLUMN ZERO, AND THAT IS WHAT THE ANCHOR IS FOR (round 2, B1). The report
+  # body is AUTHOR-CONTROLLED text that contains example verdict lines BY DESIGN — the
+  # sentinel `open` writes has to tell the agent the exact spelling of `result: PASS`, and a
+  # review report routinely QUOTES another report's verdict line. While this pattern allowed
+  # leading whitespace those examples were grammatically valid records, and the only thing
+  # keeping them out of the verdict was `-m1` ORDER: delete the sentinel line at column zero
+  # (`sed -i '/^result:/d'`, which leaves the indented examples intact) and append your own
+  # verdict, and the TEMPLATE's `PASS` won. Order is not inertness. Column zero is a place
+  # the payload provably cannot reach — every quoted, indented, `>`-quoted or bulleted copy
+  # is DATA — which is #3312's rule (anchor the control token; never pick a rarer delimiter)
+  # and the same anchor `premerge-assert.sh`'s `_c_verdict_awk` uses on `/^REVIEW-STAGE: /`.
+  # Case-insensitivity is KEPT: `Result:` at column zero is one author's spelling of the
+  # control line, not a payload posing as one.
+  line="$(LC_ALL=C grep -m1 -i '^result:' "$rpath" 2>/dev/null || true)"
   if [ -z "$line" ]; then
     printf "NOT-RUN|report ungrammatical: no 'result:' line\n"; return 0
   fi

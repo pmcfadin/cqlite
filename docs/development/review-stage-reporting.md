@@ -138,7 +138,14 @@ The nine-row tally in §2 above does not record, per spawn, whether a report pat
 Three further declared limits of the mechanism itself:
 
 - **`verdict` establishes that a VERDICT WAS RECORDED, never that a review was PERFORMED.** A
-  report whose only content is `result: PASS` reads as `PASS`. Judging whether the working is
+  report whose only content is `result: PASS` reads as `PASS` — read at COLUMN ZERO: the report
+  body is author-controlled text that carries example verdict lines BY DESIGN (the pre-stamped
+  sentinel has to show the agent the spelling), so an indented, quoted or bulleted copy is DATA.
+  While indentation was tolerated the template's own examples were grammatically valid records
+  held off only by `grep -m1` ORDER, and deleting the column-zero sentinel then appending a
+  verdict read the TEMPLATE's `PASS` — measured, #3312's family: an artifact that DESCRIBES the
+  escape hatch becoming it. The examples now also sit behind a `| ` gutter, so neither the anchor
+  nor the rendering is load-bearing alone. Judging whether the working is
   real is a human's job — and for the author-performed substitute, requiring the working to be
   recorded is the whole point.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage

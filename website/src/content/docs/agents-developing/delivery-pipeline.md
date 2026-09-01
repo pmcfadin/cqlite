@@ -580,7 +580,13 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   spawned**, carrying a non-verdict sentinel, and prints the absolute path plus **a paste-ready clause to
   put in the spawn prompt verbatim** — the paraphrase is what varied across the measured sessions.
   `verdict` then emits ONE line of a CLOSED grammar — `{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}`, first
-  word, **string equality, never a prefix test** (#3544) — exiting `0/4/5/6`; `status` reports
+  word, **string equality, never a prefix test** (#3544) — exiting `0/4/5/6`; it reads the report's
+  `result:` line **at COLUMN ZERO only**, because the report body is author-controlled text carrying
+  example verdict lines BY DESIGN (the sentinel must show the agent the spelling), so while indentation
+  was tolerated the template's own examples were valid records held off by `grep -m1` ORDER alone and
+  deleting the column-zero sentinel then appending a verdict read the TEMPLATE's `PASS` (measured —
+  #3312: anchor the control token where the payload cannot reach, never pick a rarer delimiter);
+  `status` reports
   elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF FIVE causes
   (`no report written`, `report absent`, `report empty`, `report ungrammatical: <what>`,
   `stage never opened`), because the operator action differs per cause. **An idle notice is strictly
