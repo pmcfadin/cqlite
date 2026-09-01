@@ -11,8 +11,8 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
   (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)
 
 -- GATE A: TMA (raw record; #3287 AC1 turns on what tma-probe.txt shows) --
-  perf stat -M TopdownL1 : rc=1, 4 line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)
-  perf stat -M TopdownL2 : rc=1, 4 line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)
+  perf stat --all-user -M TopdownL1 : rc=1, 4 line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)
+  perf stat --all-user -M TopdownL2 : rc=1, 4 line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)
   READ tma-probe.txt: a metric group that produced real level-2 metric rows
   with numeric shares answers AC1 yes; a not-found/not-supported diagnostic
   answers it no; anything else means the step must be re-run. This script
@@ -24,13 +24,13 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
   offcore_requests_outstanding.cycles_with_data_rd:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
   offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
   offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
-  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=1595137  hostile-512m=11591587  hostile-2g=8876391
-  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=143431090  hostile-512m=11929334089  hostile-2g=7124705942
+  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=1364606  hostile-512m=11851751  hostile-2g=5902647
+  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=143218342  hostile-512m=12215990881  hostile-2g=6985391956
 
 -- GATE C: reproduce #3224's own baseline counters --
   cycle_activity.stalls_l3_miss:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
-  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=3830697  hostile-512m=12100861830  hostile-2g=6831281729
-  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=308941191  hostile-512m=13591506372  hostile-2g=7500452260
+  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=2322323  hostile-512m=11590642343  hostile-2g=6659890685
+  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=298536273  hostile-512m=13097882224  hostile-2g=7336567995
   LLC-loads:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   LLC-load-misses:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   cache-references:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
@@ -42,9 +42,9 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 3830697 <= 308941191)
-    hostile-512m: HOLDS (0 <= 12100861830 <= 13591506372)
-    hostile-2g: HOLDS (0 <= 6831281729 <= 7500452260)
+    friendly-L2resident: HOLDS (0 <= 2322323 <= 298536273)
+    hostile-512m: HOLDS (0 <= 11590642343 <= 13097882224)
+    hostile-2g: HOLDS (0 <= 6659890685 <= 7336567995)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt
