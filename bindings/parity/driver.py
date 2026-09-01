@@ -65,9 +65,29 @@ def check_fixture_floor(data: Optional[dict] = None) -> List[str]:
     floor = data.get("floor")
     if not isinstance(floor, dict):
         return ["fixtures.json has no `floor` block — the case floor cannot be checked"]
-    fixtures = data.get("fixtures", [])
-    names = [f["name"] for f in fixtures]
     failures: List[str] = []
+    # PRESENCE first (issue #1455, F3): every read below is a direct index so an
+    # absent field cannot inherit a permissive default and silently shrink what
+    # is compared.
+    for key in ("min_fixtures", "required_names"):
+        if key not in floor:
+            failures.append(f"fixtures.json floor block is missing `{key}`")
+    if "fixtures" not in data:
+        failures.append("fixtures.json is missing the `fixtures` section")
+    if failures:
+        return failures
+    fixtures = data["fixtures"]
+    for fixture in fixtures:
+        label = fixture.get("name", "<unnamed>")
+        for key in ("name", "keyspace", "table", "schema", "query", "columns",
+                    "known_divergence"):
+            if key not in fixture:
+                failures.append(f"fixture {label!r} is missing `{key}`")
+        if not fixture.get("columns"):
+            failures.append(f"fixture {label!r} declares no columns")
+    if failures:
+        return failures
+    names = [f["name"] for f in fixtures]
     if len(fixtures) < floor["min_fixtures"]:
         failures.append(
             f"fixture floor: {len(fixtures)} < {floor['min_fixtures']} — fixtures were REMOVED"

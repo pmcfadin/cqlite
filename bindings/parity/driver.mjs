@@ -53,9 +53,27 @@ export function checkFixtureFloor(data = loadFixtureFile()) {
   if (!floor || typeof floor !== 'object') {
     return ['fixtures.json has no `floor` block — the case floor cannot be checked'];
   }
-  const fixtures = data.fixtures || [];
-  const names = fixtures.map((f) => f.name);
   const failures = [];
+  // PRESENCE first (issue #1455, F3): a `|| []` here would let an absent
+  // section inherit the permissive branch.
+  for (const key of ['min_fixtures', 'required_names']) {
+    if (!(key in floor)) failures.push(`fixtures.json floor block is missing \`${key}\``);
+  }
+  if (!('fixtures' in data)) failures.push('fixtures.json is missing the `fixtures` section');
+  if (failures.length) return failures;
+  const fixtures = data.fixtures;
+  for (const fixture of fixtures) {
+    const label = fixture.name || '<unnamed>';
+    for (const key of ['name', 'keyspace', 'table', 'schema', 'query', 'columns',
+      'known_divergence']) {
+      if (!(key in fixture)) failures.push(`fixture '${label}' is missing \`${key}\``);
+    }
+    if (!fixture.columns || !Object.keys(fixture.columns).length) {
+      failures.push(`fixture '${label}' declares no columns`);
+    }
+  }
+  if (failures.length) return failures;
+  const names = fixtures.map((f) => f.name);
   if (fixtures.length < floor.min_fixtures) {
     failures.push(`fixture floor: ${fixtures.length} < ${floor.min_fixtures} — fixtures were REMOVED`);
   }

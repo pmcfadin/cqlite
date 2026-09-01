@@ -86,6 +86,13 @@ export function checkVectors(vectors = loadVectors()) {
   for (const vec of vectors) {
     counts.vectors += 1;
     counts.checks += 1;
+    if (!('node' in vec)) {
+      // PRESENCE is required (issue #1455, F3): an absent leg key is a NAMED
+      // refusal, never a silent skip that shrinks the subject set.
+      failures.push(`${vec.name}/node: leg key 'node' is ABSENT from the vector`);
+      counts.failed += 1;
+      continue;
+    }
     const expected = vec.canonical;
     let actual;
     try {
@@ -137,15 +144,20 @@ export function materializeNodeRow(spec) {
  * ordinary object, assigning it runs `Object.prototype`'s inherited setter --
  * no own property, no error, the column simply gone from the canonical row.
  */
-export function checkRows(rows = loadAll().rows || []) {
+export function checkRows(rows = loadAll().rows) {
   const failures = [];
   const counts = {
     rows: 0, checks: 0, ok: 0, failed: 0, skipped: 0,
   };
   for (const c of rows) {
     counts.rows += 1;
-    if (!('node' in c)) { counts.skipped += 1; continue; }
     counts.checks += 1;
+    if (!('node' in c)) {
+      // Same rule as the value vectors (F3).
+      failures.push(`${c.name}/node: leg key 'node' is ABSENT from the row case`);
+      counts.failed += 1;
+      continue;
+    }
     const expected = c.canonical;
     let actual;
     try {
@@ -193,10 +205,10 @@ function expectRaise(fn, expect) {
   return [false, `did NOT raise; returned ${JSON.stringify(result)}`];
 }
 
-export function checkErrors(errors = loadAll().errors || []) {
+export function checkErrors(errors = loadAll().errors) {
   const failures = [];
   const counts = {
-    cases: 0, checks: 0, ok: 0, failed: 0,
+    cases: 0, checks: 0, ok: 0, failed: 0, otherLeg: 0,
   };
   const record = (label, ok, detail) => {
     if (ok) counts.ok += 1;
@@ -210,8 +222,12 @@ export function checkErrors(errors = loadAll().errors || []) {
       record(`${c.name}/parse_type`, ok, detail);
       continue;
     }
-    for (const [leg, spec] of Object.entries(c.legs || {})) {
-      if (!LEGS.includes(leg)) continue;
+    for (const [leg, spec] of Object.entries(c.legs)) {
+      if (!LEGS.includes(leg)) {
+        // Owned by the OTHER runner (vectors.py). Counted, not dropped.
+        counts.otherLeg += 1;
+        continue;
+      }
       counts.checks += 1;
       const [ok, detail] = expectRaise(
         () => canonNode(materializeNode(spec), parseType(c.type)),
@@ -227,6 +243,68 @@ export function checkErrors(errors = loadAll().errors || []) {
 // Case floor (issue #1455, B2)
 // ---------------------------------------------------------------------------
 
+export const REQUIRED_FLOOR_KEYS = [
+  'min_vectors', 'min_errors', 'min_rows', 'required_row_names', 'required_kinds',
+  'require_nested_container', 'require_null_canonical',
+];
+export const ALL_LEGS = ['python', 'node', 'cli'];
+
+/**
+ * Every case must CARRY every field the runners read (issue #1455, F3).
+ *
+ * The class this closes: a `|| []` / `?? 0` / `.get(k, default)` read lets an
+ * ABSENT field inherit the permissive branch, so a deleted leg, section or
+ * floor key silently shrinks the subject set while both runners report green.
+ * Every read in the checks is now a direct index; this is what turns the
+ * resulting `undefined` into a message naming the case and the field.
+ *
+ * Twin of `check_schema` in vectors.py — deliberately the SAME required set,
+ * asserted over the SAME file, so neither runner can drift into accepting a
+ * shape the other rejects.
+ */
+export function checkSchema(data = loadAll()) {
+  const failures = [];
+  for (const section of ['floor', 'vectors', 'rows', 'errors']) {
+    if (!(section in data)) failures.push(`canonical-vectors.json is missing the \`${section}\` section`);
+  }
+  if (failures.length) return failures;
+  for (const key of REQUIRED_FLOOR_KEYS) {
+    if (!(key in data.floor)) failures.push(`floor block is missing \`${key}\``);
+  }
+  for (const vec of data.vectors) {
+    const label = vec.name || '<unnamed>';
+    for (const key of ['name', 'type', 'canonical', ...ALL_LEGS]) {
+      if (!(key in vec)) failures.push(`vector '${label}' is missing \`${key}\``);
+    }
+  }
+  for (const c of data.rows) {
+    const label = c.name || '<unnamed>';
+    for (const key of ['name', 'columns', 'canonical', ...ALL_LEGS]) {
+      if (!(key in c)) failures.push(`row case '${label}' is missing \`${key}\``);
+    }
+  }
+  for (const c of data.errors) {
+    const label = c.name || '<unnamed>';
+    for (const key of ['name', 'stage', 'expect', 'type']) {
+      if (!(key in c)) failures.push(`error case '${label}' is missing \`${key}\``);
+    }
+    if (c.stage === 'canonicalize') {
+      if (!c.legs || typeof c.legs !== 'object' || !Object.keys(c.legs).length) {
+        failures.push(
+          `error case '${label}' is stage=canonicalize but carries no non-empty \`legs\` `
+          + '(it would verify NOTHING and still count as a case)',
+        );
+      } else {
+        const unknown = Object.keys(c.legs).filter((leg) => !ALL_LEGS.includes(leg));
+        if (unknown.length) failures.push(`error case '${label}' names unknown leg(s) ${JSON.stringify(unknown)}`);
+      }
+    } else if (c.stage !== 'parse_type') {
+      failures.push(`error case '${label}' has unknown stage ${JSON.stringify(c.stage)}`);
+    }
+  }
+  return failures;
+}
+
 export function collectKinds(typeText) {
   const walk = (t) => [t.kind, ...t.args.flatMap(walk)];
   return walk(parseType(typeText));
@@ -238,21 +316,26 @@ export function checkFloor(data = loadAll()) {
   if (!floor || typeof floor !== 'object') {
     return ['canonical-vectors.json has no `floor` block — the case floor cannot be checked'];
   }
+  // The SCHEMA must hold before any floor arithmetic: every read below is a
+  // direct index precisely so an absent key cannot inherit a permissive
+  // default (issue #1455, F3).
+  const schemaFailures = checkSchema(data);
+  if (schemaFailures.length) return schemaFailures;
   const failures = [];
-  const vectors = data.vectors || [];
-  const errors = data.errors || [];
+  const vectors = data.vectors;
+  const errors = data.errors;
   if (vectors.length < floor.min_vectors) {
     failures.push(`vector floor: ${vectors.length} < ${floor.min_vectors} — vectors were REMOVED`);
   }
   if (errors.length < floor.min_errors) {
     failures.push(`error-case floor: ${errors.length} < ${floor.min_errors} — cases were REMOVED`);
   }
-  const rows = data.rows || [];
-  if (rows.length < (floor.min_rows || 0)) {
+  const rows = data.rows;
+  if (rows.length < floor.min_rows) {
     failures.push(`row-case floor: ${rows.length} < ${floor.min_rows} — row cases were REMOVED`);
   }
   const rowNames = rows.map((r) => r.name);
-  const missingRows = (floor.required_row_names || []).filter((n) => !rowNames.includes(n));
+  const missingRows = floor.required_row_names.filter((n) => !rowNames.includes(n));
   if (missingRows.length) failures.push(`required row case(s) absent: ${JSON.stringify(missingRows)}`);
   const names = vectors.map((v) => v.name);
   if (new Set(names).size !== names.length) failures.push('duplicate vector names');
@@ -306,7 +389,7 @@ export function emitCanonical(target, data = loadAll()) {
     // own `__proto__` key serializes to `{"__proto__": ...}`, which json.loads
     // reads back as an own key. If either half of that ever stops holding, the
     // Python round-trip check is what says so.
-    rows: (data.rows || []).filter((c) => 'node' in c).map((c) => ({
+    rows: data.rows.filter((c) => 'node' in c).map((c) => ({
       name: c.name,
       canonical: canonRowNode(materializeNodeRow(c.node), typesFromColumns(c.columns)),
     })),
@@ -328,24 +411,38 @@ function main() {
     return 0;
   }
   const data = loadAll();
+  const schemaFailures = checkSchema(data);
+  if (schemaFailures.length) {
+    // Fail BEFORE the sweeps: every reader below indexes directly, so a
+    // malformed file would throw rather than report (issue #1455, F3).
+    for (const line of schemaFailures) process.stderr.write(`FAIL ${line}\n`);
+    process.stdout.write(`schema: FAILED (${schemaFailures.length} RECOGNISED)\n`);
+    return 1;
+  }
   const floorFailures = checkFloor(data);
   const vec = checkVectors(data.vectors);
-  const rows = checkRows(data.rows || []);
-  const err = checkErrors(data.errors || []);
+  const rows = checkRows(data.rows);
+  const err = checkErrors(data.errors);
   for (const line of [...floorFailures, ...vec.failures, ...rows.failures, ...err.failures]) {
     process.stderr.write(`FAIL ${line}\n`);
   }
+  // Counts are reported AFFIRMATIVELY -- "0 RECOGNISED", never a bare 0.
+  process.stdout.write(
+    `schema: OK (${data.vectors.length} vectors, ${data.rows.length} rows, `
+    + `${data.errors.length} error cases, all required fields present)\n`,
+  );
   process.stdout.write(
     `vectors: ${vec.counts.ok}/${vec.counts.checks} leg-checks OK over `
-    + `${vec.counts.vectors} vectors (${vec.counts.skipped} leg-checks skipped) `
+    + `${vec.counts.vectors} vectors (${vec.counts.skipped} RECOGNISED leg-skips) `
     + `[legs: ${LEGS.join(', ')}]\n`,
   );
   process.stdout.write(
-    `refusals: ${err.counts.ok}/${err.counts.checks} leg-checks OK over ${err.counts.cases} cases\n`,
+    `refusals: ${err.counts.ok}/${err.counts.checks} leg-checks OK over ${err.counts.cases} cases `
+    + `(${err.counts.otherLeg} RECOGNISED leg-checks owned by vectors.py)\n`,
   );
   process.stdout.write(
     `rows: ${rows.counts.ok}/${rows.counts.checks} leg-checks OK over `
-    + `${rows.counts.rows} row cases (${rows.counts.skipped} leg-checks skipped)\n`,
+    + `${rows.counts.rows} row cases (${rows.counts.skipped} RECOGNISED leg-skips)\n`,
   );
   process.stdout.write(`floor: ${floorFailures.length ? 'FAILED' : 'OK'}\n`);
   return (floorFailures.length || vec.failures.length || rows.failures.length

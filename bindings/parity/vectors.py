@@ -113,7 +113,21 @@ def check_vectors(vectors: Optional[List[dict]] = None) -> Tuple[List[str], Dict
         counts["vectors"] += 1
         expected = vec["canonical"]
         for leg in LEGS:
-            if leg == "cli" and vec.get("cli") is None and expected is not None:
+            if leg not in vec:
+                # PRESENCE is required; only an EXPLICIT null may skip a leg
+                # (issue #1455, F3). `vec.get("cli")` read a three-valued signal
+                # -- present-with-a-value / present-and-null / MISSING -- two
+                # ways, and an accidentally deleted key then took the permissive
+                # branch, leaving the differential pin green over a shrunken
+                # subject set. A missing key is a NAMED refusal.
+                failures.append(
+                    f"{vec['name']}/{leg}: leg key {leg!r} is ABSENT from the vector "
+                    "(a leg is skipped only by an EXPLICIT null, never by omission)"
+                )
+                counts["failed"] += 1
+                counts["checks"] += 1
+                continue
+            if leg == "cli" and vec["cli"] is None and expected is not None:
                 # An explicitly "unreachable from the CLI" vector; python-only.
                 counts["skipped"] += 1
                 continue
@@ -162,7 +176,7 @@ def check_rows(rows: Optional[List[dict]] = None) -> Tuple[List[str], Dict[str, 
     pinned against the SAME expected row rather than each against itself.
     """
     if rows is None:
-        rows = load_all().get("rows", [])
+        rows = load_all()["rows"]
     failures: List[str] = []
     counts = {"rows": 0, "checks": 0, "ok": 0, "failed": 0, "skipped": 0}
     for case in rows:
@@ -170,7 +184,13 @@ def check_rows(rows: Optional[List[dict]] = None) -> Tuple[List[str], Dict[str, 
         expected = case["canonical"]
         for leg in LEGS:
             if leg not in case:
-                counts["skipped"] += 1
+                # Same rule as the value vectors (F3): a row case must CARRY
+                # every leg; omission is a refusal, not a skip.
+                failures.append(
+                    f"{case['name']}/{leg}: leg key {leg!r} is ABSENT from the row case"
+                )
+                counts["failed"] += 1
+                counts["checks"] += 1
                 continue
             counts["checks"] += 1
             try:
@@ -214,9 +234,9 @@ def check_errors(errors: Optional[List[dict]] = None) -> Tuple[List[str], Dict[s
     issue #28 forbids, so "it refused" is a pinned property, not a hope.
     """
     if errors is None:
-        errors = load_all().get("errors", [])
+        errors = load_all()["errors"]
     failures: List[str] = []
-    counts = {"cases": 0, "checks": 0, "ok": 0, "failed": 0}
+    counts = {"cases": 0, "checks": 0, "ok": 0, "failed": 0, "other_leg": 0}
     for case in errors:
         counts["cases"] += 1
         expect = case["expect"]
@@ -225,8 +245,11 @@ def check_errors(errors: Optional[List[dict]] = None) -> Tuple[List[str], Dict[s
             ok, detail = _expect_raise(lambda: parse_type(case["type"]), expect)
             _record(failures, counts, f"{case['name']}/parse_type", ok, detail)
             continue
-        for leg, spec in case.get("legs", {}).items():
+        for leg, spec in case["legs"].items():
             if leg not in LEGS:
+                # Owned by the OTHER runner (vectors.mjs). Counted, not
+                # silently dropped, so the two tallies reconcile.
+                counts["other_leg"] += 1
                 continue
             counts["checks"] += 1
             ok, detail = _expect_raise(
@@ -266,6 +289,74 @@ def _record(failures: List[str], counts: Dict[str, int], label: str, ok: bool, d
 # ---------------------------------------------------------------------------
 
 
+REQUIRED_FLOOR_KEYS = (
+    "min_vectors",
+    "min_errors",
+    "min_rows",
+    "required_row_names",
+    "required_kinds",
+    "require_nested_container",
+    "require_null_canonical",
+)
+ALL_LEGS = ("python", "node", "cli")
+
+
+def check_schema(data: Optional[dict] = None) -> List[str]:
+    """Every case must CARRY every field the runners read (issue #1455, F3).
+
+    The class this closes: a ``.get(key, default)`` / ``|| []`` / ``?? 0`` read
+    lets an ABSENT field inherit the permissive branch, so a deleted leg, a
+    deleted section or a deleted floor key silently shrinks the subject set
+    while both runners report green. That is the standing rule against deriving
+    a pass from the ABSENCE of a bad signal, and the floors added earlier count
+    CASES without requiring each case to be complete.
+
+    Every read in ``check_vectors``/``check_rows``/``check_errors``/
+    ``check_floor`` is now a direct index; this function is what turns the
+    resulting ``KeyError`` into a message that names the case and the field.
+    """
+    if data is None:
+        data = load_all()
+    failures: List[str] = []
+    for section in ("floor", "vectors", "rows", "errors"):
+        if section not in data:
+            failures.append(f"canonical-vectors.json is missing the `{section}` section")
+    if failures:
+        return failures
+    for key in REQUIRED_FLOOR_KEYS:
+        if key not in data["floor"]:
+            failures.append(f"floor block is missing `{key}`")
+    for vec in data["vectors"]:
+        label = vec.get("name", "<unnamed>")
+        for key in ("name", "type", "canonical", *ALL_LEGS):
+            if key not in vec:
+                failures.append(f"vector {label!r} is missing `{key}`")
+    for case in data["rows"]:
+        label = case.get("name", "<unnamed>")
+        for key in ("name", "columns", "canonical", *ALL_LEGS):
+            if key not in case:
+                failures.append(f"row case {label!r} is missing `{key}`")
+    for case in data["errors"]:
+        label = case.get("name", "<unnamed>")
+        for key in ("name", "stage", "expect", "type"):
+            if key not in case:
+                failures.append(f"error case {label!r} is missing `{key}`")
+        if case.get("stage") == "canonicalize":
+            legs = case.get("legs")
+            if not isinstance(legs, dict) or not legs:
+                failures.append(
+                    f"error case {label!r} is stage=canonicalize but carries no non-empty `legs` "
+                    "(it would verify NOTHING and still count as a case)"
+                )
+            else:
+                unknown = [leg for leg in legs if leg not in ALL_LEGS]
+                if unknown:
+                    failures.append(f"error case {label!r} names unknown leg(s) {unknown}")
+        elif case.get("stage") not in ("parse_type", "canonicalize"):
+            failures.append(f"error case {label!r} has unknown stage {case.get('stage')!r}")
+    return failures
+
+
 def collect_kinds(type_text: str) -> List[str]:
     def walk(t) -> List[str]:
         out = [t.kind]
@@ -287,9 +378,16 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
     floor = data.get("floor")
     if not isinstance(floor, dict):
         return ["canonical-vectors.json has no `floor` block — the case floor cannot be checked"]
+    # The SCHEMA must hold before any floor arithmetic: every read below is a
+    # direct index precisely so an absent key cannot inherit a permissive
+    # default, and the schema check is what turns the resulting KeyError into a
+    # named message (issue #1455, F3).
+    schema_failures = check_schema(data)
+    if schema_failures:
+        return schema_failures
     failures: List[str] = []
-    vectors = data.get("vectors", [])
-    errors = data.get("errors", [])
+    vectors = data["vectors"]
+    errors = data["errors"]
     if len(vectors) < floor["min_vectors"]:
         failures.append(
             f"vector floor: {len(vectors)} < {floor['min_vectors']} — vectors were REMOVED"
@@ -298,13 +396,13 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
         failures.append(
             f"error-case floor: {len(errors)} < {floor['min_errors']} — cases were REMOVED"
         )
-    rows = data.get("rows", [])
-    if len(rows) < floor.get("min_rows", 0):
+    rows = data["rows"]
+    if len(rows) < floor["min_rows"]:
         failures.append(
             f"row-case floor: {len(rows)} < {floor['min_rows']} — row cases were REMOVED"
         )
     row_names = [r["name"] for r in rows]
-    missing_rows = [n for n in floor.get("required_row_names", []) if n not in row_names]
+    missing_rows = [n for n in floor["required_row_names"] if n not in row_names]
     if missing_rows:
         failures.append(f"required row case(s) absent: {missing_rows}")
     names = [v["name"] for v in vectors]
@@ -326,9 +424,11 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
     missing = [k for k in floor["required_kinds"] if k not in seen]
     if missing:
         failures.append(f"no vector covers CQL kind(s): {missing}")
-    if floor.get("require_nested_container") and not nested:
+    if floor["require_nested_container"] and not nested:
         failures.append("no vector nests a container inside a container")
-    if floor.get("require_null_canonical") and not any(v["canonical"] is None for v in vectors):
+    if floor["require_null_canonical"] and not any(
+        v["canonical"] is None for v in vectors
+    ):
         failures.append("no vector canonicalizes to null")
     return failures
 
@@ -340,25 +440,42 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
 
 def main() -> int:
     data = load_all()
+    schema_failures = check_schema(data)
+    if schema_failures:
+        # Fail BEFORE the sweeps: every reader below indexes directly, so a
+        # malformed file would raise rather than report (issue #1455, F3).
+        for line in schema_failures:
+            print(f"FAIL {line}", file=sys.stderr)
+        print(f"schema: FAILED ({len(schema_failures)} RECOGNISED)")
+        return 1
     floor_failures = check_floor(data)
     vec_failures, vec_counts = check_vectors(data["vectors"])
-    row_failures, row_counts = check_rows(data.get("rows", []))
-    err_failures, err_counts = check_errors(data.get("errors", []))
+    row_failures, row_counts = check_rows(data["rows"])
+    err_failures, err_counts = check_errors(data["errors"])
     for line in floor_failures + vec_failures + row_failures + err_failures:
         print(f"FAIL {line}", file=sys.stderr)
+    # Counts are reported AFFIRMATIVELY -- "0 RECOGNISED", never a bare 0 --
+    # because a bare zero in a run log reads as a verified all-clear from a scan
+    # that might simply not have run.
+    print(
+        f"schema: OK ({len(data['vectors'])} vectors, {len(data['rows'])} rows, "
+        f"{len(data['errors'])} error cases, all required fields present)"
+    )
     print(
         f"vectors: {vec_counts['ok']}/{vec_counts['checks']} leg-checks OK over "
         f"{vec_counts['vectors']} vectors "
-        f"({vec_counts['skipped']} leg-checks skipped: cli-unreachable) "
+        f"({vec_counts['skipped']} RECOGNISED leg-skips: explicit cli-unreachable nulls) "
         f"[legs: {', '.join(LEGS)}]"
     )
     print(
         f"refusals: {err_counts['ok']}/{err_counts['checks']} leg-checks OK over "
-        f"{err_counts['cases']} cases"
+        f"{err_counts['cases']} cases "
+        f"({err_counts['other_leg']} RECOGNISED leg-checks owned by vectors.mjs)"
     )
     print(
         f"rows: {row_counts['ok']}/{row_counts['checks']} leg-checks OK over "
-        f"{row_counts['rows']} row cases ({row_counts['skipped']} leg-checks skipped)"
+        f"{row_counts['rows']} row cases "
+        f"({row_counts['skipped']} RECOGNISED leg-skips)"
     )
     print(f"floor: {'OK' if not floor_failures else 'FAILED'}")
     return 1 if (floor_failures or vec_failures or row_failures or err_failures) else 0
