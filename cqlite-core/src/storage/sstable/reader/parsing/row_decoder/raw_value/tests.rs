@@ -44,15 +44,12 @@ fn test_parse_value_from_raw_bytes_primitives() {
         .unwrap();
     assert_eq!(val, Value::Boolean(false));
 
-    // float (parse_value_from_raw_bytes promotes f32 to f64 via Float)
+    // float -> `Value::Float32`; used to pin the f32->f64 widening (round 10).
     let data = 1.5f32.to_be_bytes();
     let val = parser
         .parse_value_from_raw_bytes(&data, "float", "col", 0)
         .unwrap();
-    match val {
-        Value::Float(f) => assert!((f - 1.5).abs() < 0.001),
-        other => panic!("Expected Float, got {:?}", other),
-    }
+    assert_eq!(val, Value::Float32(1.5), "float is Float32");
 
     // double
     let data = 9.876f64.to_be_bytes();
@@ -401,4 +398,83 @@ fn test_parse_raw_type_value_depth_guard() {
     let data = 42i32.to_be_bytes();
     let result = parser.parse_raw_type_value(&data, 0, "int", "col", MAX_TYPE_NESTING_DEPTH + 1);
     assert!(result.is_err());
+}
+
+/// Regression pin for the #3612 -> #3723 REBASE (port 1 of 3).
+///
+/// `#3612` changed the `float` arm from the f64 `Value::Float(f as f64)` to
+/// `Value::Float32(f)`; `#3723` split the flat `raw_value.rs` that arm lived in
+/// into this directory module. A rebase resolved by keeping the split file
+/// wholesale would silently drop the behaviour change back to `Value::Float`,
+/// and NOTHING else would fail: the widening is lossless for every value a test
+/// is likely to pick, so a `Value::Float(1.5)` assertion passes either way.
+///
+/// So this pins the DISCRIMINANT, not the magnitude, at each route a float can
+/// reach the fixed-width arms by AFTER the split:
+///   1. the direct CQL short form,
+///   2. the marshal form, which normalizes through
+///      `primitive_marshal_to_cql_short` (the item whose visibility is port 2),
+///   3. a `float` element nested inside a bounded collection, which is the path
+///      #3723's width guards sit on.
+#[test]
+fn float_decodes_to_float32_not_the_f64_float_on_every_route() {
+    let parser = V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+    let bytes = 1.5f32.to_be_bytes();
+
+    // Route 1: the CQL short form.
+    assert_eq!(
+        parser
+            .parse_value_from_raw_bytes(&bytes, "float", "col", 0)
+            .unwrap(),
+        Value::Float32(1.5),
+        "the `float` short form must decode to Float32, not the f64 Float"
+    );
+
+    // Route 2: the marshal form, normalized via `primitive_marshal_to_cql_short`.
+    assert_eq!(
+        V5CompressedLegacyParser::primitive_marshal_to_cql_short(
+            "org.apache.cassandra.db.marshal.FloatType"
+        ),
+        Some("float"),
+        "FloatType must still normalize to the `float` short form"
+    );
+    assert_eq!(
+        parser
+            .parse_value_from_raw_bytes(
+                &bytes,
+                "org.apache.cassandra.db.marshal.FloatType",
+                "col",
+                0
+            )
+            .unwrap(),
+        Value::Float32(1.5),
+        "the marshal form must reach the same Float32 arm as the short form"
+    );
+
+    // Route 3: a `float` element inside a bounded `list<float>` — the nested
+    // path #3723 added the width guard to. Bounded sub-format is
+    // `[i32 BE count][i32 BE len][bytes]...`.
+    let mut nested = Vec::new();
+    nested.extend_from_slice(&1i32.to_be_bytes()); // one element
+    nested.extend_from_slice(&4i32.to_be_bytes()); // declared length 4
+    nested.extend_from_slice(&bytes);
+    let val = parser
+        .parse_value_from_raw_bytes(&nested, "list<float>", "col", 0)
+        .unwrap();
+    match val {
+        Value::List(items) => assert_eq!(
+            items,
+            vec![Value::Float32(1.5)],
+            "a nested `float` element must decode to Float32 too"
+        ),
+        other => panic!("expected a List, got {:?}", other),
+    }
+
+    // And the discriminant is genuinely what is being asserted: the f64 `Float`
+    // carrying the same magnitude must NOT compare equal to it.
+    assert_ne!(
+        Value::Float32(1.5),
+        Value::Float(1.5),
+        "Float32 and the f64 Float must be distinguishable, or this test is vacuous"
+    );
 }

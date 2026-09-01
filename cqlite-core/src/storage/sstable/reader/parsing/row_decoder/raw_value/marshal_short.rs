@@ -24,7 +24,14 @@ impl V5CompressedLegacyParser {
     /// decode the corresponding scalar UDT field values — e.g. `ShortType`/
     /// `ByteType` are needed to read `smallint`/`tinyint` UDT fields, which
     /// otherwise fall through to the blob default.
-    pub(super) fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
+    /// Visible throughout `row_decoder`, not merely within `raw_value`: the
+    /// composite cell-path key decoder (`complex_column::cell_path_key`, issue
+    /// #3612) delegates scalar marshal forms here. `pub(super)` would be NARROWER
+    /// than the pre-split `raw_value.rs` spelling of the same widening, because
+    /// after the epic #1116 split `super` is `raw_value`, not `row_decoder`.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn primitive_marshal_to_cql_short(
+        marshal_type: &str,
+    ) -> Option<&'static str> {
         // Composite marshal forms carry a `(` after the type name; primitives do
         // not. Reject anything parameterised so we never misread a collection /
         // UDT as a scalar.

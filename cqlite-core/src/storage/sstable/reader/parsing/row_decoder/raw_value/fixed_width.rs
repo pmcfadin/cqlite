@@ -162,8 +162,10 @@ impl V5CompressedLegacyParser {
                 Ok(Value::Uuid(uuid))
             }
             "float" => {
+                // CQL `float` is `Value::Float32`, not the f64 `Value::Float`; the column
+                // path and both UDT field decoders already agree (roborev round 10 F1).
                 let f = f32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float(f as f64))
+                Ok(Value::Float32(f))
             }
             "double" => Ok(Value::Float(f64::from_be_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
