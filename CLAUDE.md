@@ -1960,6 +1960,23 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   ref — but it was split out rather than shipped, because the fail-open defect family (five
   instances: a failed probe read as a negative answer) clustered in that exit-0 path and it is the
   value a cron reads. Restoring it is tracked separately, carrying the family census forward.
+  **AND ON THIS FLEET IT ANSWERS ABOUT THE EMPTY SET — SUPERVISOR FLEETS ONLY, DESCOPED by owner
+  ruling 2026-09-01 on #3548 (option C; completes #3393).** Its subject set is `refs/lane-claims/*`
+  (+ legacy `refs/machine-claims/*`), and **the only writer of either in the tree is
+  `worker-supervisor.sh`** — this fleet runs `/drive-issue` lanes, so measured on all three boxes
+  `lane-claims=0 machine-claims=0`, production supervisors ZERO, while `claims=6 heartbeats=20`. The
+  command therefore reports nothing and exits 1, which reinforces the rule above rather than softening
+  it: **exit 1 = "nothing was reported", never a clean bill of health.** The two POPULATED namespaces
+  were measured and rejected, so do not "fix" it read-side: `refs/claims/issue-<N>` carries the
+  TRANSIENT CLAIMING SHELL's pid, never refreshed (measured dead while its lane ran ⇒ it would
+  false-`DEAD` healthy lanes), and `refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE and
+  force-updated, so N lanes overwrite each other (the same masking the retired per-machine claim ref
+  had). Lane liveness here rests on the coordination sweep plus the **#3436 board-signature read**
+  (Ready + pushed branch + no claim ref) — **operating mechanisms, NOT committed tooling: no such
+  script or command exists in this repo**, and #3436's reading of that signature CONFLICTS with the
+  runbook's "parked-by-design" reading of the same shape, unresolved. AC4 survives the descope: a
+  stale pid must never yield a `DEAD-*` verdict, it must abstain. Full record:
+  `docs/development/fleet-runbook.md` ("Lane liveness on a supervisor-less `/drive-issue` fleet").
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
