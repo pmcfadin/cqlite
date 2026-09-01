@@ -1215,10 +1215,11 @@ pub fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
 ///
 /// This function used to REFUSE such a key outright (`is_scalar_type`), which made
 /// four columns of the committed `test_nested_udt_keys.nested_udt_keys` fixture
-/// inexpressible to the lane rather than merely excluded. The refusal survives only
-/// where the ORACLE contradicts itself: a golden key that is not a `toJSONString`
-/// document is reported, which is exactly the MULTICELL case — there the key is a
-/// cell PATH, written `writeString(getString(...))` (see `gap::Divergence`).
+/// inexpressible to the lane rather than merely excluded. A refusal survives only
+/// where the golden's key is not a `toJSONString` document at all — which is exactly
+/// the MULTICELL case, where the key is a cell PATH and
+/// `JsonTransformer.serializeCell` writes it with the OTHER writer,
+/// `writeString(getString(...))` (see `gap::Divergence`).
 fn compare_map(
     golden: &Map<String, Value>,
     cli: &[Value],
