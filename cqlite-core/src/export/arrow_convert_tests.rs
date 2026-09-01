@@ -1247,47 +1247,67 @@ fn the_trusted_path_returns_the_same_batch_as_the_validating_path() {
     }
 }
 
-// ===== TEMPORARY MEASUREMENT (#3742) — delete before reporting =====
+// ============================================================================
+// Issue #3742 — the arrow ORACLE for a zero-column batch
+// ============================================================================
+
+/// **Measured, not assumed (issue #3742).** What arrow does with a schema of
+/// ZERO fields and an EMPTY array list, at the version this workspace resolves.
+///
+/// Issue #3552 left this deliberately unpinned ("the exact terminal behaviour of
+/// `try_new` on an empty array list … is arrow's, not this crate's"), which left
+/// `a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry`'s `Ok` arm
+/// — and its "the batch reports 0 rows" assertion — reachable only in theory.
+/// This test settles it by EXECUTION: at arrow 53.4.1 the `Ok` arm is
+/// UNREACHABLE, so both paths of that test take the `(Err, Err)` arm and only
+/// its agreement property is live.
+///
+/// The corroborating source is `arrow-array-53.4.1`
+/// `src/record_batch.rs:294-300`: the row count is
+/// `options.row_count.or_else(|| columns.first().map(|c| c.len()))`, so with no
+/// columns and no explicit count there is nothing to derive it from. Arrow's own
+/// `test_no_column_record_batch` pins the same error.
+///
+/// Pinning the message text is deliberate: it is the string an operator sees
+/// today for a zero-column projection (`tonic::Status::Internal` on the
+/// `do_get` stream), so a change to it is a change to CQLite's observable
+/// behaviour and should be seen, not absorbed.
 #[test]
-fn tmp_3742_measure_arrow_zero_column() {
-    use arrow::datatypes::Schema as ASchema;
+fn arrow_refuses_a_zero_column_batch_unless_given_an_explicit_row_count() {
     use arrow::record_batch::RecordBatchOptions;
-    let schema = Arc::new(ASchema::empty());
-    let r = RecordBatch::try_new(schema.clone(), vec![]);
-    eprintln!("MEASURE try_new(empty schema, vec![]) => {r:?}");
-    let r2 = RecordBatch::try_new_with_options(
-        schema.clone(),
-        vec![],
-        &RecordBatchOptions::new().with_row_count(Some(3)),
+
+    let schema = Arc::new(Schema::empty());
+
+    // (a) No row count and no column: REFUSED.
+    let err = RecordBatch::try_new(Arc::clone(&schema), vec![])
+        .expect_err("arrow 53.4.1 refuses a zero-column batch with no explicit row count");
+    assert_eq!(
+        err.to_string(),
+        "Invalid argument error: must either specify a row count or at least one column"
     );
-    eprintln!(
-        "MEASURE try_new_with_options(row_count=3) => ok={} num_rows={:?} err={:?}",
-        r2.is_ok(),
-        r2.as_ref().map(|b| b.num_rows()).ok(),
-        r2.as_ref().err().map(|e| e.to_string())
-    );
-    let r3 = RecordBatch::try_new_with_options(
-        schema,
-        vec![],
-        &RecordBatchOptions::new().with_row_count(Some(0)),
-    );
-    eprintln!(
-        "MEASURE try_new_with_options(row_count=0) => ok={} num_rows={:?}",
-        r3.is_ok(),
-        r3.as_ref().map(|b| b.num_rows()).ok()
-    );
-    // Also: Schema::new(vec![]) vs Schema::empty()
-    let s2 = Arc::new(ASchema::new(Vec::<Field>::new()));
-    let r4 = RecordBatch::try_new(s2, vec![]);
-    eprintln!("MEASURE try_new(Schema::new(vec![]), vec![]) => {r4:?}");
-    // And the crate's own path
-    let cols: Vec<ColumnInfo> = Vec::new();
+
+    // (b) An EXPLICIT row count is accepted and carried — so the information the
+    // shape loses is recoverable, if a caller ever chooses to supply it. Nothing
+    // in production does today; this records the capability, not a decision.
+    for n in [0usize, 3] {
+        let batch = RecordBatch::try_new_with_options(
+            Arc::clone(&schema),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(n)),
+        )
+        .expect("an explicit row count makes a zero-column batch constructible");
+        assert_eq!(batch.num_rows(), n);
+        assert_eq!(batch.num_columns(), 0);
+    }
+
+    // (c) The crate's own entry point inherits (a) verbatim — including for a
+    // NON-EMPTY row set, which is the case issue #3742 is about.
+    let no_columns: Vec<ColumnInfo> = Vec::new();
     let rows: Vec<QueryRow> = (0..3).map(|_| row_one("a", Value::Integer(1))).collect();
-    let r5 = rows_to_record_batch(&cols, &rows);
-    eprintln!(
-        "MEASURE rows_to_record_batch(0 cols, 3 rows) => ok={} num_rows={:?} err={:?}",
-        r5.is_ok(),
-        r5.as_ref().map(|b| b.num_rows()).ok(),
-        r5.as_ref().err().map(|e| e.to_string())
+    let err = rows_to_record_batch(&no_columns, &rows)
+        .expect_err("rows_to_record_batch inherits arrow's refusal");
+    assert_eq!(
+        err.to_string(),
+        "Arrow error: Invalid argument error: must either specify a row count or at least one column"
     );
 }

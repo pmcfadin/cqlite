@@ -136,7 +136,8 @@ fn measure_zero_column_projection_over_do_get() {
 #[test]
 fn measure_zero_column_projection_on_the_point_read_route() {
     let (_temp, data_dir) = build_fixture();
-    let filter = serde_json::json!({"type": "Compare", "column": "key", "op": "Equal", "value": "k1"});
+    let filter =
+        serde_json::json!({"type": "Compare", "column": "key", "op": "Equal", "value": "k1"});
 
     let (ok, msgs, err) = drive(
         &data_dir,
@@ -176,5 +177,7 @@ fn measure_zero_output_columns_via_an_empty_aggregation() {
             "aggregation": {"group_by": [], "aggregates": []}
         })),
     );
-    eprintln!("MEASURE agg empty (no group_by, no aggregates): rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
+    eprintln!(
+        "MEASURE agg empty (no group_by, no aggregates): rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}"
+    );
 }
