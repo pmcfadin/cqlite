@@ -643,7 +643,7 @@ fi
 echo "TEST 28: dead-lanes is documented in --help, and rejects a stray argument"
 # ===========================================================================
 help_out=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
-if printf '%s\n' "$help_out" | grep -q 'dead-lanes'; then
+if grep -q 'dead-lanes' <<<"$help_out"; then
   ok "dead-lanes appears in --help (an undocumented subcommand is one nobody runs)"
 else
   bad "dead-lanes must be documented in --help"
@@ -994,15 +994,20 @@ chmod +x "$gitshim/git"
 craft_old_claim "$WORK" "warnMachine" 3404 "$$" 0
 warn_out=$(cd "$WORK" && PATH="$gitshim:$PATH" HEARTBEAT_MACHINE=warnMachine \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if ! printf '%s\n' "$warn_out" | grep -q 'UNKNOWN-UNREADABLE' \
-  && ! printf '%s\n' "$warn_out" | grep -qE '^Warning:|^warning:'; then
+if ! grep -q 'UNKNOWN-UNREADABLE' <<<"$warn_out" \
+  && ! grep -qE '^Warning:|^warning:' <<<"$warn_out"; then
   ok "git warnings on stderr produce no bogus ref rows and no spurious UNKNOWN-UNREADABLE"
 else
   bad "stderr must not be parsed as the ref listing: out:
 $warn_out"
 fi
 # NON-VACUITY: the shim really did emit those warnings (otherwise this asserts nothing).
-if PATH="$gitshim:$PATH" git ls-remote "$ORIGIN" 'refs/machine-claims/*' 2>&1 >/dev/null | grep -q 'Permanently added'; then
+# CAPTURE-THEN-MATCH, not a pipe (#3548, the sigpipe round). This is the site that ACTUALLY emitted
+# the observed "the git shim emitted no warning" failure: `grep -q` exits at the first match, `git`
+# then takes SIGPIPE, and under this suite's `set -o pipefail` the PIPELINE status goes non-zero — so
+# a shim that DID warn was reported as silent, and TEST 40's non-vacuity control red on correct input.
+_shimwarn_out=$(PATH="$gitshim:$PATH" git ls-remote "$ORIGIN" 'refs/machine-claims/*' 2>&1 >/dev/null)
+if grep -q 'Permanently added' <<<"$_shimwarn_out"; then
   ok "NON-VACUITY: the git shim does emit stderr warnings during ls-remote"
 else
   bad "NON-VACUITY broken: the git shim emitted no warning, so TEST 40 proves nothing"
@@ -1088,13 +1093,13 @@ echo "TEST 43: the retired per-machine bound is GONE from the help, and the per-
 # the same way TEST 46 was found still enforcing "NEVER exits 0" after exit 0 came back. A guard
 # aimed at a retired contract defends the error.
 help43=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
-if ! printf '%s\n' "$help43" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
+if ! grep -qi 'ONE CLAIM REF PER MACHINE' <<<"$help43"; then
   ok "the help no longer presents one-ref-per-machine as a current limitation"
 else
   bad "the retired per-machine bound is still documented as live"
 fi
-if printf '%s\n' "$help43" | grep -q 'refs/lane-claims/<machine>/<issue>' \
-  && printf '%s\n' "$help43" | grep -qi 'never stamped is invisible\|never stamped'; then
+if grep -q 'refs/lane-claims/<machine>/<issue>' <<<"$help43" \
+  && grep -qi 'never stamped is invisible\|never stamped' <<<"$help43"; then
   ok "the help states the per-lane layout AND the bound that actually remains (a lane that never stamped is invisible)"
 else
   bad "the help must state the per-lane layout and the remaining invisible-lane bound"
@@ -1207,7 +1212,7 @@ help_text=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
 emitted=$(grep -oE 'verdict="[A-Z][A-Z-]*"' "$HB" | sed -e 's/verdict="//' -e 's/"//' | sort -u)
 undocumented=""
 for v in $emitted; do
-  printf '%s\n' "$help_text" | grep -q "$v" || undocumented="$undocumented $v"
+  grep -q "$v" <<<"$help_text" || undocumented="$undocumented $v"
 done
 if [ -n "$emitted" ] && [ -z "$undocumented" ]; then
   ok "all $(printf '%s\n' "$emitted" | wc -l | tr -d ' ') verdict tokens the code emits are documented in --help"
@@ -1219,7 +1224,7 @@ fi
 zc_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1); zc_rc=$?
 # The phrase is matched on ONE line: the help is a comment block, so a longer phrase
 # spans a line break and would never match however correct the text is.
-if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'zero'; then
+if [ "$zc_rc" -eq 1 ] && grep -qi 'zero' <<<"$help_text"; then
   ok "the help's exit-code contract matches the zero-claims behaviour it documents (both say incomplete/1)"
 else
   bad "help and behaviour disagree on zero claims: rc=$zc_rc"
@@ -1233,7 +1238,7 @@ fi
 ns_emitted=$(grep -oE "refs/(lane-claims|machine-claims|heartbeats|tmp)/" "$HB" | sed 's|/$||' | sort -u)
 ns_missing=""
 for ns in $ns_emitted; do
-  printf '%s\n' "$help_text" | grep -q "$ns" || ns_missing="$ns_missing $ns"
+  grep -q "$ns" <<<"$help_text" || ns_missing="$ns_missing $ns"
 done
 if [ -n "$ns_emitted" ] && [ -z "$ns_missing" ]; then
   ok "every ref namespace the code touches is documented in --help ($(printf '%s' "$ns_emitted" | tr '\n' ' '))"
@@ -1242,8 +1247,8 @@ else
 fi
 # The per-lane shape specifically, since that is the one that drifted: the help must show the
 # lane-id component and must mark the legacy namespace as legacy.
-if printf '%s\n' "$help_text" | grep -q 'refs/lane-claims/<machine>/<lane-id>' \
-  && printf '%s\n' "$help_text" | grep -qi 'LEGACY'; then
+if grep -q 'refs/lane-claims/<machine>/<lane-id>' <<<"$help_text" \
+  && grep -qi 'LEGACY' <<<"$help_text"; then
   ok "--help documents the per-lane ref shape and marks refs/machine-claims/* as legacy"
 else
   bad "--help must document refs/lane-claims/<machine>/<lane-id> and mark the per-machine namespace legacy"
@@ -1254,11 +1259,11 @@ fi
 # re-read by eye each round. Brittle by construction, and accepted: doctrine treats this help as the
 # authoritative contract precisely because it cannot drift from the code, which is only true if
 # something checks.
-if printf '%s\n' "$help_text" | grep -q 'stamp <lane-id>' \
-  && printf '%s\n' "$help_text" | grep -qi 'list-claims .*one line per LANE'; then
+if grep -q 'stamp <lane-id>' <<<"$help_text" \
+  && grep -qi 'list-claims .*one line per LANE' <<<"$help_text"; then
   ok "--help describes stamp as taking a <lane-id> and list-claims as one line per LANE"
 else
-  bad "--help still describes the per-lane world in per-machine terms: $(printf '%s\n' "$help_text" | grep -E 'stamp <|list-claims ' | head -3)"
+  bad "--help still describes the per-lane world in per-machine terms: $(grep -E 'stamp <|list-claims ' <<<"$help_text" | head -3)"
 fi
 # ...and no line may cite #1930's retracted "one worker per machine" as a LIVE justification. The two
 # surviving citations are both explicitly marked as retracted, so the guard requires the retraction
@@ -1303,14 +1308,14 @@ fi
 # assertion has now been pointed at three different contracts in one day — never-0, then 0-restored,
 # now never-0-for-a-different-reason — which is exactly why it exists: each time the contract moved,
 # this is what caught the documentation lagging behind the code.
-if printf '%s\n' "$help_text" | grep -qi 'never exits 0' \
-  && ! printf '%s\n' "$help_text" | grep -qi 'exit 0 = at least one LOCAL'; then
+if grep -qi 'never exits 0' <<<"$help_text" \
+  && ! grep -qi 'exit 0 = at least one LOCAL' <<<"$help_text"; then
   ok "the help documents this slice's contract: positive detection only, never exit 0"
 else
   bad "the help must match the implementation: this slice never exits 0"
 fi
 # ...and the retired per-machine limitation must not still be presented as current.
-if ! printf '%s\n' "$help_text" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
+if ! grep -qi 'ONE CLAIM REF PER MACHINE' <<<"$help_text"; then
   ok "the help no longer presents one-ref-per-machine as a current limitation"
 else
   bad "the help still describes the retired per-machine layout as a live bound"
