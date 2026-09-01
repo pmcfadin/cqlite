@@ -270,7 +270,7 @@ is no level-1 breakdown to subdivide, and the raw-event substitute is barred (se
 | `offcore_requests_outstanding.cycles_with_data_rd` | same; `0` in both here |
 | `offcore_requests.all_data_rd` | present; **ABSENT-FROM-PMU here** |
 | `offcore_requests_buffer.sq_full` | present; **ABSENT-FROM-PMU here** — this is the super-queue-full term that makes prefetch pressure visible |
-| `l1d_pend_miss.fb_full` | NONZERO and moving (**already true here**, ×2611 — keep it; it is the fill-buffer half of the same story) |
+| `l1d_pend_miss.fb_full` | NONZERO and moving (**already true here** — 1,557,955 → 9,932,430 friendly→hostile-512m; keep it, it is the fill-buffer half of the prefetch-pressure story) |
 
 Gate B is the gate that decides whether the study is worth running at all. Without a working offcore
 term the TMA split alone **mis-attributes prefetch-induced memory stalls as core-bound**, which
