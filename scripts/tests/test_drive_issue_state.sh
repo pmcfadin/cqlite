@@ -2061,6 +2061,84 @@ $d37_out"
 fi
 
 # ===========================================================================
+case_begin 38-adopt-never-calls-a-live-owner-gone "adopt is a re-entrant NO-OP for BOTH ownership bases; it may only rewrite when the writer is provably GONE (roborev job 34 H2)"
+# ===========================================================================
+# THE DEFECT: `check_ownership` returns success for THREE different facts — the recorded
+# session IS me, the recorded pid is MY OWN LIVE pid (round 5's same-process branch), and
+# (adopt mode) the recorded writer is provably GONE — and collapsed them into one undifferentiated
+# `return 0`. `cmd_adopt` then re-derived "is it already mine?" from the SESSION ID ALONE, so a
+# changed or unrecorded session with the SAME LIVE PID took the adoption path: it rewrote the
+# marker, recorded a STILL-RUNNING process as `prior-session-pid`, and printed that the writer
+# was "provably gone". That is a FALSE STATEMENT in the audit record this script exists to
+# produce, and recording a live owner as the prior one is exactly what LIVE-PEER refuses.
+GONE_TEXT='provably gone'
+# (A) recorded session differs, recorded pid is THIS live process.
+L38A=$(lane lane38-a)
+run "$L38A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage implement >/dev/null 2>&1
+cp "$L38A/$MARKER" "$T/38a-before.md"
+a38_out=$(run "$L38A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason cron-reinvoke:same-process); a38_rc=$?
+# (B) NO session id recorded at all, recorded pid is THIS live process (the same-process branch
+# exists precisely for a session with CLAUDE_PID set and CLAUDE_CODE_SESSION_ID unset).
+L38B=$(lane lane38-b)
+( cd "$L38B" && env -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA "CLAUDE_PID=$$" bash "$DS" write 3822 >/dev/null 2>&1 )
+cp "$L38B/$MARKER" "$T/38b-before.md"
+b38_out=$( cd "$L38B" && env -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA "CLAUDE_PID=$$" \
+  bash "$DS" adopt 3822 --reason cron-reinvoke:same-process-no-session 2>&1 ); b38_rc=$?
+for probe in A B; do
+  case "$probe" in
+    A) p_out="$a38_out"; p_rc="$a38_rc"; p_lane="$L38A"; p_before="$T/38a-before.md" ;;
+    B) p_out="$b38_out"; p_rc="$b38_rc"; p_lane="$L38B"; p_before="$T/38b-before.md" ;;
+  esac
+  if [ "$p_rc" -eq 0 ] && [ "$(verdict_of "$p_out")" = ADOPTED ] \
+     && ! printf '%s\n' "$p_out" | grep -q "$GONE_TEXT"; then
+    ok "($probe) adopt over a marker whose writer is THIS LIVE PROCESS does NOT claim the writer was gone"
+  else
+    bad "($probe) adopt claimed a live writer was gone (or did not succeed re-entrantly): rc=$p_rc verdict=$(verdict_of "$p_out")
+$p_out"
+  fi
+  if cmp -s "$p_before" "$p_lane/$MARKER"; then
+    ok "($probe) the re-entrant adopt changed NOTHING — the marker is byte-identical"
+  else
+    bad "($probe) the re-entrant adopt rewrote the marker:
+$(diff "$p_before" "$p_lane/$MARKER" || true)"
+  fi
+  if grep -q "^prior-session-pid: $$\$" "$p_lane/$MARKER" 2>/dev/null; then
+    bad "($probe) a STILL-RUNNING process ($$) was recorded as prior-session-pid:
+$(cat "$p_lane/$MARKER")"
+  else
+    ok "($probe) no live process was recorded as prior-session-pid"
+  fi
+done
+# NEGATIVE CONTROL — a GENUINELY DEAD writer still adopts, with the provenance recorded. Without
+# this the case above would pass by simply disabling adoption.
+L38C=$(lane lane38-c)
+sleep 30 & dead38=$!
+run "$L38C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$dead38" -- write 3822 --stage implement >/dev/null 2>&1
+kill "$dead38" 2>/dev/null; wait "$dead38" 2>/dev/null
+c38_out=$(run "$L38C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason cron-reinvoke:writer-pid-gone); c38_rc=$?
+if [ "$c38_rc" -eq 0 ] && [ "$(verdict_of "$c38_out")" = ADOPTED ] \
+   && printf '%s\n' "$c38_out" | grep -q "$GONE_TEXT" \
+   && grep -q "^prior-session: $SESS_A\$" "$L38C/$MARKER" \
+   && grep -q "^prior-session-pid: $dead38\$" "$L38C/$MARKER"; then
+  ok "NEGATIVE CONTROL: a provably GONE writer is still adopted, and the hand-over provenance IS recorded — the distinction is real, not a disabled adopt"
+else
+  bad "the dead-writer adoption regressed: rc=$c38_rc verdict=$(verdict_of "$c38_out")
+$c38_out
+$(cat "$L38C/$MARKER" 2>/dev/null)"
+fi
+# The OTHER caller of the same result: `write` treats BOTH ownership bases as OWNED, and must
+# keep doing so — the same-process basis is an AFFIRMATIVE measurement of sameness, not a
+# weaker one, so making adopt re-entrant must not make write refuse its own marker.
+w38_out=$(run "$L38A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- write 3822 --stage address); w38_rc=$?
+if [ "$w38_rc" -eq 0 ] && [ "$(verdict_of "$w38_out")" = WRITTEN ] \
+   && grep -q '^stage: address$' "$L38A/$MARKER"; then
+  ok "SWEEP: the same-process basis is still OWNED for `write` (the fix differentiates the bases, it does not narrow ownership)"
+else
+  bad "write over the same-process basis regressed: rc=$w38_rc verdict=$(verdict_of "$w38_out")
+$w38_out"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2077,8 +2155,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 32-failed-scan-is-not-no-match 33-signals-emit-one-verdict
 34-shift-never-leaks-bash-diagnostics 35-one-verdict-per-failure-mode
 36-anchor-holds-on-every-stream
-37-machine-axis-must-be-measurable 28-case-floor"
-CASE_FLOOR=37
+37-machine-axis-must-be-measurable
+38-adopt-never-calls-a-live-owner-gone 28-case-floor"
+CASE_FLOOR=38
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""

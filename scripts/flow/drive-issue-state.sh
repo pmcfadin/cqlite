@@ -32,12 +32,15 @@
 #     copied tree, a foreign worktree means the file was copied.
 #
 #   SESSION AXIS — recorded (AC1), but NOT fail-closed on its own.
-#     A recorded session id equal to the current one (and recordable) is OWNED outright. So
-#     is a recorded pid that is ALIVE and EQUAL to our own session pid with an intersecting
-#     start window — a pid is unique among live processes, so that process IS us, and
-#     without this a session with CLAUDE_PID set but no CLAUDE_CODE_SESSION_ID would refuse
-#     its OWN marker as a live peer. It is an affirmative measurement of sameness (stronger
-#     than the id string it stands in for), never a permissive fallback.
+#     A recorded session id equal to the current one (and recordable) is OWNED outright
+#     (basis `session`). So is a recorded pid that is ALIVE and EQUAL to our own session pid
+#     with an intersecting start window (basis `same-live-pid`) — a pid is unique among live
+#     processes, so that process IS us, and without this a session with CLAUDE_PID set but no
+#     CLAUDE_CODE_SESSION_ID would refuse its OWN marker as a live peer. It is an affirmative
+#     measurement of sameness (stronger than the id string it stands in for), never a
+#     permissive fallback. THE TWO BASES ARE CARRIED, NOT COLLAPSED: `verify`/`write` accept
+#     both, and `adopt` treats both as ALREADY YOURS (a re-entrant no-op) rather than as
+#     something to hand over.
 #     A session difference alone is resolved by the LIVENESS OF THE RECORDED WRITER,
 #     three-valued, on `claim-heartbeat.sh dead-lanes`' precedent:
 #       writer provably GONE  -> ADOPTABLE. `verify` still exits NON-ZERO: adoption is an
@@ -172,6 +175,13 @@
 #   adopt  <N> --reason <why> [--actor <id>]
 #              The explicit adopt gesture. Resolves the SESSION axis ONLY: a fail-closed
 #              axis mismatch still refuses, and so does a live or unmeasurable writer.
+#              IT REWRITES ONLY WHEN THE RECORDED WRITER IS PROVABLY GONE. Where the marker
+#              is ALREADY YOURS — by either basis, the recorded session id being this one OR
+#              the recorded pid being THIS live process — it is a re-entrant NO-OP: it says so
+#              and changes NOTHING, because rewriting there would record a STILL-RUNNING
+#              process as the prior owner and print that it was "provably gone", a false
+#              statement in the audit record. The basis comes from the ownership verification
+#              itself, never re-derived from the fields by the caller.
 #              It RECORDS the provenance of the hand-over — `prior-session`,
 #              `prior-session-pid`, `prior-ts`, `adopt-reason` — which then survives later
 #              `write`s and is REPLACED (never accumulated) by a later adopt.
@@ -895,7 +905,22 @@ writer_liveness() {
 # Ownership verification, shared by verify / write / adopt.
 # `check_ownership <issue> <mode>` where mode = strict (verify/write) | adopt.
 # Returns 0 for OWNED. Every other outcome is a refusal that EXITS.
+#
+# THE RESULT CARRIES HOW IT WAS ESTABLISHED (roborev job 34 H2). Three DIFFERENT facts reach
+# `return 0`, and collapsing them into one undifferentiated success let `cmd_adopt` re-derive
+# "is it already mine?" from the session id alone — so a changed or unrecorded session with the
+# SAME LIVE PID took the ADOPTION path, rewrote the marker, recorded a STILL-RUNNING process as
+# `prior-session-pid` and printed that the writer was "provably gone": a false statement in the
+# audit record this script exists to produce, and precisely what LIVE-PEER refuses. So every
+# caller reads OWNERSHIP_BASIS rather than re-deriving the distinction from the fields:
+#   session         the recorded session id IS this session  -> already yours
+#   same-live-pid   the recorded pid is THIS live process     -> already yours
+#   adoptable-gone  the recorded writer is provably GONE      -> `adopt` may rewrite (only here)
+# `verify` and `write` treat the first two identically and by design (the pid measurement is
+# STRONGER than the id string it stands in for), and never see the third: `gone` is a refusal in
+# strict mode.
 # ---------------------------------------------------------------------------
+OWNERSHIP_BASIS=''
 check_ownership() {
   local issue="$1" mode="$2"
   local machine session
@@ -915,6 +940,7 @@ check_ownership() {
 
   # SESSION AXIS. Equal AND recordable => OWNED. Anything else is liveness-resolved.
   if [ "$S_session" = "$session" ] && [ "$session" != unrecorded ]; then
+    OWNERSHIP_BASIS=session
     return 0
   fi
 
@@ -929,6 +955,7 @@ check_ownership() {
   # measurement of sameness (pid identity + start-window intersection), strictly stronger
   # than the session-id string it stands in for — never a fallback to permissiveness.
   if [ "$LIVE_STATE" = alive ] && [ "$S_pid" = "$(this_session_pid)" ]; then
+    OWNERSHIP_BASIS=same-live-pid
     return 0
   fi
 
@@ -940,6 +967,7 @@ check_ownership() {
       refuse LIVENESS-UNKNOWN 7 "$why. Liveness was NOT measured, and an unmeasured liveness is never read as verified — refusing. Resolve the ambiguity (identify the session, or clear the marker deliberately) rather than adopting on unproven information." ;;
     gone)
       if [ "$mode" = adopt ]; then
+        OWNERSHIP_BASIS=adoptable-gone
         return 0
       fi
       refuse ADOPTABLE 5 "$why. The recorded writer is provably GONE, so this lane IS adoptable — but adoption is an EXPLICIT gesture: run '$prog adopt $(sane "$issue") --reason <what the resume is>', which rewrites the stamp and records the prior session." ;;
@@ -1316,7 +1344,7 @@ cmd_verify() {
   done
   check_ownership "$issue" strict
   verdict OWNED
-  detail "issue=$(sane "$issue") machine=$(sane "$S_machine") worktree=$(sane "$S_worktree") session=$(sane "$S_session") stage=$(sane "${S_stage:-none}") ts=$(sane "$S_ts") — this lane's marker, this session; resume from the recorded stage"
+  detail "issue=$(sane "$issue") machine=$(sane "$S_machine") worktree=$(sane "$S_worktree") session=$(sane "$S_session") stage=$(sane "${S_stage:-none}") ts=$(sane "$S_ts") basis=$(sane "$OWNERSHIP_BASIS") — this lane's marker, this session; resume from the recorded stage"
 }
 
 # assert_reason <raw> — claim.sh's `--reason` gate, same rules and same reasons. An
@@ -1379,11 +1407,22 @@ cmd_adopt() {
   # evaporate.
   local request="$S_request" pr="$S_pr" branch="$S_branch"
 
-  if [ "$prior_session" = "$(this_session)" ] && [ "$prior_session" != unrecorded ]; then
-    verdict ADOPTED
-    detail "re-entrant: this session already owns $(sane "$(marker_path)") — nothing to transfer"
-    return 0
-  fi
+  # RE-ENTRANT FOR BOTH OWNERSHIP BASES (roborev job 34 H2). This used to test the SESSION ID
+  # alone, which is only ONE of the two ways check_ownership says "already yours" — so the
+  # same-live-pid basis fell through to the rewrite below and recorded a running process as the
+  # prior owner. The basis is now read from the verification itself rather than re-derived here,
+  # and the ONLY basis licensed to rewrite is `adoptable-gone`; `alive` and `unknown` never reach
+  # this point (they refuse inside check_ownership) and an unrecognised basis is a refusal, not a
+  # rewrite — a positive action must never rest on an unrecognised state.
+  case "$OWNERSHIP_BASIS" in
+    session | same-live-pid)
+      verdict ADOPTED
+      detail "re-entrant: this session already owns $(sane "$(marker_path)") (basis=$(sane "$OWNERSHIP_BASIS")) — nothing to transfer, and NOTHING is recorded as a prior owner: the recorded writer is THIS session, not a gone one"
+      return 0 ;;
+    adoptable-gone) : ;;
+    *)
+      refuse ERROR 1 "internal: ownership basis '$(sane "$OWNERSHIP_BASIS")' is not one of session|same-live-pid|adoptable-gone — refusing to transfer ownership on an unrecognised basis; nothing was written" ;;
+  esac
 
   local carried f_stage=''
   carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the carried body under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$carried"))"
