@@ -4,7 +4,7 @@ i4i-magnitude: UNMEASURED (this host is 'c7i.4xlarge', not an i4i) — AC1's i4i
 kernel: 6.17.0-1019-aws
 cores: 16
 mem-total-kb: 32308512
-loadavg-at-start: 1.62 5.56 20.46
+loadavg-at-start: 4.79 4.70 8.81
 corpus: /data/ws0-2824
 corpus-bytes: 2779188457
 corpus-device: /dev/nvme1n1
@@ -24,9 +24,10 @@ limit-cross-arm-readahead: the warm phase runs at auto, so an arm that issues wh
 env-pinned-floor: CQLITE_PREFETCH=off CQLITE_DISK_ACCESS_MODE=mmap
 env-pinned-cold-warm: CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap
 env-inherited-cqlite: CQLITE_DATASETS_ROOT=/data/datasets CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_PROJECT_NUMBER=1 CQLITE_PROJECT_OWNER=pmcfadin
-started-utc: 2026-09-01T19:32:31Z
+started-utc: 2026-09-01T19:52:45Z
 arm: baseline  sha256=3542103a02b4fbf7ded59f75d0cff8660fa07d943177ccaafb744ffa61a79068
 arm: patched  sha256=4488b5bc5973d15ae8dbc489eefd017f06baf1f5c6d45bf514eff34f2164eda7
 run: COMPLETE
-finished-utc: 2026-09-01T19:38:14Z
-loadavg-at-end: 4.58 6.71 16.52
+work-shape: rows=4000000 cells=48000000 tables=/data/ws0-2824/ws0/events
+finished-utc: 2026-09-01T19:59:10Z
+loadavg-at-end: 12.87 8.90 9.09

@@ -405,7 +405,8 @@ done
 # It records what each arm DOES; it asserts nothing about what each arm SHOULD do,
 # because the labels are the caller's and this harness does not know their meaning.
 {
-  echo "# madvise census per arm, --setup-only, CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap\n# counts are SUCCESSFUL calls (returned 0); any failures are shown as (+N FAILED)"
+  echo "# madvise census per arm, --setup-only, CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap"
+  echo "# counts are SUCCESSFUL calls (returned 0); failures appear as (+N FAILED)"
   if ! command -v strace >/dev/null 2>&1; then
     echo "UNAVAILABLE: strace is not installed — the advice census was NOT taken."
     echo "UNAVAILABLE: this run carries no evidence that the arms differ in issued advice."

@@ -38,17 +38,18 @@ a cold cache. `scan_major_faults = cold - floor`.
 
 | signal | baseline median [values] | patched median [values] |
 |---|---|---|
-| **scan-attributable major faults** (bounds, does not resolve — see residual) | **3.5** [4, 5, 3, 3] | **3.0** [3, 3, 4, 3] |
+| **scan-attributable major faults** (bounds, does not resolve — see residual) | **5.0** [5, 5, 4, 5] | **3.0** [3, 3, 4, 3] |
 | raw cold major faults | 54 | 53 |
-| floor major faults (startup only, `prefetch=off`) | 50.5 | 49.5 |
+| floor major faults (startup only, `prefetch=off`) | 49 | 49.5 |
 | warm major faults | 0 | 0 |
 | page-cache drain before every cold phase | 16/16 `DRAINED` | 16/16 `DRAINED` |
+| work validated identical every phase | `rows=4000000 cells=48000000` | same |
 
 **The attribution residual, stated because it is the same size as the difference.**
 `scan_major_faults = cold(auto) - floor(off) = scan(auto) + [setup(auto) - setup(off)]`. The bracketed
 term is not zero for an arm whose `auto` setup issues advice, and the advice census below shows the
 patched arm does exactly that (`WILLNEED=1` on a `--setup-only` run at `auto`). It is arm-asymmetric and
-of the same order as the 0.5-fault median difference, so **this column bounds the scan cost; it does not
+of the same order as the 2-fault median difference, so **this column bounds the scan cost; it does not
 resolve it.** Read it as "single digits in both arms", never as a between-arm signal. The floor is
 measured at `off` deliberately — at `auto` the patched floor's asynchronous whole-file read-ahead
 outlives its process and pre-warms the cold phase that follows, a far larger and equally
@@ -68,8 +69,12 @@ identical in both arms, and not from the reader.
 
 ## Reading it
 
-**Scan-attributable major faults are single digits in both arms — medians 3.5 and 3.0 across ~630,000
-file pages — and the 0.5 difference is inside the declared residual above, so it is not a signal.** The
+**Scan-attributable major faults are single digits in both arms — medians 5.0 and 3.0 across ~630,000
+file pages.** The 2-fault gap is more consistent across rounds than in earlier runs (baseline 5,5,4,5;
+patched 3,3,4,3), but it is **the same order as the declared residual below and is not reported as a
+signal**: `[setup(auto) - setup(off)]` is arm-asymmetric and unquantified here, and 2 faults out of
+~630,000 pages is operationally nil either way. What the data supports is "no large effect"; it does not
+resolve a difference this small, and no claim rests on one. The
 kernel's default read-ahead was already converting essentially everything to minor faults in both arms.
 There was nothing for `MADV_WILLNEED` to convert.
 
