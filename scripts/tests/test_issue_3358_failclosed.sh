@@ -131,11 +131,40 @@ if [ ! -f "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
   exit 1
 fi
 
+# EVERY git invocation in this script goes through this wrapper (roborev job 293, and the
+# same posture as `guard_git` in test-data/scripts/fetch-datasets.sh:109, issue #2878).
+#
+# POSTURE: clear the ENTIRE `GIT_*` namespace rather than blacklisting names. Inherited git
+# environment is routine (hooks, `rebase --exec`, some CI runners), and this script's safety
+# oracle is exactly the kind of thing it silently breaks: a VALID but FOREIGN
+# `GIT_INDEX_FILE` makes `ls-files` enumerate only a SUBSET of the fixture (possibly zero),
+# so the CONTENT digest is computed over fewer files than exist and a change to an omitted
+# tracked file compares EQUAL. That is a false PASS in the guard whose whole claim is "this
+# run left the tracked fixture UNCHANGED" — and it is not hypothetical: the sibling wrapper's
+# own comment records this exact door causing tracked fixtures to be deleted while the run
+# declared success (#2878). `GIT_DIR`/`GIT_WORK_TREE`/`GIT_OBJECT_DIRECTORY` redirect the
+# same inputs.
+#
+# A `-u` blacklist is an ever-growing list that fails silently the day git adds another
+# variable. None of this script's three operations (status --porcelain, ls-files,
+# hash-object) needs any GIT_* input, so clearing the namespace has no legitimate cost, and
+# where it is visible it fails LOUDLY rather than mis-reading quietly.
+# The subshell keeps the caller's environment untouched.
+guard_git() {
+  (
+    # `${!GIT_@}` enumerates every GIT_-prefixed variable in scope, inherited ones included;
+    # unquoted on purpose (names cannot word-split), and `unset` with no arguments is a no-op.
+    # shellcheck disable=SC2086
+    unset ${!GIT_@} 2>/dev/null || true
+    git "$@"
+  )
+}
+
 # BASELINE for the safety case, captured before anything is staged. An unanswerable
 # `git status` is recorded as the sentinel `UNMEASURED` rather than as an empty string,
 # because empty means "clean" and would make a failed probe look like a clean baseline —
 # the permissive direction.
-FIXTURE_STATUS_BEFORE=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null) \
+FIXTURE_STATUS_BEFORE=$(guard_git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null) \
   || FIXTURE_STATUS_BEFORE="UNMEASURED"
 
 # CONTENT, not status. `git status --porcelain` yields a STATUS CODE, and a file already
@@ -175,7 +204,7 @@ _fixture_content_digest() {
   # git's exit status be checked before the list is used.
   local tmpf n out h rc emitted
   tmpf=$(mktemp "${TMPDIR:-/tmp}/i3358-dg.XXXXXX") || { printf 'UNMEASURED(mktemp)'; return; }
-  if ! git -C "$REPO" ls-files -z -- "$FIXTURE_REL" >"$tmpf" 2>/dev/null; then
+  if ! guard_git -C "$REPO" ls-files -z -- "$FIXTURE_REL" >"$tmpf" 2>/dev/null; then
     rm -f "$tmpf"; printf 'UNMEASURED(ls-files-failed)'; return
   fi
   n=$(tr -cd '\0' <"$tmpf" | wc -c | tr -d ' ')
@@ -185,7 +214,7 @@ _fixture_content_digest() {
   esac
   out=""
   while IFS= read -r -d '' f; do
-    h=$(git -C "$REPO" hash-object -- "$f" 2>/dev/null); rc=$?
+    h=$(guard_git -C "$REPO" hash-object -- "$f" 2>/dev/null); rc=$?
     if [ "$rc" -ne 0 ] || [ -z "$h" ]; then
       rm -f "$tmpf"; printf 'UNMEASURED(hash-object-failed)'; return
     fi
@@ -412,7 +441,7 @@ fi
 # must not read as "untouched" — an unanswerable question is not a clean answer. The
 # `-s` check is the independent second leg: case 3 truncates a COPY, and a staging bug
 # that truncated the ORIGINAL in place would leave a 0-byte tracked file.
-fixture_status=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null)
+fixture_status=$(guard_git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null)
 fixture_status_rc=$?
 fixture_digest_after=$(_fixture_content_digest)
 if [ "$fixture_status_rc" -ne 0 ]; then
