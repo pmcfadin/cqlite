@@ -917,7 +917,13 @@ DELTA_MODE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of rec
 delta_block() {
   local anchor="${1:-$ANCHOR}" commit="${2:-$C7}" tstart="${3:-$C12}" \
         ti="${4:-PASS}" result="${5:-PASS}" mode="${6:-$DELTA_MODE}" \
-        paren="${7:-(full-gate PASS commit)}" dirty="${8-no}"
+        paren="${7:-(full-gate PASS commit)}" dirty="${8-no}" \
+        tsdirty="${9-__mirror__}"
+  # 9th param, mirroring by default: the delta block's tree-start: dirty value,
+  # allowed to DIVERGE from its commit: one for the lockfile-settled case
+  # (#3648 roborev round 5 -- without it the delta tree-start: assertion was
+  # uncovered, since every delta fixture mirrored a single value into both).
+  [ "$tsdirty" = "__mirror__" ] && tsdirty="$dirty"
   printf '%s\n' "$DELTA_S"
   printf 'run-id: /tmp/agent-gate.dLt4Qx\n'
   [ "$mode" = "-" ] || printf '%s\n' "$mode"
@@ -928,7 +934,7 @@ delta_block() {
   printf 'gate-of-record: full agent-gate.sh run at %s (this DELTA re-certifies a test/docs-only diff; it is NOT a substitute for the full gate)\n' "$anchor"
   printf 'delta-executors: cargo test -p cqlite-core --test issue_3465 (3), docs (2)\n'
   [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: %s digest: 671a6275687c\n' \
-    "$tstart" "$(dirty_tree_start "$dirty")"
+    "$tstart" "$(dirty_tree_start "$tsdirty")"
   printf 'tree-end: %s dirty: %s digest: 671a6275687c\n' "$tstart" "$(dirty_tree_start "$dirty")"
   [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
   printf 'logs: /tmp/agent-gate.dLt4Qx\n'
@@ -1144,6 +1150,29 @@ esac
 full_summary "$T/anchor-dirty-yes.txt" "$A7" "$A12" PASS PASS yes
 refused_pair "anchor block dirty: yes -> refuse even with a clean delta re-cert" \
   "$T/anchor-dirty-yes.txt" "$GOODDELTA" "The full-gate block records 'dirty: yes'"
+
+# 33(x)(c2) THE DELTA HALF OF THE LOCKFILE-SETTLED CASE (#3648 roborev round 5).
+# 33(x)(b)/(c) mirror ONE dirty value into both commit: and tree-start:, so they
+# would still pass with the delta-specific tree-start: assertion deleted -- i.e.
+# that assertion was uncovered. (My own round-4 RED-verify showed it: removing
+# BOTH tree-start assertions red only ONE case.) These two pin each block's
+# tree-start: independently, with commit: clean so the refusal cannot be its.
+delta_summary "$T/delta-start-only.txt" "$ANCHOR" "$C7" "$C12" \
+  "PASS (lockfile-settled: Cargo.lock)" PASS "$DELTA_MODE" "(full-gate PASS commit)" no yes
+if grep -qE '^tree-start: .* dirty: yes ' "$T/delta-start-only.txt" \
+   && grep -qE '^commit: .* dirty: no$' "$T/delta-start-only.txt"; then
+  ok "dirty fixture (delta): dirty at START, clean at commit: -- values are INDEPENDENT"
+else
+  bad "dirty fixture (delta): expected tree-start dirty: yes with commit: dirty: no"
+fi
+refused_pair "delta tree-start: dirty: yes with a clean commit: -> refuse" \
+  "$ANCHORFULL" "$T/delta-start-only.txt" "tree-start:"
+
+# And the ANCHOR's own tree-start:, with a wholly clean delta beside it.
+full_summary "$T/anchor-start-only.txt" "$A7" "$A12" \
+  "PASS (lockfile-settled: Cargo.lock)" PASS no yes
+refused_pair "anchor tree-start: dirty: yes with a clean commit: and a clean delta -> refuse" \
+  "$T/anchor-start-only.txt" "$GOODDELTA" "tree-start:"
 
 # 33(x)(d) an ABSENT dirty: field in either block -> refuse (never read as clean).
 delta_summary "$T/delta-dirty-absent.txt" "$ANCHOR" "$C7" "$C12" PASS PASS \
