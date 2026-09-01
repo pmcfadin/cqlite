@@ -772,6 +772,28 @@ def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
 # CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
 # =============================================================================
 
+# The child bound for the resolution probe below. MEASURED: unlike the Node side
+# there is NO competing enforcer to stay under — `bindings/python/pyproject.toml`'s
+# `[tool.pytest.ini_options]` sets no timeout and `pytest-timeout` is not
+# installed (pytest 9.1.1) — so this bound is the ONLY bound, and it is kept
+# generous (~150x the probe's measured warm runtime) rather than mirroring Node's
+# tighter value, which exists there solely to stay below jest's 30s `testTimeout`.
+_PROBE_TIMEOUT_SECS = 60
+
+
+def _probe_stream(value: Any) -> str:
+    """A probe capture stream as text, whatever shape the failure left it in.
+
+    `TimeoutExpired` may carry `None`, and carries `bytes` when the run was not
+    in text mode, so neither is assumed.
+    """
+    if value is None:
+        return "(none)"
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
 # The child-process probe for the behavioural half below. It re-evaluates THIS
 # module — and `conftest` — from scratch in a fresh interpreter whose
 # `CQLITE_DATASETS_ROOT` points at an empty directory, then records BOTH the
@@ -902,22 +924,42 @@ def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(tmp_
     child_env.pop("CQLITE_REQUIRE_FIXTURES", None)
     child_env.pop("CQLITE_PARITY_REQUIRE_DATASETS", None)
 
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _RESOLUTION_PROBE,
-            str(Path(__file__).parent),
-            str(Path(__file__)),
-            str(out_path),
-        ],
-        env=child_env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+    # AFFIRMATIVE COMPLETION ASSERTS, before a single byte of the payload is
+    # read. A timed-out or dead probe must fail NAMING that, and must never fall
+    # through into comparing absent output against an expected path: that either
+    # misleads (a "path mismatch" for a hang) or, with no payload written at all,
+    # risks a comparison that passes having measured nothing.
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _RESOLUTION_PROBE,
+                str(Path(__file__).parent),
+                str(Path(__file__)),
+                str(out_path),
+            ],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired as expired:
+        pytest.fail(
+            f"resolution probe TIMED OUT after {_PROBE_TIMEOUT_SECS}s. It normally "
+            "completes in well under a second, so this is a hang, not a slow box — "
+            "nothing about path resolution was measured.\n"
+            f"--- stdout ---\n{_probe_stream(expired.stdout)}\n"
+            f"--- stderr ---\n{_probe_stream(expired.stderr)}",
+            pytrace=False,
+        )
     assert proc.returncode == 0, (
-        f"resolution probe failed (rc={proc.returncode})\n"
+        f"resolution probe exited {proc.returncode} (bound {_PROBE_TIMEOUT_SECS}s)\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
+    assert out_path.is_file(), (
+        f"resolution probe exited 0 but wrote no payload to {out_path} — nothing was "
+        "measured, so no path comparison below would mean anything\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
     payload = json.loads(out_path.read_text())

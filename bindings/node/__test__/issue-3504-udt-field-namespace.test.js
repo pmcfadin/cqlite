@@ -521,14 +521,18 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
       const probe = spawnSync(
         process.execPath,
         ['-e', RESOLUTION_PROBE, __dirname, __filename, outPath],
-        { env: childEnv, encoding: 'utf8', timeout: 180000 }
+        { env: childEnv, encoding: 'utf8', timeout: PROBE_TIMEOUT_MS }
       );
-      expect(probe.error).toBeUndefined();
-      if (probe.status !== 0) {
-        throw new Error(
-          `resolution probe failed (status=${probe.status})\n` +
-            `--- stdout ---\n${probe.stdout}\n--- stderr ---\n${probe.stderr}`
-        );
+
+      // AFFIRMATIVE COMPLETION ASSERT, before a single byte of the payload is
+      // read. A timed-out, unspawnable or dead probe must fail NAMING that, and
+      // must never fall through into comparing absent output against an
+      // expected path: that either misleads (a "path mismatch" for a hang) or,
+      // with no payload written at all, risks a comparison that passes having
+      // measured nothing.
+      const failure = probeCompletionFailure(probe, PROBE_TIMEOUT_MS, outPath);
+      if (failure !== null) {
+        throw new Error(failure);
       }
       const payload = JSON.parse(fs.readFileSync(outPath, 'utf8'));
 
@@ -554,6 +558,74 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     }
   });
 });
+
+// The child bound for the AC5 probe below. MEASURED, not picked: jest's resolved
+// `testTimeout` here is 30000ms — `globalConfig.testTimeout` from
+// `jest.config.js`, with BOTH project entries null, read via
+// `npx jest --showConfig` on jest 29.7.0 — and this file sets no per-test
+// override. `spawnSync` BLOCKS the event loop, so jest physically cannot
+// interrupt it while it runs; the bound must therefore stay strictly BELOW
+// jest's, so the call always returns first and jest's deadline remains the outer
+// enforcing authority instead of being silently unenforceable. This is half of
+// it, and ~300x the probe's measured warm runtime (~50ms), so a loaded box
+// cannot flake on it. Do NOT raise jest's timeout to accommodate this bound —
+// that inverts the fix.
+const PROBE_TIMEOUT_MS = 15000;
+
+/**
+ * Why the probe did not complete, as a message naming the cause — or `null` when
+ * it completed and left a payload.
+ *
+ * The states are the ones `spawnSync` actually reports, measured on this node
+ * rather than assumed: a timeout is `error.code === 'ETIMEDOUT'` with
+ * `status === null` and `signal === 'SIGTERM'`; an ordinary failure is a numeric
+ * non-zero `status` with no `error`; and an exit-0 child that wrote nothing is
+ * `status === 0`, which only the payload check below can catch.
+ *
+ * @param {import('child_process').SpawnSyncReturns<string>} result
+ * @param {number} timeoutMs
+ * @param {string} outPath
+ * @returns {string|null}
+ */
+function probeCompletionFailure(result, timeoutMs, outPath) {
+  const detail =
+    `--- child stdout ---\n${result.stdout === undefined ? '(none)' : result.stdout}\n` +
+    `--- child stderr ---\n${result.stderr === undefined ? '(none)' : result.stderr}`;
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    return (
+      `resolution probe TIMED OUT after ${timeoutMs}ms (spawnSync ETIMEDOUT, killed with ` +
+      `${String(result.signal)}). It normally completes in well under a second, so this is a ` +
+      `hang, not a slow box — nothing about path resolution was measured.\n${detail}`
+    );
+  }
+  if (result.error) {
+    return (
+      `resolution probe could not be spawned: ` +
+      `${result.error.code || result.error.message} (bound ${timeoutMs}ms)\n${detail}`
+    );
+  }
+  if (result.signal !== null && result.signal !== undefined) {
+    return (
+      `resolution probe was KILLED by ${String(result.signal)} (bound ${timeoutMs}ms)\n${detail}`
+    );
+  }
+  if (typeof result.status !== 'number') {
+    return (
+      `resolution probe did not exit normally (status=${String(result.status)}, ` +
+      `signal=${String(result.signal)}, bound ${timeoutMs}ms)\n${detail}`
+    );
+  }
+  if (result.status !== 0) {
+    return `resolution probe exited ${result.status} (bound ${timeoutMs}ms)\n${detail}`;
+  }
+  if (!fs.existsSync(outPath)) {
+    return (
+      `resolution probe exited 0 but wrote no payload to ${outPath} — nothing was ` +
+      `measured, so no path comparison below would mean anything\n${detail}`
+    );
+  }
+  return null;
+}
 
 // The child-process probe for the AC5 behavioural half above. Run as
 // `node -e <this> <testsDir> <thisFile> <outPath>` with a perturbed
