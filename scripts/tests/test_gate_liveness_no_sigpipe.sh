@@ -127,8 +127,8 @@ _field() {
 }
 POS
 pos_out=$(violations "$tmp/pos.sh")
-pos_n=$(printf '%s' "$pos_out" | grep -c . )
-if [ "$pos_n" -eq 1 ] && printf '%s' "$pos_out" | grep -q 'grep -m1'; then
+pos_n=$(grep -c . <<<"$pos_out")
+if [ "$pos_n" -eq 1 ] && grep -q 'grep -m1' <<<"$pos_out"; then
   ok "3 positive control: the matcher NAMES the #3803 shape (line ${pos_out%%:*})"
 else
   bad "3 positive control" "matcher found $pos_n site(s) in a fixture containing exactly one; the scan cannot be trusted"
@@ -176,7 +176,7 @@ fi
 # 6. THE ASSERTION. Scan the SHIPPED reader.
 # ---------------------------------------------------------------------------
 sub_out=$(violations "$SUBJECT")
-sub_n=$(printf '%s' "$sub_out" | grep -c .)
+sub_n=$(grep -c . <<<"$sub_out")
 if [ "$sub_n" -eq 0 ]; then
   ok "6 scripts/gate-liveness.sh: builtin-writer-into-pipe sites: 0 RECOGNISED"
 else
