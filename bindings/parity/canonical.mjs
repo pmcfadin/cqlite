@@ -330,6 +330,40 @@ function containerName(v) {
   return m ? m[1] : tag;
 }
 
+/**
+ * The EXACT JavaScript type the Node binding produces for each integer-bearing
+ * CQL kind (issue #1455, F5). Verified at source, `bindings/node/src/value.rs`:
+ *
+ *   tinyint/smallint/int  -> `create_int32`            => number   (:214-216)
+ *   bigint/counter        -> `create_bigint_from_i64`  => BigInt   (:219-220)
+ *   time                  -> `create_bigint_from_i64`  => BigInt   (:249)
+ *   varint                -> `varint_to_bigint`        => BigInt   (:259)
+ *   duration.months/.days -> `create_int32`            => number   (:337-338)
+ *   duration.nanos        -> `create_bigint_from_i64`  => BigInt   (:339-340)
+ *
+ * Accepting `number` OR `bigint` for every kind normalized away a regression
+ * that returns a `number` where the documented surface is `BigInt`: it passed
+ * for every value below 2^53 and would only ever have surfaced past it -- the
+ * worst failure mode, silent for every realistic fixture. Same shape as F4's
+ * container work, one level down.
+ */
+const NODE_INT_JS_TYPE = new Map([
+  ['tinyint', 'number'], ['smallint', 'number'], ['int', 'number'],
+  ['bigint', 'bigint'], ['counter', 'bigint'], ['varint', 'bigint'],
+  ['time', 'bigint'],
+]);
+
+/** Refuse a value whose JS type is not the one the binding produces. */
+function requireJsType(value, expected, what) {
+  // eslint-disable-next-line valid-typeof
+  if (typeof value !== expected) {
+    throw new CanonicalError(
+      `declared ${what} expects a JavaScript ${expected}, got ${typeof value}`,
+    );
+  }
+  return value;
+}
+
 const nodeAdapter = {
   name: 'node',
   /**
@@ -374,7 +408,9 @@ const nodeAdapter = {
       if (typeof value !== 'boolean') throw new CanonicalError(`boolean column got ${typeof value}`);
       return value;
     }
-    if (INT_KINDS.has(kind)) return canonInt(value);
+    if (INT_KINDS.has(kind)) {
+      return canonInt(requireJsType(value, NODE_INT_JS_TYPE.get(kind), kind));
+    }
     if (FLOAT_KINDS.has(kind)) {
       if (typeof value !== 'number') throw new CanonicalError(`${kind} column got ${typeof value}`);
       return value;
@@ -402,13 +438,21 @@ const nodeAdapter = {
       const iso = value.toISOString();
       return iso.slice(0, iso.indexOf('T'));
     }
-    if (kind === 'time') return canonInt(value);
+    if (kind === 'time') {
+      return canonInt(requireJsType(value, NODE_INT_JS_TYPE.get('time'), 'time'));
+    }
     if (kind === 'duration') {
       if (value === null || typeof value !== 'object'
           || !('months' in value) || !('days' in value) || !('nanos' in value)) {
         throw new CanonicalError('duration column is not {months, days, nanos}');
       }
-      return canonDuration(value.months, value.days, value.nanos);
+      // The NESTED one is easy to miss: months/days are plain numbers and only
+      // `nanos` is a BigInt (duration_to_object, value.rs:337-340).
+      return canonDuration(
+        requireJsType(value.months, 'number', 'duration.months'),
+        requireJsType(value.days, 'number', 'duration.days'),
+        requireJsType(value.nanos, 'bigint', 'duration.nanos'),
+      );
     }
     if (kind === 'decimal') {
       if (typeof value !== 'string') throw new CanonicalError(`decimal column got ${typeof value}`);
@@ -427,7 +471,22 @@ const nodeAdapter = {
 // ---------------------------------------------------------------------------
 
 function canon(value, t, ad) {
-  if (value === null || value === undefined) return null;
+  // Only an ACTUAL null canonicalizes to null (issue #1455, F6). Declared gap 5
+  // accommodates an ABSENT property -- the Node binding legitimately omits a
+  // metadata column with no value (bindings/node/src/row.rs:123-138) -- and
+  // `canonRowNode` supplies `null` for exactly that case, deciding absence with
+  // `hasOwnProperty`, never with an `=== undefined` test. A property that IS
+  // present and holds `undefined` is therefore a binding regression, not an
+  // omission, and it must RED: it is a value the binding cannot produce, and
+  // `JSON.stringify` would silently drop it from the artifact anyway. The same
+  // rule reaches container ELEMENTS, so a sparse array's hole is refused too.
+  if (value === null) return null;
+  if (value === undefined) {
+    throw new CanonicalError(
+      `declared ${t.kind} is PRESENT but holds undefined — an absent property is `
+      + 'canonicalized as null by canonRowNode; a present undefined is a regression',
+    );
+  }
   const { kind } = t;
   if (kind === 'list') return ad.asSeq(value, t).map((x) => canon(x, t.args[0], ad));
   if (kind === 'set') {

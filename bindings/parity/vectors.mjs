@@ -55,12 +55,26 @@ export function materializeNode(spec) {
   switch (spec.$) {
     // The Node binding surfaces uuid/decimal/inet as plain strings.
     case 'uuid': case 'decimal': case 'inet': return spec.v;
+    // A PRESENT property holding `undefined` (issue #1455, F6). Node-only by
+    // construction: JSON has no `undefined`, and Python has no analogue -- an
+    // absent Python key is simply absent. Only refusal cases use it.
+    case 'undefined': return undefined;
     case 'bytes': return Buffer.from(spec.hex, 'hex');
     case 'datetime': return new Date(spec.ms);
     case 'date': return new Date(`${spec.v}T00:00:00.000Z`);
     case 'bigint': return BigInt(spec.v);
     case 'duration': return {
       months: spec.months, days: spec.days, nanos: BigInt(spec.nanos),
+    };
+    // Node-only, REFUSAL cases only (issue #1455, F5): each field is
+    // materialized individually, so a case can plant the wrong JS type on ONE
+    // of them -- a bare JSON number stays a number, a {"$":"bigint"} tag
+    // becomes a BigInt. The plain `duration` tag above always builds the
+    // CORRECT shape, which is what the value vectors use.
+    case 'duration_raw': return {
+      months: materializeNode(spec.months),
+      days: materializeNode(spec.days),
+      nanos: materializeNode(spec.nanos),
     };
     // A tuple is indistinguishable from a list on this leg (DECLARED GAP).
     case 'list': case 'tuple': return spec.items.map(materializeNode);

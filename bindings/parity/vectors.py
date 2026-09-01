@@ -65,6 +65,19 @@ def materialize_python(spec: Any) -> Any:
     if not isinstance(spec, dict) or "$" not in spec:
         raise ValueError(f"untagged vector spec: {spec!r}")
     tag = spec["$"]
+    if tag == "duration_raw":
+        raise ValueError(
+            "the `duration_raw` vector tag is node-only; it exists to plant a wrong "
+            "JavaScript type on ONE duration field"
+        )
+    if tag == "undefined":
+        # Node-only (issue #1455, F6): Python has no `undefined`, so a case
+        # using this tag must name only the `node` leg. Reaching here means a
+        # case wired it to a python/cli leg by mistake.
+        raise ValueError(
+            "the `undefined` vector tag is node-only; Python has no analogue "
+            "(an absent key is simply absent)"
+        )
     if tag == "uuid":
         return _uuid.UUID(spec["v"])
     if tag == "bytes":

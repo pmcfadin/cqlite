@@ -28,7 +28,17 @@
     "because a column NAME can be hostile -- `__proto__` is a legal quoted CQL",
     "identifier -- and the value vectors never touch a column-name-keyed object.",
     "Expressible as data precisely because JSON.parse and json.loads create an",
-    "OWN `__proto__` property where a JS object literal would not."
+    "OWN `__proto__` property where a JS object literal would not.",
+    "",
+    "Two node-only spec tags exist for REFUSAL cases (issue #1455, F5/F6):",
+    "  {\"$\":\"undefined\"}    -- a PRESENT property holding `undefined`.",
+    "  {\"$\":\"duration_raw\"} -- a duration object whose months/days/nanos are",
+    "                          materialized INDIVIDUALLY (a bare JSON number",
+    "                          becomes a JS number, a {\"$\":\"bigint\"} tag a",
+    "                          BigInt), so a case can plant the wrong JS type on",
+    "                          one field. The plain {\"$\":\"duration\"} tag always",
+    "                          produces the CORRECT shape and is what value",
+    "                          vectors use."
   ],
   "floor": {
     "_comment": [
@@ -43,7 +53,7 @@
       "required_row_names keep it from being emptied."
     ],
     "min_vectors": 74,
-    "min_errors": 35,
+    "min_errors": 46,
     "required_kinds": [
       "ascii",
       "bigint",
@@ -350,6 +360,17 @@
     {"name": "node_array_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"node": {"$": "list", "items": ["a"]}}, "expect": "declared set<> expects a JavaScript Set"},
     {"name": "node_set_for_list", "stage": "canonicalize", "type": "list<int>", "legs": {"node": {"$": "set", "items": [1]}}, "expect": "declared list<> expects a JavaScript Array"},
     {"name": "node_set_for_tuple", "stage": "canonicalize", "type": "tuple<int>", "legs": {"node": {"$": "set", "items": [1]}}, "expect": "declared tuple<> expects a JavaScript Array"},
-    {"name": "node_map_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"node": {"$": "map", "entries": []}}, "expect": "declared set<> expects a JavaScript Set"}
+    {"name": "node_map_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"node": {"$": "map", "entries": []}}, "expect": "declared set<> expects a JavaScript Set"},
+    {"name": "node_number_for_bigint", "stage": "canonicalize", "type": "bigint", "_why": "value.rs uses create_bigint_from_i64 for bigint; a `number` is a regression that would pass silently for every value below 2^53.", "legs": {"node": 5}, "expect": "declared bigint expects a JavaScript bigint"},
+    {"name": "node_number_for_counter", "stage": "canonicalize", "type": "counter", "_why": "value.rs uses create_bigint_from_i64 for counter; a `number` is a regression that would pass silently for every value below 2^53.", "legs": {"node": 5}, "expect": "declared counter expects a JavaScript bigint"},
+    {"name": "node_number_for_varint", "stage": "canonicalize", "type": "varint", "_why": "value.rs uses create_bigint_from_i64 for varint; a `number` is a regression that would pass silently for every value below 2^53.", "legs": {"node": 5}, "expect": "declared varint expects a JavaScript bigint"},
+    {"name": "node_bigint_for_tinyint", "stage": "canonicalize", "type": "tinyint", "_why": "value.rs uses create_int32 for tinyint; a BigInt is a regression.", "legs": {"node": {"$": "bigint", "v": "5"}}, "expect": "declared tinyint expects a JavaScript number"},
+    {"name": "node_bigint_for_smallint", "stage": "canonicalize", "type": "smallint", "_why": "value.rs uses create_int32 for smallint; a BigInt is a regression.", "legs": {"node": {"$": "bigint", "v": "5"}}, "expect": "declared smallint expects a JavaScript number"},
+    {"name": "node_bigint_for_int", "stage": "canonicalize", "type": "int", "_why": "value.rs uses create_int32 for int; a BigInt is a regression.", "legs": {"node": {"$": "bigint", "v": "5"}}, "expect": "declared int expects a JavaScript number"},
+    {"name": "node_number_for_time", "stage": "canonicalize", "type": "time", "_why": "value.rs:249 uses create_bigint_from_i64 for Time.", "legs": {"node": 4325394017000}, "expect": "declared time expects a JavaScript bigint"},
+    {"name": "node_number_for_duration_nanos", "stage": "canonicalize", "type": "duration", "_why": "The NESTED one: duration_to_object BigInts only `nanos` (value.rs:339-340).", "legs": {"node": {"$": "duration_raw", "months": 1, "days": 2, "nanos": 3}}, "expect": "declared duration.nanos expects a JavaScript bigint"},
+    {"name": "node_bigint_for_duration_months", "stage": "canonicalize", "type": "duration", "_why": "months/days are create_int32 plain numbers (value.rs:337-338).", "legs": {"node": {"$": "duration_raw", "months": {"$": "bigint", "v": "1"}, "days": 2, "nanos": {"$": "bigint", "v": "3"}}}, "expect": "declared duration.months expects a JavaScript number"},
+    {"name": "node_present_undefined_scalar", "stage": "canonicalize", "type": "text", "_why": "Declared gap 5 accommodates an ABSENT property; a present `undefined` is a regression, and JSON.stringify would drop it from the artifact silently.", "legs": {"node": {"$": "undefined"}}, "expect": "PRESENT but holds undefined"},
+    {"name": "node_present_undefined_in_a_list", "stage": "canonicalize", "type": "list<int>", "_why": "The same rule must reach container ELEMENTS (a sparse array's hole).", "legs": {"node": {"$": "list", "items": [1, {"$": "undefined"}]}}, "expect": "PRESENT but holds undefined"}
   ]
 }
