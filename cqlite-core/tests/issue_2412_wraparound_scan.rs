@@ -18,8 +18,10 @@
 //! Fix: a wraparound range starts the walk at offset 0 (the true beginning of
 //! `Index.db`) so both segments are reachable; the per-entry
 //! `ScanTokenBound::contains` filter already selects exactly the two segments,
-//! and `can_stop_past` already refuses to early-stop for `wraparound` (verified
-//! here to still hold, not merely assumed).
+//! and `can_stop_past` already refuses to early-stop for a wraparound bound
+//! (verified here to still hold, not merely assumed). Wrapping itself is DERIVED
+//! from the endpoints, `start_excl >= end_incl`, the way `Range.isWrapAround`
+//! does it (#3634) — it was a caller-supplied flag when this test was written.
 //!
 //! This test builds ONE BIG generation with `N` partitions (comfortably over
 //! `min_index_interval` so `Summary.db` carries multiple samples — otherwise a
