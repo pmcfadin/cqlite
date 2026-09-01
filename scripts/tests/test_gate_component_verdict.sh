@@ -193,7 +193,7 @@ echo "=== section 3: COMPLETION is a precondition, and the verdict is never DERI
 S9="$TMP/incomplete.txt"
 mk_summary "$S9" run-1 "INCOMPLETE (gate did not finish)" "$(comp_line tooling-tests PASS 1112s)"
 expect "3.1 a PASS component line in an INCOMPLETE block => COULD-NOT-MEASURE" \
-  COULD-NOT-MEASURE 4 "not complete" -- "$S9" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "run-not-complete" -- "$S9" --mode only --component tooling-tests --run-id run-1
 
 # Direction 2 — the one the lead's correction is about: the run's terminal token may not
 # stand in for the component's verdict, in EITHER direction.
@@ -242,7 +242,7 @@ echo "=== section 5: the accepted-verdict set is a PARAMETER OF THE RUN MODE ===
 # REQUIRED, and the modes this tool does not serve are NAMED REFUSALS pointing at their
 # authority — not a second implementation of a grammar that already has an owner.
 expect "5.1 --mode is REQUIRED (the accepted set is never implicit)" \
-  USAGE 64 "--mode" -- "$S2" --component tooling-tests
+  USAGE 64 "mode is required" -- "$S2" --component tooling-tests
 expect "5.2 --mode record is REFUSED and names premerge-assert.sh as the authority" \
   USAGE 64 "premerge-assert" -- "$S2" --mode record --component tooling-tests
 expect "5.3 --mode lite is REFUSED (a lite PASS is a different claim entirely)" \
