@@ -1092,6 +1092,71 @@ else
 fi
 
 # =====================================================================================
+# 25. OUTPUT LARGER THAN THE PIPE BUFFER MUST NOT INVERT A SUCCESSFUL MATCH.
+#     `set -o pipefail` is on, and `grep -q`/`grep -m1` EXIT ON THE FIRST MATCH. When the
+#     producer still has more than a pipe buffer's worth (64 KiB on Linux) to write it
+#     takes SIGPIPE and dies 141, so the PIPELINE reports failure — and a SUCCESSFUL match
+#     reads as unsuccessful. Measured: a 200 KB blob whose sentinel is on line 1 gives
+#     `grep -qF` rc 141, and the `grep -m1` command substitution likewise, so its `|| return
+#     0` fires and the key is reported ABSENT while it is plainly present.
+#     Both consequences are wrong in the DANGEROUS direction: a working credential reads as
+#     unmeasured/rejected, and a correctly seeded tmux server reads as SERVER-MISSING —
+#     whose remedy is to overwrite the very value that is already right.
+#     `tmux show-environment -g` on a heavily populated server, and a `claude` run that
+#     prints a long preamble, are both ordinary.
+#     THE FIX IS TO REMOVE THE PIPE, not to widen the buffer: every match is now a bash
+#     builtin (`case`/`[[ =~ ]]`/a line walk over the string), so there is no second process
+#     to lose a race with.
+# =====================================================================================
+# ~200 KB, comfortably past the 64 KiB Linux pipe buffer, generated without assuming any
+# particular tool: bash's own printf padding.
+BULK=$(printf '%0.sx' $(seq 1 2000))
+plant_claude_bulky() { # rc 0, sentinel FIRST, then far more output than a pipe holds
+  cat >"$1/claude" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$SENTINEL'
+i=0
+while [ "\$i" -lt 100 ]; do printf '%s\n' '$BULK'; i=\$((i + 1)); done
+exit 0
+EOF
+  chmod +x "$1/claude"
+}
+d25=$(mkshim "$tmp/s25"); plant_claude_bulky "$d25"
+run_cap "$d25" "$ef2" -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
+  ok "claude-auth: a sentinel on line 1 of 200 KB of output still VERIFIES (no SIGPIPE inversion)"
+else
+  bad "claude-auth: a large probe output inverted a successful sentinel match: $out"
+fi
+# The tmux half: the token is the FIRST line, so an early-exiting matcher kills the
+# producer with ~200 KB still to write.
+plant_tmux_bulky() {
+  local d="$1"
+  cat >"$d/tmux" <<EOF
+#!/usr/bin/env bash
+log="$d/tmux-calls.log"
+while [ "\$#" -gt 0 ]; do case "\$1" in -L|-S) shift 2 ;; *) break ;; esac; done
+case "\$1" in
+  show-environment)
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '$TOK'
+    i=0
+    while [ "\$i" -lt 100 ]; do printf 'PADDING_%s=%s\n' "\$i" '$BULK'; i=\$((i + 1)); done
+    printf 'CLAUDE_CONFIG_DIR=%s\n' '$CFGDIR'
+    exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$d/tmux"
+}
+d25b=$(mkshim "$tmp/s25b"); plant_tmux_bulky "$d25b"
+run_cap "$d25b" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+  ok "claude-tmux-env: a correctly seeded server with 200 KB of environment still VERIFIES"
+else
+  bad "claude-tmux-env: a large show-environment inverted the key lookup: $out"
+fi
+
+# =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
 #     `tooling-tests` is a MANDATORY gate component, so a path that exists on ONE box —
 #     or in ONE agent session — makes the gate host-dependent, and if that directory
@@ -1197,7 +1262,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=60
+CASE_FLOOR=62
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

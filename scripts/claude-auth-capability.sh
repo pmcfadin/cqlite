@@ -163,6 +163,40 @@ claude_auth_resolve_timeout() {
   [ -n "$CLAUDE_AUTH_TIMEOUT_BIN" ]
 }
 
+# ---- matching: BUILTIN ONLY, NEVER THROUGH A PIPE -----------------------------------
+# `set -o pipefail` is on and `grep -q`/`grep -m1` EXIT ON THE FIRST MATCH, so when the
+# producer still has more than a pipe buffer (64 KiB on Linux) to write it takes SIGPIPE
+# and dies 141 — and the PIPELINE reports failure for a SUCCESSFUL match. Measured on this
+# box: a 200 KB blob whose needle is on line 1 gives `printf … | grep -qF …` rc 141. Both
+# consequences here are wrong in the dangerous direction: a valid credential reads as
+# unmeasured, and a correctly seeded tmux server reads as SERVER-MISSING — whose remedy is
+# to overwrite the value that is already right. `tmux show-environment -g` on a heavily
+# populated server is an ordinary producer of that much output.
+#
+# The fix is to REMOVE THE PIPE rather than to widen the buffer or add `|| true` (which
+# would swallow a real grep ERROR — the three-valued-rc trap this file already avoids
+# elsewhere). Everything below is a bash builtin: no second process, so no race to lose.
+
+# claude_auth_contains <haystack> <needle>: literal substring test.
+claude_auth_contains() {
+  case "$1" in *"$2"*) return 0 ;; esac
+  return 1
+}
+
+# claude_auth_matches_ci <text> <ere>: case-insensitive extended-regex test. `nocasematch`
+# is a SHELL-WIDE option and this file is SOURCED by bootstrap, so its previous state is
+# saved and restored — turning an option on for a caller that did not ask for it is the
+# same class as replacing a caller's trap.
+claude_auth_matches_ci() {
+  local __prev=0 __rc=1
+  shopt -q nocasematch && __prev=1
+  shopt -s nocasematch
+  # $2 is deliberately UNQUOTED: quoted, `=~` would compare it literally.
+  [[ "$1" =~ $2 ]] && __rc=0
+  [ "$__prev" = 1 ] || shopt -u nocasematch
+  return "$__rc"
+}
+
 # ---- redaction: THE ONE EMIT BOUNDARY ----------------------------------------------
 # claude_auth_redact <text>: <text> with the persisted credential replaced, control
 # characters flattened, and the result truncated. Applied at the single place a detail is
@@ -355,7 +389,7 @@ claude_auth_verdict_into() {
   claude_auth_probe_restore_traps
   [ -z "$__op" ] || eval "$__op=\"\$(claude_auth_redact \"\$__out\")\""
 
-  if [ "$__rc" -eq 0 ] && printf '%s' "$__out" | grep -qF -- "$CLAUDE_AUTH_SENTINEL"; then
+  if [ "$__rc" -eq 0 ] && claude_auth_contains "$__out" "$CLAUDE_AUTH_SENTINEL"; then
     eval "$__ov=VERIFIED"
     eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file authenticated a cold, non-interactive 'claude -p' run against a FRESH empty config dir (rc 0 AND the sentinel returned)\""
     return 0
@@ -367,7 +401,7 @@ claude_auth_verdict_into() {
   # NETWORK-UNREACHABLE IS UNMEASURED, NOT FAILED — but the matcher is deliberately narrow
   # and the fallback is the NON-PASSING one, so a shape it does not recognise degrades to
   # FAILED (a warn either way; only the operator's next action differs).
-  if printf '%s' "$__out" | grep -qEi 'getaddrinfo|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network is unreachable|temporary failure in name resolution|connection error'; then
+  if claude_auth_matches_ci "$__out" 'getaddrinfo|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network is unreachable|temporary failure in name resolution|connection error'; then
     eval "$__od=\"the probe could not reach the API (\$(claude_auth_redact \"\$__out\")) — the credential is UNKNOWN, not ok\""
     return 0
   fi
@@ -449,7 +483,7 @@ claude_tmux_env_verdict_into() {
     # file remains) does say `no server running` (also measured). Anything else — a
     # permission denial, `lost server`, a protocol mismatch — is genuinely UNKNOWN and
     # keeps the UNMEASURED branch below: this list is affirmative, not a catch-all.
-    if printf '%s' "$__err" | grep -qiE 'no server running|error connecting to .*\(no such file or directory\)'; then
+    if claude_auth_matches_ci "$__err" 'no server running|error connecting to .*\(no such file or directory\)'; then
       # NOT A DEAD END. A freshly provisioned box has no server yet — that is the NORMAL
       # state at the moment `.agent-ami/profile.yaml` runs bootstrap with --strict — so a
       # blanket NO-SERVER red on this check's primary use case with no way out. The
@@ -759,12 +793,32 @@ claude_tmux_cold_verdict_into() {
 # explicitly removed. Both "not listed" and "listed as removed" are `absent` — a pane
 # receives nothing either way.
 claude_tmux_show_key_into() {
-  local __ov="$1" __os="$2" __text="$3" __k="$4" __line
+  local __ov="$1" __os="$2" __rest="$3" __k="$4"
+  local __line='' __nl='' __hit='' __found=0 __removed=0
+  __nl=$'\n'
   eval "$__ov="; eval "$__os=absent"
-  if printf '%s\n' "$__text" | grep -qx -- "-$__k"; then return 0; fi
-  __line=$(printf '%s\n' "$__text" | grep -m1 "^$__k=") || return 0
-  eval "$__ov=\${__line#\$__k=}"
-  eval "$__os=present"
+  # A BUILTIN LINE WALK, not `printf | grep`: `grep -x`/`grep -m1` EXIT ON THE FIRST MATCH
+  # and the producer then takes SIGPIPE, so under `pipefail` a PRESENT key read as ABSENT
+  # once the server environment passed one pipe buffer (see the matcher block above). Not a
+  # `while read` either: a piped read loop runs in a SUBSHELL and its writes are discarded.
+  # `__found` is tracked SEPARATELY from `__hit` because `KEY=` is a legitimate EMPTY
+  # assignment, and collapsing it onto "not found" would be the same two-valued read one
+  # level down; the callers reject present-but-empty themselves, with their own wording.
+  while [ -n "$__rest" ]; do
+    case "$__rest" in
+      *"$__nl"*) __line=${__rest%%"$__nl"*}; __rest=${__rest#*"$__nl"} ;;
+      *)         __line="$__rest"; __rest='' ;;
+    esac
+    if [ "$__line" = "-$__k" ]; then __removed=1; fi
+    case "$__line" in
+      "$__k"=*) if [ "$__found" = 0 ]; then __hit=${__line#"$__k"=}; __found=1; fi ;;
+    esac
+  done
+  # The whole text is scanned either way, so an explicit removal wins wherever it appears —
+  # exactly as the `grep -qx` precedence did.
+  if [ "$__removed" = 1 ]; then return 0; fi
+  if [ "$__found" = 1 ]; then eval "$__ov=\$__hit"; eval "$__os=present"; fi
+  return 0
 }
 
 # ---- the repair: seed the RUNNING server, persist NOTHING new ----------------------
