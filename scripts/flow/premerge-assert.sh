@@ -670,7 +670,28 @@ assert_covers() {
 # re-gateable — commit or discard, then re-run — so an escape hatch could only
 # buy a vacuous green, which is the shape this whole script exists to refuse.
 assert_clean_tree() {
-  local what="$1" val="$2"
+  local what="$1" val="$2" kind="$3"
+  # The REMEDY is per-artifact, because the two artifacts are re-produced by
+  # DIFFERENT runs (#3648 roborev round 1, finding 1). Telling the operator to
+  # "re-run the FULL gate" over a dirty DELTA block contradicts #1892, which
+  # mandates `--delta` — never a repeat full gate — for a test/docs-only diff on
+  # top of a full PASS. A refusal naming the wrong remedy sends a correct operator
+  # down a route doctrine forbids, which is worse than naming none.
+  #
+  # `kind` is REQUIRED and an unrecognised value REFUSES. It deliberately takes no
+  # `${3:-full}` default: a permissive default is how a new call site silently
+  # inherits the wrong remedy, and this file's whole discipline is that an
+  # unestablished value is never given the benign branch.
+  local rerun
+  case "$kind" in
+    full)  rerun="re-run the FULL gate on the clean tree and pass that summary" ;;
+    delta) rerun="re-run the --delta re-certification on the clean tree and pass that summary (the anchor's own full-gate PASS is unaffected)" ;;
+    *)
+      refuse_no_gate \
+        "INTERNAL: assert_clean_tree was called with remedy kind '$kind', which is not" \
+        "'full' or 'delta'. Refusing rather than guessing a remedy (#3648)."
+      ;;
+  esac
   if [ "$val" = no ]; then
     return 0
   fi
@@ -678,17 +699,20 @@ assert_clean_tree() {
     refuse_no_gate \
       "The $what records NO 'dirty:' value on its 'commit:' line — nothing was measured" \
       "about whether that run executed against a committed tree, so it cannot certify one." \
-      "REMEDY: re-run the FULL gate on a clean tree and pass THAT summary."
+      "REMEDY: $rerun."
   fi
   refuse_no_gate \
     "The $what records 'dirty: $val' — the gate of record must be 'dirty: no' (#3648)." \
-    "'yes' means that run certified the sha PLUS uncommitted TRACKED edits (the gate's" \
-    "capture is --exclude-standard, so this is never a gitignored log). Anything that is" \
+    "'yes' means that run certified the sha PLUS uncommitted NON-IGNORED content — both" \
+    "modified TRACKED files and UNTRACKED files the repo's ignore rules do not exclude," \
+    "since the gate's capture pairs a tracked-side diff with" \
+    "\`git ls-files --others --exclude-standard\` (so this is never a gitignored log, and it" \
+    "is not tracked-only either). Anything that is" \
     "neither 'yes' nor 'no' means the state was never established — and an unestablished" \
     "state is not a clean one. Either way the tree that was gated is not provably the tree" \
     "that will merge: commit:/tree-start: name the same sha in both cases and cannot see it." \
-    "REMEDY: commit the edits (or discard them), then re-run the FULL gate on the clean" \
-    "tree and pass that summary. There is deliberately NO opt-out: a dirty tree is always" \
+    "REMEDY: commit the edits (or discard them), then $rerun." \
+    "There is deliberately NO opt-out: a dirty tree is always" \
     "re-gateable, so an override could only buy a vacuous green."
 }
 
@@ -855,7 +879,7 @@ else
   # The delta run's OWN tree must be clean too: it is the run that covers the
   # tree being merged, so a dirty delta re-cert certifies edits that are not in
   # the PR exactly as a dirty full gate does.
-  assert_clean_tree "delta block" "$delta_dirty"
+  assert_clean_tree "delta block" "$delta_dirty" delta
 fi
 
 # `dirty:` is REPORTED **AND ENFORCED** (#3648, replacing the deferral note this
@@ -864,7 +888,7 @@ fi
 # both blocks are held to the same requirement. The evidence line below still
 # prints the value — after this call it can only ever read `dirty: no`, which is
 # the affirmative record that the check RAN.
-assert_clean_tree "full-gate block" "$full_dirty"
+assert_clean_tree "full-gate block" "$full_dirty" full
 
 # ---------------------------------------------------------------------------
 # THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)

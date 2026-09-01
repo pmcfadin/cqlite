@@ -679,6 +679,20 @@ case "$OUT" in
     ok "dirty: the refusal states there is no opt-out (a dirty tree is re-gateable)" ;;
   *) bad "dirty: the refusal must state that there is no opt-out (got: $OUT)" ;;
 esac
+# 25(b2) THE DIAGNOSTIC MUST DESCRIBE THE GATE'S ACTUAL DIRTY IDENTITY (#3648
+# roborev round 1, finding 2). It previously said "uncommitted TRACKED edits",
+# which is FALSE: agent-gate.sh pairs the tracked-side diff with
+# `git ls-files --others --exclude-standard`, so a non-ignored UNTRACKED file makes
+# the tree dirty too. An operator told "tracked" looks for a modified file, finds
+# none, and concludes the gate is broken.
+case "$OUT" in
+  *"NON-IGNORED content"*) ok "dirty: the refusal describes NON-IGNORED content, not tracked-only" ;;
+  *) bad "dirty: the refusal must not narrow the dirty identity to tracked files (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"UNTRACKED files"*) ok "dirty: the refusal names UNTRACKED files as a dirty cause" ;;
+  *) bad "dirty: the refusal must name untracked files as a dirty cause (got: $OUT)" ;;
+esac
 
 # 25(c) ABSENT `dirty:` field -> REFUSE. Never skipped, never read as clean:
 # the same discipline as a non-hex commit:/tree-start: placeholder.
@@ -1046,6 +1060,26 @@ delta_summary "$T/delta-dirty-yes.txt" "$ANCHOR" "$C7" "$C12" PASS PASS \
   "$DELTA_MODE" "(full-gate PASS commit)" yes
 refused_pair "delta block dirty: yes -> refuse (it covers the MERGED tree)" \
   "$ANCHORFULL" "$T/delta-dirty-yes.txt" "The delta block records 'dirty: yes'"
+# 33(x)(b2) THE REMEDY IS PER-ARTIFACT (#3648 roborev round 1, finding 1). A dirty
+# DELTA block must send the operator back to the `--delta` re-certification, NOT to
+# a repeat full gate: #1892 mandates `--delta` for a test/docs-only diff on top of a
+# full PASS and forbids re-running the full gate. A refusal naming the wrong remedy
+# routes a correct operator down a path doctrine forbids.
+case "$OUT" in
+  *"re-run the --delta re-certification on the clean tree"*)
+    ok "dirty (delta): the refusal names the DELTA remedy, not a repeat full gate" ;;
+  *) bad "dirty (delta): the refusal must name the --delta remedy (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"re-run the FULL gate"*)
+    bad "dirty (delta): the delta refusal must NOT tell the operator to re-run the FULL gate (got: $OUT)" ;;
+  *) ok "dirty (delta): the delta refusal does NOT misdirect to a repeat full gate" ;;
+esac
+case "$OUT" in
+  *"anchor's own full-gate PASS is unaffected"*)
+    ok "dirty (delta): the refusal states the anchor's full PASS still stands" ;;
+  *) bad "dirty (delta): the refusal should say the anchor PASS is unaffected (got: $OUT)" ;;
+esac
 
 # 33(x)(c) the ANCHOR (full) block dirty -> refuse, naming the full-gate block.
 # The delta here is the GOOD one, so the refusal cannot be the delta's.
