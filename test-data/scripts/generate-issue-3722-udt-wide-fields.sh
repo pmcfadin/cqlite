@@ -323,17 +323,66 @@ for line in sys.stdin:
 if [[ "${#OUT_DIR}" -lt 4 ]]; then
   fail "OUT_DIR '$OUT_DIR' is suspiciously short (< 4 chars). Refusing."
 fi
-case "$OUT_DIR" in
-  /) fail "Refusing to operate on '/'." ;;
-  /tmp) fail "Refusing to use '/tmp' directly. Use a subdirectory." ;;
+# ----------------------------------------------------------------------------
+# Destructive-path guard (roborev round 2 on #3722).
+#
+# This script `rm -rf`s $OUT_DIR, so the containment check must be made on the
+# RESOLVED path, never on the path as typed. A textual prefix test passes for
+# `$REPO_ROOT/../../etc` and for any symlinked component, and the delete then
+# lands wherever the path actually resolves. Fixing the string match harder is
+# the rarer-delimiter trap: resolve the path and compare the resolved value.
+#
+# Canonicalization must also work for a path that does not exist yet (the normal
+# case on a first run), which is why `realpath -m` / `readlink -f` / a python3
+# fallback are tried in that order — and why the absence of ALL THREE is a
+# FAIL, not a licence to fall back to the raw string.
+_canon() {
+  local target="$1"
+  if command -v realpath >/dev/null 2>&1 && realpath -m / >/dev/null 2>&1; then
+    realpath -m -- "$target" 2>/dev/null && return 0
+  fi
+  if command -v readlink >/dev/null 2>&1 && readlink -f / >/dev/null 2>&1; then
+    readlink -f -- "$target" 2>/dev/null && return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+OUT_DIR_RESOLVED="$(_canon "$OUT_DIR")" || fail \
+  "Cannot canonicalize OUT_DIR '$OUT_DIR': no working realpath, readlink -f or
+  python3 on this host. Refusing to run, because this script deletes that
+  directory and a textual containment check is not sound (roborev, #3722)."
+REPO_ROOT_RESOLVED="$(_canon "$REPO_ROOT")" || fail \
+  "Cannot canonicalize REPO_ROOT '$REPO_ROOT'."
+TMP_RESOLVED="$(_canon /tmp)" || fail "Cannot canonicalize /tmp."
+
+case "$OUT_DIR_RESOLVED" in
+  /) fail "Refusing to operate on '/' (OUT_DIR '$OUT_DIR' resolves there)." ;;
 esac
+if [[ "$OUT_DIR_RESOLVED" == "$REPO_ROOT_RESOLVED" ]]; then
+  fail "Refusing to operate on the repository root itself (OUT_DIR '$OUT_DIR')."
+fi
+if [[ "$OUT_DIR_RESOLVED" == "$TMP_RESOLVED" ]]; then
+  fail "Refusing to use '/tmp' directly. Use a subdirectory."
+fi
+
+# STRICTLY BENEATH an approved root, compared on the resolved values. The
+# trailing slash is what makes it "beneath" rather than "a sibling whose name
+# starts with the same characters".
 _under_repo=0
 _under_tmp=0
-[[ "$OUT_DIR" == "$REPO_ROOT/"* ]] && _under_repo=1
-[[ "$OUT_DIR" == /tmp/*          ]] && _under_tmp=1
+[[ "$OUT_DIR_RESOLVED" == "$REPO_ROOT_RESOLVED"/* ]] && _under_repo=1
+[[ "$OUT_DIR_RESOLVED" == "$TMP_RESOLVED"/*        ]] && _under_tmp=1
 if [[ "$_under_repo" -eq 0 && "$_under_tmp" -eq 0 ]]; then
-  fail "OUT_DIR '$OUT_DIR' is not under the repo root or /tmp/."
+  fail "OUT_DIR '$OUT_DIR' resolves to '$OUT_DIR_RESOLVED', which is not
+  strictly beneath the repo root ('$REPO_ROOT_RESOLVED') or '$TMP_RESOLVED'."
 fi
+
+# Every later use — including the rm -rf — uses the RESOLVED path, so the value
+# that was validated is the value that is operated on.
+OUT_DIR="$OUT_DIR_RESOLVED"
 
 log "Starting $KEYSPACE generation (issue #3722)"
 log "Output directory: $OUT_DIR"
