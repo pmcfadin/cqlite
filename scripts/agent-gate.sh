@@ -14815,6 +14815,14 @@ run_pub_surface() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_review_stage.sh (#3751), which covers scripts/flow/review-stage.sh
+# — the mechanism that makes a delegated review stage's verdict an ARTIFACT rather than an
+# absence a consumer has to guess about. It rides in THIS component rather than adding one:
+# the subject is a flow script beside claim.sh and premerge-assert.sh, whose suites already
+# live here, and a new component would change the component SET that #3544's pre-flight
+# compares against origin/main for every branch in flight. Hermetic in the same sense as its
+# neighbours: it builds synthetic `git init` repositories under mktemp -d and reads nothing
+# from the surrounding checkout.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -16458,7 +16466,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_review_stage.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -16471,6 +16479,7 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_review_stage.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
