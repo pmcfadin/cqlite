@@ -315,9 +315,9 @@
 //!
 //! (`key_is_opaque_composite` IS that fail-closed check's predicate: both guard
 //! sites — set element and map key — test it and return
-//! `composite_collection_unsupported`. Its one other consumer,
-//! `sort_elements_by_cell_path`'s raw-byte ordering arm, is DEFENSIVE only, because
-//! the guard fires first; do not read that arm as the outcome. An earlier revision
+//! `composite_collection_unsupported`. Its only other consumer (its own `Frozen`
+//! arm recurses) is `sort_elements_by_cell_path`'s raw-byte ordering arm, DEFENSIVE
+//! only because the guard fires first; do not read that arm as the outcome. An earlier revision
 //! of this header cited the predicate for "NO availability difference" — the symbol
 //! was right and the conclusion was exactly backwards.)
 //!
