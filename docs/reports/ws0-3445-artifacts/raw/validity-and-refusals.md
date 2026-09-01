@@ -55,6 +55,29 @@ changes codegen by construction, which is why AC1 names it a cross-check and the
 requires the caveat stated. It is reported, quantified against the primary route, and never
 substituted for it.
 
+## On the `lost samples` column — an AD-HOC READ, now ENFORCED (roborev r6, finding 2)
+
+Stated precisely, because the column is cited as a reason to trust these reps and the two things
+below are different claims.
+
+**How it was established for the published reps: an ad-hoc read, not a control the harness
+implemented.** During the validity audit I ran `perf report | grep 'Total Lost Samples'` over
+each rep in a shell loop. `record-scan.sh` never checked it, so for these reps the zero is a
+measurement I took rather than a property the rig guaranteed.
+
+**The claim is true, and was RE-DERIVED rather than remembered.** Re-read from the committed
+`perf.data` files while fixing the finding: **15/15 reps report `lost=0`**. `perf record` exiting
+0 does not establish this by itself — a ring-buffer overflow biases attribution silently — which
+is exactly why it needed checking rather than assuming.
+
+**It is now ENFORCED.** `record-scan.sh` extracts the count after recording, writes
+`lost-samples.txt`, and REFUSES the rep unless the value is explicitly `0`. An **unreadable**
+count is a refusal, not a zero — the same rule applied everywhere else in this rig.
+
+So: future reps get the control; the published reps have the measurement. That distinction is the
+whole content of this section, and it is the third time on this issue that a stated control had
+to be separated from a verified one.
+
 ## Co-tenancy, stated rather than assumed away
 
 This box is shared: peer lanes ran gates throughout, and loadavg across published reps spans
