@@ -403,7 +403,91 @@ fi
 # STUB_GH_ISSUE_ERR overrides the diagnostic (and forces exit 1) so a COULD-NOT-ASK can be fixtured
 # without also disabling `gh pr view`, which STUB_GH_RC would do — the deferral would then never reach
 # the retrievability leg at all and the case would pass for the wrong reason.
+# ===== `pr view --json closingIssuesReferences`: THE LINKED-ISSUE RELATION (#3759) =====
+# The misplacement probe resolves which thread to look at from the STRUCTURED GitHub relation, never
+# from the PR body. Modelled as its OWN call because the wrapper issues it as its own call: folding
+# it into `--json comments` would change the shape of the payload an AUTHORIZATION is decided from,
+# and would make the probe's data available on paths that never run it.
+#
+# `STUB_GH_LINKED_ISSUES` DEFAULTS TO EMPTY, so a case that wants a probe has to SAY so. That is the
+# fail-closed direction and it stops a case passing because the double happened to be permissive
+# about a question the wrapper asks. `STUB_GH_LINKED_JSON` passes a payload through verbatim (a
+# non-numeric entry, or garbage), and `STUB_GH_LINKED_RC` fails the call — each a distinct
+# could-not-check cause the wrapper must report separately.
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  case " $* " in
+    *closingIssuesReferences*)
+      if [ "${STUB_GH_LINKED_RC:-0}" -ne 0 ]; then
+        printf '%s\n' "${STUB_GH_LINKED_ERR:-gh: simulated closingIssuesReferences failure}" >&2
+        exit "${STUB_GH_LINKED_RC}"
+      fi
+      if [ -n "${STUB_GH_LINKED_JSON:-}" ]; then
+        printf '%s\n' "$STUB_GH_LINKED_JSON"
+        exit 0
+      fi
+      _stub_refs=""
+      for _stub_n in ${STUB_GH_LINKED_ISSUES:-}; do
+        _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n}"
+      done
+      printf '{"closingIssuesReferences":[%s]}\n' "$_stub_refs"
+      exit 0
+      ;;
+  esac
+fi
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+  # ===== `issue view <N> --json comments`: THE PROBED THREAD (#3759) =====
+  # Handled BEFORE the retrievability branch below, and driven by its OWN knobs, so a case that
+  # fixtures a disposition failure (STUB_GH_ISSUE_ERR) does not silently also break the probe read —
+  # two independent questions must be independently failable or a case measures the wrong one.
+  #
+  # The comment fixture is one multi-record string: a `\002<issue-number>` line opens a record, and
+  # the usual `\001<login>` + body lines follow, so the SAME converter produces the SAME
+  # `{"comments":[{"author":{"login":…},"body":…}]}` shape the PR call produces — which is the
+  # measured fact that licenses the wrapper reusing one scanner for both threads.
+  case " $* " in
+    *" comments"*|*",comments"*|*"comments,"*)
+      for _stub_fail in ${STUB_GH_ISSUE_COMMENTS_FAIL:-}; do
+        if [ "$_stub_fail" = "${3:-}" ]; then
+          printf '%s\n' "${STUB_GH_ISSUE_COMMENTS_ERR:-HTTP 502: Bad gateway (https://api.github.com/graphql)}" >&2
+          exit 1
+        fi
+      done
+      for _stub_garbage in ${STUB_GH_ISSUE_COMMENTS_GARBAGE:-}; do
+        if [ "$_stub_garbage" = "${3:-}" ]; then
+          printf 'not json at all\n'
+          exit 0
+        fi
+      done
+      printf '%b' "${STUB_GH_ISSUE_COMMENTS:-}" | STUB_WANT_ISSUE="${3:-}" python3 -c '
+import json, os, sys
+want = os.environ.get("STUB_WANT_ISSUE", "")
+raw = sys.stdin.read()
+current = None
+records = {}
+author = None
+body = []
+def flush():
+    if current is not None and author is not None:
+        records.setdefault(current, []).append(
+            {"author": {"login": author}, "body": "\n".join(body)})
+for line in raw.split("\n"):
+    if line.startswith("\u0002"):
+        flush()
+        current = line[1:].strip()
+        author = None
+        body = []
+    elif line.startswith("\u0001"):
+        flush()
+        author = line[1:]
+        body = []
+    elif author is not None:
+        body.append(line)
+flush()
+json.dump({"comments": records.get(want, [])}, sys.stdout)
+'
+      exit 0
+      ;;
+  esac
   if [ -n "${STUB_GH_ISSUE_ERR:-}" ]; then
     printf '%s\n' "$STUB_GH_ISSUE_ERR" >&2
     exit 1
@@ -1189,6 +1273,19 @@ export STUB_GH_RC=0
 export STUB_GH_ISSUES=''
 export STUB_GH_ISSUES_CLOSED=''
 export STUB_GH_ISSUE_ERR=''
+# #3759: the LINKED-ISSUE MISPLACEMENT PROBE knobs. STUB_GH_LINKED_ISSUES is the closingIssuesReferences
+# relation and DEFAULTS TO EMPTY — a case that wants a probe has to say so, which is the fail-closed
+# direction; STUB_GH_ISSUE_COMMENTS carries per-issue comment fixtures (\002<n> opens a record), and the
+# _FAIL/_GARBAGE/_ERR knobs make an individual thread independently unreadable so a PARTIAL read is
+# expressible. Nothing here is a seam in the wrapper: the whole `gh` binary is a substituted artifact.
+export STUB_GH_LINKED_ISSUES=''
+export STUB_GH_LINKED_JSON=''
+export STUB_GH_LINKED_RC=0
+export STUB_GH_LINKED_ERR=''
+export STUB_GH_ISSUE_COMMENTS=''
+export STUB_GH_ISSUE_COMMENTS_FAIL=''
+export STUB_GH_ISSUE_COMMENTS_GARBAGE=''
+export STUB_GH_ISSUE_COMMENTS_ERR=''
 export STUB_ON_REVIEW=''
 reset_stub() {
   STUB_JOB=4656
@@ -1216,6 +1313,14 @@ reset_stub() {
   STUB_GH_ISSUES=''
   STUB_GH_ISSUES_CLOSED=''
   STUB_GH_ISSUE_ERR=''
+  STUB_GH_LINKED_ISSUES=''
+  STUB_GH_LINKED_JSON=''
+  STUB_GH_LINKED_RC=0
+  STUB_GH_LINKED_ERR=''
+  STUB_GH_ISSUE_COMMENTS=''
+  STUB_GH_ISSUE_COMMENTS_FAIL=''
+  STUB_GH_ISSUE_COMMENTS_GARBAGE=''
+  STUB_GH_ISSUE_COMMENTS_ERR=''
   STUB_ON_REVIEW=''
 }
 
@@ -3744,7 +3849,7 @@ assert_says 'case (wv1) the NONE cause names the SHAPE requirement (job 29)' \
 assert_says 'case (wv1) and it names the contexts that do not count' \
   'a marker inside prose, a code fence, a quote or a review body is not read'
 assert_says 'case (wv1) the waiver state is reported as NONE' \
-  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
 assert_lacks 'case (wv1) and no snapshot keys are emitted' '^snapshot-'
 reset_stub
@@ -3929,7 +4034,7 @@ assert_verdict 'case (wv11)' FAIL 1
 assert_says 'case (wv11) reposting the diagnostic does not waive anything' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv11) and no waiver is found in it' \
-  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (wv11) the reposted block never grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3944,7 +4049,7 @@ STUB_GH_COMMENTS="\001pmcfadin\n> roborev-waive: prompt-content-absent base=$w_b
 run_wrapper "$w_work"
 assert_verdict 'case (wv12)' FAIL 1
 assert_says 'case (wv12) no quoted or indented copy is honoured' \
-  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (wv12) and none of them grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -4763,7 +4868,7 @@ assert_verdict 'case (df2)' FAIL 1
 assert_no_marker_form 'case (df2)'
 assert_says 'case (df2) the findings stand as PRESENT' '^findings: PRESENT \(2\)$'
 assert_says 'case (df2) the NONE cause teaches the sole-content and top-level rules' \
-  '^deferral: NONE \(no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read\)$'
+  '^deferral: NONE \(no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (df2) nothing is deferred' '^findings: DEFERRED'
 # LAYER 3 (#3312 job 23): no emitted diagnostic carries ANY part of the marker, because a summary
 # block pasted into a PR comment would otherwise authorize the next run.
