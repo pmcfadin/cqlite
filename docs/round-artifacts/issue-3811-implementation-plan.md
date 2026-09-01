@@ -58,12 +58,26 @@ reintroduced) or **not**, and the label is proved by reintroducing the defect.
 |---|---|---|---|---|
 | 1 | UDT, all fields present, exact | `[len][f1][len][f2]` | OK | control — must NOT become an error (guards against over-strictness) |
 | 2 | UDT, trailing garbage | case 1 `|| 0xAA` | **corruption** | `TupleType.split` `position < length` ⇒ "but got more" |
-| 3 | UDT, partial 1-byte prefix | case 1 `|| 0x00` | **corruption** | `position + 4 > length` ⇒ "Not enough bytes" — NOT an omitted field |
-| 4 | UDT, partial 3-byte prefix | case 1 `|| 0x00 00 00` | **corruption** | same rule, the boundary case |
+| 3 | UDT, partial 1-byte prefix | **case 5** `|| 0x00` | **corruption** | `position + 4 > length` ⇒ "Not enough bytes" — NOT an omitted field |
+| 4 | UDT, partial 3-byte prefix | **case 5** `|| 0x00 00 00` | **corruption** | same rule, the boundary case |
 | 5 | UDT, legally short (trailing field omitted) | `[len][f1]` only | **OK, f2 = null** | `position == length` ⇒ legal short return. This is the case a naive "all fields present" check would BREAK |
+| 3b | UDT, exact `|| 0x00` (supplementary) | case 1 `|| 0x00` | **corruption** | rule 3, NOT rule 2 — see the correction below |
 | 6 | UDT, declared field length overruns | `[len=99][2 bytes]` | **corruption** | `position + size > length` |
 | 7 | AC4 collapse: cases 1 vs 2 | — | **distinct outcomes** | two distinct serialized inputs must not yield one `Value` |
 | 8 | AC4 collapse: cases 1 vs 3 | — | **distinct outcomes** | the partial-prefix half of the same property |
+
+**CORRECTION (this draft was WRONG, fixed after the demonstration run).** Rows 3
+and 4 originally hung the stray bytes off case 1. Under `TupleType.split` that does
+not reach the partial-prefix rule at all: with every declared field present the
+component loop is already exhausted when the stray byte is reached, so rule 2 is
+never evaluated and the verdict is rule 3 — the SAME rule as case 2. Two tests of
+one rule, labelled as two rules, is precisely the "test whose claim exceeds what it
+exercises" AC6 forbids. Rule 2 is reachable ONLY when a declared field is still to be
+read, i.e. from the LEGALLY SHORT encoding plus 1-3 stray bytes. Hence rows 3/4 now
+hang off **case 5**, which is also the only reading under which "cases 3 and 4 are one
+byte apart" is true (11 B vs 12 B; case 1 || 0x00 is 19 B, eight bytes away). The
+original spelling is retained as supplementary row 3b so its collapse is on record.
+Demonstrated, not argued: `issue-3811-defect-demonstration.md`.
 
 Cases 3, 4 and 5 are one byte apart and are the whole point: 5 must stay legal
 while 3 and 4 become errors. A test suite containing 2 but not 3/4/5 would pass
