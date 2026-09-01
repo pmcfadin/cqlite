@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=134
+CASE_FLOOR=164
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -925,6 +925,250 @@ if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed NOT-O
   ok "requested and observed admission values are printed side by side"
 else
   bad "the admission line did not print requested and observed separately"
+fi
+
+echo
+echo "-- nothing non-finite may reach a verdict rule --"
+
+poison() { # <dir> <arm> <replicate> <field> <python-literal>
+  python3 - "$1/$2-r$(printf '%02d' "$3").jsonl" "$4" "$5" <<'PYINNER'
+import json
+import sys
+
+path, field, literal = sys.argv[1], sys.argv[2], sys.argv[3]
+value = {"inf": float("inf"), "-inf": float("-inf"), "nan": float("nan")}.get(literal)
+if value is None:
+    value = float(literal)
+with open(path, encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+# Preserve the field's JSON type: poisoning an integer field with a float would
+# trip the shape check instead of the property under test.
+existing = records[0].get(field)
+if isinstance(existing, int) and not isinstance(existing, bool) and value == value \
+        and value not in (float("inf"), float("-inf")):
+    value = int(value)
+records[0][field] = value
+with open(path, "w", encoding="utf-8") as handle:
+    for record in records:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+}
+
+for poison_value in inf nan; do
+  mkfixture "$TMP/nf-$poison_value" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+  poison "$TMP/nf-$poison_value" head 3 rows_per_s "$poison_value"
+  run_analyzer "$TMP/nf-$poison_value"
+  check_verdict "a rows_per_s of $poison_value" UNMEASURED 7 single-stream
+  check_cause "rows_per_s of $poison_value" run-non-finite
+done
+
+# `inf > 0` is TRUE, which is how this used to reach the rule. Pin the predicate
+# itself, since it is the one line the whole guard rests on.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_stats as S
+
+bad = [float("inf"), float("-inf"), float("nan"), 0.0, -1.0]
+good = [1e-300, 1.0, 1e300]
+raise SystemExit(
+    0 if all(not S.is_usable_ratio(v) for v in bad)
+    and all(S.is_usable_ratio(v) for v in good) else 1
+)
+PYINNER
+then
+  ok "is_usable_ratio rejects inf, -inf, NaN, zero and negative, and accepts finite positives"
+else
+  bad "is_usable_ratio does not gate the values that reach the verdict rule"
+fi
+
+# A ratio can be non-finite from two FINITE, internally consistent operands.
+mkfixture "$TMP/nf-ratio" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/nf-ratio" <<'PYINNER'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+# Both records stay finite AND internally consistent (rows_per_s x duration_s ==
+# rows_total, duration inside the declared band), yet head/base overflows.
+for name, rate, duration, rows in (
+    ("base-r01.jsonl", 1.0 / 240.0, 240.0, 1),
+    ("head-r01.jsonl", 2.9e306, 60.0, int(2.9e306 * 60.0)),
+):
+    path = os.path.join(root, name)
+    with open(path, encoding="utf-8") as handle:
+        record = json.loads(handle.read())
+    record["rows_per_s"] = rate
+    record["duration_s"] = duration
+    record["rows_total"] = rows
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/nf-ratio"
+check_verdict "a ratio that overflows from two finite operands" UNMEASURED 7 single-stream
+check_cause "an overflowing ratio" ratio-non-finite
+
+echo
+echo "-- an n=3 bootstrap is the observed RANGE, not an interval --"
+
+# At n=3 the all-minimum resample has probability 1/27 = 3.7%, which exceeds the
+# 2.5% tail, so the bounds ARE (min, max). The refusal is an affirmative
+# measurement of that -- it compares the interval the bootstrap actually
+# returned -- so it keeps working if someone changes n, the tail or the floor.
+mkfixture "$TMP/degen3" 3 "100000:116000,100000:118000,100000:120000"
+run_analyzer "$TMP/degen3" --min-pairs 3
+check_verdict "three pairs, where the bootstrap contributes nothing" UNMEASURED 7 single-stream
+check_cause "an n=3 bootstrap" bootstrap-degenerate
+
+# Identical ratios are degenerate at ANY n: a zero-width interval lands inside
+# whatever band contains the point.
+mkfixture "$TMP/degen-flat" 6 "100000:117000,100000:117000,100000:117000,100000:117000,100000:117000,100000:117000"
+run_analyzer "$TMP/degen-flat"
+check_verdict "six identical pairs, giving a zero-width interval" UNMEASURED 7 single-stream
+check_cause "a zero-width interval" bootstrap-degenerate
+
+# The floor moved to 5, so the old default of 3 is now refused before any
+# statistics are computed.
+mkfixture "$TMP/four" 4 "100000:117000,100000:117000,100000:118000,100000:118000"
+run_analyzer "$TMP/four"
+check_verdict "four pairs against the new floor of five" UNMEASURED 7 single-stream
+check_cause "four pairs" insufficient-pairs
+
+# ...and five NON-identical pairs is a real interval again.
+mkfixture "$TMP/five" 5 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000"
+run_analyzer "$TMP/five"
+check_verdict "five distinct pairs" MEETS-TARGET 0 single-stream
+
+echo
+echo "-- declared versus observed, applied to the step records themselves --"
+
+mkfixture "$TMP/rec" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+poison "$TMP/rec" head 2 target_concurrency 32
+run_analyzer "$TMP/rec"
+check_verdict "a record whose concurrency is not the declared one" UNMEASURED 7 single-stream
+check_cause "a concurrency the manifest does not declare" ramp-order-mismatch
+
+mkfixture "$TMP/rec2" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+poison "$TMP/rec2" base 4 duration_s 1.5
+run_analyzer "$TMP/rec2"
+check_verdict "a 1.5-second record under a declared 60-second step" UNMEASURED 7 single-stream
+check_cause "a step duration nothing like the declared one" step-duration-mismatch
+
+mkfixture "$TMP/rec3" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+poison "$TMP/rec3" head 5 rows_total 12
+run_analyzer "$TMP/rec3"
+check_verdict "a record whose rows_total contradicts its own rate" UNMEASURED 7 single-stream
+check_cause "an internally inconsistent record" record-internally-inconsistent
+
+mkfixture "$TMP/rec4" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/rec4/head-r02.jsonl" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["round"] = "base-r02"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/rec4"
+check_verdict "a file filed under the arm its own round label denies" UNMEASURED 7 single-stream
+check_cause "a mislabelled replicate file" round-label-mismatch
+
+echo
+echo "-- nothing escapes as an unanchored traceback --"
+
+# Each of these used to raise out of run_section: exit 1, an unprefixed
+# traceback, and a section with NO verdict line -- worse than a wrong verdict,
+# because nothing downstream can even detect it.
+mkfixture "$TMP/tb1" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/tb1/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["arms"]["base"] = "commit cfa93fe99^"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tb1"
+check_verdict "an arms entry that is a string, not an object" UNMEASURED 7 single-stream
+check_cause "a string where an object was expected" manifest-field
+
+mkfixture "$TMP/tb2" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/tb2/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+# "²".isdigit() is True and int() of it raises -- a manifest field that used
+# to escape as a traceback.
+manifest["workload"]["ramp"] = "1,²"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tb2"
+check_verdict "a ramp containing a superscript two" UNMEASURED 7 single-stream
+check_cause "a non-ASCII digit in the ramp" manifest-field
+
+mkfixture "$TMP/tb3" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/tb3/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest["workload"]["step_duration"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tb3"
+check_verdict "a manifest with no declared step duration" UNMEASURED 7 single-stream
+check_cause "an absent step duration" manifest-field
+
+echo
+echo "-- partial admission observation is not agreement --"
+
+mkfixture "$TMP/adm-partial" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/adm-partial/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_observed"] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/adm-partial"
+check_verdict "half the runs observed, half not" MEETS-TARGET 0 single-stream
+if grep -q 'corroboration partial (6 of 12 runs)' "$TMP/out.txt"; then
+  ok "the admission line counts which runs actually corroborated the ceiling"
+else
+  bad "partial admission observation was not counted"
+fi
+if grep -q 'PARTIAL OBSERVATION IS NOT AGREEMENT' "$TMP/out.txt"; then
+  ok "partial observation is disclosed rather than reduced to the observed value"
+else
+  bad "partial observation was silently upgraded to agreement"
+fi
+run_analyzer "$TMP/five"
+if grep -q 'corroboration agreed (10 of 10 runs)' "$TMP/out.txt" \
+   && ! grep -q '^AB-3649: verdict-detail single-stream ADMISSION ' "$TMP/out.txt"; then
+  ok "full corroboration is stated as such and carries no caveat"
+else
+  bad "a fully corroborated ceiling was not reported as agreed"
 fi
 
 echo
