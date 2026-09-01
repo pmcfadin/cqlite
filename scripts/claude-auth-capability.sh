@@ -1015,12 +1015,14 @@ CLAUDE_AUTH_PROBE_DIR=''
 CLAUDE_AUTH_PROBE_FILE=''
 CLAUDE_AUTH_PROBE_PREV_TRAPS=''
 
-# THE PROBE LIFECYCLE HELPERS ARE SHARED BY BOTH PROBES — the `--auth` one (which registers
-# only a throwaway CLAUDE_CONFIG_DIR) and the cold-start tmux one (a directory AND a server
-# socket). They were named `..._cold_probe_...` when only the second existed; a name that
-# says "cold" while the auth path also depends on it is a comment that lies in the symbol
-# table. Cleanup is keyed on what is REGISTERED, so the socket half is simply skipped when
-# no socket was armed.
+# THE PROBE LIFECYCLE HELPERS NOW HAVE THREE REGISTRANTS, NOT TWO, AND ONE OF THEM IS NOT A
+# PROBE — the `--auth` probe (a throwaway CLAUDE_CONFIG_DIR), the cold-start tmux probe (a
+# working directory AND a server socket), and the LIVE READ's stderr temp file, which joined
+# when bounding that read widened its own leak window from microseconds to seconds. They were
+# named `..._cold_probe_...` when only the cold one existed; a name that says "cold" while
+# two other paths depend on it is a comment that lies in the symbol table, and "BOTH probes"
+# was the same defect one revision later. Cleanup is keyed on what is REGISTERED, so each
+# half is simply skipped when nothing was armed for it.
 claude_auth_probe_cleanup() {
   if [ -n "$CLAUDE_AUTH_PROBE_SOCKET" ]; then
     # rc is deliberately ignored: tmux `exit-empty` means the server may already be gone,
@@ -1135,8 +1137,10 @@ claude_tmux_cold_probe_into() {
   CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
   claude_auth_probe_arm_traps
 
-  # The pane script reports DELIVERY, never the value: set/unset, a LENGTH, and the config
-  # directory (a path, not a secret). Nothing it writes carries the credential.
+  # The pane script reports DELIVERY, never the value: set/unset, a LENGTH, a SALTED DIGEST
+  # and the config directory (a path, not a secret). Nothing it writes carries the
+  # credential — the digest is salted per run, so it identifies the delivered value only by
+  # comparison against a digest of the persisted one taken with the SAME salt.
   cat >"$__dir/probe.sh" <<'CLAUDE_AUTH_PROBE'
 #!/bin/sh
 t="${CLAUDE_CODE_OAUTH_TOKEN-}"
