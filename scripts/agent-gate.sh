@@ -10651,6 +10651,20 @@ EOF
 # full suite adds ~15–35s on top of it — 504 passing tests across 27/27 suites, green
 # on two consecutive runs. That is not a cost worth 26 suites of blindness.
 #
+# THE COUNTS IN THE TWO PARAGRAPHS ABOVE ARE DATED MEASUREMENTS AND ARE KEPT ON PURPOSE
+# (issue #3772, which removed the stale ones elsewhere in this file). The line #3772
+# draws, so that a later reader does not "finish the job" by deleting these too:
+#   * a claim about WHAT IS TRUE NOW ("the list is N files", "they agree at N today")
+#     decays the moment a test file is added, so it is never written down -- every such
+#     claim in this component is DERIVED at run time instead;
+#   * a claim about WHAT WAS MEASURED THEN, attributed to the change that measured it
+#     (#1255 narrowed to 1 of 27; #3522 measured 504 passing tests across 27/27 and
+#     ~15-35s), is a dated record of a past state. It stays true however the suite
+#     grows, exactly like the measurement in a commit message, and deleting it would
+#     destroy the evidence for a decision rather than refresh it.
+# If you are unsure which kind you are writing: if adding one test file would make the
+# sentence false, it is the first kind -- derive it or drop it.
+#
 # THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
 # COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
 # dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
@@ -10860,9 +10874,11 @@ run_node_bindings() {
   # WHY TWO, AND WHY ONE WAS NOT ENOUGH (roborev round 3, D1). `jest --listTests` is the
   # right oracle for the ACTUAL set — it applies this package's `testMatch`
   # (`**/__test__/**/*.test.js`, RECURSIVE) and jest's ignore patterns, which a
-  # `find -maxdepth 1` cannot reproduce (it agrees at 27 today and would silently
-  # UNDERCOUNT the day a subdirectory appears, false-redding healthy code). That argument
-  # stands and is why the find below is RECURSIVE and is NOT used to select what runs.
+  # `find -maxdepth 1` cannot reproduce: it agrees with jest's list for as long as
+  # __test__/ stays flat, and would silently UNDERCOUNT the day a subdirectory appears,
+  # false-redding healthy code. That argument stands and is why the find below is
+  # RECURSIVE and is NOT used to select what runs. (No count stated -- #3772: a
+  # "they agree at N today" is a claim about TODAY, and this one had gone stale.)
   #
   # But using it as the EXPECTED count too made the guard SELF-REFERENTIAL: the expectation
   # and the run both flow from jest's configuration, so a `testMatch` narrowing or an added
@@ -11211,8 +11227,9 @@ run_node_bindings() {
       cd "'"$REPO_ROOT"'/bindings/node"
       npm test -- --json --outputFile="$CQLITE_JEST_JSON"' >>"$log" 2>&1; then
     # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
-    # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
-    # assertions from 27 suites of nothing.
+    # was skipped as PASSED, so the exit code alone cannot distinguish a full suite of
+    # assertions from the same number of suites containing nothing. (The argument never
+    # needed a count and no longer states one -- #3772.)
     # BOTH halves are required and neither implies the other (roborev round 5, F1):
     # check_jest_suites_ran judges the FILE SET and the aggregate counts;
     # check_jest_per_suite_passed judges whether EACH reconciled suite did any work. A suite
