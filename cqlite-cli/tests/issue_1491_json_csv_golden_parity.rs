@@ -729,12 +729,23 @@ const CASES: &[Case] = &[
             // are separate cells whose key is the cell PATH, which
             // `cassandra-5.0.8 JsonTransformer.serializeCell` writes with
             // `writeString(getString(...))`. The golden therefore carries
-            // `TupleType.getString`'s colon-joined text (`"charlie\:3:8"`) while the
-            // CLI renders the key's raw bytes as a blob literal
-            // (`0x000000130000...`) — NEITHER side decodes it, so there is no
-            // container to pair. A value disagreement, and the CQLite half of it (a
-            // real `SELECT` returns the decoded tuple) is a read-fidelity defect
-            // separable from this lane.
+            // `TupleType.getString`'s colon-joined text (`"charlie\:3:8"`).
+            //
+            // WHAT THE EGRESS DOES CHANGED UNDER THIS BRANCH, and the skip below moved
+            // with it. Until #3612 the CLI rendered the key's raw bytes as a blob
+            // literal (`0x000000130000…`), so NEITHER side decoded it and the two
+            // disagreed by a divergence of their own. `8c503f7cf` (#3612 / PR #3736)
+            // taught cqlite-core to decode a multicell composite cell path
+            // STRUCTURALLY, so the CLI now emits `[{label: charlie, rank: 3}, 8]` —
+            // measured after rebasing onto it, not assumed.
+            //
+            // That left the earlier declaration describing something that no longer
+            // happens, and `Report::stale_skips` FAILED the lane over it rather than
+            // let it stand: the self-retirement this scaffold was accepted for, firing
+            // on its own. What remains is the GOLDEN's non-decode alone, which is
+            // exactly `NestedFrozenValueLeftUndecodedByGolden` — the divergence the
+            // five sibling columns above already declare — so this column is no longer
+            // a special case, and the residual is the lane's rather than this change's.
             Skip {
                 path: "m_tuple_udt",
                 formats: BOTH,

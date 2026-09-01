@@ -659,9 +659,21 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
         )
     };
 
+    // A WELL-FORMED decode of the declared element type. This used to pass
+    // `[{"label": "alpha"}]` against `set<text>` — an OBJECT inside a text set, which is
+    // not a decode of that type at all and was only ever a stand-in for "some array".
+    // Since roborev job 32 the matcher canonicalizes the egress side under the declared
+    // type, so the stand-in no longer qualifies — correctly: a malformed decode is not
+    // "the golden left it undecoded WHILE THE EGRESS DECODED IT". Replaced with the shape
+    // the real `s_set_udt` column actually produces.
     assert!(
-        ask(&json!([{"label": "alpha"}]), &inner_set),
+        ask(&json!(["alpha"]), &inner_set),
         "an undecoded golden scalar against a DECODED CLI array is the declared gap"
+    );
+    assert!(
+        !ask(&json!([{"label": "alpha"}]), &inner_set),
+        "…but an array whose MEMBERS do not decode to the declared element type is a \
+         malformed decode, not this gap (roborev job 32)"
     );
     for not_an_array in [
         json!({"label": "alpha"}),

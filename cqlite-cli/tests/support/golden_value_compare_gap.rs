@@ -405,7 +405,24 @@ impl Divergence {
                 // array (`super::compare_map` reads a map as an array of
                 // `{key,value}` objects), so an object, a scalar, a null or a number
                 // here is NOT this gap and is reported as an ordinary diff.
-                matches!(cli, Value::Array(_))
+                //
+                // AND THE ARRAY MUST BE A WELL-FORMED VALUE OF THE DECLARED TYPE
+                // (roborev job 32). `Value::Array(_)` alone accepts a tuple of the wrong
+                // ARITY, or a nested UDT with a field the `CREATE TYPE` does not declare
+                // — so a MALFORMED decode was suppressed alongside the golden's
+                // non-decode, which is strictly more than this gap says it covers: "the
+                // golden leaves it undecoded WHILE THE EGRESS DECODES IT" presumes the
+                // egress produced something the DDL describes.
+                //
+                // Asked by CANONICALIZING the egress side under the declared type, which
+                // is DELEGATION rather than the shape ladder #3500 abandoned: `canon_typed`
+                // IS the lane's structural check — arity, declared fields, field order —
+                // so this reimplements none of it. A CLI value that does not canonicalize
+                // is not a decode of this type at all, and is reported.
+                if !matches!(cli, Value::Array(_)) {
+                    return false;
+                }
+                super::canon_typed(cli, egress, ty, depth, Kinding::Natural, Side::Cli).is_ok()
             }
             Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex => {
                 // ASKED AT THE KEY NODE, NOT AT THE COLUMN (roborev job 28).
