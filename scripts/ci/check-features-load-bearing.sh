@@ -47,16 +47,18 @@
 #       gates no compilation. `all()`/`any()`/`not()` need no special handling: they
 #       are inside the head's own balanced span.
 #
-#       THE BUILD-SCRIPT ROUTE is an env read through a genuine API, in three
-#       ANCHORED spellings: a full `std::env::var` / `core::env::var` path (leading
-#       `::` allowed, but NOT `my_std::env::var`); a bare `env::var` ONLY when the file
-#       proves the MODULE binding (`use std::env;`, braced lists included, and NOT
-#       `my_env::var`); and a bare `var`/`var_os` ONLY when the file proves the
-#       FUNCTION binding (`use std::env::var`). `env` and `var` are ordinary
-#       identifiers — an unanchored match accepted a LOCAL `mod env` and even the
-#       `env::var` suffix of `my_env::var(...)`, each crediting a dead feature.
-#       `option_env!` is not accepted: cargo documents these variables for build-script
-#       EXECUTION, and claiming a compile-time read would assert something unverified.
+#       THE BUILD-SCRIPT ROUTE is deliberately MAXIMAL, and this is where the contract
+#       shows its teeth. Recognising an env READ was narrowed three times (an anchored
+#       API path, a proven module binding, a proven function binding) and review found
+#       another spelling each time — a constant argument, `env::vars()` iteration, an
+#       aliased `use std::env::var as get_var`, a local wrapper — every one of which
+#       reported a LIVE feature DEAD. So: in a package that HAS a build script, a
+#       feature is credited when `CARGO_FEATURE_<NAME>` appears IN ANY FORM ANYWHERE in
+#       that package's `.rs` sources, comments and strings included. A BARE
+#       `CARGO_FEATURE_` prefix (environment iteration names no individual feature)
+#       credits EVERY feature of that package. A package with NO build script gets no
+#       env credit at all — cargo sets these variables for a build script's execution,
+#       so without one there is nothing to read them.
 #   E2  OPTIONAL DEPENDENCY — G's dep list enables an optional dependency (`dep:x`).
 #       The "bare optional-dep name" spelling (`wasm = ["wasm-bindgen", ...]`) is
 #       covered by the closure, because cargo SYNTHESISES an implicit feature per
@@ -176,14 +178,15 @@
 #   * ORPHAN `.rs` files under a target's source directory — one no `mod` chain reaches
 #     from the target root is scanned as if compiled, so a cfg gate in dead code credits
 #     its feature. Deciding it means resolving the module graph.
-#   * PACKAGE-WIDE build-script env scanning — a member with a build script has EVERY
-#     `.rs` file in its package directory scanned for `CARGO_FEATURE_*`, because a build
-#     script reaches helper modules through `mod`, `#[path]` and `include!`. Missing such
-#     a read would report a live feature dead, which the contract forbids.
-#   * FILE-WIDE env-import detection — a `use std::env;` anywhere in a file lets a bare
-#     `env::var("CARGO_FEATURE_X")` elsewhere in that file credit a feature, even when
-#     the call actually resolves to a local module of that name. Scope-aware name
-#     resolution is out of bounds.
+#   * ANY TEXTUAL `CARGO_FEATURE_*` MENTION in a build-script package's sources credits
+#     that feature — no API, module or scope analysis, comments and strings included —
+#     and a bare `CARGO_FEATURE_` prefix credits every feature of that package. Three
+#     narrower rules each reported a live feature dead (see E1); this one cannot.
+#   * A `.rs` FILE WITH NO UNAMBIGUOUS OWNER credits EVERY candidate package — every
+#     member whose package directory contains it — and a file beneath a NESTED member's
+#     directory credits the OUTER member too. A module included from outside any target
+#     root (`#[path = "../gated.rs"]`, `include!`) is reachable by a target this scan
+#     cannot trace, and subtracting an owner reported a feature used only there as dead.
 #   * INDIRECTLY redundant dependency-feature edges — `dep/x` where the declaration
 #     enables some feature that itself enables `x`. Deciding it needs the dependency's
 #     own feature table, which `--no-deps` does not carry for external crates.
@@ -357,10 +360,12 @@ CONTRACT_LINE = (
     "CONTRACT: SOUND-BY-DESIGN (every ambiguity resolves toward CREDITING, so a live "
     "feature is not reported dead) and INCOMPLETE (a dead feature can escape). Escape "
     "routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target source "
-    "dir; package-wide (not module-graph) build-script env scanning; file-wide (not "
-    "scope-aware) env-import detection; indirectly redundant dependency edges. One "
-    "soundness LIMIT, not an escape route: a cfg whose feature name is produced by MACRO "
-    "EXPANSION is not seen at all."
+    "dir; any textual CARGO_FEATURE_* mention in a build-script package's sources (no "
+    "API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every feature of "
+    "that package); a .rs file with no unambiguous owner credits EVERY candidate package, "
+    "and one under a nested member's dir credits the outer member too; indirectly "
+    "redundant dependency edges. One soundness LIMIT, not an escape route: a cfg whose "
+    "feature name is produced by MACRO EXPANSION is not seen at all."
 )
 
 STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
@@ -574,98 +579,33 @@ def cfg_feature_sites(code, strings):
 
 
 # ---------------------------------------------------------------------------
-# BUILD-SCRIPT ENV READS (job 52 finding 3).
+# BUILD-SCRIPT `CARGO_FEATURE_*` — A TEXTUAL FAMILY SCAN, DELIBERATELY MAXIMAL
+# (roborev job 58, finding 1).
 #
-# cargo sets CARGO_FEATURE_<NAME> in a build script's environment, so reading one IS a
-# cfg-equivalent effect — but only in a BUILD SCRIPT, and only through a genuine
-# environment API. A bare `var("CARGO_FEATURE_X")` is not one: `var` is an ordinary
-# identifier, and an unrelated local function of that name would otherwise credit a
-# dead feature. So `var`/`var_os` unqualified is accepted ONLY when the file proves the
-# import (`use std::env::var`, including a braced list). `option_env!` is deliberately
-# NOT accepted: cargo documents these variables for build-script EXECUTION, and
-# claiming a compile-time read would be asserting something unverified.
-# ---------------------------------------------------------------------------
-# THREE spellings, each ANCHORED (roborev job 55, finding 2). An unanchored
-# `env::var(` accepted a LOCAL `mod env` — an ordinary module of that name reading
-# nothing from the process environment — and, having no left anchor at all, it also
-# matched the `env::var` SUFFIX of `my_env::var(...)`. Both credited a dead feature.
+# cargo sets `CARGO_FEATURE_<NAME>` in a build script's environment, so reading one is a
+# cfg-equivalent effect. Recognising the READ is where three rounds of review kept
+# finding holes: a constant argument, `std::env::vars()` iteration, an aliased import
+# (`use std::env::var as get_var`), a local wrapper, a helper module. Every miss reports
+# a LIVE feature dead, which the CONTRACT forbids — and every fix was another spelling.
 #
-#   ENV_ABS_RE  — a full `std::env::var` / `core::env::var` path (a leading `::` is
-#                 allowed), anchored so `my_std::env::var` and `crate::std::env::var`
-#                 do NOT match.
-#   ENV_MOD_RE  — a bare `env::var`, accepted ONLY when the file proves the module
-#                 binding (`use std::env;`, including a braced `use std::{env, fs};`),
-#                 and anchored so `my_env::var` does not match.
-#   ENV_FN_RE   — a bare `var`/`var_os`, accepted ONLY when the file proves the
-#                 function binding (`use std::env::var`, braced lists included).
-PATH_SEG = r'(?<![A-Za-z0-9_:])(?:::)?'
-ENV_ABS_RE = re.compile(PATH_SEG + r'(?:std|core)' + WS + r'::' + WS + r'env' + WS + r'::' + WS + r'(?P<fn>var_os|var)' + WS + r'\(' + WS)
-ENV_MOD_RE = re.compile(r'(?<![A-Za-z0-9_:])env' + WS + r'::' + WS + r'(?P<fn>var_os|var)' + WS + r'\(' + WS)
-ENV_FN_RE = re.compile(r'(?<![A-Za-z0-9_:])(?P<fn>var_os|var)' + WS + r'\(' + WS)
-USE_ENV_FN_RE = re.compile(r'(?<![A-Za-z0-9_])use[ \t\r\n]+(?:::)?(?:std|core)' + WS + r'::' + WS + r'env' + WS + r'::' + WS + r'(?P<tail>\{[^}]*\}|var_os|var)')
-USE_ENV_MOD_RE = re.compile(r'(?<![A-Za-z0-9_])use[ \t\r\n]+(?:::)?(?:std|core)' + WS + r'::' + WS + r'(?P<tail>env' + WS + r'[;,}]|\{[^}]*\})')
-CARGO_FEATURE_RE = re.compile(r'^CARGO_FEATURE_([A-Z0-9_]+)$')
+# So the class is closed rather than narrowed: in a package that HAS a build script, a
+# feature is credited if `CARGO_FEATURE_<NAME>` appears IN ANY FORM, ANYWHERE in that
+# package's `.rs` sources — comments and strings included, no API, module or scope
+# analysis. Over-crediting can only let a dead feature escape, which the contract
+# permits and the contract line declares.
+#
+# THE BARE PREFIX counts too, and for the same reason: code that iterates the
+# environment (`k.starts_with("CARGO_FEATURE_")`) names no individual feature, so there
+# is nothing to match. A `CARGO_FEATURE_` with no `[A-Z0-9_]` name after it therefore
+# credits EVERY feature of that package — the only reading that cannot report a live
+# feature dead.
+CARGO_FEATURE_MENTION_RE = re.compile(r'CARGO_FEATURE_([A-Z0-9_]*)')
 
 
-def imported_env_fns(code):
-    """The `std::env` function names this file has imported by name."""
-    names = set()
-    for m in USE_ENV_FN_RE.finditer(code):
-        tail = m.group("tail")
-        if tail.startswith("{"):
-            for part in tail[1:-1].split(","):
-                part = part.strip()
-                if part in ("var", "var_os"):
-                    names.add(part)
-        else:
-            names.add(tail)
-    return names
-
-
-def imports_env_module(code):
-    """True when this file binds the `std::env` MODULE (so a bare `env::var` is std's)."""
-    for m in USE_ENV_MOD_RE.finditer(code):
-        tail = m.group("tail").strip()
-        if tail.startswith("{"):
-            for part in tail[1:-1].split(","):
-                if part.strip() == "env":
-                    return True
-        else:
-            return True
-    return False
-
-
-def build_script_env_features(code, strings):
-    """Yield (CARGO_FEATURE_<X> suffix, offset) for every genuine env read."""
-    imported_fns = imported_env_fns(code)
-    mod_bound = imports_env_module(code)
-    seen = set()
-
-    def emit(m):
-        name = strings.get(m.end())
-        if not name:
-            return None
-        hit = CARGO_FEATURE_RE.match(name)
-        if not hit or m.start() in seen:
-            return None
-        seen.add(m.start())
-        return hit.group(1), m.start()
-
-    for m in ENV_ABS_RE.finditer(code):
-        got = emit(m)
-        if got:
-            yield got
-    if mod_bound:
-        for m in ENV_MOD_RE.finditer(code):
-            got = emit(m)
-            if got:
-                yield got
-    for m in ENV_FN_RE.finditer(code):
-        if m.group("fn") not in imported_fns:
-            continue
-        got = emit(m)
-        if got:
-            yield got
+def build_script_feature_mentions(raw_text):
+    """Yield (suffix, offset) for every CARGO_FEATURE_* mention; '' means the bare prefix."""
+    for m in CARGO_FEATURE_MENTION_RE.finditer(raw_text):
+        yield m.group(1), m.start()
 
 
 def cargo_feature_env_name(feature):
@@ -809,8 +749,12 @@ def edge_is_redundant(info, dep_feature):
 #    that would hand a package the whole of its own directory again, nested members and
 #    all, so a build script is registered as an exact file only.
 #
-#    Nested-member exclusion: a file inside a DEEPER member's package directory is not
-#    the shallower member's source, unless it is literally one of its target files.
+#    NOTHING IS SUBTRACTED (roborev job 58): the nested-member exclusion that used to
+#    live here dropped the OUTER owner of a file beneath a nested member's directory, and
+#    an outer target can reach such a file through `#[path]`, `include!` or a shared
+#    helper — so a feature used only there was reported dead. A file no target tree
+#    covers falls back to every member whose package DIRECTORY contains it, which is what
+#    covers a module included from outside any target root.
 # ---------------------------------------------------------------------------
 TREELESS_KINDS = {"custom-build"}
 exact_owners = {}
@@ -840,14 +784,6 @@ for name, rec in members.items():
         tree_owners.append((os.path.dirname(sp), name))
 
 tree_owners.sort(key=lambda t: len(t[0]), reverse=True)
-member_dirs = sorted(((rec["dir"], name) for name, rec in members.items()), key=lambda t: len(t[0]), reverse=True)
-
-
-def deepest_member_dir(path):
-    for pkg_dir, name in member_dirs:
-        if path == pkg_dir or path.startswith(pkg_dir + os.sep):
-            return pkg_dir, name
-    return None, None
 
 
 def buildscript_owners_of(path):
@@ -862,16 +798,40 @@ def buildscript_owners_of(path):
     return out
 
 
+def containment_candidates(path):
+    """Members whose PACKAGE DIRECTORY contains this file."""
+    return {name for name, rec in members.items()
+            if path == rec["dir"] or path.startswith(rec["dir"] + os.sep)}
+
+
 def owners_of(path):
+    """Every candidate owner — AMBIGUITY RESOLVES TOWARD CREDITING (roborev job 58, F2).
+
+    Three layers, and none of them SUBTRACTS:
+
+      * the exact `src_path` of a target — unambiguous;
+      * any target's source TREE that contains the file. The nested-member exclusion
+        that used to sit here was REMOVED: a module beneath a nested member's package
+        directory can still be reached by an OUTER target (`#[path]`, `include!`, a
+        shared helper), and dropping the outer owner reported a feature used only there
+        as DEAD. A file two targets can reach genuinely references both packages'
+        features, so it credits BOTH;
+      * failing both, every member whose PACKAGE DIRECTORY contains the file. That is
+        what covers a module included from OUTSIDE any target root
+        (`#[path = "../gated.rs"]`, `include!`), which no tree covers and which
+        therefore had no owner at all — again a live feature reported dead.
+
+    Only a file under no member's directory has no owner, and then there is nothing it
+    could possibly be compiled into.
+    """
     owners = set(exact_owners.get(path, ()))
-    deep_dir, _deep_name = deepest_member_dir(path)
     for tree_dir, name in tree_owners:
         if name in owners:
             continue
         if path == tree_dir or path.startswith(tree_dir + os.sep):
-            if deep_dir is not None and len(members[name]["dir"]) < len(deep_dir):
-                continue
             owners.add(name)
+    if not owners:
+        owners = containment_candidates(path)
     return owners
 
 
@@ -908,13 +868,18 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
                 if feat not in record:
                     record[feat] = "%s:%d" % (rel, code.count("\n", 0, off) + 1)
         if bs_owners:
-            env_sites = list(build_script_env_features(code, strings))
+            # RAW text, not the lexed code: a mention in a comment or a string counts too
+            # (see the note above — the class is closed, not narrowed).
+            mentions = list(build_script_feature_mentions(text))
             for owner in bs_owners:
                 record = members[owner]["refsites"]
-                for env, off in env_sites:
+                for env, off in mentions:
+                    line_no = text.count("\n", 0, off) + 1
                     for feat in members[owner]["features"]:
-                        if cargo_feature_env_name(feat) == env and feat not in record:
-                            record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, code.count("\n", 0, off) + 1, env)
+                        if feat in record:
+                            continue
+                        if env == "" or cargo_feature_env_name(feat) == env:
+                            record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, line_no, env or "<bare prefix>")
 
 if scanned_files == 0:
     fail("NOT ONE Rust source file of a workspace-member target could be found, so no reference site could possibly have been observed. A positive verdict requires an affirmative measurement; refusing to pass over an empty scan.")
