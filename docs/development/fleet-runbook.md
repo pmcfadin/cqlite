@@ -36,10 +36,13 @@ gh auth status                                  # must include the 'project' sco
 ```
 
 **On a LAUNCHER-ONBOARDED box the credential step is already done (#3369)** — the agent-ami
-profile's `verify.run` is `bootstrap-agent-machine.sh --fix-credentials --strict`, which runs
-`gh auth setup-git` itself after the token is injected. It is **wired at onboard, not baked into
-the image**, so a hand-built box still needs the line above; the two paths do not conflict, and
-re-running it is idempotent.
+profile's `verify.run` is
+`bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --strict`, which runs
+`gh auth setup-git` itself after the token is injected **and persists the single-gate pin**
+(`--fix-gate-pin`, #3414 — without it a launched box arrives unpinned and every gate on it resolves
+the #1825 cap from the default formula). It is **wired at onboard, not baked into the image**, so a
+hand-built box still needs the line above; the two paths do not conflict, and re-running it is
+idempotent.
 
 **The `refs/claims/*` preflight is no longer a separate manual step either.** Every bootstrap run
 MEASURES push capability by performing the operation — it invokes `claim.sh smoke` and reports one
@@ -47,6 +50,57 @@ of `git-push: VERIFIED` / `FAILED` / `UNMEASURED`. Run the probe by hand only wh
 
 ```bash
 bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (see below)
+```
+
+**The single-gate pin is provisioned and VERIFIED the same way (#3414).** Bootstrap persists
+`CQLITE_GATE_MAX_CONCURRENCY=1` into **`/etc/environment`** under `--yes` — read by PAM's
+`pam_env` at session creation, with no interactivity guard — and then reports one
+`gate-pin:` line taken from an **affirmative probe**: it scrubs its own inherited value —
+**and `BASH_ENV`/`ENV` with it**, since a non-interactive bash sources `$BASH_ENV` and that file
+could re-export the very variable just removed — then reads the variable back out of a fresh,
+profile-free session. It is never a grep of the file it just wrote. Five verdicts ship, only the
+first an `[ok]`: **`VERIFIED`** (the file sets a value, the session sees THAT SAME value, and the
+gate honours it), **`NOT-SYSTEM-WIDE`** (the session sees a value the file does not set — a sudo-
+or user-specific override), **`NOT-HONOURED`** (visible, but the gate discards or clamps it),
+**`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, the gate could not be
+consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. `VERIFIED` is the ONLY `[ok]`.
+
+On a **non-Linux** host there is no `[ok]`. `/etc/environment` + `pam_env` is a Linux mechanism, so
+macOS is scoped out rather than supported (no launchd equivalent is shipped — there is no Mac on
+this fleet to verify one against). An earlier form reported `NOT-APPLICABLE` as a second `[ok]`
+here; that was right about the mechanism and wrong about the verdict, because `--strict` reads the
+`[ok]` and so **certified an unpinned host**. Such a host now reports **`UNMEASURED`** when a value
+is visible — with no system-wide file to correlate against, a machine-wide pin cannot be told apart
+from a user-scoped one — and the per-run authority is the gate's own `cpu-budget:` token.
+`NOT-APPLICABLE` is emitted nowhere in the script today.
+Three facts to keep in mind when you touch this:
+
+* **`VERIFIED` is SCOPED, and the line says so.** The probe measures a PAM-created (sudo)
+  session, because that is the only session an unprivileged process can create. A gate is not
+  launched through sudo: a supervisor or lane tree started from a systemd unit or a container
+  entrypoint has no PAM in its ancestry, so `/etc/environment` never applies to it. `VERIFIED`
+  therefore means "a PAM-created session here sees a value the gate honours", never "every gate
+  on this box is pinned" — the authoritative per-run confirmation is that gate's own
+  `cpu-budget: max-concurrency=N(pinned)` token.
+
+* **A shell profile is the wrong place and a grep of it is the wrong check.** Stock Ubuntu
+  `~/.bashrc` opens with `case $- in *i*) ;; *) return;; esac`, so an export appended there is
+  never reached by the non-interactive shells that launch gates. All three fleet boxes carried
+  the export and **none** of them had it in effect; every gate resolved the #1825 cap from the
+  default formula (`--slots 3` on a 16-core box) while the pin looked installed. Bootstrap still
+  appends to the profile for interactive convenience, but that append can only ever print
+  `[info]`.
+* **An existing value is never rewritten.** A box deliberately running >1 concurrent gate
+  overrides the pin; bootstrap leaves the line exactly as it is and verifies effectiveness.
+
+```bash
+# how to ask the question yourself. The scrub and the '-' (NOT ':-') are load-bearing:
+# without the scrub an INHERITED value reads as a healthy pin, and ':-' collapses "unset"
+# with "set but empty" — the exact defect this issue removed from the gate's own resolver.
+env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV \
+  sudo -u "$(id -un)" bash -c 'printf "[%s]\n" "${CQLITE_GATE_MAX_CONCURRENCY-UNSET}"'
+# and what the gate then stamps on its own cpu-budget line:
+#   max-concurrency=1(pinned)   <- provisioned    max-concurrency=3(default) <- NOT provisioned
 ```
 
 **Cost and residual of the automatic probe.** Every bootstrap run — laptop runs included — makes two

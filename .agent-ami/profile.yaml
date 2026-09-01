@@ -60,7 +60,19 @@ verify:
   # read back + delete a throwaway refs/claims/smoke-<commit-sha> ref), not by probing the
   # credential helper: the affected box passed `gh auth status` AND
   # `git ls-remote origin HEAD` and still could not push.
-  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --strict"
+  # --fix-gate-pin (issue #3414) is the SECOND narrow repair, added for the same reason and
+  # in the same shape as --fix-credentials above. The single-gate pin
+  # (CQLITE_GATE_MAX_CONCURRENCY=1) has to be PERSISTED where a non-interactive shell reads
+  # it — /etc/environment, read by PAM at session creation — and a launched box gets no
+  # other bootstrap invocation, so without this flag every new instance arrives UNPINNED,
+  # its gates silently resolve the #1825 cap from the default formula and admit co-tenants,
+  # and verify merely reds. That converts a silent defect into a loud one without removing
+  # it, and an alarm that fires on every new box is one people learn to waive. Persisting an
+  # env line is not a toolchain install, so verify stays a verification step — the same
+  # boundary --yes would have crossed. The write is idempotent and NEVER rewrites an existing
+  # value, and the verdict still comes from probing a fresh session, so a box that cannot be
+  # pinned (no passwordless sudo) stays non-passing and --strict still exits 1.
+  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --strict"
   expect: "All checks green."
 hooks:
   # Deliberately EMPTY (issue #3369). The credential wiring belongs in verify.run above,

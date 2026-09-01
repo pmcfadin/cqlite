@@ -1246,18 +1246,87 @@ accelerators_line() {
 #                         core-tests long pole.
 # A caller who exports CARGO_BUILD_JOBS is respected verbatim (never overridden).
 
-# _gate_max_concurrency: resolve N from the #1825 default formula + the
-# CQLITE_GATE_MAX_CONCURRENCY override. Defined early (issue #2640) because the
-# core-budget derivation below needs it before any cargo runs; the #1825 cap's
-# acquire_gate_slot consumes the SAME function further down (single source).
-_gate_max_concurrency() {
+# _gate_resolve_max_concurrency: resolve N — and WHERE N CAME FROM — ONCE, into
+# GATE_MAX_CONCURRENCY + GATE_MAX_CONCURRENCY_SOURCE. Resolved early (issue #2640)
+# because the core-budget derivation below needs it before any cargo runs; the
+# #1825 cap's acquire_gate_slot and the SUMMARY's cpu-budget line both READ THESE
+# GLOBALS through _gate_max_concurrency, so the value the slot semaphore enforces
+# and the value the pasted SUMMARY reports are STRUCTURALLY the same value — a
+# second, independently-recomputing resolver could disagree with the first.
+#
+# THE SOURCE TOKEN IS THE POINT (issue #3414). `max-concurrency=3` alone does not
+# say whether this box was PINNED at 3 or merely DEFAULTED there because nothing
+# set the variable, and those are different operational facts: the fleet ran for
+# months with the pin present in ~/.bashrc but invisible to every non-interactive
+# shell (Ubuntu's stock .bashrc returns early when not interactive), so every gate
+# silently resolved N from the formula, admitted co-tenants, and no artifact said
+# so. Four states, because two more fall straight out of the resolver:
+#   pinned  — the env var is set to a valid integer >= 1 and is used verbatim
+#   default — the env var is UNSET, so N is the #1825 formula max(2,(ncpu-2)/4)
+#   invalid — the env var is set to a value that cannot be used as a cap: EMPTY,
+#             non-numeric, or a digit string too large to represent (19+ digits,
+#             roborev job 332). It is SILENTLY discarded for the formula (a mis-set
+#             tmux/systemd/CI var reads exactly like a healthy defaulted box unless
+#             we say so)
+#   clamped — the env var is set to a valid integer < 1 (e.g. 0) and is silently
+#             raised to 1
+# `${VAR+set}` — NOT `${VAR:-}` — is what separates unset from set-but-empty:
+# the `:-` form collapses them onto one answer, which is precisely how an empty
+# value would have gone on reading as `default`.
+_gate_resolve_max_concurrency() {
   local dflt=$(( ( _ncpu - 2 ) / 4 ))
   [ "$dflt" -lt 2 ] && dflt=2
-  local v="${CQLITE_GATE_MAX_CONCURRENCY:-$dflt}"
-  case "$v" in *[!0-9]*|'') v=$dflt ;; esac
-  [ "$v" -lt 1 ] && v=1
-  printf '%s' "$v"
+  local v src sig
+  if [ -z "${CQLITE_GATE_MAX_CONCURRENCY+set}" ]; then
+    v=$dflt; src=default
+  else
+    v="${CQLITE_GATE_MAX_CONCURRENCY}"
+    case "$v" in
+      ''|*[!0-9]*) v=$dflt; src=invalid ;;
+      # BASE-10 EXPLICITLY (roborev job 331, Medium). The case above admits any digit-only
+      # string, so `08` reached the arithmetic below — where bash reads a leading zero as
+      # OCTAL and `08`/`09` are not valid octal. Measured before the fix:
+      #   CQLITE_GATE_MAX_CONCURRENCY=08 -> "line 1301: 08: value too great for base"
+      # i.e. the gate ERRORED OUT rather than resolving a cap, which is worse than either
+      # mis-classifying it or refusing it. `10#` forces base 10, and `v` is normalised so
+      # every downstream consumer (cores-per-gate, build-jobs, test-threads) gets a clean
+      # decimal — the SUMMARY then reports the value actually honoured, e.g. `8(pinned)`.
+      *)           # AN UPPER BOUND CHECKED BY DIGIT COUNT, BEFORE ANY ARITHMETIC (roborev
+                   # job 332). `10#$v` on a digit string bash cannot represent WRAPS
+                   # SILENTLY, and the wrap was reported as a pin. Measured before the fix:
+                   #   ...=99999999999999999999 -> max-concurrency=7766279631452241919(pinned)
+                   #   ...=9223372036854775808  -> max-concurrency=1(clamped)
+                   # The first is the damaging one: the SUMMARY AFFIRMS a pin at a value
+                   # nobody set, which inverts the one property this token exists to carry.
+                   # The second mislabels an unusable value as a deliberate 0.
+                   #
+                   # The bound is a DIGIT COUNT, not a comparison against INT64_MAX, because
+                   # it must be decided WITHOUT the arithmetic that is the defect: any
+                   # <=18-digit decimal is < 9.22e18 and always fits, so 19+ digits is
+                   # refused. That refuses a handful of representable 19-digit values too —
+                   # deliberately, since a 19-digit slot cap is a mis-set variable by any
+                   # measure, and `invalid` (silently discarded, use the formula) is the
+                   # correct answer for one. A lexical compare against INT64_MAX would be
+                   # exact but locale-dependent on digit collation; a length test is not.
+                   sig="$v"
+                   while [ "${#sig}" -gt 1 ] && [ "${sig#0}" != "$sig" ]; do sig="${sig#0}"; done
+                   if [ "${#sig}" -gt 18 ]; then
+                     v=$dflt; src=invalid
+                   else
+                     v=$(( 10#$sig ))
+                     if [ "$v" -lt 1 ]; then v=1; src=clamped; else src=pinned; fi
+                   fi ;;
+    esac
+  fi
+  GATE_MAX_CONCURRENCY="$v"
+  GATE_MAX_CONCURRENCY_SOURCE="$src"
 }
+_gate_resolve_max_concurrency
+
+# _gate_max_concurrency: the SINGLE accessor for the resolved N. Kept as a function
+# so every existing call site (acquire_gate_slot, the core budget, the cpu-budget
+# line) keeps reading one resolution rather than recomputing its own.
+_gate_max_concurrency() { printf '%s' "$GATE_MAX_CONCURRENCY"; }
 
 # _gate_cores_per_gate: the fair-share core count for THIS gate = max(1, ncpu/N).
 _gate_cores_per_gate() {
@@ -1283,8 +1352,14 @@ fi
 # cpu_budget_line: machine-checkable one-liner stamped into every SUMMARY block,
 # so per-gate CPU throttling (or its absence) is visible in the pasted block, not
 # just scrollback (#2640). Names the wrapper (nice/taskpolicy/none), the resolved
-# machine-wide concurrency N, the derived per-gate cores, and the build-jobs +
-# test-threads the gate actually used.
+# machine-wide concurrency N **and where N came from** (#3414), the derived
+# per-gate cores, and the build-jobs + test-threads the gate actually used.
+#
+# max-concurrency carries its source in parentheses — the same idiom as
+# build-jobs=N(derived|caller) beside it — so a pasted SUMMARY distinguishes a box
+# that was PINNED at N from one that merely DEFAULTED there (and from one whose pin
+# is invalid or was clamped). It is deliberately here and NOT on `accelerators:`:
+# the cap already lives on this line, and two spellings of one fact is drift.
 #
 # The `cpu-budget:` line is a space-delimited `key=value`-per-token line, so the
 # wrapper field MUST be a SINGLE token: AGENT_GATE_WRAPPER holds the full command
@@ -1292,12 +1367,14 @@ fi
 # otherwise inject stray `-c`/`utility`/`-n`/`10` tokens between wrapper= and the
 # next key and break any positional/space-splitting parser. Emit only the tool
 # name (first word) here; the full command stays in AGENT_GATE_WRAPPER for the
-# re-exec (issue #2640).
+# re-exec (issue #2640). The same rule binds every field added later: the #3414
+# source token is `max-concurrency=1(pinned)` with NO space inside the parens, for
+# exactly the reason the wrapper field is truncated.
 cpu_budget_line() {
   local _wrapper_tok="${AGENT_GATE_WRAPPER:-none}"
   _wrapper_tok="${_wrapper_tok%% *}"   # first word only: "taskpolicy -c utility" -> "taskpolicy"
-  printf 'cpu-budget: wrapper=%s ncpu=%s max-concurrency=%s cores-per-gate=%s build-jobs=%s(%s) test-threads=%s' \
-    "$_wrapper_tok" "$_ncpu" "$(_gate_max_concurrency)" \
+  printf 'cpu-budget: wrapper=%s ncpu=%s max-concurrency=%s(%s) cores-per-gate=%s build-jobs=%s(%s) test-threads=%s' \
+    "$_wrapper_tok" "$_ncpu" "$GATE_MAX_CONCURRENCY" "$GATE_MAX_CONCURRENCY_SOURCE" \
     "$GATE_CORES_PER_GATE" "${CARGO_BUILD_JOBS:-unset}" "${CARGO_BUILD_JOBS_SOURCE:-unknown}" \
     "$GATE_TEST_THREADS"
 }
