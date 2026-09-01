@@ -379,14 +379,30 @@ fn canon_map(
         (Side::Golden, Value::Object(entries)) => {
             let mut out = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                // [`MapKeySpelling::ToJsonString`] UNCONDITIONALLY, and this is an
-                // INVARIANT rather than a default: a map reaches `canon_typed` only as
-                // a map KEY's own nested map or as a member of a frozen container, and
-                // CQL requires both to be frozen — so it lives in one value cell and
-                // its keys come from `MapType.toJSONString`. A top-level MULTICELL map
-                // column never arrives here: `compare::compare_value_body` routes its
-                // `(Object, Array)` pair to `compare::compare_map`, which takes the
-                // spelling from the DDL (`compare::map_key_spelling`).
+                // [`MapKeySpelling::ToJsonString`] UNCONDITIONALLY. This is an
+                // INVARIANT, not a default, and it is the ONE place this module's rules
+                // could disagree with `compare::compare_map`'s — that function takes the
+                // spelling from the DDL and can be `GetString`, so the two would differ
+                // on a TOP-LEVEL MULTICELL container-keyed map.
+                //
+                // EVERY PATH INTO `canon_typed` IS ENUMERATED, because an invariant
+                // backed by one of its arguments is an invariant nobody can re-check:
+                //
+                //   1. `compare::compare_value_body` routes a top-level map's
+                //      `(Object, Array)` pair to `compare::compare_map`, never here;
+                //   2. the row-order key path (`compare::row_order_divergence`)
+                //      canonicalizes PK and CK columns only, and CQL forbids a
+                //      NON-FROZEN collection as a key column;
+                //   3. recursion from [`canon_container`] is already inside a container,
+                //      every level of which CQL requires to be frozen;
+                //   4. `compare::compare_map` canonicalizes a KEY, and a map key is
+                //      frozen by CQL.
+                //
+                // AND IT FAILS CLOSED IF IT IS EVER WRONG, which is why this is an
+                // assertion and not a threaded parameter: a `getString` cell path does
+                // not parse as the declared container's `toJSONString` document, so
+                // [`golden_map_key_value`] REFUSES rather than mis-pairing. The cost of
+                // a broken invariant here is a loud refusal, not a false pass.
                 let key_value = golden_map_key_value(key, key_ty, MapKeySpelling::ToJsonString)?;
                 let canon_key = canon_typed(
                     &key_value,
