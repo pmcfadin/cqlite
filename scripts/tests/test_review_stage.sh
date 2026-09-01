@@ -57,15 +57,25 @@ if ! T=$(mktemp -d "${TMPDIR:-/tmp}/review-stage-test.XXXXXX" 2>/dev/null) ||
 fi
 trap 'rm -rf "$T"' EXIT
 
-REPO_SEQ=0
 # newrepo [gitignore-body] — a synthetic worktree. With no argument it ignores
 # `.review-stage/` exactly as the shipped .gitignore does; a caller passes a DIFFERENT body
 # to exercise the fail-closed path verification. `git init` is enough: check-ignore and
 # rev-parse --show-toplevel both work with no commits and no configured identity.
+#
+# EACH REPOSITORY IS UNIQUE BY CONSTRUCTION (`mktemp -d`), not by a counter. Every call site
+# is `R=$(newrepo)`, i.e. COMMAND SUBSTITUTION, which runs the function in a SUBSHELL — so a
+# `REPO_SEQ=$((REPO_SEQ + 1))` inside it incremented a variable in the subshell and the parent
+# never saw it. Every case therefore shared ONE directory and leaked state into the next: the
+# gitignore-body case rewrote the shared `.gitignore` to `unrelated-pattern`, after which the
+# outside-the-repo case refused at the STAGE-RECORD half instead of the report path it names —
+# a case passing for a reason that was not its own. The counter is REMOVED rather than worked
+# around (an `export`/tempfile shim would leave the same trap for the next helper); `mktemp -d`
+# cannot be defeated by a subshell because uniqueness comes from the filesystem, not from
+# state this script has to carry.
 newrepo() {
-  REPO_SEQ=$((REPO_SEQ + 1))
-  local d="$T/repo$REPO_SEQ"
-  mkdir -p "$d"
+  local d
+  d=$(mktemp -d "$T/repo.XXXXXX" 2>/dev/null) || return 1
+  [ -n "$d" ] && [ -d "$d" ] || return 1
   git -C "$d" init -q >/dev/null 2>&1 || return 1
   if [ $# -ge 1 ]; then printf '%s\n' "$1" >"$d/.gitignore"; else printf '.review-stage/\n' >"$d/.gitignore"; fi
   printf '%s\n' "$d"
@@ -254,9 +264,19 @@ fi
 
 # (c) a path OUTSIDE the repository cannot be confirmed, so it is refused — "cannot tell"
 #     must never take the permissive branch.
+#
+#     THE REFUSAL IS ASSERTED TO NAME **report-of-record** AND THE REQUESTED PATH, so this case
+#     can only pass for its OWN reason. It could not, before: every `newrepo` ran in command
+#     substitution, so the `REPO_SEQ` increment happened in a SUBSHELL and was lost — every case
+#     shared ONE directory, R4 above rewrote its `.gitignore` to `unrelated-pattern`, and this
+#     case then refused at the STAGE-RECORD half (a real refusal, for the wrong reason) without
+#     ever reaching the report path it names. Each repo is now unique BY CONSTRUCTION.
 rs "$R3" open c --issue 202 --agent spec-auditor --report "$T/outside-the-repo.md"
 rc_is 2 "check-ignore: a path outside the repository is REFUSED, not exempted"
 has "path-not-gitignored" "check-ignore: the outside-the-repo refusal names the same reason"
+has "what=report-of-record" "check-ignore: the outside-the-repo refusal names the REPORT half, not the stage record"
+has "path=$T/outside-the-repo.md" "check-ignore: the refusal names the REQUESTED path verbatim"
+hasnt "what=stage-record" "check-ignore: this case reached the report path, not a stage-record refusal"
 
 # --- 6. re-opening does not silently reset the clock ----------------------------
 R5="$(newrepo)"
