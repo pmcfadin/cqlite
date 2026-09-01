@@ -295,6 +295,13 @@ required-features = ["cli-helpers"]
 name = "issue_3721_column_decode_error_surface"
 required-features = ["cli-helpers"]
 
+# Range-tombstone MARKER refusals must be OBSERVABLE too — the same swallow one
+# structural level up from the per-column one (issue #3721). Same public surface
+# (`ingestion::ingest` + `Database::execute`), so the same `cli-helpers` gate.
+[[test]]
+name = "issue_3721_range_marker_refusal_surface"
+required-features = ["cli-helpers"]
+
 # Scan-path error counting (issue #1704). It is
 # `#![cfg(all(feature = "observability-testing", feature = "delta-scan"))]` — the
 # in-memory metric capture harness needs the SDK testing exporters, and the

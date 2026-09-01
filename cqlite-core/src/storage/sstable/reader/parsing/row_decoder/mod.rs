@@ -805,6 +805,7 @@ pub(crate) mod now_clock;
 mod parser_construction;
 mod partition_driver;
 pub(crate) mod partition_shadow;
+mod range_marker_error; // issue #3721 policy (marker level)
 mod raw_type_value;
 mod raw_value;
 mod row_data;

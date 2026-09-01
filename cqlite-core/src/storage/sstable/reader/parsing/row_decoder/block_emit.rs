@@ -130,8 +130,18 @@ impl V5CompressedLegacyParser {
                     if let Some(sh) = shadow.as_mut() {
                         match self.parse_range_tombstone_marker_full(data, offset, schema) {
                             Ok((bv, bk, dp, ds, next_offset)) => {
-                                if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
-                                    break;
+                                // Issue #3721: the marker is FRAMED (`next_offset`
+                                // is bound, so the body continues) and the FSM
+                                // refuses only an unrepresentable bound kind — a
+                                // `break` here reported `Ok` while dropping the
+                                // tombstone and every later row of the partition.
+                                if let Err(e) = sh.feed_range_marker(bv, bk, dp, ds) {
+                                    return Err(range_marker_error::range_marker_refused(
+                                        e,
+                                        partition_index,
+                                        offset,
+                                        next_offset,
+                                    ));
                                 }
                                 offset = next_offset;
                                 continue;
