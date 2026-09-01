@@ -81,8 +81,10 @@
 #                             a clean measurement records PASS with the driver-named
 #                             annotation and the affirmative line echoed (G1a); an
 #                             ADVISORY-INCREASE records PASS too, naming the crates (G1b);
-#                             a verdict with no `probe … INVOKED` line records the driver
-#                             as NOT REACHED rather than claiming a cargo run (G1c)
+#                             and PASS requires BOTH affirmative signals beside the
+#                             verdict — a verdict with no `probe … INVOKED` line (G1c) or
+#                             no `MEASURED …` line (G1d) is a NAMED SKIP, never the
+#                             self-contradictory `PASS [never reached …]` G1c used to pin
 #   G2  gate SKIP paths    -> same substitution: the component records SKIP for exit 3,
 #                             for a zero exit with NO verdict line, and for an unexpected
 #                             rc — never PASS. This is the vacuous-pass guard, and it is
@@ -745,7 +747,7 @@ fi
 # door and is exactly CLAUDE.md's "a lane that reds on correct input is the lane agents
 # learn to waive".
 #
-#   G1a/G1b/G1c + G2a/G2b/G2c   PLANTED. The guard is SUBSTITUTED in a scratch worktree
+#   G1a-G1d + G2a/G2b/G2c       PLANTED. The guard is SUBSTITUTED in a scratch worktree
 #                               (the component has no seam either), so every mapping from
 #                               guard output to SUMMARY status is pinned EXACTLY, with no
 #                               dependence on what this box's dependency graph looks like.
@@ -825,10 +827,22 @@ exit 0')
       bad "G1b: an increase was recorded PASS without echoing the crates responsible — a silent advisory is no advisory"
     fi
 
-    # G1c — REACH IS READ FROM THE PROBE LINE, NEVER FROM THE STATUS (#3453). A guard
-    # that reached a verdict without printing `probe … INVOKED` must NOT have an
-    # invocation attributed to it: claiming a cargo run that did not happen is the
-    # defect the reach recording exists to fix.
+    # G1c — A VERDICT WITHOUT A PROBE IS NOT A MEASUREMENT (roborev round 3, #1700).
+    #
+    # WHAT THIS CASE ASSERTED BEFORE, and why it was wrong: it required only that the
+    # ANNOTATION read `never reached`, and it accepted — indeed CODIFIED — the component
+    # recording PASS. That is the self-contradictory result `PASS [never reached …]`: the
+    # component certifying a duplicate census while its own recording says cargo was never
+    # invoked. A test pinning that is worse than the defect alone, because it defends it
+    # against the next person. The route it left open is the vacuous pass this component
+    # exists to prevent — a stale log, a hard-coded or replayed verdict line, a guard that
+    # printed a verdict without measuring anything — all of which reach a verdict with no
+    # probe line, which is exactly the signal that says a measurement happened.
+    #
+    # The corrected contract: NOTHING becomes a verdict unless the census was AFFIRMATIVELY
+    # measured. PASS requires BOTH affirmative signals — `probe … INVOKED` and `MEASURED …`
+    # — beside the verdict; absent either, SKIP naming the cause. The annotation must STILL
+    # record the driver as not reached (#3453), so both halves are asserted here.
     COMPONENT_LOG="$TMPROOT/g1c.log"
     line=$(component_run '#!/usr/bin/env bash
 echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace --target all"
@@ -836,9 +850,38 @@ echo "dep-duplicates: 0 INCREASE RECOGNISED — 4 duplicate instance(s) / 2 dupl
 echo "dep-duplicates: verdict NO-INCREASE (4/2 vs baseline 4/2)"
 exit 0')
     case "$line" in
-      *'never reached'*) ok "G1c: with no probe line the annotation records the driver as NOT REACHED rather than claiming an unobserved cargo run (#3453)" ;;
-      *)                 bad "G1c: a verdict with no probe line produced: ${line:-<no component line>}" ;;
+      *SKIP*) ok "G1c: a verdict with NO 'probe … INVOKED' line is recorded SKIP — a verdict is not a measurement, and PASS may not rest on one that was never taken" ;;
+      *)      bad "G1c: a verdict with no probe line was recorded as '${line:-<no component line>}' instead of SKIP (the self-contradictory 'PASS [never reached]')" ;;
     esac
+    case "$line" in
+      *'never reached'*) ok "G1c: the annotation still records the driver as NOT REACHED rather than claiming an unobserved cargo run (#3453)" ;;
+      *)                 bad "G1c: the annotation did not record the driver as not reached: ${line:-<no component line>}" ;;
+    esac
+    if grep -q 'cause=verdict-without-probe' "$COMPONENT_LOG"; then
+      ok "G1c: the SKIP NAMES its cause (verdict-without-probe), so a reader is told which affirmative signal was missing"
+    else
+      bad "G1c: the SKIP did not name verdict-without-probe — an unnamed SKIP tells an operator nothing"
+    fi
+
+    # G1d — THE OTHER MISSING AFFIRMATIVE. Same class as G1c: a probe line and a verdict
+    # but NO `MEASURED …` line means no census was ever published, so there is nothing the
+    # verdict can be a verdict ABOUT. The two signals are required TOGETHER because either
+    # alone is satisfiable without the other having happened.
+    COMPONENT_LOG="$TMPROOT/g1d.log"
+    line=$(component_run '#!/usr/bin/env bash
+echo "dep-duplicates: probe cargo tree -d --workspace --target all INVOKED (rc 0)"
+echo "dep-duplicates: 0 INCREASE RECOGNISED — 4 duplicate instance(s) / 2 duplicated crate(s) vs baseline 4/2"
+echo "dep-duplicates: verdict NO-INCREASE (4/2 vs baseline 4/2)"
+exit 0')
+    case "$line" in
+      *SKIP*) ok "G1d: a verdict with NO 'MEASURED …' line is recorded SKIP — an unpublished census may not become a certification" ;;
+      *)      bad "G1d: a verdict with no MEASURED line was recorded as '${line:-<no component line>}' instead of SKIP" ;;
+    esac
+    if grep -q 'cause=verdict-without-measurement' "$COMPONENT_LOG"; then
+      ok "G1d: the SKIP NAMES its cause (verdict-without-measurement)"
+    else
+      bad "G1d: the SKIP did not name verdict-without-measurement"
+    fi
 
     # G2 — THE VACUOUS-PASS GUARD. Three stubs, same scratch checkout.
     COMPONENT_LOG="$TMPROOT/g2a.log"
@@ -929,7 +972,9 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # host with no timeout(1) and no cargo. Round 3's grammar-closure cases add six more
 # host-independent verdicts BY CONSTRUCTION (P19b, P19c, P19d x2, P19e x2 — shim cargo +
 # plant_timeout, no ambient tool), so 43 / 63 / 57; the floor moves with them, or a
-# deletion of the new cases would not red.
+# deletion of the new cases would not red. The affirmative-signal cases (G1c's two extra
+# verdicts + G1d's two) are G-class, i.e. they need git + the gate, so they raise the
+# measured totals to 67 but NOT the floor.
 CASE_FLOOR=42
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \

@@ -16291,17 +16291,21 @@ run_pub_surface() {
 #
 # IT ALSO NEVER PASSES VACUOUSLY, which is the other half and the harder one. "Advisory"
 # is not a licence to green on nothing (CLAUDE.md: a positive verdict requires an
-# affirmative measurement), so PASS is keyed on the AFFIRMATIVE value — the guard's own
-# `verdict NO-INCREASE|ADVISORY-INCREASE` line, which it can only print AFTER it has
-# read counts out of real `cargo tree` output and parsed the baseline — and never on the
-# absence of an error. Every other outcome is a SKIP NAMING THE CAUSE: the guard absent
+# affirmative measurement), so PASS is keyed on THREE AFFIRMATIVE SIGNALS TOGETHER, never
+# on the absence of an error: the guard's `verdict NO-INCREASE|ADVISORY-INCREASE` line,
+# its `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line (a census was
+# really published). The verdict ALONE is not enough — a stale log, a replayed or
+# hard-coded verdict line, or a guard that returned a verdict having measured nothing all
+# reach it, and keying on it alone once permitted the self-contradictory
+# `PASS [never reached …]`. Every other outcome is a SKIP NAMING THE CAUSE: the guard absent
 # from the checkout, no cargo on PATH, no `timeout(1)` accepting `-k` with which to BOUND
 # the probe (the guard then does not run it at all — an unbounded `cargo tree` could hang
 # this component with no verdict, and a missing capability must not inherit the permissive
 # branch), `cargo tree` non-zero or timed out, output the
 # parser does not recognise, a missing or ungrammatical baseline, an unexpected exit
-# status, or a zero exit with NO verdict line (a guard that returned early measured
-# nothing, and that is a SKIP, not a pass). A SKIP is visible in the SUMMARY and is not a
+# status, a zero exit with NO verdict line (a guard that returned early measured
+# nothing, and that is a SKIP, not a pass), or a verdict unaccompanied by the probe or
+# the MEASURED line. A SKIP is visible in the SUMMARY and is not a
 # certification; the component's own self-test — which DOES fail, on all of those paths —
 # lives in tooling-tests.
 #
@@ -16336,7 +16340,7 @@ run_dep_duplicates() {
   # ANSI-STRIPPED, READ BY REDIRECTION (#3400). The guard's own lines carry no escapes,
   # but cargo's stderr shares this log and colour SURVIVES redirection to a file — and a
   # parse routed through the shared idiom cannot rot into the one that is not.
-  local src verdict="" probe="" unmeas=""
+  local src verdict="" probe="" measured="" unmeas=""
   src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
   if [ -n "$src" ] && [ -r "$src" ]; then
     local line
@@ -16344,6 +16348,7 @@ run_dep_duplicates() {
       case "$line" in
         'dep-duplicates: verdict '*)            [ -n "$verdict" ] || verdict="${line#dep-duplicates: verdict }" ;;
         'dep-duplicates: probe '*' INVOKED '*)  [ -n "$probe" ] || probe="$line" ;;
+        'dep-duplicates: MEASURED '*)           [ -n "$measured" ] || measured="$line" ;;
         'dep-duplicates: SKIP-UNMEASURABLE '*)  [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-UNMEASURABLE }" ;;
         'dep-duplicates: SKIP-BASELINE-UNUSABLE '*) [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-BASELINE-UNUSABLE }" ;;
       esac
@@ -16370,15 +16375,33 @@ run_dep_duplicates() {
     0)
       case "$verdict" in
         NO-INCREASE*|ADVISORY-INCREASE*)
-          status=PASS
-          # Echo the guard's OWN statements so a pasted gate log shows the ratchet RAN
-          # over real numbers, and so an increase is loud where a human will see it.
-          local l
-          while IFS= read -r l || [ -n "$l" ]; do
-            case "$l" in
-              'dep-duplicates: 0 INCREASE RECOGNISED'*|'dep-duplicates: ADVISORY-INCREASE'*|'dep-duplicates: RATCHET-LOOSE'*|'dep-duplicates: MEASURED '*|'dep-duplicates: verdict '*) echo "$l" ;;
-            esac
-          done <"$src"
+          # A VERDICT IS NOT A MEASUREMENT (roborev round 3, #1700). PASS requires the
+          # verdict AND BOTH affirmative signals that a census was actually taken: the
+          # guard's `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line
+          # (a census was really published). Keying PASS on the verdict alone permitted
+          # the self-contradictory `PASS [never reached …]` — this component certifying a
+          # duplicate census beside its own record that cargo was never invoked — and let
+          # a stale, replayed or hard-coded verdict line manufacture exactly the vacuous
+          # pass the component exists to prevent. Absent either signal it is a SKIP naming
+          # WHICH one was missing; this component may never FAIL, so SKIP is how it says
+          # "nothing was measured".
+          if [ -z "$probe" ]; then
+            status=SKIP
+            cause="cause=verdict-without-probe detail=$guard printed 'verdict $verdict' but NO 'probe … INVOKED' line, so no cargo invocation is evidenced and the verdict rests on nothing measured here"
+          elif [ -z "$measured" ]; then
+            status=SKIP
+            cause="cause=verdict-without-measurement detail=$guard printed 'verdict $verdict' but NO 'MEASURED …' line, so no duplicate census was published for that verdict to be about"
+          else
+            status=PASS
+            # Echo the guard's OWN statements so a pasted gate log shows the ratchet RAN
+            # over real numbers, and so an increase is loud where a human will see it.
+            local l
+            while IFS= read -r l || [ -n "$l" ]; do
+              case "$l" in
+                'dep-duplicates: 0 INCREASE RECOGNISED'*|'dep-duplicates: ADVISORY-INCREASE'*|'dep-duplicates: RATCHET-LOOSE'*|'dep-duplicates: MEASURED '*|'dep-duplicates: verdict '*) echo "$l" ;;
+              esac
+            done <"$src"
+          fi
           ;;
         *)
           # Exit 0 with no verdict: the guard returned early, so NOTHING was compared.
