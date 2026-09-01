@@ -532,15 +532,24 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `--lite`/`--delta` loops and the SIDE lane exists only in the full gate) → **signal the gate**,
   the last disk-free channel, after which the run publishes NO verdict and keeps the
   `RESULT: INCOMPLETE` launch sentinel, which is never a certification. Bounded by a state where
-  the gate cannot produce a trustworthy verdict anyway. **That last rung is TERM *then* KILL,
-  because `kill` SUCCEEDING IS NOT THE TARGET DYING (job 319 round 4)** — the ladder's own rule
-  applied to its own bottom rung: `kill -TERM` returns 0 on mere DELIVERY, and an ignored TERM
-  disposition inherited by the gate's shell survives into bash and cannot be un-ignored, so a
-  TERM-only rung resumes with the original well-formed `PASS` intact. TERM first so cleanup can
-  run; SIGKILL after, because it cannot be ignored — which **ENDS the ladder instead of adding a
-  rung with another hole in it**. Signalling `$$` is safe in the way `kill -- -$pgid` is not: it
-  is this subshell's own ancestor, alive by construction, so there is no reaped-leader pid-reuse
-  hazard and no way to hit a peer lane's gate. Same round, same family, one
+  the gate cannot produce a trustworthy verdict anyway. **That last rung sends EXACTLY ONE signal
+  and it is SIGKILL — two rounds landed there and the second FALSIFIED the reasoning written for
+  the first (job 319 rounds 4–5).** Round 4: `kill` SUCCEEDING IS NOT THE TARGET DYING — `kill
+  -TERM` returns 0 on mere DELIVERY, and an ignored TERM disposition inherited by the gate's shell
+  survives into bash and cannot be un-ignored, so a TERM-only rung resumes with the original
+  well-formed `PASS` intact. That produced TERM → sleep → KILL. Round 5: **that sequence reopened
+  the pid-reuse hazard, and the comment written for it asserted the hazard was absent** — *"`$$` is
+  our ancestor, alive by construction"*, true BEFORE the first signal and **false after it**: once
+  TERM lands the gate may exit and be reaped during the wait, and on a four-lane box the pid's next
+  owner is most likely **a peer lane's gate**, which this repo has an incident for. The fix is a
+  **DELETION** — no TERM, no sleep, one SIGKILL to a pid that is still our own live ancestor at the
+  instant we signal it — **and that a repeatedly-patched guard's next fix REMOVES code is the tell
+  that it is the right one**, where each previous round ADDED a rung. SIGKILL cannot be ignored, so
+  "did it work" does not arise, and the EXIT trap does not run, leaving the INCOMPLETE sentinel.
+  Cleanup is forgone deliberately: a cleanup that needs to write has nowhere to write. **Anything
+  that re-adds a first signal re-adds the reuse window**, which is why that is pinned
+  structurally — the runtime cases cannot see it (a re-added TERM+sleep+KILL still exits 137 and
+  passes them both). Same round, same family, one
   file down: **the missing NEWLINE is part of the verdict.** An ENOSPC short write can truncate
   `printf '%s %s\n'` ON A FIELD BOUNDARY — `PASS 12` losing its newline, or `PASS 1` being all
   that reached disk of `PASS 12` — and both parse as well-formed two-field verdicts, the second

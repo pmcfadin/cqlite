@@ -1854,21 +1854,28 @@ if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && !
   )
   chmod 755 "$d/logs" 2>/dev/null || true
   ex21c=$(printf '%s\n' "$o21c" | sed -n 's/^EXIT //p')
-  if [ "${ex21c:-0}" = 143 ] \
+  if [ "${ex21c:-0}" = 137 ] \
      && case "$o21c" in *"D1 TRUNCATION also failed"*) true ;; *) false ;; esac \
      && case "$o21c" in *"D2 GATE is being terminated"*) true ;; *) false ;; esac \
      && case "$o21c" in *ALIVE*) false ;; *) true ;; esac; then
-    ok "21c-ladder: when the marker append, the truncation AND the unlink all fail, the SIDE lane names each escalation and SIGTERMs the gate (exit 143, and the shell never reaches its next statement) -- so the run publishes no verdict rather than certifying the surviving PASS"
+    ok "21c-ladder: when the marker append, the truncation AND the unlink all fail, the SIDE lane names each escalation and SIGKILLs the gate (exit 137, and the shell never reaches its next statement) -- so the run publishes no verdict rather than certifying the surviving PASS"
   else
-    bad "21c-ladder: the lower rungs did not fire (exit='${ex21c:-<none>}'; expected 143 with both diagnostics and no ALIVE):
+    bad "21c-ladder: the lower rungs did not fire (exit='${ex21c:-<none>}'; expected 137 with both diagnostics and no ALIVE):
 $o21c"
   fi
-  # (21d) RUNG 4 WITH SIGTERM IGNORED -- roborev job 319 round 4. `kill -TERM` returns 0 when the
-  # signal is merely DELIVERED, and an ignored disposition inherited by the gate's shell SURVIVES
-  # into bash and cannot be un-ignored, so a TERM-only rung would resume execution here with the
-  # original well-formed PASS intact: a false certification at the bottom of a fail-closed ladder.
-  # SIGKILL cannot be ignored, which is what ENDS the ladder instead of adding another rung.
-  # Asserted as death by SIGKILL (128+9) with the shell never reaching its next statement.
+  # (21d) THE SAME OUTCOME WITH SIGTERM IGNORED -- roborev job 319 rounds 4 and 5.
+  #
+  # Round 4's finding was that a TERM-only rung is survivable (an ignored TERM disposition
+  # inherited by the gate's shell survives into bash and cannot be un-ignored, and `kill` returns 0
+  # on mere delivery). Round 5's was that the TERM-then-sleep-then-KILL sequence written for it
+  # REOPENED the pid-reuse hazard: after the first signal the gate may exit and be reaped during
+  # the sleep, and on a four-lane box the pid's next owner is most likely a peer lane's gate.
+  #
+  # Since the rung now sends ONE SIGKILL, this case's runtime half is nearly a duplicate of 21c
+  # -- making an outcome uniform is exactly how one case quietly becomes a copy of another that
+  # passes without entering the state it was written for. So it keeps the runtime assertion (an
+  # ignored TERM changes nothing) and adds the STRUCTURAL half that 21c cannot express: the rung
+  # must contain no first signal and no sleep, because re-adding either re-adds the reuse window.
   chmod 444 "$d/logs/legacy-heuristics.result" 2>/dev/null || true
   chmod 555 "$d/logs" 2>/dev/null || true
   o21d=$(
@@ -1883,10 +1890,53 @@ $o21c"
   chmod 755 "$d/logs" 2>/dev/null || true
   ex21d=$(printf '%s\n' "$o21d" | sed -n 's/^EXIT //p')
   if [ "${ex21d:-0}" = 137 ] && case "$o21d" in *SURVIVED*) false ;; *) true ;; esac; then
-    ok "21d-unignorable: with SIGTERM IGNORED the gate is still terminated -- rung 4 escalates to SIGKILL (exit 137) and the shell never reaches its next statement, so a 'kill' that returns 0 can no longer be mistaken for the target having died"
+    ok "21d-unignorable: with SIGTERM IGNORED the outcome is UNCHANGED -- the gate still dies (exit 137) and the shell never reaches its next statement, so a 'kill' that returns 0 can no longer be mistaken for the target having died"
   else
     bad "21d-unignorable: a gate ignoring SIGTERM SURVIVED rung 4 (exit='${ex21d:-<none>}'), so the original well-formed PASS would stand:
 $o21d"
+  fi
+  # STRUCTURAL: exactly ONE signal to $$ in the SIDE branch, and it is KILL. A first signal (TERM)
+  # followed by a wait is what reopened the pid-reuse hazard in round 5: once the gate is signalled
+  # it may exit, be reaped, and its pid reassigned -- most likely to a peer lane's gate. 21c/21d
+  # cannot see this, because a re-added TERM+sleep+KILL would still exit 137 and pass both.
+  _rung_body=$(awk '
+    /^_tree_boundary_fail\(\) \{/ { inb=1 }
+    inb && /BASHPID/ { ins=1 }
+    ins && /^  fi$/ { ins=0 }
+    ins { print }
+    inb && /^\}$/ { inb=0 }
+  ' "$GATE")
+  _sig_kill=$(printf '%s\n' "$_rung_body" | grep -c 'kill -KILL "\$\$"' || true)
+  _sig_other=$(printf '%s\n' "$_rung_body" | grep -cE 'kill -(TERM|INT|HUP|QUIT) "\$\$"' || true)
+  _sig_sleep=$(printf '%s\n' "$_rung_body" | grep -cE '^[[:space:]]*sleep ' || true)
+  if [ "$_sig_kill" = 1 ] && [ "$_sig_other" = 0 ] && [ "$_sig_sleep" = 0 ]; then
+    ok "21d-one-signal: the SIDE branch signals \$\$ exactly once and with KILL (no TERM, no sleep) -- so there is no window in which the gate can be reaped and its pid reassigned to a peer lane's gate before a second signal lands"
+  else
+    bad "21d-one-signal: kill-KILL=$_sig_kill other-signals=$_sig_other sleeps=$_sig_sleep -- a first signal followed by a wait reopens the pid-reuse hazard round 5 found, and 21c/21d would both still pass with it"
+  fi
+  # POSITIVE CONTROL for that guard: plant the exact TERM+sleep+KILL sequence round 5 rejected and
+  # require the extraction to SEE it. A structural assert whose awk silently matched nothing would
+  # otherwise report clean forever -- and here the region is delimited by `BASHPID` and a bare
+  # `  fi`, both of which an unrelated edit can move.
+  _ctl_gate=$(mktemp "$tmp/one-signal-ctl.XXXXXX")
+  awk '
+    { print }
+    /kill -KILL "\$\$" 2>\/dev\/null \|\| true/ && !d {
+      print "        kill -TERM \"$$\" 2>/dev/null || true"; print "        sleep 1"; d=1 }
+  ' "$GATE" > "$_ctl_gate"
+  _ctl_body=$(awk '
+    /^_tree_boundary_fail\(\) \{/ { inb=1 }
+    inb && /BASHPID/ { ins=1 }
+    ins && /^  fi$/ { ins=0 }
+    ins { print }
+    inb && /^\}$/ { inb=0 }
+  ' "$_ctl_gate")
+  _ctl_other=$(printf '%s\n' "$_ctl_body" | grep -cE 'kill -(TERM|INT|HUP|QUIT) "\$\$"' || true)
+  _ctl_sleep=$(printf '%s\n' "$_ctl_body" | grep -cE '^[[:space:]]*sleep ' || true)
+  if [ "$_ctl_other" -ge 1 ] && [ "$_ctl_sleep" -ge 1 ]; then
+    ok "21d-one-signal-control: the planted TERM+sleep+KILL sequence IS seen by the same extraction (other-signals=$_ctl_other sleeps=$_ctl_sleep), so the clean reading above is a measurement and not an empty match"
+  else
+    bad "21d-one-signal-control: the planted sequence was NOT seen (other-signals=$_ctl_other sleeps=$_ctl_sleep) -- the one-signal guard's region extraction is blind and its green says nothing"
   fi
 else
   chmod 755 "$d/logs" 2>/dev/null || true
@@ -1909,7 +1959,9 @@ fi
 # -- plus the mutation certifying the same directory with two components missing from the table;
 # 22c record_result setting OVERALL=FAIL under a REAL /dev/full ENOSPC, which DECLARES its skip
 # elsewhere and so does not raise the floor. 1 + 2 = 3.); +1 (the case-15 positive control added
-# with them, when re-deriving that guard's population from source made its own vacuity reachable.)
+# with them, when re-deriving that guard's population from source made its own vacuity reachable.);
+# +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
+# STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
 CASE_FLOOR=82
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then

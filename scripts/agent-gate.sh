@@ -9537,7 +9537,7 @@ _tree_boundary_fail() {
       #                                   HERE and not in `record_result`: absence means "not
       #                                   selected" only to the `--lite`/`--delta` loops, and the
       #                                   SIDE lane exists only in the full gate.)
-      #   4. SIGNAL the gate itself     — the last disk-free channel there is. The run then
+      #   4. SIGKILL the gate itself    — the last disk-free channel there is. The run then
       #                                   publishes NO verdict: its summary keeps the launch
       #                                   sentinel `RESULT: INCOMPLETE`, which doctrine defines
       #                                   as "still running, died, or queued" and NEVER as
@@ -9550,20 +9550,29 @@ _tree_boundary_fail() {
       #                                   in this subshell (bash keeps `$$`; `BASHPID` is what
       #                                   differs, which is the lane discriminator above).
       #
-      # RUNG 4 IS TERM **THEN** KILL, because `kill` SUCCEEDING IS NOT THE TARGET DYING (roborev
-      # job 319 round 4) -- the same "a specified control must be required to have WORKED" rule
-      # this ladder exists to apply, at its own last rung. `kill -TERM` returns 0 when the signal
-      # is merely DELIVERED, and TERM can be IGNORED: an ignored disposition inherited by the
-      # gate's own shell SURVIVES into bash and cannot be un-ignored, so execution would resume
-      # here with the original well-formed `PASS` intact -- a false certification at the bottom of
-      # a fail-closed ladder. TERM goes first so the gate can still run its cleanup; SIGKILL
-      # follows because it cannot be ignored or handled, which ENDS the ladder rather than adding
-      # a rung someone can find another hole in. It also guarantees the EXIT trap does not run, so
-      # the summary keeps its INCOMPLETE sentinel rather than emitting anything at all.
+      # RUNG 4 SENDS EXACTLY ONE SIGNAL, AND IT IS SIGKILL. Two rounds landed here and the second
+      # falsified the reasoning written for the first, so both are recorded.
       #
-      # Signalling `$$` is safe in the way `kill -- -$pgid` is not: `$$` is this subshell's own
-      # ancestor, alive by construction while it waits on this lane, so there is no reaped-leader
-      # pid-reuse hazard and no possibility of hitting a peer lane's gate.
+      # Round 4 of job 319: `kill` SUCCEEDING IS NOT THE TARGET DYING -- `kill -TERM` returns 0 on
+      # mere DELIVERY, and an ignored TERM disposition inherited by the gate's shell SURVIVES into
+      # bash and cannot be un-ignored, so a TERM-only rung resumes here with the original
+      # well-formed `PASS` intact. That produced a TERM-then-sleep-then-KILL sequence.
+      #
+      # Round 5 of job 319: THAT SEQUENCE REOPENED THE PID-REUSE HAZARD, and the comment written
+      # for it asserted the hazard was absent -- "`$$` is our ancestor, alive by construction".
+      # True BEFORE the first signal and FALSE AFTER it: once TERM is delivered the gate may exit
+      # and be reaped during the sleep, and the pid can be reassigned. On a four-lane box the most
+      # likely new owner is a PEER LANE'S GATE, which this repository already has an incident for.
+      #
+      # The fix is a DELETION, which is the tell that it is the right one: no TERM, no sleep, no
+      # second signal -- one SIGKILL, delivered to a pid that is still our own live ancestor at the
+      # instant we signal it, so there is no window in which it can be reaped and reused. SIGKILL
+      # cannot be ignored or handled, so the "did it work" question does not arise, and it
+      # guarantees the EXIT trap does not run, leaving the summary on its INCOMPLETE sentinel
+      # rather than emitting anything at all. Cleanup is forgone deliberately: the gate is
+      # unrecoverable here (the logs filesystem is full, the marker channel failed, and its own
+      # verdict could be neither emptied nor removed), and a cleanup that needs to write has
+      # nowhere to write. Anything that re-adds a first signal re-adds the reuse window with it.
       : > "$_tbf_v" 2>/dev/null || true
       if [ -s "$_tbf_v" ]; then
         echo "⚠️ agent-gate: [$comp] verdict TRUNCATION also failed — attempting to REMOVE the verdict instead (#3800)" >&2
@@ -9571,8 +9580,6 @@ _tree_boundary_fail() {
       fi
       if [ -e "$_tbf_v" ] && [ -s "$_tbf_v" ]; then
         echo "⚠️ agent-gate: [$comp] verdict could be neither emptied nor removed, and the marker channel is unavailable — there is no disk-free way left to fail this run from a SIDE-lane subshell, so the GATE is being terminated: it will publish no verdict at all (RESULT stays the INCOMPLETE launch sentinel, which is never a certification) (#3800)" >&2
-        kill -TERM "$$" 2>/dev/null || true
-        sleep 1
         kill -KILL "$$" 2>/dev/null || true
       fi
       return 1
