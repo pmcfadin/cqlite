@@ -75,6 +75,12 @@ fn schema() -> TableSchema {
             // retains (roborev F2): `CqlType::parse` yields
             // `Custom("udt:ks.key_part")`.
             col("qset", "set<frozen<ks.key_part>>"),
+            // The same two types as COMPONENTS of a composite (roborev F3): the
+            // composite path decodes to a `Value` and orders component-wise, so
+            // it cannot borrow the scalar path's raw-cell_path workaround and
+            // needs its own byte-order arm.
+            col("ituple", "set<frozen<tuple<inet, int>>>"),
+            col("ttuple", "set<frozen<tuple<time, int>>>"),
             // inet/time element ordering (roborev 1631/1632): InetAddressType /
             // TimeType order by raw serialized bytes, NOT the formatted-string
             // order the scalar `compare_custom` would use.
@@ -487,6 +493,93 @@ fn set_of_qualified_frozen_udt_decodes_structurally() {
     assert!(
         matches!(get(&qualified, "qset"), Some(Value::Set(items)) if items.len() == 2),
         "sanity: the qualified column really did reassemble both elements"
+    );
+}
+
+/// Roborev F3 (issue #2339): an `inet` COMPONENT of a composite orders by the
+/// serialized address bytes, not by the formatted dotted quad.
+///
+/// `InetAddressType() {super(ComparisonType.BYTE_ORDER);}` at the pinned
+/// `cassandra-5.0.8` tag, so `9.0.0.1` = `[9,0,0,1]` precedes `10.0.0.1` =
+/// `[10,0,0,1]`. `ComparatorType::compare`'s fall-through for `Custom("inet")` is
+/// `compare_custom`, which compares `format!("{value}")` — and TEXT order is the
+/// REVERSE (`"10.0.0.1" < "9.0.0.1"`, since `'1' < '9'`), so before the fix a
+/// `tuple`/UDT carrying an inet was ordered the wrong way round.
+///
+/// The scalar `set<inet>` path dodges this by sorting on raw `cell_path` bytes
+/// (`comparator_orders_by_raw_cell_path_bytes`); a composite cannot — its
+/// cell_path bytes are dominated by the components' i32-BE length prefixes — so
+/// the composite comparator needs the byte-order arm.
+#[test]
+fn composite_with_an_inet_component_orders_by_address_bytes_not_text() {
+    // frozen<tuple<inet, int>>: i32-BE length + value per component.
+    let nine = hex("0000000409000001" /* 9.0.0.1 */)
+        .into_iter()
+        .chain(hex("0000000400000001")) // int 1
+        .collect::<Vec<u8>>();
+    let ten = hex("000000040a000001" /* 10.0.0.1 */)
+        .into_iter()
+        .chain(hex("0000000400000001")) // int 1
+        .collect::<Vec<u8>>();
+    // Arrival order deliberately the REVERSE of the expected order, so a
+    // no-op sort cannot pass this.
+    let cells = vec![
+        elem("ituple", Value::blob(Vec::new()), ten),
+        elem("ituple", Value::blob(Vec::new()), nine),
+    ];
+    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let tuple = |addr: Vec<u8>| {
+        Value::Frozen(Box::new(Value::Tuple(vec![
+            Value::inet(addr),
+            Value::Integer(1),
+        ])))
+    };
+    assert_eq!(
+        get(&out, "ituple"),
+        Some(&Value::Set(vec![
+            tuple(vec![9, 0, 0, 1]),
+            tuple(vec![10, 0, 0, 1]),
+        ])),
+        "9.0.0.1 must precede 10.0.0.1 (InetAddressType is BYTE_ORDER); the \
+         formatted-string order the central comparator falls through to is the reverse"
+    );
+}
+
+/// Roborev F3 (issue #2339): a `time` COMPONENT of a composite orders by its
+/// 8-byte big-endian serialized form.
+///
+/// `private TimeType() {super(ComparisonType.BYTE_ORDER);}` at the pinned
+/// `cassandra-5.0.8` tag. Unlike `inet` there is no OBSERVABLE divergence for an
+/// in-range value — `Value`'s `TIME(hh:mm:ss.nnnnnnnnn)` rendering zero-pads every
+/// field, so text order happens to agree — which is precisely why this is pinned:
+/// the ordering must come from the declared type's authority, not from a `Display`
+/// impl that no format authority governs and that a future change could reflow.
+#[test]
+fn composite_with_a_time_component_orders_by_serialized_bytes() {
+    // frozen<tuple<time, int>>: time is an 8-byte i64-BE nanoseconds-of-day.
+    let at = |nanos: i64| {
+        let mut path = vec![0, 0, 0, 8];
+        path.extend_from_slice(&nanos.to_be_bytes());
+        path.extend_from_slice(&hex("0000000400000001")); // int 1
+        path
+    };
+    let (early, late) = (1_i64, 36_000_000_000_000_i64); // 00:00:00.000000001, 10:00
+    let cells = vec![
+        elem("ttuple", Value::blob(Vec::new()), at(late)),
+        elem("ttuple", Value::blob(Vec::new()), at(early)),
+    ];
+    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let tuple = |nanos: i64| {
+        Value::Frozen(Box::new(Value::Tuple(vec![
+            Value::Time(nanos),
+            Value::Integer(1),
+        ])))
+    };
+    assert_eq!(
+        get(&out, "ttuple"),
+        Some(&Value::Set(vec![tuple(early), tuple(late)])),
+        "the earlier nanoseconds-of-day must sort first (TimeType is BYTE_ORDER \
+         over an 8-byte big-endian i64)"
     );
 }
 
