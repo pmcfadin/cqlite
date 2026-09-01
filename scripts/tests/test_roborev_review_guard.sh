@@ -6125,10 +6125,18 @@ _jm_facts="$tmp/jm-facts.txt"
 # cannot see that, which is the point. Truncating is necessary and NOT sufficient: the sub-cases
 # asserting an ABSENCE (no `source_machine_id`) are satisfied trivially by an empty file, so the
 # tool is also required to have SUCCEEDED and to have produced output.
-_jm_run() { # _jm_run <job> — payload on stdin; truncates first, then requires the tool to work
+# ===== AND IT MUST RUN IN THIS SHELL, NOT AS A PIPELINE COMPONENT (#3654 round 3) =====
+# `printf ... | _jm_run 4656` puts the function in a SUBSHELL, so its `bad` calls incremented a
+# COPY of FAIL and the verdict was discarded on exit — the tally stayed green while the guard
+# reported a failure into the void. That is CLAUDE.md's rule stated for cargo parsers and general
+# in fact: READ BY REDIRECTION, NEVER A PIPE, because a piped reader runs in a subshell and its
+# verdict is thrown away. The payload is therefore an ARGUMENT written to a file and fed by `<`.
+_jm_payload_file="$tmp/jm-payload.json"
+_jm_run() { # _jm_run <job> <payload> — runs in THIS shell; payload by redirection, never a pipe
+  printf '%s' "$2" >"$_jm_payload_file"
   : >"$_jm_facts"
   : >"$_jm_prompt"
-  if ! python3 "$_jm_tool" "$1" "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1; then
+  if ! python3 "$_jm_tool" "$1" "$_jm_facts" "$_jm_prompt" <"$_jm_payload_file" >/dev/null 2>&1; then
     bad "case (jm9/jm11) the facts tool exited non-zero for job $1 — the assert that follows would read an empty or stale facts file"
     return 1
   fi
@@ -6142,15 +6150,13 @@ _jm_prompt="$tmp/jm-facts-prompt.txt"
 if [ ! -f "$_jm_tool" ] || ! command -v python3 >/dev/null 2>&1; then
   printf 'SKIP - roborev-job-facts.py or python3 unavailable; the fact-extraction cases did not run\n'
 else
-  printf '[{"id":4656,"git_ref":"aaa..bbb","status":"done","source_machine_id":"%s"}]' "$JM_UUID" \
-    | _jm_run 4656 || true
+  _jm_run 4656 "$(printf '[{"id":4656,"git_ref":"aaa..bbb","status":"done","source_machine_id":"%s"}]' "$JM_UUID")" || true
   if [ "$(sed -n 's/^source_machine_id=//p' "$_jm_facts" | head -1)" = "$JM_UUID" ]; then
     ok 'case (jm9) a list-shaped row yields source_machine_id as a string fact'
   else
     bad "case (jm9) the list-shaped row did not yield source_machine_id (facts: $(tr '\n' ' ' <"$_jm_facts"))"
   fi
-  printf '{"id":4656,"job_id":4656,"agent":"codex","prompt":"p","job":{"id":4656,"git_ref":"aaa..bbb","status":"done"}}' \
-    | _jm_run 4656 || true
+  _jm_run 4656 "$(printf '{"id":4656,"job_id":4656,"agent":"codex","prompt":"p","job":{"id":4656,"git_ref":"aaa..bbb","status":"done"}}')" || true
   if grep -q '^source_machine_id=' "$_jm_facts"; then
     bad "case (jm9) a show-shaped payload emitted a source_machine_id fact — an empty one renders as a blank uuid (facts: $(tr '\n' ' ' <"$_jm_facts"))"
   else
@@ -6159,8 +6165,7 @@ else
   # AND THE ROW SELECTION IS UNCHANGED: adding a string fact must not be able to move `find_job`
   # onto a different row. The review row here answers to the same id and carries no git_ref, so a
   # regression that let the new fact influence selection would surface as the wrong git_ref.
-  printf '{"id":4656,"job_id":4656,"source_machine_id":"decoy","job":{"id":4656,"git_ref":"aaa..bbb","status":"done","model":"m"}}' \
-    | _jm_run 4656 || true
+  _jm_run 4656 "$(printf '{"id":4656,"job_id":4656,"source_machine_id":"decoy","job":{"id":4656,"git_ref":"aaa..bbb","status":"done","model":"m"}}')" || true
   if [ "$(sed -n 's/^git_ref=//p' "$_jm_facts" | head -1)" = 'aaa..bbb' ]; then
     ok 'case (jm9) the git_ref-bearing row is still the one selected (the new fact cannot move find_job)'
   else
@@ -6403,8 +6408,7 @@ printf '== (jm11) #3654: a `show` payload whose TOP-LEVEL id is NOT the asked jo
 if [ ! -f "$_jm_tool" ] || ! command -v python3 >/dev/null 2>&1; then
   printf 'SKIP - roborev-job-facts.py or python3 unavailable; the id-divergence case did not run\n'
 else
-  printf '{"id":8,"job_id":9,"uuid":"outer-uuid","source_machine_id":"DECOY","prompt":"p","job":{"id":9,"git_ref":"aaa..bbb","status":"done","model":"m"}}' \
-    | _jm_run 9 || true
+  _jm_run 9 "$(printf '{"id":8,"job_id":9,"uuid":"outer-uuid","source_machine_id":"DECOY","prompt":"p","job":{"id":9,"git_ref":"aaa..bbb","status":"done","model":"m"}}')" || true
   if [ "$(sed -n 's/^git_ref=//p' "$_jm_facts" | head -1)" = 'aaa..bbb' ]; then
     ok 'case (jm11) the nested job row is still selected when the top-level id names another review'
   else
