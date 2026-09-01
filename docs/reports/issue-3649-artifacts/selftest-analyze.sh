@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=360
+CASE_FLOOR=361
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3246,6 +3246,41 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was cont
   ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
 else
   bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# STRUCTURAL: the driver must not REFUSE on the storage probe, only warn. The
+# refusal lives in the analyzer, where the false claim would be made. If it moved
+# back into the driver, this suite's own end-to-end sessions would pass or fail
+# depending on whether `df` names a resolvable device for the scratch directory
+# -- which on this box it does not (`/dev/root`), so they would pass BY ACCIDENT
+# here and refuse on a box that names a real one. Pinned structurally because the
+# behavioural case cannot be written without a network-backed path to point at.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+window = re.search(r'AB_STORAGE" = "NETWORK".*?\nfi\n', source, re.S)
+if not window:
+    sys.stderr.write("AB-3649: the driver's NETWORK-storage branch was not found\n")
+    raise SystemExit(1)
+body = window.group(0)
+if re.search(r"^\s*die ", body, re.M):
+    sys.stderr.write("AB-3649: the driver refuses on network storage; that refusal "
+                     "belongs in the analyzer\n")
+    raise SystemExit(1)
+if "warn " not in body:
+    sys.stderr.write("AB-3649: the driver neither warns nor refuses on network storage\n")
+    raise SystemExit(1)
+if "analyze-ab.py refuses it" not in body:
+    sys.stderr.write("AB-3649: the warning does not name the refusal the operator "
+                     "will hit at analysis\n")
+    raise SystemExit(1)
+PYINNER
+then
+  ok "the driver warns on network storage and names the analysis refusal, rather than refusing itself"
+else
+  bad "the driver's network-storage handling is not warn-and-name (see stderr above)"
 fi
 
 # The storage PROBE itself, against real paths. `/` on this box is EBS-backed, so

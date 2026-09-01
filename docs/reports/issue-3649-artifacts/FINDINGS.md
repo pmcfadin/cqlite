@@ -475,16 +475,61 @@ is worth recording as a result rather than a shortfall**:
 |---|---|
 | compressed corpus | **enforced**, driver and analyzer |
 | required ticket fields (`version`, `keyspace`, `table`, `ddl`) | **enforced** at pre-flight, mirrored from `ticket.rs:225-256` |
-| the field i4i rig, not a lane box | **disclosed** — a rig class is not reliably derivable from a host string, and refusing on one would red a correct rig the day someone uses `i4i.2xlarge` |
-| an uncontended box | **disclosed** — the one-minute load average at session start is recorded and a value above 2.0 is named beside the verdict |
+| corpus on local NVMe, not network storage | **enforced** — the device model behind the served directory; the driver warns at pre-flight and the analyzer refuses the verdict |
+| an uncontended box | **disclosed** — measured against `nproc/2` and reported beside the verdict |
+| the `i4i` label itself | **declared** — not derivable from a host string, and the two properties it stood for are checked directly instead |
 
-**Refusing on a host string would be the guard people learn to waive**, so the
-verdict still renders and the disclosure travels with it. Two further stated
-preferences — CPU pinning and an even replicate count — were already disclosed
-rather than enforced, for the same reason.
+**Check the property the label stood for, not the label.** The first pass of
+this table disclosed "the field i4i rig" and stopped there, on the reasoning that
+a rig class cannot be derived from a hostname. That reasoning is correct and the
+conclusion did not follow: the acceptance criteria do not care about the string
+`i4i` — they care about what it stood for, and the load-bearing parts are
+**measurable**. The corpus's backing device is a stable fact (`lsblk` on this
+lane's host returns *Amazon Elastic Block Store*, which is precisely what
+disqualified it), so it is enforced. What survives as a disclosure is the label,
+which is the part that genuinely cannot be measured — and that is a much smaller
+gap than the row it replaced.
 
-The analyzer also now says when **only one quantity** was supplied, because the
-criteria name both and a single-section report cannot cover them.
+**The two are dispositioned differently on evidence, not on how important each
+feels.** Contention was implemented as a refusal first and withdrawn: `loadavg1`
+is a *decaying* one-minute average, so it reports load the session has already
+finished causing — the driver builds three worktrees itself, and on a 4-core rig
+an operator's second attempt would be refused for the load of the first. It also
+made this deterministic test suite flaky, crossing the limit between two cases of
+a single run. A guard that reds on correct input is the guard an operator waives
+at 2am on a metered box, and the escape (`--control`) disclaims the whole
+verdict, so the refusal would have cost the session and bought nothing.
+
+**The refusal belongs where the false claim would be made, and finding that out
+was the useful part.** It was written into the driver's pre-flight first, and the
+end-to-end sessions stayed green — but only because `df` reports `/dev/root` on
+this lane box, which has no `/sys/block/root`, so the probe answered
+`NOT-MEASURABLE` and the sessions were never refused. On a box naming a real
+device they would all have refused, and the harness would have been correct here
+and broken elsewhere **for a reason having nothing to do with the code under
+test**. So the driver warns at pre-flight — before the builds, naming the exact
+refusal — and the analyzer refuses the verdict. That also stops the instrument's
+own testability depending on where its scratch directory happens to live, and
+it is pinned structurally, since the behavioural case cannot be written without
+a network-backed path to point at.
+
+**And a property that cannot be measured is reported as itself.**
+`storage: NOT-MEASURABLE` and `storage: LOCAL` are different facts; only the
+second is a verified local disk, and only the first is a gap. Both tokens are
+*required* in the manifest and drawn from a closed set, so a manifest that never
+asked refuses rather than passing as one that asked and could not tell — the
+sentinel rule this lane keeps re-learning, applied to the record itself. Fixing
+this turned up one more instance in the analyzer's own predecessor check, which
+read `NOT-RECORDED` as a quiet box (`except ValueError: busy = False`).
+
+Two further stated preferences — CPU pinning and an even replicate count — remain
+disclosed rather than enforced, for the reason the label row now carries alone.
+
+The analyzer also states **which quantities it covers and which it does not**,
+naming the missing one, before *and* after the verdicts. A report covering one
+quantity and silent about the other is how an incomplete session gets read as a
+complete answer — the same class as a PR body over-claiming — and a reader who
+scrolls to the verdict should not have to remember a header.
 
 ---
 

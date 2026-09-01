@@ -94,10 +94,24 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
       the record of what was run on.
 - [ ] `free -g` leaves room for the corpus page cache after the server's heap.
 - [ ] Nothing else is running: no JVM, no gate, no second lane. `nproc` is 4;
-      one competing compile is the whole box.
+      one competing compile is the whole box. The driver measures this and
+      **discloses** it beside the verdict (`host contention QUIET|CONTENDED`),
+      deliberately without refusing — `loadavg1` decays over a minute, so it
+      also reports load your *previous* attempt caused, and refusing would
+      block a legitimate re-run. **The disclosure is not a substitute for
+      looking**: `CONTENDED` in a report means the number is suspect.
 - [ ] Scratch root on the **instance-store NVMe** (`/data`), never the EBS root.
       The default `--work-dir /data/ab-3649` assumes this — check it is on the
       NVMe and not a symlink back to EBS.
+- [ ] The **corpus** is on the instance store too. This one *is* enforced,
+      because a network hop inside the read path is variable latency added to
+      the quantity being measured. The driver reads the device model behind the
+      served directory and **warns at pre-flight** on an EBS-backed corpus,
+      naming the refusal you will hit; `analyze-ab.py` then **refuses** it with
+      `corpus-network-storage` and yields no verdict. The warning fires before
+      the builds, so move the corpus then rather than burning the session.
+      `NOT-MEASURABLE` (an LVM or mapper device, say) is disclosed rather than
+      refused — confirm it by hand if you see it.
 - [ ] `taskset`, `python3`, `cargo`, `git`, `curl` present.
 
 ---

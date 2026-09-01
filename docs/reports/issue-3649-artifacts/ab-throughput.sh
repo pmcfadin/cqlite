@@ -791,8 +791,15 @@ AB_STORAGE_DETAIL="${AB_STORAGE_RAW#* }"
 export AB_STORAGE AB_STORAGE_DETAIL
 say "corpus storage $AB_STORAGE ($AB_STORAGE_DETAIL)"
 if [ "$AB_STORAGE" = "NETWORK" ] && [ -z "$CONTROL" ]; then
-  die corpus-network-storage \
-    "the served directory $SERVED_DIR is backed by network storage ($AB_STORAGE_DETAIL). The #3649 rig is specified as a field i4i box for the property that its corpus is on LOCAL NVMe -- a network hop inside the read path is variable latency added to the quantity being measured. Move the corpus to instance storage, or pass --control <label>"
+  # WARNED HERE, REFUSED AT ANALYSIS. The refusal belongs where the false claim
+  # would be made -- the verdict -- and putting it here as well would make this
+  # instrument's own testability depend on where the harness's scratch directory
+  # happens to live: `df` reports `/dev/root` on this lane box, which probes
+  # NOT-MEASURABLE, so the end-to-end sessions pass BY ACCIDENT and would refuse
+  # on a box that names a real device. A guard whose verdict turns on that is not
+  # a guard. The operator loses nothing: this fires at pre-flight, before the
+  # builds, and names the exact refusal the analysis will produce.
+  warn "corpus storage NETWORK -- the served directory $SERVED_DIR is backed by network storage ($AB_STORAGE_DETAIL). The #3649 rig is specified as a field i4i box for the property that its corpus is on LOCAL NVMe: a network hop inside the read path is variable latency added to the quantity being measured. THIS SESSION WILL NOT YIELD A VERDICT -- analyze-ab.py refuses it with cause corpus-network-storage. Move the corpus to instance storage now, or re-run with --control <label>"
 elif [ "$AB_STORAGE" = "NOT-MEASURABLE" ]; then
   warn "corpus storage NOT-MEASURABLE ($AB_STORAGE_DETAIL) -- this run cannot say whether the corpus is on local or network storage. That is a gap in the record, not a verified local disk; confirm it by hand before reporting the result"
 fi
