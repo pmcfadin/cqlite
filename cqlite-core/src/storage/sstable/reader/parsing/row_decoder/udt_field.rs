@@ -46,15 +46,13 @@
 //!
 //! # Collection element types
 //!
-//! The list/set/map/tuple arms delegate the payload framing to the existing
-//! parsers in `frozen.rs`, which take ELEMENT types as separate `&str`s. Only the
-//! element types are rendered (via [`CqlType::to_cql_string`]) — never an outer
-//! `list<…>`/`map<…>` string — which bypasses `extract_map_types` /
-//! `extract_tuple_element_types` entirely. Two consequences worth knowing:
-//! element values are decoded by `parse_value_from_raw_bytes`, so they follow ITS
-//! conventions (notably a `float` ELEMENT is `Value::Float(f64)`, unchanged from
-//! every other frozen-collection path), and a UDT ELEMENT resolves by NAME
-//! through the `UdtRegistry` rather than from inline field defs.
+//! The list/set/map/tuple arms delegate to `udt_field_collection.rs`, which
+//! decodes each element STRUCTURALLY from its `&CqlType` (never from a rendered
+//! type string, which would drop a UDT element's inline field defs — the same
+//! reason the `Udt` FIELD arm recurses) and requires the field's bytes to be
+//! consumed EXACTLY. The byte framing itself is the single implementation in
+//! `frozen_framing.rs`, parameterized by an element-decode callback. See that
+//! module header for both properties in full.
 
 use super::*;
 
@@ -211,54 +209,13 @@ impl V5CompressedLegacyParser {
             }
 
             // ---------------------------------------------------------------
-            // Collections/tuple: delegate the payload framing to `frozen.rs`,
-            // passing ONLY the rendered ELEMENT types (module header).
+            // Collections/tuple: `udt_field_collection.rs` — structural
+            // element decode over the one framing impl (module header).
             // ---------------------------------------------------------------
-            CqlType::List(element) => {
-                let (value, _) = self.parse_frozen_list_value_raw(
-                    data,
-                    0,
-                    &element.to_cql_string(),
-                    "udt field",
-                    depth + 1,
-                )?;
-                Ok(value)
-            }
-            CqlType::Set(element) => {
-                let (value, _) = self.parse_frozen_set_value_raw(
-                    data,
-                    0,
-                    &element.to_cql_string(),
-                    "udt field",
-                    depth + 1,
-                )?;
-                Ok(value)
-            }
-            CqlType::Map(key, value) => {
-                let (decoded, _) = self.parse_frozen_map_value_raw(
-                    data,
-                    0,
-                    &key.to_cql_string(),
-                    &value.to_cql_string(),
-                    "udt field",
-                    depth + 1,
-                )?;
-                Ok(decoded)
-            }
-            CqlType::Tuple(element_types) => {
-                let rendered: Vec<String> =
-                    element_types.iter().map(|t| t.to_cql_string()).collect();
-                let mut offset = 0usize;
-                let elements = self.parse_tuple_elements_raw(
-                    data,
-                    &mut offset,
-                    data.len(),
-                    &rendered,
-                    "udt field",
-                    depth + 1,
-                )?;
-                Ok(Value::Tuple(elements))
-            }
+            CqlType::List(element) => self.parse_udt_field_sequence(data, element, false, depth),
+            CqlType::Set(element) => self.parse_udt_field_sequence(data, element, true, depth),
+            CqlType::Map(key, value) => self.parse_udt_field_map(data, key, value, depth),
+            CqlType::Tuple(element_types) => self.parse_udt_field_tuple(data, element_types, depth),
 
             // ---------------------------------------------------------------
             // Composite.
@@ -313,6 +270,27 @@ impl V5CompressedLegacyParser {
         Ok(())
     }
 
+    /// A UDT field's bytes are EXACTLY its value's bytes: the caller already
+    /// consumed the field's `[i32 BE len]` prefix, so anything left over after a
+    /// well-formed value is corruption, not a value to accept.
+    ///
+    /// This is the variable-length counterpart of [`Self::require_len`]'s strict
+    /// `!= N`, and the consistency is deliberate: ONE rule for "the field's bytes
+    /// are exactly this value's bytes", whatever the type.
+    pub(super) fn require_full_consumption(
+        consumed: usize,
+        field_len: usize,
+        type_name: &str,
+    ) -> Result<()> {
+        if consumed != field_len {
+            return Err(Error::corruption(format!(
+                "{} field: consumed {} of {} bytes; trailing bytes in a length-bounded UDT field are corruption",
+                type_name, consumed, field_len
+            )));
+        }
+        Ok(())
+    }
+
     /// Big-endian i64 from the first 8 bytes. Callers check the length first.
     fn be_i64(data: &[u8]) -> i64 {
         i64::from_be_bytes([
@@ -340,6 +318,10 @@ impl V5CompressedLegacyParser {
         let months = next("months")?;
         let days = next("days")?;
         let nanos = next("nanos")?;
+
+        // Same exact-consumption rule as the collection arms and the strict
+        // fixed-width `!= N` checks (see `require_full_consumption`).
+        Self::require_full_consumption(pos, data.len(), "Duration")?;
 
         let months = i32::try_from(months)
             .map_err(|_| Error::corruption("Duration field: months out of i32 range"))?;

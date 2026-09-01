@@ -797,6 +797,7 @@ pub(in crate::storage::sstable::reader) use compaction_stream::{
 };
 mod complex_column;
 mod frozen;
+mod frozen_framing; // issue #3722: element-decoder-parameterized frozen/tuple framing (one framing impl)
 mod marshal_element;
 pub(crate) mod now_clock;
 mod partition_driver;
@@ -807,6 +808,7 @@ mod row_data;
 mod row_framing;
 mod udt;
 mod udt_field; // issue #3722: THE single UDT-field value decoder (campsite split of `udt`, #1116)
+mod udt_field_collection; // issue #3722: the collection/tuple arms of `udt_field` (campsite split, #1116)
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
 // Per-column decode dispatch tag (Epic J / issue #1635). Imported into this
