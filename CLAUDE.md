@@ -2000,7 +2000,15 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   byte offset and copies with `tail -c`, a different mechanism from the script's, with the
   retired helper kept as the positive control. `$( )` capture is the same class (it strips
   trailing newlines), which is why body bytes are streamed to a redirected stdout and never
-  captured into a variable.
+  captured into a variable. (8) Contract (c)'s own enforcer had a window inside it: `verdict()`
+  committed the "already emitted" flag BEFORE printing the line, so a signal landing between the
+  two made the handler AND the EXIT backstop both stay silent and the run exited with NO token —
+  over a possibly-committed write. **A flag that says a side effect HAPPENED must be set AFTER
+  the side effect, and the gap made unobservable**: the emission is now a signal-deferred
+  critical section (print, then commit, then deliver anything that arrived), there is exactly ONE
+  site that prints a verdict line and ONE that sets the flag, and the race is pinned by a
+  structural order assert plus a signal PLANTED at the window in a scratch copy — with the
+  pre-fix ordering kept as the positive control, because a race cannot be pinned by a timed test.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

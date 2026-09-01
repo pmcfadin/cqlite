@@ -123,7 +123,10 @@
 #       USAGE error and a SIGNAL: an EXIT-trap backstop emits `verdict ERROR` for any path that
 #       would otherwise leave with none, and the INT/TERM/HUP handlers emit exactly one token
 #       chosen by COMMIT_PHASE — ERROR before the atomic rename, the run's own success token
-#       after it, and a DEFERRED delivery across it.
+#       after it, and a DEFERRED delivery across it. THE EMISSION ITSELF IS A DEFERRAL WINDOW
+#       TOO: the line is printed BEFORE the "already emitted" state is committed, and a signal
+#       landing between the two is HELD rather than delivered — otherwise both readers see
+#       "already emitted" for a line that does not exist yet and the run exits with NO token.
 #
 # VERDICT TOKENS (closed set)
 #   OWNED               this lane, this issue, this session — proceed
@@ -291,6 +294,12 @@ START_SLACK_SECS=2
 # parser picks first. `verdict()` records that it fired, the signal handlers consult the flag so
 # they cannot add a second, and the EXIT trap consults it so no path can leave with none.
 VERDICT_EMITTED=0
+# VERDICT_EMITTING is the CRITICAL-SECTION half of the same contract (roborev job 35 I1): 1 while
+# a verdict line is being emitted, so no reader can observe "already emitted" before the line is
+# actually on stdout. VERDICT_SIG_PENDING carries a signal that arrived inside that window, held
+# until the state is consistent (see verdict/settle_verdict_signal).
+VERDICT_EMITTING=0
+VERDICT_SIG_PENDING=''
 # `--help` is contract (a)'s stated exemption: it emits no verdict line because no consumer
 # parses it. It is the ONLY exemption, and it is a flag rather than an inference.
 VERDICT_EXEMPT=0
@@ -319,7 +328,32 @@ sane() {
 # It records that it fired so nothing downstream can print a second one, and so the EXIT trap
 # can tell "decided" from "left without deciding". NEVER call it inside `$( )`: the flag would
 # be set in the subshell and the line captured into a variable (the defect case 17 pins).
-verdict() { VERDICT_EMITTED=1; printf '%s verdict %s\n' "$P" "$1"; }
+#
+# THE EMISSION IS A SIGNAL-DEFERRED CRITICAL SECTION (roborev job 35 I1). This was
+# `VERDICT_EMITTED=1; printf ...` — the flag committed BEFORE the line was printed — and a signal
+# arriving between those two commands produced the one state neither reader can recover from:
+# `on_signal` saw "already emitted" and stayed silent, the EXIT-trap backstop saw it and stayed
+# silent, and the run exited having printed NO verdict at all, possibly over a COMMITTED write.
+# That is contract (c) broken from inside the function installed to enforce it (round 6's G2),
+# so the two commands must not be observable in that order:
+#   * VERDICT_EMITTING marks the section. Nothing may conclude "already emitted" while it is set.
+#   * The line is PRINTED, and only THEN is VERDICT_EMITTED committed. The ordering is asserted
+#     structurally by scripts/tests/test_drive_issue_state.sh case 42, because a race cannot be
+#     pinned by a timed test; the behavioural half plants the signal AT the window in a scratch
+#     copy of this file rather than hoping the scheduler puts it there.
+#   * A signal that lands anywhere inside is DEFERRED (recorded, not delivered) and settled the
+#     instant the state is consistent — the same shape as the deferral across the atomic rename,
+#     and for the same reason: the run reports the outcome it ACHIEVED instead of losing it.
+# THE FIRST deferred signal wins: a second one during the same few commands would only overwrite
+# an exit code we are already about to deliver, and one exit is all there is to deliver.
+verdict() {
+  local token="${1:-}"
+  VERDICT_EMITTING=1
+  printf '%s verdict %s\n' "$P" "$token"
+  VERDICT_EMITTED=1
+  VERDICT_EMITTING=0
+  settle_verdict_signal
+}
 detail()  { printf '%s verdict-detail %s\n' "$P" "$*"; }
 
 # refuse <TOKEN> <exit-code> <detail...> — emit a named refusal and exit.
@@ -328,9 +362,12 @@ refuse() {
   # end prints bash's own UNPREFIXED `shift count out of range` under `shift_verbose`/POSIX mode,
   # which breaks contract (a) from inside the function that exists to satisfy contract (c).
   if [ "$#" -lt 2 ]; then
-    VERDICT_EMITTED=1
-    printf '%s verdict ERROR\n' "$P"
-    printf '%s verdict-detail internal: refuse was called with %s argument(s); a token and an exit code are required\n' "$P" "$#"
+    # ROUTED THROUGH `verdict`, not a hand-rolled flag-then-printf pair (roborev job 35 I1 class
+    # sweep): this guard had its own copy of the exact ordering the finding names, and a second
+    # emitter is a second place for the window to reappear. `verdict` takes no `shift`, so it is
+    # safe to call from the function that exists because a `shift` is not.
+    verdict ERROR
+    detail "internal: refuse was called with $# argument(s); a token and an exit code are required"
     exit 1
   fi
   local token="$1" code="$2"; shift 2
@@ -396,6 +433,14 @@ SIG_PENDING=''
 # on_signal <name> <exit-code>
 on_signal() {
   local sig="$1" code="$2"
+  # THE VERDICT-EMISSION WINDOW COMES FIRST (roborev job 35 I1). While a verdict line is being
+  # printed, neither branch below may run: reading VERDICT_EMITTED here is exactly the read that
+  # used to observe a flag set before its line existed. Deferred, never dropped — settled by
+  # `verdict` itself the moment the state is consistent.
+  if [ "$VERDICT_EMITTING" -eq 1 ]; then
+    [ -n "$VERDICT_SIG_PENDING" ] || VERDICT_SIG_PENDING="$sig:$code"
+    return 0
+  fi
   if [ "$COMMIT_PHASE" = committing ]; then
     # DEFERRED, NOT IGNORED. The commit is a single rename; letting it finish costs one syscall
     # and lets the run report the outcome it ACHIEVED instead of an "undetermined". The exit
@@ -419,6 +464,18 @@ trap 'on_signal INT 130'  INT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129'  HUP
 
+# settle_verdict_signal — deliver a signal that was deferred across the VERDICT EMISSION, now
+# that the line is on stdout and VERDICT_EMITTED is committed. Called by `verdict` itself, so
+# every emitter gets it without remembering to (roborev job 35 I1).
+settle_verdict_signal() {
+  [ -n "$VERDICT_SIG_PENDING" ] || return 0
+  local sig="${VERDICT_SIG_PENDING%%:*}" code="${VERDICT_SIG_PENDING##*:}"
+  VERDICT_SIG_PENDING=''
+  trap '' INT TERM HUP
+  detail "SIG$sig arrived DURING the verdict emission and was DEFERRED across it, so the verdict above was printed IN FULL rather than lost. Exiting $code."
+  exit "$code"
+}
+
 # settle_pending_signal — deliver a signal that was deferred across the commit, AFTER the
 # verdict is out. Called at the end of every mutating subcommand.
 settle_pending_signal() {
@@ -437,6 +494,10 @@ settle_pending_signal() {
 # trap AND REPLACES the exit status (measured on roborev job 26 F2).
 on_exit() {
   local rc=$?
+  # DISARMED FIRST (roborev job 35 I1). The backstop below calls `verdict`, which parks a signal
+  # arriving mid-emission and then EXITs to deliver it — from inside the EXIT trap that would
+  # skip `cleanup_tmp`. Nothing this trap does needs to be interruptible, so nothing is.
+  trap '' INT TERM HUP 2>/dev/null || true
   if [ "$VERDICT_EXEMPT" -eq 0 ] && [ "$VERDICT_EMITTED" -eq 0 ]; then
     verdict ERROR || true
     detail "the run ended at exit $rc without reaching any decision point, so NOTHING was decided and NOTHING was written. This is a defect in $(sane "$prog"), not a state of the marker: report it with the command you ran." || true

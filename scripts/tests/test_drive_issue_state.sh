@@ -2363,6 +2363,141 @@ else
 fi
 
 # ===========================================================================
+case_begin 42-verdict-emission-is-a-critical-section "the verdict line is PRINTED before the 'already emitted' state is committed — a signal in that window loses no verdict (roborev job 35 I1)"
+# ===========================================================================
+# THE DEFECT: `verdict()` was `VERDICT_EMITTED=1; printf ...` — the flag SET BEFORE the line was
+# printed. A signal arriving between those two commands left the worst possible state: `on_signal`
+# saw the flag and stayed silent, the EXIT-trap backstop saw it and stayed silent, and the run
+# exited having printed NO verdict at all — while a write may already have been committed. That is
+# contract (c) ("EVERY exit carries exactly one token") violated by round 6's own G2 fix, from
+# inside the function the fix installed to enforce it.
+#
+# HOW THIS IS TESTED WITHOUT A COIN FLIP. The window is between two SHELL commands, so no PATH
+# shim can reach it and no sleep can time it. Both halves below are deterministic:
+#   * STRUCTURAL — the print must PRECEDE the state commit, and `VERDICT_EMITTED=1` must exist at
+#     exactly ONE site in the whole script (the class sweep: `refuse`'s internal argument-count
+#     guard had its own copy of the same flag-then-print ordering).
+#   * BEHAVIOURAL, by ARTIFACT SUBSTITUTION — the signal is PLANTED into a scratch copy of the
+#     script AT the window (`kill -TERM $$` between the print and the commit), so it arrives
+#     exactly where the race would put it, every run. The POSITIVE CONTROL reconstructs the
+#     PRE-FIX ordering in a second copy with the SAME plant and requires it to emit ZERO verdicts
+#     — without it, a green here could mean the plant never reached the window.
+SCRATCH42="$T/scratch42"; mkdir -p "$SCRATCH42/lib"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$SCRATCH42/lib/process-liveness.sh"
+
+# --- STRUCTURAL -------------------------------------------------------------------------
+# COMMENTS ARE STRIPPED BEFORE THE ORDER IS READ: these functions document the very identifiers
+# being located, so a prose mention would otherwise "occur" before the code and the assert would
+# be about the comment (measured — it did, on the first run of this case).
+uncomment() { printf '%s\n' "$1" | grep -v '^[[:space:]]*#'; }
+v42_body=$(awk '/^verdict\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
+v42_code=$(uncomment "$v42_body")
+v42_print=$(printf '%s\n' "$v42_code" | grep -n "printf '%s verdict" | head -1 | cut -d: -f1)
+v42_flag=$(printf '%s\n' "$v42_code" | grep -n '^ *VERDICT_EMITTED=1$' | head -1 | cut -d: -f1)
+if [ -n "$v42_print" ] && [ -n "$v42_flag" ] && [ "$v42_print" -lt "$v42_flag" ]; then
+  ok "STRUCTURAL: inside verdict(), the verdict line is PRINTED (body line $v42_print) before VERDICT_EMITTED is committed (body line $v42_flag)"
+else
+  bad "STRUCTURAL: verdict() commits the 'already emitted' state before (or without) printing the line — print=${v42_print:-none} flag=${v42_flag:-none}
+$v42_code"
+fi
+v42_sites=$(grep -c '^ *VERDICT_EMITTED=1$' "$DS" || true)
+if [ "$v42_sites" = 1 ]; then
+  ok "CLASS SWEEP: VERDICT_EMITTED=1 is assigned at exactly ONE site — nothing else can claim 'already emitted' out of order"
+else
+  bad "VERDICT_EMITTED=1 is assigned at $v42_sites sites; every one that is not verdict()'s is a second copy of the job 35 I1 ordering:
+$(grep -n '^ *VERDICT_EMITTED=1$' "$DS")"
+fi
+# ONE EMITTER, pinned. The window can only exist where a `verdict ` line is printed, so a second
+# printf of one is a second place for it to come back — which is exactly what `refuse`'s internal
+# argument-count guard was.
+v42_emit=$(grep -c "printf '%s verdict %s" "$DS" || true)
+if [ "$v42_emit" = 1 ]; then
+  ok "CLASS SWEEP: exactly ONE site in the script prints a 'verdict ' line, so the ordering above is the only ordering there is"
+else
+  bad "$v42_emit sites print a 'verdict ' line; every one outside verdict() is a second copy of the window:
+$(grep -n "printf '%s verdict %s" "$DS")"
+fi
+s42_body=$(awk '/^on_signal\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$DS")
+s42_code=$(uncomment "$s42_body")
+s42_ing=$(printf '%s\n' "$s42_code" | grep -n 'VERDICT_EMITTING' | head -1 | cut -d: -f1)
+s42_ed=$(printf '%s\n' "$s42_code" | grep -n 'VERDICT_EMITTED' | head -1 | cut -d: -f1)
+if [ -n "$s42_ing" ] && [ -n "$s42_ed" ] && [ "$s42_ing" -lt "$s42_ed" ]; then
+  ok "STRUCTURAL: on_signal consults the in-flight flag (body line $s42_ing) BEFORE it may conclude 'already emitted' (body line $s42_ed)"
+else
+  bad "on_signal can conclude 'already emitted' without first checking whether an emission is IN FLIGHT — emitting=${s42_ing:-none} emitted=${s42_ed:-none}
+$s42_code"
+fi
+
+# --- BEHAVIOURAL, by artifact substitution ----------------------------------------------
+# plant_verdict_window <fixed|prefix> <outfile> — copy the shipped script with `kill -TERM $$`
+# planted inside verdict(): `fixed` puts it in the SHIPPED window (after the print, before the
+# state commit); `prefix` first reconstructs the PRE-FIX body (commit, then print) and puts the
+# plant between them. Nothing but verdict() is touched, and no seam is added to the shipped file.
+plant_verdict_window() {
+  awk -v mode="$1" '
+    /^verdict\(\) \{$/ { inv = 1; print; next }
+    inv && /^\}$/       { inv = 0; print; next }
+    inv {
+      if (mode == "fixed") {
+        print
+        if ($0 ~ /printf .%s verdict/) print "  kill -TERM $$"
+        next
+      }
+      if ($0 ~ /^ *VERDICT_EMITTING=1$/) { print "  VERDICT_EMITTED=1"; print "  kill -TERM $$"; next }
+      if ($0 ~ /^ *VERDICT_EMITTED=1$/)  next
+      if ($0 ~ /^ *VERDICT_EMITTING=0$/) next
+      if ($0 ~ /settle_verdict_signal$/) next
+      print; next
+    }
+    { print }
+  ' "$DS" >"$2"
+}
+plant_run() {  # plant_run <script> <lane> — combined output on stdout, run's status returned
+  local sc="$1" d="$2" out rc
+  out=$( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$sc" write 3822 --stage implement 2>&1 ); rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
+}
+plant_verdict_window fixed  "$SCRATCH42/fixed.sh"
+plant_verdict_window prefix "$SCRATCH42/prefix.sh"
+if grep -q 'kill -TERM \$\$' "$SCRATCH42/fixed.sh" && grep -q 'kill -TERM \$\$' "$SCRATCH42/prefix.sh" \
+   && bash -n "$SCRATCH42/fixed.sh" 2>/dev/null && bash -n "$SCRATCH42/prefix.sh" 2>/dev/null; then
+  ok "PLANT FIXTURE: both scratch copies parse and both carry the planted signal inside verdict()"
+else
+  bad "the plant did not take — this case cannot reach its subject:
+$(awk '/^verdict\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' "$SCRATCH42/fixed.sh")"
+fi
+L42=$(lane lane42-fixed)
+p42a=$(plant_run "$SCRATCH42/fixed.sh" "$L42"); r42a=$?
+if [ "$(verdict_count "$p42a")" = 1 ] && [ "$(verdict_of "$p42a")" = WRITTEN ] \
+   && [ "$r42a" -eq 143 ] && all_lines_anchored "$p42a" && [ -f "$L42/$MARKER" ]; then
+  ok "BEHAVIOURAL: a SIGTERM planted IN the emission window still yields exactly ONE anchored 'verdict WRITTEN', exit 143, and the marker on disk"
+else
+  bad "a signal inside the emission window broke contract (c): rc=$r42a verdicts=$(verdict_count "$p42a") token=$(verdict_of "$p42a") marker=$([ -f "$L42/$MARKER" ] && echo present || echo absent)
+$p42a"
+fi
+L42P=$(lane lane42-prefix)
+p42b=$(plant_run "$SCRATCH42/prefix.sh" "$L42P"); r42b=$?
+if [ "$(verdict_count "$p42b")" = 0 ]; then
+  ok "POSITIVE CONTROL: the PRE-FIX ordering with the SAME plant emits ZERO verdicts (rc=$r42b) — the window is real and the plant reaches it"
+else
+  bad "the pre-fix reconstruction still emitted $(verdict_count "$p42b") verdict(s), so the green above may be about a plant that never landed:
+$p42b"
+fi
+# NON-VACUITY: the same scratch copy WITHOUT a plant writes normally, so both results above are
+# about the planted signal and not about a copy the rewrite broke.
+cp "$DS" "$SCRATCH42/clean.sh"
+L42N=$(lane lane42-clean)
+p42n=$(plant_run "$SCRATCH42/clean.sh" "$L42N"); r42n=$?
+if [ "$r42n" -eq 0 ] && [ "$(verdict_count "$p42n")" = 1 ] && [ "$(verdict_of "$p42n")" = WRITTEN ]; then
+  ok "NON-VACUITY: the unplanted scratch copy writes normally (rc 0, one WRITTEN verdict)"
+else
+  bad "the scratch fixture is broken independently of the plant: rc=$r42n token=$(verdict_of "$p42n")
+$p42n"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2382,8 +2517,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 37-machine-axis-must-be-measurable
 38-adopt-never-calls-a-live-owner-gone
 39-body-bytes-survive-repeated-writes
-40-worktree-axis-must-be-measurable 41-body-without-trailing-newline 28-case-floor"
-CASE_FLOOR=41
+40-worktree-axis-must-be-measurable 41-body-without-trailing-newline
+42-verdict-emission-is-a-critical-section 28-case-floor"
+CASE_FLOOR=42
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2395,10 +2531,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 131 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 131)"
+if [ "$PASS" -ge 139 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 139)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 131)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 139)"
 fi
 
 # ===========================================================================
