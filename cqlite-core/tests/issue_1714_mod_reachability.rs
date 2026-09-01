@@ -677,6 +677,85 @@ fn inline_mod_declares_no_file() {
     );
 }
 
+#[test]
+fn out_of_line_child_of_an_inline_module_resolves_under_the_block_directory() {
+    // rustc resolves `mod child;` inside `mod outer { … }` under `<moddir>/outer/`.
+    // `child.rs` beside lib.rs is a DECOY: a walker that ignores the inline
+    // scope reaches it and reports `outer/child.rs` orphaned, inverting this.
+    assert_eq!(
+        orphans(&[
+            ("lib.rs", "mod outer {\n    mod child;\n}\n"),
+            ("outer/child.rs", ""),
+            ("child.rs", ""),
+        ]),
+        vec!["child.rs".to_string()]
+    );
+}
+
+#[test]
+fn inline_module_scoping_nests_and_then_closes() {
+    // Two levels deep, and a sibling declared AFTER the blocks close must be
+    // back at file scope — i.e. the brace stack pops.
+    assert!(orphans(&[
+        (
+            "lib.rs",
+            "mod o {\n    mod i {\n        mod deep;\n    }\n}\nmod after;\n"
+        ),
+        ("o/i/deep.rs", ""),
+        ("after.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn a_char_literal_brace_does_not_skew_the_inline_module_scope() {
+    // 13 `'{'` / `'}'` char literals live in cqlite-core/src; char literals are
+    // not stripped, so an unguarded brace scan would leave depth permanently
+    // raised and mis-scope every later declaration in the file.
+    assert!(orphans(&[
+        ("lib.rs", "pub const OPEN: char = '{';\nmod a;\n"),
+        ("a.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn path_attr_inside_an_inline_module_is_relative_to_the_block_directory() {
+    // Per the Rust reference, a `#[path]` inside inline `mod` blocks resolves
+    // under `<moddir>/<block…>/`, NOT beside the declaring file. `p.rs` beside
+    // lib.rs is the decoy for the declaring-file reading.
+    assert_eq!(
+        orphans(&[
+            (
+                "lib.rs",
+                "mod outer {\n    #[path = \"p.rs\"]\n    mod x;\n}\n"
+            ),
+            ("outer/p.rs", ""),
+            ("p.rs", ""),
+        ]),
+        vec!["p.rs".to_string()]
+    );
+}
+
+#[test]
+fn a_multiline_path_attribute_is_associated_with_its_module() {
+    // Attribute text is joined across newlines while inside `[...]`, so a
+    // `#[path]` broken over lines still resolves.
+    assert!(orphans(&[
+        ("lib.rs", "#[path\n    = \"elsewhere.rs\"]\nmod x;\n"),
+        ("elsewhere.rs", ""),
+    ])
+    .is_empty());
+    assert!(orphans(&[
+        (
+            "lib.rs",
+            "#[cfg(test)]\n#[path =\n    \"t.rs\"\n]\nmod tests;\n"
+        ),
+        ("t.rs", ""),
+    ])
+    .is_empty());
+}
+
 // --- RED arms: each differs from its green twin in exactly ONE property -----
 
 #[test]
@@ -747,4 +826,22 @@ fn a_mod_declaration_resolving_to_no_file_is_reported_loudly() {
 #[should_panic(expected = "ABSOLUTE")]
 fn an_absolute_path_attr_is_refused_loudly() {
     let _ = probe(&[("lib.rs", "#[path = \"/etc/passwd\"]\nmod x;\n")]);
+}
+
+#[test]
+#[should_panic(expected = "unmodeled attribute form")]
+fn a_cfg_attr_carrying_path_is_refused_loudly() {
+    // Not implemented, deliberately: DETECTED and refused, so it can never
+    // resolve to the wrong file silently. Zero occurrences in the tree today.
+    let _ = probe(&[("lib.rs", "#[cfg_attr(test, path = \"t.rs\")]\nmod x;\n")]);
+}
+
+#[test]
+fn a_cfg_attr_without_a_path_assignment_is_not_refused() {
+    // The refusal must be narrow: an ordinary `cfg_attr` still parses.
+    assert!(orphans(&[
+        ("lib.rs", "#[cfg_attr(test, allow(dead_code))]\nmod a;\n"),
+        ("a.rs", ""),
+    ])
+    .is_empty());
 }
