@@ -998,12 +998,16 @@ for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
   scan_found "$RE_XARGS_R" "$_bs_f"
   case $? in
     1) ok "bootstrap-scope: $_bs_name is clean of the \`xargs -r\` rule today — so the planted hit below is attributable to the plant and not inherited" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
-    0) bad "bootstrap-scope: $_bs_name already matches the \`xargs -r\` rule ($(scan_all_hits)) — fix it; until then the plant control below cannot attribute its hit" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    0) bad "bootstrap-scope: $_bs_name already matches the \`xargs -r\` rule ($(scan_all_hits)) — fix it; until then the plant control below cannot attribute its hit"; continue ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
     *) continue ;; # already counted by scan_found
   esac
   # (b) plant the INCIDENT construct into a copy and require the scan to NAME it.
   _bs_copy="$tmp/bootstrap-planted-$_bs_i.sh"
   cat "$_bs_f" >"$_bs_copy"
+  # A blank line FIRST: a source file with no trailing newline would otherwise join the plant
+  # onto its last physical line, where an enclosing quote or comment could hide it — the plant
+  # would go undetected and this control would report a hole that does not exist.
+  printf '\n' >>"$_bs_copy"
   printf '%s\n' '  printf "" | xargs -r rm' >>"$_bs_copy" # portability-lint-allow: plants the #3756 incident construct into a THROWAWAY COPY on purpose
   scan_found "$RE_XARGS_R" "$_bs_copy"
   case $? in
