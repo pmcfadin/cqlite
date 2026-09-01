@@ -818,7 +818,7 @@ if [ "$i3_status" -ne 0 ] && [ "$i3_markers" -eq 0 ]; then
 else
   bad "I3: an over-range bar ADMITTED a 200GiB filesystem (exit $i3_status, markers $i3_markers) — the bar was loosened"
 fi
-if grep -q 'was NOT used verbatim (out-of-range)' "$i3_err" 2>/dev/null; then
+if grep -q 'was NOT used AS SET (out-of-range)' "$i3_err" 2>/dev/null; then
   ok "I3: the unusable bar is named on stderr as an operator action, with the accepted range"
 else
   bad "I3: no stderr note naming the out-of-range bar"
