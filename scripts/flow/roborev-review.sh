@@ -856,10 +856,22 @@ JOB_RECORD="SKIP"
 # after that variable, for two reasons that are one reason: a hard-coded `SKIP` made an abort
 # between the record poll and the recompute emit `job-record: PASS` beside
 # `job-machine: UNAVAILABLE (... job-record: SKIP)` — two keys contradicting each other about the
-# same fact — while interpolating it at the ORIGINAL site read `$JOB_RECORD` twenty lines before it
-# exists, which under `set -u` aborts the wrapper outright. Keeping the two adjacent is what stops
-# either failure returning.
-JOB_MACHINE="UNAVAILABLE (no job record was read — job-record: $JOB_RECORD)"
+# same fact.
+#
+# ROUND 3 FINDING: INTERPOLATING HERE MOVED THAT BUG INSTEAD OF REMOVING IT. `$JOB_RECORD` is
+# `SKIP` AT THIS POINT, so the expansion captures `SKIP` permanently and an abort after the record
+# poll still emits the contradictory pair. The general rule, which is the part worth keeping: for a
+# value whose whole purpose is to reflect LATER state, no expansion at an EARLY site can ever be
+# right — it has to be BUILT WHEN IT IS READ. So this stays deliberately EMPTY and the fallback is
+# constructed at emit time by `job_machine_value` below. (The `on_exit` EXIT trap emits the block
+# on ANY abort, which is exactly the path that made this reachable.)
+JOB_MACHINE=""
+job_machine_value() { # the job-machine: value, resolved against the CURRENT job-record state
+  # A computed state wins; otherwise the run never reached the recompute, and the honest thing to
+  # report is the job-record state AS IT STANDS NOW, not as it stood at initialization.
+  if [ -n "$JOB_MACHINE" ]; then printf '%s' "$JOB_MACHINE"; return 0; fi
+  printf 'UNAVAILABLE (no job record was read — job-record: %s)' "$JOB_RECORD"
+}
 SHA_ASSERT="SKIP"
 # The POSITIVE "a review actually happened" assert. Absence of a vacuous phrase is
 # NOT evidence a review occurred: a transcript that only says "Waiting for job N to
@@ -1049,7 +1061,7 @@ emit_summary() {
   # block is pasted into PR threads read by people who are not on the box. A conditional emit would
   # reproduce the defect — a reader with no `job-machine:` line cannot tell "this daemon was not
   # recorded" from "this wrapper does not report it".
-  emit_kv 'job-machine' "$JOB_MACHINE"
+  emit_kv 'job-machine' "$(job_machine_value)"
   emit_kv 'model' "$MODEL_LINE"
   emit_kv 'census' "$CENSUS"
   emit_kv 'tokens' "$TOKENS"

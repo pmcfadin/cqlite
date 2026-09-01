@@ -6064,8 +6064,8 @@ printf '== (jm7) #3654 structural: job-machine is in NEITHER failing-capable key
 # non-uuid states do not red a run TODAY; only a structural assert stops a future edit registering
 # the key in the verdict scan or the affirmation backstop, where a `NOT RECORDED` — a routine state
 # on a roborev build that does not carry the field — would fail every review on the fleet.
-# Read from the two STATEMENTS, never from a file-wide grep: `emit_kv 'job-machine' "$JOB_MACHINE"`
-# would satisfy a file-wide search with the key registered in both scans.
+# Read from the two STATEMENTS, never from a file-wide grep: the key's own `emit_kv` line would
+# satisfy a file-wide search even with the key registered in both scans.
 _jm_scan_keys=$(sed -n '/^[[:space:]]*for scan_keyed in /,/; do$/p' "$WRAPPER_REAL")
 _jm_aff_keys=$(sed -n '/^[[:space:]]*for keyed in "push-assert=/,/; do$/p' "$WRAPPER_REAL")
 if [ -z "$_jm_scan_keys" ] || [ -z "$_jm_aff_keys" ]; then
@@ -6084,7 +6084,11 @@ else
 fi
 # AND IT IS ACTUALLY EMITTED, unconditionally. Without this the two asserts above are satisfied by
 # DELETING the key, which is the decorative-assert trap this suite has ruled on before.
-if grep -qE "^[[:space:]]*emit_kv 'job-machine' \"\\\$JOB_MACHINE\"" "$WRAPPER_REAL"; then
+# The VALUE EXPRESSION is deliberately not pinned: since #3654 round 3 the fallback is built at
+# emit time (`$(job_machine_value)`) rather than captured at initialization, so pinning the old
+# `"$JOB_MACHINE"` spelling would red on correct code. What must hold is unchanged and is what is
+# asserted — the key goes through `emit_kv`, the ONE neutralisation boundary, unconditionally.
+if grep -qE "^[[:space:]]*emit_kv 'job-machine' \"[^\"]+\"$" "$WRAPPER_REAL"; then
   ok 'case (jm7) the key is emitted through the ONE value boundary (emit_kv), unconditionally'
 else
   bad 'case (jm7) job-machine is not emitted via emit_kv — either it is gone, or its value bypasses the neutralisation boundary'
@@ -6309,6 +6313,51 @@ assert_says 'case (jm18) the miss names the depth reached and that the list ende
   'searched to a depth of [0-9]+ rows and to the end of what the daemon returns'
 assert_lacks 'case (jm18) it never claims a fixed 50-job window' "latest 50 jobs"
 reset_stub
+
+printf '== (jm19) #3654 r3: an abort AFTER the record poll never emits a stale job-record state ==\n'
+# THE PAIR OF KEYS MUST NOT CONTRADICT EACH OTHER. `job-machine:`'s UNAVAILABLE fallback names the
+# `job-record:` state it inherits, and it used to be a fully-formed string built at INITIALIZATION,
+# where `$JOB_RECORD` is `SKIP`. The `on_exit` EXIT trap emits the block on ANY abort, so a run that
+# died after the record poll printed `job-record: PASS` beside
+# `job-machine: UNAVAILABLE (... job-record: SKIP)` — an artifact stating two different things about
+# one fact. Interpolating at that same early site does NOT fix it (the expansion still captures
+# SKIP), which is why the value is built at EMIT time instead.
+#
+# Fixtured by injecting an abort between the poll and the recompute, into a SCRATCH COPY of the
+# wrapper — the one place that window is reachable on demand.
+_jmb_dir="$tmp/jm-abort"
+mkdir -p "$_jmb_dir"
+cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_jmb_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_jmb_dir/"
+fi
+if sed_inplace_verified "$_jmb_dir/roborev-review.sh" \
+     's/^JOB_VERDICT=\$(fact verdict)$/exit 9\nJOB_VERDICT=$(fact verdict)/' \
+     'exit 9' ; then
+  reset_stub
+  STUB_ANNOUNCE_SHA="$jm_head"
+  run_wrapper --wrapper "$_jmb_dir/roborev-review.sh" "$jm_work"
+  # The run aborted, so job-record: reached PASS while job-machine: never recomputed. The ONE
+  # property: whatever job-record: says, job-machine: must say the SAME thing.
+  _jmb_rec=$(sed -n 's/^job-record: //p' "$OUT" | head -1)
+  _jmb_mach=$(sed -n 's/^job-machine: //p' "$OUT" | head -1)
+  if [ -z "$_jmb_mach" ]; then
+    bad "case (jm19) no job-machine: line was emitted on the abort path (job-record: '${_jmb_rec:-<none>}')"
+  elif [ -z "$_jmb_rec" ]; then
+    bad 'case (jm19) no job-record: line was emitted, so the two keys could not be compared'
+  else
+    case "$_jmb_mach" in
+      *"job-record: $_jmb_rec"*)
+        ok "case (jm19) job-machine: names the CURRENT job-record state ($_jmb_rec) on an abort" ;;
+      *)
+        bad "case (jm19) the two keys contradict each other: job-record: '$_jmb_rec' but job-machine: '$_jmb_mach'" ;;
+    esac
+  fi
+  reset_stub
+else
+  bad 'case (jm19) could not inject the abort into the scratch wrapper, so the stale-state path was never exercised (a green here would be a probe failing in the direction that looks like success)'
+fi
 
 printf '== (jm15) #3654 r2: NO ambient-branch fallback when the record does not name its branch ==\n'
 # THE FALLBACK THAT MUST NOT EXIST. Here the daemon WOULD answer for the fixture's own branch, so a
