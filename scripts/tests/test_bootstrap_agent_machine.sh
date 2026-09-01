@@ -542,6 +542,35 @@ mk_hermetic_bin() {
   stub_net "$dir"  # gh/roborev/cargo stubs — no live network from these cases
 }
 
+# scc_stub_body: the shared stub. Reads SCC_STUB_MAX / SCC_STUB_USED / SCC_STUB_LOC /
+# SCC_STUB_ISO_LOC / SCC_STUB_LOG from the environment at call time, so one stub serves every
+# case (bootstrap's oracle scrubs only SCCACHE_*, BASH_ENV and ENV, so these survive).
+scc_stub_body='log=${SCC_STUB_LOG:-}
+[ -n "$log" ] && printf "%s\n" "$*" >> "$log"
+case "$*" in *--show-stats*) ;; *) exit 0 ;; esac
+scc_resolve() {
+  v=${SCCACHE_CACHE_SIZE-}
+  case "$v" in
+    *[!0-9KkMmGgTt]*|""|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*) echo 10737418240; return ;;
+  esac
+  n=${v%[KkMmGgTt]}; s=${v#"$n"}
+  case "$s" in
+    K|k) m=1024 ;; M|m) m=1048576 ;; G|g) m=1073741824 ;; T|t) m=1099511627776 ;; *) m=1 ;;
+  esac
+  echo $(( 10#$n * m ))
+}
+if [ -n "${SCCACHE_SERVER_PORT:-}" ]; then
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\\\"%s\\\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+    "${SCC_STUB_ISO_LOC:-${SCCACHE_DIR:-/none}}" "$(scc_resolve)"
+elif [ "${SCC_STUB_MAX:-none}" = none ]; then
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\\\"%s\\\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+    "${SCC_STUB_LOC:-/data/sccache-stub}" "$(scc_resolve)"
+else
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\\\"%s\\\\\"\",\"cache_size\":%s,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+    "${SCC_STUB_LOC:-/data/sccache-stub}" "${SCC_STUB_USED:-1000}" "$SCC_STUB_MAX"
+fi
+exit 0'
+
 # 6a. mold present + cc passes the probe -> managed block written, both Linux
 #     triples, NO linker line (default cc accepts -fuse-ld=mold).
 sbA=$(mktemp -d "$tmp/moldA.XXXXXX"); stubA="$tmp/stubA"; mkdir -p "$stubA"
@@ -1214,7 +1243,14 @@ mk_push_repo() {
   # suite-wide seam ALSO removes an order-dependence that was already latent: the shared
   # file is appended to by whichever earlier `--yes` case runs first, so what these cases
   # measured depended on suite ordering.
-  printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$dir/etc-environment"
+  # SCCACHE_CACHE_SIZE joins the pin for the same reason and with the same history (issue
+  # #3727): section 5b2's VERIFIED requires the file line AND a session that sees it AND a
+  # running server enforcing the bytes it means, so without this every sandbox here gains a
+  # `sccache-cap: FAILED` warn, `base_warns` goes 1 -> 2, and the three green-path cases below
+  # silently skip — the drift this file's own comments record FOUR times. The value pairs with
+  # mk_push_bin's sudo shim and sccache stub, so 5b2 contributes ZERO warnings deterministically
+  # on a capped host and an uncapped one alike.
+  printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=30G\n' >"$dir/etc-environment"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
 
@@ -1287,7 +1323,11 @@ mk_push_bin() {
   # shipped awk rather than guessed).
   mk_stub "$dir" perf 'case "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac
 exit 0'
-  mk_stub "$dir" sccache 'exit 0'
+  # A REAL-SHAPED sccache (issue #3727): section 5b2 asks it for the value->bytes map through
+  # an isolated read AND for the running server's enforced cap, so a bare `exit 0` yields
+  # `sccache-cap: UNMEASURED` — one extra warn in every sandbox here. SCC_STUB_MAX pairs with
+  # the 30G in mk_push_repo's env file (30 GiB = 32212254720 bytes).
+  mk_stub "$dir" sccache "$scc_stub_body"
   mk_stub "$dir" cargo-nextest 'exit 0'
   mk_stub "$dir" cargo 'exit 0'
   mk_stub "$dir" roborev 'exit 0'
@@ -1299,9 +1339,12 @@ exit 0'
   # the datasets stub); 5b is simply the newest place it could leak in. Section 3b never
   # invokes sudo and the perf section is skipped here (`uname` reports Darwin), so this
   # shim's only subject is 5b.
+  # SCCACHE_CACHE_SIZE is injected alongside the pin (issue #3727) so section 5b2's verdict —
+  # and therefore the warning count every case here measures — does not depend on whether the
+  # HOST running the suite happens to be capped.
   mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
-exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=30G "$@"'
   mk_push_gh "$dir" "$setup"
 }
 
@@ -1315,8 +1358,10 @@ push_out=""
 run_push() {
   local repo="$1" bin="$2" gc="$3"; shift 3
   push_rc=0
+  # SCC_STUB_MAX = 30 GiB in bytes: the cap the sccache stub reports as the RUNNING server's,
+  # matching the 30G in this sandbox's env file and sudo shim (issue #3727).
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
-    CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
+    CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" SCC_STUB_MAX=32212254720 \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
@@ -2929,7 +2974,10 @@ else
   #      someone thought of: section 5b must contain EXACTLY ONE `ok` call, and it
   #      must be the probe's VERIFIED verdict. Any future `ok` added for a file write,
   #      a profile grep or an inherited value reds this immediately.
-  pin_section=$(awk '/^# ---- 5b\./,/^# ---- 5c\./' "$BOOTSTRAP")
+  # BOUNDED AT 5b2, NOT AT 5c (issue #3727): section 5b2 sits between them and has its own
+  # single `ok`, so the old range counted both sections' success verdicts and this guard fired
+  # on a correct change. 12b-o below is the same assertion for 5b2.
+  pin_section=$(awk '/^# ---- 5b\./,/^# ---- 5b2\./' "$BOOTSTRAP")
   # TWO success verdicts now, and both are ENUMERATED rather than merely counted: the
   # probe's VERIFIED, and the non-Linux NOT-APPLICABLE (an explicit inapplicability, which
   # must be an [ok] so a correctly-configured Mac is not permanently non-passing). Naming
@@ -4100,6 +4148,426 @@ elif grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | g
 else
   bad "gate-pin: verify.run no longer passes --fix-gate-pin — launched boxes will arrive UNPINNED"
   grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | head -2
+fi
+
+# --- 12b. SECTION 5b2: the sccache cache-size cap (issue #3727) ------------------------
+# The twin of the 11* block above, one variable over, and it must be a SEPARATE block for
+# the reason section 5b2 is a separate section: the two answer different questions with
+# different remedies (`sccache --stop-server` vs editing a value), and folding them would
+# make each case's subject ambiguous.
+#
+# THE STUB IS AN sccache, NOT A SEAM (#3312's corollary, as this file applies it elsewhere):
+# a CQLITE_BOOTSTRAP_SCCACHE_BIN variable would be one more thing a real invoker can set, so
+# the cases substitute the ARTIFACT on PATH. The stub models the two shapes MEASURED on
+# sccache 0.17.0 — an ISOLATED client (SCCACHE_SERVER_PORT set: no server, so the cap comes
+# from the client's own SCCACHE_CACHE_SIZE and cache_size is null) and a PRODUCTION read (a
+# running server: a fixed cap and an integer cache_size) — and it RECORDS ITS ARGV, so a case
+# can assert what was never invoked.
+#
+# scc_stub_body (the shared sccache stub) is defined with the other PATH-stub helpers near
+# the top of this file, because mk_push_bin needs it too.
+
+# mksccshims <dir> <session-value> [no-sccache]
+#   <session-value>: `-` = a fresh session sees NOTHING (nothing persisted);
+#                    `file:<path>` = the PAM stand-in reads the value out of that env file at
+#                    session-creation time, exactly as pam_env does — so a write performed
+#                    earlier in the SAME bootstrap run is visible to the probe;
+#                    anything else = inject that literal.
+#   The pin (CQLITE_GATE_MAX_CONCURRENCY=1) is injected alongside so section 5b reaches its
+#   own VERIFIED and its warnings cannot be mistaken for this section's.
+mksccshims() {
+  local dir="$1" val="$2" mode="${3:-}" t bin
+  mk_hermetic_bin "$dir"
+  for t in id tee true; do
+    bin=$(type -P "$t" 2>/dev/null) || continue
+    [ -n "$bin" ] && ln -sf "$bin" "$dir/$t" 2>/dev/null || true
+  done
+  [ "$mode" = no-sccache ] || mk_stub "$dir" sccache "$scc_stub_body"
+  if [ "${val#file:}" != "$val" ]; then
+    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
+if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+pam_file='${val#file:}'
+scc_val=\"\"
+if [ -f \"\$pam_file\" ] && grep -Eq '^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=' \"\$pam_file\"; then
+  scc_val=\$(sed -n 's/^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=//p' \"\$pam_file\" | tail -1)
+  exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$scc_val\" \"\$@\"
+fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 \"\$@\""
+  elif [ "$val" = "-" ]; then
+    mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+  else
+    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
+if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=$val \"\$@\""
+  fi
+}
+
+# runscc <script> <shim-dir> <env-file> [NAME=VALUE...] [--flag...] — one bootstrap run.
+# BOTH variables are scrubbed from every call: this suite runs on fleet boxes that export
+# them, and an inherited value would otherwise decide the verdict instead of the case's input.
+runscc() {
+  local script="$1" shims="$2" envfile="$3"; shift 3
+  local -a scc_env=() scc_flags=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -*) scc_flags+=("$a") ;;
+      *) scc_env+=("$a") ;;
+    esac
+  done
+  env -u CQLITE_GATE_MAX_CONCURRENCY -u SCCACHE_CACHE_SIZE \
+    PATH="$shims" CARGO_HOME="$tmp/pin-cargo" HOME="$tmp/scc-home" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envfile" \
+    ${scc_env[@]+"${scc_env[@]}"} \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$script" \
+      --skip-smoke ${scc_flags[@]+"${scc_flags[@]}"} 2>&1
+}
+# scc_slice <output>: JUST section 5b2's block. Every assertion below is made against the
+# slice, never the whole run: sections 5b and 3b legitimately warn in some of these sandboxes,
+# and a whole-output warn count would make each case's subject ambiguous.
+scc_slice() {
+  push_plain "$1" | awk '/== sccache cache-size cap/{f=1;next} /^== /{f=0} f'
+}
+scc_warns() { printf '%s\n' "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
+scc_oks()   { printf '%s\n' "$1" | grep -cE '^[[:space:]]+\[ok\] '; }
+
+if [ "$(id -u)" = 0 ]; then
+  skip "sccache-cap: the ENTIRE block (the test seam is refused under root, so section 5b2 cannot be driven here)"
+elif [ ! -d "$pinroot/scripts" ]; then
+  skip "sccache-cap: the ENTIRE block (the staged bootstrap tree from the 11* block is unavailable)"
+else
+  mkdir -p "$tmp/scc-home/.cargo"
+  scc_bs="$pinroot/scripts/bootstrap-agent-machine.sh"
+  # A SECOND COPY WITH THE CAP LITERAL SUBSTITUTED. The shipped literal is deliberately the
+  # unsubstituted `__DERIVED_CAP__` placeholder until the measurement run lands, and bootstrap
+  # REFUSES to persist it — so the cases that exercise a real WRITE substitute the artifact in
+  # their own scratch copy (the idiom this repo mandates over a settable seam), while the cases
+  # that exercise the REFUSAL use the shipped script. When the placeholder is substituted for
+  # real, both keep working: the sed is asserted to have matched.
+  scc_bs_sub="$tmp/scc-bs-substituted.sh"
+  cp "$scc_bs" "$scc_bs_sub"
+  sed -i.bak "s/^SCC_ENV_VALUE='[^']*'$/SCC_ENV_VALUE='30G'/" "$scc_bs_sub" 2>/dev/null \
+    || sed -i '' "s/^SCC_ENV_VALUE='[^']*'\$/SCC_ENV_VALUE='30G'/" "$scc_bs_sub" 2>/dev/null
+  rm -f "$scc_bs_sub.bak"
+  if grep -q "^SCC_ENV_VALUE='30G'\$" "$scc_bs_sub"; then
+    ok "sccache-cap: the substituted scratch copy carries the test cap literal (the harness's own precondition)"
+  else
+    bad "sccache-cap: could not substitute SCC_ENV_VALUE in the scratch copy — the write cases below would test nothing"
+  fi
+  scc_log="$tmp/scc-stub-argv.log"; : >"$scc_log"
+
+  # 12b-a. VERIFIED — the only [ok] this section may ever emit. The file sets the cap, a fresh
+  #        profile-free session sees the SAME value, and the RUNNING server enforces exactly the
+  #        bytes that value means. Without this case, every negative below would also pass
+  #        against a section that can only ever say FAILED.
+  scc_shims_v="$tmp/scc-shims-v"
+  scc_env_v="$tmp/scc-env-v"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=30G\n' >"$scc_env_v"
+  mksccshims "$scc_shims_v" "file:$scc_env_v"
+  scc_out_v=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
+  scc_sl_v=$(scc_slice "$scc_out_v")
+  if printf '%s\n' "$scc_sl_v" | grep -qE '\[ok\].*sccache-cap: VERIFIED' \
+     && [ "$(scc_warns "$scc_sl_v")" = 0 ] && [ "$(scc_oks "$scc_sl_v")" = 1 ]; then
+    ok "sccache-cap: file + session + RUNNING server agree -> exactly one [ok] VERIFIED and zero [warn]"
+  else
+    bad "sccache-cap: the positive case did not reach a clean VERIFIED (oks=$(scc_oks "$scc_sl_v") warns=$(scc_warns "$scc_sl_v"))"
+    printf '%s\n' "$scc_sl_v" | head -6
+  fi
+  # The scope note must state what VERIFIED does NOT cover — an unqualified VERIFIED reads as
+  # "every gate on this box gets this cap", and the server-startup caveat is the new one.
+  if printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*SERVER at STARTUP' \
+     && printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*provenance is not' \
+     && printf '%s\n' "$scc_sl_v" | grep -q 'sccache-cap=<bytes>(pinned)'; then
+    ok "sccache-cap: VERIFIED prints its scope — server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
+  else
+    bad "sccache-cap: the scope note is missing one of its three statements"
+    printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
+  fi
+
+  # 12b-b. NOT-HONOURED — the #3727 state itself: the value is persisted, visible and accepted,
+  #        and the RUNNING server enforces something else because it predates the value. The
+  #        remedy must be `sccache --stop-server` and must NOT tell the operator to edit a value
+  #        that is already correct (a remedy the operator has already complied with is worse
+  #        than none, because it stops them looking).
+  scc_out_nh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
+  scc_sl_nh=$(scc_slice "$scc_out_nh")
+  if printf '%s\n' "$scc_sl_nh" | grep -qE '\[warn\].*sccache-cap: NOT-HONOURED' \
+     && printf '%s\n' "$scc_sl_nh" | grep -q 'sccache --stop-server' \
+     && ! printf '%s\n' "$scc_sl_nh" | grep -qE '\[ok\].*sccache-cap' \
+     && ! printf '%s\n' "$scc_sl_nh" | grep -q 'fix the VALUE'; then
+    ok "sccache-cap: a stale server is NOT-HONOURED whose remedy is 'sccache --stop-server', never editing the value"
+  else
+    bad "sccache-cap: the stale-server state did not report NOT-HONOURED with the stop-server remedy"
+    printf '%s\n' "$scc_sl_nh" | head -6
+  fi
+
+  # 12b-c. NOT-SYSTEM-WIDE — visible, accepted and enforced, but NOT coming from the
+  #        system-wide file, so a server started outside that source gets sccache's default.
+  scc_shims_lit="$tmp/scc-shims-lit"; mksccshims "$scc_shims_lit" 30G
+  scc_env_empty="$tmp/scc-env-empty"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_empty"
+  scc_out_nsw=$(runscc "$scc_bs" "$scc_shims_lit" "$scc_env_empty" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
+  scc_sl_nsw=$(scc_slice "$scc_out_nsw")
+  if printf '%s\n' "$scc_sl_nsw" | grep -qE '\[warn\].*sccache-cap: NOT-SYSTEM-WIDE' \
+     && printf '%s\n' "$scc_sl_nsw" | grep -q -- '--fix-sccache-cap' \
+     && ! printf '%s\n' "$scc_sl_nsw" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: a value reaching only this session is NOT-SYSTEM-WIDE, remedied by --fix-sccache-cap"
+  else
+    bad "sccache-cap: a session-only value was not reported as NOT-SYSTEM-WIDE"
+    printf '%s\n' "$scc_sl_nsw" | head -6
+  fi
+
+  # 12b-d. FAILED, and the scrub that makes it honest: bootstrap's OWN environment carries a
+  #        value (the normal state of a re-run on a fleet box) while nothing is persisted and
+  #        the session sees nothing. An unscrubbed probe would certify exactly the failure this
+  #        section exists to catch.
+  scc_shims_none="$tmp/scc-shims-none"; mksccshims "$scc_shims_none" -
+  scc_out_f=$(runscc "$scc_bs" "$scc_shims_none" "$scc_env_empty" SCC_STUB_MAX=32212254720 \
+    SCCACHE_CACHE_SIZE=30G SCC_STUB_LOG="$scc_log")
+  scc_sl_f=$(scc_slice "$scc_out_f")
+  if printf '%s\n' "$scc_sl_f" | grep -qE '\[warn\].*sccache-cap: FAILED' \
+     && ! printf '%s\n' "$scc_sl_f" | grep -qE '\[ok\].*sccache-cap' \
+     && printf '%s\n' "$scc_sl_f" | grep -q -- '--fix-sccache-cap'; then
+    ok "sccache-cap: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
+  else
+    bad "sccache-cap: an inherited value was accepted as evidence the box is capped"
+    printf '%s\n' "$scc_sl_f" | head -6
+  fi
+
+  # 12b-e. THE ONE DECLARED AMBIGUITY. A value that resolves to sccache's OWN default cannot be
+  #        told apart from one sccache silently DISCARDED, so the verdict is UNMEASURED with the
+  #        ambiguity named and the accepted grammar printed — never a guess, and never VERIFIED.
+  for scc_amb in 10G 30GiB; do
+    scc_shims_amb="$tmp/scc-shims-amb-$scc_amb"; mksccshims "$scc_shims_amb" "$scc_amb"
+    scc_env_amb="$tmp/scc-env-amb-$scc_amb"
+    printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=%s\n' "$scc_amb" >"$scc_env_amb"
+    scc_out_amb=$(runscc "$scc_bs" "$scc_shims_amb" "$scc_env_amb" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
+    scc_sl_amb=$(scc_slice "$scc_out_amb")
+    if printf '%s\n' "$scc_sl_amb" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+       && printf '%s\n' "$scc_sl_amb" | grep -q "sccache's OWN default cap" \
+       && printf '%s\n' "$scc_sl_amb" | grep -q '<digits>\[KkMmGgTt\]' \
+       && ! printf '%s\n' "$scc_sl_amb" | grep -qE '\[ok\].*sccache-cap'; then
+      ok "sccache-cap: '$scc_amb' resolving to sccache's own default is UNMEASURED with the ambiguity + grammar named"
+    else
+      bad "sccache-cap: '$scc_amb' did not produce the declared-ambiguity UNMEASURED"
+      printf '%s\n' "$scc_sl_amb" | head -6
+    fi
+  done
+
+  # 12b-f. NO ORACLE, NO VERDICT. With no sccache on PATH the value->bytes map cannot be asked
+  #        of the tool that owns it, so the answer is UNMEASURED — never an [ok], and never a
+  #        bash reimplementation of the grammar.
+  scc_shims_nb="$tmp/scc-shims-nb"; mksccshims "$scc_shims_nb" 30G no-sccache
+  scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCC_STUB_MAX=32212254720)
+  scc_sl_nb=$(scc_slice "$scc_out_nb")
+  if printf '%s\n' "$scc_sl_nb" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+     && printf '%s\n' "$scc_sl_nb" | grep -q "no 'sccache' on PATH" \
+     && ! printf '%s\n' "$scc_sl_nb" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing oracle, never an [ok]"
+  else
+    bad "sccache-cap: an absent oracle did not produce UNMEASURED"
+    printf '%s\n' "$scc_sl_nb" | head -6
+  fi
+
+  # 12b-g. NO RUNNING SERVER -> UNMEASURED, not a comparison of the value with itself. MEASURED:
+  #        with nothing running, --show-stats answers max_cache_size from the CLIENT's own env
+  #        and reports cache_size null, so accepting that number would compare the session value
+  #        against itself and call the box VERIFIED.
+  scc_out_ns=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none SCC_STUB_LOG="$scc_log")
+  scc_sl_ns=$(scc_slice "$scc_out_ns")
+  if printf '%s\n' "$scc_sl_ns" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+     && printf '%s\n' "$scc_sl_ns" | grep -q 'no sccache server is running' \
+     && ! printf '%s\n' "$scc_sl_ns" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: a null cache_size is UNMEASURED — the client's own echo can never certify a cap"
+  else
+    bad "sccache-cap: a client-side echo with no server running was not refused"
+    printf '%s\n' "$scc_sl_ns" | head -6
+  fi
+
+  # 12b-h. THE ISOLATION ASSERT, which is the single most important line in the section: if the
+  #        isolated probe is answered by a DIFFERENT sccache, its cap says nothing about our
+  #        value and the reading must be discarded rather than trusted.
+  scc_out_iso=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+    SCC_STUB_ISO_LOC=/some/other/servers/cache SCC_STUB_LOG="$scc_log")
+  scc_sl_iso=$(scc_slice "$scc_out_iso")
+  if printf '%s\n' "$scc_sl_iso" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+     && printf '%s\n' "$scc_sl_iso" | grep -q 'answered by a DIFFERENT sccache' \
+     && ! printf '%s\n' "$scc_sl_iso" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: a foreign sccache answering the isolated probe is DISCARDED, not trusted"
+  else
+    bad "sccache-cap: the isolation assert did not fire on a foreign cache location"
+    printf '%s\n' "$scc_sl_iso" | head -6
+  fi
+
+  # 12b-i. AND IT NEVER STOPS A SERVER. Behavioural, from the stub's recorded argv across every
+  #        case above: the production server is somebody else's, and a `--stop-server` here
+  #        would cost a peer lane's in-flight compile its cache. (This is why the isolated
+  #        oracle was built as a READ rather than as the plan's start-a-server design.)
+  if [ -s "$scc_log" ] && ! grep -q -- '--stop-server' "$scc_log"; then
+    ok "sccache-cap: across every case, section 5b2 invoked sccache $(grep -c '^' "$scc_log") time(s) and NEVER --stop-server"
+  elif [ ! -s "$scc_log" ]; then
+    bad "sccache-cap: the sccache stub recorded NO invocations — the cases above measured nothing"
+  else
+    bad "sccache-cap: section 5b2 invoked 'sccache --stop-server' — it must never stop a server it does not own"
+    grep -n -- '--stop-server' "$scc_log" | head -3
+  fi
+
+  # 12b-j. NON-LINUX IS UNMEASURED, NEVER AN [ok]. The correlation's file half does not exist
+  #        there, so a machine-wide cap cannot be told from a sudo- or user-scoped one — and an
+  #        `ok "NOT-APPLICABLE"` would let --strict CERTIFY AN UNCAPPED HOST, which is this
+  #        issue's own defect wearing a platform label (the mistake #3414 made and removed).
+  scc_shims_mac="$tmp/scc-shims-mac"; mksccshims "$scc_shims_mac" 30G
+  mk_stub "$scc_shims_mac" uname 'echo Darwin; exit 0'
+  scc_out_mac=$(runscc "$scc_bs" "$scc_shims_mac" "$scc_env_v" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
+  scc_sl_mac=$(scc_slice "$scc_out_mac")
+  if printf '%s\n' "$scc_sl_mac" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+     && ! printf '%s\n' "$scc_sl_mac" | grep -qE '\[ok\]'; then
+    ok "sccache-cap: a non-Linux host with a session-visible, enforced cap is UNMEASURED, never certified"
+  else
+    bad "sccache-cap: a non-Linux host produced a success verdict"
+    printf '%s\n' "$scc_sl_mac" | head -6
+  fi
+
+  # 12b-k. NEVER REWRITES AN EXISTING VALUE, even under --fix-sccache-cap and even when the
+  #        existing value differs from this fleet's: a box deliberately running its own cap keeps
+  #        it. Asserted byte-for-byte, because "left as is" is a claim about the FILE.
+  scc_env_7g="$tmp/scc-env-7g"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=7G\n' >"$scc_env_7g"
+  scc_before=$(cat "$scc_env_7g")
+  scc_shims_7g="$tmp/scc-shims-7g"; mksccshims "$scc_shims_7g" "file:$scc_env_7g"
+  scc_out_7g=$(runscc "$scc_bs_sub" "$scc_shims_7g" "$scc_env_7g" SCC_STUB_MAX=7516192768 \
+    SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
+  if [ "$(cat "$scc_env_7g")" = "$scc_before" ]; then
+    ok "sccache-cap: --fix-sccache-cap leaves an existing SCCACHE_CACHE_SIZE byte-identical (never rewrites a value)"
+  else
+    bad "sccache-cap: --fix-sccache-cap rewrote an existing value"
+    diff <(printf '%s\n' "$scc_before") "$scc_env_7g" | head -6
+  fi
+  # ... and that box is VERIFIED at ITS OWN cap, which is what makes the no-rewrite rule safe
+  # rather than merely polite.
+  if printf '%s\n' "$(scc_slice "$scc_out_7g")" | grep -qE '\[ok\].*sccache-cap: VERIFIED.*7G'; then
+    ok "sccache-cap: a box on its own 7G cap VERIFIES at that value (the fleet literal is not imposed)"
+  else
+    bad "sccache-cap: a box with its own cap did not verify at its own value"
+    scc_slice "$scc_out_7g" | head -6
+  fi
+
+  # 12b-l. THE WRITE. With a substituted literal and no line in the file, --fix-sccache-cap
+  #        persists it, and the SAME RUN's probe then sees it — pam_env reads the file at
+  #        session creation, so no reboot and no re-login (the PAM stand-in models exactly that).
+  scc_env_w="$tmp/scc-env-w"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_w"
+  scc_shims_w="$tmp/scc-shims-w"; mksccshims "$scc_shims_w" "file:$scc_env_w"
+  scc_out_w=$(runscc "$scc_bs_sub" "$scc_shims_w" "$scc_env_w" SCC_STUB_MAX=32212254720 \
+    SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
+  if grep -q '^SCCACHE_CACHE_SIZE=30G$' "$scc_env_w" \
+     && grep -q '^# cqlite: sccache object-cache size cap' "$scc_env_w" \
+     && printf '%s\n' "$(scc_slice "$scc_out_w")" | grep -qE '\[ok\].*sccache-cap: VERIFIED'; then
+    ok "sccache-cap: --fix-sccache-cap persists the cap AND the same run's probe verifies it"
+  else
+    bad "sccache-cap: the write path did not persist + verify in one run"
+    echo "--- env file ---"; cat "$scc_env_w"; scc_slice "$scc_out_w" | head -6
+  fi
+  # The comment goes on its OWN line: pam_env takes a trailing `# …` as part of the value, so an
+  # inline comment would make the persisted cap literally `30G  # cqlite: …` — which sccache
+  # silently discards.
+  if ! grep -q '^SCCACHE_CACHE_SIZE=.*#' "$scc_env_w"; then
+    ok "sccache-cap: the persisted line carries NO inline comment (pam_env would read it as part of the value)"
+  else
+    bad "sccache-cap: the persisted line has an inline comment — pam_env would fold it into the value"
+    grep -n 'SCCACHE_CACHE_SIZE' "$scc_env_w"
+  fi
+
+  # 12b-m. THE PLACEHOLDER REFUSAL. Until the measured cap is substituted, the shipped literal is
+  #        not a value sccache accepts — and persisting it would be SILENT (no diagnostic
+  #        anywhere) and PERMANENT (this section never rewrites an existing value). So the write
+  #        is refused, loudly, and nothing is written. This case is a no-op once the literal is a
+  #        real cap, so it is keyed on what the shipped script actually says rather than assuming.
+  scc_shipped_val=$(sed -n "s/^SCC_ENV_VALUE='\\(.*\\)'\$/\\1/p" "$scc_bs" | head -1)
+  case "$scc_shipped_val" in
+    *[!0-9KkMmGgTt]*|''|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*|*[0-9])
+      scc_env_ph="$tmp/scc-env-ph"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_ph"
+      scc_out_ph=$(runscc "$scc_bs" "$scc_shims_w" "$scc_env_ph" SCC_STUB_MAX=32212254720 \
+        SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
+      if ! grep -q 'SCCACHE_CACHE_SIZE' "$scc_env_ph" \
+         && printf '%s\n' "$(scc_slice "$scc_out_ph")" | grep -q 'SILENTLY DISCARD'; then
+        ok "sccache-cap: an unusable cap literal ('$scc_shipped_val') is REFUSED, not persisted (a discarded line would be permanent and invisible)"
+      else
+        bad "sccache-cap: an unusable cap literal was persisted, or the refusal was silent"
+        echo "--- env file ---"; cat "$scc_env_ph"; scc_slice "$scc_out_ph" | head -4
+      fi ;;
+    *)
+      ok "sccache-cap: the shipped cap literal '$scc_shipped_val' is an accepted <digits>[KkMmGgTt] value (the placeholder has been substituted; the refusal path is now unreachable by design)" ;;
+  esac
+
+  # 12b-n. THE OPT-OUT is loud and NON-PASSING — a switch that returned `ok` would be a way to
+  #        buy a vacuous green, which is the failure mode this section removes.
+  for scc_optout in --skip-sccache-cap env:CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1; do
+    if [ "${scc_optout#env:}" != "$scc_optout" ]; then
+      scc_out_oo=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" "${scc_optout#env:}" SCC_STUB_MAX=32212254720)
+    else
+      scc_out_oo=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 "$scc_optout")
+    fi
+    scc_sl_oo=$(scc_slice "$scc_out_oo")
+    if printf '%s\n' "$scc_sl_oo" | grep -qE '\[warn\].*sccache-cap: OPT-OUT' \
+       && ! printf '%s\n' "$scc_sl_oo" | grep -qE '\[ok\].*sccache-cap'; then
+      ok "sccache-cap: $scc_optout is a [warn] OPT-OUT that can never buy a green"
+    else
+      bad "sccache-cap: $scc_optout did not report as a non-passing OPT-OUT"
+      printf '%s\n' "$scc_sl_oo" | head -4
+    fi
+  done
+  # Contradictory intents do not resolve silently: an EXPLICIT skip beside an explicit fix is a
+  # usage error (exit 2), while the weaker ENV opt-out loses to an explicit --fix-sccache-cap.
+  scc_rc_x=0
+  runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" --skip-sccache-cap --fix-sccache-cap >/dev/null 2>&1 || scc_rc_x=$?
+  if [ "$scc_rc_x" = 2 ]; then
+    ok "sccache-cap: --skip-sccache-cap beside --fix-sccache-cap is a usage error (exit 2), not a silent winner"
+  else
+    bad "sccache-cap: contradictory flags resolved silently (rc=$scc_rc_x, expected 2)"
+  fi
+  scc_out_envfix=$(runscc "$scc_bs_sub" "$scc_shims_w" "$scc_env_w" \
+    CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1 SCC_STUB_MAX=32212254720 --fix-sccache-cap)
+  if ! printf '%s\n' "$(scc_slice "$scc_out_envfix")" | grep -q 'OPT-OUT'; then
+    ok "sccache-cap: an env opt-out cannot neuter an explicit --fix-sccache-cap"
+  else
+    bad "sccache-cap: CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1 overrode an explicit --fix-sccache-cap"
+  fi
+fi
+
+# 12b-o. STRUCTURAL, because the behavioural cases above can only cover the branches someone
+#        thought of: section 5b2 must contain EXACTLY ONE `ok` call, and it must be the probe's
+#        VERIFIED verdict. Any future `ok` added for a file write, a platform exemption or a
+#        visible-but-unenforced value reds this immediately — the twin of 11i for 5b.
+scc_section=$(awk '/^# ---- 5b2\./,/^# ---- 5c\./' "$BOOTSTRAP")
+scc_ok_total=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*ok "' || true)
+scc_ok_named=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*ok "sccache-cap: VERIFIED [(]' || true)
+if [ -n "$scc_section" ] && [ "${scc_ok_total:-0}" = 1 ] && [ "${scc_ok_named:-0}" = 1 ]; then
+  ok "sccache-cap: section 5b2's ONLY success verdict is VERIFIED (no platform exemption, no write-succeeded ok)"
+else
+  bad "sccache-cap: section 5b2 has ${scc_ok_total:-0} ok() call(s), ${scc_ok_named:-0} of them a named verdict"
+fi
+
+# 12b-p. TWO SPELLINGS OF ONE NUMBER IS DRIFT, and this is the only mechanism against it: the
+#        fleet cap lives in bootstrap (which persists it) and in .agent-ami/profile.yaml (whose
+#        env reaches launcher-created processes). If they disagree, a launched box's session env
+#        and its /etc/environment carry different caps and whichever starts the server wins.
+scc_profile="$SCRIPT_DIR/../../.agent-ami/profile.yaml"
+scc_bs_val=$(sed -n "s/^SCC_ENV_VALUE='\\(.*\\)'\$/\\1/p" "$BOOTSTRAP" | head -1)
+scc_prof_val=$(sed -n 's/^[[:space:]]*SCCACHE_CACHE_SIZE:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$scc_profile" | head -1)
+if [ ! -r "$scc_profile" ]; then
+  bad "sccache-cap: .agent-ami/profile.yaml is not readable — cannot check the cap literal or verify.run"
+elif [ -n "$scc_bs_val" ] && [ "$scc_bs_val" = "$scc_prof_val" ]; then
+  ok "sccache-cap: bootstrap's SCC_ENV_VALUE and profile.yaml's SCCACHE_CACHE_SIZE are the SAME literal ('$scc_bs_val')"
+else
+  bad "sccache-cap: the fleet cap literal DRIFTED — bootstrap says '$scc_bs_val', profile.yaml says '$scc_prof_val'"
+fi
+# And verify.run must actually pass the flag: a repair nothing calls is a repair that does not
+# happen (the same reasoning as the --fix-gate-pin case above).
+if [ -r "$scc_profile" ] \
+   && grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$scc_profile" | grep -q -- '--fix-sccache-cap'; then
+  ok "sccache-cap: .agent-ami/profile.yaml's verify.run persists the cap on a launched box (--fix-sccache-cap)"
+else
+  bad "sccache-cap: verify.run no longer passes --fix-sccache-cap — launched boxes will arrive UNCAPPED"
+  grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$scc_profile" | head -2
 fi
 
 # --- 13. NO SKIP MAY BE ANNOUNCED THROUGH ok() (issue #3414 roborev round 2) ----------
