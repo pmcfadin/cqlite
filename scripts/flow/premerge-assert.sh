@@ -152,24 +152,40 @@
 #     So the three `PREMERGE: SCOPE` lines are RETAINED: slice 1 does not close
 #     the gap they disclose, and removing them would be exactly the overclaim
 #     this residual exists to prevent.
-#  4. THE #3653 ANCHOR BINDING IS A LOCAL-REPOSITORY FACT (Case B only). It
-#     proves the anchor is an ancestor of the certified sha AS THIS CHECKOUT'S
-#     OBJECT STORE RECORDS IT. Two things it therefore does NOT prove. (a) It
-#     says NOTHING about whether the anchor is on the PR AS GITHUB SEES IT: the
-#     local branch could hold commits that were never pushed, and no `gh` call
-#     here reads the PR's commit list. The `commit:`/`tree-start:` binding plus
-#     the head compare are what tie the whole chain to the sha GitHub will merge.
-#     (b) REPOSITORY STATE THAT REWRITES ANCESTRY is closed by CONSTRUCTION, not
-#     by the threat model: the walk runs in an isolated scratch repository whose
-#     only view of this lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` (roborev job
-#     355), so `$GIT_DIR/info/grafts` and `refs/replace/*` — both of which are
-#     PEER-WRITABLE here, since every lane is a worktree of one shared `.git`,
-#     and both of which also fire BY ACCIDENT as leftovers of an unrelated
-#     debugging session — cannot reach it. The two git pins stay as belt. What
-#     remains INVOKER-CLASS and out of model by residual 2 is planting forged
-#     OBJECTS in the shared store: objects are content-addressed, so that means
-#     defeating sha collision resistance or replacing the store wholesale, and
-#     the shared-store trust boundary is #3746's subject, not this check's.
+#  4. THE #3653 ANCHOR BINDING — WHAT IT PROVES, AND THE BOUNDARY IT DOES NOT
+#     CROSS (Case B only). Stated as a BOUNDARY rather than as another list of
+#     closed attacks, because three review rounds found three routes into one
+#     mechanism (graft -> environment/template -> commit-graph) and the pattern
+#     predicts a fourth: that is CLAUDE.md's "one axis closed, space declared
+#     done" shape (#3544 job 264), and the repository has already ruled on the
+#     unclosable version of it (#3746 / job 311 — DECLARE the boundary in the
+#     emitted line, hand the real subject to the issue that owns it).
+#
+#     IT PROVES: the anchor is an ancestor of the certified sha over the objects
+#     and commit metadata THIS BOX'S SHARED OBJECT STORE PRESENTS, read in an
+#     isolated scratch repository that is proof against — with a positive control
+#     for each — `$GIT_DIR/info/grafts` (job 355), `refs/replace/*`, an inherited
+#     `GIT_DIR`/`GIT_COMMON_DIR` and an ambient `GIT_TEMPLATE_DIR`/config
+#     `init.templateDir` (job 358), and a trusted `commit-graph` (job 361). Each
+#     of those is PEER-WRITABLE on this fleet, because every lane is a worktree
+#     of ONE shared `.git`, and each also fires BY ACCIDENT as a leftover of an
+#     unrelated debugging session — which is why they are closed and not merely
+#     declared.
+#
+#     IT DOES NOT PROVE, and no further enumeration will change this:
+#       (a) that the anchor is on the PR AS GITHUB SEES IT. The local branch may
+#           hold commits never pushed, and no `gh` call here reads the PR's commit
+#           list. The `commit:`/`tree-start:` binding plus the head compare are
+#           what tie the chain to the sha GitHub will merge.
+#       (b) anything against a PEER THAT CAN WRITE THE SHARED OBJECT STORE. Git
+#           does not rehash a packed object against the id it was asked for, and
+#           not every file in that store is content-addressed. So the ancestry
+#           verdict is derived from a store that is TRUSTED, NOT VERIFIED — which
+#           the evidence line SAYS, on every run, naming #3746. That hazard is
+#           strictly bigger than this guard: #3746's own note is that its subject
+#           may be the infrastructure decision that lanes share an object store
+#           at all. A FIFTH route in this family is therefore a residual under
+#           (b), not a defect in this check and not a false claim here.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -496,6 +512,40 @@ refuse_anchor_unverifiable() {
 # --- THE ISOLATED HOP'S ENVIRONMENT (roborev job 358) -----------------------
 # See the header for the two measured routes and the ADMIT/CLEAR line. Built
 # once, used by every git call below — lane discovery included.
+# THE PRE-COMMAND OPTIONS, IN ONE ARRAY BECAUSE THEY MUST REACH EVERY SITE
+# (roborev job 361 + job 276's rule). `-c core.commitGraph=false` is the new one:
+# `objects/info/commit-graph` (and the `objects/info/commit-graphs/` chain) is
+# reachable through the alternate, it is NOT content-addressed, and git TRUSTS its
+# recorded parent edges — so a peer-writable forged graph is a parent-edge source
+# the isolation does not otherwise remove.
+#
+# MEASURED ON THIS BOX (git 2.43.0), with a commit-graph whose CDAT parent slot was
+# patched to name a FOREIGN commit and whose trailing checksum was recomputed:
+#   rev-list --parents -1 <c2>              -> the FORGED parent   (graph trusted)
+#   -c core.commitGraph=false, same command -> the REAL parent      (flag works)
+#   rev-list <c2> | grep <foreign>          -> 1 by default, 0 with the flag
+#   merge-base --is-ancestor <foreign> <c2> -> "no" in BOTH cases
+# So the MECHANISM is real and measured, and the EXPLOIT AGAINST THIS PARTICULAR
+# CALL DID NOT REPRODUCE on this git version: `merge-base --is-ancestor` did not
+# take the forged edge, while `rev-list` did. The flag is therefore DEFENCE IN
+# DEPTH against a measured-trusted metadata source that is one git version, or one
+# refactor of this walk, away from mattering — not the fix for a reproduced
+# exploit. That distinction is stated here, and in the test, rather than implied.
+#
+# WHAT WAS MEASURED AND DELIBERATELY *NOT* DISABLED, because widening past the
+# measurement is guessing:
+#   * `core.multiPackIndex` — with the pack `.idx` removed and a multi-pack-index
+#     present, the object was NOT readable (`packfile ... index unavailable`), so
+#     no evidence it substitutes for object lookup here, and none that it supplies
+#     parent edges. Its hazard class is "which BYTES an oid resolves to", which is
+#     #3746's trusted-store boundary, not a parent-edge route.
+#   * reachability bitmaps — with a bitmap present, `GIT_TRACE2_PERF=1` during
+#     `merge-base --is-ancestor` produced ZERO bitmap mentions. No evidence of
+#     consultation. (Bitmaps serve packing and `rev-list --objects`.)
+# Both are named so a future reader knows they were measured and left alone, not
+# forgotten.
+ANCHOR_GIT_OPTS=(--no-replace-objects -c core.commitGraph=false)
+
 ANCHOR_GIT_ENV=()
 _anchor_build_git_env() {
   ANCHOR_GIT_ENV=()
@@ -520,6 +570,12 @@ _anchor_build_git_env
 # affirmative token published on the evidence line; it is never silently empty.
 ANCHOR_BOUND_RUNNER=""
 ANCHOR_READS="UNRECORDED"
+
+# THE DECLARED BOUNDARY, in ONE constant consumed by the ONE renderer (job 361,
+# following #3746 / job 311's mechanics). It is a CONSTANT and not a computed
+# value on purpose: there is no measurement this script can take that would make
+# it false, so a variable would only invite a future arm to omit it.
+ANCHOR_PROVENANCE="ancestry over this box's SHARED object store: objects+metadata TRUSTED, not verified (#3746)"
 _anchor_resolve_bound() {
   local name
   if name=$(resolve_advisory_timeout) && ANCHOR_BOUND_RUNNER=$(command -v "$name" 2>/dev/null) &&
@@ -540,9 +596,10 @@ _anchor_resolve_bound() {
 _anchor_run() {
   if [ -n "$ANCHOR_BOUND_RUNNER" ]; then
     env -i "${ANCHOR_GIT_ENV[@]}" "$ANCHOR_BOUND_RUNNER" \
-      --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" git "$@"
+      --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" \
+      git "${ANCHOR_GIT_OPTS[@]}" "$@"
   else
-    env -i "${ANCHOR_GIT_ENV[@]}" git "$@"
+    env -i "${ANCHOR_GIT_ENV[@]}" git "${ANCHOR_GIT_OPTS[@]}" "$@"
   fi
 }
 
@@ -558,7 +615,9 @@ _anchor_timed_out() {
 # Same isolation: an inherited GIT_DIR would make discovery answer about another
 # repository, which poisons the alternate and the shallowness verdict (job 276:
 # the allowlist has to reach the sites a later change adds).
-_anchor_lane() { _anchor_run --no-replace-objects "$@"; }
+# (The options come from ANCHOR_GIT_OPTS inside _anchor_run — ONE definition for
+# every site, so a new option cannot reach some calls and miss others.)
+_anchor_lane() { _anchor_run "$@"; }
 
 # --- THE ISOLATED SCRATCH REPOSITORY (roborev job 355) ----------------------
 # CLEANUP IS REGISTERED BEFORE THE RESOURCE EXISTS. CLAUDE.md's recurring lesson
@@ -710,10 +769,10 @@ _anchor_git() {
   if [ -n "$ANCHOR_BOUND_RUNNER" ]; then
     env -i "${ANCHOR_GIT_ENV[@]}" "GIT_ALTERNATE_OBJECT_DIRECTORIES=$ANCHOR_ALT" \
       "$ANCHOR_BOUND_RUNNER" --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" \
-      git --no-replace-objects -C "$ANCHOR_SCRATCH_REPO" "$@"
+      git "${ANCHOR_GIT_OPTS[@]}" -C "$ANCHOR_SCRATCH_REPO" "$@"
   else
     env -i "${ANCHOR_GIT_ENV[@]}" "GIT_ALTERNATE_OBJECT_DIRECTORIES=$ANCHOR_ALT" \
-      git --no-replace-objects -C "$ANCHOR_SCRATCH_REPO" "$@"
+      git "${ANCHOR_GIT_OPTS[@]}" -C "$ANCHOR_SCRATCH_REPO" "$@"
   fi
 }
 
@@ -1646,12 +1705,19 @@ if [ -n "$delta_file" ]; then
   # `anchor-ancestry:` is the AFFIRMATIVE record that the #3653 binding RAN. After
   # assert_anchor_on_history it can only ever read BOUND — which is the point: a
   # silent pass is indistinguishable from a check that was never reached.
+  # THE BOUNDARY IS DECLARED ON THE LINE, NOT ENUMERATED FOREVER (job 361; the
+  # #3746 / job-311 precedent, applied verbatim: a check that claims nothing false
+  # is worth more than one claiming a closure it does not deliver). Folded into the
+  # ONE suffix the renderer consumes — never appended per verdict arm, or the two
+  # spellings would drift.
+  #
   # `anchor-reads:` is AFFIRMATIVE in both directions (job 358): `bounded-<n>s+<g>s`
   # or `UNBOUNDED(no-timeout-runner-supporting--kill-after)`. An unbounded run is
   # legitimate — a hang cannot manufacture a false pass, and refusing a box with
   # no `timeout` would red correct input — but it must never be SILENT, because a
   # bounded path degrading into an unbounded one unnoticed is the real hazard.
-  printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s anchor-reads: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-    "$delta_anchor" "$ANCHOR_ANCESTRY" "$ANCHOR_READS" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
+  printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s anchor-reads: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s | %s\n' \
+    "$delta_anchor" "$ANCHOR_ANCESTRY" "$ANCHOR_READS" "$delta_commit" "$delta_ts" "$delta_dirty" \
+    "$delta_file" "$ANCHOR_PROVENANCE"
 fi
 exit 0

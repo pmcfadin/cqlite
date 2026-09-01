@@ -134,8 +134,18 @@ carry).
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`) with an explicit empty `--template=`. The reads are
   bounded by the advisory's own runner; with no `timeout`/`gtimeout` they run unbounded and the evidence
   line affirms it (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) instead of refusing, because a hang yields
-  no verdict rather than a false pass. Residual, stated: it proves ancestry **in the local object store
-  only** — not that the anchor is on the PR as GitHub sees it.
+  no verdict rather than a false pass. The **commit-graph is disabled** on those reads
+  (`-c core.commitGraph=false`, job 361): it reaches the scratch through the alternate, is not
+  content-addressed, and git trusts its parent edges — measured, a forged graph changes what
+  `rev-list --parents` reports, though on git 2.43.0 it did NOT change `merge-base --is-ancestor`, so the
+  flag is defence in depth pinned structurally. `core.multiPackIndex` and reachability bitmaps were
+  measured as not consulted for this call and deliberately left alone.
+  **Then the boundary is DECLARED, not enumerated again** (the #3746 / job-311 precedent, after three
+  rounds found three routes into one mechanism): every Case B success line carries one constant —
+  `ancestry over this box's SHARED object store: objects+metadata TRUSTED, not verified (#3746)`. It
+  proves ancestry over what this box's shared store presents; it does NOT prove the anchor is on the PR
+  as GitHub sees it, nor anything against a peer that can WRITE that store. A further route in the family
+  is a residual under that declaration rather than a false claim here.
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
   It does not prove the change was certified against the `main` it will join: a squash-merge composes

@@ -1769,8 +1769,30 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   also **bounded** by the runner this script already resolves for the advisory; where no
   `timeout`/`gtimeout` exists they run UNBOUNDED and the evidence line SAYS so
   (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) rather than refusing — a hang is a LIVENESS failure that
-  yields no verdict, not a false pass, and refusing a box without `timeout` would red correct input. It
-  proves ancestry **in the local object store only** — not that the anchor is on the PR as GitHub sees it.
+  yields no verdict, not a false pass, and refusing a box without `timeout` would red correct input.
+  **THE COMMIT-GRAPH IS TRUSTED METADATA, SO IT IS DISABLED — AND THE MEASUREMENT IS NOT THE ONE THE
+  FINDING PREDICTED** (roborev job 361). `objects/info/commit-graph` reaches the scratch through the
+  alternate, is NOT content-addressed, and git trusts its parent edges. Measured on git 2.43.0 against a
+  graph whose CDAT parent slot was patched and whose checksum recomputed: `rev-list --parents` reports the
+  FORGED parent and `-c core.commitGraph=false` the real one (so the graph IS consulted and IS trusted) —
+  but `merge-base --is-ancestor`, the call this guard makes, answered `no` **both** ways, so the exploit
+  against THIS call did not reproduce. The flag ships as defence in depth (one git version or one refactor
+  from mattering) and the test says so, pinning it STRUCTURALLY where no behavioural arm can. Measured and
+  deliberately NOT disabled: `core.multiPackIndex` (with the pack `.idx` removed the object was
+  unreadable, so no evidence it supplies lookups or edges) and reachability bitmaps (`GIT_TRACE2_PERF=1`
+  showed ZERO bitmap mentions during the call) — widening past a measurement is guessing.
+  **AND AT THAT POINT THE BOUNDARY IS DECLARED RATHER THAN ENUMERATED AGAIN.** Three review rounds found
+  three routes into one mechanism (graft → environment/template → commit-graph), which is #3544 job 264's
+  *"one axis closed, space declared done"* shape, and #3746 / job 311 already ruled on the unclosable
+  version: DECLARE it in the emitted line and hand the subject to the issue that owns it. So every Case B
+  success line ends with one constant — `ancestry over this box's SHARED object store: objects+metadata
+  TRUSTED, not verified (#3746)` — folded into the ONE renderer, never per-arm. What the binding proves:
+  ancestry over the objects and commit metadata this box's shared store presents, isolated (each with a
+  positive control) from grafts, replace refs, an inherited `GIT_DIR`, an ambient template, and the
+  commit-graph. What it does not: that the anchor is on the PR **as GitHub sees it**, and anything against
+  a peer that can WRITE that shared store. A fifth route in this family is a residual under that
+  declaration, not a false claim — a check that claims nothing false is worth more than one claiming a
+  closure it does not deliver.
   **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
   It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
   tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge

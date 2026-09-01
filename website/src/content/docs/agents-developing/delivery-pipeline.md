@@ -203,8 +203,19 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   are bounded by the runner the advisory already resolves; where none exists they run unbounded and the
   evidence line affirms it (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) rather than refusing — a hang is
   a liveness failure yielding no verdict, and refusing a box with no `timeout` would red correct input.
-  Residual: it proves ancestry **in the local object store only** — not that the anchor is on the PR as
-  GitHub sees it.
+  The **commit-graph is disabled** on those reads (job 361) — it is reachable through the alternate, is
+  not content-addressed, and git trusts its parent edges; measured, a forged graph changes
+  `rev-list --parents`, but on git 2.43.0 it did not change `merge-base --is-ancestor`, so the flag ships
+  as defence in depth and is pinned structurally. `core.multiPackIndex` and reachability bitmaps were
+  measured as not consulted and left alone, because widening past a measurement is guessing.
+  **And there the enumeration STOPS and the boundary is DECLARED** (#3746 / job 311's precedent, after
+  three rounds produced three routes into one mechanism — #3544 job 264's "one axis closed, space
+  declared done" shape): every Case B success line ends with one constant, `ancestry over this box's
+  SHARED object store: objects+metadata TRUSTED, not verified (#3746)`. The binding proves ancestry over
+  the objects and metadata this box's shared store presents, isolated with a positive control from
+  grafts, replace refs, an inherited `GIT_DIR`, an ambient template and the commit-graph; it does NOT
+  prove the anchor is on the PR as GitHub sees it, nor anything against a peer that can WRITE that store.
+  A fifth route is a residual under the declaration, not a false claim.
   **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
   `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
   PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A

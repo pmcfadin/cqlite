@@ -1915,6 +1915,184 @@ else
   fi
 fi
 
+# --- 44(i): A FORGED commit-graph (roborev job 361) --------------------------
+#
+# `objects/info/commit-graph` is reachable through the alternate, is NOT
+# content-addressed, and git TRUSTS its recorded parent edges — so it is a
+# parent-edge source the scratch isolation does not by itself remove. The control
+# is `-c core.commitGraph=false` on every isolated read.
+#
+# WHAT THIS ARM CAN HONESTLY CLAIM, WHICH IS LESS THAN THE OTHER TWO. Measured on
+# this suite's own fixture (see the forge below): the graph IS consulted and IS
+# trusted — `rev-list --parents` reports the FORGED parent and `-c
+# core.commitGraph=false` reports the real one — but `merge-base --is-ancestor`,
+# which is the call this guard makes, answered "no" in BOTH cases on git 2.43.0.
+# So the EXPLOIT AGAINST THIS CALL does not reproduce here, and an arm shaped like
+# 44(f)/44(g) ("plain merge-base answers 0, the guard still refuses") CANNOT be
+# built on this host. Pretending otherwise would be a green that proves nothing.
+#
+# What is asserted instead, split by what each half can actually establish:
+#   (1) BEHAVIOURAL, and it is a real positive control for the MECHANISM: the
+#       forged graph changes `rev-list`'s answer, and the flag changes it back.
+#       That proves the fixture is genuinely forged AND that git trusts the graph.
+#   (2) BEHAVIOURAL: the guard refuses the foreign pair in the forged repository,
+#       and still BINDs a genuine ancestor there. NOT load-bearing on this git —
+#       it would pass without the flag — and labelled as such.
+#   (3) STRUCTURAL, labelled: the isolated reads carry `-c core.commitGraph=false`
+#       from the single options array. This is the assertion that actually pins
+#       the control on a host where the behavioural one cannot, and it is declared
+#       structural rather than dressed up as behavioural (the convention CLAUDE.md
+#       records for roborev job 279's ownership invariant).
+CG_REPO="$T/ancestry-cg-repo"
+cg_shape=0
+cg_forged=0
+if [ "$anc_shape" -eq 1 ] && cp -a "$ANC_REPO" "$CG_REPO" 2>/dev/null &&
+   git -C "$CG_REPO" commit-graph write --reachable >/dev/null 2>&1 &&
+   [ -f "$CG_REPO/.git/objects/info/commit-graph" ]; then
+  cg_shape=1
+fi
+if [ "$cg_shape" -eq 1 ]; then
+  # THE FORGE: patch the CDAT record's first parent slot for the CERTIFIED commit
+  # to name the FOREIGN commit, then recompute the file's trailing checksum. git
+  # writes the graph read-only, which is not a control (a peer runs as the same
+  # user), so it is chmod'd first — exactly as a planter would.
+  chmod u+w "$CG_REPO/.git/objects/info/commit-graph" 2>/dev/null
+  if python3 - "$CG_REPO/.git/objects/info/commit-graph" "$R_CERT" "$R_FOREIGN" <<'FORGE' >/dev/null 2>&1
+import sys, struct, hashlib
+path, victim, newparent = sys.argv[1], sys.argv[2], sys.argv[3]
+d = bytearray(open(path, 'rb').read())
+if d[0:4] != b'CGPH' or d[4] != 1 or d[5] != 1:
+    raise SystemExit(1)                      # not a v1/SHA-1 graph: unsupported here
+nchunks = d[6]
+off, entries = 8, []
+for _ in range(nchunks + 1):
+    entries.append((bytes(d[off:off + 4]), struct.unpack('>Q', d[off + 4:off + 12])[0]))
+    off += 12
+chunks = {entries[i][0]: (entries[i][1], entries[i + 1][1]) for i in range(nchunks)}
+if b'OIDL' not in chunks or b'CDAT' not in chunks:
+    raise SystemExit(1)
+oidl, cdat = chunks[b'OIDL'], chunks[b'CDAT']
+n = (oidl[1] - oidl[0]) // 20
+oids = [d[oidl[0] + i * 20:oidl[0] + i * 20 + 20].hex() for i in range(n)]
+if victim not in oids or newparent not in oids:
+    raise SystemExit(1)
+rec = cdat[0] + oids.index(victim) * 36
+d[rec + 20:rec + 24] = struct.pack('>I', oids.index(newparent))
+d[len(d) - 20:] = hashlib.sha1(bytes(d[:len(d) - 20])).digest()
+open(path, 'wb').write(bytes(d))
+FORGE
+  then
+    cg_forged=1
+  fi
+fi
+# (1) THE MECHANISM CONTROL — the forge must actually change what git believes.
+cg_control=0
+if [ "$cg_forged" -eq 1 ]; then
+  cg_default=$(git -C "$CG_REPO" rev-list --parents -1 "$R_CERT" 2>/dev/null)
+  cg_off=$(git -C "$CG_REPO" -c core.commitGraph=false rev-list --parents -1 "$R_CERT" 2>/dev/null)
+  if [ "${cg_default#*"$R_FOREIGN"}" != "$cg_default" ] &&
+     [ "${cg_off#*"$R_FOREIGN"}" = "$cg_off" ]; then
+    cg_control=1
+  fi
+fi
+if [ "$cg_control" -eq 1 ]; then
+  ok "commit-graph POSITIVE CONTROL: the forged graph makes git report a FOREIGN parent, and -c core.commitGraph=false reports the real one"
+  # The reachability half of the same control, which is the property an ancestry
+  # walk would consume.
+  if [ "$(git -C "$CG_REPO" rev-list "$R_CERT" | grep -c "$R_FOREIGN")" = 1 ] &&
+     [ "$(git -C "$CG_REPO" -c core.commitGraph=false rev-list "$R_CERT" | grep -c "$R_FOREIGN")" = 0 ]; then
+    ok "commit-graph POSITIVE CONTROL: the forged graph makes the FOREIGN commit reachable from the certified head (and the flag removes it)"
+  else
+    bad "commit-graph POSITIVE CONTROL: the forge did not change reachability — the fixture is not the shape this arm claims"
+  fi
+  # (2) The guard's behaviour in that repository. Declared NOT load-bearing on a
+  # git whose --is-ancestor ignores the forged edge; it is here so a git that
+  # DOES honour it would red this arm rather than merge.
+  OUT=$(cd "$CG_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 2 ]; then
+    bad "commit-graph: a forged commit-graph produced a non-refusal (exit $RC, wanted 2) — this git's --is-ancestor DOES honour the forged edge and the control is not reaching it (job 361) (got: $OUT)"
+  else
+    ok "commit-graph: the guard refuses the foreign pair in the forged repository (exit 2)"
+  fi
+  OUT=$(cd "$CG_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ] && [ "${OUT#*anchor-ancestry: BOUND}" != "$OUT" ]; then
+    ok "commit-graph: NON-VACUITY — a genuine ancestor is still BOUND in the forged repository"
+  else
+    bad "commit-graph: the genuine ancestor stopped being BOUND (exit $RC) — the refusal above proves nothing (got: $OUT)"
+  fi
+  printf 'ARM NOT TAKEN: commit-graph EXPLOIT arm (job 361) — the mechanism control above FIRED, but on\n'
+  printf 'ARM NOT TAKEN: this git `merge-base --is-ancestor` answered "no" for the forged edge WITH and\n'
+  printf 'ARM NOT TAKEN: WITHOUT the flag, so no arm on this host can show the flag CHANGING this\n'
+  printf 'ARM NOT TAKEN: guard-s verdict. The control is pinned STRUCTURALLY below instead.\n'
+else
+  printf 'ARM NOT TAKEN: forged commit-graph (job 361) — this host could not build the fixture (no\n'
+  printf 'ARM NOT TAKEN: commit-graph support, a non-v1/SHA-1 graph format, or the forge did not change\n'
+  printf 'ARM NOT TAKEN: what git believes), so no behavioural claim is made about the graph route.\n'
+  printf 'ARM NOT TAKEN: The structural assertion below still applies.\n'
+  ok "commit-graph: SKIPPED (mechanism control did not fire — arm UNEXERCISED, declared not silent)"
+fi
+
+# (3) THE STRUCTURAL ASSERTION, labelled as such. On a git whose --is-ancestor
+# ignores a forged graph this is the ONLY thing pinning the control, so it is not
+# optional decoration: it asserts the shipped script disables the graph, from the
+# SINGLE options array, so a future option cannot reach some call sites and miss
+# others (roborev job 276's failure mode).
+if grep -q -F -- 'ANCHOR_GIT_OPTS=(--no-replace-objects -c core.commitGraph=false)' "$ASSERT"; then
+  ok "commit-graph (STRUCTURAL): the shipped script disables core.commitGraph in the ONE options array"
+else
+  bad "commit-graph (STRUCTURAL): the shipped script no longer disables core.commitGraph in ANCHOR_GIT_OPTS (job 361)"
+fi
+# ...and that every git invocation in the check consumes that array rather than
+# calling `git` bare. Counted, not eyeballed: this is the invariant that job 276
+# says has to reach the sites a later change adds.
+anchor_bare=$(awk '
+  /^_anchor_(run|git)\(\) \{/ { inf = 1 }
+  inf && /^\}/ { inf = 0 }
+  inf && /(^|[^_[:alnum:]])git / && !/ANCHOR_GIT_OPTS/ { c++ }
+  END { print c + 0 }
+' "$ASSERT")
+if [ "$anchor_bare" = 0 ]; then
+  ok "commit-graph (STRUCTURAL): every git invocation in the isolated wrappers passes ANCHOR_GIT_OPTS"
+else
+  bad "commit-graph (STRUCTURAL): $anchor_bare git invocation(s) in the isolated wrappers bypass ANCHOR_GIT_OPTS — an option would reach some sites and miss others (job 276)"
+fi
+
+# --- 44(j): THE BOUNDARY IS DECLARED ON EVERY SUCCESS LINE (job 361) ---------
+# Three rounds found three routes into one mechanism, so the guard now DECLARES
+# what it cannot prove instead of implying a closure it does not deliver: the
+# ancestry verdict is derived from a shared object store that is TRUSTED, not
+# VERIFIED, and that hazard belongs to #3746.
+if run_anc 0 "Case B success declares the ancestry provenance boundary" \
+  2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA"; then
+  case "$OUT" in
+    *"TRUSTED, not verified (#3746)"*)
+      ok "boundary: the DELTA-RECERT line declares the store is TRUSTED, not verified, naming #3746" ;;
+    *) bad "boundary: the success line must declare the trusted-store boundary (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"SHARED object store"*)
+      ok "boundary: the declaration names WHAT is trusted (this box's shared object store)" ;;
+    *) bad "boundary: the declaration must name the shared object store (got: $OUT)" ;;
+  esac
+  # It must not have displaced the tokens a reader greps for.
+  case "$OUT" in
+    *"anchor-ancestry: BOUND"*) ok "boundary: the ancestry token is unchanged beside the declaration" ;;
+    *) bad "boundary: the declaration must not displace anchor-ancestry: BOUND (got: $OUT)" ;;
+  esac
+fi
+# ONE renderer, never per-arm: two spellings of a boundary drift, and a drifted
+# boundary is worse than none. Asserted structurally, for the same reason (3) is.
+boundary_sites=$(grep -c -F -- 'TRUSTED, not verified (#3746)' "$ASSERT")
+if [ "$boundary_sites" = 1 ]; then
+  ok "boundary (STRUCTURAL): the declaration text exists in exactly ONE place in the shipped script"
+else
+  bad "boundary (STRUCTURAL): the declaration appears $boundary_sites times — it must be ONE constant consumed by the ONE renderer"
+fi
+
 # =============================================================================
 # #3465 review — the remaining refusal branches
 # =============================================================================
