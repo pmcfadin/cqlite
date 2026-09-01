@@ -2226,7 +2226,8 @@ fi
 # component's scope) reintroduced one level down, at line granularity.
 #
 # STRUCTURAL, like case 92 and for the same reason: the behavioural facts cost a full
-# npm ci + napi build (~138s measured) to prove one line's presence, inside a
+# npm ci + napi build (138s measured on PR #3555's post-rebase build) to prove one line's
+# presence, inside a
 # tooling-tests component already near ~950s. The property being asserted IS a property
 # of the source.
 #
