@@ -163,6 +163,35 @@ lanes, and adds the case the failing-assertion plants cannot reach: one that cfg
 compiles, runs **zero** tests and exits 0 — the only plant that exercises the non-zero-count half of
 `check_unittest_targets_ran`.
 
+**AND THE SAME QUESTION APPLIES TO A LINT'S SUBJECT SET, WHICH IS WHERE IT WAS HARDEST TO SEE
+(#3756).** A gate component's subject set is a package or a target; a LINT's is a LIST OF FILES,
+and an enumerated list that honestly declares its own non-exhaustiveness is **honest without
+being coverage**. Measured: `scripts/tests/test_roborev_guard_portability.sh` has carried the
+rule *"`xargs -r` (and GNU long options) are not in BSD xargs"* verbatim since #3296, and
+`xargs -0 -r` still shipped in `scripts/tests/test_bootstrap_agent_machine.sh`'s tree-identity
+digest — the worst available place, since a silent BSD failure inside an INTEGRITY digest made
+an edited untracked file report `STABLE` — because neither that lint nor its sibling
+`test_agent_gate_tree_portability.sh` named either bootstrap file (**0 references in either**).
+A human reviewer caught it; the lint that already knew the rule never looked. **A FULL
+DERIVATION WAS MEASURED AND REJECTED, NOT ASSUMED AWAY**: sweeping all 167 tracked
+`scripts/**/*.sh` reds 10 of 15 rules across ~40 sites — mostly OTHER portability lints' own
+rule TABLES and deliberate GNU-first/BSD-fallback pairs — a cross-cutting cleanup with its own
+review surface that would red `roborev-lints` in every lane's `--lite`. So the set stays
+ENUMERATED and **DECLARES ITSELF AT RUN TIME**, the same move `flight-tests` makes: every
+scanned path is printed beside an affirmatively MEASURED `unscanned: N of M tracked
+scripts/**/*.sh` line, which reads `NOT MEASURED` — never a number — when the census cannot be
+taken, because a number in a scope declaration reads as authority. Two rules fall out.
+**MEMBERSHIP IS NOT DETECTION**: adding a file to the list proves it reaches `grep`, not that
+the incident's own construct would be caught in it, so each newly-scanned file carries a control
+that PLANTS the construct into a throwaway copy and requires the scan to **NAME** the planted
+line — in a 3000-line file a bare red is produced identically by an unrelated rule. And
+**WIDENING A LINT FINDS THINGS, WHICH IS THE POINT AND ALSO THE COST**: the two bootstrap files
+yielded a real macOS defect (`readlink -f` behind a `|| echo` fallback that made a symlinked
+cargo config get REPLACED by a plain file) and one rule FALSE POSITIVE — `timeout[[:space:]]+[0-9]`
+matched the `2` of `command -v timeout 2>/dev/null`, i.e. the rule red on **the very guard its own
+message recommends**, at three real call sites. Fix the rule, never the caller, and pin both
+directions: a false-positive fix that also loses the true positive is not a fix.
+
 **A CI exemption that defers to a local gate component is only as true as that component's SCOPE
 (#3493).** `.github/ci-gating-tiers.yml` excuses a workflow from `required` by naming the local
 component that supposedly owns its merge-gating half — and nothing checks that the named component
