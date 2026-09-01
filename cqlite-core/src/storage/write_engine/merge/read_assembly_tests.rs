@@ -583,6 +583,77 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
     );
 }
 
+/// Issue #2339 (roborev F4, REJECTED finding — this pins the CORRECT behaviour so
+/// it cannot be re-litigated): a tuple/UDT whose trailing components are OMITTED
+/// compares EQUAL to one that encodes them EXPLICITLY AS NULL.
+///
+/// A review round claimed the two must differ ("Cassandra's shorter-prefix
+/// ordering") and proposed comparing component counts. That contradicts the pinned
+/// `cassandra-5.0.8` `TupleType.compareCustom`, verbatim:
+///
+/// ```text
+/// if (allRemainingComponentsAreNull(left, accessorL, offsetL)
+///  && allRemainingComponentsAreNull(right, accessorR, offsetR))
+///     return 0;
+/// ...
+/// private <T> boolean allRemainingComponentsAreNull(T v, ValueAccessor<T> accessor, int offset) {
+///     while (!accessor.isEmptyFromOffset(v, offset)) {
+///         int size = accessor.getInt(v, offset);
+///         offset += TypeSizes.INT_SIZE;
+///         if (size >= 0) return false;
+///     }
+///     return true;            // EXHAUSTED BUFFER => vacuously TRUE
+/// }
+/// ```
+///
+/// An exhausted buffer is vacuously "all remaining components are null", so the
+/// omitted and explicit encodings return 0. Cassandra's shorter-prefix rule lives
+/// in `ClusteringComparator` (clustering-key PREFIXES) — a different ordering on a
+/// different type, not tuple component comparison.
+///
+/// Byte encodings, not hand-built values: the decoder is what turns an omitted
+/// suffix into a SHORTER `Value::Tuple`, and that is half of the property.
+#[test]
+fn an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix() {
+    let cmp = ComparatorType::Tuple(vec![ComparatorType::Text, ComparatorType::Int]);
+    let decode =
+        |bytes: &[u8]| composite::decode_composite("c", "element", bytes, &cmp).expect("decodes");
+    // text "a", then: nothing / an explicit null int (i32-BE -1).
+    let omitted = decode(&hex("0000000161"));
+    let explicit = decode(&hex("0000000161ffffffff"));
+    assert_eq!(
+        omitted,
+        Value::Tuple(vec![Value::Text("a".into())]),
+        "precondition: an omitted suffix decodes to a SHORTER tuple, which is what \
+         makes the comparison non-trivial"
+    );
+    assert_eq!(
+        explicit,
+        Value::Tuple(vec![Value::Text("a".into()), Value::Null]),
+        "precondition: the explicit encoding decodes to a null component"
+    );
+    assert_eq!(
+        composite::compare_composite(&omitted, &explicit, &cmp).unwrap(),
+        std::cmp::Ordering::Equal,
+        "TupleType.compareCustom: both sides' remaining components are all null \
+         (vacuously so for the exhausted one), so it returns 0"
+    );
+    assert_eq!(
+        composite::compare_composite(&explicit, &omitted, &cmp).unwrap(),
+        std::cmp::Ordering::Equal,
+        "and the relation is symmetric"
+    );
+    // The CONTROL that makes the assertion meaningful: a NON-null suffix is
+    // GREATER than an omitted one, so "equal" is not just "short-circuits on
+    // length".
+    let present = decode(&hex("00000001610000000400000007"));
+    assert_eq!(
+        composite::compare_composite(&omitted, &present, &cmp).unwrap(),
+        std::cmp::Ordering::Less,
+        "a side that runs out is LESS than one carrying a non-null component"
+    );
+}
+
 /// The RETAINED fail-closed path: a composite element whose declared UDT name
 /// resolves to NOTHING (no registry, or a name absent from it) has no field
 /// list to decode into, so it still fails closed naming the column and the
