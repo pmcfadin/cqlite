@@ -133,27 +133,138 @@ if [ "${#CANONICAL[@]}" -ne 8 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# #3642 (residual 3 of #3493): a ONE-DIRECTIONAL derivation, restoring the detection the
-# hand-named list gave up.
+# _setup_js_cql_census <file> — CLASSIFY EVERY `.cql` OCCURRENCE, REFUSE ON ANYTHING ELSE
+# (roborev #3642, blocker 3). One TAB-separated line per occurrence:
 #
-# The list above is hand-named ON PURPOSE — deriving BOTH sides is the tautology that made
-# an earlier version unable to fail, because removing a schema from production removed it
-# from the expectation too. But hand-naming cost a real detection: a NINTH schema
-# referenced by bindings/node/__test__/setup.js without being added to
-# CANONICAL_SCHEMA_FILES is no longer noticed, and the #3148 preflight then stops guarding
-# a file the node suite resolves — its absence surfacing as a mid-suite jest failure
-# instead of a named preflight FAIL.
+#   OK      <line>  <basename>        a recognised canonical declaration
+#   COMMENT <line>  <text>            an inert `//` or block-comment-continuation line
+#   REFUSE  <line>  <text>            a `.cql` this scan cannot classify -> the case FAILs
+#   ERROR   0       <why>             the file could not be read at all
 #
-# So the derivation runs in ONE DIRECTION only: read what setup.js actually references and
-# require that set to be a SUBSET of the hand-named authority. The authority is never
-# derived, so a deletion from production still reds; an ADDITION to the node suite now
-# reds too, until someone adds it here deliberately.
+# WHY A CENSUS AND NOT A BETTER PATTERN. The predecessor recognised ONE exact single-line
+# form and SILENTLY DROPPED everything else, so a ninth schema written as a multiline
+# `path.join(...)`, or via an intermediate variable, was omitted while the six existing
+# matches kept the derivation non-empty — the subset assert stayed true and the drift this
+# check exists for went unseen. That is a PARTIAL vacuity: the "is the set empty" refusal
+# cannot see it, because the set is not empty.
 #
-# THE DERIVATION REFUSES RATHER THAN YIELDING AN EMPTY SET. A subset assert over an empty
-# left-hand side is vacuously true, so a setup.js this extractor cannot parse would
-# silently turn this case into a no-op — the "positive verdict from an unmeasured signal"
-# family this repo fails closed on. Unreadable file, or zero schemas extracted, is a FAIL
-# naming the derivation.
+# The fix is NOT formatting-independent JS parsing. That is an unbounded parsing problem
+# and this repo's standing ruling is that such a scanner cannot abstain and will produce
+# false verdicts (see scripts/ci/check-pub-surface.sh, which refuses rather than guesses on
+# any `pub mod` shape it does not recognise). So this scan ENFORCES AN ENUMERABLE
+# DECLARATION STRUCTURE instead: a schema reference must be a single, column-zero
+# `const NAME = path.join(SCHEMAS_DIR, '<file>.cql');`, and any OTHER `.cql` occurrence is a
+# NAMED refusal that reds the case with the line number and the text. Remedy is always the
+# same — write the reference in the canonical one-line form.
+#
+# CLASSIFICATION ORDER, and why each rule is decidable without a lexer:
+#   1. a line whose first non-space characters are `//` is INERT. A commented-out reference
+#      is not a reference, and counting one would red a correct tree.
+#   2. a line carrying `/*` or `*/` MIXES code and comment; telling them apart needs a
+#      lexer, so it REFUSES.
+#   3. a line whose first non-space character is `*` is a block-comment continuation. It
+#      cannot be code carrying a `.cql` literal (rule 2 already took every line that opens
+#      or closes a block comment).
+#   4. the canonical declaration -> OK.
+#   5. anything else -> REFUSE.
+#
+# DECLARED RESIDUAL: a reference with no literal `.cql` ANYWHERE in setup.js — e.g.
+# `path.join(SCHEMAS_DIR, tableName + SUFFIX)` — has no basename in this file to census, so
+# it is invisible to this scan. It is also invisible to the subset assert for the same
+# reason (there is nothing to compare), and the schema it resolves would surface as a
+# mid-suite jest failure. Bounding that needs the JS parsing this scan deliberately refuses
+# to do; it is a declared gap, not a covered one.
+#
+# The awk program below contains NO literal single quote (it is inside a single-quoted shell
+# string): the quote character is built as `Q = sprintf("%c", 39)` and the patterns are
+# composed as strings. That is why the regexes are variables rather than literals.
+_setup_js_cql_census() { # <setup.js path>
+  local f=$1
+  if [ ! -r "$f" ]; then
+    printf 'ERROR\t0\tunreadable file: %s\n' "$f"
+    return 0
+  fi
+  awk '
+    BEGIN {
+      Q = sprintf("%c", 39)
+      QC = "[\"" Q "]"                     # either quote character
+      NQ = "[^\"" Q "]"                    # anything but a quote
+      DECL = "^const[ ]+[A-Za-z_$][A-Za-z0-9_$]*[ ]*=[ ]*path\\.join\\(SCHEMAS_DIR,[ ]*" QC NQ "*\\.cql" QC "\\)[ ]*;[ ]*$"
+      LIT  = QC NQ "*\\.cql"
+    }
+    index($0, ".cql") == 0 { next }
+    {
+      line = $0
+      gsub(/\t/, " ", line)
+      gsub(/\r/, "", line)
+      if (length(line) > 110) line = substr(line, 1, 110) "..."
+    }
+    line ~ /^[ ]*\/\// { printf "COMMENT\t%d\t%s\n", NR, line; next }
+    line ~ /\/\*/      { printf "REFUSE\t%d\tmixed code and block comment on one line: %s\n", NR, line; next }
+    line ~ /\*\//      { printf "REFUSE\t%d\tmixed code and block comment on one line: %s\n", NR, line; next }
+    line ~ /^[ ]*\*/   { printf "COMMENT\t%d\t%s\n", NR, line; next }
+    line ~ DECL {
+      if (match(line, LIT)) {
+        printf "OK\t%d\t%s\n", NR, substr(line, RSTART + 1, RLENGTH - 1)
+      } else {
+        printf "REFUSE\t%d\tcanonical declaration whose .cql literal could not be extracted: %s\n", NR, line
+      }
+      next
+    }
+    { printf "REFUSE\t%d\tnot the canonical `const NAME = path.join(SCHEMAS_DIR, <file>.cql);` form: %s\n", NR, line }
+  ' "$f"
+}
+
+# _census_names <census>  — the OK basenames, sorted and deduped.
+_census_names() { printf '%s\n' "$1" | awk -F'\t' '$1 == "OK" { print $3 }' | sort -u; }
+# _census_refusals <census> — one `line N: text` per REFUSE/ERROR entry (empty = none).
+_census_refusals() {
+  printf '%s\n' "$1" | awk -F'\t' '$1 == "REFUSE" || $1 == "ERROR" { printf "line %s: %s\n", $2, $3 }'
+}
+# _census_extra <census> — the OK basenames NOT in the hand-named authority.
+_census_extra() {
+  local _n _extra=""
+  while IFS= read -r _n; do
+    [ -n "$_n" ] || continue
+    case " ${REQUIRED_SCHEMAS[*]} " in
+      *" $_n "*) : ;;
+      *) _extra="$_extra $_n" ;;
+    esac
+  done < <(_census_names "$1")
+  printf '%s' "${_extra# }"
+}
+
+SETUP_JS="$REPO/bindings/node/__test__/setup.js"
+sjs_census=$(_setup_js_cql_census "$SETUP_JS")
+sjs_refusals=$(_census_refusals "$sjs_census")
+sjs_names=$(_census_names "$sjs_census" | tr '\n' ' ' | sed 's/ $//')
+
+# CASE 1 — the census itself. Every `.cql` occurrence must be classified; an occurrence
+# this scan cannot read is a refusal, never a silent skip, because a silent skip is exactly
+# how a ninth schema hid behind six recognised siblings.
+if [ -n "$sjs_refusals" ]; then
+  bad "3642-setupjs-census: $SETUP_JS carries .cql reference(s) this scan cannot classify, so the subset assert below cannot claim to cover the file:
+$(printf '%s\n' "$sjs_refusals" | sed 's/^/    /')
+    REMEDY: write each schema reference as a single column-zero line, exactly
+    \`const NAME = path.join(SCHEMAS_DIR, 'file.cql');\`. This scan refuses rather than
+    parse JS formatting-independently (see the header, and scripts/ci/check-pub-surface.sh)."
+else
+  ok "3642-setupjs-census: every .cql occurrence in setup.js is classified — $( _census_names "$sjs_census" | grep -c . ) canonical declaration(s), $(printf '%s\n' "$sjs_census" | awk -F'\t' '$1 == "COMMENT"' | grep -c .) inert comment line(s), 0 unclassifiable"
+fi
+
+# CASE 2 — the ONE-DIRECTIONAL subset assert (#3642, residual 3 of #3493).
+#
+# The authority (REQUIRED_SCHEMAS) is hand-named ON PURPOSE — deriving BOTH sides is the
+# tautology that made an earlier version unable to fail, because removing a schema from
+# production removed it from the expectation too. But hand-naming cost a real detection: a
+# NINTH schema referenced by setup.js without being added to CANONICAL_SCHEMA_FILES is not
+# noticed, and the #3148 preflight then stops guarding a file the node suite resolves — its
+# absence surfacing as a mid-suite jest failure instead of a named preflight FAIL.
+#
+# So the derivation runs in ONE DIRECTION only: what setup.js references must be a SUBSET
+# of the hand-named authority. A deletion from production still reds (the authority is not
+# derived); an ADDITION to the node suite now reds too, until someone adds it here
+# deliberately.
 #
 # SCOPED TO setup.js, deliberately. Since #3493 round 10 every schema the node suite reads
 # must come from setup.js's resolver (write.test.js used to build the path itself, which
@@ -162,61 +273,74 @@ fi
 # CANONICAL_SCHEMA_FILES and are not this preflight's subject; they resolve through
 # global.testPaths.SCHEMAS_DIR, not through the canonical set.
 #
-# _setup_js_schemas <file> — the .cql basenames <file> resolves through SCHEMAS_DIR, one
-# per line, sorted and deduped. `//`-commented lines are skipped: a commented-out
-# reference is not a reference, and counting one would red a correct tree.
-_setup_js_schemas() { # <setup.js path>
-  grep -v '^[[:space:]]*//' "$1" 2>/dev/null \
-    | grep -o "path\.join(SCHEMAS_DIR,[[:space:]]*['\"][^'\"]*\.cql['\"]" \
-    | sed "s/.*['\"]\([^'\"]*\.cql\)['\"]\$/\1/" \
-    | sort -u
-}
-
-# _schemas_not_in_authority <setup.js path> — echo the referenced schemas that are NOT in
-# REQUIRED_SCHEMAS, or the token `__DERIVATION_FAILED__` when nothing could be extracted.
-_schemas_not_in_authority() { # <setup.js path>
-  local _f=$1 _n _extra=""
-  if [ ! -r "$_f" ]; then printf '__DERIVATION_FAILED__'; return 0; fi
-  local _refs; _refs=$(_setup_js_schemas "$_f")
-  if [ -z "$_refs" ]; then printf '__DERIVATION_FAILED__'; return 0; fi
-  while IFS= read -r _n; do
-    [ -n "$_n" ] || continue
-    case " ${REQUIRED_SCHEMAS[*]} " in
-      *" $_n "*) : ;;
-      *) _extra="$_extra $_n" ;;
-    esac
-  done <<< "$_refs"
-  printf '%s' "${_extra# }"
-}
-
-SETUP_JS="$REPO/bindings/node/__test__/setup.js"
-sjs_extra=$(_schemas_not_in_authority "$SETUP_JS")
-if [ "$sjs_extra" = "__DERIVATION_FAILED__" ]; then
-  bad "3642-setupjs-derivation: could not extract any SCHEMAS_DIR .cql reference from $SETUP_JS — REFUSING to report a subset over an empty set, which would be vacuously true. Fix the extractor (_setup_js_schemas) or the file."
+# AN EMPTY LEFT-HAND SIDE IS A REFUSAL, NOT A PASS: a subset assert over an empty set is
+# vacuously true, so a setup.js this scan finds no declaration in would silently turn this
+# case into a no-op — the "positive verdict from an unmeasured signal" family this repo
+# fails closed on.
+sjs_extra=$(_census_extra "$sjs_census")
+if [ -z "$sjs_names" ]; then
+  bad "3642-setupjs-derivation: no canonical SCHEMAS_DIR .cql declaration was extracted from $SETUP_JS — REFUSING to report a subset over an empty set, which would be vacuously true. Either the file stopped declaring schemas that way (see the census verdict above) or the extractor is broken."
 elif [ -n "$sjs_extra" ]; then
   bad "3642-setupjs-subset: setup.js resolves schema(s) the #3148 preflight does not guard:$sjs_extra. Either add them to CANONICAL_SCHEMA_FILES in agent-gate.sh AND to REQUIRED_SCHEMAS above (deliberately, in the same diff), or stop resolving them through setup.js — otherwise their absence surfaces as a mid-suite jest failure instead of a named preflight FAIL."
 else
-  ok "3642-setupjs-subset: every schema setup.js resolves ($(_setup_js_schemas "$SETUP_JS" | tr '\n' ' ' | sed 's/ $//')) is covered by the hand-named REQUIRED_SCHEMAS"
+  ok "3642-setupjs-subset: every schema setup.js resolves ($sjs_names) is covered by the hand-named REQUIRED_SCHEMAS"
 fi
 
-# DISCRIMINATION CONTROL. A subset assert that has never been seen to fail is not
-# evidence: an extractor whose pattern no longer matches reports "all covered" for every
-# input, which is the exact failure mode the refusal above guards against in one direction
-# and this guards in the other. A scratch copy of setup.js gains a NINTH schema reference,
-# and the check must NAME it.
-sjs_planted="$tmp/setup-ninth.js"
-if [ -r "$SETUP_JS" ]; then
+# DISCRIMINATION CONTROLS. A subset assert that has never been seen to fail is not
+# evidence, and — the blocker-3 lesson — a control that plants only the syntax the scan
+# ALREADY recognises tests the scan on input it handles. So three plants: the recognised
+# form, and the two UNRECOGNISED shapes whose silent omission was the defect. The first
+# must be NAMED as an extra schema; the other two must be NAMED REFUSALS, because a scan
+# that cannot read them must say so rather than report "all covered".
+if [ ! -r "$SETUP_JS" ]; then
+  bad "3642-setupjs-discriminates: $SETUP_JS is unreadable, so the three discrimination controls could not run"
+  bad "3642-setupjs-refuses-multiline: $SETUP_JS is unreadable, so this control could not run"
+  bad "3642-setupjs-refuses-indirect: $SETUP_JS is unreadable, so this control could not run"
+else
+  # (a) the RECOGNISED form — detected as an extra schema and named.
+  sjs_planted="$tmp/setup-ninth.js"
   cp "$SETUP_JS" "$sjs_planted"
   printf "\nconst SCHEMA_NINTH = path.join(SCHEMAS_DIR, 'ninth-schema.cql');\n" >> "$sjs_planted"
-  sjs_planted_extra=$(_schemas_not_in_authority "$sjs_planted")
+  sjs_planted_extra=$(_census_extra "$(_setup_js_cql_census "$sjs_planted")")
   case " $sjs_planted_extra " in
     *" ninth-schema.cql "*)
-      ok "3642-setupjs-discriminates: a planted ninth schema reference in setup.js is detected and NAMED" ;;
+      ok "3642-setupjs-discriminates: a planted ninth schema in the canonical form is detected and NAMED" ;;
     *)
       bad "3642-setupjs-discriminates: a planted ninth-schema.cql reference was NOT detected (got '${sjs_planted_extra:-<none>}'); the subset check would pass over the very drift it exists for" ;;
   esac
-else
-  bad "3642-setupjs-discriminates: $SETUP_JS is unreadable, so the discrimination control could not run"
+
+  # (b) a MULTILINE path.join — the exact shape the predecessor dropped silently. The
+  # `.cql` literal sits on its own line, so it can never match a single-line declaration
+  # form; the requirement is that it REFUSES and names the line, not that it is parsed.
+  sjs_multi="$tmp/setup-multiline.js"
+  cp "$SETUP_JS" "$sjs_multi"
+  {
+    printf '\nconst SCHEMA_MULTI = path.join(\n'
+    printf '  SCHEMAS_DIR,\n'
+    printf "  'multiline-schema.cql'\n"
+    printf ');\n'
+  } >> "$sjs_multi"
+  sjs_multi_ref=$(_census_refusals "$(_setup_js_cql_census "$sjs_multi")")
+  if printf '%s' "$sjs_multi_ref" | grep -q 'multiline-schema\.cql'; then
+    ok "3642-setupjs-refuses-multiline: a multiline path.join(SCHEMAS_DIR, ...) is REFUSED by name, not silently omitted while the recognised siblings keep the set non-empty"
+  else
+    bad "3642-setupjs-refuses-multiline: a multiline path.join carrying 'multiline-schema.cql' produced no named refusal (refusals: '${sjs_multi_ref:-<none>}'). That is the PARTIAL vacuity this census exists to remove: the set stays non-empty, the subset assert stays true, and the ninth schema is missed."
+  fi
+
+  # (c) an INTERMEDIATE VARIABLE — the second unrecognised shape. The basename is a bare
+  # string literal, so again: refuse by name.
+  sjs_indirect="$tmp/setup-indirect.js"
+  cp "$SETUP_JS" "$sjs_indirect"
+  {
+    printf "\nconst NINTH_NAME = 'indirect-schema.cql';\n"
+    printf 'const SCHEMA_INDIRECT = path.join(SCHEMAS_DIR, NINTH_NAME);\n'
+  } >> "$sjs_indirect"
+  sjs_indirect_ref=$(_census_refusals "$(_setup_js_cql_census "$sjs_indirect")")
+  if printf '%s' "$sjs_indirect_ref" | grep -q 'indirect-schema\.cql'; then
+    ok "3642-setupjs-refuses-indirect: a schema resolved through an intermediate variable is REFUSED by name"
+  else
+    bad "3642-setupjs-refuses-indirect: an intermediate-variable reference to 'indirect-schema.cql' produced no named refusal (refusals: '${sjs_indirect_ref:-<none>}'); such a reference would be omitted from the derivation while the recognised siblings keep it non-empty"
+  fi
 fi
 
 # A dataset root whose canonical corpus IS present, so the #2078 corpus guard is
