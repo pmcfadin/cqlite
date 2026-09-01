@@ -273,7 +273,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   not be on. The replacement needs no process inspection and so is correct on every host, macOS
   included: the gate relaunches its beater at each component boundary, so a live gate whose beater
   alone died recovers to `RUNNING` within one component — re-read before acting, and treat a
-  still-`STALLED` run as gone only after a component's worth of time (~850s at the longest).
+  still-`STALLED` run as gone only after **longer than the LONGEST COMPONENT OF YOUR OWN RUN,
+  derived from the component table in your own SUMMARY** — never from a constant in prose. The
+  figure previously written here, "~850s", was understated by 2.4x (`tooling-tests` measured
+  **2073s** on #3473's gate of record #4), and acting on an understated bound makes a closer declare
+  a LIVE gate gone and relaunch it, putting two gates on one summary path.
   Full record: `docs/development/lane-gate-execution.md`.
 - **A GENUINELY PROSE diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE

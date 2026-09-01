@@ -357,9 +357,19 @@ identity and no boot identity — and is therefore correct on every host.
 `STALLED` answers it. The rule that replaces "definitely dead, re-run now" needs no process
 inspection: the gate relaunches its beater at every component boundary, so a live gate whose
 beater alone died **recovers to `RUNNING` within one component**. Re-read before acting; if it
-is still `STALLED` after a component's worth of time (~850 s at the longest), treat the gate as
+is still `STALLED` after **longer than the longest component of your own run**, treat the gate as
 gone and relaunch. The verdict text says all of this, so a reader acting on it needs no
 memory of this document.
+
+**Do not take that bound from a number written here.** This document said "~850 s at the longest"
+in four places, and gate of record #4 on this very branch measured **`tooling-tests` at 2073 s** —
+2.4x the stated ceiling. Acting on the understated figure is not a small error: it tells a closer
+its live gate is gone less than half way through the longest component, so the closer relaunches
+and **two gates write one summary path**, which is the outcome this whole issue exists to prevent.
+The figure decayed because `tooling-tests` executes ~69 nested scripts and things keep being added
+to it — including, in this very change, cases in the two suites it runs. So **derive the bound from
+the component table in your own SUMMARY block** (`<name>: PASS (<n>s)`), where it is a measurement
+rather than a remembered constant, and treat any number in prose here as illustrative only.
 
 `STALLED` requires **two valid samples of the same run** showing no progress. If the confirmation
 sample cannot be copied, holds NUL bytes, fails validation, or belongs to another run, the verdict is
@@ -1513,7 +1523,9 @@ reused, it is reversed.
   distinguish from a slow gate. It costs one wrapper call.
 - Never conclude "my gate is still running" from `RESULT: INCOMPLETE` alone. Ask
   `gate-liveness.sh`. A `STALLED` verdict means stop waiting open-endedly: re-read once, and
-  relaunch if it persists past a long component (~850 s). It is not proof of death.
+  relaunch only after waiting longer than the LONGEST COMPONENT OF YOUR OWN RUN, read off your
+  own SUMMARY's component table rather than from a constant (the "~850 s" once written here was
+  understated 2.4x; `tooling-tests` measured 2073 s). It is not proof of death.
 - On a host where `gate-detached.sh` refuses (no working user systemd manager), the gate
   of record must be launched from a separate login (`ssh` + `nohup`), which gets its own
   scope. Do not launch it in-session and hope.

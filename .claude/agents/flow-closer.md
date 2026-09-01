@@ -68,7 +68,11 @@ bash scripts/gate-liveness.sh /tmp/gate-<N>.txt --run-id <run-id-from-the-launch
 #   COMPLETE (exit 0) — a terminal verdict is in the summary file; read it
 #   RUNNING  (exit 2) — alive, no verdict yet (includes queued on the #1825 slot); end your turn
 #   STALLED  (exit 3) — no liveness published for a while. NOT proof it is dead: re-read once,
-#                       and relaunch only if still STALLED after ~850s (one long component).
+#                       and relaunch only after waiting LONGER THAN THE LONGEST COMPONENT of
+#                       your own run -- read it off your SUMMARY's component table, do NOT use a
+#                       constant. (A "~850s" figure here was understated 2.4x: tooling-tests
+#                       measured 2073s. Under-waiting relaunches a LIVE gate => two gates, one
+#                       summary path.)
 #   UNKNOWN  (exit 4) — cannot tell; the printed cause names what was unmeasurable
 ```
 `STALLED` is the state you could not previously see, and it is **actionable**: stop waiting
