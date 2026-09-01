@@ -6952,6 +6952,18 @@ done
 grep -qF 'the INVOKER can bypass this' "$ORACLES" || _tm_missing="$_tm_missing oracles-triage-rule"
 grep -qF 'top-level PR comments only' "$ORACLES" \
   || grep -qF 'TOP-LEVEL PR COMMENTS ONLY' "$ORACLES" || _tm_missing="$_tm_missing comment-channel-residual"
+# ===== AND THE RESIDUAL NAMES THE LINKED-ISSUE THREAD, IN BOTH BLOCKS (#3759) =====
+# STRENGTHENED, NOT MERELY REWORDED. The residual used to name two misplacement locations — a review
+# body and a review-thread reply — and NOT the PR's LINKED ISSUE, which is the MOST PROBABLE of the
+# three because that is where lane/lead coordination lives. That omission is what the #3710 incident
+# cost 8 hours to. The two RESIDUALS blocks in the oracles (the waiver's and the deferral's) are the
+# artifacts an implementer actually reads, so BOTH must carry the correction: a residual corrected in
+# one of two places is a residual that reads as correct in the other. Counted rather than merely
+# found, for exactly that reason.
+if [ "$(grep -ciF 'PROBABLE MISPLACEMENT IS THE' "$ORACLES")" -lt 2 ]; then
+  _tm_missing="$_tm_missing linked-issue-residual-in-both-blocks"
+fi
+grep -qF 'MISPLACED' "$ORACLES" || _tm_missing="$_tm_missing misplaced-state-not-recorded-in-residual"
 if [ -z "$_tm_missing" ]; then
   ok 'structural: the waiver threat model, its triage rule and the comment-channel residual are stated in code'
 else
@@ -7677,6 +7689,122 @@ if [ -f "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md" 
   done
 else
   bad 'structural: docs/reports/3229-artifacts/live-probe-procedure.md is missing — the AC2 requirement was dropped rather than rescheduled'
+fi
+
+# =============================================================================================
+# structural (#3759): THE MISPLACED STATE IS DIAGNOSTIC-ONLY, AND THE PROBE REUSES ONE ENFORCER
+# =============================================================================================
+# Behavioural cases cover the fixtures someone thought of; these cover the properties a later
+# "simplification" would quietly undo. Neither substitutes for the other — a structural assert cannot
+# see a granting path built some other way, and a behavioural case cannot see a granting path nobody
+# fixtured.
+printf '== structural (#3759): MISPLACED grants nothing, and the probe reuses the one scanner ==\n'
+# (1) THE GRANTING GATES ARE STILL THE TWO TOKEN-EXACT `= "granted"` COMPARISONS, and `misplaced`
+# appears in NO granting branch. A `MISPLACED*` prefix test, a `!= none` test or a second granting
+# comparison would each be an authorization change wearing a diagnostic's clothes.
+_mps_ok=1
+_mps_why=""
+grep -qF '[ "$ROBOREV_WAIVER_STATE" = "granted" ]' "$CHECKS_FILE" || { _mps_ok=0; _mps_why="$_mps_why waiver-gate-not-token-exact;"; }
+grep -qF '[ "$ROBOREV_DEFERRAL_STATE" = "granted" ]' "$CHECKS_FILE" \
+  || grep -qF '[ "$ROBOREV_DEFERRAL_STATE" = "granted" ] || return 0' "$ORACLES" \
+  || { _mps_ok=0; _mps_why="$_mps_why deferral-gate-not-token-exact;"; }
+# EXTRACTED TO A FILE, NEVER PIPED INTO A NEGATED `grep -q` (#3387): the polarity here is the
+# fail-open one — a SIGPIPE-141 would read as "no granting use of misplaced found" exactly when one
+# exists. Every `misplaced` mention in the three shell files must be a RECOGNITION or a REPORT: the
+# two case-list entries, the two probe assignments, the two report arms, the probe's own outcome
+# handling, and comments. What must never appear is `misplaced` beside a grant.
+_mps_sites="$tmp/mps-misplaced-sites.txt"
+{ grep -nF 'misplaced' "$ORACLES" || true; grep -nF 'misplaced' "$CHECKS_FILE" || true; } >"$_mps_sites"
+if [ ! -s "$_mps_sites" ]; then
+  _mps_ok=0; _mps_why="$_mps_why no-misplaced-state-at-all;"
+fi
+# GRANT-SHAPED TOKENS beside the state: the verdicts a grant produces (`WAIVED`, `DEFERRED`) and the
+# admission variable. None of them may appear on a line that also mentions `misplaced`.
+if grep -nE 'misplaced' "$_mps_sites" | grep -qE 'WAIVED|DEFERRED \(|deferral_admits|= "granted"'; then
+  _mps_ok=0; _mps_why="$_mps_why misplaced-on-a-granting-line;"
+fi
+if [ "$_mps_ok" -eq 1 ]; then
+  ok 'structural (#3759): the only granting gates are the two token-exact = "granted" comparisons, and misplaced reaches none of them'
+else
+  bad "structural (#3759): the MISPLACED state has reached a granting path, or a granting gate is no longer token-exact —$_mps_why. MISPLACED is a DIAGNOSTIC state: only a marker on the PULL REQUEST grants, and moving one there is a human act by the authorizer"
+fi
+# (2) THE SCANNER IS UNMODIFIED BY THIS CHANGE, AND THERE IS NO SECOND ONE. A second implementation
+# of a marker grammar is a second place for it to diverge, and a divergence in an AUTHORIZATION
+# grammar is a bypass — which is why the issue-side call passes the SAME kind, base, head, job and
+# allowlist and the scanner is never told which thread its input came from.
+if grep -qF 'python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS"' "$ORACLES"; then
+  ok 'structural (#3759): the linked-issue probe calls the SAME scanner with the same kind, scope and allowlist'
+else
+  bad 'structural (#3759): the linked-issue probe no longer delegates to the one scanner with the caller-supplied kind/scope/allowlist — a second recogniser over an authorization grammar is a bypass (#3626 reuse-do-not-reinvent)'
+fi
+if grep -qE 'misplaced' "$SCAN_TOOL"; then
+  bad 'structural (#3759): the SCANNER emits or knows about the misplaced state — thread identity is the CALLER-side knowledge, and telling the scanner would mean adding a provenance argument to the one component whose inputs must stay fixed'
+else
+  ok 'structural (#3759): the scanner knows nothing about threads — misplaced is assigned by the shell caller'
+fi
+# (3) THE GRANTING PAYLOAD DID NOT CHANGE SHAPE, AND THE RESOLVER IS A SEPARATE, LATER CALL. The
+# payload an AUTHORIZATION is decided from must not change shape as a side effect of adding a
+# DIAGNOSTIC — its fixed, measured shape is exactly what licenses reusing the scanner unmodified —
+# and a combined fetch would make the relation available on paths that never run the probe, so
+# reachability would rest on where an `if` sits rather than on the data not existing.
+# EXECUTABLE LINES ONLY, for the reason the #3229 sole-content guard states: the oracles' comment
+# block RECORDS the rejected combined form by name (`--json comments,closingIssuesReferences`) and
+# says why it was rejected, and that record is the durable artifact. Scanning prose would make
+# WRITING THE REASONING DOWN a violation — the same mistake as the job-18 census assert.
+_mpj_exec="$tmp/mpj-oracles-exec.txt"
+grep -v '^[[:space:]]*#' "$ORACLES" >"$_mpj_exec" || true
+_mpj_ok=1
+[ "$(grep -cF 'gh pr view --json comments 2>/dev/null' "$_mpj_exec")" -eq 2 ] || _mpj_ok=0
+grep -qE 'json comments,closingIssuesReferences|json closingIssuesReferences,comments' "$_mpj_exec" && _mpj_ok=0
+grep -qF 'gh pr view --json closingIssuesReferences' "$_mpj_exec" || _mpj_ok=0
+if [ "$_mpj_ok" -eq 1 ]; then
+  ok 'structural (#3759): the two granting --json comments calls are unchanged and the relation is fetched by its own later call'
+else
+  bad 'structural (#3759): the granting call was restructured, or comments and closingIssuesReferences are requested together — the payload an authorization is decided from must not change shape as a side effect of adding a diagnostic (#3759 R4)'
+fi
+# (4) NO PULL-REQUEST BODY READ CAME BACK, IN ANY FORM. #3626 deleted the PR-body link requirement
+# because a body is EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS WITH NO PER-EDIT ATTRIBUTION,
+# while a top-level comment is permanent and attributable — the recogniser problem was a SYMPTOM, not
+# the reason. Reinstating a body scan FOR ANY PURPOSE, including choosing which thread to name in a
+# diagnostic, would be reinstating a deleted generation.
+_mpb_exec="$tmp/mpb-exec.txt"
+{ grep -v '^[[:space:]]*#' "$ORACLES" || true; grep -v '^[[:space:]]*#' "$CHECKS_FILE" || true; } >"$_mpb_exec"
+if grep -qE -- '--json[ ,]*body|json body|PR_BODY|pr view --json [a-zA-Z,]*\bbody\b' "$_mpb_exec"; then
+  bad 'structural (#3759): a pull-request BODY read was reintroduced — the body is the weaker artifact (mutable by anyone with write access, no per-edit attribution) and #3626 deleted it deliberately'
+else
+  ok 'structural (#3759): no pull-request body read exists — the linked issue comes from the structured relation alone'
+fi
+# (5) THE MUTABLE-DERIVED BOUNDARY IS WRITTEN AT THE CALL SITE, not only in a design document,
+# because the next edit that adds a granting consumer reads the code before it reads a design note.
+if grep -qF 'THE MOMENT ANY CONSUMER DOWNSTREAM OF THIS RELATION COULD GRANT' "$ORACLES"; then
+  ok 'structural (#3759): the mutable-derived boundary for closingIssuesReferences is stated beside the call'
+else
+  bad 'structural (#3759): the closingIssuesReferences call no longer states WHY a mutable-derived relation is acceptable here (it grants nothing; it only selects which thread to name) — an unstated boundary is how a granting consumer gets added'
+fi
+# (6) THE PROBE NEVER RETURNS NON-ZERO AND ITS OUTCOME SET IS CLOSED. A two-valued return would
+# re-import the collapse this change exists to remove.
+_mpo_ok=1
+grep -qF 'ROBOREV_PROBE_OUTCOME  misplaced | checked | no-subject | could-not-check' "$ORACLES" || _mpo_ok=0
+grep -qF 'NEVER RETURNS NON-ZERO AND NEVER EXITS' "$ORACLES" || _mpo_ok=0
+_mpp_body="$tmp/mpp-body.txt"
+awk '/^roborev_linked_issue_marker_probe\(\) \{/,/^\}$/' "$ORACLES" >"$_mpp_body"
+[ -s "$_mpp_body" ] || _mpo_ok=0
+grep -qE '^[[:space:]]*return [1-9]' "$_mpp_body" && _mpo_ok=0
+grep -qE '^[[:space:]]*exit ' "$_mpp_body" && _mpo_ok=0
+if [ "$_mpo_ok" -eq 1 ]; then
+  ok 'structural (#3759): the probe has a closed four-outcome set and can neither return non-zero nor exit'
+else
+  bad 'structural (#3759): the probe can fail two-valued (a non-zero return or an exit), or its outcome set is no longer the declared closed four — every failure must be a STATE WITH A CAUSE, or "could not check" collapses onto "checked" again'
+fi
+# (7) THE GATE OF RECORD IS UNMODIFIED BY THIS CHANGE. `scripts/agent-gate.sh` is out of scope, and
+# no gate component may learn to read a misplacement diagnostic.
+_mpg_gate="$SCRIPT_DIR/../agent-gate.sh"
+if [ ! -f "$_mpg_gate" ]; then
+  bad "structural (#3759): the agent gate is not at $_mpg_gate, so the out-of-scope claim could not be checked"
+elif grep -qE 'closingIssuesReferences|ROBOREV_PROBE_|MISPLACED' "$_mpg_gate"; then
+  bad 'structural (#3759): the agent gate reads the misplacement probe or its state — this change is confined to the roborev wrapper diagnostic and agent-gate.sh must end it unmodified'
+else
+  ok 'structural (#3759): the agent gate is untouched by the misplacement probe'
 fi
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
