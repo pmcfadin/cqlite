@@ -121,10 +121,13 @@ fn decode(
 /// A wrong-width member is REFUSED even though the covering deletion would have
 /// filtered it away. RED before this fix: the element `continue`d first and the
 /// read returned `Set([])` with `shadow_filtered_element_count == 1`.
+///
+/// The ZERO-length case is not in this loop: it is width-validated here too, but
+/// its refusal stays TOLERATED, so a shadowed zero-length member is still
+/// filtered silently — pinned separately below.
 #[test]
 fn wrong_width_member_is_refused_even_when_shadowed() {
     for path in [
-        vec![],                             // 0 bytes
         vec![0x00, 0x00, 0x07],             // 3 bytes
         vec![0x00, 0x00, 0x00, 0x07, 0x00], // 5 bytes
     ] {
@@ -217,6 +220,26 @@ fn only_the_shadowed_member_is_filtered_from_a_mixed_set() {
             .expect("a mixed set must decode"),
         (Value::Set(vec![Value::Integer(9)]), 1),
         "exactly the shadowed member is dropped; the live member is untouched"
+    );
+}
+
+/// A shadowed ZERO-length fixed-width member: refused by the width guard, but
+/// TOLERATED, so it is filtered and counted exactly as before issue #3723.
+///
+/// Pre-#3723 the element `continue`d before any decode, giving `(Set([]), 1)`.
+/// Validating dropped members must not turn that into a read failure — only a
+/// WRONG width is fatal (`fatal_decode_error.rs`).
+#[test]
+fn a_zero_length_shadowed_member_still_filters_silently() {
+    assert_eq!(
+        decode(
+            "set<int>",
+            &[build_set_cell_bytes(&[])],
+            Some(shadow_everything())
+        )
+        .expect("a zero-length path on a dropped member must not fail the read"),
+        (Value::Set(vec![]), 1),
+        "the member is filtered and counted, exactly as on origin/main"
     );
 }
 

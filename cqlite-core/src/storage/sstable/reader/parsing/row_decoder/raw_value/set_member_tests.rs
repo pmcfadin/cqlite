@@ -58,15 +58,16 @@ fn well_formed_int_member_decodes_as_control() {
     );
 }
 
-/// Overlong, short AND zero-length are all refused with the NAMED error.
+/// A WRONG WIDTH is refused with the NAMED error AND is FATAL to the read: the
+/// collection is not returned minus the member.
 ///
-/// The zero-length case is the one issue #3723 review found bypassing the guard
-/// entirely: `else if !cell.path_bytes.is_empty()` meant an empty path never
-/// reached the decoder and the member was silently OMITTED.
+/// The ZERO-length case is deliberately NOT in this loop — it is refused too,
+/// but stays TOLERATED (see `zero_length_member_is_refused_but_tolerated`
+/// below), because unlike a wrong width it is not a disposition this branch
+/// introduced.
 #[test]
 fn wrong_width_int_members_are_refused_not_omitted() {
     for path in [
-        vec![],                             // 0 bytes
         vec![0x00, 0x00, 0x07],             // 3 bytes
         vec![0x00, 0x00, 0x00, 0x07, 0x00], // 5 bytes
     ] {
@@ -91,6 +92,30 @@ fn wrong_width_int_members_are_refused_not_omitted() {
             ),
         }
     }
+}
+
+/// A ZERO-length fixed-width member is refused with the SAME named error, but
+/// the refusal is TOLERATED: the member is omitted and the collection is
+/// returned — the EXACT disposition this input had before issue #3723.
+///
+/// Pre-#3723 the set branch's `else if !cell.path_bytes.is_empty()` guard meant
+/// an empty path never reached the decoder at all, so the member was silently
+/// dropped and the read returned `Set([])` (verified against `origin/main`'s
+/// `complex_column.rs`). #3723 routes it through the width guard so the refusal
+/// is NAMED and observable — but escalating it to a fatal read failure would
+/// change the behaviour of a path that already errored before this branch, which
+/// is precisely what #3723 promised not to do. Only a WRONG width is fatal; see
+/// `fatal_decode_error.rs`.
+#[test]
+fn zero_length_member_is_refused_but_tolerated() {
+    assert_eq!(
+        decode("set<int>", &[]).expect(
+            "a zero-length fixed-width member must keep its pre-#3723 TOLERATED \
+             disposition — refused, named, but not fatal to the read"
+        ),
+        Value::Set(vec![]),
+        "the member is omitted and the collection survives, exactly as on origin/main"
+    );
 }
 
 /// Anti-blanket-propagation: a TOLERATED decode failure still omits the member
@@ -167,7 +192,6 @@ fn decode_valued(column_type: &str, path: &[u8], value: &[u8]) -> Result<Value> 
 fn wrong_width_path_is_refused_even_when_the_cell_carries_a_valid_value() {
     let good_value = 9i32.to_be_bytes();
     for path in [
-        vec![],                             // 0 bytes
         vec![0x00, 0x00, 0x07],             // 3 bytes
         vec![0x00, 0x00, 0x00, 0x07, 0x00], // 5 bytes
     ] {
@@ -194,6 +218,21 @@ fn wrong_width_path_is_refused_even_when_the_cell_carries_a_valid_value() {
             ),
         }
     }
+}
+
+/// The zero-length half of the case above: refused, but TOLERATED, so the cell
+/// value still wins and the collection is returned. Pre-#3723 `if let Some(val)
+/// = cell.value` short-circuited before the path was looked at, yielding exactly
+/// this `Set([9])` — the disposition preserved here.
+#[test]
+fn a_zero_length_path_on_a_valued_cell_still_yields_the_cell_value() {
+    assert_eq!(
+        decode_valued("set<int>", &[], &9i32.to_be_bytes()).expect(
+            "a zero-length path is refused but TOLERATED, so the valued cell still decodes"
+        ),
+        Value::Set(vec![Value::Integer(9)]),
+        "the pre-#3723 result for an empty path on a valued set cell"
+    );
 }
 
 /// Negative control 1: a well-formed path plus a cell value still decodes, and

@@ -309,13 +309,31 @@ async fn short_fixed_width_set_member_is_refused_at_the_read_path() {
 /// ZERO-LENGTH (blocker 2b): the `else if !cell.path_bytes.is_empty()` guard
 /// meant an empty cell path BYPASSED the decoder entirely, so the member was
 /// dropped without ever reaching the width guard — the exact opposite of this
-/// branch's AC2. The empty path is now decoded like any other.
+/// branch's AC2. The empty path is now decoded like any other, so the refusal
+/// happens and is NAMED.
+///
+/// Its DISPOSITION, though, is the pre-#3723 one: TOLERATED. On `origin/main`
+/// this same fixture read back as a row whose `tags` was an EMPTY set (the
+/// member silently dropped by the `is_empty()` bypass), and #3723 does not
+/// change the behaviour of a path that already failed before it — only a WRONG
+/// declared width, a class this branch introduced, is fatal. So the row must
+/// still come back, with the member omitted.
 #[tokio::test]
-async fn zero_length_fixed_width_set_member_is_refused_at_the_read_path() {
+async fn zero_length_fixed_width_set_member_is_tolerated_at_the_read_path() {
     let temp = TempDir::new().unwrap();
     let path = write_fixture(&temp, "set<int>", Value::Set(vec![Value::Integer(MEMBER)])).await;
     patch_declared_length(&path, 0);
-    expect_width_mismatch(read_rows(&path).await, 0, "declared 0 bytes");
+
+    let rows = read_rows(&path).await.expect(
+        "a ZERO-length fixed-width set member must keep its pre-#3723 tolerated \
+         disposition: the row is returned, not an Err (only a WRONG width is fatal)",
+    );
+    assert_eq!(
+        tags_of(&rows),
+        Some(Value::Set(vec![])),
+        "the zero-length member is omitted and the row survives — exactly what \
+         origin/main returned for these bytes"
+    );
 }
 
 // ---------------------------------------------------------------------------
