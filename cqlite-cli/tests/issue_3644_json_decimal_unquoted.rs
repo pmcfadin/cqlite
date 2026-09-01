@@ -584,6 +584,42 @@ mod writer_paths {
         assert_both(udt, r#"{"amount":123.45,"missing":null}"#);
     }
 
+    /// A UDT carrying the SAME field name twice renders ONE JSON key, at the
+    /// FIRST position with the LAST value (roborev job 17).
+    ///
+    /// Regression guard for this issue's own refactor: the UDT arm used to build
+    /// a `serde_json::Map`, whose `insert` collapsed duplicates; `JsonCell::Object`
+    /// is a `Vec`, which appended, so the document gained two keys of one name.
+    /// That is an ambiguous document — parsers disagree on which wins — and it is
+    /// the same rule `dedup_keys_last_wins` already applies to row keys.
+    ///
+    /// REACHABLE, which is why this is a defect and not a note: a duplicate field
+    /// is not legal CQL (Cassandra rejects the `CREATE TYPE`), but CQLite's own
+    /// `CREATE TYPE` parser performs no duplicate check, and `UdtValue` is public.
+    #[test]
+    fn a_udt_with_a_duplicate_field_name_renders_one_key_first_position_last_value() {
+        let udt = Value::Udt(Box::new(UdtValue {
+            type_name: "dup".to_string(),
+            keyspace: "ks".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "a".to_string(),
+                    value: Some(Value::Integer(1)),
+                },
+                UdtField {
+                    name: "b".to_string(),
+                    value: Some(Value::Integer(2)),
+                },
+                UdtField {
+                    name: "a".to_string(),
+                    value: Some(Value::Integer(3)),
+                },
+            ],
+        }));
+        // `a` keeps its FIRST position (before `b`) and takes its LAST value (3).
+        assert_both(udt, r#"{"a":3,"b":2}"#);
+    }
+
     /// Item 2 of issue #3644, kept as a pinned CORRECT behaviour rather than a
     /// gap: a non-finite `double`/`float` renders as JSON `null`, matching
     /// `cassandra-5.0.8:.../marshal/DoubleType.java:114-123` and

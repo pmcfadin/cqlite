@@ -253,7 +253,18 @@ impl JsonCell {
                     udt,
                     Self::from_value,
                     || JsonCell::Plain(JsonValue::Null),
-                    |name, rendered| entries.push((name.to_string(), rendered)),
+                    // FIRST position, LAST value — the `serde_json::Map::insert`
+                    // collapse this `Vec` displaced, and the same rule
+                    // `dedup_keys_last_wins` applies to row keys (`json.rs`). A
+                    // duplicate FIELD name is not legal CQL (Cassandra rejects
+                    // it) but CQLite's `CREATE TYPE` parser does not check, and
+                    // `UdtValue` is public, so it IS constructible — and two
+                    // JSON keys of one name is an ambiguous document that
+                    // parsers resolve differently.
+                    |name, rendered| match entries.iter().position(|(k, _)| k == name) {
+                        Some(i) => entries[i].1 = rendered,
+                        None => entries.push((name.to_string(), rendered)),
+                    },
                 );
                 JsonCell::Object(entries)
             }
