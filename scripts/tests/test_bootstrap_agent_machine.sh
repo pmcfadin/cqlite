@@ -547,7 +547,6 @@ mk_hermetic_bin() {
 # case (bootstrap's oracle scrubs only SCCACHE_*, BASH_ENV and ENV, so these survive).
 scc_stub_body='log=${SCC_STUB_LOG:-}
 [ -n "$log" ] && printf "%s\n" "$*" >> "$log"
-case "$*" in *--show-stats*) ;; *) exit 0 ;; esac
 scc_resolve() {
   v=${SCCACHE_CACHE_SIZE-}
   case "$v" in
@@ -559,14 +558,31 @@ scc_resolve() {
   esac
   echo $(( 10#$n * m ))
 }
+# --start-server FIXES THE CAP FOR THAT SERVER S LIFETIME, from the env it is started with — the
+# whole mechanism of #3727 — so the stub records it in a state file and every later production
+# read answers from that. Without this, bootstrap becoming the first starter would be
+# unobservable in a test.
+case "$*" in
+  *--start-server*)
+    [ -n "${SCC_STUB_STATE:-}" ] && scc_resolve > "$SCC_STUB_STATE"
+    exit 0 ;;
+  *--show-stats*) ;;
+  *) exit 0 ;;
+esac
 if [ -n "${SCCACHE_SERVER_PORT:-}" ]; then
-  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\\\"%s\\\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+  # ISOLATED client, no server: the cap comes from this process s own SCCACHE_CACHE_SIZE and the
+  # size is null (measured on sccache 0.17.0).
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
     "${SCC_STUB_ISO_LOC:-${SCCACHE_DIR:-/none}}" "$(scc_resolve)"
+elif [ -n "${SCC_STUB_STATE:-}" ] && [ -s "${SCC_STUB_STATE:-}" ]; then
+  # A server was STARTED during this run and is enforcing the cap it was started with.
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":%s,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+    "${SCC_STUB_LOC:-/data/sccache-stub}" "${SCC_STUB_USED:-1000}" "$(cat "$SCC_STUB_STATE")"
 elif [ "${SCC_STUB_MAX:-none}" = none ]; then
-  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\\\"%s\\\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
     "${SCC_STUB_LOC:-/data/sccache-stub}" "$(scc_resolve)"
 else
-  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\\\"%s\\\\\"\",\"cache_size\":%s,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":%s,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
     "${SCC_STUB_LOC:-/data/sccache-stub}" "${SCC_STUB_USED:-1000}" "$SCC_STUB_MAX"
 fi
 exit 0'
@@ -4382,6 +4398,83 @@ else
   else
     bad "sccache-cap: a client-side echo with no server running was not refused"
     printf '%s\n' "$scc_sl_ns" | head -6
+  fi
+
+  # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER
+  #         (issue #3727 roborev finding 2). This is the case that made every newly launched box
+  #         fail `--strict` immediately after correctly persisting the cap: nothing has compiled
+  #         yet, so cache_size is null and the cap IN FORCE is genuinely unmeasurable. The fix is
+  #         the mechanism itself — the cap is fixed by whichever process starts the server FIRST,
+  #         so bootstrap starts it under the persisted value. Asserted three ways: the verdict,
+  #         the DECLARATION that this run started it (an [ok] that reads as an independent
+  #         observation would be over-read), and the stub's argv.
+  scc_state_w="$tmp/scc-stub-state-fresh"; rm -f "$scc_state_w"
+  scc_log_fresh="$tmp/scc-stub-argv-fresh.log"; : >"$scc_log_fresh"
+  scc_out_fresh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none \
+    SCC_STUB_STATE="$scc_state_w" SCC_STUB_LOG="$scc_log_fresh" --fix-sccache-cap)
+  scc_sl_fresh=$(scc_slice "$scc_out_fresh")
+  if printf '%s\n' "$scc_sl_fresh" | grep -qE '\[ok\].*sccache-cap: VERIFIED' \
+     && [ "$(scc_warns "$scc_sl_fresh")" = 0 ]; then
+    ok "sccache-cap: a fresh box with NO server reaches VERIFIED — the section starts the server under the persisted value instead of failing --strict"
+  else
+    bad "sccache-cap: a fresh box with no running server did not reach VERIFIED (roborev finding 2)"
+    printf '%s\n' "$scc_sl_fresh" | head -8
+  fi
+  if printf '%s\n' "$scc_sl_fresh" | grep -q 'THIS RUN STARTED' \
+     && printf '%s\n' "$scc_sl_fresh" | grep -q 'scope:.*THIS RUN started it'; then
+    ok "sccache-cap: the VERIFIED verdict DECLARES that this run started the server (not an independent observation)"
+  else
+    bad "sccache-cap: a run that started the server claimed VERIFIED without saying so"
+    printf '%s\n' "$scc_sl_fresh" | grep -E 'VERIFIED|scope:' | head -4
+  fi
+  if grep -q -- '--start-server' "$scc_log_fresh"; then
+    ok "sccache-cap: the start is REAL — 'sccache --start-server' appears in the recorded argv"
+  else
+    bad "sccache-cap: VERIFIED was reached with no --start-server invocation"
+    cat "$scc_log_fresh" | head -5
+  fi
+  # ... and the cap the started server enforces is the one from the FILE, not sccache's default:
+  # that is the difference between provisioning and a vacuous pass.
+  if [ "$(cat "$scc_state_w" 2>/dev/null)" = 32212254720 ]; then
+    ok "sccache-cap: the server this run started was started under the persisted 30G (32212254720 bytes), not the default"
+  else
+    bad "sccache-cap: the started server got '$(cat "$scc_state_w" 2>/dev/null)' rather than the persisted value's bytes"
+  fi
+
+  # 12b-g3. A DEFAULT RUN STARTS NOTHING. Starting a daemon is a host mutation, and this file's
+  #         standing contract is that a run without --yes / a --fix flag mutates nothing — so the
+  #         same fresh box stays UNMEASURED, names what is missing, and points at the flag.
+  scc_state_d="$tmp/scc-stub-state-default"; rm -f "$scc_state_d"
+  scc_log_def="$tmp/scc-stub-argv-default.log"; : >"$scc_log_def"
+  scc_out_def=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none \
+    SCC_STUB_STATE="$scc_state_d" SCC_STUB_LOG="$scc_log_def")
+  scc_sl_def=$(scc_slice "$scc_out_def")
+  if printf '%s\n' "$scc_sl_def" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+     && printf '%s\n' "$scc_sl_def" | grep -q 'no sccache server is running' \
+     && printf '%s\n' "$scc_sl_def" | grep -q -- '--fix-sccache-cap' \
+     && ! grep -q -- '--start-server' "$scc_log_def" \
+     && [ ! -s "$scc_state_d" ]; then
+    ok "sccache-cap: a DEFAULT run starts no server — UNMEASURED naming the flag, and zero host mutation"
+  else
+    bad "sccache-cap: a default run either started a server or failed to point at the flag"
+    printf '%s\n' "$scc_sl_def" | head -6; cat "$scc_log_def" | head -3
+  fi
+
+  # 12b-g4. AND IT NEVER RESTARTS A LIVE SERVER. The asymmetry is deliberate: a running server may
+  #         have a peer lane's gate compiling against it, so a cap it does not enforce stays
+  #         NOT-HONOURED with a remedy for a human to run between gates — bootstrap must not
+  #         start (or stop) anything here even under --fix-sccache-cap.
+  scc_state_l="$tmp/scc-stub-state-live"; rm -f "$scc_state_l"
+  scc_log_live="$tmp/scc-stub-argv-live.log"; : >"$scc_log_live"
+  scc_out_live=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=10737418240 \
+    SCC_STUB_STATE="$scc_state_l" SCC_STUB_LOG="$scc_log_live" --fix-sccache-cap)
+  if printf '%s\n' "$(scc_slice "$scc_out_live")" | grep -qE '\[warn\].*sccache-cap: NOT-HONOURED' \
+     && ! grep -qE -- '--start-server|--stop-server' "$scc_log_live" \
+     && [ ! -s "$scc_state_l" ]; then
+    ok "sccache-cap: a LIVE server with the wrong cap is NOT-HONOURED and is neither started nor stopped (a peer lane may be compiling against it)"
+  else
+    bad "sccache-cap: a live server was restarted or stopped, or the verdict was not NOT-HONOURED"
+    printf '%s\n' "$(scc_slice "$scc_out_live")" | head -6; cat "$scc_log_live" | head -3
   fi
 
   # 12b-h. THE ISOLATION ASSERT, which is the single most important line in the section: if the

@@ -3564,6 +3564,9 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     info "scope: the cap is read by the sccache SERVER at STARTUP, so this verdict is about THIS box's CURRENT server plus FUTURE sessions. A server started later by a session that does NOT see the value will enforce sccache's default instead, and a server already running keeps its cap for its whole lifetime"
     info "scope: VERIFIED asserts that the file SETS this value, that a fresh session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it. Agreement is measured; provenance is not"
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  accelerators: ... sccache-cap=<bytes>(pinned)   ((default) there means that gate's server is at sccache's own cap, (stale) that it predates the value)"
+    if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
+      info "scope: there was NO server when this run began, so the cap is in force from now on because THIS RUN started it. Anything that stops the server later and does not see the value (a session created before the /etc/environment line existed) will start one at sccache's own default again"
+    fi
     [ -n "$SCC_PROBE_SUBJECT_NOTE" ] && info "subject: $SCC_PROBE_SUBJECT_NOTE"
   }
   # scc_stale_remedy: the remedy for a visible, accepted value the RUNNING server does not
@@ -3571,6 +3574,13 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # (5b's job-311 lesson): if the file and the session disagree, sending the operator to edit
   # the file is advice about a value that is already being ignored.
   scc_stale_remedy() {
+    if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
+      # Reached only if the server WE started reports a cap other than the bytes we started it
+      # with — an sccache-level inconsistency, not a stale server, so the stop-server remedy
+      # below would be nonsense advice. Named rather than folded into the generic text.
+      info "note: this run STARTED that server itself under '$scc_probe_seen' and it STILL reports a different cap — that is an sccache-level inconsistency (the value was accepted by the isolated probe but not applied by the server), not a server predating the value; report it rather than restarting in a loop"
+      return 0
+    fi
     info "remedy:  sccache --stop-server    (the next compile restarts it, and the new server reads SCCACHE_CACHE_SIZE then). Do NOT edit the value — it is already correct and already visible; what is stale is the SERVER"
     if [ "$SCC_FILE_HAS_LINE" = yes ] && [ "$SCC_FILE_VALUE" != "$scc_probe_seen" ]; then
       info "note: the session value is NOT coming from $SCC_ENV_FILE — that file sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' while this session sees '$scc_probe_seen', so a sudo- or user-specific source is overriding it; fix that override too, or the two will keep disagreeing"
@@ -3689,7 +3699,21 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
               # above; this half asks a different question — is the session getting THIS FILE's
               # value — and normalising here would be a second classifier free to disagree.
               if [ "$SCC_FILE_VALUE" = "$scc_probe_seen" ]; then
-                ok "sccache-cap: VERIFIED ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and the RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means; this run's own value, BASH_ENV and ENV were scrubbed first)"
+                # WHERE THIS RUN STARTED THE SERVER ITSELF, SAY SO IN THE VERDICT. The third
+                # fact is then true because bootstrap MADE it true — a provisioning action, not
+                # an independent observation of a server somebody else started — and a reader
+                # who cannot tell those apart would over-read the [ok]. (The read-back is still
+                # a measurement: it is sccache reporting what it actually enforces.)
+                # ONE `ok` CALL, with the varying phrase in a variable: the self-test's
+                # structural guard requires section 5b2 to contain exactly one `ok "` and for it
+                # to be the named VERIFIED verdict, and two call sites would defeat a guard that
+                # exists to stop a future `ok` sneaking in for a file write or an exemption.
+                if [ "$SCC_SERVER_STARTED" = 1 ]; then
+                  scc_srv_phrase="the sccache server THIS RUN STARTED under it enforces exactly the $SCC_SEEN_BYTES bytes it means — there was no server before, so this run became the first starter rather than leaving the cap to whichever lane compiled next"
+                else
+                  scc_srv_phrase="the ALREADY-RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means"
+                fi
+                ok "sccache-cap: VERIFIED ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and $scc_srv_phrase; this run's own value, BASH_ENV and ENV were scrubbed first)"
                 scc_scope_note
               else
                 warn "sccache-cap: NOT-SYSTEM-WIDE ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' but this session sees '$scc_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and whichever of them starts the sccache server will cap it with THAT, not with the one measured here)"
