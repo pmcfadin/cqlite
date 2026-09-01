@@ -1,0 +1,444 @@
+# roborev-review-guard — delta for roborev-waiver-misplaced (issue #3759)
+
+**Architecture note (read this first).** `scripts/flow/roborev-review.sh` is the only sanctioned
+roborev invocation, and its `==== ROBOREV REVIEW SUMMARY ====` block is the verdict a merge rests on.
+Two human authorizations can excuse one of its keys, each on the same tightly-constrained channel: the
+**absence waiver** (`roborev-waive: prompt-content-absent`, #3312) and the **findings deferral**
+(`roborev-defer: findings`, #3626). Both are read from **top-level pull-request comments only**. A
+marker posted anywhere else is silently not applied, and the resulting `NONE` is **textually
+indistinguishable from a refused or never-posted authorization**.
+
+Measured: for PR #3710 the coordination lead granted **both** markers — field-perfect, verified
+base/head/job, each the sole nonblank content of its own comment, from an allowlisted author — on
+**issue #3544**, the thread where that lane's coordination happened all day. `PR #3710 comments:
+roborev-waive: 0, roborev-defer: 0` / `issue #3544: both markers present, correct in every field`. So
+`--recheck-job 317` would have reported `waiver: NONE` / `deferral: NONE`, the `prompt-content` FAIL
+would have stood, and the lane's natural reading of `NONE` is *"the lead refused"*. **Position 1 of a
+six-PR serial queue idled ~8 hours and blocked five lanes.** Two lanes diagnosed it independently, and
+`lane-3544` explicitly **declined to copy the markers onto the PR itself** — on a shared login it could
+have made its own merge gate pass, and correctly identified that as the exact bypass the channel exists
+to prevent.
+
+CLAUDE.md's recorded residual names two misplacement locations — *"inside a review body or a
+review-thread reply"* — and **does not name the linked ISSUE thread**, which is the **most probable**
+of the three, because that is where lane/lead coordination lives.
+
+This delta adds a **distinct, NON-GRANTING** state, `MISPLACED`, for **both** kinds. `NONE` today
+covers "never granted", "granted and misplaced" and "granted for a different scope", and the operator
+action differs for each: a multi-state reality collapsed onto two slots where **the discarded value is
+the diagnostic one**. It is a **diagnosability** change and not a loosening — nothing here permits a
+marker on an issue thread to grant anything, and the author allowlist, the sole-nonblank-content rule,
+the column-zero anchor and the base+head+job binding are all untouched.
+
+The new state is **additive to two existing requirements' cause sets** (`waiver:` under *The reviewer
+must demonstrably have received the census's own code files*, and *The deferral state is reported under
+its own key, including when nothing was granted*) and changes no existing behaviour, so this delta is
+stated entirely as ADDED requirements, as #3626's was. It needs **no change to the closed verdict
+grammar**: `waiver:` and `deferral:` are informational keys, outside the verdict scan and outside the
+affirmation loop, so a new value there cannot make anything pass by itself.
+
+**Acceptance-criterion → requirement map** (issue #3759 body "Proposed" items 1–3 + "Scope note", lead
+brief 2026-09-01 items R1–R8):
+
+| AC / ruling item | Requirement(s) |
+|---|---|
+| Proposed 2 — a distinct diagnosable state, `waiver: MISPLACED (found on linked issue #N, not the PR)` (R1) | ADDED *A misplaced authorization is reported under a distinct, non-granting MISPLACED state, for both kinds* |
+| Proposed 2 / Scope note — `MISPLACED` must NOT grant; fail-closed either way (R2) | ADDED *MISPLACED grants nothing, and no channel rule is loosened to produce it* |
+| R3 — escalation only from `none`, and only from an issue-side marker that would have granted | ADDED *The escalation is only from `none`, and only from a marker the channel would have accepted* |
+| R4 — the linked issue is resolved structurally, never by parsing the PR body | ADDED *The linked issue is resolved from the structured GitHub relation, never from the pull-request body* |
+| R5 — the probe declares its own non-exhaustiveness; never fails the run; never looks complete | ADDED *The probe is best-effort, cannot change any verdict, and declares what it did and did not check* |
+| R6 — emit-boundary safety unchanged and re-asserted | ADDED *Every new diagnostic rides the existing single emit boundary and carries no part of either marker* |
+| Proposed 1 + 3 — doctrine names the linked issue as the most probable misplacement; lead-side verification procedure (R7) | ADDED *Doctrine and the in-source residuals name the linked-issue thread and the new state* |
+| R8 — behavioural coverage in the gate-executed guard suite | ADDED *Every MISPLACED and NONE rendering is pinned hermetically, and the live path is demonstrated post-merge* |
+
+## ADDED Requirements
+
+### Requirement: A misplaced authorization is reported under a distinct, non-granting MISPLACED state, for both kinds
+
+The wrapper SHALL recognise a new state, **`misplaced`**, for **both** authorization kinds — the
+absence waiver and the findings deferral — and SHALL report it as `waiver: MISPLACED (…)` /
+`deferral: MISPLACED (…)`.
+
+**When it is looked for.** When, and **only** when, the pull-request-side scan for a kind returns state
+`none`, the wrapper SHALL additionally scan the **top-level comments of the pull request's linked
+issue(s)**, using **the same scanner**, **the same marker kind**, and **the same** `base`, `head`,
+`job` and author-allowlist arguments (and, for the deferral, the same observed findings count). If that
+scan returns `granted`, the state SHALL become `misplaced`; otherwise it SHALL remain `none`.
+
+**One enforcer, inherited by call.** The scanner SHALL NOT be duplicated, forked or given a
+thread-specific variant. It is already **thread-agnostic** — it consumes
+`{"comments":[{"author":{"login":…},"body":…}]}` on standard input and knows nothing about pull
+requests — and `gh issue view --json comments` returns that same shape, so the sole-nonblank-content
+rule, the column-zero anchor, the structured author association, the allowlist, the field grammar, the
+placeholder refusal and the scope binding are all inherited **by call**. *A second implementation of a
+channel rule is a second place for it to diverge, and a divergence in an authorization rule is a
+bypass.* `scripts/flow/roborev-waiver-scan.py` SHALL be unmodified by this change.
+
+**The scanner SHALL NOT emit `misplaced`.** Thread identity is the **caller's** knowledge: the scanner
+cannot know which thread its input came from, and telling it would mean adding a provenance argument to
+the one component whose inputs must stay fixed. The state SHALL therefore be assigned by the shell
+caller in `roborev-review-oracles.sh`, leaving the scanner's contract exactly as it is — *given these
+comments, does an authorization for this review exist in them?*
+
+**What the report SHALL contain.** The `MISPLACED` value SHALL name (1) the **issue number** the
+marker was found on, (2) that it **grants nothing and the failing verdict stands**, and (3) the
+**remedy**: re-post the **identical marker** as a **top-level comment on the pull request**. Each of
+the two report arms SHALL be **dedicated**, not a fall-through: the generic arm that uppercases an
+unhandled state would render a syntactically correct `MISPLACED (…)` and no remedy, and this state's
+entire value is its remedy.
+
+**`misplaced` SHALL be added to both lookup functions' recognised-state lists** — as a **belt**, not as
+a route. The probe assigns after that validation today, so no list change is strictly required; the
+entry exists so that a future refactor routing the probe result through the validation cannot rewrite
+an accurate diagnostic into a generic `unavailable`, re-collapsing the very state this change splits
+out. Those lists are **recognition** lists, not granting lists, and membership SHALL confer nothing.
+
+#### Scenario: A would-have-granted waiver marker sits on the linked issue and nothing is on the PR
+- **WHEN** a run whose `prompt-content` census paths are absent finds no `roborev-waive:` marker on the PR, and the PR's linked issue #N carries one that is well-formed, sole content of a top-level comment, from an allowlisted author, naming this base, head and job
+- **THEN** the run reports `waiver: MISPLACED (…)` naming issue #N and the remedy of re-posting it as a top-level PR comment, `prompt-content:` still reads `FAIL`, and `RESULT: FAIL`
+
+#### Scenario: A would-have-granted deferral marker sits on the linked issue
+- **WHEN** a `--recheck-job` over an affirmatively measured `findings: PRESENT (n)` finds no `roborev-defer:` marker on the PR, and the PR's linked issue #N carries one naming this base, head, job and count from an allowlisted author
+- **THEN** the run reports `deferral: MISPLACED (…)` naming issue #N and the remedy, `findings:` still reads `PRESENT (n)` — never `DEFERRED` and never `NONE` — and `RESULT: FAIL`
+
+#### Scenario: The scanner is not duplicated and does not learn about threads
+- **WHEN** this change is applied
+- **THEN** `scripts/flow/roborev-waiver-scan.py` is unmodified, no second scanner exists, the scanner emits no `misplaced` state, and the issue-side call passes the same kind, base, head, job and allowlist as the PR-side call
+
+#### Scenario: The report arm is dedicated rather than a fall-through
+- **WHEN** the state is `misplaced` for either kind
+- **THEN** the emitted value carries the issue number, the non-granting statement and the remedy, rather than the generic uppercased state with only a raw detail
+
+### Requirement: MISPLACED grants nothing, and no channel rule is loosened to produce it
+
+`MISPLACED` SHALL be a **diagnostic state only**. It SHALL NOT grant, SHALL NOT partially grant, and
+SHALL NOT grant with a notice. The `prompt-content:` FAIL and the `findings:` FAIL SHALL stand exactly
+as they stand today, and the terminal `RESULT` SHALL be unchanged by the presence of a misplaced
+marker.
+
+**Nothing about the channel SHALL be loosened**: not the author allowlist, not the
+sole-nonblank-content rule, not the column-zero anchor, not the structured `gh --json` author
+association, not the placeholder-reason refusal, and not the `base` + `head` + `job` binding (nor the
+deferral's `count=` match and issue-disposition legs). The security property **only a marker on the
+pull request grants** SHALL be preserved exactly.
+
+**The granting gates SHALL remain the two token-exact equalities** —
+`[ "$ROBOREV_WAIVER_STATE" = "granted" ]` and `[ "$ROBOREV_DEFERRAL_STATE" = "granted" ]` — and no
+branch anywhere SHALL treat `misplaced` as granting. Because `waiver:` and `deferral:` are
+**informational** keys, outside the closed verdict grammar and outside the affirmation loop, the new
+value additionally **cannot** make anything pass by itself; **no grammar entry is required and none
+SHALL be added**, since adding one would be the first step toward a value with verdict weight.
+
+**A structural test SHALL assert that no granting path is reachable from `misplaced`**, alongside the
+behavioural cases. Both are required and neither substitutes for the other: a behavioural case covers
+only the fixtures someone thought of, and a structural assert cannot see a granting path built some
+other way.
+
+#### Scenario: A misplaced waiver does not waive
+- **WHEN** the waiver state is `misplaced`
+- **THEN** `prompt-content:` never reads `WAIVED`, the absence FAIL stands, and `RESULT: FAIL`
+
+#### Scenario: A misplaced deferral does not defer
+- **WHEN** the deferral state is `misplaced`
+- **THEN** `findings:` never reads `DEFERRED`, the findings FAIL stands, and `RESULT: FAIL`
+
+#### Scenario: No granting path is reachable from the new state
+- **WHEN** `scripts/tests/test_roborev_review_guard.sh` runs
+- **THEN** it asserts structurally that the only granting gates are the two token-exact `= "granted"` comparisons and that `misplaced` appears in no granting branch, and it fails if either becomes false
+
+#### Scenario: The closed verdict grammar is unchanged
+- **WHEN** this change is applied
+- **THEN** no value is added to the verdict grammar's recognised set and no key that carries a verdict can report `MISPLACED`
+
+### Requirement: The escalation is only from `none`, and only from a marker the channel would have accepted
+
+**`MISPLACED` SHALL mean exactly one operator action** — *re-post the identical marker as a top-level
+comment on the pull request.* Both halves of this requirement exist to keep that true.
+
+**Only from `none`.** A pull-request-side `stale`, `malformed`, `unauthorized`, `count-mismatch` or
+`unavailable` SHALL NEVER be overwritten. Each is already specific, already actionable and already
+correct — *"your marker names a different review"*, *"a field is wrong"*, *"this login may not grant"*,
+*"re-triage, the counts differ"*, *"the oracle could not be consulted"* — and replacing one with
+`MISPLACED` would substitute a vaguer diagnosis for a precise one and send the operator to move a
+comment that still would not grant. `none` is the only state carrying no information, and it is the
+only state the probe may refine. The probe SHALL NOT EVEN BE PERFORMED for the other states: a network
+call whose result is discarded is latency plus a future footgun.
+
+**Only from an issue-side `granted`.** An issue-side marker that is itself stale, malformed or
+unauthorized SHALL NOT produce `MISPLACED`; the state SHALL stay `none`. Such a marker is a
+**different** defect that happens to be on a different thread, and re-posting it would not help —
+reporting `MISPLACED` for it makes the run FAIL after the operator followed the remedy, which spends
+the diagnostic's credibility. The escalation condition SHALL therefore be exactly *"this marker WOULD
+have been accepted by the channel had it been on the pull request"*.
+
+**What "accepted by the channel" means SHALL be stated in the rendering, not glossed.** The probe asks
+the **scanner's** verdict — every property decidable from the comment itself: shape, sole content,
+column-zero anchor, author allowlist, field grammar, reason substance, the base/head/job binding, and
+for a deferral the `count=` match against the observed count. It SHALL NOT run the deferral's
+**network disposition leg** (each `issues=` number's four-valued open-issue check) issue-side. That is
+a **declared scoping**, sound because (1) `MISPLACED` grants nothing, so the worst case is advice one
+step short of complete rather than a pass; (2) the remedy is identical either way — a deferral naming a
+closed issue on the wrong thread must still be moved to the pull request, where the disposition leg
+then runs and reports its own precise `ISSUE-CLOSED` / `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE`; and (3) it
+would add one network call per declared issue per probed thread on a purely diagnostic path. The
+rendering SHALL therefore claim *"would have been accepted by the channel"* and **not** *"would have
+granted"*, and SHALL name that the disposition legs still apply once the marker is on the pull request.
+**A diagnostic that overstates what it measured is what stops the next person looking.**
+
+#### Scenario: A PR-side STALE marker is not overwritten by a perfect issue-side marker
+- **WHEN** the PR carries a well-formed marker naming a different job, and the linked issue carries one naming THIS review exactly
+- **THEN** the state remains `STALE` with its own cause, is never reported `MISPLACED`, and — measured against the `gh` invocation log — no linked-issue probe call was made
+
+#### Scenario: A stale issue-side marker leaves the state at NONE
+- **WHEN** nothing is on the PR and the linked issue carries a marker naming a different base, head or job
+- **THEN** the state stays `NONE` with the probe's *checked* declaration, and `MISPLACED` is not reported
+
+#### Scenario: A malformed issue-side marker leaves the state at NONE
+- **WHEN** nothing is on the PR and the linked issue carries a marker with a missing field, an abbreviated sha or a placeholder reason
+- **THEN** the state stays `NONE` with the probe's *checked* declaration
+
+#### Scenario: An unauthorized issue-side author leaves the state at NONE
+- **WHEN** nothing is on the PR and the linked issue carries a field-perfect marker from an author outside `ROBOREV_WAIVER_AUTHORS`
+- **THEN** the state stays `NONE` — the allowlist applies identically on both threads, and a stranger's comment on a public issue thread cannot even produce a diagnostic that names it as an authorization
+
+#### Scenario: The rendering does not claim more than the probe measured
+- **WHEN** a deferral is reported `MISPLACED`
+- **THEN** the value states that the marker would have been accepted by the channel and that the issue-disposition legs still apply once it is re-posted on the PR, rather than asserting it would have granted
+
+### Requirement: The linked issue is resolved from the structured GitHub relation, never from the pull-request body
+
+The linked issue(s) SHALL be resolved from `gh pr view --json closingIssuesReferences` — the structured
+GitHub relation. The pull-request **body** SHALL NOT be read, scanned, or consulted for this or any
+other purpose.
+
+**This is a standing ruling, not a preference.** #3626 **deleted** a PR-body link requirement because
+*a pull-request body is editable at any time by anyone with write access, with no per-edit attribution,
+while a top-level comment is permanent and attributable* — so the body was the **weaker artifact**, and
+would stay weaker **even if Markdown parsed trivially**. Its recogniser class provably did not close
+(Markdown-handling references in one predicate went 0 → 11 across two rounds, with a multi-backtick
+span and an explicit `[#N](url)` link accepted at deletion time). Per #3312, *remove the shared channel,
+do not pick a rarer delimiter.* Reinstating a body scan **for any purpose** is reinstating a deleted
+generation, and this requirement SHALL be read as forbidding it.
+
+**The mutable-derived caveat SHALL be declared at the call site, not only in design notes.**
+`closingIssuesReferences` is derived from the body's closing keywords and is therefore itself mutable by
+anyone with write access. That is acceptable **here and only here**, for one precise reason: **the
+result grants nothing** — it selects *which thread to print a diagnostic about*. The worst outcome from
+a re-pointed relation is a diagnostic naming the wrong issue, or none, and the run FAILs either way.
+**The moment any consumer downstream of this relation could grant, the argument evaporates and the
+relation must go with it**; that boundary SHALL be written in the source beside the call, because a
+future edit adding a granting consumer reads the code before it reads a design document.
+
+Each issue number returned SHALL be validated **affirmatively as digits** before it is used or emitted;
+a value that is not a number SHALL be a could-not-check cause and SHALL NOT be interpolated raw.
+
+**Several linked issues** SHALL each be probed, **in the order GitHub returns them** (not a sort — any
+sort is a policy nobody asked for), **bounded** by a named constant, reporting the **first** thread
+carrying a matching marker. The bound exists because the probe is a diagnostic and must not become an
+unbounded fan-out of network calls on a failing run; when the declared set exceeds it, the rendering
+SHALL say so.
+
+#### Scenario: The relation is the only source of the linked issue
+- **WHEN** the probe resolves which issue to check
+- **THEN** it uses `gh pr view --json closingIssuesReferences`, and no `#N` scan of the PR body and no `--json body` read exists anywhere in the wrapper or its sourced files
+
+#### Scenario: A PR body mentioning an issue that is not linked
+- **WHEN** the PR body mentions `#N` as prose with no closing keyword, so GitHub declares no linked issue, and issue #N carries a field-perfect marker
+- **THEN** no thread is probed, the state stays `NONE` with the declared *no linked issue* rendering, and the marker on #N is not found — the relation, not the prose, is what bounds and attributes the probe
+
+#### Scenario: Several linked issues, the first match reported
+- **WHEN** the PR declares two linked issues and the second carries the matching marker
+- **THEN** both are probed in GitHub's order and the state is `MISPLACED` naming the second
+
+#### Scenario: A non-numeric value in the relation payload
+- **WHEN** the relation payload carries a value that is not a number
+- **THEN** it is not used and not interpolated raw, and the outcome is a could-not-check cause
+
+### Requirement: The probe is best-effort, cannot change any verdict, and declares what it did and did not check
+
+The probe SHALL be **best-effort**. A missing `gh`, an unusable scanner, no linked issue, an API error,
+an unparseable payload, or a thread whose comments cannot be read SHALL each leave the state exactly
+where the pull-request-side scan left it — at `none`. The probe SHALL NEVER make a run pass and SHALL
+NEVER make a run fail on its own, and its helper SHALL NEVER return non-zero or exit: a two-valued
+return would re-import the very collapse this change exists to remove, so every failure SHALL be a
+**state with a cause**.
+
+**BUT `NONE` SHALL NEVER BE SILENTLY AMBIGUOUS ABOUT WHETHER THE PROBE RAN.** *A lane that omits
+coverage silently is indistinguishable from one that covers it* — the reason the gate prints
+`0 RECOGNISED` rather than a bare `0` and declares its gaps rather than implying completeness. The
+`none` report SHALL therefore carry the probe's declaration, from a **closed set of renderings**:
+
+1. **checked** — *"linked issue #N checked: no matching marker there either"*. Emitted **only when
+   every probed thread was read successfully**.
+2. **partially checked** — *"linked issues #A,#B checked — N of M declared, probe bounded at N: no
+   matching marker"*. The unprobed remainder is named, never implied.
+3. **no subject** — *"no linked issue is declared on this PR, so no linked-issue thread was checked"*.
+4. **could not check** — *"the linked-issue thread could NOT be checked: `<cause>`"*, naming the cause.
+
+A **mixed outcome** — one thread read, another unavailable — SHALL take rendering 4 and name **both**
+halves; it SHALL NOT take rendering 1. *A partial scan reported as a complete one is worse than an
+admitted failure, because it is the version nobody re-checks.*
+
+The existing `NONE` teaching text — that the marker must be the **sole nonblank content** of a
+**top-level** comment — SHALL be **retained**; the declaration is additional, not a replacement. An
+unrecognised rendering SHALL NOT exist: the set is closed, and a new outcome requires deciding what it
+means before it can be printed.
+
+#### Scenario: The probe ran and found nothing
+- **WHEN** no marker is on the PR and the single linked issue's comments were read and carry none
+- **THEN** the state is `NONE` and its value names the *checked* rendering identifying that issue, so a reader can tell the most probable misplacement was ruled out
+
+#### Scenario: No linked issue is declared
+- **WHEN** no marker is on the PR and the PR declares no linked issue
+- **THEN** the state is `NONE` and its value names the *no linked issue* rendering, so the absence of a check is stated rather than looking like a completed one
+
+#### Scenario: The probe could not be performed
+- **WHEN** no marker is on the PR and the linked-issue comment read fails (no `gh`, an API error, or an unparseable payload)
+- **THEN** the state is `NONE`, its value names the *could not check* rendering with the cause, the run still FAILs on the underlying key, and the probe failure itself neither fails nor rescues anything
+
+#### Scenario: One thread read, another unavailable
+- **WHEN** two linked issues are declared, the first is read with no match, and the second's comments cannot be retrieved
+- **THEN** the value takes the *could not check* rendering naming both what was read and what was not, and never the *checked* rendering
+
+#### Scenario: More linked issues than the bound
+- **WHEN** the declared linked-issue set exceeds the probe bound and no match is found in the probed prefix
+- **THEN** the value names how many were declared, how many were probed and the bound, so the unprobed remainder is visible
+
+### Requirement: Every new diagnostic rides the existing single emit boundary and carries no part of either marker
+
+The new detail strings interpolate externally-sourced values — a **runtime issue number** from
+GitHub's structured payload and a **`gh` diagnostic** which is arbitrary remote text. Every one of them
+SHALL pass through the **existing single emit boundary** for its process — `roborev_safe_line` in the
+wrapper, `safe_value` in the scanner — and SHALL NOT be escaped, redacted or sanitised per
+interpolation site. *A per-site escape is a list to keep complete*, and the class was fixed once
+already by moving the neutralisation to the one boundary rather than to the field that happened to
+carry it.
+
+**No emitted diagnostic SHALL carry any part of either marker stem** (`roborev-waive`,
+`roborev-defer`), nor a fillable field skeleton, because summary blocks are pasted into pull-request
+comments as a matter of course in this repository and an artifact that describes the escape hatch must
+not become it. The exact form SHALL remain in `--help` only. The new cases SHALL be run through the
+existing `assert_no_marker_form` helper, which is attached to **every** diagnostic-emitting case —
+*a property asserted only where it cannot fail is not asserted*, which is exactly how the MALFORMED
+detail leaked the whole marker form for a whole release while a nearby comment denied it.
+
+Values SHALL remain one line per value: a control character in a remote diagnostic SHALL be rendered as
+a **visible escape** at the boundary, so no value can span lines and the block SHALL still carry
+exactly one `RESULT:` line.
+
+#### Scenario: A misplaced diagnostic is pasted back into the PR as a comment
+- **WHEN** a run reporting `waiver: MISPLACED` or `deferral: MISPLACED` has its block posted as a PR comment
+- **THEN** it contains no part of either marker stem and no field skeleton, so it authorizes nothing on any later run
+
+#### Scenario: A gh diagnostic on the probe path carries a marker keyword
+- **WHEN** the linked-issue comment read fails with a diagnostic containing `roborev-waive` or `roborev-defer`
+- **THEN** the *could not check* cause still quotes the diagnostic, with the keyword redacted by the wrapper's own emit boundary and no marker form emitted
+
+#### Scenario: A remote diagnostic containing a control character
+- **WHEN** the probe's cause text carries a newline or other control character
+- **THEN** it is rendered as a visible escape, the value occupies one line, and the block carries exactly one `RESULT:` line
+
+#### Scenario: Every new diagnostic-emitting case is asserted
+- **WHEN** `scripts/tests/test_roborev_review_guard.sh` runs
+- **THEN** `assert_no_marker_form` is applied to both `MISPLACED` arms and to all four `NONE` renderings, not only to the case where the property holds trivially
+
+### Requirement: Doctrine and the in-source residuals name the linked-issue thread and the new state
+
+`CLAUDE.md` SHALL be updated **in this change**, in **both** places that record the residual — the
+absence waiver's and the findings deferral's, which carry the same sentence — to state that the
+**linked ISSUE thread** is the **MOST PROBABLE** misplacement, because that is where lane/lead
+coordination lives, and to record the new **`MISPLACED`** state: that it names the issue the marker was
+found on, that it **grants nothing**, and that the FAIL stands. *A residual corrected in one of two
+places is a residual that reads as correct in the other.*
+
+The **same two "RESIDUALS" comment blocks in `scripts/flow/roborev-review-oracles.sh`** SHALL receive
+the same correction, and `--help` SHALL be corrected where it states the residual (its
+*"THE COMMENT MUST BE TOP-LEVEL"* bullet names only a review body and a review-thread reply). These are
+the artifacts an implementer actually reads; leaving them stale is how the doctrine gap regenerates.
+`MISPLACED (…)` SHALL be added to the documented value sets of both the `waiver` and `deferral` keys,
+marked non-granting and informational.
+
+Doctrine SHALL also record the **lead-side procedure** (issue item 3): after posting either marker,
+verify with `gh pr view <PR> --json comments` that the marker line is on the **pull request** — *a
+grant is only granted once it is readable by the scanner that reads it.*
+
+The two locations that remain unread for granting purposes — a **review body** and a
+**review-thread reply** — SHALL still be named, since the probe does not read those either; the linked
+issue is added to the list as the most probable, not substituted for them.
+
+The website `agents-developing/roborev-findings/` page SHALL carry the same content. **Publication
+verification is POST-MERGE and cannot be performed in this change**: the site is served from `main`, so
+grepping the served page for a distinctive new phrase before this branch merges could only ever report
+`0`, which is precisely the false signal the *"never by HTTP 200"* rule exists to prevent. The phrase to
+grep SHALL be recorded in the pull-request body.
+
+#### Scenario: An agent reads the residual after this change
+- **WHEN** an agent or lead reads the waiver or deferral residual in `CLAUDE.md`
+- **THEN** it names the linked-issue thread as the most probable misplacement alongside a review body and a review-thread reply, and records that a misplaced marker is reported `MISPLACED` and grants nothing
+
+#### Scenario: The in-source residuals match the doctrine
+- **WHEN** an implementer reads the two RESIDUALS comment blocks in `roborev-review-oracles.sh` and the `--help` output
+- **THEN** all three name the linked-issue thread and the `MISPLACED` state, so no artifact still states the superseded two-location residual
+
+#### Scenario: The lead-side verification step is recorded
+- **WHEN** a lead posts either marker
+- **THEN** doctrine directs them to verify with `gh pr view <PR> --json comments` that the line is on the PR
+
+### Requirement: Every MISPLACED and NONE rendering is pinned hermetically, and the live path is demonstrated post-merge
+
+`scripts/tests/test_roborev_review_guard.sh` — already executed by the agent gate's `tooling-tests`
+component — SHALL gain behavioural cases covering, at minimum:
+
+- a would-have-granted **waiver** marker on the linked issue with nothing on the PR ⇒
+  `waiver: MISPLACED` naming that issue, with the run still FAILing;
+- the same for **`roborev-defer:`** ⇒ `deferral: MISPLACED`, with `findings:` unchanged and the FAIL
+  standing;
+- a **stale**, a **malformed** and an **unauthorized** issue-side marker ⇒ state stays `NONE`;
+- a **PR-side `stale`** with a perfect issue-side marker ⇒ stays `STALE`, is not overwritten, **and no
+  probe call was made** (asserted against the `gh` invocation log, not assumed);
+- **no linked issue** ⇒ `NONE` with the declared *no linked issue* rendering;
+- the probe **unable to run** ⇒ `NONE` with the declared *could not check* rendering and its cause, the
+  run still FAILing; plus the **partial-read** case ⇒ *could not check* naming both halves;
+- **more linked issues than the bound** ⇒ the rendering declares declared/probed/bound;
+- a **positive control** that `MISPLACED` reaches **no granting path**, for both kinds, paired with the
+  **structural** assert of R2;
+- `assert_no_marker_form` on **every** new diagnostic-emitting case, plus a keyword-bearing `gh`
+  diagnostic on the probe path.
+
+The `gh` test double SHALL be extended for the two new calls —
+`pr view --json closingIssuesReferences` and `issue view <N> --json comments` — with the linked-issue
+list **defaulting to EMPTY**, so a case that wants a probe has to **say so**. That is the fail-closed
+direction and it stops a case passing because the double happened to be permissive about a question the
+wrapper asks.
+
+Every case SHALL plant its artifacts in its **own scratch copy of the tree**, **never** a path variable
+or an environment seam: *a test-only seam is one more thing a real invoker can set*, and the harness
+already asserts that none has been reintroduced. The suite SHALL additionally assert **structurally**
+that `roborev-waiver-scan.py` is unmodified, that no consumer of `closingIssuesReferences` feeds a
+granting branch, that no pull-request **body** read was reintroduced, and that `scripts/agent-gate.sh`
+is unmodified.
+
+Each case whose subject is the **escalation rule** SHALL carry a **planted-mutant contrast** — the
+naive form (probe on every state, or escalate on any issue-side marker) applied to a scratch copy,
+producing the outcome the real code refuses — because a case that passes against both the real code and
+its naive form measures nothing.
+
+Because a pull request whose subject is how the wrapper reads authorizations **cannot certify itself**,
+the live demonstration SHALL be planned and recorded **post-merge**, and the pull-request body SHALL
+say so. A hermetic pass SHALL NOT be recorded as evidence that the live probe path works.
+
+#### Scenario: The escalation rule regresses
+- **WHEN** the escalation is loosened to fire from a state other than `none`, or from an issue-side marker the channel would not have accepted
+- **THEN** `scripts/tests/test_roborev_review_guard.sh` fails, and with it the gate's `tooling-tests` component
+
+#### Scenario: The linked-issue fixture defaults to absent
+- **WHEN** a case does not declare a linked issue
+- **THEN** the test double reports none, so no case can pass because the double was permissive about a question the wrapper asks
+
+#### Scenario: A case is planted rather than seamed
+- **WHEN** a case needs a different scanner, wrapper or oracle behaviour
+- **THEN** it substitutes the artifact in its own scratch copy of the tree, and the harness fails if a test-only path variable or environment seam is reintroduced
+
+#### Scenario: The self-certification boundary is stated
+- **WHEN** the pull request is opened
+- **THEN** its body states that the wrapper cannot certify itself, that the live probe demonstration is post-merge, and that `MISPLACED` grants nothing
