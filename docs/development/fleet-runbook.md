@@ -865,14 +865,23 @@ machine + heartbeat age (issue #2089). Interpretation:
 - **Ready, no claim ref** → next thing a worker will grab
 - **In Progress, heartbeat fresh** → leave it alone
 - **In Progress, heartbeat stale** → deterministically reaped by flow-board (heartbeat age > 4h AND no
-  open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089). The
-  supervisor also stamps a lane-scoped claim ref `refs/lane-claims/<machine>/<issue>` (per-lane since
-  #3393; the legacy per-machine ref is still read only so a pre-ruling one gets drained) that the
+  open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089). **On a
+  SUPERVISOR fleet only**, the supervisor also stamps a lane-scoped claim ref
+  `refs/lane-claims/<machine>/<issue>` (per-lane since #3393; the legacy per-machine ref is still read
+  only so a pre-ruling one gets drained) that the
   `project-board-sync` 30-min cron's `reap-claims` job reaps on the SAME predicate server-side (age >
   4h AND no open PR AND, for a local claim, PID-dead) — so a supervisor that dies overnight gets its
-  claim reaped by CI without waiting for a human to run flow-board (issue #2655)
+  claim reaped by CI without waiting for a human to run flow-board (issue #2655). **`worker-supervisor.sh`
+  is the ONLY writer of `refs/lane-claims/*` in the tree**, so on this fleet — `/drive-issue` lanes, zero
+  production supervisors — that namespace is EMPTY (measured on all three boxes) and neither the
+  `reap-claims` job nor `dead-lanes` has a subject. What IS populated here is the per-issue lock
+  `refs/claims/issue-<N>` and the per-MACHINE heartbeat `refs/heartbeats/<machine>`; see *Lane liveness on
+  a supervisor-less fleet* below (#3548)
 - **Ready but branch already on origin** → parked-by-design (e.g. spec approved, awaiting a
-  team) — pickup is *resume that branch*, never a fresh claim
+  team) — pickup is *resume that branch*, never a fresh claim. **This exact signal is AMBIGUOUS and the
+  ambiguity is unresolved**: #3436 reads *Ready + pushed branch + no claim ref* as a LOST lane, and this
+  bullet reads it as benign. Nothing mechanical tells the two apart today — check the branch's last commit
+  time and whether a session is actually driving it before deciding
 
 ## Recovery scenarios (all safe by construction)
 
@@ -887,8 +896,56 @@ machine + heartbeat age (issue #2089). Interpretation:
 | `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 | **SSH accepts TCP but sends no banner** (from inside the VPC) | **Check `dmesg` for an OOM kill BEFORE concluding the instance is broken** — see the diagnostic order below. This is a memory symptom far more often than a broken box, and a soft reboot may be silently ignored. |
-| A lane vanished — worktree clean, claim held, nothing reported | `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. **Exit 3 = a dead lane was found; exit 1 = none was found.** This slice is positive-detection only and **never exits 0** (#3393 split): act on 3, never read 1 as a clean bill of health. Per-lane refs do make a sound clean verdict possible — a surviving lane's stamp no longer overwrites a dead sibling's — but it is tracked separately. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
+| A lane vanished — worktree clean, claim held, nothing reported | **On a `/drive-issue` fleet, `dead-lanes` is a DEAD END — read *Lane liveness on a supervisor-less fleet* below first (#3548).** Its subject set is `refs/lane-claims/*` (+ legacy `refs/machine-claims/*`), written by `worker-supervisor.sh` ALONE, and this fleet runs no supervisors: measured `lane-claims=0` on all three boxes, so the command reports nothing and exits 1 — which means *nothing was reported*, never *nothing is dead*. What to do instead: check `dmesg` for an OOM kill (diagnostic order below), then reconcile the board against the branch — a `Ready`/`In Progress` item with a pushed branch, a held `refs/claims/issue-<N>` and no session driving it is the lost-lane signature (#3436). **On a SUPERVISOR fleet** the command is the right tool: `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. **Exit 3 = a dead lane was found; exit 1 = none was found.** This slice is positive-detection only and **never exits 0** (#3393 split): act on 3, never read 1 as a clean bill of health. Per-lane refs do make a sound clean verdict possible — a surviving lane's stamp no longer overwrites a dead sibling's — but it is tracked separately. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
 
+
+### Lane liveness on a supervisor-less `/drive-issue` fleet (#3548)
+
+**Lane-granular dead-lane detection does not run on this fleet, and we say so rather than pretend
+otherwise** — owner ruling 2026-09-01 on #3548 (option C, descope and document; completes #3393).
+
+Why: `dead-lanes` enumerates `refs/lane-claims/<machine>/<lane-id>` plus the legacy
+`refs/machine-claims/<machine>`, and **the only writer of either in the whole tree is
+`scripts/local/worker-supervisor.sh`**. This fleet runs `/drive-issue` lanes, not supervisors —
+measured on all three boxes: `lane-claims=0 machine-claims=0`, production supervisors ZERO, while
+`claims=6 heartbeats=20`. So the detector answers about the empty set. **Exit 1 means "nothing was
+reported", never a clean bill of health.**
+
+The two populated namespaces were **measured** and rejected as substitutes, so do not expect a
+read-side "fix":
+
+- `refs/claims/issue-<N>` carries a pid, but it is the **transient claiming shell's** and is never
+  refreshed — measured dead (`pid=3775744`) while its lane was running. Reading it would report a
+  dead lane for a healthy one.
+- `refs/heartbeats/<machine>` is **single-slot per machine**, force-updated by `beat`, so N lanes on
+  one box overwrite each other and at most one is ever reportable — structurally the same masking
+  defect the retired per-machine claim ref had (instance 5 of the #3464
+  retracted-invariant-in-a-second-carrier family).
+
+**What lane liveness actually rests on here.** Two things, and neither is a script you can run:
+
+1. **The coordination lead's sweep** — a human-driven loop over the board and the open PRs. It is what
+   has been catching stalls in practice, including a lane parked 56 minutes on a missed request.
+2. **The #3436 board-signature read** — *Ready + pushed branch + no claim ref* as the signature of a
+   lost lane.
+
+**Both are OPERATING MECHANISMS, tracked by #3436 (open, `status:in-review`) — NOT committed tooling.**
+There is no `board-signature` script, no sweep command, and no flag in this repository; a `grep` for
+either term finds nothing. Do not go looking for one, and do not add its name to this page until
+something in `scripts/` actually implements it.
+
+**And the signature is ambiguous today.** The *Reading the board* section above reads *Ready + branch
+already on origin* as **parked-by-design**, while #3436 reads the same shape as a **lost lane**. That
+conflict is real and unresolved: nothing mechanical distinguishes them, so an operator has to check
+the branch's last commit time and whether a session is driving it. Until #3436 lands a mechanism, treat
+the signature as a prompt to look, never as a verdict.
+
+The primitives that DO exist and are worth running by hand on a suspect box: `dmesg | grep -i "out of
+memory"` (step 1 below — an OOM kill is the most common cause), `bash scripts/flow/claim.sh status <N>`
+(who holds the per-issue lock), `bash scripts/flow/claim-heartbeat.sh list` (machine-level heartbeat
+ages — per MACHINE, not per lane), and a filtered board read (`gh project item-list 1 --owner pmcfadin
+--query 'status:"In Progress"' …`). `dead-lanes` itself stays correct and useful on a **supervisor**
+fleet.
 
 ### Diagnostic order when a box stops answering (#3393)
 
@@ -905,11 +962,13 @@ So, in this order:
    victim, its RSS and its cgroup — `task_memcg=…/tmux-spawn-<uuid>.scope` identifies a **lane**
    rather than a system service. This is step 1 because it is cheap, non-destructive, and
    disambiguates the most likely cause.
-2. **`bash scripts/flow/claim-heartbeat.sh dead-lanes`** — which lanes lost their process. Run it
-   **on the box in question**: a PID is only checkable where it runs. A row annotated `open-pr=yes`
-   is an **orphaned endgame** (#2499): adopt it, never reap it. Since #3393's per-lane claim refs
-   every lane on a multi-lane box is reported independently, so this no longer covers just one of
-   them.
+2. **`bash scripts/flow/claim-heartbeat.sh dead-lanes`** — which lanes lost their process, **on a
+   SUPERVISOR fleet**. Run it **on the box in question**: a PID is only checkable where it runs. A row
+   annotated `open-pr=yes` is an **orphaned endgame** (#2499): adopt it, never reap it. Since #3393's
+   per-lane claim refs every lane on a multi-lane box is reported independently, so this no longer
+   covers just one of them. **On a supervisor-less `/drive-issue` box this step reports nothing** —
+   the claim namespace it reads is empty (#3548) — so skip to step 3 and reconcile the board by hand
+   (next subsection).
 3. **`df -h`** — a full disk is the other resource-exhaustion story that surfaces as a confusing
    failure (#3379), and it is equally cheap to rule out.
 4. **Only then** treat the instance as broken. Note that a soft `reboot-instances` may be
