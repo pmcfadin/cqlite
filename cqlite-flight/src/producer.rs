@@ -369,6 +369,17 @@ pub struct MergeProducer {
     /// so the service can hand the SAME resolved registry to the warm registry's
     /// reader-open path (issue #2349).
     pub(crate) udt_registry: Option<UdtRegistry>,
+    /// The keyspace an UNQUALIFIED UDT reference resolves under when
+    /// [`Self::udt_registry`] is consulted for MERGED-READ reassembly (issue
+    /// #2339), i.e. the keyspace that registry was BUILT under.
+    ///
+    /// Distinct from `schema.keyspace` on purpose: `parse_cql_schema` gives an
+    /// unqualified ticket `CREATE TABLE` the literal placeholder `"default"`, so a
+    /// lookup keyed on the schema would miss every UDT the ticket declared. `None`
+    /// falls back to `schema.keyspace`, which is correct for every caller that
+    /// builds its own schema and registry under one keyspace (the direct
+    /// `MergeProducer` users in tests and tools).
+    pub(crate) udt_keyspace: Option<String>,
     /// Read-time reconciliation clock (epoch seconds), captured ONCE at
     /// construction from the authoritative `read_time_now_secs` seam (issue
     /// #2374/#2789). Threaded into every merger this producer opens (so
@@ -466,6 +477,7 @@ impl MergeProducer {
             agg: None,
             partial_columns: None,
             udt_registry: None,
+            udt_keyspace: None,
             // Issue #2374/#2789: capture the read-time reconciliation clock once.
             now_secs: Self::reconciliation_now_secs(),
         })
@@ -517,6 +529,30 @@ impl MergeProducer {
         }
         self.udt_registry = Some(registry);
         self
+    }
+
+    /// Set the keyspace an unqualified UDT reference resolves under for
+    /// merged-read reassembly (issue #2339) — see [`Self::udt_keyspace`].
+    pub(crate) fn with_udt_keyspace(mut self, keyspace: &str) -> Self {
+        self.udt_keyspace = Some(keyspace.to_string());
+        self
+    }
+
+    /// The UDT resolution scope handed to the merged-read reassembler and to the
+    /// bypass divergence predicate, so both answer the same question with the same
+    /// inputs (issue #2339). `None` when no registry is attached.
+    pub(crate) fn udt_scope(
+        &self,
+    ) -> Option<cqlite_core::storage::write_engine::merge::UdtScope<'_>> {
+        self.udt_registry.as_ref().map(|registry| {
+            cqlite_core::storage::write_engine::merge::UdtScope {
+                registry,
+                keyspace: self
+                    .udt_keyspace
+                    .as_deref()
+                    .unwrap_or(self.schema.keyspace.as_str()),
+            }
+        })
     }
 
     /// Resolve each column's `cql_type` against `registry` in place (issue #2349):
@@ -1047,7 +1083,7 @@ impl MergeProducer {
             cells,
             &self.schema,
             needed,
-            self.udt_registry.as_ref(),
+            self.udt_scope(),
         )
         .map_err(ProducerError::Merge)?;
 

@@ -112,6 +112,31 @@ fn mixed_shape_error(column: &str) -> Error {
     ))
 }
 
+/// Which [`UdtRegistry`], and under WHICH KEYSPACE, an UNQUALIFIED UDT reference
+/// in a declared type resolves for merged-read reassembly (issue #2339).
+///
+/// The two facts travel together because neither is usable alone: the registry is
+/// keyed by keyspace, and a caller's `TableSchema.keyspace` is NOT always the one
+/// the registry was built under — `schema::parse_cql_schema` yields the literal
+/// placeholder `"default"` for an unqualified `CREATE TABLE`, which is what a
+/// Flight ticket DDL is, while its registry is keyed by the ticket's real
+/// keyspace. Passing the keyspace explicitly makes that mismatch impossible to
+/// re-introduce silently: a missed lookup leaves a UDT reference an opaque
+/// `Custom` and (correctly) fails the composite decode closed, which reads as
+/// "unsupported" rather than "mis-wired".
+///
+/// `None` at the call site means NO registry: a composite whose element/key is a
+/// bare UDT reference then has no field list to decode into and fails closed
+/// (never a guess — no-heuristics, issue #28).
+#[cfg(feature = "write-support")]
+#[derive(Debug, Clone, Copy)]
+pub struct UdtScope<'a> {
+    /// The authoritative UDT definitions.
+    pub registry: &'a UdtRegistry,
+    /// The keyspace an unqualified UDT reference resolves under.
+    pub keyspace: &'a str,
+}
+
 /// Reassemble a merged live row's per-column cells into user-facing
 /// [`RowCells`], collapsing multi-cell collection columns into a single
 /// `Value::List` / `Value::Set` / `Value::Map` (issue #2324).
@@ -143,7 +168,7 @@ pub fn assemble_read_cells(
     cells: Vec<CellData>,
     schema: &TableSchema,
     needed: Option<&HashSet<String>>,
-    registry: Option<&UdtRegistry>,
+    udts: Option<UdtScope<'_>>,
 ) -> Result<RowCells> {
     // Group cells by column, preserving first-seen order so a stable, schema-
     // independent ordering results (downstream keys by name, so order is not
@@ -214,7 +239,7 @@ pub fn assemble_read_cells(
         match accum {
             ColumnAccum::Simple(value) => out.push((name, value)),
             ColumnAccum::Complex(elements) => {
-                let value = assemble_complex(&name, elements, schema, registry)?;
+                let value = assemble_complex(&name, elements, schema, udts)?;
                 out.push((name, value));
             }
         }
@@ -258,7 +283,7 @@ fn assemble_complex(
     name: &str,
     mut elements: Vec<CellData>,
     schema: &TableSchema,
-    registry: Option<&UdtRegistry>,
+    udts: Option<UdtScope<'_>>,
 ) -> Result<Value> {
     // Resolve the declared collection type. An undeclared column (the Flight
     // producer builds cells for every on-disk column, even ones the caller did
@@ -282,7 +307,7 @@ fn assemble_complex(
         // arrive in run-encounter, not disk, order) reconstructs in the SAME order
         // a single-generation `SELECT` returns (issue #2324, roborev 1628).
         CqlType::Set(inner) => {
-            let elem_cmp = element_comparator(inner, schema, registry)?;
+            let elem_cmp = element_comparator(inner, udts)?;
             if key_is_opaque_composite(&elem_cmp) {
                 // A composite (frozen tuple / UDT / nested collection) set element
                 // IS its `cell_path` — `e.value` is EMPTY for a set cell, as the
@@ -313,7 +338,7 @@ fn assemble_complex(
             Ok(Value::List(elements.into_iter().map(|e| e.value).collect()))
         }
         CqlType::Map(key_type, _) => {
-            let key_cmp = element_comparator(key_type, schema, registry)?;
+            let key_cmp = element_comparator(key_type, udts)?;
             if key_is_opaque_composite(&key_cmp) {
                 // A composite map KEY is the element's `cell_path`: decode it
                 // structurally, then order entries with Cassandra's own type
@@ -455,7 +480,7 @@ fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
 }
 
 /// Resolve a collection's declared element/key type to a [`ComparatorType`],
-/// resolving UDT REFERENCES through `registry` when one is available (issue
+/// resolving UDT REFERENCES through `udts` when a scope is available (issue
 /// #2339).
 ///
 /// The registry is what makes a composite element/key decodable at all:
@@ -463,18 +488,13 @@ fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
 /// `Set(Frozen(Custom("contact_info")))` — an all-lowercase UDT name parses to a
 /// bare `Custom` carrying NO field list — so without the registry there is no
 /// field structure to decode INTO and the type stays an opaque `Custom`
-/// ([`key_is_opaque_composite`] still names it, so the path fails closed with the
-/// same clear error rather than guessing). `keyspace` is the TABLE's keyspace,
-/// the authoritative scope for an unqualified UDT reference (issue #28).
+/// ([`key_is_opaque_composite`] still names it, so the path fails closed with a
+/// clear error rather than guessing).
 #[cfg(feature = "write-support")]
-fn element_comparator(
-    declared: &CqlType,
-    schema: &TableSchema,
-    registry: Option<&UdtRegistry>,
-) -> Result<ComparatorType> {
-    match registry {
-        Some(registry) => {
-            ComparatorType::from_cql_type_with_registry(declared, registry, &schema.keyspace)
+fn element_comparator(declared: &CqlType, udts: Option<UdtScope<'_>>) -> Result<ComparatorType> {
+    match udts {
+        Some(udts) => {
+            ComparatorType::from_cql_type_with_registry(declared, udts.registry, udts.keyspace)
         }
         None => ComparatorType::from_cql_type(declared),
     }

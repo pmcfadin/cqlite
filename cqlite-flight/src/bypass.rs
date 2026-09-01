@@ -62,11 +62,12 @@
 
 use std::sync::Arc;
 
-use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
+use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{
     QueryRowBatch, QueryRowStream, SSTableReader, ScanTokenBound,
 };
+use cqlite_core::storage::write_engine::merge::UdtScope;
 use cqlite_core::storage::write_engine::DecoratedKey;
 use cqlite_core::types::ScanRow;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
@@ -212,7 +213,7 @@ pub fn bypass_reason(
     schema: &TableSchema,
     forced: ForcedMergePath,
     aggregating: bool,
-    registry: Option<&UdtRegistry>,
+    udts: Option<UdtScope<'_>>,
 ) -> BypassReason {
     if forced == ForcedMergePath::Merge {
         return BypassReason::ForcedMerge;
@@ -270,7 +271,7 @@ pub fn bypass_reason(
     if schema
         .columns
         .iter()
-        .any(|c| declares_composite_keyed_collection(&c.data_type, registry, &schema.keyspace))
+        .any(|c| declares_composite_keyed_collection(&c.data_type, udts))
     {
         return BypassReason::MulticellArmDivergence;
     }
@@ -308,11 +309,7 @@ pub fn bypass_reason(
 /// FROZEN shapes are excluded throughout: a frozen collection or frozen UDT is
 /// ONE cell, so it never reaches `assemble_complex`'s multi-element path and both
 /// arms serve it identically.
-fn declares_composite_keyed_collection(
-    data_type: &str,
-    registry: Option<&UdtRegistry>,
-    keyspace: &str,
-) -> bool {
+fn declares_composite_keyed_collection(data_type: &str, udts: Option<UdtScope<'_>>) -> bool {
     let Ok(parsed) = CqlType::parse(data_type) else {
         return true;
     };
@@ -324,7 +321,7 @@ fn declares_composite_keyed_collection(
         // ticket registry. So an UNRESOLVABLE composite element still diverges and
         // is still refused.
         CqlType::Set(inner) => {
-            is_opaque_composite(&inner) && !merge_arm_resolves_composite(&inner, registry, keyspace)
+            is_opaque_composite(&inner) && !merge_arm_resolves_composite(&inner, udts)
         }
         // A composite MAP KEY is still divergent, in the opposite direction from
         // before #2339: the merge arm decodes it structurally, the
@@ -382,17 +379,13 @@ fn is_opaque_composite(ty: &CqlType) -> bool {
 /// resolve through the registry, then require that NO unresolved UDT reference
 /// remains anywhere in the type tree.
 ///
-/// `None` registry ⇒ nothing can resolve ⇒ `false` (refuse the fast arm), which is
-/// the fail-closed direction.
-fn merge_arm_resolves_composite(
-    ty: &CqlType,
-    registry: Option<&UdtRegistry>,
-    keyspace: &str,
-) -> bool {
-    let Some(registry) = registry else {
+/// No scope ⇒ nothing can resolve ⇒ `false` (refuse the fast arm), which is the
+/// fail-closed direction.
+fn merge_arm_resolves_composite(ty: &CqlType, udts: Option<UdtScope<'_>>) -> bool {
+    let Some(udts) = udts else {
         return false;
     };
-    fully_resolved(&registry.resolve_type(ty, keyspace))
+    fully_resolved(&udts.registry.resolve_type(ty, udts.keyspace))
 }
 
 /// Whether every UDT reference in `ty` carries its field list — the property

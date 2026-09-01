@@ -104,7 +104,7 @@ pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, Ro
 /// `Value::Set` / `Value::Map` for read consumers that key cells by column name.
 mod read_assembly;
 #[cfg(feature = "write-support")]
-pub use read_assembly::assemble_read_cells;
+pub use read_assembly::{assemble_read_cells, UdtScope};
 
 /// Composite (frozen tuple / UDT / nested frozen collection) collection
 /// key/element decode + Cassandra-faithful ordering for [`read_assembly`]

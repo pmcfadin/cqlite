@@ -22,11 +22,14 @@ use std::sync::OnceLock;
 /// UDT cases use can be real Cassandra-written bytes lifted verbatim from its
 /// sstabledump golden (#3042). `addr_type` is deliberately NOT registered — it
 /// is the unresolved-UDT fail-closed case.
-fn registry() -> Option<&'static UdtRegistry> {
+fn registry() -> Option<UdtScope<'static>> {
     static REG: OnceLock<UdtRegistry> = OnceLock::new();
-    Some(REG.get_or_init(|| {
-        udt_registry_from_cql("CREATE TYPE key_part (label text, rank int);", "ks")
-    }))
+    Some(UdtScope {
+        registry: REG.get_or_init(|| {
+            udt_registry_from_cql("CREATE TYPE key_part (label text, rank int);", "ks")
+        }),
+        keyspace: "ks",
+    })
 }
 
 fn col(name: &str, ty: &str) -> Column {
