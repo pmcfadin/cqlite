@@ -6091,7 +6091,291 @@ INHERITED_PARENT_RUN_ID="${AGENT_GATE_PARENT_RUN_ID:-}"
 EXPLICIT_SUMMARY_FILE=0
 [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && EXPLICIT_SUMMARY_FILE=1
 
+# ==== BEGIN disk-exhaustion attribution (#3800) ====
+# A full gate that dies because the DISK filled reports, in the ONE artifact agents are
+# told to retain, `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`.
+# Doctrine forbids reading gate.log, so the reader debugs a minimal-features build that was
+# never broken. Measured on #3800: `lane-3634/target` at 101G mid-full-gate peaking at 143G
+# on a 295G disk shared with two other active lanes, 0 bytes free at the failure; a re-run on
+# the SAME tree at the SAME sha PASSed once a peer freed space.
+#
+# This block adds ONE `disk-exhaustion:` line to every terminal SUMMARY, on the
+# `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)` precedent:
+# a distinct, textually-separable marker key carrying a CLOSED value set.
+#
+# IT IS AN ATTRIBUTION, NEVER A VERDICT. Nothing here reads, sets or influences OVERALL /
+# RESULT, in any mode. Turning a FAIL green because the cause LOOKS environmental would be
+# unsound twice over -- the component genuinely did not pass, and a matched signature is
+# evidence about the HOST, never proof the diff is innocent -- and this slice does not own the
+# verdict. Naming the cause in the retained artifact is the whole deliverable.
+#
+# The capacity-management half (a disk-aware slot cap, a per-lane disk budget, a shared
+# per-box CARGO_TARGET_DIR, refusing/queueing a gate on low free space) is DELIBERATELY NOT
+# here: it is consolidated under #3434 / #3763 / #3755 pending an owner ruling. Do not add it
+# to this block.
+#
+# The whole scan runs ONCE, at TERMINAL-EMIT time, from the parent shell -- not inside the
+# component runners. Three reasons, each measured against this script's actual shape:
+#   * `run_component` is one of ~12 runners (`run_core_tests`, `run_python_bindings`,
+#     `run_node_bindings`, `run_flight_tests`, `run_scoped_tests`, ...) that each duplicate the
+#     verdict-recording shape; a per-runner hook would have to be added ~12 times and a 13th
+#     runner would silently opt out.
+#   * Full-gate components run in BACKGROUNDED SUBSHELLS (#1737) and cannot mutate the parent's
+#     arrays, and `$LOG_DIR/<name>.result` is a HARD two-field format (`<STATUS> <SECONDS>`,
+#     read back with `read -r _st _secs`) that must not grow a third field.
+#   * Component logs are never deleted -- there is no `rm -rf "$LOG_DIR"` anywhere in this
+#     script, and `$LOG_DIR` is retained deliberately as the `logs:` bundle -- so every
+#     `<component>.log` is still on disk at the terminal emit, whichever runner wrote it.
+#
+# The CLOSED signature set: `<our-name>|<literal phrase>`, checked in this order.
+# A bare `ENOSPC` token is DELIBERATELY EXCLUDED: it occurs in this repository's own test
+# names, comments and doctrine, so it would fire on a log that merely MENTIONS the class.
+DISK_EXHAUSTION_SIGNATURES=(
+  'no-space-left-on-device|No space left on device'
+  'os-error-28|os error 28'
+  'disk-quota-exceeded|Disk quota exceeded'
+)
+
+# Startup free-space capture (populated immediately after LOG_DIR is created).
+DISK_TARGET_PATH=""
+DISK_LOGS_PATH=""
+DISK_FREE_START_TARGET=""   # "<avail_kb> <mountpoint>", or "" when unmeasurable
+DISK_FREE_START_LOGS=""
+
+# _disk_safe <value> -- strip control characters from ANY value interpolated into the line.
+#
+# #3312 (control and data must not share a channel): a component log is compiler- and
+# test-controlled text, and a `df` mount point can legitimately contain characters we do not
+# choose. NOTHING log-derived reaches the emitted line -- see _disk_exhaustion_line -- but the
+# component name, the log BASENAME and the mount point are still dynamic, and a newline in any
+# of them would break the block frame and could forge a `RESULT: PASS` or a second
+# `==== AGENT-GATE SUMMARY ====` marker inside the block. Neutralised at the ONE emit boundary
+# (the final printf), never per interpolation site: a per-site escape is a list to keep complete.
+_disk_safe() { printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\037\177'; }
+
+# _disk_abbrev <csv> <max-items> -- bound a name list so one line stays one readable line.
+_disk_abbrev() {
+  local csv="${1:-}" max="${2:-6}" out="" n=0 item rest="${1:-}"
+  [ -n "$csv" ] || { printf ''; return 0; }
+  while [ -n "$rest" ]; do
+    case "$rest" in *,*) item="${rest%%,*}"; rest="${rest#*,}" ;; *) item="$rest"; rest="" ;; esac
+    n=$(( n + 1 ))
+    if [ "$n" -le "$max" ]; then out="${out:+$out,}$item"; fi
+  done
+  if [ "$n" -gt "$max" ]; then printf '%s,+%s more' "$out" "$(( n - max ))"; else printf '%s' "$out"; fi
+}
+
+# _disk_df_probe <path> -- print "<avail_kb> <mountpoint>" for the filesystem holding <path>,
+# or nothing (and rc 1) when it cannot be measured.
+#
+# `df -Pk` is the POSIX form and the ONLY correct one here: `df -h`'s output differs between
+# GNU and BSD and macOS is a first-class gate host, and `-P` is what guarantees one
+# unwrapped line per filesystem so field positions mean what they say.
+_disk_df_probe() {
+  local p="${1:-}" out
+  [ -n "$p" ] || return 1
+  command -v df >/dev/null 2>&1 || return 1
+  # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist
+  # on a clean checkout, and `df` on a missing path is an ERROR, not a free-space of zero.
+  # Bounded by the loop below shortening `p` every iteration.
+  while [ -n "$p" ] && [ "$p" != / ] && [ ! -e "$p" ]; do
+    case "$p" in */*) p="${p%/*}"; [ -n "$p" ] || p=/ ;; *) p="." ;; esac
+  done
+  [ -e "$p" ] || return 1
+  # Mount points may contain spaces, so avail is $4 and the mount point is $6..NF.
+  out=$(df -Pk "$p" 2>/dev/null | awk 'NR>1 {a=$4; m=$6; for(i=7;i<=NF;i++) m=m" "$i; print a" "m; exit}')
+  case "$out" in ''|[!0-9]*) return 1 ;; esac
+  printf '%s' "$out"
+}
+
+# _disk_capture_start -- take the START-of-run free-space reading. Called once, right after
+# LOG_DIR is created, so the emitted field can be a DELTA rather than an instantaneous read.
+_disk_capture_start() {
+  DISK_TARGET_PATH="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  DISK_LOGS_PATH="${LOG_DIR:-}"
+  DISK_FREE_START_TARGET="$(_disk_df_probe "$DISK_TARGET_PATH" 2>/dev/null)"
+  DISK_FREE_START_LOGS="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
+}
+
+# _disk_gib <kb> -- render KiB as "<n>.<d>G". `?` when the input is not a measurement.
+_disk_gib() {
+  case "${1:-}" in ''|*[!0-9]*) printf '?' ; return 0 ;; esac
+  printf '%s.%sG' "$(( $1 / 1048576 ))" "$(( ( $1 % 1048576 ) * 10 / 1048576 ))"
+}
+
+# _disk_free_leg <label> <start "kb mount"> <now "kb mount">
+_disk_free_leg() {
+  local label="${1:-}" st="${2:-}" nw="${3:-}"
+  if [ -z "$st" ]; then printf '%s UNMEASURED' "$label"; return 0; fi
+  printf '%s %s %s->%s' "$label" "${st#* }" "$(_disk_gib "${st%% *}")" "$(_disk_gib "${nw%% *}")"
+}
+
+# _disk_free_field -- the `<free-field>` of the emitted line: a DELTA, never an instantaneous
+# read.
+#
+# WHY A DELTA. Peers free space between the failing component and the terminal emit -- that is
+# literally #3800's own re-run evidence (same tree, same sha, opposite verdicts) -- so an
+# emit-time number alone is actively misleading: it can read "plenty free" on the run that died
+# of ENOSPC. The pair start->emit is what shows the collapse.
+#
+# The two facts are kept INDEPENDENT of the log scan on purpose: an unmeasurable `df` renders
+# `free: UNMEASURED (...)` and does NOT by itself make the whole line UNMEASURED, because the
+# log scan is the primary oracle and reporting it as unmeasured would discard a real finding.
+_disk_free_field() {
+  local st_t="${DISK_FREE_START_TARGET:-}" st_l="${DISK_FREE_START_LOGS:-}"
+  local now_t="" now_l=""
+  [ -n "${DISK_TARGET_PATH:-}" ] && now_t="$(_disk_df_probe "$DISK_TARGET_PATH" 2>/dev/null)"
+  [ -n "${DISK_LOGS_PATH:-}" ] && now_l="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
+  if [ -z "$st_t" ] && [ -z "$st_l" ]; then
+    printf 'free: UNMEASURED (no startup df capture)'
+    return 0
+  fi
+  if [ -n "$st_t" ] && [ -n "$st_l" ] && [ "${st_t#* }" = "${st_l#* }" ]; then
+    # Same filesystem -- report it ONCE.
+    printf 'free(start->emit): %s' "$(_disk_free_leg 'target+logs fs' "$st_t" "$now_t")"
+    return 0
+  fi
+  printf 'free(start->emit): %s; %s' \
+    "$(_disk_free_leg 'target fs' "$st_t" "$now_t")" \
+    "$(_disk_free_leg 'logs fs' "$st_l" "$now_l")"
+}
+
+# _disk_scan_field -- the `<scan-field>`: the scan DECLARES its own non-exhaustiveness, the
+# same way the base-staleness advisory and the legacy-heuristics lane declare theirs. A scan
+# that omits coverage silently is indistinguishable from one that covers it.
+_disk_scan_field() {
+  printf 'scan: CLOSED signature set {no-space-left-on-device, os-error-28, disk-quota-exceeded} over non-PASS component logs only; NON-EXHAUSTIVE by construction -- a disk-full failure worded any other way is a DECLARED false negative'
+}
+
+# _disk_exhaustion_line <name> <status> [<name> <status> ...]
+#
+# Renders the single `disk-exhaustion:` SUMMARY line. Pure with respect to the run: it reads
+# component logs and `df`, and mutates no gate state. Positional pairs rather than a bash
+# nameref, because this script supports bash < 4.3 (macOS ships 3.2) in places.
+#
+# SUBJECT SET = THE NON-PASS COMPONENTS ONLY (#3800). Scanning a PASSing component's log would
+# report a signature that explains nothing -- a build that recovered, a test fixture whose text
+# quotes the phrase -- and invite exactly the false positive that makes a marker ignorable.
+#
+# LOG MATCHING IS PER COMPONENT AND EXACT: `$LOG_DIR/<name>.log` plus `$LOG_DIR/<name>.*.log`
+# (several components write extra per-subject logs, e.g.
+# `binding-rust-tests.cqlite-ffi-common.log`). Deliberately NOT `<name>*.log`, which would
+# cross component boundaries and attribute a peer component's failure to this one.
+#
+# THIS DELIBERATELY DOES NOT USE `_ansi_stripped_log`, AND THAT IS THE POINT.
+# That helper materialises a sibling `<log>.ansi-stripped` FILE. A disk-exhaustion diagnostic
+# that needs free disk in order to run is useless on exactly the run it exists for: under
+# ENOSPC the sibling write fails, the helper fails closed, and this scanner would report
+# UNMEASURED on the one run that had the answer. So the RAW log is read, by REDIRECTION.
+#
+# That is safe under #3400 for a reason that is NOT visible in the code, which is why it is
+# written here: cargo colours the STATUS WORD and emits the reset IMMEDIATELY after it
+# (`Running<ESC>[0m tests/foo.rs`), so a pattern spanning `<status> <payload>` matches nothing
+# under CARGO_TERM_COLOR. These three signatures are pure PAYLOAD -- they come from libc
+# `strerror`, from LLVM/`ld`, and from Rust's `io::Error` Display -- never from a cargo status
+# word, so they carry no escape bytes and no status-word boundary to be split at.
+# `scripts/tests/test_agent_gate_disk_exhaustion.sh` plants an ANSI-COLOURED log and proves
+# detection survives, so this claim is measured rather than asserted.
+#
+# GREP'S EXIT STATUS IS THREE-VALUED and is read as such: 0 = matched, 1 = READ and did not
+# match, >=2 = could NOT be read. Collapsing >=2 onto "no match" is the two-valued-predicate
+# defect this repository keeps finding -- it always picks the permissive answer. The clean
+# verdict is keyed on the AFFIRMATIVE fact (every subject log was READ), never on `!= matched`.
+_disk_exhaustion_line() {
+  local total=0 nonpass=0 read_ok=0 unread=0 matched=0
+  local nonpass_names="" unread_names=""
+  local m_sig="" m_comp="" m_status="" m_log="" m_ln=""
+  local n s log entry sig phrase hit rc found_any log_read out extra
+  local ldir="${LOG_DIR:-}"
+
+  while [ "$#" -ge 2 ]; do
+    n="$1"; s="$2"; shift 2
+    total=$(( total + 1 ))
+    [ "$s" = PASS ] && continue
+    nonpass=$(( nonpass + 1 ))
+    nonpass_names="${nonpass_names:+$nonpass_names,}$n"
+    found_any=0
+    if [ -n "$ldir" ]; then
+      for log in "$ldir/$n.log" "$ldir/$n."*".log"; do
+        # `<name>.*.log` never matches `<log>.ansi-stripped` (wrong suffix), so the sibling
+        # files _ansi_stripped_log leaves behind for OTHER guards are structurally excluded.
+        [ -e "$log" ] || continue
+        found_any=1
+        if [ ! -r "$log" ]; then
+          unread=$(( unread + 1 ))
+          unread_names="${unread_names:+$unread_names,}${log##*/}(unreadable)"
+          continue
+        fi
+        log_read=0
+        for entry in "${DISK_EXHAUSTION_SIGNATURES[@]}"; do
+          sig="${entry%%|*}"; phrase="${entry#*|}"
+          # RAW log, read by REDIRECTION (never a pipe into a while-read, whose accumulated
+          # verdict would die with the subshell) and never through a sibling temp file.
+          # `-a` so a log carrying stray binary bytes is still searched rather than reported
+          # as "binary file matches" with no line number.
+          hit="$(LC_ALL=C grep -n -a -m1 -F -e "$phrase" < "$log" 2>/dev/null)"; rc=$?
+          if [ "$rc" -eq 0 ]; then
+            log_read=1
+            if [ "$matched" -eq 0 ]; then
+              m_sig="$sig"; m_comp="$n"; m_status="$s"; m_log="${log##*/}"; m_ln="${hit%%:*}"
+            fi
+            matched=$(( matched + 1 ))
+            break
+          elif [ "$rc" -eq 1 ]; then
+            log_read=1
+          else
+            log_read=-1   # grep ERROR: could not tell. NEVER "no signature".
+            break
+          fi
+        done
+        if [ "$log_read" -eq 1 ]; then
+          read_ok=$(( read_ok + 1 ))
+        else
+          unread=$(( unread + 1 ))
+          unread_names="${unread_names:+$unread_names,}${log##*/}(unreadable)"
+        fi
+      done
+    fi
+    if [ "$found_any" -eq 0 ]; then
+      # A non-PASS component with NO log is an absent subject, never a clean one.
+      unread=$(( unread + 1 ))
+      unread_names="${unread_names:+$unread_names,}$n(no log)"
+    fi
+  done
+
+  case "$m_ln" in ''|*[!0-9]*) m_ln=0 ;; esac
+
+  if [ "$matched" -gt 0 ]; then
+    # RECOGNISED. NOTHING LOG-DERIVED IS INTERPOLATED: only OUR signature NAME from the closed
+    # set, the component name (which comes from the gate's own COMPONENTS array, not from the
+    # log), the log BASENAME (component name + a fixed suffix) and an integer line number. The
+    # matched TEXT is never echoed -- a component log is compiler- and test-controlled, and a
+    # newline in it would break the block frame and could forge a RESULT line (#3312).
+    extra=""
+    [ "$matched" -gt 1 ] && extra="$extra ($matched non-PASS component logs matched; first reported)."
+    [ "$unread" -gt 0 ] && extra="$extra ($unread further subject log(s) could NOT be read: $(_disk_abbrev "$unread_names" 4))."
+    out="disk-exhaustion: RECOGNISED (#3800) -- signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln; treat this $m_status as ENVIRONMENTAL -- disk exhaustion, NOT a defect in the diff: free space and re-run. This is an ATTRIBUTION and does NOT change RESULT.$extra $(_disk_free_field). $(_disk_scan_field)"
+  elif [ "$nonpass" -eq 0 ]; then
+    out="disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan ($total/$total PASS). $(_disk_free_field). $(_disk_scan_field)"
+  elif [ "$unread" -gt 0 ]; then
+    # UNMEASURED IS NEVER PERMISSIVE. A log that could not be read is never reported as
+    # "no signature": that is a pass derived from the ABSENCE of a bad signal.
+    out="disk-exhaustion: UNMEASURED (#3800) -- $unread of $(( read_ok + unread )) subject log(s) could NOT be read ($(_disk_abbrev "$unread_names" 4)); a log that could NOT be read is never reported as 'no signature'. $(_disk_free_field). $(_disk_scan_field)"
+  else
+    out="disk-exhaustion: 0 RECOGNISED (#3800) -- scanned $read_ok non-PASS component log(s) ($(_disk_abbrev "$nonpass_names" 6)); every subject log was READ and no signature from the CLOSED set matched. $(_disk_free_field). $(_disk_scan_field)"
+  fi
+
+  # ONE emit boundary, ONE sanitisation: the rendered line is guaranteed to be exactly one
+  # line before it can reach a SUMMARY_META element.
+  printf '%s\n' "$(_disk_safe "$out")"
+}
+# ==== END disk-exhaustion attribution (#3800) ====
+
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
+# #3800: the START-of-run free-space reading, taken the moment LOG_DIR exists so the
+# terminal `disk-exhaustion:` line can report a start->emit DELTA rather than an
+# instantaneous emit-time read (peers free space between the failure and the emit).
+_disk_capture_start
 # ==== BEGIN feature-matrix annotation (#3453) ====
 # The SUMMARY feature-matrix annotation. INLINE here, not a sourced sibling, on purpose:
 # eight hermetic self-tests build a synthetic repo by copying THIS ONE FILE into
@@ -9016,6 +9300,12 @@ if [ "$SELFTEST" -eq 1 ]; then
   for i in "${!NAMES[@]}"; do
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line, driven through the REAL emit path so the
+  # self-test asserts the line as the block actually carries it (the #2078 marker below uses
+  # the same hook for the same reason). It NEVER changes RESULT: this hook emits PASS.
+  _de_pairs=()
+  for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+  meta+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
   # through the real emit path so the self-test can assert it lands in the block.
   if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ "$(_fixture_status)" = OPTOUT ]; then
@@ -17267,6 +17557,11 @@ run_lite() {
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+  # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+  _de_pairs=()
+  for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+  SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
@@ -17638,6 +17933,13 @@ run_delta() {
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     done
+    # #3800: the delta REFUSED path gets the line too. It is a TERMINAL emit an agent
+    # retains, its component table can carry a non-PASS row (file-size/fmt/scoped-tests
+    # run BEFORE the refusal), and a refusal caused by a disk-starved tier is exactly the
+    # confusion this marker exists to remove -- so "inapplicable" would be a guess.
+    _de_pairs=()
+    for _de_i in "${!DN[@]}"; do _de_pairs+=("${DN[$_de_i]}" "${DS[$_de_i]}"); done
+    SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
     emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
@@ -17675,6 +17977,11 @@ run_delta() {
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+  # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+  _de_pairs=()
+  for _de_i in "${!DN[@]}"; do _de_pairs+=("${DN[$_de_i]}" "${DS[$_de_i]}"); done
+  SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
@@ -17857,6 +18164,11 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+  # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+  _de_pairs=()
+  for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+  SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
@@ -18768,6 +19080,11 @@ fi
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
+# #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+# ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+_de_pairs=()
+for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
 # #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
 # which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,
 # which the component table above already shows.
