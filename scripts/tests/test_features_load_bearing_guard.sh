@@ -98,6 +98,21 @@
 #                redundancy test is not simply refusing every external edge.
 #  25.  RED    — the same for a WORKSPACE-member edge whose dependency declaration
 #                already enables the forwarded feature.
+#
+#   ROUND 3 (roborev job 55):
+#  26.  RED+GREEN — the build-script env API must be ANCHORED: a LOCAL `mod env` with no
+#                `use std::env;`, and `my_env::var(...)`, each confer NOTHING; a bare
+#                `env::var` WITH a proven `use std::env;` does.
+#  27.  GREEN  — REGRESSION: a non-weak edge to an OPTIONAL dependency whose declaration
+#                already enables the forwarded feature is STILL load-bearing, because the
+#                edge ACTIVATES the dependency. Judging redundancy first reported a live
+#                feature dead — a false FAIL, worse than the false PASS it came from.
+#  28.  GREEN  — PINS A DECLARED RESIDUAL, not desired behaviour: an ORPHAN .rs file
+#                under a target's source dir (reachable from no `mod` chain) IS scanned,
+#                so a cfg gate in dead code credits its feature. The success line says
+#                so; this case makes the declaration testable, because a declaration
+#                nobody tests is a comment. If module-graph resolution is ever
+#                implemented, this case reds and the residual text must change with it.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -231,6 +246,25 @@ fixture() { # <name> -> echoes dir
   local d="$TMPROOT/$1"
   build_fixture "$d"
   echo "$d"
+}
+
+# A NON-MEMBER dependency, as a LOCAL PATH crate created OUTSIDE the fixture workspace
+# (a sibling of it under $TMPROOT). Nothing here is fetched, so every case stays offline
+# and deterministic — the property `tooling-tests` needs.
+make_extdep() { # <fixture dir>
+  local ext="$TMPROOT/extdep-$(basename "$1")"
+  mkdir -p "$ext/src"
+  cat >"$ext/Cargo.toml" <<'EOF'
+[package]
+name = "extdep"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+derive = []
+rc = []
+EOF
+  echo "pub fn nothing() {}" >"$ext/src/lib.rs"
 }
 
 run_guard() { # <dir> ; captures combined output, returns guard rc
@@ -520,16 +554,23 @@ expect_green "$D" "case 23b"
 ok "an unrelated local \`var("CARGO_FEATURE_X")\` confers nothing; the same call with a PROVEN \`use std::env::var\` does"
 
 # --- 24. RED: a REDUNDANT external dependency edge ---------------------------
+# OFFLINE BY CONSTRUCTION. This suite runs in `tooling-tests`, a MANDATORY gate
+# component, so a case that can reach the crates.io index makes the gate of record
+# flaky and red on an offline host. `extdep` is therefore a LOCAL PATH crate created
+# OUTSIDE the fixture workspace (so it is not a member and is never scanned), which
+# gives the guard exactly what this case needs — a non-member dependency — with no
+# network and no lockfile. Verified with CARGO_NET_OFFLINE=1.
 D="$(fixture redundant-external)"
+make_extdep "$D"
 python3 - "$D/a/Cargo.toml" <<'PYEOF'
 import sys
 p = sys.argv[1]
 s = open(p).read()
 dep = 'bee = { path = "../b", package = "b" }'
-s = s.replace(dep, dep + '\nserde = { version = "1", features = ["derive"] }')
+s = s.replace(dep, dep + '\nextdep = { path = "../../extdep-redundant-external", features = ["derive"] }')
 # `redext` forwards a feature the DECLARATION already enables (a no-op); `newext`
 # forwards one it does not (a real effect) — the control.
-s = s.replace('tfeat = []', 'tfeat = []\nredext = ["serde/derive"]\nnewext = ["serde/rc"]')
+s = s.replace('tfeat = []', 'tfeat = []\nredext = ["extdep/derive"]\nnewext = ["extdep/rc"]')
 open(p, 'w').write(s)
 PYEOF
 grep -q '^redext = ' "$D/a/Cargo.toml" || fail_case "case 24: fixture edit did not plant redext"
@@ -565,13 +606,111 @@ if grep -qE '^ +[^ ]+  fwd ' "$TMPROOT/out.txt"; then
 fi
 ok "a REDUNDANT workspace-member edge confers no credit, and a non-redundant edge on the same dependency is unaffected"
 
+# --- 26. RED then GREEN: the env API must be ANCHORED ------------------------
+D="$(fixture local-env-mod)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+mod env {
+    pub fn var(_key: &str) -> Option<String> { None }
+}
+
+fn main() {
+    if env::var("CARGO_FEATURE_TFEAT").is_some() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+expect_red_naming "$D" "tfeat" "case 26a"
+D="$(fixture my-env-suffix)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+mod my_env {
+    pub fn var(_key: &str) -> Option<String> { None }
+}
+
+fn main() {
+    if my_env::var("CARGO_FEATURE_TFEAT").is_some() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+expect_red_naming "$D" "tfeat" "case 26b"
+D="$(fixture env-mod-green)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+use std::env;
+
+fn main() {
+    if env::var("CARGO_FEATURE_TFEAT").is_ok() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+expect_green "$D" "case 26c"
+ok "a local \`mod env\` and \`my_env::var(...)\` confer nothing; a bare \`env::var\` with a proven \`use std::env;\` does"
+
+# --- 27. GREEN: activation outranks redundancy (regression) ------------------
+# `actfeat` forwards a feature the OPTIONAL dependency's declaration already enables,
+# so the forwarding half is a no-op — but the edge still ACTIVATES `optdep`, which is
+# an effect. Judging redundancy first reported this LIVE feature as dead.
+D="$(fixture activation-vs-redundancy)"
+python3 - "$D/a/Cargo.toml" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace('optdep = { path = "../optdep", optional = true }',
+              'optdep = { path = "../optdep", optional = true, features = ["odfeat"] }')
+s = s.replace('tfeat = []', 'tfeat = []\nactfeat = ["optdep/odfeat"]')
+open(p, 'w').write(s)
+PYEOF
+grep -q '^actfeat = ' "$D/a/Cargo.toml" || fail_case "case 27: fixture edit did not plant actfeat"
+expect_green "$D" "case 27"
+ACT_COUNT="$(asserted_count)"
+[ "$ACT_COUNT" -eq "$((BASE_COUNT + 1))" ] \
+  || fail_case "case 27: expected $((BASE_COUNT + 1)) asserted features, got $ACT_COUNT"
+ok "a non-weak edge to an OPTIONAL dependency stays load-bearing even when the forwarded feature is already enabled (it ACTIVATES the dependency)"
+
+# --- 28. GREEN: pins the DECLARED orphan-file residual ----------------------
+# NOT desired behaviour — a declared one. The guard's success line states that an
+# ORPHAN .rs file under a target's source dir is scanned as if compiled; this case
+# makes that statement testable. If module-graph resolution is ever implemented this
+# case must red, and the residual text must be updated in the same change.
+D="$(fixture orphan-file)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\norphanfeat = []/' "$D/a/Cargo.toml"
+grep -q '^orphanfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 28: fixture edit did not plant orphanfeat"
+# Reachable from NO `mod` chain: a/src/lib.rs does not declare `mod obsolete`.
+cat >"$D/a/src/obsolete.rs" <<'EOF'
+#[cfg(feature = "orphanfeat")]
+pub fn long_dead() {}
+EOF
+grep -q 'mod obsolete' "$D/a/src/lib.rs" \
+  && fail_case "case 28: the fixture's lib.rs declares the module, so the file is not an orphan"
+expect_green "$D" "case 28"
+ORPHAN_COUNT="$(asserted_count)"
+[ "$ORPHAN_COUNT" -eq "$((BASE_COUNT + 1))" ] \
+  || fail_case "case 28: expected $((BASE_COUNT + 1)) asserted features, got $ORPHAN_COUNT"
+grep -q 'NON-EXHAUSTIVE' "$TMPROOT/out.txt" \
+  || fail_case "case 28: the success line does not DECLARE its residual, so this credited-orphan behaviour is undeclared"
+grep -q 'ORPHAN' "$TMPROOT/out.txt" \
+  || fail_case "case 28: the declared residual does not NAME the orphan-file case that this fixture demonstrates"
+ok "an ORPHAN .rs file under a target's source dir IS scanned (a credited dead feature) and the success line DECLARES exactly that"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=25
+CASE_COUNT_EXPECTED=28
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

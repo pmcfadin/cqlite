@@ -687,7 +687,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 25 cases over throwaway
+#                      features-load-bearing component: 28 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -14969,7 +14969,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 25 cases over throwaway fixture
+# proof for the features-load-bearing component: 28 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16430,7 +16430,14 @@ run_tooling_tests() {
   # attribute, a local `var("CARGO_FEATURE_X")` with no proven `use std::env::var`, and a
   # redundant dependency-feature edge (external and workspace) each confer NOTHING. Every
   # one was MEASURED to pass on the pre-fix guard, so each is a real differential rather
-  # than a case that would green either way.
+  # than a case that would green either way. Three more (job 55) pin the ANCHORED
+  # build-script env API (a local `mod env`, and `my_env::var`, confer nothing), the
+  # REGRESSION that a non-weak edge to an OPTIONAL dependency stays load-bearing even
+  # when the forwarded feature is already enabled, and the guard's DECLARED orphan-file
+  # residual — that last one asserts the success line NAMES the behaviour it exhibits, so
+  # the declaration cannot drift from the code. Every fixture is a LOCAL path workspace
+  # with no registry dependency, so the suite runs offline (verified under
+  # CARGO_NET_OFFLINE=1) — this component is mandatory and must not depend on a network.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
   # scripts/ci/) because the guard has no test-only seam and must never grow one.
   echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
