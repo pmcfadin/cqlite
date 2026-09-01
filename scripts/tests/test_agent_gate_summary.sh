@@ -4721,7 +4721,18 @@ fi
 nll_comp_v1=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 nll_leakfile_v1="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
 nll_v1_ok=1
-printf '%s' "$nll_comp_v1" | grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' \
+# SIGPIPE-FREE MATCH (#3685), second and LAST measured-dangerous site in this file. The
+# `printf | grep -q` form here false-FAILed 12/40 (30%): the data is 34,397 bytes and this
+# pattern sits at byte 6,331, so `grep -q` exits having DISCARDED 28,066 bytes and whichever
+# of printf's write(2) calls lands after that gets EPIPE -> rc=141 -> a FAIL on a TRUE
+# assertion. It is why `1465-gate-strict` red 1-in-3 suite runs even after L4618 was fixed.
+#        SORT KEY for #3685's other sites is BYTES DISCARDED, not "early match" — the
+#        discarded count IS the race window. Measured here: 305-byte data at 14% => 0/40
+#        (too small to race); 34,397-byte data at 93%/98% => 0/40 (only ~2.5KB discarded);
+#        34,397 at 18%/10% => 30%/37.5%. Small OR late is safe; only large AND early fires.
+#        `grep -c` sites below are SAFE by construction — a count reads all input, so there
+#        is no early exit to race. Only the two `grep -q` sites needed changing.
+[[ $nll_comp_v1 == *'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)'* ]] \
   || { nll_v1_ok=0; echo "  node-bindings does not declare the strict leak-budget env"; }
 # every `env` that launches node in this component must carry the unset array
 nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )?env ')
