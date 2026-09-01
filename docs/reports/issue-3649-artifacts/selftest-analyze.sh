@@ -1,0 +1,537 @@
+#!/usr/bin/env bash
+#
+# selftest-analyze.sh -- deterministic tests for analyze-ab.py (issue #3649).
+#
+# The analyzer's statistics and its verdict rule are the reviewable core of this
+# artifact set, and they are tested here against SYNTHETIC JSONL fixtures
+# constructed in a scratch directory -- never against a live run, and never
+# against wall-clock timing (this repository lints wall-clock threshold asserts
+# out of the correctness test path, #2642). Every case is reproducible on a
+# laptop in seconds, so there is no excuse for publishing a figure from this
+# harness without running it first.
+#
+# It prints a case count and a CASE FLOOR. A green tally over a silently
+# shrunken suite is a known defect class in this repository (a span-replacing
+# edit deleted four cases from another suite and it reported "failed: 0" at 102
+# instead of 105 for a whole round), so a suite that has lost cases reds here.
+#
+# Usage: bash selftest-analyze.sh          (needs python3 only)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANALYZER="$HERE/analyze-ab.py"
+DRIVER="$HERE/ab-throughput.sh"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+PASSED=0
+FAILED=0
+CASE_FLOOR=25
+
+ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
+bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
+
+expect() { # <description> <condition-already-evaluated:0|1>
+  if [ "$2" -eq 0 ]; then ok "$1"; else bad "$1"; fi
+}
+
+# ---------------------------------------------------------------------------
+# Fixture generator: a manifest plus one single-record JSONL per (arm, replicate)
+# ---------------------------------------------------------------------------
+cat > "$TMP/mkfixture.py" <<'PYEOF'
+import json
+import os
+import sys
+
+STEP = "flight-loadgen.step/v1"
+
+
+def step_record(round_label, rate, duration=60.0, requests_ok=5):
+    # Latency is made a plausible function of the rate so the two arms differ in
+    # the latency block too; nothing in the verdict rule reads it.
+    per_request_ms = (duration * 1000.0) / requests_ok
+    return {
+        "schema": STEP,
+        "round": round_label,
+        "endpoint": "http://127.0.0.1:8815",
+        "ts_unix_ms": 1780000000000,
+        "seed": 42,
+        "step": 0,
+        "target_concurrency": 1,
+        "shape": "full",
+        "duration_s": duration,
+        "requests_ok": requests_ok,
+        "requests_unavailable": 0,
+        "requests_error": 0,
+        "error_codes": {},
+        "qps": requests_ok / duration,
+        "rows_per_s": rate,
+        "bytes_per_s": rate * 200.0,
+        "rows_total": int(rate * duration),
+        "bytes_total": int(rate * duration * 200),
+        "latency_ms": {
+            "p50": per_request_ms,
+            "p95": per_request_ms * 1.10,
+            "p99": per_request_ms * 1.20,
+            "max": per_request_ms * 1.35,
+            "samples": requests_ok,
+        },
+    }
+
+
+def main():
+    outdir = sys.argv[1]
+    requested = int(sys.argv[2])
+    spec = sys.argv[3]  # "base:head,base:head,..." one entry per replicate
+    os.makedirs(outdir, exist_ok=True)
+    runs = []
+    for index, entry in enumerate(spec.split(","), start=1):
+        base_rate, head_rate = (float(v) for v in entry.split(":"))
+        for arm, rate in (("base", base_rate), ("head", head_rate)):
+            name = "%s-r%02d.jsonl" % (arm, index)
+            with open(os.path.join(outdir, name), "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(step_record("%s-r%02d" % (arm, index), rate)))
+                handle.write("\n")
+            runs.append({"arm": arm, "replicate": index, "file": name, "temperature": "warm"})
+    manifest = {
+        "schema": "ab-3649.manifest/v1",
+        "driver_version": "selftest-fixture",
+        "generated_utc": "2026-09-01T00:00:00Z",
+        "replicates_requested": requested,
+        "arms": {
+            "base": {"commit": "0" * 40, "ref": "cfa93fe99^"},
+            "head": {"commit": "1" * 40, "ref": "cfa93fe99"},
+        },
+        "workload": {
+            "shape": "full",
+            "ramp": "1",
+            "step_duration": "60s",
+            "prewarm": True,
+            "server_cpus": "0,2",
+            "client_cpus": "1,3",
+            "temperature": "warm",
+        },
+        "corpus": {
+            "path": "/data/ab-3649/corpus/sstables",
+            "data_db_bytes": 681574400,
+            "data_db_files": 3,
+            "min_bytes_required": 268435456,
+            "rows_declared": 3999890,
+        },
+        "host": {
+            "instance_type": "i4i.xlarge",
+            "nproc": 4,
+            "loadavg1": "0.05",
+            "kernel": "selftest",
+        },
+        "runs": runs,
+    }
+    with open(os.path.join(outdir, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=1, sort_keys=True)
+        handle.write("\n")
+
+
+main()
+PYEOF
+
+mkfixture() { python3 "$TMP/mkfixture.py" "$@"; }
+
+RC=0
+run_analyzer() { # <dir> [extra args...]
+  local dir="$1"; shift
+  set +e
+  python3 "$ANALYZER" --manifest "$dir/manifest.json" "$@" \
+    > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+anchored() { # every line of both streams carries the prefix
+  local file
+  for file in "$TMP/out.txt" "$TMP/err.txt"; do
+    if [ -s "$file" ] && grep -qv '^AB-3649: ' "$file"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+verdict_token() { sed -n 's/^AB-3649: verdict \([A-Z][A-Z-]*\)$/\1/p' "$TMP/out.txt"; }
+
+check_verdict() { # <description> <expected-token> <expected-exit>
+  local desc="$1" want="$2" want_rc="$3"
+  local got
+  got="$(verdict_token)"
+  local lines
+  lines="$(printf '%s\n' "$got" | grep -c . || true)"
+  if [ "$lines" != "1" ]; then
+    bad "$desc (expected exactly one verdict line, got $lines)"
+    return
+  fi
+  if [ "$got" != "$want" ]; then
+    bad "$desc (verdict $got, expected $want)"
+    return
+  fi
+  if [ "$RC" != "$want_rc" ]; then
+    bad "$desc (exit $RC, expected $want_rc)"
+    return
+  fi
+  if ! anchored; then
+    bad "$desc (an output line does not carry the AB-3649 anchor)"
+    return
+  fi
+  ok "$desc -> $want (exit $RC)"
+}
+
+check_cause() { # <description> <expected-cause>
+  if grep -q "^AB-3649: cause $2$" "$TMP/err.txt"; then
+    ok "$1 -> cause $2"
+  else
+    bad "$1 (cause line 'AB-3649: cause $2' absent; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+  fi
+}
+
+echo "==== analyze-ab.py self-test (issue #3649) ===="
+echo
+
+# ---------------------------------------------------------------------------
+echo "-- the four measured verdicts --"
+
+# 1. A clean, clearly-positive effect whose interval sits inside 1.10-1.25.
+mkfixture "$TMP/meets" 6 "100000:116000,100000:117000,100000:117000,100000:118000,100000:118000,100000:119000"
+run_analyzer "$TMP/meets"
+check_verdict "clean positive effect, tight interval inside the band" MEETS-TARGET 0
+
+# 2. THE CASE THIS WHOLE FILE EXISTS FOR. A large point-estimate difference with
+#    heavily overlapping dispersion, in the spirit of the rejected proxy bench
+#    (base 78.6 ms [69.5, 88.4] vs head 66.5 ms [54.5, 83.2]) -- expressed here
+#    as throughput, since rows/s is what the served path reports. The point
+#    estimate lands at ~1.16x, INSIDE the target band, and it must still NOT
+#    become MEETS-TARGET: the interval is [0.97, 1.40] and covers both no-effect
+#    and the band.
+mkfixture "$TMP/inconclusive" 6 \
+  "12723:10814.55,12723:12086.85,12723:13995.3,12723:15013.14,12723:18448.35,12723:20611.26"
+run_analyzer "$TMP/inconclusive"
+check_verdict "large point difference, overlapping dispersion" INCONCLUSIVE 6
+if grep -q '^AB-3649: test ci-contains-1.0 yes$' "$TMP/out.txt"; then
+  ok "the inconclusive case reports that its interval covers 1.0"
+else
+  bad "the inconclusive case did not report ci-contains-1.0"
+fi
+if grep -qE '^AB-3649: ratio point 1\.1[0-9]+ ' "$TMP/out.txt"; then
+  ok "a point estimate sitting INSIDE the target band still does not earn a verdict"
+else
+  bad "the inconclusive fixture no longer has a point estimate inside the band, so it is no longer testing the case it exists for"
+fi
+
+# 3. A real, MEASURED no-effect: ratio ~1.0 with a tight interval. This is a
+#    different fact from inconclusive and must not collapse onto it -- the
+#    interval rules the target band out even though it straddles 1.0.
+mkfixture "$TMP/noeffect" 6 \
+  "100000:99900,100000:100000,100000:100100,100000:100200,100000:99950,100000:100050"
+run_analyzer "$TMP/noeffect"
+check_verdict "measured no effect, tight interval around 1.0" BELOW-TARGET 4
+if grep -q '^AB-3649: test ci-contains-1.0 yes$' "$TMP/out.txt" \
+   && grep -q '^AB-3649: test ci-entirely-below-band yes$' "$TMP/out.txt"; then
+  ok "the no-effect case is distinguished from the inconclusive one by its own test lines"
+else
+  bad "the no-effect case did not report both covering 1.0 and excluding the band"
+fi
+
+# 4. The 1.5-1.9 region. It must render against the 1.10-1.25 BAND, with the
+#    ceiling merely named. There is no verdict token that endorses the ceiling.
+mkfixture "$TMP/ceiling" 6 \
+  "100000:169000,100000:170000,100000:170000,100000:171000,100000:171000,100000:172000"
+run_analyzer "$TMP/ceiling"
+check_verdict "a ratio in the 1.5-1.9 region" ABOVE-TARGET 5
+if grep -q '^AB-3649: target profile narrow band \[1.10, 1.25\] source ' "$TMP/out.txt"; then
+  ok "the 1.5-1.9 case is still rendered against the 1.10-1.25 band"
+else
+  bad "the 1.5-1.9 case did not print the 1.10-1.25 band"
+fi
+if grep -q '^AB-3649: ceiling 1.5-1.9x is a rig-narrow UTILIZATION ceiling' "$TMP/out.txt"; then
+  ok "the ceiling is named on the run that lands in it"
+else
+  bad "the ceiling was not named"
+fi
+if grep -qE 'MEETS-CEILING|CEILING-MET|MEETS-UTILIZATION' "$TMP/out.txt"; then
+  bad "the output invented a ceiling-endorsing token"
+else
+  ok "no ceiling-endorsing verdict token exists in the output"
+fi
+
+# The wide profile has its own band and the same rule.
+run_analyzer "$TMP/meets" --profile wide
+check_verdict "the wide profile tests the 1.05-1.10 band, not the narrow one" ABOVE-TARGET 5
+
+echo
+echo "-- every input the analyzer cannot measure, cause by cause --"
+
+# 5. Malformed JSONL.
+mkfixture "$TMP/malformed" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+printf '{"schema": "flight-loadgen.step/v1", NOT JSON\n' > "$TMP/malformed/head-r03.jsonl"
+run_analyzer "$TMP/malformed"
+check_verdict "a malformed JSONL record" UNMEASURED 7
+check_cause "malformed JSONL" run-file-not-jsonl
+
+# 6. A missing run file the manifest still declares.
+mkfixture "$TMP/missing" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+rm -f "$TMP/missing/base-r02.jsonl"
+run_analyzer "$TMP/missing"
+check_verdict "a declared run file that is not on disk" UNMEASURED 7
+check_cause "missing run file" run-file-unreadable
+
+# 7. An empty run file (the shape a killed loadgen leaves).
+mkfixture "$TMP/empty" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+: > "$TMP/empty/head-r01.jsonl"
+run_analyzer "$TMP/empty"
+check_verdict "an empty run file" UNMEASURED 7
+check_cause "empty run file" run-file-empty
+
+# 8. An unpaired replicate: interleaving is the whole design, so a lone arm is
+#    not analysable.
+mkfixture "$TMP/unpaired" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/unpaired/manifest.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["runs"] = [r for r in manifest["runs"] if not (r["arm"] == "head" and r["replicate"] == 4)]
+manifest["replicates_requested"] = 6
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYEOF
+run_analyzer "$TMP/unpaired"
+check_verdict "a replicate present for one arm only" UNMEASURED 7
+check_cause "unpaired replicate" unpaired-replicates
+
+# 9. Fewer completed pairs than the session requested -- the shortfall reaches
+#    the analyzer as an explicit manifest fact, never as an absence.
+mkfixture "$TMP/short" 8 "100000:117000,100000:117000,100000:118000,100000:118000"
+run_analyzer "$TMP/short"
+check_verdict "fewer completed pairs than requested" UNMEASURED 7
+check_cause "replicate shortfall" replicate-shortfall
+
+# 10. Too few pairs to bootstrap at all.
+mkfixture "$TMP/tiny" 2 "100000:117000,100000:118000"
+run_analyzer "$TMP/tiny"
+check_verdict "a pair count below the bootstrap floor" UNMEASURED 7
+check_cause "insufficient pairs" insufficient-pairs
+
+# 11. A replicate that recorded a request error is not a throughput measurement.
+mkfixture "$TMP/errors" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/errors/head-r02.jsonl" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["requests_error"] = 1
+record["error_codes"] = {"Internal": 1}
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYEOF
+run_analyzer "$TMP/errors"
+check_verdict "a replicate carrying a request error" UNMEASURED 7
+check_cause "request error in a replicate" run-errors
+
+# 12. Admission shedding changes what was measured (#2420).
+mkfixture "$TMP/shed" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/shed/base-r05.jsonl" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["requests_unavailable"] = 3
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYEOF
+run_analyzer "$TMP/shed"
+check_verdict "a replicate that was admission-shed" UNMEASURED 7
+check_cause "admission shed in a replicate" run-shed
+
+# 13. A zero-row scan: green by omission is the failure this repository refuses.
+mkfixture "$TMP/zerorows" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/zerorows/head-r06.jsonl" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["rows_per_s"] = 0.0
+record["rows_total"] = 0
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYEOF
+run_analyzer "$TMP/zerorows"
+check_verdict "a replicate that returned no rows" UNMEASURED 7
+check_cause "zero-row replicate" run-degenerate
+
+# 14. A multi-step ramp is not this design.
+mkfixture "$TMP/multistep" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+cat "$TMP/multistep/base-r01.jsonl" "$TMP/multistep/base-r01.jsonl" > "$TMP/multistep/tmp.jsonl"
+mv "$TMP/multistep/tmp.jsonl" "$TMP/multistep/base-r01.jsonl"
+run_analyzer "$TMP/multistep"
+check_verdict "a run file holding more than one step record" UNMEASURED 7
+check_cause "multi-step run file" run-record-count
+
+# 15/16/17. Manifest-level refusals.
+mkdir -p "$TMP/nomanifest"
+run_analyzer "$TMP/nomanifest"
+check_verdict "an absent manifest" UNMEASURED 7
+check_cause "absent manifest" manifest-unreadable
+
+mkdir -p "$TMP/badmanifest"
+printf 'this is not json\n' > "$TMP/badmanifest/manifest.json"
+run_analyzer "$TMP/badmanifest"
+check_verdict "a manifest that is not JSON" UNMEASURED 7
+check_cause "manifest that is not JSON" manifest-not-json
+
+mkfixture "$TMP/wrongschema" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/wrongschema/manifest.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["schema"] = "ab-3649.manifest/v0"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYEOF
+run_analyzer "$TMP/wrongschema"
+check_verdict "a manifest carrying an unknown schema tag" UNMEASURED 7
+check_cause "unknown manifest schema" manifest-schema
+
+echo
+echo "-- determinism, anchoring, and the structural property of the source --"
+
+# 18. Same input twice -> byte-identical output on both streams.
+run_analyzer "$TMP/meets"
+cp "$TMP/out.txt" "$TMP/out.first"
+cp "$TMP/err.txt" "$TMP/err.first"
+run_analyzer "$TMP/meets"
+if cmp -s "$TMP/out.first" "$TMP/out.txt" && cmp -s "$TMP/err.first" "$TMP/err.txt"; then
+  ok "two runs over one input produce byte-identical output"
+else
+  bad "the analyzer is not deterministic over a fixed input"
+fi
+
+# 19. A usage error is anchored too -- argparse would not be.
+set +e
+python3 "$ANALYZER" --no-such-flag > "$TMP/out.txt" 2> "$TMP/err.txt"
+RC=$?
+set -e
+if [ "$RC" = "3" ] && anchored && [ -s "$TMP/err.txt" ]; then
+  ok "an unrecognised flag exits 3 with every line anchored"
+else
+  bad "an unrecognised flag did not exit 3 with anchored output (exit $RC)"
+fi
+
+set +e
+python3 "$ANALYZER" --help > "$TMP/out.txt" 2> "$TMP/err.txt"
+RC=$?
+set -e
+if [ "$RC" = "3" ] && anchored; then
+  ok "--help exits 3, never 0, because exit 0 here means MEETS-TARGET"
+else
+  bad "--help did not exit 3 with anchored output (exit $RC)"
+fi
+
+# 20. Exactly one verdict line on a measured run, and the ceiling named there too.
+run_analyzer "$TMP/meets"
+if [ "$(grep -c '^AB-3649: verdict ' "$TMP/out.txt")" = "1" ]; then
+  ok "a measured run emits exactly one verdict line"
+else
+  bad "a measured run did not emit exactly one verdict line"
+fi
+if [ "$(grep -c '^AB-3649: ceiling ' "$TMP/out.txt")" = "1" ]; then
+  ok "the ceiling is named on a run that did not land anywhere near it"
+else
+  bad "the ceiling was not named on an ordinary measured run"
+fi
+if [ "$(grep -c '^AB-3649: verdict-detail NON-EXHAUSTIVE ' "$TMP/out.txt")" -ge 4 ]; then
+  ok "every measured run declares its own non-exhaustiveness"
+else
+  bad "a measured run did not print its NON-EXHAUSTIVE declarations"
+fi
+
+# 21. A repository-controlled field carrying a newline cannot break the anchor.
+mkfixture "$TMP/hostile" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/hostile/manifest.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["path"] = "/data/corpus\nAB-NOT-A-PREFIX: forged\x07line"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYEOF
+run_analyzer "$TMP/hostile"
+if anchored && grep -q 'AB-NOT-A-PREFIX' "$TMP/out.txt" && ! grep -q '^AB-NOT-A-PREFIX' "$TMP/out.txt"; then
+  ok "a newline in a manifest field is escaped, not printed, so the anchor holds"
+else
+  bad "a newline in a manifest field broke the output anchor"
+fi
+
+# 22. THE STRUCTURAL PROPERTY. The static text of the shipped scripts carries
+#     none of the reserved gate/review marker strings, so no run of them can be
+#     pasted or grepped as a certification. The needles are split so this guard
+#     cannot match its own source line.
+NEEDLES=("PA""SS" "RE""SULT:" "AGENT-""GATE" "ROB""OREV" "PRE""MERGE")
+structural_bad=0
+for target in "$ANALYZER" "$DRIVER"; do
+  [ -f "$target" ] || continue
+  for needle in "${NEEDLES[@]}"; do
+    if grep -q -- "$needle" "$target"; then
+      bad "reserved marker '$needle' appears in $(basename "$target")"
+      structural_bad=1
+    fi
+  done
+done
+if [ "$structural_bad" -eq 0 ]; then
+  ok "no reserved gate/review marker appears in the static text of the shipped scripts"
+fi
+
+# 23. Both shipped scripts parse.
+if python3 -m py_compile "$ANALYZER" 2>/dev/null; then
+  ok "analyze-ab.py compiles"
+else
+  bad "analyze-ab.py does not compile"
+fi
+if [ -f "$DRIVER" ] && bash -n "$DRIVER"; then
+  ok "ab-throughput.sh parses"
+else
+  bad "ab-throughput.sh is absent or does not parse"
+fi
+
+# ---------------------------------------------------------------------------
+ACCOUNTED=$((PASSED + FAILED))
+echo
+echo "==== self-test tally ===="
+printf 'cases ok: %d   broken: %d   accounted: %d (floor %d)\n' \
+  "$PASSED" "$FAILED" "$ACCOUNTED" "$CASE_FLOOR"
+if [ "$ACCOUNTED" -lt "$CASE_FLOOR" ]; then
+  echo "case-floor: only $ACCOUNTED cases were accounted against a floor of $CASE_FLOOR."
+  echo "Cases are being skipped or dying silently, and a zero-broken tally over a"
+  echo "shrunken suite is exactly the vacuous green this floor exists to catch."
+  exit 1
+fi
+if [ "$FAILED" -ne 0 ]; then
+  echo "The analyzer is not behaving as its verdict rule requires. Do not publish a"
+  echo "verdict from it until every case is ok."
+  exit 1
+fi
+echo "Every case behaved as the verdict rule requires, including the two that must"
+echo "NOT produce a number: the overlapping-dispersion case and every unmeasurable"
+echo "input."
+exit 0
