@@ -1108,8 +1108,8 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 
 - **EVERY DELEGATED STAGE'S VERDICT IS A FILE, PRE-STAMPED BEFORE THE SPAWN (#3751).** A review
   stage used to write NOTHING at any point, so its reader had only ABSENCE to reason from — and
-  every consumer of an absence has to CHOOSE how to read it. Nine measured spawns across four
-  lanes and three agent types produced no report; nine for nine the lanes recorded "not run" and
+  every consumer of an absence has to CHOOSE how to read it. Nine measured spawns across five
+  lanes and four agent types produced no report; nine for nine the lanes recorded "not run" and
   disclosed it, **which is discipline, not mechanism**. So `scripts/flow/review-stage.sh` transplants
   #3041's idiom: `open <kind> --issue <N> --agent <type>` creates the report-of-record file
   **before the agent is spawned**, carrying a non-verdict sentinel, and prints the absolute path

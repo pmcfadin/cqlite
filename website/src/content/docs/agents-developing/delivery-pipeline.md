@@ -573,7 +573,7 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   Skip only for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface).
 - **Every delegated stage's verdict is a FILE, pre-stamped BEFORE the spawn (issue #3751).** A review
   stage used to write NOTHING at any point, so its reader had only ABSENCE to reason from — and every
-  consumer of an absence has to CHOOSE how to read it. Nine measured spawns across four lanes and three
+  consumer of an absence has to CHOOSE how to read it. Nine measured spawns across five lanes and four
   agent types produced no report; nine for nine the lanes recorded "not run" and disclosed it, **which is
   discipline, not mechanism.** So `scripts/flow/review-stage.sh` transplants the gate's own idiom (#3041):
   `open <kind> --issue <N> --agent <type>` creates the report-of-record file **before the agent is
