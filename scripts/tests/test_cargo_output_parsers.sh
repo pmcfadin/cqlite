@@ -709,6 +709,85 @@ else
   bad "A5: run_arrow_parity_guard_cmd is not using a private mktemp -d — the two callers disagree"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────────────
+# (A7) THE #3625 CENSUS PARSERS ARE PARSE SITES TOO, so they belong in this registry —
+#      the question this file exists to answer is "is EVERY cargo-output parse in the
+#      shipped gate colour-immune", and a new one absent from it is a hole the whole
+#      suite cannot see. Extracted from the shipped gate, like every other site here.
+#
+#      `Executable ` is a CARGO STATUS WORD and IS coloured (same placement as `Running`:
+#      the reset lands between the word and the payload), so the raw parse counts ZERO —
+#      and for the census a measured zero means VACUOUS, i.e. a FALSE RED on a healthy
+#      `--no-run` lane. `test result:` is libtest's and carries no escapes, which is why
+#      routing it is belt; it is routed anyway, for the same reason site 4 is.
+#
+#      The census's own state machine, the verdict coupling and the AC3 plant live in
+#      scripts/tests/test_agent_gate_census.sh. What is asserted HERE is only the property
+#      this file owns: colour immunity at the parse site.
+# ─────────────────────────────────────────────────────────────────────────────────────
+cen_rc=0
+python3 - "$GATE" "$tmp/census_parsers.sh" <<'CENSUSPY' || cen_rc=$?
+import re, sys
+gate, out = sys.argv[1], sys.argv[2]
+lines = open(gate, encoding='utf-8').read().split('\n')
+
+
+def extract(start_re, end_re):
+    for i, l in enumerate(lines):
+        if re.match(start_re, l):
+            for j in range(i + 1, len(lines)):
+                if re.match(end_re, lines[j]):
+                    return '\n'.join(lines[i:j + 1])
+            break
+    return ''
+
+
+helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
+lt = extract(r'^_census_libtest_tally\(\) \{', r'^\}')
+cp = extract(r'^_census_compile_tally\(\) \{', r'^\}')
+meas = extract(r'^_census_measure\(\) \{', r'^\}')
+for name, body, needle in (('_ansi_stripped_log', helper, 'sed -E'),
+                           ('_census_libtest_tally', lt, 'test result:'),
+                           ('_census_compile_tally', cp, 'Executable'),
+                           ('_census_measure', meas, '_ansi_stripped_log')):
+    if not body.strip() or needle not in body:
+        print('EXTRACT-FAIL: %s' % name, file=sys.stderr)
+        sys.exit(2)
+# COMMENT-BLIND, for the reason recorded at the A2 extraction: a comment NAMING the helper
+# would otherwise satisfy a substring test, and _census_measure's comment block names it.
+if not any('_ansi_stripped_log' in l for l in meas.split('\n')
+           if not l.lstrip().startswith('#')):
+    print('EXTRACT-FAIL: _census_measure has no NON-COMMENT call to _ansi_stripped_log - '
+          'it would parse the raw log and this suite would certify the defect',
+          file=sys.stderr)
+    sys.exit(2)
+open(out, 'w', encoding='utf-8').write('\n\n'.join((helper, lt, cp)) + '\n')
+CENSUSPY
+if [ "$cen_rc" -ne 0 ]; then
+  bad "A7: extraction of the #3625 census parsers from agent-gate.sh FAILED (rc=$cen_rc) — cannot certify their colour handling"
+else
+  ok "A7: extracted _census_libtest_tally + _census_compile_tally (and verified _census_measure routes through _ansi_stripped_log from a non-comment line)"
+  # The escape bytes are the SAME real ones the provenance cases at the top of this file
+  # already proved are real; ESC is that variable.
+  {
+    printf '%s  Executable%s unittests src/lib.rs (target/debug/deps/dw-1)\n' "${ESC}[1m${ESC}[92m" "${ESC}[0m"
+    printf 'test result: ok. 4 passed; 0 failed; 0 ignored\n'
+  } > "$tmp/census-colour.log"
+  cen_raw=$( set +e; . "$tmp/census_parsers.sh"; _census_compile_tally "$tmp/census-colour.log" )
+  cen_stripped=$( set +e; . "$tmp/census_parsers.sh"; s=$(_ansi_stripped_log "$tmp/census-colour.log"); _census_compile_tally "$s" )
+  if [ "$cen_raw" = 0 ] && [ "$cen_stripped" = 1 ]; then
+    ok "A7a: _census_compile_tally counts 0 'Executable' lines on the COLOURED log and 1 after _ansi_stripped_log — the strip carries the correctness (an unrouted call would report a healthy --no-run lane as having built nothing)"
+  else
+    bad "A7a: expected raw=0 stripped=1 from the census compile tally, got raw='$cen_raw' stripped='$cen_stripped'"
+  fi
+  cen_lt=$( set +e; . "$tmp/census_parsers.sh"; s=$(_ansi_stripped_log "$tmp/census-colour.log"); _census_libtest_tally "$s" )
+  if [ "$cen_lt" = "4 1" ]; then
+    ok "A7b: _census_libtest_tally reads libtest's own uncoloured tally through the same normalised source (4 passed across 1 result line)"
+  else
+    bad "A7b: expected '4 1' from the census libtest tally, got '$cen_lt'"
+  fi
+fi
+
 echo
 printf 'passed=%d failed=%d\n' "$PASSES" "$FAILS"
 if [ "$FAILS" -gt 0 ]; then
