@@ -18176,10 +18176,16 @@ run_tooling_tests() {
   # exists solely because a GNU-only construct shipped without a macOS path. The lane lock is
   # Linux-`/proc`-SPECIFIC BY DESIGN: its holder identity is boot-id + `/proc/<pid>/stat`
   # start-ticks, and on a host without /proc `acquire` REFUSES with
-  # reason=unresolved-identity. So the suites cannot pass there — test_lane_lock.sh asserts
-  # real acquisitions against real /proc identities, and test_advertised_collision_scan.sh
-  # asserts a NON-EMPTY lock record from a real `lane-lock.sh acquire 600`. Run unguarded,
-  # both would FAIL `tooling-tests` on every macOS gate host.
+  # reason=unresolved-identity. test_lane_lock.sh is WHOLLY that subject — every case asserts
+  # real acquisitions against real /proc identities — so unguarded it would FAIL
+  # `tooling-tests` on every macOS gate host.
+  #
+  # SCOPED TO THIS ONE SUITE (#3436, roborev round 30). An earlier revision also skipped
+  # test_advertised_collision_scan.sh here, but only ONE of its 32 cases touches the lane lock
+  # (TEST 9's lock-record clause); the rest are pure git + filesystem and are exactly the
+  # portability coverage a macOS run exists to provide. That skip deleted all of it, and was
+  # inconsistent with how the same round scoped test_claim_lock.sh to two tests instead of
+  # muting the file. The condition now lives INSIDE that suite, next to the clause it guards.
   #
   # THIS IS A SKIP, AND IT IS NOT A COVERAGE HOLE WEARING A SKIP'S CLOTHES. The distinction
   # CLAUDE.md draws is whether something COVERABLE is being excused: here the subject does not
@@ -18195,7 +18201,7 @@ run_tooling_tests() {
   # that misfires on Linux would silently disable both suites, which is the failure mode this
   # comment is warning about, and it would be invisible precisely where it matters.
   if [ "$_AGENT_GATE_OS" != "Linux" ]; then
-    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh + test_advertised_collision_scan.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
     echo ">>> [$name]   the machine-local lane lock is Linux-/proc-specific by design (boot-id + /proc/<pid>/stat"
     echo ">>> [$name]   start-ticks); on a host without /proc \`acquire\` refuses with reason=unresolved-identity,"
     echo ">>> [$name]   so there is no behaviour to assert. Every OTHER tooling-tests suite still runs here."
@@ -18228,29 +18234,30 @@ run_tooling_tests() {
       return 0
     fi
 
-    # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
-    # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
-    # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
-    # the machine-visible signature of an ADVERTISED collision window -- board
-    # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
-    # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
-    # legitimate release-on-finalize while the board invited a second claimant. The suite
-    # pins each fact's absence separately (a detector firing on two of three facts fails),
-    # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
-    # exits 0, and that it mutates nothing. Same
-    # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
-    # component, mirroring the keyspace-scoping guard.
-    echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
-    if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
-      status=FAIL
-      echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
-      tail -40 "$log"
-      echo "--- end of $name output ---"
-      end=$(date +%s)
-      record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
-      return 0
-    fi
+  fi
+
+  # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
+  # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
+  # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
+  # the machine-visible signature of an ADVERTISED collision window -- board
+  # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
+  # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
+  # legitimate release-on-finalize while the board invited a second claimant. The suite
+  # pins each fact's absence separately (a detector firing on two of three facts fails),
+  # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
+  # exits 0, and that it mutates nothing. Same
+  # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
   fi
 
   # claim-lock suite (#3436 FIX 13d): it needs bash + git + coreutils and NO python3, and

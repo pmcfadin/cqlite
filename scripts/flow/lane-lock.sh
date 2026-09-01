@@ -108,13 +108,23 @@
 #      (That process's `comm` is also literally `tmux: server` — a space-bearing
 #      comm, which is why the /proc/<pid>/stat parse above splits on the last ')'.)
 #
-#      If the ONLY cwd match is $$ itself -> pid-scope=ephemeral. That is NOT
-#      refused: it is recorded, and such a holder's liveness is UNKNOWN-EPHEMERAL,
-#      which REFUSES and never auto-reclaims. RATIONALE, and the direction matters:
-#      an ephemeral pid is a per-tool-call shell that dies between tool calls, so
-#      calling it DEAD would auto-reclaim a lane whose session is very much alive —
-#      handing a second writer the exact collision this file exists to prevent. Fail
-#      closed toward REFUSING; an operator can always `release --force`.
+#      If the ONLY cwd match is $$ itself -> pid-scope=ephemeral, and a WRITE
+#      (acquire/reclaim) REFUSES it: see require_durable_identity below. THIS
+#      PARAGRAPH USED TO SAY THE OPPOSITE — "that is NOT refused: it is recorded" —
+#      which described a design that was tried and REVERTED (#3436, roborev round 30
+#      caught the stale text). Recording the tool call's own shell bricked the lane on
+#      FIRST USE: that shell exits immediately, the record then reads UNKNOWN-EPHEMERAL
+#      forever, every UNKNOWN-* refuses — including the owning session's own next
+#      acquire — so one acquire from outside the lane made the lane permanently
+#      unusable. A guard that reds on correct input is worse than no guard.
+#      UNKNOWN-EPHEMERAL IS STILL A LIVENESS VALUE and still refuses + never
+#      auto-reclaims, but it is now reachable only from a record ALREADY ON DISK (one
+#      written by the pre-refusal version, or by hand) — never from a write this
+#      version performs. The direction is the same and still matters: an ephemeral pid
+#      is a per-tool-call shell that dies between tool calls, so calling it DEAD would
+#      auto-reclaim a lane whose session is very much alive, handing a second writer
+#      the exact collision this file exists to prevent. Fail closed toward REFUSING; an
+#      operator can always `release --force`.
 #      The chain is never followed to pid 1, and a non-cwd-matching ancestor is never
 #      recorded as a fallback: an unrelated long-lived ancestor would be a
 #      permanently-alive holder.
@@ -330,11 +340,23 @@
 #           SELF — probe still reports the record's liveness and still exits 0.
 #           `reclaimable=` states whether an `acquire` would auto-reclaim, so a caller
 #           need not re-implement the DEAD-*/UNKNOWN-* split.
-#   release <N> [--lane-dir <p>] [--actor <id>] [--force]
+#   release <N> [--expect <lease>] [--lane-dir <p>] [--actor <id>] [--force]
 #           delete the record. Without --force it requires our exact token
 #           (RELEASE-REFUSED otherwise); --force deletes unconditionally (reaper).
 #           Releasing a free lane is RELEASED (already free), exit 0 — idempotent, so
 #           cleanup paths are safe to run twice or after a crash.
+#           --expect <lease>: OPTIONAL compare-and-swap, the same discipline as reclaim.
+#           The record's CURRENT lease must equal it exactly or the release is REFUSED
+#           (RELEASE-LOST reason=lease-mismatch, exit 2) rather than deleting a lock that
+#           is not the incarnation you acquired. WHY IT MATTERS (#3436, roborev rounds
+#           21/30): the holder TOKEN is unchanged by a same-process release+reacquire, so
+#           identity alone cannot tell one acquisition from the next and a DELAYED or
+#           DUPLICATED release deletes a LIVE lock. Only the lease can. `acquire` and
+#           `probe`/`status` both publish `lease=`; pass THAT, never a value you built.
+#           An empty `--expect ""` is a usage error on purpose (an unset variable would
+#           silently disable the check). It stays OPTIONAL so the idempotent cleanup paths
+#           (trap handlers, supervisor teardown) keep working, but ANY caller that held the
+#           lane across a gap — finalize did, it acquired — SHOULD pass it.
 #   reclaim <N> --expect <lease>|none --reason <why> [--lane-dir <p>] [--actor <id>] [--pid <pid>]
 #           (RECLAIMED / RECLAIMED (re-entrant) / RECLAIM-LEASE-MISMATCH — its OWN verdict
 #           word, exit 0, for a re-entrant reclaim whose --expect did NOT hold, so a caller

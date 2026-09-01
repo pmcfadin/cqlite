@@ -289,9 +289,26 @@ out=$(run_scan "$GH9"); rc=$?
 refsAfter=$(refs_snapshot)
 treeAfter=$(tree_snapshot)
 recordAfter=$(cat "$LANE_LOCK_RECORD_600" 2>/dev/null)
+# THE LOCK-RECORD CLAUSE IS THE ONLY /proc-DEPENDENT THING IN THIS ENTIRE SUITE, so it is what
+# gets conditioned -- NOT the suite, and not even this test (#3436, roborev round 30). The
+# acquire above needs boot-id + /proc/<pid>/stat, and on a host without /proc it REFUSES with
+# reason=unresolved-identity by design, leaving recordBefore empty and failing `-n`. An earlier
+# revision handled that by skipping this whole suite at the gate, which deleted ALL 32 cases of
+# portability coverage for a script explicitly written to bash 3.2 -- the opposite of what a
+# macOS run is for, and inconsistent with how the very same round scoped test_claim_lock.sh to
+# two tests rather than muting the file. The refs/tree/rc assertions are pure git + filesystem
+# and are exactly what a macOS run should exercise, so they run everywhere.
+if [ "${LANE_LOCK_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}" = "Linux" ]; then
+  record_ok=$([ -n "$recordBefore" ] && [ "$recordBefore" = "$recordAfter" ] && echo 1 || echo 0)
+  record_note="AND an existing lane-lock record"
+else
+  # Affirmatively NOT asserted, and said out loud rather than folded silently into a pass.
+  record_ok=1
+  record_note="(lane-lock record NOT asserted: no /proc on this host, so acquire cannot record one)"
+fi
 if [ "$refsBefore" = "$refsAfter" ] && [ "$treeBefore" = "$treeAfter" ] \
-   && [ -n "$recordBefore" ] && [ "$recordBefore" = "$recordAfter" ] && [ "$rc" -eq 3 ]; then
-  ok "a FOUND run left every ref, the whole lane tree AND an existing lane-lock record byte-identical"
+   && [ "$record_ok" = "1" ] && [ "$rc" -eq 3 ]; then
+  ok "a FOUND run left every ref, the whole lane tree $record_note byte-identical"
 else
   bad "the scan mutated something (rc=$rc)
 refs before:
