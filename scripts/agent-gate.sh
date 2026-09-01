@@ -17671,12 +17671,13 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
@@ -19025,6 +19026,307 @@ run_delta() {
 # derivation for #2640) so the per-gate core budget and this machine-wide cap
 # share a single source of truth for the slot count.
 
+# ---- DISK ADMISSION: evaluated at LAUNCH, RE-EVALUATED AT SLOT GRANT (issue #3755) ----
+#
+# THE DEFECT. Admission and consumption are two different moments, and the gate only
+# ever had the first one. A full gate launched with 167G free can sit an hour in the
+# #1825 queue and begin its build at 30G: the whole queue wait is wasted, the build
+# aborts into a floor, and it does so WHILE STILL HOLDING the slot a peer could have
+# used. An admission test taken at launch says nothing about the moment the resource
+# is actually consumed.
+#
+# THE PREMISE CORRECTION worth recording, because #3755 is written as if a launch-time
+# check existed: it did not. Before this block the only `df` in scripts/ was
+# worker-supervisor.sh's DISK_FLOOR_GB=40, which gates WORKER SPAWN and not the gate.
+# So "the same predicate as the launch-time check" had no referent, and delivering it
+# means introducing ONE predicate and evaluating it at BOTH moments — which is what
+# _gate_disk_admission_measure is. There is deliberately no second implementation:
+# a second implementation of a predicate is a second place for it to disagree.
+#
+# WHERE. Both evaluations live inside acquire_gate_slot. That function already
+# self-exempts --lite/--delta/--only, so the guard is full-gate-only BY CONSTRUCTION
+# rather than by a condition someone has to remember, and it returns immediately
+# before the certification window and the first component — which is exactly "after
+# slot grant and before the first build step".
+#
+# THE DISPOSITIONS ARE ASYMMETRIC ON PURPOSE. The reason is stated at each branch
+# rather than here, but in summary: LAUNCH is ADVISORY (a low reading there can be
+# freed by the very peer gate we are about to queue behind, so refusing would be a
+# false refusal, and a guard that reds on correct input is the guard agents learn to
+# waive); POST-SLOT-GRANT is FAIL-CLOSED; UNMEASURED is DECLARED and non-fatal at
+# both moments (the cap's own stated doctrine is that the gate must never be
+# un-runnable because of the cap — but never SILENTLY, so an unmeasurable reading
+# names itself in the SUMMARY instead of taking the permissive branch quietly).
+#
+# WHAT THE OUTCOME IS CALLED. RESULT stays FAIL. A new terminal token
+# (`RESULT: REFUSED`, which --delta has) would break the mandated completion probe
+# `grep -qE 'RESULT: (PASS|FAIL)'` and reintroduce #3041 from the other side: a poller
+# would read a FINISHED refusal as still-running or dead. Distinctness is carried by a
+# NAMED line and a NAMED `refusal:` key, exactly the documented
+# `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)`
+# precedent.
+
+# The bar, in GiB. 40 is #3755's own "40G building floor" and the value the committed
+# fleet tooling already uses (worker-supervisor.sh's DISK_FLOOR_GB).
+_GATE_MIN_FREE_GB_DEFAULT=40
+
+# The `disk-admission:` line every FULL-gate SUMMARY carries. Empty until the probe
+# runs, i.e. for the exempt modes, which get no line at all.
+DISK_ADMISSION_LINE=""
+# Rendered per-moment states, so the line can name BOTH evaluations and a reader can
+# tell whether a run was admitted once or twice.
+_DA_LAUNCH_RENDER=""
+_DA_POST_RENDER=""
+_DA_BAR=""
+_DA_BAR_SRC=""
+# Per-measurement outputs of _gate_disk_admission_measure.
+_DA_STATE=""
+_DA_VALUE=""
+_DA_MOUNT=""
+_DA_WHY=""
+
+# _gate_is_nonneg_decimal <s>: true for an unsigned integer or decimal (`40`, `0.5`,
+# `.5`, `40.`). Written with `case` globs, not `[[ =~ ]]`: this script carries no
+# other `=~` and supports the bash 3.2 floor.
+_gate_is_nonneg_decimal() {
+  case "$1" in
+    ''|.) return 1 ;;
+    *[!0-9.]*) return 1 ;;
+    *.*.*) return 1 ;;
+  esac
+  return 0
+}
+
+# _gate_min_free_gb: prints "<gib> <source>", source ∈ default|pinned|invalid|clamped.
+#
+# The source token is the #3414 `cpu-budget:` idiom and exists for the same measured
+# reason: an UNSET variable and a MIS-SET one are different operational facts, and
+# `${VAR:-40}` renders them IDENTICALLY — which is how a pin that was never in effect
+# read as installed for months. `${VAR+set}` is the only spelling that tells unset from
+# set-empty. Fractional values are legal (worker-supervisor's DISK_FLOOR_GB accepts
+# them). A negative bar clamps to 0 rather than being refused: "never refuse" is a
+# coherent thing to ask for, and `-0` clamping to `0` is the same value.
+_gate_min_free_gb() {
+  local v body neg=0
+  if [ -z "${CQLITE_GATE_MIN_FREE_GB+set}" ]; then
+    printf '%s default' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
+  fi
+  v="$CQLITE_GATE_MIN_FREE_GB"
+  body="$v"
+  case "$v" in -*) neg=1; body="${v#-}" ;; esac
+  if ! _gate_is_nonneg_decimal "$body"; then
+    printf '%s invalid' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
+  fi
+  [ "$neg" -eq 1 ] && { printf '0 clamped'; return 0; }
+  printf '%s pinned' "$v"
+}
+
+# _gate_disk_admission_subject: the path whose filesystem the build will fill — the
+# cargo target dir. `target/` legitimately does not exist yet on a cold lane, so walk
+# up to the nearest EXISTING ancestor rather than failing: df answers about a
+# FILESYSTEM, and the not-yet-created directory will live on the one its parent is on.
+# Prints a path, or nothing (which the caller renders as UNMEASURED — never as a
+# permissive default).
+_gate_disk_admission_subject() {
+  local d="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -e "$d" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  [ -e "/" ] && { printf '/'; return 0; }
+  return 1
+}
+
+# _gate_disk_admission_probe: the THREE-VALUED reading of the subject filesystem.
+# Prints exactly one of
+#     MEASURED <available-kib> <mount-point>
+#     UNMEASURED <why>
+# and returns 0 either way — the CALLER disposes, because the two moments dispose of
+# the same reading differently.
+#
+# Three-valued on purpose. Every `test`/`[` file predicate is two-valued and therefore
+# has to collapse "cannot tell" onto one of its answers, and it always picks the
+# permissive one (the `1699-find-tristate` shape). "Below the bar" and "could not be
+# measured" are DIFFERENT states here and must never merge: the first refuses, the
+# second declares.
+#
+# `df -Pk`, never `df -h`: POSIX `-P` pins the column layout (1 Filesystem,
+# 2 1024-blocks, 3 Used, 4 Available, 5 Capacity, 6.. Mounted on) and forbids the
+# line-wrapping plain `df` may do for a long device name, and `-k` pins the unit to
+# KiB, where `-h` rounds and appends a locale-dependent suffix. Read by ASSIGNMENT,
+# never `df | while read`: a piped loop runs in a SUBSHELL and its verdict is
+# discarded, which is the same silent-pass shape #3400 records for the cargo parsers.
+#
+# rc 127 is separated from every other failure because that is EXACTLY what a shell
+# reports for an ABSENT command — "this box has no df" and "df ran and could not
+# answer" are different operational facts. The call's stderr is discarded so an absent
+# df cannot leak `command not found` onto the gate's own stderr, where
+# test_agent_gate_summary.sh's minimal-PATH case reads any such line as a defect.
+_gate_disk_admission_probe() {
+  local path out rc avail mount
+  path=$(_gate_disk_admission_subject) || {
+    printf 'UNMEASURED no-existing-ancestor-of-target-dir'; return 0; }
+  out=$(df -Pk "$path" 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 127 ] && { printf 'UNMEASURED df-unavailable'; return 0; }
+    printf 'UNMEASURED df-failed'; return 0
+  fi
+  # The LAST line, not `NR==2`: `-P` guarantees one line per operand, and taking the
+  # last one is additionally immune to a leading advisory line some df builds print.
+  avail=$(printf '%s\n' "$out" | awk 'END { print $4 }' 2>/dev/null)
+  mount=$(printf '%s\n' "$out" | awk 'END { if (NF >= 6) { m=$6; for (i=7;i<=NF;i++) m=m" "$i; print m } }' 2>/dev/null)
+  # AFFIRMATIVE validation: the field must BE a number. A device or mount name
+  # containing a space shifts the columns, and a shifted `$4` is a wrong measurement,
+  # not a missing one — so it is refused as unparsable rather than believed.
+  case "$avail" in
+    ''|*[!0-9]*) printf 'UNMEASURED df-unparsable'; return 0 ;;
+  esac
+  printf 'MEASURED %s %s' "$avail" "${mount:-unknown}"
+}
+
+# _gate_gib_render <kib> -> "<n.n>GiB" (display only). Empty when awk cannot answer.
+_gate_gib_render() { awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/dev/null; }
+# _gate_gib_to_kib <gib> -> integer KiB. Empty when awk cannot answer, which the
+# caller turns into UNMEASURED rather than into a comparison against nothing.
+_gate_gib_to_kib() { awk -v g="$1" 'BEGIN { printf "%d", (g * 1048576) + 0.5 }' 2>/dev/null; }
+
+# _gate_disk_admission_measure: ONE evaluation of the ONE predicate. Sets _DA_STATE
+# (OK | BELOW | UNMEASURED), _DA_VALUE (rendered GiB), _DA_MOUNT, _DA_WHY. Both
+# moments call THIS — that identity is the whole of AC1.
+_gate_disk_admission_measure() {
+  local probe bar_kib
+  _DA_STATE=""; _DA_VALUE=""; _DA_MOUNT=""; _DA_WHY=""
+  probe=$(_gate_disk_admission_probe)
+  case "$probe" in
+    'MEASURED '*)
+      probe="${probe#MEASURED }"
+      local kib="${probe%% *}"
+      _DA_MOUNT="${probe#* }"
+      _DA_VALUE=$(_gate_gib_render "$kib")
+      [ -n "$_DA_VALUE" ] || _DA_VALUE="${kib}KiB"
+      bar_kib=$(_gate_gib_to_kib "$_DA_BAR")
+      case "$bar_kib" in
+        ''|*[!0-9]*)
+          # The bar could not be rendered into the measurement's own unit, so there is
+          # nothing to compare against. That is an UNMEASURED comparison, never a
+          # silent pass and never a refusal on a value we could not compute.
+          _DA_STATE=UNMEASURED; _DA_WHY=bar-unrenderable; return 0 ;;
+      esac
+      # Keyed on the AFFIRMATIVE value (`>= bar`), never on the absence of a bad
+      # signal: a positive verdict here requires a measurement that cleared the bar.
+      if [ "$kib" -ge "$bar_kib" ]; then _DA_STATE=OK; else _DA_STATE=BELOW; fi
+      ;;
+    'UNMEASURED '*) _DA_STATE=UNMEASURED; _DA_WHY="${probe#UNMEASURED }" ;;
+    *)              _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised ;;
+  esac
+  return 0
+}
+
+# _gate_disk_admission_render_state: the per-moment rendering shared by both moments,
+# so the two can never drift into two spellings of one fact.
+_gate_disk_admission_render_state() {
+  case "$_DA_STATE" in
+    OK)    printf '%s' "$_DA_VALUE" ;;
+    BELOW) printf '%s(BELOW BAR)' "$_DA_VALUE" ;;
+    *)     printf 'UNMEASURED(%s)' "${_DA_WHY:-unknown}" ;;
+  esac
+}
+
+# _gate_disk_admission_line <verdict-clause> <detail>: assemble DISK_ADMISSION_LINE.
+# The parenthetical always names BOTH moments and the bar, so AC3's three facts
+# (value observed, bar applied, verdict) and the admitted-once-vs-twice distinction
+# are present in every rendering, including the failing ones.
+_gate_disk_admission_line() {
+  local verdict="$1" detail="$2" evaluated=2
+  case "$_DA_POST_RENDER" in 'NOT MEASURED'*) evaluated=1 ;; esac
+  DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${evaluated}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown})"
+  [ -n "$detail" ] && DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE — $detail"
+  return 0
+}
+
+# _disk_admission_meta: the line for an emit_summary POSITIONAL slot. Always prints
+# something, so a caller can pass it unconditionally; an exempt or pre-probe block
+# says so rather than implying a check that never ran.
+_disk_admission_meta() {
+  if [ -n "${DISK_ADMISSION_LINE:-}" ]; then
+    printf '%s' "$DISK_ADMISSION_LINE"
+  else
+    printf '%s' 'disk-admission: NOT EVALUATED (this block was emitted outside the #3755 slot-grant probe) — it asserts NOTHING about free space'
+  fi
+}
+
+# _gate_disk_admission_launch: the FIRST evaluation, taken before the daemon is
+# started and therefore before this run can queue.
+#
+# ADVISORY, NEVER FATAL, and the reason is specific to this moment: the box can be
+# below the bar at launch precisely BECAUSE a peer gate is mid-build, and that peer is
+# the run we are about to queue behind — it frees its target dir churn as it finishes.
+# Refusing here would red a run that is about to be perfectly fine, i.e. a guard that
+# reds on correct input, which is the guard agents learn to waive. What the launch
+# reading IS for is the second half of AC3: it is the baseline the post-slot reading is
+# read against, so a queue that ate 137G is visible as such in the block.
+_gate_disk_admission_launch() {
+  local bar
+  bar=$(_gate_min_free_gb)
+  _DA_BAR="${bar%% *}"; _DA_BAR_SRC="${bar##* }"
+  _gate_disk_admission_measure
+  _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
+  _DA_POST_RENDER='NOT MEASURED (the slot was never granted)'
+  if [ "$_DA_STATE" = BELOW ]; then
+    echo "agent-gate: WARN: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at LAUNCH, below the ${_DA_BAR}GiB bar — ADVISORY here (a queued peer may free space); the binding check is re-taken AT SLOT GRANT (#3755)" >&2
+  fi
+  return 0
+}
+
+# _gate_disk_admission_no_grant <why>: record that no post-slot evaluation happened
+# because no slot was ever granted (the cap is inactive for this run). DECLARED rather
+# than silently rendered as a pass: "measured once" and "measured twice" are different
+# facts and a reader must be able to tell them apart.
+_gate_disk_admission_no_grant() {
+  _DA_POST_RENDER="NOT MEASURED (no slot grant: $1)"
+  _gate_disk_admission_line ADVISORY "the binding post-slot check did not run; this block asserts only the LAUNCH reading (#3755)"
+  echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  return 0
+}
+
+# _gate_disk_admission_refuse: the FAIL-CLOSED post-slot disposition.
+_gate_disk_admission_refuse() {
+  # AC2, and it is FIRST for a reason. The slot is a machine-wide resource and the
+  # entire point of refusing here is to hand it straight back to a peer that can use
+  # it; every millisecond spent rendering or emitting before the release is time a
+  # queued gate waits on a run that has already decided not to build. _gate_release_slot
+  # is idempotent (it clears GATE_SLOT_DAEMON_PID), so the EXIT trap's later call is a
+  # no-op rather than a double kill.
+  _gate_release_slot
+  _gate_disk_admission_line "FAIL-CLOSED (#3755)" "slot RELEASED immediately; NOTHING was built"
+  echo "agent-gate: FAIL: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at SLOT GRANT, below the ${_DA_BAR}GiB bar (${_DA_BAR_SRC}) — refusing to start a build that would abort into the floor (#3755)" >&2
+  echo "agent-gate: the slot has been RELEASED; a queued peer gets it instead of waiting behind a run that cannot finish." >&2
+  echo "agent-gate: remedy: free space on ${_DA_MOUNT:-the target filesystem} (cargo clean / prune stale /tmp/agent-gate.* run dirs), then re-run." >&2
+  echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  # A complete, well-formed terminal block — the refusal must not be information-poorer
+  # than any other FAIL. _tree_commit_meta runs BEFORE _tree_meta_array so the `commit:`
+  # stamp comes from the same verified capture the tree lines do (#2926 review C1).
+  _tree_commit_meta
+  _tree_meta_array
+  declare -a _da_meta=()
+  _da_meta+=("$TREE_COMMIT_LINE")
+  _da_meta+=("refusal: post-slot disk admission (#3755) — the slot was granted, the re-check failed, the slot was RELEASED; NO component ran")
+  _da_meta+=("$DISK_ADMISSION_LINE")
+  _da_meta+=("$(_component_set_meta)")
+  _da_meta+=("$(accelerators_line)")
+  _da_meta+=("$(cpu_budget_line)")
+  _da_meta+=("${TREE_META_LINES[@]}")
+  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped)")
+  # Routed through the shared no-clobber terminal contract (#2874), not a bare
+  # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
+  # as every other one.
+  _emit_terminal_summary FAIL "${_da_meta[@]}" || true
+  if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+    echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
+  fi
+  exit 1
+}
+
 # PID of the background slot daemon (empty when the cap is inactive for this run).
 GATE_SLOT_DAEMON_PID=""
 
@@ -19051,9 +19353,16 @@ acquire_gate_slot() {
   [ "$LITE" -eq 1 ] && return 0
   [ "$DELTA" -eq 1 ] && return 0
   [ -n "$ONLY" ] && return 0
-  [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ] && return 0
+  # #3755: the LAUNCH evaluation. Placed AFTER the exemptions and BEFORE everything
+  # else in this function, so it is reached by exactly the run class that queues and
+  # then builds — the full gate — and by nothing else. ADVISORY (see the function).
+  _gate_disk_admission_launch
+  if [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ]; then
+    _gate_disk_admission_no_grant "cap force-disabled"; return 0
+  fi
   if ! command -v python3 >/dev/null 2>&1; then
     echo "agent-gate: python3 unavailable -- full-gate concurrency cap DISABLED (#1825)" >&2
+    _gate_disk_admission_no_grant "python3 unavailable"
     return 0
   fi
   local n dir poll daemon ready
@@ -19063,10 +19372,12 @@ acquire_gate_slot() {
   daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
   if [ ! -f "$daemon" ]; then
     echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
+    _gate_disk_admission_no_grant "slot daemon missing"
     return 0
   fi
   if ! mkdir -p "$dir" 2>/dev/null; then
     echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
+    _gate_disk_admission_no_grant "slot dir uncreatable"
     return 0
   fi
   ready="$LOG_DIR/gate-slot.ready"
@@ -19090,6 +19401,7 @@ acquire_gate_slot() {
     if ! kill -0 "$GATE_SLOT_DAEMON_PID" 2>/dev/null; then
       echo "agent-gate: slot daemon exited before acquiring -- cap DISABLED for this run (#1825)" >&2
       GATE_SLOT_DAEMON_PID=""
+      _gate_disk_admission_no_grant "slot daemon exited before acquiring"
       return 0
     fi
     if [ "$printed" -eq 0 ] && [ "$waited" -ge 3 ]; then
@@ -19114,6 +19426,32 @@ acquire_gate_slot() {
     sleep 0.2
   done
   [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)" >&2
+
+  # ---- #3755: the RE-EVALUATION, at the moment the resource is actually consumed ----
+  #
+  # The slot is now held and NOTHING has been built yet: the next thing this function
+  # does is return, into _tree_recapture_after_slot and the first component. So this is
+  # the last instant at which a refusal costs nothing and the first at which the reading
+  # is the one that matters. Same predicate as the launch call above — literally the
+  # same function — which is what makes the two readings comparable at all.
+  #
+  # FAIL-CLOSED here, unlike at launch: there is no peer left to free space for us (we
+  # hold the slot), so a below-bar reading now is the reading the build would start on.
+  _gate_disk_admission_measure
+  _DA_POST_RENDER=$(_gate_disk_admission_render_state)
+  case "$_DA_STATE" in
+    BELOW) _gate_disk_admission_refuse ;;   # exits 1
+    OK)
+      _gate_disk_admission_line PASS "re-checked AT SLOT GRANT, not merely at launch (#3755)" ;;
+    *)
+      # DECLARED, not silent. The cap's standing doctrine is that the gate must never be
+      # un-runnable because of the cap, and that extends to a probe bolted onto it — but
+      # a reading that could not be taken must never be rendered as one that passed, so
+      # the block says the bar was NOT APPLIED rather than saying PASS.
+      _gate_disk_admission_line "UNMEASURED (${_DA_WHY:-unknown})" "the bar was NOT APPLIED; the run proceeds UNADMITTED (#3755)" ;;
+  esac
+  echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  return 0
 }
 
 # Test-only stub (issue #1825 concurrency self-test): when CQLITE_GATE_STUB_RUNDIR
@@ -20074,6 +20412,12 @@ fi
 # was compared against), so a pasted block shows the skew check RAN and names its
 # baseline. Always non-empty on this path — the pre-flight runs at the mode dispatch.
 [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
+# #3755: stamp the disk-admission verdict — the value observed at LAUNCH, the value
+# observed again AT SLOT GRANT, the bar and where the bar came from. Always non-empty
+# on the full-gate path (acquire_gate_slot always evaluates); `--only` self-exempts
+# from the slot cap and therefore from the probe, so its block honestly reads
+# `NOT EVALUATED` rather than implying a check that never ran.
+SUMMARY_META+=("$(_disk_admission_meta)")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")
