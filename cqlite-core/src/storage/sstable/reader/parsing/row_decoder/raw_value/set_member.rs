@@ -33,6 +33,37 @@
 //!    cell's value at all; the authority, and why the RETURNED value still
 //!    stays pre-#3723, are recorded at the ordering itself in
 //!    [`V5CompressedLegacyParser::decode_set_member`].
+//!
+//! ## The member is validated even when it is DROPPED (#3723, review round 3)
+//!
+//! The set branch's caller decodes EVERY live member — including one the #1741
+//! per-element shadow/TTL filter is about to discard — and throws the value away
+//! for a dropped element. Before that, a shadowed or TTL-expired member
+//! `continue`d ahead of this function, so its path was never width-validated: a
+//! malformed fixed-width member escaped the refusal contract purely because some
+//! OTHER cell happened to shadow it. `element_dropped` is a read-clock /
+//! covering-deletion decision; the width guard is a statement about the BYTES, so
+//! one must not be conditioned on the other. (User impact is small — a dropped
+//! member is never returned — but corrupt bytes here are evidence of damage the
+//! rest of the file may share, and a contract that holds only for unshadowed
+//! members is not a contract.)
+//!
+//! Decoding a value we discard is deliberate wasted work, chosen over the two
+//! cheaper shapes:
+//!
+//! * A width-only pre-check (`fixed_width_admissible_width(element_type)` against
+//!   `path_bytes.len()`) would be a SECOND implementation of
+//!   `fixed_width::decode_fixed_width_raw`'s rule, free to diverge from it, and it
+//!   would only see a TOP-LEVEL fixed-width element type — a nested one
+//!   (`set<frozen<tuple<int, …>>>`) would stay validated for live members and
+//!   unvalidated for dropped ones, i.e. exactly the inconsistency being removed.
+//! * A validate-only mode threaded into `parse_value_from_raw_bytes` would need a
+//!   caller-side walk of the element framing, the shape issue #3612 forbade (and
+//!   this issue's signature is fixed).
+//!
+//! Tolerance is unchanged in both directions: a dropped member whose path fails
+//! with a TOLERATED class still yields `Ok(None)` and is filtered silently, and
+//! the drop accounting (`shadow_filtered_element_count`) is untouched.
 
 use super::*;
 

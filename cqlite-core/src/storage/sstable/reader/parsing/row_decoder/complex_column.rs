@@ -610,17 +610,20 @@ impl V5CompressedLegacyParser {
                     row_ttl_seconds,
                     row_expires_at,
                 );
-                if dropped {
-                    shadow_filtered_element_count += 1;
-                    continue;
-                }
-
                 // For sets: the path bytes ARE the element value (cell value is always
                 // empty). Issue #3723 moved this decode into `raw_value::set_member` and
                 // closed two silent-data-loss holes there: an EMPTY path now reaches the
                 // element decoder instead of bypassing the width guard, and a fatal
                 // `FixedWidthLengthMismatch` PROPAGATES instead of dropping the member.
                 // Every other decode error still yields `Ok(None)` (member omitted).
+                //
+                // Issue #3723 (review round 3): this decode runs BEFORE the `dropped`
+                // early return below and its value is DISCARDED when the element is
+                // filtered, so a shadowed / TTL-expired member's path is width-validated
+                // exactly like a live one. #1741 filtering itself is UNCHANGED (`dropped`
+                // is computed above and acted on below as before). Why decode-and-discard
+                // rather than a cheaper width pre-check: see the "validated even when
+                // dropped" section of `raw_value::set_member`'s module header.
                 let set_member: Option<Value> = self.decode_set_member(
                     cell.value.clone(),
                     &cell.path_bytes,
@@ -628,6 +631,13 @@ impl V5CompressedLegacyParser {
                     &column.name,
                     i as u64,
                 )?;
+
+                if dropped {
+                    // The decoded member is DISCARDED here: it was validated, not
+                    // surfaced. Nothing about the drop accounting changes.
+                    shadow_filtered_element_count += 1;
+                    continue;
+                }
 
                 // Epic #899: surface the live set element (decoded member value)
                 // to the compaction path, keyed by its cell_path.
