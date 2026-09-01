@@ -6282,6 +6282,27 @@ _disk_note_unread_verdict() {
 # backwards clock is not reported as a measurement failure). An ENOSPC write typically leaves
 # the file CREATED and EMPTY -- open+truncate succeeds, the write does not -- so the empty
 # and short-write shapes are exactly what this catches.
+#
+# THE SECONDS CHECK IS ITS OWN FUNCTION BECAUSE THE OBVIOUS INLINE SPELLING IS WRONG (roborev
+# job 316). `case $v in ''|*[!0-9-]*) malformed ;; esac` reads as "digits, minus admitted" and
+# in fact admits `-`, `--`, `1-2` and `-1-`: a character-class complement cannot express WHERE
+# the minus may appear, so a partially-written duration passed as well-formed and its component
+# was omitted from the unread-verdict subject set -- the one place this whole channel exists to
+# populate. Exactly one LEADING minus, then at least one digit, and nothing else. Every real
+# `record_result` third argument is `$((end - start))` or a literal `0`, so nothing legitimate
+# is newly refused (audited: 117 arithmetic + 17 literal call sites).
+_disk_secs_is_int() {
+  local v="${1-}"
+  case "$v" in
+    ''|-) return 1 ;;
+    -*) v="${v#-}" ;;
+  esac
+  case "$v" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
 _disk_verdict_read() {
   local comp="${1:-}" rf="${2:-}"
   DISK_VERDICT_ST=""; DISK_VERDICT_SECS=""
@@ -6295,10 +6316,42 @@ _disk_verdict_read() {
     PASS|FAIL|SKIP) ;;
     *) _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1 ;;
   esac
-  case "$DISK_VERDICT_SECS" in
-    ''|*[!0-9-]*) _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1 ;;
-  esac
+  _disk_secs_is_int "$DISK_VERDICT_SECS" || {
+    _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
+  }
   return 0
+}
+
+# THE AGGREGATION WRAPPER -- and the reason it exists is a FALSE `RESULT: PASS` (roborev job 316).
+#
+# Round 4 gave the gate a reader that DETECTS an unreadable `.result` and made it an UNMEASURED
+# subject of the `disk-exhaustion:` line. It did NOT touch what the SUMMARY does with that
+# component, and the three aggregation loops keyed `OVERALL=FAIL` on the status token being
+# exactly `FAIL`. So a present-but-malformed verdict -- the EMPTY file an ENOSPC write leaves
+# behind, a truncated `PAS`, or a valid `PASS` with a truncated seconds field -- was recorded as
+# unmeasured by the marker and simultaneously left `OVERALL` untouched: the gate of record could
+# emit `RESULT: PASS` for a run in which a SELECTED component's verdict was never read. The
+# marker said UNMEASURED and the verdict said certified, which is worse than either alone,
+# because the verdict is what a closer reads.
+#
+# It is the standing rule one layer in from where round 4 applied it: a positive verdict requires
+# an AFFIRMATIVE measurement, and "the status token was not the string FAIL" is the absence of a
+# bad signal, not the presence of a good one. So an UNREAD verdict is normalised to a synthetic
+# `FAIL 0` HERE, once, and the caller forces `OVERALL=FAIL` -- the same disposition the
+# fail-closed presence guard already gives an ABSENT `.result`, for the same reason: a component
+# whose verdict cannot be read may have succeeded, and a gate may not certify a maybe.
+#
+# rc mirrors `_disk_verdict_read`: 0 = read, 1 = present but UNREAD (recorded; ST/SECS
+# normalised), 2 = ABSENT (each caller decides -- for the full gate's reconstruction absence
+# means "not selected", for `--delta`'s two components it is a measurement failure).
+_disk_verdict_read_aggregate() {
+  local comp="${1:-}" rf="${2:-}" rc=0
+  _disk_verdict_read "$comp" "$rf" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  # ANY nonzero rc leaves a usable pair, so no caller can render a blank status line; the rc
+  # is returned unchanged so absence stays distinguishable from unreadability.
+  DISK_VERDICT_ST=FAIL; DISK_VERDICT_SECS=0
+  return "$rc"
 }
 
 # Startup free-space capture (populated immediately after LOG_DIR is created).
@@ -9332,10 +9385,16 @@ _tree_boundary_meta_lines() {
   # #3800 (job 304): every `.result` read goes through the ONE reader, so a verdict the gate
   # could not READ (an ENOSPC-truncated or otherwise malformed file) becomes an UNMEASURED
   # subject of the `disk-exhaustion:` line below instead of a blank cell in this table.
+  # #3800 (job 316): through the AGGREGATION wrapper, for the "genuine PREFIX, never a second
+  # dialect" reason stated just above -- the terminal table now renders an unread verdict as a
+  # synthetic `FAIL 0`, so this prefix must render it identically. OVERALL is deliberately NOT
+  # touched from these two loops: this is a renderer inside a block that is ALREADY a
+  # `tree-integrity: FAIL` emit, and a renderer that decides verdicts is the coupling the
+  # aggregation wrapper exists to keep in one place.
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
-    _disk_verdict_read "$_c" "$_rf" || true
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
     _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
     _de_pairs+=("$_c" "$_st")
@@ -9346,7 +9405,7 @@ _tree_boundary_meta_lines() {
     [ -f "$_rf" ] || continue
     _c="${_rf##*/}"; _c="${_c%.result}"
     case "$_seen" in *" $_c "*) continue ;; esac
-    _disk_verdict_read "$_c" "$_rf" || true
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
     _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
     _de_pairs+=("$_c" "$_st")
@@ -18004,10 +18063,12 @@ aggregate_lite_components() {
     rf="$LOG_DIR/$c.result"
     [ -f "$rf" ] || continue   # not run (e.g. --only skip) — do not add, do not fail
     # #3800 (job 304): the ONE reader, so a `.result` this lane could not READ becomes an
-    # UNMEASURED subject of the `disk-exhaustion:` line instead of a silent synthetic FAIL.
-    _disk_verdict_read "$c" "$rf" || true
+    # UNMEASURED subject of the `disk-exhaustion:` line. #3800 (job 316): via the aggregation
+    # wrapper, so it ALSO fails the run. The `[ -n "$st" ]` belt that stood here covered only
+    # the EMPTY shape and left a truncated-but-non-empty one (`PAS`, or `PASS abc`) rendering as
+    # a non-FAIL status over an unread verdict; the wrapper normalises every unread shape.
+    _disk_verdict_read_aggregate "$c" "$rf" || OVERALL=FAIL
     st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
-    [ -n "$st" ] || { st=FAIL; secs=0; }
     LN+=("$c"); LS+=("$st"); LT+=("${secs}s")
     [ "$st" = FAIL ] && OVERALL=FAIL
   done
@@ -18414,9 +18475,10 @@ run_delta() {
   for c in file-size fmt; do
     rf="$LOG_DIR/$c.result"
     if [ -f "$rf" ]; then
-      _disk_verdict_read "$c" "$rf" || true
+      # #3800 (job 316): through the aggregation wrapper, so an unread verdict fails the
+      # delta re-cert instead of rendering a non-FAIL status beside a certified RESULT.
+      _disk_verdict_read_aggregate "$c" "$rf" || OVERALL=FAIL
       st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
-      [ -n "$st" ] || { st=FAIL; secs=0; }
       DN+=("$c"); DS+=("$st"); DT+=("${secs}s")
       [ "$st" = FAIL ] && OVERALL=FAIL
     else
@@ -19572,10 +19634,13 @@ _apply_tree_integrity_marker
 for _c in "${COMPONENTS[@]}"; do
   _rf="$LOG_DIR/$_c.result"
   [ -f "$_rf" ] || continue
-  # #3800 (job 304): the ONE reader. An unreadable/malformed verdict is recorded as an
-  # UNMEASURED subject of the `disk-exhaustion:` line; the reconstruction itself is
-  # unchanged and still fail-closed (an unrecognised status is not PASS).
-  _disk_verdict_read "$_c" "$_rf" || true
+  # #3800 (job 304): the ONE reader records an unreadable/malformed verdict as an UNMEASURED
+  # subject of the `disk-exhaustion:` line. #3800 (job 316): and the AGGREGATION acts on it --
+  # an unread verdict becomes a synthetic `FAIL 0` and forces OVERALL, because the comment that
+  # stood here ("still fail-closed -- an unrecognised status is not PASS") was true of the TABLE
+  # and false of the VERDICT: the status merely was not the string FAIL, so `RESULT: PASS` was
+  # emitted over a component whose verdict was never read.
+  _disk_verdict_read_aggregate "$_c" "$_rf" || OVERALL=FAIL
   _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
   NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
   [ "$_st" = FAIL ] && OVERALL=FAIL

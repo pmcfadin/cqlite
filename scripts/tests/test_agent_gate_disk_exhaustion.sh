@@ -91,9 +91,13 @@ EXTRACT_OK=1
   # `# <name> <status> <seconds>` comment, so the loop's `[{]$` anchor would extract NOTHING
   # and the fail-closed check below would fire. Anchored without the end-of-line assertion.
   extract_region '^record_result[(][)] [{]' '^[}]$'
+  # #3800 (roborev job 316): the seconds GRAMMAR and the AGGREGATION wrapper. The shipped
+  # `aggregate_lite_components` case 20c drives is extracted SEPARATELY, into $EX_AGG -- see the
+  # reason at its extraction below.
   for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
-            _disk_note_unread_verdict _disk_verdict_read \
+            _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
+            _disk_verdict_read_aggregate \
             _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -104,7 +108,8 @@ EXTRACT_OK=1
 
 for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
-            _disk_note_capture_failure _disk_note_unread_verdict _disk_verdict_read \
+            _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
+            _disk_verdict_read _disk_verdict_read_aggregate \
             record_result _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -115,7 +120,29 @@ for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _d
   fi
 done
 if [ "$EXTRACT_OK" -eq 1 ]; then
-  ok "extract: the shipped signature set, BOTH gate-internal subject channels and 24 helpers (incl. the REAL _tree_identity and the shipped record_result) were extracted from scripts/agent-gate.sh"
+  ok "extract: the shipped signature set, BOTH gate-internal subject channels and 26 helpers (incl. the REAL _tree_identity and the shipped record_result) were extracted from scripts/agent-gate.sh"
+fi
+
+# #3800 (roborev job 316): `aggregate_lite_components` is extracted into its OWN file, NOT into
+# $EX, and the reason is case 15's subject set. Case 15 asserts that NO function in $EX assigns
+# OVERALL/RESULT -- the "attribution, never a verdict" property this whole issue rests on -- by
+# scanning the WHOLE extracted file. The aggregator's entire job is to assign OVERALL, so
+# extracting it into $EX would have made case 15 red on correct input, and the tempting repair
+# (excluding it BY NAME) is the "exclude whatever fails" shape that would let a future
+# attribution helper be excused the same way. A separate file keeps case 15's subject set
+# exactly what it was and states the distinction instead of eroding it: the aggregator is a
+# CONSUMER under test, not a member of the attribution family.
+#
+# And the distinction is real, not bookkeeping. What job 316 wired to the verdict is the
+# AGGREGATION's disposition of a `.result` file it could not READ -- which would be correct if
+# the `disk-exhaustion:` line did not exist at all. The line itself still changes nothing, which
+# is why case 15 must keep failing on any attribution function that touches OVERALL.
+EX_AGG="$tmp/extracted-aggregator.sh"
+extract_region '^aggregate_lite_components[(][)] [{]$' '^[}]$' > "$EX_AGG"
+if grep -q '^aggregate_lite_components' "$EX_AGG" && grep -q '_disk_verdict_read_aggregate' "$EX_AGG"; then
+  ok "extract-agg: the SHIPPED aggregate_lite_components was extracted separately (and does route through the aggregation wrapper), so case 20c drives the real aggregator rather than a model of it"
+else
+  bad "extract-agg: aggregate_lite_components was NOT extracted from the shipped gate -- case 20c would be vacuous"
 fi
 if bash -n "$EX" 2>/dev/null; then
   ok "extract: the extracted region is syntactically valid bash (the cases run the real thing)"
@@ -1342,7 +1369,6 @@ fi
 # holds on macOS too: 8 + 3 = 11 on a /dev/full host, 8 + 2 = 10 without it, and a floor must
 # take the LOWER. The 8th case-17 entry is 17f, the 400 KB payload that pins the in-memory
 # branch against pipefail+SIGPIPE turning a MATCH into UNMEASURED -- found by measurement while
-# writing this round, not predicted.)
 # writing this round, not predicted.); +13 (roborev job 304: the THIRD KIND OF SUBJECT -- a
 # `.result` verdict the gate could not READ (15 cases). 13b asserts the emitted line declares its SUBJECT
 # set and NAMES the writers outside it, in all four renderings: 2. Case 19 pins the arm --
@@ -1356,7 +1382,180 @@ fi
 # survives outside the ONE reader: 2. Case 19i is the pair MUTATION found -- an unread
 # verdict on an otherwise ALL-PASS run, which the pre-fix branch order rendered clean and which
 # every other case in this file missed: 2. 2+6+2+1+2+2 = 15.)
-CASE_FLOOR=68
+# ============================================================================
+# (20) roborev job 316 -- THE MARKER SAID UNMEASURED AND THE VERDICT SAID CERTIFIED.
+#
+# Round 4 built a reader that DETECTS an unreadable `.result` and made it an UNMEASURED subject
+# of the `disk-exhaustion:` line. It left the three AGGREGATION loops keying `OVERALL=FAIL` on
+# the status token being exactly `FAIL` -- so a present-but-malformed verdict was recorded as
+# unmeasured by the marker and left OVERALL untouched, and the gate of record could emit
+# `RESULT: PASS` for a run in which a SELECTED component's verdict was never read. Two arms:
+# the seconds GRAMMAR (which decided whether the subject was recorded at all) and the
+# AGGREGATION (which decides whether the run may certify).
+# ============================================================================
+
+# (20a) THE SECONDS GRAMMAR. `case $v in ''|*[!0-9-]*)` reads as "digits, minus admitted" and
+# admits `-`, `--`, `1-2`, `-1-`: a character-class complement cannot say WHERE the minus may
+# appear. Each of those is a partially-written duration that passed as well-formed, so its
+# component was OMITTED from the unread-verdict subject set -- the one place this channel exists
+# to populate. Driven through the SHIPPED `_disk_verdict_read`, both directions, because a
+# grammar tightened too far reds on correct input (`$((end - start))` can legitimately be
+# negative on a backwards clock, and 117 call sites pass exactly that).
+d="$tmp/c20a"; mkdir -p "$d"
+o20a=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  for bad_secs in '-' '--' '1-2' '-1-' '12x' '-' ''; do
+    printf 'PASS %s\n' "$bad_secs" > "$d/x.result"
+    _disk_verdict_read x "$d/x.result" && printf 'ACCEPTED [%s]\n' "$bad_secs"
+  done
+  for ok_secs in 0 12 -12 000; do
+    printf 'PASS %s\n' "$ok_secs" > "$d/y.result"
+    _disk_verdict_read y "$d/y.result" || printf 'REFUSED [%s]\n' "$ok_secs"
+  done
+  printf 'DONE\n'
+)
+if case "$o20a" in *ACCEPTED*) false ;; *REFUSED*) false ;; *DONE*) true ;; *) false ;; esac; then
+  ok "20a-seconds-grammar: every misplaced-minus shape (-, --, 1-2, -1-, 12x, empty) is MALFORMED, and a plain, zero-padded and NEGATIVE integer are all still accepted (the backwards-clock case 117 call sites can produce)"
+else
+  bad "20a-seconds-grammar: the grammar is wrong in one direction or the other: $o20a"
+fi
+
+# (20a-mutation) the PRE-FIX spelling, planted into the extracted copy, must ACCEPT the shapes
+# 20a refuses -- otherwise 20a would pass against either implementation and measure nothing.
+o20am=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _disk_secs_is_int() { case "${1-}" in ''|*[!0-9-]*) return 1 ;; esac; return 0; }
+  for bad_secs in '-' '--' '1-2' '-1-'; do
+    printf 'PASS %s\n' "$bad_secs" > "$d/x.result"
+    _disk_verdict_read x "$d/x.result" && printf 'ACCEPTED [%s]\n' "$bad_secs"
+  done
+)
+if [ "$(printf '%s\n' "$o20am" | grep -c '^ACCEPTED')" = 4 ]; then
+  ok "20a-mutation: the pre-fix character-class spelling accepts all four misplaced-minus shapes, so 20a discriminates between the two implementations rather than passing on both"
+else
+  bad "20a-mutation: the pre-fix spelling did not accept the shapes 20a refuses, so 20a is not measuring the grammar fix: $o20am"
+fi
+
+# (20b) THE AGGREGATION WRAPPER's contract: an UNREAD verdict is normalised to a synthetic
+# `FAIL 0` (so no caller can render a blank cell over an unread verdict, and no caller can read
+# a non-FAIL status off one), the rc is passed through UNCHANGED (so ABSENT stays
+# distinguishable from UNREADABLE -- the full gate treats absence as "not selected" and
+# `--delta` treats it as a measurement failure), and a WELL-FORMED verdict is passed through
+# VERBATIM (a wrapper that normalised everything would fail every run).
+d="$tmp/c20b"; mkdir -p "$d"
+o20b=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  : > "$d/empty.result"
+  printf 'PASS abc\n' > "$d/badsecs.result"
+  printf 'PAS 12\n'   > "$d/badtok.result"
+  printf 'PASS 12\n'  > "$d/good.result"
+  for c in empty badsecs badtok good; do
+    rc=0; _disk_verdict_read_aggregate "$c" "$d/$c.result" || rc=$?
+    printf '%s rc=%s st=%s secs=%s\n' "$c" "$rc" "$DISK_VERDICT_ST" "$DISK_VERDICT_SECS"
+  done
+  rc=0; _disk_verdict_read_aggregate gone "$d/gone.result" || rc=$?
+  printf 'gone rc=%s st=%s secs=%s\n' "$rc" "$DISK_VERDICT_ST" "$DISK_VERDICT_SECS"
+  printf 'RECORDED %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
+)
+exp20b='empty rc=1 st=FAIL secs=0
+badsecs rc=1 st=FAIL secs=0
+badtok rc=1 st=FAIL secs=0
+good rc=0 st=PASS secs=12
+gone rc=2 st=FAIL secs=0
+RECORDED 3'
+if [ "$o20b" = "$exp20b" ]; then
+  ok "20b-wrapper: every UNREAD shape (empty, truncated seconds, truncated token) normalises to a synthetic FAIL 0 at rc 1, a WELL-FORMED verdict passes through verbatim at rc 0, an ABSENT file keeps its distinct rc 2, and only the three present-but-unread ones are RECORDED as subjects"
+else
+  bad "20b-wrapper: contract violated.
+--- got ---
+$o20b
+--- want ---
+$exp20b"
+fi
+
+# (20c) THE PROPERTY THE FINDING WAS ABOUT, through the SHIPPED aggregator. `PASS abc` is the
+# sharpest shape: the STATUS token is valid, so the pre-fix loops recorded `PASS` in the table
+# and left OVERALL alone -- a certified run over a verdict that was never fully read. The
+# EMPTY-file shape is included because it is what an ENOSPC write actually leaves behind.
+d="$tmp/c20c"; mkdir -p "$d"
+o20c=$(
+  . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
+  printf 'PASS 3\n'   > "$d/file-size.result"
+  printf 'PASS abc\n' > "$d/fmt.result"
+  : > "$d/clippy.result"
+  OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=()
+  aggregate_lite_components
+  printf 'OVERALL %s\n' "$OVERALL"
+  for i in "${!NAMES[@]}"; do printf 'ROW %s %s %s\n' "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}"; done
+  printf 'RECORDED %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
+)
+exp20c='OVERALL FAIL
+ROW file-size PASS 3s
+ROW fmt FAIL 0s
+ROW clippy FAIL 0s
+RECORDED 2'
+if [ "$o20c" = "$exp20c" ]; then
+  ok "20c-aggregation: the SHIPPED aggregator turns an unread verdict into OVERALL=FAIL and a FAIL 0 row -- a valid-token/truncated-seconds 'PASS abc' can no longer render PASS beside a certified RESULT, and the well-formed sibling is untouched"
+else
+  bad "20c-aggregation: the aggregation does not fail closed on an unread verdict.
+--- got ---
+$o20c
+--- want ---
+$exp20c"
+fi
+
+# (20c-mutation) restore the pre-fix disposition (read raw, do not normalise, never signal) and
+# the SAME run must certify -- which IS the false PASS this round removes. Without this control a
+# green 20c proves only that the aggregator sets OVERALL somewhere.
+o20cm=$(
+  . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
+  _disk_verdict_read_aggregate() { _disk_verdict_read "$1" "$2" || true; return 0; }
+  OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=()
+  aggregate_lite_components
+  printf 'OVERALL %s\n' "$OVERALL"
+)
+if [ "$o20cm" = "OVERALL PASS" ]; then
+  ok "20c-mutation: with the pre-fix disposition restored the identical run reports OVERALL=PASS over two unread verdicts -- the false certification this round removes, and proof 20c measures the new arm"
+else
+  bad "20c-mutation: the pre-fix disposition did not certify, so 20c is not measuring the aggregation fix; got: $o20cm"
+fi
+
+# (20d) STRUCTURAL -- the wrapper cannot be BYPASSED, and each of its call sites must DISPOSE of
+# the failure. Behavioural cases only cover the sites someone already thought of; this is a
+# census in the MARKED/EXEMPT/GAP idiom case 14 uses, and it is what stops a fourth aggregation
+# site being added straight back into the hole. Exactly ONE raw `_disk_verdict_read` call site is
+# permitted and it must be inside the wrapper; every wrapper call site must either force OVERALL
+# or carry a declared renderer exemption.
+raw20d=$(grep -c '_disk_verdict_read "' "$GATE" || true)
+raw_in_wrapper=$(awk '
+  /^_disk_verdict_read_aggregate\(\) \{/ { inw=1 }
+  inw && /_disk_verdict_read "/ { n++ }
+  inw && /^\}$/ { inw=0 }
+  END { print n+0 }' "$GATE")
+if [ "$raw20d" = 1 ] && [ "$raw_in_wrapper" = 1 ]; then
+  ok "20d-no-bypass: the raw two-field reader has exactly ONE call site in the shipped gate and it is inside the aggregation wrapper -- no aggregation path can consume a verdict without the fail-closed normalisation"
+else
+  bad "20d-no-bypass: raw _disk_verdict_read call sites=$raw20d (inside the wrapper=$raw_in_wrapper); a raw read outside the wrapper renders an unread verdict as a non-FAIL status while the run certifies"
+fi
+agg_sites=$(grep -c '_disk_verdict_read_aggregate "' "$GATE" || true)
+agg_fails=$(grep -c '_disk_verdict_read_aggregate "[^"]*" "[^"]*" || OVERALL=FAIL' "$GATE" || true)
+agg_exempt=$(grep -c '_disk_verdict_read_aggregate "[^"]*" "[^"]*" || true' "$GATE" || true)
+if [ "$agg_sites" -ge 3 ] && [ "$agg_fails" -ge 3 ] && [ $((agg_fails + agg_exempt)) -eq "$agg_sites" ]; then
+  ok "20d-census: all $agg_sites wrapper call sites dispose of the failure -- $agg_fails force OVERALL=FAIL (the three certifying aggregations: full-gate reconstruction, --lite, --delta) and $agg_exempt are the DECLARED mid-run renderer exemptions inside a block that is already a FAIL emit; a new site with neither disposition is a GAP and reds here"
+else
+  bad "20d-census: wrapper call sites=$agg_sites forcing-OVERALL=$agg_fails declared-exempt=$agg_exempt -- every site must do one or the other, and at least the three certifying aggregations must force OVERALL"
+fi
+
+# +6 (roborev job 316: THE MARKER SAID UNMEASURED AND THE VERDICT SAID CERTIFIED. The seconds
+# grammar, both directions, plus the mutation that proves the pre-fix character-class spelling
+# accepts the four misplaced-minus shapes: 2. The wrapper contract -- three unread shapes
+# normalised, a well-formed verdict verbatim, ABSENT keeping its distinct rc, and only the
+# present-but-unread ones recorded: 1. The property itself through the SHIPPED
+# aggregate_lite_components, plus the mutation that restores the pre-fix disposition and
+# recertifies the same run: 2. The no-bypass + call-site-disposition census: 1 (two ok() calls,
+# counted as 1 case each -> the two structural asserts are the 6th and 7th ok, so the floor
+# rises by 7, not 6.) 2+1+2+2 = 7, plus the separate extract-agg provenance case = 8.)
+CASE_FLOOR=76
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
