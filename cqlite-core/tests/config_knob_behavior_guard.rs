@@ -220,14 +220,9 @@ const KNOBS: &[Knob] = &[
         declared_on: "StorageConfig",
         field: "prefetch",
         evidence: Evidence::Reserved(
-            "LIVE (madvise advice / direct-I/O read-ahead window) but performance-only. \
-             The advice mapping IS directly asserted: reader/prefetch_advice_tests.rs \
-             test_mmap_advice_for_auto_is_willneed_never_sequential pins the default \
-             Auto -> MADV_WILLNEED (#2824) and the durable Auto != MADV_SEQUENTIAL \
-             invariant (#1143), and test_default_storage_config_advises_willneed pins \
-             that THIS field's default travels it. The p99 tail shape it exists for \
-             stays observational in tests/issue_1143_mmap_prefetch_tail_guard.rs. \
-             Owning issues: #1143, #2824.",
+            "LIVE (madvise advice / direct-I/O read-ahead window) but performance-only; \
+             the p99 property it exists for is pinned by \
+             tests/issue_1143_mmap_prefetch_tail_guard.rs. Owning issue: #1143.",
         ),
     },
     Knob {
@@ -789,8 +784,8 @@ fn covered_by_evidence_names_a_real_test() {
 /// justification points at a tracking issue nobody can open is indistinguishable
 /// from no justification at all.
 ///
-/// Each entry below was checked against the tracker on 2026-08-29 (and #2824 on
-/// 2026-09-01) to exist AND to be the right owner for the knob citing it:
+/// Each entry below was checked against the tracker on 2026-08-29 to exist AND to
+/// be the right owner for the knob citing it:
 ///
 /// | issue | state | owns |
 /// |-------|-------|------|
@@ -806,12 +801,11 @@ fn covered_by_evidence_names_a_real_test() {
 /// | #1697 | closed | config source of truth (memtable + STCS knobs) |
 /// | #1918 | closed | forced read path |
 /// | #2632 | OPEN | wire murmur3 h2 into the `Filter.db` bloom plumbing |
-/// | #2824 | OPEN | `MADV_WILLNEED` under Auto-mmap (`prefetch`); slice 1 of 2 |
 ///
 /// A closed issue is a legitimate citation: it names the lane that WIRED the knob,
 /// which is what the evidence is pointing at.
 const VERIFIED_ISSUE_REFS: &[u32] = &[
-    1143, 1406, 1568, 1582, 1593, 1619, 1685, 1695, 1696, 1697, 1918, 2632, 2824,
+    1143, 1406, 1568, 1582, 1593, 1619, 1685, 1695, 1696, 1697, 1918, 2632,
 ];
 
 /// Every issue number cited anywhere in [`KNOBS`] must be in

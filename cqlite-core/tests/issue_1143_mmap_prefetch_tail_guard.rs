@@ -11,12 +11,9 @@
 //! re-reads them, so those re-reads take SYNCHRONOUS major page faults on the
 //! tokio worker thread and the read-side p99 tail blows up (~2x).
 //!
-//! The fix (`mmap_advice_for`, `reader/backend_resolve.rs`) took
-//! `PrefetchMode::Auto` OFF `MADV_SEQUENTIAL`. Since issue #2824 `Auto` maps to
-//! `MADV_WILLNEED`, which queues asynchronous read-ahead and has NO drop-behind
-//! semantics, so hot pages stay resident and #1143's mechanism does not
-//! transfer. The invariant this guard exists for is "`Auto` never yields
-//! `MADV_SEQUENTIAL`", not "`Auto` yields nothing".
+//! The fix (`mmap_advice_for`, `reader/mod.rs`) maps `PrefetchMode::Auto` to NO
+//! madvise, so the mmap backend relies on the kernel's default read-ahead (no
+//! drop-behind) and hot pages stay resident. This guard pins that behaviour.
 //!
 //! ## Why the latency comparison is OBSERVATIONAL ONLY (no timing assert)
 //!
@@ -29,10 +26,8 @@
 //! slowest scan, so a ratio-vs-ratio timing assert flakes nondeterministically on
 //! one scheduler pause even when the prefetch policy mapping is correct. The
 //! deterministic regression guard for the fix is the unit test
-//! `test_mmap_advice_for_auto_is_willneed_never_sequential`
-//! (`reader/prefetch_advice_tests.rs`),
-//! which asserts `mmap_advice_for(Auto) != Some(Sequential)`; this test remains a
-//! never-flaking load-shape smoke that surfaces the tail shape in logs.
+//! `mmap_advice_for(PrefetchMode::Auto) == None` (`reader/mod.rs`); this test
+//! remains a never-flaking load-shape smoke that surfaces the tail shape in logs.
 //! Non-timing correctness IS still enforced: both backends must scan a non-zero
 //! row count, and the test skips cleanly when fixtures/host cannot force reclaim.
 //!
@@ -307,9 +302,8 @@ async fn mmap_auto_prefetch_tail_not_worse_than_buffered() {
     // samples, nearest-rank p99 is the single slowest scan, so one scheduler
     // pause makes a ratio-vs-ratio timing assert flake in CI even when the
     // prefetch policy mapping is correct. The deterministic regression guard is
-    // the unit test asserting `mmap_advice_for(Auto) != Some(Sequential)`
-    // (`reader/prefetch_advice_tests.rs`, retargeted by #2824); this test stays a never-flaking
-    // load-shape smoke that logs the measured tail shape.
+    // the unit test `mmap_advice_for(PrefetchMode::Auto) == None`; this test
+    // stays a never-flaking load-shape smoke that logs the measured tail shape.
     eprintln!(
         "issue #1143 guard (observational): buffered p50={buf_p50:?} p99={buf_p99:?} \
          ratio={buf_ratio:.2} | mmap(Auto) p50={mmap_p50:?} p99={mmap_p99:?} \

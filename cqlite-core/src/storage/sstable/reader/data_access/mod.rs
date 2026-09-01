@@ -452,7 +452,7 @@ impl SSTableReader {
     /// order while Data.db is laid out in Murmur3 TOKEN order — uncorrelated for the
     /// default partitioner — so its access really is scattered and `MADV_RANDOM` is
     /// correct. The genuinely sequential walks (the Summary-guided walk, the full
-    /// index scan/stream, the windowed scan) reach the never-`MADV_RANDOM` scan plane through
+    /// index scan/stream, the windowed scan) reach the unadvised scan plane through
     /// the positional helpers below, which take their plane from the caller.
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<ScanRow>> {
         self.read_value_at_offset_via(self.point_source.as_ref(), offset, size)
@@ -541,7 +541,7 @@ impl SSTableReader {
     /// bytes verified when they were first inserted.
     ///
     /// `source` is the positional plane the CALLER's read intent selected (issue
-    /// #2876) — the `MADV_RANDOM` point mapping for a point lookup, the scan
+    /// #2876) — the advised point mapping for a point lookup, the unadvised scan
     /// mapping for the index-driven scan. It is threaded in rather than read off
     /// `self` precisely because this helper serves BOTH intents.
     ///
@@ -583,10 +583,10 @@ impl SSTableReader {
             // lookups (`big_point.rs`) and by every index-driven scan
             // (`sequential.rs`), so the plane comes from the caller's intent — a
             // point read keeps the dedicated `MADV_RANDOM` mapping (issue #2210), a
-            // scan takes the never-`MADV_RANDOM` one, for which that readahead
-            // suppression is a deliberate loss. The covering CRC.db chunks were
-            // already verified on the SAME plane by `verify_uncompressed_range`
-            // (issue #1396), so these bytes are integrity-checked too.
+            // scan takes the unadvised one, for which that readahead suppression is
+            // a deliberate loss. The covering CRC.db chunks were already verified on
+            // the SAME plane by `verify_uncompressed_range` (issue #1396), so these
+            // bytes are integrity-checked too.
             model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             let mut buffer = vec![0u8; size as usize];
             source.read_exact_at(block_offset, &mut buffer)?;
@@ -816,8 +816,8 @@ impl SSTableReader {
     /// #2876), threaded through for the CRC chunk reads exactly as in
     /// [`Self::verify_uncompressed_range`]. Every caller today is a scan walk
     /// (`summary_scan.rs`, `full_index_scan.rs`, `full_index_stream.rs`) and passes
-    /// the never-`MADV_RANDOM` scan mapping; a future point caller passes the
-    /// `MADV_RANDOM` one and gets the right advice without editing this helper.
+    /// the unadvised scan mapping; a future point caller passes the advised one and
+    /// gets the right advice without editing this helper.
     ///
     /// SCOPE NOTE (#2876): `source` governs the **CRC chunk reads only**. The payload
     /// bytes below are read through `file` — a seek-based [`BlockSource`], which is NOT

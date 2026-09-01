@@ -283,8 +283,7 @@ pub struct SSTableReader {
     /// file (issue #2210) to suppress kernel readahead for scattered point faults,
     /// which is exactly backwards for a mostly-sequential scan walk (one 4 KiB page
     /// fault per positional read, #2210 × #1940 cross-path regression). Built once
-    /// at open from the SAME never-`MADV_RANDOM` mapping
-    /// [`scan_source`](Self::scan_source)
+    /// at open from the SAME unadvised mapping [`scan_source`](Self::scan_source)
     /// already uses for the mmap backend (an `Arc` clone, no new mapping / fd,
     /// #1143 preserved); the Direct/Buffered backends have no per-mapping advice
     /// concept, so they share `point_source` unchanged.

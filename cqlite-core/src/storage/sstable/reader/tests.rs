@@ -606,6 +606,46 @@ mod tests {
         assert_eq!(parse_prefetch_mode("???"), None);
     }
 
+    /// Issue #1143 (P0) mechanism guard: `PrefetchMode::Auto` MUST NOT map to
+    /// `MADV_SEQUENTIAL` on the mmap backend.
+    ///
+    /// `MADV_SEQUENTIAL` couples read-ahead with drop-behind (pages evicted as a
+    /// scan passes them); under concurrent write load the evicted pages are gone
+    /// when an overlapping scan re-reads them, causing synchronous major page
+    /// faults on the tokio worker and a ~2x read-side p99 tail regression. The
+    /// default `Auto` path therefore issues NO advice (relies on the kernel's
+    /// default read-ahead, no drop-behind), keeping the isolated mmap win.
+    ///
+    /// This is deterministic and host-independent (it asserts the policy mapping,
+    /// not timing), so it reliably fails if the drop-behind is reintroduced —
+    /// unlike a wall-clock tail guard, which cannot force page-cache reclaim on
+    /// the tiny vendored fixtures. `Off` also issues no advice; explicit
+    /// `Sequential`/`WillNeed` remain the caller's opt-in to those hints.
+    #[cfg(unix)]
+    #[test]
+    fn test_mmap_advice_for_auto_is_no_madvise() {
+        use super::super::backend_resolve::mmap_advice_for;
+        use crate::config::PrefetchMode;
+
+        // The fix under guard: Auto must NOT emit Sequential (drop-behind).
+        assert_eq!(
+            mmap_advice_for(PrefetchMode::Auto),
+            None,
+            "issue #1143 REGRESSION: Auto prefetch re-emitting madvise \
+             (MADV_SEQUENTIAL drop-behind) — read p99 tail will regress under write load"
+        );
+        assert_eq!(mmap_advice_for(PrefetchMode::Off), None);
+        // Explicit opt-ins are preserved.
+        assert_eq!(
+            mmap_advice_for(PrefetchMode::Sequential),
+            Some(memmap2::Advice::Sequential)
+        );
+        assert_eq!(
+            mmap_advice_for(PrefetchMode::WillNeed),
+            Some(memmap2::Advice::WillNeed)
+        );
+    }
+
     /// The `Auto` heuristic: tiny → buffered, sub-RAM → mmap, > fraction of
     /// RAM → direct (when memory is known and direct I/O is compiled in).
     #[test]

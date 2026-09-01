@@ -124,9 +124,8 @@ impl SSTableReader {
             chunk_offsets: vec![],
         };
         let chunk_source = super::super::chunk_source::ChunkSource::new(
-            // Correct-by-intent: this is a SCAN path, so hand it the
-            // never-`MADV_RANDOM` scan plane (issue #2876). `decode_borrowed` performs
-            // no I/O today, so
+            // Correct-by-intent: this is a SCAN path, so hand it the unadvised
+            // scan plane (issue #2876). `decode_borrowed` performs no I/O today, so
             // this is inert — but `ChunkSource::chunk()` CAN read, and a future
             // fallback here (a decode-error re-read, or a chunk absent from the
             // caller's buffer) would otherwise silently route full-scan I/O back

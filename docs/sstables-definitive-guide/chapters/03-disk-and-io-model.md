@@ -80,9 +80,8 @@ mechanism and the two conditions under which it silently does not engage.
 > summary-guided scan walk onto that same source (#1940) combined into a cross-path regression:
 > the compressed scan walk issued ~4–4.5 KiB block requests at ~7 000 reads/s where ~128 KiB
 > readahead was expected (issue #2876). The fix (PR #2882) split the scan-side positional source
-> from the point mapping — the scan side is a handle that is never `MADV_RANDOM`-advised (an `Arc`
-> clone of the same mmap, not a second `mmap`/fd; CQLite advises it `MADV_WILLNEED` by default,
-> issue #2824), while genuine point lookups keep the `MADV_RANDOM` source:
+> from the point mapping — the scan side is an unadvised handle (an `Arc` clone of the same mmap,
+> not a second `mmap`/fd), while genuine point lookups keep the advised source:
 > `cqlite-core/src/storage/sstable/reader/mod.rs:608` builds `scan_positional_source`, and
 > `POINT_MMAP_MADV_RANDOM_MIN_BYTES` (line 343) gates the advice to mappings ≥ 8 MiB. A regression
 > test asserts the scan walk makes zero reads against the point source
