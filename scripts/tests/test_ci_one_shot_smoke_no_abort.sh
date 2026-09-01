@@ -103,9 +103,24 @@ printf '[{"id": 1}]\n'      > "${WORK}/goldens/select_collections_json.golden"
 
 run_suite() {
     # $1 = script to run, $2 = output dir. Echoes combined output; returns rc.
+    #
+    # `env -i` + an explicit allowlist, NOT a bare `env` (roborev job 3). A bare
+    # `env` inherits the caller's environment, and the subject branches on
+    # CQLITE_DATASET: if the invoking shell exports it -- which a lane box
+    # routinely does, and which this repo's own docs tell you to export -- the
+    # subject silently switches to dataset mode, resolves CQLITE_DATASETS_ROOT
+    # to the REAL corpus, and stops exercising the fixture entirely. The guard
+    # would then pass or fail for a reason that has nothing to do with #3689,
+    # and it would do so only on some machines.
+    #
+    # Allowlist rather than `env -u CQLITE_DATASET ...` so that a NEW variable
+    # the subject learns to read is cleared BY DEFAULT instead of needing to be
+    # discovered here (the #3544 rule, one directory over).
     local script="$1" outdir="$2"
     mkdir -p "${outdir}"
-    env \
+    env -i \
+        PATH="${PATH}" \
+        HOME="${HOME}" \
         CQLITE_CLI="${WORK}/stub-cqlite" \
         CQLITE_SCHEMA="${WORK}/schemas/basic-types.cql" \
         CQLITE_DATA_DIR="${WORK}/data" \
@@ -237,6 +252,34 @@ if [[ "${save_sites}" -gt 0 && "${save_sites}" -eq "${local_decls}" && "${save_s
     pass "all ${save_sites} save sites declare a local and pass it back to errexit_restore"
 else
     fail "save/restore sites are not balanced: ${save_sites} saves, ${local_decls} locals, ${restore_calls} explicit restores"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 4 -- HERMETICITY: an exported CQLITE_DATASET must not change the run.
+#
+# Positive control for the env leak found in review (roborev job 3). Exporting
+# CQLITE_DATASET is normal on a fleet box, and it makes the subject take its
+# dataset-mode branch against the real corpus. If the allowlist above ever
+# regresses to a bare `env`, this case sees a different run and fails.
+# ---------------------------------------------------------------------------
+poisoned_out="$(
+    export CQLITE_DATASET=test_basic
+    export CQLITE_DATASETS_ROOT=/nonexistent/should/be/ignored
+    export CQLITE_DATA_DIR=/nonexistent/should/be/ignored
+    run_suite "${SUBJECT}" "${WORK}/out/poisoned" | strip_ansi
+)"
+
+if grep -q 'Using dataset mode' <<<"${poisoned_out}"; then
+    fail "an exported CQLITE_DATASET leaked into the subject -- it ran in dataset mode, not against the fixture (roborev job 3)"
+else
+    pass "exported CQLITE_DATASET does not leak into the subject"
+fi
+
+poisoned_run="$(grep -oE 'Tests Run: +[0-9]+' <<<"${poisoned_out}" | grep -oE '[0-9]+' | tail -1)"
+if [[ "${poisoned_run:-0}" == "${tests_run:-x}" ]]; then
+    pass "poisoned environment produces the same run (${poisoned_run} tests)"
+else
+    fail "poisoned environment changed the run: ${poisoned_run:-<none>} tests vs ${tests_run:-<none>} clean"
 fi
 
 echo
