@@ -637,7 +637,8 @@ if run 0 "ANSI-coloured full summary -> still parsed -> exit 0" \
 fi
 
 # --- Case 25: dirty: is REPORTED **AND ENFORCED** (#3648) --------------------
-# A gate that ran with `dirty: yes` certified sha PLUS uncommitted TRACKED edits
+# A gate that ran with `dirty: yes` certified sha PLUS uncommitted NON-IGNORED
+# content (tracked edits and/or non-ignored untracked files)
 # (the gate's capture is --exclude-standard, so never a gitignored log), and
 # `commit:`/`tree-start:` name the same sha either way — so this is the one
 # property of that hazard the sha binding provably cannot see. It was REPORTED
@@ -704,6 +705,33 @@ else
 fi
 refused "commit: line with NO dirty: field -> refuse (nothing was measured)" \
   "$T/dirty-absent.txt" "records NO 'dirty:' value"
+
+# 25(c2) DUPLICATED `dirty:` FIELD -> REFUSE, and refuse on the AMBIGUITY rather
+# than on either value (#3648 roborev round 2, finding 1 -- Medium). The parser
+# used to assign on EVERY `dirty:` token, so the LAST one won: a commit: line
+# reading `dirty: yes dirty: no` reduced to `no` and CERTIFIED a dirty run. That
+# is precisely the "last one wins" reading assert_single_key refuses for whole
+# keys, one field down, and it is a false PASS in a merge gate. The refusal must
+# fire BEFORE the `= no` compare, so a trailing clean value cannot short-circuit.
+full_summary "$T/dirty-dup.txt"
+sed -i 's/^\(commit: .* dirty: no\)$/\1 dirty: yes/' "$T/dirty-dup.txt"
+if grep -qE '^commit: .* dirty: no dirty: yes$' "$T/dirty-dup.txt"; then
+  ok "dirty fixture: the duplicate-field fixture really carries TWO dirty: tokens"
+else
+  bad "dirty fixture: expected two dirty: tokens on the commit: line"
+fi
+refused "commit: line with TWO dirty: fields -> refuse (AMBIGUOUS, not last-wins)" \
+  "$T/dirty-dup.txt" "AMBIGUOUS"
+# And the mirror image: a clean value LAST must not rescue a dirty value first.
+full_summary "$T/dirty-dup-clean-last.txt" "$C7" "$C12" PASS PASS yes
+sed -i 's/^\(commit: .* dirty: yes\)$/\1 dirty: no/' "$T/dirty-dup-clean-last.txt"
+if grep -qE '^commit: .* dirty: yes dirty: no$' "$T/dirty-dup-clean-last.txt"; then
+  ok "dirty fixture: the clean-last fixture is dirty FIRST, clean LAST"
+else
+  bad "dirty fixture: expected 'dirty: yes dirty: no' on the commit: line"
+fi
+refused "commit: dirty: yes then dirty: no -> refuse (a trailing clean value cannot rescue it)" \
+  "$T/dirty-dup-clean-last.txt" "AMBIGUOUS"
 
 # 25(d) PRESENT KEY, EMPTY VALUE -> REFUSE. Distinct from an absent field: the
 # gate said something and it reduced to nothing.
