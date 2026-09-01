@@ -58,9 +58,16 @@
 #                cqlite-ffi-common/src/json_number.rs only inside doc comments.
 #  13.  GREEN  — a genuine `CARGO_FEATURE_<NAME>` env read in the package's BUILD
 #                SCRIPT is an effect (it is how a build script sees a feature).
-#  14.  RED    — the differential pair for 13, both halves: a merely TEXTUAL
-#                `CARGO_FEATURE_X` in build.rs, and a real env read in a NON-build
-#                script source, each confer no credit.
+#  14.  GREEN  — SOUNDNESS, six spellings in one loop: an aliased import, a constant
+#                argument, `env::vars()` iteration, a local wrapper, a `my_env` module
+#                and a bare textual mention ALL credit. Each was, at some revision, not
+#                recognised and its feature reported DEAD; the rule is now textual and
+#                maximal, and the contract line declares it.
+#  15.  GREEN  — a BARE `CARGO_FEATURE_` prefix (environment iteration names no
+#                individual feature) credits EVERY feature of that package.
+#  16.  RED    — a package with NO build script gets no env credit at all, even for a
+#                real env read: cargo sets these variables for a build script's
+#                execution, so without one nothing reads them.
 #  15.  RED    — job 50 finding 2: a STANDALONE weak edge (`optdep?/odfeat`) is not an
 #                effect. Cargo does nothing with it unless the optional dependency is
 #                activated by something else.
@@ -76,9 +83,11 @@
 #                credits the OUTER member. Measured differential: the pre-fix
 #                directory-prefix ownership reports this fixture's `tfeat` DEAD — a
 #                false FAIL — while the target-derived ownership certifies it.
-#  18.  RED    — the other half of finding 4: the nested member's OWN lib site does
-#                not credit the outer member's same-named feature. Credit must not leak
-#                across the package boundary in either direction.
+#  18.  GREEN  — the other half of the overlap, in the direction that used to SUBTRACT:
+#                a file under the NESTED member's directory credits the OUTER member
+#                too. An outer target can reach such a file (`#[path]`, `include!`, a
+#                shared helper) and this scan cannot trace that, so dropping the outer
+#                owner reported a feature used only there as DEAD.
 #  19.  USAGE  — an unrecognized argument exits 2 (repo convention).
 #  20.  GREEN  — --help exits 0 and documents that there is no opt-out.
 #
@@ -89,9 +98,6 @@
 #                is documentation, and the `cfg(` in it is not an anchored head.
 #  22.  RED    — a RAW STRING (any hash count) containing a whole `#[cfg(feature = …)]`
 #                attribute confers nothing. Its bytes never reach the code text.
-#  23.  RED+GREEN — an unrelated local `var("CARGO_FEATURE_X")` in build.rs confers
-#                nothing; the SAME call with `use std::env::var` proved in the file
-#                does. `var` is an ordinary identifier.
 #  24.  RED    — a REDUNDANT external dependency edge (`serde/derive` beside
 #                `serde = { features = ["derive"] }`) confers nothing, with a
 #                NON-redundant sibling edge (`serde/rc`) as the control that the
@@ -100,9 +106,6 @@
 #                already enables the forwarded feature.
 #
 #   ROUND 3 (roborev job 55):
-#  26.  RED+GREEN — the build-script env API must be ANCHORED: a LOCAL `mod env` with no
-#                `use std::env;`, and `my_env::var(...)`, each confer NOTHING; a bare
-#                `env::var` WITH a proven `use std::env;` does.
 #  27.  GREEN  — REGRESSION: a non-weak edge to an OPTIONAL dependency whose declaration
 #                already enables the forwarded feature is STILL load-bearing, because the
 #                edge ACTIVATES the dependency. Judging redundancy first reported a live
@@ -121,11 +124,27 @@
 #                NAME, forwarding a feature only the real dependency declares, must not
 #                be reported dead. Name-based resolution looked the feature up in the
 #                MEMBER and refused; resolution is by canonical PATH.
-#  31.  GREEN  — DECLARED: file-wide (not scope-aware) env-import detection — a
-#                `use std::env;` in the file lets a bare `env::var(...)` that actually
-#                resolves to a LOCAL module credit a feature.
 #  32.  GREEN  — DECLARED: a `#[cfg(feature = ...)]` inside an UNEXPANDED `macro_rules!`
 #                body credits its feature though no expansion applies it here.
+#
+#   ROUND 5 (roborev job 58) — MAKING THE PUBLISHED CONTRACT TRUE. It claimed soundness
+#   and named macro-generated feature names as the SOLE false-failure limit; both were
+#   false, and a false rationale in a gate log is worse than none. Cases 33-34 pin the two
+#   soundness fixes, and 35 pins the ASYMMETRY they both rest on.
+#  33.  GREEN  — SOUNDNESS: a module included from OUTSIDE any target root
+#                (`#[path = "../gated.rs"]`) still credits its feature. No tree covered
+#                it, so it had NO owner and its feature was reported dead.
+#  34.  GREEN  — SOUNDNESS: a HELPER MODULE under the nested member's directory, reached
+#                by the OUTER target, credits the outer member. Case 17 only covered an
+#                exact target FILE, which is why this survived three rounds.
+#  35.  GREEN  — THE ASYMMETRY ITSELF, the invariant everything rests on and the one a
+#                refactor would most easily break: three differently-ambiguous files,
+#                each the sole site of a distinct feature, must ALL credit. Asserted by
+#                COUNT, so dropping any one of them reds this case.
+#
+#   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
+#   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
+#   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
 #  28.  GREEN  — PINS A DECLARED RESIDUAL, not desired behaviour: an ORPHAN .rs file
 #                under a target's source dir (reachable from no `mod` chain) IS scanned,
 #                so a cfg gate in dead code credits its feature. The success line says
@@ -431,7 +450,7 @@ EOF
 expect_red_naming "$D" "leafx" "case 12"
 ok "a feature named in a string literal, in doc text, or in a cfg_attr attribute TAIL confers no credit"
 
-# --- 13. GREEN / 14. RED: CARGO_FEATURE_* env reads in a build script ---------
+# --- 13. GREEN: a genuine env read in a build script -------------------------
 D="$(fixture buildscript-green)"
 cat >"$D/a/build.rs" <<'EOF'
 fn main() {
@@ -440,30 +459,126 @@ fn main() {
     }
 }
 EOF
-# Remove tfeat's cfg site so the build-script read is its ONLY effect.
+# Remove tfeat's cfg site so the build-script mention is its ONLY effect.
 cat >"$D/a/tests/t.rs" <<'EOF'
 #[test]
 fn t() {}
 EOF
 expect_green "$D" "case 13"
-ok "a genuine CARGO_FEATURE_<NAME> env read in the package's build script is an effect"
+ok "a CARGO_FEATURE_<NAME> env read in the package's build script is an effect"
 
-D="$(fixture buildscript-red)"
-cat >"$D/a/build.rs" <<'EOF'
+# --- 14. GREEN (DECLARED): ANY textual form counts, in six spellings ---------
+# The class review kept re-opening. Each of these was, at some revision, NOT recognised
+# and its feature reported DEAD — a false FAIL, which the contract forbids. The rule is
+# now textual and maximal, so all six credit, and the contract line says so.
+for spelling in aliased-import constant-argument env-vars-iteration local-wrapper my-env-module bare-string-mention; do
+  D="$(fixture "textual-$spelling")"
+  cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+  case "$spelling" in
+    aliased-import)
+      cat >"$D/a/build.rs" <<'EOF'
+use std::env::var as get_var;
+
 fn main() {
-    // Documents CARGO_FEATURE_TFEAT without ever reading it.
-    let name = "CARGO_FEATURE_TFEAT";
-    let _ = name.len();
+    if get_var("CARGO_FEATURE_TFEAT").is_ok() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
 }
 EOF
+      ;;
+    constant-argument)
+      cat >"$D/a/build.rs" <<'EOF'
+const KEY: &str = "CARGO_FEATURE_TFEAT";
+
+fn main() {
+    if std::env::var(KEY).is_ok() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+      ;;
+    env-vars-iteration)
+      cat >"$D/a/build.rs" <<'EOF'
+fn main() {
+    for (key, _value) in std::env::vars() {
+        if key == "CARGO_FEATURE_TFEAT" {
+            println!("cargo:rustc-cfg=has_tfeat");
+        }
+    }
+}
+EOF
+      ;;
+    local-wrapper)
+      cat >"$D/a/build.rs" <<'EOF'
+fn var(key: &str) -> Option<String> { std::env::var(key).ok() }
+
+fn main() {
+    if var("CARGO_FEATURE_TFEAT").is_some() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+      ;;
+    my-env-module)
+      cat >"$D/a/build.rs" <<'EOF'
+mod my_env {
+    pub fn var(key: &str) -> Option<String> { std::env::var(key).ok() }
+}
+
+fn main() {
+    if my_env::var("CARGO_FEATURE_TFEAT").is_some() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+      ;;
+    bare-string-mention)
+      cat >"$D/a/build.rs" <<'EOF'
+fn main() {
+    // Whatever this does with it, the name is here: CARGO_FEATURE_TFEAT
+    let keys = ["CARGO_FEATURE_TFEAT"];
+    for k in keys {
+        if std::env::var_os(k).is_some() {
+            println!("cargo:rustc-cfg=has_tfeat");
+        }
+    }
+}
+EOF
+      ;;
+  esac
+  expect_green "$D" "case 14 ($spelling)"
+  assert_contract_declares "any textual CARGO_FEATURE_* mention in a build-script package's sources" "case 14 ($spelling)"
+done
+ok "SOUNDNESS: all six CARGO_FEATURE_* spellings credit (aliased import, constant, env::vars(), local wrapper, my_env module, bare mention) — and the contract declares the textual scan"
+
+# --- 15. GREEN (DECLARED): a BARE CARGO_FEATURE_ prefix credits every feature -
+# Environment ITERATION names no individual feature, so there is nothing to match and
+# the only reading that cannot report a live feature dead is to credit them all.
+D="$(fixture bare-prefix)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nprefixonly = []/' "$D/a/Cargo.toml"
+grep -q '^prefixonly = \[\]$' "$D/a/Cargo.toml" || fail_case "case 15: fixture edit did not plant prefixonly"
 cat >"$D/a/tests/t.rs" <<'EOF'
 #[test]
 fn t() {}
 EOF
-expect_red_naming "$D" "tfeat" "case 14a"
-D="$(fixture buildscript-red-no-script)"
-# A package with NO build script at all gets no env credit: cargo sets these variables
-# for a build script's execution, so without one there is nothing to read them.
+cat >"$D/a/build.rs" <<'EOF'
+fn main() {
+    for (key, _value) in std::env::vars() {
+        if let Some(name) = key.strip_prefix("CARGO_FEATURE_") {
+            println!("cargo:rustc-cfg=feature_seen_{}", name.to_lowercase());
+        }
+    }
+}
+EOF
+expect_green "$D" "case 15"
+assert_contract_declares "a bare CARGO_FEATURE_ prefix credits every feature of that package" "case 15"
+ok "a BARE CARGO_FEATURE_ prefix credits EVERY feature of the package (nothing names an individual one), and the contract declares it"
+
+# --- 16. RED: a package with NO build script gets no env credit --------------
+D="$(fixture no-build-script)"
 sed -i '/^build = "build.rs"$/d' "$D/a/Cargo.toml"
 rm -f "$D/a/build.rs"
 cat >"$D/a/src/lib.rs" <<'EOF'
@@ -478,8 +593,8 @@ cat >"$D/a/tests/t.rs" <<'EOF'
 #[test]
 fn t() {}
 EOF
-expect_red_naming "$D" "tfeat" "case 14b"
-ok "a merely textual CARGO_FEATURE_X in build.rs, and a real env read in a package with NO build script, each confer no credit"
+expect_red_naming "$D" "tfeat" "case 16"
+ok "a package with NO build script gets no env credit at all, even for a real env read"
 
 # --- 15. RED / 16. GREEN: weak dependency edges ------------------------------
 D="$(fixture weak-red)"
@@ -506,14 +621,16 @@ grep -q 'tfeat' "$TMPROOT/out.txt" \
   && fail_case "case 17: the success line should not be naming features at all"
 ok "a file that is the OUTER member's own test-target source, inside the NESTED member's package dir, credits the outer member"
 
-D="$(fixture overlap-red)"
-# a declares a feature with the SAME NAME as the nested member's, and no site of its own.
+D="$(fixture overlap-both)"
+# THE ASYMMETRY, in the direction that used to SUBTRACT. `a` declares a feature with the
+# SAME NAME as the nested member's and has no site of its own — but the nested member's
+# file lies under a directory `a`'s own test target can reach (`#[path]`, `include!`, a
+# shared helper), and this scan cannot trace that. Dropping the outer owner reported a
+# feature used only there as DEAD, so a file two packages can reach now credits BOTH.
 sed -i 's/^tfeat = \[\]$/tfeat = []\nnfeat = []/' "$D/a/Cargo.toml"
 grep -q '^nfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 18: fixture edit did not plant a's nfeat"
-expect_red_naming "$D" "nfeat" "case 18"
-grep -q '\[a\]' "$TMPROOT/out.txt" \
-  || { cat "$TMPROOT/out.txt"; fail_case "case 18: the dead feature was not attributed to member \`a\`"; }
-ok "the nested member's own lib site does not credit the outer member's same-named feature"
+expect_green "$D" "case 18"
+ok "a file under a NESTED member's directory credits the OUTER member too (ownership never subtracts)"
 
 # --- 19. USAGE: an unrecognized argument exits 2 ------------------------------
 set +e
@@ -551,40 +668,6 @@ pub fn always() {}
 EOF
 expect_red_naming "$D" "leafx" "case 22"
 ok "a RAW/byte string (any hash count) carrying a whole cfg attribute confers no credit"
-
-# --- 23. RED then GREEN: `var` must be a proven environment API --------------
-D="$(fixture bare-var-red)"
-cat >"$D/a/tests/t.rs" <<'EOF'
-#[test]
-fn t() {}
-EOF
-cat >"$D/a/build.rs" <<'EOF'
-fn var(_key: &str) -> Option<String> { None }
-
-fn main() {
-    if var("CARGO_FEATURE_TFEAT").is_some() {
-        println!("cargo:rustc-cfg=has_tfeat");
-    }
-}
-EOF
-expect_red_naming "$D" "tfeat" "case 23a"
-D="$(fixture bare-var-green)"
-cat >"$D/a/tests/t.rs" <<'EOF'
-#[test]
-fn t() {}
-EOF
-cat >"$D/a/build.rs" <<'EOF'
-use std::env::{var, var_os};
-
-fn main() {
-    let _ = var_os("PATH");
-    if var("CARGO_FEATURE_TFEAT").is_ok() {
-        println!("cargo:rustc-cfg=has_tfeat");
-    }
-}
-EOF
-expect_green "$D" "case 23b"
-ok "an unrelated local \`var("CARGO_FEATURE_X")\` confers nothing; the same call with a PROVEN \`use std::env::var\` does"
 
 # --- 24. RED: a REDUNDANT external dependency edge ---------------------------
 # OFFLINE BY CONSTRUCTION. This suite runs in `tooling-tests`, a MANDATORY gate
@@ -638,58 +721,6 @@ if grep -qE '^ +[^ ]+  fwd ' "$TMPROOT/out.txt"; then
   fail_case "case 25: fwd was reported dead too — its own edge (bee/bfeat) is not redundant, so the redundancy test is over-reaching"
 fi
 ok "a REDUNDANT workspace-member edge confers no credit, and a non-redundant edge on the same dependency is unaffected"
-
-# --- 26. RED then GREEN: the env API must be ANCHORED ------------------------
-D="$(fixture local-env-mod)"
-cat >"$D/a/tests/t.rs" <<'EOF'
-#[test]
-fn t() {}
-EOF
-cat >"$D/a/build.rs" <<'EOF'
-mod env {
-    pub fn var(_key: &str) -> Option<String> { None }
-}
-
-fn main() {
-    if env::var("CARGO_FEATURE_TFEAT").is_some() {
-        println!("cargo:rustc-cfg=has_tfeat");
-    }
-}
-EOF
-expect_red_naming "$D" "tfeat" "case 26a"
-D="$(fixture my-env-suffix)"
-cat >"$D/a/tests/t.rs" <<'EOF'
-#[test]
-fn t() {}
-EOF
-cat >"$D/a/build.rs" <<'EOF'
-mod my_env {
-    pub fn var(_key: &str) -> Option<String> { None }
-}
-
-fn main() {
-    if my_env::var("CARGO_FEATURE_TFEAT").is_some() {
-        println!("cargo:rustc-cfg=has_tfeat");
-    }
-}
-EOF
-expect_red_naming "$D" "tfeat" "case 26b"
-D="$(fixture env-mod-green)"
-cat >"$D/a/tests/t.rs" <<'EOF'
-#[test]
-fn t() {}
-EOF
-cat >"$D/a/build.rs" <<'EOF'
-use std::env;
-
-fn main() {
-    if env::var("CARGO_FEATURE_TFEAT").is_ok() {
-        println!("cargo:rustc-cfg=has_tfeat");
-    }
-}
-EOF
-expect_green "$D" "case 26c"
-ok "a local \`mod env\` and \`my_env::var(...)\` confer nothing; a bare \`env::var\` with a proven \`use std::env;\` does"
 
 # --- 27. GREEN: activation outranks redundancy (regression) ------------------
 # `actfeat` forwards a feature the OPTIONAL dependency's declaration already enables,
@@ -760,8 +791,8 @@ pub fn wants_tfeat() -> bool {
 }
 EOF
 expect_green "$D" "case 29"
-assert_contract_declares "package-wide (not module-graph) build-script env scanning" "case 29"
-ok "SOUNDNESS: a CARGO_FEATURE_* read in a build script's HELPER MODULE still credits its feature (and the contract declares the package-wide scan)"
+assert_contract_declares "any textual CARGO_FEATURE_* mention in a build-script package's sources" "case 29"
+ok "SOUNDNESS: a CARGO_FEATURE_* read in a build script's HELPER MODULE still credits its feature (and the contract declares the textual scan)"
 
 # --- 30. GREEN (SOUNDNESS): a same-named NON-MEMBER path dependency ----------
 # `bx` is a non-member crate whose package NAME is `b`, the same as the member's, and it
@@ -793,37 +824,6 @@ grep -q '^extonly = ' "$D/a/Cargo.toml" || fail_case "case 30: fixture edit did 
 expect_green "$D" "case 30"
 ok "SOUNDNESS: a NON-MEMBER path dependency sharing a member's package name resolves by PATH, so a feature only it declares is not a refusal"
 
-# --- 31. GREEN (DECLARED): file-wide env-import detection --------------------
-# The credited call resolves to `inner::env::var`, NOT std's — but the file contains a
-# `use std::env;`, and scope-aware name resolution is out of bounds. Declared.
-D="$(fixture env-import-file-wide)"
-cat >"$D/a/tests/t.rs" <<'EOF'
-#[test]
-fn t() {}
-EOF
-cat >"$D/a/build.rs" <<'EOF'
-mod inner {
-    pub mod env {
-        pub fn var(_key: &str) -> Option<String> { None }
-    }
-
-    pub fn go() -> bool {
-        env::var("CARGO_FEATURE_TFEAT").is_some()
-    }
-}
-
-fn main() {
-    use std::env;
-    let _ = env::var("PATH");
-    if inner::go() {
-        println!("cargo:rustc-cfg=has_tfeat");
-    }
-}
-EOF
-expect_green "$D" "case 31"
-assert_contract_declares "file-wide (not scope-aware) env-import detection" "case 31"
-ok "DECLARED: a file-wide \`use std::env;\` lets a bare env::var(...) that resolves to a LOCAL module credit a feature, and the contract says so"
-
 # --- 32. GREEN (DECLARED): cfg inside an UNEXPANDED macro body --------------
 D="$(fixture macro-body-cfg)"
 sed -i 's/^tfeat = \[\]$/tfeat = []\nmacrofeat = []/' "$D/a/Cargo.toml"
@@ -841,13 +841,93 @@ expect_green "$D" "case 32"
 assert_contract_declares "cfgs inside unexpanded macro bodies" "case 32"
 ok "DECLARED: a cfg inside an UNEXPANDED macro_rules! body credits its feature, and the contract names that escape route"
 
+# --- 33. GREEN (SOUNDNESS): a module included from OUTSIDE any target root ---
+# `a/gated.rs` sits in the package root, under no target's source tree, and is reached
+# by `#[path = "../gated.rs"]` from a/src/lib.rs. No tree covers it, so it used to have
+# NO owner and the feature it gates was reported DEAD. Ownership now falls back to every
+# member whose package DIRECTORY contains the file.
+D="$(fixture out-of-tree-path-module)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\npathfeat = []/' "$D/a/Cargo.toml"
+grep -q '^pathfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 33: fixture edit did not plant pathfeat"
+cat >"$D/a/gated.rs" <<'EOF'
+#[cfg(feature = "pathfeat")]
+pub fn gated_by_path_module() {}
+EOF
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+#[path = "../gated.rs"]
+pub mod gated;
+EOF
+expect_green "$D" "case 33"
+ok "SOUNDNESS: a module included from OUTSIDE any target root (#[path]) still credits its feature"
+
+# --- 34. GREEN (SOUNDNESS): a nested-member HELPER reached by the outer target -
+# `a/tests/helpers/util.rs` lies inside the NESTED member's package directory but under
+# `a`'s own test-target directory, and it is the only site of a's `helperfeat`. The
+# existing overlap case only covered an EXACT target file, which is why this survived
+# three rounds.
+D="$(fixture nested-helper-module)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nhelperfeat = []/' "$D/a/Cargo.toml"
+grep -q '^helperfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 34: fixture edit did not plant helperfeat"
+mkdir -p "$D/a/tests/helpers"
+cat >"$D/a/tests/helpers/util.rs" <<'EOF'
+#[cfg(feature = "helperfeat")]
+pub fn helper_only() {}
+EOF
+cat >>"$D/a/tests/t.rs" <<'EOF'
+
+#[path = "helpers/util.rs"]
+mod util;
+EOF
+expect_green "$D" "case 34"
+ok "SOUNDNESS: a helper module under the NESTED member's dir, reached by the OUTER target, credits the outer member"
+
+# --- 35. THE ASYMMETRY ITSELF ------------------------------------------------
+# This is the invariant everything else rests on, and the one a future refactor would
+# most easily break: WHEN OWNERSHIP IS AMBIGUOUS, CREDIT — never drop. Three files, each
+# ambiguous in a different way, each the SOLE site of a distinct feature, in ONE run: a
+# file no target tree covers (package root), a file under a nested member's directory,
+# and a file in a directory no target names at all. If any of them is dropped instead of
+# credited, its feature is reported dead and this case reds — which is exactly the false
+# FAIL the contract forbids.
+D="$(fixture ambiguity-credits)"
+python3 - "$D/a/Cargo.toml" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace('tfeat = []', 'tfeat = []\nambig1 = []\nambig2 = []\nambig3 = []')
+open(p, 'w').write(s)
+PYEOF
+for f in ambig1 ambig2 ambig3; do
+  grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 35: fixture edit did not plant $f"
+done
+cat >"$D/a/ambig1.rs" <<'EOF'
+#[cfg(feature = "ambig1")]
+pub fn one() {}
+EOF
+mkdir -p "$D/a/tests/aux"
+cat >"$D/a/tests/aux/ambig2.rs" <<'EOF'
+#[cfg(feature = "ambig2")]
+pub fn two() {}
+EOF
+mkdir -p "$D/a/extra/deep"
+cat >"$D/a/extra/deep/ambig3.rs" <<'EOF'
+#[cfg(feature = "ambig3")]
+pub fn three() {}
+EOF
+expect_green "$D" "case 35"
+AMBIG_COUNT="$(asserted_count)"
+[ "$AMBIG_COUNT" -eq "$((BASE_COUNT + 3))" ] \
+  || fail_case "case 35: expected $((BASE_COUNT + 3)) asserted features, got $AMBIG_COUNT — one of the three ambiguous files was DROPPED rather than credited"
+ok "THE ASYMMETRY: three differently-ambiguous files each credit their feature ($AMBIG_COUNT = $BASE_COUNT + 3) — ambiguity resolves toward CREDITING, never toward dropping"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=32
+CASE_COUNT_EXPECTED=34
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

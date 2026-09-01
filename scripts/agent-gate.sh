@@ -289,9 +289,10 @@
 #                      not report a LIVE feature dead, every ambiguity resolving
 #                      toward CREDITING — and explicitly INCOMPLETE: a dead feature
 #                      can escape. The guard prints a second success line stating
-#                      that and enumerating its five known escape routes plus the one
+#                      that and enumerating its known escape routes plus the one
 #                      remaining soundness LIMIT (a cfg whose feature name is
-#                      produced by MACRO EXPANSION is not seen), and THIS COMPONENT
+#                      produced by MACRO EXPANSION, which no lexical scan can see),
+#                      and THIS COMPONENT
 #                      REQUIRES that line — a guard that quietly stopped declaring
 #                      its own incompleteness would imply coverage it lacks. The
 #                      asymmetry is deliberate: a false PASS leaves a dead flag in
@@ -699,7 +700,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 32 cases over throwaway
+#                      features-load-bearing component: 34 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -14995,7 +14996,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 32 cases over throwaway fixture
+# proof for the features-load-bearing component: 34 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16466,7 +16467,13 @@ run_tooling_tests() {
   # dependency sharing a member's package name) each MEASURED to FAIL on the previous
   # guard — those were false FAILs, the direction the contract forbids — plus two more
   # declared escape routes, each asserting both that the behaviour occurs AND that the
-  # contract line names it. Every fixture is a LOCAL path workspace with no registry
+  # contract line names it. Round 5 (job 58) made the PUBLISHED contract true: eleven
+  # further measured differentials, all of them false FAILs, covering six
+  # `CARGO_FEATURE_*` spellings, a bare `CARGO_FEATURE_` prefix, an out-of-tree
+  # `#[path]` module, a nested-member helper reached by the outer target, and THE
+  # ASYMMETRY itself — three differently-ambiguous files that must all credit, asserted
+  # by count, because "when ownership is ambiguous, CREDIT" is the invariant every other
+  # case rests on and the one a refactor would most easily break. Every fixture is a LOCAL path workspace with no registry
   # dependency, so the suite runs offline (verified under CARGO_NET_OFFLINE=1) — this
   # component is mandatory and must not depend on a network.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
