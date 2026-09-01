@@ -7737,6 +7737,18 @@ if grep -qF 'python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBORE
 else
   bad 'structural (#3759): the linked-issue probe no longer delegates to the one scanner with the caller-supplied kind/scope/allowlist — a second recogniser over an authorization grammar is a bypass (#3626 reuse-do-not-reinvent)'
 fi
+# AND THERE IS EXACTLY ONE SCANNER FILE. "The scanner is unmodified by this change" is a property of
+# a diff and cannot be asserted durably here (a `git diff origin/main` assert goes stale the moment
+# this merges, and a stale assert is one that reds on correct input); what IS durable is that no
+# SECOND scanner was added beside it, which is the thing the reuse ruling actually forbids.
+# The count is required to be EXACTLY 1, so a find that FAILED (yielding 0) reds rather than passing
+# — the fail-closed direction for the three-valued-signal trap this repo lints for (1699-find-tristate).
+_mps_scanners=$(find "$SCRIPT_DIR/../flow" -maxdepth 1 \( -name '*waiver*scan*.py' -o -name '*marker*scan*.py' \) 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "$_mps_scanners" = "1" ]; then
+  ok 'structural (#3759): exactly one authorization scanner exists — the probe forked no thread-specific variant'
+else
+  bad "structural (#3759): $_mps_scanners authorization scanner files exist in scripts/flow (want exactly 1) — a second implementation of a marker grammar is a second place for it to diverge, and a divergence in an AUTHORIZATION grammar is a bypass"
+fi
 if grep -qE 'misplaced' "$SCAN_TOOL"; then
   bad 'structural (#3759): the SCANNER emits or knows about the misplaced state — thread identity is the CALLER-side knowledge, and telling the scanner would mean adding a provenance argument to the one component whose inputs must stay fixed'
 else
