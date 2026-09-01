@@ -148,34 +148,53 @@
 # compile it), so it is out of this guard's scope — its features are neither
 # certified nor reported here.
 #
-# # THE DECLARED RESIDUAL — printed on every success, never implied away
+# # THE CONTRACT: SOUND-BY-DESIGN, EXPLICITLY INCOMPLETE
 #
-# This scan is LEXICAL, not a compiler, so the success line ends with
-# `cfg-site detection: lexical, NON-EXHAUSTIVE` naming the two things it does not
-# decide. A lane that omits coverage silently is indistinguishable from one that covers
-# it, and a positive verdict must rest on an affirmative measurement:
+# This is a LEXICAL scan over Rust, not a compiler, so it cannot be both complete and
+# sound. It chooses SOUNDNESS: wherever it cannot decide, it resolves toward CREDITING.
 #
-#   * A cfg produced by MACRO EXPANSION is not seen. A feature name assembled by a
-#     macro (or emitted by a `macro_rules!` body that this scan reads as tokens rather
-#     than expands) has no textual `feature = "NAME"` for the scan to find. Direction:
-#     it would report such a feature DEAD — a false FAIL, which is loud.
-#   * An ORPHAN `.rs` file under a target's source directory — one no `mod` chain
-#     reaches from the target root — is scanned as if it were compiled, so a cfg gate
-#     in dead code can credit a dead feature. Deciding it means resolving Rust's module
-#     graph (`mod`, `#[path]`, `#[cfg]`-gated `mod`, nested inline modules) from bash,
-#     which is the UNBOUNDED-PARSING problem this repo has already paid for once and
-#     removed: #1712 deleted the rustdoc/public-API half of `pub-surface` precisely
-#     because a scanner that must find declarations anywhere in arbitrary source cannot
-#     abstain. Not worth that cost for a case that needs dead code to be committed AND
-#     to name an otherwise-dead feature. Direction: such a file is SCANNED — a residual
-#     false PASS. Pinned by a fixture in
-#     scripts/tests/test_features_load_bearing_guard.sh, so this declaration cannot
-#     drift from the code: a declaration nobody tests is a comment.
-#   * An INDIRECTLY redundant dependency-feature edge is not detected: `dep/x` where
-#     the declaration enables some feature that itself enables `x`. Deciding it needs
-#     the dependency's own feature table, which `--no-deps` does not carry for external
-#     crates. Direction: such an edge is CREDITED — a residual false PASS, declared
-#     here rather than hidden.
+#   * SOUND — it does not report a LIVE feature dead. No false FAILs.
+#   * INCOMPLETE — a DEAD feature can escape it. False PASSes are permitted, and
+#     DECLARED on the guard's own second success line.
+#
+# The asymmetry is deliberate: a false PASS leaves a dead flag in place, which is merely
+# the status quo, while a false FAIL reds correct input and turns this into the guard
+# everyone waives. Three review rounds asked for scope-aware name resolution,
+# build-script module-graph traversal and macro expansion — in bash — which is the
+# unbounded-parsing problem this repo has already paid for and REMOVED a guard over
+# (#1712 deleted `pub-surface`'s rustdoc/public-API half precisely because a scanner
+# that must find declarations anywhere in arbitrary source cannot abstain). So the
+# remaining cases are resolved permissively and STATED, not implemented.
+#
+# THE DECLARED ESCAPE ROUTES (each pinned by a fixture in
+# scripts/tests/test_features_load_bearing_guard.sh, because a declaration nobody tests
+# is a comment that rots):
+#
+#   * cfgs inside an UNEXPANDED MACRO BODY — a `#[cfg(feature = "x")]` in a
+#     `macro_rules!` body is read as tokens, not expanded, so it credits `x` even where
+#     no expansion applies it in the declaring package.
+#   * ORPHAN `.rs` files under a target's source directory — one no `mod` chain reaches
+#     from the target root is scanned as if compiled, so a cfg gate in dead code credits
+#     its feature. Deciding it means resolving the module graph.
+#   * PACKAGE-WIDE build-script env scanning — a member with a build script has EVERY
+#     `.rs` file in its package directory scanned for `CARGO_FEATURE_*`, because a build
+#     script reaches helper modules through `mod`, `#[path]` and `include!`. Missing such
+#     a read would report a live feature dead, which the contract forbids.
+#   * FILE-WIDE env-import detection — a `use std::env;` anywhere in a file lets a bare
+#     `env::var("CARGO_FEATURE_X")` elsewhere in that file credit a feature, even when
+#     the call actually resolves to a local module of that name. Scope-aware name
+#     resolution is out of bounds.
+#   * INDIRECTLY redundant dependency-feature edges — `dep/x` where the declaration
+#     enables some feature that itself enables `x`. Deciding it needs the dependency's
+#     own feature table, which `--no-deps` does not carry for external crates.
+#
+# ONE SOUNDNESS LIMIT REMAINS, and it is declared as a LIMIT rather than an escape route
+# because it breaks the other way: a cfg whose feature NAME is produced by MACRO
+# EXPANSION (assembled by `concat!`, or emitted by an attribute macro) has no textual
+# `feature = "NAME"` to find, so such a feature would be reported DEAD. Nothing in this
+# workspace is written that way — 59/59 features are credited without it — and closing
+# it means expansion, which is out of bounds. It is stated on the success line so a
+# future false FAIL of that shape is diagnosable rather than mysterious.
 #
 # # FAIL-CLOSED, ALWAYS
 #
@@ -325,12 +344,24 @@ EXEMPT_FEATURES = {
 #   node_modules/ — vendored JS.
 SKIP_DIR_NAMES = {"target", ".git", "node_modules", "fuzz"}
 
-# THE DECLARED RESIDUAL, printed on every success. See the script header: this scan is
-# LEXICAL, and two things it cannot decide are named rather than implied away.
-RESIDUAL_NOTE = ("cfg-site detection: lexical, NON-EXHAUSTIVE "
-                 "(a cfg produced by MACRO EXPANSION is not seen; an ORPHAN .rs file under a "
-                 "target's source dir, not reachable from the target root, is scanned as if "
-                 "compiled; an INDIRECTLY redundant dependency-feature edge is not detected)")
+# THE CONTRACT, printed on every success — stated first, with its known instances under
+# it, because a growing list of caveats reads as an apology while a stated contract is
+# something a reader can act on. See the script header for the reasoning.
+#
+# SOUND-BY-DESIGN: wherever this lexical scan cannot decide, it resolves toward
+# CREDITING, so it does not report a live feature dead. INCOMPLETE: a dead feature can
+# therefore escape. That asymmetry is deliberate — a false PASS leaves a dead flag in
+# place, which is the status quo, while a false FAIL reds correct input and makes this
+# the guard everyone waives.
+CONTRACT_LINE = (
+    "CONTRACT: SOUND-BY-DESIGN (every ambiguity resolves toward CREDITING, so a live "
+    "feature is not reported dead) and INCOMPLETE (a dead feature can escape). Escape "
+    "routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target source "
+    "dir; package-wide (not module-graph) build-script env scanning; file-wide (not "
+    "scope-aware) env-import detection; indirectly redundant dependency edges. One "
+    "soundness LIMIT, not an escape route: a cfg whose feature name is produced by MACRO "
+    "EXPANSION is not seen at all."
+)
 
 STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
 IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -708,6 +739,8 @@ if not members:
 #    per-target): credit is withheld only when EVERY one of them already enables the
 #    feature, which is the direction that cannot invent a false FAIL.
 # ---------------------------------------------------------------------------
+DIR_TO_MEMBER = {rec["dir"]: name for name, rec in members.items()}
+
 for name, rec in members.items():
     keys = {}
     for dep in rec["dependencies"]:
@@ -715,7 +748,15 @@ for name, rec in members.items():
         if not dname:
             fail("member '%s' has a dependency with no name in cargo metadata. Refusing to resolve feature edges against an unreadable dependency table." % name)
         key = dep.get("rename") or dname
-        is_local = dep.get("path") is not None or dep.get("source") is None
+        # A dependency is THIS workspace's member only when its resolved PATH is that
+        # member's package directory. Matching by PACKAGE NAME (roborev job 55/57) sends
+        # a non-member path dependency that happens to share a member's name into the
+        # WRONG feature table: the forwarded feature is then looked up in the member,
+        # and a feature that exists only in the real dependency is reported as
+        # non-existent — a refusal on correct input, i.e. a false FAIL. The path is
+        # canonical and bounded, so this is resolved properly rather than declared.
+        dep_path = dep.get("path")
+        dep_member = DIR_TO_MEMBER.get(os.path.realpath(dep_path)) if dep_path else None
         dfeats = dep.get("features")
         if dfeats is None:
             dfeats = []
@@ -730,8 +771,8 @@ for name, rec in members.items():
             "features": set(dfeats),
             "default": bool(dep.get("uses_default_features", True)),
         })
-        if is_local and dname in members:
-            entry["member"] = dname
+        if dep_member is not None:
+            entry["member"] = dep_member
     rec["dep_keys"] = keys
 
 
@@ -774,7 +815,16 @@ def edge_is_redundant(info, dep_feature):
 TREELESS_KINDS = {"custom-build"}
 exact_owners = {}
 tree_owners = []
-buildscript_files = {}
+# Members that HAVE a build script. Its `CARGO_FEATURE_*` reads are looked for in EVERY
+# .rs file of that member's package directory, not only in build.rs (roborev job 57):
+# a build script reaches helper modules through `mod`, `#[path]` and `include!`, and
+# resolving those means implementing Rust's module graph in bash — the unbounded parsing
+# problem #1712 removed a guard over. Missing such a read reports a LIVE feature dead,
+# which the contract forbids, while over-crediting can only let a dead feature escape,
+# which the contract allows. So the over-permissive route is taken deliberately and is
+# named in the CONTRACT line as `package-wide (not module-graph) build-script env
+# scanning`.
+buildscript_members = set()
 
 for name, rec in members.items():
     for target in rec["targets"]:
@@ -785,7 +835,7 @@ for name, rec in members.items():
         sp = os.path.realpath(sp)
         exact_owners.setdefault(sp, set()).add(name)
         if set(kinds) & TREELESS_KINDS:
-            buildscript_files.setdefault(sp, set()).add(name)
+            buildscript_members.add(name)
             continue
         tree_owners.append((os.path.dirname(sp), name))
 
@@ -798,6 +848,18 @@ def deepest_member_dir(path):
         if path == pkg_dir or path.startswith(pkg_dir + os.sep):
             return pkg_dir, name
     return None, None
+
+
+def buildscript_owners_of(path):
+    """Members WITH a build script whose package directory contains this file."""
+    if not buildscript_members:
+        return ()
+    out = []
+    for name in buildscript_members:
+        d = members[name]["dir"]
+        if path == d or path.startswith(d + os.sep):
+            out.append(name)
+    return out
 
 
 def owners_of(path):
@@ -824,10 +886,12 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
             continue
         full = os.path.realpath(os.path.join(dirpath, fname))
         owners = owners_of(full)
-        if not owners:
-            # Not a source file of any workspace-member target: a non-member crate's
-            # source (the measurement harnesses under docs/reports/**), or a stray .rs
-            # no target reaches. Nothing to certify.
+        bs_owners = buildscript_owners_of(full)
+        if not owners and not bs_owners:
+            # Not a source file of any workspace-member target and not inside a
+            # build-script package: a non-member crate's source (the measurement
+            # harnesses under docs/reports/**), or a stray .rs no target reaches.
+            # Nothing to certify.
             continue
         try:
             with open(full, "r", encoding="utf-8", errors="replace") as fh:
@@ -838,20 +902,19 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         code, strings = lex(text)
         rel = os.path.relpath(full, REPO_ROOT)
         sites = list(cfg_feature_sites(code, strings))
-        env_sites = []
-        if full in buildscript_files:
-            env_sites = list(build_script_env_features(code, strings))
         for owner in owners:
             record = members[owner]["refsites"]
             for feat, off in sites:
                 if feat not in record:
                     record[feat] = "%s:%d" % (rel, code.count("\n", 0, off) + 1)
-            if not env_sites or owner not in buildscript_files.get(full, ()):
-                continue
-            for env, off in env_sites:
-                for feat in members[owner]["features"]:
-                    if cargo_feature_env_name(feat) == env and feat not in record:
-                        record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, code.count("\n", 0, off) + 1, env)
+        if bs_owners:
+            env_sites = list(build_script_env_features(code, strings))
+            for owner in bs_owners:
+                record = members[owner]["refsites"]
+                for env, off in env_sites:
+                    for feat in members[owner]["features"]:
+                        if cargo_feature_env_name(feat) == env and feat not in record:
+                            record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, code.count("\n", 0, off) + 1, env)
 
 if scanned_files == 0:
     fail("NOT ONE Rust source file of a workspace-member target could be found, so no reference site could possibly have been observed. A positive verdict requires an affirmative measurement; refusing to pass over an empty scan.")
@@ -1089,9 +1152,10 @@ if dead:
 # scripts/agent-gate.sh matches this line WHOLE.
 print(
     "features-load-bearing: %d/%d declared features load-bearing across %d workspace manifests "
-    "(%d exempt: %s); %d Rust source files scanned for reference sites; %s"
-    % (asserted, asserted, len(members), exempt_count, ", ".join(sorted(EXEMPT_FEATURES)), scanned_files, RESIDUAL_NOTE)
+    "(%d exempt: %s); %d Rust source files scanned for reference sites"
+    % (asserted, asserted, len(members), exempt_count, ", ".join(sorted(EXEMPT_FEATURES)), scanned_files)
 )
+print("features-load-bearing: " + CONTRACT_LINE)
 PYEOF
 
 if ! python3 "$READER" "$REPO_ROOT" "$METADATA"; then

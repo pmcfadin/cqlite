@@ -14846,7 +14846,21 @@ run_features_load_bearing() {
     # NONZERO: "0/0 features load-bearing across 0 manifests; 0 files scanned" is the
     # vacuous measurement itself.
     local measured
-    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites; cfg-site detection: lexical, NON-EXHAUSTIVE \(.+\)$' "$log" || true)"
+    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites$' "$log" || true)"
+    # THE CONTRACT LINE IS REQUIRED TOO (#1698, roborev job 57). The guard is SOUND-BY-DESIGN
+    # and INCOMPLETE, and it says so on its own second success line, enumerating the escape
+    # routes it knows about. A guard whose success text quietly stopped declaring its own
+    # incompleteness would be implying coverage it does not have, so a measurement without a
+    # contract line is NOT a PASS here.
+    local contract
+    contract="$(grep -m1 -E '^features-load-bearing: CONTRACT: SOUND-BY-DESIGN \(.+\) and INCOMPLETE \(.+\)\. Escape routes: .+\. One soundness LIMIT, not an escape route: .+$' "$log" || true)"
+    if [ -z "$contract" ]; then
+      echo "❌ [$name] the guard printed its measurement but NOT its CONTRACT line:" >&2
+      echo "    expected \`features-load-bearing: CONTRACT: SOUND-BY-DESIGN (…) and INCOMPLETE (…). Escape routes: …. One soundness LIMIT, not an escape route: …\`" >&2
+      echo "    That line is where this guard declares what it cannot decide; without it a" >&2
+      echo "    green implies coverage the guard does not have. Refusing to record PASS." >&2
+      measured=""
+    fi
     if [ -n "$measured" ]; then
       # THE SHAPE IS NOT ENOUGH — THE COUNTS MUST COHERE. The guard asserts
       # load-bearing == asserted before printing, so a line whose numerator differs
