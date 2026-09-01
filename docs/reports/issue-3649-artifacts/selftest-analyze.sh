@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=283
+CASE_FLOOR=288
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2452,12 +2452,87 @@ PYINNER
     fi
   fi
 
+  # THE SENSITIVITY CONTROL, RUN FOR REAL. Two individually-correct rules --
+  # "refuse cross-arm config differences" and "asymmetric per-arm flags require
+  # --control" -- made the runbook's own positive control unrunnable, and nothing
+  # short of executing it would have shown that. This is the case that would have
+  # caught it.
+  run_e2e "$TMP/e2e-ctl" --ramp 1 --no-prewarm --control sensitivity     --head-server-extra '--max-batch-bytes 1'
+  if [ "$RC" = "0" ]; then
+    ok "the sensitivity control -- deliberately asymmetric -- completes a session"
+  else
+    bad "the sensitivity control could not run (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '
+' ' ')"
+  fi
+  CTL_DIR="$(find "$TMP/e2e-ctl" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$CTL_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --single-stream "$CTL_DIR/manifest.json"       > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token single-stream)" != "UNMEASURED" ]; then
+      ok "the analyzer ANALYSES the sensitivity control instead of refusing it"
+    else
+      bad "the analyzer refused the sensitivity control: $(grep -m1 '^AB-3649: cause single-stream' "$TMP/err.txt")"
+    fi
+    if grep -q '^AB-3649: verdict-detail single-stream CONTROL the two arms were served under DIFFERENT ' "$TMP/out.txt"; then
+      ok "...and still discloses that the arms were served differently"
+    else
+      bad "the control's asymmetry was not disclosed"
+    fi
+    # EXACTLY the declared difference, and nothing else: an observed value that
+    # does not match what the manifest declared is still a refusal.
+    python3 - "$CTL_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["expected_server_config"]["head"]["max_batch_bytes_observed"] = "999"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+    set +e
+    python3 "$ANALYZER" --single-stream "$CTL_DIR/manifest.json"       > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if grep -q '^AB-3649: cause single-stream server-config-unexpected$' "$TMP/err.txt"; then
+      ok "a control whose arms differ in a way the manifest did NOT declare is refused"
+    else
+      bad "an undeclared per-arm difference was permitted under a control label"
+    fi
+  fi
+
   # The prewarm path is a separate branch and has its own way to be wrong.
   run_e2e "$TMP/e2e-warm" --ramp 1
   if [ "$RC" = "0" ]; then
     ok "a session with the warming pass enabled also completes"
   else
     bad "the prewarm branch failed (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+
+  # FINDING 3: the manifest must record what HAPPENED, not what was asked for.
+  run_e2e "$TMP/e2e-cold" --ramp 1 --temperature warm
+  WARM_DIR="$(find "$TMP/e2e-warm" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$WARM_DIR" ] && python3 - "$WARM_DIR" <<'PYINNER'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+manifest = json.load(open(os.path.join(root, "manifest.json"), encoding="utf-8"))
+recorded = manifest["workload"]["prewarm"]
+happened = any(
+    name.endswith(".prewarm.log")
+    for name in os.listdir(os.path.join(root, "logs"))
+)
+raise SystemExit(0 if recorded == happened else 1)
+PYINNER
+  then
+    ok "the manifest's prewarm flag matches whether a warming pass actually ran"
+  else
+    bad "the manifest records a prewarm value the session did not perform"
   fi
 
   # No server may outlive the session: the reap path runs for real here.

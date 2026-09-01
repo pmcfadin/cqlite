@@ -643,12 +643,26 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     expected = manifest.get("expected_server_config")
     expected = expected if isinstance(expected, dict) else {}
 
-    def declared(arm, field):
+    def raw_declared(arm, field):
+        """What the manifest says this arm was configured with, verbatim.
+
+        `NOT-REQUESTED` is a REAL value here, meaning "the server default" -- and
+        it is exactly the base arm's entry in the sensitivity control, where only
+        the head arm overrides `--max-batch-bytes`. Collapsing it to "unknown"
+        made that control's difference undeclared, which is the collision this
+        whole block exists to resolve.
+        """
         arm_expected = expected.get(arm)
         if not isinstance(arm_expected, dict):
             return None
         value = arm_expected.get(field)
-        return None if value in (None, "", "NOT-REQUESTED") else str(value)
+        return None if value in (None, "") else str(value)
+
+    def declared(arm, field):
+        """The value an OBSERVATION must equal, or None when the driver could not
+        know it -- a server default is not something this session chose."""
+        value = raw_declared(arm, field)
+        return None if value == "NOT-REQUESTED" else value
 
     for name, corroboration in sorted(readbacks.items()):
         by_arm = {}
@@ -680,9 +694,9 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
                 )
         if not corroboration.disagrees:
             continue
-        base_want, head_want = declared("base", name), declared("head", name)
+        base_raw, head_raw = raw_declared("base", name), raw_declared("head", name)
         difference_declared = (
-            base_want is not None and head_want is not None and base_want != head_want
+            base_raw is not None and head_raw is not None and base_raw != head_raw
         )
         if control and difference_declared:
             continue
