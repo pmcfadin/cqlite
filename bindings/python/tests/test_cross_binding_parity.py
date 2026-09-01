@@ -92,7 +92,9 @@ REQUIRE_NODE_ENV = "CQLITE_PARITY_REQUIRE_NODE"
 # rationale in a test log is worse than none, because it is what stops the next
 # person looking. Full text: bindings/parity/README.md.
 DECLARED_GAPS: Tuple[str, ...] = (
-    "tuple vs list is UNDETECTABLE here: the node and cli legs both emit a plain array.",
+    "tuple vs list is UNDETECTABLE here: the node and cli legs both emit a plain array — and "
+    "the CLI leg cannot tell set from list either, so F4's type-specific container check is "
+    "enforced on the python and node legs ONLY.",
     "no `varint` column exists in the committed schema corpus; the rule is pinned by "
     "canonical-vectors.json alone.",
     "UDT columns are REFUSED by the canonicalizer, not compared; no fixture uses one.",

@@ -16,7 +16,7 @@ surface-layer sibling of the read-path differential
 | `fixtures.json` | The fixtures: query, schema, **declared CQL column types**, and an (empty) `known_divergence` key |
 | `canonical.py` | Canonical form — Python + CLI adapters |
 | `canonical.mjs` | Canonical form — Node adapter (independent twin of `canonical.py`) |
-| `canonical-vectors.json` | Differential pin: `vectors` both canonicalizers must reproduce exactly, `rows` for the row-building path (hostile column names), `errors` both must REFUSE, and the `floor` block that stops any of them shrinking |
+| `canonical-vectors.json` | Differential pin: `vectors` both canonicalizers must reproduce exactly, `rows` for the row-building path (hostile column names), `errors` both must REFUSE, and the `floor` block that stops any of them shrinking. `check_schema`/`checkSchema` require every case to carry every field before any sweep runs |
 | `vectors.py` / `vectors.mjs` | Vector runners for each language (`vectors.mjs --emit <path>` writes the JS canonical values THROUGH `JSON.stringify`) |
 | `driver.py` / `driver.mjs` | Per-leg runners; write `out/py.<fixture>.json` / `out/node.<fixture>.json` |
 | `out/` | Artifacts (gitignored) |
@@ -105,7 +105,8 @@ rationale in a test log is worse than none, because it is what stops the next
 person looking. `test_declared_gaps_are_stated_in_full` keeps the count and the
 README list in step.
 
-1. **Tuple vs list is undetectable.** The issue asked for `tuple` to
+1. **Tuple vs list is undetectable — and on the CLI leg, so is set vs list.**
+   The issue asked for `tuple` to
    canonicalize as `{"__tuple__": [...]}` so it could not be confused with a
    list. That tag is **unrecoverable on two of the three legs**: the Node
    binding emits a plain `Array` (`bindings/node/src/value.rs:290`) and the CLI
@@ -113,6 +114,10 @@ README list in step.
    has a distinct `tuple`. Tagging Python alone would make every tuple column
    diverge by construction. So a tuple canonicalizes to a **plain array on all
    three legs**, and **this harness cannot detect a tuple/list confusion.**
+   The same limit is why F4's type-specific container check (see below) is
+   enforced on the python and node legs only: `cqlite-cli`'s JSON writer
+   renders `list`, `set` and `tuple` all as a bare array, so that leg cannot
+   distinguish any of them.
 2. **No `varint` fixture exists.** No committed schema under `test-data/schemas/`
    declares a `varint` column (the only occurrence of the word is a comment in
    `cql-type-parity.cql`). The issue's requested
@@ -165,6 +170,90 @@ lands". **#1450 is landed**, and all three legs were measured to agree exactly
 on both (`duration_val` = `{0, 0, 46702000000000}`, `work_time` =
 `4325394017000`), so nothing is allowlisted. **A real divergence is a bug to
 report, not an entry to add.**
+
+## Containers are TYPE-SPECIFIC, per leg
+
+A `list`, a `set` and a `tuple` are **distinguishable public API shapes**, and
+a binding regression that returns an `Array` for a declared `set<text>` (or a
+`Set` for a `list<int>`) is exactly the cross-binding drift this harness
+exists to catch. The generic sequence adapters used to accept all three
+interchangeably and normalize the difference away, so the regression PASSED.
+
+| declared kind | python leg | node leg | cli leg |
+|---|---|---|---|
+| `list<T>` | `list` | `Array` | JSON array |
+| `set<T>` | `frozenset` / `set` | `Set` | JSON array |
+| `tuple<...>` | `tuple` | `Array` (declared gap 1) | JSON array |
+| `map<K,V>` | `dict` | `Map` | array of `{key,value}` |
+
+A mismatch is refused with a message naming the declared kind, the expected
+container and what actually arrived (`declared set<> expects a JavaScript Set,
+got Array`).
+
+**The CLI leg cannot participate**, and that is declared rather than papered
+over: `cqlite-cli/src/output/json.rs` renders list, set and tuple all as a bare
+JSON array, so on that leg the check is only "is it an array". The enforcement
+is on the python and node legs.
+
+### Three intentional projections, each measured at the binding's source
+
+1. **`SET<FROZEN<UDT>>` is a Python `list`** (#804/#3500).
+   `bindings/python/src/value.rs::set_to_py` branches on
+   `items.iter().any(contains_udt)` — **UDT containment, not unhashability**.
+   Currently unreachable here (`parse_type` refuses UDT names), so the
+   allowance is implemented and tested (`test_set_of_udt_projection_is_allowed`
+   builds the type tree directly) purely so that adding UDT support later
+   cannot turn a correct binding red.
+2. **Hashable positions project every container.** Inside a `set` element or a
+   `map` KEY, `bindings/python/src/value_hashable.rs::value_to_hashable_key`
+   turns `list`/`tuple` into a Python `tuple`, keeps `set` as a `frozenset`,
+   and turns `map` into a `tuple` of 2-`tuple`s. So a `set<frozen<list<int>>>`
+   is a `frozenset` **of tuples**, and a context-free strict check would red on
+   correct input. `_canon` therefore carries a `hashable` flag, set when
+   descending into a set element or a map key and never cleared (that function
+   recurses into itself). A map **value** is *not* a hashable position
+   (`map_to_py` projects only the key), and that asymmetry has its own vector.
+   *This projection was not anticipated when the fix was requested; it was
+   found by the check reddening a vector of ours that was itself wrong about
+   the binding, and the vector was corrected against the source.*
+3. **Node cannot distinguish `tuple` from `list`** — both are `Array`
+   (`bindings/node/src/value.rs:290`). Kept a **declared gap**, not turned into
+   a refusal. The Node binding has no hashable projection at all: measured,
+   `set_to_js_set` / `map_to_js_map` / `list_to_array` recurse through
+   `value_to_napi` unconditionally, which is why only the Python adapter
+   carries the flag.
+
+Every accepted shape and every refused shape has a vector
+(`set_of_frozen_set`, `map_key_frozen_list`, `map_key_frozen_map`,
+`map_value_frozen_list_is_not_projected`, `tuple_containing_a_list`,
+`list_of_frozen_set`; refusals `python_list_for_set`, `python_tuple_for_list`,
+`node_array_for_set`, `node_set_for_list`, `node_map_for_set`,
+`node_object_for_map`, …). Verified by planting: swapping a `Set` for an
+`Array` in a node vector reds `vectors.mjs` naming the kind; the mirror swap on
+the python leg reds `vectors.py`.
+
+## Presence is required — no permissive defaults
+
+A `.get(key, default)` in Python or a `|| []` / `?? 0` in JS reads a
+**three-valued** signal (present-with-a-value / present-and-null / **missing**)
+**two-valued**, and always picks the permissive branch. Accidentally delete a
+vector's `cli` key and that leg was silently skipped — the differential pin
+stayed green over a shrunken subject set. The case floors count CASES; they
+could not see an incomplete case.
+
+Both runners now index **directly** everywhere, and `check_schema` /
+`checkSchema` (twins over the same file, run BEFORE any sweep) turn the
+resulting error into a named message: every top-level section present; every
+`floor` key present; every vector carrying `name`/`type`/`canonical` **and all
+three leg keys**; every row case the same plus `columns`; every error case
+`name`/`stage`/`expect`/`type`, with a **non-empty** `legs` when
+`stage=canonicalize` (an empty one would verify nothing and still count).
+`fixtures.json` gets the same treatment in both drivers.
+
+**A leg is skipped only by an EXPLICIT `null`**; an absent key is a named
+refusal. Counts are reported **affirmatively** — `0 RECOGNISED leg-skips`,
+never a bare `0` — because a bare zero in a run log reads as a verified
+all-clear from a scan that may never have run.
 
 ## Case floors — the subject set cannot shrink to nothing
 
