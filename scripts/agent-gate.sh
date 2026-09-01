@@ -14698,15 +14698,40 @@ EOF
   # class, and section 19 of test_agent_gate_summary.sh lints this function for exactly it.
   # The stripped copy goes to a file and `grep -c` consumes it whole: an AFFIRMATIVE count,
   # which is what a permissive branch must key on.
-  local _fx_blind="" _fx_blind_n=0 _dsrc _fx_rc _fx_fatal="" _fx_cnt _fx_strip _fx_base
+  local _fx_blind="" _fx_blind_n=0 _dsrc _fx_rc _fx_fatal="" _fx_free="" _fx_rrc _fx_cnt _fx_strip _fx_base
   local _fx_lookup='(^|[^A-Za-z0-9_])(env::)?var(_os)?[[:space:]]*\([[:space:]]*"CQLITE_REQUIRE_FIXTURES"'
   while IFS= read -r _dsrc; do
     [ -n "$_dsrc" ] || continue
     _fx_base=$(basename "${_dsrc%.rs}")
     _fx_strip="$LOG_DIR/fx-nocomment-$_fx_base.rs"
     # A failed strip is UNMEASURED, never "no match": the same three-valued rule as the scan.
-    if ! sed 's|//.*||' "$_dsrc" > "$_fx_strip" 2>/dev/null; then
+    # BOTH comment forms are stripped (roborev round 5): `//` tails via sed, and `/* … */`
+    # blocks — which may SPAN LINES and so cannot be done with a line-oriented sed — via the
+    # same python3 the target derivation above already depends on. A block-commented lookup
+    # was a measured false-accept of the line-only strip.
+    if ! sed 's|//.*||' "$_dsrc" 2>/dev/null \
+         | python3 -c 'import re,sys; sys.stdout.write(re.sub(r"/\*.*?\*/", " ", sys.stdin.read(), flags=re.S))' \
+         > "$_fx_strip" 2>/dev/null; then
       _fx_fatal="$_fx_fatal $_fx_base(comment-strip failed)"
+      continue
+    fi
+    # FIXTURE-FREE TARGETS ARE EXEMPT, AND THE TEST IS DERIVED (roborev round 5, F2). Without
+    # this, a NEW gated target that reads no corpus at all would be classified fixture-blind
+    # and RED the full gate — a false red on correct code, which is the guard agents learn to
+    # waive, and it would silently break the automatic-enrolment property this lane claims
+    # ("a new gated file is picked up with NO gate edit"). A target that never references
+    # CQLITE_DATASETS_ROOT consumes no corpus, so the strict flag is meaningless for it and
+    # demanding it would be demanding meaningless fixture handling. LATENT when found
+    # (measured: all 12 currently derived targets reference CQLITE_DATASETS_ROOT, counts 2-10),
+    # so this changes nothing today and closes the false-red for the next target.
+    _fx_reads=0
+    grep -qE 'CQLITE_DATASETS_ROOT' "$_fx_strip" 2>/dev/null && _fx_reads=1 || _fx_rrc=$?
+    if [ "${_fx_rrc:-1}" -ge 2 ]; then
+      _fx_fatal="$_fx_fatal $_fx_base(corpus-reference scan exit ${_fx_rrc})"
+      continue
+    fi
+    if [ "$_fx_reads" -eq 0 ]; then
+      _fx_free="$_fx_free $_fx_base"
       continue
     fi
     _fx_rc=0
@@ -14741,7 +14766,8 @@ EOF
     census+=("       (the full gate) this is a FAIL, not a note: a target that ignores the flag")
     census+=("       can return successfully having compared nothing:$_fx_blind")
   else
-    census+=("       every derived target performs an env lookup of CQLITE_REQUIRE_FIXTURES — the")
+    census+=("       every CORPUS-READING derived target performs an env lookup of")
+    census+=("       CQLITE_REQUIRE_FIXTURES — the")
     census+=("       variable this lane exports, and deliberately the only one accepted here:")
     census+=("       0 RECOGNISED gaps")
     census+=("       SCOPE OF THAT CLAIM (R3-F1): it is STRUCTURAL. It proves an executable")
@@ -14752,6 +14778,14 @@ EOF
     census+=("       distinguish a wholly fixture-FREE target from a fixture-blind one — which")
     census+=("       no outcome-based probe can decide either (see the rejected-probe note in")
     census+=("       this function). RECOGNISED limitation, declared rather than implied.")
+  fi
+  if [ -n "$_fx_free" ]; then
+    census+=("       FIXTURE-FREE (exempt, #3725/R5-F2): reference no CQLITE_DATASETS_ROOT, so they")
+    census+=("       consume no corpus and the strict flag is meaningless for them — demanding it")
+    census+=("       would be a false red on correct code:$_fx_free")
+  else
+    census+=("       fixture-free exemptions: 0 RECOGNISED — every derived target references")
+    census+=("       CQLITE_DATASETS_ROOT, so every one is held to the strict-flag requirement")
   fi
   census+=("       WHICH corpus is missing is named BY THE TARGET, not by this lane: each strict")
   census+=("       failure prints the KEYSPACE and TABLE it could not open (test_types,")
