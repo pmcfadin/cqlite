@@ -405,7 +405,8 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   so the block would have emitted an affirmative `0 RECOGNISED` on exactly the path the line
   was added for. A **false clean reading**, and this repo's standing anti-pattern (a positive
   verdict keyed on the ABSENCE of a bad signal in a subject set that cannot contain it) —
-  strictly worse than the exemption it replaced. So the subject set is now **TWO KINDS**:
+  strictly worse than the exemption it replaced. So the subject set went to **TWO KINDS**
+  (a THIRD followed one round later — see the boundary paragraph below):
   non-PASS component logs, **plus the gate's own capture-failure text**, captured **IN MEMORY**
   (`DISK_MEM_SUBJECTS`) and handed back on `_tree_identity`'s rc-2 channel, which is disjoint
   from the identity channel **by return code**. In memory and never a spill file, for the same
@@ -457,7 +458,41 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   renderer; row sites map to their emit site and are DEDUPED), so a third renderer is recognised
   with no edit to the suite — plus a permanent control planting into the SECOND renderer
   specifically, because the two pre-existing controls both plant into the `_fm_summary_line`
-  family and neither can fail if the derivation goes blind again. Capacity management (a
+  family and neither can fail if the derivation goes blind again.
+  **THIRD INSTANCE, SO THE SUBJECT SET IS NOW *DECLARED* RATHER THAN CARVED AGAIN (roborev job
+  304).** `record_result` writes `$LOG_DIR/<component>.result`; under ENOSPC that write fails,
+  its error text goes to **gate STDERR** — neither a component log nor an in-memory subject —
+  and the parent's fail-closed guard then synthesises `FAIL 0` for a component whose **own log
+  is CLEAN**, because it may genuinely have succeeded and died on the WRITE. Both channels
+  empty ⇒ an affirmative `0 RECOGNISED`: the identical false-clean shape to the tree-capture
+  case, one writer over. Three consecutive rounds each found a **different** unwatched writer,
+  which is the standing signal to CONSOLIDATE and STATE THE BOUNDARY rather than patch the next
+  instance. So: **(1)** a `.result` verdict the gate could not READ — **absent, unreadable, or
+  MALFORMED** (the STATUS token checked against the closed `PASS|FAIL|SKIP` set and the seconds
+  field against an integer; an ENOSPC write typically leaves the file CREATED and EMPTY) — is a
+  **THIRD kind of subject** (`DISK_UNREAD_VERDICTS`) contributing to `UNMEASURED` and **never**
+  to a clean reading, *whatever caused it* — strictly more general than ENOSPC, and the same
+  rule as always (key the clean branch on the affirmative "every subject was READ"). **Every**
+  `.result` reader routes through the ONE reader `_disk_verdict_read`, pinned structurally: a
+  private two-field verdict read anywhere else records nothing and REDS the suite. **The
+  UNMEASURED arm now takes precedence over "no non-PASS component to scan"**, and that ORDER is
+  load-bearing on a reachable shape — a `.result` reading `PASS abc` records PASS in the table
+  while its verdict was not fully read, so the old order rendered the affirmative clean reading
+  over an unmeasured subject on a run with nothing else wrong (found by MUTATION: removing the
+  reorder left every other case in the suite green). **(2)** `record_result` captures its own
+  write failure **IN MEMORY** on the existing `_disk_note_capture_failure` channel — never a
+  spill file, which under ENOSPC is what cannot be written. **THAT NOTE REACHES THE PARENT ONLY
+  FROM THE PARENT SHELL**: the serial MAIN lane and every `--lite`/`--delta` component. A
+  SIDE-lane component runs in a backgrounded subshell (#1737) where the append is lost, and the
+  marker-FILE idiom used elsewhere is unavailable **by construction** under ENOSPC — that path
+  is covered by (1) instead, the missing/malformed `.result` rendering UNMEASURED. Partial and
+  declared beats a false clean. **(3)** The emitted `scan:` field now declares its **SUBJECT
+  set** exactly as it declares its **signature set** — the three kinds, plus the gate-internal
+  writers **known to sit outside** them (`_fm_*` sidecars, `node-bindings.leak-lane`,
+  `summary-integrity.fail`, the heartbeat file), whose ENOSPC failures are **DECLARED false
+  negatives**. `NON-EXHAUSTIVE by construction ON BOTH AXES`. The transferable rule: **when a
+  diagnostic's subject set has been extended three times, publish the boundary — a marker that
+  names its own blind spots is worth more than one implying a completeness it does not have.** Capacity management (a
   disk-aware slot cap, per-lane budgets, a shared `CARGO_TARGET_DIR`) is **#3434/#3763/#3755**,
   not here. Per-worktree `target/` is **~100–145GB** for a full gate, not the ~25–30GB
   `docs/development/gate-ops.md` claimed until now.

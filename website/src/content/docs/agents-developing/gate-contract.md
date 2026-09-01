@@ -782,8 +782,9 @@ Properties worth knowing:
   keyed on the absence of a bad signal in a set that cannot hold it. Strictly worse than the
   exemption it replaced. When you extend a diagnostic to a new failure path, ask whether the
   evidence can **physically land** in the subject set — not merely whether the line is emitted.
-- **So the subject set is TWO KINDS: non-PASS component logs, plus the gate's own
-  capture-failure text, held IN MEMORY.** `_tree_identity` captures the stderr of its manifest
+- **So the subject set went to TWO KINDS: non-PASS component logs, plus the gate's own
+  capture-failure text, held IN MEMORY** (a THIRD followed one round later — see the
+  declared-boundary bullet below). `_tree_identity` captures the stderr of its manifest
   write (and of the batched `git hash-object`) and hands it back on the **rc-2 channel**, which
   is disjoint from the identity channel **by return code** — a channel the text cannot
   influence. Each capture-failure site records it as a **named** subject
@@ -807,6 +808,48 @@ Properties worth knowing:
   **declares its skip** and a host-independent injected case (with a negative control) carries
   the property everywhere.
 
+- **THIRD INSTANCE ⇒ THE SUBJECT SET IS NOW *DECLARED*, NOT CARVED AGAIN** (roborev job 304).
+  `record_result` writes `$LOG_DIR/<component>.result`. Under ENOSPC that write fails, its
+  error text goes to **gate stderr** — neither a component log nor an in-memory subject — and
+  the parent's fail-closed guard then synthesises `FAIL 0` for a component whose **own log is
+  clean**, because it may genuinely have succeeded and died on the *write*. Both channels
+  empty ⇒ an affirmative `0 RECOGNISED`, the same false-clean shape as the tree-capture case
+  one writer over. Three consecutive review rounds each found a **different** unwatched
+  gate-internal writer, and the standing ruling on a repeatedly-carved guard is to
+  **consolidate and state the boundary** rather than patch the next instance. Three parts:
+  1. **A verdict the gate could not READ is an UNMEASURED subject, whatever caused it.**
+     Absent, unreadable, or **malformed** — the STATUS token validated against the closed
+     `PASS|FAIL|SKIP` set and the seconds field against an integer, because an ENOSPC write
+     typically leaves the file *created and empty* (open+truncate succeeds, the write does
+     not). Recorded in `DISK_UNREAD_VERDICTS`, counted in the census, and it can never
+     contribute to a clean reading. Strictly more general than ENOSPC. **Every `.result`
+     reader routes through the one reader `_disk_verdict_read`** — a private two-field verdict
+     read anywhere else records nothing, and the suite REDS on one structurally. The
+     `UNMEASURED` arm now takes **precedence over** *"no non-PASS component to scan"*, and that
+     order is load-bearing on a reachable shape: a `.result` reading `PASS abc` records PASS in
+     the table while its verdict was not fully read, so the old order rendered the affirmative
+     clean reading over an unmeasured subject on a run with nothing else wrong. Found by
+     **mutation** — removing the reorder left every other case in the suite green.
+  2. **`record_result` captures its own write failure IN MEMORY**, on the existing
+     `_disk_note_capture_failure` channel — never a spill file, which under ENOSPC is exactly
+     what cannot be written. **That note reaches the parent only from the parent shell**: the
+     serial MAIN lane and every `--lite`/`--delta` component. A SIDE-lane component runs in a
+     backgrounded subshell (#1737) where the append is lost, and the marker-*file* idiom used
+     elsewhere for that boundary is unavailable **by construction** under ENOSPC. That path is
+     covered by (1) instead — the missing or malformed `.result` renders UNMEASURED naming the
+     component. Partial and declared beats a false clean.
+  3. **The emitted `scan:` field declares its SUBJECT set as well as its signature set**: the
+     three kinds — (a) logs of non-PASS components, (b) the gate's own in-memory
+     capture-failure subjects, (c) components whose `.result` verdict could not be read — plus
+     the gate-internal writers **known to sit outside** them, named so the boundary is a fact a
+     reader can check rather than a hedge: the `_fm_*` sidecars, `node-bindings.leak-lane`,
+     `summary-integrity.fail`, and the heartbeat file. An ENOSPC failure in any of those is a
+     **declared false negative**. The line reads `NON-EXHAUSTIVE by construction ON BOTH AXES`.
+
+  The transferable rule: **when a diagnostic's subject set has been extended three times,
+  publish the boundary.** A marker that names its own blind spots is worth more than one
+  implying a completeness it does not have — the same reasoning as the closed signature set
+  declaring its own non-exhaustiveness, one axis over.
 - **It is an ATTRIBUTION, never a verdict.** It never reads, sets or influences
   `OVERALL`/`RESULT`. A matched signature is evidence about the **host**, not proof the diff is
   innocent, and this marker does not own the verdict.
