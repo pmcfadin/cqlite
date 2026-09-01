@@ -4985,6 +4985,26 @@ _component_set_probe_inner() {
   _cs_alt_q="${lane_objects//\\/\\\\}"; _cs_alt_q="${_cs_alt_q//\"/\\\"}"
   _CS_READ_DIR="$csdir/repo"
   _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=\"$_cs_alt_q\"")
+  # THE ISOLATION ASSERTION LIVES HERE, WHERE IT DOMINATES EVERY CONSUMER (roborev job 347). It
+  # used to sit immediately before the HEAD peel, and that was the repo's own standing error: a
+  # check placed AFTER the harmful effect can only REPORT it, never PREVENT it — the same family as
+  # job 264's transfer hop (where the sha assert sat downstream of the fetch it was meant to
+  # validate) and job 290's certification window. FOUR object reads run BEFORE the peel — the fast
+  # path's `cat-file -e` and `rev-list`, and the manifest `ls-tree`/`show` at the baseline rev — so
+  # an unisolated value performed prohibited LIVE reads and only then got reported.
+  #
+  # ONE PLACEMENT, NOT N SCATTERED ASSERTS, and this is the one line where that is expressible:
+  # `_CS_READ_DIR` is assigned in exactly three places (the global initialiser, the probe's own
+  # reset, and this line), nothing reassigns it afterwards, and every consumer — in this function
+  # and in the two helpers it calls — runs after this point. So a single assert here is a
+  # DOMINATOR: there is no path from an unisolated value to a git call.
+  #
+  # NOT MERELY A RESTATEMENT OF THE LINE ABOVE IT. What it catches is the assignment itself being
+  # wrong rather than absent: `$csdir` empty (the value would be the plausible-looking `/repo`),
+  # a future edit pointing it at the live checkout, or a stale `_CS_SCRATCH_DIR` from an earlier
+  # probe in the same process. The `-n "$_CS_SCRATCH_DIR"` half is what makes the empty-`csdir`
+  # case a refusal instead of an accidental match.
+  if _cs_read_dir_isolated_or_refuse "read objects for the component-set comparison"; then return 0; fi
 
   # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
   # If this repository already has the object, there is NOTHING to fetch: a git object is
@@ -5282,11 +5302,12 @@ _component_set_probe_inner() {
   if _cs_live_refuse "HEAD's sha (the ref only, unpeeled)"; then return 0; fi
   local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0
   if [ -n "$head_unpeeled" ]; then
-    # THE READ REPOSITORY IS ASSERTED, NOT ASSUMED (#3757). Every path that reaches here has
-    # already set `$_CS_READ_DIR` to the scratch — that is exactly the kind of "happens to go
-    # first" reasoning job 314 ruled against, so it is CHECKED at the consumer that would
-    # otherwise hand the value to git.
-    if _cs_read_dir_isolated_or_refuse "peel HEAD ($head_unpeeled) to a commit"; then return 0; fi
+    # THE READ REPOSITORY IS ASSERTED, NOT ASSUMED (#3757) — and the assertion is UPSTREAM, at the
+    # scratch assignment, not here (roborev job 347). A check at this consumer could only report a
+    # prohibited read that the four earlier consumers had already performed. See the assertion at
+    # the `_CS_READ_DIR="$csdir/repo"` assignment for why one placement there dominates all of
+    # them; there is deliberately no second check at this site, because two checks on one property
+    # is the drift this region keeps removing.
     # PEEL + COMMIT-VALIDATE IN THE ISOLATED SCRATCH, and BOUNDED there for the reason job 315
     # recorded for the ancestry walk: this reads a commit object out of the LANE's SHARED object
     # store through the alternate, and a LOOSE object is read as a stream, so a FIFO planted at an

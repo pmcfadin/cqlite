@@ -1285,7 +1285,7 @@ fi
 #       (iii) the peel calls the runtime refusal before handing the value to git.
 # ---------------------------------------------------------------------------
 cs_read_dir_findings() {
-  local g="$1" init sentinel_decl assign assign_ln body_lo body_hi consumers ln peel_ln guard_ln refuse_body glob_init
+  local g="$1" init sentinel_decl assign assign_ln body_lo body_hi consumers ln guard_ln guard_n refuse_body glob_init
   init=$(cs_region_code "$g" | grep -F '_CS_READ_DIR=' | grep -F '_CS_READ_ENV=(); _CS_HEAD_SHA=' | head -1)
   if [ -z "$init" ]; then
     printf 'FINDING: could not locate the probe initialiser line that sets _CS_READ_DIR — the shape changed or the scan broke (fail-closed)\n'
@@ -1367,15 +1367,42 @@ cs_read_dir_findings() {
   elif ! grep -qF '[ "$_CS_READ_DIR" = "$_CS_SCRATCH_DIR/repo" ]' <<<"$refuse_body"; then
     printf 'FINDING: the refusal is not AFFIRMATIVE — it does not require _CS_READ_DIR to BE the scratch this run created ($_CS_SCRATCH_DIR/repo), so an unlisted bad value passes silently\n'
   fi
-  peel_ln=$(cs_region_code "$g" | grep -F 'rev-parse --verify --quiet "${head_unpeeled}^{commit}"' | head -1)
-  guard_ln=$(cs_region_code "$g" | grep -F '_cs_read_dir_isolated_or_refuse "peel HEAD' | head -1)
-  if [ -z "$peel_ln" ]; then
-    printf 'FINDING: could not locate the scratch peel (fail-closed)\n'
-  elif [ -z "$guard_ln" ]; then
-    printf 'FINDING: the peel does not call _cs_read_dir_isolated_or_refuse — an unisolated value would be handed to git instead of refused by name\n'
-  elif [ "${guard_ln%%:*}" -ge "${peel_ln%%:*}" ]; then
-    printf 'FINDING: the _cs_read_dir_isolated_or_refuse call (line %s) is not BEFORE the peel (line %s) — a check placed after the harmful effect can only report it\n' "${guard_ln%%:*}" "${peel_ln%%:*}"
+  # THE GUARD MUST DOMINATE EVERY CONSUMER, NOT MERELY PRECEDE THE PEEL (roborev job 347). The
+  # first version asserted only "the call is before the peel", and that is the standing error this
+  # repo keeps ruling on: FOUR object reads run before the peel (the fast path's `cat-file -e` and
+  # `rev-list`, and the manifest `ls-tree`/`show` through `_component_set_set_at_rev`), so a check
+  # there could only REPORT a prohibited live read that had already happened. Two consumer kinds,
+  # so two comparisons: the direct `-C "$_CS_READ_DIR"` sites in the probe body, and the probe
+  # body's CALLS to the helpers whose own bodies are lexically earlier.
+  guard_ln=$(cs_region_code "$g" | grep -F '_cs_read_dir_isolated_or_refuse "' | head -1)
+  guard_n=$(cs_region_code "$g" | grep -cF '_cs_read_dir_isolated_or_refuse "' || true)
+  if [ -z "$guard_ln" ]; then
+    printf 'FINDING: nothing calls _cs_read_dir_isolated_or_refuse — an unisolated value would be handed to git instead of refused by name\n'
+    return 0
   fi
+  if [ "$guard_n" != 1 ]; then
+    printf 'FINDING: %s calls to _cs_read_dir_isolated_or_refuse; ONE placement that dominates every consumer is the contract, and N scattered asserts is the drift this region removes\n' "$guard_n"
+  fi
+  guard_ln="${guard_ln%%:*}"
+  if [ "$guard_ln" -le "$assign_ln" ]; then
+    printf 'FINDING: the _cs_read_dir_isolated_or_refuse call (line %s) does not follow the scratch assignment (line %s), so it cannot be asserting what that assignment produced\n' "$guard_ln" "$assign_ln"
+  fi
+  while IFS= read -r ln; do
+    [ -n "$ln" ] || continue
+    [ "${ln%%:*}" -ge "$body_lo" ] || continue
+    [ "${ln%%:*}" -le "$body_hi" ] || continue
+    if [ "${ln%%:*}" -lt "$guard_ln" ]; then
+      printf 'FINDING: %s: an object read through $_CS_READ_DIR runs BEFORE the isolation assertion at line %s — the assertion does not dominate it, so a prohibited LIVE read happens and is only then reported: %s\n' "${ln%%:*}" "$guard_ln" "${ln#*:}"
+    fi
+  done <<<"$consumers"
+  while IFS= read -r ln; do
+    [ -n "$ln" ] || continue
+    [ "${ln%%:*}" -ge "$body_lo" ] || continue
+    [ "${ln%%:*}" -le "$body_hi" ] || continue
+    if [ "${ln%%:*}" -lt "$guard_ln" ]; then
+      printf 'FINDING: %s: the probe CALLS a helper that reads through $_CS_READ_DIR before the isolation assertion at line %s — lexically the helper body is elsewhere, but this call site runs first: %s\n' "${ln%%:*}" "$guard_ln" "${ln#*:}"
+    fi
+  done <<<"$(cs_region_code "$g" | grep -E '^[0-9]+:[[:space:]]*(if )?_component_set_set_at_rev ')"
   return 0
 }
 rd_findings=$(cs_read_dir_findings "$GATE")
@@ -1386,39 +1413,43 @@ else
   printf '%s\n' "$rd_findings"
 fi
 
-# FIVE PLANTED CONTROLS over the three properties (roborev job 339, item 3: this said "THREE
+# SIX PLANTED CONTROLS over the three properties (roborev job 339, item 3: this said "THREE
 # PLANTED CONTROLS, one per property" over four entries, and neither half was true — i and ii both
 # target the INITIALISER). Each mutates a COPY and must be REPORTED and NAMED.
 rd_dir="$tmp/3757-read-dir-controls"; mkdir -p "$rd_dir"
-rd_ids=(i ii iii iv v)
+rd_ids=(i ii iii iv v vi)
 rd_whats=(
   'the initialiser set back to the LIVE checkout'
   'the initialiser left EMPTY, which git reads as the CURRENT directory'
   'a -C "$_CS_READ_DIR" consumer planted BEFORE the scratch assignment, in the probe body'
-  'the runtime refusal call removed from the peel'
+  'the runtime refusal call removed entirely'
   'the refusal reverted to a DENY-LIST of bad states instead of an affirmative test'
+  'the refusal moved back DOWN to the peel, behind four object reads (the job-347 regression)'
 )
 rd_progs=(
   's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
   's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
   's|^  _CS_READ_DIR="\$csdir/repo"$|  : "$(git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e planted-by-the-selftest 2>/dev/null)"\n  _CS_READ_DIR="$csdir/repo"|'
-  '/_cs_read_dir_isolated_or_refuse "peel HEAD/d'
+  '/_cs_read_dir_isolated_or_refuse "/d'
   's|if \[ -n "\$_CS_SCRATCH_DIR" \] && \[ "\$_CS_READ_DIR" = "\$_CS_SCRATCH_DIR/repo" \]; then|if [ "$_CS_READ_DIR" != "$REPO_ROOT" ]; then|'
+  '/_cs_read_dir_isolated_or_refuse "/d; s|^\(    \)_CS_HEAD_SHA=\$(_component_set_bounded|\1if _cs_read_dir_isolated_or_refuse "peel HEAD"; then return 0; fi\n\1_CS_HEAD_SHA=$(_component_set_bounded|'
 )
 rd_tooks=(
   '^  _CS_READ_DIR="\$REPO_ROOT"; _CS_READ_ENV'
   '^  _CS_READ_DIR=""; _CS_READ_ENV'
   'cat-file -e planted-by-the-selftest'
-  '_cs_read_dir_isolated_or_refuse "peel HEAD'
+  '_cs_read_dir_isolated_or_refuse "'
   'if \[ "\$_CS_READ_DIR" != "\$REPO_ROOT" \]; then'
+  '_cs_read_dir_isolated_or_refuse "peel HEAD"'
 )
-rd_expect_n=(1 1 1 0 1)
+rd_expect_n=(1 1 1 0 1 1)
 rd_needles=(
   'THE LIVE CHECKOUT'
   'reads -C "" as the CURRENT directory'
   'BEFORE the scratch assignment'
-  'does not call _cs_read_dir_isolated_or_refuse'
+  'nothing calls _cs_read_dir_isolated_or_refuse'
   'not AFFIRMATIVE'
+  'the assertion does not dominate it'
 )
 for rd_i in "${!rd_ids[@]}"; do
   rd_id="${rd_ids[$rd_i]}"
@@ -1434,6 +1465,51 @@ for rd_i in "${!rd_ids[@]}"; do
     bad "3757-read-dir-control[$rd_id]: planting '${rd_whats[$rd_i]}' produced no finding naming '${rd_needles[$rd_i]}' — a silent false PASS. Findings: $rd_out"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# 3757c-bis. BEHAVIOURAL: THE REFUSAL PREVENTS THE LIVE READS, IT DOES NOT MERELY REPORT THEM
+#     (roborev job 347, item 1). The structural case above pins WHERE the assertion sits; this one
+#     measures that no prohibited read HAPPENED, which is what the finding actually asked for.
+#
+#     HOW THE ABSENCE OF A READ IS OBSERVED, without inventing an oracle: the gate records its own
+#     progress in fields the self-test hook already prints. `BASELINE_OBJECTS` is set by the FAST
+#     PATH'S FIRST OBJECT READ (`cat-file -e <sha>^{commit}` + `rev-list`), and `BASELINE_SRC` by
+#     the manifest read (`ls-tree`/`show`). Both run through `$_CS_READ_DIR`, so with the scratch
+#     assignment rewritten to the LIVE checkout they are LIVE reads — and if the assertion
+#     dominates them, BOTH fields must still read `<none>` while the KIND is `read-dir-unisolated`.
+#     `<none>` here is not an absence of evidence: it is the gate reporting that the step which
+#     would have set the field never ran.
+#
+#     THE CONTROL IS WHAT MAKES THAT MEAN ANYTHING: the same fixture with the assertion DELETED
+#     must show those fields POPULATED, i.e. the live reads really are on this path and really do
+#     happen when nothing stops them. Without it, `<none>` could just as well mean the fixture
+#     never got that far for some unrelated reason.
+# ---------------------------------------------------------------------------
+dom_base=$(mkbaseline base-readdir-dom - )
+dom_live_sed='s|^  _CS_READ_DIR="\$csdir/repo"$|  _CS_READ_DIR="$REPO_ROOT"|'
+dom_fx=$(mkbranch readdir-dom "$dom_base" "$dom_live_sed" --from-origin)
+dom_ctl_fx=$(mkbranch readdir-dom-noassert "$dom_base" "$dom_live_sed"'; /_cs_read_dir_isolated_or_refuse "/d' --from-origin)
+dom_took=$(grep -c '^  _CS_READ_DIR="\$REPO_ROOT"$' "$dom_fx/scripts/agent-gate.sh" 2>/dev/null || true)
+dom_ctl_took=$(grep -c '_cs_read_dir_isolated_or_refuse "' "$dom_ctl_fx/scripts/agent-gate.sh" 2>/dev/null || true)
+dom_out=$(hook "$dom_fx")
+dom_ctl=$(hook "$dom_ctl_fx")
+dom_kind=$(field KIND "$dom_out")
+dom_obj=$(field BASELINE_OBJECTS "$dom_out")
+dom_src=$(field BASELINE_SRC "$dom_out")
+dom_ctl_obj=$(field BASELINE_OBJECTS "$dom_ctl")
+dom_ctl_src=$(field BASELINE_SRC "$dom_ctl")
+if [ "$dom_took" != 1 ]; then
+  bad "3757-read-dir-dominates: the fixture mutation did not take (matched $dom_took, expected 1) — nothing is under test"
+elif [ "$dom_ctl_took" != 0 ]; then
+  bad "3757-read-dir-dominates: the CONTROL still calls the assertion ($dom_ctl_took occurrence(s)) — it cannot show what happens without it"
+elif [ "$dom_ctl_obj" = "<none>" ] && [ "$dom_ctl_src" = "<none>" ]; then
+  bad "3757-read-dir-dominates: the CONTROL (assertion deleted) read NOTHING either (objects='$dom_ctl_obj' src='$dom_ctl_src'), so the live reads are not on this path and a '<none>' in the subject would prove nothing"
+elif [ "$dom_kind" = read-dir-unisolated ] && [ "$dom_obj" = "<none>" ] && [ "$dom_src" = "<none>" ]; then
+  ok "3757-read-dir-dominates: with the read repository left at the LIVE checkout the run refuses (read-dir-unisolated) having performed NO object read and NO manifest read (BASELINE_OBJECTS/BASELINE_SRC both <none>), while the same fixture without the assertion records both (objects='$dom_ctl_obj' src='$dom_ctl_src') — the assertion PREVENTS the reads, it does not report them afterwards"
+else
+  bad "3757-read-dir-dominates: expected read-dir-unisolated with NO read recorded (got kind='$dom_kind' objects='$dom_obj' src='$dom_src'; control objects='$dom_ctl_obj' src='$dom_ctl_src')"
+  printf '%s\n' "$dom_out"
+fi
 
 # ---------------------------------------------------------------------------
 # 3757d. BEHAVIOURAL: an unisolated read repository is REFUSED BY NAME, not read live.
@@ -5479,7 +5555,10 @@ fi
 # 123 -> 128 with roborev job 339's five: evasion routes e-h (the same-line -C override, the
 # --git-dir override, a second wrapper, a variable command word) and read-dir control v (the
 # refusal reverted to a deny-list). All five unconditional.
-CASE_FLOOR=128
+# 128 -> 130 with roborev job 347's two: read-dir control vi (the assertion moved back down to the
+# peel) and the behavioural `3757-read-dir-dominates` (no live read HAPPENS, measured from the
+# gate's own progress fields against a control with the assertion deleted). Both unconditional.
+CASE_FLOOR=130
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
