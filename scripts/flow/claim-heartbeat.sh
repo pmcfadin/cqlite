@@ -117,12 +117,8 @@
 #                                            # never read 1 as a clean bill of health.
 #                                            # A sound clean verdict is possible on
 #                                            # per-lane refs and is tracked separately.
-#                                            # SUPERVISOR FLEETS ONLY: the claim refs it
-#                                            # reads are written by worker-supervisor.sh
-#                                            # alone, so on a supervisor-less /drive-issue
-#                                            # fleet the subject set is EMPTY and this
-#                                            # reports nothing (DESCOPED, #3548 — see
-#                                            # SCOPE OF `dead-lanes` below).
+#                                            # SUPERVISOR FLEETS ONLY (DESCOPED, #3548) —
+#                                            # see SCOPE OF `dead-lanes` below.
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -253,54 +249,21 @@
 # #3548, option C; completes #3393)
 #   The subject set is `refs/lane-claims/<machine>/<lane-id>` plus the legacy
 #   `refs/machine-claims/<machine>`, and the ONLY writer of either in this tree is
-#   `scripts/local/worker-supervisor.sh` (through `stamp`). So lane-granular dead-lane
-#   detection is a SUPERVISOR-FLEET capability.
-#
-#   WHAT WAS MEASURED, AND WHAT IT DOES NOT IMPLY (roborev job 58). On 2026-09-01 this fleet's
-#   three boxes each reported `lane-claims=0 machine-claims=0` with ZERO production supervisors,
-#   so `dead-lanes` had no subject and exited 1. That is a POINT-IN-TIME MEASUREMENT OF THIS
-#   FLEET, not a property of supervisor-less fleets in general: refs PERSIST after supervisors
-#   stop, the legacy per-machine refs are deliberately still read so pre-ruling ones drain, and
-#   `stamp` is a documented subcommand anyone can call directly — so a migrated, previously
-#   supervised or manually stamped fleet can legitimately produce rows. Either way the
-#   operational conclusion is unchanged: EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill
-#   of health (#3467).
-#
-#   WHAT LANE LIVENESS RESTS ON HERE — the coordination sweep plus TWO BOARD SIGNATURES, NEITHER
-#   OF WHICH IS A VERDICT; both are prompts to look. THE CANONICAL STATEMENT OF BOTH SIGNATURES —
-#   what each shape is, why neither is a verdict, and the checks that turn signature (a) into an
-#   actionable candidate — LIVES IN ONE PLACE: docs/development/fleet-runbook.md, section "Lane
-#   liveness on a supervisor-less `/drive-issue` fleet". READ IT THERE; it is deliberately NOT
-#   restated here. Five review rounds (jobs 38, 40, 41, 47, 55) were all propagation failures of
-#   one duplicated statement, so the duplication was removed rather than guarded. These are
-#   operating mechanisms, NOT committed commands.
-#
-#   THE TWO POPULATED NAMESPACES ARE DELIBERATELY NOT READ, measured rather than priced
-#   from the shape (#3548). Do NOT "fix" the empty subject set by pointing this command at
-#   them; both were evaluated and rejected:
-#     * `refs/claims/issue-<N>` — the per-issue lock, populated on every box. It records the
-#       pid of the TRANSIENT CLAIMING SHELL and never refreshes it. Measured: pid 3775744 was
-#       already gone while its lane was running, so reading it here would report
-#       DEAD-NO-PROCESS for HEALTHY lanes — a false-positive machine, worse than nothing.
-#     * `refs/heartbeats/<machine>` — populated on every box, but SINGLE-SLOT PER MACHINE and
-#       force-updated by `beat`, so N lanes on one box overwrite each other and at most one
-#       is ever reportable. That is structurally the same masking defect the retired
-#       `refs/machine-claims/<machine>` layout had, i.e. instance 5 of the #3464
-#       retracted-invariant-in-a-second-carrier family.
-#
-#   AC4 SURVIVES THE DESCOPE, AND EXCLUSION IS THE ABSTENTION. `refs/claims/issue-<N>` and
-#   `refs/heartbeats/<machine>` are NOT ENUMERATED by this command, so they produce no row and no
-#   verdict at all — not `DEAD-*`, not `UNKNOWN-*`, nothing. Do not describe that by NAMING a
-#   verdict: every name is wrong because nothing is classified, and naming one made this sentence
-#   false twice (roborev jobs 17 and 19). AC4 is therefore stated COUNTERFACTUALLY, about the
-#   change nobody has made: WERE a later change ever to read a NON-REFRESHING carrier, a stale pid
-#   there MUST NEVER YIELD A `DEAD-*` VERDICT — it must abstain. A REFRESHING carrier needs no such
-#   rule: `worker-supervisor.sh` restamps `refs/lane-claims/*` every iteration, so an absent or
-#   recycled pid there really does mean the lane is gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`
-#   are CORRECT verdicts (see WHOSE PROCESS, EXACTLY above) — presence alone is still not enough
-#   there, hence the identity check against the claim `ts` and the UNKNOWN-IDENTITY band above.
-#   `test_claim_heartbeat.sh` pins the exclusion behaviourally, so a later read-side change cannot
-#   quietly turn the measured false positive into a verdict.
+#   `scripts/local/worker-supervisor.sh` (through `stamp`). EXIT 1 MEANS "NOTHING WAS
+#   REPORTED", NEVER a clean bill of health (#3467) — including when the subject set is
+#   empty, as it was on this fleet when #3548 was measured (see the runbook below).
+#   The two POPULATED namespaces are deliberately NOT read, and both refusals are measured:
+#   `refs/claims/issue-<N>` records the TRANSIENT CLAIMING SHELL's pid, never refreshed
+#   (measured dead while its lane ran, so it would report healthy lanes dead), and
+#   `refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE, so N lanes overwrite each other.
+#   Being UNENUMERATED is the abstention: neither yields a row or a verdict of any kind.
+#   AC4 as a COUNTERFACTUAL: WERE a later change ever to read a NON-REFRESHING carrier, a
+#   stale pid there must never yield a `DEAD-*` verdict — it must abstain; `refs/lane-claims/*`
+#   is restamped every supervisor iteration, so `DEAD-*` there is correct.
+#   Everything else — what the fleet's liveness actually rests on, both board signatures and
+#   the measurement itself — is stated ONCE in docs/development/fleet-runbook.md, section
+#   "Lane liveness on a supervisor-less `/drive-issue` fleet". It is deliberately not
+#   restated here: seven review rounds on #3548 were propagation failures of duplicated prose.
 #
 # Run from inside the repo (any cwd under the working tree/worktree is fine —
 # this never touches the working tree or the current branch).
@@ -1363,21 +1326,12 @@ open_pr_state() {
 # cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process is
 # gone. See the header for what "owning process" means and what this does NOT cover.
 #
-# SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes
-# #3393). The subject set below is `refs/lane-claims/*` + the legacy `refs/machine-claims/*`,
-# whose ONLY writer in this tree is `scripts/local/worker-supervisor.sh`. On a
-# supervisor-less `/drive-issue` fleet that set is EMPTY (measured: lane-claims=0,
-# machine-claims=0, production supervisors ZERO on all three boxes), so this function reports
-# nothing and returns 1 — and returning 1 means "NOTHING WAS REPORTED", never a clean bill of
-# health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are
-# NOT read here, for two MEASURED reasons (stale claiming-shell pid; single-slot-per-machine
-# masking) spelled out in the header's SCOPE section — do not point this at them. Being
-# UNENUMERATED is the abstention: neither namespace produces a row or a verdict of any kind. AC4
-# survives as a COUNTERFACTUAL for a future change — were one ever to read a NON-REFRESHING
-# carrier, a stale pid there must never yield a `DEAD-*` verdict, it must abstain — while
-# `refs/lane-claims/*`, which the supervisor RESTAMPS every iteration, legitimately yields
-# `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`. Naming a verdict for the unenumerated carriers made this
-# sentence false twice (roborev jobs 17 and 19); do not reintroduce one.
+# SUPERVISOR FLEETS ONLY — DESCOPED (#3548, owner ruling 2026-09-01; completes #3393). The
+# subject set below is `refs/lane-claims/*` + the legacy `refs/machine-claims/*`, written by
+# `worker-supervisor.sh` alone; returning 1 means "NOTHING WAS REPORTED", never a clean bill of
+# health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are NOT
+# read here — do not point this at them; the measured reasons and AC4's counterfactual are in
+# the header's SCOPE section.
 #
 # EXIT PRECEDENCE (3 outranks 1, deliberately): a found dead lane is ACTIONABLE NOW,
 # so it wins the exit code, and any incompleteness is still stated in the text rather

@@ -3019,7 +3019,7 @@ kill "${zparent:-0}" 2>/dev/null || true
 
 
 # ===========================================================================
-echo "TEST 81: --help carries the COMPLETE #3548 scope statement, phrase by phrase"
+echo "TEST 81: --help carries the REDUCED #3548 scope contract, phrase by phrase"
 # ===========================================================================
 # The owner ruling of 2026-09-01 (option C) is a DOCUMENTATION deliverable, so it is only worth
 # something if it is still there next month. A wording pass that deletes the scope statement leaves
@@ -3051,75 +3051,26 @@ require_help_phrase() {  # <the guarantee this phrase carries> <the COMPLETE phr
     bad "--help is MISSING the $1 statement (#3548) — this exact phrase is gone: \"$2\""
   fi
 }
-# (A `refute_help_phrase` mirror lived here and was REMOVED with the assertions that used it: the
-# negative half is now owned in one place, TEST 83, for all four covered files. Leaving an uncalled
-# helper behind would be dead code implying coverage that lives elsewhere.)
-require_help_phrase "supervisor-fleet scope" \
-  'lane-granular dead-lane detection is a SUPERVISOR-FLEET capability'
-require_help_phrase "descope attribution (owner ruling + issue numbers)" \
-  'DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes #3393)'
-# The RELATIONSHIP, not the mention: this is WHY the subject set is empty here, and without it the
-# scope reads as an arbitrary restriction someone may "relax".
+# THE REDUCED SCOPE CONTRACT (roborev job 59). This case pins what the owner's ruling asked the code
+# seam to say, and nothing more. It used to pin the signature statements and a dated measurement too;
+# both moved to the runbook's single canonical section, because seven review rounds on #3548 (jobs 38,
+# 40, 41, 47, 55, 58, 59) were propagation failures of the same prose duplicated across five files —
+# including twice INSIDE this one file. Phrases are matched whole against a whitespace-flattened copy
+# (a comment block wraps, so a line-wise grep for a multi-line phrase can never match).
+require_help_phrase "supervisor-fleets-only scope, with the ruling cited" \
+  'SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes #3393)'
 require_help_phrase "only-writer relationship" \
   'the ONLY writer of either in this tree is `scripts/local/worker-supervisor.sh`'
-# THE EMPTY SUBJECT SET IS A MEASUREMENT, NOT AN IMPLICATION (roborev job 58, finding 1). The help used
-# to say "on a supervisor-less /drive-issue fleet the subject set is EMPTY", which over-claims: refs
-# PERSIST after supervisors stop, the legacy per-machine refs are deliberately still read so pre-ruling
-# ones drain, and `stamp` is a documented subcommand anyone can call directly — so a migrated,
-# previously supervised or manually stamped fleet can legitimately produce rows. Both halves are pinned:
-# the dated measurement of THIS fleet, and the explicit statement that it does not generalise.
-require_help_phrase "empty subject set stated as a DATED measurement of this fleet" \
-  'On 2026-09-01 this fleet'
-require_help_phrase "explicit non-generalisation of that measurement" \
-  'not a property of supervisor-less fleets in general'
-# Not a duplicate of TEST 52's behavioural check: that pins that the CODE never exits 0, this pins
-# that the CONTRACT still tells an operator not to read the 1 as clean — and the descope is what
-# makes a 1 the NORMAL outcome here, so deleting the sentence is more dangerous than it was.
 require_help_phrase "exit-1-is-not-a-clean-bill-of-health rule (#3467)" \
   'EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill of health'
-# The two MEASURED refusals, each binding its namespace to its own reason. A later reader's first
-# instinct is "just point it at the populated namespace", so the evidence has to survive here.
 require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid)" \
-  '`refs/claims/issue-<N>` — the per-issue lock, populated on every box. It records the pid of the TRANSIENT CLAIMING SHELL and never refreshes it'
+  '`refs/claims/issue-<N>` records the TRANSIENT CLAIMING SHELL'
 require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)" \
-  '`refs/heartbeats/<machine>` — populated on every box, but SINGLE-SLOT PER MACHINE and force-updated by `beat`, so N lanes on one box overwrite each other'
-# AC4 IS PINNED AS A MECHANISM, NOT AS A VERDICT — and this is the third wording of it, so the
-# reason is recorded rather than the wording alone. Round 2 (roborev job 17) asserted the UNQUALIFIED
-# sentence ("a stale pid must never yield `DEAD-*`"), which is false: `dead-lanes` emits
-# `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` for a `refs/lane-claims/*` pid and is RIGHT to, because the
-# supervisor restamps that ref every iteration. Round 3 (job 19) then promised an `UNKNOWN-*` verdict
-# for the excluded carriers — also false, and contradicting TEST 82 below, because those namespaces
-# are NEVER ENUMERATED, so nothing is classified at all. EVERY verdict name is wrong here; the true
-# statement is about the MECHANISM.
-#
-# So two phrases, and the FIRST is the coupling that matters: it states exactly what TEST 82 proves
-# behaviourally (no row, no verdict), so the prose and the test can no longer drift apart. The second
-# pins AC4 in its COUNTERFACTUAL form — the shape that is true today AND load-bearing for the future
-# reader it exists to stop.
-#
-# DELETED with this round: the "AC4 positive half" assertion (that a REFRESHING carrier legitimately
-# yields `DEAD-*`). The counterfactual phrasing cannot be re-absolutised without failing the phrase
-# below, which is what that assertion was guarding, so it pinned wording nobody needs.
-# THE TWO BOARD SIGNATURES, SEPARATELY (roborev job 40). The help said lane liveness on a
-# supervisor-less fleet rests on the #3436 read "Ready + pushed branch + no claim ref" in a context
-# presenting it as the DEAD-LANE signal — which is backwards in the operator-misleading direction: a
-# vanished /drive-issue lane RETAINS its `refs/claims/issue-<N>` (the ref outlives the process), so the
-# death signal is a HELD claim with no live session, while the no-claim-ref shape is #3436's
-# UNCLAIMED-WORK signature and says nothing about a death. It was the same defect roborev had already
-# fixed in the runbook, surviving in a second file. Both phrases are pinned, so deleting either — or
-# merging them back into one signature — reds this case, and the two files carry one wording.
-# THE SIGNATURE STATEMENTS ARE NOT ASSERTED HERE ANY MORE (roborev job 58). They were consolidated
-# into ONE canonical location — docs/development/fleet-runbook.md, "Lane liveness on a supervisor-less
-# /drive-issue fleet" — because five review rounds (jobs 38, 40, 41, 47, 55) were propagation failures
-# of one duplicated statement. TEST 83 now owns them: it asserts the FULL statement in the canonical
-# file, that this `--help` POINTS there, and that no covered file re-asserts a definite label. Four
-# `require_help_phrase` assertions and two `refute_help_phrase` assertions were deleted from here as
-# part of that move — deliberately, and not because the properties stopped mattering: asserting them in
-# two places is the duplication the round removed.
+  '`refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE'
 require_help_phrase "exclusion-IS-the-abstention mechanism (what TEST 82 proves)" \
-  'are NOT ENUMERATED by this command, so they produce no row and no verdict at all — not `DEAD-*`, not `UNKNOWN-*`, nothing'
+  'Being UNENUMERATED is the abstention: neither yields a row or a verdict of any kind'
 require_help_phrase "AC4 as a COUNTERFACTUAL about a non-refreshing carrier" \
-  'WERE a later change ever to read a NON-REFRESHING carrier, a stale pid there MUST NEVER YIELD A `DEAD-*` VERDICT — it must abstain'
+  'WERE a later change ever to read a NON-REFRESHING carrier, a stale pid there must never yield a `DEAD-*` verdict'
 
 # ===========================================================================
 echo "TEST 82: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"
@@ -3252,7 +3203,7 @@ if [ -n "$missing83" ]; then
   bad "TEST 83 cannot run: committed source unreadable —$missing83 (fail-closed: absence is not a pass)"
 else
   rb83n=$(_norm <"$_rb"); cl83n=$(_norm <"$_cl"); wb83n=$(_norm <"$_wb")
-  # --- (1) THE CANONICAL LOCATION CARRIES THE FULL STATEMENT. These are the load-bearing clauses: that
+  # --- THE CANONICAL LOCATION CARRIES THE FULL STATEMENT. These are the load-bearing clauses: that
   #     neither shape is a verdict, both signatures' own sentences, the operator rule, and the named
   #     check that makes signature (a) actionable. Delete or reword any of them and this reds.
   for _need in \
@@ -3268,26 +3219,18 @@ else
       bad "the CANONICAL signature statement in fleet-runbook.md is MISSING (#3548): \"$_need\""
     fi
   done
-  # --- (2) EVERY POINTING SITE POINTS. A pointer is what replaces the restatement, so losing it
-  #     re-creates the duplication pressure this round removed.
-  #
-  #     THE NEEDLE IS A DISTINCTIVE PHRASE, NOT THE PATH OR THE HEADING — because this case reads each
-  #     file as ONE blob, and both doctrine files already cite the runbook and that section heading
-  #     elsewhere for unrelated reasons. MEASURED, not reasoned: the first version required only the
-  #     path + heading, and deleting the signature pointer outright from CLAUDE.md and from the website
-  #     page left it GREEN (209 passed, 0 failed) because the unrelated "Full record:" citation
-  #     satisfied it. That is the same whole-file blindness job 58 raised one level up. So the needle is
-  #     the pointer's own wording, which exists in these files for no other purpose.
-  for _pair in "--help:$help83n" "CLAUDE.md:$cl83n" "website delivery-pipeline.md:$wb83n"; do
-    _who="${_pair%%:*}"; _txt="${_pair#*:}"
-    if grep -Fqi -- 'canonical statement of both signatures' <<<"$_txt" \
-      && grep -Fqi -- 'docs/development/fleet-runbook.md' <<<"$_txt"; then
-      ok "$_who POINTS at the canonical statement (its own pointer wording + the path)"
-    else
-      bad "$_who does not POINT at the canonical signature statement (#3548) — it must carry the pointer phrase 'canonical statement of both signatures' AND name docs/development/fleet-runbook.md"
-    fi
-  done
-  # --- (3) NO covered site re-asserts a definite label, for EITHER signature.
+  # --- POINTER INTEGRITY IS DELIBERATELY NOT GUARDED (roborev job 59, finding 2). Read that as a
+  #     decision, not an oversight. Three assertions here required each pointing site to name the
+  #     canonical section, and they were DELETED: this case reads each file as ONE blob, and both
+  #     doctrine files cite the runbook and that section heading elsewhere for unrelated reasons — so
+  #     the first version PASSED (209 passed, 0 failed) with the signature pointer deleted outright
+  #     from CLAUDE.md and from the website page. Binding the needle to the pointer's own wording fixed
+  #     that instance and left the shape: a whole-file match cannot tell WHERE a phrase occurs. A
+  #     broken pointer is a nit; a guard that can pass while wrong is worse than no guard, and this
+  #     repo has removed two guards for exactly that reason. So the guarded properties are the ones
+  #     that are load-bearing AND provable: the canonical statement exists in full in ONE place, and
+  #     no covered file contradicts it.
+  # --- NO covered site re-asserts a definite label, for EITHER signature.
     # SYMMETRIC ACROSS BOTH SIGNATURES (roborev job 55). The negative half used to forbid definite
     # labels for (b) ONLY, so a file could satisfy every positive clause and still carry a
     # contradictory definite label for (a) — which is exactly what happened: two runbook sites survived

@@ -450,42 +450,21 @@ It claims nothing about lanes that never stamped (a lane run with `CLAIM_CMD=""`
 nothing about other machines — a PID is only checkable where it runs, so **run it ON the suspect
 box**.
 
-**AND ON A SUPERVISOR-LESS FLEET IT ANSWERS ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
+**AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
 by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
-`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and **the only writer of either in the
-tree is `worker-supervisor.sh`**. The fleet runs `/drive-issue` lanes, not supervisors — measured on
-all three boxes: `lane-claims=0 machine-claims=0`, production supervisors **zero**, while
-`claims=6 heartbeats=20`. So the command reports nothing and exits 1, which is exactly why the
-no-exit-0 rule above matters rather than being softened: **1 means "nothing was reported", never a
-clean bill of health.**
+`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only writer of either in the tree
+is `worker-supervisor.sh`. This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
+had no subject and exited 1 — persisted or manually `stamp`ed refs can still produce rows, and either
+way **1 means "nothing was reported", never a clean bill of health.** The two *populated* namespaces
+are deliberately not read, both refusals measured: `refs/claims/issue-<N>` records the transient
+claiming shell's pid (dead while its lane runs), and `refs/heartbeats/<machine>` is single-slot per
+machine. **AC4** survives as a counterfactual: were a later change ever to read a non-refreshing
+carrier, a stale pid there must abstain rather than yield `DEAD-*`.
 
-The two *populated* namespaces were **measured** and rejected as substitutes, so a read-side "just
-point it at those" fix is refused with evidence: `refs/claims/issue-<N>` records the pid of the
-**transient claiming shell** and never refreshes it (measured dead while its lane was running, so
-reading it would report a dead lane for a healthy one), and `refs/heartbeats/<machine>` is
-**single-slot per machine** and force-updated, so N lanes on one box overwrite each other and at most
-one is ever reportable — structurally the same masking defect the retired per-machine claim ref had.
-**AC4 survives the descope, and exclusion IS the abstention.** Neither populated carrier is
-enumerated by `dead-lanes`, so neither produces a row or a verdict of any kind — not `DEAD-*`, not
-`UNKNOWN-*`, nothing; naming a verdict for them is false, and so is the unqualified "a stale pid must
-never yield `DEAD-*`". The rule is a **counterfactual** for a future change: were one ever to read a
-**non-refreshing** carrier (`refs/claims/issue-<N>`, whose pid is the transient claiming shell;
-`refs/heartbeats/<machine>`, which carries no per-lane pid at all), a stale pid there must never yield
-a `DEAD-*` verdict — it must abstain. The **refreshing** carrier `refs/lane-claims/*`, restamped every
-supervisor iteration, needs no such rule: there an absent or recycled pid really does mean the lane is
-gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are correct.
-
-What lane liveness rests on here is the **coordination lead's sweep** plus **two board signatures,
-NEITHER of which is a verdict** — each is **a prompt to look, never a verdict**, and signature (a) (a
-held claim with no live session) is only a *candidate*, and only once its named checks hold, starting
-with **no active `drive-issue-<N>` cron**: `/drive-issue`'s park-and-resume produces that same shape
-for perfectly healthy work. The **canonical statement of both signatures lives in one place** and is
-deliberately not restated here — `docs/development/fleet-runbook.md` → *Lane liveness on a
-supervisor-less `/drive-issue` fleet*. (Five review rounds on #3548 were propagation failures of that
-one duplicated statement, so the duplication was removed rather than guarded.) All of it is
-**operating mechanism, not committed tooling**: there is no sweep command and no board-signature script
-in this repository, and that ambiguity is unresolved. Full record, including the primitives that do exist:
-`docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*.
+**Everything else is stated once, not here.** What lane liveness on this fleet actually rests on, and
+both board signatures — neither of which is a verdict — live in
+`docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*. Seven
+review rounds on #3548 were propagation failures of duplicated prose, so nothing restates it.
 
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH
