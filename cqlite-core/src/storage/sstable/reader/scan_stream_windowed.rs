@@ -550,7 +550,7 @@ impl SSTableReader {
         // worker pool — decode CPU on the reactor is the Epic F starvation the
         // parse-offload (#1143) and IO-offload (#1593) fixes exist to prevent. The
         // read is now a SYNCHRONOUS positional read on `self.scan_positional_source`
-        // (issue #2876 — the unadvised scan plane, NOT the MADV_RANDOM point plane) for
+        // (issue #2876 — the never-`MADV_RANDOM` scan plane, NOT the point plane) for
         // EVERY backend (issue #1940 restructure): no `tokio::fs`, no
         // `futures::executor::block_on`, and therefore ZERO blocking-pool
         // amplification (the former `block_on(read_next_block_parts(..))` re-
@@ -621,7 +621,8 @@ impl SSTableReader {
     ///
     /// The read is a SYNCHRONOUS positional read on `reader.scan_positional_source`
     /// (issue #1940 restructure; repointed off the MADV_RANDOM point plane onto the
-    /// unadvised scan plane by #2876): a `pread`-style call carrying its offset as a parameter,
+    /// never-`MADV_RANDOM` scan plane by #2876): a `pread`-style call carrying its offset as a
+    /// parameter,
     /// which touches NO tokio reactor/timer and completes fully on THIS blocking
     /// thread for every backend (mmap = resident slice; `O_DIRECT` = aligned pread;
     /// buffered = `pread` on a dedicated `std::fs::File`). This deliberately

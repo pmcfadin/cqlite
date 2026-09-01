@@ -25,7 +25,8 @@
 //!
 //! **CASSANDRA-15452 is the upstream precedent for exactly this failure mode.**
 //! Cassandra's fix for the same problem was a userspace scan-only readahead buffer
-//! *with no madvise*, and they discovered that an enabled ChunkCache DEFEATED it:
+//! *with no madvise at all*, and they discovered that an enabled ChunkCache
+//! DEFEATED it:
 //! the userspace buffer was correct in isolation while the layer underneath
 //! silently negated it. A userspace coalescing window is only worth its complexity
 //! if it reads a plane that actually reads ahead. That is a property of the PAIR,
@@ -316,8 +317,8 @@ async fn open_reader(path: &std::path::Path) -> SSTableReader {
 ///    `min_refills_for_full_scan(...)` times (positive lower bound, not `0 <= 0`);
 /// 3. each scan-plane read advances the walk by at least one authoritative
 ///    `CompressionInfo.chunk_length` — i.e. reads are window-sized, not
-///    partition-sized, which is what makes kernel readahead on the unadvised plane
-///    effective in the first place.
+///    partition-sized, which is what makes kernel readahead on the
+///    never-`MADV_RANDOM` scan plane effective in the first place.
 ///
 /// Mutation-proven in both directions (issue #2877 combined-test brief): pointing
 /// the window's refills back at `point_source` fails assert 1; disabling the
@@ -330,7 +331,7 @@ async fn open_reader(path: &std::path::Path) -> SSTableReader {
 #[cfg(all(feature = "write-support", feature = "lz4"))]
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial(work_counters)]
-async fn coalescing_window_reads_only_the_unadvised_scan_plane() {
+async fn coalescing_window_reads_only_the_non_madv_random_scan_plane() {
     let (_temp, data_path, schema, chunk_count, data_section_len) =
         build_compressed_fixture().await;
 
@@ -483,7 +484,8 @@ async fn coalescing_window_reads_only_the_unadvised_scan_plane() {
 
     // ---- ASSERT 3: reads are WINDOW-sized (chunk-granular), not PARTITION-sized.
     //
-    // The property that makes kernel readahead on the unadvised plane pay off, and
+    // The property that makes kernel readahead on the never-`MADV_RANDOM` scan
+    // plane pay off, and
     // the one assert that fails if coalescing regresses to per-partition reads while
     // the plane split stays intact.
     //

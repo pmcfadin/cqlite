@@ -19,7 +19,7 @@
 //! `point_source` under the original #1940 restructure) — the positional
 //! [`ReadAt`](super::read_at::ReadAt) plane built once at open for EVERY backend
 //! (buffered = `pread` on a dedicated `std::fs::File`; mmap = a resident slice over
-//! the SAME unadvised mapping the scan backend uses; `O_DIRECT` = an aligned
+//! the SAME never-`MADV_RANDOM` mapping the scan backend uses; `O_DIRECT` = an aligned
 //! positioned read). A positional read carries its offset as a parameter and
 //! touches no tokio reactor/timer, so it completes fully on the calling (blocking)
 //! thread — no `tokio::fs`, no `block_on`, no second blocking thread. `read_at.rs`'s

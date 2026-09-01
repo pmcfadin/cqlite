@@ -27,7 +27,8 @@ choice of advice a *read-plane* decision rather than a per-call tuning knob:
   `Data.db`.
 
 A reader with both access patterns therefore needs **two mapping handles** (or two backends) — one
-advised for point lookups, one unadvised for scans. Cloning a handle to the same mapping is enough;
+`MADV_RANDOM` for point lookups, one left free of it for scans (unadvised, or advised
+`MADV_WILLNEED`; CQLite uses the latter by default, issue #2824). Cloning a handle to the same mapping is enough;
 a second `mmap` or file descriptor is not required. If a scan is served from the `MADV_RANDOM`
 mapping it collapses toward page-at-a-time faulting: CQLite measured ~4–4.5 KiB block requests at
 ~7 000 reads/s on a compressed scan walk in exactly that configuration (issue #2876, fixed by PR

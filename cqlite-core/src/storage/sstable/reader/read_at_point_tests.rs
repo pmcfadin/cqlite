@@ -78,7 +78,7 @@ async fn concurrent_point_reads(
 /// `point_source` is the wrapped plane: `read_value_at_offset` is the POINT-intent
 /// entry point (issue #2876), so a point read must reach the reader's dedicated
 /// `MADV_RANDOM` point-read mapping (issue #2210) and this convoy proof belongs on
-/// that plane. The genuinely sequential walks reach the unadvised scan plane via the
+/// that plane. The genuinely sequential walks reach the never-`MADV_RANDOM` scan plane via the
 /// positional helpers, which take their plane from the caller.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn eight_concurrent_point_reads_do_not_convoy() {
@@ -413,7 +413,7 @@ async fn summary_guided_scan_plane_probe(
 
     // Independent spies on the two planes: `point_source` (the dedicated
     // `MADV_RANDOM` point mapping, issue #2210) and `scan_positional_source` (the
-    // unadvised scan mapping, issue #2876). They are separate reader fields, so
+    // never-`MADV_RANDOM` scan mapping, issue #2876). They are separate reader fields, so
     // replacing one never redirects the other — even on the Buffered/Direct
     // backends where both start out as clones of the same backing source.
     let point_calls = Arc::new(AtomicUsize::new(0));
