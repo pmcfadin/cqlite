@@ -52,6 +52,7 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::error::ErrorCategory;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::access_path::AccessPath;
 use cqlite_core::schema::parse_cql_schema;
 use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::{Config, Database, Error, Platform};
@@ -605,21 +606,33 @@ const SLICE_QUERY: &str =
 const REVERSE_QUERY: &str = "SELECT * FROM test_big.wide_partition WHERE pk = 1 ORDER BY ck DESC";
 const FULL_PARTITION_QUERY: &str = "SELECT * FROM test_big.wide_partition WHERE pk = 1";
 
-/// Run one query over the wide-partition fixture with `schema_body` declared.
-async fn wide_query(schema_body: &str, query: &str) -> Result<Vec<i32>, Error> {
+/// Run one query over the wide-partition fixture with `schema_body` declared,
+/// returning its `ck` values in the order the query produced them, plus the
+/// reported access path.
+async fn wide_query_with_path(
+    schema_body: &str,
+    query: &str,
+) -> Result<(Vec<i32>, Option<AccessPath>), Error> {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = fixture_root(WIDE_KEYSPACE, WIDE_TABLE);
     let schema = write_schema(dir.path(), schema_body);
     let db = open_db(&root, &schema, WIDE_KEYSPACE).await;
     let result = db.execute(query).await?;
-    Ok(result
+    let cks = result
         .rows
         .iter()
         .filter_map(|r| match r.values.get("ck") {
             Some(cqlite_core::types::Value::Integer(i)) => Some(*i),
             _ => None,
         })
-        .collect())
+        .collect();
+    Ok((cks, result.metadata.access_path))
+}
+
+async fn wide_query(schema_body: &str, query: &str) -> Result<Vec<i32>, Error> {
+    wide_query_with_path(schema_body, query)
+        .await
+        .map(|(cks, _)| cks)
 }
 
 #[tokio::test]
@@ -671,9 +684,19 @@ async fn every_wide_partition_read_path_answers_the_same_way() {
 /// `feb5aee62` and at HEAD.
 #[tokio::test]
 async fn a_correct_schema_clustering_slice_still_returns_every_row() {
-    let mut cks = wide_query(&wide_schema(WIDE_TABLE_CORRECT), SLICE_QUERY)
+    let (mut cks, path) = wide_query_with_path(&wide_schema(WIDE_TABLE_CORRECT), SLICE_QUERY)
         .await
         .expect("correct-schema clustering slice must succeed");
+    // The promoted-index narrowing must still be ENGAGED, not merely correct by
+    // falling back. This is what separates "the over-run was eliminated" from "the
+    // over-run is compensated for": a phantom-partition over-run would trip
+    // `indexed_walk_falls_back`, retract the narrowing and report `PartitionLookup`.
+    assert_eq!(
+        path,
+        Some(AccessPath::ClusteringSlice),
+        "the clustering-slice fast path must survive the fix — a fallback here would \
+         mean the windowed walk is still over-running a real row boundary"
+    );
     cks.sort_unstable();
     assert_eq!(
         cks,
