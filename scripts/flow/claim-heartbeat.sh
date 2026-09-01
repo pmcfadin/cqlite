@@ -117,6 +117,12 @@
 #                                            # never read 1 as a clean bill of health.
 #                                            # A sound clean verdict is possible on
 #                                            # per-lane refs and is tracked separately.
+#                                            # SUPERVISOR FLEETS ONLY: the claim refs it
+#                                            # reads are written by worker-supervisor.sh
+#                                            # alone, so on a supervisor-less /drive-issue
+#                                            # fleet the subject set is EMPTY and this
+#                                            # reports nothing (DESCOPED, #3548 — see
+#                                            # SCOPE OF `dead-lanes` below).
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -242,6 +248,40 @@
 #   the repository DOES own: the supervisor-authored claim ref and the pid it
 #   records (#2655). The remaining half — teaching the fleet a committed lane/
 #   session convention — needs an owner decision and is left to #3393.
+#
+# SCOPE OF `dead-lanes`: SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on
+# #3548, option C; completes #3393)
+#   The subject set is `refs/lane-claims/<machine>/<lane-id>` plus the legacy
+#   `refs/machine-claims/<machine>`, and the ONLY writer of either in this tree is
+#   `scripts/local/worker-supervisor.sh` (through `stamp`). So lane-granular dead-lane
+#   detection APPLIES TO SUPERVISOR FLEETS ONLY. On a supervisor-less `/drive-issue` fleet
+#   the subject set is EMPTY — measured on all three boxes: lane-claims=0,
+#   machine-claims=0, production supervisors ZERO — so this command reports nothing and
+#   exits 1. That reinforces the rule above rather than softening it: EXIT 1 MEANS
+#   "NOTHING WAS REPORTED", NEVER a clean bill of health (#3467). On such a fleet lane
+#   liveness rests on the coordination sweep plus the #3436 board-signature read (Ready +
+#   pushed branch + no claim ref) — operating mechanisms, NOT committed commands. See
+#   docs/development/fleet-runbook.md.
+#
+#   THE TWO POPULATED NAMESPACES ARE DELIBERATELY NOT READ, measured rather than priced
+#   from the shape (#3548). Do NOT "fix" the empty subject set by pointing this command at
+#   them; both were evaluated and rejected:
+#     * `refs/claims/issue-<N>` — the per-issue lock (~6 per box). It records the pid of the
+#       TRANSIENT CLAIMING SHELL and never refreshes it. Measured: pid 3775744 was already
+#       gone while its lane was running, so reading it here would report DEAD-NO-PROCESS
+#       for HEALTHY lanes — a false-positive machine, which is worse than reporting nothing.
+#     * `refs/heartbeats/<machine>` — ~20 per box, but SINGLE-SLOT PER MACHINE and
+#       force-updated by `beat`, so N lanes on one box overwrite each other and at most one
+#       is ever reportable. That is structurally the same masking defect the retired
+#       `refs/machine-claims/<machine>` layout had, i.e. instance 5 of the #3464
+#       retracted-invariant-in-a-second-carrier family.
+#
+#   AC4 SURVIVES THE DESCOPE: whatever detection remains, a STALE PID MUST NEVER YIELD A
+#   `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead. That is why a pid is
+#   read ONLY from a claim ref a supervisor refreshes, and why presence alone is not enough
+#   (the identity check against the claim `ts`, and the UNKNOWN-IDENTITY band, above).
+#   `test_claim_heartbeat.sh` pins the namespace containment behaviourally, so a later
+#   read-side change cannot quietly turn the measured false positive into a verdict.
 #
 # Run from inside the repo (any cwd under the working tree/worktree is fine —
 # this never touches the working tree or the current branch).
@@ -1303,6 +1343,17 @@ open_pr_state() {
 
 # cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process is
 # gone. See the header for what "owning process" means and what this does NOT cover.
+#
+# SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes
+# #3393). The subject set below is `refs/lane-claims/*` + the legacy `refs/machine-claims/*`,
+# whose ONLY writer in this tree is `scripts/local/worker-supervisor.sh`. On a
+# supervisor-less `/drive-issue` fleet that set is EMPTY (measured: lane-claims=0,
+# machine-claims=0, production supervisors ZERO on all three boxes), so this function reports
+# nothing and returns 1 — and returning 1 means "NOTHING WAS REPORTED", never a clean bill of
+# health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are
+# NOT read here, for two MEASURED reasons (stale claiming-shell pid; single-slot-per-machine
+# masking) spelled out in the header's SCOPE section — do not point this at them. AC4 still
+# holds: a stale pid must never yield a `DEAD-*` verdict, it must abstain.
 #
 # EXIT PRECEDENCE (3 outranks 1, deliberately): a found dead lane is ACTIONABLE NOW,
 # so it wins the exit code, and any incompleteness is still stated in the text rather
