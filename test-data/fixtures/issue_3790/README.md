@@ -1,0 +1,263 @@
+# issue #3790 — `inet` / `time` multicell-collection ordering fixture
+
+**Cassandra-written** SSTable pinning the ON-DISK ordering of `inet` and `time`
+values used as non-frozen collection elements and map keys, plus the composite
+(frozen tuple) case. This file is **the oracle**: the "observed on-disk order"
+tables below are what Cassandra 5.0.2 actually wrote, read back out of the
+committed `sstabledump` golden, and they are what an ordering test must assert.
+
+- Schema (with the per-column rationale): `test-data/schemas/issue-3790-comparator-ordering.cql`
+- Generator: `test-data/scripts/generate-issue-3790-comparator-ordering.sh`
+- Backs issue #3790 (acceptance criteria 1–4).
+
+## What is here
+
+```
+test-data/fixtures/issue_3790/                                  <- an "sstables root"
+└── test_comparator_order/                                      <- keyspace
+    └── collection_order-3479a500a65e11f1895d413585556a46/      <- table dir
+        ├── nb-1-big-Data.db            (701 B)   Cassandra 5.0 `nb` BIG, UNCOMPRESSED
+        ├── nb-1-big-Data.db.jsonl      (4.0 KB)  sstabledump golden — the physical-dump oracle
+        ├── nb-1-big-Statistics.db      + .db.txt (sstablemetadata rendering)
+        ├── nb-1-big-{Index,Summary,Filter,CRC}.db
+        ├── nb-1-big-TOC.txt
+        └── nb-1-big-Digest.crc32
+```
+
+Keyspace `test_comparator_order`, table `collection_order`. **No
+`CompressionInfo.db`** — asserted by the generator, not assumed. Total committed
+size **52 KB** on disk (~13.4 KB of file content).
+
+## How a test resolves it
+
+The fixture root **is** an sstables root (it directly contains the keyspace
+directory), so it is opened exactly the way the dataset lanes open
+`$CQLITE_DATASETS_ROOT/sstables`. Use the TABLE-granular resolver's documented
+PURE form, which takes the candidate list as a parameter:
+
+```rust
+#[path = "support/datasets_root.rs"] mod datasets_root;
+use datasets_root::{first_root_with_table, repo_root, sstables_root_candidates};
+
+let fixture_root = repo_root().join("test-data/fixtures/issue_3790");
+let mut roots = sstables_root_candidates();      // env corpus, then the checkout corpus
+roots.push(fixture_root);                        // ... then this committed fixture
+let root = first_root_with_table(&roots, "test_comparator_order", "collection_order")
+    .expect("committed fixture is must_run (#3220): fail closed, never skip");
+```
+
+`first_root_with_table` judges presence by an actual `*-Data.db` (never by
+directory existence), so it cannot select a root that holds only sidecars. This
+fixture is git-committed, so per #3220 it is **`must_run`** — a consumer must
+fail closed if it is not found, never skip.
+
+### Why it is NOT under `test-data/datasets/sstables/`
+
+That is where `sstables_root_for_table`'s built-in checkout candidate looks, and
+putting it there would need no extra candidate root — but per
+`test-data/corpus-coverage-policy.md` a newly-committed keyspace there is
+**auto-enrolled as in-scope/ENFORCED** by the #1229 corpus enumeration, and the
+Python and Node enumeration guards red on any committed keyspace absent from
+their explicit `IN_SCOPE_KEYSPACES` maps. Enrolling it therefore requires
+lockstep edits to three harnesses outside `test-data/**`
+(`smoke-test-all-tables.sh`, `bindings/python/tests/corpus.py`,
+`bindings/node/__test__/parity-utils.js`) plus a policy-doc row — a cross-cutting
+change, and one that would put a fixture whose whole point is a *known live
+ordering defect* into the enforced read-parity corpus before the fix lands.
+Precedent for this location: `test-data/fixtures/issue_3504/` and
+`test-data/fixtures/issue_3630/`.
+
+## Exactly how it was produced
+
+```bash
+bash test-data/scripts/generate-issue-3790-comparator-ordering.sh
+```
+
+- Image: `cassandra:5.0.2`, digest
+  `sha256:9945dafdc759800f1e129ee871e45c9d3aa304fb5149148bde8685ae9812b81b`
+  (pulled locally; no network fetch needed).
+- The script starts a container named `cqlite-issue3790-cmporder` (fail-closed if
+  that name already exists — a peer lane's Cassandra is never touched), applies
+  the committed schema with `cqlsh -f`, runs the two `INSERT`s below via
+  `cqlsh -k test_comparator_order -e`, then `nodetool flush test_comparator_order`,
+  tar-streams `/var/lib/cassandra/data/test_comparator_order` out, and generates
+  the golden with `sstabledump <Data.db> -l` and the `.txt` with
+  `sstablemetadata`, both inside the same image.
+- Asserted by the generator: exactly ONE `Data.db` (single flush), NO
+  `CompressionInfo.db`, and the golden mentions all five columns and all eight
+  ordering-bearing literals.
+
+### The values inserted
+
+Both statements carry `USING TIMESTAMP 1000`. **No TTL and no
+`default_time_to_live`** (explicitly `0`), so this fixture cannot time-bomb. The
+literals are written in an order that is **neither** the byte order **nor** the
+string order, so no observed on-disk order can be an artefact of insertion
+sequence.
+
+Row `id = 1` — the full case:
+
+| column | value |
+|---|---|
+| `inet_set` | `{'192.168.0.1', '9.0.0.1', 'fe80::1', '10.0.0.2', '::1', '2001:db8::1'}` |
+| `inet_map` | `{'192.168.0.1':'v4-private', '9.0.0.1':'v4-nine', 'fe80::1':'v6-linklocal', '10.0.0.2':'v4-ten', '::1':'v6-loopback', '2001:db8::1':'v6-doc'}` |
+| `time_set` | `{'12:00:00.000000000', '00:00:09.000000000', '23:59:59.999999999', '00:00:00.000000000', '00:00:10.000000000'}` |
+| `time_map` | `{'12:00:00.000000000':'t-noon', '00:00:09.000000000':'t-nine-sec', '23:59:59.999999999':'t-max', '00:00:00.000000000':'t-midnight', '00:00:10.000000000':'t-ten-sec'}` |
+| `pair_set` | `{('192.168.0.1','12:00:00.000000000'), ('9.0.0.1','23:59:59.999999999'), ('10.0.0.2','00:00:09.000000000'), ('2001:db8::1','00:00:10.000000000'), ('10.0.0.2','00:00:00.000000000')}` |
+
+Row `id = 2` — the minimal falsifying pair:
+
+| column | value |
+|---|---|
+| `inet_set` | `{'10.0.0.2', '9.0.0.1'}` |
+| `inet_map` | `{'10.0.0.2':'pair-ten', '9.0.0.1':'pair-nine'}` |
+| `time_set` | `{'00:00:10.000000000', '00:00:09.000000000'}` |
+| `time_map` | `{'00:00:10.000000000':'pair-ten-sec', '00:00:09.000000000':'pair-nine-sec'}` |
+| `pair_set` | `{('10.0.0.2','00:00:09.000000000'), ('9.0.0.1','00:00:10.000000000')}` |
+
+## THE ORACLE — observed on-disk ordering
+
+Read out of the committed golden `nb-1-big-Data.db.jsonl` (cell `path` entries in
+file order, i.e. the order Cassandra wrote the cells of each complex column).
+`sstabledump` renders an inet cell path as text and escapes `:` inside a tuple
+path as `\:`; the **byte** column below is the serialized value Cassandra
+actually compares (`InetAddressType`/`TimeType` are both
+`ComparisonType.BYTE_ORDER`, verified at tag `cassandra-5.0.8`).
+
+### `inet_set` and `inet_map`, row `id = 1` — identical order in both columns
+
+| # | value | golden `path` | serialized bytes (hex) | len |
+|---|---|---|---|---|
+| 1 | `::1`         | `0:0:0:0:0:0:0:1`      | `00000000000000000000000000000001` | 16 |
+| 2 | `9.0.0.1`     | `9.0.0.1`              | `09000001`                         | 4 |
+| 3 | `10.0.0.2`    | `10.0.0.2`             | `0a000002`                         | 4 |
+| 4 | `2001:db8::1` | `2001:db8:0:0:0:0:0:1` | `20010db8000000000000000000000001` | 16 |
+| 5 | `192.168.0.1` | `192.168.0.1`          | `c0a80001`                         | 4 |
+| 6 | `fe80::1`     | `fe80:0:0:0:0:0:0:1`   | `fe800000000000000000000000000001` | 16 |
+
+`inet_map` values follow the same order: `v6-loopback`, `v4-nine`, `v4-ten`,
+`v6-doc`, `v4-private`, `v6-linklocal`.
+
+That is **unsigned byte-wise order** — first bytes `0x00 < 0x09 < 0x0a < 0x20 <
+0xc0 < 0xfe` — and it is NOT the order CQLite's formatted-string comparison
+produces, which is:
+
+```
+::1  <  10.0.0.2  <  192.168.0.1  <  2001:db8::1  <  9.0.0.1  <  fe80::1
+```
+
+(`"0000:..." < "10.0.0.2" < "192.168.0.1" < "2001:0db8:..." < "9.0.0.1" <
+"fe80:..."` under `types.rs::fmt_inet`, which renders IPv4 dotted-decimal and
+IPv6 as eight zero-padded hex groups).
+
+**`9.0.0.1` is at position 2 on disk and at position 5 by string.** Three
+independent falsifying pairs, inverting in both the v4/v4 and the v4/v6
+direction, so no single coincidence can satisfy them all:
+
+| pair | Cassandra (bytes) | CQLite (string) |
+|---|---|---|
+| `9.0.0.1` vs `10.0.0.2`    | `9.0.0.1` first (`0x09 < 0x0a`) | `10.0.0.2` first (`'1' < '9'`) |
+| `2001:db8::1` vs `192.168.0.1` | `2001:db8::1` first (`0x20 < 0xc0`) | `192.168.0.1` first (`'1' < '2'`) |
+| `9.0.0.1` vs `2001:db8::1` | `9.0.0.1` first (`0x09 < 0x20`) | `2001:db8::1` first (`'2' < '9'`) |
+
+Row `id = 2` is the same property in two elements: on disk `9.0.0.1` then
+`10.0.0.2` (`pair-nine` then `pair-ten`); by string the reverse.
+
+### `time_set` and `time_map`, row `id = 1` — identical order in both columns
+
+| # | golden `path` | nanoseconds since midnight | 8-byte big-endian (hex) |
+|---|---|---|---|
+| 1 | `00:00:00.000000000` | `0`              | `0000000000000000` |
+| 2 | `00:00:09.000000000` | `9000000000`     | `000000021ca9c380` |
+| 3 | `00:00:10.000000000` | `10000000000`    | `00000002540be400` |
+| 4 | `12:00:00.000000000` | `43200000000000` | `0000273fcbce7000` |
+| 5 | `23:59:59.999999999` | `86399999999999` | `00004e94914eff7f` |
+
+`time_map` values follow the same order: `t-midnight`, `t-nine-sec`, `t-ten-sec`,
+`t-noon`, `t-max`. Row `id = 2`: `00:00:09` then `00:00:10` (`pair-nine-sec` then
+`pair-ten-sec`).
+
+**HONEST SCOPE — read this before writing a `time` assertion.** CQLite renders
+`time` as `TIME(HH:MM:SS.nnnnnnnnn)` (`types.rs::fmt_time`), which is fixed-width
+and zero-padded, so over the whole valid range `0..=86399999999999` the string
+order and the nanosecond order **coincide**. There is therefore **no `time` value
+pair that falsifies the current formatted-string implementation**, and this
+fixture does not claim one. What the `time` columns do provide:
+
+1. a **value-order pin** over Cassandra-written bytes, so a future
+   re-implementation that breaks nanosecond ordering reds; and
+2. a **falsifier for a decimal-nanosecond string comparison** — the other
+   plausible wrong implementation: `9000000000 < 10000000000` numerically while
+   `"9000000000" > "10000000000"` lexicographically. That is exactly why
+   `00:00:09` and `00:00:10` are in the value set.
+
+Anyone reporting this fixture as catching a `time` string-ordering bug would be
+overclaiming; `inet` is the column that catches the live defect.
+
+### `pair_set` — the composite case (`SET<FROZEN<TUPLE<INET, TIME>>>`)
+
+Row `id = 1`, golden `path` in file order (`\:` is sstabledump's escaping of a
+`:` inside the tuple path, and the tuple's two components are separated by an
+unescaped `:`):
+
+| # | tuple | golden `path` |
+|---|---|---|
+| 1 | (`9.0.0.1`, `23:59:59.999999999`)     | `9.0.0.1:23\:59\:59.999999999` |
+| 2 | (`10.0.0.2`, `00:00:00.000000000`)    | `10.0.0.2:00\:00\:00.000000000` |
+| 3 | (`10.0.0.2`, `00:00:09.000000000`)    | `10.0.0.2:00\:00\:09.000000000` |
+| 4 | (`2001:db8::1`, `00:00:10.000000000`) | `2001\:db8\:0\:0\:0\:0\:0\:1:00\:00\:10.000000000` |
+| 5 | (`192.168.0.1`, `12:00:00.000000000`) | `192.168.0.1:12\:00\:00.000000000` |
+
+Two facts make this the composite oracle #3790 AC4 asks for:
+
+- The **first** component decides between distinct inets, in the same byte order
+  as above (`9.0.0.1` before `10.0.0.2` before `2001:db8::1` before
+  `192.168.0.1`) — so a tuple *containing* an `inet` inherits the defect, which is
+  the scalar-leaf delegation the issue names.
+- Entries 2 and 3 share the inet `10.0.0.2` and differ **only** in the `time`
+  component, and they are ordered `00:00:00` before `00:00:09`. So the second
+  component's comparator is load-bearing here and not merely carried along.
+
+Row `id = 2`: `9.0.0.1:00\:00\:10...` then `10.0.0.2:00\:00\:09...` — the first
+component decides, and it decides against the time components' order, which
+would be reversed. A comparator that (wrongly) compared the rendered *whole tuple
+path* as one string would put `10.0.0.2...` first.
+
+## Residual: the golden is NOT byte-reproducible
+
+Assigning a whole non-frozen collection — which is what an `INSERT` of a
+collection column does — makes Cassandra write a **complex-column deletion**
+ahead of the cells, one per collection (five per row here):
+
+```json
+{"name":"inet_map","deletion_info":{"marked_deleted":"1970-01-01T00:00:00.000999Z",
+                                    "local_delete_time":"2026-09-01T23:38:17Z"}}
+```
+
+`marked_deleted` is pinned by `USING TIMESTAMP 1000` (timestamp − 1 = 999 µs), but
+`local_delete_time` is a wall clock (`nowInSeconds`) that no CQL clause can pin,
+so **that one field differs on every regeneration**. The same residual
+`issue-3504-udt-collision.cql` and `issue-3630-row-collision.cql` record for
+their tombstones.
+
+Do not byte-compare this golden across regenerations: compare the cell **paths**
+(which is what the ordering oracle is about) and the values, or normalise
+`local_delete_time` away first. The tombstone is **kept rather than avoided** — it
+is what a real `INSERT` into a non-frozen collection produces, so removing it
+(by populating with `UPDATE ... SET col = col + {...}`, which writes no complex
+deletion) would buy reproducibility at the cost of the shape users actually have
+on disk.
+
+## Verified to READ
+
+`stat`-ing files proves nothing; the reader is the judge. Confirmed with the
+committed binaries in place:
+
+```
+cargo run -p cqlite-cli --bin cqlite -- read-sstable \
+  test-data/fixtures/issue_3790/test_comparator_order/collection_order-*/nb-1-big-Data.db \
+  --format json
+```
+
+See "Read-back verification" below for the observed row count and what CQLite
+returned for the collections.
