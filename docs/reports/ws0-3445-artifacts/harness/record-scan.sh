@@ -27,6 +27,10 @@ set -euo pipefail
 
 CORPUS=/data/ws0-3096
 OUT=; BINARY=; EVENT=cycles; PERIOD=500009; SECS=40; CPU=2; SETTLE=5; MODE=record
+# Quiescence bound. A rep is publishable only if the box was quiet across the WHOLE rep,
+# not merely at its start, so the load is SAMPLED THROUGHOUT and the maximum is checked.
+# 0 disables the check (and says so in the verdict file) -- it never silently disables it.
+MAX_LOAD=3.0; LOAD_SAMPLE_SECS=5
 STAT_EVENTS='cycles,instructions,cycle_activity.stalls_total,cycle_activity.stalls_l1d_miss,idq_uops_not_delivered.core,int_misc.recovery_cycles'
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,6 +43,8 @@ while [ $# -gt 0 ]; do
     --settle) SETTLE=$2; shift 2;;
     --mode) MODE=$2; shift 2;;
     --stat-events) STAT_EVENTS=$2; shift 2;;
+    --max-load) MAX_LOAD=$2; shift 2;;
+    --load-sample-secs) LOAD_SAMPLE_SECS=$2; shift 2;;
     --corpus) CORPUS=$2; shift 2;;
     *) echo "record-scan.sh: unknown argument: $1" >&2; exit 2;;
   esac
@@ -49,11 +55,24 @@ done
 
 mkdir -p "$OUT"
 RUNDIR=$(mktemp -d /tmp/ws0-3445-rep.XXXXXX)
-cleanup() { touch "$RUNDIR/stop" 2>/dev/null || true; sleep 0.5; kill "${WPID:-}" 2>/dev/null || true; }
+# The sampler is a background child, so it is reaped here too: an early exit must not
+# leave a loadavg loop running on a metered box after the rep it belonged to is gone.
+cleanup() {
+  touch "$RUNDIR/stop" 2>/dev/null || true; sleep 0.5
+  kill "${WPID:-}" 2>/dev/null || true
+  kill "${SAMPLER:-}" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 # Co-tenancy is RECORDED, never assumed away: other lanes share this box, and a rep taken
 # beside a peer's gate is a rep whose validity has to be judged, not hidden.
+#
+# WHY A BEFORE/AFTER PAIR IS NOT ENOUGH. The gate semaphore
+# (CQLITE_GATE_MAX_CONCURRENCY=1) serialises GATE against GATE; a perf run holds no slot,
+# so a peer's gate can start, run and finish entirely INSIDE this rep's window while both
+# endpoint samples look quiet. loadavg is also a decaying average, so its value at t=0
+# describes the minute BEFORE the rep. Hence a sampler across the whole window, and a
+# verdict taken from the MAXIMUM rather than from either endpoint.
 { echo "loadavg_before=$(cut -d' ' -f1-3 /proc/loadavg)"
   echo "nproc=$(nproc)"
   echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || true)"
@@ -78,6 +97,15 @@ sleep "$SETTLE"          # steady state, after the barrier release transient
 # Affinity is READ BACK from the kernel rather than trusted to taskset's argument.
 tr -d '\0' < "/proc/$WPID/status" | grep -E 'Cpus_allowed_list' > "$OUT/affinity-observed.txt" || true
 
+# --- load sampler across the measured window ------------------------------------
+: > "$OUT/load-samples.txt"
+( while :; do
+    echo "$(date -u +%H:%M:%S) $(cut -d' ' -f1 /proc/loadavg) $(pgrep -c -f 'cargo|agent-gate|maturin|rustc' || echo 0)"
+    sleep "$LOAD_SAMPLE_SECS"
+  done ) >> "$OUT/load-samples.txt" 2>/dev/null &
+SAMPLER=$!
+stop_sampler() { kill "$SAMPLER" 2>/dev/null || true; }
+
 if [ "$MODE" = record ]; then
   perf record -e "$EVENT" -c "$PERIOD" -p "$WPID" -o "$OUT/perf.data" \
     -- sleep "$SECS" > "$OUT/perf-record.log" 2>&1 || true
@@ -91,9 +119,30 @@ else
     -- sleep "$SECS" 2> "$OUT/counters.csv" > "$OUT/perf-stat.stdout" || true
 fi
 
+stop_sampler
 { echo "loadavg_after=$(cut -d' ' -f1-3 /proc/loadavg)"
   echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || true)"
 } > "$OUT/cotenancy-after.txt"
+
+# --- quiescence verdict: REFUSE loudly, never silently re-roll -------------------
+# The verdict is written to a file in the rep directory whatever it says, so a REFUSED
+# rep leaves a durable record that can be reported as a refusal. A rep quietly re-rolled
+# until it looked clean is the worse outcome (#3299 AC5), so this script does not retry.
+PEAK=$(awk '{ if ($2+0 > m) m = $2+0 } END { printf "%.2f", m }' "$OUT/load-samples.txt")
+NSAMP=$(wc -l < "$OUT/load-samples.txt")
+if [ "$NSAMP" -lt 2 ]; then
+  printf 'verdict=REFUSED\nreason=quiescence-unmeasured\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+elif [ "$(awk -v p="$PEAK" -v m="$MAX_LOAD" 'BEGIN{print (m+0==0) ? "off" : ((p+0>m+0)?"bad":"ok")}')" = bad ]; then
+  printf 'verdict=REFUSED\nreason=box-not-quiet-across-rep\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+elif [ "$(awk -v m="$MAX_LOAD" 'BEGIN{print (m+0==0)?"off":"on"}')" = off ]; then
+  printf 'verdict=UNCHECKED\nreason=max-load-check-disabled\nsamples=%s\npeak_load=%s\n' \
+    "$NSAMP" "$PEAK" > "$OUT/quiescence-verdict.txt"
+else
+  printf 'verdict=OK\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+fi
 
 touch "$RUNDIR/stop"
 wait "$WPID" || true
