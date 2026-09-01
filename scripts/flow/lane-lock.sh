@@ -1352,7 +1352,42 @@ SAME_DIR_UNREADABLE=0
 # and the file paths. Every value is sanitized here, once, so the token we WRITE and
 # the token we COMPARE are always the same value (claim.sh's this_machine rationale).
 # prepare_identity <issue> <lane-real> <actor-raw> <pid-opt> [write|compare]
+# SET-BUT-EMPTY IS A USAGE ERROR FOR EVERY IDENTITY-BEARING ENV VAR (#3436, roborev round 32).
+# Same reasoning as `--pid ''` and `--expect ''`, one channel over: `LANE_LOCK_X="$var"` with an
+# UNSET var is the classic spelling, and `${X:-default}` silently turns it into the default, so
+# the caller believes it named an identity while the lock records another. All three of these
+# are token components — machine, actor, pid — so a wrong one is a wrong HOLDER.
+#
+# ONE BOUNDARY, not a check at each of the ~8 read sites: a per-site guard is a list to keep
+# complete, and round 31 proved that the hard way (3 of 5 --pid sites patched on the first
+# attempt). It CANNOT live inside a helper called from `$(...)` either — die_usage exits 64,
+# and inside a command substitution that kills only the SUBSHELL while the script sails on,
+# which is this file's most-repeated bug (rounds 19, 22, 23).
+#
+# THE BOUNDARY IS prepare_identity, NOT THE SUBCOMMAND DISPATCH (#3436, roborev round 33).
+# Round 32 put it at the dispatch, where it ran for EVERY subcommand — and that broke
+# `release --force`, which round 5 had already established MUST NOT NEED AN IDENTITY (see the
+# comment in cmd_release). An inherited empty var then made the break-glass refuse, so the one
+# command that clears a stuck lane could not run: a guard that reds on correct input, on the
+# recovery path. `status` was collateral for the same reason.
+# prepare_identity is the precise boundary because it IS the thing that resolves and validates
+# identity: cmd_status never calls it, cmd_release skips it under --force, and it is called
+# from the main shell at every site (never inside `$(...)`), so die_usage still exits the
+# script. Placing the check here needs no list of exempt subcommands — the exemption falls out
+# of who actually consumes an identity.
+require_identity_env_nonempty() {
+  local v val
+  for v in LANE_LOCK_PID LANE_LOCK_ACTOR LANE_LOCK_MACHINE; do
+    eval "val=\${$v+set}"
+    [ -n "$val" ] || continue          # genuinely unset: the documented default applies
+    eval "val=\${$v}"
+    [ -n "$val" ] && continue
+    die_usage "$v is SET but EMPTY. That is a usage error, not 'unset': it is a component of the HOLDER IDENTITY, and \`$v=\"\$var\"\` with an unset var would silently fall back to the default and record an identity you did not name. Unset it, or give it a value."
+  done
+}
+
 prepare_identity() {
+  require_identity_env_nonempty
   G_ISSUE="$1"
   G_LANE="$2"
   G_ACTOR="$(resolve_actor "$3")"
@@ -2115,33 +2150,10 @@ SUBCOMMAND="${1:-}"
 # relative value is a lock BYPASS (two cwds, two lock roots, both acquire), so it must
 # fail before anything reads a path. `--help` is exempt: printing usage must work on a
 # misconfigured box, and it touches no path.
-# SET-BUT-EMPTY IS A USAGE ERROR FOR EVERY IDENTITY-BEARING ENV VAR (#3436, roborev round 32).
-# Same reasoning as `--pid ''` and `--expect ''`, one channel over: `LANE_LOCK_X="$var"` with an
-# UNSET var is the classic spelling, and `${X:-default}` silently turns it into the default, so
-# the caller believes it named an identity while the lock records another. All three of these
-# are token components — machine, actor, pid — so a wrong one is a wrong HOLDER.
-#
-# ONE BOUNDARY IN THE MAIN SHELL, not a check at each of the ~8 read sites: a per-site guard is
-# a list to keep complete, and round 31 proved that the hard way (3 of 5 --pid sites patched on
-# the first attempt). It CANNOT live inside a helper called from `$(...)` either — die_usage
-# exits 64, and inside a command substitution that kills only the SUBSHELL while the script
-# sails on, which is this file's most-repeated bug (rounds 19, 22, 23).
-# `--help` is exempt for the same reason require_lane_root_abs exempts it: printing usage must
-# work on a misconfigured box.
-require_identity_env_nonempty() {
-  local v val
-  for v in LANE_LOCK_PID LANE_LOCK_ACTOR LANE_LOCK_MACHINE; do
-    eval "val=\${$v+set}"
-    [ -n "$val" ] || continue          # genuinely unset: the documented default applies
-    eval "val=\${$v}"
-    [ -n "$val" ] && continue
-    die_usage "$v is SET but EMPTY. That is a usage error, not 'unset': it is a component of the HOLDER IDENTITY, and \`$v=\"\$var\"\` with an unset var would silently fall back to the default and record an identity you did not name. Unset it, or give it a value."
-  done
-}
 
 case "$SUBCOMMAND" in
   -h | --help | help) : ;;
-  *) require_lane_root_abs; require_identity_env_nonempty ;;
+  *) require_lane_root_abs ;;
 esac
 case "$SUBCOMMAND" in
   -h | --help | help) print_help ;;

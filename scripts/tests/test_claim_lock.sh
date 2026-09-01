@@ -1450,5 +1450,39 @@ else
 $out_c"
 fi
 
+# ===========================================================================
+echo 'TEST: a credential-bearing CLAIM_REMOTE is REDACTED in claim.sh output (rounds 28/33)'
+# ===========================================================================
+# claim.sh interpolated $REMOTE into ~20 diagnostics with no redaction while its sibling
+# advertised-collision-scan.sh had redact_remote() from round 7 -- one env var, two scripts, one
+# leaking (round 28). The fix redacts at the ONE emit boundary (note + emit). It shipped with NO
+# TEST, which is why round 33 could then find a LOCALE bug in it and nothing would have caught a
+# regression either way. Exercised through the REAL emit path, not by sourcing the function: the
+# property that matters is what a user actually sees on stdout.
+# Deliberately OUTSIDE the CLAIM_TEST_OS guard above -- redaction has nothing to do with /proc.
+o_red="$( cd /tmp && timeout 30 env CLAIM_REMOTE='https://user:ghp_TESTSECRET123@example.invalid/o/r.git' \
+          GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
+if ! printf '%s' "$o_red" | grep -q 'ghp_TESTSECRET123' \
+   && printf '%s' "$o_red" | grep -q '\*\*\*@example.invalid'; then
+  ok "a credential-bearing CLAIM_REMOTE is redacted to ***@host in claim.sh's emitted diagnostics"
+else
+  bad "the token survived into claim.sh output, or the host was lost:
+$o_red"
+fi
+# LOCALE: BSD/macOS sed REJECTS invalid UTF-8 in a UTF-8 locale, and redact_urls runs inside
+# `$(...)` in emit -- a failed sed would contribute an EMPTY substitution while the surrounding
+# echo still exits 0, printing a bare `CLAIM: ` and silently losing the whole verdict (round 33).
+# LC_ALL=C makes the match byte-oriented. Asserted as "the line still carries its content",
+# which is the property; the locale pin is the mechanism.
+o_utf="$( cd /tmp && timeout 30 env CLAIM_REMOTE="$(printf 'https://user:tok@ex\xff\xfeample.invalid/o/r.git')" \
+          LC_ALL=en_US.UTF-8 GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
+if printf '%s' "$o_utf" | grep -q 'ls-remote-unreachable-on' \
+   && ! printf '%s' "$o_utf" | grep -qE '^CLAIM: *$'; then
+  ok "a remote carrying INVALID UTF-8 still emits its full verdict — the redactor did not swallow the line"
+else
+  bad "an invalid-UTF-8 remote produced an empty or truncated verdict:
+$o_utf"
+fi
+
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

@@ -275,7 +275,24 @@ die_usage() { echo "$prog: $*" >&2; exit 64; }
 # unchanged. `sed -E` is honoured by GNU and BSD sed alike (macOS is a first-class gate
 # host), and the class is POSIX so no GNU-only escape is involved.
 redact_urls() {
-  printf '%s\n' "$*" | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^[:space:]@/]*@#\1***@#g'
+  # LC_ALL=C IS LOAD-BEARING, exactly as it is for sanitize_field above (#3436, roborev round
+  # 33). In a UTF-8 locale BSD/macOS sed REJECTS invalid byte sequences, and a remote name, a
+  # path or a ref can carry them. This function runs inside `$(...)` in emit/note, so a failed
+  # sed contributes an EMPTY substitution while the surrounding echo still exits 0 — the
+  # verdict line would print `CLAIM: ` and nothing else, losing the whole message with no error
+  # anywhere. C makes the match byte-oriented, so there is no invalid sequence to reject.
+  # The sibling sanitize_field has pinned this since #2945; this function shipped without it.
+  local out
+  out="$(printf '%s\n' "$*" | LC_ALL=C sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^[:space:]@/]*@#\1***@#g')"
+  # FAIL CLOSED, AND NEVER TOWARD THE RAW VALUE. If the transform ever yields nothing from a
+  # non-empty input, the safe fallback is NOT to print the original — that is precisely the
+  # credential this function exists to remove. Report the loss instead: a named diagnostic is
+  # recoverable, a leaked token is not.
+  if [ -z "$out" ] && [ -n "$*" ]; then
+    printf '%s\n' "<diagnostic suppressed: redaction failed; refusing to print an unredacted value>"
+    return 0
+  fi
+  printf '%s\n' "$out"
 }
 note()      { echo "[claim] $(redact_urls "$*")" >&2; }
 emit()      { echo "CLAIM: $(redact_urls "$*")"; }
