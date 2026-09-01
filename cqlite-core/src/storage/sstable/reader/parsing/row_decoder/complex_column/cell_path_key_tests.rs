@@ -1018,22 +1018,15 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // !! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE NOW REACHED BY A REAL READ
 // !! (issue #3747). This note previously said the opposite; do not restore it.
 //
-// #3612 wrote these cases as UNIT-ONLY, and that was accurate AT THE TIME: the
-// sole production caller decoded a key only `if !cell.path_bytes.is_empty()`
-// (`complex_column.rs`, the multicell map branch), so a zero-length cell path
-// never reached `parse_cell_path_key` at all — and, worse, that branch DROPPED
-// the whole entry, because the `if let Some(key_value) = decoded_key` below it
-// never fired. #3612 filed that swallow as #3747 rather than fixing it.
-//
-// #3747 has since REMOVED that guard, so the map branch now decodes every
-// cell path, empty included, and these cases describe behaviour a `SELECT` and a
-// compaction read actually exercise. The end-to-end evidence is separate and
-// lives where it belongs — `cqlite-core/tests/issue_3747_empty_map_key.rs`,
-// against a Cassandra-written fixture and its `sstabledump` golden — because a
-// unit test still does not constitute wiring evidence on its own (CLAUDE.md: a
-// feature is done only when its public surface exercises it). What changed is
-// that these cases are no longer UNREACHABLE; they are the function-level half
-// of a property whose public-surface half is now also covered.
+// #3612 wrote them as UNIT-ONLY and that was accurate THEN: the sole production
+// caller decoded a key only `if !cell.path_bytes.is_empty()`, so a zero-length
+// path never reached `parse_cell_path_key` — and that branch DROPPED the entry,
+// because `if let Some(key_value) = decoded_key` never fired. #3612 filed the
+// swallow as #3747 instead of fixing it. #3747 removed the guard, so these cases
+// now describe behaviour a `SELECT` and a compaction read exercise. They are the
+// function-level half only: the wiring evidence is
+// `cqlite-core/tests/issue_3747_empty_map_key.rs`, against a Cassandra-written
+// fixture and its golden (a unit test is not wiring evidence on its own).
 //
 // That filter is PRE-EXISTING, not part of #3612, and it means a legal empty
 // `text`/`blob` map key is silently dropped from query and compaction results —
@@ -1112,15 +1105,12 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `inet` is NOT a fifth strict case, and it is the ONE family where the empty
 /// buffer decodes rather than merely passing the width table.
 ///
-/// This case carried the loudest UNIT-ONLY warning in the file, because its name
-/// reads like a capability claim and no read could reach it. **That is no longer
-/// true**: #3747 removed the caller's empty-path guard, so a `SELECT` over a
-/// `map<inet,…>` with an empty key really does reach this arm and really does
-/// return an empty `Value::Inet`. The test is renamed accordingly — a name that
-/// asserts unreachability is worse than no name once the code has moved.
-///
-/// It remains the only thing pinning the corrected `[0, 4, 16]` row against the
-/// three places that previously called `inet` "the fifth strict case".
+/// This carried the loudest UNIT-ONLY warning in the file, because its name reads
+/// like a capability claim and no read could reach it. **No longer true**: #3747
+/// removed the caller's empty-path guard, so a `SELECT` over `map<inet,…>` with an
+/// empty key does reach this arm and does return an empty `Value::Inet`. Renamed
+/// accordingly — a name asserting unreachability is worse than none once the code
+/// has moved. It remains the only thing pinning the corrected `[0, 4, 16]` row.
 ///
 /// `InetAddressSerializer.validate` RETURNS EARLY on empty
 /// (`if (accessor.isEmpty(value)) return;`) and only then delegates to

@@ -772,14 +772,12 @@ impl V5CompressedLegacyParser {
                 // recorded on the per-element compaction entry and used to build
                 // the collapsed `Value::Map`.
                 //
-                // ISSUE #3747 — DECODED UNCONDITIONALLY. A multicell map cell's cell path
-                // IS its key and Cassandra always writes one, so a ZERO-LENGTH path is an
-                // EMPTY KEY — legal data (`{'': 1}` is valid CQL; empty is DISTINCT from
-                // null) — never "no key". The old `!is_empty()` guard dropped the entry,
-                // so a `SELECT` silently returned a map SHORT ONE ENTRY. WHICH empties are
-                // legal is NOT decided here: #3612's `cell_path_key_allowed_widths` runs
-                // first and is derived from Cassandra's serializers. Removing this guard
-                // only lets that authority see the case it was shielded from.
+                // ISSUE #3747 — DECODED UNCONDITIONALLY. A map cell's cell path IS its key
+                // and Cassandra always writes one, so a ZERO-LENGTH path is an EMPTY KEY —
+                // legal data (`{'': 1}` is valid CQL; empty is DISTINCT from null), never
+                // "no key". The old `!is_empty()` guard dropped it, so a `SELECT` returned
+                // a map SHORT ONE ENTRY. WHICH empties are legal is decided by #3612's
+                // Cassandra-derived `cell_path_key_allowed_widths`, which runs first.
                 tracing::debug!(
                     "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
                     column.name,
