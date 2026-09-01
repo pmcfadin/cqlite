@@ -150,12 +150,23 @@
 #                           the record's, and its state is not 'Z' (zombie)
 #   DEAD-NO-PROCESS         same boot-id, /proc/<pid> absent — or present and a zombie
 #   DEAD-PID-REUSED         same boot-id, /proc/<pid> exists, start-ticks DIFFER
-#   DEAD-REBOOT             record's boot-id differs from the live one; a reboot
-#                           killed every process, so the holder is definitively gone
+#   DEAD-REBOOT             record's boot-id is WELL-FORMED and differs from the live
+#                           one; a reboot killed every process, so the holder is gone.
+#                           The well-formed half is load-bearing (#3436, roborev round
+#                           27): this branch used to fire on ANY nonempty value that was
+#                           not ours, so a corrupt boot-id read DEAD and auto-reclaimed a
+#                           lane whose holder was never checked. `!= ours` is a NEGATIVE;
+#                           the affirmative fact a DEAD verdict needs is "a valid boot-id
+#                           naming a DIFFERENT boot", which only a shape check supplies.
 #   UNKNOWN-FOREIGN         record's machine differs from ours: a pid is not checkable
 #   UNKNOWN-EPHEMERAL       record's pid-scope=ephemeral (see above)
 #   UNKNOWN-NO-PID          record carries no usable pid
 #   UNKNOWN-NO-BOOT-ID      record carries no boot-id (predates the field / hand-made)
+#   UNKNOWN-BAD-BOOT-ID     record's boot-id is PRESENT but not a boot-id (truncated,
+#                           corrupt, foreign format). "Differs from ours" then means
+#                           nothing: see the DEAD-REBOOT note below
+#   UNKNOWN-RECORD-VERSION  record's version is absent or is not the one this file
+#                           writes, so NO field in it can be interpreted with confidence
 #   UNKNOWN-NO-START-TICKS  record carries no start-ticks
 #   UNKNOWN-NO-PROC         no /proc on this host: identity cannot be re-checked at all
 #   UNKNOWN-UNREADABLE      the record exists but could not be parsed
@@ -511,6 +522,15 @@ require_abs_path() {
 proc_available() { [ -d /proc/self ]; }
 
 # live_boot_id — the FULL boot id, or "" when it cannot be read.
+# A Linux boot_id is a UUID. Checked with a `case` glob: no pipe (#3685 — a
+# `printf | grep -q` here would be one more SIGPIPE site), no regex, bash 3.2 safe.
+is_boot_id_shaped() {
+  case "${1:-}" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 live_boot_id() {
   [ -r /proc/sys/kernel/random/boot_id ] || return 0
   LC_ALL=C tr -d ' \t\n' < /proc/sys/kernel/random/boot_id 2>/dev/null || true
@@ -805,6 +825,13 @@ record_is_self() {
 record_liveness() {
   local live_boot live_ticks state
   if [ "$REC_UNREADABLE" -eq 1 ]; then printf 'UNKNOWN-UNREADABLE\n'; return 0; fi
+  # VERSION BEFORE EVERY OTHER FIELD (#3436, roborev round 27). `version` was PARSED and
+  # then read NOWHERE, so a record written by a future/foreign writer was interpreted as
+  # v1 regardless: its boot-id, pid and start-ticks were trusted to mean what v1 means.
+  # We cannot know that, and every downstream verdict — including a DEAD one that
+  # auto-reclaims the lane — would rest on it. Refuse to interpret instead. Checked
+  # before record_is_self because the TOKEN is built from those same fields.
+  if [ "${REC_VERSION:-}" != "$RECORD_VERSION" ]; then printf 'UNKNOWN-RECORD-VERSION\n'; return 0; fi
   if record_is_self; then printf 'SELF\n'; return 0; fi
   if [ "$REC_MACHINE" != "$(this_machine)" ]; then printf 'UNKNOWN-FOREIGN\n'; return 0; fi
   # BOOT ID BEFORE PID SCOPE (#3436, roborev round 26). A record from a PREVIOUS boot is dead
@@ -829,6 +856,13 @@ record_liveness() {
     printf 'UNKNOWN-NO-PROC\n'; return 0
   fi
   if [ -z "$REC_BOOT_ID" ]; then printf 'UNKNOWN-NO-BOOT-ID\n'; return 0; fi
+  # PRESENT IS NOT VALID (#3436, roborev round 27). The line above already refuses to
+  # call an ABSENT boot-id dead — "cannot tell which boot" must never become "dead" —
+  # and the comparison below was one case short of the same rule: a truncated or corrupt
+  # value is also a boot-id we cannot tell anything from, yet it is `!= live_boot` and
+  # so read DEAD-REBOOT and auto-reclaimed. Same sibling-miss shape this branch has now
+  # paid for repeatedly: the principle was applied at the site it was noticed at.
+  if ! is_boot_id_shaped "$REC_BOOT_ID"; then printf 'UNKNOWN-BAD-BOOT-ID\n'; return 0; fi
   if [ "$REC_BOOT_ID" != "$live_boot" ]; then
     # A reboot killed every process that existed under the old boot id. This is the
     # one DEAD verdict that needs no pid read at all.

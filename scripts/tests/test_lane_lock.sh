@@ -1977,5 +1977,74 @@ else
 fi
 rm -rf "$D42"
 
+# ===========================================================================
+echo 'TEST 43: a DEAD verdict needs an AFFIRMATIVE fact, not just "differs from ours" (round 27)'
+# ===========================================================================
+# record_liveness refused to call an ABSENT boot-id dead but called a PRESENT-and-corrupt one
+# DEAD-REBOOT, because the branch keyed on `!= live_boot` — a NEGATIVE. A truncated/corrupt
+# boot-id is exactly as uninformative as a missing one, so it must refuse too, or a lane whose
+# holder was never checked is auto-reclaimed. Same for `version`, which was parsed and never read.
+D43="$(mktemp -d)"; mkdir -p "$D43/.lane-locks"
+_mk43() { # <issue> <version> <boot-id>
+  printf 'version=%s\nissue=%s\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=cwd-match\nboot-id=%s\nstart-ticks=1\nacquired-ts=2020-01-01T00:00:00Z\nnonce=x\n' \
+    "$2" "$1" "$D43" "$(hostname -s 2>/dev/null || hostname)" "$3" > "$D43/.lane-locks/lane-$1.lock"
+}
+_st43() { env -u LANE_LOCK_PID LANE_ROOT="$D43" bash "$LL" status "$1" 2>&1; }
+
+# (a) corrupt boot-id => UNKNOWN-BAD-BOOT-ID, NOT reclaimable
+_mk43 431 1 'deadbeef-nope'
+o43a="$(_st43 431)"
+if printf '%s' "$o43a" | grep -q 'liveness=UNKNOWN-BAD-BOOT-ID' && printf '%s' "$o43a" | grep -q 'reclaimable=no'; then
+  ok "(a) a corrupt boot-id is UNKNOWN-BAD-BOOT-ID and NOT reclaimable"
+else
+  bad "(a) corrupt boot-id was not refused:
+$o43a"
+fi
+
+# (b) truncated boot-id (a real uuid with its tail cut) => same refusal
+_mk43 432 1 '00000000-dead-beef-0000-0000000'
+o43b="$(_st43 432)"
+if printf '%s' "$o43b" | grep -q 'liveness=UNKNOWN-BAD-BOOT-ID'; then
+  ok "(b) a TRUNCATED boot-id is refused too — length is part of the shape"
+else
+  bad "(b) truncated boot-id was not refused:
+$o43b"
+fi
+
+# (c) CONTROL: a WELL-FORMED foreign boot-id must STILL be DEAD-REBOOT and reclaimable.
+#     Without this the fix could satisfy (a)/(b) by refusing everything, which would brick
+#     the documented reboot un-brick — the exact over-correction FIX 5/14 warns about.
+_mk43 433 1 '00000000-dead-beef-0000-000000000000'
+o43c="$(_st43 433)"
+if printf '%s' "$o43c" | grep -q 'liveness=DEAD-REBOOT' && printf '%s' "$o43c" | grep -q 'reclaimable=yes'; then
+  ok "(c) CONTROL: a well-formed foreign boot-id is still DEAD-REBOOT and reclaimable"
+else
+  bad "(c) CONTROL FAILED — the reboot un-brick was broken by the shape check:
+$o43c"
+fi
+
+# (d) an unknown record version refuses BEFORE any field is interpreted
+_mk43 434 2 '00000000-dead-beef-0000-000000000000'
+o43d="$(_st43 434)"
+if printf '%s' "$o43d" | grep -q 'liveness=UNKNOWN-RECORD-VERSION' && printf '%s' "$o43d" | grep -q 'reclaimable=no'; then
+  ok "(d) a future record version refuses, and outranks the DEAD-REBOOT its own fields would give"
+else
+  bad "(d) future version was interpreted as v1:
+$o43d"
+fi
+
+# (e) CONTROL: version=1 still reaches the normal verdicts (covered by (c), asserted here
+#     as a missing-version case: absent version is also uninterpretable, never v1-by-default)
+printf 'issue=435\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=cwd-match\nboot-id=00000000-dead-beef-0000-000000000000\nstart-ticks=1\nnonce=x\n' \
+  "$D43" "$(hostname -s 2>/dev/null || hostname)" > "$D43/.lane-locks/lane-435.lock"
+o43e="$(_st43 435)"
+if printf '%s' "$o43e" | grep -q 'liveness=UNKNOWN-RECORD-VERSION'; then
+  ok "(e) an ABSENT version is uninterpretable too — not silently treated as v1"
+else
+  bad "(e) absent version was defaulted to v1:
+$o43e"
+fi
+rm -rf "$D43"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
