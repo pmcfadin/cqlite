@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (301 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (316 cases).**
       It runs a **complete two-arm, five-pair session end to end** against stub
       `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, so a driver that cannot
       complete a session fails here rather than on the rig after both release
@@ -437,6 +437,19 @@ no probe — "something answered on 8815" was never the same claim as "my server
 owns 8815", and on a nine-lane box the difference is one session measuring
 another's binary. `--port <n>` remains available if you need a fixed one.
 
+### The floors are floors
+
+`--min-corpus-bytes` (256 MiB) and `--min-sstables` (2) are **not lowerable for a
+measurement**. Both the driver and the analyzer enforce the documented minimums,
+and the analyzer deliberately ignores the thresholds the manifest records — a
+verdict must not derive its validity from a number its own session chose. Lower
+them only under `--control <label>`, where the verdict is disclaimed.
+
+This is the third distinct route by which #3058's single-source bypass has been
+reachable: a recursive census, a symlinked decoy, and simply passing
+`--min-sstables 1`. If you find yourself wanting to lower a floor to make a
+session run, the session is not a measurement.
+
 ### The census describes the SERVED table, not the disk
 
 `--min-corpus-bytes` and `--min-sstables` are claims about the one directory the
@@ -781,7 +794,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     301 cases incl. full sessions under PATH shims; run it first
+  selftest-analyze.sh     316 cases incl. full sessions under PATH shims; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

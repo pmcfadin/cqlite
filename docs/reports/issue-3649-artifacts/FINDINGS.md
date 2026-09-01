@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 301 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `selftest-analyze.sh` | 316 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,58 @@ session, not by this lane.
 
 ---
 
-## 9. The seventh lesson: guard the VALUE, and enumerate the SET
+## 9. The eighth lesson: make there be ONE path, not a guard on each path
+
+Three of round 9's four findings were the same shape, and it is the shape round 8
+only half-closed: **a value with more than one source, guarded at one source
+instead of at the value.**
+
+- the batch-size floor was checked on `--batch-size`; per-arm extras were a
+  second route (round 8, fixed for that one value);
+- the corpus floors were checked in the driver; an operator lowering
+  `--min-sstables` was a second route, and the analyzer trusted the number the
+  session under test reported — **the third separate way #3058's single-source
+  bypass has been reachable**, after the recursive census and the symlinked
+  decoy;
+- `--max-concurrent-scans` was declared per-arm overridable and validated
+  globally, so any effective override failed at run time.
+
+Guarding each resolved value one at a time is the same trap as reconciling
+record fields one at a time — §10 (guard the VALUE, and enumerate the SET) — so
+the fix is the same move that closed the
+sharing class: **make there be one path.** A single `resolve-session` step takes
+every raw input, applies every rule, and emits the complete resolved
+configuration; the driver reads nothing else. A new option cannot route around a
+guard because nothing else produces the values, and a structural case asserts
+every declared resolver input is an option the driver accepts.
+
+**And the analyzer enforces the floors independently.** A verdict must not derive
+its validity from a number its own subject chose, so the documented minimums live
+in `ab_common.py` and the analyzer checks *those*, ignoring the manifest's own
+`min_*_required`. Lowerable only under a control label, where the verdict is
+already disclaimed. Same reason the shape is re-checked rather than trusted.
+
+**The `eval`, and where it came from.** Per-arm values were resolved with
+`eval "VAR=\"$(...)\""`, which executes a command substitution embedded in an
+operator-supplied flag value. It was introduced *by the fix* for round 7's argv
+problem — the remedy for a parse defect created an execution defect, which is
+#3312's rule (control and data must not share a channel) arriving in the driver.
+Removed rather than sanitised: associative arrays carry the values, and the
+resolver's output is read as data. **Sanitising and keeping the `eval` would have
+been the "rarer delimiter" move this repository has a standing ruling against.**
+
+**One honest note about the case I wrote for it.** My first injection case
+asserted only that no side effect appeared — and with the resolver in place a
+dangerous payload is refused before it could reach any interpreter, so that
+assertion **cannot fail however the code is written**. It was a case that could
+not fail, written into the round whose subject is guards that do not bind. It now
+asserts the refusal (behavioural, can fail) *and* the absence of side effects
+(which would catch an `eval` placed upstream of validation, exactly where the
+original was), with the split stated in the case itself.
+
+---
+
+## 10. The seventh lesson: guard the VALUE, and enumerate the SET
 
 Round 8's three findings are three shapes this lane keeps producing, and two of
 them were fixed by changing *where* a rule lives rather than adding another rule.
@@ -358,7 +409,7 @@ what input your harness writes by habit rather than by choice.**
 
 ---
 
-## 10. The sixth lesson: two correct rules can compose into an unusable whole
+## 11. The sixth lesson: two correct rules can compose into an unusable whole
 
 Round 6's High was that **the runbook's own sensitivity control could not be
 analyzed**. Round 2 required the analyzer to refuse cross-arm server-config
@@ -411,7 +462,7 @@ Two things worth carrying:
 - **Only execution finds this class.** Two individually-correct rules, each with
   its own passing tests, composed into an unusable whole. The case that catches
   it runs the control end to end under the shims — and it exists because
-  §11 (the driver was never executed) had already made that possible.
+  §12 (the driver was never executed) had already made that possible.
 
 **A validator that disagrees with its consumer is now FIVE instances, and the
 count is the argument.** The duration grammar, the census enumeration, the census
@@ -450,7 +501,7 @@ blind here" does not.
 
 ---
 
-## 11. The fifth lesson, and the one that closes the class: the driver was never executed
+## 12. The fifth lesson, and the one that closes the class: the driver was never executed
 
 Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
 helper had been extracted into `ab_driver_support.py` and one call site was left
@@ -467,8 +518,8 @@ that could not complete a single session.
 
 This is the FIFTH instance of one class in this lane — the dead utilization path,
 ten environment-coupled cases, the silent passer among them, the inline parity
-rule, and now the driver itself. §15 (a green suite over an unexecuted subject)
-states the class; §12 (when one mechanism keeps producing findings) says that when a
+rule, and now the driver itself. §16 (a green suite over an unexecuted subject)
+states the class; §13 (when one mechanism keeps producing findings) says that when a
 mechanism keeps producing findings you remove the reason it can. **The reason was
 that the session loop needed a rig, so nothing could run it.** So it no longer
 needs one:
@@ -506,7 +557,7 @@ which is salted per process and would have made the suite non-deterministic.
 
 ---
 
-## 12. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+## 13. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
 
 Four review rounds produced findings in the driver's session lifecycle — the
 work directory, the port, readiness, the census — roughly seven of the last
@@ -538,10 +589,10 @@ improving the sequencing and **removed the shared resource instead**:
 defect.** Not the sequencing around it, not the guard in front of it. Ask what
 resource is being shared and whether it needs to be shared at all — the fix that
 ends the series is usually a deletion. Same shape as removing the second duration
-grammar rather than widening it -- §14 (a parameter accepted without being
+grammar rather than widening it -- §15 (a parameter accepted without being
 checked) -- one level up.
 
-**And a second instance of the mirroring rule from §14 (a parameter accepted
+**And a second instance of the mirroring rule from §15 (a parameter accepted
 without being checked).** The corpus census
 scanned the whole data root recursively while the server reads **one** resolved
 directory, flat. So both size gates could pass on files that are never served —
@@ -560,7 +611,7 @@ nowhere else to decide it.
 
 ---
 
-## 13. The third lesson: the dangerous defect is the one no test would have failed on
+## 14. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -595,7 +646,7 @@ count forces.
 
 ---
 
-## 14. The second lesson: a parameter accepted without being checked against the claim
+## 15. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -629,7 +680,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 15. The first lesson: a green suite over an unexecuted subject
+## 16. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -660,7 +711,7 @@ Two rules worth carrying:
 
 ---
 
-## 16. A process finding: cadence, not partition
+## 17. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -674,7 +725,7 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §15 (a green suite over an unexecuted subject)
+which is precisely the hole §16 (a green suite over an unexecuted subject)
 describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 
