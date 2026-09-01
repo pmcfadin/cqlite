@@ -19359,7 +19359,7 @@ _gate_disk_admission_clears_bar() {
 #   FILESYSTEM-TOUCHING — every one BOUNDED via `_component_set_bounded`:
 #     cargo metadata   the target-dir resolution        (_GATE_TARGET_DIR_BOUND_SECS)
 #     python3 -c       reads the metadata payload       (_GATE_TARGET_DIR_BOUND_SECS)
-#     test -e          the existing-ancestor walk       (_GATE_DF_BOUND_SECS)
+#     mkdir -p         creating the resolved target dir (_GATE_DF_BOUND_SECS)
 #     df -Pk           the free-space reading           (_GATE_DF_BOUND_SECS)
 #
 #   NO FILESYSTEM ACCESS — deliberately NOT bounded, and each stated so the next reader
@@ -19473,40 +19473,50 @@ sys.stdout.write(p)
 # field separator because BOTH a mount point and a target dir may contain spaces; a TAB
 # in either is refused upstream rather than rendered.
 #
-# The resolved target dir legitimately does not exist yet on a cold lane, so we walk up
-# to the nearest EXISTING ancestor: df answers about a FILESYSTEM, and a directory cargo
-# is about to create lives on the one its parent is on. (`[ -e ]` is two-valued and
-# collapses "cannot tell" onto "absent"; the walk then lands on a higher ancestor of the
-# SAME filesystem, so the collapse costs nothing here — unlike the verdict predicates,
-# where it would.)
+# The resolved target dir legitimately does not exist yet on a cold lane, so it is CREATED
+# (bounded `mkdir -p`) rather than approximated by an ancestor. See the body: that removed
+# a two-valued predicate that could admit on the wrong filesystem.
 _gate_disk_admission_subject() {
-  local r d td e
+  local r td e
   r=$(_gate_resolve_target_dir)
   case "$r" in
     'OK '*) td="${r#OK }" ;;
     *) printf 'UNRESOLVED\t%s' "${r#UNRESOLVED }"; return 0 ;;
   esac
-  d="$td"
-  while [ -n "$d" ] && [ "$d" != "/" ]; do
-    # BOUNDED, for the same reason `df` is: `[ -e ]` STATS the path, and a stat on a
-    # stalled mount hangs exactly as `df` does. `test` is used as an EXTERNAL command so
-    # the bound applies to a real process. rc 0 exists / 1 absent / anything else is a
-    # third state that must not be collapsed onto "absent" — the walk would then climb
-    # past a hung mount and measure a filesystem that is not the subject.
-    _component_set_bounded "$_GATE_DF_BOUND_SECS" test -e "$d"; e=$?
-    case "$e" in
-      0) printf 'OK\t%s\t%s' "$d" "$td"; return 0 ;;
-      1) ;;
-      124|137) printf 'UNRESOLVED\ttarget-dir-stat-timeout'; return 0 ;;
-      "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-stat-unboundable'; return 0 ;;
-      *) printf 'UNRESOLVED\ttarget-dir-stat-failed'; return 0 ;;
-    esac
-    d="$(dirname "$d")"
-  done
-  _component_set_bounded "$_GATE_DF_BOUND_SECS" test -e "/"; e=$?
-  [ "$e" -eq 0 ] && { printf 'OK\t/\t%s' "$td"; return 0; }
-  printf 'UNRESOLVED\ttarget-dir-no-existing-ancestor'
-  return 0
+  # THE ANCESTOR WALK IS GONE — REMOVED, NOT HARDENED (roborev job 351).
+  #
+  # It ascended from the target dir to the nearest path `test -e` accepted, because the
+  # directory legitimately does not exist yet on a cold lane. `test -e` is TWO-VALUED: it
+  # answers 1 for a permission-denied component, a symlink loop and a non-directory
+  # component exactly as it does for a genuinely missing path. So the walk climbed PAST an
+  # inaccessible mount and measured a DIFFERENT filesystem — a FALSE ADMISSION, and the
+  # `1699-find-tristate` shape this repo lints for: a multi-state signal read two-valued
+  # always takes the permissive branch. MEASURED, both halves, on one fixture:
+  #
+  #   test -e <unreadable-parent>/inner/target   -> rc 1  ("absent" — the false answer)
+  #   mkdir -p <unreadable-parent>/inner/target  -> rc 1  (an honest refusal)
+  #
+  # `mkdir -p` replaces it, and the reason is NOT merely that it is less code. It answers
+  # the question this probe actually has — CAN THE BUILD WRITE HERE — where the walk
+  # answered a PROXY, "which ancestor exists". Those differ exactly where it matters: a
+  # target dir whose parent exists but is not writable made the walk measure the parent's
+  # filesystem and ADMIT, while the build would have failed. Its failure modes are also
+  # already distinct (permission, ENOSPC, a non-directory component, a stalled mount via
+  # the bound), so the three-valued answer comes for free instead of being reconstructed
+  # from a two-valued primitive.
+  #
+  # THE SIDE EFFECT IS ACCEPTED, DELIBERATELY. On a refusal we may leave an empty directory
+  # that would not otherwise exist. It is inert, it is reused by the next run, and cargo
+  # creates exactly this directory seconds later on every path that does not refuse
+  # (measured: `cargo metadata` does NOT create it, so this is the first creation) — so the
+  # gate does nothing here the build was not about to do anyway.
+  _component_set_bounded "$_GATE_DF_BOUND_SECS" mkdir -p "$td"; e=$?
+  case "$e" in
+    0) printf 'OK\t%s\t%s' "$td" "$td"; return 0 ;;
+    124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout'; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable'; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-uncreatable'; return 0 ;;
+  esac
 }
 
 # _gate_disk_admission_parse: the ONE parse of a `df -Pk` data line, ANCHORED ON THE
@@ -20904,15 +20914,30 @@ SIDE_LANE_PID=""
 launch_components() {
   local -a main_lane=() side_lane=()
   local c
-  # #3755: resolve the side lane's target base HERE, in the main shell, before any lane is
-  # launched — one resolver, one truth, shared with the admission probe.
-  _gate_side_target_base_init
   for c in "${COMPONENTS[@]}"; do
     [ "$c" = file-size ] && continue
     _pool_selected "$c" || continue
     if is_side_component "$c"; then side_lane+=("$c"); SELECTED_SIDE+=("$c")
     else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
   done
+
+  # #3755: resolve the side lane's target base HERE — AFTER the lanes are known, and ONLY
+  # when the side lane has something in it (roborev job 351).
+  #
+  # THE DEFECT THIS ORDERING FIXES. The call used to sit at the top of this function, before
+  # anything established whether a side component had even been selected, so a MAIN-ONLY
+  # invocation — `--only file-size`, DOCUMENTED as cargo-free and hermetic — ran
+  # `cargo metadata`. That is a delay and a possible `Cargo.lock` write on a path whose
+  # whole contract is that it touches neither, and `--only` is what the nested tooling
+  # self-tests use, so it reached the gate of record by a path nobody was watching.
+  #
+  # LAZY, not eager: the resolution's only consumer is run_side_component. It still happens
+  # exactly once, in the MAIN shell, before any lane starts — which is what keeps it out of
+  # the backgrounded SIDE sub-pool, where a cache write would land in a subshell and
+  # concurrent resolutions would race on the bounded runner's shared capture files.
+  if [ "${#side_lane[@]}" -gt 0 ]; then
+    _gate_side_target_base_init
+  fi
 
   # Bash 3.2 under `set -u` treats "${arr[@]}" of an EMPTY array as unbound (fixed
   # in bash 4.4+; #1841 latent bug surfaced by the #1825 concurrency-cap self-test,

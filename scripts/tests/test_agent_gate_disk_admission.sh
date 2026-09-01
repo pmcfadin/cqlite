@@ -1179,6 +1179,10 @@ fi
 # during the queue the retained mount describes a different filesystem — and the
 # remedy line would send an operator to clean the wrong one.
 # ===========================================================================
+# NOTE the target dirs below live under $tmp. Since the subject became a bounded
+# `mkdir -p` (job 351) an unwritable path such as `/td-A` is legitimately
+# `target-dir-uncreatable`, so a fixture using one would measure that instead of the
+# subject-moved property this case is about.
 m_case() {
   local label="$1" td1="$2" td2="$3" expect_fs="$4" why="$5"
   local cs="$tmp/$label.cargoscript"
@@ -1204,11 +1208,11 @@ m_case() {
   esac
 }
 # The subject MOVED during the queue -> the mount measured for the old one is dropped.
-m_case m-moved   /td-A /td-B unknown \
+m_case m-moved   "$tmp/td-A" "$tmp/td-B" unknown \
   "the mount is CLEARED when the re-resolved subject differs (no fresh-dir/stale-mount pairing)"
 # CONTROL: the subject is unchanged -> the mount IS retained. Without this, a rule that
 # simply always cleared would pass the case above and lose real information.
-m_case m-same    /td-A /td-A /shimfs \
+m_case m-same    "$tmp/td-A" "$tmp/td-A" /shimfs \
   "the mount is RETAINED when the re-resolved subject is PROVEN identical"
 
 # ===========================================================================
@@ -1339,6 +1343,154 @@ if [ "$p_status" -eq 0 ] && [ "$p_markers" -ge 1 ]; then
   ok "bounded-df: the gate did not hang holding the slot — it measured, declared and proceeded"
 else
   bad "bounded-df: the run did not complete normally (exit $p_status, markers $p_markers)"
+fi
+
+# ===========================================================================
+# Case Q (roborev job 351, Medium): a MAIN-ONLY invocation never runs
+# `cargo metadata`.
+#
+# _gate_side_target_base_init used to be called before anything established
+# whether a side component had even been selected, so `--only file-size` —
+# DOCUMENTED as cargo-free and hermetic, and the shape the nested tooling
+# self-tests use — invoked cargo metadata: a delay and a possible Cargo.lock
+# write on a path whose contract is that it touches neither.
+#
+# Asserted from an OBSERVATION (a recording shim), never from a timing or an
+# absence nobody measured — and the shim is proved to discriminate first.
+# ===========================================================================
+mkdir -p "$tmp/q-cargoshim"
+_Q_REAL_CARGO=$(command -v cargo 2>/dev/null || printf '/nonexistent/cargo')
+cat > "$tmp/q-cargoshim/cargo" <<QSHIM
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$CARGO_RECORD"
+exec "$_Q_REAL_CARGO" "\$@"
+QSHIM
+chmod +x "$tmp/q-cargoshim/cargo"
+# `grep -c` PRINTS 0 and EXITS 1 when nothing matches, so a `|| printf '0'` fallback
+# emits BOTH and the result is the two-line string "0\n0" — which then blows up in
+# `[ -eq ]`. Take grep's output and sanitize it; never add a fallback beside it.
+q_meta_calls() {
+  local n; n=$(grep -c '^metadata' "$1" 2>/dev/null); n="${n%%$'\n'*}"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+# (a) THE SUBJECT: a main-only --only run.
+q_rec="$tmp/q-only.record"; : > "$q_rec"
+env PATH="$tmp/q-cargoshim:$PATH" CARGO_RECORD="$q_rec" \
+  AGENT_GATE_SUMMARY_FILE="$tmp/q-only.summary.txt" \
+  CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-/nonexistent}" \
+  bash "$GATE" --only file-size >"$tmp/q-only.out" 2>"$tmp/q-only.err"
+q_only=$(q_meta_calls "$q_rec")
+# (b) THE DISCRIMINATION CONTROL, run FIRST in spirit and asserted here: the SAME shim on a
+#     full gate MUST record metadata calls. Without it, "0" proves only that the shim is
+#     inert — the failure mode four earlier controls on this branch actually had.
+q_rec2="$tmp/q-full.record"; : > "$q_rec2"
+q_full_script=$(df_script q-full "$HIGH")
+mkdir -p "$tmp/q-full.run"
+env PATH="$tmp/q-cargoshim:$tmp/shim:$PATH" CARGO_RECORD="$q_rec2" \
+  DF_SHIM_SCRIPT="$q_full_script" DF_SHIM_STATE="$tmp/q-full.dfstate" \
+  AGENT_GATE_SUMMARY_FILE="$tmp/q-full.summary.txt" \
+  CQLITE_GATE_STUB_RUNDIR="$tmp/q-full.run" CQLITE_GATE_STUB_SLEEP=1 \
+  CQLITE_GATE_SLOTS_DIR="$tmp/q-full-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+  bash "$GATE" >"$tmp/q-full.out" 2>"$tmp/q-full.err"
+q_full=$(q_meta_calls "$q_rec2")
+if [ "$q_full" -ge 1 ]; then
+  ok "only-cargo-free CONTROL: the same shim records $q_full 'cargo metadata' call(s) on a full gate — a 0 from it means something"
+else
+  bad "only-cargo-free CONTROL: the shim recorded NO metadata call even on a full gate — it is inert and the subject assertion below proves nothing"
+fi
+if [ "$q_only" -eq 0 ]; then
+  ok "only-cargo-free: '--only file-size' invoked cargo metadata 0 times (its cargo-free contract holds)"
+else
+  bad "only-cargo-free: '--only file-size' invoked cargo metadata $q_only time(s) — a documented cargo-free path runs cargo"
+fi
+# The claim is precisely about `cargo metadata`. The gate's accelerator detection runs
+# `cargo nextest --version` at startup on EVERY invocation, which is pre-existing and not
+# this issue's subject; asserting "no cargo at all" would be asserting something false.
+if [ "$(wc -l < "$q_rec")" -ge 1 ]; then
+  ok "only-cargo-free: the run DID make its pre-existing startup cargo probe — the shim was on PATH and active"
+else
+  bad "only-cargo-free: no cargo call at all was recorded — the shim was not on the child's PATH"
+fi
+
+# ===========================================================================
+# Case R (roborev job 351, Medium): the two-valued ancestor walk is GONE.
+#
+# `test -e` answers 1 for a permission-denied component, a symlink loop and a
+# non-directory component exactly as for a genuinely missing path, so the walk
+# climbed PAST an inaccessible mount and measured a DIFFERENT filesystem — a
+# FALSE ADMISSION, the 1699-find-tristate shape. `mkdir -p` replaces it and
+# answers the question the probe actually has: can the build write here.
+#
+# The fixture uses a NON-DIRECTORY path component, not chmod: ENOTDIR is raised
+# for root and non-root alike, so this control cannot be bypassed by privilege
+# (the H2 lesson from job 335).
+# ===========================================================================
+r_file="$tmp/r-not-a-directory"; : > "$r_file"
+r_target="$r_file/target"
+
+# THE POSITIVE CONTROL: the PRE-FIX walk, reproduced verbatim, on the same input.
+r_walk() {
+  local d="$1"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -e "$d" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  printf '/'
+}
+r_would=$(r_walk "$r_target")
+if [ "$r_would" = "$r_file" ]; then
+  ok "mkdir-subject CONTROL: the PRE-FIX walk resolved to '$r_would' — a plain FILE, not the build directory — and would have measured its filesystem and ADMITTED"
+else
+  bad "mkdir-subject CONTROL: the pre-fix walk resolved to '$r_would'; this fixture does not demonstrate the defect"
+fi
+
+r_script=$(df_script r "$HIGH")
+run_stub_gate r "$r_script" \
+  CARGO_TARGET_DIR="$r_target" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/r-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+r_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; r_status=$WX_STATUS; r_markers=$WX_MARKERS
+assert_no_timeout "r uncreatable target dir"
+r_line=$(grep_line "$r_err" '^agent-gate: disk-admission: ')
+case "$r_line" in
+  *'UNMEASURED (target-dir-uncreatable)'*)
+    ok "mkdir-subject: an uncreatable target dir is UNMEASURED with its own cause, not a reading of some ancestor" ;;
+  *) bad "mkdir-subject: expected UNMEASURED (target-dir-uncreatable), got: ${r_line:-<none>}" ;;
+esac
+if [ "$(df_calls r)" -eq 0 ]; then
+  ok "mkdir-subject: df was NEVER called — no filesystem other than the subject was measured"
+else
+  bad "mkdir-subject: df ran $(df_calls r) time(s) — some other filesystem was measured, which is the false admission"
+fi
+if [ "$r_status" -eq 0 ] && [ "$r_markers" -ge 1 ]; then
+  ok "mkdir-subject: the refusal to measure is DECLARED and non-fatal"
+else
+  bad "mkdir-subject: an unmeasurable subject refused the run (exit $r_status)"
+fi
+
+# THE OTHER HALF: a target dir that simply does not exist yet — the cold-lane case the
+# walk existed for — must be CREATED and measured, not refused. This is what stops the
+# fix being an over-correction that reds every cold lane.
+r_cold="$tmp/r-cold/deep/target"
+r_cold_script=$(df_script r-cold "$HIGH")
+run_stub_gate r-cold "$r_cold_script" \
+  CARGO_TARGET_DIR="$r_cold" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/r-cold-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+r_cold_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; r_cold_status=$WX_STATUS
+assert_no_timeout "r cold target dir"
+r_cold_line=$(grep_line "$r_cold_err" '^agent-gate: disk-admission: ')
+case "$r_cold_line" in
+  *"disk-admission: PASS"*"target-dir $r_cold "*)
+    ok "mkdir-subject: a not-yet-existing target dir is CREATED and measured (the cold-lane case the walk existed for)" ;;
+  *) bad "mkdir-subject: a cold target dir was not measured: ${r_cold_line:-<none>}" ;;
+esac
+if [ -d "$r_cold" ]; then
+  ok "mkdir-subject: the accepted side effect is real and asserted — the directory now exists (cargo would create it seconds later anyway)"
+else
+  bad "mkdir-subject: the target dir was reported measured but does not exist"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"
