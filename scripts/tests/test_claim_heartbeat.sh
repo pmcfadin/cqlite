@@ -2189,8 +2189,14 @@ else
 fi
 _help67=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
 # The help must open with the script's own banner and must NOT contain a function definition.
-if printf '%s\n' "$_help67" | head -5 | grep -q 'claim-heartbeat.sh' \
-  && ! printf '%s\n' "$_help67" | grep -qE '^[a-z_][a-z0-9_]*\(\) \{'; then
+# PIPELINE-FREE (roborev job 15, finding 1 — the same SIGPIPE class, found here by this round's
+# plant runs rather than predicted). `printf | head -5 | grep -q` under this suite's `set -o
+# pipefail` reports a FALSE FAIL whenever `head`/`grep` exits before the writer finishes: measured
+# 1 spurious failure in 60 runs of this exact condition, 0 in 60 of the form below. The help
+# content was correct every time; only the pipeline status was not.
+_help67_head="$(head -5 <<<"$_help67")"
+if grep -q 'claim-heartbeat.sh' <<<"$_help67_head" \
+  && ! grep -qE '^[a-z_][a-z0-9_]*\(\) \{' <<<"$_help67"; then
   ok "--help emits the help block and leaks no function body"
 else
   bad "--help does not look like help: first lines:
