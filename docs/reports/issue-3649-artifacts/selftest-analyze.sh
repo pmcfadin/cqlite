@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=229
+CASE_FLOOR=261
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -800,6 +800,40 @@ else
   bad "the startup sweep could not read:$sweep_bad"
 fi
 
+# THE WITHIN-PAIR ORDER RULE, EXECUTED. This is the one driver decision whose
+# failure mode is a confident wrong answer rather than an error: if base always
+# ran first, a drift inside a pair would land on the head arm every time and bias
+# every ratio in one direction, with every statistical test still passing. It
+# lives in the helper precisely so it can be run here.
+order_bad=''
+for probe in "1 base head" "2 head base" "3 base head" "4 head base" "7 base head"; do
+  set -- $probe
+  [ "$(python3 "$SUPPORT" pair-order "$1")" = "$2 $3" ] || order_bad="$order_bad rep$1"
+done
+if [ -z "$order_bad" ]; then
+  ok "the within-pair order alternates with replicate parity"
+else
+  bad "the within-pair order rule is wrong for:$order_bad"
+fi
+# ...and the property that matters is the BALANCE it produces over a session.
+balance_report="$(
+  base_first=0; head_first=0
+  for r in $(seq 1 8); do
+    case "$(python3 "$SUPPORT" pair-order "$r")" in
+      base*) base_first=$((base_first + 1)) ;;
+      *)     head_first=$((head_first + 1)) ;;
+    esac
+  done
+  echo "$base_first $head_first"
+)"
+if [ "$balance_report" = "4 4" ]; then
+  ok "over an even replicate count the two orderings run exactly as often"
+else
+  bad "eight replicates did not balance the two orderings ($balance_report)"
+fi
+run_support pair-order 0
+check_support "pair-order refuses a non-positive replicate" 2
+
 for bad_ramp in "1,abc" "1,²" "2" "4,2" "1,1" "0"; do
   run_support validate-ramp "$bad_ramp"
   if [ "$RC" = "1" ] && anchored; then
@@ -1436,6 +1470,118 @@ else
 fi
 
 echo
+echo "-- within-pair order must be counterbalanced, and COUNTED from the record --"
+
+# Interleaving across replicates controls drift BETWEEN pairs. A gradient WITHIN
+# a pair -- thermal ramp, a neighbour starting -- lands on whichever arm runs
+# second, every time, and biases every ratio the same way. No test of the
+# statistics can catch that: every one of them passes.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: counterbalance base-first 3 head-first 3 residual 0 pair(s)$' "$TMP/out.txt"; then
+  ok "an even replicate count counterbalances exactly, and the counts are reported"
+else
+  bad "the counterbalance counts were not reported for an even session"
+fi
+if grep -q '^AB-3649: counterbalance order-by-replicate 1:base,2:head,3:base,4:head,5:base,6:head$' "$TMP/out.txt"; then
+  ok "the executed order is printed per replicate, so a reader can check it"
+else
+  bad "the per-replicate executed order was not printed"
+fi
+if grep -q '^AB-3649: verdict-detail single-stream COUNTERBALANCE ' "$TMP/out.txt"; then
+  bad "an exactly balanced session printed a residual disclosure it does not need"
+else
+  ok "an exactly balanced session carries no counterbalance residual"
+fi
+
+# An ODD count cannot balance exactly. That residual is disclosed, not refused:
+# refusing it would red a correct session.
+mkfixture "$TMP/cb-odd" 5 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000"
+run_analyzer "$TMP/cb-odd"
+check_verdict "an odd replicate count, which cannot balance exactly" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: counterbalance base-first 3 head-first 2 residual 1 pair(s)$' "$TMP/out.txt" \
+   && grep -q '^AB-3649: verdict-detail single-stream COUNTERBALANCE 3 pair(s) ran base-first' "$TMP/out.txt"; then
+  ok "an odd count's one-pair residual is disclosed rather than hidden or refused"
+else
+  bad "an odd count's counterbalance residual was not disclosed"
+fi
+
+# THE DEFECT ITSELF: every pair in the same order.
+mkfixture "$TMP/cb-broken" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/cb-broken/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    entry["position_in_pair"] = 1 if entry["arm"] == "base" else 2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/cb-broken"
+check_verdict "every pair run in the same within-pair order" UNMEASURED 7 single-stream
+check_cause "an uncounterbalanced session" counterbalance-broken
+
+# Counterbalancing that is not RECORDED is counterbalancing that cannot be
+# checked -- so an absent or duplicated position is a refusal, not an assumption.
+for breakage in absent duplicate; do
+  mkfixture "$TMP/cb-$breakage" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/cb-$breakage/manifest.json" "$breakage" <<'PYINNER'
+import json
+import sys
+
+path, breakage = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["replicate"] != 1:
+        continue
+    if breakage == "absent":
+        entry.pop("position_in_pair", None)
+    else:
+        entry["position_in_pair"] = 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/cb-$breakage"
+  check_verdict "a pair whose executed order is $breakage" UNMEASURED 7 single-stream
+  check_cause "an unrecorded within-pair order ($breakage)" position-not-recorded
+done
+
+echo
+echo "-- an observation that is taken must be COMPARED --"
+
+# Round 2 finding 1, one field over: max_batch_bytes and the admission wait
+# timeout were read off the startup line and then neither persisted nor compared,
+# so two arms could be verdicted under different effective configurations.
+for cfg_field in batch_size_observed max_batch_bytes_observed wait_timeout_ms_observed; do
+  mkfixture "$TMP/cfg-$cfg_field" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/cfg-$cfg_field/manifest.json" "$cfg_field" <<'PYINNER'
+import json
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry[name] = "999999"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/cfg-$cfg_field"
+  check_verdict "arms served under a different $cfg_field" UNMEASURED 7 single-stream
+  check_cause "a differing $cfg_field" server-config-mismatch
+done
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: server-observed batch-size 8192 max-batch-bytes 4194304 wait-timeout-ms 30000$' "$TMP/out.txt"; then
+  ok "the observed server configuration is reported, not merely checked"
+else
+  bad "the observed server configuration was not reported"
+fi
+
+echo
 echo "-- both sections in one report --"
 
 run_both "$TMP/meets" "$TMP/util-flat"
@@ -1666,6 +1812,47 @@ else
   run_driver --help
   check_driver "the driver --help exits 3, never 0" 3
 
+  # FINDING 4: a value-taking option with no value used to `shift 2` past the end
+  # and exit 1 with an unanchored bash error.
+  for lonely in --corpus --ticket-template --replicates --max-concurrent-scans \
+                --batch-size --step-duration --ramp --control; do
+    run_driver "$lonely"
+    if [ "$RC" = "3" ] && anchored \
+       && grep -q "^AB-3649: usage-error $lonely requires a value\$" "$TMP/err.txt"; then
+      ok "$lonely with no value is an anchored usage error"
+    else
+      bad "$lonely with no value exited $RC without an anchored usage error"
+    fi
+  done
+  # STRUCTURAL: every arm that consumes a value must be in the one list, or the
+  # next option added is the next one to miss the guard. Done in Python because a
+  # sed/tr pipeline over a line-continued shell array is its own source of bugs.
+  if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+declared = re.search(r'VALUE_OPTS="((?:[^"\\]|\\.)*)"', source, re.S)
+if not declared:
+    sys.stderr.write("AB-3649: VALUE_OPTS is not a single quoted assignment\n")
+    raise SystemExit(1)
+listed = set(declared.group(1).replace("\\\n", " ").split())
+consuming = set(re.findall(r"^\s*(--[a-z-]+)\)[^\n]*shift 2", source, re.M))
+missing = sorted(consuming - listed)
+if missing:
+    sys.stderr.write("AB-3649: not in VALUE_OPTS: %s\n" % " ".join(missing))
+    raise SystemExit(1)
+if not consuming:
+    sys.stderr.write("AB-3649: found no value-consuming arms, so this guard proved nothing\n")
+    raise SystemExit(1)
+PYINNER
+  then
+    ok "every value-consuming option arm appears in the one VALUE_OPTS guard list"
+  else
+    bad "an option arm shifts a value without being in VALUE_OPTS (see stderr above)"
+  fi
+
+
   run_driver --no-such-flag
   check_driver "an unrecognised driver flag exits 3" 3
 
@@ -1831,6 +2018,21 @@ else
     ok "and the abort says so, rather than claiming a manifest it did not write"
   else
     bad "the abort did not disclose whose manifest is in the work directory"
+  fi
+  # FINDING 2, THE STRUCTURAL HALF: the session's own record lives in a private
+  # staging directory until a replicate has completed, so no failure between
+  # pre-flight and the first served request can reach $RUN_DIR at all. The
+  # staging directory must also be cleaned up.
+  if [ -z "$(find "$TMP/w-prior/results" -maxdepth 1 -name '.staging-*' 2>/dev/null)" ]; then
+    ok "the staging directory is removed on exit, leaving no debris behind"
+  else
+    bad "a staging directory survived the session"
+  fi
+  if grep -q 'still describes any EARLIER session until the first replicate completes' "$TMP/out.txt" \
+     || ! grep -q 'ledger staged' "$TMP/out.txt"; then
+    ok "the run says which session the work directory currently describes"
+  else
+    bad "the staging announcement did not say whose record is in the work directory"
   fi
 
   # A refusal must still leave a manifest, so the analyzer sees the shortfall as

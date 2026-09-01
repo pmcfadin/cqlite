@@ -962,11 +962,13 @@ PYEOF
 say "session replicates $REPLICATES order counterbalanced-by-replicate-parity shape $SHAPE ramp $RAMP step-duration $STEP_DURATION temperature $TEMPERATURE prewarm $PREWARM"
 rep=1
 while [ "$rep" -le "$REPLICATES" ]; do
-  if [ "$((rep % 2))" -eq 1 ]; then
-    pair_first=base; pair_second=head
-  else
-    pair_first=head; pair_second=base
-  fi
+  # The rule lives in ab_driver_support.py so it can be executed by the
+  # self-test: this is the one decision here whose failure is a confident wrong
+  # answer rather than an error, so it must not be the untested one.
+  pair_order="$(python3 "$SUPPORT" pair-order "$rep")" \
+    || die pair-order-failed "could not determine the within-pair order for replicate $rep"
+  pair_first="${pair_order%% *}"
+  pair_second="${pair_order##* }"
   say "pair $rep order $pair_first-then-$pair_second"
   run_one "$pair_first" "$rep" 1
   run_one "$pair_second" "$rep" 2

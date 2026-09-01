@@ -36,6 +36,7 @@ from ab_common import err, out
 NOT_OBSERVED = "NOT-OBSERVED"
 
 USAGE = [
+    "ab_driver_support.py pair-order <replicate>",
     "ab_driver_support.py validate-ramp <ramp>",
     "ab_driver_support.py parse-duration <value>",
     "ab_driver_support.py validate-ticket <template.json>",
@@ -252,6 +253,23 @@ def expand_cpu_list(spec):
     return cpus or None
 
 
+def pair_order(replicate):
+    """Which arm runs FIRST in this replicate's pair.
+
+    Executable, and therefore testable, for the reason round 1 paid for: the rule
+    used to be three lines inline in the session loop, which needs a rig, so
+    nothing could run it. This is the one rule in the driver whose failure mode is
+    a CONFIDENT WRONG ANSWER rather than an error -- if base always ran first, a
+    monotonic drift within a pair would land on the head arm every time and bias
+    every ratio in one direction, and every test of the statistics would still
+    pass. A rule like that must not be the untested one.
+
+    Base first on odd replicates, head first on even ones, so over an even count
+    each ordering runs exactly half the time.
+    """
+    return ("base", "head") if replicate % 2 == 1 else ("head", "base")
+
+
 def ramp_section(steps):
     """Which analyzer section this ladder can be consumed by, or None.
 
@@ -434,6 +452,12 @@ def main(argv):
             err(line)
         return 2
     command, rest = argv[0], argv[1:]
+    if command == "pair-order":
+        if len(rest) != 1 or not re.fullmatch(r"[0-9]+", rest[0]) or int(rest[0]) < 1:
+            err("usage-error pair-order needs a positive integer <replicate>")
+            return 2
+        sys.stdout.write("%s %s\n" % pair_order(int(rest[0])))
+        return 0
     if command == "validate-ramp":
         if len(rest) != 1:
             err("usage-error validate-ramp needs <ramp>")
