@@ -303,23 +303,28 @@
 //!
 //! # The asymmetry across the three cell-path/key readers (issue #3612)
 //!
-//! For a key type CQLite models nowhere, TWO of the three serve an opaque
-//! `Value::Blob`: this multicell path (plus the caller-aggregated `warn!`) and the
-//! frozen-map reader
-//! (`parse_frozen_map_value`, via `read_frozen_element`). The THIRD — the
-//! multi-generation MERGED read — FAILS CLOSED instead, returning
-//! `Error::unsupported_format` from `composite_collection_unsupported` before any
-//! ordering decision is reached; serving an opaque blob there was deliberately
-//! abandoned. So there IS an availability difference between the single-generation
-//! readers and the merged read, and issue #2339 tracks closing it.
+//! THIS PASSAGE IS THE SINGLE STATEMENT OF THE CROSS-READER COMPARISON.
+//! `read_assembly.rs` CITES it rather than paraphrasing: three paraphrases there were
+//! false, each one written while fixing the last (rounds 1-3 of #3612 review).
 //!
-//! (`key_is_opaque_composite` IS that fail-closed check's predicate: both guard
-//! sites — set element and map key — test it and return
-//! `composite_collection_unsupported`. Its only other consumer (its own `Frozen`
-//! arm recurses) is `sort_elements_by_cell_path`'s raw-byte ordering arm, DEFENSIVE
-//! only because the guard fires first; do not read that arm as the outcome. An earlier revision
-//! of this header cited the predicate for "NO availability difference" — the symbol
-//! was right and the conclusion was exactly backwards.)
+//! For a key type CQLite models nowhere, TWO of the three serve an opaque `Value::Blob`:
+//! this multicell path (plus the caller-aggregated `warn!`) and the frozen-map reader
+//! (`parse_frozen_map_value`, via `read_frozen_element`). The THIRD — the multi-generation
+//! MERGED read — FAILS CLOSED instead, returning `Error::unsupported_format` from
+//! `composite_collection_unsupported` before any ordering decision is reached; serving an
+//! opaque blob there was deliberately abandoned. So there IS an availability difference
+//! between the single-generation readers and the merged read, tracked by issue #2339.
+//!
+//! For a key type CQLite DOES model (`tuple<…>`, a nested collection, a resolvable UDT)
+//! the divergence is WIDER, not narrower: the single-generation readers decode it
+//! STRUCTURALLY while the merged read still FAILS CLOSED. So #2339 is MERGE-side work,
+//! and nothing on this path waits on it.
+//!
+//! (`key_is_opaque_composite` IS that check's predicate: both guard sites — set element,
+//! map key — test it and return `composite_collection_unsupported`. Its only other consumer
+//! (its own `Frozen` arm recurses) is `sort_elements_by_cell_path`'s raw-byte ordering arm,
+//! DEFENSIVE only because the guard fires first. An earlier revision cited the predicate for
+//! "NO availability difference" — right symbol, conclusion exactly backwards.)
 //!
 //! They DIVERGE on CORRUPTION: only this path validates fixed widths and full
 //! consumption, so a multicell key with a wrong width or trailing bytes is

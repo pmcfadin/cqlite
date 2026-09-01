@@ -357,13 +357,13 @@ fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType
 }
 
 /// True when `cmp` names an element/key type [`deserialize_value_bytes`] CANNOT decode — a
-/// frozen tuple / UDT / nested collection / non-scalar `Custom`. It is the PREDICATE OF THIS
-/// PATH'S FAIL-CLOSED GUARD: both guard call sites (set element, map key) return
-/// [`composite_collection_unsupported`], so the merge path ERRORS. Serving an opaque
-/// `Value::Blob(cell_path)` was the round-2 route, ABANDONED. Its only other consumer (the
-/// `Frozen` arm recurses) is [`sort_elements_by_cell_path`]'s arm, DEFENSIVE only because the
-/// guard fires first. The single-generation reader DIVERGES — it DOES serve that blob
-/// (`parse_cell_path_key_reporting`, #3612); closing that is #2339. Lockstep scalars; DECLARED type only (#28).
+/// frozen tuple / UDT / nested collection / non-scalar `Custom`. It is THIS PATH'S FAIL-CLOSED
+/// PREDICATE: both guard call sites (set element, map key) return
+/// [`composite_collection_unsupported`], whose doc records why the opaque-blob route was
+/// abandoned, so the merge path ERRORS; #2339 closes THIS side. Its only other consumer,
+/// [`sort_elements_by_cell_path`]'s arm (the `Frozen` arm recurses), is DEFENSIVE: the guard
+/// fires first. Lockstep scalars; DECLARED type only (#28). The SINGLE-generation reader's
+/// behaviour per type is stated ONCE in `cell_path_key.rs`'s asymmetry section — cite, never restate.
 #[cfg(feature = "write-support")]
 fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
     match cmp {
