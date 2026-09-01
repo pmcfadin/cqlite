@@ -229,6 +229,10 @@ EOF
 #   complete    — matching token AND CLAUDE_CONFIG_DIR
 #   broken      — an error that is NOT "no server running"
 #   probefail   — no server AND the isolated cold-start probe cannot be started
+#   slowstart   — no server, and a would-be server takes SEVERAL SECONDS to start the pane
+#                 (still inside the probe bound, and the pane still reports). The only mode
+#                 that puts an interrupt INSIDE the cold probe's own working-directory
+#                 lifetime, which is what the interrupt-safety case below needs.
 #   wedged      — the server accepts the call and NEVER ANSWERS (show-environment sleeps
 #                 far past any bound). The shape a half-dead tmux server has in the field.
 #   substitute  — no server, and a would-be server SUBSTITUTES a DIFFERENT token of the
@@ -271,6 +275,14 @@ case "\$1" in
     printf 'new-session sock=%s\n' "\$sock" >>"\$log"
     case '$mode' in
       probefail) printf 'error connecting to socket\n' >&2; exit 1 ;;
+      slowstart)
+        # A DEDICATED MARKER, written before the sleep: the interrupt case below must signal
+        # while the probe is INSIDE its armed window, and `new-session` is the first thing
+        # the probe does AFTER arming its traps. Polling for the working DIRECTORY instead
+        # was measurably racy — `mktemp -d` runs BEFORE the arm, so the signal could land in
+        # the unarmed gap and red correct code.
+        printf 'entered\n' >"$d/slowstart-entered"
+        sleep 3; sh -c "\$cmd"; exit \$? ;;
       substitute)
         # A server-side substitution, which is what a \`set-environment\` line in a tmux
         # config does. The pane receives a DIFFERENT value of the SAME LENGTH.
@@ -284,7 +296,7 @@ case "\$1" in
     exit 0 ;;
   show-environment)
     case '$mode' in
-      no-server|probefail|substitute) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
+      no-server|probefail|substitute|slowstart) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
       wedged)     sleep 120; exit 0 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
@@ -1802,6 +1814,103 @@ else
   bad "interrupt safety: an interrupted bounded read leaked a temp file: $(comm -13 <(printf '%s\n' "$int_before") <(printf '%s\n' "$int_after"))"
 fi
 
+# ...AND THE SAME MUST HOLD FOR EACH PROBE'S WORKING DIRECTORY, WHICH NOTHING ASSERTED.
+# `claude_auth_probe_arm_traps` has THREE call sites — the credential probe's throwaway
+# CLAUDE_CONFIG_DIR, the live read's stderr file (above), and the cold probe's private
+# working directory — and only the stderr file was pinned, so DELETING either directory's arm
+# call left this suite fully green while an interrupt leaked a directory into a tree we do not
+# own. A leak per SIGINT on a provisioning entry point is exactly the shape the trap exists
+# for, and an unfalsifiable guard is worse than none.
+#
+# EACH CASE RUNS UNDER ITS OWN PRIVATE TMPDIR, so the assertion is EXACT (the private tree
+# holds no leftovers) rather than a before/after diff of a /tmp shared with concurrent lanes.
+#
+# glob_matches <path-glob>: print each EXISTING entry matching <path-glob>, one per line.
+# A GLOB, not `find`, and the SAME helper for both halves of each case (the wait and the
+# assertion): a `find` reduced to an emptiness test collapses "the scan failed" onto "no
+# match" — the shape this repo lints as `1699-find-tristate` — and here that collapse would
+# read a failed scan as a clean tree, which is the permissive direction.
+glob_matches() {
+  local c
+  for c in $1; do [ -e "$c" ] && printf '%s\n' "$c"; done
+  return 0
+}
+# wait_for_glob <path-glob>: bounded poll until <path-glob> matches; rc 1 if it never did.
+# THE WINDOW IS MEASURED, NOT ASSUMED — signalling BEFORE the artifact exists would pass
+# vacuously, with nothing to leak, so a window never entered is a FAILURE below, not a pass.
+wait_for_glob() {
+  local i=0
+  while [ "$i" -lt 200 ]; do
+    [ -n "$(glob_matches "$1")" ] && return 0
+    sleep 0.05; i=$((i + 1))
+  done
+  return 1
+}
+
+# (d1) THE CREDENTIAL PROBE's throwaway CLAUDE_CONFIG_DIR (armed between its `mktemp -d` and
+# the up-to-90s network call, so the window is the widest of the three).
+#
+# THE POLL WAITS ON A MARKER THE PROBE WRITES *AFTER* ARMING, NOT ON THE DIRECTORY. Waiting
+# on the directory was measurably racy and red CORRECT code: `mktemp -d` runs BEFORE the arm,
+# so a signal fired the instant the directory appeared could land in the unarmed gap, where
+# bash's default SIGTERM disposition kills the process and the leak is real but is NOT the
+# defect this case is about. The stub is the first thing to run INSIDE the armed window.
+int_a_tmp="$tmp/int-auth-tmp"; mkdir -p "$int_a_tmp"
+int_a_mark="$tmp/int-auth-reached"; rm -f "$int_a_mark"
+d32c=$(mkshim "$tmp/s32c")
+# Slow enough that the signal lands while the throwaway config dir exists, far short of the
+# 90s probe bound. Like every other claude stub here it never echoes its argv or environment:
+# the value under test is a secret.
+cat >"$d32c/claude" <<EOF
+#!/usr/bin/env bash
+printf 'entered\n' >'$int_a_mark'
+sleep 4
+printf 'the interrupt should have arrived long before this\n'
+exit 1
+EOF
+chmod +x "$d32c/claude"
+PATH="$d32c:$PATH" env -u SUDO_USER -u SUDO_UID CQLITE_BOOTSTRAP_TEST_MODE=1 \
+  TMPDIR="$int_a_tmp" CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" bash "$CAPLIB" --auth >/dev/null 2>&1 &
+int_a_pid=$!
+if wait_for_glob "$int_a_mark"; then
+  kill -TERM "$int_a_pid" 2>/dev/null
+  wait "$int_a_pid" 2>/dev/null
+  int_a_left=$(glob_matches "$int_a_tmp/cqlite-claude-probe.*")
+  if [ -z "$int_a_left" ]; then
+    ok "interrupt safety: SIGTERM during the credential probe leaves no throwaway config dir"
+  else
+    bad "interrupt safety: an interrupted credential probe leaked its config dir: $int_a_left"
+  fi
+else
+  kill -TERM "$int_a_pid" 2>/dev/null; wait "$int_a_pid" 2>/dev/null
+  bad "interrupt safety: the credential probe never reached its bounded network call, so the armed window this case is about was never entered"
+fi
+
+# (d2) THE COLD-START PROBE's private working directory (it also carries the tmux socket, so
+# a leak here strands a throwaway server's socket too). `slowstart` is the mode that holds the
+# probe inside that window: no live server, so the cold path is taken, and the would-be
+# server takes several seconds to start the pane.
+# Same marker discipline as (d1): `slowstart` records that `new-session` was ENTERED, which
+# happens only after the arm, so the signal cannot land in the pre-arm gap.
+int_b_tmp="$tmp/int-cold-tmp"; mkdir -p "$int_b_tmp"
+d32d=$(mkshim "$tmp/s32d"); plant_tmux "$d32d" slowstart
+PATH="$d32d:$PATH" env -u SUDO_USER -u SUDO_UID CQLITE_BOOTSTRAP_TEST_MODE=1 \
+  TMPDIR="$int_b_tmp" CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" bash "$CAPLIB" --tmux-env >/dev/null 2>&1 &
+int_b_pid=$!
+if wait_for_glob "$d32d/slowstart-entered"; then
+  kill -TERM "$int_b_pid" 2>/dev/null
+  wait "$int_b_pid" 2>/dev/null
+  int_b_left=$(glob_matches "$int_b_tmp/cqlite-tmux-probe.*")
+  if [ -z "$int_b_left" ]; then
+    ok "interrupt safety: SIGTERM during the cold-start probe leaves no private working dir"
+  else
+    bad "interrupt safety: an interrupted cold-start probe leaked its working dir: $int_b_left"
+  fi
+else
+  kill -TERM "$int_b_pid" 2>/dev/null; wait "$int_b_pid" 2>/dev/null
+  bad "interrupt safety: the cold-start probe never started its throwaway server, so the armed window this case is about was never entered"
+fi
+
 # (c) STRUCTURAL. Logical lines (backslash continuations joined) so a wrapped invocation is
 # judged whole; whole-line comments blanked; `command -v tmux` is a resolution, not a call;
 # and a line whose `tmux` sits inside a MESSAGE (`printf`) is not an invocation. DECLARED
@@ -2126,9 +2235,11 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
-# delivered credential, the sudo-posture cases, and the bounding class): 125 cases run, and
-# the real-tmux isolation case (3 assertions) is still the only legitimately skippable one.
-CASE_FLOOR=122
+# delivered credential, the sudo-posture cases, and the bounding class), then 122 -> 124 by
+# round 5's two probe-working-directory interrupt cases: 127 cases run, and the real-tmux
+# isolation case (3 assertions) is still the only legitimately skippable one. The figure is
+# MEASURED, not counted by eye — forcing the tmux block's skip branch reports 124/1.
+CASE_FLOOR=124
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
