@@ -587,9 +587,12 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   deleting the column-zero sentinel then appending a verdict read the TEMPLATE's `PASS` (measured —
   #3312: anchor the control token where the payload cannot reach, never pick a rarer delimiter);
   `status` reports
-  elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF FIVE causes
-  (`no report written`, `report absent`, `report empty`, `report ungrammatical: <what>`,
-  `stage never opened`), because the operator action differs per cause. **An idle notice is strictly
+  elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF SIX causes
+  (`no report written`, `report absent`, `report unreadable`, `report empty`,
+  `report ungrammatical: <what>`, `stage never opened`), because the operator action differs per cause —
+  `report unreadable` is its own cause rather than folded into `report empty` (whose fix is the AGENT,
+  where an unreadable file's is `chmod`) or `report ungrammatical` (which would assert something about
+  content never observed). **An idle notice is strictly
   WEAKER than the gate's `INCOMPLETE` sentinel** — at least the sentinel names itself a non-verdict — so
   never read one as a completed review. Writes go under `.review-stage/`, whose ignore status is
   **verified with `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate

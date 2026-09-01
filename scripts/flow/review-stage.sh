@@ -69,13 +69,19 @@
 # braces: the template now renders those examples behind a `| ` gutter, so they do not begin
 # with the token even if this anchor were ever loosened again.
 #
-# `NOT-RUN` carries one of FIVE named causes, because the operator action differs per cause
-# and one token for five states is the collapse this issue is about:
+# `NOT-RUN` carries one of SIX named causes, because the operator action differs per cause
+# and one token for six states is the collapse this issue is about:
 #   no report written          the stage is open and the report is still the sentinel
 #   report absent              the stage is open and its report file is GONE
+#   report unreadable          the report file exists and CANNOT BE READ (permission, I/O)
 #   report empty               the report file exists and holds nothing recordable
 #   report ungrammatical: <w>  a result line that is unrecognised, absent, or unsupported
 #   stage never opened         no stage was ever opened for this <kind>/<issue>
+#
+# `report unreadable` was the SIXTH, added in round 2 (B7) rather than folded into an existing
+# cause: an unreadable file is NOT empty (the operator fix is `chmod`, not the agent) and calling
+# it ungrammatical would assert something about content that was never observed. Reuse would have
+# been a false rationale, which is worse than none.
 #
 # TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
 # ---------------------------------------------------------------------------
@@ -302,7 +308,7 @@ author_working_defect() {
 # author_defect_prose <field|kind|token> — render one defect as the tail of a NOT-RUN cause.
 # The operator action differs per field and per kind ("that is not a performer" / "that reason
 # says nothing" / "you left a template in it" are three different next moves), which is the
-# same reason the five NOT-RUN causes are named separately.
+# same reason the six NOT-RUN causes are named separately.
 author_defect_prose() {
   local d="${1:-}" field kind tok
   field="${d%%|*}"
@@ -714,10 +720,23 @@ classify_report() {
   if [ ! -f "$rpath" ]; then
     printf 'NOT-RUN|report absent\n'; return 0
   fi
+  # UNREADABLE IS ITS OWN CAUSE, AND IS ASKED BEFORE THE CONTENT (#3751 round 2, B7). The cause
+  # list exists because THE OPERATOR ACTION DIFFERS PER CAUSE, and an unreadable report used to
+  # be reported as `report empty` — which sends the operator to the AGENT when the fix is
+  # `chmod`. Reusing `report ungrammatical` instead would be no better: it asserts something
+  # about CONTENT THAT WAS NEVER OBSERVED, and a false rationale is worse than none, because it
+  # is what stops the next person looking. Measured BY ATTEMPTING THE OPEN rather than with
+  # `[ -r ]`, which answers TRUE for root and cannot see an I/O error; the redirection error is
+  # bash's own, so it is suppressed inside the subshell rather than on `tr` (a raw shell error
+  # beside the verdict line is not a named refusal).
+  if ! ( : <"$rpath" ) 2>/dev/null; then
+    printf 'NOT-RUN|report unreadable\n'; return 0
+  fi
   # "empty" means nothing RECORDABLE — a file of blank lines is empty in every sense a
   # reader cares about, and reporting `report ungrammatical` for it would name the wrong
-  # operator action.
-  body="$(LC_ALL=C tr -d '[:space:]' <"$rpath" 2>/dev/null || true)"
+  # operator action. The redirection is grouped so a read that fails BETWEEN the probe above
+  # and here (a race, a revoked mode) still cannot leak bash's error into the caller's stderr.
+  body="$( { LC_ALL=C tr -d '[:space:]' <"$rpath"; } 2>/dev/null || true )"
   if [ -z "$body" ]; then
     printf 'NOT-RUN|report empty\n'; return 0
   fi

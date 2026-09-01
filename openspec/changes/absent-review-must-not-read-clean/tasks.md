@@ -4,7 +4,7 @@
 - [x] 1.1 `scripts/flow/review-stage.sh` — `open` (sentinel pre-stamp, `git check-ignore` fail-closed path
       verification, re-open refusal, prints the paste-ready spawn clause)
 - [x] 1.2 `status` — elapsed / deadline / sentinel-only, advisory only
-- [x] 1.3 `verdict` — closed grammar, string-equality token match, five named `NOT-RUN` causes, exit codes
+- [x] 1.3 `verdict` — closed grammar, string-equality token match, six named `NOT-RUN` causes, exit codes
 - [x] 1.4 `record-author-performed` — required working, placeholder refusal, `AUTHOR-PERFORMED` token
 - [x] 1.5 `.gitignore` entry for `.review-stage/`
 

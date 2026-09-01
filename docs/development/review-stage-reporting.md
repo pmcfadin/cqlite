@@ -209,8 +209,8 @@ bash scripts/flow/review-stage.sh verdict c --issue 1234
 bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary> --c-verdict AUTO
 ```
 
-`NOT-RUN` always carries one of five named causes — `no report written`, `report absent`,
-`report empty`, `report ungrammatical: <what>`, `stage never opened` — because the operator
+`NOT-RUN` always carries one of six named causes — `no report written`, `report absent`,
+`report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened` — because the operator
 action differs per cause, and one token for five states is the collapse this issue is about.
 Everything is written under `.review-stage/`, whose ignore status is **verified with
 `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate of

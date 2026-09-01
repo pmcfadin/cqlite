@@ -26,8 +26,8 @@ non-verdict sentinel recording `spawned-at`, `agent`, `issue`, and a `deadline`.
 `review-stage.sh verdict <kind> --issue <N>` SHALL emit exactly one line of a CLOSED grammar:
 `REVIEW-STAGE: <kind> RESULT: <token> elapsed=<secs> deadline=<secs> agent=<type> report=<path>`
 with `<token>` from `{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}`, matched by string equality on the
-first word, and with any unrecognised, empty, sentinel-only, ungrammatical, absent, or never-opened
-state reported as `NOT-RUN`. The recorded result SHALL be read from a `result:` line ANCHORED AT
+first word, and with any unrecognised, empty, unreadable, sentinel-only, ungrammatical, absent, or
+never-opened state reported as `NOT-RUN`. The recorded result SHALL be read from a `result:` line ANCHORED AT
 COLUMN ZERO: the report body is author-controlled text that carries example verdict lines BY DESIGN
 (the pre-stamped sentinel has to show the agent the spelling, and a review report quotes other
 reports), so an indented, quoted or bulleted copy is DATA and not the record.
@@ -43,8 +43,10 @@ reports), so an indented, quoted or bulleted copy is DATA and not the record.
 - **AND** the token is neither `PASS` nor any value a consumer may read as a passing verdict
 
 #### Scenario: each NOT-RUN cause is named
-- **WHEN** the report is absent / empty / ungrammatical / the stage was never opened
+- **WHEN** the report is absent / unreadable / empty / ungrammatical / the stage was never opened
 - **THEN** the `NOT-RUN` token carries a parenthesised cause distinguishing that state from the others
+- **AND** an UNREADABLE report is its own cause, not `report empty`: the operator fix is `chmod`, not
+  the agent, and calling it ungrammatical would assert something about content never observed
 
 #### Scenario: an unrecognised token is not passed through
 - **WHEN** a report records a result token outside the closed set

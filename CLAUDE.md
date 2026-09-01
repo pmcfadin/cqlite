@@ -1122,9 +1122,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   template's own examples were valid records held off by `grep -m1` ORDER alone, and deleting the
   column-zero sentinel then appending a verdict read the TEMPLATE's `PASS` (measured; #3312's rule
   — anchor the control token where the payload cannot reach, never pick a rarer delimiter); `status` reports elapsed/deadline and is **advisory, never a
-  verdict input**. `NOT-RUN` always names ONE OF FIVE causes (`no report written`, `report absent`,
-  `report empty`, `report ungrammatical: <what>`, `stage never opened`) because the operator action
-  differs per cause. **An idle notice is strictly WEAKER than the gate's `INCOMPLETE` sentinel** —
+  verdict input**. `NOT-RUN` always names ONE OF SIX causes (`no report written`, `report absent`,
+  `report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`) because
+  the operator action differs per cause — `report unreadable` was added in round 2 rather than folded
+  into `report empty` (whose fix is the AGENT, where an unreadable file's is `chmod`) or into
+  `report ungrammatical` (which would assert something about content never observed: a false
+  rationale is worse than none). **An idle notice is strictly WEAKER than the gate's `INCOMPLETE` sentinel** —
   at least the sentinel names itself a non-verdict — so never read one as a completed review. All
   six pipeline-gating agent definitions carry the matching report-of-record clause (Q1=(a): the
   class is *spawns whose silence gates a merge*, so `flow-closer`, which owns the merge, and

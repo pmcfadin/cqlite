@@ -140,7 +140,7 @@ never gate stdout or review churn.
    ```
    `verdict` emits exactly one line of a CLOSED grammar and exits `0` PASS / `4` FINDINGS / `5`
    NOT-RUN / `6` AUTHOR-PERFORMED. **`NOT-RUN` is not a clean review** — it means sentinel-only,
-   absent, empty, ungrammatical or never-opened, and the token NAMES which, because the operator
+   absent, unreadable, empty, ungrammatical or never-opened, and the token NAMES which, because the operator
    action differs per cause. Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
    (`open --force` KEEPS the original clock, so the elapsed time still reads true), or read
    `status` for how long it has produced nothing. **Never infer a clean review from an idle

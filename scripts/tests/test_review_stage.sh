@@ -21,10 +21,10 @@
 #
 # WHY EVERY NOT-RUN CAUSE IS ASSERTED BY NAME
 # -------------------------------------------
-# Five states share one token and one exit code, and the operator action differs per state
+# SIX states share one token and one exit code, and the operator action differs per state
 # ("the agent produced nothing" / "someone deleted the file" / "you never opened a stage" are
 # three different next moves). Asserting exit 5 alone would pass on a script that collapsed
-# all five into one message — which is the collapse this issue exists to remove. So each
+# all six into one message — which is the collapse this issue exists to remove. So each
 # cause is matched as TEXT.
 #
 # Run standalone:   bash scripts/tests/test_review_stage.sh
@@ -154,36 +154,36 @@ rs "$R" verdict c --issue 3751
 rc_is 4 "POSITIVE CONTROL: a findings report reads FINDINGS with exit 4"
 has "RESULT: FINDINGS " "POSITIVE CONTROL: the token is exactly FINDINGS"
 
-# --- 3. the five NOT-RUN causes, each BY NAME -----------------------------------
+# --- 3. the six NOT-RUN causes, each BY NAME ------------------------------------
 # (a) no report written — asserted in case 1 above, re-asserted here on a fresh stage so the
-#     five causes are visible as one set.
+#     six causes are visible as one set (the sixth, `report unreadable`, is section 11b).
 R2="$(newrepo)"
 rs "$R2" open c --issue 100 --agent rust-reviewer --deadline-secs 60
 rc_is 0 "causes: fresh stage opens"
 rs "$R2" verdict c --issue 100
-has "NOT-RUN (no report written)" "cause 1/5 BY NAME: no report written"
+has "NOT-RUN (no report written)" "cause 1/6 BY NAME: no report written"
 
 # (b) report absent — the stage is open and its report file is GONE.
 rm -f "$(REPORT_OF "$R2" 100 c)"
 rs "$R2" verdict c --issue 100
 rc_is 5 "causes: an absent report is still exit 5"
-has "NOT-RUN (report absent)" "cause 2/5 BY NAME: report absent"
+has "NOT-RUN (report absent)" "cause 2/6 BY NAME: report absent"
 has "agent=rust-reviewer" "causes: an absent report still reports the stage's agent (the stage record survives it)"
 
 # (c) report empty — exists, holds nothing recordable.
 printf '\n   \n\t\n' >"$(REPORT_OF "$R2" 100 c)"
 rs "$R2" verdict c --issue 100
-has "NOT-RUN (report empty)" "cause 3/5 BY NAME: report empty"
+has "NOT-RUN (report empty)" "cause 3/6 BY NAME: report empty"
 
 # (d) report ungrammatical — a body with no result line at all.
 printf '# my review\n\nlooks fine to me\n' >"$(REPORT_OF "$R2" 100 c)"
 rs "$R2" verdict c --issue 100
-has "NOT-RUN (report ungrammatical: no 'result:' line)" "cause 4/5 BY NAME: report ungrammatical (no result line)"
+has "NOT-RUN (report ungrammatical: no 'result:' line)" "cause 4/6 BY NAME: report ungrammatical (no result line)"
 
 # (e) stage never opened — no stage record for this kind at all.
 rs "$R2" verdict coverage --issue 100
 rc_is 5 "causes: a never-opened stage is exit 5"
-has "NOT-RUN (stage never opened)" "cause 5/5 BY NAME: stage never opened"
+has "NOT-RUN (stage never opened)" "cause 5/6 BY NAME: stage never opened"
 hasnt "RESULT: PASS" "causes: a never-opened stage is not a pass"
 
 # --- 4. the grammar is CLOSED, not prefix-tested --------------------------------
@@ -479,7 +479,7 @@ rc_is 5 "hand-written AP: performed-by=nobody / reason=x / evidence=tbd is NOT-R
 hasnt "RESULT: AUTHOR-PERFORMED" "hand-written AP: the unusable triple does not reach the proceeding token"
 has "report ungrammatical: AUTHOR-PERFORMED" "hand-written AP: reported as ungrammatical, naming the token"
 
-# EACH FIELD, BY NAME — the operator action differs per field, exactly as it does for the five
+# EACH FIELD, BY NAME — the operator action differs per field, exactly as it does for the six
 # NOT-RUN causes.
 hand_ap "$AP_R" nobody 'no peer agent available; hand C against the spec deltas' 'docs/x.md'
 rs "$R7" verdict c --issue 500
@@ -795,6 +795,51 @@ if [ -f "$R17/mylogs/mine.md" ] && [ ! -L "$R17/mylogs/mine.md" ]; then
 else
   bad "tempfile control: the custom report was not written"
 fi
+
+# --- 11b. AN UNREADABLE REPORT IS ITS OWN CAUSE, NOT "report empty" (round 2, B7) ---------
+# The cause list's entire justification is that THE OPERATOR ACTION DIFFERS PER CAUSE: "the file
+# is empty" sends the operator to the agent, "I cannot read the file" sends them to `chmod`. An
+# unreadable report was reported as `report empty`, and bash's own redirection error ("Permission
+# denied") leaked to stderr beside the verdict line — a raw error is not a named refusal.
+R11B="$(newrepo)"
+rs "$R11B" open c --issue 800 --agent spec-auditor
+rc_is 0 "unreadable: the stage opens"
+R11B_REPORT="$(REPORT_OF "$R11B" 800 c)"
+printf 'result: PASS\n\nreviewed.\n' >"$R11B_REPORT"
+chmod 000 "$R11B_REPORT" 2>/dev/null || true
+
+# THE PRECONDITION IS MEASURED BY ATTEMPTING THE READ, not by `[ -r ]` (which answers TRUE for
+# root). Both branches execute the SAME NUMBER of assertions, so the suite's EXACT case floor
+# stays host-independent, and the branch that cannot measure the property DECLARES that rather
+# than passing silently.
+if ( : <"$R11B_REPORT" ) 2>/dev/null; then
+  ok "unreadable: DECLARED GAP — this host still reads a mode-000 file (running as root, or a filesystem ignoring mode bits), so the unreadable cause has NO SUBJECT here; the case below asserts what IS true on such a host instead of passing silently"
+  rs "$R11B" verdict c --issue 800
+  rc_is 0 "unreadable (no-subject host): the report IS readable, so its content decides — PASS"
+  has "RESULT: PASS " "unreadable (no-subject host): the token is the report's own"
+  hasnt "Permission denied" "unreadable (no-subject host): no raw shell error is emitted"
+else
+  ok "unreadable: the precondition holds — this host cannot read the mode-000 report (MEASURED by attempting the read, not by [ -r ], which answers TRUE for root)"
+  rs "$R11B" verdict c --issue 800
+  rc_is 5 "unreadable: an unreadable report is NOT-RUN (exit 5)"
+  has "NOT-RUN (report unreadable)" "unreadable: cause 6/6 BY NAME — 'report unreadable', whose operator action is chmod, NOT 'report empty', whose operator action is the agent"
+  hasnt "Permission denied" "unreadable: bash's raw redirection error does not leak beside the verdict line"
+fi
+
+# CONTROL, on every host: restored permissions read the content, so the cause above is about
+# READABILITY and not about the file being rejected for some other reason.
+chmod 644 "$R11B_REPORT" 2>/dev/null || true
+rs "$R11B" verdict c --issue 800
+rc_is 0 "unreadable CONTROL: restoring read permission reads the report again (PASS)"
+has "RESULT: PASS " "unreadable CONTROL: the token is the report's own"
+
+# AND THE EMPTY CAUSE IS STILL DISTINCT — a fix that folded unreadable into empty, or empty into
+# unreadable, would pass one of the two cases above on its own.
+: >"$R11B_REPORT"
+rs "$R11B" verdict c --issue 800
+rc_is 5 "unreadable: an EMPTY (but readable) report is still exit 5"
+has "NOT-RUN (report empty)" "unreadable: 'report empty' still names the empty state, distinctly"
+hasnt "report unreadable" "unreadable: an empty report is not reported as unreadable"
 
 # --- 12. OUTSIDE A GIT WORKTREE: the documented exit fires, and no path is fabricated ------
 # `repo_root` used to `die_usage` itself, and its only caller was `$(repo_root)` inside a

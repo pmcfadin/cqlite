@@ -910,8 +910,8 @@ c_evaluate() {
     NOT-RUN)
       refuse_no_c_verdict \
         "The $C_STAGE_KIND stage reports NOT-RUN — no verdict was ever recorded." \
-        "NOT-RUN covers five distinct states (sentinel-only, report absent, report empty," \
-        "report ungrammatical, stage never opened) and the verdict line above NAMES which," \
+        "NOT-RUN covers six distinct states (sentinel-only, report absent, report unreadable," \
+        "report empty, report ungrammatical, stage never opened) and the verdict line above NAMES which," \
         "because the operator action differs per cause."
       ;;
     '')

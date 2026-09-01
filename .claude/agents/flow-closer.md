@@ -224,8 +224,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    The verdict MUST be `PASS` (every requirement `satisfied` with a public-surface test as
    evidence). `FINDINGS` — an `unmet`/uncovered/unjustified-`partial` requirement — blocks merge
    → route back (see step 4 escalation). **`NOT-RUN` also blocks, and it is NOT a clean review**:
-   it means the stage produced nothing (sentinel-only / absent / empty / ungrammatical /
-   never-opened, and the token names which). Re-spawn it (`open --force` re-stamps the report and
+   it means the stage produced nothing (sentinel-only / absent / unreadable / empty /
+   ungrammatical / never-opened, and the token names which). Re-spawn it (`open --force` re-stamps the report and
    KEEPS the original clock, so the elapsed time still reads true), or use `status` to report how
    long it has produced nothing. If no independent audit can be obtained, the SANCTIONED
    FALLBACK — never a hand-asserted pass — is to record the substitute WITH ITS WORKING:

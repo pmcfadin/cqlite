@@ -24,11 +24,11 @@ REVIEW-STAGE: <kind> RESULT: <token> elapsed=<secs> deadline=<secs> agent=<type>
 |---|---|---|---|
 | `PASS` | the agent wrote a report and it records no blocking finding | 0 | yes |
 | `FINDINGS` | the agent wrote a report recording ≥1 blocking finding | 4 | no |
-| `NOT-RUN` | sentinel-only, absent, empty, or ungrammatical | 5 | **no** |
+| `NOT-RUN` | sentinel-only, absent, unreadable, empty, or ungrammatical | 5 | **no** |
 | `AUTHOR-PERFORMED` | a disclosed substitute with its working recorded | 6 | **only under §4** |
 
-`NOT-RUN` carries a **cause** in parentheses — `no report written`, `report absent`, `report empty`,
-`report ungrammatical: <what>`, `stage never opened` — because the operator action differs per cause and
+`NOT-RUN` carries a **cause** in parentheses — `no report written`, `report absent`, `report unreadable`,
+`report empty`, `report ungrammatical: <what>`, `stage never opened` — because the operator action differs per cause and
 one token for five states is the shape this issue is about.
 
 Two rules make the grammar closed rather than prefix-tested (#3544's lesson): the token is reduced to its
@@ -131,7 +131,7 @@ component, so `agent-gate.components` is unchanged):
 - **a positive control**: a real report ⇒ `PASS`, exit 0, and the merge assert proceeds. Without it, a
   script that always answered `NOT-RUN` would pass the suite — a guard that cannot green vacuously is the
   standing requirement here.
-- the ungrammatical, empty, absent, and never-opened causes each asserted **by name**, not by exit code
+- the ungrammatical, empty, unreadable, absent, and never-opened causes each asserted **by name**, not by exit code
   alone: five states behind one exit code is the collapse this issue is about.
 - `AUTHOR-PERFORMED` accepted with the full form and refused for each missing element and each placeholder.
 - a **case floor** (#3544), because a span-replacing edit silently deleted four cases from a suite that
