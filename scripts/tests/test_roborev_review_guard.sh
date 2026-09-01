@@ -5983,7 +5983,7 @@ STUB_LIST_JSON=none
 run_wrapper "$jm_work"
 assert_verdict 'case (jm5)' FAIL 1
 assert_says 'case (jm5) the key names the job-record state it inherits' \
-  '^job-machine: UNAVAILABLE \(no job record could be read, so the issuing daemon is unknown — job-record: DEGRADED'
+  '^job-machine: UNAVAILABLE \(no job record could be read at all, so the issuing daemon is unknown — job-record: DEGRADED'
 assert_says 'case (jm5) the FAIL belongs to sha-assert, not to job-machine' \
   '^sha-assert: FAIL \(job record unavailable'
 assert_lacks 'case (jm5) no diagnostic blames the informational key' 'ERROR: job-machine'

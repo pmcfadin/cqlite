@@ -1456,12 +1456,18 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
 # does not name its own branch; and a branch holding more than `--limit 50` jobs. Each lands on
 # `NOT RECORDED` with its own cause named, which is why that value explains itself rather than
 # merely reporting an absence.
+# TWO GLOBALS, NOT STDOUT, AND THAT IS LOAD-BEARING. This first PRINTED the uuid and was called in
+# a command substitution — so the SUBSHELL's assignment to `JOB_MACHINE_MISS` never reached the
+# parent and every miss rendered the generic cause instead of the one it had just measured (caught
+# by case jm15). A result that is two values does not fit one channel.
+JOB_MACHINE_ID=""
 JOB_MACHINE_MISS=""
-read_machine_fact() { # read_machine_fact <job> -> prints the daemon uuid, or nothing (+ JOB_MACHINE_MISS)
+read_machine_fact() { # read_machine_fact <job> -> sets JOB_MACHINE_ID | JOB_MACHINE_MISS
   local mfacts="$FACTS_FILE.machine" mprompt="$FACTS_FILE.machine.prompt" json="" id="" job_branch=""
+  JOB_MACHINE_ID=""
   JOB_MACHINE_MISS=""
   id=$(fact source_machine_id)
-  if [ -n "$id" ]; then printf '%s' "$id"; return 0; fi
+  if [ -n "$id" ]; then JOB_MACHINE_ID="$id"; return 0; fi
   job_branch=$(fact branch)
   if [ -z "$job_branch" ]; then
     JOB_MACHINE_MISS="the job record does not name its own branch, and the daemon's job list is branch-filtered, so the lookup could not be scoped to this job; it was deliberately NOT retried against the branch this invocation is on, which would answer about a different branch"
@@ -1485,7 +1491,7 @@ read_machine_fact() { # read_machine_fact <job> -> prints the daemon uuid, or no
     JOB_MACHINE_MISS="neither the job record nor the daemon's job list for branch '$job_branch' carries source_machine_id"
     return 1
   fi
-  printf '%s' "$id"
+  JOB_MACHINE_ID="$id"
 }
 
 # REQUIRED to stop polling: the fields without which an assert cannot run at all.
@@ -1558,9 +1564,10 @@ TOK_OUT=$(fact output_tokens)
 # actions, and collapsing them onto one value is the shape this repository keeps paying for. The
 # key is INFORMATIONAL — it is in neither the verdict-grammar scan nor the affirmation loop — so
 # none of these three can red an otherwise-clean run.
-JOB_MACHINE_ID=""
+# CALLED IN THIS SHELL, NEVER IN A COMMAND SUBSTITUTION: it reports a uuid AND, when there is none,
+# the cause it measured — and a subshell would discard the second (see read_machine_fact).
 if [ "$announce_ok" -eq 1 ]; then
-  JOB_MACHINE_ID=$(read_machine_fact "$JOB" || printf '')
+  read_machine_fact "$JOB" || true
 fi
 # THE SPLIT IS "WAS A RECORD READ", NOT "IS IT COMPLETE" (#3654 round 2). This used to branch on
 # `record_required_present`, which asks about COMPLETENESS — so a record that WAS read but is
