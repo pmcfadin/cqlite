@@ -102,14 +102,19 @@ fn tuple_body(fields: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// The five nesting positions AC1 enumerates, as
-/// `(label, cql type string, body builder)` for one element of type `t`.
-fn nesting_positions(t: &str) -> Vec<(String, String, Box<dyn Fn(&[u8]) -> Vec<u8>>)> {
+/// Builds a container body around ONE element payload.
+type BodyBuilder = Box<dyn Fn(&[u8]) -> Vec<u8>>;
+
+/// One nesting position: `(label, cql type string, body builder)`.
+type NestingPosition = (String, String, BodyBuilder);
+
+/// The five nesting positions AC1 enumerates, for one element of type `t`.
+fn nesting_positions(t: &str) -> Vec<NestingPosition> {
     vec![
         (
             format!("frozen<list<{}>>", t),
             format!("list<{}>", t),
-            Box::new(|e: &[u8]| frozen_sequence(&[e])) as Box<dyn Fn(&[u8]) -> Vec<u8>>,
+            Box::new(|e: &[u8]| frozen_sequence(&[e])) as BodyBuilder,
         ),
         (
             format!("frozen<set<{}>>", t),

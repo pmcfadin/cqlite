@@ -359,6 +359,7 @@ mod tests {
     /// | `InvalidPath`, `TypeConversion`, `Storage`, `Concurrency`, `NotFound` | `CqliteError` (base) | |
     /// | `AlreadyExists`, `InvalidOperation`, `ConstraintViolation`, `Transaction` | `CqliteError` (base) | |
     /// | `Index`, `Compaction`, `Internal`, `Parse`, `WriteDirLocked` | `CqliteError` (base) | |
+    /// | `FixedWidthLengthMismatch` | `CqliteError` (base) | Wrong on-disk width (#3723) |
     /// | `Wasm` (wasm32 only) | `CqliteError` (base) | |
     fn expected_py_class(err: &Error) -> PyExceptionClass {
         match err {
@@ -385,6 +386,9 @@ mod tests {
             // === Variants with no closer Python class: the base exception ===
             Error::Serialization { .. } => PyExceptionClass::Cqlite,
             Error::Corruption(_) => PyExceptionClass::Cqlite,
+            // Issue #3723: a wrong on-disk fixed-width length — corrupt data, so it
+            // takes `Corruption`'s class.
+            Error::FixedWidthLengthMismatch { .. } => PyExceptionClass::Cqlite,
             Error::InvalidFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedVersion { .. } => PyExceptionClass::Cqlite,

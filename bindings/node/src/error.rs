@@ -486,6 +486,9 @@ mod tests {
             // the parse identity because JS has no closer code for them.
             Error::CqlParse(_)
             | Error::Corruption(_)
+            // Issue #3723: a wrong on-disk fixed-width length is corrupt DATA and
+            // takes `Corruption`'s identity, not a query or schema code.
+            | Error::FixedWidthLengthMismatch { .. }
             | Error::Serialization { .. }
             | Error::Parse(_)
             | Error::TypeConversion(_)
