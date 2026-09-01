@@ -594,7 +594,16 @@ fs_summary_row "$r4g/.sum" "$sumrow4g" ||
   bad "case4g (#3402): the run emitted no usable file-size row — the L1 asserts are UNMEASURED"
 assert_verdict "case4g: a verdict-token-bearing grown path is still an OPT-OUT" "$d4g" OPT-OUT
 has "case4g (#3402): the row NAMES the withholding instead of rendering a rewritten path" \
-    "$sumrow4g" "detail WITHHELD"
+    "$sumrow4g" "WITHHELD"
+# The two-field split (roborev job 21): withholding must cost the FILE LIST and nothing
+# else. The first version replaced the whole suffix and so destroyed the COUNT — which is
+# gate-authored, provably safe, and the most useful thing left on the row — while claiming
+# in a comment that the count was kept. These two needles are what make that claim testable
+# rather than asserted.
+has "case4g (#3402): the COUNT survives the withholding (only the path list is dropped)" \
+    "$sumrow4g" "1 over-threshold file(s) grown"
+has "case4g (#3402): the engaged env var survives the withholding" \
+    "$sumrow4g" "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
 lacks "case4g (#3402): the row carries NO rewritten spelling of the real filename" \
     "$sumrow4g" "redacted-token"
 if [ ! -s "$sumrow4g" ]; then
@@ -1029,10 +1038,12 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # misattributing one as the other.
 # 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
 # FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
-# 107 -> 112 on roborev round 1 (+3 case4e, +2 case4f), then 112 -> 114 on job 19/20:
-# case4f DELETED (-2: it could not fail and could flake — see case4g's note) and case4g
-# ADDED (+4). Every case4g assert is unconditional: no /dev/full, no locale, no network.
-EXPECTED_CHECKS=114
+# 107 -> 112 on roborev round 1 (+3 case4e, +2 case4f); 112 -> 114 on jobs 19/20 (case4f
+# DELETED -2, it could not fail and could flake — see case4g's note; case4g ADDED +4);
+# 114 -> 116 on job 21 (+2 case4g: the COUNT and the env var must survive a withholding,
+# which is the claim that job 21 found false). All unconditional: no /dev/full, no locale,
+# no network.
+EXPECTED_CHECKS=116
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"

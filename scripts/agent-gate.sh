@@ -6778,14 +6778,29 @@ _fm_annotate() {
 # backgrounded subshell of the bounded pool (#1737) and cannot write the parent's state.
 _status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
 
-# _record_status_detail <component> <text> (#3402): publish that detail. Best-effort by
+# _record_status_detail <component> <trusted> [<untrusted>] (#3402): publish that detail as
+# TWO FIELDS, one per line — because they have different provenance and the reader of the
+# other end has to be able to tell them apart (roborev job 21).
+#   <trusted>    gate-authored text plus numbers this component computed. No repository
+#                content reaches it.
+#   <untrusted>  optional; repository-derived text (today: the grown-FILE PATHS).
+# Withholding used to replace the WHOLE suffix, so a path carrying the completion probe's
+# verdict token also destroyed the COUNT — gate-authored data, provably safe, and the single
+# most useful thing on the row — while a comment two lines up claimed the count was kept.
+# Splitting the fields is #3312's own prescription applied here: when one string carries both
+# your text and someone else's payload, SEPARATE THE CHANNEL rather than escape harder. The
+# boundary can then withhold exactly the untrusted half.
+# Best-effort by
 # design — the detail EXPLAINS a status token, it does not carry the verdict, so a
 # LOG_DIR that cannot take it must not change what the component reports. (The token
 # itself rides `.result`, whose write failure is already handled by the missing-result
 # guard.)
 _record_status_detail() {
   [ -n "${LOG_DIR:-}" ] || return 0
-  printf '%s\n' "$2" 2>/dev/null >"$(_status_detail_file "$1")" || return 0
+  # ALWAYS two lines, even when the untrusted field is empty, so the reader's line 2 means
+  # "the untrusted field" and never "whatever happened to be next".
+  { printf '%s\n' "$2"; printf '%s\n' "${3:-}"; } 2>/dev/null \
+    >"$(_status_detail_file "$1")" || return 0
 }
 
 # _status_detail <component> (#3402): read it back, reduced to ONE line with no control
@@ -6841,13 +6856,20 @@ _status_detail() {
   # change exists to remove, reintroduced by its own guard, and strictly worse than the
   # disclosure it was protecting: a reader cannot tell a rewritten name from a real one.
   #
-  # So the value is WITHHELD WHOLE, loudly, and the reader is sent to the component log — a
-  # truthful degradation instead of a false statement. The row keeps its status token and
-  # its count; only the detail suffix is replaced, by a sentence that says it was withheld
-  # and why. The refusal names NO part of the token it refuses (the reason is described, not
-  # quoted), because a diagnostic reproducing the token it exists to keep off this row would
-  # forge the very row it prevents — the rule this repo already applies to the roborev
-  # waiver markers.
+  # So the offending value is WITHHELD, loudly, and the reader is sent to the component log
+  # — a truthful degradation instead of a false statement.
+  #
+  # WITHHELD AT FIELD GRANULARITY, which is the whole point of the two-field sidecar
+  # (roborev job 21). The first version replaced the ENTIRE suffix, which also destroyed the
+  # COUNT — gate-authored, provably safe, and the most useful thing on the row — while the
+  # comment here claimed the count was kept. That claim was simply false, and the fix is to
+  # make it true rather than to narrow it: a pathological filename now costs the FILE LIST
+  # and nothing else, so the row still discloses that the ratchet was not enforced and over
+  # how many files.
+  #
+  # The refusal names NO part of the token it refuses (the reason is described, not quoted),
+  # because a diagnostic reproducing the token it exists to keep off this row would forge the
+  # very row it prevents — the rule this repo already applies to the roborev waiver markers.
   #
   # THE TRIGGER IS DELIBERATELY BROADER THAN THE PROBE PATTERN. It fires on any `RESULT:`,
   # not only `RESULT: PASS`/`RESULT: FAIL`, because narrowing it would require knowing every
@@ -6855,11 +6877,20 @@ _status_detail() {
   # here (pollers outside this repo read these blocks). The cost of the broad trigger is a
   # withheld detail on a pathological filename; the cost of a narrow one is a forged verdict
   # for a consumer nobody surveyed. Only one of those is recoverable by reading the log.
-  local _sd_v
-  _sd_v=$(head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
-  case "$_sd_v" in
-    *RESULT:*) printf '%s' "[detail WITHHELD: it contains the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
-    *)         printf '%s' "$_sd_v" ;;
+  local _sd_t _sd_u
+  _sd_t=$(sed -n '1p' "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
+  _sd_u=$(sed -n '2p' "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
+  # The TRUSTED field is still checked, not assumed: "gate-authored" is a property of
+  # today's four call sites, and a fifth could interpolate something. Its refusal withholds
+  # the whole row detail, because if the trusted half is compromised nothing after it can be
+  # relied on either.
+  case "$_sd_t" in
+    *RESULT:*) printf '%s' "[detail WITHHELD: its gate-authored half carries the completion probe's reserved verdict token (#2908) — see the component log]"; return 0 ;;
+  esac
+  case "$_sd_u" in
+    "")        printf '%s' "$_sd_t" ;;
+    *RESULT:*) printf '%s%s' "$_sd_t" "[WITHHELD: a listed path carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
+    *)         printf '%s%s' "$_sd_t" "$_sd_u" ;;
   esac
 }
 
@@ -17987,8 +18018,12 @@ run_file_size() {
       # (full gate, aggregate_lite_components, run_delta) set OVERALL=FAIL only on an
       # EXACT `FAIL`, so OPT-OUT rides to a PASS RESULT without a special case.
       status=OPT-OUT
+      # The COUNT is gate-authored and goes in the trusted field; only the PATHS are
+      # repository-derived. So a pathological filename costs the file list and nothing else
+      # — the row still discloses that the ratchet was not enforced and over how many files.
       _record_status_detail "$name" \
-        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown: $(_fs_abbrev_grown ${grew_paths[@]+"${grew_paths[@]}"})"
+        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown: " \
+        "$(_fs_abbrev_grown ${grew_paths[@]+"${grew_paths[@]}"})"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"
