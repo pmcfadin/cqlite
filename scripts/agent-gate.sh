@@ -14852,6 +14852,31 @@ run_tooling_tests() {
     return 0
   fi
 
+  # review-stage verdict guard (#3751): no python3 needed, always runs. Covers
+  # scripts/flow/review-stage.sh, which makes a delegated review stage's verdict an
+  # ARTIFACT so an absent review reports as NOT-RUN instead of as an absence a
+  # consumer has to guess about. It is placed HERE, above the python3 SKIP, and not
+  # in the &&-chain below it, for #3522's reason stated in its own words: a
+  # never-SKIPping lane must not be folded into a SKIP-aware one. The suite needs
+  # nothing beyond bash and git, so inheriting the selftest reader's python3 SKIP
+  # would leave the anti-vacuous-green mechanism's ONLY test silently unexecuted --
+  # which is this issue's own subject. A failure FAILs the component, mirroring the
+  # keyspace-scoping guard. (The bash-only suites still in the gated chain --
+  # test_claim_lock, test_premerge_assert, test_base_staleness and friends -- inherit
+  # that SKIP too; that is PRE-EXISTING and deliberately NOT swept here, since a
+  # sweep of the component's structure is not this issue's scope. Follow-up material.)
+  echo ">>> [$name] bash scripts/tests/test_review_stage.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_review_stage.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (review-stage verdict guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # UDT row-builder tuple-shape guard (#1991): no python3/Docker needed, always
   # runs. Pins build_udt_value() to a positional tuple (a dict → KeyError: 0
   # under prepared inserts, aborting the exhaustive regen) + an actionable 0-row
@@ -16466,7 +16491,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_review_stage.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -16479,7 +16504,6 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_review_stage.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
