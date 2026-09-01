@@ -85,6 +85,45 @@ def load(path):
         return None, "%s could not be read as JSON (%s)" % (path, exc.__class__.__name__)
 
 
+def load_stream(path):
+    """Decode a CONCATENATION of JSON documents into a list of them.
+
+    `gh api --paginate` emits ONE JSON ARRAY PER PAGE, concatenated — NOT one
+    array — so `json.load` fails on any genuinely paginated payload and a
+    single-page read silently drops every later page. Both directions are
+    wrong for this leg (#3752 blocker 3): a disarm on page 2 must be seen, and
+    a stream that cannot be decoded IN FULL must be UNMEASURED rather than
+    evaluated from the part that happened to parse.
+
+    Returns (documents, None) or (None, reason).
+    """
+    try:
+        with open(path, "r") as handle:
+            text = handle.read()
+    except OSError as exc:
+        return None, "%s could not be read (%s)" % (path, exc.__class__.__name__)
+    decoder = json.JSONDecoder()
+    documents = []
+    index = 0
+    size = len(text)
+    while True:
+        while index < size and text[index] in " \t\r\n":
+            index += 1
+        if index >= size:
+            break
+        try:
+            document, index = decoder.raw_decode(text, index)
+        except ValueError:
+            return None, (
+                "%s holds a page that could not be decoded (at byte %d of %d); a paginated "
+                "timeline that cannot be read in full is unmeasured, never clear"
+                % (path, index, size))
+        documents.append(document)
+    if not documents:
+        return None, "%s held no JSON document at all, so no page was read" % path
+    return documents, None
+
+
 def block_lines(text):
     """Yield the lines inside each column-zero-anchored roborev block."""
     inside = False
@@ -250,11 +289,13 @@ def cmd_hold(argv):
         return 5
     collect_marker_events(pr_payload, events, unparsed)
 
-    timeline, why = load(argv[2])
-    if timeline is None:
+    # EVERY page, decoded BEFORE anything is evaluated.
+    pages, why = load_stream(argv[2])
+    if pages is None:
         fail(why)
         return 5
-    collect_disarm_events(timeline, window, now, events, unparsed)
+    for page in pages:
+        collect_disarm_events(page, window, now, events, unparsed)
 
     for path in argv[3:]:
         thread, why = load(path)

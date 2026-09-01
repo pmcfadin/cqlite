@@ -721,10 +721,280 @@ else
   bad "scanner: the recorded terminal verdict was not reported (got: $scan_out)"
 fi
 
+
+# ==============================================================================
+# BLOCKER 1 (roborev, HIGH) — THE `git_ref` BASE HALF IS PART OF THE BINDING
+# ==============================================================================
+# Validating only the HEAD half reopens CLAUDE.md's own recorded T4 vacuity
+# class one level down: "a SINGLE-SHA review covers ONE COMMIT — a PARTIAL
+# review whose enqueued sha EQUALS HEAD, so no sha check can see it." A record
+# of `HEAD~1..HEAD` has a head EQUAL to the certified sha and leaves every
+# earlier reviewable commit on the branch unreviewed. The wrapper asserts
+# against that at REVIEW time; this leg must assert it at MERGE time.
+#
+# The expected base is the MERGE-BASE, never the base ref's TIP (#3392): a
+# tip-expecting assert false-FAILs deterministically on any branch whose main
+# advanced, and that was misdiagnosed as a race twice. Case `base-mb-not-tip`
+# below is the falsifying control for that.
+(
+  cd "$WORK" || exit 1
+  MB=$(git rev-parse main)
+  printf '%s\n' "$MB" >"$T/b1-mb"
+  git checkout -q -b b1-partial main
+  printf 'fn c() {}\n' >>src/lib.rs
+  git add -A && git commit -qm "b1 first code"
+  git rev-parse HEAD >"$T/b1-mid"
+  printf 'fn d() {}\n' >>src/lib.rs
+  git add -A && git commit -qm "b1 second code"
+  git rev-parse HEAD >"$T/b1-head"
+  git checkout -q -b b1-prose main
+  printf 'notes\n' >>README.md
+  git add -A && git commit -qm "b1 prose prefix"
+  git rev-parse HEAD >"$T/b1-prose-mid"
+  printf 'fn e() {}\n' >>src/lib.rs
+  git add -A && git commit -qm "b1 code after prose"
+  git rev-parse HEAD >"$T/b1-prose-head"
+  # A branch whose merge-base is NOT the base ref's tip: main advances AFTER
+  # the branch point, exactly the #3392 shape.
+  git checkout -q -b b1-mb main
+  printf 'fn f() {}\n' >>src/lib.rs
+  git add -A && git commit -qm "b1 mb-branch code"
+  git rev-parse HEAD >"$T/b1-mb-head"
+  git checkout -q main
+  printf 'main moves again\n' >>README.md
+  git add -A && git commit -qm "main advances again"
+) >/dev/null 2>&1
+B1_MB=$(cat "$T/b1-mb")
+B1_MID=$(cat "$T/b1-mid")
+B1_HEAD=$(cat "$T/b1-head")
+B1_PROSE_MID=$(cat "$T/b1-prose-mid")
+B1_PROSE_HEAD=$(cat "$T/b1-prose-head")
+B1_MB_HEAD=$(cat "$T/b1-mb-head")
+
+# NON-VACUITY for the #3392 control: the merge-base must really differ from the
+# base ref's tip, or `base-mb-not-tip` would prove nothing.
+if [ "$B1_MB" != "$(cd "$WORK" && git rev-parse main)" ]; then
+  ok "fixture: main advanced past the branch point, so merge-base != base-ref tip (#3392)"
+else
+  bad "fixture: merge-base equals main's tip — the #3392 control would be vacuous"
+fi
+
+# --- base-partial: a PARTIAL range whose head EQUALS the certified sha ----------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 600)"
+roborev_job 600 "$B1_MID" "$B1_HEAD"
+if run_binding 4 "base-partial: a <head~1>..<head> record leaves earlier code unreviewed" \
+  review-binding 1 pmcfadin/cqlite "$B1_HEAD"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*) ok "base-partial: verdict UNBOUND" ;;
+    *) bad "base-partial: expected UNBOUND — the head half alone cannot bind (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"reviewed BASE"*"unreviewed"*|*"unreviewed"*"reviewed BASE"*)
+      ok "base-partial: the report names the unreviewed prefix, not just the head" ;;
+    *) bad "base-partial: the refusal did not name the unreviewed prefix (got: $OUT)" ;;
+  esac
+fi
+
+# --- base-prose-prefix: an omitted prefix that is CODE-FREE still binds ---------
+# The fail-closed direction must not red correct input: a round that starts
+# after a prose-only prefix has reviewed every reviewable commit on the branch.
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 601)"
+roborev_job 601 "$B1_PROSE_MID" "$B1_PROSE_HEAD"
+if run_binding 0 "base-prose-prefix: an omitted prefix that is code-free still binds" \
+  review-binding 1 pmcfadin/cqlite "$B1_PROSE_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*) ok "base-prose-prefix: verdict BOUND" ;;
+    *) bad "base-prose-prefix: a code-free omitted prefix was refused (got: $OUT)" ;;
+  esac
+fi
+
+# --- base-mb-not-tip: the expected base is the MERGE-BASE, never the tip -------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 602)"
+roborev_job 602 "$B1_MB" "$B1_MB_HEAD"
+if run_binding 0 "base-mb-not-tip: a base equal to the MERGE-BASE binds though main moved (#3392)" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*) ok "base-mb-not-tip: verdict BOUND (the tip is not the expected base)" ;;
+    *) bad "base-mb-not-tip: a correct merge-base-anchored review was refused (got: $OUT)" ;;
+  esac
+fi
+
+# --- base-superset: a base BEHIND the merge-base reviewed MORE, not less -------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 603)"
+roborev_job 603 "$(cd "$WORK" && git rev-parse "$B1_MB^")" "$B1_MB_HEAD"
+if run_binding 0 "base-superset: a base BEHIND the merge-base is more coverage, not less" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*) ok "base-superset: verdict BOUND" ;;
+    *) bad "base-superset: a superset review was refused (got: $OUT)" ;;
+  esac
+fi
+
+# --- base-unresolvable: a base half naming no object here is UNMEASURED --------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 604)"
+roborev_job 604 0000000000000000000000000000000000000000 "$B1_HEAD"
+if run_binding 5 "base-unresolvable: a base half resolving to no object is UNMEASURED" \
+  review-binding 1 pmcfadin/cqlite "$B1_HEAD"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*) ok "base-unresolvable: verdict UNMEASURED, never a binding" ;;
+    *) bad "base-unresolvable: expected UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+
+# --- base-nonhex: a base half that is not hex is its OWN named refusal ---------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 605)"
+python3 - "$MOCK_ROBOREV_DIR/job-605.json" "$B1_HEAD" <<'PY'
+import json, sys
+out, head = sys.argv[1:3]
+json.dump({"id": 605, "job": {"id": 605, "git_ref": "notahex..%s" % head, "status": "done"}},
+          open(out, "w"))
+PY
+if run_binding 5 "base-nonhex: a non-hex BASE half is UNMEASURED, never ignored" \
+  review-binding 1 pmcfadin/cqlite "$B1_HEAD"; then
+  case "$OUT" in
+    *"base half"*) ok "base-nonhex: the cause names the BASE half specifically" ;;
+    *) bad "base-nonhex: the base half was silently discarded (got: $OUT)" ;;
+  esac
+fi
+
+
+# ==============================================================================
+# BLOCKER 2 (roborev, MED) — ONE BAD RECORD MUST NOT END THE SCAN
+# ==============================================================================
+# The leg's own contract is that ANY recorded round covering the certified head
+# suffices, because a multi-round PR legitimately leaves rounds 1..n-1 behind.
+# Short-circuiting on the FIRST unretrievable record contradicts that contract
+# and refuses a PR that DOES carry a later covering round — and a false
+# rationale in a gate artifact is what stops the next person looking.
+#
+# RESOLUTION RULE, asserted here and stated beside the code: an unresolved
+# record can only change the answer while nothing has PROVED coverage. So
+# coverage wins outright, and an unresolved record is decisive only when no
+# other round bound — never permissive, never unconditionally fatal.
+
+# pr_payload_comments <out> <baseRefName> <comment-body>... — several recorded
+# blocks, one per top-level comment, in order.
+pr_payload_comments() {
+  local out="$1" base="$2"
+  shift 2
+  python3 - "$out" "$base" "$@" <<'PY'
+import json, sys
+out, base = sys.argv[1:3]
+json.dump({"baseRefName": base, "body": "",
+           "comments": [{"body": b} for b in sys.argv[3:]]}, open(out, "w"))
+PY
+}
+
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 700)" "$(roborev_block 701)"
+rm -f "$MOCK_ROBOREV_DIR/job-700.json" "$MOCK_ROBOREV_DIR/list.json"
+roborev_job 701 "$B1_MB" "$B1_MB_HEAD"
+if run_binding 0 "multi-round: an unretrievable FIRST record does not hide a covering second" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*) ok "multi-round: verdict BOUND — coverage wins over an unresolved sibling" ;;
+    *) bad "multi-round: a covering later round was not reached (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"700"*"could not be retrieved"*)
+      ok "multi-round: the unresolved record is REPORTED, not silently dropped" ;;
+    *) bad "multi-round: the unresolved record vanished from the report (got: $OUT)" ;;
+  esac
+fi
+
+# When NOTHING binds, an unresolved record COULD have been the covering one, so
+# the verdict is UNMEASURED — and the non-vacuity requirement is that the SECOND
+# record was really examined, which a short-circuit could never show.
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 700)" "$(roborev_block 702)"
+roborev_job 702 "$B1_MB" "$B1_MID"
+if run_binding 5 "multi-round: no coverage plus an unresolved record is UNMEASURED" \
+  review-binding 1 pmcfadin/cqlite "$B1_HEAD"; then
+  case "$OUT" in
+    *"REVIEWABLE CODE was added after it"*)
+      ok "multi-round: the second record WAS examined (no short-circuit on the first)" ;;
+    *) bad "multi-round: the scan stopped at the first bad record (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "multi-round: an unresolved record that could have bound is UNMEASURED, not UNBOUND" ;;
+    *) bad "multi-round: expected UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+
+# Two RESOLVABLE records, the first not covering: the definite refusal is
+# UNBOUND, not UNMEASURED — nothing was unmeasurable.
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 703)" "$(roborev_block 704)"
+roborev_job 703 "$B1_MB" "$B1_MID"
+roborev_job 704 "$B1_MB" "$B1_MID"
+if run_binding 4 "multi-round: every record readable and none covering is UNBOUND" \
+  review-binding 1 pmcfadin/cqlite "$B1_HEAD"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*) ok "multi-round: a fully-measured absence of coverage is UNBOUND" ;;
+    *) bad "multi-round: expected UNBOUND (got: $OUT)" ;;
+  esac
+fi
+
+# ==============================================================================
+# BLOCKER 3 (roborev, MED) — THE DISARM TIMELINE MUST BE READ IN FULL
+# ==============================================================================
+# One page of 100 events is not the timeline. On a longer PR a recent
+# `auto_merge_disabled` sits on a later page, and reporting `clear` from a
+# signal that was never fully read is the affirmative-measurement rule violated
+# directly — a false PASS on exactly AC6's scenario (#3735 merged three minutes
+# after the lead disarmed it).
+if grep -vE '^[[:space:]]*#' "$BINDING" | grep -qE 'gh api .*--paginate'; then
+  ok "timeline: the disarm timeline is requested with --paginate (structural)"
+else
+  bad "timeline: the timeline request takes one page only — a later disarm is invisible"
+fi
+
+# `gh api --paginate` emits ONE JSON ARRAY PER PAGE, concatenated — not one
+# array. Every page must be decoded before any verdict is reached.
+paged_timeline() { # paged_timeline <page2-json-array>
+  python3 - "$MOCK_GH_DIR/timeline.json" "$1" <<'PY'
+import json, sys
+out, page2 = sys.argv[1:3]
+page1 = [{"event": "subscribed", "created_at": "2026-01-01T00:00:0%dZ" % (i % 10),
+          "actor": {"login": "someone"}} for i in range(100)]
+with open(out, "w") as fh:
+    json.dump(page1, fh)
+    fh.write("\n")
+    fh.write(page2)
+    fh.write("\n")
+PY
+}
+
+hold_payload "$MOCK_GH_DIR/pr-hold.json" '[]'
+paged_timeline "[{\"event\":\"auto_merge_disabled\",\"created_at\":\"$(iso_ago 180)\",\"actor\":{\"login\":\"pmcfadin\"}}]"
+if run_hold 4 "timeline: a disarm on PAGE 2 is found (AC6's own scenario)"; then
+  case "$OUT" in
+    *"verdict HOLD-FOUND"*) ok "timeline: a second-page disarm inside the window stops the merge" ;;
+    *) bad "timeline: a second-page disarm did not stop the merge (got: $OUT)" ;;
+  esac
+fi
+
+# Decoding every page must not turn into a blanket hold: an OLD disarm on page 2
+# is still outside the window.
+paged_timeline "[{\"event\":\"auto_merge_disabled\",\"created_at\":\"$(iso_ago 5400)\",\"actor\":{\"login\":\"pmcfadin\"}}]"
+if run_hold 0 "timeline: an OLD disarm on page 2 is decoded and correctly outside the window"; then
+  case "$OUT" in
+    *"verdict NO-HOLD-RECOGNISED"*) ok "timeline: reading every page did not become a blanket hold" ;;
+    *) bad "timeline: an out-of-window page-2 disarm still blocked (got: $OUT)" ;;
+  esac
+fi
+
+# A pagination that cannot be completed is UNMEASURED — read as a hold.
+printf '[]\n{ this is not json\n' >"$MOCK_GH_DIR/timeline.json"
+if run_hold 5 "timeline: a pagination that cannot be decoded in full is UNMEASURED"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*) ok "timeline: an undecodable later page is UNMEASURED, never clear" ;;
+    *) bad "timeline: expected UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=43
+CASE_FLOOR=60
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

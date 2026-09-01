@@ -342,17 +342,36 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   # ANY recorded round that covers the certified head is sufficient: a
   # multi-round PR legitimately leaves rounds 1..n-1 behind the head, and
   # failing on those would red correct input.
-  local job bound=0 unclassifiable=0 reviewed
+  #
+  # SO ONE BAD RECORD MUST NOT END THE SCAN, AND THE RESOLUTION RULE IS STATED
+  # HERE BESIDE THE CODE (#3752 blocker 2). Refusing on the FIRST unretrievable
+  # record contradicts the contract in the paragraph above it — it refuses a PR
+  # that DOES carry a later covering round — and a false rationale in a gate
+  # artifact is worse than silence, because it is what stops the next person
+  # looking. Every record is therefore examined and its failure RECORDED, then:
+  #
+  #   * a record that PROVES coverage decides the run outright (BOUND); an
+  #     unresolved sibling cannot change an answer already proved.
+  #   * with no coverage proved, an unresolved record COULD have been the
+  #     covering one, so the verdict is UNMEASURED — a refusal naming what was
+  #     unreadable, never permissive.
+  #   * with no coverage proved and every record READ, nothing was unmeasurable
+  #     and the definite refusal is UNBOUND.
+  local job bound=0 unclassifiable=0 unclassifiable_base=0 reviewed
   local heads=()
+  local unresolved=()
   for job in "${jobs[@]}"; do
     # NOT a command substitution. `reviewed_head_of` can refuse, and a refusal
     # inside `$( )` would exit only the SUBSHELL — the caller would read the
     # diagnostic as a sha and carry on. That is the fail-OPEN shape this whole
     # file exists to refuse, so the result travels in a global.
     RH_HEAD=""
+    RH_BASE=""
     RH_ERR=""
     if ! reviewed_head_of "$job" "$tmp"; then
-      unmeasured "$RH_ERR"
+      say "job $(sane "$job") $(sane "$RH_ERR")"
+      unresolved+=("$RH_ERR")
+      continue
     fi
     reviewed="$RH_HEAD"
     heads+=("$reviewed")
@@ -367,6 +386,44 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       say "job $(sane "$job") old commit dangling and reflog-reachable, so object validity"
       say "job $(sane "$job") proves nothing and the ancestor test is the verdict."
       continue
+    fi
+
+    # ---- THE BASE HALF, and it is checked BEFORE the equality shortcut ----
+    # A `<head~1>..<head>` record satisfies EVERY head test there is, so a base
+    # check placed after the shortcut would never run on the one shape it
+    # exists for. The expected base is the MERGE-BASE, never the base ref's
+    # TIP (#3392): a tip-expecting assert false-FAILs deterministically on any
+    # branch whose main advanced, and that was misdiagnosed as a race twice.
+    #
+    # A reviewed base at OR BEFORE the merge-base reviewed MORE of this branch,
+    # not less, so it is covered outright — that arm is what keeps a legitimate
+    # superset review from reading as a gap.
+    if git merge-base --is-ancestor "$RH_BASE" "$merge_base" >/dev/null 2>&1; then
+      :
+    else
+      classify_paths "$merge_base" "$RH_BASE"
+      case "$?" in
+        0)
+          say "job $(sane "$job") starts after this PR's merge-base, but the omitted"
+          say "job $(sane "$job") prefix is prose by scripts/ci/classify-docs-only.sh"
+          ;;
+        1)
+          say "job $(sane "$job") reviewed BASE $(sane "$RH_BASE") is not this PR's"
+          say "job $(sane "$job") merge-base, and the prefix it skipped carries unreviewed"
+          say "job $(sane "$job") reviewable code. A partial range whose HEAD equals the"
+          say "job $(sane "$job") certified sha passes every head test and still leaves"
+          say "job $(sane "$job") earlier commits unreviewed, so the head half alone"
+          say "job $(sane "$job") cannot bind."
+          continue
+          ;;
+        *)
+          say "job $(sane "$job") reviewed BASE $(sane "$RH_BASE") could not be compared"
+          say "job $(sane "$job") against this PR's merge-base, so how much of the branch"
+          say "job $(sane "$job") the round covered is unknown"
+          unclassifiable_base=1
+          continue
+          ;;
+      esac
     fi
 
     if [ "$reviewed" = "$certified" ]; then
@@ -405,11 +462,25 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     exit 0
   fi
 
+  # Nothing bound. A measurement failure is NOT an absence of coverage, and the
+  # two need different operator actions, so each unreadable input is named.
+  local causes=()
   if [ "$unclassifiable" -eq 1 ]; then
-    unmeasured "a recorded round IS an ancestor of the certified head, but the range after it" \
-      "could not be classified, so whether reviewable code was added after the review is" \
-      "UNKNOWN. That is a measurement failure, not an absence of coverage, and the two need" \
-      "different actions — so it is reported as its own verdict rather than folded into one."
+    causes+=("a recorded round IS an ancestor of the certified head, but the range after it \
+could not be classified, so whether reviewable code was added after the review is UNKNOWN.")
+  fi
+  if [ "$unclassifiable_base" -eq 1 ]; then
+    causes+=("a recorded round's BASE half could not be compared against this PR's merge-base, \
+so how much of the branch that round actually covered is UNKNOWN.")
+  fi
+  local why
+  for why in ${unresolved[@]+"${unresolved[@]}"}; do
+    causes+=("$why")
+  done
+  if [ "${#causes[@]}" -gt 0 ]; then
+    causes+=("That is a measurement failure, not an absence of coverage, and the two need \
+different actions — so it is reported as its own verdict rather than folded into one.")
+    unmeasured "${causes[@]}"
   fi
   say "unbound none of the recorded roborev rounds covers the certified head."
   verdict UNBOUND
@@ -419,8 +490,16 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   exit 4
 }
 
-# reviewed_head_of <job> <tmp> — echoes the 40-hex reviewed HEAD from the job
-# RECORD, or exits UNMEASURED.
+# reviewed_head_of <job> <tmp> — sets RH_HEAD and RH_BASE from the job RECORD's
+# `git_ref`, or sets RH_ERR and returns 1. BOTH HALVES ARE PART OF THE BINDING.
+#
+# VALIDATING ONLY THE HEAD HALF REOPENS THE T4 VACUITY CLASS ONE LEVEL DOWN.
+# Project doctrine records it: "a SINGLE-SHA review covers ONE COMMIT — a
+# PARTIAL review whose enqueued sha EQUALS HEAD, so no sha check can see it."
+# A record of `<head~1>..<head>` has a head EQUAL to the certified sha and
+# leaves every earlier reviewable commit on the branch unreviewed. The wrapper
+# asserts against that at REVIEW time; this leg asserts it at MERGE time, or
+# the merge gate is blind to exactly the vacuity the wrapper was built to catch.
 #
 # DERIVED FROM THE RECORD, NEVER FROM STDOUT (#3752 AC2/#2964). The wrapper's
 # `Enqueued job <N> for <sha>` line names, for a RANGE review, only the range
@@ -431,8 +510,9 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
 # uses. A second implementation's correctness is only knowable by differential
 # testing against the first (#3229), so there is deliberately only one.
 reviewed_head_of() {
-  local job="$1" tmp="$2" payload json ref head
+  local job="$1" tmp="$2" payload json ref head base
   RH_HEAD=""
+  RH_BASE=""
   RH_ERR=""
   for payload in show list; do
     case "$payload" in
@@ -461,6 +541,7 @@ reviewed_head_of() {
         ;;
     esac
     head="${ref##*..}"
+    base="${ref%%..*}"
     case "$head" in
       *[!0-9a-f]* | "")
         RH_ERR="job $job's record carries git_ref '$ref', whose head half is not hex, so the reviewed head cannot be established."
@@ -471,7 +552,18 @@ reviewed_head_of() {
       RH_ERR="job $job's record carries git_ref '$ref', whose head half is not a full 40-hex sha, so the reviewed head cannot be established."
       return 1
     fi
+    case "$base" in
+      *[!0-9a-f]* | "")
+        RH_ERR="job $job's record carries git_ref '$ref', whose base half is not hex, so where the review STARTED cannot be established — and the base half is half the binding (#3752)."
+        return 1
+        ;;
+    esac
+    if [ "${#base}" -ne 40 ]; then
+      RH_ERR="job $job's record carries git_ref '$ref', whose base half is not a full 40-hex sha, so where the review STARTED cannot be established — and the base half is half the binding (#3752)."
+      return 1
+    fi
     RH_HEAD="$head"
+    RH_BASE="$base"
     return 0
   done
   RH_ERR="job $job's record could not be retrieved or carries no git_ref. Neither \`roborev show $job --json\` nor \`roborev list --json\` yielded it, so the reviewed head is unknown — which is a refusal, never a skip (#3752 AC3)."
@@ -504,9 +596,21 @@ cmd_hold_check() {
     unmeasured "\`gh pr view $pr --repo $repo\` failed, so the PR thread could not be re-read" \
       "for a stop order. A thread that cannot be read is a hold, never a clearance."
 
-  gh api "repos/$repo/issues/$pr/timeline?per_page=100" >"$tmp/timeline.json" 2>/dev/null ||
-    unmeasured "the PR timeline could not be read, so a lead disarm inside the" \
-      "${PREMERGE_DISARM_WINDOW_SECS}s window could not be ruled out."
+  # `--paginate`, AND EVERY PAGE IS DECODED BEFORE ANY VERDICT (#3752 blocker 3).
+  # One page of 100 events is not the timeline: on a longer PR a recent
+  # `auto_merge_disabled` sits on a LATER page, and a `clear` derived from a
+  # signal that was never fully read is the affirmative-measurement rule
+  # violated directly — a false clearance on precisely the scenario this leg
+  # exists for (#3735 merged three minutes after the lead disarmed it).
+  #
+  # `gh api --paginate` emits ONE JSON ARRAY PER PAGE, CONCATENATED — not one
+  # array — so the scanner decodes a document STREAM, and a stream that cannot
+  # be decoded in full is UNMEASURED, read as a hold.
+  gh api --paginate "repos/$repo/issues/$pr/timeline?per_page=100" \
+    >"$tmp/timeline.json" 2>/dev/null ||
+    unmeasured "the PR timeline could not be read IN FULL (pagination failed), so a lead" \
+      "disarm inside the ${PREMERGE_DISARM_WINDOW_SECS}s window could not be ruled out." \
+      "An incompletely-read timeline is a hold, never a clearance."
 
   local extra=()
   local issues issue
