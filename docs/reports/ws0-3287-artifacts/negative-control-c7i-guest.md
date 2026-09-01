@@ -154,3 +154,89 @@ ones from a genuinely memory-clean workload. Only a differential against a predi
 - The event-disposition triage is **three-valued on purpose** (`ABSENT-FROM-PMU` / `NOT-SUPPORTED` /
   `PROGRAMS`), and `PROGRAMS` is deliberately *not* called `SUPPORTED`: this host's whole lesson is
   that programming a counter and measuring with it are different facts.
+
+---
+
+# RESUME NOTE — the exact capability gate a metal box must pass before #3287 is attempted
+
+**Park record.** #3287 was parked 2026-09-01 by lead ruling (option (b)) awaiting a bare-metal
+window. This section is the pre-flight gate for whoever picks it up. Run
+`bash docs/reports/ws0-3287-artifacts/capability-probe.sh <outdir>` on the candidate host FIRST and
+check it against the table below — before any corpus staging, and certainly before any metered hour
+is spent on a capture.
+
+**The pass criterion is never "it programs without error".** That is the whole lesson of this file:
+three of the counters below program cleanly on a `c7i` guest and return measurement-shaped zeros.
+Every requirement is therefore stated as **"NONZERO and moving on the differential"** — the
+`hostile` arm versus the `friendly` arm of `cache-hostile.c`, whose behaviour is known before it is
+measured. A counter that does not MOVE has not been validated, whatever it printed.
+
+## Gate A — TMA level-2 (#3287 AC1)
+
+| probe | pass criterion |
+|---|---|
+| `perf stat -e slots -- true` and `-e topdown.slots` | resolves and counts; **`EINVAL` here** |
+| `topdown-retiring`, `topdown-fe-bound`, `topdown-be-bound`, `topdown-bad-spec` | all four present; **all four ABSENT-FROM-PMU here** |
+| `perf stat -M TopdownL1 -- true` | resolves and prints four level-1 shares summing to ~100% |
+| `perf stat -M TopdownL2 -- true` | **resolves** — this is the AC itself. Level-2 is unreachable if level-1 is |
+
+Level-2 is served by `PERF_METRICS` on Ice Lake and later. If `slots` returns `EINVAL`, stop: there
+is no level-1 breakdown to subdivide, and the raw-event substitute is barred (see Finding 3).
+
+## Gate B — the offcore / prefetch-stall term (#3287 AC2) — the one the issue exists for
+
+| probe | pass criterion |
+|---|---|
+| `offcore_requests_outstanding.all_data_rd` | **NONZERO on the hostile arm and >> the friendly arm**; `0` in both here |
+| `offcore_requests_outstanding.cycles_with_data_rd` | same; `0` in both here |
+| `offcore_requests.all_data_rd` | present; **ABSENT-FROM-PMU here** |
+| `offcore_requests_buffer.sq_full` | present; **ABSENT-FROM-PMU here** — this is the super-queue-full term that makes prefetch pressure visible |
+| `l1d_pend_miss.fb_full` | NONZERO and moving (**already true here**, ×2611 — keep it; it is the fill-buffer half of the same story) |
+
+Gate B is the gate that decides whether the study is worth running at all. Without a working offcore
+term the TMA split alone **mis-attributes prefetch-induced memory stalls as core-bound**, which
+#3287's own text names in advance as not having answered the question. A host that passes Gate A and
+fails Gate B is **not** a partial win — publish nothing from it.
+
+## Gate C — reproduce #3224's own baseline buckets (#3287 AC5's reconciliation)
+
+Non-negotiable, because AC5 requires the result be reconciled against #3224 §5.3, and that
+reconciliation is only meaningful if this host can reproduce the buckets at all.
+
+| probe | pass criterion |
+|---|---|
+| `cycle_activity.stalls_l3_miss` | **NONZERO and moving** — `0` in every arm here, the finding above |
+| `cycle_activity.stalls_l2_miss` | NONZERO and moving (already true here) |
+| `cycle_activity.stalls_total` | NONZERO, and the three must **NEST**: `stalls_l3_miss <= stalls_l2_miss <= stalls_total` in every arm. #3224's partition is differencing, so a nesting violation invalidates it |
+| `LLC-loads`, `LLC-load-misses` | present and moving; `ABSENT-FROM-PMU` here |
+| `cache-references`, `cache-misses` | NONZERO and moving; both silent `0` here and on #3224's own c7i probe |
+| `ls /sys/bus/event_source/devices/uncore*` | at least one `uncore_imc*`; **none here**. AC3's bandwidth source and AC5's saturation verdict both need it. Never gate on `perf list \| grep uncore` — it lists per-model JSON entries on hosts with no uncore PMU at all |
+
+## Gate D — topology and exclusivity (not a PMU question, and it fails on a lane box too)
+
+- **≥ 8 complete physical cores available exclusively**: #3224's geometry is 6 for the server
+  (`llc-s6-N16`) plus 2 constant for the client. A lane box has exactly 8 and shares them with up to
+  4 concurrent lanes and a full `agent-gate.sh` — zero headroom and no isolation.
+- **SMT sibling map read from `/sys`, never assumed.** Use `ws0_assert_full_physical_cores` from
+  #3224's harness: it requires the pinned set to be an exact union of *complete* sibling groups with
+  group count equal to the requested S, so it is correct on any topology. #3217's hardcoded core
+  table silently measured a different machine than it labelled.
+- **Single NUMA node**, server under `numactl --cpunodebind=<n> --membind=<n>`, so a mixed-NUMA
+  allocation is excluded by construction rather than by argument.
+- **Prefer the same class as #3224's host** (`i4i.metal`, Xeon 8375C, Ice Lake-SP). AC5 asks for
+  reconciliation against #3224 §5.3's absolutes, and #3224's RUNBOOK states the rule flatly: a
+  sentence comparing absolutes across microarchitectures is a defect. A different metal class means
+  re-measuring both endpoints there and reconciling *ratios*, not absolutes — state which you did.
+- **Re-apply and RE-VERIFY the sysctls, then re-verify them again mid-session.**
+  `kernel.perf_event_paranoid` was found at **4** on #3224's fresh metal box (#3249's fix is not in
+  the golden AMI and does not survive a reboot), and #3217 records both values reverting on their own
+  schedule mid-session — surfacing later as unsymbolized frames, i.e. a failure that looks like a
+  different problem. Note that on this guest both were already permissive and it changed nothing:
+  **the permission layer and the capability layer are independent.**
+
+## Also carried, from #3224's own park state
+
+`docs/architecture/0.17-throughput-mission.md` records that #3224's pulled `/data` volume — the only
+inputs for the `4.6×` AC5 re-derivation and two integrity checks — is **preserved and billing** until
+#3287 consumes it or the owner deletes it. Check whether it still exists before assuming a
+re-derivation is possible; if it is gone, say so rather than re-deriving from a different corpus.
