@@ -822,8 +822,12 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 /// bare zero): evidence about what was looked for, never evidence that nothing else exists.
 ///
 /// The authoritative fix is to carry `ttl_seconds` through the delta model so the TTLs
-/// themselves can be compared; that is a public-type change, ESCALATED and deliberately
-/// not made here. Until it lands, this comment is the record of what the check does and
+/// themselves can be compared; that is a public-type change, and it is FILED AS #3787
+/// (P2) rather than made here — lead ruling on #3725, which took the scoped option
+/// deliberately rather than widening a test-execution-gating PR into `cqlite-core`'s
+/// public delta model. #3787 carries the expensive prerequisite: a CASSANDRA-WRITTEN
+/// fixture with an explicit `USING TIMESTAMP` and a TTL, without which neither residual
+/// below is reachable and the fix cannot be demonstrated. Until it lands, this comment is the record of what the check does and
 /// does not establish — do NOT re-derive it, and do not widen the tolerance to silence the
 /// residual, which would trade a loud false FAIL for a silent false PASS.
 ///
