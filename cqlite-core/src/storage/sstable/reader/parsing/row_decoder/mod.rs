@@ -722,9 +722,7 @@ use display_row::{
     build_display_row, build_display_row_read_path, extract_clustering_values, merge_static_cells,
     row_is_visible,
 };
-// campsite split of `block_emit_windowed` (epic #1116): the streaming-scan
-// `SlidingPartitionPolicy`.
-mod timestamp_policy;
+mod timestamp_policy; // campsite split of `block_emit_windowed` (#1116): SlidingPartitionPolicy
 use timestamp_policy::TimestampPolicy;
 
 // Issue #1741 / #1853: `now_epoch_secs()` (the read-time TTL "now" clock, with
@@ -808,6 +806,7 @@ mod raw_value;
 mod row_data;
 mod row_framing;
 mod udt;
+mod udt_field; // issue #3722: THE single UDT-field value decoder (campsite split of `udt`, #1116)
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
 // Per-column decode dispatch tag (Epic J / issue #1635). Imported into this

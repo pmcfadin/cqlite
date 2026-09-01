@@ -516,7 +516,7 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Parse field value based on its type
-                let value = self.parse_udt_field_value(field_data, &field_def.field_type)?;
+                let value = self.parse_udt_field_value(field_data, &field_def.field_type, 0)?;
                 Some(value)
             };
 
@@ -533,145 +533,6 @@ impl V5CompressedLegacyParser {
         };
 
         Ok((Value::Udt(Box::new(udt_value)), current_offset))
-    }
-
-    /// Parse a UDT field value based on its CqlType.
-    fn parse_udt_field_value(&self, data: &[u8], field_type: &CqlType) -> Result<Value> {
-        match field_type {
-            CqlType::Text | CqlType::Ascii => {
-                std::str::from_utf8(data)
-                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-            CqlType::Int => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Int field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-            CqlType::BigInt => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "BigInt field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-            CqlType::Float => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Float field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f32::from_bits(bits)))
-            }
-            CqlType::Double => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Double field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Float(f64::from_bits(bits)))
-            }
-            CqlType::Boolean => {
-                if data.len() != 1 {
-                    return Err(Error::corruption(format!(
-                        "Boolean field requires 1 byte, got {}",
-                        data.len()
-                    )));
-                }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            CqlType::Uuid => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "UUID field requires 16 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
-            }
-            CqlType::Timestamp => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Timestamp field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
-            CqlType::Date => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Date field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Date(days as i32))
-            }
-            CqlType::Blob => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            CqlType::Inet => Ok(Value::Inet(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            CqlType::Frozen(inner) => {
-                // Parse the inner type and wrap in Frozen
-                let inner_value = self.parse_udt_field_value(data, inner)?;
-                Ok(Value::Frozen(Box::new(inner_value)))
-            }
-            CqlType::Udt(name, field_defs) => {
-                // Nested UDT - recursively parse
-                let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
-                for (field_name, field_type) in field_defs {
-                    nested_def =
-                        nested_def.with_field(field_name.clone(), field_type.clone(), true);
-                }
-                let dummy_column = crate::schema::Column {
-                    name: name.clone(),
-                    data_type: "udt".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                };
-                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
-                Ok(value)
-            }
-            _ => {
-                // For other types, return as blob
-                tracing::debug!(
-                    "V5CompressedLegacy: UDT field type {:?} parsed as blob ({} bytes)",
-                    field_type,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-        }
     }
 
     /// Create an empty value for a given CQL type.
@@ -822,115 +683,6 @@ impl V5CompressedLegacyParser {
         Ok((total, consumed))
     }
 
-    /// Parse a UDT field value without requiring SSTableReader.
-    /// This is a simplified version of parse_udt_field_value for use in frozen collection contexts.
-    ///
-    /// Limitation: Complex nested types (nested UDTs, nested collections) are returned as blobs.
-    /// For full UDT support with nested types, use parse_udt_field_value with a reader.
-    pub(super) fn parse_simple_udt_field_value(data: &[u8], field_type: &CqlType) -> Result<Value> {
-        match field_type {
-            CqlType::Text | CqlType::Ascii => {
-                std::str::from_utf8(data)
-                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-            CqlType::Int => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Int field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-            CqlType::BigInt => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "BigInt field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-            CqlType::Boolean => {
-                if data.len() != 1 {
-                    return Err(Error::corruption(format!(
-                        "Boolean field requires 1 byte, got {}",
-                        data.len()
-                    )));
-                }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            CqlType::Float => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Float field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f32::from_bits(bits)))
-            }
-            CqlType::Double => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Double field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Float(f64::from_bits(bits)))
-            }
-            CqlType::Uuid | CqlType::TimeUuid => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "UUID field requires 16 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
-            }
-            CqlType::Timestamp => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Timestamp field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
-            CqlType::Blob => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            _ => {
-                // For complex types (nested UDTs, collections, etc.), return as blob
-                // These require SSTableReader for full parsing
-                tracing::debug!(
-                    "UDT field type {:?} in frozen context parsed as blob ({} bytes)",
-                    field_type,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-        }
-    }
-
     /// Parse a nested UDT from registry definition (Issue #238)
     /// Used when parsing UDT fields that are themselves UDTs
     pub(super) fn parse_nested_udt_from_registry(
@@ -968,7 +720,7 @@ impl V5CompressedLegacyParser {
             let field_value = if field_len == -1 {
                 None
             } else if field_len == 0 {
-                let value = Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
+                let value = self.parse_udt_field_value(&[], &field_def.field_type, 0)?;
                 Some(value)
             } else {
                 let field_len = Self::checked_component_len(
@@ -1057,12 +809,12 @@ impl V5CompressedLegacyParser {
                             _ => {
                                 // Other frozen types - parse as simple value
                                 let inner_value =
-                                    Self::parse_simple_udt_field_value(field_data, inner)?;
+                                    self.parse_udt_field_value(field_data, inner, 1)?;
                                 Value::Frozen(Box::new(inner_value))
                             }
                         }
                     }
-                    _ => Self::parse_simple_udt_field_value(field_data, &field_def.field_type)?,
+                    _ => self.parse_udt_field_value(field_data, &field_def.field_type, 0)?,
                 };
                 Some(value)
             };
@@ -1131,7 +883,7 @@ impl V5CompressedLegacyParser {
                 None
             } else if field_len == 0 {
                 // Empty value
-                let value = Self::parse_simple_udt_field_value(&[], field_type)?;
+                let value = self.parse_udt_field_value(&[], field_type, depth)?;
                 Some(value)
             } else {
                 let field_len =
@@ -1165,11 +917,11 @@ impl V5CompressedLegacyParser {
                         _ => {
                             // Other frozen types - parse as simple value
                             let inner_value =
-                                Self::parse_simple_udt_field_value(field_data, inner)?;
+                                self.parse_udt_field_value(field_data, inner, depth + 1)?;
                             Value::Frozen(Box::new(inner_value))
                         }
                     },
-                    _ => Self::parse_simple_udt_field_value(field_data, field_type)?,
+                    _ => self.parse_udt_field_value(field_data, field_type, depth)?,
                 };
                 Some(value)
             };

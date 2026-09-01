@@ -772,9 +772,10 @@ impl V5CompressedLegacyParser {
                                             field_data, nested_udt, registry,
                                         )?
                                     } else {
-                                        Self::parse_simple_udt_field_value(
+                                        self.parse_udt_field_value(
                                             field_data,
                                             &field_def.field_type,
+                                            depth,
                                         )?
                                     }
                                 }
@@ -794,9 +795,10 @@ impl V5CompressedLegacyParser {
                                             1,
                                         )?
                                     } else {
-                                        Self::parse_simple_udt_field_value(
+                                        self.parse_udt_field_value(
                                             field_data,
                                             &field_def.field_type,
+                                            depth,
                                         )?
                                     }
                                 }
@@ -812,9 +814,10 @@ impl V5CompressedLegacyParser {
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
-                                            Self::parse_simple_udt_field_value(
+                                            self.parse_udt_field_value(
                                                 field_data,
                                                 &field_def.field_type,
+                                                depth,
                                             )?
                                         }
                                     }
@@ -836,20 +839,23 @@ impl V5CompressedLegacyParser {
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
-                                            Self::parse_simple_udt_field_value(
+                                            self.parse_udt_field_value(
                                                 field_data,
                                                 &field_def.field_type,
+                                                depth,
                                             )?
                                         }
                                     }
-                                    _ => Self::parse_simple_udt_field_value(
+                                    _ => self.parse_udt_field_value(
                                         field_data,
                                         &field_def.field_type,
+                                        depth,
                                     )?,
                                 },
-                                _ => Self::parse_simple_udt_field_value(
+                                _ => self.parse_udt_field_value(
                                     field_data,
                                     &field_def.field_type,
+                                    depth,
                                 )?,
                             }
                         } else {
@@ -877,14 +883,16 @@ impl V5CompressedLegacyParser {
                                         )?;
                                         Value::Frozen(Box::new(inner_value))
                                     }
-                                    _ => Self::parse_simple_udt_field_value(
+                                    _ => self.parse_udt_field_value(
                                         field_data,
                                         &field_def.field_type,
+                                        depth,
                                     )?,
                                 },
-                                _ => Self::parse_simple_udt_field_value(
+                                _ => self.parse_udt_field_value(
                                     field_data,
                                     &field_def.field_type,
+                                    depth,
                                 )?,
                             }
                         };
@@ -962,7 +970,7 @@ impl V5CompressedLegacyParser {
                             } else if field_len == 0 {
                                 // Empty field - parse with empty data
                                 let value =
-                                    Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
+                                    self.parse_udt_field_value(&[], &field_def.field_type, depth)?;
                                 Some(value)
                             } else {
                                 let field_len = Self::checked_component_len(
@@ -1057,16 +1065,19 @@ impl V5CompressedLegacyParser {
                                             _ => {
                                                 // Other frozen types - parse as simple value
                                                 let inner_value =
-                                                    Self::parse_simple_udt_field_value(
-                                                        field_data, inner,
+                                                    self.parse_udt_field_value(
+                                                        field_data,
+                                                        inner,
+                                                        depth + 1,
                                                     )?;
                                                 Value::Frozen(Box::new(inner_value))
                                             }
                                         }
                                     }
-                                    _ => Self::parse_simple_udt_field_value(
+                                    _ => self.parse_udt_field_value(
                                         field_data,
                                         &field_def.field_type,
+                                        depth,
                                     )?,
                                 };
                                 Some(value)
