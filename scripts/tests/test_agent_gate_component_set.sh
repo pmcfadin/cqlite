@@ -23,6 +23,10 @@
 #   4b. removal that is only an UNCOMMITTED working-tree edit            -> FAIL naming it
 #   4d. a SHALLOW clone where rc 1 is ambiguous                          -> INDETERMINATE, never BEHIND
 #   5d. a concurrent fetch clobbering FETCH_HEAD                         -> baseline unaffected
+#   3757. HEAD is resolved UNPEELED in the live repository and PEELED in the isolated scratch
+#      (#3757): no live git call peels an object (structural, with a positive control), the
+#      scratch peel is bounded and three-valued (structural, with a positive control), a FIFO at
+#      HEAD's own object is refused BY NAME, and an unpeelable HEAD stays INDETERMINATE
 #   5. no skew                                                          -> affirmative PASS + baseline sha
 #   6. --lite with a real skew                                          -> line present, run NOT failed
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
@@ -759,8 +763,9 @@ fi
 #     walk rather than of an earlier read. Verified standalone before writing it:
 #       parent object = real file :  rev-parse --verify HEAD^{commit} 2ms   merge-base 2ms
 #       parent object = FIFO      :  rev-parse --verify HEAD^{commit} 2ms   merge-base BLOCKED
-#     FIFOing HEAD's OWN object would block `rev-parse --verify HEAD^{commit}` instead and report
-#     `repo-read-blocked` from that site, passing this case for the wrong reason.
+#     FIFOing HEAD's OWN object would block the PEEL of HEAD instead (which since #3757 runs in
+#     the scratch, not in the live repository) and report `repo-read-blocked` from that site,
+#     passing this case for the wrong reason. `3757-head-object-fifo` below is that other case.
 #
 #     LITE BOUND (15s) not strict (120s): the property is "this read is bounded at all".
 # ---------------------------------------------------------------------------
@@ -773,8 +778,10 @@ case "$anc_objdir" in /*) : ;; *) anc_objdir="$anc_fx/$anc_objdir" ;; esac
 # than depend on a builder's history depth (which is not this case's subject and can change), add
 # an empty commit: HEAD~1 is then the fixture's original branch commit, which is LOOSE in the
 # fixture's own store and — the property that makes this a test of the WALK — is read by nothing
-# earlier. HEAD's own object is resolved by `rev-parse --verify HEAD^{commit}`; the baseline's
-# objects are read in the scratch; only `merge-base` has to traverse HEAD~1.
+# earlier. HEAD's own object is peeled IN THE SCRATCH through the alternate (#3757 moved that
+# peel out of the live repository; the case below plants a FIFO on HEAD's own object and asserts
+# THAT site by name); the baseline's objects are read in the scratch; only `merge-base` has to
+# traverse HEAD~1.
 ( fx "$anc_fx" && git "${GIT_ID[@]}" commit -q --allow-empty -m anc-parent ) >/dev/null 2>&1 || true
 anc_parent=$(git -C "$anc_fx" rev-parse --verify --quiet 'HEAD~1^{commit}' 2>/dev/null || true)
 # BLAST-RADIUS GUARD, AND IT MATTERS MORE HERE THAN FOR THE CONFIG CASE. A WORKTREE's object
@@ -815,6 +822,216 @@ else
       bad "3544-ancestry-bounded: expected KIND repo-read-blocked well inside the bound (got '$anc_kind' in ${anc_el}s)"
       printf '%s\n' "$anc_out"
     fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3757. THE LIVE REPOSITORY IS ASKED FOR HEAD'S REF, NEVER FOR HEAD'S OBJECT (issue #3757).
+#
+#     THE DEFECT. The ancestry probe resolved HEAD with `rev-parse --verify --quiet
+#     "HEAD^{commit}"` IN THE LIVE REPOSITORY. A peel is an OBJECT read, and in a promisor clone
+#     a missing object is answered by a LAZY FETCH under that repository's OWN local config —
+#     where a `url.*.insteadOf` rewrite invokes a remote HELPER. That is the route jobs 268/299
+#     removed from every other read in this pre-flight, left open at one call site because the
+#     comment above it argued the read was "genuinely local" on the grounds that no partial-clone
+#     filter omits COMMITS. True, and the wrong question: the hazard is the object being absent
+#     for any OTHER reason (a pruned or corrupted store, a hand-written ref, a peer lane editing
+#     the SHARED `.git`).
+#
+#     MEASURED before the fix was written, with a discriminating control (git 2.43.0). Promisor
+#     clones of a local bare origin at `--filter=blob:none` AND `--filter=tree:0`
+#     (`uploadpack.allowfilter=true`), HEAD pointed at a commit present on the remote and ABSENT
+#     locally (absence confirmed with `GIT_NO_LAZY_FETCH=1 cat-file -e`), the promisor URL
+#     replaced by an `ext::` recorder that logs every invocation:
+#       rev-parse --verify --quiet HEAD             rc=0    4ms   helper invocations: 0
+#       rev-parse --verify --quiet 'HEAD^{commit}'  rc=1   10ms   helper invocations: 2
+#     and, separating the OBJECT READ from the network with a FIFO at HEAD's LOOSE object path:
+#       rev-parse --verify --quiet HEAD             rc=0    3ms   (sha printed)
+#       rev-parse --verify --quiet 'HEAD^{commit}'  BLOCKED       (bound fired at 3s)
+#
+#     FOUR CASES: the shape is pinned STRUCTURALLY in both directions (no live peel; the peel is
+#     in the scratch AND bounded AND three-valued), and the two consequences that a structural
+#     scan cannot see are driven BEHAVIOURALLY (a FIFO at HEAD's own object is refused by name
+#     rather than hanging; an UNPEELABLE HEAD stays INDETERMINATE and never becomes a false
+#     BEHIND).
+# ---------------------------------------------------------------------------
+
+# cs_live_peel_findings <gate-path>: print one FINDING line per LIVE-repository git call that
+# PEELS an object. Reads CODE, never prose about code: the doctrine comments in that file
+# necessarily contain `HEAD^{commit}` (this very case's rationale does), so a whole-file grep
+# would red a correct tree — the same defect `3544-canonical-literal` records from the other
+# side. Comment lines are dropped while ORIGINAL line numbers are kept, so a finding can name
+# the line an author has to open.
+cs_live_peel_findings() {
+  local g="$1" l
+  # Both spellings of a live call: through the `_cs_live_git` wrapper, and any direct `git`
+  # invocation naming the live checkout. The second is what a FUTURE author would add.
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    case "$l" in
+      *'^{'*) printf 'FINDING: %s\n' "$l" ;;
+    esac
+  done < <( { grep -n '_cs_live_git ' "$g"; grep -n -- '-C "\$REPO_ROOT"' "$g"; } \
+              | grep -v ':[[:space:]]*#' | sort -u )
+}
+
+# cs_live_head_calls <gate-path>: the UNPEELED live HEAD resolutions, as code lines.
+cs_live_head_calls() {
+  grep -n '_cs_live_git .*rev-parse --verify --quiet HEAD$' "$1" | grep -v ':[[:space:]]*#'
+}
+
+peel_findings=$(cs_live_peel_findings "$GATE")
+peel_head=$(cs_live_head_calls "$GATE")
+peel_head_n=$(printf '%s\n' "$peel_head" | grep -c . )
+# THE CONTROL SUBSTITUTES THE ARTIFACT, in a throwaway copy — never a settable seam in the
+# gate (the rule `3544-canonical-literal`'s helper is built on). And the substitution is
+# VERIFIED to have taken: a sed that matched nothing would make the control "pass" by proving
+# nothing, which is the vacuous green this whole file exists to refuse.
+peel_ctl_dir="$tmp/3757-peel-control"; mkdir -p "$peel_ctl_dir"
+peel_ctl="$peel_ctl_dir/agent-gate.sh"
+sed 's|\(_cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1"HEAD^{commit}"|' "$GATE" >"$peel_ctl"
+peel_ctl_took=$(grep -c '_cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet "HEAD\^{commit}"' "$peel_ctl")
+peel_ctl_findings=$(cs_live_peel_findings "$peel_ctl")
+# THE PROPERTY IS JUDGED FIRST, THE CONTROL'S INTEGRITY ONLY GATES THE `ok`. Ordered the other
+# way round (control first), a gate that HAS the live peel red with "the control could not
+# reintroduce the peel" — a true sentence that sends the reader to the test instead of to the
+# defect, and AC2 requires the red to NAME the offending construct.
+if [ -n "$peel_findings" ]; then
+  bad "3757-no-live-peel: a live-repository git call PEELS an object (a lazy fetch route in a promisor clone):"
+  printf '%s\n' "$peel_findings"
+elif [ "$peel_head_n" -ne 1 ]; then
+  bad "3757-no-live-peel: expected exactly ONE unpeeled live HEAD resolution, found $peel_head_n — the shape changed or the scan broke (fail-closed: this is not a clean result). Lines: $peel_head"
+elif [ "$peel_ctl_took" -ne 1 ]; then
+  bad "3757-no-live-peel: the POSITIVE CONTROL could not reintroduce the peel (substitution took $peel_ctl_took times) — the scan cannot be shown to discriminate, so a clean result on the real gate is not evidence"
+elif ! grep -q 'FINDING:' <<<"$peel_ctl_findings" \
+     || ! grep -q 'HEAD\^{commit}' <<<"$peel_ctl_findings"; then
+  bad "3757-no-live-peel: the control's reintroduced peel was NOT reported (or was reported without NAMING the construct) — a bare red is not evidence. Control findings: $peel_ctl_findings"
+else
+  ok "3757-no-live-peel: no live-repository git call peels an object (HEAD is resolved UNPEELED, exactly once), and reintroducing the peel in a scratch copy is REPORTED and NAMED"
+fi
+
+# ---------------------------------------------------------------------------
+# 3757b. THE PEEL MOVED TO THE ISOLATED SCRATCH, AND IT IS BOUNDED AND THREE-VALUED THERE.
+#     Removing the peel from the live repository is only half the fix: the peel still reads a
+#     commit object, now out of the LANE's SHARED store through the alternate, where a LOOSE
+#     object is read as a stream and a FIFO planted by a PEER LANE blocks it (job 315's finding,
+#     one call site over). So the scratch read must be BOUNDED and must map
+#     124/137/`$_CS_UNBOUNDABLE_RC` onto the EXISTING `repo-read-blocked` refusal — a missing
+#     capability must never inherit the permissive branch.
+# ---------------------------------------------------------------------------
+cs_scratch_peel_findings() {
+  local g="$1" site n body
+  site=$(grep -n 'rev-parse --verify --quiet "\${head_unpeeled}\^{commit}"' "$g" | grep -v ':[[:space:]]*#')
+  n=$(printf '%s\n' "$site" | grep -c . )
+  if [ "$n" -ne 1 ]; then
+    printf 'FINDING: expected exactly ONE scratch peel of HEAD, found %s\n' "$n"
+    return 0
+  fi
+  grep -q '_component_set_bounded "\$_CS_BOUND_SECS"' <<<"$site" \
+    || printf 'FINDING: the scratch peel is NOT bounded: %s\n' "$site"
+  grep -q -- '-C "\$_CS_READ_DIR"' <<<"$site" \
+    || printf 'FINDING: the scratch peel does not run in $_CS_READ_DIR: %s\n' "$site"
+  grep -q '_CS_READ_ENV' <<<"$site" \
+    || printf 'FINDING: the scratch peel does not carry $_CS_READ_ENV (the alternate): %s\n' "$site"
+  # The rc mapping lives in the ten lines after the read; read it as CODE.
+  body=$(awk -v s="${site%%:*}" 'NR>s+0 && NR<=s+10' "$g" | grep -v '^[[:space:]]*#')
+  grep -q 'peel_rc" -eq 124' <<<"$body" || printf 'FINDING: 124 (bound fired) is not mapped after the scratch peel\n'
+  grep -q 'peel_rc" -eq 137' <<<"$body" || printf 'FINDING: 137 (KILLed) is not mapped after the scratch peel\n'
+  grep -q 'peel_rc" -eq "\$_CS_UNBOUNDABLE_RC"' <<<"$body" || printf 'FINDING: $_CS_UNBOUNDABLE_RC (no bounding mechanism) is not mapped after the scratch peel\n'
+  grep -q '_CS_KIND=repo-read-blocked' <<<"$body" || printf 'FINDING: the blocked/unboundable peel does not take the existing repo-read-blocked kind\n'
+  return 0
+}
+sp_findings=$(cs_scratch_peel_findings "$GATE")
+sp_ctl="$peel_ctl_dir/unbounded-gate.sh"
+sed 's|\(_CS_HEAD_SHA=\$(\)_component_set_bounded "\$_CS_BOUND_SECS" \(env -i\)|\1\2|' "$GATE" >"$sp_ctl"
+sp_ctl_took=$(grep -c '_CS_HEAD_SHA=\$(env -i' "$sp_ctl")
+sp_ctl_findings=$(cs_scratch_peel_findings "$sp_ctl")
+# Property first, control-integrity second — same reasoning as the case above.
+if [ -n "$sp_findings" ]; then
+  bad "3757-scratch-peel-bounded: the scratch peel does not have the required shape:"
+  printf '%s\n' "$sp_findings"
+elif [ "$sp_ctl_took" -ne 1 ]; then
+  bad "3757-scratch-peel-bounded: the POSITIVE CONTROL could not unbound the scratch peel (substitution took $sp_ctl_took times) — the scan cannot be shown to discriminate"
+elif ! grep -q 'NOT bounded' <<<"$sp_ctl_findings"; then
+  bad "3757-scratch-peel-bounded: unbounding the peel in a scratch copy was NOT reported — a bare pass is not evidence. Control findings: $sp_ctl_findings"
+else
+  ok "3757-scratch-peel-bounded: HEAD's peel runs in \$_CS_READ_DIR with the alternate, BOUNDED, and maps 124/137/UNBOUNDABLE onto repo-read-blocked; unbounding it in a scratch copy is REPORTED"
+fi
+
+# ---------------------------------------------------------------------------
+# 3757c. BEHAVIOURAL: a FIFO at HEAD's OWN loose object is REFUSED BY NAME, not hung.
+#     The plant targets HEAD's own commit object — the object the SCRATCH peel now reads
+#     through the alternate — and the assertion is on the DETAIL text, because
+#     `repo-read-blocked` alone is produced by three other sites (the config include, the
+#     shallowness probe, the ancestry walk) and could not tell this read from those.
+#     Same blast-radius guard as `3544-ancestry-bounded`, and for the same reason: on this
+#     fleet a WORKTREE's object dir is the SHARED store, so a FIFO planted without resolving
+#     and checking that path would hang every lane on the box.
+# ---------------------------------------------------------------------------
+hp_fx=$(mkbranch head-obj-fifo "$(mkbaseline base-headobj - )" - )
+hp_ctl=$(hook "$hp_fx")
+hp_objdir=$(git -C "$hp_fx" rev-parse --git-path objects 2>/dev/null)
+case "$hp_objdir" in /*) : ;; *) hp_objdir="$hp_fx/$hp_objdir" ;; esac
+hp_head=$(git -C "$hp_fx" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)
+if [ -z "$hp_objdir" ] || case "$hp_objdir" in "$tmp"/?*) false ;; *) true ;; esac; then
+  bad "3757-head-object-fifo: refusing to plant a blocking object: resolved objects dir '$hp_objdir' is not strictly under \$tmp ('$tmp') — a FIFO in a SHARED object store would hang every lane on this box"
+elif [ -z "$hp_head" ]; then
+  bad "3757-head-object-fifo: the fixture's HEAD does not resolve to a commit, so the plant has no subject"
+elif [ "$(field KIND "$hp_ctl")" != ok ]; then
+  bad "3757-head-object-fifo: the POSITIVE CONTROL (same fixture, no FIFO) did not reach KIND ok (got '$(field KIND "$hp_ctl")') — the case cannot discriminate"
+else
+  hp_obj="$hp_objdir/${hp_head:0:2}/${hp_head:2}"
+  if [ ! -f "$hp_obj" ]; then
+    echo "skip - 3757-head-object-fifo: HEAD's object is packed, not loose ('$hp_obj' absent) — the loose-object path is not plantable in this fixture"
+  else
+    cp "$hp_obj" "$tmp/3757-head-backup" && rm -f "$hp_obj" && mkfifo "$hp_obj"
+    hp_t0=$(date +%s)
+    hp_out=$( fx "$hp_fx" && bash "$hp_fx/scripts/agent-gate.sh" --component-set-line lite 2>/dev/null )
+    hp_el=$(( $(date +%s) - hp_t0 ))
+    # CLEANUP FIRST AND WITHOUT GIT (the include.path case's lesson: a `git config --unset`
+    # cleanup once blocked for 10m43s on the very FIFO it had planted, and `|| true` cannot
+    # rescue a hang).
+    rm -f "$hp_obj" && cp "$tmp/3757-head-backup" "$hp_obj"
+    hp_kind=$(field KIND "$hp_out")
+    hp_line=$(field COMPONENT_SET_LINE "$hp_out")
+    if [ "$hp_kind" = repo-read-blocked ] && [ "$hp_el" -lt 80 ] \
+       && grep -q 'peeling HEAD' <<<"$hp_line" && grep -q 'SHARED object store' <<<"$hp_line"; then
+      ok "3757-head-object-fifo: a FIFO at HEAD's OWN loose object is BOUNDED and refused by name (repo-read-blocked in ${hp_el}s), and the detail names the PEEL and the shared object store"
+    else
+      bad "3757-head-object-fifo: expected KIND repo-read-blocked naming the peel, well inside the bound (got '$hp_kind' in ${hp_el}s)"
+      printf '%s\n' "$hp_out"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3757d. BEHAVIOURAL: an UNPEELABLE HEAD is INDETERMINATE, never a false BEHIND.
+#     The live call resolves the REF and does not check the object exists — measured, and this
+#     case is what pins it end to end: HEAD is pointed at a well-formed sha naming NO object, so
+#     the live read succeeds, the SCRATCH peel fails, and the rc=128 semantics carry it to
+#     `_CS_ANCESTOR=unknown`. The control is the SAME fixture untouched, which is genuinely
+#     BEHIND — so the pair discriminates INDETERMINATE from the verdict it must not become.
+#     Nothing is fetched to satisfy the peel: a missing HEAD object is a broken checkout, not a
+#     reason for this pre-flight to reach the network.
+# ---------------------------------------------------------------------------
+up_fx=$(mkbranch head-unpeelable "$(mkbaseline base-unpeelable "$ADD_SENTINEL" )" - )
+up_ctl=$(hook "$up_fx")
+up_branch=$(git -C "$up_fx" symbolic-ref --short HEAD 2>/dev/null || true)
+up_bogus=0123456789012345678901234567890123456789
+if [ "$(field VERDICT "$up_ctl")" != BEHIND ]; then
+  bad "3757-unpeelable-head: the POSITIVE CONTROL (same fixture, real HEAD) is not BEHIND (got '$(field VERDICT "$up_ctl")') — the case cannot show INDETERMINATE is not the default"
+elif [ -z "$up_branch" ] || [ ! -f "$up_fx/.git/refs/heads/$up_branch" ]; then
+  bad "3757-unpeelable-head: could not locate the fixture's HEAD ref file (branch='$up_branch') — the plant has no subject"
+else
+  printf '%s\n' "$up_bogus" >"$up_fx/.git/refs/heads/$up_branch"
+  up_live=$(git -C "$up_fx" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  up_out=$(hook "$up_fx" lite)
+  up_v=$(field VERDICT "$up_out"); up_a=$(field ANCESTOR "$up_out")
+  if [ "$up_live" = "$up_bogus" ] && [ "$up_v" = INDETERMINATE ] && [ "$up_a" = unknown ]; then
+    ok "3757-unpeelable-head: the live read resolves HEAD's ref WITHOUT checking the object exists, and a HEAD that cannot be peeled to a commit is INDETERMINATE (ancestor unknown) — never a false BEHIND"
+  else
+    bad "3757-unpeelable-head: expected the live read to return the bogus sha and the verdict to be INDETERMINATE/unknown (live='$up_live' verdict='$up_v' ancestor='$up_a')"
+    printf '%s\n' "$up_out"
   fi
 fi
 
@@ -4725,7 +4942,11 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=110
+# 110 -> 113 with #3757's four cases, RAISED BY THREE and not four: `3757-head-object-fifo` can
+# legitimately `skip` when the fixture's HEAD object is packed rather than loose (the same
+# conditional `3544-ancestry-bounded` carries), and a floor that counts a skippable case would red
+# on correct input.
+CASE_FLOOR=113
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
