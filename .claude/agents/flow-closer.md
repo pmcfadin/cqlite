@@ -271,12 +271,21 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      the gate of record — the fix still has to be re-certified per the two
      re-certification bullets at the end of this step.
    - A **src-design** blocker (needs real implementation judgment) → you have no `Agent`
-     tool, so **emit a NEEDS-SPAWN packet and end your turn**; the lead respawns a fresh
-     `sstable-developer` (explicit model) to fix it TDD and re-invokes you with its
-     LITE-block + ≤5-line report:
+     tool, so **OPEN THE STAGE FIRST, then emit a NEEDS-SPAWN packet and end your turn**; the
+     lead respawns a fresh `sstable-developer` (explicit model) to fix it TDD and re-invokes
+     you with its LITE-block + ≤5-line report. `report:` is a REQUIRED packet field (#3751) —
+     the same rule as step 2's C spawn, so the lead's spawn and your later read agree on ONE
+     path:
+     ```bash
+     bash scripts/flow/review-stage.sh open fix --issue <N> --agent sstable-developer
+     #   -> prints the absolute report path AND the paste-ready spawn clause
      ```
-     NEEDS-SPAWN {role: sstable-developer, issue: <N>, anchor: <issue or roborev finding>, reason: src-design blocker <1 line>, resume-token: fix}
      ```
+     NEEDS-SPAWN {role: sstable-developer, issue: <N>, anchor: <issue or roborev finding>, report: <path from `open`>, reason: src-design blocker <1 line>, resume-token: fix}
+     ```
+     On re-invoke, read the STAGE and not the prose — `bash scripts/flow/review-stage.sh
+     verdict fix --issue <N>` — for the same reason step 2 does: a lead handing back a
+     confident summary over a `NOT-RUN` stage is reporting work that did not happen.
    - **Any src change after the full gate INVALIDATES that gate.** The gate of record must
      **postdate the final src change AND the final rebase** — if you fixed src (yours or the
      implementer's) or rebased after step 1, **re-run the full gate** (back to step 1).

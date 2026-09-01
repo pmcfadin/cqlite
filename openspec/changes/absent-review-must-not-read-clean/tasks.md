@@ -19,7 +19,8 @@
       spec-auditor, rust-reviewer, coverage-reviewer, compaction-parity-auditor, flow-closer,
       sstable-developer) — owner ratifies the widening at Seam 1
 - [x] 3.2 `flow-implement` / `flow-closer` skills: `open` before spawn, `verdict` after
-- [x] 3.3 `flow-closer`'s `NEEDS-SPAWN {role: spec-auditor}` handshake carries the report path
+- [x] 3.3 `flow-closer`'s `NEEDS-SPAWN` handshake carries the report path — BOTH packet templates
+      (`role: spec-auditor` and `role: sstable-developer`), since `report:` is declared REQUIRED
 
 ## 4. Tests
 - [x] 4.1 `scripts/tests/test_review_stage.sh` — AC1 case, positive control, per-cause naming,
