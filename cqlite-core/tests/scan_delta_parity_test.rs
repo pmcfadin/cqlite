@@ -1584,11 +1584,13 @@ async fn test_scan_delta_parity_all_test_deltas() {
     let fixtures = find_delta_fixtures_with_data(&datasets_root);
 
     if fixtures.is_empty() {
+        // `datasets_root()` ALREADY ends in `sstables/test_deltas` (see its definition), so
+        // appending that subpath again printed a doubled, NONEXISTENT location. This message
+        // is the remedy an operator follows, so a wrong path in it is worse than no path.
+        // roborev round 3.
         skip_or_fail(
             "test_deltas (all fixtures)",
-            &format!(
-                "no fixture with a binary Data.db under {datasets_root:?}/sstables/test_deltas"
-            ),
+            &format!("no fixture with a binary Data.db under {datasets_root:?}"),
         );
         return;
     }

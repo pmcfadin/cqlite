@@ -102,11 +102,13 @@ done
 if [ "$_needs_datasets" -eq 1 ]; then
   if [ -z "$DATASETS" ]; then
     echo "CQLITE_DATASETS_ROOT is not set, and the selected lanes include a" >&2
-    echo "dataset-consuming lane (flight-tests / legacy-heuristics). Export the" >&2
-    echo "absolute root printed by:" >&2
+    echo "dataset-consuming lane (flight-tests / legacy-heuristics /" >&2
+    echo "feature-iso-delta-scan). Export the absolute root printed by:" >&2
     echo "  bash test-data/scripts/fetch-datasets.sh" >&2
-    echo "Or select only the compile-only lanes (feature-iso-parquet," >&2
-    echo "feature-iso-delta-scan), which need no corpus." >&2
+    echo "Or select only feature-iso-parquet, the ONE remaining compile-only" >&2
+    echo "lane, which needs no corpus. feature-iso-delta-scan stopped being" >&2
+    echo "compile-only on #3725 -- it EXECUTES dataset-consuming parity" >&2
+    echo "targets." >&2
     exit 2
   fi
   case "$DATASETS" in
