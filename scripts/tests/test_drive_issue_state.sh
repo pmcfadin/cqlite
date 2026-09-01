@@ -1718,6 +1718,245 @@ else
 fi
 
 # ===========================================================================
+case_begin 35-one-verdict-per-failure-mode "TABLE: every failure mode emits EXACTLY ONE closed-set verdict token, with the documented exit code"
+# ===========================================================================
+# THE CLASS COVERAGE, not another point fix. Rounds 5 and 6 both found a round-N fix that had
+# reached ONE site of its own class: F1 gave the liveness-library guard a token and left the
+# signal traps without one; F2 captured 21 external commands' stderr and left `shift`'s. What
+# stops that regenerating is not another per-site case but a TABLE over the INVARIANT — so a
+# NEW exit path is covered by adding a ROW, and a new exit path added with no row is what the
+# row-count floor below reds on.
+#
+# The table is EXECUTED ONCE and its outputs are kept on disk, because case 36 asserts a
+# DIFFERENT invariant over the SAME runs: two properties of one observation, never two
+# observations that might disagree about which run they describe.
+INV_DIR="$T/invariants"; mkdir -p "$INV_DIR"
+INV_ROWS="bad-issue:USAGE:64
+missing-option-value:USAGE:64
+unknown-option:USAGE:64
+unknown-subcommand:USAGE:64
+no-subcommand:USAGE:64
+body-carries-sentinel:USAGE:64
+absent-marker:ABSENT:3
+marker-not-regular:ERROR:1
+unstamped-marker:UNSTAMPED:8
+displaced-sentinel:MALFORMED:8
+malformed-marker:MALFORMED:8
+duplicate-sentinel:DUPLICATE-SENTINEL:8
+foreign-issue:FOREIGN-ISSUE:4
+foreign-machine:FOREIGN-MACHINE:4
+foreign-worktree:FOREIGN-WORKTREE:4
+adoptable:ADOPTABLE:5
+live-peer:LIVE-PEER:6
+liveness-unknown:LIVENESS-UNKNOWN:7
+missing-liveness-library:ERROR:1
+failing-sentinel-scan:ERROR:1
+no-flock:ERROR:1
+failing-date:ERROR:1
+failing-mktemp:ERROR:1
+signal-before-rename:ERROR:143
+signal-after-rename:WRITTEN:143
+write-succeeds:WRITTEN:0
+verify-owned:OWNED:0
+show-fields:SHOWN:0
+adopt-succeeds:ADOPTED:0"
+# An unwritable worktree is only measurable when permissions apply to us: root bypasses them,
+# so the row is DECLARED unavailable rather than passing vacuously.
+if [ "$(id -u)" -ne 0 ]; then
+  INV_ROWS="$INV_ROWS
+unwritable-worktree:ERROR:1"
+else
+  ok "DECLARED: the 'unwritable-worktree' row is unavailable under root (permissions are bypassed) — it is omitted rather than asserted vacuously"
+fi
+inv_bin() {  # inv_bin <cmd> <body-line> — a PATH dir holding one shim
+  local c="$1" body="$2" d="$INV_DIR/bin-$1-$$-$RANDOM"
+  mkdir -p "$d"
+  { printf '#!/bin/sh\n'; printf '%s\n' "$body"; } >"$d/$c"
+  chmod +x "$d/$c"
+  printf '%s\n' "$d"
+}
+inv_exec() {  # inv_exec <dir> <script> <shimdir|''> <session> <pid> <args...>
+  local d="$1" sc="$2" sd="$3" ss="$4" sp="$5"; shift 5
+  ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      ${ss:+"CLAUDE_CODE_SESSION_ID=$ss"} ${sp:+"CLAUDE_PID=$sp"} ${sd:+"PATH=$sd:$PATH"} \
+      bash "$sc" "$@" 2>&1 )
+}
+inv_run() {  # inv_run <row-name> — set the state up, run it, print output, return rc
+  local n="$1" d other dead sl scr sd
+  d=$(lane "inv-$n")
+  case "$n" in
+    bad-issue)             inv_exec "$d" "$DS" '' "$SESS_A" $$ verify not-a-number ;;
+    missing-option-value)  inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 --stage ;;
+    unknown-option)        inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 --nope ;;
+    unknown-subcommand)    inv_exec "$d" "$DS" '' "$SESS_A" $$ frobnicate ;;
+    no-subcommand)         inv_exec "$d" "$DS" '' "$SESS_A" $$ ;;
+    body-carries-sentinel)
+      printf 'notes\n%s\nmore\n' "$sentinel" >"$INV_DIR/body-bad.md"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 --body-file "$INV_DIR/body-bad.md" ;;
+    absent-marker)         inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    marker-not-regular)    mkdir -p "$d/$MARKER"; inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    unstamped-marker)      printf 'legacy plan\n' >"$d/$MARKER"; inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    displaced-sentinel)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      { printf '\n'; cat "$d/$MARKER"; } >"$INV_DIR/t" && mv "$INV_DIR/t" "$d/$MARKER"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    malformed-marker)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      grep -vFx -- "$sentinel_end" "$d/$MARKER" >"$INV_DIR/t" && mv "$INV_DIR/t" "$d/$MARKER"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    duplicate-sentinel)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      { printf '%s\n' "$sentinel"; printf 'issue: 3822\n'; } >>"$d/$MARKER"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    foreign-issue)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 9999 >/dev/null 2>&1
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    foreign-machine)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxB \
+          "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$DS" verify 3822 2>&1 ) ;;
+    foreign-worktree)
+      other=$(lane "inv-$n-other")
+      inv_exec "$other" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      cp "$other/$MARKER" "$d/$MARKER"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    adoptable | adopt-succeeds)
+      sleep 30 & dead=$!
+      inv_exec "$d" "$DS" '' "$SESS_A" "$dead" write 3822 >/dev/null 2>&1
+      kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null
+      if [ "$n" = adoptable ]; then
+        inv_exec "$d" "$DS" '' "$SESS_B" $$ verify 3822
+      else
+        inv_exec "$d" "$DS" '' "$SESS_B" $$ adopt 3822 --reason invariant-table:writer-gone
+      fi ;;
+    live-peer)
+      sleep 300 & sl=$!
+      inv_exec "$d" "$DS" '' "$SESS_A" "$sl" write 3822 >/dev/null 2>&1
+      inv_exec "$d" "$DS" '' "$SESS_B" $$ verify 3822; local rc=$?
+      kill "$sl" 2>/dev/null; wait "$sl" 2>/dev/null
+      return "$rc" ;;
+    liveness-unknown)
+      inv_exec "$d" "$DS" '' "$SESS_A" '' write 3822 >/dev/null 2>&1
+      inv_exec "$d" "$DS" '' "$SESS_B" $$ verify 3822 ;;
+    missing-liveness-library)
+      scr="$INV_DIR/nolib"; mkdir -p "$scr"; cp "$DS" "$scr/drive-issue-state.sh"
+      inv_exec "$d" "$scr/drive-issue-state.sh" '' "$SESS_A" $$ verify 3822 ;;
+    failing-sentinel-scan)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      { printf '\n'; cat "$d/$MARKER"; } >"$INV_DIR/t" && mv "$INV_DIR/t" "$d/$MARKER"
+      inv_exec "$d" "$DS" "$G1SHIM" "$SESS_A" $$ write 3822 ;;
+    no-flock)
+      sd=$(inv_bin flock 'exit 1')
+      inv_exec "$d" "$DS" "$sd" "$SESS_A" $$ write 3822 ;;
+    failing-date)
+      sd=$(inv_bin date 'echo "date: simulated" >&2; exit 1')
+      inv_exec "$d" "$DS" "$sd" "$SESS_A" $$ write 3822 ;;
+    failing-mktemp)
+      sd=$(inv_bin mktemp 'echo "mktemp: simulated" >&2; exit 1')
+      inv_exec "$d" "$DS" "$sd" "$SESS_A" $$ write 3822 ;;
+    signal-before-rename)
+      inv_exec "$d" "$DS" "$(sig_shim flock before)" "$SESS_A" $$ write 3822 ;;
+    signal-after-rename)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 --stage groom >/dev/null 2>&1
+      # sig_shim's filtered form fires ONCE per shim directory, and case 33 already spent this
+      # one — a shared fixture that silently no-ops is a row that proves nothing, so the
+      # once-stamp is cleared explicitly rather than relied upon to be fresh.
+      sd=$(sig_shim rm before drive-issue-body); rm -f "$sd/fired"
+      inv_exec "$d" "$DS" "$sd" "$SESS_A" $$ write 3822 --stage implement ;;
+    write-succeeds)        inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 --stage implement ;;
+    verify-owned)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
+    show-fields)
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ show 3822 ;;
+    unwritable-worktree)
+      chmod 555 "$d"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822; local wrc=$?
+      chmod 755 "$d" 2>/dev/null || true
+      return "$wrc" ;;
+    *) printf 'DRIVE-STATE: verdict UNROUTED-TABLE-ROW\n'; return 99 ;;
+  esac
+}
+inv_names=''
+for row in $INV_ROWS; do
+  nm="${row%%:*}"
+  inv_run "$nm" >"$INV_DIR/$nm.out" 2>&1; printf '%s\n' "$?" >"$INV_DIR/$nm.rc"
+  inv_names="$inv_names $nm"
+done
+inv_fail=0; inv_count=0
+for row in $INV_ROWS; do
+  nm="${row%%:*}"; rest="${row#*:}"; want_v="${rest%%:*}"; want_rc="${rest##*:}"
+  inv_count=$((inv_count + 1))
+  out="$(cat "$INV_DIR/$nm.out")"; rc="$(cat "$INV_DIR/$nm.rc")"
+  why=''
+  [ "$(verdict_count "$out")" = 1 ] || why="$why verdicts=$(verdict_count "$out")"
+  got="$(verdict_of "$out")"
+  verdict_in_set "$got" || why="$why token-outside-closed-set='$got'"
+  [ "$got" = "$want_v" ] || why="$why token=$got(want $want_v)"
+  [ "$rc" = "$want_rc" ] || why="$why rc=$rc(want $want_rc)"
+  if [ -n "$why" ]; then
+    inv_fail=$((inv_fail + 1))
+    printf 'note   row %s ->%s\n%s\n' "$nm" "$why" "$(printf '%s' "$out" | cat -v)"
+  fi
+done
+if [ "$inv_fail" -eq 0 ]; then
+  ok "all $inv_count table rows emit EXACTLY ONE closed-set verdict token with the documented exit code"
+else
+  bad "$inv_fail of $inv_count table rows broke the one-verdict/closed-set/exit-code invariant"
+fi
+# ROW FLOOR, the same idea as the case floor: a span-replacing edit that silently drops rows
+# otherwise leaves a green tally over a shrunken table.
+if [ "$inv_count" -ge 29 ]; then
+  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 29) — including all four success verdicts, both signal phases and every refusal token"
+else
+  bad "table floor breached: only $inv_count rows ran"
+fi
+# COMPLETENESS AGAINST THE GRAMMAR: every token in the CLOSED set must be produced by some row,
+# so a verdict added to the script without a row here reds instead of joining uncovered.
+inv_missing=''
+for t in $VERDICT_SET; do
+  found=0
+  for row in $INV_ROWS; do
+    nm="${row%%:*}"; [ "$(verdict_of "$(cat "$INV_DIR/$nm.out")")" = "$t" ] && { found=1; break; }
+  done
+  [ "$found" -eq 1 ] || inv_missing="$inv_missing $t"
+done
+if [ -z "$inv_missing" ]; then
+  ok "every token in the CLOSED verdict set is actually produced by a row in this table"
+else
+  bad "verdict tokens produced by NO row (a token joined the grammar uncovered):$inv_missing"
+fi
+
+# ===========================================================================
+case_begin 36-anchor-holds-on-every-stream "TABLE: the DRIVE-STATE: anchor holds on stdout AND stderr for every failure mode"
+# ===========================================================================
+# The second invariant over the SAME observations case 35 recorded. Contract (a) and contract
+# (c) are independent — round 5's F1 was a line that satisfied (a) and not (c) — so they get
+# independent assertions rather than one combined check that could pass on either.
+anch_fail=0; anch_rows=0; anch_lines=0
+for row in $INV_ROWS; do
+  nm="${row%%:*}"
+  anch_rows=$((anch_rows + 1))
+  out="$(cat "$INV_DIR/$nm.out")"
+  anch_lines=$((anch_lines + $(printf '%s\n' "$out" | grep -c '' || true)))
+  if all_lines_anchored "$out"; then :; else
+    anch_fail=$((anch_fail + 1))
+    printf 'note   row %s emitted an UNPREFIXED line:\n%s\n' "$nm" "$(printf '%s' "$out" | grep -v '^DRIVE-STATE: ' | grep -v '^$' | cat -v)"
+  fi
+done
+if [ "$anch_fail" -eq 0 ]; then
+  ok "no unprefixed line on stdout+stderr combined across all $anch_rows table rows"
+else
+  bad "$anch_fail of $anch_rows rows emitted at least one line without the DRIVE-STATE: anchor"
+fi
+if [ "$anch_lines" -ge 60 ]; then
+  ok "NON-VACUITY: $anch_lines output lines were actually inspected — the sweep is not passing on empty output"
+else
+  bad "only $anch_lines lines were inspected across $anch_rows rows: the rows cannot have produced real output"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1732,9 +1971,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 29-missing-liveness-library 30-native-diagnostics-stay-anchored
 31-adoption-provenance-survives
 32-failed-scan-is-not-no-match 33-signals-emit-one-verdict
-34-shift-never-leaks-bash-diagnostics
-28-case-floor"
-CASE_FLOOR=31
+34-shift-never-leaks-bash-diagnostics 35-one-verdict-per-failure-mode
+36-anchor-holds-on-every-stream 28-case-floor"
+CASE_FLOOR=36
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -1746,8 +1985,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 83 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 83)"
+if [ "$PASS" -ge 100 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 100)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
