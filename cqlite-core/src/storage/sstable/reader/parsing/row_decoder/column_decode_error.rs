@@ -272,7 +272,7 @@ pub(super) fn dispatch_type(declared: &str, header: Option<&str>) -> String {
 ///   `bti_collect_partition_rows`, drops only the row-body window and still reads
 ///   the NARROWED extent, which ends mid-partition — MEASURED to fail a clean read
 ///   of the committed `test_big.wide_partition` fixture on the retry as well.
-/// * `big_promoted::big_reverse_partition_rows_via_promoted_index` — the reverse
+/// * `big_promoted::big_reverse_partition_rows` — the reverse
 ///   block walk. It has no unwindowed form to retry, so it abandons the
 ///   optimization through `Ok(None)`, the documented channel every other "cannot
 ///   use the fast path" branch of that function already takes; the caller then
@@ -334,10 +334,17 @@ pub(in crate::storage::sstable::reader) fn indexed_walk_falls_back(e: &Error) ->
 /// cannot faithfully reconstruct shadow state: lose the fast path, never the rows.
 ///
 /// So this function propagates [`Error::ColumnDecode`] unconditionally, and the
-/// fallback lives at the three windowed callers
-/// (`big_promoted::big_decode_clustering_window`,
-/// `big_promoted::big_reverse_partition_rows_via_promoted_index`,
-/// `bti_point::bti_collect_partition_rows`).
+/// fallback lives at the TWO windowed callers named in the section above — the
+/// only two call sites of [`indexed_walk_falls_back`]:
+/// `bti::clustering_seek_decode::decode_clustering_seek_target` and
+/// `big_promoted::big_reverse_partition_rows`.
+///
+/// Measured, because an earlier revision of this paragraph named THREE and named
+/// the wrong functions: `big_decode_clustering_window`
+/// (`bti/clustering_seek_decode.rs`) and `bti_point::bti_collect_partition_rows`
+/// both propagate their windowed walk's `Err` with `?` and retract nothing — the
+/// retraction is one level up, for the reason the section above gives (they hold
+/// only the row-body window, not the narrowed extent).
 pub(super) fn end_of_partition_or_bail(
     e: Error,
     partition_index: usize,
