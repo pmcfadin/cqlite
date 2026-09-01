@@ -4354,13 +4354,13 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$scc_val\" \${scc_e
 # BOTH variables are scrubbed from every call: this suite runs on fleet boxes that export
 # them, and an inherited value would otherwise decide the verdict instead of the case's input.
 #
-# SINCE ROUND 4, THE INVOKING ENVIRONMENT IS ONE OF THE THREE CONTEXTS 5b2 COMPARES (#3727 roborev
-# round 3, f1) — because that is the context a worker launches gates from. So a case that expects a
-# verdict OTHER than CONFLICTING-SOURCES must pass `SCCACHE_CACHE_SIZE=<v>` explicitly, matching
-# what its `sudo` shim injects into the sessions: the scrub leaves the invoker UNSET, which is a
-# genuine disagreement with a session that sees a value. `env` applies its `-u` options before the
-# NAME=VALUE assignments, so passing it still works. Cases that WANT the disagreement (12b-d2,
-# 12b-q, 12b-r) leave it scrubbed or set it deliberately.
+# THE INVOKING ENVIRONMENT IS NO LONGER COMPARED (#3727, lead retraction after roborev round 9):
+# under `sudo bash bootstrap` it is root's, so comparing it false-failed correct boxes. 5b2 now
+# compares the two SESSION contexts only. The `SCCACHE_CACHE_SIZE=<v>` arguments the cases pass are
+# therefore no longer load-bearing for the verdict — they are kept because they make each case's
+# intended invoking environment explicit rather than inherited from whatever box runs the suite, and
+# because `env` applies its `-u` options before the NAME=VALUE assignments so passing it is still
+# well-defined. 12b-d2 asserts the retraction directly: an inherited value must be IGNORED.
 runscc() {
   local script="$1" shims="$2" envfile="$3"; shift 3
   local -a scc_env=() scc_flags=()
@@ -4440,10 +4440,11 @@ else
   # The scope note must state what VERIFIED does NOT cover — an unqualified VERIFIED reads as
   # "every gate on this box gets this cap", and the server-startup caveat is the new one.
   if out_has "$scc_sl_v" 'scope:.*NON-LOGIN PAM session.*LOGIN shell' \
+     && out_has "$scc_sl_v" 'scope:.*INVOKING shell.*NOT compared' \
      && out_has "$scc_sl_v" 'scope:.*SERVER at STARTUP' \
      && out_has "$scc_sl_v" 'scope:.*provenance is not' \
      && out_has "$scc_sl_v" 'sccache-cap=<bytes>(pinned)'; then
-    ok "sccache-cap: VERIFIED prints its scope — BOTH session types measured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
+    ok "sccache-cap: VERIFIED prints its scope — both session types measured, the invoking shell DECLARED as not compared, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
   else
     bad "sccache-cap: the scope note is missing one of its three statements"
     printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
@@ -4497,25 +4498,24 @@ else
     printf '%s\n' "$scc_sl_f" | head -6
   fi
 
-  # 12b-d2. THE SCRUB, RESTATED FOR THREE CONTEXTS (issue #3727, rounds 1 and 3). Bootstrap's OWN
-  #         environment carries a value — the normal state of a re-run on a fleet box — while nothing
-  #         is persisted and no session sees it. An unscrubbed probe would certify exactly the failure
-  #         this section exists to catch; and since round 3 the invoking shell is itself one of the
-  #         compared contexts, so the honest verdict is not FAILED but CONFLICTING-SOURCES: a gate
-  #         launched from THIS shell would get 30G while one launched from a fresh PAM session gets
-  #         nothing. Either way it must never be VERIFIED, and the invoking shell must be NAMED
-  #         rather than silently treated as the answer.
+  # 12b-d2. AN INHERITED VALUE IS IGNORED, NOT COMPARED (#3727 — the scrub, and the lead's round-9
+  #         RETRACTION of the third context). Bootstrap's OWN environment carries a value — the normal
+  #         state of a re-run on a fleet box — while nothing is persisted and no session sees it. Two
+  #         properties are asserted together, because they used to fight each other: the value must
+  #         never certify anything (the scrub, round 1), and it must ALSO not be treated as a launch
+  #         context of its own (round 9: under `sudo bash bootstrap` the invoking environment is
+  #         ROOT's, so comparing it reported a false CONFLICTING-SOURCES on a correct box). So the
+  #         verdict here is the affirmative FAILED — both sessions are blind — and the scope note must
+  #         DECLARE that the invoking shell is not compared, so the gap is visible rather than silent.
   scc_out_inh=$(runscc "$scc_bs" "$scc_shims_none" "$scc_env_empty" SCC_STUB_MAX=32212254720 \
     SCCACHE_CACHE_SIZE=30G SCC_STUB_LOG="$scc_log")
   scc_sl_inh=$(scc_slice "$scc_out_inh")
   if ! out_has "$scc_sl_inh" -E '\[ok\].*sccache-cap' \
-     && out_has "$scc_sl_inh" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && out_has "$scc_sl_inh" 'INVOKING SHELL' \
-     && out_has "$scc_sl_inh" "'30G'" \
-     && out_has "$scc_sl_inh" '<UNSET>'; then
-    ok "sccache-cap: an INHERITED-but-not-persisted value is never VERIFIED — it is a CONFLICTING-SOURCES that NAMES the invoking shell against the blind sessions"
+     && out_has "$scc_sl_inh" -E '\[warn\].*sccache-cap: FAILED' \
+     && ! out_has "$scc_sl_inh" 'CONFLICTING-SOURCES'; then
+    ok "sccache-cap: an INHERITED-but-not-persisted value neither certifies nor conflicts — the two blind sessions decide, and the verdict is FAILED"
   else
-    bad "sccache-cap: an inherited value was accepted as evidence, or the invoking shell was not named"
+    bad "sccache-cap: an inherited value was accepted as evidence, or was compared as a launch context of its own"
     printf '%s\n' "$scc_sl_inh" | head -6
   fi
 

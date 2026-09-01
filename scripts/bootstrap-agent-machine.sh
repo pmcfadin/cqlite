@@ -3165,24 +3165,23 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # VERIFIED on a partial match.
   SCC_ROUTING_NAMES="SCCACHE_DIR SCCACHE_SERVER_PORT SCCACHE_GHA_ENABLED SCCACHE_GHA_VERSION SCCACHE_REDIS SCCACHE_REDIS_ENDPOINT SCCACHE_REDIS_TTL SCCACHE_WEBDAV_ENDPOINT SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_KEY_PREFIX SCCACHE_GCS_BUCKET SCCACHE_GCS_KEY_PATH SCCACHE_AZURE_CONNECTION_STRING SCCACHE_AZURE_BLOB_CONTAINER SCCACHE_MEMCACHED SCCACHE_MEMCACHED_ENDPOINT SCCACHE_OSS_BUCKET SCCACHE_OSS_ENDPOINT SCCACHE_CONF SCCACHE_NO_DAEMON"
 
-  # The fingerprint the three contexts are compared on: one `NAME=<value>` line per exported
-  # SCCACHE_* variable, sorted, with the value rendered by `printf %q`. That is a bash BUILTIN, so
-  # it needs nothing on PATH and is identical in every context that emits it; it is INJECTIVE and
-  # always SINGLE-LINE (a value containing a newline renders as `$'x\ny'`), which is what stops a
-  # control character inside a value from splitting a fingerprint line — two different environments
-  # comparing equal, or a correct one comparing unequal, is exactly the substitution this comparison
-  # exists to prevent.
+  # THE INVOKING ENVIRONMENT IS NOT COMPARED — MY INSTRUCTION, WITHDRAWN (issue #3727, lead
+  # retraction after roborev round 9). It was added in round 4 on the reasoning that gates are
+  # launched from agent sessions and `scripts/flow/gate-detached.sh` forwards the caller's env, which
+  # is true — but three consecutive findings descended from comparing it, every one a FALSE FAIL on a
+  # correct box: r6 f1 (binary from the ambient PATH), r7 f1 (sudo's `secure_path` breaking the
+  # documented `cargo install` layout) and r9 f1 (under `sudo bash bootstrap` the invoking
+  # environment is ROOT's, so on the first repair run it is legitimately UNSET while the fresh user
+  # sessions already see the persisted value — a false CONFLICTING-SOURCES that also blocks the
+  # server start under --strict). The standing ruling for repeated findings in one mechanism is to
+  # REMOVE it rather than carve it a fourth time, and a check that reds on a correct box buys nothing
+  # while costing everything.
   #
-  # DERIVED from the environment (`compgen -e`), never a curated list: a routing variable this
-  # script has never heard of still lands in the fingerprint, and a difference in it is then
-  # reported as unclassified rather than silently ignored.
-  scc_env_fingerprint_local() {
-    local n
-    for n in $(compgen -e 2>/dev/null || true); do
-      case "$n" in SCCACHE_*) printf '%s=%q\n' "$n" "${!n}" ;; esac
-    done | LC_ALL=C sort
-  }
-
+  # So there is no local fingerprint helper any more: the two SESSION contexts each compute their own
+  # inside the probe, and nothing reads this shell's SCCACHE_* for comparison.
+  #
+  # DECLARED GAP, not a silent one: an invoking shell whose SCCACHE_* disagree with BOTH sessions is
+  # a real hazard this check does NOT detect. It is stated in the scope note of every verdict.
   SCC_ORACLE_WHY=""
   # scc_bytes_for <outvar> [<value>]: the bytes sccache resolves <value> to; omit <value>
   # entirely (not empty — set-but-empty is a distinct, measured state) to measure sccache's own
@@ -3351,7 +3350,6 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   SCC_SCCACHE_BIN=""
   SCC_BIN_STATE=""          # agreed | disagree:<detail> | unresolved:<detail>
   SCC_BIN_ABSENT=""         # contexts that resolved NO sccache (non-participants)
-  SCC_BIN_INVOKER="$(command -v sccache 2>/dev/null || true)"
   # scc_resolve_binary: ask each context which sccache it would run. Two extra bounded sudo calls,
   # deliberately taken BEFORE the persist decision, because the literal oracle that AUTHORIZES the
   # write must not run on a binary the participants have not agreed on (round 4's fix would otherwise
@@ -3373,11 +3371,10 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       __lo=$(printf '%s\n' "$__lo" | grep -v '^[[:space:]]*$' | tail -1)
     fi
     local __parts="" __first=""
-    if [ -n "$SCC_BIN_INVOKER" ]; then
-      __parts="$__parts invoking-shell:$SCC_BIN_INVOKER"; __first="$SCC_BIN_INVOKER"
-    else
-      SCC_BIN_ABSENT="$SCC_BIN_ABSENT invoking-shell"
-    fi
+    # THE INVOKING SHELL IS NOT A PARTICIPANT (lead retraction, see the note above): under
+    # `sudo bash bootstrap` its PATH is root's, which introduced a spurious binary disagreement on a
+    # correct box. The participants are the two session contexts, which is also what round 6 was
+    # really after — the binary GATES would run, not the one bootstrap happens to see.
     if [ "$__asked" = 0 ]; then
       SCC_BIN_ABSENT="$SCC_BIN_ABSENT non-login-PAM(not-asked) login-shell(not-asked)"
     else
@@ -3835,7 +3832,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # scc_scope_note: what VERIFIED does NOT cover, printed with the verdict rather than buried in
   # a doc — an unqualified VERIFIED reads as "every gate on this box gets this cap".
   scc_scope_note() {
-    info "scope: measured through THREE contexts — a NON-LOGIN PAM session (sudo), a LOGIN shell (sudo -i, which also runs /etc/profile.d) and THIS INVOKING SHELL (the context a worker launches gates from, whose env gate-detached.sh forwards) — and all three AGREED on the value AND on every exported SCCACHE_* variable; a disagreement would have been reported as CONFLICTING-SOURCES, and a difference in an SCCACHE_* name this check does not classify as routing as UNMEASURED, instead of this verdict. Whether the service stacks a gate is actually launched from read the same sources is NOT checked here, and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has $SCC_ENV_FILE applied at all — measured, such a session (env -i) sees the variable UNSET"
+    info "scope: measured through TWO session types — a NON-LOGIN PAM session (sudo) and a LOGIN shell (sudo -i, which also runs /etc/profile.d) — and they AGREED on the value AND on every exported SCCACHE_* variable; a disagreement would have been reported as CONFLICTING-SOURCES, and a difference in an SCCACHE_* name this check does not classify as routing as UNMEASURED, instead of this verdict. Whether the service stacks a gate is actually launched from read the same sources is NOT checked here, and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has $SCC_ENV_FILE applied at all — measured, such a session (env -i) sees the variable UNSET"
     info "scope: the cap is read by the sccache SERVER at STARTUP, so this verdict is about THIS box's CURRENT server plus FUTURE sessions. A server started later by a session that does NOT see the value will enforce sccache's default instead, and a server already running keeps its cap for its whole lifetime"
     info "scope: VERIFIED asserts that the file SETS this value, that a fresh session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it. Agreement is measured; provenance is not"
     # WHICH SERVER WAS MEASURED, stated rather than assumed: every read and any start ran INSIDE
@@ -3850,6 +3847,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       info "scope: there was NO server when this run began, so the cap is in force from now on because THIS RUN started it. Anything that stops the server later and does not see the value (a session created before the /etc/environment line existed) will start one at sccache's own default again"
     fi
     info "scope: every sccache call here used '$SCC_SCCACHE_BIN', the binary agreed by every launch context that HAS one${SCC_BIN_ABSENT:+ (none on the PATH of:${SCC_BIN_ABSENT} — those contexts compile UNCACHED rather than at a different cap)} — a disagreement between contexts that have one would have been CONFLICTING-SOURCES, and no participant at all UNMEASURED, because a cap verified with one binary says nothing about another"
+    info "scope: the INVOKING shell's own SCCACHE_* are NOT compared — under the documented 'sudo bash scripts/bootstrap-agent-machine.sh' that environment is ROOT's, which legitimately differs from the user's and produced a FALSE CONFLICTING-SOURCES on correct boxes. So an invoking shell whose SCCACHE_* disagree with BOTH sessions is a real hazard this check does NOT detect: a DECLARED gap, not a silent one (#3727)"
     [ -n "$SCC_PROBE_SUBJECT_NOTE" ] && info "subject: $SCC_PROBE_SUBJECT_NOTE"
   }
   # scc_stale_remedy: the remedy for a visible, accepted value the RUNNING server does not
@@ -3967,16 +3965,6 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     scc_login_set=$scc_ps_set; scc_login_seen=$scc_ps_seen
     scc_login_routing=$scc_ps_routing; scc_login_dir=$scc_ps_dir; scc_login_port=$scc_ps_port
     scc_login_env=$scc_ps_env
-    # THE THIRD CONTEXT: THE INVOKING ENVIRONMENT — the one that actually launches gates on this
-    # fleet (#3727 roborev round 3, f1). A worker's agent session exports its own SCCACHE_* values
-    # and `scripts/flow/gate-detached.sh` FORWARDS the caller's environment, so a gate can talk to a
-    # server configured differently from either PAM session while this section certifies the PAM one.
-    # That is "verify one object, certify another" on the ROUTING axis, so the invoking context joins
-    # the comparison instead of being scrubbed away. Read from THIS shell, before any scrub.
-    scc_invoker_env=$(scc_env_fingerprint_local)
-    scc_invoker_set=${SCCACHE_CACHE_SIZE+1}
-    scc_invoker_seen=${SCCACHE_CACHE_SIZE-}
-
     # DISPLAY forms, built explicitly. An inline `${set:+'$seen'}${set:-<UNSET>}` is WRONG in a way
     # that reads fine: `:-` substitutes when the variable is EMPTY, so on a box where the value IS
     # set it printed the marker `1` after the quoted value. Two lines, no cleverness.
@@ -4004,26 +3992,23 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     elif [ "$SCC_BIN_STATE" != agreed ]; then
       warn "sccache-cap: UNMEASURED (the sccache binary the launch contexts would run could not be established — ${SCC_BIN_STATE#unresolved:} — and this section will not fall back to the binary on ITS OWN PATH, which under a 'sudo bash bootstrap' is root's rather than the account gates run as)"
     elif [ "$scc_probe_set" != "$scc_login_set" ] || [ "$scc_probe_seen" != "$scc_login_seen" ] \
-         || [ "$scc_probe_set" != "$scc_invoker_set" ] || [ "$scc_probe_seen" != "$scc_invoker_seen" ] \
-         || [ "$scc_nonlogin_env" != "$scc_login_env" ] || [ "$scc_nonlogin_env" != "$scc_invoker_env" ]; then
+         || [ "$scc_nonlogin_env" != "$scc_login_env" ]; then
       # CONFLICTING-SOURCES — RANKED ABOVE EVERY OTHER VERDICT, INCLUDING VERIFIED (round 3, widened
       # in round 4 to THREE contexts and the whole SCCACHE_* set). A box whose answer depends on HOW
       # you ask has not been pinned, whatever any single probe says, and a VERIFIED derived from one
       # of three disagreeing contexts is a false certification for the other two. So this is decided
       # BEFORE the file/server correlation and it never reaches an [ok].
-      scc_ip_show="<UNSET>"; [ -n "$scc_invoker_set" ] && scc_ip_show="'$scc_invoker_seen'"
       # WHICH NAMES DIFFER decides which of the two statements below is honest. A name in the
       # RECOGNISED routing set supports a positive claim ("they would contact different servers"); a
       # name outside it supports only "this check cannot establish that they route to the same
       # server", which is UNMEASURED, not a conflict — reporting the stronger claim about a variable
       # this script does not classify would be asserting a fact it has not established.
-      scc_diff_names=$(printf '%s\n%s\n%s\n' "$scc_nonlogin_env" "$scc_login_env" "$scc_invoker_env" \
+      scc_diff_names=$(printf '%s\n%s\n' "$scc_nonlogin_env" "$scc_login_env" \
         | sed -n 's/^\([A-Za-z_][A-Za-z_0-9]*\)=.*/\1/p' | LC_ALL=C sort -u \
         | while read -r scc_dn; do
             scc_a=$(printf '%s\n' "$scc_nonlogin_env" | sed -n "s/^$scc_dn=//p" | head -1)
             scc_b=$(printf '%s\n' "$scc_login_env"    | sed -n "s/^$scc_dn=//p" | head -1)
-            scc_c=$(printf '%s\n' "$scc_invoker_env"  | sed -n "s/^$scc_dn=//p" | head -1)
-            if [ "$scc_a" != "$scc_b" ] || [ "$scc_a" != "$scc_c" ]; then printf '%s ' "$scc_dn"; fi
+            if [ "$scc_a" != "$scc_b" ]; then printf '%s ' "$scc_dn"; fi
           done)
       scc_diff_unclassified=""
       for scc_dn in $scc_diff_names; do
@@ -4032,17 +4017,16 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
           *) scc_diff_unclassified="$scc_diff_unclassified$scc_dn " ;;
         esac
       done
-      if [ "$scc_probe_seen" != "$scc_login_seen" ] || [ "$scc_probe_set" != "$scc_login_set" ] \
-         || [ "$scc_probe_seen" != "$scc_invoker_seen" ] || [ "$scc_probe_set" != "$scc_invoker_set" ]; then
-        warn "sccache-cap: CONFLICTING-SOURCES (the contexts a gate can be launched from resolve SCCACHE_CACHE_SIZE DIFFERENTLY — a non-login PAM session sees $scc_np_show, a LOGIN shell sees $scc_lp_show, and THIS INVOKING SHELL (the one a worker launches gates from, and whose env gate-detached.sh forwards) sees $scc_ip_show; whichever context starts the sccache server decides the cap, so this box is NOT pinned however any single value was persisted)"
+      if [ "$scc_probe_seen" != "$scc_login_seen" ] || [ "$scc_probe_set" != "$scc_login_set" ]; then
+        warn "sccache-cap: CONFLICTING-SOURCES (the two session types a gate can be launched from resolve SCCACHE_CACHE_SIZE DIFFERENTLY — a non-login PAM session sees $scc_np_show while a LOGIN shell sees $scc_lp_show; whichever session starts the sccache server decides the cap, so this box is NOT pinned however either value was persisted)"
       elif [ -n "$scc_diff_unclassified" ]; then
         # An unclassified SCCACHE_* difference cannot support the positive claim, so it is reported
         # as unmeasurable ROUTING rather than as a conflict — and the NAME is printed, because the
         # recognised set is not closed and the next routing variable will arrive this way.
-        warn "sccache-cap: UNMEASURED (the contexts agree on the cap, but they differ in SCCACHE_* variable(s) this check does not classify as routing: ${scc_diff_unclassified% } — so it cannot be established that they address the SAME sccache server, and a cap verified against one server says nothing about another)"
+        warn "sccache-cap: UNMEASURED (the two session types agree on the cap, but they differ in SCCACHE_* variable(s) this check does not classify as routing: ${scc_diff_unclassified% } — so it cannot be established that they address the SAME sccache server, and a cap verified against one server says nothing about another)"
         info "if that variable does select a server or a store, treat this as a routing conflict and reconcile it; if it does not, the contexts are equivalent for this purpose and the recognised list in SCC_ROUTING_NAMES should gain it (issue #3727)"
       else
-        warn "sccache-cap: CONFLICTING-SOURCES (the contexts agree on the cap but NOT on the ROUTING — differing: ${scc_diff_names% } | non-login: SCCACHE_DIR='$SCC_SESSION_DIR' SCCACHE_SERVER_PORT='${SCC_SESSION_PORT:-<unset>}'; login: SCCACHE_DIR='$scc_login_dir' SCCACHE_SERVER_PORT='${scc_login_port:-<unset>}'; invoking shell: SCCACHE_DIR='${SCCACHE_DIR-<unset>}' SCCACHE_SERVER_PORT='${SCCACHE_SERVER_PORT-<unset>}' — so they would contact DIFFERENT servers and a cap verified against one says nothing about the others)"
+        warn "sccache-cap: CONFLICTING-SOURCES (the two session types agree on the cap but NOT on the ROUTING — differing: ${scc_diff_names% } | non-login: SCCACHE_DIR='$SCC_SESSION_DIR' SCCACHE_SERVER_PORT='${SCC_SESSION_PORT:-<unset>}'; login: SCCACHE_DIR='$scc_login_dir' SCCACHE_SERVER_PORT='${scc_login_port:-<unset>}' — so they would contact DIFFERENT servers and a cap verified against one says nothing about the other)"
       fi
       info "on this fleet the login-shell value comes from a SHELL PROFILE: /etc/profile.d/20-agent-ami.sh SOURCES ~/.agent-ami/worker-env.sh, and profile.d runs AFTER pam_env has applied $SCC_ENV_FILE — so the profile WINS for any login shell, and persisting to $SCC_ENV_FILE alone cannot change what such a gate sees"
       info "find every source (the list is NOT exhaustive — a profile.d file may merely SOURCE another file, which is how this was missed once):  grep -rn SCCACHE_CACHE_SIZE $SCC_ENV_FILE /etc/profile.d ~/.agent-ami ~/.bashrc ~/.profile ~/.pam_environment 2>/dev/null"

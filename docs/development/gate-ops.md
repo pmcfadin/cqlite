@@ -118,10 +118,14 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
 * an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
   carries `sccache-cap=<bytes>(<source>)` read from the running server, and why
   `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the
-  `/etc/environment` line, the running server, **and the value seen by three contexts a gate can be
-  launched from** — a non-login PAM session, a login shell (which also runs `/etc/profile.d`) and
-  the invoking shell itself, whose environment `gate-detached.sh` forwards — comparing every
-  exported `SCCACHE_*` variable, not just the cap, before it will say `sccache-cap: VERIFIED`. Any
+  `/etc/environment` line, the running server, **and the value seen by the two session types a gate
+  can be launched from** — a non-login PAM session and a login shell (which also runs
+  `/etc/profile.d`) — comparing every exported `SCCACHE_*` variable, not just the cap, before it
+  will say `sccache-cap: VERIFIED`. The **invoking shell is deliberately NOT compared**: under the
+  documented `sudo bash …` invocation that environment is root's, which legitimately differs from
+  the user's and produced a false `CONFLICTING-SOURCES` on correct boxes. An invoking shell that
+  disagrees with both sessions is therefore a hazard this check does **not** detect — a declared
+  gap, printed in the scope note of every verdict (#3727). Any
   disagreement is `CONFLICTING-SOURCES`; a difference in an `SCCACHE_*` name it does not classify as
   routing is `UNMEASURED` naming that name, never a pass on a partial match. The same rule covers
   the **binary**: each context is asked which `sccache` it would run and the ones that HAVE one must
