@@ -3016,6 +3016,7 @@ _locks_left() {  # <summary> <log> -> prints the surviving reservation paths, on
 if ! sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER" | grep -q '^_release_reservations()'; then
   bad "4b.204 _release_reservations exists and could be extracted" "no such function in the launcher"
   bad "4b.205 _release_reservations survives an empty _extra_locks under set -u" "not run: extraction failed"
+  bad "4b.206 a second release does not delete a peer's lock" "not run: extraction failed"
 else
   _rr_src=$(sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER")
   _rr_d="$TMP/rr"; mkdir -p "$_rr_d"
@@ -3045,16 +3046,38 @@ else
   [ "$_rr_empty" = ok ] \
     && ok "4b.205 _release_reservations survives an EMPTY _extra_locks under set -u" \
     || bad "4b.205 _release_reservations survives an empty _extra_locks under set -u" "got: $_rr_empty"
+  # IDEMPOTENT AGAINST THE HAZARD, not merely "does not error twice" (roborev job 45 on this change).
+  # Calling it twice on ALREADY-REMOVED paths cannot detect the defect it was meant to cover: the
+  # question is what the SECOND call does once a PEER has legitimately acquired the summary path in
+  # between. So the peer's lock is planted between the calls and must survive — the same
+  # delete-a-live-peer's-lock outcome job 269 fixed on the acquisition loop.
+  _rr_p="$_rr_d/peer"
+  ln -s "unit=mine|pid=1" "$_rr_p.launch-lock"
+  _rr_pout=$( ( set -u
+                eval "$_rr_src"
+                _reserve="$_rr_p.launch-lock"
+                _extra_locks=()
+                _release_reservations
+                ln -s "unit=PEER|pid=2" "$_rr_p.launch-lock"   # a peer acquires the freed path
+                _release_reservations
+                echo DONE ) 2>&1 )
+  _rr_pown=$(readlink "$_rr_p.launch-lock" 2>/dev/null || true)
+  if [ "$_rr_pout" = DONE ] && [ "$_rr_pown" = "unit=PEER|pid=2" ]; then
+    ok "4b.206 a SECOND release does not delete a lock a peer acquired in between"
+  else
+    bad "4b.206 a second release does not delete a peer's lock" \
+        "out=[$_rr_pout] owner=[${_rr_pown:-<gone>}] (expected unit=PEER|pid=2)"
+  fi
 fi
 
 if [ "$HAVE_SYSTEMD" != yes ]; then
-  skip=$((skip+4)); echo "SKIP 4b.206-4b.209 (no user systemd manager on this host)"
+  skip=$((skip+4)); echo "SKIP 4b.206-4b.210 (no user systemd manager on this host)"
 else
   # (a) THE LATE SYMLINK REFUSAL — released only `$_reserve`, leaving the heartbeat and log markers.
   _f3a=$(_inject_before symlink-race 'if [ -L "$LOGFILE" ]; then' \
                         'rm -f "$LOGFILE"; ln -s /dev/null "$LOGFILE"   # INJECTED: the job-200 race') || _f3a=""
   if [ -z "$_f3a" ]; then
-    bad "4b.206 the late symlink refusal releases the whole reservation" \
+    bad "4b.207 the late symlink refusal releases the whole reservation" \
         "the point-of-use symlink check is no longer a unique anchor line in the launcher"
   else
     _f3s="$TMP/f3a-sum"; _f3l="$TMP/f3a.log"
@@ -3062,13 +3085,13 @@ else
     _f3left=$(_locks_left "$_f3s" "$_f3l")
     if [ "$_f3r" != 0 ] && printf '%s' "$_f3o" | grep -q 'became a symlink after it was checked' \
        && [ -z "$_f3left" ]; then
-      ok "4b.206 the late symlink refusal leaves NO reservation behind (exit $_f3r)"
+      ok "4b.207 the late symlink refusal leaves NO reservation behind (exit $_f3r)"
     else
-      bad "4b.206 the late symlink refusal leaves no reservation behind" \
+      bad "4b.207 the late symlink refusal leaves no reservation behind" \
           "exit $_f3r survived: $(printf '%s' "$_f3left" | tr '\n' ' ') out=$_f3o"
     fi
     # NEGATIVE CONTROL on the same injected copy: with the release calls neutered the markers MUST
-    # survive, or 4b.206 is passing on an observable it cannot actually move.
+    # survive, or 4b.207 is passing on an observable it cannot actually move.
     _f3c=$(_inject_before symlink-race-ctl 'if [ -L "$LOGFILE" ]; then' \
                           'rm -f "$LOGFILE"; ln -s /dev/null "$LOGFILE"   # INJECTED: the job-200 race')
     if [ -n "$_f3c" ] && _neuter_release "$_f3c"; then
@@ -3076,14 +3099,14 @@ else
       _f3co=$(bash "$_f3c" --summary "$_f3cs" --log "$_f3cl" -- --only fmt 2>&1); _f3cr=$?
       _f3cleft=$(_locks_left "$_f3cs" "$_f3cl")
       if [ "$_f3cr" != 0 ] && [ -n "$_f3cleft" ]; then
-        ok "4b.207 control: with the release neutered the markers DO survive ($(printf '%s' "$_f3cleft" | wc -l | tr -d ' ') left)"
+        ok "4b.208 control: with the release neutered the markers DO survive ($(printf '%s' "$_f3cleft" | wc -l | tr -d ' ') left)"
       else
-        bad "4b.207 control: with the release neutered the markers survive" \
-            "exit $_f3cr survived nothing — 4b.206 cannot detect the defect it pins"
+        bad "4b.208 control: with the release neutered the markers survive" \
+            "exit $_f3cr survived nothing — 4b.207 cannot detect the defect it pins"
       fi
       rm -f "$_f3cleft" 2>/dev/null || true
     else
-      bad "4b.207 control: with the release neutered the markers survive" \
+      bad "4b.208 control: with the release neutered the markers survive" \
           "could not build the control copy (no _release_reservations CALL to neuter)"
     fi
   fi
@@ -3098,7 +3121,7 @@ else
   _f3b=$(_inject_before truncate-fail '( : > "$LOGFILE" ) 2>/dev/null || {' \
                         'rm -f "$LOGFILE"; mkdir -p "$LOGFILE"   # INJECTED: make the `>` fail') || _f3b=""
   if [ -z "$_f3b" ]; then
-    bad "4b.208 the truncation refusal releases the whole reservation" \
+    bad "4b.209 the truncation refusal releases the whole reservation" \
         "the pre-launch truncate is no longer a unique anchor line in the launcher"
   else
     _f3bs="$TMP/f3b-sum"; _f3bl="$TMP/f3b.log"
@@ -3106,9 +3129,9 @@ else
     _f3bleft=$(_locks_left "$_f3bs" "$_f3bl")
     if [ "$_f3br" != 0 ] && printf '%s' "$_f3bo" | grep -q 'cannot truncate the log' \
        && [ -z "$_f3bleft" ]; then
-      ok "4b.208 the truncation refusal leaves NO reservation behind (exit $_f3br)"
+      ok "4b.209 the truncation refusal leaves NO reservation behind (exit $_f3br)"
     else
-      bad "4b.208 the truncation refusal leaves no reservation behind" \
+      bad "4b.209 the truncation refusal leaves no reservation behind" \
           "exit $_f3br survived: $(printf '%s' "$_f3bleft" | tr '\n' ' ') out=$_f3bo"
     fi
   fi
@@ -3120,7 +3143,7 @@ else
   _f3d=$(_inject_before launch-fail 'if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \' \
                         'systemd-run() { return 1; }   # INJECTED: the start job fails') || _f3d=""
   if [ -z "$_f3d" ]; then
-    bad "4b.209 a FAILED systemd-run releases the reservation when the unit is affirmatively terminal" \
+    bad "4b.210 a FAILED systemd-run releases the reservation when the unit is affirmatively terminal" \
         "the systemd-run invocation is no longer a unique anchor line in the launcher"
   else
     _f3ds="$TMP/f3d-sum"; _f3dl="$TMP/f3d.log"
@@ -3128,10 +3151,56 @@ else
     _f3dleft=$(_locks_left "$_f3ds" "$_f3dl")
     if [ "$_f3dr" != 0 ] && printf '%s' "$_f3do" | grep -q 'systemd-run failed to start unit' \
        && [ -z "$_f3dleft" ]; then
-      ok "4b.209 a FAILED systemd-run leaves NO reservation behind (exit $_f3dr)"
+      ok "4b.210 a FAILED systemd-run leaves NO reservation behind (exit $_f3dr)"
     else
-      bad "4b.209 a failed systemd-run leaves no reservation behind" \
+      bad "4b.210 a failed systemd-run leaves no reservation behind" \
           "exit $_f3dr survived: $(printf '%s' "$_f3dleft" | tr '\n' ' ') out=$_f3do"
+    fi
+  fi
+  # (d) THE OTHER HALF OF THAT GUARD — the case an UNCONDITIONAL rollback would also pass (roborev
+  # job 45 on this change, Medium). 4b.210 shows the release HAPPENS on a terminal unit; on its own it
+  # says nothing about the branch being conditional, so deleting the `_unit_is_live` guard would leave
+  # the suite green while the launcher handed a LIVE unit's paths to a peer. `_unit_is_live` is
+  # overridden to its permissive answer (0 = live or unmeasurable) — the two states that must NOT
+  # release, together, since the launcher deliberately treats them alike — and the markers must survive.
+  _f3e=$(_inject_before launch-fail-live 'if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \' \
+                        'systemd-run() { return 1; }; _unit_is_live() { return 0; }   # INJECTED: start fails, unit reads LIVE') || _f3e=""
+  if [ -z "$_f3e" ]; then
+    bad "4b.211 a failed systemd-run KEEPS the reservation when the unit is live or unmeasurable" \
+        "the systemd-run invocation is no longer a unique anchor line in the launcher"
+  else
+    _f3es="$TMP/f3e-sum"; _f3el="$TMP/f3e.log"
+    _f3eo=$(bash "$_f3e" --summary "$_f3es" --log "$_f3el" -- --only fmt 2>&1); _f3er=$?
+    _f3eleft=$(_locks_left "$_f3es" "$_f3el")
+    if [ "$_f3er" != 0 ] && [ -n "$_f3eleft" ]; then
+      ok "4b.211 a failed systemd-run KEEPS the reservation when the unit is live/unmeasurable ($(printf '%s' "$_f3eleft" | wc -l | tr -d ' ') held)"
+    else
+      bad "4b.211 a failed systemd-run keeps the reservation when the unit is live/unmeasurable" \
+          "exit $_f3er released everything: the rollback is unconditional, so a LIVE unit's paths go to a peer"
+    fi
+  fi
+  # (e) AND THE POST-LAUNCH REFUSAL MUST KEEP THE WHOLE SET — asserted BEHAVIOURALLY, because 4b.214
+  # only reads a comment and a comment cannot stop someone adding a release call underneath it
+  # (roborev job 45, same finding). A gate really starts here, so `_hb_seen` is forced to 0 after the
+  # verification loop has already run: the refusal fires on its own terms, stops the unit it started,
+  # and every marker must still be there when it exits — the unit's processes may still be draining.
+  _f3f=$(_inject_before hb-refusal 'if [ "$_hb_seen" -ne 1 ]; then' \
+                        '_hb_seen=0   # INJECTED: force the post-launch refusal') || _f3f=""
+  if [ -z "$_f3f" ]; then
+    bad "4b.212 the post-launch heartbeat refusal KEEPS the whole reservation" \
+        "the post-launch refusal is no longer a unique anchor line in the launcher"
+  else
+    _f3fs="$TMP/f3f-sum"; _f3fl="$TMP/f3f.log"
+    _f3fo=$(bash "$_f3f" --summary "$_f3fs" --log "$_f3fl" -- --only fmt 2>&1); _f3fr=$?
+    _f3fleft=$(_locks_left "$_f3fs" "$_f3fl")
+    # The copy stops the unit itself; record whatever it named so cleanup can still reach it.
+    _f3fu=$(printf '%s' "$_f3fo" | sed -n 's/^unit:  *//p'); [ -n "$_f3fu" ] && echo "$_f3fu" >> "$UNITS_FILE"
+    if [ "$_f3fr" != 0 ] && printf '%s' "$_f3fo" | grep -q 'published no readable liveness' \
+       && [ "$(printf '%s' "$_f3fleft" | wc -l | tr -d ' ')" = 3 ]; then
+      ok "4b.212 the post-launch heartbeat refusal KEEPS all three markers (exit $_f3fr)"
+    else
+      bad "4b.212 the post-launch heartbeat refusal keeps the whole reservation" \
+          "exit $_f3fr held: $(printf '%s' "$_f3fleft" | tr '\n' ' ') out=$(printf '%s' "$_f3fo" | head -2)"
     fi
   fi
 fi
@@ -3142,18 +3211,18 @@ fi
 # above; this line only tells us if a fifth appears without one.
 _rel_calls=$(grep -cE '(^|[[:space:]]|\|\| )_release_reservations([[:space:]]|$)' "$LAUNCHER" || true)
 if [ "${_rel_calls:-0}" -ge 4 ]; then
-  ok "4b.210 every known pre-launch refusal routes through the one release (call sites: $_rel_calls)"
+  ok "4b.213 every known pre-launch refusal routes through the one release (call sites: $_rel_calls)"
 else
-  bad "4b.210 every known pre-launch refusal routes through the one release" \
+  bad "4b.213 every known pre-launch refusal routes through the one release" \
       "found only ${_rel_calls:-0} call sites; a site has gone back to releasing part of the set"
 fi
 # And the ONE path that deliberately does NOT release must SAY so, or its omission reads as the same
 # oversight this finding was: the post-launch heartbeat refusal stops an already-started gate, whose
 # processes may still be draining, so handing its paths to a peer is worse than the litter.
 if sed -n '/^if \[ "\$_hb_seen" -ne 1 \]; then/,/^fi$/p' "$LAUNCHER" | grep -q 'DOES \*NOT\* RELEASE'; then
-  ok "4b.211 the post-launch refusal declares why it keeps the reservation"
+  ok "4b.214 the post-launch refusal declares why it keeps the reservation"
 else
-  bad "4b.211 the post-launch refusal declares why it keeps the reservation" \
+  bad "4b.214 the post-launch refusal declares why it keeps the reservation" \
       "an undeclared omission is indistinguishable from the F3 defect"
 fi
 

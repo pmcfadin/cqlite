@@ -1321,17 +1321,28 @@ _extra_ok=1
 # So the set is released in ONE place and every refusal calls it. A per-site release is a list to keep
 # complete, and three sites had already drifted into three different answers about one invariant.
 #
-# `_extra_locks` is emptied after the loop so a second call cannot re-remove a path a later launcher
-# may by then legitimately own — this function must be idempotent, since a refusal path may run after
-# the acquisition rollback already ran.
+# IDEMPOTENT MEANS EVERY PATH IT REMOVES IS FORGOTTEN, NOT JUST THE ARRAY (roborev job 45 on this
+# change, Low). The first version cleared `_extra_locks` and then unlinked `$_reserve` while LEAVING
+# `_reserve` set, so a second call would unlink that path again — and the reservation it removed the
+# second time could by then belong to a peer that legitimately acquired it, which is the delete-a-live-
+# peer's-lock failure the acquisition loop's own quoting comment exists to prevent. Every call site
+# today `exit`s immediately afterwards, so nothing reaches a second call: this is a claim the comment
+# made and the code did not keep, and a comment asserting a property the code lacks is exactly what
+# this file has been bitten by before. The claim is made TRUE rather than deleted, because the whole
+# point of centralising was that a future refusal path can call this without auditing its callers.
+#
+# The unlink reads a LOCAL copy taken before the global is cleared, so the forget is unconditional
+# even if the `rm` fails.
 # ${ARRAY[@]+"${ARRAY[@]}"} and `rm -f --`, both for the reasons the acquisition loop states above:
 # an empty array is UNBOUND under `set -u` on bash 3.2, and an unquoted expansion would word-split and
 # glob a space-bearing path onto a live peer's reservation.
 _release_reservations() {
-  local _l
+  local _l _r="$_reserve"
   for _l in ${_extra_locks[@]+"${_extra_locks[@]}"}; do rm -f -- "$_l" 2>/dev/null || true; done
   _extra_locks=()
-  rm -f -- "$_reserve" 2>/dev/null || true
+  _reserve=""
+  [ -n "$_r" ] && rm -f -- "$_r" 2>/dev/null
+  return 0
 }
 for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   [ "$_art" = "$SUMMARY" ] && continue
