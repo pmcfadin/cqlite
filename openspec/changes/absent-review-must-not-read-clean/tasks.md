@@ -15,7 +15,9 @@
 - [ ] 2.4 report `AUTHOR-PERFORMED` under its own token on the `PREMERGE:` line, never folded into `OK`
 
 ## 3. Agent + skill side
-- [ ] 3.1 report-of-record clause in each pipeline-gating agent definition (scope pending Seam 1)
+- [ ] 3.1 report-of-record clause in ALL SIX pipeline-gating agent definitions (Q1=(a) as ruled;
+      spec-auditor, rust-reviewer, coverage-reviewer, compaction-parity-auditor, flow-closer,
+      sstable-developer) — owner ratifies the widening at Seam 1
 - [ ] 3.2 `flow-implement` / `flow-closer` skills: `open` before spawn, `verdict` after
 - [ ] 3.3 `flow-closer`'s `NEEDS-SPAWN {role: spec-auditor}` handshake carries the report path
 
@@ -29,3 +31,8 @@
 - [ ] 5.1 `docs/development/review-stage-reporting.md` — AC5 record with the source census and the limits
 - [ ] 5.2 CLAUDE.md: the report-of-record contract in the implement-loop + flow-closer sections
 - [ ] 5.3 website `agents-developing/` page update + publish verified by NEW CONTENT served, not HTTP 200
+
+## 6. Landing coordination
+- [ ] 6.1 Coordinate the `premerge-assert.sh` arity change with #3752's `--roborev-block`-shaped flag so
+      in-flight lanes pay ONE re-certification visit, not two (lead ruling 2026-09-01T18:19:24Z).
+      Landing ORDER is the lead's call; this change assumes neither.

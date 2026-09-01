@@ -147,3 +147,37 @@ component, so `agent-gate.components` is unchanged):
 | Enforce in `flow-closer`'s prose only | Prose is what already failed; six lanes complied and nothing required them to. And a check must sit at the merge point (#3465/#3616). |
 | Let the deadline decide the verdict | Adds a clock to a question answerable from content, and would fail a slow-but-real review. |
 | Let the caller declare C not-applicable | A caller-supplied exemption is the escape hatch; routing is measurable from the branch. |
+
+## §7 — scope, as ruled (Q1 = widen) and what it costs
+
+The mechanism is agent-agnostic by construction — `open`/`status`/`verdict` know a stage kind, an issue and
+a path, never an agent's tool list — so widening is a change to **how many definitions carry the clause**,
+not to the design. The six pipeline-gating spawns:
+
+| agent | why its silence gates something |
+|---|---|
+| `spec-auditor` | **C**, merge-gating, nothing else in the pipeline substitutes for it |
+| `rust-reviewer` | review-first round on the lite-green diff |
+| `coverage-reviewer` | test-quality sign-off (`docs/development/pm-operating-loop.md` "done" definition) |
+| `compaction-parity-auditor` | parity-gap audit where it is the routed oracle |
+| `flow-closer` | **owns the merge**; idled three times mid-endgame holding the gate of record |
+| `sstable-developer` | idled with queued work undone; its silence was read as progress |
+
+The last two are why the widening matters: they are the measured **worst** instances, and a mechanism
+scoped to read-only reviewers would have left the merge-owning stage uncovered while the tool to cover it
+sat in the same file. Note the asymmetry that makes them different in kind, not just in tools — a
+write-capable agent leaves **disk evidence** (commits, files) that a lane can verify independently, so for
+those two the artifact is corroboration; for the four read-only agents there is **no other artifact at
+all**, which is why the stage verdict has to be one.
+
+## §8 — composing with #3752 on the same script
+
+#3752 binds `premerge-assert.sh` to the roborev certification (a rebase rewrites the reviewed commit, so a
+truthful "roborev: PASS" can describe a commit that is not being merged). Same script, same shape, same
+reason. Two consequences for this design, both deliberate:
+
+- **No assumption about landing order.** `--c-verdict` is a named flag, not a positional, so it composes
+  with a sibling required flag in either order; the usage line is written to be extended rather than
+  replaced, and its exit-3-on-omission does not depend on being the only required flag.
+- **One re-certification visit for in-flight lanes**, which is a landing-order decision for the lead, not
+  a design constraint discharged here.

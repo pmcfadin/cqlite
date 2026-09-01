@@ -85,3 +85,25 @@ oracles that write durable artifacts (the roborev wrapper), and disclose a subst
 - Giving the agents `SendMessage`, or otherwise changing harness-level spawn delivery — out of repository.
 - Any change to what a review stage *concludes*. This governs how its verdict is recorded and read.
 - Retro churn on the deliveries already shipped with a disclosed self-C (owner ruling: they stand).
+
+## Lead rulings recorded (2026-09-01T18:19:24Z, issue thread) — subject to owner ratification at Seam 1
+
+**Q1 = (a): the scope is ANY pipeline-gating spawn, not only the read-only reviewers.** The lead's reason
+is the issue's own principle: *"an absent review must never read as a clean one"* is about the **class** of
+spawn whose silence gates a merge, and `flow-closer` is the strongest member of that class — it **owns the
+merge** and lacks `SendMessage` identically. So **six** agent definitions, not three. Recorded here rather
+than split into a separate change, per the ruling, and **flagged as the one scope question the owner is
+ratifying** at Seam 1 (the filed issue's title and table name read-only reviewers).
+
+**Q2 = (a): `premerge-assert --c-verdict` enforces fail-closed immediately — no advisory phase.** The lead
+distinguished this from #3650, which earned its advisory-first because the blast-radius *definition* was
+unmeasured and the obvious one was falsified by measurement; here the remedy is mechanical and **one
+argument per lane**, and *a known one-command remedy does not need a soak*.
+
+**Landing coordination with #3752 (a rebase silently voids a roborev certification).** That issue adds a
+`--roborev-block`-shaped requirement to the SAME script for the SAME reason — a merge-gating stage bound to
+the head but not to the certification. Two independent arity changes to `premerge-assert.sh` would make
+every in-flight lane re-certify **twice**. Per the ruling the two land coordinated so lanes pay **ONE**
+re-certification visit. Sequencing is a landing-order question, not a design one: the argument name, the
+usage text and the fail-closed semantics here are chosen to compose with a sibling required flag rather
+than to assume this change lands first.
