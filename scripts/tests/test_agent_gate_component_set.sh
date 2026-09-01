@@ -955,21 +955,35 @@ CS_DECLARED_DIRECT_GIT=(
 )
 CS_ISOLATED_SELECTORS=('-C "$_CS_READ_DIR"' '-C "$csdir/repo"')
 cs_live_call_findings() {
-  local gate="$1" line num raw argv dq entry i hit
+  local gate="$1" line num raw argv dq entry i hit prev_cont=0
   local -a seen=()
   for i in "${!CS_DECLARED_LIVE_CALLS[@]}"; do seen[$i]=0; done
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     num="${line%%:*}"; raw="${line#*:}"
-    # ROUTE (c): a continued line cannot be judged as a line. Reject it rather than judge the
-    # fragment — a `\` continuation is how an argument list hides from a per-line scan.
+    # ROUTE (c): a LIVE call split over a `\` continuation cannot be judged as a line, so it is
+    # rejected rather than judged from the fragment — a continuation is how an argument list hides
+    # from a per-line scan. SCOPED TO `_cs_live_git` LINES, because an `&&`-chained ISOLATED read
+    # legitimately continues (the fast path's presence probe does, and an unscoped rule RED on it
+    # — measured, first run: a guard that reds on correct input is the guard agents learn to
+    # waive).
     case "$raw" in
-      *'\') case "$raw" in
-              *_cs_live_git*|*' git '*|*'	git '*)
-                printf 'FINDING: %s: a git call is split over a line CONTINUATION, so its argument list cannot be judged as one line — write it on one line (or declare it): %s\n' "$num" "$raw"
-                continue ;;
-            esac ;;
+      *_cs_live_git*'\')
+        printf 'FINDING: %s: a LIVE git call is split over a line CONTINUATION, so its argument list cannot be judged as one line — write it on one line: %s\n' "$num" "$raw"
+        prev_cont=1; continue ;;
     esac
+    # THE TAIL OF A CONTINUED CALL IS ALSO A PLACE A LIVE REPOSITORY CAN BE NAMED. `git` takes the
+    # LAST `-C`, so an isolated first line followed by a tail naming `$REPO_ROOT` (or a
+    # `--git-dir=`/`GIT_DIR=`) would run live while the first line classified as isolated. Nothing
+    # in the region does this today; the rule is what keeps it that way, and the set it forbids is
+    # EMPTY rather than declared, so there is nothing to keep in step.
+    if [ "$prev_cont" = 1 ]; then
+      case "$raw" in
+        *'$REPO_ROOT'*|*--git-dir*|*GIT_DIR=*)
+          printf 'FINDING: %s: the CONTINUATION TAIL of a git call names the live repository (git honours the LAST -C, so this can redirect an isolated call): %s\n' "$num" "$raw" ;;
+      esac
+    fi
+    case "$raw" in *'\') prev_cont=1 ;; *) prev_cont=0 ;; esac
     case "$raw" in
       *_cs_live_git\ *)
         argv="${raw#*_cs_live_git }"
@@ -983,7 +997,7 @@ cs_live_call_findings() {
         if [ -z "$hit" ]; then
           printf 'FINDING: %s: UNDECLARED live-repository git call: %s\n' "$num" "$argv"
         fi
-        continue ;;
+        prev_cont=0; continue ;;
     esac
     # A DIRECT `git` at command position. Quoted spans are removed FIRST so a diagnostic string
     # (`_CS_DETAIL="git fetch … exited $rc"`, `hint="… git rebase …"`) is not read as an
@@ -1098,7 +1112,8 @@ cs_scratch_peel_findings() {
   return 0
 }
 sp_findings=$(cs_scratch_peel_findings "$GATE")
-sp_ctl="$peel_ctl_dir/unbounded-gate.sh"
+sp_dir="$tmp/3757-scratch-peel-control"; mkdir -p "$sp_dir"
+sp_ctl="$sp_dir/unbounded-gate.sh"
 sed 's|\(_CS_HEAD_SHA=\$(\)_component_set_bounded "\$_CS_BOUND_SECS" \(env -i\)|\1\2|' "$GATE" >"$sp_ctl"
 sp_ctl_took=$(grep -c '_CS_HEAD_SHA=\$(env -i' "$sp_ctl")
 sp_ctl_findings=$(cs_scratch_peel_findings "$sp_ctl")
@@ -1132,7 +1147,7 @@ fi
 #       (iii) the peel calls the runtime refusal before handing the value to git.
 # ---------------------------------------------------------------------------
 cs_read_dir_findings() {
-  local g="$1" init assign assign_ln consumers ln peel_ln guard_ln
+  local g="$1" init sentinel_decl assign assign_ln body_lo body_hi consumers ln peel_ln guard_ln
   init=$(cs_region_code "$g" | grep -F '_CS_READ_DIR=' | grep -F '_CS_READ_ENV=(); _CS_HEAD_SHA=' | head -1)
   if [ -z "$init" ]; then
     printf 'FINDING: could not locate the probe initialiser line that sets _CS_READ_DIR — the shape changed or the scan broke (fail-closed)\n'
@@ -1140,9 +1155,22 @@ cs_read_dir_findings() {
     case "$init" in
       *'_CS_READ_DIR="$REPO_ROOT"'*)
         printf 'FINDING: %s: the initialiser makes THE LIVE CHECKOUT the default read repository, so any consumer reached before the scratch assignment reads objects live: %s\n' "${init%%:*}" "${init#*:}" ;;
-      *'_CS_READ_DIR=""'*) : ;;
-      *) printf 'FINDING: %s: the initialiser sets _CS_READ_DIR to an unrecognised value; only the empty sentinel is declared: %s\n' "${init%%:*}" "${init#*:}" ;;
+      *'_CS_READ_DIR=""'*)
+        printf 'FINDING: %s: the initialiser leaves the read repository EMPTY, and git reads -C "" as the CURRENT directory (measured: rc 0, and cat-file -e HEAD^{commit} succeeds), so an unguarded consumer reads the LIVE repository: %s\n' "${init%%:*}" "${init#*:}" ;;
+      *'_CS_READ_DIR="$_CS_READ_DIR_UNSET"'*) : ;;
+      *) printf 'FINDING: %s: the initialiser sets _CS_READ_DIR to an unrecognised value; only the declared UNSET sentinel is allowed: %s\n' "${init%%:*}" "${init#*:}" ;;
     esac
+  fi
+  # THE SENTINEL MUST BE A PATH THAT CANNOT EXIST — that is what makes an unguarded consumer fail
+  # CLOSED rather than read live, and it is the half no source scan could otherwise supply.
+  # CAPTURED, NOT PIPED INTO `grep -q`. This suite runs under `pipefail`, and a successful
+  # `grep -q` EXITS EARLY, which SIGPIPEs the upstream producer — so the PIPELINE status is 141
+  # even though the pattern was found, and `if ! …` then fires on a correct tree. Measured here on
+  # the first run: this exact predicate reported the sentinel "not declared" while a standalone
+  # `grep -c` on the same input answered 1.
+  sentinel_decl=$(cs_region_code "$g" | grep "^[0-9][0-9]*:_CS_READ_DIR_UNSET='/nonexistent/" || true)
+  if [ -z "$sentinel_decl" ]; then
+    printf 'FINDING: the UNSET sentinel is not declared as a literal /nonexistent/... path — a sentinel git can resolve is a live read waiting to happen\n'
   fi
   assign=$(cs_region_code "$g" | grep -F '_CS_READ_DIR="$csdir/repo"' | head -1)
   if [ -z "$assign" ]; then
@@ -1150,14 +1178,35 @@ cs_read_dir_findings() {
     return 0
   fi
   assign_ln="${assign%%:*}"
+  # ORDERING, SCOPED TO `_component_set_probe_inner`'s OWN BODY — and the scope is the honest part.
+  # LEXICAL POSITION IS NOT EXECUTION ORDER FOR A FUNCTION BODY: three `-C "$_CS_READ_DIR"`
+  # consumers live in helper functions DEFINED hundreds of lines EARLIER than the assignment and
+  # CALLED after it, so a region-wide rule reported all three as "before the assignment" — a false
+  # FAIL on correct code, measured on the first run. Inside one function body the two orders DO
+  # coincide, so that is where the rule applies. DECLARED RESIDUAL: consumers in helper bodies are
+  # NOT covered by this rule; they are covered by the UNSET sentinel above (an unguarded read fails
+  # closed) and, for the peel, by the runtime refusal below.
+  body_lo=$(cs_region_stream "$g" | grep '^[0-9][0-9]*:_component_set_probe_inner() {$' | head -1)
+  body_lo="${body_lo%%:*}"
+  if [ -z "$body_lo" ]; then
+    printf 'FINDING: could not locate _component_set_probe_inner in the region (fail-closed)\n'
+    return 0
+  fi
+  body_hi=$(cs_region_stream "$g" | awk -F: -v lo="$body_lo" '$1+0 > lo+0 && $0 ~ /^[0-9]+:}$/ { print $1; exit }')
+  if [ -z "$body_hi" ]; then
+    printf 'FINDING: could not locate the end of _component_set_probe_inner (fail-closed)\n'
+    return 0
+  fi
   consumers=$(cs_region_code "$g" | grep -F -- '-C "$_CS_READ_DIR"')
   if [ -z "$consumers" ]; then
     printf 'FINDING: no -C "$_CS_READ_DIR" consumer found in the region — the guard has no subject (fail-closed)\n'
   fi
   while IFS= read -r ln; do
     [ -n "$ln" ] || continue
+    [ "${ln%%:*}" -ge "$body_lo" ] || continue
+    [ "${ln%%:*}" -le "$body_hi" ] || continue
     if [ "${ln%%:*}" -lt "$assign_ln" ]; then
-      printf 'FINDING: %s: a -C "$_CS_READ_DIR" consumer runs BEFORE the scratch assignment at line %s, so it would read in whatever the initialiser left: %s\n' "${ln%%:*}" "$assign_ln" "${ln#*:}"
+      printf 'FINDING: %s: a -C "$_CS_READ_DIR" consumer runs BEFORE the scratch assignment at line %s, in the probe body where lexical order IS execution order: %s\n' "${ln%%:*}" "$assign_ln" "${ln#*:}"
     fi
   done <<<"$consumers"
   peel_ln=$(cs_region_code "$g" | grep -F 'rev-parse --verify --quiet "${head_unpeeled}^{commit}"' | head -1)
@@ -1173,7 +1222,7 @@ cs_read_dir_findings() {
 }
 rd_findings=$(cs_read_dir_findings "$GATE")
 if [ -z "$rd_findings" ]; then
-  ok "3757-read-dir-shape: the read repository is an empty sentinel until the scratch exists, every -C \$_CS_READ_DIR consumer runs after the scratch assignment, and the peel refuses an unisolated value before calling git"
+  ok "3757-read-dir-shape: the read repository is a NON-EXISTENT-path sentinel until the scratch exists (so an unguarded consumer fails closed, not live), no consumer in the probe body precedes the scratch assignment, and the peel refuses an unisolated value before calling git"
 else
   bad "3757-read-dir-shape: the read-repository invariants are not met:"
   printf '%s\n' "$rd_findings"
@@ -1181,24 +1230,27 @@ fi
 
 # THREE PLANTED CONTROLS, one per property. Each mutates a COPY and must be REPORTED and NAMED.
 rd_dir="$tmp/3757-read-dir-controls"; mkdir -p "$rd_dir"
-rd_ids=(i ii iii)
+rd_ids=(i ii iii iv)
 rd_whats=(
   'the initialiser set back to the LIVE checkout'
-  'a -C "$_CS_READ_DIR" consumer planted BEFORE the scratch assignment'
+  'the initialiser left EMPTY, which git reads as the CURRENT directory'
+  'a -C "$_CS_READ_DIR" consumer planted BEFORE the scratch assignment, in the probe body'
   'the runtime refusal call removed from the peel'
 )
 rd_progs=(
-  's|^  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
+  's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
+  's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
   's|^  _CS_READ_DIR="\$csdir/repo"$|  : "$(git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e planted-by-the-selftest 2>/dev/null)"\n  _CS_READ_DIR="$csdir/repo"|'
   '/_cs_read_dir_isolated_or_refuse "peel HEAD/d'
 )
 rd_tooks=(
   '^  _CS_READ_DIR="\$REPO_ROOT"; _CS_READ_ENV'
+  '^  _CS_READ_DIR=""; _CS_READ_ENV'
   'cat-file -e planted-by-the-selftest'
   '_cs_read_dir_isolated_or_refuse "peel HEAD'
 )
-rd_expect_n=(1 1 0)
-rd_needles=('THE LIVE CHECKOUT' 'BEFORE the scratch assignment' 'does not call _cs_read_dir_isolated_or_refuse')
+rd_expect_n=(1 1 1 0)
+rd_needles=('THE LIVE CHECKOUT' 'reads -C "" as the CURRENT directory' 'BEFORE the scratch assignment' 'does not call _cs_read_dir_isolated_or_refuse')
 for rd_i in "${!rd_ids[@]}"; do
   rd_id="${rd_ids[$rd_i]}"
   rd_copy="$rd_dir/prop-$rd_id.sh"
@@ -5239,9 +5291,12 @@ fi
 # legitimately `skip` when the fixture's HEAD object is packed rather than loose (the same
 # conditional `3544-ancestry-bounded` carries), and a floor that counts a skippable case would red
 # on correct input.
-# 113 -> 123 with roborev job 325's ten further #3757 cases, all unconditional: the allowlist
-# clean case + its FOUR planted evasion routes (which replaced one deny-pattern case), the
-# read-dir shape case + its THREE planted controls, and the behavioural read-dir refusal.
+# 113 -> 123 with roborev job 325's #3757 work: ELEVEN cases ADDED — the allowlist clean case + its
+# FOUR planted evasion routes, the read-dir shape case + its FOUR planted controls, and the
+# behavioural read-dir refusal — and ONE REMOVED (the deny-pattern `3757-no-live-peel` case the
+# allowlist replaces), so the net is TEN and the floor is raised by exactly ten. All eleven are
+# unconditional; the one skippable case in this family remains `3757-head-object-fifo`, which the
+# floor does not count.
 CASE_FLOOR=123
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"

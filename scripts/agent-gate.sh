@@ -2776,15 +2776,27 @@ _CS_MISSING=""     # baseline components ABSENT from this tree's set (space sepa
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
+# THE "NOT ESTABLISHED YET" VALUE FOR `_CS_READ_DIR`, AND IT IS A NON-EXISTENT PATH ON PURPOSE
+# (#3757). The obvious sentinels are both UNSAFE, measured rather than assumed (git 2.43.0, in a
+# real worktree):
+#   git -C ""            rev-parse --git-dir  -> rc 0, prints the LIVE worktree's git dir
+#   git -C ""            cat-file -e HEAD^{commit} -> rc 0  (a LIVE OBJECT READ)
+#   git -C <nonexistent> rev-parse --git-dir  -> rc 128, "cannot change to '…': No such file"
+# `-C ""` leaves the working directory UNCHANGED, so an EMPTY value silently MEANS this checkout —
+# the exact read the region's execution-route enumeration forbids — while a non-existent path
+# makes any consumer reached before the scratch exists fail CLOSED without touching the live
+# repository. The named refusal below still exists and is what a reader sees at the peel; this
+# value is what bounds every OTHER consumer, including the ones whose bodies are defined earlier
+# in this file than the assignment (lexical position is not execution order for a function body,
+# so no source scan can decide that ordering — the sentinel makes it moot).
+_CS_READ_DIR_UNSET='/nonexistent/agent-gate-component-set-read-dir-not-established'
 _CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
                    # ALWAYS the isolated scratch — "else this checkout" was written here while
                    # the pre-flight still read objects live, and since #3757 it reads NONE
                    # there, so that clause licensed exactly what the enumeration above forbids.
-                   # EMPTY until the scratch exists, and empty is NOT a safe fallback: `git -C
-                   # ""` leaves the working directory UNCHANGED (measured; documented in
-                   # git-config(1)'s `-C` entry), i.e. it silently means THIS checkout. So a
-                   # consumer must REFUSE on an unisolated value rather than pass it to git —
-                   # see `_cs_read_dir_isolated_or_refuse` (#3757).
+                   # Set to `$_CS_READ_DIR_UNSET` at every probe entry (see above) and to the
+                   # scratch once it exists; a consumer must REFUSE any other value rather than
+                   # pass it to git — see `_cs_read_dir_isolated_or_refuse` (#3757).
 _CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTORIES=<lane
                    # objects>` when reading in the scratch (HEAD's objects live in the lane),
                    # else EMPTY
@@ -4526,13 +4538,15 @@ _cs_live_refuse() {
 # leaves the working directory unchanged, so it MEANS this checkout) and `$REPO_ROOT` itself. A
 # fall-through would be a lazy-fetch route re-opened by a future edit, reported as nothing.
 _cs_read_dir_isolated_or_refuse() {
+  local why
   case "$_CS_READ_DIR" in
-    "") : ;;
-    "$REPO_ROOT") : ;;
+    "")                        why="EMPTY, and git reads \`-C \"\"\` as 'leave the working directory unchanged' — i.e. the LIVE checkout" ;;
+    "$_CS_READ_DIR_UNSET")     why="still the 'not established' sentinel ($_CS_READ_DIR), so the isolated scratch was never created" ;;
+    "$REPO_ROOT")              why="the LIVE checkout ($_CS_READ_DIR)" ;;
     *) return 1 ;;
   esac
   _CS_KIND=read-dir-unisolated
-  _CS_DETAIL="refusing to $1: the isolated read repository was never established (\$_CS_READ_DIR is ${_CS_READ_DIR:+the LIVE checkout $_CS_READ_DIR}${_CS_READ_DIR:-EMPTY, which git reads as 'leave the working directory unchanged' — i.e. the LIVE checkout}), and an object read there can be answered from the NETWORK by a promisor remote under this repository's own config. This is a code-path defect in the pre-flight, not a state of your checkout: the scratch assignment was skipped or removed"
+  _CS_DETAIL="refusing to $1: the isolated read repository was never established (\$_CS_READ_DIR is $why), and an object read in the live repository can be answered from the NETWORK by a promisor remote under that repository's own config. This is a code-path defect in the pre-flight, not a state of your checkout: the scratch assignment was skipped or removed"
   return 0
 }
 
@@ -4540,17 +4554,18 @@ _component_set_probe_inner() {
   # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
   # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
   # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
-  # `_CS_READ_DIR` STARTS EMPTY, NOT AT `$REPO_ROOT` (#3757). The old initialiser made THE LIVE
-  # CHECKOUT the value every consumer would see if the scratch assignment were ever skipped, so
-  # "this pre-flight reads no object in the live repository" held only because every earlier
-  # failure `return 0`s before that assignment — an ORDERING property nothing checked. Job 314
-  # rejected the same reasoning in this same function ("relying on 'the parent happens to go
-  # first'... is made explicit instead"). There is no reachable route to it today; this is
-  # HARDENING, and the two halves that make it real are the runtime refusal
-  # (`_cs_read_dir_isolated_or_refuse`) and a structural ordering assert in
-  # scripts/tests/test_agent_gate_component_set.sh (`3757-read-dir-ordering`), because an empty
-  # value is NOT self-protecting: `git -C ""` means the current directory.
-  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""
+  # `_CS_READ_DIR` STARTS AT THE UNSET SENTINEL, NOT AT `$REPO_ROOT` (#3757). The old initialiser
+  # made THE LIVE CHECKOUT the value every consumer would see if the scratch assignment were ever
+  # skipped, so "this pre-flight reads no object in the live repository" held only because every
+  # earlier failure `return 0`s before that assignment — an ORDERING property nothing checked.
+  # Job 314 rejected the same reasoning in this same function ("relying on 'the parent happens to
+  # go first'... is made explicit instead"). There is no reachable route to it today; this is
+  # HARDENING, and it is made real by three things rather than by tracing: the sentinel (a
+  # non-existent path, so an unguarded consumer fails CLOSED instead of reading live — see its
+  # measurement above), the named runtime refusal at the peel
+  # (`_cs_read_dir_isolated_or_refuse`), and a structural assert over this function's own body in
+  # scripts/tests/test_agent_gate_component_set.sh (`3757-read-dir-shape`).
+  _CS_READ_DIR="$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
