@@ -30,7 +30,12 @@
 ## 5. Doctrine + root cause
 - [x] 5.1 `docs/development/review-stage-reporting.md` — AC5 record with the source census and the limits
 - [x] 5.2 CLAUDE.md: the report-of-record contract in the implement-loop + flow-closer sections
-- [ ] 5.3 website `agents-developing/` page update + publish verified by NEW CONTENT served, not HTTP 200
+- [x] 5.3 website `agents-developing/` page update — `delivery-pipeline.md` (the report-of-record bullet in
+      the implement loop + the `--c-verdict` paragraph in the closer merge protocol) and
+      `gate-contract.md` (the invocation signature + the C-verdict half). **The publish-verification
+      half is POST-MERGE by construction**: the site deploys from `main`, so a `curl … | grep '<new
+      phrase>'` before the merge can only ever return 0. Run it after the merge and expect a ~3-minute
+      CDN stale window; a `0` then means not-yet-published, not published-and-wrong.
 
 ## 6. Landing coordination
 - [ ] 6.1 Coordinate the `premerge-assert.sh` arity change with #3752's `--roborev-block`-shaped flag so

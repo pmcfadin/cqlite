@@ -82,7 +82,8 @@ carry).
   and never poll a PR's own CI.
 - **Residual — re-run order.** A tier re-run *after* `required` has already gone green cannot be
   retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]
+  --c-verdict <path|AUTO>`
   remains the closer's last look — and since #3465 it is where the gate of record stops being a
   convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
   one full `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, no
@@ -106,6 +107,14 @@ carry).
   `delta-anchor:` naming exactly that anchor — an `(UNRESOLVED)` anchor refuses — and its own
   `commit:`/`tree-start:` at the certified sha. The chain is closed end to end; a delta block ALONE
   is still the #3408 escape and still refused.
+  **`--c-verdict <path|AUTO>` is REQUIRED too, and omitting it is exit 3 (#3751).** It is the C intent
+  audit's half of the same idea: a gate summary certifies that the code BUILDS AND PASSES, and nothing in
+  the merge path used to ask whether the audit of *intent* had reported at all. `AUTO` measures the routing
+  from the CERTIFIED TREE (does this branch touch `openspec/changes/`, excluding `archive/**`, between the
+  merge-base with `origin/main` and the certified sha) rather than trusting the caller, an `UNMEASURED`
+  measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
+  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Details:
+  [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
   It does not prove the change was certified against the `main` it will join: a squash-merge composes

@@ -126,8 +126,8 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
 
 - **Pre-merge SHA + gate-of-record assertion (#2456/#2668/#3465, scripted hard precondition).**
   Immediately before arming `gh pr merge --auto`, the closer does `git push`, then runs
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]` —
-  which asserts the PR is
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]
+  --c-verdict <path|AUTO>` — which asserts the PR is
   OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
   loud refusal) on a moved head, a closed/merged PR, or a gh failure.
   **The third argument is REQUIRED (#3465), and it closes TWO distinct escapes with one mechanism.**
@@ -169,6 +169,32 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   naming exactly that anchor (an `(UNRESOLVED)` anchor refuses), and its OWN `commit:`/`tree-start:`
   at the certified sha. A block carrying `nested-under:` (#2874) is refused in either shape: a nested
   sub-gate runs at the SAME tree, so the sha binding provably cannot distinguish it.
+  **`--c-verdict` IS REQUIRED AND HAS NO DEFAULT: OMITTING IT IS EXIT 3 (#3751).** The C intent audit
+  was the one certification with no step in the merge path asking for it, so a design-routed change could
+  merge on an audit that never reported — and a silent "C is not required" would reproduce, inside the
+  enforcer, the exact defect the enforcer exists to close (the #3465 precedent, one argument over). It is
+  a NAMED flag rather than a fifth positional so it composes with #3752's sibling required flag in EITHER
+  landing order, and the missing-flag census names each absent flag independently, so its exit 3 does not
+  depend on being the only required flag. **The routing is MEASURED FROM THE CERTIFIED TREE, never taken
+  from the caller** — a caller-supplied *"C does not apply here"* is precisely the escape hatch this
+  closes. `AUTO` asks git what THIS BRANCH does to `openspec/changes/`: the diff between
+  merge-base(`origin/main`, `<certified>`) and `<certified>`, with `openspec/changes/archive/**` excluded
+  (archiving is flow-finalize's work, not a routing signal). Non-empty ⇒ design-routed ⇒ **C REQUIRED**,
+  and an absent or `NOT-RUN` verdict REFUSES the merge naming the stage and the cause; empty ⇒
+  affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. A plain LISTING of
+  `openspec/changes/` cannot answer it — measured 2026-09-01, `origin/main` carries `archive` plus two
+  sibling lanes' in-flight change directories, so every branch would read design-routed and the
+  "measurement" would be vacuous — and the base is the **MERGE-BASE, never `origin/main`'s TIP** (#3392: a
+  tip comparison reports another lane's newly-landed change as a difference of THIS branch and reds a
+  correct oracle-driven PR). **Any failure to measure — no git, no `origin/main`, the certified commit
+  absent from this checkout — is `UNMEASURED` and is TREATED AS REQUIRED**: never derive a pass from the
+  absence of a bad signal. There is deliberately NO spelling of the flag that means "not applicable": a
+  supplied PATH can only carry a review-stage verdict token, so a file asserting `NOT-APPLICABLE` is
+  refused as an unrecognised token, and inapplicability is reachable ONLY through AUTO's measurement. Only
+  `PASS` and `AUTHOR-PERFORMED` proceed, and the second prints **under its own token on a
+  `PREMERGE: C-VERDICT` line, never folded into `PREMERGE: OK`** — the same reason the roborev wrapper's
+  `WAIVED` is distinct from `PASS`: a reader must be able to see that the intent audit was performed by
+  the diff's author.
   **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
   `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
   PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A
@@ -522,6 +548,41 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
 - **Review-first is the default (issue #2086).** `rust-reviewer` + roborev run on the **lite-green** diff
   **before** the first full gate, so review discovers fixable problems before we pay for the 12–25 min gate.
   Skip only for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface).
+- **Every delegated stage's verdict is a FILE, pre-stamped BEFORE the spawn (issue #3751).** A review
+  stage used to write NOTHING at any point, so its reader had only ABSENCE to reason from — and every
+  consumer of an absence has to CHOOSE how to read it. Nine measured spawns across four lanes and three
+  agent types produced no report; nine for nine the lanes recorded "not run" and disclosed it, **which is
+  discipline, not mechanism.** So `scripts/flow/review-stage.sh` transplants the gate's own idiom (#3041):
+  `open <kind> --issue <N> --agent <type>` creates the report-of-record file **before the agent is
+  spawned**, carrying a non-verdict sentinel, and prints the absolute path plus **a paste-ready clause to
+  put in the spawn prompt verbatim** — the paraphrase is what varied across the measured sessions.
+  `verdict` then emits ONE line of a CLOSED grammar — `{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}`, first
+  word, **string equality, never a prefix test** (#3544) — exiting `0/4/5/6`; `status` reports
+  elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF FIVE causes
+  (`no report written`, `report absent`, `report empty`, `report ungrammatical: <what>`,
+  `stage never opened`), because the operator action differs per cause. **An idle notice is strictly
+  WEAKER than the gate's `INCOMPLETE` sentinel** — at least the sentinel names itself a non-verdict — so
+  never read one as a completed review. Writes go under `.review-stage/`, whose ignore status is
+  **verified with `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate
+  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).
+  `verdict` establishes that a VERDICT WAS RECORDED, never that a review was PERFORMED — a report whose
+  only content is `result: PASS` reads as PASS. Where no independent audit can be obtained, the sanctioned
+  fallback is `record-author-performed --reason <why> --evidence <artifact> --performed-by author|peer`,
+  which REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
+  token `AUTHOR-PERFORMED`, never `PASS` — *an author's hand audit is not an independent one; weight it
+  accordingly*, and it is sanctioned at all because *an audit whose working is shown is auditable, whereas
+  an absent one is not*. All six pipeline-gating agent definitions carry the matching report-of-record
+  clause: the class is *spawns whose silence gates a merge*, so `flow-closer` (which owns the merge) and
+  `sstable-developer` (which had queued work it never did) are in it beside the four reviewers.
+  **The claim is about the CONSUMER and not about the agents, and stating it narrowly is the point:**
+  naming a report path was effective for `spec-auditor` and `flow-closer` and did NOTHING for
+  `rust-reviewer` (0 of 3, one of them told IN WRITING that an absent file would be recorded as a
+  non-review) — and the mechanical reason surfaced while writing that clause, which is that
+  `rust-reviewer` had **no write channel at all** (`Read, Glob, Grep`), so the contract was unsatisfiable
+  by construction. It now carries `Write` for that one purpose; that grants nothing its siblings lacked,
+  since three of the four "read-only" reviewers already carry `Bash` — **"read-only" here was always
+  prose, never a mechanism.** Full record incl. the census, the tally and the limits:
+  [`docs/development/review-stage-reporting.md`](https://github.com/pmcfadin/cqlite/blob/main/docs/development/review-stage-reporting.md).
 - **Scoped re-cert, one full gate (issue #2087).** A roborev blocker that touches src re-certifies with
   `scripts/agent-gate.sh --lite` (blast-radius-scoped) + any diff-relevant parity/integration target — NOT
   a full gate. The single full gate of record runs **once**, immediately pre-merge; lite re-certs (their
