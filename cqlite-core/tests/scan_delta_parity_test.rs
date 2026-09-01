@@ -800,10 +800,26 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 ///     FAIL, it is loud and named rather than silent, and it is unreachable in the current
 ///     corpus: no fixture uses `USING TIMESTAMP`, and the measurement below found ZERO
 ///     cells where a suppressed expiry accompanies a printed cell `tstamp`.
-///   * SECOND RESIDUAL, the worse direction, named because this list is meant to be
-///     exhaustive: the `min(…, cellMaxDeletionTime)` clamp means two DIFFERENT TTLs that
-///     both saturate produce EQUAL expiries, which this check would ACCEPT. It needs a TTL
-///     large enough to clamp (decades), and no fixture has one.
+///   * SECOND RESIDUAL, and the WORSE direction because it is SILENT: the
+///     `min(…, cellMaxDeletionTime)` clamp means two DIFFERENT TTLs that both saturate
+///     produce EQUAL expiries, which this check would ACCEPT. The clamp is version-
+///     dependent — `Cell.MAX_DELETION_TIME` = `CassandraUInt.MAX_VALUE_LONG - 2`
+///     (4294967293 s, ≈2106) when the cluster is all ≥ 5.0, else
+///     `MAX_DELETION_TIME_2038_LEGACY_CAP` = `Integer.MAX_VALUE - 1` (2147483646 s, ≈2038)
+///     — see `Cell.java:51-57` and `getVersionedMaxDeletiontionTime` at `:91-100`.
+///     MEASURED, not assumed: of the 768 suppressed expiring cells in the corpus, ZERO
+///     render an `expires_at` at either clamp value, and ZERO render one materially below
+///     their own `tstamp + ttl` (the general signature of clamping); the largest expiry
+///     anywhere in the corpus is 1782428346 s (2026-06-25), nine decades short. So it is
+///     unreachable here — but note this residual was missed by two review rounds and by
+///     the ruling that set up this comment, which is why the list below is scoped rather
+///     than closed.
+///
+/// THESE ARE THE RESIDUALS **RECOGNISED**, not a completeness claim. The clamp's
+/// interaction with the suppression rule was reasoned about here, not enumerated
+/// systematically, and a shape nobody has thought of is absent from this list rather than
+/// marked in it. Treat it the way the gate treats its own censuses (`0 RECOGNISED`, never a
+/// bare zero): evidence about what was looked for, never evidence that nothing else exists.
 ///
 /// The authoritative fix is to carry `ttl_seconds` through the delta model so the TTLs
 /// themselves can be compared; that is a public-type change, ESCALATED and deliberately
