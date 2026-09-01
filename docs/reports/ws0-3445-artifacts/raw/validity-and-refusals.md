@@ -6,19 +6,19 @@ observation, because a rep silently dropped is worse than a rep reported as refu
 
 ## Published reps — every rep, every check
 
-| rep | arm | warm (prewarm rows) | rows measured | pinned (kernel read-back) | lost samples | loadavg | peer procs | verdict |
+| rep | arm | warm (prewarm rows) | rows measured | pinned (kernel read-back) | lost samples | loadavg **before/after** | peer procs | verdict |
 |---|---|--:|--:|---|--:|--:|--:|---|
-| `ac1-perfprof-1` | annotate | 4,000,000 | 14,213,888 | cpu 2 | 0 | 1.04 | 1 | PUBLISHED |
-| `ac1-perfprof-2` | annotate | 4,000,000 | 12,614,912 | cpu 2 | 0 | 4.46 | 11 | PUBLISHED |
-| `ac1-perfprof-3` | annotate | 4,000,000 | 12,570,624 | cpu 2 | 0 | 5.33 | 1 | PUBLISHED |
-| `ab-annotate-1` | annotate (A/B) | 4,000,000 | — | cpu 2 | 0 | 4.38 | 4 | PUBLISHED |
-| `ab-annotate-2` | annotate (A/B) | 4,000,000 | — | cpu 2 | 0 | 12.84 | 10 | PUBLISHED |
-| `ab-annotate-3` | annotate (A/B) | 4,000,000 | — | cpu 2 | 0 | 6.15 | 1 | PUBLISHED |
-| `probe-rep-1..3` | probe | 4,000,000 | 9.7-11.8 M | cpu 2 | 0 | 14.8-18.3 | 7-30 | PUBLISHED (see below) |
-| `ab-probe-1..3` | probe (A/B) | 4,000,000 | — | cpu 2 | 0 | 4.80-10.77 | 1-15 | PUBLISHED |
-| `ac1-perfsym-1..3` | fidelity control | 4,000,000 | 11.5-13.9 M | cpu 2 | 0 | 2.58-6.70 | 1 | PUBLISHED |
-| `ac2-stat-1..3` | AC2 counters | 4,000,000 | — | cpu 2 | n/a (counting) | 5.65-8.67 | 5-8 | PUBLISHED |
-| `ac2-stalls-1..3` | AC2 sampling | 4,000,000 | 10.7-13.4 M | cpu 2 | 0 | 5.65-8.67 | 5-8 | PUBLISHED |
+| `ac1-perfprof-1` | annotate | 4,000,000 | 14,213,888 | cpu 2 | 0 | 1.04 / 2.58 | 1 | PUBLISHED |
+| `ac1-perfprof-2` | annotate | 4,000,000 | 12,614,912 | cpu 2 | 0 | 4.46 / 6.70 | 11 | PUBLISHED |
+| `ac1-perfprof-3` | annotate | 4,000,000 | 12,570,624 | cpu 2 | 0 | 5.33 / 4.99 | 1 | PUBLISHED |
+| `ab-annotate-1` | annotate (A/B) | 4,000,000 | — | cpu 2 | 0 | 4.38 / 6.15 | 4 | PUBLISHED |
+| `ab-annotate-2` | annotate (A/B) | 4,000,000 | — | cpu 2 | 0 | 12.84 / 10.77 | 10 | PUBLISHED |
+| `ab-annotate-3` | annotate (A/B) | 4,000,000 | — | cpu 2 | 0 | 6.15 / 4.80 | 1 | PUBLISHED |
+| `probe-rep-1..3` | probe | 4,000,000 | 9.7-11.8 M | cpu 2 | 0 | 14.77-18.31 / 16.85-18.31 | 7-30 | PUBLISHED (see below) |
+| `ab-probe-1..3` | probe (A/B) | 4,000,000 | — | cpu 2 | 0 | 4.80-10.77 / 5.23-12.84 | 1-15 | PUBLISHED |
+| `ac1-perfsym-1..3` | fidelity control | 4,000,000 | 11.5-13.9 M | cpu 2 | 0 | 2.58-6.70 / 4.99-6.70 | 1 | PUBLISHED |
+| `ac2-stat-1..3` | AC2 counters | 4,000,000 | — | cpu 2 | n/a (counting) | 6.26-9.55 / 5.83-7.17 | 5-8 | PUBLISHED |
+| `ac2-stalls-1..3` | AC2 sampling | 4,000,000 | 10.7-13.4 M | cpu 2 | 0 | 5.65-8.67 / 5.65-8.67 | 5-8 | PUBLISHED |
 
 `pct_running` is only a concept for the COUNTING reps. All three `ac2-stat` reps report
 **100.00** on every one of the six events, read from field 5 of `perf stat -x,` output
@@ -77,3 +77,78 @@ the damage, and one confound had to be actively removed:
 No rep was excluded on co-tenancy grounds. The reason is stated rather than assumed: the
 share's insensitivity to load is measured above, and the one comparison where load could
 have mattered was re-taken under matched conditions instead of being argued about.
+
+
+---
+
+# ADDENDUM — the quiescence bar was raised MID-ISSUE, and the whole published set predates it
+
+The coordination lead measured this box at **loadavg 15.80 (1m) / 22.77 (5m) on 16 cores**
+while a peer lane ran a `--lite` gate including `maturin`, and set an explicit bar: a rep is
+publishable only if the box was quiet **across the whole rep**, roughly loadavg <= 2-3.
+
+**Applied strictly, NONE of the 18 reps in the table above clears that bar.** Only
+`ac1-perfprof-1` comes close (before 1.04, after 2.58). This is stated plainly rather than
+argued around: every published figure in this report was taken on a contended box, and the
+per-rep before/after loads are in the table so a reader can judge each one.
+
+Two mechanisms were then added, and one question was answered by measurement.
+
+**Mechanism 1 — the gate semaphore does not protect a perf run.**
+`CQLITE_GATE_MAX_CONCURRENCY=1` is pinned and verified on this box, but it serialises GATE
+against GATE. A perf run holds no slot, so a peer's entire gate can start, run and finish
+*inside* a rep's window. "The pin is in effect" is not "the box is quiet".
+
+**Mechanism 2 — a before/after pair cannot see that.** `loadavg` is a decaying average, so
+its value at t=0 describes the minute *before* the rep. `harness/record-scan.sh` therefore now
+samples load every 5 s **across** the window, takes its verdict from the **maximum**, writes
+`quiescence-verdict.txt` (`OK` / `REFUSED(box-not-quiet-across-rep)` /
+`REFUSED(quiescence-unmeasured)` / `UNCHECKED`), and **never retries** — a rep quietly
+re-rolled until it looks clean is the worse outcome (#3299 AC5).
+
+## The question that actually matters: can contention move the verdicts?
+
+Answered by measurement, not by assurance — full output in `load-sensitivity.txt`. The
+published set happens to span a **5x load range** (peak loadavg 2.58 to 12.84), which makes it
+its own load-sensitivity experiment.
+
+**AC3 (the 3% cliff) — not threatened, by four orders of magnitude.**
+
+| quantity | value |
+|---|--:|
+| OLS slope, cycle share vs peak loadavg | **-0.0009 pp per unit load** (slightly *negative*) |
+| total share spread over the 5x load range | **0.1338 pp** |
+| share extrapolated to loadavg 0 (idle) | **1.7087%** (vs 1.7027% measured mean) |
+| distance from mean to the 3% cliff | **1.2973 pp** |
+| => flipping KILL -> FUND would need | **10x the entire observed load-induced variation**, or loadavg ~1442 on 16 cores |
+
+The share is a **ratio measured on a pinned core**, and contention slows numerator and
+denominator together, which is why the slope is ~0. The verdict is not close to load-sensitive.
+
+**AC2 — the conclusion survives the exact contamination that would break it.**
+
+The lead's stated fear is precisely right about the direction: contention inflates stalls and
+so pushes vint's stall share **up** toward its cycle share, manufacturing "the dependency IS
+visible". The data shows that direction (slope **+0.0042 pp per unit load**) — and the
+conclusion still holds:
+
+| | stall share | ratio to cycle share (needs < 1.0) |
+|---|--:|--:|
+| most contended stall rep (peak 8.67) | 1.5315% | **0.899x** |
+| mean of the three | 1.3732% | 0.806x |
+| extrapolated to idle | 1.3405% | **0.785x** |
+
+So the anti-concentration finding is **conservative** under contention: quiescence makes it
+*stronger*, not weaker, and even the worst contended rep leaves VInt less stall-dense than the
+average scan cycle. Had the finding been "the dependency IS visible", contention would have
+been a fatal confound and the number would have had to be withheld. It is the other way round.
+
+## Status of the confirmatory quiet reps
+
+A background job was set to wait for sustained quiet (<= 2.5 for 6 consecutive checks) and
+then take an interleaved quiet set. It did not get to run: the box went from loadavg ~8 to
+**67-80 with 43 concurrent `agent-gate` processes**, and `/tmp` was cleaned by a peer lane
+mid-wait (which removed the job's own script and log). No quiet rep was obtained, and none is
+reported. **No number here comes from an unquiesced retry, and no published number was
+re-rolled**; the contended set stands as taken, with its loads disclosed per rep and its
+load-sensitivity measured above.

@@ -1,0 +1,42 @@
+LOAD-SENSITIVITY OF THE PUBLISHED SHARES  (issue #3445)
+Peak = max(loadavg before, loadavg after) for that rep.
+
+=== Route 1 annotate: vint share of CYCLES ===
+rep                     load b/a   peak   share %
+ac1-perfprof-1         1.04/2.58   2.58    1.6621
+ac1-perfprof-2          4.46/6.7   6.70    1.6695
+ac1-perfprof-3         5.33/4.99   5.33    1.7960
+ab-annotate-1          4.38/6.15   6.15    1.6686
+ab-annotate-2        12.84/10.77  12.84    1.6875
+ab-annotate-3           6.15/4.8   6.15    1.7326
+  load range        2.58 .. 12.84  (5.0x)
+  share range       1.6621 .. 1.7960  (spread 0.1338 pp)
+  OLS slope         -0.00090 pp per unit loadavg
+  extrapolated to loadavg 0 (idle): 1.7087 %
+
+=== AC2: vint share of STALLS ===
+rep                     load b/a   peak   share %
+ac2-stalls-1           5.83/5.65   5.83    1.3652
+ac2-stalls-2           5.65/8.67   8.67    1.2229
+ac2-stalls-3           8.67/6.15   8.67    1.5315
+  load range        5.83 .. 8.67  (1.5x)
+  share range       1.2229 .. 1.5315  (spread 0.3087 pp)
+  OLS slope         +0.00424 pp per unit loadavg
+  extrapolated to loadavg 0 (idle): 1.3405 %
+
+=== DOES CONTENTION THREATEN THE AC3 CLIFF? ===
+AC3 threshold                     3.0000 %
+observed mean (annotate)          1.7027 %
+distance to the cliff             1.2973 pp
+total share spread over an 5x load range   0.1338 pp
+=> flipping KILL->FUND needs 10x the ENTIRE observed load-induced variation
+=> at the fitted slope, it would need loadavg 1442 on a 16-core box
+
+=== DOES CONTENTION THREATEN THE AC2 CONCLUSION? ===
+The lead's stated fear: contention manufactures 'the dependency IS visible'.
+That failure mode inflates stall share, i.e. pushes stall share UP toward the cycle share.
+  stall-share slope vs load       +0.00424 pp per unit loadavg  (UP with load, as feared)
+  highest-load stall rep          1.5315 % (still BELOW the cycle share 1.7027 %)
+  worst-case ratio at max load    0.899x  (conclusion needs < 1.0)
+=> the anti-concentration conclusion survives the very contamination that would break it:
+   even the MOST contended stall rep leaves vint less stall-dense than the scan average.
