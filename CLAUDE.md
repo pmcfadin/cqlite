@@ -1406,7 +1406,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   never the id alone** — `roborev show <id> --json | jq '.job | {id, git_ref, branch, status,
   token_usage}'`, because `show` NESTS those fields under `.job` and carries `source_machine_id`
   NOWHERE, while `roborev list --json --repo <abs> --branch <branch>` rows carry the daemon id and
-  `list` filters by the CURRENT BRANCH by default. **A LOCAL ROW COUNT IS NOT EVIDENCE OF
+  `list` filters by the CURRENT BRANCH by default. **Read `.job`, never a `show` payload's TOP-LEVEL
+  `id`**: that is the REVIEW row's own sequence and need not be the job you asked for (measured over
+  ten records — asking for 9 returns `id=8`, `job_id=9`, `job.id=9`), so a top-level jq manufactures
+  the very "is this the right review?" doubt the check exists to remove. The wrapper is unaffected —
+  `find_job` matches `id`/`job_id`/`job` and then prefers the object carrying `git_ref` — so this is
+  a trap for the human running the check by hand, not a live false `STALE`. **A LOCAL ROW COUNT IS NOT EVIDENCE OF
   UNIQUENESS**: `roborev list … | jq '[.[] | select(.id==N)] | length'` returns `1` whether or not
   another box holds that id, because `list` only ever sees the LOCAL daemon — another probe whose
   output is IDENTICAL under the two states it claims to separate (the `RESULT: INCOMPLETE` launch

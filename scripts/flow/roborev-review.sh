@@ -496,12 +496,18 @@ of a collision; reading it as one cost a valid waiver a round. The check that se
     roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
     roborev list --json --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref, branch}'
 
-git_ref MUST equal the marker's <base40>..<head40>. TWO TRAPS IN THOSE COMMANDS, both
+git_ref MUST equal the marker's <base40>..<head40>. THREE TRAPS IN THOSE COMMANDS, all
 measured on roborev v0.61.2: (1) 'show <id> --json' NESTS git_ref/status/token_usage
 under '.job' and does not carry source_machine_id ANYWHERE, so a top-level jq over that
 payload prints nulls for all four — a check whose output cannot show what it claims;
 (2) 'roborev list' filters by the CURRENT BRANCH by default, so pass --branch explicitly
-or a correct query returns null.
+or a correct query returns null; (3) the TOP-LEVEL 'id' of a 'show' payload is the REVIEW
+row's own sequence and is NOT necessarily the job you asked for — measured over ten
+records, asking for 9 returns id=8 with job_id=9 and job.id=9. So read '.job' (or
+'job_id'), never the top-level 'id', or the answer manufactures exactly the "is this the
+right review?" doubt this section exists to remove. The wrapper is unaffected: its
+extractor matches id/job_id/job and then PREFERS the object carrying git_ref, so it lands
+on the job row either way — this is a trap for the HUMAN running the check by hand.
 
 AND A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS. This, which reads like a collision
 check, is not one:
@@ -1346,6 +1352,15 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
     local json=""
     case "$payload" in
       show) json=$(roborev show "$1" --json 2>/dev/null || printf '') ;;
+      # ===== THIS READ IS CURRENT-BRANCH-SCOPED, AND DELIBERATELY UNCHANGED (#3654) =====
+      # `roborev list` defaults to "the current repo AND branch" (measured: a bare
+      # `roborev list --json`, and the form below, both return `null` from a branch with no jobs,
+      # while adding `--branch <other>` returns that branch's rows). It is correct here BY
+      # CONSTRUCTION — the wrapper enqueued the review FOR this branch, so the record it is looking
+      # for is on it — and it must NOT grow a `--branch` here: `sha-assert` depends on this read,
+      # and naming the branch is behaviour-neutral only while the invoking cwd's branch equals
+      # `$BRANCH`. Changing it is a separate question from #3654. The supplementary machine read
+      # below is a NEW read and does name the branch; the difference is deliberate and documented there.
       list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
     esac
     extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE" || continue
@@ -1377,11 +1392,25 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
 # move a verdict. It runs AFTER the record poll loop has settled, so it also cannot perturb the
 # transient-read modelling above it. A failure here is not an error — it yields no id, and the key
 # says so affirmatively.
+#
+# IT NAMES THE BRANCH, AND THE RECORD READ ABOVE DOES NOT. `roborev list` filters by the CURRENT
+# BRANCH by default, and this wrapper is invoked from arbitrary directories with an explicit
+# `--repo` — so a default-scoped read here would resolve nothing whenever the invoking cwd's branch
+# is not the branch under review, and `job-machine:` would read `NOT RECORDED` for a reason that has
+# nothing to do with the record. Naming `$BRANCH` removes that dependence. It is safe HERE and not
+# above precisely because this read is new and informational: nothing asserts on its result, and its
+# worst case is the affirmative `NOT RECORDED` state.
+#
+# BOUNDED CASES WHERE IT LEGITIMATELY DOES NOT RESOLVE, so the state is read as information and not
+# as a defect: a roborev build whose `list` rows do not carry `source_machine_id`; a branch with more
+# than `--limit 50` jobs, which pushes this record off the read; and a `--recheck-job` of a job that
+# was enqueued for a DIFFERENT branch. Each lands on `NOT RECORDED`, which is why that value names
+# the payload that carries the field rather than merely reporting an absence.
 read_machine_fact() { # read_machine_fact <job> -> prints the daemon uuid, or nothing
   local mfacts="$FACTS_FILE.machine" mprompt="$FACTS_FILE.machine.prompt" json="" id=""
   id=$(fact source_machine_id)
   if [ -n "$id" ]; then printf '%s' "$id"; return 0; fi
-  json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '')
+  json=$(roborev list --json --limit 50 --repo "$REPO" --branch "$BRANCH" 2>/dev/null || printf '')
   [ -n "$json" ] || return 1
   : >"$mfacts"
   : >"$mprompt"

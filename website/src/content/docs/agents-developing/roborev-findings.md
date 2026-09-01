@@ -333,6 +333,15 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    roborev list --json --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref}'
    ```
 
+   **Read `.job`, never a `show` payload's top-level `id`.** That field is the *review* row's own
+   sequence and need not be the job you asked for — measured over ten records, asking for 9 returns
+   `id=8` with `job_id=9` and `job.id=9` — so a top-level jq manufactures exactly the "is this the right
+   review?" doubt the check exists to remove. The wrapper is unaffected (`find_job` matches
+   `id`/`job_id`/`job` and then **prefers the object carrying `git_ref`**, so it lands on the job row
+   either way): this is a trap for the human running the check by hand, not a live false `STALE`. For the
+   same reason, do not reach for the top-level `uuid` as a machine proxy — `job.uuid` does not exist, the
+   nested row is what is selected, and the fact would render blank.
+
    **A local row count is not evidence of uniqueness.** `roborev list … | jq '[.[] | select(.id==N)] |
    length'` returns `1` whether or not another box holds that id, because `list` only ever sees the **local**
    daemon — one more probe whose output is **identical under the two states it claims to separate** (the
