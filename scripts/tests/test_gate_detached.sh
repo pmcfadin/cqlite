@@ -2980,15 +2980,32 @@ fi
 # invocation). Through `-v` that anchor would never match its own source line, and the case would
 # report "the site moved" about a launcher that had not changed — a false FAIL from the test's own
 # plumbing. ENVIRON[] is verbatim.
-_inject_before() {  # <tag> <exact-anchor-line> <injected-line> -> prints copy path | rc 1 if anchor not unique
-  local tag="$1" d n
-  d="$TMP/inj-$tag/scripts/flow"                 # .../scripts/flow so the copy derives the same REPO_ROOT shape
+# AND THE COPY'S `REPO_ROOT` IS PINNED TO THE REAL CHECKOUT (roborev job 50 on this change, Low).
+# The launcher derives it from its OWN path, so a copy under $TMP derives a root holding neither
+# `scripts/agent-gate.sh` nor `scripts/gate-liveness.sh`: the unit would start and die instantly, and
+# 4b.212 would then reach the post-launch refusal because the gate CANNOT RUN — passing while proving
+# nothing about a gate that started successfully. A case that reaches its assertion by the wrong route
+# is the same defect as one that never reaches it. 4b.212b is the positive control for this pin.
+# The substitution is VERIFIED to have applied (exactly one matching line), because a reworded
+# derivation would silently restore the broken root.
+_inject_before() {  # <tag> <exact-anchor-line> <injected-line> -> prints copy path | rc 1 on any unmet precondition
+  local tag="$1" d n m
+  d="$TMP/inj-$tag/scripts/flow"                 # .../scripts/flow so the copy derives a REPO_ROOT of the same shape
   mkdir -p "$d" || return 1
   n=$(_INJ_A="$2" awk '$0==ENVIRON["_INJ_A"]{c++} END{print c+0}' "$LAUNCHER")
   [ "$n" = 1 ] || return 1
   _INJ_A="$2" _INJ_I="$3" awk '{ if ($0==ENVIRON["_INJ_A"]) print ENVIRON["_INJ_I"]; print }' \
       "$LAUNCHER" > "$d/gate-detached.sh" || return 1
+  _pin_repo_root "$d/gate-detached.sh" || return 1
   printf '%s' "$d/gate-detached.sh"
+}
+_pin_repo_root() {  # <copy-path> — replace the self-derived REPO_ROOT with this checkout's
+  local f="$1" n
+  n=$(awk '/^REPO_ROOT=\$\(cd /{c++} END{print c+0}' "$f")
+  [ "${n:-0}" = 1 ] || return 1
+  _PIN_R="$REPO_ROOT" awk '{ if ($0 ~ /^REPO_ROOT=\$\(cd /) printf "REPO_ROOT=%c%s%c\n", 34, ENVIRON["_PIN_R"], 34
+                             else print }' "$f" > "$f.pin" && mv "$f.pin" "$f" || return 1
+  grep -qxF "REPO_ROOT=\"$REPO_ROOT\"" "$f" || return 1
 }
 # NEGATIVE CONTROL. A bare "no locks survived" is not evidence on its own: an assertion that can
 # never fail passes for free. Neutering every CALL (never the definition) must make the same
@@ -3076,7 +3093,7 @@ else
 fi
 
 if [ "$HAVE_SYSTEMD" != yes ]; then
-  skip=$((skip+4)); echo "SKIP 4b.206-4b.210 (no user systemd manager on this host)"
+  skip=$((skip+7)); echo "SKIP 4b.207-4b.212b (no user systemd manager on this host)"
 else
   # (a) THE LATE SYMLINK REFUSAL — released only `$_reserve`, leaving the heartbeat and log markers.
   _f3a=$(_inject_before symlink-race 'if [ -L "$LOGFILE" ]; then' \
@@ -3177,11 +3194,14 @@ else
     _f3es="$TMP/f3e-sum"; _f3el="$TMP/f3e.log"
     _f3eo=$(bash "$_f3e" --summary "$_f3es" --log "$_f3el" -- --only fmt 2>&1); _f3er=$?
     _f3eleft=$(_locks_left "$_f3es" "$_f3el")
-    if [ "$_f3er" != 0 ] && [ -n "$_f3eleft" ]; then
+    # ALL THREE, not "at least one" (roborev job 50 on this change, Medium). `-n` passes when a single
+    # marker survives, and releasing two of three admits a peer onto a LIVE gate's other two artifacts
+    # — the whole failure this branch is conditional for. The count is the requirement.
+    if [ "$_f3er" != 0 ] && [ "$(_locks_count "$_f3eleft")" = 3 ]; then
       ok "4b.211 a failed systemd-run KEEPS the reservation when the unit is live/unmeasurable ($(_locks_count "$_f3eleft") held)"
     else
       bad "4b.211 a failed systemd-run keeps the reservation when the unit is live/unmeasurable" \
-          "exit $_f3er released everything: the rollback is unconditional, so a LIVE unit's paths go to a peer"
+          "exit $_f3er held $(_locks_count "$_f3eleft") of 3: a partial release still hands a LIVE unit's paths to a peer"
     fi
   fi
   # (e) AND THE POST-LAUNCH REFUSAL MUST KEEP THE WHOLE SET — asserted BEHAVIOURALLY, because 4b.214
@@ -3207,6 +3227,27 @@ else
       bad "4b.212 the post-launch heartbeat refusal keeps the whole reservation" \
           "exit $_f3fr held: $(printf '%s' "$_f3fleft" | tr '\n' ' ') out=$(printf '%s' "$_f3fo" | head -2)"
     fi
+  fi
+  # POSITIVE CONTROL FOR THE COPIES THEMSELVES. 4b.212 only means what it says if an UNINJECTED copy
+  # launches a gate that DOES become monitorable — otherwise its refusal is an artifact of running a
+  # copy at all, and the case would pass on a launcher that had lost the injected line entirely. The
+  # copy is built through the same helper (so it carries the same REPO_ROOT pin) with the injection
+  # aimed at a line whose only effect is a comment: nothing about the launcher's behaviour changes.
+  _f3g=$(_inject_before control-nochange 'if [ "$_hb_seen" -ne 1 ]; then' ':   # INJECTED: no-op') || _f3g=""
+  if [ -z "$_f3g" ]; then
+    bad "4b.212b control: an UNINJECTED copy still launches a monitorable gate" \
+        "could not build the control copy"
+  else
+    _f3gs="$TMP/f3g-sum"; _f3gl="$TMP/f3g.log"
+    _f3go=$(bash "$_f3g" --summary "$_f3gs" --log "$_f3gl" -- --only fmt 2>&1); _f3gr=$?
+    _f3gu=$(printf '%s' "$_f3go" | sed -n 's/^unit:  *//p'); [ -n "$_f3gu" ] && echo "$_f3gu" >> "$UNITS_FILE"
+    if [ "$_f3gr" = 0 ]; then
+      ok "4b.212b control: an uninjected copy launches a MONITORABLE gate, so 4b.212's refusal is the injection's"
+    else
+      bad "4b.212b control: an uninjected copy launches a monitorable gate" \
+          "exit $_f3gr: 4b.212 may be reaching its refusal because a COPY cannot run a gate at all. out=$(printf '%s' "$_f3go" | head -3)"
+    fi
+    [ -n "$_f3gu" ] && systemctl --user stop "$_f3gu" >/dev/null 2>&1
   fi
 fi
 # DRIFT ALARM, and DECLARED AS ONE: this counts call sites, it does not prove the span is covered.
