@@ -2771,7 +2771,7 @@ runpin() {
     PATH="$shims" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envfile" \
     ${pin_env[@]+"${pin_env[@]}"} \
-    timeout -s KILL 300 "$PIN_BS" "$root/scripts/bootstrap-agent-machine.sh" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$root/scripts/bootstrap-agent-machine.sh" \
       --skip-smoke ${pin_flags[@]+"${pin_flags[@]}"} 2>&1
 }
 
@@ -2940,7 +2940,7 @@ else
   envf_j="$tmp/pin-env-j"; : >"$envf_j"
   out_j=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_j" \
-    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
       --skip-smoke --skip-gate-pin 2>&1)
   if printf '%s' "$out_j" | grep -qE '\[warn\].*gate-pin: OPT-OUT' \
      && ! printf '%s' "$out_j" | grep -qE '\[ok\].*gate-pin'; then
@@ -3129,7 +3129,7 @@ else
     # shellcheck disable=SC2086
     pin_t_out=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$tmp/pin-env-t" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke $pin_order 2>&1)
     pin_t_rc=$?
     if [ "$pin_t_rc" -eq 2 ] && printf '%s' "$pin_t_out" | grep -q 'contradictory'; then
@@ -3546,7 +3546,7 @@ else
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     out_ak=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
     if printf '%s' "$out_ak" | grep -q 'gate-pin: SKIPPED' \
        && printf '%s' "$out_ak" | grep -q 'PRIVILEGED write' \
@@ -3580,7 +3580,7 @@ else
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     out_am=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER=cqlite-no-such-account-3414 \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
        && printf '%s' "$out_am" | grep -qE 'does not resolve to an account|INCONSISTENT sudo metadata' \
@@ -3592,7 +3592,7 @@ else
     fi
     out_an=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER="$(id -un)" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_an" | grep -q "the account that invoked sudo"; then
       ok "gate-pin: a resolvable sudo invoker becomes the probe subject, and the run says so"
@@ -3620,7 +3620,7 @@ else
     out_at=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" PATH="$pin_liar:$PATH" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
     if printf '%s' "$out_at" | grep -q 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
@@ -3637,7 +3637,7 @@ else
     #      wrong-subject defect the retarget exists to fix, wearing the retarget's clothes.
     out_au=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_UID=1000 SUDO_USER=root \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_au" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
        && printf '%s' "$out_au" | grep -q 'INCONSISTENT sudo metadata' \
@@ -3651,7 +3651,7 @@ else
     # 11av. ...and root invoking sudo (SUDO_UID=0) tells us nothing about a gate's account.
     out_av=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_UID=0 SUDO_USER=root \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_av" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
        && printf '%s' "$out_av" | grep -q 'sudo was invoked BY root'; then
@@ -3759,12 +3759,12 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   envf_ba="$tmp/pin-env-ba"; rm -f "$envf_ba"
   out_ba=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_ba" \
-    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --fix-gate-pin 2>&1)
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --fix-gate-pin 2>&1)
   ba_created=0; [ -s "$envf_ba" ] && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_ba" && ba_created=1
   envf_bb="$tmp/pin-env-bb"; rm -f "$envf_bb"
   out_bb=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_bb" \
-    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
   if [ "$ba_created" = 1 ] \
      && printf '%s' "$out_ba" | grep -q 'CREATED' \
      && [ ! -e "$envf_bb" ] \
@@ -3957,10 +3957,10 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   out_k=$(env -u CQLITE_BOOTSTRAP_TEST_MODE \
     PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$envf_k" \
-    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
   out_k2=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="relative/env" \
-    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
   if printf '%s' "$out_k" | grep -q 'gate-pin: SKIPPED' \
      && printf '%s' "$out_k2" | grep -q 'gate-pin: SKIPPED' \
      && ! printf '%s' "$out_k" | grep -qE '\[ok\].*gate-pin'; then

@@ -2289,7 +2289,13 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # destination correct BY CONSTRUCTION — `ln` links the inode, so it carries this mode
       # from the instant it appears — and removes the need for any rollback at all.
       chmod 0644 "$t" 2>/dev/null || true
-      [ "$(stat -c %a "$t" 2>/dev/null)" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
+      # PORTABLE MODE READ (roborev job 330, Medium). `stat -c` is GNU-only; BSD/macOS `stat`
+      # rejects it. The PRODUCTION path is Linux-gated, but the TEST SEAM stubs `uname` to
+      # simulate Linux while linking the HOST copy of `stat`, so on a macOS host this check would
+      # fail-closed (exit 6) and the create would never happen — a break that the Linux-only
+      # justification does not cover. GNU first, BSD fallback; `stat -f %Lp` is the BSD spelling.
+      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null)
+      [ "$_pm" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
       ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
       rm -f "$t" 2>/dev/null
     ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null
