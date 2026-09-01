@@ -99,8 +99,9 @@ fi
 #
 # Every entry here is a schema the corpus or the node suite resolves, so dropping ANY of them
 # stops the #3148 preflight guarding a file something reads.
-for _req in basic-types.cql da-test.cql oa-test.cql write-test.cql \
-            time-series.cql wide-table-bti.cql collections.cql wide-rows.cql; do
+REQUIRED_SCHEMAS=(basic-types.cql da-test.cql oa-test.cql write-test.cql
+                  time-series.cql wide-table-bti.cql collections.cql wide-rows.cql)
+for _req in "${REQUIRED_SCHEMAS[@]}"; do
   case " ${CANONICAL[*]} " in
     *" $_req "*) : ;;
     *) echo "FAIL - $_req is no longer in the gate's CANONICAL_SCHEMA_FILES; the #3148 preflight" >&2
@@ -110,12 +111,112 @@ for _req in basic-types.cql da-test.cql oa-test.cql write-test.cql \
   esac
 done
 
+# And a FLOOR on the hand-named list itself. The loop above is satisfied vacuously by an
+# EMPTY REQUIRED_SCHEMAS, and the `-ne 8` check below measures the DERIVED list, not this
+# one — so shrinking the authority silently weakens every assertion that rests on it,
+# which is #3544's "a green tally over a shrunken suite" one list over. A second
+# hand-maintained number is the point: both have to be edited deliberately.
+if [ "${#REQUIRED_SCHEMAS[@]}" -ne 8 ]; then
+  echo "FAIL - REQUIRED_SCHEMAS has ${#REQUIRED_SCHEMAS[@]} entries, this test expects 8." >&2
+  echo "       This list is the hand-named AUTHORITY for what the #3148 preflight must guard;" >&2
+  echo "       shrinking it makes the membership loop above pass over fewer schemas. If a" >&2
+  echo "       schema was genuinely added or removed, change the count here in the same diff." >&2
+  exit 1
+fi
+
 # And the reverse direction: an ADDITION to production must be acknowledged here too, or this
 # list silently stops being the complete set it claims to be.
 if [ "${#CANONICAL[@]}" -ne 8 ]; then
   echo "FAIL - the gate's CANONICAL_SCHEMA_FILES has ${#CANONICAL[@]} entries, this test expects 8." >&2
   echo "       If a schema was added, add it to the required list above — deliberately." >&2
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# #3642 (residual 3 of #3493): a ONE-DIRECTIONAL derivation, restoring the detection the
+# hand-named list gave up.
+#
+# The list above is hand-named ON PURPOSE — deriving BOTH sides is the tautology that made
+# an earlier version unable to fail, because removing a schema from production removed it
+# from the expectation too. But hand-naming cost a real detection: a NINTH schema
+# referenced by bindings/node/__test__/setup.js without being added to
+# CANONICAL_SCHEMA_FILES is no longer noticed, and the #3148 preflight then stops guarding
+# a file the node suite resolves — its absence surfacing as a mid-suite jest failure
+# instead of a named preflight FAIL.
+#
+# So the derivation runs in ONE DIRECTION only: read what setup.js actually references and
+# require that set to be a SUBSET of the hand-named authority. The authority is never
+# derived, so a deletion from production still reds; an ADDITION to the node suite now
+# reds too, until someone adds it here deliberately.
+#
+# THE DERIVATION REFUSES RATHER THAN YIELDING AN EMPTY SET. A subset assert over an empty
+# left-hand side is vacuously true, so a setup.js this extractor cannot parse would
+# silently turn this case into a no-op — the "positive verdict from an unmeasured signal"
+# family this repo fails closed on. Unreadable file, or zero schemas extracted, is a FAIL
+# naming the derivation.
+#
+# SCOPED TO setup.js, deliberately. Since #3493 round 10 every schema the node suite reads
+# must come from setup.js's resolver (write.test.js used to build the path itself, which
+# BYPASSED CQLITE_SCHEMAS_ROOT). Individual suites that create their own single-table .cql
+# fixtures under test-data/schemas — issue-3504-udt-collision.cql and friends — are NOT in
+# CANONICAL_SCHEMA_FILES and are not this preflight's subject; they resolve through
+# global.testPaths.SCHEMAS_DIR, not through the canonical set.
+#
+# _setup_js_schemas <file> — the .cql basenames <file> resolves through SCHEMAS_DIR, one
+# per line, sorted and deduped. `//`-commented lines are skipped: a commented-out
+# reference is not a reference, and counting one would red a correct tree.
+_setup_js_schemas() { # <setup.js path>
+  grep -v '^[[:space:]]*//' "$1" 2>/dev/null \
+    | grep -o "path\.join(SCHEMAS_DIR,[[:space:]]*['\"][^'\"]*\.cql['\"]" \
+    | sed "s/.*['\"]\([^'\"]*\.cql\)['\"]\$/\1/" \
+    | sort -u
+}
+
+# _schemas_not_in_authority <setup.js path> — echo the referenced schemas that are NOT in
+# REQUIRED_SCHEMAS, or the token `__DERIVATION_FAILED__` when nothing could be extracted.
+_schemas_not_in_authority() { # <setup.js path>
+  local _f=$1 _n _extra=""
+  if [ ! -r "$_f" ]; then printf '__DERIVATION_FAILED__'; return 0; fi
+  local _refs; _refs=$(_setup_js_schemas "$_f")
+  if [ -z "$_refs" ]; then printf '__DERIVATION_FAILED__'; return 0; fi
+  while IFS= read -r _n; do
+    [ -n "$_n" ] || continue
+    case " ${REQUIRED_SCHEMAS[*]} " in
+      *" $_n "*) : ;;
+      *) _extra="$_extra $_n" ;;
+    esac
+  done <<< "$_refs"
+  printf '%s' "${_extra# }"
+}
+
+SETUP_JS="$REPO/bindings/node/__test__/setup.js"
+sjs_extra=$(_schemas_not_in_authority "$SETUP_JS")
+if [ "$sjs_extra" = "__DERIVATION_FAILED__" ]; then
+  bad "3642-setupjs-derivation: could not extract any SCHEMAS_DIR .cql reference from $SETUP_JS — REFUSING to report a subset over an empty set, which would be vacuously true. Fix the extractor (_setup_js_schemas) or the file."
+elif [ -n "$sjs_extra" ]; then
+  bad "3642-setupjs-subset: setup.js resolves schema(s) the #3148 preflight does not guard:$sjs_extra. Either add them to CANONICAL_SCHEMA_FILES in agent-gate.sh AND to REQUIRED_SCHEMAS above (deliberately, in the same diff), or stop resolving them through setup.js — otherwise their absence surfaces as a mid-suite jest failure instead of a named preflight FAIL."
+else
+  ok "3642-setupjs-subset: every schema setup.js resolves ($(_setup_js_schemas "$SETUP_JS" | tr '\n' ' ' | sed 's/ $//')) is covered by the hand-named REQUIRED_SCHEMAS"
+fi
+
+# DISCRIMINATION CONTROL. A subset assert that has never been seen to fail is not
+# evidence: an extractor whose pattern no longer matches reports "all covered" for every
+# input, which is the exact failure mode the refusal above guards against in one direction
+# and this guards in the other. A scratch copy of setup.js gains a NINTH schema reference,
+# and the check must NAME it.
+sjs_planted="$tmp/setup-ninth.js"
+if [ -r "$SETUP_JS" ]; then
+  cp "$SETUP_JS" "$sjs_planted"
+  printf "\nconst SCHEMA_NINTH = path.join(SCHEMAS_DIR, 'ninth-schema.cql');\n" >> "$sjs_planted"
+  sjs_planted_extra=$(_schemas_not_in_authority "$sjs_planted")
+  case " $sjs_planted_extra " in
+    *" ninth-schema.cql "*)
+      ok "3642-setupjs-discriminates: a planted ninth schema reference in setup.js is detected and NAMED" ;;
+    *)
+      bad "3642-setupjs-discriminates: a planted ninth-schema.cql reference was NOT detected (got '${sjs_planted_extra:-<none>}'); the subset check would pass over the very drift it exists for" ;;
+  esac
+else
+  bad "3642-setupjs-discriminates: $SETUP_JS is unreadable, so the discrimination control could not run"
 fi
 
 # A dataset root whose canonical corpus IS present, so the #2078 corpus guard is
