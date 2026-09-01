@@ -6,7 +6,7 @@ observation, because a rep silently dropped is worse than a rep reported as refu
 
 ## Published reps — every rep, every check
 
-| rep | arm | warm (prewarm rows) | rows measured | pinned (kernel read-back) | lost samples | loadavg **before/after** | peer procs | verdict |
+| rep | arm | warm (prewarm rows) | rows measured | pinned (kernel read-back) | lost samples | loadavg **before/after (ENDPOINT reads — see gap note)** | peer procs | verdict |
 |---|---|--:|--:|---|--:|--:|--:|---|
 | `ac1-perfprof-1` | annotate | 4,000,000 | 14,213,888 | cpu 2 | 0 | 1.04 / 2.58 | 1 | PUBLISHED |
 | `ac1-perfprof-2` | annotate | 4,000,000 | 12,614,912 | cpu 2 | 0 | 4.46 / 6.70 | 11 | PUBLISHED |
@@ -142,6 +142,39 @@ So the anti-concentration finding is **conservative** under contention: quiescen
 *stronger*, not weaker, and even the worst contended rep leaves VInt less stall-dense than the
 average scan cycle. Had the finding been "the dependency IS visible", contention would have
 been a fatal confound and the number would have had to be withheld. It is the other way round.
+
+## DECLARED GAP — the quiescence check is PROSPECTIVE; the published reps were not validated by it
+
+Stated as its own heading, not a footnote, because a report implying a control the measurement
+did not have is worse than one declaring the gap.
+
+**The `loadavg before/after` column above is an ENDPOINT PAIR, not an across-rep bound.** It is
+exactly the read that `harness/record-scan.sh`'s own header now calls insufficient: loadavg is a
+decaying average, so the "before" value describes the minute *preceding* the rep, and a peer
+gate can start and finish inside the window without either endpoint moving.
+
+So, precisely:
+
+* **No load data was captured DURING any published rep.** The across-window sampler, the
+  `quiescence-verdict.txt` file and the non-zero refusal exit were all added AFTER the published
+  reps were taken, in `528a1515a` and `519447871`. They are **prospective only**.
+* **No published rep carries a quiescence verdict**, and replaying the new check against the
+  endpoint data is not the same test — so the honest answer to "would any published rep be
+  refused under the new check?" is: **on the endpoint data available, all of them would be**
+  (every rep's endpoint peak exceeds the 3.0 bound; only `ac1-perfprof-1` at 2.58 is close), and
+  **the across-rep data the new check actually reads does not exist for them.**
+* What the published reps WERE validated by: `pct_running == 100.00%` on all six events (rules
+  out counter multiplexing, the usual contention artifact), warm (a full untimed prewarm pass
+  every rep), pinned to one core with affinity read back from the kernel, 0 lost samples, >= 3
+  reps per arm, and the interleaved A/B design for the cross-route comparison.
+* What they were NOT validated by: an across-rep load bound.
+
+The basis for trusting the verdict anyway is measured, not asserted, in `load-sensitivity.txt`
+and summarised in the report: the share is a **ratio on a pinned core**, its slope against peak
+load is **-0.0009 pp per unit** over a 5x load range, and flipping the pre-registered verdict
+needs 10x the entire observed load-induced variation. A reader who rejects that argument should
+treat the numbers as provisional pending a quiesced re-run; the mechanism to do that re-run is
+now in the tree and refuses non-zero if the box is not quiet.
 
 ## Status of the confirmatory quiet reps
 

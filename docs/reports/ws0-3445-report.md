@@ -1,20 +1,29 @@
 # WS0 #3445 — bounding the INLINED VInt-decode share of scan on-CPU
 
-**Verdict: KILL.** VInt decode is **1.70% of bare-scan on-CPU** (annotate route, mean of 6
-warm pinned reps, range 1.66–1.80%), against a **pre-registered 3% fund/kill threshold**.
-No VInt-targeted lever may be filed citing this issue.
+**Verdict: KILL** under the pre-registered definition. VInt decode is **1.70% of bare-scan
+on-CPU** (annotate route, mean of 6 warm pinned reps, 1.66-1.80%), against a **pre-registered
+3% fund/kill threshold**. No VInt-targeted lever may be filed citing this issue.
+
+**Read the denominator before quoting the number.** "Share of scan on-CPU" is measured against
+**all** cycles in the window, libc and kernel included, which is what the issue's wording says
+and is the basis the verdict is taken on. **42.8% of those cycles are outside the measured
+binary** and are structurally unreachable by the attribution, so on an **in-binary basis the
+same numerator is 2.98%** — 0.02 pp under the same cliff. Both figures are reported throughout;
+the pre-registered basis is primary, and the choice between them is the single largest
+judgement call in this report (§2.4). It is **not mine to make**: the owner is being asked to
+rule on which denominator the pre-registered 3% governs.
 
 Epic #2817. Sibling of #3248 (encode side, same method). Measurement only: **no production
 code changed by this PR.**
 
 | | value |
 |---|---|
-| **AC1 — Route 1 (PRIMARY), `perf annotate` / DWARF inline chain** | **1.7027%** mean (1.6621–1.7960, stdev 0.052, n=6) |
-| AC1 — Route 1, wide boundary (decoder + nom adapters) | 1.7378% mean (1.6941–1.8352) |
-| **AC1 — Route 2 (CROSS-CHECK), `#[inline(never)]` probe** | **2.2624%** mean (2.1541–2.4583, stdev 0.120, n=6) |
-| **AC1 — quantified disagreement** | **+0.56 pp pooled / +0.65 pp matched-co-tenancy; probe reads 1.33–1.38× HIGH** |
-| **AC2 — stall attribution** | **Visible and measurably ANTI-concentrated**: 1.3732% of stalls vs 1.7027% of cycles = **0.806× the scan average stall density** |
-| **AC3 — verdict vs pre-registered 3%** | **KILL**, by 1.30 pp |
+| **AC1 — Route 1 (PRIMARY), `perf annotate` / DWARF inline chain** | **1.7027%** of total on-CPU (1.6621-1.7960, sd 0.052, n=6) · **2.9779%** in-binary (2.9262-3.1259) |
+| AC1 — Route 1, wide boundary (decoder + nom adapters) | 1.7378% total-basis |
+| **AC1 — Route 2 (CROSS-CHECK), `#[inline(never)]` probe** | **2.2624%** total-basis (2.1541-2.4583, sd 0.120) · 3.9763% in-binary |
+| **AC1 — quantified disagreement** | **+0.56 pp / 1.329x** on the total basis; **+1.00 pp / 1.335x** in-binary — the RATIO is stable across bases, so the disagreement is a property of the probe, not of the denominator |
+| **AC2 — stall attribution** | **NOT CONFIRMED — at the scan average.** Like-for-like (both on the in-binary basis) stalls/cycles = **1.061x**. Neither concentrated nor anti-concentrated |
+| **AC3 — verdict vs pre-registered 3%** | **KILL** on the pre-registered total basis (1.70%, margin 1.30 pp). **MARGINAL** on an in-binary basis (2.98% mean, reps 2.93-3.13 straddle the line; probe route 3.98%) |
 | AC4 — mission doc | **untouched**; it contains zero VInt claims (`grep -c -i vint` = 0), so no published number moves |
 
 Corpus: the pinned #3096 `ws0.events` — 4,000,000 rows / 40,000 partitions / 12 cells per
@@ -105,6 +114,59 @@ so the disagreement is a property of the inline attribute, not of the machine.
 **Both routes agree on the only thing that matters here: the share is under 3%.** The probe's
 structurally inflated ceiling (2.46% at its worst rep) still does not reach the threshold.
 
+### 2.4 The denominator — the largest judgement call in this report
+
+Stated explicitly because it moves the headline by 1.75x and was disclosed nowhere in the first
+version of this report.
+
+`vint_share.py` can only attribute a sample it can ask DWARF about, which means a sample **in
+the measured binary**. Every other sample — libc `malloc`/`free`/`memcpy`, the kernel — is
+counted in the denominator and is unreachable by the numerator:
+
+| | mean |
+|---|--:|
+| cycles outside the measured binary (cycles reps) | **42.83%** |
+| cycles outside the measured binary (stall reps) | **56.47%** |
+| in-binary cycles with NO DWARF inline chain | **0.0000%** |
+
+So there are two defensible denominators, and they answer different questions:
+
+| basis | annotate route | what it means |
+|---|--:|---|
+| **total on-CPU** (all DSOs) — *the pre-registered basis* | **1.7027%** | of everything the scan does on-CPU |
+| **in-binary** | **2.9779%** | of the cycles the attribution can actually see |
+
+The issue's wording is "share of scan on-CPU", so the total basis is primary and the verdict is
+taken on it. Neither is wrong; quoting one without naming it is.
+
+**Both bases UNDERCOUNT VInt, and the direction is knowable even where the size is not.** §6
+records that the multi-byte path issues a dynamic-length `call memcpy@GLIBC`, and 44.4% of
+decodes take it. Those callee cycles execute **in libc**, so they are off-binary: attributed to
+neither basis' numerator, and to the total basis' denominator. Bounding it from the profile:
+
+* Cycles at unsymbolised libc addresses total **12.69%** of scan on-CPU. These split by region
+  into a memcpy/memmove family (`__nss_database_lookup + 0x19xxx`, glibc's signature for the
+  ifunc-resolved SIMD implementations) at **8.89%**, and a malloc-region family
+  (`__default_morecore + 0x8xx`) at **3.78%**.
+* **8.89% is therefore a hard CEILING** on VInt's hidden memcpy cost — and a very loose one,
+  because a scan copies row and cell bytes on many paths and VInt's copies are 1-8 bytes each.
+* The exact split is **UNMEASURED**. Getting it needs call-graph attribution of libc frames to
+  their callers, which this lane did not run (the box could not be quiesced, §7), and #3248's
+  precedent treats call-graph runs as structural evidence only. It is stated as unmeasured
+  rather than estimated.
+
+The undercount cannot change the verdict on the pre-registered basis: adding the *entire*
+8.89% ceiling to 1.70% gives 10.6% — but that figure is meaningless, since almost all of that
+memcpy is other callers' work. What it does mean is that **1.70% is a floor, not a ceiling**,
+in exactly the way #3027's 0.74% was, one level down. This is the residual this issue reduced
+rather than eliminated.
+
+Blocker note: the no-DWARF-chain undercount, which could in principle have been large, is
+**measured at 0.0000% of in-binary cycles** — every sampled in-binary address resolved to an
+inline chain. The ~12% of unsymbolised addresses visible in the profile are all *libc*, i.e.
+already off-binary and already counted above. `vint_share.py` now refuses above a stated bound
+rather than folding such addresses silently into "not VInt".
+
 ### The pipeline was validated against an independent instrument
 
 On the probe binary, `decode_unsigned` is out-of-line, so `perf` can attribute it with no
@@ -112,9 +174,14 @@ inline-chain reasoning at all. The two methods agree to within **0.01 pp** on al
 (1: 2.1541 vs 2.15; 2: 2.1575 vs 2.16; 3: 2.2349 vs 2.23). That is the strongest evidence here
 that the DWARF pipeline is measuring what it claims.
 
-## 3. #3027's hypothesis about WHERE the cycles were is falsified
+## 3. #3027's hypothesis has two halves; one is falsified and one is not confirmed
 
-This is the substantive correction, and it is the opposite shape from what #3027 expected.
+#3027 supposed (a) that the hidden VInt cycles were inside `parse_row_data_with_offset_impl`'s
+9.64%, and (b) that the serial dependency "would show up as ILP stalls inside that 9.6%".
+**(a) is falsified by direct measurement. (b) is NOT confirmed and NOT falsified** — VInt
+stalls at the scan average (§4), and the instrument here cannot resolve a few-percent effect.
+Only (a) is settled below, and it is a caller-attribution fact that does not depend on any
+denominator choice.
 
 | host function | share of vint cycles | of scan on-CPU | #3027's figure for that symbol |
 |---|--:|--:|--:|
@@ -128,65 +195,114 @@ functions #3027 had already named at 0.87% and 0.74%. The inlining blind spot wa
 was worth about **2.2× the 0.74% floor** — not the order of magnitude the blind spot left room
 for.
 
+Both `%of scan on-CPU` columns above are on the pre-registered **total** basis, so they are
+directly comparable with #3027's own figures, which were taken the same way.
+
 **No published number moves.** #3027's measurements (0.74%, 9.64%) remain correct; what is
-falsified is an inference in its narrative about where the hidden cycles must be. Per AC4 this
-report does not edit that document, and the mission doc contains no VInt claim at all.
+falsified is half (a) of an inference in its narrative about where the hidden cycles must be.
+Per AC4 this report does not edit that document, and the mission doc contains no VInt claim at
+all.
 
 ## 4. AC2 — the stall attribution statement
 
-**Answer: the serial-dependency cost is NOT visible as concentrated stall cycles. It is
-measurably anti-concentrated, and this is a measured negative rather than an unmeasurable.**
+**Answer: NOT CONFIRMED. The VInt decode chain stalls at the scan average — 1.061x — so the
+serial dependency is neither visible as concentrated stall cycles nor measurably absent.**
 
-This host exposes no `topdown.slots` and `perf stat -M TopdownL1` is unavailable, so AC2 cannot
-be answered in Topdown's frontend/backend vocabulary. It is answered instead by **sampling on
-the stall event itself** (`cycle_activity.stalls_total`, which IS available and IS samplable)
-and attributing stalls through the *same* inline chain as cycles — which makes vint's share of
-stalls directly comparable to its share of cycles.
+### This section previously said the opposite, and the correction is the important part
 
-| quantity | mean | 
+The first version of this report claimed the dependency was "measurably ANTI-concentrated" at
+**0.806x**, i.e. that VInt was *less* stall-bound than the average scan cycle. **That was
+wrong, and it was wrong for a reason worth recording:** it divided two shares whose
+**denominators differ**.
+
+| | vint share | out-of-binary cycles in those reps |
+|---|--:|--:|
+| cycles reps | 1.7027% of total | **42.83%** |
+| stall reps | 1.3732% of total | **56.47%** |
+
+Off-binary work (malloc, libc, kernel) stalls *more* than the measured binary does, so the
+stall reps carry a larger unreachable denominator. Dividing `1.3732 / 1.7027` therefore
+measured the difference between two denominators and reported it as a property of VInt. On a
+like-for-like basis:
+
+| basis | cycle share | stall share | ratio |
+|---|--:|--:|--:|
+| in-binary (correct — same denominator both sides) | 2.9779% | 3.1601% | **1.061x** |
+| total (WRONG — different denominators) | 1.7027% | 1.3732% | 0.806x |
+
+**1.061x is parity.** VInt stalls in proportion to the cycles it consumes.
+
+This is the same failure shape as the two PIE-rebase errors in §7 — a complete, confident,
+wrong table — with one difference that matters: the rebase self-check *caught* those, and
+nothing caught this, because a self-check guards the mechanism it wraps and not the arithmetic
+a human later builds on its output. The `denominator_note` field now shipped in every result
+JSON, and the separate `*_in_binary` figures, exist so the mistake is not available to make.
+
+### What is measurable, and what is not
+
+| quantity | value |
 |---|--:|
-| vint share of **cycles** | 1.7027% |
-| vint share of **stalls** | 1.3732% (1.3652 / 1.2229 / 1.5315) |
-| **relative stall density** | **0.806×** the scan average |
+| vint share of cycles, in-binary | 2.9779% |
+| vint share of `cycle_activity.stalls_total`, in-binary | 3.1601% (2.7865-3.6172, n=3) |
+| **ratio** | **1.061x** |
+| whole-scan IPC | 2.41 |
+| whole-scan `stalls_total` / cycles | 28.98% |
+| whole-scan `stalls_l1d_miss` / cycles | 7.30% |
+| whole-scan `int_misc.recovery_cycles` / cycles | 2.14% |
 
-Whole-scan context, all three counting reps at **100.00% `pct_running`** on six events: IPC
-**2.41**, `stalls_total` 28.98% of cycles, `stalls_l1d_miss` 7.30%, `int_misc.recovery_cycles`
-2.14%. This is not a stall-dominated workload, and the VInt chain is *less* stall-bound than
-its average cycle.
+All three counting reps report **100.00% `pct_running`** on all six events, so none of this is
+a multiplexing artifact.
 
-Instruction granularity agrees. Within the region the stall distribution tracks the cycle
-distribution — `bswap` carries 70.5% of vint stalls against 72.7% of vint cycles (ratio 0.97)
-— so no instruction in the decode is disproportionately stall-bound. The larger ratios in the
-per-opcode table (`not` 5.1×, `test` 7.3×, `bsr` 5.5×) sit on opcodes carrying 0.26%, 0.12%
-and 0.06% of vint cycles; they are noise and are recorded as such rather than quoted.
+Instruction granularity is consistent with parity: within the region the stall distribution
+tracks the cycle distribution (`bswap` 70.5% of vint stalls against 72.7% of vint cycles,
+ratio 0.97). The larger per-opcode ratios (`not` 5.1x, `test` 7.3x, `bsr` 5.5x) sit on opcodes
+carrying 0.26%, 0.12% and 0.06% of vint cycles and are noise, recorded rather than quoted.
 
-**The bound on this answer, stated because it is real.** `cycle_activity.stalls_total` counts
-cycles in which no uops are delivered. A dependency chain in a short region surrounded by
-independent work can have its latency *hidden* by that work and never register as a stall. So
-the defensible claim is the one made above — at both whole-scan and instruction granularity the
-dependency is not visible as excess stall cycles — and **not** the stronger claim that no
-latency exists. Separating hidden latency from absent latency needs precise events or Topdown
-slots, and **this host has neither**; that part is **unmeasurable here**, and is reported as
-unmeasurable rather than as zero.
+**The bound on this answer.** This host exposes no `topdown.slots` and no PEBS, so AC2 cannot
+be answered in Topdown's frontend/backend vocabulary and sample IPs are not precise.
+`cycle_activity.stalls_total` counts cycles in which no uops are delivered, so a dependency
+chain whose latency is *hidden* by surrounding independent work never registers as a stall.
+The defensible claim is therefore the one above — **at parity, dependency not confirmed** — and
+**not** that no dependency latency exists. Separating hidden latency from absent latency needs
+precise events or Topdown slots, and this host has neither: that part is **unmeasurable here**,
+and is reported as unmeasurable rather than as zero. Given the ratio is 1.06x and the rep
+spread on the stall side is wide (2.79-3.62%, sd 0.42), a real effect of a few percent would
+sit inside this instrument's noise, which is the honest resolution limit.
 
 ## 5. AC3 — the pre-registered verdict
 
 > If VInt share on the annotate route is < 3% of scan on-CPU, the verdict is **KILL** and no
 > VInt lever may be filed citing this issue.
 
-Annotate route: **1.7027%**. **1.30 pp below the threshold. The verdict is KILL.**
+Annotate route, on the basis the threshold was registered against ("share of scan on-CPU", so
+all cycles in the window): **1.7027%**. **1.30 pp below the threshold. The verdict is KILL.**
 
-It does not depend on any judgement call in the method:
+**It is robust to every choice inside the method EXCEPT the denominator**, and an earlier
+version of this report wrongly claimed it depended on no judgement call at all. Sensitivity,
+worst case in each row:
 
-* widest single annotate rep: 1.7960% — KILL
-* wide boundary (decoder + nom adapters), worst rep: 1.8352% — KILL
-* skid band, worst *narrow* edge over all annotate reps: 1.8369% — KILL
-* skid band on the *wide* boundary, worst edge (the most permissive figure this method can
-  produce at all): 1.8880% — KILL
-* even the cross-check probe, which is *known* to inflate: 2.2624% mean, 2.4583% worst — KILL
+| variation | worst figure | verdict |
+|---|--:|---|
+| widest single annotate rep | 1.7960% | KILL |
+| wide boundary (decoder + nom adapters), worst rep | 1.8352% | KILL |
+| skid band, worst *narrow* edge | 1.8369% | KILL |
+| skid band, worst *wide* edge (most permissive within the basis) | 1.8880% | KILL |
+| cross-check probe, known to inflate | 2.4583% | KILL |
+| no-DWARF-chain cycles (measured undercount, §2.4) | 0.0000% | no effect |
+| **in-binary denominator, mean** | **2.9779%** | **KILL by 0.02 pp** |
+| **in-binary denominator, worst rep** | **3.1259%** | **ABOVE the line** |
+| **in-binary denominator, probe route** | **3.9763%** | **ABOVE the line** |
 
-For a VInt lever to be worth funding it would have to remove more than the entire measured
-cost of VInt decoding, twice over.
+So: **on the pre-registered basis the verdict is KILL with a 1.30 pp margin and nothing in the
+method threatens it. On an in-binary basis it is MARGINAL** — the mean sits 0.02 pp under the
+cliff, individual reps cross it, and the probe route is well over. Which denominator the
+pre-registered 3% governs is a question about the pre-registration, **not a measurement
+question, and not mine to settle**; it is with the owner. Both numbers are stated so the ruling
+can be applied without re-measuring.
+
+One thing the in-binary reading does *not* do is make a lever attractive: even at 2.98% the
+entire cost of VInt decoding would have to be removed, and §6 shows 55.6% of decodes never
+touch the expensive path.
 
 ## 6. What a future lever would have faced, recorded so the KILL is informative
 
@@ -254,6 +370,13 @@ gate against gate; a perf run holds no slot). Applied strictly to the >= 2-3 loa
   gives ratio **0.899x**, the mean 0.806x, and the idle extrapolation **0.785x**. Quiescence
   would make this finding *stronger*, not weaker. Had it come out the other way, the number
   would have had to be withheld.
+
+**The quiescence check is PROSPECTIVE and the published reps were not validated by it** — this
+is declared as its own heading in `raw/validity-and-refusals.md`. No load data was captured
+*during* any published rep; the per-rep `loadavg` figures are endpoint pairs, which is the read
+the harness header itself calls insufficient. On that endpoint data every published rep would be
+refused by the new bound. What they *were* validated by: `pct_running == 100.00%`, warm, pinned
+with kernel read-back, 0 lost samples, >= 3 reps, and interleaved A/B for the route comparison.
 
 Confirmatory quiet reps were attempted and **not obtained**: the box went to loadavg 67-80 with
 43 concurrent `agent-gate` processes and a peer's `/tmp` cleanup removed the waiting job. None

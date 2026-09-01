@@ -208,26 +208,34 @@ def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict
         fa = ip - base
         by_addr[fa] += period
         if fa not in persym:
-            m = re.match(r"^(.*)\+0x[0-9a-f]+$", " ".join(parts[2:]).rsplit(" (", 1)[0])
-            persym[fa] = m.group(1) if m else ""
+            m = re.match(r"^(.*)\+0x([0-9a-f]+)$", " ".join(parts[2:]).rsplit(" (", 1)[0])
+            persym[fa] = (m.group(1), int(m.group(2), 16)) if m else ("", None)
     return by_addr, persym, total, other, unparsed
 
 
-def verify_base(persym: dict[int, str], sym_addrs: list[int], syms: list[tuple[int, str]]) -> tuple[int, int]:
-    """Do nm and perf agree about which symbol each computed file address lies in?"""
+def verify_base(persym: dict[int, tuple[str, int | None]], sym_addrs: list[int],
+                syms: list[tuple[int, str]]) -> tuple[int, int]:
+    """Is the PIE rebase right? Answered by ADDRESS, not by comparing two demanglers.
+
+    perf reports each sample as `symbol + symoff`, so `file_addr - symoff` is where perf
+    thinks that symbol STARTS, in file-address space. If the rebase is correct that value
+    must land exactly on a symbol start in nm's table. Exact arithmetic on both sides, and
+    no dependence on how anything is spelled.
+
+    Two name-based versions were tried and both were wrong instruments:
+      * bidirectional substring -- accepts `foo` against `foo_inner`, i.e. a genuinely
+        wrong symbol, which is what this check exists to reject;
+      * normalised equality -- REJECTED 32 of 3430 addresses on this binary where perf
+        renders LLVM's local-copy suffix (`…::clone.3959`) and nm renders `…::clone`. A
+        pure rendering difference, so that version red on correct input.
+    Comparing addresses removes the whole class: there is nothing left to spell.
+    """
+    starts = set(sym_addrs)
     ok = bad = 0
-    for fa, pname in persym.items():
-        if not pname:
+    for fa, (pname, symoff) in persym.items():
+        if not pname or symoff is None:
             continue
-        i = bisect.bisect_right(sym_addrs, fa) - 1
-        nname = syms[i][1] if i >= 0 else ""
-        # perf and nm render templates/closures slightly differently, so compare on a
-        # normalised form rather than demanding byte equality of two demanglers -- but
-        # require EQUALITY of that normalised form. A bidirectional substring test (the
-        # first version) would accept `foo` against `foo_inner`, i.e. a genuinely wrong
-        # symbol, which is precisely what this check exists to reject.
-        norm = lambda s: re.sub(r"[<>\s]", "", s)
-        if nname and norm(nname) == norm(pname):
+        if (fa - symoff) in starts:
             ok += 1
         else:
             bad += 1

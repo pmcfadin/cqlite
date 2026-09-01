@@ -1,47 +1,33 @@
-========================================================================
-ROUTE 1 (PRIMARY) — annotate / DWARF inline-chain attribution
+==========================================================================
+#3445 FINAL STATISTICS (corrected: both denominators reported separately)
+==========================================================================
 
-narrow (decoder proper)  (n=6)
-   ac1-perfprof-1     1.6621%
-   ac1-perfprof-2     1.6695%
-   ac1-perfprof-3     1.7960%
-   ab-annotate-1      1.6686%
-   ab-annotate-2      1.6875%
-   ab-annotate-3      1.7326%
-   mean 1.7027%   median 1.6785%  min 1.6621  max 1.7960  stdev 0.0524
+ROUTE 1 annotate (cycles)  (n=6)
+  TOTAL-basis     mean 1.7027%  range 1.6621-1.7960  stdev 0.0524
+  IN-BINARY basis mean 2.9779%  range 2.9262-3.1259  stdev 0.0785
+  outside-binary  mean 42.83%   no-DWARF-chain mean 0.0000% of in-binary
 
-wide (decoder + nom adapters)  (n=6)
-   ac1-perfprof-1     1.6941%
-   ac1-perfprof-2     1.7002%
-   ac1-perfprof-3     1.8352%
-   ab-annotate-1      1.7064%
-   ab-annotate-2      1.7282%
-   ab-annotate-3      1.7627%
-   mean 1.7378%   median 1.7173%  min 1.6941  max 1.8352  stdev 0.0539
+ROUTE 2 inline(never) probe  (n=6)
+  TOTAL-basis     mean 2.2624%  range 2.1541-2.4583  stdev 0.1202
+  IN-BINARY basis mean 3.9763%  range 3.8326-4.2316  stdev 0.1639
+  outside-binary  mean 43.13%   no-DWARF-chain mean 0.0000% of in-binary
 
-========================================================================
-ROUTE 2 (CROSS-CHECK) — #[inline(never)] probe build
+AC2 stall event  (n=3)
+  TOTAL-basis     mean 1.3732%  range 1.2229-1.5315  stdev 0.1545
+  IN-BINARY basis mean 3.1601%  range 2.7865-3.6172  stdev 0.4216
+  outside-binary  mean 56.47%   no-DWARF-chain mean 0.0000% of in-binary
 
-decode_unsigned symbol share  (n=6)
-   probe-rep-1        2.1541%
-   probe-rep-2        2.1575%
-   probe-rep-3        2.2349%
-   ab-probe-1         2.2166%
-   ab-probe-2         2.4583%
-   ab-probe-3         2.3530%
-   mean 2.2624%   median 2.2257%  min 2.1541  max 2.4583  stdev 0.1202
+==========================================================================
+AC1 DISAGREEMENT (like-for-like, each basis compared with ITSELF)
+  TOTAL basis     annotate 1.7027  probe 2.2624  delta +0.5597 pp  ratio 1.329x
+  IN-BINARY basis annotate 2.9779  probe 3.9763  delta +0.9984 pp  ratio 1.335x
 
-========================================================================
-DISAGREEMENT (route2 - route1, narrow):  +0.5597 pp   ratio 1.329x
-  matched-co-tenancy A/B pairs only:
-    annotate mean 1.6962%  probe mean 2.3426%  delta +0.6464 pp  ratio 1.381x
+==========================================================================
+AC2 STALL vs CYCLE CONCENTRATION — the CORRECTED computation
+  WRONG (as first published): stall total-basis / cycle total-basis
+     1.3732 / 1.7027 = 0.806x   <-- denominators DIFFER (outside-binary 56.47% vs 42.83%)
+  CORRECT: both on the IN-BINARY basis
+     3.1601 / 2.9779 = 1.061x
 
-========================================================================
-AC2 — stall attribution
-  vint share of cycle_activity.stalls_total: 1.3652% / 1.2229% / 1.5315%
-  mean 1.3732%  vs cycle share mean 1.7027%
-  relative stall density = 0.806x the scan average
-
-========================================================================
-AC3 pre-registered threshold: 3.00%   annotate route mean: 1.7027%
-VERDICT: KILL  (margin 1.30 pp below threshold; even the probe's inflated 2.26% and the widest single rep 1.84% stay under 3%)
+==========================================================================
+AC3 vs pre-registered 3%: total-basis 1.7027% => KILL ; in-binary 2.9779% => KILL

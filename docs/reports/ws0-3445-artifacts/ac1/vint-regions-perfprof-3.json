@@ -19,8 +19,12 @@
   },
   "cycle_weighted": {
     "cycles_total_all_dsos": 87976583550,
+    "cycles_in_binary": 50546909828,
     "vint_cycles": 1580028440,
+    "no_chain_cycles": 0,
+    "no_chain_pct_of_in_binary": 0.0,
     "vint_pct_of_total": 1.7959647627166808,
+    "vint_pct_of_in_binary": 3.1258655482135085,
     "by_opcode": [
       {
         "opcode": "bswap",
