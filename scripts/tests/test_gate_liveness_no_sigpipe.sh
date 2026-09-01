@@ -47,7 +47,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=13
+CASE_FLOOR=14
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -77,7 +77,10 @@ print_scope() {
   printf '           1. A builtin feeding an UNRECOGNISED short-circuiting reader is NOT DETECTED.\n'
   printf '              The reader set above is a recognised list, not a proof about every command\n'
   printf '              that can exit before EOF; a new one passes unseen until it is added here.\n'
-  printf '           2. The scan is LEXICAL and per-line. It does NOT tokenise bash: a writer split\n'
+  printf '           2b. Command segments are split on ; && || LEXICALLY. A separator inside a quoted
+              string or a command substitution splits where bash would not, so such a line
+              may be mis-segmented in EITHER direction. There are none in the subject today.
+           2. The scan is LEXICAL and per-line. It does NOT tokenise bash: a writer split\n'
   printf '              across a line continuation, hidden behind a function, or fed from a process\n'
   printf '              substitution is NOT recognised.\n'
   printf '           3. Comments are NOT stripped beyond whole-line ones. A `|` followed by a\n'
@@ -109,27 +112,35 @@ violations() {
   awk '
     { line = $0 }
     line ~ /^[[:space:]]*#/ { next }
-    line !~ /(^|[^[:alnum:]_.\/-])(printf|echo)[[:space:]]/ { next }
     {
-      rest = line
-      gsub(/\|\|/, "\001", rest)        # a logical OR is not a pipe
-      n = split(rest, seg, "|")
-      if (n < 2) next
-      hazard = 0
-      for (i = 2; i <= n; i++) {
-        s = seg[i]
-        sub(/^[[:space:]]+/, "", s)
-        sub(/^&[[:space:]]*/, "", s)     # `|&` redirects stderr too; still a pipe
-        sub(/^[[:space:]]+/, "", s)
-        if (match(s, /^[A-Za-z_][A-Za-z0-9_.-]*/) == 0) continue
-        w = substr(s, 1, RLENGTH)
-        if (w == "head")                                              hazard = 1
-        else if (w == "grep" && s ~ /(^|[[:space:]])-[A-Za-z]*[qm]/)  hazard = 1
-        else if (w == "read")                                         hazard = 1
-        else if (w == "sed"  && s ~ /(^|[;'\''"[:space:]])[0-9]*q([;'\''"[:space:]]|$)/) hazard = 1
-        else if (w == "awk"  && s ~ /exit/)                           hazard = 1
+      # Split the line into COMMAND SEGMENTS first, then test each independently. A writer in one
+      # command and a pipeline in a LATER one are not a hazard (measured false positive: a command
+      # substitution, a semicolon, then an unrelated pipeline into grep -q) -- but a hazard in a
+      # later segment is STILL a hazard, so this must SPLIT rather than TRUNCATE. Truncating at the
+      # first separator was tried and silently dropped a real site; case 9b pins that direction.
+      work = line
+      gsub(/&&/, ";", work)
+      gsub(/\|\|/, ";", work)          # a logical OR separates commands; it is not a pipe
+      ncmd = split(work, cmd, ";")
+      for (c = 1; c <= ncmd; c++) {
+        if (cmd[c] !~ /(^|[^[:alnum:]_.\/-])(printf|echo)[[:space:]]/) continue
+        n = split(cmd[c], seg, "|")
+        if (n < 2) continue
+        for (i = 2; i <= n; i++) {
+          s = seg[i]
+          sub(/^[[:space:]]+/, "", s)
+          sub(/^&[[:space:]]*/, "", s)   # `|&` redirects stderr too; still a pipe
+          sub(/^[[:space:]]+/, "", s)
+          if (match(s, /^[A-Za-z_][A-Za-z0-9_.-]*/) == 0) continue
+          w = substr(s, 1, RLENGTH)
+          if (w == "head")                                              hazard = 1
+          else if (w == "grep" && s ~ /(^|[[:space:]])-[A-Za-z]*[qm]/)  hazard = 1
+          else if (w == "read")                                         hazard = 1
+          else if (w == "sed"  && s ~ /(^|[;\'"'"'"[:space:]])[0-9]*q([;\'"'"'"[:space:]]|$)/) hazard = 1
+          else if (w == "awk"  && s ~ /exit/)                           hazard = 1
+        }
       }
-      if (hazard) printf "%d:%s\n", NR, line
+      if (hazard) { printf "%d:%s\n", NR, line; hazard = 0 }
     }
   ' "$file"
 }
@@ -245,9 +256,26 @@ _fp_case() { # _fp_case <n> <label> <line-of-bash>
   fi
 }
 _fp_case 6 "a pipe inside the FORMAT STRING"        "printf 'a | b\\n'"
-_fp_case 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with |'
+_fp_case 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with | pipes in it'
 _fp_case 8 "a pipe inside a QUOTED ARGUMENT"        'echo "col1|col2"'
-_fp_case 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | thing'
+# NOTE: the reader here is DELIBERATELY a recognised one (`grep -q`). With a non-reader such as
+# `thing` this case passes on the reader requirement alone and never exercises the `;` handling it
+# claims to test -- a case passing for the wrong reason.
+_fp_case 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | grep -q x'
+
+# ---------------------------------------------------------------------------
+# 9b. CONVERSE CONTROL. Cases 6-9 assert the matcher stays QUIET on correct code; alone they are
+#    satisfiable by a matcher that has stopped matching anything. This asserts the other
+#    direction on the same shapes: a quoted pipe, and a `;`, must NOT MASK a genuine
+#    builtin-into-short-circuiting-reader pipeline on the same line.
+# ---------------------------------------------------------------------------
+printf '#!/usr/bin/env bash\n%s\n%s\n' 'echo "col1|col2" | grep -q x' 'printf %s "$v"; :; printf %s\n "$t" | head -1' >"$tmp/conv.sh"
+conv_n=$(violations "$tmp/conv.sh" | grep -c .)
+if [ "$conv_n" -eq 2 ]; then
+  ok "9b converse control: neither a quoted pipe nor a \`;\` masks a real hazardous pipeline"
+else
+  bad "9b converse control" "expected 2 real sites, matcher found $conv_n — the narrowing in cases 6-9 has gone too far and is now hiding genuine #3803 sites"
+fi
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
