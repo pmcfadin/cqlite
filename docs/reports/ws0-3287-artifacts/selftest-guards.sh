@@ -67,6 +67,7 @@ mk_env() { # $1 dir
 #                                                    size other than the one asked for
 #        SHIM_GATE_ABSURD=1                       -> gate-probe instruction counts whose
 #                                                    ratio exceeds the 100x work ratio
+#        SHIM_GATE_RATIO=<n>                      -> gate-probe ratio of exactly <n>x
 args=("$@")
 if [[ " ${args[*]} " == *" --version "* ]]; then echo "perf version shim"; exit 0; fi
 if [[ " ${args[*]} " == *" list "* ]]; then
@@ -149,6 +150,8 @@ for e in "${evs[@]}"; do
       elif [ -n "${SHIM_GATE_ABSURD:-}" ]; then
         # ratio 1e6 between the two gate probes: impossible for a 100x work ratio
         if [ "$accesses" = 1000 ]; then v=1; else v=1000000; fi
+      elif [ -n "${SHIM_GATE_RATIO:-}" ]; then
+        if [ "$accesses" = 1000 ]; then v=1000; else v=$(( 1000 * SHIM_GATE_RATIO )); fi
       else v=$((accesses*6)); fi ;;
     cycles:u)                v=$((accesses*30)) ;;
     cycle_activity.stalls_total:u)   v=$((accesses*20)) ;;
@@ -215,6 +218,68 @@ gateline() { grep -E "$2" "$1/out/host/differential.txt" 2>/dev/null | head -1; 
 
 # =============================================================================
 echo "== #3287 capability-probe.sh guard selftest =="
+# Does this host offer a COMPLETE sibling group that is online AND in our affinity?
+# The probe's own Gate D predicate (roborev job 320): "cpu N has >1 sibling" is not
+# "a complete group is available" — in a restricted container cpu0's sibling can be
+# cpu8 with only cpu0 allowed.
+#
+# It lives in its own script so it can be RUN UNDER A RESTRICTED AFFINITY and shown
+# to answer differently — a precondition nobody has watched change its mind is an
+# assumption, not a check.
+cat > "$TMP/has-group.sh" <<'PRED'
+#!/usr/bin/env bash
+_expand() { # "0-3,8" -> "0 1 2 3 8"
+  local part lo hi
+  for part in $(tr ',' ' ' <<<"${1:-}"); do
+    case "$part" in
+      *-*) lo=${part%%-*}; hi=${part##*-}; while [ "$lo" -le "$hi" ]; do printf '%s ' "$lo"; lo=$((lo+1)); done ;;
+      "" ) ;;
+      *  ) printf '%s ' "$part" ;;
+    esac
+  done
+}
+allowed=" $(_expand "$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status)") "
+online=" $(_expand "$(cat /sys/devices/system/cpu/online 2>/dev/null)") "
+for c in $allowed; do
+  sl=$(cat "/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list" 2>/dev/null) || continue
+  members=$(_expand "$sl")
+  # A singleton is a complete group but not a MULTI-thread one; this case wants the
+  # shape the probe derives on a normal SMT host.
+  [ "$(wc -w <<<"$members")" -ge 2 ] || continue
+  complete=yes
+  for m in $members; do
+    case "$allowed" in *" $m "*) ;; *) complete=no; break;; esac
+    case "$online"  in *" $m "*) ;; *) complete=no; break;; esac
+  done
+  [ "$complete" = yes ] && { echo yes; exit 0; }
+done
+echo no
+PRED
+chmod +x "$TMP/has-group.sh"
+have_group=$(bash "$TMP/has-group.sh")
+
+# WHOLE-SUITE PRECONDITION, and the correction of a claim this file used to make
+# (roborev job 324). Every case runs the REAL capability-probe.sh under a shim
+# `perf`, so the shim decides what the PMU says — but Gate D still reads this host's
+# real /sys topology and /proc/self/status. On a host with no complete allowed and
+# online sibling group the probe correctly refuses, and EVERY good-input case reds
+# for a reason that has nothing to do with the guard under test. Calling those cases
+# "host-independent" was therefore false: they are independent of the PMU, not of
+# the topology.
+#
+# The alternative fix — injecting synthetic topology into the probe — is declined for
+# the same reason as in case 9: a settable topology seam in a tool whose entire
+# purpose is to not lie about the host is a worse trade than an honest skip. So the
+# suite states the requirement and stops, rather than reporting failures it caused.
+if [ "$have_group" != yes ]; then
+  echo "   SKIP  ENTIRE SUITE — this host exposes no complete sibling group that is both online"
+  echo "         and inside this process's affinity mask, so capability-probe.sh's Gate D refuses"
+  echo "         to pin (correctly), and every case here would red for that reason rather than"
+  echo "         for anything it tests. The shim decides what the PMU says; it cannot decide the"
+  echo "         topology. NOTHING WAS VERIFIED by this run."
+  exit 0
+fi
+
 
 # --- 1-2. Gate A after the #3870 descope: RECORD verbatim, CLASSIFY nothing ----
 # The classifier these cases used to drive is gone (lead ruling on #3287
@@ -294,9 +359,20 @@ else bad "a multiplexed group was accepted as counts (rc=$rc)" "$d"; fi
 # it a PASS.
 d="$TMP/c3c"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_GATE_ABSURD=1 run_probe "$d")
 if [ "$rc" != 0 ] && grep -q 'WINDOW NOT GATED' "$d/stderr.txt" \
-   && grep -q '150x' "$d/stderr.txt"; then
+   && grep -q 'required \[10x,100x\]' "$d/stderr.txt"; then
   ok "scaling ratio above the 100x work ratio -> rejected (arithmetically impossible, so the counts are mislabelled)"
 else bad "an impossible scaling ratio was accepted as a gated window (rc=$rc)" "$d"; fi
+
+# --- 3d. a ratio INSIDE the old 100-150x gap must be rejected -----------------
+# roborev job 324. The first ceiling was 150x while the same comment argued the
+# arithmetic bound is 100x, so 100-150x -- the range a corrupted or mismatched pair
+# of counts is most likely to land in -- was reported MEASURED-OK. 120x is that
+# case. (c3b covers the good direction: the real ~95x still passes.)
+d="$TMP/c3d"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_GATE_RATIO=120 run_probe "$d")
+if [ "$rc" != 0 ] && grep -q 'WINDOW NOT GATED' "$d/stderr.txt" \
+   && grep -q 'required \[10x,100x\]' "$d/stderr.txt"; then
+  ok "scaling ratio of 120x -> rejected (inside the gap the 150x ceiling used to allow)"
+else bad "a 120x ratio was accepted as a gated window (rc=$rc)" "$d"; fi
 
 # --- 4b. an IMPOSSIBLE enabled% must be rejected too --------------------------
 # roborev job 320: the bound was one-sided (`>= 99.999`), so 150 -- or any misparsed
@@ -416,48 +492,6 @@ fi
 # complete, online, allowed sibling group yields one. A single-vCPU or heavily
 # constrained container has none, and reporting that as a Gate D defect would be
 # a false accusation (roborev job 318).
-# The precondition must apply the PROBE'S OWN predicate, not a weaker proxy
-# (roborev job 320). "cpu N has more than one sibling" is not "a complete sibling
-# group is available": in a restricted container cpu0's sibling can be cpu8 with
-# only cpu0 allowed, so the weaker test ran the case on a host that legitimately
-# has no pinnable group, and the probe's correct refusal read as a Gate D defect.
-# Every member of the group must be BOTH online AND in this process's affinity.
-#
-# It lives in its own script so it can be RUN UNDER A RESTRICTED AFFINITY and shown
-# to answer differently — a precondition nobody has watched change its mind is an
-# assumption, not a check.
-cat > "$TMP/has-group.sh" <<'PRED'
-#!/usr/bin/env bash
-_expand() { # "0-3,8" -> "0 1 2 3 8"
-  local part lo hi
-  for part in $(tr ',' ' ' <<<"${1:-}"); do
-    case "$part" in
-      *-*) lo=${part%%-*}; hi=${part##*-}; while [ "$lo" -le "$hi" ]; do printf '%s ' "$lo"; lo=$((lo+1)); done ;;
-      "" ) ;;
-      *  ) printf '%s ' "$part" ;;
-    esac
-  done
-}
-allowed=" $(_expand "$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status)") "
-online=" $(_expand "$(cat /sys/devices/system/cpu/online 2>/dev/null)") "
-for c in $allowed; do
-  sl=$(cat "/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list" 2>/dev/null) || continue
-  members=$(_expand "$sl")
-  # A singleton is a complete group but not a MULTI-thread one; this case wants the
-  # shape the probe derives on a normal SMT host.
-  [ "$(wc -w <<<"$members")" -ge 2 ] || continue
-  complete=yes
-  for m in $members; do
-    case "$allowed" in *" $m "*) ;; *) complete=no; break;; esac
-    case "$online"  in *" $m "*) ;; *) complete=no; break;; esac
-  done
-  [ "$complete" = yes ] && { echo yes; exit 0; }
-done
-echo no
-PRED
-chmod +x "$TMP/has-group.sh"
-have_group=$(bash "$TMP/has-group.sh")
-
 # --- 10b. the precondition itself must be able to say NO ----------------------
 # Its whole job is to skip case 10 on a host with no complete allowed group. Run it
 # under a one-CPU affinity, which is exactly that host, and require it to change its
@@ -490,15 +524,17 @@ echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=19
+FLOOR=20
 if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
   echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
   exit 1
 fi
-# A SKIP is counted for the floor but must never substitute for verification: the
-# 16 shim-driven cases depend on nothing about this host, so if any of them failed
-# to RUN, something is wrong with the suite rather than with the machine.
-SHIM_FLOOR=16
+# A SKIP is counted for the floor but must never substitute for verification. These
+# 17 cases are PMU-independent — the shim decides what perf says — and, past the
+# whole-suite precondition above, their topology requirement is satisfied too, so if
+# any failed to RUN it is the suite that is wrong and not the machine. They are NOT
+# "host-independent" in general; that claim was false and is corrected (job 324).
+SHIM_FLOOR=17
 if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
   echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1

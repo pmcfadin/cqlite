@@ -482,17 +482,17 @@ if [ "$GATE_OK" = 1 ]; then
   I2=$(csv_val "$D/gate-probe-100000.csv" instructions:u)
   if [[ "$I1" =~ ^[0-9]+$ ]] && [[ "$I2" =~ ^[0-9]+$ ]] && [ "$I1" -gt 0 ]; then
     GATE_RATIO=$(awk -v a="$I1" -v b="$I2" 'BEGIN{printf "%.2f", b/a}')
-    # TWO-SIDED, and the ceiling is PHYSICAL rather than picked. instructions =
+    # TWO-SIDED, and the ceiling is the ARITHMETIC one. instructions =
     # constant + k*accesses, so with a 100x work ratio the instruction ratio is
-    # (C + 1e5k)/(C + 1e3k), which is bounded ABOVE by 100 and approaches it only
-    # as the constant term vanishes. A ratio above 100 is therefore not a better
-    # window, it is arithmetic that cannot happen — a misparsed or mismatched pair
-    # of probe counts — and the one-sided form would have called it a PASS. 150
-    # leaves 50% headroom so no correct host can be red. (Class swept from roborev
-    # job 320 f3, which found the same shape in the enabled% guard; both bounds in
-    # this script are now two-sided, and these are the only two.)
-    awk -v a="$I1" -v b="$I2" 'BEGIN{exit !(b >= 10*a && b <= 150*a)}' || { GATE_OK=0
-      note_fail "WINDOW NOT GATED: instructions $I1 (1e3) -> $I2 (1e5), ratio ${GATE_RATIO}x, required [10x,150x]. A window closed on the chase scales ~100x; near 1x means init/teardown is inside it, which is asymmetric between arms and corrupts every ratio. Above 100x is arithmetically impossible for a 100x work ratio, so it means the counts are not what they are labelled."; }
+    # (C + 1e5k)/(C + 1e3k): bounded above by 100, reaching it only as the constant
+    # term vanishes. So 100 IS the bound. An earlier revision said exactly that and
+    # then set the ceiling at 150x "for headroom" — reflexive caution contradicting
+    # the argument in its own comment, and it left 100-150x, the most plausible
+    # corruption range, reported as MEASURED-OK (roborev job 324). Headroom is not
+    # needed because no correct host can exceed 100x; the 0.001 is float slack, not
+    # tolerance, since a zero-constant host lands exactly ON 100.
+    awk -v a="$I1" -v b="$I2" 'BEGIN{exit !(b >= 10*a && b <= 100.001*a)}' || { GATE_OK=0
+      note_fail "WINDOW NOT GATED: instructions $I1 (1e3) -> $I2 (1e5), ratio ${GATE_RATIO}x, required [10x,100x]. A window closed on the chase scales ~100x; near 1x means init/teardown is inside it, which is asymmetric between arms and corrupts every ratio. ABOVE 100x is arithmetically impossible for a 100x work ratio, so it means these counts are not what they are labelled."; }
   else
     GATE_OK=0; note_fail "gate probe: unreadable instruction counts — window closure UNMEASURED"
   fi
