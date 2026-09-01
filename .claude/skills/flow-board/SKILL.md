@@ -106,6 +106,10 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    Read each lifecycle column with its own filtered call. Do NOT switch to GraphQL `projectItems` to
    "avoid truncation" — that was a wrong diagnosis; and do NOT raise `-L` on an unfiltered list instead of
    filtering.
+   **Pick order (owner ruling 2026-09-01, #3893): release-milestoned product items FIRST.** Offer or
+   claim a delivery-tooling `Ready` item only when no product item is `Ready`, or the tooling item's body
+   cites a blocking cause (false PASS / lane blocked > 1 h / recurred twice). Render the two groups
+   separately so the split is visible.
    Show, per item: `#N (slug)  P?  Status  assignee  PR/CI  worktree`. Group by `Status`
    (`Backlog → Ready → In Progress → In Review → Done`); each `In Progress` item MUST show its assignee
    (the claiming session/owner). If `have_project=0`, you may render a **read-only** status view from

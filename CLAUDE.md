@@ -1816,6 +1816,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   target) → re-review` (#2087). **Nits** never trigger
   a re-verify round: batch all of a PR's nits into ONE linked follow-up issue at merge time. When in
   doubt, blocker. Every pre-roborev self-check class below is BLOCKER by definition.
+  **Scripts get a capped loop (#3893):** roborev on `scripts/**`, `.claude/**`, `.github/**` and
+  measurement-harness code (`docs/reports/*-artifacts/**`) is capped at **TWO rounds**; round-3 findings
+  are DISPOSED — one linked follow-up issue per PR, `roborev-defer` marker on the merits — not fixed,
+  UNLESS a finding is a **hang** or a **false verdict** (those two classes are exempt from every
+  convergence rule). Bash has no compiler, so each fix round seeds the next; measured 22/25/32 findings
+  over 7–12 rounds on three harness PRs in one day, most in the prior round's own fix. Tests and the full
+  gate still apply; only the review loop is capped.
   **A DEFERRED finding still has to get PAST roborev, and since #3626 that is mechanical rather than a
   matter of lead memory**: roborev re-reports a deferred finding on every later round, so batching nits
   into a follow-up issue does not by itself make `findings:` read `NONE`. The lead records the deferral
@@ -1886,6 +1893,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. New issues auto-land
   at `Backlog`. Empty Ready column = no work ready → STOP. Board unreachable (auth/scope) → STOP and
   fix auth; never label-dispatch.
+- **PRODUCT FIRST — the dispatch queue is for the release, not the tooling (owner ruling 2026-09-01,
+  #3893).** Measured that night: Ready held 9 product items vs 38 delivery-tooling items; 13 of the day's
+  new issues were tooling; three bash-harness PRs ran 22/25/32 roborev findings, most in the previous
+  round's fix. Tooling had reached Ready with equal standing and starved the release lane. Rules:
+  **(1)** a worker pulling from Ready takes a **release-milestoned** item (currently `0.17`) whenever one
+  is Ready; delivery-tooling (gate, roborev, claim, bootstrap, fleet, telemetry, coord) is taken only when
+  no product item is Ready or the tooling item is BLOCKING under (2). **(2)** A tooling issue reaches
+  Ready ONLY if it (a) caused a **false PASS** or the merge of bad code, (b) **blocked a lane > 1 h**, or
+  (c) **recurred twice** — cite which in the issue body. Everything else lands `Backlog` (or is a one-line
+  doctrine note, or nothing). "Well-scoped" is no longer sufficient; the lead enforces this at triage
+  and does not promote tooling on scope alone. **(3)** Tooling is **feature-complete for the release**: a
+  tooling change needs a (2)-justification. **(4)** Finish in-flight tooling PRs on their merits; do not
+  feed the pipeline. **(5)** Retro metric: product share of merged PRs, target ≥ 70 % (≈ 45 % when ruled).
 - **How to READ the board — always `--query`, never an unfiltered page (#3055)**: the fresh board read
   the claim protocol requires is a **server-side filtered** `item-list`. This board is 900+ items, and
   an UNFILTERED `gh project item-list` **silently truncates** at the page limit — it returns a partial
