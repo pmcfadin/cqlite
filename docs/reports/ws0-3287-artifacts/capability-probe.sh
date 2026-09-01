@@ -60,10 +60,30 @@
 # (v) A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT. A zero exit from
 #     perf is not evidence that numbers exist: every CSV is parsed, every requested
 #     event must have a row with a numeric count and 100.00% enabled time, and any
-#     failure stamps VERDICT: UNMEASURED and exits non-zero. Distinguish carefully
-#     from the ONE legitimate case: perf exits non-zero when an event is ABSENT
-#     from the PMU, and for a capability probe that is the ANSWER, not a failure.
-#     Absent-vs-broken is therefore classified explicitly everywhere.
+#     failure stamps VERDICT: UNMEASURED and exits non-zero. That rule governs the
+#     DATA-INTEGRITY guards, which is now the only thing this script asserts --
+#     see the SCOPE block below.
+#
+# (vi) SCOPE OF THIS SCRIPT'S CLAIM -- IT RECORDS, IT DOES NOT CLASSIFY (#3870).
+#     An earlier revision carried an auto-classifier: Gate A decided
+#     RESOLVED/ABSENT for the TMA metric groups, and a classify() decided
+#     ABSENT/STUCK/MOVING per counter from the arms. That layer is REMOVED by lead
+#     ruling on #3287 (request REQ-3287-20260901T195930Z, option (a)) and is
+#     tracked in #3870. Five review rounds put 17 findings in it, each round's
+#     High-severity ones inside the previous round's fix code, and two were still
+#     open at descope: Gate A read ANY digit anywhere in perf's output as proof
+#     TMA had resolved (a live fail-open), and classify() called 100 -> 101
+#     'MOVING', certifying a counter on noise.
+#
+#     What the script does now: it RUNS each step, RECORDS perf's raw output and
+#     exit status verbatim, VALIDATES the data (window closure, 100.00% enabled,
+#     <not counted>, stale-CSV purge, stall nesting, CPU affinity), and PRINTS the
+#     per-arm counts beside each event's disposition. It draws no capability
+#     conclusion. VERDICT: COMPLETE therefore means 'every step executed and every
+#     data-integrity guard passed' -- it is NOT a statement that this host can
+#     serve #3287, and must never be read as one. The reader answers Gates A-D
+#     from the recorded numbers; negative-control-c7i-guest.md is that reading for
+#     this host.
 #
 # Usage: bash capability-probe.sh <output-dir> [path-to-cache-hostile.c]
 # Exit:  0 = probe COMPLETE (read host/differential.txt for the gate verdicts)
@@ -201,50 +221,42 @@ fi
 } >> "$D/capability-probe.txt" 2>&1
 
 # ----------------------------------------------------- Gate A: TMA level-1 and -2
-# Each command's status recorded AND its output classified. A non-zero exit with a
-# recognised absent-event diagnostic is a CAPABILITY ANSWER; anything else is an
-# operational error that must fail the run. Revision 3 ignored every status here
-# and its non-empty-file check was vacuous, because the block wrote its own
-# headings. (job 309 f2.)
+# RECORDED, NOT CLASSIFIED (#3870, see SCOPE above). Each command's exit status and
+# its output are written verbatim to tma-probe.txt; this script decides nothing
+# about what they mean. The removed classifier is why: 'rc=0 and a digit appears
+# somewhere' is not a measurement of TMA availability, and an exit status is not a
+# capability answer in either direction.
+#
+# Nothing here calls note_fail, and that is deliberate rather than an omission: a
+# failure verdict would BE a classification of perf's exit status, which is the
+# layer that was removed. A perf that is broken rather than merely lacking these
+# metrics is caught by the event-disposition sweep below, which is retained and
+# does fail closed -- so removing this layer opens no unguarded route.
 : > "$D/tma-probe.txt"
-TMA_L1=UNMEASURED; TMA_L2=UNMEASURED
+TMA_L1=UNRECORDED; TMA_L2=UNRECORDED
 
-# NOTE THE CALLING CONVENTION, AND WHY IT IS NOT $( ).
-# Revision 4 did `TMA_L1=$(tma_probe ...)`, which runs the function in a SUBSHELL:
-# every note_fail inside it set FAILED=1 in a child process that then exited, so
-# the parent's FAILED stayed 0 and Gate A was FAIL-OPEN -- an operational error
-# could leave VERDICT: COMPLETE over an unmeasured TMA gate. The class was swept
-# across the whole file and this was its only instance. The classification is now
-# returned through a global. (#3287 roborev job 312, finding 1.)
-TMA_CLASS=""
-tma_probe() { # $1 label  rest: perf args   -> sets TMA_CLASS
+# The calling convention is NOT $( ). Revision 4 used command substitution, which
+# runs the function in a SUBSHELL: any state it set died with the child. The
+# summary line is returned through a global. (#3287 roborev job 312, finding 1.)
+TMA_RECORD=""
+tma_probe() { # $1 label  rest: perf args   -> sets TMA_RECORD
   local label="$1"; shift
-  local out rc
+  local out rc lines
   out=$("$@" 2>&1); rc=$?
-  if [ $rc -eq 0 ]; then
-    # rc=0 is NOT sufficient. A metric group must actually produce numbers; an
-    # exit status is not a measurement. Require at least one numeric field in the
-    # output before calling the gate RESOLVED.
-    if grep -qE '[0-9]' <<<"$out" && grep -qvE '^[[:space:]]*$' <<<"$out"; then
-      TMA_CLASS=RESOLVED
-    else
-      TMA_CLASS="ERROR (rc=0 but no numeric output)"
-      note_fail "Gate A: '$label' exited 0 and produced no numbers — TMA capability NOT measured"
-    fi
-  elif grep -qE 'Bad event|Unable to find|No supported events|not supported|Invalid argument|Cannot find metric' <<<"$out"; then
-    TMA_CLASS=ABSENT
-  else
-    TMA_CLASS="ERROR (rc=$rc)"
-    note_fail "Gate A: '$label' failed operationally (rc=$rc) — TMA capability NOT measured, and an operational error is not a capability answer"
-  fi
-  { echo "== $label =="; echo "$out"; echo "[rc=$rc class=$TMA_CLASS]"; echo; } >> "$D/tma-probe.txt"
+  lines=$(printf '%s' "$out" | grep -c '' 2>/dev/null || echo 0)
+  # A factual descriptor only: what ran, what it returned, how much it said, and
+  # where to read it. No verdict token appears in this string.
+  TMA_RECORD="rc=$rc, ${lines} line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)"
+  { echo "== $label =="; echo "$out"; echo "[rc=$rc]"; echo; } >> "$D/tma-probe.txt"
 }
-tma_probe "perf stat -M TopdownL1" perf stat -M TopdownL1 -- true; TMA_L1="$TMA_CLASS"
-tma_probe "perf stat -M TopdownL2" perf stat -M TopdownL2 -- true; TMA_L2="$TMA_CLASS"
-for e in topdown.slots slots topdown-retiring topdown-fe-bound topdown-be-bound topdown-bad-spec; do
+tma_probe "perf stat -M TopdownL1" perf stat -M TopdownL1 -- true; TMA_L1="$TMA_RECORD"
+tma_probe "perf stat -M TopdownL2" perf stat -M TopdownL2 -- true; TMA_L2="$TMA_RECORD"
+# The individual topdown EVENTS go through the retained disposition sweep instead
+# of this recorder, so they get the four-valued answer that layer provides.
+for e in slots topdown-retiring topdown-fe-bound topdown-be-bound topdown-bad-spec; do
   tma_probe "event $e" perf stat -e "$e" -- true
 done
-[ -s "$D/tma-probe.txt" ] || note_fail "Gate A: tma-probe.txt is empty"
+[ -s "$D/tma-probe.txt" ] || note_fail "Gate A: tma-probe.txt is empty — the step did not record its output"
 
 # ------------------------------------------------------ per-event disposition
 # Four-valued. PROGRAMS is deliberately NOT called SUPPORTED: programming a
@@ -423,30 +435,36 @@ else
 fi
 rm -f "$CH" "$CTL" "$ACK"
 
-# --------------------------------------------------------------- gate verdicts
-# Each Gate C / Gate B counter is classified from the MEASURED arms:
-#   ABSENT  - not on this PMU at all (a legitimate capability answer)
-#   STUCK   - programs and reads 0 in BOTH arms, i.e. a silent instrument
-#   MOVING  - reads nonzero and rises with the working set: usable
-classify() { # $1 rendered-name  $2 group
-  local n="$1" g="$2" f h
-  f=$(csv_val "$D/arm-friendly-L2resident-$g.csv" "$n" 2>/dev/null)
-  h=$(csv_val "$D/arm-hostile-512m-$g.csv"        "$n" 2>/dev/null)
-  if ! [[ "$f" =~ ^[0-9]+$ ]] || ! [[ "$h" =~ ^[0-9]+$ ]]; then
-    # Distinguish the two reasons a value is missing: the event was excluded up
-    # front because this PMU does not have it (a capability ANSWER), or the arm
-    # should have produced it and did not (a measurement FAILURE, already counted
-    # by csv_validate). Reporting both as one string hid the difference.
-    local base="${n%:u}"
-    if [ "${DISP[$base]:-}" != PROGRAMS ]; then echo "ABSENT (${DISP[$base]:-unprobed})"
-    else echo "UNMEASURED (event programs, but no value in this run's CSV)"; fi
-    return
-  fi
-  if [ "$f" -eq 0 ] && [ "$h" -eq 0 ]; then echo "STUCK (0 in both arms)"; return; fi
-  if [ "$h" -gt "$f" ]; then echo "MOVING ($f -> $h)"; else echo "NOT-MOVING ($f -> $h)"; fi
+# ------------------------------------------------------------- recorded readings
+# RECORDED, NOT CLASSIFIED (#3870, see SCOPE at the top). The removed classify()
+# printed ABSENT / STUCK / MOVING / NOT-MOVING per counter. It is replaced by a
+# reporter that prints the same underlying facts and asserts nothing about them:
+# the event's disposition from the retained sweep, and its count in each arm as
+# validated from that arm's CSV. "0 in both arms while the 2 GiB arm is many times
+# L3" is a conclusion for the reader to draw from these numbers, and drawing it is
+# what negative-control-c7i-guest.md does.
+#
+# A missing value still distinguishes its two causes, because they are different
+# FACTS about the run rather than judgements of it: the event was excluded up front
+# (this PMU does not have it) or the arm should have produced a value and did not
+# (a measurement failure, already counted by csv_validate).
+reading() { # $1 rendered-name  $2 group  -> raw per-arm counts, no verdict
+  local n="$1" g="$2" base="${n%:u}" f h h2
+  f=$(csv_val  "$D/arm-friendly-L2resident-$g.csv" "$n" 2>/dev/null)
+  h=$(csv_val  "$D/arm-hostile-512m-$g.csv"        "$n" 2>/dev/null)
+  h2=$(csv_val "$D/arm-hostile-2g-$g.csv"          "$n" 2>/dev/null)
+  [[ "$f"  =~ ^[0-9]+$ ]] || f="(no value in this run's CSV)"
+  [[ "$h"  =~ ^[0-9]+$ ]] || h="(no value in this run's CSV)"
+  [[ "$h2" =~ ^[0-9]+$ ]] || h2="(no value in this run's CSV)"
+  printf 'disposition=%s  friendly-L2resident=%s  hostile-512m=%s  hostile-2g=%s' \
+    "${DISP[$base]:-unprobed}" "$f" "$h" "$h2"
 }
 {
-  echo "== #3287 capability probe — gate verdicts =="
+  echo "== #3287 capability probe — RECORDED READINGS =="
+  echo "SCOPE: this probe RECORDS and VALIDATES; it does not classify (#3870)."
+  echo "       No line below is a capability verdict. Gates A-D are answered by"
+  echo "       READING these numbers — see negative-control-c7i-guest.md for this"
+  echo "       host's reading. VERDICT at the foot covers data integrity ONLY."
   echo "host L3: $(lscpu | awk -F: '/L3 cache/{gsub(/^ +/,"",$2);print $2}')"
   echo "cpuset:  ${CPUSET:-<UNDERIVED>} (${CPU_TOPO_NOTE:-no source})"
   echo "window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED"
@@ -456,14 +474,18 @@ classify() { # $1 rendered-name  $2 group
     echo "  (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)"
   fi
   echo
-  echo "-- GATE A: TMA --"
+  echo "-- GATE A: TMA (raw record; #3287 AC1 turns on what tma-probe.txt shows) --"
   echo "  perf stat -M TopdownL1 : $TMA_L1"
-  echo "  perf stat -M TopdownL2 : $TMA_L2   <-- #3287 AC1 needs this RESOLVED"
-  echo "  (per-event detail in tma-probe.txt; ABSENT is a capability ANSWER, ERROR is not)"
+  echo "  perf stat -M TopdownL2 : $TMA_L2"
+  echo "  READ tma-probe.txt: a metric group that produced real level-2 metric rows"
+  echo "  with numeric shares answers AC1 yes; a not-found/not-supported diagnostic"
+  echo "  answers it no; anything else means the step must be re-run. This script"
+  echo "  deliberately does not make that call (#3870)."
   echo
   echo "-- GATE B: offcore / prefetch-stall term (the one #3287 exists for) --"
+  echo "  (counts as measured; the 2 GiB arm is many times L3, so read a 0 there)"
   for n in offcore_requests_outstanding.all_data_rd:u offcore_requests_outstanding.cycles_with_data_rd:u; do
-    echo "  $n : $(classify "$n" offcore)"
+    echo "  $n : $(reading "$n" offcore)"
   done
   for e in offcore_requests.all_data_rd offcore_requests_buffer.sq_full; do
     echo "  $e : ${DISP[$e]:-unprobed} (disposition only; not in a differential group)"
@@ -473,19 +495,20 @@ classify() { # $1 rendered-name  $2 group
   # Gate B signal -- the fill-buffer half of the prefetch-pressure story, and the
   # one Gate B signal that actually works on a guest. (job 312, finding 5.)
   for n in l1d_pend_miss.fb_full:u l1d_pend_miss.pending:u; do
-    echo "  $n : $(classify "$n" prefetch)"
+    echo "  $n : $(reading "$n" prefetch)"
   done
   echo
   echo "-- GATE C: reproduce #3224's own baseline counters --"
   for n in cycle_activity.stalls_l3_miss:u cycle_activity.stalls_l2_miss:u cycle_activity.stalls_total:u; do
-    echo "  $n : $(classify "$n" stalls)"
+    echo "  $n : $(reading "$n" stalls)"
   done
   for n in LLC-loads:u LLC-load-misses:u cache-references:u cache-misses:u; do
-    echo "  $n : $(classify "$n" cache)"
+    echo "  $n : $(reading "$n" cache)"
   done
   echo "  NESTING (stalls_l3_miss <= stalls_l2_miss <= stalls_total), per arm:"
-  echo "    DECLARED LIMIT: nesting HOLDS TRIVIALLY when stalls_l3_miss is STUCK at 0,"
-  echo "    so a HOLDS here is NOT evidence that counter works — read its line above."
+  echo "    DECLARED LIMIT: nesting HOLDS TRIVIALLY when stalls_l3_miss reads 0 in"
+  echo "    every arm, so a HOLDS here is NOT evidence that counter works — read its"
+  echo "    recorded counts above."
   echo "    This check catches a nesting VIOLATION (which would invalidate #3224's"
   echo "    difference-based partition); it cannot catch a silent zero. Only the"
   echo "    differential can, which is why both are reported."
@@ -515,7 +538,10 @@ classify() { # $1 rendered-name  $2 group
   echo "contamination can only ADD counts."
   echo
   if [ "$FAILED" = 0 ]; then
-    echo "VERDICT: COMPLETE (every step measured; the gate lines above are the answer)"
+    echo "VERDICT: COMPLETE (data integrity only — every step executed and every"
+    echo "         data-integrity guard passed. This is NOT a capability claim and"
+    echo "         NOT an answer to any of Gates A-D: this probe records, it does"
+    echo "         not classify (#3870). Read the numbers above.)"
   else
     echo "VERDICT: UNMEASURED (at least one step failed; see PROBE-STEP-FAILED on stderr"
     echo "         and the [rc=]/arm-rc: lines in host/*.txt). No capability claim may"

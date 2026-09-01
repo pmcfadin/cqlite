@@ -147,29 +147,58 @@ gateline() { grep -E "$2" "$1/out/host/differential.txt" 2>/dev/null | head -1; 
 # =============================================================================
 echo "== #3287 capability-probe.sh guard selftest =="
 
-# --- 1. Gate A: operational error must FAIL; absence must PASS ---------------
-d="$TMP/c1a"; mkdir -p "$d"; rc=$(SHIM_TMA=error run_probe "$d")
-if [ "$rc" != 0 ] && grep -q 'VERDICT: UNMEASURED' <<<"$(verdict "$d")" \
-   && grep -q 'failed operationally' "$d/stderr.txt"; then
-  ok "Gate A operational error -> UNMEASURED, cause named (job 312 f1: was fail-open via \$( ) subshell)"
-else bad "Gate A operational error was NOT rejected (rc=$rc, $(verdict "$d"))"; fi
+# --- 1-2. Gate A after the #3870 descope: RECORD verbatim, CLASSIFY nothing ----
+# The classifier these cases used to drive is gone (lead ruling on #3287
+# REQ-3287-20260901T195930Z, option (a); tracked in #3870). The contract they now
+# pin is the descoped one, and it is pinned in BOTH directions: perf's output and
+# exit status must survive into tma-probe.txt whatever they are, and no capability
+# verdict may be derived from them. The old cases asserted RESOLVED/ABSENT, i.e.
+# exactly the layer that was removed for a live fail-open -- keeping them would
+# have re-required the defect.
 
-d="$TMP/c1b"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
+# --- 1. every perf outcome is RECORDED verbatim, rc included -------------------
+# Bad-and-good in tension is expressed here as absent-vs-healthy: the recorder must
+# keep BOTH, because a probe that only records what it likes is a classifier.
+d="$TMP/c1a"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
 if [ "$rc" = 0 ] && grep -q 'VERDICT: COMPLETE' <<<"$(verdict "$d")" \
-   && grep -q 'ABSENT' <<<"$(gateline "$d" 'TopdownL2')"; then
-  ok "Gate A absence -> COMPLETE + ABSENT (an absent event is the ANSWER, not a failure)"
-else bad "Gate A absence was misreported (rc=$rc, $(verdict "$d"), $(gateline "$d" 'TopdownL2'))"; fi
+   && grep -q 'Cannot find metric' "$d/out/host/tma-probe.txt" \
+   && grep -q '\[rc=1\]' "$d/out/host/tma-probe.txt" \
+   && grep -q 'rc=1' <<<"$(gateline "$d" 'TopdownL2')"; then
+  ok "Gate A absence -> perf's own diagnostic and rc recorded verbatim, no verdict invented"
+else bad "Gate A absence was not recorded faithfully (rc=$rc, $(gateline "$d" 'TopdownL2'))" "$d"; fi
 
-# --- 2. Gate A: rc=0 with no numbers is not a measurement -------------------
-d="$TMP/c2"; mkdir -p "$d"; rc=$(SHIM_TMA=zero-no-numbers run_probe "$d")
-if [ "$rc" != 0 ] && grep -q 'no numeric output' "$d/out/host/differential.txt" ; then
-  ok "Gate A rc=0 with no numbers -> not RESOLVED (an exit status is not a measurement)"
-else bad "Gate A accepted rc=0 with no numeric output (rc=$rc)" "$d"; fi
+d="$TMP/c1b"; mkdir -p "$d"; rc=$(SHIM_TMA=resolved run_probe "$d")
+if [ "$rc" = 0 ] && grep -q 'VERDICT: COMPLETE' <<<"$(verdict "$d")" \
+   && grep -q 'tma_retiring' "$d/out/host/tma-probe.txt" \
+   && grep -q '42.0' "$d/out/host/tma-probe.txt"; then
+  ok "Gate A on a healthy TMA host -> the metric rows are preserved verbatim for the reader"
+else bad "Gate A dropped or mangled real metric output (rc=$rc, $(verdict "$d"))" "$d"; fi
 
+# --- 2. an unrecognised perf failure is recorded, not turned into an answer ----
+# THIS CASE IS THE DESCOPE ITSELF, made falsifiable. Before #3870 this input
+# stamped VERDICT: UNMEASURED, because the probe judged perf's exit status. It no
+# longer does: rc=7 and the diagnostic are recorded, Gate A asserts nothing, and
+# the run's verdict is decided by the data-integrity guards alone. What must NOT
+# happen is the probe silently converting rc=7 into a capability answer.
+d="$TMP/c2"; mkdir -p "$d"; rc=$(SHIM_TMA=error run_probe "$d")
+if grep -q 'some unexpected diagnostic' "$d/out/host/tma-probe.txt" \
+   && grep -q '\[rc=7\]' "$d/out/host/tma-probe.txt" \
+   && grep -q 'rc=7' <<<"$(gateline "$d" 'TopdownL2')" \
+   && ! grep -qi 'Gate A' "$d/stderr.txt"; then
+  ok "Gate A operational error -> recorded with its rc, NOT converted into a capability answer (#3870)"
+else bad "Gate A did not record an unrecognised perf failure faithfully (rc=$rc)" "$d"; fi
+
+# --- 2b. the removed classifier must not come back through the report ----------
+# A structural guard, not a behavioural one: these four tokens were the classifier's
+# entire output vocabulary, so their reappearance in the report IS the regression,
+# whatever produced it. Driven on a HEALTHY run, where the old layer would have had
+# the most to say. ABSENT is deliberately not in the set -- the uncore-PMU line uses
+# it for a directory that does not exist, which is a fact and not a verdict.
 d="$TMP/c2b"; mkdir -p "$d"; rc=$(SHIM_TMA=resolved run_probe "$d")
-if [ "$rc" = 0 ] && grep -q 'RESOLVED' <<<"$(gateline "$d" 'TopdownL2')"; then
-  ok "Gate A with real metric output -> RESOLVED (good input still accepted)"
-else bad "Gate A rejected a healthy TMA host (rc=$rc, $(gateline "$d" 'TopdownL2'))"; fi
+leak=$(grep -oE '\b(RESOLVED|STUCK|NOT-MOVING|MOVING)\b' "$d/out/host/differential.txt" 2>/dev/null | sort -u | tr '\n' ' ')
+if [ "$rc" = 0 ] && [ -z "$leak" ]; then
+  ok "no per-gate verdict token in the report (descoped classifier stays out; #3870)"
+else bad "classifier vocabulary reappeared in differential.txt: [$leak] (rc=$rc)" "$d"; fi
 
 # --- 3. window closure: an ungated window must be caught --------------------
 d="$TMP/c3"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_UNGATED=1 run_probe "$d")
@@ -194,7 +223,7 @@ printf '# stale\n999999999,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/
 printf '# stale\n888888888,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/out/host/arm-hostile-512m-stalls.csv"
 rc=$(SHIM_TMA=absent run_probe "$d")
 if ! grep -rq '999999999\|888888888' "$d/out/host/"*.csv 2>/dev/null; then
-  ok "stale arm CSVs purged before classification (job 312 f2: another host's numbers under COMPLETE)"
+  ok "stale arm CSVs purged before this run reports (job 312 f2: another host's numbers under COMPLETE)"
 else bad "stale CSVs from a previous run survived into this run's verdict" "$d"; fi
 
 # --- 6. <not counted> is a failed measurement, not an absence --------------
