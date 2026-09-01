@@ -364,7 +364,7 @@ claude_auth_resolve_tmux_identity() {
   __me=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -un 2>/dev/null)
   __rc=$?
   if [ "$__rc" -ne 0 ] || [ -z "$__me" ]; then
-    CLAUDE_AUTH_TMUX_IDENTITY_WHY='this process cannot name its own user (`id -un` did not answer), so it cannot tell whether it is already the invoking agent'
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY='this process cannot name its own user (the id -un lookup did not answer), so it cannot tell whether it is already the invoking agent'
     return 0
   fi
   if [ "$__su" = "$__me" ]; then CLAUDE_AUTH_TMUX_IDENTITY=self; return 0; fi
@@ -1285,7 +1285,7 @@ claude_tmux_show_key_into() {
 # is a different claim from seeding from a persisted one and the operator must be able to
 # tell which happened.
 claude_auth_fix_tmux_env__untraced() {
-  local __file='' __tok='' __state='' __cfg='' __cfgstate='' __cfgsrc='' rc=0
+  local __file='' __tok='' __state='' __cfg='' __cfgstate='' __cfgsrc='' __cfgrc=0 rc=0
   if ! claude_auth_env_file_into __file; then
     printf 'claude-auth: fix REFUSED (the TEST-ONLY seam is set without CQLITE_BOOTSTRAP_TEST_MODE=1)\n'
     return 1
@@ -1343,9 +1343,17 @@ claude_auth_fix_tmux_env__untraced() {
       "$CLAUDE_AUTH_CONFIG_KEY" "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
     return 0
   fi
-  if claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" setenv -g "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" 2>/dev/null; then
+  claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" setenv -g "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" 2>/dev/null
+  __cfgrc=$?
+  if [ "$__cfgrc" -eq 0 ]; then
     printf 'claude-auth: seeded %s=%s into the running tmux server (source: %s)\n' \
       "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" "$__cfgsrc"
+  elif claude_auth_bound_fired "$__cfgrc"; then
+    # The same distinction the token half makes, for the same reason: "is a server running?"
+    # is a wrong diagnosis for a server that IS running and is not answering.
+    printf 'claude-auth: fix FAILED (the tmux server did not accept `setenv -g %s` within %ss and the call was killed — the server is not answering)\n' \
+      "$CLAUDE_AUTH_CONFIG_KEY" "$CLAUDE_AUTH_TMUX_OP_BOUND"
+    rc=1
   else
     printf 'claude-auth: fix FAILED (tmux would not accept `setenv -g %s`)\n' "$CLAUDE_AUTH_CONFIG_KEY"
     rc=1

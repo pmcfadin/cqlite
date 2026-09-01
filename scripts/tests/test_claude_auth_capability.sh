@@ -1734,7 +1734,10 @@ if [ "$bnd_rc" = 124 ] || [ "$bnd_rc" = 137 ]; then
 else
   bad "bounded runner: a 30s child under a 1s bound returned rc $bnd_rc"
 fi
-if [ "$bnd_dt" -le 10 ]; then
+# The threshold is generous on purpose (bound 1s + a 5s SIGKILL escalation + process
+# startup, on a box that may be running a gate): what it has to distinguish is "the bound
+# fired" from "we waited out the child's own 30s lifetime", and 20 does that.
+if [ "$bnd_dt" -le 20 ]; then
   ok "bounded runner: ...and it returned in ${bnd_dt}s, not the child's own lifetime"
 else
   bad "bounded runner: the bound took ${bnd_dt}s to fire — it did not bound anything"
@@ -2042,8 +2045,10 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # case (the real-tmux isolation case, 3 assertions) skips, and a floor that reds on correct
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
-# non-Linux branch in every case.
-CASE_FLOOR=91
+# non-Linux branch in every case. Raised 91 -> 119 by round 4 (the digest identity of a
+# delivered credential, the sudo-posture cases, and the bounding class): 122 cases run, and
+# the real-tmux isolation case is still the only legitimately skippable one.
+CASE_FLOOR=119
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
