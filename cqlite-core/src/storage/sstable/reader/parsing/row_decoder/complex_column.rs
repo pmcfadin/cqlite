@@ -615,33 +615,19 @@ impl V5CompressedLegacyParser {
                     continue;
                 }
 
-                // For sets: the path bytes ARE the element value (cell value is always empty).
-                // If cell.value is Some (unusual case where a set cell has a non-empty value),
-                // use it. Otherwise parse the path bytes as the element type.
-                let set_member: Option<Value> = if let Some(val) = cell.value.clone() {
-                    Some(val)
-                } else if !cell.path_bytes.is_empty() {
-                    // Path bytes are the set element — parse them as the element type
-                    match self.parse_value_from_raw_bytes(
-                        &cell.path_bytes,
-                        &element_type,
-                        &column.name,
-                        0,
-                    ) {
-                        Ok(val) => Some(val),
-                        Err(e) => {
-                            tracing::debug!(
-                                "V5CompressedLegacy: set element {} parse failed (type={}): {}",
-                                i,
-                                element_type,
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+                // For sets: the path bytes ARE the element value (cell value is always
+                // empty). Issue #3723 moved this decode into `raw_value::set_member` and
+                // closed two silent-data-loss holes there: an EMPTY path now reaches the
+                // element decoder instead of bypassing the width guard, and a fatal
+                // `FixedWidthLengthMismatch` PROPAGATES instead of dropping the member.
+                // Every other decode error still yields `Ok(None)` (member omitted).
+                let set_member: Option<Value> = self.decode_set_member(
+                    cell.value.clone(),
+                    &cell.path_bytes,
+                    &element_type,
+                    &column.name,
+                    i as u64,
+                )?;
 
                 // Epic #899: surface the live set element (decoded member value)
                 // to the compaction path, keyed by its cell_path.

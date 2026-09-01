@@ -8,8 +8,15 @@
 
 use super::*;
 
+// Issue #3723: the fatal-vs-tolerated decode-error discrimination, shared by
+// the complex-column loop (`row_data`) and the multicell-set member decode
+// (`set_member`). Read its module header before widening the set.
+mod fatal_decode_error;
+pub(super) use fatal_decode_error::is_fatal_decode_error;
 mod fixed_width;
 mod marshal_short;
+// Issue #3723: ONE multicell-set member decoded from its cell path.
+mod set_member;
 
 #[cfg(test)]
 mod tests;
