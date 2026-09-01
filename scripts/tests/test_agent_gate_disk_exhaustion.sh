@@ -448,29 +448,187 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────
-# (14) STRUCTURAL: the emit-site set is DERIVED FROM SOURCE, never hard-coded. Every place
-# the shipped script appends a per-component verdict row to a summary meta array is a
-# terminal emit site, and each must also append the attribution line.
+# (14) STRUCTURAL: a CENSUS over EVERY emit site in the shipped script, derived from
+# source -- never a hard-coded list and never a count.
+#
+# WHY IT REPLACED THE OLD CASE (roborev job 299, finding 1). The previous case derived
+# its subject set from sites containing `_fm_summary_line` -- i.e. only the sites that
+# carry a COMPONENT TABLE, which are exactly the sites already compliant. It was
+# CIRCULAR: it could only ever find sites that were already marked, so it could not see
+# (and did not see) that the doctrine's "every terminal block carries the line" claim was
+# false for the other 19 call sites. A guard whose subject set is the compliant set is a
+# guard that cannot fail.
+#
+# THE TRUE CONTRACT, which this census enforces: every emit site that carries a COMPONENT
+# TABLE appends the attribution line; every OTHER site is DECLARED exempt, at the site, with
+# a stated reason. Blocks emitted before any component runs have nothing to attribute -- the
+# line could only render a misleading `0 RECOGNISED ... (0/0 PASS)` -- and each already names
+# its own cause with its own dedicated marker, so adding the line there would be noise that
+# dilutes the marker's meaning.
+#
+# Verdicts, on the `component-set-exempt:` census's own model (this file mirrors
+# scripts/tests/test_agent_gate_component_set.sh's derivation deliberately -- one idiom,
+# not two):
+#   MARKED-DIRECT           the call's own argument list contains _disk_exhaustion_line;
+#   MARKED-VIA-<ARRAY>      the call passes "${ARRAY[@]}" and the array's OWN construction
+#                           region pushes the line;
+#   MARKED-VIA-RENDERER-<f> the array is filled from a function whose BODY emits the line;
+#   EXEMPT                  a contiguous comment line above the site (or the site line
+#                           itself) carries `disk-exhaustion-exempt: <reason>`, non-empty;
+#   GAP                     none of the above => FAIL, naming the site.
+# So a NEW emit site lands in GAP with NO edit to this file, which is the property that
+# stops this class recurring. MARKED is tested BEFORE EXEMPT: observation beats declaration,
+# so a site that really does append the line reads MARKED even if someone also exempted it.
+#
+# Two derivation details that are load-bearing, both learned by the sibling census:
+#   * a renderer/array scan counts a token only on a CODE line. `_tree_boundary_meta_lines`
+#     contains the WORDS "disk-exhaustion:" in its DECLARED-OMISSION comment; counting a
+#     comment would make a census satisfied by a sentence ABOUT the check.
+#   * the exemption is read from a CONTIGUOUS comment block above the site, not from the
+#     single line above, because several of these sites already carry a
+#     `component-set-exempt:` annotation on that line and the sibling census reads exactly
+#     line i-1. Splitting the two would red that suite.
 # ─────────────────────────────────────────────────────────────────────────────────
-sites=$(grep -n 'META+=("\$(_fm_summary_line\|^ *meta+=("\$(_fm_summary_line' "$GATE" | cut -d: -f1)
-site_n=0; wired=0; unwired=""
-for ln in $sites; do
-  site_n=$((site_n + 1))
-  if sed -n "${ln},$((ln + 15))p" "$GATE" | grep -q '_disk_exhaustion_line'; then
-    wired=$((wired + 1))
-  else
-    unwired="${unwired:+$unwired,}$ln"
-  fi
-done
-if [ "$site_n" -ge 5 ]; then
-  ok "14-emit-sites: derived $site_n component-table emit sites from the shipped source (not a hard-coded count)"
+DISK_CENSUS_AWK="$tmp/disk-emit-census.awk"
+cat >"$DISK_CENSUS_AWK" <<'DISK_CENSUS_PROG'
+{ line[NR] = $0 }
+function _marking_fn(fn,   k, inside) {
+  inside = 0
+  for (k = 1; k <= NR; k++) {
+    if (line[k] ~ ("^" fn "\\(\\) \\{")) { inside = 1; continue }
+    if (inside && line[k] ~ /^\}/) return 0
+    if (inside && line[k] !~ /^[ \t]*#/ && line[k] ~ /_disk_exhaustion_line/) return 1
+  }
+  return 0
+}
+END {
+  for (i = 1; i <= NR; i++) {
+    l = line[i]
+    if (l ~ /^[ \t]*#/) continue
+    if (l ~ /^(emit_summary|_emit_terminal_summary)\(\)/) continue
+    if (l !~ /(^|[^_a-zA-Z])(emit_summary|_emit_terminal_summary)[ \t]/) continue
+    args = l; j = i
+    while (args ~ /\\[ \t]*$/) { j++; args = args "\n" line[j] }
+    verdict = "GAP"
+    if (args ~ /_disk_exhaustion_line/) verdict = "MARKED-DIRECT"
+    else if (match(args, /\$\{[A-Za-z_]+\[@\]\}/)) {
+      nm = substr(args, RSTART + 2, RLENGTH - 6)
+      for (k = i; k > 0; k--) {
+        if (line[k] ~ ("(declare -a |local -a )?" nm "=\\(")) break
+        if (k < i && line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{|^\}/) break
+        if (line[k] !~ /^[ \t]*#/ && line[k] ~ ("" nm "\\+=\\(\"\\$\\(_disk_exhaustion_line")) { verdict = "MARKED-VIA-" nm; break }
+        if (match(line[k], /< <\(([A-Za-z_][A-Za-z0-9_]*)\)/)) {
+          fn = substr(line[k], RSTART + 4, RLENGTH - 5)
+          if (_marking_fn(fn)) { verdict = "MARKED-VIA-RENDERER-" fn; break }
+        }
+      }
+    }
+    if (verdict == "GAP") {
+      # The exemption: the site line itself, or a CONTIGUOUS comment block above it.
+      if (args ~ /disk-exhaustion-exempt:[ \t]*[^ \t]/) verdict = "EXEMPT"
+      else for (k = i - 1; k > 0; k--) {
+        if (line[k] !~ /^[ \t]*#/) break
+        if (line[k] ~ /disk-exhaustion-exempt:[ \t]*[^ \t]/) { verdict = "EXEMPT"; break }
+      }
+    }
+    printf "%s\t%d\t%s\n", verdict, i, substr(l, 1, 70)
+  }
+}
+DISK_CENSUS_PROG
+
+disk_census() { awk -f "$DISK_CENSUS_AWK" "${1:-$GATE}"; }
+dc_out=$(disk_census)
+dc_sites=$(printf '%s\n' "$dc_out" | grep -c '	')
+dc_marked=$(printf '%s\n' "$dc_out" | grep -c '^MARKED')
+dc_exempt=$(printf '%s\n' "$dc_out" | grep -c '^EXEMPT	')
+dc_gaps=$(printf '%s\n' "$dc_out" | grep -c '^GAP	')
+
+# FAIL-CLOSED on the derivation itself: a scan that finds nothing is a clean census of
+# nothing, which is the vacuous pass this suite exists to prevent.
+if [ "$dc_sites" -ge 20 ]; then
+  ok "14-census: derived $dc_sites emit sites from the shipped source ($dc_marked marked, $dc_exempt declared exempt) -- no hard-coded list, no hard-coded count"
 else
-  bad "14-emit-sites: derived only $site_n emit sites -- the derivation no longer matches the script's shape and this case would be vacuous"
+  bad "14-census: the emit-site derivation found only $dc_sites call sites in $GATE -- the call shape changed and this census would be vacuous"
 fi
-if [ "$site_n" -gt 0 ] && [ "$wired" -eq "$site_n" ]; then
-  ok "14-emit-sites: all $site_n emit sites append the disk-exhaustion attribution line"
+if [ "$dc_sites" -gt 0 ] && [ "$dc_gaps" -eq 0 ]; then
+  ok "14-census: all $dc_sites emit sites are ACCOUNTED FOR -- each either appends the disk-exhaustion line or carries 'disk-exhaustion-exempt: <reason>'"
 else
-  bad "14-emit-sites: $wired of $site_n emit sites append the line; unwired at line(s): ${unwired:-<none>}"
+  bad "14-census: $dc_gaps of $dc_sites emit site(s) neither append the disk-exhaustion line nor carry 'disk-exhaustion-exempt: <reason>':"
+  printf '%s\n' "$dc_out" | grep '^GAP	' | while IFS='	' read -r _v _ln _src; do
+    echo "   line $_ln: $_src"
+  done
+fi
+
+# The COMPONENT-TABLE sites specifically. This is the property the retired case pinned and
+# it is still worth pinning DIRECTLY: the census above proves accountability, which an
+# author could satisfy by exempting a table-bearing site. Sites are derived from the
+# `_fm_summary_line` shape, and every one must be MARKED (never EXEMPT).
+tbl_lines=$(grep -n 'META+=("\$(_fm_summary_line\|^ *meta+=("\$(_fm_summary_line' "$GATE" | cut -d: -f1)
+tbl_n=0; tbl_marked=0; tbl_bad=""
+for ln in $tbl_lines; do
+  tbl_n=$((tbl_n + 1))
+  # The emit site is the first emit call at or after the table-building loop. Its verdict
+  # comes from the CENSUS, never from a second derivation that could disagree with it.
+  v=$(printf '%s\n' "$dc_out" | awk -F'\t' -v s="$ln" '$2 >= s { print $1; exit }')
+  case "$v" in
+    MARKED*) tbl_marked=$((tbl_marked + 1)) ;;
+    *) tbl_bad="${tbl_bad:+$tbl_bad,}$ln($v)" ;;
+  esac
+done
+if [ "$tbl_n" -ge 5 ]; then
+  ok "14-tables: derived $tbl_n component-table emit sites from the shipped source (not a hard-coded count)"
+else
+  bad "14-tables: derived only $tbl_n component-table emit sites -- the derivation no longer matches the script's shape"
+fi
+if [ "$tbl_n" -gt 0 ] && [ "$tbl_marked" -eq "$tbl_n" ]; then
+  ok "14-tables: all $tbl_n component-table emit sites are MARKED (a table-bearing block may never be exempted away)"
+else
+  bad "14-tables: $tbl_marked of $tbl_n component-table sites are MARKED; not-marked: ${tbl_bad:-<none>}"
+fi
+
+# POSITIVE CONTROLS, both directions. A guard that has not been shown to fail on a planted
+# break is not evidence -- and each direction needs its OWN plant, because they fail through
+# different arms of the census.
+# (a) DELETE ONE EXEMPTION => that site must become a GAP.
+ctl_a="$tmp/disk-census-control-a.sh"
+awk 'BEGIN { done = 0 }
+     { if (!done && $0 ~ /disk-exhaustion-exempt:/) { done = 1; next }
+       print }' "$GATE" >"$ctl_a"
+if ! cmp -s "$GATE" "$ctl_a"; then
+  a_gaps=$(disk_census "$ctl_a" | grep -c '^GAP	')
+  if [ "$a_gaps" -ge 1 ]; then
+    ok "14-control-a: deleting ONE 'disk-exhaustion-exempt:' comment makes the census report a GAP ($a_gaps) -- the exemption arm is live, not inert"
+  else
+    bad "14-control-a: a gate with an exemption REMOVED still censused clean -- the exemption arm is inert"
+  fi
+else
+  bad "14-control-a: could not build the control (no exemption comment matched) -- the census cannot be shown to discriminate"
+fi
+# (b) REMOVE THE _disk_exhaustion_line CALL from one component-table site => that site must
+#     stop being MARKED, which the census reports as a GAP (it carries no exemption).
+ctl_b="$tmp/disk-census-control-b.sh"
+awk 'BEGIN { done = 0 }
+     { if (!done && $0 ~ /META\+=\("\$\(_disk_exhaustion_line/) { done = 1; next }
+       print }' "$GATE" >"$ctl_b"
+if ! cmp -s "$GATE" "$ctl_b"; then
+  b_gaps=$(disk_census "$ctl_b" | grep -c '^GAP	')
+  if [ "$b_gaps" -ge 1 ]; then
+    ok "14-control-b: removing the attribution call from ONE component-table site makes the census report a GAP ($b_gaps) -- the marking arm is live, not inert"
+  else
+    bad "14-control-b: a gate with one attribution call REMOVED still censused clean -- the marking arm is inert"
+  fi
+else
+  bad "14-control-b: could not build the control (no marked component-table site matched) -- the census cannot be shown to discriminate"
+fi
+# Every exemption must carry a reason that DISTINGUISHES its site: 19 copies of one generic
+# sentence is not 19 reasons. Measured as: the reason texts are distinct from one another.
+ex_reasons=$(grep -o 'disk-exhaustion-exempt:.*' "$GATE" | sed 's/^disk-exhaustion-exempt:[[:space:]]*//')
+ex_total=$(printf '%s\n' "$ex_reasons" | grep -c .)
+ex_uniq=$(printf '%s\n' "$ex_reasons" | grep . | sort -u | wc -l | tr -d ' ')
+if [ "$ex_total" -gt 0 ] && [ "$ex_total" -eq "$ex_uniq" ]; then
+  ok "14-reasons: all $ex_total exemption reasons are DISTINCT -- a reason that does not distinguish its site is not a reason"
+else
+  bad "14-reasons: $ex_total exemption reasons collapse to $ex_uniq distinct texts -- a duplicated generic reason explains nothing"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -519,10 +677,12 @@ fi
 # green it -- `failed: 0` over a shrunken subject set is the vacuous pass these suites are
 # for (#3544's own lesson, one directory over). Raise it deliberately when adding cases.
 # ─────────────────────────────────────────────────────────────────────────────────
-# 30 at introduction; +3 (roborev job 299: the RECOGNISED wording split into host-attribution,
-# evidence-not-proof, the negative on the retired 'NOT a defect in the diff' claim, and the
-# retained ATTRIBUTION clause -- 4 cases replacing 1).
-CASE_FLOOR=33
+# 30 at introduction; +3 (roborev job 299 finding 2: the RECOGNISED wording split into
+# host-attribution, evidence-not-proof, the negative on the retired 'NOT a defect in the diff'
+# claim, and the retained ATTRIBUTION clause -- 4 cases replacing 1); +5 (job 299 finding 1: the
+# circular 2-case 14-emit-sites replaced by a 7-case census over ALL emit sites -- accountability,
+# the table-bearing subset, two positive controls and the distinct-reasons assert).
+CASE_FLOOR=38
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

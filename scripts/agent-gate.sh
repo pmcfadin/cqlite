@@ -2109,6 +2109,7 @@ apply_fixture_preflight() {
       echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
       echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
+      # disk-exhaustion-exempt: pre-flight FAIL emitted BEFORE the component loop -- no component has run, so there is no component log to scan and the line could only render a misleading "0 RECOGNISED ... (0/0 PASS)"; the cause is already named by missing-fixtures: in this same block
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
@@ -2542,6 +2543,7 @@ apply_schemas_preflight() {
       return 1
     fi
     _tree_meta_array   # #2926
+    # disk-exhaustion-exempt: pre-flight FAIL on a REJECTED relative CQLITE_SCHEMAS_ROOT, emitted BEFORE the component loop -- no component log exists to attribute, and the missing-schemas: marker in this same block already names the cause
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
@@ -2570,6 +2572,7 @@ apply_schemas_preflight() {
         return 1
       fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
+      # disk-exhaustion-exempt: pre-flight FAIL on unreadable committed test-data/schemas/*.cql, emitted BEFORE the component loop -- no component log exists to attribute, and missing-schemas: already names the cause
       emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
@@ -5542,6 +5545,7 @@ apply_component_set_preflight() {
   # assert (the #3148 trap, recorded so it is not re-sprung).
   [ "$report_only" -eq 1 ] && return 1
   _tree_meta_array   # #2926: every emitted block carries the tree provenance
+  # disk-exhaustion-exempt: #3544 component-set pre-flight FAIL, emitted at the MODE DISPATCH -- before the #1825 slot and before any component -- so nothing has run to attribute; component-set: already names the cause
   emit_summary FAIL \
     "$why_summary" \
     "$COMPONENT_SET_LINE" \
@@ -8537,6 +8541,7 @@ _assert_summary_integrity() {
   # terminal capture inside _tree_meta_lines means a run that is BOTH clobbered AND
   # mutated emits BOTH named lines under a single RESULT: FAIL.
   _tree_meta_array
+  # disk-exhaustion-exempt: #2874 summary-integrity FAIL: a live PEER clobbered the pinned summary path. This block carries no component table, its cause is a concurrent peer rather than this host disk, and summary-integrity: already names it
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
     "detected-after-component: $comp" \
@@ -8595,6 +8600,7 @@ _emit_terminal_summary() {
     _publish_integrity_fail "$reason" "$comp" ${@+"$@"}   # ${@+"$@"}: empty-safe under set -u on bash 3.2
     return 1
   fi
+  # disk-exhaustion-exempt: forwarder, not a site of its own -- the shared no-clobber publish path appends nothing, and every CALLER of it is classified by this same census
   # component-set-exempt: forwarder — this is the shared no-clobber publish path; it stamps nothing of its own and every CALLER is checked by this same census
   emit_summary "$result" "$@"
 }
@@ -9034,6 +9040,7 @@ _tree_boundary_fail() {
   local -a _meta=()
   while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)
   _meta+=("detected-after-component: $comp")
+  # disk-exhaustion-exempt: #2926 tree-integrity BOUNDARY FAIL. Its component table comes from _tree_boundary_meta_lines, which carries this line DECLARED OMISSION in its own body (see the #3800 note there): the cause is a mid-run tree mutation, and a start->emit free-space delta at a boundary would measure a window the run has not finished
   _emit_terminal_summary FAIL "${_meta[@]}" || true
   exit 1
 }
@@ -9414,6 +9421,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # the very "emit sites nobody enumerated" shape this change set out to close (review
     # H3). _tree_meta_array finalizes in the CURRENT shell (never a subshell, B2).
     _tree_meta_array
+    # disk-exhaustion-exempt: #2874 summary-integrity self-test hook (marker) -- pre-dispatch, synthetic block; no component has run and the run-id it publishes is a fixture
     # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} \
@@ -9439,6 +9447,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     _term_rc=0
     # Threaded for the same reason as the `marker` hook above (#2926 review H3).
     _tree_meta_array
+    # disk-exhaustion-exempt: #2874 summary-integrity self-test hook (terminal-nomarker) -- pre-dispatch, synthetic block; no component has run
     # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       "${TREE_META_LINES[@]}" || _term_rc=$?
@@ -9596,6 +9605,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       # capture-derived `commit:` line the full/lite/delta emits publish.
       _tree_commit_meta
       _tree_meta_array
+      # disk-exhaustion-exempt: #2926 tree-integrity self-test hook (clean|boundary|terminal) -- pre-dispatch, synthetic block; the only recorded verdict is the hook own tree-selftest fixture
       # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
@@ -9612,6 +9622,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_selftest_mutate
       _tree_commit_meta
       _tree_meta_array
+      # disk-exhaustion-exempt: #2926 tree-integrity self-test hook (postfinalize) -- pre-dispatch, synthetic block; no real component has run
       # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
@@ -9631,6 +9642,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_finalize || true
       _tree_commit_meta
       _tree_meta_array
+      # disk-exhaustion-exempt: #2926 tree-integrity self-test hook (side) -- pre-dispatch, synthetic block; no real component has run
       # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
@@ -17735,6 +17747,7 @@ run_delta() {
     echo "--- [delta] ERROR: anchor '$anchor' does not resolve to a commit." >&2
     echo "    Pass the commit the full gate PASSed at (a sha, tag, or ref)." >&2
     _tree_meta_array   # #2926
+    # disk-exhaustion-exempt: --delta usage ERROR: the anchor does not resolve to a commit. Emitted before any delta component runs, so there is no log to scan; delta-anchor: (UNRESOLVED) already names the cause
     emit_summary ERROR \
       "delta-anchor: $anchor (UNRESOLVED)" \
       "$(accelerators_line)" \
@@ -17753,6 +17766,7 @@ run_delta() {
     if [ ! -f "$DELTA_ANCHOR_SUMMARY_FILE" ]; then
       echo "--- [delta] ERROR: --anchor-summary-file '$DELTA_ANCHOR_SUMMARY_FILE' not found." >&2
       _tree_meta_array   # #2926
+      # disk-exhaustion-exempt: --delta usage ERROR: --anchor-summary-file not found. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
@@ -17767,6 +17781,7 @@ run_delta() {
       echo "--- [delta] ERROR: --anchor-summary-file is not a FULL-gate SUMMARY block." >&2
       echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta run." >&2
       _tree_meta_array   # #2926
+      # disk-exhaustion-exempt: --delta usage ERROR: the anchor summary is not a FULL-gate SUMMARY block. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
@@ -17779,6 +17794,7 @@ run_delta() {
       echo "--- [delta] ERROR: --anchor-summary-file did not record RESULT: PASS." >&2
       echo "    A delta re-cert must anchor to a full-gate PASS." >&2
       _tree_meta_array   # #2926
+      # disk-exhaustion-exempt: --delta usage ERROR: the anchor summary did not record RESULT: PASS. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
@@ -17874,6 +17890,7 @@ run_delta() {
     _tree_finalize || true   # #2926
     _tree_commit_meta; anchor_meta[0]="$TREE_COMMIT_LINE"   # #2926 review C1
     _tree_meta_array
+    # disk-exhaustion-exempt: --delta REFUSED BEFORE EXECUTION (the diff carries files --delta cannot re-certify). Its own delta-scope: line reads "NOT RUN -- refused before execution", so no component log exists to scan
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
@@ -17901,6 +17918,7 @@ run_delta() {
     _tree_finalize || true   # #2926
     _tree_commit_meta; anchor_meta[0]="$TREE_COMMIT_LINE"   # #2926 review C1
     _tree_meta_array
+    # disk-exhaustion-exempt: --delta REFUSED BEFORE EXECUTION (bindings/node/__test__ changed, native module not built). Its own delta-scope: line reads "NOT RUN -- refused before execution", so no component log exists to scan
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
@@ -18426,6 +18444,7 @@ if selected_needs_datasets; then
     # stale PASS survives; this makes the early exit explicit for a caller reading
     # the recovery path.
     _tree_meta_array   # #2926
+    # disk-exhaustion-exempt: --only dataset pre-flight FAIL (zero Data.db). Emitted BEFORE the component loop -- no component log exists, and preflight: already names the cause
     emit_summary FAIL \
       "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
       "$(_component_set_meta)" \
