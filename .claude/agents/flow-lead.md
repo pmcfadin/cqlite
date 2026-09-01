@@ -53,8 +53,11 @@ back into one.
 
 - **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
   (design-driven) + roborev clean — the closer runs `bash scripts/flow/premerge-assert.sh <pr>
-  <certified-sha> <gate-summary-file>` — the third argument is REQUIRED and is the FULL gate's own
-  summary file, so a merge with NO gate of record is now mechanically refused (#3465) — re-reads for
+  <certified-sha> <gate-summary-file> --c-verdict AUTO` — the third argument is REQUIRED and is the
+  FULL gate's own summary file, so a merge with NO gate of record is mechanically refused (#3465),
+  and `--c-verdict` is REQUIRED with no default (omitting it is exit 3), so a merge with NO recorded
+  C intent audit is refused too where C is required — routing MEASURED from the certified tree, never
+  taken from the caller (#3751) — re-reads for
   a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
