@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 288 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `selftest-analyze.sh` | 295 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -337,12 +337,47 @@ Two things worth carrying:
 - **`NOT-REQUESTED` is a value, not an absence.** The first version collapsed
   "this arm takes the server default" to "unknown", which made the sensitivity
   control's difference *undeclared* — the base arm requests nothing and the head
-  arm overrides. That is the same shape as every partial-observation bug in this
-  lane: a state that means something specific, flattened into "no information".
+  arm overrides.
+
+  **This is the fourth sentinel bug in this lane, and it bit in the OPPOSITE
+  direction from the other three**, which is what turns the observation into a
+  rule. The earlier ones read *unobserved* as agreement — permissive, admitting
+  something unproven. This one read *not requested* as unknown — restrictive,
+  refusing something legitimate. Same root, inverted consequence, depending only
+  on which branch the sentinel silently falls into. So the rule is stronger than
+  "do not read absence as agreement": **a sentinel needs its own branch, because
+  whichever default it silently inherits will be wrong in one direction or the
+  other.**
+
+  That is also the tri-state lint (`1699-find-tristate`, pinned in
+  `scripts/tests/test_agent_gate_summary.sh`) arriving from the other end: the
+  lint catches a three-valued *shell predicate* collapsed into two — `[ -z
+  "$(find …)" ]` folding "the scan FAILED" onto "no match" — and this lane found
+  three-valued *data* (`NOT-OBSERVED`, `NOT-REQUESTED`, `UNMEASURED`,
+  `could-not-tell`) collapsed the same way. Predicate and payload, one rule.
+  **Declared gap: the lint covers the predicate half mechanically and the payload
+  half not at all** — those four sentinels are conventions in prose, checked by
+  review. Whether that is worth mechanising is an open question, and this
+  repository's history with guards whose false-PASS count climbs across rounds
+  argues against it; what is not open is that the gap should be stated rather
+  than implied away by the citation.
 - **Only execution finds this class.** Two individually-correct rules, each with
   its own passing tests, composed into an unusable whole. The case that catches
   it runs the control end to end under the shims — and it exists because
   §10 (the driver was never executed) had already made that possible.
+
+**A validator that disagrees with its consumer is now FIVE instances, and the
+count is the argument.** The duration grammar, the census enumeration, the census
+containment, the per-arm argv construction, and the full-ring ticket check —
+every one fixed the same way: read what actually consumes the value, mirror it,
+and cite where you read it. The recurrence is why the rule is *check the
+consumer's source first*, not *write the obvious validator and find out in
+review*. The fifth was instructive twice over: the reviewer's summary of the
+server's token semantics was itself partly wrong (it said `wraparound=true`
+should be accepted because the server treats it a certain way; the source says
+the flag is **not consulted at all** since #3634), so reading `ticket.rs` beat
+taking a correct-sounding description — which is the same rule applied one level
+up.
 
 **And a sweep, not just a fix.** Findings 1, 3 and 4 were all fallout from the
 round-4 restructure: a new rule colliding with an old one, a manifest field
@@ -355,6 +390,16 @@ restructure that closes a class reliably leaves its own debris, and the debris i
 shallower but not less real. **When a restructure lands, sweep every path,
 default and doc string that named the old design — the cost of that sweep is
 lower than one review round.**
+
+**And the sweep has to be a standing step, because of HOW those cases were
+found.** Three self-test cases in this lane have been green for the wrong reason,
+and **not one was found by the case failing** — they were found by sweeping, or by
+fixing something adjacent that forced the quiet one to actually run. A case that
+cannot fail is invisible to precisely the signal everything else relies on, so
+the only thing that finds it is deliberately going to look. That is what makes
+the sweep an argument rather than hygiene: "tidy up after a restructure" gets
+skipped under time pressure; "the signal you would normally trust is structurally
+blind here" does not.
 
 ---
 

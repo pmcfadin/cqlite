@@ -2619,8 +2619,13 @@ PYINNER
   else
     ok "every server was reaped; none outlived its session"
   fi
-  echo "  note    DECLARED GAP: the real cargo build, cqlite-flight and flight-loadgen are"
+  echo "  note    DECLARED GAP 1: the real cargo build, cqlite-flight and flight-loadgen are"
   echo "          exercised by nothing here -- these cases prove the DRIVER's logic only."
+  echo "  note    DECLARED GAP 2: the stub is MORE PERMISSIVE than the real binary. It"
+  echo "          parses its own argv, so an argument line Clap would REJECT still runs"
+  echo "          here -- a duplicated option, an unknown flag, a bad value. That class"
+  echo "          is covered structurally instead (the server-argv cases above assert no"
+  echo "          option is emitted twice); nothing in this suite can reproduce Clap."
 fi
 
 echo

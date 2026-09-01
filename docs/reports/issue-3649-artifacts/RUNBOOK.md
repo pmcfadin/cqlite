@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (288 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (295 cases).**
       It runs a **complete two-arm, five-pair session end to end** against stub
       `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, so a driver that cannot
       complete a session fails here rather than on the rig after both release
@@ -269,6 +269,14 @@ If you genuinely want another shape, pass `--control <label>`: the ticket check
 is then skipped and the analyzer disclaims the verdict on a
 `verdict-detail … SHAPE` line rather than scoring it against the band.
 
+**A token range is not automatically a narrowing.** The check mirrors
+`FlightTicket::token_in_range`: absent endpoints are the full ring, and **equal**
+endpoints are too (wrapping is derived as `start >= end`, so `token > start OR
+token <= end` admits everything). An explicit `(i64::MIN, i64::MAX]` is *not* —
+half-open drops the token equal to `i64::MIN`, which is a real token (#3633). The
+`wraparound` flag is **ignored**, exactly as the server ignores it since #3634;
+a template that sets it is accepted.
+
 Commit the template you actually used, and the corpus census, to
 `docs/reports/issue-3649-artifacts/corpus/`.
 
@@ -400,6 +408,24 @@ comparison quantity is the **peak `rows_per_s` over the surviving ladder**, and
 the analyzer requires the two arms of each pair to have the **same** surviving
 ladder. Each pass costs `2 × replicates × (steps × step-duration + prewarm +
 server start/stop)`, so budget 5b at roughly four times 5a for a four-step ramp.
+
+### The server runs in a controlled environment
+
+Each `cqlite-flight` is launched under `env -i` with a **named allowlist**
+(`PATH`, `HOME`, `TMPDIR`, `RUST_LOG=info`, `RUST_BACKTRACE=1`,
+`CQLITE_FLIGHT_MERGE_PATH`) and nothing else. Two reasons, both of which turn an
+exported variable on the rig into a wrong or dead session:
+
+- every `CQLITE_*` variable the server honours — `CQLITE_MAX_BATCH_BYTES`,
+  `CQLITE_ADMISSION_WAIT_TIMEOUT_MS`, `CQLITE_MAX_INFLIGHT_EGRESS_BYTES` — is a
+  **silent override of a value the manifest claims to record**;
+- an inherited `RUST_LOG=warn` suppresses the INFO readiness line, so **every**
+  server would time out having already bound its port.
+
+It is an allowlist and not a denylist for the reason `gate-detached.sh` learned
+the hard way: a list of *remembered* variables fails silently. If you need the
+server to see something else, add it to that list in the driver with its reason
+beside it — do not export it and hope.
 
 ### The port is ephemeral, and readiness comes from the server's own log
 
@@ -752,7 +778,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     288 cases incl. full sessions under PATH shims; run it first
+  selftest-analyze.sh     295 cases incl. full sessions under PATH shims; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output
