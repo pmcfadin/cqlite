@@ -5084,14 +5084,30 @@ fi
 # network, no datasets), so none of these five can become a declared tooling skip.
 fm_sum="$tmp/3453-annot-summary.txt"
 if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
-  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$fm_sum")
-  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\) +\[.+\]$' "$fm_sum")
+  # VACUOUS joins PASS/FAIL/SKIP in the component-status vocabulary (#3625): a PASS whose
+  # measured subject count is zero is recorded under its own token, so a shape recogniser
+  # that omits it would stop SEEING the very lines that state a component verified nothing.
+  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)' "$fm_sum")
+  # The line's tail is now `[<feature matrix>]  {<census>}` — BOTH are part of the block
+  # contract, and the `$` anchor requires the census to be LAST, so neither can be dropped
+  # without this failing (#3453 + #3625).
+  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\) +\[.+\]  \{.+\}$' "$fm_sum")
   if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
-    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix"
+    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix AND a census suffix"
   else
-    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix"
-    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" || true
+    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix + census suffix"
+    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" || true
   fi
+  # #3625: the aggregate census line. It must be present, must declare its own
+  # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
+  # than a bare N — a bare zero in a gate log reads as a verified all-clear.
+  fm_census=$(grep -E '^census: ' "$fm_sum" | head -1)
+  case "$fm_census" in
+    *'AFFIRMED a count'*'DECLARED-GAP (RECOGNISED)'*'NOT-MEASURED (RECOGNISED)'*'VACUOUS (RECOGNISED)'*'NON-EXHAUSTIVE'*)
+      ok "3625-census-block: the block carries ONE aggregate census line declaring its own non-exhaustiveness" ;;
+    '') bad "3625-census-block: no 'census:' aggregate line in the emitted block" ;;
+    *)  bad "3625-census-block: the census line does not carry the required RECOGNISED/NON-EXHAUSTIVE wording: $fm_census" ;;
+  esac
   if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   else
