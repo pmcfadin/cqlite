@@ -695,6 +695,19 @@ fn scalar_csv_text(scalar: &Value, ty: Option<&CqlType>, kinding: Kinding) -> St
 ///     `format_duration` is a follow-up, not this lane's business; what belongs
 ///     here is that the census says so rather than claiming a match it does not
 ///     have;
+///   * **`counter` — CANNOT OCCUPY THIS POSITION, and is therefore not part of
+///     the walk above.** Stated because it is a `CqlType::Numeric` and would
+///     otherwise be read as covered by "the integer family": Cassandra's
+///     `CounterColumnType.getString` is `accessor.toHex(value)`
+///     (`cassandra-5.0.8:.../marshal/CounterColumnType.java:74-77`), i.e. BARE
+///     HEX like a blob's, which this function does NOT translate. That would be a
+///     material divergence if a golden could carry it, and none can: every
+///     stringified position is barred to a counter by Cassandra itself — a
+///     PRIMARY KEY column (`CreateTableStatement.java:231-232`, "counter type is
+///     not supported for PRIMARY KEY column"), a multicell set element and a map
+///     key (`CQL3Type.java:825-836`, "Counters are not allowed inside
+///     collections"). The spelling differential records it as the one DECLARED
+///     UNREACHABLE position rather than pinning a spelling no golden has;
 ///   * **every other type — IDENTICAL text.** `boolean` is `Boolean.toString()` on
 ///     both sides; the integer family is `String.valueOf` / `BigInteger.toString(10)`
 ///     against `to_string()`; `float`/`double`/`decimal` differ only in the

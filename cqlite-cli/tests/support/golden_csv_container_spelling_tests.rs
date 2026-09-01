@@ -17,6 +17,11 @@
 
 use super::*;
 
+// `schema` sits two modules up (this is a child of the container test module,
+// which is itself a child of the container module), and the census below names it
+// three times; one alias keeps the path out of the assertions.
+use super::super::super::schema::native_scalar_decls;
+
 /// One declared type's two golden spellings, and what the seam must do with each.
 ///
 /// `natural` is the RAW JSON token `sstabledump` wrote with
@@ -61,6 +66,18 @@ enum Expect {
         golden: &'static str,
         why: &'static str,
     },
+    /// The position CANNOT EXIST, so there is nothing to compare and nothing is
+    /// compared: the pair is COUNTED as declared-unreachable and the seam is not
+    /// called.
+    ///
+    /// This is NOT a second exception set for DIVERGENCES, and must never be used
+    /// as one. [`Expect::Narrowed`] is for two spellings of a value a golden DOES
+    /// carry; this is for a (type, kinding) pair no golden can carry at all,
+    /// because Cassandra's own type rules forbid the type from ever sitting there.
+    /// `why` must cite those rules from the pin — an assertion here would have to
+    /// invent a golden spelling, which is exactly what the `inet` IPv6 omission
+    /// refuses to do.
+    Unreachable { why: &'static str },
 }
 
 /// THE DIFFERENTIAL. For each declared type, at BOTH kindings:
@@ -80,6 +97,25 @@ enum Expect {
 /// Feeding a string node to a natural position would manufacture a divergence that
 /// no golden has.
 ///
+/// # What is CENSUSED, and how completely
+///
+/// Two censuses, because a `CqlType` VARIANT census cannot see a missing CONCRETE
+/// type — every numeric type maps to `CqlType::Numeric`, so any ONE numeric case
+/// satisfied it and `counter` had no spelling case at all (roborev job 21 F2):
+///
+///   * **CONCRETE declared types**, over
+///     `super::super::super::schema::native_scalar_decls()` — the SAME lists
+///     `parse_bare_type` matches against, so this is the parser's own native
+///     scalar set and not a copy of it. Every name must have a case, or be in the
+///     assertion's `WITHHELD` table with a reason (`duration` is the only entry,
+///     and a withholding that goes stale FAILS). Bounded claim, stated: complete
+///     with respect to those lists, i.e. to the types this lane's DDL parser
+///     RECOGNISES — a type it rejects outright is a parse error, not a silent gap.
+///   * **`CqlType` variants**, kept because it covers what the first cannot: the
+///     CONTAINER variants, which have no fixed declared spelling, and — via
+///     `tag`'s total match — a NEW variant, which is a compile error whose author
+///     lands here.
+///
 /// # The exception set, in full — two entries, both already declared
 ///
 ///   * **`timestamp`, both kindings.** `2025-10-06 01:12:05.394Z` (natural) /
@@ -94,6 +130,21 @@ enum Expect {
 ///     comparison closes it in `super::super::normalize_decimal`, which reads an
 ///     exponent, and it likewise cannot carry a separator, a bracket or an empty
 ///     rendering.
+///
+/// # The one DECLARED UNREACHABLE position
+///
+///   * **`counter` at [`Kinding::Stringified`].** Not an exception to a spelling
+///     claim but a position that cannot exist, so nothing is compared and no
+///     golden spelling is written down (see [`Expect::Unreachable`]).
+///     `CounterColumnType.getString` is `accessor.toHex(value)`
+///     (`cassandra-5.0.8:.../marshal/CounterColumnType.java:74-77`) — BARE HEX,
+///     which this seam translates only for `blob`, so it WOULD be a material
+///     divergence if a golden could carry it. None can: a counter is refused as a
+///     PRIMARY KEY column (`CreateTableStatement.java:231-232`) and inside a
+///     collection, keys included (`CQL3Type.java:825-836`), which is every
+///     stringified position `JsonTransformer` writes. The count of such positions
+///     is asserted, so a second one cannot join silently. Its NATURAL position IS
+///     measured, from the committed `test_types.ct_single_sstable` golden.
 ///
 /// # What this case deliberately does NOT assert, and why
 ///
@@ -179,6 +230,41 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
             stringified: "12345",
             stringified_expect: Expect::Same,
             source: "pin: IntegerType, BigInteger.toString(10)",
+        },
+        // --- counter: a `CqlType::Numeric` whose two kindings are NOT the same
+        // question. See the doc's unreachable-position entry.
+        SpellingCase {
+            decl: "counter",
+            value: CoreValue::Counter(422_212_677_445_164),
+            natural: "422212677445164",
+            natural_expect: Expect::Same,
+            // `writeString(getString(v))` is BARE HEX for a counter
+            // (`CounterColumnType.java:74-77` returns `accessor.toHex(value)`),
+            // which this seam does not translate — but no golden can carry it,
+            // because every stringified position is barred to a counter by
+            // Cassandra itself. So the divergence is DECLARED UNREACHABLE rather
+            // than pinned: pinning it would assert a golden spelling that cannot
+            // occur.
+            stringified: "",
+            stringified_expect: Expect::Unreachable {
+                why: "a counter can occupy NO stringified position: a PRIMARY KEY \
+                      column is refused by CreateTableStatement.java:231-232 \
+                      (\"counter type is not supported for PRIMARY KEY column\") \
+                      and a multicell set element or map key by \
+                      CQL3Type.java:825-836 (\"Counters are not allowed inside \
+                      collections\"), which is every stringified position \
+                      JsonTransformer has. Its getString would diverge materially \
+                      if one existed (CounterColumnType.java:74-77 is \
+                      accessor.toHex, bare hex like a blob's)",
+            },
+            source: "test_types.ct_single_sstable golden (COMMITTED), `c` cell \
+                     value 422212677445164 — an unquoted JSON number, per \
+                     CounterColumnType.toJSONString:91-94 \
+                     (CounterSerializer.deserialize(buffer).toString()) written \
+                     with writeRawValue. NOTE: that number is the counter CONTEXT \
+                     read as a long, which is what sstabledump writes; it is the \
+                     GOLDEN's spelling of the cell and this case is about spelling \
+                     alone",
         },
         // --- decimal: `BigDecimal.toString()` on both sides.
         SpellingCase {
@@ -399,8 +485,11 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
     ];
 
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    let mut decls_seen: BTreeSet<&'static str> = BTreeSet::new();
     let mut compared = 0usize;
+    let mut unreachable = 0usize;
     for case in &cases {
+        decls_seen.insert(case.decl);
         let ty = ty_of(case.decl);
         seen.insert(tag(&ty));
         // The CSV side, measured — never written down in the case.
@@ -422,20 +511,25 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
                 "writeString(getString(v))",
             ),
         ] {
-            let got = scalar_csv_text(&node, Some(&ty), kinding);
             match expect {
-                Expect::Same => assert_eq!(
-                    got, csv,
-                    "{} at {kinding:?}: the census claims the golden's \
-                     {writer} text IS the CSV text, and the seam produced {got:?} \
-                     where ValueFormatter renders {csv:?} (golden spelling from {})",
-                    case.decl, case.source
-                ),
+                Expect::Same => {
+                    let got = scalar_csv_text(&node, Some(&ty), kinding);
+                    assert_eq!(
+                        got, csv,
+                        "{} at {kinding:?}: the census claims the golden's \
+                         {writer} text IS the CSV text, and the seam produced \
+                         {got:?} where ValueFormatter renders {csv:?} (golden \
+                         spelling from {})",
+                        case.decl, case.source
+                    );
+                    compared += 1;
+                }
                 Expect::Narrowed {
                     csv: pinned,
                     golden: pinned_golden,
                     why,
                 } => {
+                    let got = scalar_csv_text(&node, Some(&ty), kinding);
                     // BOTH sides pinned, and the three failures are worded apart
                     // because they are three different events: the CSV spelling
                     // moved, the GOLDEN-side spelling moved, or the divergence
@@ -463,9 +557,22 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
                          than left excusing nothing ({why})",
                         case.decl
                     );
+                    compared += 1;
+                }
+                Expect::Unreachable { why } => {
+                    // Nothing is compared, and nothing may be WRITTEN DOWN
+                    // either: a spelling in the case that no assertion reads
+                    // would be an unchecked claim about a golden that cannot
+                    // exist.
+                    assert!(
+                        matches!(kinding, Kinding::Stringified) && case.stringified.is_empty(),
+                        "{} at {kinding:?}: an unreachable position must carry NO \
+                         golden spelling ({why})",
+                        case.decl
+                    );
+                    unreachable += 1;
                 }
             }
-            compared += 1;
         }
     }
 
@@ -501,15 +608,91 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
     // ANTI-VACUITY. A loop whose body never ran, or a case list someone shortened,
     // must not read as green.
     assert!(
-        cases.len() >= 22,
+        cases.len() >= 23,
         "the differential lost cases: {} left",
         cases.len()
     );
     assert_eq!(
-        compared,
+        compared + unreachable,
         2 * (cases.len() + container_decls.len()),
-        "every case and every container decl must be measured at BOTH kindings"
+        "every case and every container decl must be accounted for at BOTH \
+         kindings — measured, or counted as declared-unreachable"
     );
+    // The declared-unreachable positions are COUNTED, so a second one cannot join
+    // silently: `counter` at a stringified position is the only one, and adding
+    // another means arguing here that Cassandra's type rules forbid it too.
+    assert_eq!(
+        unreachable, 1,
+        "exactly ONE (case, kinding) pair is declared unreachable (counter at a \
+         stringified position); {unreachable} were counted"
+    );
+
+    // --- the two censuses ---------------------------------------------------
+    //
+    // A `CqlType` VARIANT census cannot see a missing CONCRETE type: every numeric
+    // type maps to `CqlType::Numeric`, so any ONE numeric case satisfied it and
+    // `counter` had no spelling case at all (roborev job 21 F2). So both are
+    // asserted, and they answer different questions.
+
+    // (1) CONCRETE declared types. The subject set is
+    // `native_scalar_decls()` — the same lists
+    // `parse_bare_type` matches against, so a native scalar this lane's DDL parser
+    // newly recognises joins this census automatically and FAILS until its
+    // spelling is established.
+    //
+    // WITHHELD names are the ONLY escape, they are NAMED with a reason, and each
+    // must still be a native scalar AND still be uncovered — so a stale
+    // withholding fails once its case lands. The reasons are the doc's, restated
+    // where the assertion is.
+    const WITHHELD: &[(&str, &str)] = &[(
+        "duration",
+        "MEASURED, DECLARED MATERIAL DIVERGENCE (see this test's doc): Duration.toString \
+         decomposes into y/mo/w/d/h/m/s/ms/us/ns while ValueFormatter::format_duration \
+         prints months/days/NANOS. Withheld pending the format_duration follow-up — an \
+         Expect::Narrowed entry would document a defect as itself, and an Expect::Same \
+         case would simply fail",
+    )];
+    for (name, why) in WITHHELD {
+        assert!(
+            native_scalar_decls().contains(name),
+            "withheld `{name}` is not a native scalar type this lane's parser \
+             recognises, so the withholding names nothing ({why})"
+        );
+        assert!(
+            !decls_seen.contains(name),
+            "`{name}` now HAS a spelling case, so its withholding is stale and \
+             must be removed rather than left excusing a case that exists ({why})"
+        );
+    }
+    for decl in native_scalar_decls() {
+        if let Some((_, why)) = WITHHELD.iter().find(|(name, _)| *name == decl) {
+            // Named, with a reason, in the doc AND here.
+            let _ = why;
+            continue;
+        }
+        assert!(
+            decls_seen.contains(decl),
+            "no case establishes the CONCRETE declared type `{decl}`'s spelling \
+             against the CSV egress's own formatter — add one (from a committed \
+             golden where the corpus has one, else the pin), or, if it diverges \
+             materially, declare it in this test's doc and in WITHHELD rather \
+             than leaving it unmeasured"
+        );
+    }
+    // The other direction: a case for a decl the parser does not list would mean
+    // the lists are no longer the parser's whole native scalar set.
+    for decl in &decls_seen {
+        assert!(
+            native_scalar_decls().contains(decl),
+            "case decl `{decl}` is not in the parser's own native scalar lists, so \
+             those lists are no longer the subject set this census claims"
+        );
+    }
+
+    // (2) `CqlType` VARIANTS, kept because it still adds what (1) cannot: it
+    // covers the CONTAINER variants (`list`/`set`/`map`/`tuple`/`udt`), which have
+    // no fixed declared spelling, and `tag`'s total match makes a NEW variant a
+    // compile error whose author lands here.
     for variant in VARIANTS {
         assert!(
             seen.contains(variant),
