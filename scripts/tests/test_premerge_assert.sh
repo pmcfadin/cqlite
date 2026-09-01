@@ -252,7 +252,13 @@ dirty_tree_start() {
 
 emit_summary_block() {
   local start="$1" end="$2" mode="$3" commit="$4" tstart="$5" ti="$6" result="$7" \
-        dirty="${8-no}"
+        dirty="${8-no}" tsdirty="${9-__mirror__}"
+  # 9th param: tree-start:/tree-end:'s OWN dirty value, allowed to DIVERGE from
+  # commit:'s. Defaults to mirroring so every pre-existing caller is unchanged.
+  # The divergence is REAL, not synthetic: commit: renders the END capture, so a
+  # lockfile-settled run legally reads tree-start dirty:yes + commit dirty:no
+  # (#3648 roborev round 4).
+  [ "$tsdirty" = "__mirror__" ] && tsdirty="$dirty"
   printf '%s\n' "$start"
   printf 'run-id: /tmp/agent-gate.9cIQgX\n'
   [ "$mode" = "-" ] || printf '%s\n' "$mode"
@@ -261,7 +267,7 @@ emit_summary_block() {
   printf 'datasets: 144 Data.db files under /data/datasets\n'
   printf 'accelerators: sccache=on nextest=on lanes=on mold=absent perf=paranoid-4\n'
   [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: %s digest: 671a6275687c\n' \
-    "$tstart" "$(dirty_tree_start "$dirty")"
+    "$tstart" "$(dirty_tree_start "$tsdirty")"
   printf 'tree-end: %s dirty: %s digest: 671a6275687c\n' "$tstart" "$(dirty_tree_start "$dirty")"
   [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
   printf 'file-size:         PASS (0s)\n'
@@ -285,7 +291,7 @@ DELTA_E="==== END AGENT-GATE DELTA SUMMARY ===="
 # two-block case (found while writing these tests — the case passed vacuously).
 full_block() {
   emit_summary_block "$FULL_S" "$FULL_E" "-" \
-    "${1:-$C7}" "${2:-$C12}" "${3:-PASS}" "${4:-PASS}" "${5-no}"
+    "${1:-$C7}" "${2:-$C12}" "${3:-PASS}" "${4:-PASS}" "${5-no}" "${6-__mirror__}"
 }
 
 # full_summary <file> [commit] [tree-start] [tree-integrity] [result] [dirty]
@@ -732,6 +738,30 @@ else
 fi
 refused "commit: dirty: yes then dirty: no -> refuse (a trailing clean value cannot rescue it)" \
   "$T/dirty-dup-clean-last.txt" "AMBIGUOUS"
+
+# 25(c3) THE LOCKFILE-SETTLED HOLE (#3648 roborev round 4, Medium). `commit:`
+# renders the END capture (agent-gate.sh:8810), so reading cleanliness from it
+# ALONE is not enough: a gate that STARTED against a dirty Cargo.lock and
+# finished clean emits `tree-start: ... dirty: yes` + `commit: ... dirty: no`,
+# and `tree-integrity:` is a NON-FATAL `PASS (lockfile-settled: ...)`
+# (agent-gate.sh:8754) -- a legal, real PASS. Checking commit: only would certify
+# a run that executed against uncommitted content, which is this issue's own
+# defect one capture down. BOTH captures must read clean.
+full_summary "$T/dirty-start-only.txt" "$C7" "$C12" \
+  "PASS (lockfile-settled: Cargo.lock)" PASS no yes
+if grep -qE '^tree-start: .* dirty: yes ' "$T/dirty-start-only.txt" \
+   && grep -qE '^commit: .* dirty: no$' "$T/dirty-start-only.txt"; then
+  ok "dirty fixture: the lockfile-settled fixture is dirty at START, clean at commit:"
+else
+  bad "dirty fixture: expected tree-start dirty: yes with commit: dirty: no"
+fi
+if grep -q 'tree-integrity: PASS (lockfile-settled' "$T/dirty-start-only.txt"; then
+  ok "dirty fixture: the lockfile-settled fixture carries the NON-FATAL integrity PASS"
+else
+  bad "dirty fixture: expected a lockfile-settled tree-integrity PASS"
+fi
+refused "tree-start: dirty: yes with a clean commit: -> refuse (lockfile-settled run)" \
+  "$T/dirty-start-only.txt" "tree-start:"
 
 # 25(d) PRESENT KEY, EMPTY VALUE -> REFUSE. Distinct from an absent field: the
 # gate said something and it reduced to nothing.
