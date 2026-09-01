@@ -468,44 +468,31 @@ impl SSTableReader {
         let key = RowKey::from(partition_key.to_vec());
         let avail = window.len().saturating_sub(within);
         let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
-        // Issue #3721 (roborev blocker 2): the windowed attempt first, then — ONLY on
-        // a per-column decode failure, and only when a window was actually applied —
-        // the SAME read with the window dropped. An index-positioned cursor can land
-        // mid-structure, so a failure under the window is not attributable to the
-        // data; the unwindowed walk parses forward from the partition header, so its
-        // verdict is. Returning the rows the windowed attempt had buffered (the
-        // pre-fix behaviour) would be silent partial output. The buffer is local and
-        // is discarded before the retry, so no row can be double-counted, and the
-        // over-read is a SUPERSET of the slice, which this function's caller already
-        // trims with the post-scan clustering backstop.
         let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
-        let collect =
-            |rows: &mut Vec<(RowKey, ScanRow)>, window_arg: Option<(usize, usize)>| -> Result<()> {
-                parser.parse_block_emit_windowed(
-                    &window[within..],
-                    schema,
-                    self,
-                    window_arg,
-                    |(_tid, entry_key, entry_value)| {
-                        if entry_key.as_bytes() == partition_key {
-                            if self.filter_tombstone(&entry_value) {
-                                rows.push((key.clone(), entry_value));
-                            }
-                            Ok(std::ops::ControlFlow::Continue(()))
-                        } else {
-                            // First row of the next partition — stop.
-                            Ok(std::ops::ControlFlow::Break(()))
-                        }
-                    },
-                )
-            };
-        if let Err(e) = collect(&mut rows, clamped) {
-            if clamped.is_none() || !column_decode_error::indexed_walk_falls_back(&e) {
-                return Err(e);
-            }
-            rows.clear();
-            collect(&mut rows, None)?;
-        }
+        // Issue #3721 (roborev blocker 2): a per-column decode failure propagates out
+        // of this INDEX-POSITIONED walk instead of being answered with the rows
+        // buffered so far. The retry that resolves the ambiguity cannot live here —
+        // `end_bound` is the NARROWED decode extent the clustering resolver chose, so
+        // re-reading it without `row_body_window` would still stop mid-partition. The
+        // caller that chose BOTH narrowings retracts BOTH: see
+        // `data_access::clustering_seek_decode`.
+        parser.parse_block_emit_windowed(
+            &window[within..],
+            schema,
+            self,
+            clamped,
+            |(_tid, entry_key, entry_value)| {
+                if entry_key.as_bytes() == partition_key {
+                    if self.filter_tombstone(&entry_value) {
+                        rows.push((key.clone(), entry_value));
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                } else {
+                    // First row of the next partition — stop.
+                    Ok(std::ops::ControlFlow::Break(()))
+                }
+            },
+        )?;
         Ok(Some(rows))
     }
 

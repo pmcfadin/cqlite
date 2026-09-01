@@ -17,8 +17,9 @@
 //! delta-scan bridge), plus the public-surface re-exports.
 
 mod bti;
-// BTI point-read path split out of `bti.rs` (issue #1599 / G3, campsite #1116):
-// `bti_point_lookup` + the chunk-targeted single-partition decode machinery.
+mod clustering_seek_decode; // issue #3721: the clustering-seek decode + its fallback
+                            // BTI point-read path split out of `bti.rs` (issue #1599 / G3, campsite #1116):
+                            // `bti_point_lookup` + the chunk-targeted single-partition decode machinery.
 mod bti_point;
 // BIG ("nb") promoted-index forward seek + reverse iterator (Issue #1184). The
 // seek/reverse paths exist only on the default build, so the whole module is
