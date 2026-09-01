@@ -1066,4 +1066,10 @@ fi
 # claim at the sites you happen to notice is not correcting it; the disclosure path needs its own
 # census. The number was understated 2.4x (measured: tooling-tests at 2073s), and under-waiting
 # relaunches a LIVE gate, which is the two-gates-on-one-summary outcome this issue exists to stop.
-verdict STALLED 3 "no liveness (staleness window ${STALE_AFTER}s): beat-seq did NOT advance over a ${_confirm_wait}s window timed on this host (and the beat reads ${AGE}s old against this clock). This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after LONGER THAN THE LONGEST COMPONENT OF THIS RUN, treat the gate as gone and relaunch it -- read that duration off the component table in the summary block (\`<name>: PASS (<n>s)\`) rather than from any fixed figure, because it grows as components are added (a \`~850s\` figure once printed here was understated 2.4x against a measured 2073s). $_where"
+#
+# AND THE RETIRED FIGURE STAYS OUT OF THE EMITTED STRING (caught by 4b.202 on my own fix). The first
+# version of this fix explained the history INSIDE the operator-facing text — so the output still
+# printed "~850s", as a warning rather than as advice, which an operator skimming for a number would
+# read as the number. A diagnostic must not carry the value it warns against; that history belongs
+# here, in the comment, where only someone editing the code will read it.
+verdict STALLED 3 "no liveness (staleness window ${STALE_AFTER}s): beat-seq did NOT advance over a ${_confirm_wait}s window timed on this host (and the beat reads ${AGE}s old against this clock). This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after LONGER THAN THE LONGEST COMPONENT OF THIS RUN, treat the gate as gone and relaunch it -- read that duration off the component table in the summary block (\`<name>: PASS (<n>s)\`) rather than from any fixed figure, because it grows as components are added. $_where"

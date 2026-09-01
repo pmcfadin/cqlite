@@ -2802,26 +2802,20 @@ rm -rf "$rp_t"
 # arrive. Asserted STRUCTURALLY at BOTH acceptance sites, because the two differ only in what a
 # rejection means and a fix applied to one is the call-site defect this file already has a case for.
 _j318_bare=$(grep -cE '^\s*0\|2\)\s*_hb_seen=1' "$LAUNCHER" || true)
-# job 319 (Medium) upgraded BOTH sites from `_unit_is_live` to `_unit_is_affirmatively_live`: the
-# two-valued predicate returns 0 for UNMEASURABLE too, and where 0 ACCEPTS that re-admits precisely
-# the one-beat-then-dead case 4b.174/4b.175 exist for. So the affirmative predicate is what counts
-# here, and the old spelling must NOT satisfy this test.
-_j318_gated=$(grep -cE '_unit_is_affirmatively_live "\$UNIT"' "$LAUNCHER" || true)
 if [ "${_j318_bare:-0}" -eq 0 ]; then
   ok "4b.174 no acceptance site treats RUNNING (exit 2) as monitorable without a unit check"
 else
   bad "4b.174 no acceptance site treats RUNNING as monitorable without a unit check" \
       "$_j318_bare bare 0|2) arm(s) remain — a one-beat-then-dead gate would exit 0"
 fi
-# The COUNT matters: there are TWO sites (the bounded in-loop probe and the post-loop fallback), and
-# fixing only the one roborev named is exactly the audit-by-primitive failure this suite exists to
-# catch. Both must gate on the unit.
-if [ "${_j318_gated:-0}" -ge 2 ]; then
-  ok "4b.175 BOTH RUNNING acceptance sites gate on AFFIRMATIVE liveness (found $_j318_gated)"
-else
-  bad "4b.175 BOTH RUNNING acceptance sites gate on affirmative liveness" \
-      "only $_j318_gated site(s) gated; the in-loop probe and the post-loop fallback both need it"
-fi
+# 4b.175 IS DELETED, NOT RE-POINTED A THIRD TIME. Its content was "both acceptance sites gate on
+# <predicate-name>", and it broke on a CORRECT change twice: at job 320 when the predicate became
+# `_unit_is_affirmatively_live`, and at job 323 when it became `_unit_accepts_as_monitorable`. A claim
+# that needs relocating at every correct refactor is pinned to the wrong thing — the rule is to stop
+# relocating the promise and pin it at the shared definition instead. Its surviving content (BOTH
+# sites, counted) now lives in 4b.201, which counts the two-leg helper and is strictly stronger:
+# 4b.174 above still forbids a bare `0|2)` arm, so the "accepts RUNNING with no unit check at all"
+# regression remains covered from the other direction.
 # 4b.176 (roborev job 318, Low): the launcher validated an absolute `bash` and then exec'd a
 # hard-coded /bin/bash via a hard-coded /usr/bin/env, so a valid non-FHS systemd host passed every
 # capability check and failed at exec. Assert the resolved paths are what systemd-run is handed AND
