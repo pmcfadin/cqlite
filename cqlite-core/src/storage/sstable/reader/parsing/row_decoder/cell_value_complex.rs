@@ -59,12 +59,12 @@ impl V5CompressedLegacyParser {
                 let schema_elem = self.extract_collection_element_type(&inner_type, "list")?;
                 let element_type =
                     Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
-                self.parse_frozen_list_value(data, off, element_type, column, reader)?
+                self.parse_frozen_list_value(data, off, element_type, column)?
             } else if inner_type.starts_with("set<") {
                 let schema_elem = self.extract_collection_element_type(&inner_type, "set")?;
                 let element_type =
                     Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
-                self.parse_frozen_set_value(data, off, element_type, column, reader)?
+                self.parse_frozen_set_value(data, off, element_type, column)?
             } else if inner_type.starts_with("map<") {
                 let (schema_key, schema_val) = self.extract_map_types(&inner_type)?;
                 let (marshal_key, marshal_val) = match &marshal_elems {
@@ -80,7 +80,7 @@ impl V5CompressedLegacyParser {
                 // home.
                 let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key);
                 let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
-                self.parse_frozen_map_value(data, off, &key_type, value_type, column, reader)?
+                self.parse_frozen_map_value(data, off, &key_type, value_type, column)?
             } else if Self::is_udt_type(&column.data_type) {
                 // Frozen UDT - parse using UDT parser
                 // The column.data_type contains the full Cassandra type string including UserType
@@ -265,7 +265,7 @@ impl V5CompressedLegacyParser {
             Value::Frozen(Box::new(inner_value))
         } else if type_str.starts_with("tuple<") {
             // Tuple types: parse fixed number of elements
-            self.parse_tuple_value(data, &mut off, type_str, column, reader)?
+            self.parse_tuple_value(data, &mut off, type_str, column)?
         }
         // Non-frozen collections: list, set, map
         // TODO(Issue #162, Task 3): Multi-cell collection parsing

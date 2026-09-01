@@ -174,7 +174,6 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, false)
     }
@@ -189,7 +188,6 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, true)
     }
@@ -205,7 +203,6 @@ impl V5CompressedLegacyParser {
         key_type: &str,
         value_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, "map", &column.name)?;
 
@@ -448,7 +445,6 @@ impl V5CompressedLegacyParser {
         offset: &mut usize,
         type_str: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Value> {
         // Extract element types from schema (schema-aware, no heuristics)
         let element_types = self.extract_tuple_element_types(type_str)?;

@@ -949,3 +949,229 @@ fn set_member_path_bytes_with_trailing_garbage_are_refused() {
         "set member path bytes with trailing garbage",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Census finding F — the CELL-LEVEL guards, at their PRODUCTION call sites
+//
+// roborev round 3: `require_frozen_extent_accepts_only_the_exact_extent` pins the
+// RULE but not the WIRING, so a removed or mis-wired check at a production site
+// would go undetected — and its failure mode is a silently truncated row, not an
+// error. The blocker was a `_reader: &SSTableReader` parameter that all four
+// entry points took and NONE of them used (hence the underscore). It is now gone,
+// which costs nothing (`SSTableReader::open` is async and needs a real file, a
+// `Config` and a `Platform`) and makes these three sites directly drivable.
+//
+// Cell framing for all of them: `[VUInt blob_len][blob]`. The corruption is a
+// `blob_len` one byte LONGER than the elements occupy — bytes stranded INSIDE the
+// declared blob, which is the case that used to decode clean and stay
+// byte-aligned so nothing downstream ever noticed.
+// ---------------------------------------------------------------------------
+
+/// `[VUInt blob_len][content]`, plus `extra` stray bytes counted by `blob_len`
+/// but not occupied by any element. `extra == 0` is the well-formed cell.
+fn vuint_cell(content: &[u8], extra: usize) -> Vec<u8> {
+    let declared = content.len() + extra;
+    assert!(declared < 128, "test vectors keep the VUInt single-byte");
+    let mut v = vec![declared as u8];
+    v.extend_from_slice(content);
+    v.extend(std::iter::repeat_n(0xAAu8, extra));
+    v
+}
+
+fn cell_column(name: &str, data_type: &str) -> crate::schema::Column {
+    crate::schema::Column {
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    }
+}
+
+/// Assert the refusal came from `require_frozen_extent` at a production site,
+/// naming both offsets so an unrelated corruption cannot satisfy it.
+fn assert_refused_extent(result: Result<(Value, usize)>, kind: &str, ends_at: usize, ctx: &str) {
+    match result {
+        Ok((v, _)) => panic!("{ctx}: expected the frozen-extent refusal, got Ok({v:?})"),
+        Err(e) => {
+            let msg = e.to_string();
+            for needle in [
+                format!("Frozen {kind}"),
+                format!("ends at {ends_at}"),
+                "extraneous".to_string(),
+            ] {
+                assert!(msg.contains(&needle), "{ctx}: missing {needle:?} in: {msg}");
+            }
+        }
+    }
+}
+
+/// `[i32 count][i32 len][bytes]...` — the frozen list/set blob body.
+fn seq_body(elements: &[&[u8]]) -> Vec<u8> {
+    let mut v = (elements.len() as i32).to_be_bytes().to_vec();
+    for e in elements {
+        v.extend(component(e));
+    }
+    v
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — a well-formed frozen `list<int>` cell.
+#[test]
+fn cell_frozen_list_exact_decodes_ok() {
+    let body = seq_body(&[&7i32.to_be_bytes()]);
+    let (v, off) = parser()
+        .parse_frozen_list_value(
+            &vuint_cell(&body, 0),
+            0,
+            "int",
+            &cell_column("l", "frozen<list<int>>"),
+        )
+        .expect("a well-formed frozen list cell decodes");
+    assert_eq!(v, Value::List(vec![Value::Integer(7)]));
+    assert_eq!(
+        off,
+        1 + body.len(),
+        "offset must advance past the whole cell"
+    );
+}
+
+/// **DISCRIMINATING for the `parse_frozen_sequence_value` guard's WIRING.**
+#[test]
+fn cell_frozen_list_with_bytes_stranded_inside_the_blob_is_refused() {
+    let body = seq_body(&[&7i32.to_be_bytes()]);
+    assert_refused_extent(
+        parser().parse_frozen_list_value(
+            &vuint_cell(&body, 1),
+            0,
+            "int",
+            &cell_column("l", "frozen<list<int>>"),
+        ),
+        "list",
+        1 + body.len() + 1,
+        "frozen list cell / stranded byte",
+    );
+}
+
+/// **DISCRIMINATING** — the set wrapper reaches the same guard by a second route.
+#[test]
+fn cell_frozen_set_with_bytes_stranded_inside_the_blob_is_refused() {
+    let body = seq_body(&[&7i32.to_be_bytes()]);
+    assert_refused_extent(
+        parser().parse_frozen_set_value(
+            &vuint_cell(&body, 1),
+            0,
+            "int",
+            &cell_column("s", "frozen<set<int>>"),
+        ),
+        "set",
+        1 + body.len() + 1,
+        "frozen set cell / stranded byte",
+    );
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — a well-formed frozen `map<text,int>` cell.
+#[test]
+fn cell_frozen_map_exact_decodes_ok() {
+    let mut body = 1i32.to_be_bytes().to_vec();
+    body.extend(component(b"k"));
+    body.extend(component(&7i32.to_be_bytes()));
+    let (v, _) = parser()
+        .parse_frozen_map_value(
+            &vuint_cell(&body, 0),
+            0,
+            "text",
+            "int",
+            &cell_column("m", "frozen<map<text,int>>"),
+        )
+        .expect("a well-formed frozen map cell decodes");
+    assert_eq!(
+        v,
+        Value::Map(vec![(Value::Text("k".into()), Value::Integer(7))])
+    );
+}
+
+/// **DISCRIMINATING for the `parse_frozen_map_value` guard's WIRING.**
+#[test]
+fn cell_frozen_map_with_bytes_stranded_inside_the_blob_is_refused() {
+    let mut body = 1i32.to_be_bytes().to_vec();
+    body.extend(component(b"k"));
+    body.extend(component(&7i32.to_be_bytes()));
+    assert_refused_extent(
+        parser().parse_frozen_map_value(
+            &vuint_cell(&body, 1),
+            0,
+            "text",
+            "int",
+            &cell_column("m", "frozen<map<text,int>>"),
+        ),
+        "map",
+        1 + body.len() + 1,
+        "frozen map cell / stranded byte",
+    );
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — a well-formed `tuple<int, text>` cell.
+#[test]
+fn cell_tuple_exact_decodes_ok() {
+    let mut body = component(&7i32.to_be_bytes());
+    body.extend(component(b"hi"));
+    let mut off = 0usize;
+    let v = parser()
+        .parse_tuple_value(
+            &vuint_cell(&body, 0),
+            &mut off,
+            "tuple<int, text>",
+            &cell_column("t", "tuple<int, text>"),
+        )
+        .expect("a well-formed tuple cell decodes");
+    assert_eq!(
+        v,
+        Value::Tuple(vec![Value::Integer(7), Value::Text("hi".into())])
+    );
+    assert_eq!(
+        off,
+        1 + body.len(),
+        "offset must advance to the declared blob end"
+    );
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — `TupleType.split` rule 1 at the cell level:
+/// a tuple whose trailing element is simply absent stays LEGAL. This is the case
+/// the finding-F fix must not break, and it is why the guard compares consumption
+/// against the declared end rather than counting elements.
+#[test]
+fn cell_tuple_legally_short_decodes_ok() {
+    let body = component(&7i32.to_be_bytes());
+    let mut off = 0usize;
+    let v = parser()
+        .parse_tuple_value(
+            &vuint_cell(&body, 0),
+            &mut off,
+            "tuple<int, text>",
+            &cell_column("t", "tuple<int, text>"),
+        )
+        .expect("a legally short tuple cell is accepted (rule 1)");
+    assert_eq!(v, Value::Tuple(vec![Value::Integer(7), Value::Null]));
+}
+
+/// **DISCRIMINATING for the `parse_tuple_value` guard's WIRING.** This is the
+/// site whose old comment claimed advancing to `blob_end` "protects against
+/// trailing bytes" while doing the opposite.
+#[test]
+fn cell_tuple_with_bytes_stranded_inside_the_blob_is_refused() {
+    let mut body = component(&7i32.to_be_bytes());
+    body.extend(component(b"hi"));
+    let mut off = 0usize;
+    let r = parser().parse_tuple_value(
+        &vuint_cell(&body, 1),
+        &mut off,
+        "tuple<int, text>",
+        &cell_column("t", "tuple<int, text>"),
+    );
+    assert_refused_extent(
+        r.map(|v| (v, 0)),
+        "tuple",
+        1 + body.len() + 1,
+        "tuple cell / stranded byte",
+    );
+}
