@@ -436,33 +436,49 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   deleted FOUR cases and the suite reported `failed: 0` at 102 instead of 105 for a whole round —
   a green tally over a shrunken suite is #3544's own subject inside its own test file. That suite
   now asserts a CASE FLOOR**, the idiom `test_agent_gate_summary.sh` already used.
-  **THE SHARED OBJECT STORE IS TRUSTED, NOT VERIFIED — DECLARED IN THE EMITTED LINE, AND OWNED BY
-  #3746 (roborev job 311; lead ruling on `REQ-3544-OBJTRUST`).** Git does not rehash a packed
-  object against the id it was asked for on an ordinary read, and on this fleet **every lane on a
-  box is a worktree of ONE shared `.git`** (measured: `/data/lanes/repo/.git/objects` for
-  lane-3544, lane-3473 and lane-3629 alike), so a peer lane planting a forged pack/index can make
-  a canonical sha resolve to a shortened manifest — a **false PASS**, and a NON-INVOKER route,
-  hence a defect. **The recorded "a third finding here should REMOVE the reuse optimisation"
-  ruling does NOT dispose of it, because removal does not CLOSE it:** the ancestry walk and the
-  provenance leg read HEAD's **committed** content, which has no source other than that store —
-  the working tree cannot substitute, since `UNCOMMITTED` exists precisely to compare against what
-  is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into `DECLARED`
-  (non-fatal) after removal, while charging every `--lite` round for the privilege (measured
-  2026-08-31: **3.41 s / 93 MB** full, **3.58 s / 45 MB** at `--depth=1` — shallow is NOT cheaper,
-  it still ships the tip's whole tree). **A permanent tax for a half-closure is the guard agents
-  learn to waive**, and a bounded re-hash of the consumed objects is the FOURTH carve in this
-  family. So the boundary is **DECLARED**: every baseline-bearing verdict line ends by naming the
-  object provenance (`REUSED` from the shared store / `FETCHED` from the canonical remote / `NOT
-  RECORDED`) plus `store TRUSTED, not verified (#3746)`. **A check that claims nothing false is
-  worth more than one claiming a closure it does not deliver** — the same move the roborev
+  **THE SHARED OBJECT STORE IS TRUSTED, NOT VERIFIED PER-READ — DECLARED IN THE EMITTED LINE, AND
+  RESOLVED BY #3749 (roborev job 311; lead ruling on `REQ-3544-OBJTRUST`, then #3749's owner ruling
+  2026-09-01).** Git does not rehash a packed object against the id it was asked for on an ordinary
+  read, and on this fleet **every lane on a box is a worktree of ONE shared `.git`** (measured:
+  `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike), so a planted
+  pack/index can make a canonical sha resolve to a shortened manifest — a **false PASS**. What an
+  ordinary read DOES verify is the pack CRC and the zlib stream, which catch **accidental** damage
+  (bit rot, a truncated or torn write) but never rehash content against its own name.
+  **#3749 SPLIT THAT INTO TWO SUBJECTS AND OVERTURNED THE EARLIER FRAMING, which this text used to
+  carry: "a NON-INVOKER route, hence a defect" is RETRACTED.** DELIBERATE forgery by a same-host
+  peer is **INVOKER-CLASS and OUT OF MODEL** — the #3312 triage rule already says same-host actors
+  able to write these scripts are invoker-class, and a peer wanting a false PASS can simply edit
+  `scripts/agent-gate.sh`, which is cheaper than forging pack data; no check inside a process
+  defends against the party that controls the process. **ACCIDENTAL corruption IS in model**, and
+  its control is a periodic full-rehash sweep: `scripts/check-object-store-integrity.sh` (full
+  `git fsck`, never `--connectivity-only`, which does not rehash content), emitting an anchored
+  three-valued `VERIFIED`/`CORRUPT`/`UNMEASURED` verdict — run at machine onboarding
+  (`bootstrap-agent-machine.sh` section 5b-obj, where VERIFIED is the ONLY `[ok]`) and on the
+  worker supervisor's throttled per-iteration cadence (default 6h; `CORRUPT` **stops that
+  supervisor loudly** rather than holding, because corruption is non-self-clearing, while
+  `UNMEASURED` is reported and deliberately does NOT stop the loop — refusing to run any worker
+  because a hygiene probe could not run is a self-DoS). **That sweep is PERIODIC, NOT PER-READ, so
+  the emitted clause still says `store TRUSTED, not verified (#3749)` — do not inflate it.**
+  **THREE ALTERNATIVES WERE REJECTED and the reasons are recorded so they are not re-derived:**
+  per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing
+  (the FOURTH carve into one pre-flight, charged to every `--lite` round); and **removing the reuse
+  optimisation, whose original argument still stands** — the recorded "a third finding here should
+  REMOVE the reuse optimisation" ruling does NOT dispose of it, because removal does not CLOSE it:
+  the ancestry walk and the provenance leg read HEAD's **committed** content, which has no source
+  other than that store — the working tree cannot substitute, since `UNCOMMITTED` exists precisely
+  to compare against what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal)
+  into `DECLARED` (non-fatal) after removal, while charging every `--lite` round for the privilege
+  (measured 2026-08-31: **3.41 s / 93 MB** full, **3.58 s / 45 MB** at `--depth=1` — shallow is NOT
+  cheaper, it still ships the tip's whole tree). **A permanent tax for a half-closure is the guard
+  agents learn to waive.** So the boundary is **DECLARED**: every baseline-bearing verdict line ends
+  by naming the object provenance (`REUSED` from the shared store / `FETCHED` from the canonical
+  remote / `NOT RECORDED`) plus `store TRUSTED, not verified (#3749)`. **A check that claims nothing
+  false is worth more than one claiming a closure it does not deliver** — the same move the roborev
   waiver's threat model makes where a dependency cannot be removed. The declaration is folded into
   the ONE `src_note` suffix eleven printf arms already consume, never appended per-arm, and the
   self-test pins it as a **closed set of three renderings** by string equality: pinning one
   literal would red on correct input (which clause fires depends on whether this box's store
-  already held the commit), pinning nothing would let a wording pass delete it. **#3746 may
-  conclude the subject is not this pre-flight at all but the infrastructure decision that lanes
-  share an object store** — a peer able to plant objects there is a hazard to every gate on the
-  box, not to one component-set comparison.
+  already held the commit), pinning nothing would let a wording pass delete it.
   **STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN — AND A FIX THAT ADDS A RESOURCE INHERITS
   THAT RESOURCE'S LIFETIME BUGS (roborev job 282).** Two closures. (1) The rejected-origin
   diagnostic was the FIFTH finding in one family — raw URL rendered (227) → redacted but not

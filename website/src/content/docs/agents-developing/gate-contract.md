@@ -654,22 +654,45 @@ baseline source (`— baseline read via the committed manifest` / `— baseline 
 FALLBACK: … VERIFIED ABSENT at that sha`), so use of the fallback is visible rather than inferred.
 
 **And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
-verified** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED from the
-canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` — each
-followed by `store TRUSTED, not verified (#3746)`). Git does not rehash a packed object against the
-id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
-one shared `.git`**, so a peer lane planting a forged pack/index can make a canonical sha resolve to
-a shortened manifest — a false `PASS`, and a non-invoker route, hence a defect.
+verified per-read** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED
+from the canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` —
+each followed by `store TRUSTED, not verified (#3749)`). Git does not rehash a packed object against
+the id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
+one shared `.git`**, so a planted pack/index can make a canonical sha resolve to a shortened
+manifest — a false `PASS`. What an ordinary read *does* verify is the pack CRC and the zlib stream,
+which catch **accidental** damage (bit rot, a torn or truncated write) but never rehash content
+against its own name.
 
-It is **declared rather than closed** because removal does not close it. The ancestry walk and the
-provenance leg read HEAD's **committed** content, which has no source other than that store — the
-working tree cannot substitute, since the `UNCOMMITTED` verdict exists precisely to compare against
-what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into `DECLARED`
-(non-fatal) after removal, while charging every `--lite` round for a half-closure (measured
-3.41 s / 93 MB full, 3.58 s / 45 MB at `--depth=1`; shallow is *not* cheaper — it still ships the
-tip's whole tree). A check that claims nothing false is worth more than one claiming a closure it
-does not deliver. Closing it properly — including the possibility that the real subject is the
-infrastructure decision that lanes share an object store at all — is **#3746**.
+**#3749's owner ruling split that into two subjects, and overturned the earlier framing.** This page
+used to call a peer lane planting objects "a non-invoker route, hence a defect"; that is
+**retracted**. *Deliberate* forgery by a same-host peer is **invoker-class and out of model** — the
+#3312 triage rule already says same-host actors able to write these scripts are invoker-class, and a
+peer wanting a false `PASS` can simply edit `scripts/agent-gate.sh`, which is cheaper than forging
+pack data; no check inside a process defends against the party that controls the process.
+*Accidental* corruption **is** in model, and its control is a periodic full-rehash sweep:
+`scripts/check-object-store-integrity.sh` runs a full `git fsck` (never `--connectivity-only`, which
+does not rehash content) over the shared store and emits an anchored three-valued
+`VERIFIED`/`CORRUPT`/`UNMEASURED` verdict — exit 0/4/5, and **a consumer must not read `UNMEASURED`
+as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5b-obj, where
+`VERIFIED` is the only `[ok]`, so an unmeasured host cannot pass `--strict`) and on the worker
+supervisor's throttled per-iteration cadence (default every 6h). There, `CORRUPT` **stops the
+supervisor loudly** instead of holding — corruption is non-self-clearing, so a hold-and-repoll loop
+would spin to the wall-clock budget taking no useful action — while `UNMEASURED` is journalled and
+paged once and deliberately does **not** stop the loop, because refusing to run any worker over a
+hygiene probe that could not run is a self-DoS. **That sweep is periodic, not per-read, which is why
+the emitted clause still says `TRUSTED, not verified`.**
+
+Three alternatives were **rejected** by the same ruling, recorded so they are not re-derived:
+per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing (the
+fourth carve into one pre-flight, charged to every `--lite` round); and removing the reuse
+optimisation — whose original argument still stands, because removal does not close it. The ancestry
+walk and the provenance leg read HEAD's **committed** content, which has no source other than that
+store — the working tree cannot substitute, since the `UNCOMMITTED` verdict exists precisely to
+compare against what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into
+`DECLARED` (non-fatal) after removal, while charging every `--lite` round for a half-closure
+(measured 3.41 s / 93 MB full, 3.58 s / 45 MB at `--depth=1`; shallow is *not* cheaper — it still
+ships the tip's whole tree). A check that claims nothing false is worth more than one claiming a
+closure it does not deliver.
 
 **The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
 `origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
