@@ -258,8 +258,8 @@ export function checkErrors(errors = loadAll().errors) {
 // ---------------------------------------------------------------------------
 
 export const REQUIRED_FLOOR_KEYS = [
-  'min_vectors', 'min_errors', 'min_rows', 'required_row_names', 'required_kinds',
-  'require_nested_container', 'require_null_canonical',
+  'min_vectors', 'min_errors', 'min_rows', 'required_row_names', 'required_error_names',
+  'required_kinds', 'require_nested_container', 'require_null_canonical',
 ];
 export const ALL_LEGS = ['python', 'node', 'cli'];
 
@@ -351,6 +351,11 @@ export function checkFloor(data = loadAll()) {
   const rowNames = rows.map((r) => r.name);
   const missingRows = floor.required_row_names.filter((n) => !rowNames.includes(n));
   if (missingRows.length) failures.push(`required row case(s) absent: ${JSON.stringify(missingRows)}`);
+  const errorNames = errors.map((c) => c.name);
+  const missingErrors = floor.required_error_names.filter((n) => !errorNames.includes(n));
+  if (missingErrors.length) {
+    failures.push(`required strictness refusal case(s) absent: ${JSON.stringify(missingErrors)}`);
+  }
   const names = vectors.map((v) => v.name);
   if (new Set(names).size !== names.length) failures.push('duplicate vector names');
 

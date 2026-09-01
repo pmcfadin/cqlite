@@ -50,7 +50,11 @@
       "runners rather than shrinking the suite silently.",
       "`rows` pins the ROW-BUILDING path (types_from_columns/typesFromColumns +",
       "canon_row_*), which the value vectors cannot reach; min_rows and",
-      "required_row_names keep it from being emptied."
+      "required_row_names keep it from being emptied.",
+      "`required_error_names` names the STRICTNESS refusals (F4 containers, F5 the",
+      "node integer surface, F6 a present `undefined`) rather than counting them:",
+      "each pins a defect that is silent when it is not refused, so a count alone",
+      "would let one be swapped for a benign case."
     ],
     "min_vectors": 74,
     "min_errors": 46,
@@ -89,6 +93,33 @@
       "proto_polluting_column_names",
       "proto_column_absent_from_the_row",
       "proto_column_explicit_null"
+    ],
+    "required_error_names": [
+      "node_array_for_set",
+      "node_bigint_for_duration_months",
+      "node_bigint_for_int",
+      "node_bigint_for_smallint",
+      "node_bigint_for_tinyint",
+      "node_blob_not_bytes",
+      "node_map_for_set",
+      "node_map_not_a_map",
+      "node_number_for_bigint",
+      "node_number_for_counter",
+      "node_number_for_duration_nanos",
+      "node_number_for_time",
+      "node_number_for_varint",
+      "node_present_undefined_in_a_list",
+      "node_present_undefined_scalar",
+      "node_set_for_list",
+      "node_set_for_tuple",
+      "python_list_element_in_a_hashable_position",
+      "python_list_for_map",
+      "python_list_for_set",
+      "python_list_for_tuple",
+      "python_scalar_key_where_a_projected_map_is_declared",
+      "python_set_for_list",
+      "python_tuple_for_list",
+      "python_tuple_for_set"
     ]
   },
   "vectors": [

@@ -307,6 +307,7 @@ REQUIRED_FLOOR_KEYS = (
     "min_errors",
     "min_rows",
     "required_row_names",
+    "required_error_names",
     "required_kinds",
     "require_nested_container",
     "require_null_canonical",
@@ -418,6 +419,10 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
     missing_rows = [n for n in floor["required_row_names"] if n not in row_names]
     if missing_rows:
         failures.append(f"required row case(s) absent: {missing_rows}")
+    error_names = [c["name"] for c in errors]
+    missing_errors = [n for n in floor["required_error_names"] if n not in error_names]
+    if missing_errors:
+        failures.append(f"required strictness refusal case(s) absent: {missing_errors}")
     names = [v["name"] for v in vectors]
     if len(set(names)) != len(names):
         failures.append("duplicate vector names")

@@ -195,6 +195,44 @@ over: `cqlite-cli/src/output/json.rs` renders list, set and tuple all as a bare
 JSON array, so on that leg the check is only "is it an array". The enforcement
 is on the python and node legs.
 
+### Scalars: the same rule, one level down — and NODE-ONLY
+
+The Node adapter used to accept `number` **or** `bigint` for every integer
+kind, so a regression returning a `number` where the surface is `BigInt` passed
+for every value below 2^53 and would only ever have surfaced past it: silent
+for every realistic fixture, which is the worst failure mode. The exact type is
+now required per kind, verified at `bindings/node/src/value.rs`:
+
+| declared kind | node leg | source |
+|---|---|---|
+| `tinyint` `smallint` `int` | `number` | `create_int32` (`:214-216`) |
+| `bigint` `counter` | `BigInt` | `create_bigint_from_i64` (`:219-220`) |
+| `time` | `BigInt` | `create_bigint_from_i64` (`:249`) |
+| `varint` | `BigInt` | `varint_to_bigint` (`:259`) |
+| `duration.months` `duration.days` | `number` | `create_int32` (`:337-338`) |
+| `duration.nanos` | **`BigInt`** | `create_bigint_from_i64` (`:339-340`) |
+
+The **nested** `duration.nanos` is the one easiest to miss — `months` and
+`days` beside it are plain numbers — and it has its own refusal case.
+
+**This is node-only**, the same asymmetry the container table has one row up,
+and for a matching reason: the **Python** binding returns a plain `int` for
+every integer kind, so there is nothing to distinguish; the **CLI** emits a
+JSON number for all of them (a decimal string for `varint`), so nothing there
+either. The enforcement lives where the surface is unambiguous, which is the
+only place a strictness rule can be added without risking a false red.
+
+### A PRESENT `undefined` is a regression, not an absence
+
+Declared gap 5 accommodates an **absent** property — the Node binding
+legitimately omits a metadata column with no value. `canonRowNode` decides
+absence with `hasOwnProperty` (never with an `=== undefined` test, or the
+distinction could not be made at all) and supplies `null` for it. A property
+that IS present and holds `undefined` is a binding regression: the binding
+cannot produce it, and `JSON.stringify` would drop it from the artifact
+silently. It is refused, and the rule reaches container **elements** too, so a
+sparse array's hole is refused as well.
+
 ### Three intentional projections, each measured at the binding's source
 
 1. **`SET<FROZEN<UDT>>` is a Python `list`** (#804/#3500).
@@ -268,7 +306,9 @@ before reporting:
 * `fixtures.json` → `min_fixtures` **and** `required_names` (a count alone
   would let a fixture be swapped for a trivial substitute).
 * `canonical-vectors.json` → `min_vectors`, `min_errors`, `min_rows`,
-  `required_row_names`, `required_kinds` (checked against the CQL kinds
+  `required_row_names`, `required_error_names` (the strictness refusals named
+  rather than counted, since each pins a defect that is silent when it is not
+  refused), `required_kinds` (checked against the CQL kinds
   appearing anywhere in each vector's parsed type tree, so deleting every blob
   vector reds the runners), `require_nested_container` and
   `require_null_canonical`. `required_row_names` is named rather than counted
