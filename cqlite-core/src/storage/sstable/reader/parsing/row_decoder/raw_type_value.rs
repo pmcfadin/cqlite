@@ -26,6 +26,17 @@ impl V5CompressedLegacyParser {
                 column_name, depth, MAX_TYPE_NESTING_DEPTH
             )));
         }
+        // Issue #3722: every UDT-field decode in this function goes through the
+        // one consolidated decoder (`row_decoder::udt_field`) at this call's own
+        // `depth`. Two adapters, because the field-type sites and the
+        // inner-of-frozen sites differ only in which type they pass and by one
+        // nesting level; they keep the deeply-nested call sites on one line.
+        let decode_udt_field =
+            |data: &[u8], field_type: &CqlType| self.parse_udt_field_value(data, field_type, depth);
+        let decode_udt_field_inner = |data: &[u8], field_type: &CqlType| {
+            self.parse_udt_field_value(data, field_type, depth + 1)
+        };
+
         // Normalize type name for case-insensitive matching
         let normalized_type = type_str.to_lowercase();
 
@@ -772,11 +783,7 @@ impl V5CompressedLegacyParser {
                                             field_data, nested_udt, registry,
                                         )?
                                     } else {
-                                        self.parse_udt_field_value(
-                                            field_data,
-                                            &field_def.field_type,
-                                            depth,
-                                        )?
+                                        decode_udt_field(field_data, &field_def.field_type)?
                                     }
                                 }
                                 CqlType::Udt(udt_name, inline_fields) => {
@@ -795,11 +802,7 @@ impl V5CompressedLegacyParser {
                                             1,
                                         )?
                                     } else {
-                                        self.parse_udt_field_value(
-                                            field_data,
-                                            &field_def.field_type,
-                                            depth,
-                                        )?
+                                        decode_udt_field(field_data, &field_def.field_type)?
                                     }
                                 }
                                 CqlType::Frozen(inner) => match inner.as_ref() {
@@ -814,11 +817,7 @@ impl V5CompressedLegacyParser {
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
-                                            self.parse_udt_field_value(
-                                                field_data,
-                                                &field_def.field_type,
-                                                depth,
-                                            )?
+                                            decode_udt_field(field_data, &field_def.field_type)?
                                         }
                                     }
                                     CqlType::Udt(udt_name, inline_fields) => {
@@ -839,24 +838,12 @@ impl V5CompressedLegacyParser {
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
-                                            self.parse_udt_field_value(
-                                                field_data,
-                                                &field_def.field_type,
-                                                depth,
-                                            )?
+                                            decode_udt_field(field_data, &field_def.field_type)?
                                         }
                                     }
-                                    _ => self.parse_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                        depth,
-                                    )?,
+                                    _ => decode_udt_field(field_data, &field_def.field_type)?,
                                 },
-                                _ => self.parse_udt_field_value(
-                                    field_data,
-                                    &field_def.field_type,
-                                    depth,
-                                )?,
+                                _ => decode_udt_field(field_data, &field_def.field_type)?,
                             }
                         } else {
                             // No registry - check for inline UDT definitions (Issue #239)
@@ -883,17 +870,9 @@ impl V5CompressedLegacyParser {
                                         )?;
                                         Value::Frozen(Box::new(inner_value))
                                     }
-                                    _ => self.parse_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                        depth,
-                                    )?,
+                                    _ => decode_udt_field(field_data, &field_def.field_type)?,
                                 },
-                                _ => self.parse_udt_field_value(
-                                    field_data,
-                                    &field_def.field_type,
-                                    depth,
-                                )?,
+                                _ => decode_udt_field(field_data, &field_def.field_type)?,
                             }
                         };
                         Some(value)
@@ -969,8 +948,7 @@ impl V5CompressedLegacyParser {
                                 None
                             } else if field_len == 0 {
                                 // Empty field - parse with empty data
-                                let value =
-                                    self.parse_udt_field_value(&[], &field_def.field_type, depth)?;
+                                let value = decode_udt_field(&[], &field_def.field_type)?;
                                 Some(value)
                             } else {
                                 let field_len = Self::checked_component_len(
@@ -1064,20 +1042,13 @@ impl V5CompressedLegacyParser {
                                             }
                                             _ => {
                                                 // Other frozen types - parse as simple value
-                                                let inner_value = self.parse_udt_field_value(
-                                                    field_data,
-                                                    inner,
-                                                    depth + 1,
-                                                )?;
+                                                let inner_value =
+                                                    decode_udt_field_inner(field_data, inner)?;
                                                 Value::Frozen(Box::new(inner_value))
                                             }
                                         }
                                     }
-                                    _ => self.parse_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                        depth,
-                                    )?,
+                                    _ => decode_udt_field(field_data, &field_def.field_type)?,
                                 };
                                 Some(value)
                             };
