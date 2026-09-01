@@ -888,6 +888,10 @@ fn a_dangling_component_length_header_is_rejected() {
 /// default — i.e. straight back to a prefix decode. Rather than inspect the
 /// private return value, this asserts the OBSERVABLE consequence for every
 /// composite spelling the decoder supports: appending a byte must be refused.
+///
+/// DIRECTIONAL: the list is HAND-CURATED, so it proves the arms it names still
+/// refuse; it cannot see an arm added to `parse_value_from_raw_bytes` and missing
+/// from the dispatcher. That limit is stated once, at `decode_reporting_consumption`.
 #[test]
 fn every_composite_cell_path_key_spelling_is_consumption_checked() {
     let int_elem = encode_sequence(&[&1i32.to_be_bytes()]);
@@ -1482,13 +1486,9 @@ fn float_cell_path_key_keeps_cql_type_identity() {
             "{spelling}: a float key is Float32, not the f64 Float"
         );
     }
-    // Cross-spelling parity, same property as the composite keys: the frozen
-    // reader must agree, or one map's two spellings disagree on a float key.
-    assert_eq!(
-        p.parse_cell_path_key(&bytes, "float", "k").unwrap(),
-        p.parse_value_from_raw_bytes(&bytes, "float", "k", 0)
-            .unwrap(),
-    );
+    // NO cross-spelling assertion here: for `float` the cell-path decoder DELEGATES to
+    // `parse_value_from_raw_bytes`, so comparing them cannot fail. Real parity (two
+    // readers, two type strings) belongs to `multicell_and_frozen_sides_present_every_key_type_identically`.
     // `double` is untouched and REMAINS the f64 `Value::Float` — the fix narrows
     // `float` alone and must not have swept its neighbour up.
     assert_eq!(

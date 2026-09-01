@@ -480,9 +480,21 @@ impl V5CompressedLegacyParser {
     /// # Dispatch must mirror `parse_value_from_raw_bytes`
     /// The guards below are the same predicates, in the same ORDER (frozen before
     /// UDT, because `is_udt_type` is a substring match that also matches
-    /// `FrozenType(UserType(..))`). `cell_path_key_tests` asserts that every
-    /// composite spelling reports `Some`, so an arm added there and not here shows
-    /// up as a failing test rather than as a silent prefix decode.
+    /// `FrozenType(UserType(..))`).
+    ///
+    /// ## ADDING AN ARM THERE IS A MANUAL OBLIGATION HERE — no test enforces it
+    /// `cell_path_key_tests::every_composite_cell_path_key_spelling_is_consumption_checked`
+    /// runs a HAND-CURATED list and requires each spelling to refuse a trailing byte,
+    /// so it catches an arm BROKEN OR REMOVED here (its `cases.len()` pin catches a
+    /// case dropped from the list). It cannot catch the OPPOSITE direction — a
+    /// composite arm added to `parse_value_from_raw_bytes` and not here falls through
+    /// to the `None` "whole slice by construction" default and prefix-decodes
+    /// SILENTLY. An earlier revision of this doc claimed the guard did catch it.
+    /// Deriving the case set was measured and declined: the ten composite literals
+    /// are shared, but they are `starts_with` arguments there and `const`s here, and
+    /// the `is_udt_type` / `duration` arms are predicates no literal scan sees — a
+    /// scanner blind to the arm shapes most likely to be added is the
+    /// false-assurance class this repo has twice descoped, so the gap is DECLARED.
     fn decode_reporting_consumption(
         &self,
         data: &[u8],
