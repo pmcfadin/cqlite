@@ -704,7 +704,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 34 cases over throwaway
+#                      features-load-bearing component: 41 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -15002,7 +15002,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 34 cases over throwaway fixture
+# proof for the features-load-bearing component: 41 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16479,7 +16479,14 @@ run_tooling_tests() {
   # `#[path]` module, a nested-member helper reached by the outer target, and THE
   # ASYMMETRY itself — three differently-ambiguous files that must all credit, asserted
   # by count, because "when ownership is ambiguous, CREDIT" is the invariant every other
-  # case rests on and the one a refactor would most easily break. Every fixture is a LOCAL path workspace with no registry
+  # case rests on and the one a refactor would most easily break. Round 6 (job 60) pins
+  # the three bounded recogniser fixes (a cfg in a cfg_attr TAIL, whitespace in the
+  # attribute head, decoded string escapes), the two NOT-SEEN spellings the scoped claim
+  # names (a macro-expanded feature name, a runtime-built env key — both RED, both
+  # declared), and THE CLAIM ITSELF: the success output must state the scoped
+  # no-false-FAIL claim, ENUMERATE the recognised spellings, say what is NOT SEEN, and
+  # contain no form of the word "sound" — the unqualified soundness claim was retracted
+  # after six rounds of witnesses, and its return is a test failure, not a wording nit. Every fixture is a LOCAL path workspace with no registry
   # dependency, so the suite runs offline (verified under CARGO_NET_OFFLINE=1) — this
   # component is mandatory and must not depend on a network.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own

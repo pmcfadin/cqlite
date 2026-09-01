@@ -602,7 +602,10 @@ HEAD_RE = re.compile(
     r'(?P<attr>\#' + WS + r'!?' + WS + r'\[' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\()'
     r'|(?P<bang>(?<![A-Za-z0-9_])cfg' + WS + r'!' + WS + r'\()'
 )
-NESTED_CFG_RE = re.compile(r'^' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\(')
+# NO `^` ANCHOR: this pattern is used with `re.match(code, pos, endpos)`, which already
+# anchors at `pos`, while `^` would anchor at the real start of the STRING (a documented
+# Python behaviour) and so never match a tail argument mid-file.
+NESTED_CFG_RE = re.compile(WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\(')
 FEATURE_EQ_RE = re.compile(r'(?<![A-Za-z0-9_])feature' + WS + r'=' + WS)
 
 

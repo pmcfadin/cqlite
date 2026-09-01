@@ -142,6 +142,27 @@
 #                each the sole site of a distinct feature, must ALL credit. Asserted by
 #                COUNT, so dropping any one of them reds this case.
 #
+#
+#   ROUND 6 (roborev job 60) — THE CLAIM ITSELF. Three bounded recogniser fixes, the two
+#   NOT-SEEN spellings the scoped claim names, and a case pinning the wording:
+#  36.  GREEN  — SOUNDNESS: a `cfg` in a `cfg_attr` TAIL is a real gate
+#                (`#[cfg_attr(unix, cfg(feature = "x"))]`); only the condition was read.
+#  37.  GREEN  — SOUNDNESS: `# [cfg(...)]` and `# ! [cfg(...)]` — whitespace between `#`,
+#                `!` and `[` is legal Rust and the head was not matching it.
+#  38.  GREEN  — SOUNDNESS: `"\x66oo"` and `"\u{62}ar"` decode to `foo`/`bar`; recording
+#                the undecoded text reported the real feature dead.
+#  39.  GREEN  — DECLARED: an escape the scanner cannot decode credits EVERY feature of
+#                the package rather than one wrong name.
+#  40.  RED    — DECLARED LIMIT: a feature NAME produced by MACRO EXPANSION is NOT SEEN.
+#                No lexical scan can see it; this is why the claim is scoped, not absolute.
+#  41.  RED    — DECLARED LIMIT: a build-script env key CONSTRUCTED AT RUNTIME (joined
+#                from fragments) is NOT SEEN. Also unresolvable lexically.
+#  42.  GREEN  — THE CLAIM: the success output must state the SCOPED no-false-FAIL claim,
+#                ENUMERATE the recognised spellings, say what is NOT SEEN — and must not
+#                contain any form of the word "sound". The unqualified soundness claim was
+#                tried and retracted after six rounds of witnesses; a false rationale in a
+#                gate log is worse than none, so its return is a test failure.
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -332,7 +353,7 @@ expect_red_naming() { # <dir> <needle> <label>
 # same run that exhibits it. A declaration nobody tests is a comment that rots, and a
 # fixture that exhibits an undeclared behaviour is worse than either.
 assert_contract_declares() { # <phrase> <label>
-  grep -q 'CONTRACT: SOUND-BY-DESIGN' "$TMPROOT/out.txt" \
+  grep -q 'CONTRACT: NO FALSE FAIL' "$TMPROOT/out.txt" \
     || { cat "$TMPROOT/out.txt"; fail_case "$2: the guard printed no CONTRACT line, so this behaviour is undeclared"; }
   grep -qF -- "$1" "$TMPROOT/out.txt" \
     || { cat "$TMPROOT/out.txt"; fail_case "$2: the CONTRACT line does not name the escape route this fixture exhibits ('$1')"; }
@@ -921,13 +942,137 @@ AMBIG_COUNT="$(asserted_count)"
   || fail_case "case 35: expected $((BASE_COUNT + 3)) asserted features, got $AMBIG_COUNT — one of the three ambiguous files was DROPPED rather than credited"
 ok "THE ASYMMETRY: three differently-ambiguous files each credit their feature ($AMBIG_COUNT = $BASE_COUNT + 3) — ambiguity resolves toward CREDITING, never toward dropping"
 
+# --- 36. GREEN (SOUNDNESS): a cfg in a cfg_attr TAIL is a real gate ----------
+# `#[cfg_attr(unix, cfg(feature = "x"))]` applies the tail attribute when the condition
+# holds, so it gates x. Scanning only the CONDITION reported such a feature dead.
+D="$(fixture cfg-attr-tail)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\ntailfeat = []/' "$D/a/Cargo.toml"
+grep -q '^tailfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 36: fixture edit did not plant tailfeat"
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+#[cfg_attr(unix, cfg(feature = "tailfeat"))]
+pub fn gated_through_a_tail() {}
+EOF
+expect_green "$D" "case 36"
+ok "SOUNDNESS: a cfg inside a cfg_attr TAIL is a real gate and credits its feature"
+
+# --- 37. GREEN (SOUNDNESS): whitespace in the attribute head -----------------
+# `# [cfg(...)]` and `# ! [cfg(...)]` are legal Rust; requiring `#[` contiguous meant a
+# legal gate was NOT SEEN.
+D="$(fixture whitespace-attr-head)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nwsouter = []\nwsinner = []/' "$D/a/Cargo.toml"
+for f in wsouter wsinner; do
+  grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 37: fixture edit did not plant $f"
+done
+cat >"$D/a/src/gapped.rs" <<'EOF'
+# ! [cfg(feature = "wsinner")]
+
+# [cfg(feature = "wsouter")]
+pub fn spaced_out() {}
+EOF
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+pub mod gapped;
+EOF
+expect_green "$D" "case 37"
+ok "SOUNDNESS: \`# [cfg(...)]\` and \`# ! [cfg(...)]\` (whitespace in the head) are seen"
+
+# --- 38. GREEN (SOUNDNESS): Rust string escapes are decoded ------------------
+# `"\x66oo"` IS the feature `foo`; recording `x66oo` reported `foo` dead.
+D="$(fixture escape-decoding)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nfoo = []\nbar = []/' "$D/a/Cargo.toml"
+for f in foo bar; do
+  grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 38: fixture edit did not plant $f"
+done
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+#[cfg(feature = "\x66oo")]
+pub fn hex_escaped() {}
+
+#[cfg(feature = "\u{62}ar")]
+pub fn unicode_escaped() {}
+EOF
+expect_green "$D" "case 38"
+ok "SOUNDNESS: \\xHH and \\u{...} escapes are decoded, so the gated feature is the one credited"
+
+# --- 39. GREEN (DECLARED): an UNDECODABLE escape credits every feature -------
+D="$(fixture undecodable-escape)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nnowhere = []/' "$D/a/Cargo.toml"
+grep -q '^nowhere = \[\]$' "$D/a/Cargo.toml" || fail_case "case 39: fixture edit did not plant nowhere"
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+#[cfg(feature = "\q")]
+pub fn escape_this_scanner_cannot_read() {}
+EOF
+expect_green "$D" "case 39"
+assert_contract_declares "an undecodable string escape credits every feature of the package" "case 39"
+ok "DECLARED: an escape the scanner cannot decode credits EVERY feature of the package rather than one wrong name"
+
+# --- 40. RED (DECLARED LIMIT): a feature NAME produced by macro expansion ----
+# The name exists nowhere in a `feature =` position, so no lexical scan can see it. This
+# is a NOT-SEEN spelling, and the contract line says so — that is why the claim is
+# scoped rather than absolute.
+D="$(fixture macro-expanded-name)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nexpandedname = []/' "$D/a/Cargo.toml"
+grep -q '^expandedname = \[\]$' "$D/a/Cargo.toml" || fail_case "case 40: fixture edit did not plant expandedname"
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+macro_rules! gate_it {
+    ($flag:literal) => {
+        #[cfg(feature = $flag)]
+        pub fn gated_by_expansion() {}
+    };
+}
+
+gate_it!("expandedname");
+EOF
+expect_red_naming "$D" "expandedname" "case 40"
+ok "DECLARED LIMIT: a feature NAME produced by macro expansion is NOT SEEN (reported dead), which is why the claim is scoped"
+
+# --- 41. RED (DECLARED LIMIT): a build-script env key built at runtime -------
+D="$(fixture runtime-env-key)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nruntimekey = []/' "$D/a/Cargo.toml"
+grep -q '^runtimekey = \[\]$' "$D/a/Cargo.toml" || fail_case "case 41: fixture edit did not plant runtimekey"
+cat >"$D/a/build.rs" <<'EOF'
+fn main() {
+    let key = ["CARGO", "FEATURE", "RUNTIMEKEY"].join("_");
+    if std::env::var(&key).is_ok() {
+        println!("cargo:rustc-cfg=has_runtimekey");
+    }
+}
+EOF
+expect_red_naming "$D" "runtimekey" "case 41"
+ok "DECLARED LIMIT: a build-script env key CONSTRUCTED AT RUNTIME is NOT SEEN (reported dead), as the contract states"
+
+# --- 42. THE CLAIM ITSELF ----------------------------------------------------
+# The published claim must be SCOPED. An unqualified soundness claim was tried and
+# RETRACTED (six review rounds, six more valid Rust spellings), so the success output
+# must carry the bounded wording AND must not contain any form of the word "sound" — a
+# false rationale in a gate log is worse than none, because it is what stops the next
+# person looking.
+D="$(fixture claim-wording)"
+expect_green "$D" "case 42"
+grep -q 'CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 42: the success output does not state the SCOPED no-false-FAIL claim"; }
+grep -q 'NOT SEEN' "$TMPROOT/out.txt" \
+  || fail_case "case 42: the claim does not say that a spelling outside the recognised set is NOT SEEN"
+for spelling in '#\[cfg\]' '#!\[cfg\]' 'cfg!' 'cfg_attr'; do
+  grep -qE -- "$spelling" "$TMPROOT/out.txt" \
+    || fail_case "case 42: the claim does not ENUMERATE the recognised spelling '$spelling' — an unenumerated scope is not a scope"
+done
+if grep -qi 'sound' "$TMPROOT/out.txt"; then
+  cat "$TMPROOT/out.txt"
+  fail_case "case 42: the success output makes a SOUNDNESS claim. That claim is absolute over a lexical scan of Rust, it was RETRACTED on roborev job 60, and it must not come back."
+fi
+ok "THE CLAIM: the success output states the SCOPED no-false-FAIL claim, enumerates the recognised spellings, says what is NOT SEEN, and makes no soundness claim"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=34
+CASE_COUNT_EXPECTED=41
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
