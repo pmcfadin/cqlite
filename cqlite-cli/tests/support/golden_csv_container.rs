@@ -275,6 +275,27 @@
 //! counted as compared container coverage. Every refusal is decided from the
 //! GOLDEN and the committed DDL alone, so it can never be caused by the very
 //! defect under test.
+//!
+//! ## A SECOND declared residual: no refusal is asked at a MAP KEY node (#3726)
+//!
+//! Every position the COMPARISON walks is asked [`node_refusal`], because
+//! `compare::compare_value_at` asks it at each node it visits. A map KEY is not
+//! such a node: `compare::compare_map` PAIRS keys (it canonicalizes them) rather
+//! than recursing into them, so there is nowhere in that path to record a refusal.
+//!
+//! What that costs, exactly. At the map NODE, [`decode_does_not_recover`] does
+//! verify a container key's recoverability twice over — the entry split must give
+//! the golden's entries back, and [`entry_cut`] must give each rendered KEY back —
+//! so a `, ` or a `: ` that would move either cut IS refused. What it does not
+//! reach is the key's OWN member split: a `, ` inside a scalar member of the key
+//! (a `list<text>` key holding `["a, b"]`, rendering `{a, b}`) leaves both of those
+//! cuts intact and yet decodes into two members where the golden has one — which
+//! this lane would report as a divergence the CLI did not cause. Bounding it means
+//! `compare_map` asking [`node_refusal`] at the key node and recording it, which is
+//! a code path no committed fixture reaches; it is declared here instead. MEASURED
+//! on the corpus: no container map key anywhere in it carries a `, `, a `: ` or a
+//! bracket inside a member — `test_nested_udt_keys.nested_udt_keys`'s keys are
+//! `key_part` UDTs whose `label`s are plain identifiers, an empty string or null.
 
 use super::schema::CqlType;
 use super::{container, stringified_blob_spelling, Kinding};
