@@ -894,7 +894,7 @@ spec.loader.exec_module(module)
 payload = {
     # The POSITIVE CONTROL pair: what the child actually saw, and a constant
     # whose documented contract IS to follow it.
-    "env_seen": os.environ.get("CQLITE_DATASETS_ROOT"),
+    "env_seen": os.environ.get("CQLITE_DATASETS_ROOT"),  # CONTROL: the probe echoes the perturbed value back
     # CONTROL: env-routed BY CONTRACT — the positive control, never a consumer.
     "control_env_routed": str(conftest.DATASETS),  # CONTROL
     # The INVARIANT: this suite's own resolved constants. `SCHEMAS`/`SCHEMA` are
@@ -1001,7 +1001,7 @@ def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(tmp_
     # resolution reds on the equality alone; UNSET (the usual local run) and only
     # Half 2 can see it. A maintainer reading a failure needs to know which run
     # they are looking at, and neither state is the "right" one to run under.
-    ambient = os.environ.get("CQLITE_DATASETS_ROOT")
+    ambient = os.environ.get("CQLITE_DATASETS_ROOT")  # CONTROL: the AMBIENT read, diagnostic only
     ambient_note = (
         "ambient CQLITE_DATASETS_ROOT: "
         f"{ambient if ambient is not None else '(unset)'}"
@@ -1022,7 +1022,7 @@ def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(tmp_
     out_path = tmp_path / "probe.json"
 
     child_env = dict(os.environ)
-    child_env["CQLITE_DATASETS_ROOT"] = str(bogus)
+    child_env["CQLITE_DATASETS_ROOT"] = str(bogus)  # CONTROL: the perturbation itself
     # The strict-fixture flags are cleared for the CHILD only: a corpus-less
     # root makes them a hard failure by design, which would leave the probe
     # unable to run rather than able to measure.
@@ -1139,10 +1139,29 @@ def test_this_module_names_no_env_routed_corpus_constant():
     literal in this function is a `STRING` token, never a `NAME`), so the split is
     belt-and-braces rather than the mechanism.
 
-    DECLARED BOUND, because a guard that overstates its reach is worse than none:
-    a consumer reading `os.environ` DIRECTLY names no constant and is invisible
-    here. That half is what the child-process probe above measures, so the two
-    are complementary rather than overlapping, and neither alone closes the class.
+    A SECOND NEEDLE, closing the cheap half of what this guard used to merely
+    declare (roborev #3724 round 4): the env VARIABLE NAME itself, as a STRING
+    literal. A future test that skips the corpus constants and reads
+    `os.environ["<var>"]` DIRECTLY names none of the constants above, so the NAME
+    scan cannot see it — but such a read must contain the variable's name as a
+    literal, and a literal in this file's source plainly IS checkable. Compared
+    EXACTLY against the quoted spellings, which is the whole reason this file's
+    heavy PROSE about the variable stays out of scope: a docstring is ONE `STRING`
+    token holding the entire docstring, and a diagnostic message like
+    `"ambient <var>: "` is a different string again — neither is ever equal to the
+    bare quoted name. So the exemptions do not have to grow to accommodate prose.
+
+    DECLARED RESIDUAL, and it is what keeps this guard honest — the half a source
+    scan genuinely cannot reach is an INDIRECT read: a helper that returns the
+    value, a COMPUTED or concatenated variable name (`os.environ[prefix + suffix]`),
+    or an alias bound to `os.environ` names neither a corpus constant nor the
+    literal, so neither needle fires. That half stays the child-process probe's
+    job — it measures the RESOLVED paths under a perturbed environment, whatever
+    route a consumer took to read it, so the two are complementary rather than
+    overlapping and neither alone closes the class. Deliberately NOT met with an
+    AST or dataflow "environment read" detector: a recogniser over
+    author-controlled code accumulates false PASSes, and a guard with known false
+    PASSes is worse than no guard at all.
     """
     import io
     import tokenize
@@ -1155,11 +1174,16 @@ def test_this_module_names_no_env_routed_corpus_constant():
         "DATASETS" + "_AVAILABLE",
     }
 
-    names = {
-        token.string
-        for token in tokenize.tokenize(io.BytesIO(Path(__file__).read_bytes()).readline)
-        if token.type == tokenize.NAME
-    }
+    # Split for the same reason, and here the split is load-bearing in a second
+    # way: an unsplit literal below would be a STRING token equal to the quoted
+    # needle, so the scan would match its own source and could never pass.
+    env_var = "CQLITE_" + "DATASETS_ROOT"
+    quoted_env_var = {'"' + env_var + '"', "'" + env_var + "'"}
+
+    source_lines = Path(__file__).read_text().splitlines()
+    tokens = list(tokenize.tokenize(io.BytesIO(Path(__file__).read_bytes()).readline))
+
+    names = {token.string for token in tokens if token.type == tokenize.NAME}
     offenders = sorted(forbidden & names)
     assert not offenders, (
         f"this module names the env-routed corpus constant(s) {offenders} in CODE. "
@@ -1167,6 +1191,45 @@ def test_this_module_names_no_env_routed_corpus_constant():
         "from `PROJECT_ROOT` (#3131/#3148); a path built from an env-routed root "
         "is invisible exactly where this suite runs, because every gate run sets "
         "CQLITE_DATASETS_ROOT. Build the path from `PROJECT_ROOT` instead."
+    )
+
+    # Needle 2 — the env variable's own name, as a bare quoted STRING literal, on
+    # any line that does not declare itself the positive CONTROL.
+    env_offenders = sorted(
+        f"{token.start[0]}: {source_lines[token.start[0] - 1].strip()}"
+        for token in tokens
+        if token.type == tokenize.STRING
+        and token.string in quoted_env_var
+        and "CONTROL" not in source_lines[token.start[0] - 1]
+    )
+    assert not env_offenders, (
+        f"this module reads the {env_var} environment variable directly, outside "
+        f"its positive control: {env_offenders}. The committed fixture is committed "
+        "SOURCE and resolves checkout-relative from `PROJECT_ROOT` (#3131/#3148); a "
+        "path built from an env-routed root is invisible exactly where this suite "
+        "runs, because every gate run sets that variable. Build the path from "
+        "`PROJECT_ROOT` instead — or, if the reference really is a positive "
+        "control, mark the line CONTROL and say why."
+    )
+
+    # NON-VACUITY for needle 2, counted SEPARATELY from needle 1's: folding the two
+    # totals into one would let a typo in either split hide behind the other's
+    # matches. Counted over the file's TEXT, so MEASURED at 3 -- the ambient
+    # diagnostic read, the perturbation, and the probe's echo, which is physically
+    # in this file even though it lives inside a string literal the token scan
+    # cannot reach. That third one is additionally checked as PROBE SOURCE below;
+    # the two asserts are not redundant, since this one sees only text while that
+    # one sees the probe's own structure.
+    env_control_lines = [
+        line
+        for line in source_lines
+        if any(q in line for q in quoted_env_var) and "CONTROL" in line
+    ]
+    assert len(env_control_lines) == 3, (
+        f"expected exactly 3 CONTROL-marked references to {env_var} in this "
+        f"module's code, got {len(env_control_lines)}: {env_control_lines}. A count "
+        "that drifts means either a new consumer wearing the marker, or a split "
+        "needle typo that now matches nothing."
     )
 
     # The probe's SOURCE is a string literal, so the token scan above cannot see
@@ -1184,4 +1247,21 @@ def test_this_module_names_no_env_routed_corpus_constant():
     assert "CONTROL" in control_lines[0], (
         "the probe's reference to the env-routed constant must declare itself the "
         f"positive CONTROL, or it is indistinguishable from a consumer: {control_lines[0]!r}"
+    )
+
+    # ...and the same discipline for the probe's reference to the env VARIABLE. The
+    # probe legitimately reads it, ONCE, to echo the perturbed value back as the
+    # positive control's proof; a second reference would be a consumer.
+    probe_env_lines = [
+        line
+        for line in _RESOLUTION_PROBE.splitlines()
+        if any(q in line for q in quoted_env_var)
+    ]
+    assert len(probe_env_lines) == 1, (
+        f"expected exactly one reference to {env_var} in the probe source, got "
+        f"{len(probe_env_lines)}: {probe_env_lines}"
+    )
+    assert "CONTROL" in probe_env_lines[0], (
+        "the probe's read of the env variable must declare itself the positive "
+        f"CONTROL, or it is indistinguishable from a consumer: {probe_env_lines[0]!r}"
     )

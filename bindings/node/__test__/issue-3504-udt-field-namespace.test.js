@@ -482,7 +482,7 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
   // CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
   // ==========================================================================
 
-  test('the fixture and the parity reference resolve checkout-relative, not via CQLITE_DATASETS_ROOT', () => {
+  test('the fixture and the parity reference resolve checkout-relative, not via the datasets-root env var', () => {
     // The file docstring and the reference's `note_on_paths` DOCUMENT this
     // contract; nothing ASSERTED it. `assertFixturePresent` cannot: it checks
     // existence at the ALREADY-RESOLVED path, so it would pass unchanged if
@@ -500,8 +500,8 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     // Half 2 can see it. A maintainer reading a failure needs to know which run
     // they are looking at, and neither state is the "right" one to run under.
     const ambientNote =
-      `ambient CQLITE_DATASETS_ROOT: ` +
-      `${process.env.CQLITE_DATASETS_ROOT === undefined ? '(unset)' : process.env.CQLITE_DATASETS_ROOT}`;
+      `ambient CQLITE_DATASETS_ROOT: ` + // CONTROL: names the variable under test, diagnostic label only
+      `${process.env.CQLITE_DATASETS_ROOT === undefined ? '(unset)' : process.env.CQLITE_DATASETS_ROOT}`; // CONTROL: the AMBIENT read, diagnostic only
     // jest matchers take no message argument, so the note is added by RETHROWING:
     // the matcher's own diff is preserved and the ambient value is appended to it.
     const withAmbient = (assertions) => {
@@ -563,7 +563,7 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     try {
       expect(fs.readdirSync(bogus)).toEqual([]);
 
-      const childEnv = { ...process.env, CQLITE_DATASETS_ROOT: bogus };
+      const childEnv = { ...process.env, CQLITE_DATASETS_ROOT: bogus }; // CONTROL: the perturbation itself
       // Cleared for the CHILD only: `setup.js:246-251` makes a corpus-less root
       // a hard throw under either strict-fixture flag (as the gate's
       // node-bindings lane sets them), which would leave the probe unable to run
@@ -653,11 +653,27 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     //     source. Requiring it to SAY so is what stops the exemption silently
     //     growing into a consumer.
     //
-    // DECLARED BOUND, because a guard that overstates its reach is worse than
-    // none: a consumer reading `process.env` DIRECTLY names no constant and is
-    // invisible here. That half is what the child-process probe above measures,
-    // so the two are complementary rather than overlapping.
+    // A SECOND NEEDLE, closing the cheap half of what this guard used to merely
+    // declare (roborev #3724 round 4): the env VARIABLE NAME itself. A future test
+    // that skips the corpus constants and reads `process.env.<var>` DIRECTLY names
+    // none of the constants above, so the first needle cannot see it — but such a
+    // read must contain the variable's name as a literal, and a literal in this
+    // file's source plainly IS checkable. Same two exemptions, same count assert.
+    //
+    // DECLARED RESIDUAL, and it is what keeps this guard honest — the half a
+    // source scan genuinely cannot reach is an INDIRECT read: a helper that
+    // returns the value, a COMPUTED or concatenated variable name
+    // (`process.env[someVar]`), or an alias bound to `process.env` names neither a
+    // corpus constant nor the literal, so neither needle fires. That half stays
+    // the child-process probe's job — it measures the RESOLVED paths under a
+    // perturbed environment, whatever route a consumer took to read it, so the two
+    // are complementary rather than overlapping and neither alone closes the class.
+    // Deliberately NOT met with an AST or dataflow "environment read" detector: a
+    // recogniser over author-controlled code accumulates false PASSes, and a guard
+    // with known false PASSes is worse than no guard at all.
     const forbidden = ['SSTABLES' + '_DIR', 'TEST_DATA' + '_ROOT', 'DATASETS' + '_AVAILABLE'];
+    const envVar = 'CQLITE_' + 'DATASETS_ROOT';
+    const needles = [...forbidden, envVar];
     const source = fs.readFileSync(__filename, 'utf8');
 
     const offenders = [];
@@ -669,7 +685,7 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
       if (line.includes('CONTROL')) {
         return;
       }
-      for (const name of forbidden) {
+      for (const name of needles) {
         if (line.includes(name)) {
           offenders.push(`${index + 1}: ${trimmed}`);
           return;
@@ -683,10 +699,16 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     // split would silently make the scan look for a name that occurs nowhere and
     // the test would pass having checked nothing. The two known control lines
     // must therefore be FOUND — by the same `includes` the scan uses.
-    const controlLines = source
-      .split('\n')
-      .filter((line) => line.includes('CONTROL') && forbidden.some((n) => line.includes(n)));
-    expect(controlLines.length).toBe(2);
+    const controlLinesFor = (names) =>
+      source
+        .split('\n')
+        .filter((line) => line.includes('CONTROL') && names.some((n) => line.includes(n)));
+    expect(controlLinesFor(forbidden).length).toBe(2);
+    // The env-var needle's own control set, counted SEPARATELY: folding the two
+    // into one total would let a typo in either split hide behind the other's
+    // matches. MEASURED at 4 -- the ambient diagnostic's label and read, the
+    // perturbation, and the probe's echo of it.
+    expect(controlLinesFor([envVar]).length).toBe(4);
   });
 });
 
@@ -776,7 +798,7 @@ const mod = require(modulePath);
 const payload = {
   // The POSITIVE CONTROL pair: what the child actually saw, and a constant
   // whose documented contract IS to follow it.
-  envSeen: process.env.CQLITE_DATASETS_ROOT,
+  envSeen: process.env.CQLITE_DATASETS_ROOT, // CONTROL: the probe echoes the perturbed value back
   controlEnvRouted: global.testPaths.SSTABLES_DIR, // CONTROL: env-routed BY CONTRACT, never a consumer
   // The INVARIANT: this suite's own resolved constants.
   projectRoot: global.testPaths.PROJECT_ROOT,
