@@ -2769,14 +2769,22 @@ apply_schemas_preflight() {
 # show, a baseline `--list`), and routing its result through `$( )` would add a
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
-                   # | manifest-* | head-set-unmeasured
+                   # | manifest-* | head-set-unmeasured | repo-read-blocked
+                   # | read-dir-unisolated
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
 _CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
-                   # The isolated scratch when one exists, else this checkout.
+                   # ALWAYS the isolated scratch — "else this checkout" was written here while
+                   # the pre-flight still read objects live, and since #3757 it reads NONE
+                   # there, so that clause licensed exactly what the enumeration above forbids.
+                   # EMPTY until the scratch exists, and empty is NOT a safe fallback: `git -C
+                   # ""` leaves the working directory UNCHANGED (measured; documented in
+                   # git-config(1)'s `-C` entry), i.e. it silently means THIS checkout. So a
+                   # consumer must REFUSE on an unisolated value rather than pass it to git —
+                   # see `_cs_read_dir_isolated_or_refuse` (#3757).
 _CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTORIES=<lane
                    # objects>` when reading in the scratch (HEAD's objects live in the lane),
                    # else EMPTY
@@ -4507,11 +4515,42 @@ _cs_live_refuse() {
   return 1
 }
 
+# _cs_read_dir_isolated_or_refuse <what>: assert that `$_CS_READ_DIR` names the ISOLATED scratch
+# before its value is handed to git, and set a NAMED refusal if it does not. Returns 0 when it SET
+# a refusal (the caller must return), 1 otherwise — the same contract as `_cs_live_refuse`, so the
+# two read alike at a call site.
+#
+# WHY A REFUSAL AND NOT AN ASSERTION-BY-COMMENT (#3757): the two states this rejects are the two
+# that would silently redirect an OBJECT read into the live repository, which is the one thing the
+# execution-route enumeration at the head of this region forbids — empty (because `git -C ""`
+# leaves the working directory unchanged, so it MEANS this checkout) and `$REPO_ROOT` itself. A
+# fall-through would be a lazy-fetch route re-opened by a future edit, reported as nothing.
+_cs_read_dir_isolated_or_refuse() {
+  case "$_CS_READ_DIR" in
+    "") : ;;
+    "$REPO_ROOT") : ;;
+    *) return 1 ;;
+  esac
+  _CS_KIND=read-dir-unisolated
+  _CS_DETAIL="refusing to $1: the isolated read repository was never established (\$_CS_READ_DIR is ${_CS_READ_DIR:+the LIVE checkout $_CS_READ_DIR}${_CS_READ_DIR:-EMPTY, which git reads as 'leave the working directory unchanged' — i.e. the LIVE checkout}), and an object read there can be answered from the NETWORK by a promisor remote under this repository's own config. This is a code-path defect in the pre-flight, not a state of your checkout: the scratch assignment was skipped or removed"
+  return 0
+}
+
 _component_set_probe_inner() {
   # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
   # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
   # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
-  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
+  # `_CS_READ_DIR` STARTS EMPTY, NOT AT `$REPO_ROOT` (#3757). The old initialiser made THE LIVE
+  # CHECKOUT the value every consumer would see if the scratch assignment were ever skipped, so
+  # "this pre-flight reads no object in the live repository" held only because every earlier
+  # failure `return 0`s before that assignment — an ORDERING property nothing checked. Job 314
+  # rejected the same reasoning in this same function ("relying on 'the parent happens to go
+  # first'... is made explicit instead"). There is no reachable route to it today; this is
+  # HARDENING, and the two halves that make it real are the runtime refusal
+  # (`_cs_read_dir_isolated_or_refuse`) and a structural ordering assert in
+  # scripts/tests/test_agent_gate_component_set.sh (`3757-read-dir-ordering`), because an empty
+  # value is NOT self-protecting: `git -C ""` means the current directory.
+  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -5213,6 +5252,11 @@ _component_set_probe_inner() {
   if _cs_live_refuse "HEAD's sha (the ref only, unpeeled)"; then return 0; fi
   local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0
   if [ -n "$head_unpeeled" ]; then
+    # THE READ REPOSITORY IS ASSERTED, NOT ASSUMED (#3757). Every path that reaches here has
+    # already set `$_CS_READ_DIR` to the scratch — that is exactly the kind of "happens to go
+    # first" reasoning job 314 ruled against, so it is CHECKED at the consumer that would
+    # otherwise hand the value to git.
+    if _cs_read_dir_isolated_or_refuse "peel HEAD ($head_unpeeled) to a commit"; then return 0; fi
     # PEEL + COMMIT-VALIDATE IN THE ISOLATED SCRATCH, and BOUNDED there for the reason job 315
     # recorded for the ancestry walk: this reads a commit object out of the LANE's SHARED object
     # store through the alternate, and a LOOSE object is read as a stream, so a FIFO planted at an
@@ -5228,6 +5272,17 @@ _component_set_probe_inner() {
     if [ "$peel_rc" -eq 124 ] || [ "$peel_rc" -eq 137 ] || [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
       _CS_KIND=repo-read-blocked
       if [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+        # `repo-read-blocked`, NOT `unboundable`, AND THE PRECEDENT IS THE ADJACENT ANCESTRY WALK
+        # (roborev job 325, nit 4). Every `_cs_live_git` call maps this same condition to
+        # `unboundable`, and that kind's own comment argues against "a second spelling... two
+        # names for one fact" — so the choice is stated rather than left to be inferred. Two
+        # reasons for following the walk instead of the wrapper: this is a read of the LANE's
+        # SHARED OBJECT STORE (the walk's subject), not of the live repository's config (the
+        # wrapper's), so an operator reading the detail is being sent to `find <objdir> -type p`
+        # and not to `git config --get-all include.path`; and the walk 15 lines below already
+        # spells an unboundable object read this way, so matching the wrapper here would put TWO
+        # spellings on the SAME condition inside one block. No verdict changes either way —
+        # both kinds are non-`ok`, hence UNMEASURED.
         _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright; a missing capability must not inherit the permissive branch"
       else
         _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit EXCEEDED its ${_CS_BOUND_HINT}s bound reading that object from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it by resolving the object directory with \`git rev-parse --git-path objects\` and searching that directory for FIFOs with \`find <objdir> -type p\`"

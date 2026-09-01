@@ -24,28 +24,38 @@
 #   4d. a SHALLOW clone where rc 1 is ambiguous                          -> INDETERMINATE, never BEHIND
 #   5d. a concurrent fetch clobbering FETCH_HEAD                         -> baseline unaffected
 #   3757. HEAD is resolved UNPEELED in the live repository and PEELED in the isolated scratch
-#      (#3757): no live git call peels an object (structural, with a positive control), the
-#      scratch peel is bounded and three-valued (structural, with a positive control), a FIFO at
-#      HEAD's own object is refused BY NAME, and an unpeelable HEAD stays INDETERMINATE
+#      (#3757): the region's LIVE git calls equal a DECLARED ALLOWLIST of exact argument shapes
+#      (structural, with FOUR planted evasion routes — a deny pattern over rev syntax never
+#      closes), the scratch peel is bounded and three-valued (structural, with a control),
+#      `$_CS_READ_DIR` never names the live checkout (structural x3 + a behavioural refusal), a
+#      FIFO at HEAD's own object is refused BY NAME, and an unpeelable HEAD stays INDETERMINATE
 #   5. no skew                                                          -> affirmative PASS + baseline sha
 #   6. --lite with a real skew                                          -> line present, run NOT failed
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
 #
 # CENSUS, stated so a later reader can tell "covered" from "forgotten" (a silent gap is
-# the shape this whole issue is about). The pre-flight has FOUR verdicts and TEN non-`ok`
-# probe kinds, and EVERY one is exercised below:
+# the shape this whole issue is about). The pre-flight has SIX verdicts and one non-`ok` probe
+# kind per row below, and EVERY one is exercised here.
+#
+# THE KIND COUNT IS NOT REPEATED IN THIS PROSE, AND THAT IS THE FIX (roborev job 325, nit 5). It
+# was written as three different numbers at once — "TEN", "(17)" and "NINETEEN" — over an
+# enumeration that listed a fourth, while the file's own rule is that a census which miscounts its
+# own list is worse than none: a reader who trusts the number and counts the entries concludes
+# some kinds are uncovered extras. The count now lives in EXACTLY ONE place, `DECLARED_KIND_COUNT`
+# near the end of this file, which is ASSERTED against the gate's own derived set at run time
+# (`3544-kind-census`), so a new kind cannot arrive unannounced and prose cannot drift from it.
 #   verdicts (6) — PASS (case 5), DECLARED (4), UNCOMMITTED (4b), BEHIND (1),
 #                  INDETERMINATE (4c), UNMEASURED (2, 3a–3g, 4b-ii).
-#   kinds   (17) — fetch-failed, no-remote (case 2); baseline-decl-unrecognised (3a),
+#   kinds        — fetch-failed, no-remote (case 2); baseline-decl-unrecognised (3a),
 #                  baseline-set-empty (3b), baseline-set-garbage (3c/3c-ii),
 #                  baseline-unreadable (3d); manifest-missing, manifest-garbage,
 #                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
 #                  unboundable (3g);
 #                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (3a-v);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
-#                  remote-unreadable (10).
-# NINETEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is set
-# from several places, and `ok` is the twentieth value). THE SET CHANGED SHAPE with #3544
+#                  remote-unreadable (10); repo-read-blocked (3a-iv-ter/quater,
+#                  3757-head-object-fifo); read-dir-unisolated (3757-read-dir-unisolated).
+# THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
 # fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
@@ -365,6 +375,34 @@ hook() {
 }
 field() { # field <name> <hook-output>
   printf '%s\n' "$2" | grep "^$1: " | sed "s/^$1: //"
+}
+
+# THE PRE-FLIGHT REGION, EXTRACTED ONCE (#3757). Section 9b's unbounded-operation audit and
+# #3757's live-call allowlist must not disagree about where the region starts and ends: two
+# copies of the marker pair is the drift this file keeps finding elsewhere, and here a
+# disagreement would silently move a call in or out of a guard's subject.
+#
+#   cs_region_stream <gate> [numbered|plain]   (default: numbered)
+#
+# `numbered` prefixes each line with its ORIGINAL line number and a colon — the `grep -n` shape —
+# so a finding can name a line an author has to open. `plain` reproduces the region byte for byte,
+# which is what an awk program run OVER the region needs.
+CS_REGION_BEGIN='^# ---- issue #3544: component-set skew pre-flight'
+CS_REGION_END='^# ---- issue #2081:'
+cs_region_stream() {
+  local gate="$1" mode="${2:-numbered}"
+  awk -v b="$CS_REGION_BEGIN" -v e="$CS_REGION_END" -v m="$mode" '
+    $0 ~ b { inr = 1 }
+    $0 ~ e { inr = 0 }
+    inr { if (m == "plain") print $0; else printf "%d:%s\n", NR, $0 }' "$gate"
+}
+
+# cs_region_code <gate>: the region's CODE lines only, numbered. The comment strip is ANCHORED at
+# the start of the payload (`^<digits>:<space>*#`) — an UNANCHORED `:[[:space:]]*#` also matches a
+# `#` anywhere later on the line, so a real call line carrying a trailing `# note: …` was dropped
+# from the scan, which is a silent false PASS in every guard built on it (roborev job 325, nit 3).
+cs_region_code() {
+  cs_region_stream "$1" numbered | grep -v '^[0-9][0-9]*:[[:space:]]*#'
 }
 
 # ---------------------------------------------------------------------------
@@ -856,59 +894,172 @@ fi
 #     BEHIND).
 # ---------------------------------------------------------------------------
 
-# cs_live_peel_findings <gate-path>: print one FINDING line per LIVE-repository git call that
-# PEELS an object. Reads CODE, never prose about code: the doctrine comments in that file
-# necessarily contain `HEAD^{commit}` (this very case's rationale does), so a whole-file grep
-# would red a correct tree — the same defect `3544-canonical-literal` records from the other
-# side. Comment lines are dropped while ORIGINAL line numbers are kept, so a finding can name
-# the line an author has to open.
-cs_live_peel_findings() {
-  local g="$1" l
-  # Both spellings of a live call: through the `_cs_live_git` wrapper, and any direct `git`
-  # invocation naming the live checkout. The second is what a FUTURE author would add.
-  while IFS= read -r l; do
-    [ -n "$l" ] || continue
-    case "$l" in
-      *'^{'*) printf 'FINDING: %s\n' "$l" ;;
+# cs_live_call_findings <gate-path>: print one FINDING line per DEVIATION from the DECLARED set of
+# LIVE-repository git invocations in the pre-flight region. Empty output = the region's live calls
+# are exactly the declared ones.
+#
+# WHY AN ALLOWLIST AND NOT A DENY PATTERN (roborev job 325, blocker 1). The first version of this
+# guard scanned for the single literal `^{` on `_cs_live_git`/`-C "$REPO_ROOT"` lines, and it had
+# FOUR silent false PASSes, each a live OBJECT read:
+#   (a) a dereferencing rev that contains no `^{` — `HEAD~1`, `HEAD^`, `HEAD^0`, `HEAD@{1}`,
+#       `HEAD:path`, or a bare tag/branch name (a tag is a TAG object, so resolving it peels);
+#   (b) the rev held in a VARIABLE assigned on a different line (`local rev="HEAD^{commit}"`);
+#   (c) the call split over a `\` continuation, so the peel-bearing physical line matches nothing;
+#   (d) a live call spelled other than `-C "$REPO_ROOT"` — `--git-dir="$REPO_ROOT/.git"`, a
+#       `GIT_DIR=` assignment, or `cd "$REPO_ROOT"` plus a bare `git`.
+# And the count assert did not backstop it: a NEWLY ADDED live call using `HEAD~1` leaves the
+# count of unpeeled HEAD resolutions at one. A deny-list over rev syntax the author chooses never
+# closes — the standing ruling against picking a rarer delimiter — and a guard with documented
+# false PASSes is worse than none (#3229), especially here, where the call-site comment TELLS the
+# reader this guard enforces the bare-ref contract.
+#
+# So the question is asked affirmatively, which is also what makes a PASS mean something: the SET
+# of live invocations must EQUAL `CS_DECLARED_LIVE_CALLS`, in BOTH directions. An unrecognised
+# shape is a FINDING whatever it contains, so (a)–(d) are all rejected by the same rule and so is
+# the next spelling nobody has thought of; and a declared entry that no longer appears is a
+# FINDING too, because a stale entry PRE-AUTHORISES its own re-introduction (section 9b's rule for
+# git operations, applied to argv).
+#
+# GRANULARITY, and why it differs from 9b deliberately: 9b keys on the SUBCOMMAND because a
+# flag-level key would red on a reordering of correct code. Here the ARGV IS the property — `HEAD`
+# versus `HEAD^{commit}` is one token — so this guard keys on the exact argument text and is
+# scoped to the SIX live calls, where an exact list is maintainable. It is also REGION-SCOPED, not
+# file-wide: `scripts/agent-gate.sh` legitimately peels in the live repository OUTSIDE this region
+# (the `--delta` anchor resolution runs `rev-parse --verify -q "${anchor}^{commit}"` with no
+# `-C`), and a file-wide rule would red on correct code — the guard agents learn to waive.
+#
+# WHAT IT CANNOT CLAIM: that a declared call is network-free. That judgement is recorded per site
+# in the enumeration comment at the head of the region, which is where a reviewer checks it. What
+# it guarantees is that no live call arrives UNDECLARED.
+CS_DECLARED_LIVE_CALLS=(
+  # HEAD's REF, resolved UNPEELED (#3757). The whole subject of this guard: a peel here is an
+  # object read, and in a promisor clone a missing object is fetched under the LIVE repository's
+  # own config, where an `insteadOf` rewrite invokes a remote helper.
+  '--no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD'
+  # Repository STATE and CONFIG reads. None resolves a rev, so none can peel.
+  '-C "$REPO_ROOT" rev-parse --git-dir'
+  '-C "$REPO_ROOT" remote get-url origin'
+  '-C "$REPO_ROOT" rev-parse --git-path objects'
+  '-C "$REPO_ROOT" rev-parse --is-shallow-repository'
+  '-C "$REPO_ROOT" rev-parse --git-path shallow'
+)
+# The DIRECT `git` lines in the region that are NOT repository operations on a named repository,
+# each classified here rather than pattern-excused. A direct git line matching none of these, and
+# not carrying an isolated `-C`, is a FINDING — that is route (d)'s closure.
+#   <line-payload substring>|<why it is not a live repository read>
+CS_DECLARED_DIRECT_GIT=(
+  'git "$@" 2>/dev/null|the _cs_live_git WRAPPER itself: the one live invocation point, whose argv comes from the call sites this guard checks'
+  'command -v git|a capability probe (is git on PATH), not an invocation'
+  '"$uinfo" != git|a string comparison against the literal userinfo git, not an invocation'
+  'git init -q "$csdir/repo"|creates the ISOLATED scratch at a named target path; reads no repository'
+)
+CS_ISOLATED_SELECTORS=('-C "$_CS_READ_DIR"' '-C "$csdir/repo"')
+cs_live_call_findings() {
+  local gate="$1" line num raw argv dq entry i hit
+  local -a seen=()
+  for i in "${!CS_DECLARED_LIVE_CALLS[@]}"; do seen[$i]=0; done
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    num="${line%%:*}"; raw="${line#*:}"
+    # ROUTE (c): a continued line cannot be judged as a line. Reject it rather than judge the
+    # fragment — a `\` continuation is how an argument list hides from a per-line scan.
+    case "$raw" in
+      *'\') case "$raw" in
+              *_cs_live_git*|*' git '*|*'	git '*)
+                printf 'FINDING: %s: a git call is split over a line CONTINUATION, so its argument list cannot be judged as one line — write it on one line (or declare it): %s\n' "$num" "$raw"
+                continue ;;
+            esac ;;
     esac
-  done < <( { grep -n '_cs_live_git ' "$g"; grep -n -- '-C "\$REPO_ROOT"' "$g"; } \
-              | grep -v ':[[:space:]]*#' | sort -u )
+    case "$raw" in
+      *_cs_live_git\ *)
+        argv="${raw#*_cs_live_git }"
+        # Trailing whitespace only; anything else (a `)`, a redirection, a `;`) is part of the
+        # shape and must be DECLARED, because it changes what runs.
+        argv="${argv%"${argv##*[![:space:]]}"}"
+        hit=""
+        for i in "${!CS_DECLARED_LIVE_CALLS[@]}"; do
+          if [ "$argv" = "${CS_DECLARED_LIVE_CALLS[$i]}" ]; then hit=1; seen[$i]=1; break; fi
+        done
+        if [ -z "$hit" ]; then
+          printf 'FINDING: %s: UNDECLARED live-repository git call: %s\n' "$num" "$argv"
+        fi
+        continue ;;
+    esac
+    # A DIRECT `git` at command position. Quoted spans are removed FIRST so a diagnostic string
+    # (`_CS_DETAIL="git fetch … exited $rc"`, `hint="… git rebase …"`) is not read as an
+    # invocation — 9b's measured lesson. The word class excludes `--git-path`/`_cs_live_git`,
+    # where `git` is part of a longer word.
+    dq=$(printf '%s' "$raw" | sed 's/"[^"]*"//g')
+    case "$dq" in
+      git\ *|*[[:space:]\;\&\|\(]git\ *) : ;;
+      *) continue ;;
+    esac
+    hit=""
+    for entry in "${CS_ISOLATED_SELECTORS[@]}"; do
+      case "$raw" in *"$entry"*) hit=isolated; break ;; esac
+    done
+    [ -n "$hit" ] && continue
+    for entry in "${CS_DECLARED_DIRECT_GIT[@]}"; do
+      case "$raw" in *"${entry%%|*}"*) hit=declared; break ;; esac
+    done
+    [ -n "$hit" ] && continue
+    printf 'FINDING: %s: a DIRECT git invocation names no ISOLATED repository and is not declared — it may run in the LIVE checkout (route d): %s\n' "$num" "$raw"
+  done < <(cs_region_code "$gate")
+  # BOTH DIRECTIONS: a declared shape that no longer appears is a stale entry, and a stale entry
+  # pre-authorises its own re-introduction.
+  for i in "${!CS_DECLARED_LIVE_CALLS[@]}"; do
+    [ "${seen[$i]}" = 1 ] || printf 'FINDING: declared live call NOT OBSERVED in the region (stale entry, or the shape changed): %s\n' "${CS_DECLARED_LIVE_CALLS[$i]}"
+  done
 }
 
-# cs_live_head_calls <gate-path>: the UNPEELED live HEAD resolutions, as code lines.
-cs_live_head_calls() {
-  grep -n '_cs_live_git .*rev-parse --verify --quiet HEAD$' "$1" | grep -v ':[[:space:]]*#'
-}
-
-peel_findings=$(cs_live_peel_findings "$GATE")
-peel_head=$(cs_live_head_calls "$GATE")
-peel_head_n=$(printf '%s\n' "$peel_head" | grep -c . )
-# THE CONTROL SUBSTITUTES THE ARTIFACT, in a throwaway copy — never a settable seam in the
-# gate (the rule `3544-canonical-literal`'s helper is built on). And the substitution is
-# VERIFIED to have taken: a sed that matched nothing would make the control "pass" by proving
-# nothing, which is the vacuous green this whole file exists to refuse.
-peel_ctl_dir="$tmp/3757-peel-control"; mkdir -p "$peel_ctl_dir"
-peel_ctl="$peel_ctl_dir/agent-gate.sh"
-sed 's|\(_cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1"HEAD^{commit}"|' "$GATE" >"$peel_ctl"
-peel_ctl_took=$(grep -c '_cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet "HEAD\^{commit}"' "$peel_ctl")
-peel_ctl_findings=$(cs_live_peel_findings "$peel_ctl")
-# THE PROPERTY IS JUDGED FIRST, THE CONTROL'S INTEGRITY ONLY GATES THE `ok`. Ordered the other
-# way round (control first), a gate that HAS the live peel red with "the control could not
-# reintroduce the peel" — a true sentence that sends the reader to the test instead of to the
-# defect, and AC2 requires the red to NAME the offending construct.
-if [ -n "$peel_findings" ]; then
-  bad "3757-no-live-peel: a live-repository git call PEELS an object (a lazy fetch route in a promisor clone):"
-  printf '%s\n' "$peel_findings"
-elif [ "$peel_head_n" -ne 1 ]; then
-  bad "3757-no-live-peel: expected exactly ONE unpeeled live HEAD resolution, found $peel_head_n — the shape changed or the scan broke (fail-closed: this is not a clean result). Lines: $peel_head"
-elif [ "$peel_ctl_took" -ne 1 ]; then
-  bad "3757-no-live-peel: the POSITIVE CONTROL could not reintroduce the peel (substitution took $peel_ctl_took times) — the scan cannot be shown to discriminate, so a clean result on the real gate is not evidence"
-elif ! grep -q 'FINDING:' <<<"$peel_ctl_findings" \
-     || ! grep -q 'HEAD\^{commit}' <<<"$peel_ctl_findings"; then
-  bad "3757-no-live-peel: the control's reintroduced peel was NOT reported (or was reported without NAMING the construct) — a bare red is not evidence. Control findings: $peel_ctl_findings"
+live_findings=$(cs_live_call_findings "$GATE")
+if [ -z "$live_findings" ]; then
+  ok "3757-live-call-allowlist: the pre-flight region's LIVE-repository git calls are EXACTLY the ${#CS_DECLARED_LIVE_CALLS[@]} declared shapes (both directions), and HEAD's is the UNPEELED bare ref"
 else
-  ok "3757-no-live-peel: no live-repository git call peels an object (HEAD is resolved UNPEELED, exactly once), and reintroducing the peel in a scratch copy is REPORTED and NAMED"
+  bad "3757-live-call-allowlist: the region's live git calls do not match the declared set:"
+  printf '%s\n' "$live_findings"
 fi
+
+# THE FOUR EVASION ROUTES, EACH PLANTED IN ITS OWN THROWAWAY COPY (roborev job 325, blocker 1).
+# A control that plants only the shape the OLD deny pattern already caught proves nothing about
+# the three it missed, so each route is a SEPARATE mutation of the ARTIFACT (never a seam in the
+# gate) and each must be REPORTED, NAMED, and shown to have been substituted at all — a sed that
+# matched nothing would "pass" this by proving nothing.
+lc_dir="$tmp/3757-live-call-controls"; mkdir -p "$lc_dir"
+lc_ids=(a b c d)
+lc_whats=(
+  'a dereferencing rev that contains no ^{ (HEAD~1)'
+  'the rev held in a VARIABLE, so no rev token appears on the call line'
+  'the call split over a \ line CONTINUATION'
+  'a live call spelled --git-dir= instead of -C "$REPO_ROOT"'
+)
+lc_progs=(
+  's|^\(  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1HEAD~1|'
+  's|^\(  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1"$_cs_planted_rev"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_live_git --no-replace-objects -C "$REPO_ROOT" \\\n    rev-parse --verify --quiet "HEAD^{commit}"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$REPO_ROOT/.git" rev-parse --verify --quiet "HEAD^{commit}"|'
+)
+lc_tooks=(
+  'rev-parse --verify --quiet HEAD~1$'
+  'rev-parse --verify --quiet "\$_cs_planted_rev"$'
+  '_cs_live_git .*\\$'
+  'git --git-dir="\$REPO_ROOT/\.git"'
+)
+lc_needles=('HEAD~1' '_cs_planted_rev' 'line CONTINUATION' '--git-dir=')
+for lc_i in "${!lc_ids[@]}"; do
+  lc_id="${lc_ids[$lc_i]}"
+  lc_copy="$lc_dir/route-$lc_id.sh"
+  sed "${lc_progs[$lc_i]}" "$GATE" >"$lc_copy"
+  lc_n=$(grep -c "${lc_tooks[$lc_i]}" "$lc_copy" 2>/dev/null || true)
+  lc_out=$(cs_live_call_findings "$lc_copy")
+  if [ "$lc_n" != 1 ]; then
+    bad "3757-evasion-route[$lc_id]: the mutation did not take (matched $lc_n times, expected 1) — this route is NOT under test, so a clean scan on the real gate is not evidence for it. Route: ${lc_whats[$lc_i]}"
+  elif grep -qF -- "${lc_needles[$lc_i]}" <<<"$lc_out"; then
+    ok "3757-evasion-route[$lc_id]: ${lc_whats[$lc_i]} is REPORTED and NAMED (needle '${lc_needles[$lc_i]}') — the affirmative allowlist rejects it, and the old ^{ deny pattern did not"
+  else
+    bad "3757-evasion-route[$lc_id]: planting ${lc_whats[$lc_i]} produced no finding naming '${lc_needles[$lc_i]}' — a silent false PASS. Findings: $lc_out"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 3757b. THE PEEL MOVED TO THE ISOLATED SCRATCH, AND IT IS BOUNDED AND THREE-VALUED THERE.
@@ -921,7 +1072,9 @@ fi
 # ---------------------------------------------------------------------------
 cs_scratch_peel_findings() {
   local g="$1" site n body
-  site=$(grep -n 'rev-parse --verify --quiet "\${head_unpeeled}\^{commit}"' "$g" | grep -v ':[[:space:]]*#')
+  # ANCHORED comment strip (roborev job 325, nit 3): an unanchored `:[[:space:]]*#` also matches a
+  # `#` LATER on the line, so a real call line carrying a trailing `# note: …` was dropped.
+  site=$(grep -n 'rev-parse --verify --quiet "\${head_unpeeled}\^{commit}"' "$g" | grep -v '^[0-9][0-9]*:[[:space:]]*#')
   n=$(printf '%s\n' "$site" | grep -c . )
   if [ "$n" -ne 1 ]; then
     printf 'FINDING: expected exactly ONE scratch peel of HEAD, found %s\n' "$n"
@@ -933,8 +1086,11 @@ cs_scratch_peel_findings() {
     || printf 'FINDING: the scratch peel does not run in $_CS_READ_DIR: %s\n' "$site"
   grep -q '_CS_READ_ENV' <<<"$site" \
     || printf 'FINDING: the scratch peel does not carry $_CS_READ_ENV (the alternate): %s\n' "$site"
-  # The rc mapping lives in the ten lines after the read; read it as CODE.
-  body=$(awk -v s="${site%%:*}" 'NR>s+0 && NR<=s+10' "$g" | grep -v '^[[:space:]]*#')
+  # The rc mapping lives in the lines just after the read; read it as CODE. The window is 20 raw
+  # lines, not 10, because it is counted BEFORE comments are stripped and the mapping arms carry
+  # doctrine comments — a window sized to the code would shrink every time a rationale is added,
+  # and the guard would report a mapping "missing" that is simply further down.
+  body=$(awk -v s="${site%%:*}" 'NR>s+0 && NR<=s+20' "$g" | grep -v '^[[:space:]]*#')
   grep -q 'peel_rc" -eq 124' <<<"$body" || printf 'FINDING: 124 (bound fired) is not mapped after the scratch peel\n'
   grep -q 'peel_rc" -eq 137' <<<"$body" || printf 'FINDING: 137 (KILLed) is not mapped after the scratch peel\n'
   grep -q 'peel_rc" -eq "\$_CS_UNBOUNDABLE_RC"' <<<"$body" || printf 'FINDING: $_CS_UNBOUNDABLE_RC (no bounding mechanism) is not mapped after the scratch peel\n'
@@ -956,6 +1112,136 @@ elif ! grep -q 'NOT bounded' <<<"$sp_ctl_findings"; then
   bad "3757-scratch-peel-bounded: unbounding the peel in a scratch copy was NOT reported — a bare pass is not evidence. Control findings: $sp_ctl_findings"
 else
   ok "3757-scratch-peel-bounded: HEAD's peel runs in \$_CS_READ_DIR with the alternate, BOUNDED, and maps 124/137/UNBOUNDABLE onto repo-read-blocked; unbounding it in a scratch copy is REPORTED"
+fi
+
+# ---------------------------------------------------------------------------
+# 3757c. `$_CS_READ_DIR` NEVER NAMES THE LIVE CHECKOUT — asserted, not assumed (roborev job 325,
+#     blocker 2). The claim this diff adds to the region's execution-route enumeration ("since
+#     #3757 it reads NO object in the live repository") used to hold only because every earlier
+#     failure `return 0`s before the scratch assignment, while the initialiser was `$REPO_ROOT` —
+#     an ORDERING property nothing checked, which is the reasoning job 314 rejected in this same
+#     function. There is no reachable route to it today, so this is HARDENING; the point of these
+#     cases is that the property is now MECHANICAL rather than traced by hand.
+#
+#     AND AN EMPTY SENTINEL IS NOT SELF-PROTECTING: `git -C ""` leaves the working directory
+#     UNCHANGED, i.e. it MEANS the live checkout, so the initialiser alone fixes nothing. Three
+#     properties, each with its own planted control:
+#       (i)   the initialiser is not the live checkout;
+#       (ii)  every `-C "$_CS_READ_DIR"` consumer in the region appears AFTER the scratch
+#             assignment (the ordering, made explicit);
+#       (iii) the peel calls the runtime refusal before handing the value to git.
+# ---------------------------------------------------------------------------
+cs_read_dir_findings() {
+  local g="$1" init assign assign_ln consumers ln peel_ln guard_ln
+  init=$(cs_region_code "$g" | grep -F '_CS_READ_DIR=' | grep -F '_CS_READ_ENV=(); _CS_HEAD_SHA=' | head -1)
+  if [ -z "$init" ]; then
+    printf 'FINDING: could not locate the probe initialiser line that sets _CS_READ_DIR — the shape changed or the scan broke (fail-closed)\n'
+  else
+    case "$init" in
+      *'_CS_READ_DIR="$REPO_ROOT"'*)
+        printf 'FINDING: %s: the initialiser makes THE LIVE CHECKOUT the default read repository, so any consumer reached before the scratch assignment reads objects live: %s\n' "${init%%:*}" "${init#*:}" ;;
+      *'_CS_READ_DIR=""'*) : ;;
+      *) printf 'FINDING: %s: the initialiser sets _CS_READ_DIR to an unrecognised value; only the empty sentinel is declared: %s\n' "${init%%:*}" "${init#*:}" ;;
+    esac
+  fi
+  assign=$(cs_region_code "$g" | grep -F '_CS_READ_DIR="$csdir/repo"' | head -1)
+  if [ -z "$assign" ]; then
+    printf 'FINDING: could not locate the scratch assignment _CS_READ_DIR="$csdir/repo" — the shape changed or the scan broke (fail-closed)\n'
+    return 0
+  fi
+  assign_ln="${assign%%:*}"
+  consumers=$(cs_region_code "$g" | grep -F -- '-C "$_CS_READ_DIR"')
+  if [ -z "$consumers" ]; then
+    printf 'FINDING: no -C "$_CS_READ_DIR" consumer found in the region — the guard has no subject (fail-closed)\n'
+  fi
+  while IFS= read -r ln; do
+    [ -n "$ln" ] || continue
+    if [ "${ln%%:*}" -lt "$assign_ln" ]; then
+      printf 'FINDING: %s: a -C "$_CS_READ_DIR" consumer runs BEFORE the scratch assignment at line %s, so it would read in whatever the initialiser left: %s\n' "${ln%%:*}" "$assign_ln" "${ln#*:}"
+    fi
+  done <<<"$consumers"
+  peel_ln=$(cs_region_code "$g" | grep -F 'rev-parse --verify --quiet "${head_unpeeled}^{commit}"' | head -1)
+  guard_ln=$(cs_region_code "$g" | grep -F '_cs_read_dir_isolated_or_refuse "peel HEAD' | head -1)
+  if [ -z "$peel_ln" ]; then
+    printf 'FINDING: could not locate the scratch peel (fail-closed)\n'
+  elif [ -z "$guard_ln" ]; then
+    printf 'FINDING: the peel does not call _cs_read_dir_isolated_or_refuse — an unisolated value would be handed to git instead of refused by name\n'
+  elif [ "${guard_ln%%:*}" -ge "${peel_ln%%:*}" ]; then
+    printf 'FINDING: the _cs_read_dir_isolated_or_refuse call (line %s) is not BEFORE the peel (line %s) — a check placed after the harmful effect can only report it\n' "${guard_ln%%:*}" "${peel_ln%%:*}"
+  fi
+  return 0
+}
+rd_findings=$(cs_read_dir_findings "$GATE")
+if [ -z "$rd_findings" ]; then
+  ok "3757-read-dir-shape: the read repository is an empty sentinel until the scratch exists, every -C \$_CS_READ_DIR consumer runs after the scratch assignment, and the peel refuses an unisolated value before calling git"
+else
+  bad "3757-read-dir-shape: the read-repository invariants are not met:"
+  printf '%s\n' "$rd_findings"
+fi
+
+# THREE PLANTED CONTROLS, one per property. Each mutates a COPY and must be REPORTED and NAMED.
+rd_dir="$tmp/3757-read-dir-controls"; mkdir -p "$rd_dir"
+rd_ids=(i ii iii)
+rd_whats=(
+  'the initialiser set back to the LIVE checkout'
+  'a -C "$_CS_READ_DIR" consumer planted BEFORE the scratch assignment'
+  'the runtime refusal call removed from the peel'
+)
+rd_progs=(
+  's|^  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
+  's|^  _CS_READ_DIR="\$csdir/repo"$|  : "$(git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e planted-by-the-selftest 2>/dev/null)"\n  _CS_READ_DIR="$csdir/repo"|'
+  '/_cs_read_dir_isolated_or_refuse "peel HEAD/d'
+)
+rd_tooks=(
+  '^  _CS_READ_DIR="\$REPO_ROOT"; _CS_READ_ENV'
+  'cat-file -e planted-by-the-selftest'
+  '_cs_read_dir_isolated_or_refuse "peel HEAD'
+)
+rd_expect_n=(1 1 0)
+rd_needles=('THE LIVE CHECKOUT' 'BEFORE the scratch assignment' 'does not call _cs_read_dir_isolated_or_refuse')
+for rd_i in "${!rd_ids[@]}"; do
+  rd_id="${rd_ids[$rd_i]}"
+  rd_copy="$rd_dir/prop-$rd_id.sh"
+  sed "${rd_progs[$rd_i]}" "$GATE" >"$rd_copy"
+  rd_n=$(grep -c "${rd_tooks[$rd_i]}" "$rd_copy" 2>/dev/null || true)
+  rd_out=$(cs_read_dir_findings "$rd_copy")
+  if [ "$rd_n" != "${rd_expect_n[$rd_i]}" ]; then
+    bad "3757-read-dir-control[$rd_id]: the mutation did not take (matched $rd_n, expected ${rd_expect_n[$rd_i]}) — this property is NOT under test. Property: ${rd_whats[$rd_i]}"
+  elif grep -qF -- "${rd_needles[$rd_i]}" <<<"$rd_out"; then
+    ok "3757-read-dir-control[$rd_id]: ${rd_whats[$rd_i]} is REPORTED and NAMED (needle '${rd_needles[$rd_i]}')"
+  else
+    bad "3757-read-dir-control[$rd_id]: planting '${rd_whats[$rd_i]}' produced no finding naming '${rd_needles[$rd_i]}' — a silent false PASS. Findings: $rd_out"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# 3757d. BEHAVIOURAL: an unisolated read repository is REFUSED BY NAME, not read live.
+#     The structural cases above pin the SHAPE; this one drives the runtime refusal, because a
+#     guard that exists in source and is never reached is not a guard. The fixture's own gate copy
+#     has the scratch assignment rewritten to the LIVE checkout — the exact state the initialiser
+#     used to leave — and the fixture is cloned FROM its origin so the baseline read still
+#     succeeds and execution actually reaches the peel. Control: the same fixture unmutated, which
+#     must reach KIND ok, so the case cannot pass because the fixture is simply broken.
+# ---------------------------------------------------------------------------
+rdu_base=$(mkbaseline base-readdir - )
+rdu_ctl_fx=$(mkbranch readdir-ok "$rdu_base" - --from-origin)
+rdu_fx=$(mkbranch readdir-live "$rdu_base" 's|^  _CS_READ_DIR="\$csdir/repo"$|  _CS_READ_DIR="$REPO_ROOT"|' --from-origin)
+rdu_took=$(grep -c '^  _CS_READ_DIR="\$REPO_ROOT"$' "$rdu_fx/scripts/agent-gate.sh" 2>/dev/null || true)
+rdu_ctl=$(hook "$rdu_ctl_fx")
+rdu_out=$(hook "$rdu_fx")
+rdu_kind=$(field KIND "$rdu_out")
+rdu_line=$(field COMPONENT_SET_LINE "$rdu_out")
+if [ "$rdu_took" != 1 ]; then
+  bad "3757-read-dir-unisolated: the fixture mutation did not take (matched $rdu_took, expected 1) — the refusal is not under test"
+elif [ "$(field KIND "$rdu_ctl")" != ok ]; then
+  bad "3757-read-dir-unisolated: the POSITIVE CONTROL (same fixture, unmutated) did not reach KIND ok (got '$(field KIND "$rdu_ctl")') — the case cannot discriminate"
+elif [ "$rdu_kind" = read-dir-unisolated ] \
+     && grep -q 'isolated read repository was never established' <<<"$rdu_line" \
+     && [ "$(field VERDICT "$rdu_out")" = UNMEASURED ]; then
+  ok "3757-read-dir-unisolated: a read repository left at the LIVE checkout is REFUSED by name (read-dir-unisolated, verdict UNMEASURED) instead of peeling HEAD there"
+else
+  bad "3757-read-dir-unisolated: expected KIND read-dir-unisolated naming the unestablished scratch (got '$rdu_kind', verdict '$(field VERDICT "$rdu_out")')"
+  printf '%s\n' "$rdu_out"
 fi
 
 # ---------------------------------------------------------------------------
@@ -3404,7 +3690,13 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=19   # 18 -> 19: +repo-read-blocked (roborev job 312 — a live-repository read
+DECLARED_KIND_COUNT=20   # 19 -> 20: +read-dir-unisolated (#3757 — `$_CS_READ_DIR` still naming
+                         # the LIVE checkout, or left at the empty sentinel that `git -C ""`
+                         # reads AS the live checkout, at the point an object read would be
+                         # handed to git. Hardening: no reachable route today, and the refusal is
+                         # what makes "this pre-flight reads no object in the live repository" a
+                         # CHECKED claim rather than an ordering nobody verified.)
+                         # 18 -> 19: +repo-read-blocked (roborev job 312 — a live-repository read
                          # that EXCEEDED its bound, which a config `include.path` naming a FIFO
                          # causes). The step before was 20 -> 18 (-gate-script-changed,
                          # -gate-script-unverifiable, both
@@ -3471,9 +3763,10 @@ fi
 #     diff, which is what would have caught `git show`.
 # ---------------------------------------------------------------------------
 region="$tmp/preflight-region.sh"
-awk '/^# ---- issue #3544: component-set skew pre-flight/ { inr = 1 }
-     /^# ---- issue #2081:/ { inr = 0 }
-     inr { print }' "$GATE" >"$region"
+# ONE marker pair, shared with #3757's live-call allowlist (see `cs_region_stream`): a guard that
+# disagreed with this one about the region boundary would move calls in and out of its subject
+# silently.
+cs_region_stream "$GATE" plain >"$region"
 region_lines=$(wc -l <"$region" | tr -d ' ')
 
 # ONE audit program, written once and used for BOTH the region and its positive controls.
@@ -4946,7 +5239,10 @@ fi
 # legitimately `skip` when the fixture's HEAD object is packed rather than loose (the same
 # conditional `3544-ancestry-bounded` carries), and a floor that counts a skippable case would red
 # on correct input.
-CASE_FLOOR=113
+# 113 -> 123 with roborev job 325's ten further #3757 cases, all unconditional: the allowlist
+# clean case + its FOUR planted evasion routes (which replaced one deny-pattern case), the
+# read-dir shape case + its THREE planted controls, and the behavioural read-dir refusal.
+CASE_FLOOR=123
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
