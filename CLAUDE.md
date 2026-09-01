@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` hold `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features` — `feature-iso-parquet` still COMPILE-ONLY (`--lib --no-run`), while `feature-iso-delta-scan` **EXECUTES** its `--lib` suite plus a run-time-DERIVED set of crate-level `delta-scan`-gated `--test` targets under a zero-tests guard and `CQLITE_REQUIRE_FIXTURES=1`, #3725), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -107,11 +107,28 @@ execute NOWHERE** — not locally, not in CI — because their module-level
 aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
 ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
 however green the gate looks. `experimental` is **one** remaining instance (#3373) and NOT the only
-one: in `cqlite-core` the crate-level-gated integration targets for `delta-scan` (13) and
-`observability-testing` (14) are named by no `--test` in the gate and execute ZERO tests at
-`core-tests`' feature set, as do 3 of the 5 `dhat-heap` ones; the `delta_scan` module's own 39 lib
-tests run in no gate component either (`feature-iso-delta-scan` is `--lib --no-run`), only in the
-`required`-exempt `ci.yml` (#3522 audit).
+one: in `cqlite-core` the crate-level-gated integration targets for `observability-testing` (14) are
+named by no `--test` in the gate and execute ZERO tests at `core-tests`' feature set, as do 3 of the
+5 `dhat-heap` ones (#3522 audit). **The `delta-scan` half of that census is CLOSED (#3725):**
+`feature-iso-delta-scan` was `--lib --no-run`, so the 13 crate-level `delta-scan`-gated targets AND
+the `delta_scan` module's own 39 lib tests executed in no gate component — the lib half only in the
+`required`-exempt `ci.yml`. That lane now EXECUTES, at its own isolated feature set, with its target
+set DERIVED at run time and a zero-tests guard, so those tests are gated locally.
+**And the closure PAID FOR ITSELF ON THE FIRST RUN, which is the argument for doing this to the
+remaining families rather than filing them:** executing the lane surfaced **2 of
+`scan_delta_parity_test`'s 14 tests FAILING against the real corpus and PASSING against an absent
+one** — a real defect (the per-cell `expires_at` comparison did not model
+`JsonTransformer.serializeCell`'s suppression rule at `cassandra-5.0.8`) that had been latent for as
+long as nothing executed the target. This is #1716's "expect latent failures the first time you
+touch a long-unwired crate" at feature granularity: they are pre-existing, not yours, but they are
+yours to fix because your diff is what runs them — so budget for them when you wire a lane, and
+never fix one by weakening the assertion (the oracle is Cassandra's source at the pinned tag, never
+CQLite's own output).
+**AND "EXECUTED BY NO MERGE-GATING LANE" IS NOT "EXECUTES NOWHERE" (#3725).** Those 6
+`issue_1007_complex_type_parity` cases DID execute, strictly (`CQLITE_REQUIRE_FIXTURES=1`, after a
+Docker corpus regeneration), in `parity-regen-matrix.yml`'s `cql-type` leg — a lane exempt from
+`required`. The defect was the GATING half. Getting that wording right is not pedantry: "executes
+nowhere" invites adding a second executor, when the fix is to make an existing one gate.
 **AND THE SAME REASONING RUNS AT PACKAGE GRANULARITY, WHICH IS WHERE IT WAS COSTLIEST (#3522).**
 `cargo clippy --workspace --all-targets` compiles EVERY workspace member on every full gate, so a
 whole CRATE can be built by every run and execute nothing — and it reads as covered precisely
@@ -180,6 +197,43 @@ names it, correct that entry in the same diff or the exemption silently becomes 
 you widen or narrow, measure first** — the #1255 narrowing outlived its own premise (the widened
 component measures **138s**, dominated by the `release-unwind` LTO build it already paid), so the
 speed argument that justified the hole had stopped being true long before anyone re-checked it.
+**THIRD CONFIRMED INSTANCE, AND IT WAS FOUND WITHOUT LOOKING FOR IT (#3725) — SO THE DEFERRAL MUST
+NAME A LANE THAT BOTH EXECUTES AND GATES.** `test-data/scripts/smoke-test-all-tables.sh` skips
+`test_types` from the smoke sweep on the stated ground that those keyspaces are *"validated by
+dedicated Rust parity tests (tombstone/TTL + CQL-type)"* — and **every test it names**
+(`issue_1007`/`1003`/`1006`/`1008` for CQL-type, `issue_1010`/`1011` for tombstone/TTL) was
+crate-level-gated on `delta-scan` and executed by no merge-gating lane. A closed, empty loop, with an
+honest and specific rationale on each side. Note what was NOT wrong: the smoke skip itself is
+CORRECT and was left alone (those keyspaces genuinely hold partitions with zero live rows, which its
+"must emit ≥1 entry" check would mis-flag) — what was wrong is that its deferral had no gating
+target. Three instances now say the same thing: **a deferral rationale gets written once and never
+re-checked**, so when you point coverage at another lane, name it and verify that lane EXECUTES the
+content AND gates the merge. Neither half alone is coverage.
+
+**AN EXEMPTION NOW DECLARES ITS MERGE-GATING HALF IN A MACHINE-CHECKED FIELD, AND THAT CHECKS
+EXISTENCE, NOT SCOPE (#3725).** Every `.github/ci-gating-tiers.yml` `exempt:` entry carries a
+structured declaration of what gates the merge in its place, under a closed grammar, and a named
+local gate component must EXIST in `scripts/agent-gate.components` — so an exemption deferring to a
+component that was renamed, deleted or never existed is caught. **It deliberately does not claim
+more than that**: SCOPE is what #3493 showed to be the actual hazard (`node-bindings` existed and ran
+1 of 27 files) and it is not decidable from the registry, so the check is stated as an existence
+check and nothing reads it as a coverage proof. The prose `reason` is **NOT** machine-checked, by
+design — a recogniser over author-controlled prose never closes (#3312) — so the structured field is
+the control and the prose's truthfulness is a **DECLARED RESIDUAL**. Two measurements shaped this and
+are worth carrying: **all 23 exempt workflows ARE `pull_request`-triggered**, so a stored
+`pr_triggered` boolean would have been constant across every entry AND a second source of truth that
+can drift from the workflow — *derive it, do not store it* (#3544's "remove the second source rather
+than reconcile it"); and the enrolment rule ALREADY catches a new PR trigger on any workflow absent
+from the registry, so that half needed no new code and writing one would have been a guard with an
+empty subject set, which greens vacuously.
+**A `rescue` COLLAPSES "CANNOT TELL" ONTO THE PERMISSIVE ANSWER JUST LIKE A `[` PREDICATE (#3725).**
+Measured, on `main`, in a merge-gating validator: `load_workflows` mapped a `Psych::SyntaxError` to
+`{}`, so an unparseable **`pull_request`-triggered** workflow had no triggers, failed
+`pull_request_workflow?`, and ESCAPED the enrolment rule entirely — `policy_errors` reported the tree
+CLEAN (`TOTAL_ERRORS=1` well-formed vs **`0`** unparseable). The two-valued-predicate rule is not
+about bash: any construct that turns an unreadable input into a value — a `rescue`, a `||`, a
+`${VAR:-default}`, an `.ok()` — picks the permissive branch unless you make it three-valued and NAME
+the input it could not read. Ask it of every `rescue` that returns a default.
 
 **AND "DOES EVERY TEST RUN" IS NOT "IS THE CORPUS COMPLETE" (#3493).** #3522's census answers the
 first; it cannot answer the second, and neither can its per-suite guard. The Node parity cases
