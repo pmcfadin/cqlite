@@ -3502,10 +3502,15 @@ else
   # has already false-FAILED once in this file).
   sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*echo[[:space:]]/d' \
       -e '/^[[:space:]]*census+=(/d' "$ds_body_" > "$ds_code_"
-  for req_ in '--lib' '--no-default-features' 'all-compression,' '--test' \
+  # `write-support,` is PINNED (roborev round 1, finding 2). Without it 3 of the 13 derived
+  # targets — gated #![cfg(all(feature = "delta-scan", feature = "write-support"))] —
+  # compile to ZERO tests, so the lane declared the delta-scan family closed while a
+  # quarter of it executed nothing. Dropping it again silently re-opens that, which is why
+  # the feature name and not just the flag is the assertion.
+  for req_ in '--lib' '--no-default-features' 'all-compression,' 'write-support,' '--test' \
               'check_no_unexpected_zero_tests' 'check_test_targets_observed' \
               'check_unittest_targets_ran' '_deny_warnings' \
-              '_package_test_targets_gated' '_ds_fixture_posture'; do
+              '_package_test_targets_gated' '_ds_fixture_posture' '_fx_blind_n'; do
     if [ "$(grep -cF -- "$req_" "$ds_code_")" -gt 0 ]; then
       ok "3725-iso-ds-instrument: the widened lane still passes/uses $req_"
     else
@@ -3526,7 +3531,32 @@ else
   else
     bad "3725-iso-ds-failclosed: fewer than 4 FAIL-CLOSED branches in the widened lane — a derivation that can fall through silently is a lane with no subject reporting PASS"
   fi
+  # A FIXTURE-BLIND TARGET MUST FAIL THE LANE IN STRICT MODE, NOT MERELY BE CENSUSED
+  # (roborev round 1, finding 1). Reporting it informationally is what let
+  # scan_delta_parity_test — which ignored CQLITE_REQUIRE_FIXTURES — return successfully
+  # with its corpus absent and merge-gate as "passed" having compared nothing. Asserted as
+  # a CONJUNCTION on one line so a future edit cannot keep the counter and drop the guard.
+  if grep -qE '\[ "\$_fx_mode" = strict \] && \[ "\$_fx_blind_n" -gt 0 \]' "$ds_code_"; then
+    ok "3725-iso-ds-blind-fails: a fixture-blind derived target FAILs the lane in strict mode (not a census line)"
+  else
+    bad "3725-iso-ds-blind-fails: the strict-mode fixture-blind FAIL is gone — a target that ignores CQLITE_REQUIRE_FIXTURES then returns successfully with its corpus absent and the lane reports PASS having compared nothing (#3725's own defect, one target over)"
+  fi
 fi
+
+# The two targets that used to IGNORE the strict flag must keep honouring it (roborev round
+# 1, finding 1). Source facts, and cheap: the lane's own guard fails closed if either
+# regresses, but a named assert here says WHICH file and WHY, and reds in the fast loop.
+for sf_ in scan_delta_parity_test issue_1008_counter_final_value_parity; do
+  sf_path_="$SCRIPT_DIR/../../cqlite-core/tests/$sf_.rs"
+  if [ ! -r "$sf_path_" ]; then
+    bad "3725-strict-fixtures[$sf_]: source not readable — this assert would pass vacuously"
+  elif [ "$(grep -cF 'CQLITE_REQUIRE_FIXTURES' "$sf_path_")" -gt 0 ] \
+       && [ "$(grep -cE '^[[:space:]]*println!\("\[SKIP' "$sf_path_")" -le 1 ]; then
+    ok "3725-strict-fixtures[$sf_]: honours CQLITE_REQUIRE_FIXTURES and routes its absence paths through skip_or_fail (at most the one println inside that helper)"
+  else
+    bad "3725-strict-fixtures[$sf_]: an absence path prints [SKIP] and returns without consulting CQLITE_REQUIRE_FIXTURES — with its corpus absent it passes having compared nothing, and feature-iso-delta-scan executes it on the merge gate"
+  fi
+done
 
 # THE FIXTURE POSTURE, RUN — not inspected (#3725). This is the anti-vacuity half: with the
 # corpus absent and CQLITE_REQUIRE_FIXTURES unset, issue_1007_complex_type_parity reports
