@@ -1152,6 +1152,37 @@ exit 0
 EOF
   chmod +x "$d/tmux"
 }
+# ...and the replacement must not trade a wrong answer for an unusable one. The first fix
+# here walked the text by SLICING THE REMAINDER, which is quadratic: measured at 41 SECONDS
+# for a 5000-variable environment — on exactly the heavily populated server this section is
+# about. The lookup now reads the text through a here-string redirect (the loop stays in
+# this shell; a piped `while read` would discard its writes) and the same case takes ~60 ms.
+# THE BOUND BELOW IS A LIVENESS CEILING, NOT A PERFORMANCE ASSERT: it is ~500x the measured
+# cost, so it cannot red on a loaded box, and what it catches is a return to an algorithm
+# that does not finish — the failure mode, not a regression in milliseconds.
+d25c=$(mkshim "$tmp/s25c")
+cat >"$d25c/tmux" <<EOF
+#!/usr/bin/env bash
+while [ "\$#" -gt 0 ]; do case "\$1" in -L|-S) shift 2 ;; *) break ;; esac; done
+case "\$1" in
+  show-environment)
+    i=0
+    while [ "\$i" -lt 5000 ]; do printf 'VAR_%s=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' "\$i"; i=\$((i + 1)); done
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '$TOK'
+    printf 'CLAUDE_CONFIG_DIR=%s\n' '$CFGDIR'
+    exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$d25c/tmux"
+many_start=$(date +%s)
+run_cap "$d25c" "$ef2" -- --tmux-env
+many_elapsed=$(( $(date +%s) - many_start ))
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED' && [ "$many_elapsed" -lt 30 ]; then
+  ok "claude-tmux-env: a 5000-variable server environment is read correctly and FINISHES (${many_elapsed}s)"
+else
+  bad "claude-tmux-env: a 5000-variable server environment was misread or did not finish (${many_elapsed}s): $out"
+fi
 d25b=$(mkshim "$tmp/s25b"); plant_tmux_bulky "$d25b"
 run_cap "$d25b" "$ef2" -- --tmux-env
 if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
@@ -1626,7 +1657,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=90
+CASE_FLOOR=91
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

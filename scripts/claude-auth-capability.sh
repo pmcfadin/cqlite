@@ -892,27 +892,30 @@ claude_tmux_cold_verdict_into() {
 # explicitly removed. Both "not listed" and "listed as removed" are `absent` — a pane
 # receives nothing either way.
 claude_tmux_show_key_into() {
-  local __ov="$1" __os="$2" __rest="$3" __k="$4"
-  local __line='' __nl='' __hit='' __found=0 __removed=0
-  __nl=$'\n'
+  local __ov="$1" __os="$2" __text="$3" __k="$4"
+  local __line='' __hit='' __found=0 __removed=0
   eval "$__ov="; eval "$__os=absent"
-  # A BUILTIN LINE WALK, not `printf | grep`: `grep -x`/`grep -m1` EXIT ON THE FIRST MATCH
-  # and the producer then takes SIGPIPE, so under `pipefail` a PRESENT key read as ABSENT
-  # once the server environment passed one pipe buffer (see the matcher block above). Not a
-  # `while read` either: a piped read loop runs in a SUBSHELL and its writes are discarded.
+  # A LINE WALK, not `printf | grep`: `grep -x`/`grep -m1` EXIT ON THE FIRST MATCH and the
+  # producer then takes SIGPIPE, so under `pipefail` a PRESENT key read as ABSENT once the
+  # server environment passed one pipe buffer (see the matcher block above).
+  #
+  # A HERE-STRING, not a PIPE and not repeated string slicing. The pipe is what the defect
+  # was. Slicing the remainder (`${rest#*$'\n'}`) is safe but QUADRATIC — measured at 41
+  # SECONDS for a 5000-variable environment, i.e. it would have replaced a wrong answer
+  # with an unusable one on exactly the heavily populated server this fix is for. A
+  # here-string redirect keeps the loop in THIS shell (a piped `while read` runs in a
+  # subshell and its writes are discarded) and reads to EOF, so there is no early exit to
+  # lose a race with. Same case, after: 40 ms.
+  #
   # `__found` is tracked SEPARATELY from `__hit` because `KEY=` is a legitimate EMPTY
   # assignment, and collapsing it onto "not found" would be the same two-valued read one
   # level down; the callers reject present-but-empty themselves, with their own wording.
-  while [ -n "$__rest" ]; do
-    case "$__rest" in
-      *"$__nl"*) __line=${__rest%%"$__nl"*}; __rest=${__rest#*"$__nl"} ;;
-      *)         __line="$__rest"; __rest='' ;;
-    esac
+  while IFS= read -r __line; do
     if [ "$__line" = "-$__k" ]; then __removed=1; fi
     case "$__line" in
       "$__k"=*) if [ "$__found" = 0 ]; then __hit=${__line#"$__k"=}; __found=1; fi ;;
     esac
-  done
+  done <<<"$__text"
   # The whole text is scanned either way, so an explicit removal wins wherever it appears —
   # exactly as the `grep -qx` precedence did.
   if [ "$__removed" = 1 ]; then return 0; fi
