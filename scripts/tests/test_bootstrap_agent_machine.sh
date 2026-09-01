@@ -4295,6 +4295,18 @@ if [ "$scc_login" = 1 ]; then
   # that context resolves a DIFFERENT binary — the shape of #3727 round 6 f1, where two launch
   # contexts would run different sccache installs.
   [ -n "${SCC_SHIM_LOGIN_BIN:-}" ] && scc_extra+=("PATH=$SCC_SHIM_LOGIN_BIN:$PATH")
+elif [ -n "${SCC_SHIM_NONLOGIN_NOBIN:-}" ]; then
+  # The NON-LOGIN context resolves NO sccache: the `cargo install` shape, where the binary sits in
+  # the user Cargo bin directory and sudo replaces PATH with secure_path. An ABSOLUTE path still
+  # executes, which is why the server reads keep working — only `command -v` comes back empty.
+  #
+  # SCOPED TO THE RESOLUTION PROBE ONLY. Applying it to every non-login sudo call also broke
+  # `sudo -n -u <self> true` (the PRIVILEGE probe), which then reported sudo-runas-denied and made
+  # the case fail for a reason that had nothing to do with the binary — a harness artifact wearing
+  # the verdict it was meant to test.
+  case "$*" in
+    *"command -v sccache"*) scc_extra+=("PATH=/nonexistent") ;;
+  esac
 fi'
   if [ "${val#file:}" != "$val" ]; then
     mk_stub "$dir" sudo "$scc_pre
@@ -4519,7 +4531,7 @@ else
   scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720)
   scc_sl_nb=$(scc_slice "$scc_out_nb")
   if out_has "$scc_sl_nb" -E '\[warn\].*sccache-cap: UNMEASURED' \
-     && out_has "$scc_sl_nb" 'no sccache on PATH' \
+     && out_has "$scc_sl_nb" 'no launch context resolved an sccache at all' \
      && ! out_has "$scc_sl_nb" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing oracle, never an [ok]"
   else
@@ -4554,13 +4566,40 @@ else
     SCC_STUB_MAX=32212254720 SCC_SHIM_LOGIN_BIN="$scc_altbin" SCC_STUB_LOG="$scc_log")
   scc_sl_bin=$(scc_slice "$scc_out_bin")
   if out_has "$scc_sl_bin" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && out_has "$scc_sl_bin" 'DIFFERENT sccache binaries' \
+     && out_has "$scc_sl_bin" 'would run DIFFERENT ones' \
      && out_has "$scc_sl_bin" "$scc_altbin/sccache" \
      && ! out_has "$scc_sl_bin" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: contexts that would run DIFFERENT sccache binaries are CONFLICTING-SOURCES, naming both paths"
   else
     bad "sccache-cap: a binary disagreement was resolved by picking one, or not reported"
     printf '%s\n' "$scc_sl_bin" | head -6
+  fi
+
+  # 12b-f3. A CONTEXT WITH NO SCCACHE IS A NON-PARTICIPANT, NOT A VETO (issue #3727 roborev round 7,
+  #         f1 — and round 6's fix, as first written, broke exactly this box). `cargo install sccache`
+  #         lands in the user's Cargo bin directory and sudo replaces PATH with `secure_path`, so on
+  #         the DOCUMENTED Linux install the non-login PAM session resolves nothing while the
+  #         invoking shell and the login shell both resolve the same binary. Requiring all three to
+  #         agree made that ordinary box UNMEASURED and refused persistence — red on correct input.
+  #         It must VERIFY, and it must SAY that one context cannot run sccache at all, because a
+  #         gate launched from there compiles uncached whatever the cap says.
+  scc_out_nobin=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 SCC_SHIM_NONLOGIN_NOBIN=1 SCC_STUB_LOG="$scc_log")
+  scc_sl_nobin=$(scc_slice "$scc_out_nobin")
+  if out_has "$scc_sl_nobin" -E '\[ok\].*sccache-cap: VERIFIED' \
+     && [ "$(scc_warns "$scc_sl_nobin")" = 0 ]; then
+    ok "sccache-cap: a box whose non-login PAM session has no sccache (the cargo-install shape) still VERIFIES — a missing binary is not a disagreement"
+  else
+    bad "sccache-cap: the cargo-install shape was refused (round 6's guard reds on correct input again)"
+    printf '%s\n' "$scc_sl_nobin" | head -8
+  fi
+  if out_has "$scc_sl_nobin" 'no sccache is on the PATH of' \
+     && out_has "$scc_sl_nobin" 'non-login-PAM' \
+     && out_has "$scc_sl_nobin" 'UNCACHED'; then
+    ok "sccache-cap: the non-participant context is REPORTED by name, with what it costs (an uncached gate), rather than passing silently"
+  else
+    bad "sccache-cap: a context that cannot run sccache at all was not reported"
+    printf '%s\n' "$scc_sl_nobin" | grep -i 'binary\|scope' | head -3
   fi
 
   # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER

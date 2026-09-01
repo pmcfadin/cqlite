@@ -3329,42 +3329,82 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # ROOT's — so the section could ask a different (or root-only) sccache about a cap and then start
   # or verify a server with it, while gates use another binary entirely.
   #
-  # So the binary is resolved INSIDE each context and the three must AGREE before any of them is
-  # used. A DISAGREEMENT is the same class as disagreeing on the value — reported, never resolved by
-  # picking one — and a context that resolves NOTHING is UNMEASURED with the cause, never a fall
-  # back to the ambient binary (which is exactly what this finding is about). Round 3's reason
-  # survives: what is passed to the session is still an ABSOLUTE PATH, so nothing depends on
-  # `secure_path` at use time; it is just a path the session itself named.
+  # A CONTEXT WITH NO SCCACHE IS A NON-PARTICIPANT, NOT A DISAGREEMENT (roborev round 7, f1 — and
+  # round 6's requirement, as first implemented here, MADE THE STANDARD INSTALL FAIL). The documented
+  # Linux path is `cargo install sccache`, which lands in the user's Cargo bin directory, while sudo
+  # replaces PATH with `secure_path` — so a NON-LOGIN PAM session routinely resolves nothing while
+  # the invoking shell and the login shell both resolve the same binary. Requiring all three to
+  # resolve the SAME PATH turned that ordinary box into UNMEASURED, refused persistence, and would
+  # have failed `--fix-sccache-cap --strict` on a correct setup: a guard that reds on correct input,
+  # which is the guard agents learn to waive.
+  #
+  # So the PARTICIPANTS are the contexts that can launch sccache, and only they are compared:
+  #   * participants disagree  -> CONFLICTING-SOURCES (two installs can differ in the grammar, the
+  #                               default cap and the server itself)
+  #   * no participant at all  -> UNMEASURED, cause named
+  #   * participants agree     -> that path is used, and the non-participants are REPORTED, because a
+  #                               context that cannot run sccache cannot start a server either — a
+  #                               real operational fact, and a different one from a cap disagreement.
+  #
+  # Round 3's reason survives either way: what is passed to a session is still an ABSOLUTE PATH, so
+  # nothing depends on `secure_path` at use time; it is just a path some context itself named.
   SCC_SCCACHE_BIN=""
-  SCC_BIN_STATE=""          # agreed | disagree:<detail> | unresolved:<context>
+  SCC_BIN_STATE=""          # agreed | disagree:<detail> | unresolved:<detail>
+  SCC_BIN_ABSENT=""         # contexts that resolved NO sccache (non-participants)
   SCC_BIN_INVOKER="$(command -v sccache 2>/dev/null || true)"
   # scc_resolve_binary: ask each context which sccache it would run. Two extra bounded sudo calls,
   # deliberately taken BEFORE the persist decision, because the literal oracle that AUTHORIZES the
-  # write must not run on a binary the contexts have not agreed on (round 4's fix would otherwise
+  # write must not run on a binary the participants have not agreed on (round 4's fix would otherwise
   # rest on round 6's defect).
   scc_resolve_binary() {
-    local __nl __lo __rc=0
-    SCC_SCCACHE_BIN=""; SCC_BIN_STATE=""
+    local __nl="" __lo="" __asked=1
+    SCC_SCCACHE_BIN=""; SCC_BIN_STATE=""; SCC_BIN_ABSENT=""
     if [ -z "$SCC_SELF_USER" ] || [ -z "$TIMEOUT_BIN" ] || ! have sudo; then
-      SCC_BIN_STATE="unresolved:no session can be opened to ask (state $SCC_PRIV_STATE)"
+      # The SESSIONS could not be ASKED at all — distinct from a session that answered "none".
+      __asked=0
+    else
+      __nl=$(bounded 20 env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" \
+        bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null || true)
+      __lo=$(bounded 20 env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" -i \
+        bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null || true)
+      # Anchored on the LAST non-empty line: a LOGIN shell's stdout can carry the profile's own
+      # noise ahead of the answer, and taking the first line would report a motd as a binary path.
+      __nl=$(printf '%s\n' "$__nl" | grep -v '^[[:space:]]*$' | tail -1)
+      __lo=$(printf '%s\n' "$__lo" | grep -v '^[[:space:]]*$' | tail -1)
+    fi
+    local __parts="" __first=""
+    if [ -n "$SCC_BIN_INVOKER" ]; then
+      __parts="$__parts invoking-shell:$SCC_BIN_INVOKER"; __first="$SCC_BIN_INVOKER"
+    else
+      SCC_BIN_ABSENT="$SCC_BIN_ABSENT invoking-shell"
+    fi
+    if [ "$__asked" = 0 ]; then
+      SCC_BIN_ABSENT="$SCC_BIN_ABSENT non-login-PAM(not-asked) login-shell(not-asked)"
+    else
+      if [ -n "$__nl" ]; then
+        __parts="$__parts non-login-PAM:$__nl"; [ -n "$__first" ] || __first="$__nl"
+      else
+        SCC_BIN_ABSENT="$SCC_BIN_ABSENT non-login-PAM"
+      fi
+      if [ -n "$__lo" ]; then
+        __parts="$__parts login-shell:$__lo"; [ -n "$__first" ] || __first="$__lo"
+      else
+        SCC_BIN_ABSENT="$SCC_BIN_ABSENT login-shell"
+      fi
+    fi
+    if [ -z "$__parts" ]; then
+      SCC_BIN_STATE="unresolved:no launch context resolved an sccache at all (${SCC_BIN_ABSENT# })"
       return 1
     fi
-    __nl=$(bounded 20 env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" \
-      bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null) || __rc=$?
-    __lo=$(bounded 20 env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" -i \
-      bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null) || __rc=$?
-    # Anchored on the LAST non-empty line: a LOGIN shell's stdout can carry the profile's own noise
-    # ahead of the answer, and taking the first line would report a motd as a binary path.
-    __nl=$(printf '%s\n' "$__nl" | grep -v '^[[:space:]]*$' | tail -1)
-    __lo=$(printf '%s\n' "$__lo" | grep -v '^[[:space:]]*$' | tail -1)
-    if [ -z "$SCC_BIN_INVOKER" ]; then SCC_BIN_STATE="unresolved:the invoking shell has no sccache on PATH"; return 1; fi
-    if [ -z "$__nl" ]; then SCC_BIN_STATE="unresolved:a non-login PAM session found no sccache on its PATH (sudo's secure_path)"; return 1; fi
-    if [ -z "$__lo" ]; then SCC_BIN_STATE="unresolved:a login shell found no sccache on its PATH"; return 1; fi
-    if [ "$__nl" != "$__lo" ] || [ "$__nl" != "$SCC_BIN_INVOKER" ]; then
-      SCC_BIN_STATE="disagree:non-login '$__nl', login '$__lo', invoking shell '$SCC_BIN_INVOKER'"
-      return 1
-    fi
-    SCC_SCCACHE_BIN="$__nl"; SCC_BIN_STATE=agreed
+    local __p __path
+    for __p in $__parts; do
+      __path=${__p#*:}
+      if [ "$__path" != "$__first" ]; then
+        SCC_BIN_STATE="disagree:${__parts# }"
+        return 1
+      fi
+    done
+    SCC_SCCACHE_BIN="$__first"; SCC_BIN_STATE=agreed
     return 0
   }
   # The ROUTING variables are scrubbed alongside BASH_ENV/ENV: an SCCACHE_DIR or
@@ -3620,8 +3660,12 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # oracle that authorizes the write must run on the binary gates actually use (roborev round 6, f1).
   scc_resolve_binary || true
   case "$SCC_BIN_STATE" in
-    agreed) : ;;
-    disagree:*) info "sccache binary: the launch contexts DISAGREE — ${SCC_BIN_STATE#disagree:}; nothing will be persisted or certified from a binary they do not share" ;;
+    agreed)
+      # The non-participants are REPORTED even on the happy path: a context that resolves no
+      # sccache cannot start a server, so a gate launched from it compiles UNCACHED — a real fact,
+      # and a different one from a cap disagreement (roborev round 7, f1).
+      [ -n "$SCC_BIN_ABSENT" ] && info "sccache binary: '$SCC_SCCACHE_BIN' (agreed by every context that has one). NOTE: no sccache is on the PATH of:${SCC_BIN_ABSENT} — a gate launched from such a context compiles UNCACHED, whatever the cap says. On this fleet that is normal for a non-login PAM session: 'cargo install' lands in the user's Cargo bin directory and sudo replaces PATH with secure_path" ;;
+    disagree:*) info "sccache binary: the launch contexts that HAVE one DISAGREE — ${SCC_BIN_STATE#disagree:}; nothing will be persisted or certified from a binary they do not share" ;;
     *)          info "sccache binary: not established — ${SCC_BIN_STATE#unresolved:}" ;;
   esac
 
@@ -3805,7 +3849,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
       info "scope: there was NO server when this run began, so the cap is in force from now on because THIS RUN started it. Anything that stops the server later and does not see the value (a session created before the /etc/environment line existed) will start one at sccache's own default again"
     fi
-    info "scope: every sccache call here used '$SCC_SCCACHE_BIN', which is the binary ALL THREE contexts independently resolved — a disagreement there would have been CONFLICTING-SOURCES, and an unresolvable one UNMEASURED, because a cap verified with one binary says nothing about another"
+    info "scope: every sccache call here used '$SCC_SCCACHE_BIN', the binary agreed by every launch context that HAS one${SCC_BIN_ABSENT:+ (none on the PATH of:${SCC_BIN_ABSENT} — those contexts compile UNCACHED rather than at a different cap)} — a disagreement between contexts that have one would have been CONFLICTING-SOURCES, and no participant at all UNMEASURED, because a cap verified with one binary says nothing about another"
     [ -n "$SCC_PROBE_SUBJECT_NOTE" ] && info "subject: $SCC_PROBE_SUBJECT_NOTE"
   }
   # scc_stale_remedy: the remedy for a visible, accepted value the RUNNING server does not
@@ -3955,8 +3999,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       # talk to, so a cap certified with one says nothing about the other. Same class as a value or
       # routing disagreement, so the same verdict — and, as there, it is reported rather than
       # resolved by picking one.
-      warn "sccache-cap: CONFLICTING-SOURCES (the contexts a gate can be launched from would run DIFFERENT sccache binaries — ${SCC_BIN_STATE#disagree:} — so the grammar, the default cap and the server itself may all differ between them, and a cap verified with one binary says nothing about the other)"
-      info "reconcile the PATHs (or remove the extra install) so every launch context runs one sccache; until then nothing here can be certified"
+      warn "sccache-cap: CONFLICTING-SOURCES (the contexts a gate can be launched from that HAVE an sccache would run DIFFERENT ones — ${SCC_BIN_STATE#disagree:} — so the grammar, the default cap and the server itself may all differ between them, and a cap verified with one binary says nothing about the other)"
+      info "reconcile the PATHs (or remove the extra install) so every launch context that has sccache runs the SAME one; a context with NO sccache is not this problem — it simply compiles uncached"
     elif [ "$SCC_BIN_STATE" != agreed ]; then
       warn "sccache-cap: UNMEASURED (the sccache binary the launch contexts would run could not be established — ${SCC_BIN_STATE#unresolved:} — and this section will not fall back to the binary on ITS OWN PATH, which under a 'sudo bash bootstrap' is root's rather than the account gates run as)"
     elif [ "$scc_probe_set" != "$scc_login_set" ] || [ "$scc_probe_seen" != "$scc_login_seen" ] \

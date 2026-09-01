@@ -124,10 +124,14 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
   exported `SCCACHE_*` variable, not just the cap, before it will say `sccache-cap: VERIFIED`. Any
   disagreement is `CONFLICTING-SOURCES`; a difference in an `SCCACHE_*` name it does not classify as
   routing is `UNMEASURED` naming that name, never a pass on a partial match. The same rule covers
-  the **binary**: each context is asked which `sccache` it would run, all three must agree, and a
-  disagreement is `CONFLICTING-SOURCES` (two installs can differ in the grammar, the default cap and
+  the **binary**: each context is asked which `sccache` it would run and the ones that HAVE one must
+  agree, or it is `CONFLICTING-SOURCES` (two installs can differ in the grammar, the default cap and
   the server itself) — never a fall back to the one on bootstrap's own PATH, which under
-  `sudo bash …` is root's rather than the account gates run as. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
+  `sudo bash …` is root's rather than the account gates run as. A context with **no** sccache is a
+  non-participant, not a disagreement: on the documented `cargo install sccache` layout a non-login
+  PAM session resolves nothing (sudo's `secure_path`), and treating that as a conflict made an
+  ordinary box non-passing. It is reported instead — a gate launched from such a context compiles
+  **uncached**, which is a different fact from running at the wrong cap. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
   running a different cap keeps it. Before writing, it also resolves **its own** fleet literal
   through the isolated oracle and refuses to persist anything that resolves to sccache's default —
   a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
