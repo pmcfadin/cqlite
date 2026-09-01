@@ -479,6 +479,19 @@ is worth recording as a result rather than a shortfall**:
 | an uncontended box | **disclosed** — measured against `nproc/2` and reported beside the verdict |
 | the `i4i` label itself | **declared** — not derivable from a host string, and the two properties it stood for are checked directly instead |
 
+**The sweep is CURATED, not derived, and that is its one weakness.** All five
+requirements above are dispositioned, so the answer to *"what does the runbook
+promise that nothing checks?"* is **"nothing that this sweep found"** — which is
+not the same as "nothing". The candidates came from reading the runbook by hand,
+and a hand reading cannot prove it enumerated every requirement the document
+states, still less every requirement a reader would reasonably infer from it.
+Compare the option-disposition guard — §13 (guard the VALUE, and enumerate the
+SET) — which derives its subject set from
+the driver's own dispatch and therefore reds when an option is added: nothing
+equivalent exists for prose, so a sixth requirement added to the runbook later
+joins the unchecked set silently. Declared rather than left implicit, on the same
+grounds as every other non-exhaustive claim in this instrument.
+
 **Check the property the label stood for, not the label.** The first pass of
 this table disclosed "the field i4i rig" and stopped there, on the reasoning that
 a rig class cannot be derived from a hostname. That reasoning is correct and the
