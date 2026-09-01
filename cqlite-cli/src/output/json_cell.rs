@@ -38,6 +38,10 @@
 //! number, and any other text falls back to a JSON STRING (the pre-#3644
 //! rendering). `serde_json` itself is the authority on validity here; nothing
 //! re-implements the JSON number grammar.
+//!
+//! That path is REACHABLE for well-formed data too, not only for the corruption
+//! marker: a ZERO magnitude at a NEGATIVE scale formats as `"0"` followed by N
+//! zeros (`00`), which JSON forbids. See the `Err` arm of [`numeric_cell`].
 
 use cqlite_core::util::udt_json::udt_render_fields;
 use cqlite_core::Value;
@@ -59,6 +63,12 @@ pub(crate) enum JsonCell {
     /// A pre-VALIDATED raw JSON fragment, written through verbatim. Only ever
     /// built by [`numeric_cell`], which refuses anything that is not valid JSON
     /// beginning like a number.
+    ///
+    /// A fragment is always SINGLE-LINE (`ValueFormatter`'s digits, with no
+    /// embedded newline), which is what keeps the streaming writer's pretty path
+    /// correct: it re-indents a row by walking `json_str.lines()`
+    /// (`cqlite-cli/src/output/json.rs`), so a multi-line fragment would be
+    /// re-indented as if it were separate lines.
     Raw(Box<RawValue>),
     Array(Vec<JsonCell>),
     /// Entries in emission order (a map entry's `key`/`value`, a UDT's declared
@@ -112,13 +122,33 @@ fn numeric_cell(value: &Value) -> JsonCell {
     if !matches!(text.as_bytes().first(), Some(b'-' | b'0'..=b'9')) {
         return JsonCell::Plain(JsonValue::String(text));
     }
-    match RawValue::from_string(text) {
+    // `from_string` CONSUMES the text on the error path and `serde_json::Error`
+    // does not hand it back, so the fallback needs its own copy. A clone (one
+    // memcpy) is paid on the numeric path; the alternative — re-calling
+    // `format_value` in the `Err` arm — pays a second BigInt → base-10
+    // conversion, which is the superlinear step `format_decimal` documents as its
+    // sole hard cost, on the very inputs (tens of thousands of digits) where it
+    // hurts most.
+    match RawValue::from_string(text.clone()) {
         Ok(raw) => JsonCell::Raw(raw),
-        // `from_string` consumes the text on the error path, so the fallback
-        // re-renders it. Unreachable for anything `format_varint`/`format_decimal`
-        // can produce today; kept because "the formatter's output set" is not a
-        // property this module can enforce.
-        Err(_) => JsonCell::Plain(JsonValue::String(ValueFormatter::format_value(value))),
+        // REACHABLE, and the class is: a ZERO magnitude at a NEGATIVE scale.
+        // `Value::Decimal { scale: -1, unscaled: vec![0x00] }` — Cassandra's
+        // `0E+1`, exactly how `BigInteger.ZERO` at a negative scale serializes —
+        // makes `format_decimal`'s `decimal_str` `"0"`, and its `scale <= 0`
+        // branch then appends `"0".repeat(1)`, giving `"00"`. Guard 1 passes (a
+        // leading digit) and `serde_json` rejects it, because JSON forbids a
+        // leading zero followed by another digit. A NON-zero unscaled at a
+        // negative scale is fine (`5` at scale `-1` → `"50"`, valid JSON), so the
+        // class is exactly `"0"` followed by N zeros.
+        //
+        // That `format_decimal` spells this `00` where Java's
+        // `BigDecimal.toString()` gives `0E+1` is a FORMATTER divergence, reported
+        // separately — NOT something this layer papers over. The egress must not
+        // invent a spelling; it emits the text it was given, as a JSON STRING,
+        // because a raw `00` would make the whole document unparseable. Pinned by
+        // `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`
+        // (`a_zero_magnitude_at_a_negative_scale_falls_back_to_a_json_string`).
+        Err(_) => JsonCell::Plain(JsonValue::String(text)),
     }
 }
 
