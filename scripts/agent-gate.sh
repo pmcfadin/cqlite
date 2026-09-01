@@ -14414,16 +14414,6 @@ run_feature_iso_delta_scan() {
   local _posture _fx_mode _fx_note
   _posture=$(_ds_fixture_posture "$_full" "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}")
   _fx_mode=${_posture%%$'\t'*}; _fx_note=${_posture#*$'\t'}
-  local -a fixture_env=()
-  if [ "$_fx_mode" = strict ]; then
-    fixture_env=(CQLITE_REQUIRE_FIXTURES=1)
-  else
-    # `env -u`, not merely omitting the assignment: plain `env` INHERITS an exported
-    # value, and an inherited CQLITE_REQUIRE_FIXTURES=1 would make `--only`/`--lite` and
-    # the documented #2078 opt-out FAIL while the census below reports fixtures as
-    # optional (node-bindings round-1 B2).
-    fixture_env=(-u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS)
-  fi
 
   # ---- DERIVE the target set from cargo metadata + committed source ----------------
   # CANDIDATES FROM CARGO, never a tests/*.rs glob: a manifest-gated
@@ -14719,22 +14709,33 @@ EOF
   #
   # CARGO_TERM_COLOR=never is belt, not the fix: every parse below goes through
   # _ansi_stripped_log (#3400).
-  # ONE argv array, shared by the RECORD and the EXECUTION, so the two cannot describe
-  # different invocations.
   local -a cargo_argv=(test --no-fail-fast --package cqlite-core
     --no-default-features --features "$iso_features" --lib "${targets[@]}")
-  # OBSERVED EXPLICITLY, on the line immediately BEFORE the invocation (#3453, job 273 F3).
-  # The in-shell interceptors cannot see this call: _deny_warnings prepends its OWN `env`,
-  # so the shell `env` wrapper finds a NESTED `env` in command position rather than `cargo`
-  # and records nothing — the SUMMARY would then read "component FAILed before its first
-  # cargo build/test invocation" while cargo had in fact run and failed a test. That is
-  # affirmatively false, and worse than silence. Recording HERE rather than earlier also
-  # keeps it an EXECUTION record: a FAIL-CLOSED derivation above never reaches this line,
-  # and the annotation then correctly claims no invocation.
-  _fm_observe_cargo_argv "${cargo_argv[@]}" || true
-  if _deny_warnings env "${fixture_env[@]}" \
-      CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" CARGO_TERM_COLOR=never \
-      cargo "${cargo_argv[@]}" >>"$log" 2>&1; then
+  # A SUBSHELL WITH EXPORTS, deliberately, rather than `_deny_warnings env VAR=… cargo …`
+  # (#3453). `_deny_warnings` prepends its OWN `env`, so that form leaves a NESTED `env` in
+  # command position and the gate's `cargo`/`env` interceptors observe NOTHING — the
+  # SUMMARY then reads "component FAILed before its first cargo build/test invocation"
+  # while cargo has in fact run and failed a test, which is affirmatively false and worse
+  # than silence (job 273 F3). Exported here, `_deny_warnings`' own `env` finds `cargo` in
+  # command position and the STANDARD interceptor records it — no second recording path,
+  # and nothing that could describe an invocation that never started. The subshell keeps
+  # the exports out of every other component's environment.
+  local ds_rc=0
+  (
+    export CQLITE_DATASETS_ROOT
+    export CARGO_TERM_COLOR=never
+    if [ "$_fx_mode" = strict ]; then
+      export CQLITE_REQUIRE_FIXTURES=1
+    else
+      # UNSET, not merely "not assigned": an exported CQLITE_REQUIRE_FIXTURES=1 in the
+      # caller's environment is routine in this repo, and inheriting it would make
+      # `--only`/`--lite` and the documented #2078 opt-out FAIL while the census printed
+      # above reports fixtures as optional — node-bindings' round-1 B2 finding exactly.
+      unset CQLITE_REQUIRE_FIXTURES CQLITE_PARITY_REQUIRE_DATASETS
+    fi
+    _deny_warnings cargo "${cargo_argv[@]}"
+  ) >>"$log" 2>&1 || ds_rc=$?
+  if [ "$ds_rc" -eq 0 ]; then
     # A GREEN CARGO EXIT IS NOT SUFFICIENT — that is this issue's whole subject. All three
     # guards, because each is blind where the others see: zero-tests covers the integration
     # targets' COUNTS, targets-observed covers a target that never printed a banner at all
