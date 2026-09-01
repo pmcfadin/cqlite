@@ -161,11 +161,21 @@ memcpy is other callers' work. What it does mean is that **1.70% is a floor, not
 in exactly the way #3027's 0.74% was, one level down. This is the residual this issue reduced
 rather than eliminated.
 
-Blocker note: the no-DWARF-chain undercount, which could in principle have been large, is
-**measured at 0.0000% of in-binary cycles** — every sampled in-binary address resolved to an
-inline chain. The ~12% of unsymbolised addresses visible in the profile are all *libc*, i.e.
-already off-binary and already counted above. `vint_share.py` now refuses above a stated bound
-rather than folding such addresses silently into "not VInt".
+**The no-DWARF-chain undercount is 0.0000% of in-binary cycles — and that figure was first
+reported on the strength of a guard that could not have found anything else.** `addr2line -i -f`
+renders an address it cannot resolve as the literal `??` / `??:0`, and the first parser appended
+the `??` function line to the chain. `["??"]` is truthy, so unresolved samples were classified
+"not VInt" rather than "unknown", `no_chain_cycles` was 0 **by construction**, and the refusal
+threshold added to catch that undercount could never fire. The parser now inspects both halves
+of every frame and returns an empty chain when nothing resolved
+(`harness/test_vint_share_parser.py` pins it, unresolved output included).
+
+Re-derived after the fix, the value is genuinely 0.0000%, and it is now an **affirmative**
+measurement rather than the absence of a signal: **3430 of 3430** sampled in-binary addresses
+resolve to an inline chain, and injecting one unresolvable address holding 20% of in-binary
+cycles makes the guard report 20.00% and refuse. The ~12% of unsymbolised addresses visible in
+the profile are all *libc*, i.e. off-binary, already counted in the 42.83% above — which is why
+the in-binary figure is genuinely zero.
 
 ### The pipeline was validated against an independent instrument
 
@@ -288,7 +298,7 @@ worst case in each row:
 | skid band, worst *narrow* edge | 1.8369% | KILL |
 | skid band, worst *wide* edge (most permissive within the basis) | 1.8880% | KILL |
 | cross-check probe, known to inflate | 2.4583% | KILL |
-| no-DWARF-chain cycles (measured undercount, §2.4) | 0.0000% | no effect |
+| no-DWARF-chain cycles (§2.4; affirmative — 3430/3430 addresses resolve) | 0.0000% | no effect |
 | **in-binary denominator, mean** | **2.9779%** | **KILL by 0.02 pp** |
 | **in-binary denominator, worst rep** | **3.1259%** | **ABOVE the line** |
 | **in-binary denominator, probe route** | **3.9763%** | **ABOVE the line** |

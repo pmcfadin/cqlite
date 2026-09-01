@@ -22,6 +22,7 @@ patches.
 | `raw/validity-and-refusals.md` | every rep's validity checks, the REFUSED observations, the co-tenancy discussion, and the **DECLARED GAP**: the quiescence check is prospective and no load data was captured *during* any published rep |
 | `raw/load-sensitivity.txt` | whether contention can move either verdict, fitted on both bases |
 | `raw/refusal-demo/` | evidence that a refused rep actually refuses — exit 3 at `peak_load=59.21` |
+| `harness/test_vint_share_parser.py` | pins the addr2line inline-chain parser, unresolved (`??`/`??:0`) output included. Exists because a truthy `["??"]` chain made `no_chain_cycles` 0 BY CONSTRUCTION — a false zero in a validity guard |
 
 ## Harness (`harness/`) — reviewed code, not scratch
 

@@ -243,7 +243,20 @@ def verify_base(persym: dict[int, tuple[str, int | None]], sym_addrs: list[int],
 
 
 def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[str]]:
-    """file address -> full inline chain (innermost first), from DWARF via addr2line -i."""
+    """file address -> full inline chain (innermost first), from DWARF via addr2line -i.
+
+    UNRESOLVED ADDRESSES MUST COME BACK EMPTY, and getting that wrong produced a false zero.
+    `addr2line -i -f` emits a FUNCTION line then a FILE:LINE line per inline level, and for
+    an address it cannot resolve it emits the literal `??` and `??:0` (verified against this
+    binary). An earlier version appended only the function line, so an unresolved address
+    yielded `["??"]` -- which is TRUTHY, so it flowed into `classify()` and was booked as
+    "not VInt" instead of "unknown". `no_chain_cycles` was therefore 0 BY CONSTRUCTION and
+    the refusal threshold added to catch that undercount could never fire.
+
+    So both halves of each frame are inspected and a frame counts as resolved only if it
+    names either a function or a source location. A chain with no resolved frame is returned
+    EMPTY, which is what every caller tests for.
+    """
     if not addrs:
         return {}
     stdin = "\n".join(f"0x{a:x}" for a in addrs) + "\n"
@@ -253,20 +266,35 @@ def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[str]]:
     ).stdout
     chains: dict[int, list[str]] = {}
     cur: int | None = None
-    expect_func = True
+    pending_func: str | None = None
     for line in out.splitlines():
         if line.startswith("0x"):
             cur = int(line.strip(), 16)
             chains[cur] = []
-            expect_func = True
+            pending_func = None
             continue
         if cur is None:
             continue
-        # addr2line -f -i alternates FUNCTION then FILE:LINE for each inline level.
-        if expect_func:
-            chains[cur].append(line.strip())
-        expect_func = not expect_func
+        if pending_func is None:
+            pending_func = line.strip()
+            continue
+        # `line` is now the FILE:LINE partner of `pending_func`.
+        if not _frame_unresolved(pending_func, line.strip()):
+            chains[cur].append(pending_func)
+        pending_func = None
     return chains
+
+
+def _frame_unresolved(func: str, loc: str) -> bool:
+    """Is this addr2line frame a placeholder rather than a real DWARF frame?
+
+    `??` for the function AND a `??:0`-shaped location means DWARF resolved nothing. A frame
+    with a real function but an unknown line (or vice versa) IS information and is kept --
+    discarding it would swing the error the other way and undercount attributable cycles.
+    """
+    fn_unknown = func in ("", "??")
+    loc_unknown = loc in ("", "??:0", "??:?", "??")
+    return fn_unknown and loc_unknown
 
 
 def classify(chain: list[str]) -> str:

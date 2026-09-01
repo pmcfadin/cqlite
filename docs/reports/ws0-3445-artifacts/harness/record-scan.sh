@@ -52,11 +52,24 @@ done
 [ -n "$OUT" ] && [ -n "$BINARY" ] || { echo "record-scan.sh: --out and --binary are required" >&2; exit 2; }
 # A malformed bound must REFUSE, never take the "disabled" branch: `awk 'm+0==0'` treats
 # `--max-load abc` as 0 and so as "check off", i.e. a typo would silently buy a pass.
+# Must contain at least one DIGIT: the character-class test alone accepts "." and "..",
+# which awk then reads as 0, silently taking the "check disabled" branch and reporting
+# UNCHECKED for what is actually a malformed bound. A malformed bound must REFUSE.
 case "$MAX_LOAD" in
   ''|*[!0-9.]*|*.*.*) echo "record-scan.sh: --max-load must be a number (0 disables): '$MAX_LOAD'" >&2; exit 2;;
+  *[0-9]*) ;;
+  *) echo "record-scan.sh: --max-load must contain a digit (0 disables): '$MAX_LOAD'" >&2; exit 2;;
 esac
 case "$LOAD_SAMPLE_SECS" in
   ''|*[!0-9]*|0) echo "record-scan.sh: --load-sample-secs must be a positive integer" >&2; exit 2;;
+esac
+# MODE is validated against a CLOSED set here, not tested for equality at each use. The
+# measurement branched on `= record` while the pct_running validation branched on
+# `= stat`, so `--mode stats` would run `perf stat` and SKIP the multiplexing check --
+# a typo silently disabling a validity guard.
+case "$MODE" in
+  record|stat) ;;
+  *) echo "record-scan.sh: --mode must be 'record' or 'stat': '$MODE'" >&2; exit 2;;
 esac
 [ -x "$BINARY" ] || { echo "record-scan.sh: not executable: $BINARY" >&2; exit 2; }
 [ -d "$CORPUS/ws0/events" ] || { echo "record-scan.sh: no corpus at $CORPUS/ws0/events" >&2; exit 2; }
@@ -83,7 +96,7 @@ trap cleanup EXIT
 # verdict taken from the MAXIMUM rather than from either endpoint.
 { echo "loadavg_before=$(cut -d' ' -f1-3 /proc/loadavg)"
   echo "nproc=$(nproc)"
-  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || echo 0)"
+  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || :)"
 } > "$OUT/cotenancy-before.txt"
 
 taskset -c "$CPU" "$BINARY" \
@@ -118,7 +131,13 @@ fi
 # --- load sampler across the measured window ------------------------------------
 : > "$OUT/load-samples.txt"
 ( while :; do
-    echo "$(date -u +%H:%M:%S) $(cut -d' ' -f1 /proc/loadavg) $(pgrep -c -f 'cargo|agent-gate|maturin|rustc' || echo 0)"
+    # `pgrep -c` PRINTS 0 and exits non-zero when nothing matches, so `|| echo 0` appended a
+    # SECOND line -- corrupting load-samples.txt and inflating the sample count, which let a
+    # one-sample run pass the `quiescence-unmeasured` refusal that requires two. `|| :`
+    # swallows the exit status only. It fires exactly when the box is QUIET, i.e. in the
+    # condition this check exists to certify.
+    NPEER=$(pgrep -c -f 'cargo|agent-gate|maturin|rustc' || :)
+    echo "$(date -u +%H:%M:%S) $(cut -d' ' -f1 /proc/loadavg) ${NPEER:-0}"
     sleep "$LOAD_SAMPLE_SECS"
   done ) >> "$OUT/load-samples.txt" 2>/dev/null &
 SAMPLER=$!
@@ -141,15 +160,17 @@ fi
 
 stop_sampler
 { echo "loadavg_after=$(cut -d' ' -f1-3 /proc/loadavg)"
-  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || echo 0)"
+  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || :)"
 } > "$OUT/cotenancy-after.txt"
 
 # --- quiescence verdict: REFUSE loudly, never silently re-roll -------------------
 # The verdict is written to a file in the rep directory whatever it says, so a REFUSED
 # rep leaves a durable record that can be reported as a refusal. A rep quietly re-rolled
 # until it looked clean is the worse outcome (#3299 AC5), so this script does not retry.
-PEAK=$(awk '{ if ($2+0 > m) m = $2+0 } END { printf "%.2f", m }' "$OUT/load-samples.txt")
-NSAMP=$(wc -l < "$OUT/load-samples.txt")
+# Both figures count only WELL-FORMED sample lines (3 fields), so a malformed line can
+# neither hide a peak nor inflate the sample count past the unmeasured-quiescence refusal.
+PEAK=$(awk 'NF==3 { if ($2+0 > m) m = $2+0 } END { printf "%.2f", m }' "$OUT/load-samples.txt")
+NSAMP=$(awk 'NF==3' "$OUT/load-samples.txt" | wc -l)
 if [ "$NSAMP" -lt 2 ]; then
   printf 'verdict=REFUSED\nreason=quiescence-unmeasured\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
     "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
