@@ -78,6 +78,9 @@ trap cleanup EXIT
 #                              ABSENT command, so this drives the df-unavailable branch
 #                              on the same observable a df-less PATH would produce
 #   * GARBAGE               -> well-formed columns with a NON-NUMERIC Available
+#   * RAW <data-line>       -> that EXACT data line, verbatim, under the standard
+#                              header — how the space-bearing / capacity-anchor cases
+#                              deliver a payload no field-index parse can read
 # A per-run state file keeps the counter, so concurrent runs never share one.
 # ---------------------------------------------------------------------------
 mkdir -p "$tmp/shim"
@@ -93,6 +96,10 @@ val=$(sed -n "${n}p" "$DF_SHIM_SCRIPT" 2>/dev/null)
 case "$val" in
   FAIL) exit 1 ;;
   NOTFOUND) exit 127 ;;
+  'RAW '*)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+    printf '%s\n' "${val#RAW }"
+    exit 0 ;;
   GARBAGE)
     printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
     printf '/dev/shim 999999999 1 not-a-number 1%% /shimfs\n'
@@ -144,28 +151,102 @@ run_stub_gate() {
 }
 
 # watch_until_exit <pid> <rundir> <timeout_s>: poll the rundir while <pid> runs, then
-# reap it. Sets WX_STATUS (exit status) and WX_MARKERS (the MAX number of "I am working"
-# markers ever observed) — the AFFIRMATIVE evidence for "did this run begin its work
-# phase". Sets GLOBALS rather than printing: a `$( ... )` capture runs in a SUBSHELL,
-# where `wait <pid>` cannot reap a job of the PARENT shell and silently yields 127.
+# reap it. Sets WX_STATUS (exit status), WX_MARKERS (the MAX number of "I am working"
+# markers ever observed — the AFFIRMATIVE evidence for "did this run begin its work
+# phase") and WX_TIMEDOUT.
+#
+# Sets GLOBALS rather than printing: a `$( ... )` capture runs in a SUBSHELL, where
+# `wait <pid>` cannot reap a job of the PARENT shell and silently yields 127.
+#
+# THE TIMEOUT IS REAL — THERE IS NO UNBOUNDED `wait` ON ANY PATH (roborev job 323).
+# A version that stopped POLLING at the deadline and then called a bare `wait` would
+# hang FOREVER on a deadlocked gate, and this file runs inside `tooling-tests`, i.e. in
+# the gate of record for every lane on the fleet. A hang there is worse than a failure:
+# it burns the machine-wide slot with no verdict — which is the exact resource-waste
+# #3755 exists to remove, reintroduced by its own test. So expiry is detected
+# explicitly, the child is terminated, reaped on a BOUNDED path, and reported as a
+# DISTINCT TIMEOUT status (124, the `timeout(1)` convention) — never a silent pass and
+# never a generic FAIL.
+#
+# The signal goes to THE PID WE STILL HOLD, never to a process GROUP (roborev job 279):
+# once bash has reaped the leader that pgid can be recycled, and on a four-lane box the
+# group most likely to inherit it is a PEER LANE'S GATE. And no `wait` is issued after
+# the kill: a process wedged in uninterruptible sleep would make even that call
+# unbounded, so the reap is a bounded poll and a survivor is left to the EXIT trap.
 WX_STATUS=0
 WX_MARKERS=0
+WX_TIMEDOUT=0
 watch_until_exit() {
   local pid="$1" rundir="$2" timeout="$3"
-  local deadline=$(( $(date +%s) + timeout )) max=0 c
-  while [ "$(date +%s)" -lt "$deadline" ]; do
+  local deadline=$(( $(date +%s) + timeout )) max=0 c expired=0 i=0
+  WX_TIMEDOUT=0
+  while :; do
     c=$(marker_count "$rundir")
     [ "$c" -gt "$max" ] && max="$c"
     kill -0 "$pid" 2>/dev/null || break
+    if [ "$(date +%s)" -ge "$deadline" ]; then expired=1; break; fi
     sleep 0.05
   done
   c=$(marker_count "$rundir"); [ "$c" -gt "$max" ] && max="$c"
-  wait "$pid"; WX_STATUS=$?
   WX_MARKERS="$max"
+  if [ "$expired" -eq 0 ]; then
+    # Bounded by construction: the loop only leaves here once `kill -0` says the child
+    # is gone, so bash already holds its status and `wait` returns immediately.
+    wait "$pid"; WX_STATUS=$?
+    return 0
+  fi
+  WX_TIMEDOUT=1
+  WX_STATUS=124
+  kill -TERM "$pid" 2>/dev/null
+  i=0
+  while [ "$i" -lt 40 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.05; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null
+    i=0
+    while [ "$i" -lt 40 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.05; i=$((i + 1)); done
+  fi
+  return 0
+}
+
+# assert_no_timeout <label>: a TIMEOUT is its own named failure. Called after every
+# watch_until_exit, so a hung child is reported as a hang rather than surfacing as a
+# confusing cascade of value assertions against a run that never finished.
+assert_no_timeout() {
+  if [ "$WX_TIMEDOUT" -eq 0 ]; then
+    return 0
+  fi
+  bad "TIMEOUT: $1 — the child gate did not exit within its deadline; it was terminated"
+  return 1
 }
 
 # grep_line <file> <pattern>: print the first matching line (empty when none).
 grep_line() { grep -m1 -E "$2" "$1" 2>/dev/null; }
+
+# ---------------------------------------------------------------------------
+# Self-check of the harness's own timeout path (roborev job 323, finding 2).
+#
+# This case IS the positive control for boundedness: under the pre-fix helper — which
+# stopped POLLING at the deadline and then called a bare `wait` — it would hang
+# FOREVER, so the fact that this file reaches its final tally at all is the property
+# being demonstrated. Deliberately no elapsed-time assertion: "it returned" is the
+# observable, and a wall-clock threshold in a correctness path is a flake generator.
+# ---------------------------------------------------------------------------
+sleep 300 &
+_hang_pid=$!
+mkdir -p "$tmp/hang.run"
+watch_until_exit "$_hang_pid" "$tmp/hang.run" 1
+if [ "$WX_TIMEDOUT" -eq 1 ] && [ "$WX_STATUS" -eq 124 ]; then
+  ok "harness: a child that outlives its deadline is reported as a DISTINCT TIMEOUT (status 124)"
+else
+  bad "harness: a hung child was not reported as a timeout (timedout=$WX_TIMEDOUT status=$WX_STATUS)"
+fi
+if kill -0 "$_hang_pid" 2>/dev/null; then
+  bad "harness: the timed-out child is still alive — the deadline terminated nothing"
+  kill -KILL "$_hang_pid" 2>/dev/null
+else
+  ok "harness: the timed-out child was terminated (by pid, never by process group)"
+fi
+wait "$_hang_pid" 2>/dev/null
 
 HIGH=$(gib_kib 200)
 LOW=$(gib_kib 10)
@@ -203,6 +284,7 @@ run_stub_gate a-subj "$subj_script" \
 a_subj_pid=$RS_PID; a_subj_run=$RS_RUNDIR; a_subj_sum=$RS_SUMMARY; a_subj_err=$RS_ERR
 
 watch_until_exit "$a_subj_pid" "$a_subj_run" 180; a_status=$WX_STATUS; a_markers=$WX_MARKERS
+assert_no_timeout "AC5 subject"
 wait "$a_peer_pid" 2>/dev/null
 
 if grep -q 'waiting for gate slot' "$a_subj_err" 2>/dev/null; then
@@ -256,6 +338,7 @@ follow_script=$(df_script a-follow "$HIGH")
 run_stub_gate a-follow "$follow_script" \
   CQLITE_GATE_SLOTS_DIR="$a_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; f_status=$WX_STATUS; f_markers=$WX_MARKERS
+assert_no_timeout "AC2 follow-up run"
 if [ "$f_status" -eq 0 ] && [ "$f_markers" -ge 1 ]; then
   ok "AC2: the released slot is immediately usable by a follow-up run"
 else
@@ -282,6 +365,7 @@ run_stub_gate b-subj "$b_subj_script" \
   CQLITE_GATE_SLOTS_DIR="$b_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=3
 b_subj_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; b_status=$WX_STATUS; b_markers=$WX_MARKERS
+assert_no_timeout "positive control"
 wait "$b_peer_pid" 2>/dev/null
 if [ "$b_status" -eq 0 ] && [ "$b_markers" -ge 1 ]; then
   ok "CONTROL: above-bar at BOTH moments proceeds and DOES begin work (exit 0, $b_markers marker(s))"
@@ -305,6 +389,7 @@ run_stub_gate c "$c_script" \
   CQLITE_GATE_SLOTS_DIR="$tmp/c-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
 c_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; c_status=$WX_STATUS; c_markers=$WX_MARKERS
+assert_no_timeout "launch-advisory case"
 if [ "$c_status" -eq 0 ] && [ "$c_markers" -ge 1 ]; then
   ok "LAUNCH ADVISORY: below-at-launch/above-at-grant PROCEEDS (exit 0)"
 else
@@ -327,6 +412,7 @@ run_unmeasured_case() {
     CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
   local err=$RS_ERR st mk line
   watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; st=$WX_STATUS; mk=$WX_MARKERS
+  assert_no_timeout "$label"
   if [ "$st" -eq 0 ] && [ "$mk" -ge 1 ]; then
     ok "UNMEASURED($why): non-fatal — the run proceeded and began work"
   else
@@ -351,6 +437,7 @@ run_stub_gate d-absent "$d_script" \
   CQLITE_GATE_SLOTS_DIR="$tmp/d-absent-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
 d_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; d_status=$WX_STATUS; d_markers=$WX_MARKERS
+assert_no_timeout "df-absent case"
 d_line=$(grep_line "$d_err" '^agent-gate: disk-admission: ')
 if [ "$d_status" -eq 0 ] && [ "$d_markers" -ge 1 ]; then
   ok "UNMEASURED(df-unavailable): non-fatal — the run proceeded and began work"
@@ -380,6 +467,7 @@ bar_case() {
     CQLITE_GATE_STUB_SLEEP=1 "$@"
   local err=$RS_ERR st mk line
   watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; st=$WX_STATUS; mk=$WX_MARKERS
+  assert_no_timeout "$label"
   line=$(grep_line "$err" '^agent-gate: disk-admission: ')
   case "$line" in
     *"bar $expect"*) ok "bar-source: $label -> 'bar $expect'" ;;
@@ -401,6 +489,7 @@ run_stub_gate e-above "$e_script" \
   CQLITE_GATE_STUB_SLEEP=2 CQLITE_GATE_MIN_FREE_GB=500
 e_sum=$RS_SUMMARY
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; e_status=$WX_STATUS; e_markers=$WX_MARKERS
+assert_no_timeout "pinned-bar refusal"
 if [ "$e_status" -ne 0 ] && [ "$e_markers" -eq 0 ]; then
   ok "bar-source: a PINNED bar above the reading refuses and never begins work"
 else
@@ -431,6 +520,116 @@ if [ "$f_calls" -eq 0 ]; then
 else
   bad "exemption: the admission probe ran on a non-full-gate run ($f_calls df call(s))"
 fi
+
+# ===========================================================================
+# Case G (roborev job 323, finding 1): the df parse is ANCHORED ON THE CAPACITY
+# FIELD, so a source name or mount point containing SPACES cannot shift a column
+# into $4 and admit a run that is below the bar.
+#
+# This is a FALSE-PASS class, not a cosmetic one: a shifted $4 lands on the USED
+# value, which is large and NUMERIC, so a "is it a number" validation succeeds and
+# the gate is ADMITTED BELOW THE FLOOR. Every negative case below therefore carries
+# the PRE-FIX PARSE as a POSITIVE CONTROL — the defective one-liner is reproduced
+# verbatim against the same payload and must be shown to yield a number that WOULD
+# have cleared the bar. A test that merely passes after the fix does not establish
+# that the defect was ever reachable.
+# ===========================================================================
+BAR_KIB=$(gib_kib 40)
+
+# prefix_parse_admits <payload>: the PRE-FIX parse (`awk 'END { print $4 }'`),
+# reproduced exactly. Exit 0 when it yields a numeric value at or above the 40GiB
+# bar, i.e. when the old code would have ADMITTED this payload.
+prefix_parse_admits() {
+  local v
+  v=$(printf '%s\n' "$1" | awk 'END { print $4 }' 2>/dev/null)
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$v" -ge "$BAR_KIB" ]
+}
+
+# raw_case <label> <payload> <kind> <expect-substring>
+#   kind refuse     -> exit non-zero, 0 work markers, FAIL-CLOSED line in the SUMMARY
+#   kind unmeasured -> exit 0, work began, UNMEASURED line on stderr
+#   kind pass       -> exit 0, work began, PASS line on stderr
+raw_case() {
+  local label="$1" payload="$2" kind="$3" expect="$4"
+  local s; s=$(df_script "$label" "RAW $payload")
+  run_stub_gate "$label" "$s" \
+    CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+    CQLITE_GATE_STUB_SLEEP=2
+  local err=$RS_ERR sum=$RS_SUMMARY st mk line
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; st=$WX_STATUS; mk=$WX_MARKERS
+  assert_no_timeout "$label"
+  line=$(grep_line "$err" '^agent-gate: disk-admission: ')
+  case "$kind" in
+    refuse)
+      if [ "$st" -ne 0 ] && [ "$mk" -eq 0 ]; then
+        ok "df-anchor/$label: REFUSED and never began work (exit $st)"
+      else
+        bad "df-anchor/$label: ADMITTED a below-bar payload (exit $st, markers $mk)"
+      fi
+      if grep -q '^disk-admission: FAIL-CLOSED (#3755)' "$sum" 2>/dev/null; then
+        ok "df-anchor/$label: the refusal carries the named line"
+      else
+        bad "df-anchor/$label: no FAIL-CLOSED line in the SUMMARY"
+      fi ;;
+    unmeasured)
+      if [ "$st" -eq 0 ] && [ "$mk" -ge 1 ]; then
+        ok "df-anchor/$label: UNMEASURED is non-fatal — the run proceeded"
+      else
+        bad "df-anchor/$label: an unparsable payload refused the run (exit $st)"
+      fi ;;
+    pass)
+      if [ "$st" -eq 0 ] && [ "$mk" -ge 1 ]; then
+        ok "df-anchor/$label: an above-bar space-bearing payload is ADMITTED (no over-refusal)"
+      else
+        bad "df-anchor/$label: over-refused a legitimate above-bar payload (exit $st)"
+      fi ;;
+  esac
+  case "$line" in
+    *"$expect"*) ok "df-anchor/$label: line states '$expect'" ;;
+    *)           bad "df-anchor/$label: line omits '$expect': ${line:-<none>}" ;;
+  esac
+}
+
+G_SRC='my server:/export vol 999999999 900000000 10485760 90% /data'
+G_MNT='/dev/sda1 999999999 900000000 10485760 90% /mnt/my disk'
+G_BOTH='my server:/export vol 999999999 900000000 10485760 90% /mnt/my disk'
+G_NOCAP='/dev/sda1 999999999 900000000 10485760 - /data'
+# A mount PATH ending in `%` is still ONE anchor (`/mnt/50%` does not match
+# `^[0-9]+%$`), so it must parse normally — the anchor must not be so eager that an
+# ordinary path defeats it.
+G_PCTPATH='/dev/sda1 999999999 900000000 10485760 90% /mnt/50%'
+# GENUINELY ambiguous: a mount point whose SPACE-SEPARATED tokens include one that IS
+# capacity-shaped. Two anchors identify nothing, so the parse must refuse rather than
+# pick one — and must NOT fall back to $4, which would reinstate the false pass in
+# exactly the payloads that defeat the anchor.
+G_TWOCAP='/dev/sda1 999999999 900000000 10485760 90% /mnt/vol 50% spare'
+G_HIGH='my server:/export vol 999999999 1 209715200 1% /data'
+
+# The POSITIVE CONTROLS. Without these, the refusals below prove only that something
+# refused — not that the old parse would have let these through.
+for pl in "$G_SRC" "$G_BOTH"; do
+  if prefix_parse_admits "$pl"; then
+    ok "df-anchor CONTROL: the PRE-FIX \$4 parse ADMITS this below-bar payload — the defect was reachable"
+  else
+    bad "df-anchor CONTROL: the PRE-FIX \$4 parse did NOT admit '$pl' — this case does not demonstrate the defect"
+  fi
+done
+# ...and the mount-only payload is the counter-control: $4 is correct there, so that
+# case is about the RENDERED mount point, not about admission.
+if prefix_parse_admits "$G_MNT"; then
+  bad "df-anchor CONTROL: the PRE-FIX parse admits the mount-only payload — the case split is wrong"
+else
+  ok "df-anchor CONTROL: the PRE-FIX parse reads the mount-only payload correctly (that case tests rendering, not admission)"
+fi
+
+raw_case g-space-source "$G_SRC"    refuse     'post-slot 10.0GiB(BELOW BAR)'
+raw_case g-space-mount  "$G_MNT"    refuse     'fs /mnt/my disk'
+raw_case g-space-both   "$G_BOTH"   refuse     'fs /mnt/my disk'
+raw_case g-no-capacity  "$G_NOCAP"  unmeasured 'UNMEASURED (df-unparsable)'
+raw_case g-pct-path     "$G_PCTPATH" refuse    'fs /mnt/50%'
+raw_case g-two-capacity "$G_TWOCAP" unmeasured 'UNMEASURED (df-unparsable)'
+raw_case g-space-ok     "$G_HIGH"   pass       'post-slot 200.0GiB'
 
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"

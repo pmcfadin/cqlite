@@ -19142,12 +19142,56 @@ _gate_disk_admission_subject() {
   return 1
 }
 
+# _gate_disk_admission_parse: the ONE parse of a `df -Pk` data line, ANCHORED ON THE
+# CAPACITY FIELD. Reads the payload on stdin, prints `OK<TAB><avail-kib><TAB><mount>`
+# or `AMBIG <why>`.
+#
+# WHY NOT `$4` — this is a FALSE-PASS route, not a cosmetic one (roborev job 323).
+# POSIX `-P` guarantees ONE LOGICAL LINE per filesystem. It guarantees NOTHING about
+# spaces INSIDE the source name or the mount point, and both occur in the field
+# (`my server:/export vol`, `/Volumes/Macintosh HD`). A space in the SOURCE shifts every
+# column right, so `$4` lands on the USED-space value — which is large, and NUMERIC, so
+# a "is this a number" validation SUCCEEDS and the run is ADMITTED BELOW THE BAR. That
+# is the two-valued-predicate shape this repo lints for, one level up: "is it numeric"
+# standing in for "is it the right number".
+#
+# Counting from the RIGHT fails symmetrically — the mount point is the LAST field and
+# can contain spaces too — so no fixed offset from either end is safe. The CAPACITY
+# field is the only one whose SHAPE identifies it (`^[0-9]+%$`), and it sits between the
+# two variable-width regions: available KiB is the field immediately BEFORE it, the
+# mount point is everything AFTER it. That is robust to spaces on both sides at once.
+#
+# EXACTLY ONE capacity-shaped field is required. A mount point like `/mnt/50%` produces
+# a second one, and with two candidates the anchor identifies nothing — so the parse
+# REFUSES rather than picking one. There is deliberately NO fallback to `$4`: falling
+# back to the defective parse in precisely the cases that defeat the anchor would
+# reinstate the false pass under a fix that claims to have removed it.
+_gate_disk_admission_parse() {
+  awk '
+    END {
+      cap = 0; n = 0
+      for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { cap = i; n++ }
+      if (n == 0) { print "AMBIG no-capacity-field"; exit }
+      if (n > 1)  { print "AMBIG multiple-capacity-fields"; exit }
+      # Filesystem, 1024-blocks, Used, Available, Capacity: the anchor cannot be
+      # earlier than column 5 in a well-formed line, and a source name with spaces only
+      # pushes it further right.
+      if (cap < 5) { print "AMBIG capacity-field-too-early"; exit }
+      avail = $(cap - 1)
+      if (avail !~ /^[0-9]+$/) { print "AMBIG available-not-numeric"; exit }
+      m = ""
+      for (i = cap + 1; i <= NF; i++) m = (m == "" ? $i : m " " $i)
+      printf "OK\t%s\t%s\n", avail, m
+    }' 2>/dev/null
+}
+
 # _gate_disk_admission_probe: the THREE-VALUED reading of the subject filesystem.
 # Prints exactly one of
 #     MEASURED <available-kib> <mount-point>
 #     UNMEASURED <why>
 # and returns 0 either way — the CALLER disposes, because the two moments dispose of
-# the same reading differently.
+# the same reading differently. The mount point may legitimately contain SPACES, so it
+# is the trailing remainder of the MEASURED payload and never a middle field.
 #
 # Three-valued on purpose. Every `test`/`[` file predicate is two-valued and therefore
 # has to collapse "cannot tell" onto one of its answers, and it always picks the
@@ -19155,12 +19199,13 @@ _gate_disk_admission_subject() {
 # measured" are DIFFERENT states here and must never merge: the first refuses, the
 # second declares.
 #
-# `df -Pk`, never `df -h`: POSIX `-P` pins the column layout (1 Filesystem,
-# 2 1024-blocks, 3 Used, 4 Available, 5 Capacity, 6.. Mounted on) and forbids the
-# line-wrapping plain `df` may do for a long device name, and `-k` pins the unit to
-# KiB, where `-h` rounds and appends a locale-dependent suffix. Read by ASSIGNMENT,
-# never `df | while read`: a piped loop runs in a SUBSHELL and its verdict is
-# discarded, which is the same silent-pass shape #3400 records for the cargo parsers.
+# `df -Pk`, never `df -h`: POSIX `-P` pins the column ORDER (Filesystem, 1024-blocks,
+# Used, Available, Capacity, Mounted on) and forbids the line-wrapping plain `df` may do
+# for a long device name, and `-k` pins the unit to KiB, where `-h` rounds and appends a
+# locale-dependent suffix. What `-P` does NOT pin is the column POSITIONS — see
+# _gate_disk_admission_parse. Read by ASSIGNMENT, never `df | while read`: a piped loop
+# runs in a SUBSHELL and its verdict is discarded, which is the same silent-pass shape
+# #3400 records for the cargo parsers.
 #
 # rc 127 is separated from every other failure because that is EXACTLY what a shell
 # reports for an ABSENT command — "this box has no df" and "df ran and could not
@@ -19168,7 +19213,7 @@ _gate_disk_admission_subject() {
 # df cannot leak `command not found` onto the gate's own stderr, where
 # test_agent_gate_summary.sh's minimal-PATH case reads any such line as a defect.
 _gate_disk_admission_probe() {
-  local path out rc avail mount
+  local path out rc parsed avail mount
   path=$(_gate_disk_admission_subject) || {
     printf 'UNMEASURED no-existing-ancestor-of-target-dir'; return 0; }
   out=$(df -Pk "$path" 2>/dev/null); rc=$?
@@ -19178,14 +19223,25 @@ _gate_disk_admission_probe() {
   fi
   # The LAST line, not `NR==2`: `-P` guarantees one line per operand, and taking the
   # last one is additionally immune to a leading advisory line some df builds print.
-  avail=$(printf '%s\n' "$out" | awk 'END { print $4 }' 2>/dev/null)
-  mount=$(printf '%s\n' "$out" | awk 'END { if (NF >= 6) { m=$6; for (i=7;i<=NF;i++) m=m" "$i; print m } }' 2>/dev/null)
-  # AFFIRMATIVE validation: the field must BE a number. A device or mount name
-  # containing a space shifts the columns, and a shifted `$4` is a wrong measurement,
-  # not a missing one — so it is refused as unparsable rather than believed.
+  parsed=$(printf '%s\n' "$out" | _gate_disk_admission_parse)
+  case "$parsed" in
+    OK$'\t'*) ;;
+    *) printf 'UNMEASURED df-unparsable'; return 0 ;;
+  esac
+  parsed="${parsed#OK$'\t'}"
+  avail="${parsed%%$'\t'*}"
+  mount="${parsed#*$'\t'}"
+  # Belt on the anchor's own numeric assert: the caller compares this as an integer.
   case "$avail" in
     ''|*[!0-9]*) printf 'UNMEASURED df-unparsable'; return 0 ;;
   esac
+  # The mount point is rendered VERBATIM into a `key: value` SUMMARY line, and a mount
+  # point may contain arbitrary bytes. Spaces are fine (the value is the rest of the
+  # line); CONTROL characters are not — one newline would split the line and break the
+  # one-fact-per-line contract every consumer of a pasted block relies on. Stripped
+  # rather than refused: this field is DISPLAY ONLY and must never be able to fail a
+  # measurement that succeeded.
+  mount=$(printf '%s' "$mount" | tr -d '\000-\037\177' 2>/dev/null)
   printf 'MEASURED %s %s' "$avail" "${mount:-unknown}"
 }
 
