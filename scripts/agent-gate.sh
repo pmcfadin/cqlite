@@ -716,7 +716,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 41 cases over throwaway
+#                      features-load-bearing component: 46 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -15045,7 +15045,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 41 cases over throwaway fixture
+# proof for the features-load-bearing component: 46 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16529,9 +16529,15 @@ run_tooling_tests() {
   # declared), and THE CLAIM ITSELF: the success output must state the scoped
   # no-false-FAIL claim, ENUMERATE the recognised spellings, say what is NOT SEEN, and
   # contain no form of the word "sound" — the unqualified soundness claim was retracted
-  # after six rounds of witnesses, and its return is a test failure, not a wording nit. Every fixture is a LOCAL path workspace with no registry
-  # dependency, so the suite runs offline (verified under CARGO_NET_OFFLINE=1) — this
-  # component is mandatory and must not depend on a network.
+  # after six rounds of witnesses, and its return is a test failure, not a wording nit.
+  # Rounds 7-8 (jobs 62/64) add the gate-infrastructure cases: anchored/derived directory
+  # pruning (a member's own `target/` is source; cargo's reported target_directory is not),
+  # crediting at the cfg_attr recursion bound, all three `cfg!` delimiters, and a
+  # STRUCTURAL assert that this very invocation stays inside its `command -v python3`
+  # guard. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
+  # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
+  # and must depend on neither a network nor a GNU userland.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
   # scripts/ci/) because the guard has no test-only seam and must never grow one.
   # SKIP-AWARE, LOUDLY, and that is the point (roborev job 62): this suite drives
