@@ -1715,6 +1715,19 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   all — and on re-invoke it reads `review-stage.sh verdict c --issue <N>`, **not the prose it was
   re-invoked with**: a lead handing back a confident summary over a `NOT-RUN` stage is reporting a
   review that did not happen.
+  **AND THE STAGE ARTIFACT IS BOUND TO THE CERTIFIED SHA, NOT ONLY THE WORKTREE (#3751 round
+  3).** `open` resolves `HEAD` and records it in the stage record as `head-sha:`, and AUTO
+  requires that RECORDED sha to equal the certified one IN ADDITION to requiring this
+  worktree's HEAD to. The two answer different questions and neither replaces the other: HEAD
+  == certified binds the WORKTREE and is satisfied BY CONSTRUCTION (a lane stands at the very
+  commit it certifies), so it cannot see a STALE ARTIFACT — a `result: PASS` recorded before a
+  further commit, an amend or a rebase persisted in `.review-stage/` and certified the NEW
+  tree. `--force` RE-STAMPS `head-sha` (deliberately unlike `spawned-at`, preserved so
+  elapsed-since-FIRST-spawn stays readable). A record with **no** `head-sha:`, **several** of
+  them, or a value that is not a 40-hex sha is a NAMED refusal, never a skip — an older record
+  predating the field must not read as certifying, which is the gate-of-record rule (any change
+  after the gate INVALIDATES it) applied to the intent audit; the remedy printed is always to
+  re-open the stage with `--force` and re-run C.
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
   `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>`
   (#2456/#3465/#3751) — refusing to merge unless the PR head still equals the certified SHA **AND** a

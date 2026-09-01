@@ -2941,6 +2941,195 @@ if [ -n "$C_PEER_SHA" ]; then
   esac
 fi
 
+# --- 44f: the STAGE ARTIFACT must be bound to the certified sha too (G1) ------
+# 44e binds the WORKTREE (HEAD == certified). It does NOT bind the ARTIFACT, and the two
+# are different questions: the stage record carried no commit identity, so a `result: PASS`
+# recorded BEFORE a further commit, an amend or a rebase persisted in `.review-stage/` and
+# certified the NEW tree — and the HEAD check was satisfied BY CONSTRUCTION, because the
+# lane is standing at the very commit it is certifying. Open the stage, get a PASS, commit
+# again, and the stale PASS still read clean.
+#
+# FAIL-CLOSED IS DELIBERATE HERE: a C audit of an older tree may not certify a newer one.
+# That is the gate-of-record rule ("any src change after the gate INVALIDATES it") applied
+# to the intent audit, so a missing or unparsable `head-sha:` REFUSES by name rather than
+# being skipped — an older record predating the field must not be readable as certifying.
+#
+# `sr_field` rewrites the stage record in place. The record is a file this tool writes, so a
+# case may plant a shape review-stage.sh would never emit (no field, two fields, a
+# non-sha value) — which is exactly what the refusals are for.
+STALE_REPO=$(c_repo stale design) || STALE_REPO=""
+STALE_A=""
+STALE_B=""
+if [ -n "$STALE_REPO" ]; then
+  if (cd "$STALE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' \
+      >"$STALE_REPO/.review-stage/issue-3751/c.md" &&
+    STALE_A=$(git -C "$STALE_REPO" rev-parse HEAD 2>/dev/null); then
+    ok "stale fixture: a PASSING c stage was opened at the branch head (sha A)"
+  else
+    bad "stale fixture: could not open the stage — the case would be vacuous"
+    STALE_A=""
+  fi
+fi
+STALE_RECORD="$STALE_REPO/.review-stage/issue-3751/c.stage"
+if [ -n "$STALE_A" ]; then
+  # The recorded binding must really name A, or every assertion below is about nothing.
+  if LC_ALL=C grep -q "^head-sha: $STALE_A\$" "$STALE_RECORD" 2>/dev/null; then
+    ok "stale fixture: the stage record really records the commit it was opened at (head-sha: A)"
+  else
+    bad "stale fixture: the stage record does not record head-sha: A — the binding cannot be asserted (record: $(cat "$STALE_RECORD" 2>/dev/null))"
+  fi
+  # THE POSITIVE CONTROL FIRST: at A the stage certifies. Without it a binding that refused
+  # everything would satisfy every negative case below.
+  if run_in_repo "$STALE_REPO" 0 \
+    "stale control: at the SAME commit the stage was opened at, it certifies" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "stale control: head-sha == certified proceeds" ;;
+      *) bad "stale control: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+  # NOW THE DEFECT: a further commit. HEAD moves to B, the certified sha IS B (so 44e's
+  # worktree binding passes), and the stage record still says A.
+  if printf 'a later change nobody audited\n' >"$STALE_REPO/openspec/changes/a-design-routed-slug/design.md" &&
+    git -C "$STALE_REPO" add -A >/dev/null 2>&1 &&
+    git -C "$STALE_REPO" commit -q -m "a further commit after the C audit" >/dev/null 2>&1 &&
+    STALE_B=$(git -C "$STALE_REPO" rev-parse HEAD 2>/dev/null) &&
+    [ "$STALE_A" != "$STALE_B" ]; then
+    ok "stale fixture: a FURTHER commit was made (sha B != A), the stage untouched"
+  else
+    bad "stale fixture: could not make the further commit — the defect cannot be reproduced"
+    STALE_B=""
+  fi
+fi
+if [ -n "$STALE_B" ]; then
+  if run_in_repo "$STALE_REPO" 2 \
+    "stale: a PASS recorded at A must NOT certify B (the whole G1 defect)" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "stale: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "stale: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"$STALE_A"*) ok "stale: the refusal NAMES the commit the stage was opened at" ;;
+      *) bad "stale: the refusal must name the recorded sha (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*)
+        bad "stale: a stale PASS certified a newer tree — the G1 defect is live" ;;
+      *) ok "stale: no PASS token is emitted for a stage opened at another commit" ;;
+    esac
+  fi
+  # AND THE REMEDY IS RE-OPENING THE STAGE: --force re-stamps head-sha (deliberately unlike
+  # spawned-at), so a re-opened, re-audited stage certifies B. Without this the refusal above
+  # would be a dead end, and a guard with no way past it is the guard agents learn to waive.
+  if (cd "$STALE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor --force >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nre-audited at B.\n' \
+      >"$STALE_REPO/.review-stage/issue-3751/c.md"; then
+    if LC_ALL=C grep -q "^head-sha: $STALE_B\$" "$STALE_RECORD" 2>/dev/null; then
+      ok "stale remedy: --force RE-STAMPS head-sha to the current commit (B)"
+    else
+      bad "stale remedy: --force did not re-stamp head-sha to B (record: $(cat "$STALE_RECORD" 2>/dev/null))"
+    fi
+    if run_in_repo "$STALE_REPO" 0 \
+      "stale remedy: a re-opened, re-audited stage certifies B" --c-verdict AUTO; then
+      case "$OUT" in
+        *"PREMERGE: C-VERDICT PASS"*) ok "stale remedy: the merge proceeds after a real re-audit" ;;
+        *) bad "stale remedy: must reach C-VERDICT PASS (got: $OUT)" ;;
+      esac
+    fi
+    # --force PRESERVES THE CLOCK while re-stamping the sha — the two fields answer different
+    # questions and a fix that re-stamped both would hide how long the stage has been open.
+    if LC_ALL=C grep -q '^reopen-count: 1$' "$STALE_RECORD" 2>/dev/null; then
+      ok "stale remedy: the re-open was recorded as a re-open (reopen-count: 1)"
+    else
+      bad "stale remedy: the re-open was not recorded (record: $(cat "$STALE_RECORD" 2>/dev/null))"
+    fi
+  else
+    bad "stale remedy: could not re-open the stage — the remedy is unasserted"
+  fi
+fi
+# THE THREE UNPARSABLE SHAPES. Each is a NAMED refusal, never a skip: a record that cannot
+# state which tree it audited certifies nothing, and "cannot tell" must not take the
+# permissive branch. Rebuilt from a fresh fixture so the cases are independent of the
+# sequence above.
+sr_plant() {
+  # sr_plant <repo> <awk-program> — RESTORE the pristine stage record, then rewrite it through
+  # awk. A helper rather than `sed -i`, whose in-place flag is GNU/BSD incompatible on this
+  # fleet. The RESTORE is load-bearing and was measured: without it case (a) (which DELETES the
+  # head-sha line) left case (b) with ONE planted line instead of two, so (b) exercised the
+  # stale-value branch while its label claimed the ambiguity branch — a case passing for a
+  # reason that was not its own, which is this suite's own recorded failure mode.
+  # The `local` declarations are SPLIT: `local repo="$1" rec="$repo/..."` reads $repo before
+  # the assignment takes effect and dies under `set -u` — the same trap `c_repo` above
+  # documents, measured again here (it exited 127 and the whole section short-circuited
+  # SILENTLY, which is the case-floor's own subject one function over).
+  local repo="$1"
+  local prog="$2"
+  local rec="$repo/.review-stage/issue-3751/c.stage"
+  [ -f "$rec.pristine" ] || cp "$rec" "$rec.pristine" || return 1
+  LC_ALL=C awk "$prog" "$rec.pristine" >"$rec.new" 2>/dev/null || return 1
+  mv -f "$rec.new" "$rec" || return 1
+}
+SHAPE_REPO=$(c_repo shape design) || SHAPE_REPO=""
+if [ -n "$SHAPE_REPO" ]; then
+  if (cd "$SHAPE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' \
+      >"$SHAPE_REPO/.review-stage/issue-3751/c.md"; then
+    ok "shape fixture: a PASSING c stage was opened for the unparsable-record cases"
+  else
+    bad "shape fixture: could not open the stage — the cases would be vacuous"
+    SHAPE_REPO=""
+  fi
+fi
+if [ -n "$SHAPE_REPO" ]; then
+  # (a) NO head-sha AT ALL — the shape a record written before this field existed has. It must
+  #     refuse, not be waved through: that is the whole "an older record must not certify" half.
+  if sr_plant "$SHAPE_REPO" '!/^head-sha:/ { print }' &&
+    run_in_repo "$SHAPE_REPO" 2 \
+      "record-shape: a stage record with NO head-sha REFUSES (an older record cannot certify)" \
+      --c-verdict AUTO; then
+    case "$OUT" in
+      *"head-sha"*) ok "record-shape/absent: the refusal names the missing field" ;;
+      *) bad "record-shape/absent: the refusal must name head-sha (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"--force"*) ok "record-shape/absent: the refusal names the remedy (re-open the stage)" ;;
+      *) bad "record-shape/absent: the refusal must name the remedy (got: $OUT)" ;;
+    esac
+  fi
+  # (b) TWO head-sha lines — two answers to one question. Picking one is the first-wins rule
+  #     this file refuses everywhere else. The record's OWN, VALID sha stays FIRST and the
+  #     planted one is appended, so a first-wins reader would have PASSED this case: the
+  #     refusal has to come from the COUNT, not from the value it happened to read.
+  if sr_plant "$SHAPE_REPO" '{ print } END { print "head-sha: 0000000000000000000000000000000000000000" }' &&
+    run_in_repo "$SHAPE_REPO" 2 \
+      "record-shape: TWO head-sha lines is AMBIGUOUS and refuses" --c-verdict AUTO; then
+    case "$OUT" in
+      *AMBIGUOUS*) ok "record-shape/several: refused as AMBIGUOUS rather than first-wins" ;;
+      *) bad "record-shape/several: must refuse as AMBIGUOUS (got: $OUT)" ;;
+    esac
+  fi
+  # (c) A NON-SHA VALUE — `unresolved` is what `open` records where HEAD is unborn, and it is
+  #     an honest non-measurement, not a binding.
+  if sr_plant "$SHAPE_REPO" '!/^head-sha:/ { print } END { print "head-sha: unresolved" }' &&
+    run_in_repo "$SHAPE_REPO" 2 \
+      "record-shape: a head-sha that is not a 40-hex sha REFUSES by name" --c-verdict AUTO; then
+    case "$OUT" in
+      *unresolved*) ok "record-shape/unparsable: the refusal quotes the value it could not read" ;;
+      *) bad "record-shape/unparsable: the refusal must quote the value (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*)
+        bad "record-shape/unparsable: an unreadable binding certified the merge" ;;
+      *) ok "record-shape/unparsable: no PASS token is emitted for an unreadable binding" ;;
+    esac
+  fi
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a

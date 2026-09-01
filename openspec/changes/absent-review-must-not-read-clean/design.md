@@ -52,6 +52,17 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   remembering a path, and this fleet has had `/tmp` watchdogs deleted by system cleanup.
 - **Re-opening an existing stage refuses** unless `--force`. A second spawn silently resetting the clock
   would make the deadline unreadable, and a re-spawn is exactly what a lane does when the first one idles.
+- **The stage record carries the commit it was opened at (`head-sha:`), and `--force` RE-STAMPS it**
+  (#3751 round 3, G1). The merge point requires that recorded sha to equal the certified one IN ADDITION
+  to requiring this worktree's `HEAD` to: HEAD-equality binds the WORKTREE and is satisfied by
+  construction, so it cannot see a STALE ARTIFACT — a `result: PASS` recorded before a further commit, an
+  amend or a rebase persisted and certified the NEW tree. `spawned-at` is preserved across `--force` and
+  `head-sha` is not, because the two answer different questions: elapsed-since-FIRST-spawn is the number
+  that says a stage has produced nothing for 70 minutes, while a re-opened stage hands the re-spawned
+  agent a fresh sentinel and it audits the tree that is there now. An unresolvable `HEAD` records the
+  literal `unresolved` — an honest non-measurement, refused at the merge point by name, because `open`
+  must still work in a checkout with no commits (a guard that reds on correct input is the guard agents
+  learn to waive) while a non-measurement is never a pass.
 - Prints, on stdout, the absolute path **and the exact clause to paste into the spawn prompt**, so the
   contract reaches the agent verbatim rather than being paraphrased per lane.
 

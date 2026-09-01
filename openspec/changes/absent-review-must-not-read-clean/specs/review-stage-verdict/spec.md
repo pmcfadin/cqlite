@@ -110,6 +110,21 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   `.git`, so a peer lane's certified commit resolves from any lane and resolvability is not provenance
 - **AND** the same stage at the worktree's own `HEAD` certifies (the positive control)
 
+#### Scenario: a stage record is bound to the commit it was opened at
+- **WHEN** `open` creates or `--force` re-stamps a stage record
+- **THEN** the record carries a `head-sha:` field holding the commit `HEAD` resolved to at that moment
+  (or the literal `unresolved` where `HEAD` names no commit), and `--force` RE-STAMPS it — deliberately
+  unlike `spawned-at`, which is PRESERVED so elapsed-since-first-spawn stays readable
+- **AND WHEN** `--c-verdict AUTO` reads a stage whose recorded `head-sha:` is not the certified commit
+- **THEN** `premerge-assert.sh` REFUSES, naming the recorded commit and the certified one — HEAD-equality
+  binds the WORKTREE and is satisfied BY CONSTRUCTION (a lane stands at the commit it certifies), so it
+  cannot see a `PASS` recorded before a further commit, an amend or a rebase
+- **AND** a record with NO `head-sha:`, SEVERAL of them, or a value that is not a 40-hex sha is a NAMED
+  REFUSAL, never a skip — an older record predating the field must not be readable as certifying, which
+  is the gate-of-record rule (any change after the gate invalidates it) applied to the intent audit
+- **AND** re-opening the stage with `--force` at the certified commit and re-running C certifies it (the
+  positive control: a guard with no way past it is the guard agents learn to waive)
+
 #### Scenario: a sibling stage's PASS cannot certify C
 - **WHEN** the verdict line names a stage kind other than `c`, or omits any of
   `elapsed=`/`deadline=`/`agent=`/`report=`, or carries one of them twice

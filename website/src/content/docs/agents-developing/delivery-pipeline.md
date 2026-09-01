@@ -198,8 +198,8 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   absence of a bad signal. There is deliberately NO spelling of the flag that means "not applicable": a
   supplied PATH can only carry a review-stage verdict token, so a file asserting `NOT-APPLICABLE` is
   refused as an unrecognised token, and inapplicability is reachable ONLY through AUTO's
-  measurement. **TWO BINDINGS MAKE `AUTO` THE INTENDED FORM, AND BOTH WERE ADDED AFTER A REVIEW
-  FOUND THEM ABSENT (#3751 round 1).** `AUTO` locates the stage in the CURRENT worktree, so the
+  measurement. **THREE BINDINGS MAKE `AUTO` THE INTENDED FORM, AND EACH WAS ADDED AFTER A REVIEW
+  FOUND IT ABSENT (#3751 rounds 1 and 3).** `AUTO` locates the stage in the CURRENT worktree, so the
   stage must be BOUND to the tree being merged: this worktree's `HEAD` must EQUAL the certified
   commit, else the merge REFUSES naming the divergence. On this fleet every lane is a worktree of
   ONE shared `.git`, so a PEER lane's certified commit RESOLVES from any lane — `rev-parse`,
@@ -207,7 +207,20 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   `.review-stage/` records in *this* directory, which is #3616's peer-artifact class one directory
   over. **Resolvability is not provenance.** Rule 1 already asserts `headRefOid == certified`, so
   HEAD == certified binds the local artifact to THIS PR transitively, and correct input is
-  unaffected (the closer pushes, then asserts, in the lane it just certified). Second binding: the
+  unaffected (the closer pushes, then asserts, in the lane it just certified). **Second binding: the stage RECORD's own `head-sha:` must equal the certified commit
+  (#3751 round 3, G1).** The first binding closes the wrong-LANE axis and cannot see a STALE
+  ARTIFACT, because the two answer different questions: HEAD == certified binds the WORKTREE and is
+  satisfied BY CONSTRUCTION, since a lane stands at the very commit it is certifying. So a
+  `result: PASS` recorded BEFORE a further commit, an amend or a rebase persisted in
+  `.review-stage/` and certified the NEW tree. `open` therefore resolves `HEAD` and records it in
+  the stage record, and `--force` **RE-STAMPS** it — deliberately unlike `spawned-at`, which is
+  PRESERVED because elapsed-since-FIRST-spawn is the number that says a stage has produced nothing
+  for 70 minutes. A record with **no** `head-sha:`, **several** of them, or a value that is not a
+  40-hex sha is a NAMED REFUSAL and never a skip: an older record predating the field must not be
+  readable as certifying. **The fail-closed direction is deliberate** — this is the gate-of-record
+  rule (any change after the gate INVALIDATES it) applied to the intent audit, and an audit of an
+  older tree may not certify a newer one; every one of those refusals prints the same remedy, which
+  is to re-open the stage with `--force` at this commit and re-run C. Third binding: the
   verdict line is validated against its WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT:
   <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>` — with the **stage KIND compared by
   STRING EQUALITY** and each mandatory key required EXACTLY ONCE. "Somewhere on this line it says

@@ -158,12 +158,24 @@ Three further declared limits of the mechanism itself:
   longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
   report path is printed on the success line so a human can see which stage answered. `AUTO` is
   the intended form because its binding is MECHANICAL: it locates the stage in this worktree,
-  refuses two stage records as ambiguous, and requires this worktree's **HEAD to EQUAL the
-  certified commit** before trusting a locally-located stage. That last requirement exists
-  because every lane on this box is a worktree of ONE shared `.git`, so a peer lane's certified
-  commit RESOLVES from any lane — resolvability is not provenance (#3616's peer-artifact class).
-  Rule 1 asserts `headRefOid` == certified, so HEAD == certified binds the local artifact to
-  THIS PR transitively.
+  refuses two stage records as ambiguous, and applies **TWO independent bindings, because they
+  answer different questions**. (a) This worktree's **HEAD must EQUAL the certified commit** —
+  every lane on this box is a worktree of ONE shared `.git`, so a peer lane's certified commit
+  RESOLVES from any lane; resolvability is not provenance (#3616's peer-artifact class). Rule 1
+  asserts `headRefOid` == certified, so HEAD == certified binds the local artifact to THIS PR
+  transitively. (b) The **stage RECORD's own `head-sha:` must equal the certified commit** — (a)
+  binds the WORKTREE and cannot see a STALE ARTIFACT, because a lane stands at the very commit
+  it is certifying BY CONSTRUCTION: a `result: PASS` recorded before a further commit, an amend
+  or a rebase persisted in `.review-stage/` and certified the NEW tree (#3751 round 3, G1). So
+  `open` resolves `HEAD` and records it in the stage record, and `--force` **RE-STAMPS** it
+  (deliberately unlike `spawned-at`, which is preserved because elapsed-since-FIRST-spawn is the
+  number that says a stage has produced nothing for 70 minutes). A record with **no**
+  `head-sha:`, **several** of them, or a value that is not a 40-hex sha is a NAMED REFUSAL and
+  never a skip — an older record predating the field must not be readable as certifying. The
+  fail-closed direction is deliberate: this is the gate-of-record rule (any change after the
+  gate INVALIDATES it) applied to the intent audit, and an audit of an older tree may not
+  certify a newer one. The remedy every one of those refusals prints is the same: re-open the
+  stage with `--force` at this commit and re-run C.
 
 ---
 

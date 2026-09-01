@@ -333,7 +333,19 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    naming the divergence: every lane on this box is a worktree of ONE shared `.git`, so a peer
    lane's certified commit RESOLVES here and resolvability is not provenance (#3616's
    peer-artifact class). You push and then assert in the lane you just certified, so this costs
-   a correct run nothing. Pass an explicit
+   a correct run nothing.
+   **AND RE-OPEN THE STAGE IF YOU COMMIT AFTER THE C AUDIT (#3751 round 3).** A SECOND binding
+   requires the stage RECORD's own `head-sha:` — the commit `open` resolved when the stage was
+   opened — to equal `<certified-sha>` too. HEAD-equality binds the WORKTREE and is satisfied BY
+   CONSTRUCTION (you are standing at the commit you are certifying), so it cannot see a STALE
+   ARTIFACT: a `result: PASS` recorded before a further commit, an amend or a rebase persists in
+   `.review-stage/` and would certify a tree nobody audited. So if the branch moves after C
+   reports, re-open the stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`,
+   which RE-STAMPS `head-sha` while PRESERVING `spawned-at`) and re-run C — that is the remedy the
+   refusal prints. A record with no `head-sha:`, several of them, or a value that is not a 40-hex
+   sha refuses by name, never silently: an audit of an older tree may not certify a newer one,
+   which is the gate-of-record rule applied to the intent audit.
+   Pass an explicit
    `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
    cannot locate the stage — and capture the **`c`** stage's own line: the assert validates the
    WHOLE grammar and compares the stage KIND by string equality, so a sibling stage's `PASS`

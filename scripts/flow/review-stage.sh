@@ -86,12 +86,39 @@
 # TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
 # ---------------------------------------------------------------------------
 #   <dir>/<kind>.md      the REPORT OF RECORD: what the agent writes, what `verdict` reads.
-#   <dir>/<kind>.stage   the STAGE RECORD: kind/issue/agent/spawned-at/deadline/report path.
+#   <dir>/<kind>.stage   the STAGE RECORD: kind/issue/agent/spawned-at/deadline/report path,
+#                        plus the `head-sha:` the stage was opened AT (see below).
 # A single file cannot tell `stage never opened` from `report absent` — deleting it erases
 # the evidence that anything was ever opened, and `verdict` still has to report an agent, a
 # deadline and an elapsed time for a stage whose report has gone missing. So the two facts
 # live in two files: the stage record is the proof the stage EXISTS, the report is the
 # proof of what it CONCLUDED. Both are under `.review-stage/` and both are gitignored.
+#
+# AND THE STAGE RECORD CARRIES THE COMMIT IT WAS OPENED AT (#3751 round 3, G1)
+# --------------------------------------------------------------------------
+# `premerge-assert.sh --c-verdict AUTO` locates the C stage in the CURRENT worktree and
+# already refuses unless this worktree's HEAD is the certified commit. That binds the
+# WORKTREE; it does not bind the ARTIFACT. The two are different questions, and the second
+# one was unanswerable: nothing in the record said WHICH TREE the audit was about, so a
+# `result: PASS` recorded before a further commit, an amend or a rebase persisted in
+# `.review-stage/` and certified the NEW tree — open the stage, get a PASS, commit again, and
+# the stale PASS still read clean at a merge point whose HEAD-equality check was satisfied by
+# construction.
+#
+# So `open` resolves `HEAD` and records it as `head-sha:`, and the merge point requires that
+# RECORDED sha to equal the certified one IN ADDITION TO its HEAD check. FAIL-CLOSED BY
+# DESIGN: a record with no `head-sha:`, several of them, or an unparsable value is a NAMED
+# REFUSAL at the merge point, never a skip — an older record predating the field must not be
+# readable as certifying. This is the gate-of-record rule (any src change after the gate
+# INVALIDATES it) applied to the intent audit: an audit of an older tree may not certify a
+# newer one.
+#
+# UNLIKE `spawned-at`, IT IS NOT PRESERVED ACROSS `--force`. The clock is preserved because
+# elapsed-since-FIRST-spawn is the number that says "this stage has produced nothing for 70
+# minutes"; the head sha is RE-STAMPED because a re-opened stage hands the re-spawned agent a
+# fresh sentinel and it audits the tree that is there NOW. Where HEAD cannot be resolved (an
+# unborn HEAD, no commits yet) the field records the literal `unresolved` and a note says so —
+# an absent field and an unmeasured one are different facts, and both refuse at the merge point.
 #
 # BOTH PATHS ARE VERIFIED GITIGNORED, FAIL-CLOSED
 # -----------------------------------------------
@@ -625,9 +652,35 @@ cmd_open() {
   mkdir -p "$(dirname "$rpath")"
   assert_ignored "$rpath" report-of-record
 
-  local spawned_iso spawned_epoch reopen_count=0 prior_iso=""
+  local spawned_iso spawned_epoch reopen_count=0 prior_iso="" head_sha=""
   spawned_iso="$(now_iso)"
   spawned_epoch="$(now_epoch)"
+
+  # THE COMMIT THIS STAGE IS ABOUT (#3751 round 3, G1). Recorded here, at open time, because
+  # this is the tree the agent about to be spawned will audit — and `premerge-assert.sh`
+  # requires this RECORDED sha to equal the certified one, so a PASS recorded before a further
+  # commit cannot certify the newer tree. Resolved with `--verify` so only a real commit is
+  # recorded, and lowercased so the comparison at the merge point is a plain string equality.
+  #
+  # AN UNRESOLVABLE HEAD IS RECORDED AS SUCH, NEVER OMITTED. An unborn HEAD (a fresh `git init`
+  # with no commit) is a legitimate state for this tool — `open` must still work, or the guard
+  # reds on correct input — but it is NOT a binding, so the field says `unresolved` and the
+  # merge point refuses on it by name. An omitted field would be indistinguishable from a
+  # record written by a version of this script that predates the field, which is a different
+  # operator action.
+  head_sha="$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)"
+  head_sha="$(printf '%s' "$head_sha" | LC_ALL=C tr 'A-Z' 'a-z')"
+  case "$head_sha" in
+    ????????????????????????????????????????) ;;
+    *) head_sha="" ;;
+  esac
+  case "$head_sha" in
+    *[!0-9a-f]*) head_sha="" ;;
+  esac
+  if [ -z "$head_sha" ]; then
+    head_sha=unresolved
+    note "this checkout's HEAD does not resolve to a commit, so the stage records head-sha: unresolved — premerge-assert.sh will REFUSE to let this stage certify a merge until it is re-opened in a checkout with a resolvable HEAD"
+  fi
 
   if [ -f "$sfile" ]; then
     prior_iso="$(read_field "$sfile" spawned-at)"
@@ -666,6 +719,10 @@ cmd_open() {
     printf 'spawned-at: %s\n' "$spawned_iso"
     printf 'spawned-epoch: %s\n' "$spawned_epoch"
     printf 'report: %s\n' "$rpath"
+    # RE-STAMPED ON EVERY OPEN, INCLUDING --force — deliberately unlike `spawned-at` above. A
+    # forced re-open re-writes the sentinel, so the re-spawned agent audits the tree that is
+    # there NOW; carrying an older sha forward would bind the verdict to a tree nobody read.
+    printf 'head-sha: %s\n' "$head_sha"
     printf 'reopen-count: %s\n' "$reopen_count"
     [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
   } >"$WRITE_TMP"
@@ -715,7 +772,7 @@ cmd_open() {
   } >"$WRITE_TMP"
   commit_write "$rpath" report-of-record
 
-  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso reopen-count=$reopen_count report=$(field_value "$rpath")"
+  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha reopen-count=$reopen_count report=$(field_value "$rpath")"
   # THE RAW PATH, ON A LINE OF ITS OWN — deliberately NOT through `field_value`. A caller
   # consumes this line to open the file, so a neutralised '=' would hand back a path that does
   # not exist. Safe for the reason the fields are not: this is a WHOLE LINE with no `key=value`

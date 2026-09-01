@@ -202,12 +202,29 @@
 # agent and a report path, and no sha. The report path IS printed on the success
 # line so a human can see which stage answered. Under `AUTO` the binding is
 # MECHANICAL and is why AUTO is the intended form: the stage is located in this
-# worktree, two stage records are refused as ambiguous, and — because every lane on
-# this box is a worktree of ONE shared `.git`, so a peer lane's certified commit
-# RESOLVES here — this worktree's HEAD must EQUAL the certified commit before a
-# locally-located stage is trusted at all (#3751 round 1, F1). Rule 1 asserts
-# `headRefOid` == certified, so HEAD == certified binds the local artifact to THIS
-# PR transitively.
+# worktree, two stage records are refused as ambiguous, and TWO INDEPENDENT
+# BINDINGS are applied, because they answer different questions and neither
+# replaces the other.
+#   (a) THE WORKTREE (#3751 round 1, F1). This worktree's HEAD must EQUAL the
+#       certified commit before a locally-located stage is trusted at all — every
+#       lane on this box is a worktree of ONE shared `.git`, so a peer lane's
+#       certified commit RESOLVES here and resolvability is not provenance. Rule 1
+#       asserts `headRefOid` == certified, so HEAD == certified binds the local
+#       artifact to THIS PR transitively.
+#   (b) THE ARTIFACT (#3751 round 3, G1). The stage RECORD's own `head-sha:` — the
+#       commit review-stage.sh resolved when the stage was OPENED — must equal the
+#       certified commit too. (a) cannot see a STALE ARTIFACT: it is satisfied BY
+#       CONSTRUCTION, because a lane stands at the very commit it is certifying, so
+#       a `result: PASS` recorded BEFORE a further commit, an amend or a rebase
+#       persisted in `.review-stage/` and certified the NEW tree. A record with no
+#       `head-sha:`, several of them, or a value that is not a 40-hex sha is a
+#       NAMED REFUSAL and never a skip — an older record predating the field must
+#       not be readable as certifying. FAIL-CLOSED BY DESIGN: this is the
+#       gate-of-record rule (any change after the gate INVALIDATES it) applied to
+#       the intent audit, and an audit of an older tree may not certify a newer
+#       one. Every one of those refusals prints the same remedy — re-open the stage
+#       at this commit with `--force` (which RE-STAMPS `head-sha`, deliberately
+#       unlike `spawned-at`) and re-run C.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -265,7 +282,11 @@ usage() {
   printf '       --c-verdict is REQUIRED (#3751) and has NO default — omitting it is THIS\n' >&2
   printf '       usage failure, never a silent "C is not required":\n' >&2
   printf '         --c-verdict AUTO     MEASURE from the certified tree whether C is\n' >&2
-  printf '                              required, then read the stage verdict.\n' >&2
+  printf '                              required, then read the stage verdict. The stage\n' >&2
+  printf '                              must be BOUND to the certified sha twice: this\n' >&2
+  printf '                              worktree HEAD, and the stage record head-sha: it\n' >&2
+  printf '                              was opened at. A stale, missing or unparsable\n' >&2
+  printf '                              head-sha REFUSES — re-open with --force, re-run C.\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
 }
@@ -446,6 +467,9 @@ C_TOKEN_REPORT=""   # the `report=` field, so a human can see WHICH stage answer
 C_SOURCE=""         # how the verdict was obtained
 C_ROUTING=""        # REQUIRED | NOT-APPLICABLE | UNMEASURED
 C_ROUTING_DETAIL=""
+# ONE remedy sentence for every stage-binding refusal (#3751 round 3, G1): each of those
+# refusals has the SAME next action, and six copies of it is six places for it to drift.
+C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at) — then read it with: review-stage.sh verdict <kind> --issue <N>"
 
 refuse_no_c_verdict() {
   printf '========================================================\n' >&2
@@ -792,6 +816,141 @@ c_assert_head_binds_certified() {
   fi
 }
 
+# c_stage_root — the worktree root the AUTO stage lookup is relative to. ONE resolution,
+# shared by the locator and the binding assert below, so the two cannot form two opinions
+# about WHICH `.review-stage/` they are talking about. Called from a command substitution by
+# the locator, so it reports and never refuses.
+c_stage_root() {
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=""
+  [ -n "$root" ] || root="$PWD"
+  printf '%s\n' "$root"
+}
+
+# _c_stage_head_awk — read a STAGE RECORD on stdin, print `key=value` lines.
+#
+# COLUMN-ZERO ANCHORED (`/^head-sha:[ \t]/`) and every anchored line COUNTED, for the same
+# reasons `_c_verdict_awk` above is: a first-wins read of several candidates is the rule this
+# file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped as belt (#3400).
+# `NF == 2` is required AFFIRMATIVELY: the documented field is exactly `head-sha: <40-hex>`,
+# so an empty value or trailing junk is UNPARSABLE and must not be reduced to its first word —
+# a record that cannot state which tree it audited certifies nothing.
+_c_stage_head_awk() {
+  awk '
+  BEGIN { n = 0; v = "" }
+  { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
+  /^head-sha:[ \t]/ {
+    n++
+    if (n == 1 && NF == 2) v = $2
+  }
+  END { print "n=" n; print "value=" v }
+'
+}
+
+# c_assert_stage_binds_certified <issue> — THE ARTIFACT, not the worktree (#3751 round 3, G1).
+#
+# `c_assert_head_binds_certified` above binds this WORKTREE to the certified commit. That is a
+# different question from "is this ARTIFACT about the certified tree?", and the second one was
+# unanswerable: the stage record carried no commit identity, so a `result: PASS` recorded
+# BEFORE a further commit, an amend or a rebase persisted in `.review-stage/` and certified the
+# NEW tree — with the HEAD check satisfied BY CONSTRUCTION, because the lane stands at the very
+# commit it is certifying. Both checks are kept; neither replaces the other.
+#
+# WHY FAIL-CLOSED ON A MISSING OR UNPARSABLE FIELD. This is the gate-of-record rule (any src
+# change after the gate INVALIDATES it) applied to the intent audit: an audit of an older tree
+# may not certify a newer one, and a record that does not say WHICH tree it audited is not
+# evidence about this one. So a record with no `head-sha:`, several of them, or a value that is
+# not a 40-hex sha is a NAMED refusal — never a skip, because an older record predating the
+# field would otherwise be readable as certifying, which is the permissive branch this whole
+# file exists to remove. The remedy is always the same and is printed: re-open the stage
+# (`--force` RE-STAMPS `head-sha`, deliberately unlike `spawned-at`) and re-run C.
+#
+# review-stage.sh's `open` is the SOLE writer of this record. This reader is deliberately
+# STRICTER than that writer's own `read_field` (column zero, exactly one line, 40 hex or
+# refuse), so a format drift refuses rather than passing — the fail-closed direction.
+C_STAGE_HEAD=""
+c_assert_stage_binds_certified() {
+  local issue="$1" sfile out k v n="" value=""
+  sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  if [ ! -f "$sfile" ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record for issue $issue is not a readable file:" \
+      "  $sfile" \
+      "It is the artifact that proves a stage was opened AND records the commit it was" \
+      "opened at, so without it nothing binds the audit to the tree being merged." \
+      "$C_REOPEN_REMEDY"
+  fi
+  out=$(_c_stage_head_awk <"$sfile") || refuse_tool_failure awk "the C stage record's head-sha"
+  while IFS='=' read -r k v; do
+    case "$k" in
+      n)     n="$v" ;;
+      value) value="$v" ;;
+    esac
+  done <<C_STAGE_HEAD_PARSE
+$out
+C_STAGE_HEAD_PARSE
+  case "$n" in
+    ''|*[!0-9]*)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record parse produced no usable count of head-sha: lines" \
+        "— refusing (fail closed)." \
+        "  record: $sfile"
+      ;;
+  esac
+  if [ "$n" -eq 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries NO 'head-sha:' field, so it does not say which" \
+      "tree the audit was about:" \
+      "  record: $sfile" \
+      "This is the shape a record written before that field existed has, and it may NOT be" \
+      "read as certifying: an intent audit of an OLDER tree does not certify a newer one" \
+      "(the gate-of-record rule — any change after the audit invalidates it)." \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$n" -gt 1 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries $n 'head-sha:' fields — AMBIGUOUS, refusing" \
+      "rather than picking one." \
+      "  record: $sfile" \
+      "Two answers to one question is not a binding, and a first-wins read is the rule this" \
+      "file refuses everywhere else." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # 40 LOWERCASE HEX, ASSERTED AFFIRMATIVELY. `unresolved` is what review-stage.sh records
+  # where HEAD is unborn — an honest NON-measurement, and a non-measurement is not a pass.
+  case "$value" in
+    *[!0-9a-f]* | "")
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record's head-sha is '$value', which is not a 40-hex commit sha," \
+        "so the audit cannot be bound to the tree being merged." \
+        "  record: $sfile" \
+        "review-stage.sh records 'unresolved' where the checkout had no resolvable HEAD; that" \
+        "is an honest non-measurement, and a non-measurement is never read as a pass." \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+  if [ "${#value}" -ne 40 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record's head-sha is '$value' (${#value} chars), not a full" \
+      "40-char commit sha — an abbreviated value can never be safely compared." \
+      "  record: $sfile" \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$value" != "$certified" ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage was OPENED at commit $value, but the commit being certified" \
+      "is $certified — so the recorded verdict is an audit of a DIFFERENT tree." \
+      "  record: $sfile" \
+      "This is the stale-artifact case: a PASS recorded before a further commit, an amend or a" \
+      "rebase persists in .review-stage/, and this worktree's HEAD equals the certified sha BY" \
+      "CONSTRUCTION, so the HEAD binding cannot see it. An intent audit of an older tree does" \
+      "not certify a newer one — the gate-of-record rule (any change after the audit" \
+      "invalidates it), applied to C." \
+      "$C_REOPEN_REMEDY"
+  fi
+  C_STAGE_HEAD="$value"
+}
+
 # c_auto_locate_issue — find THE open C stage in this worktree, by its stage
 # RECORD (`.review-stage/issue-<N>/<kind>.stage`), which is the artifact that
 # proves a stage was opened at all. Prints the issue number, or nothing.
@@ -807,8 +966,7 @@ c_assert_head_binds_certified() {
 # a status, and the CALLER refuses explicitly.
 c_auto_locate_issue() {
   local root d n count=0 found=""
-  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=""
-  [ -n "$root" ] || root="$PWD"
+  root=$(c_stage_root)
   for d in "$root"/.review-stage/issue-*/"$C_STAGE_KIND".stage; do
     [ -f "$d" ] || continue
     n=$(basename "$(dirname "$d")")
@@ -908,6 +1066,10 @@ c_evaluate() {
         "so there is no verdict to read and nothing recorded that C was even attempted." \
         "This is the state review-stage.sh reports as 'NOT-RUN (stage never opened)'."
     fi
+    # THE ARTIFACT IS BOUND BEFORE IT IS READ (G1). Checked here, after the issue is known
+    # and BEFORE the verdict is read, so a stale record can never produce a token at all —
+    # a check placed after the token was read could only report the staleness.
+    c_assert_stage_binds_certified "$issue"
     out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue" 2>/dev/null) || rc=$?
     # The LINE is the authority, not the exit status: one grammar, read in one
     # place. review-stage.sh's non-zero exits (4 FINDINGS / 5 NOT-RUN / 6
@@ -917,7 +1079,9 @@ c_evaluate() {
       refuse_tool_failure "review-stage.sh verdict $C_STAGE_KIND --issue $issue (exit $rc, no output)" \
         "the C stage verdict"
     fi
-    C_SOURCE="AUTO issue=$issue stage=$C_STAGE_KIND (routing $C_ROUTING)"
+    # The SOURCE names the verified binding, so a pasted success line shows that the stage
+    # was bound to the certified tree rather than merely found in this directory.
+    C_SOURCE="AUTO issue=$issue stage=$C_STAGE_KIND stage-head=${C_STAGE_HEAD:0:12} (routing $C_ROUTING)"
     c_parse_verdict text "$out" "C stage verdict for issue $issue"
   fi
 

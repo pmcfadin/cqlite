@@ -116,10 +116,15 @@ carry).
   finalize PR — between the merge-base with `origin/main` and the certified sha) rather than
   trusting the caller, an `UNMEASURED`
   measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
-  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Two bindings tie the verdict to the
-  merge (#3751 round 1): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a
+  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Three bindings tie the verdict to the
+  merge (#3751 rounds 1 and 3): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a
   locally-located stage is trusted — every lane here is a worktree of ONE shared `.git`, so a peer lane's
-  certified commit resolves from any lane and **resolvability is not provenance** (#3616's class) — and the
+  certified commit resolves from any lane and **resolvability is not provenance** (#3616's class); the stage
+  RECORD's own `head-sha:` (written by `open`, RE-STAMPED by `--force`) must equal it too, because
+  HEAD-equality binds the WORKTREE and is satisfied BY CONSTRUCTION, so it cannot see a STALE ARTIFACT — a
+  `PASS` recorded before a further commit, an amend or a rebase used to certify the NEW tree, and a
+  missing, duplicated or non-sha field is a NAMED refusal rather than a skip (the gate-of-record rule
+  applied to the intent audit: an audit of an older tree may not certify a newer one); and the
   verdict line is held to its WHOLE grammar, with the stage KIND compared by string equality, so a sibling
   stage's `PASS` cannot certify C. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
