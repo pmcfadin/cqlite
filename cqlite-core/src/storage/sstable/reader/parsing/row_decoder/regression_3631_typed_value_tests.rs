@@ -1158,3 +1158,166 @@ fn an_oversized_fixed_width_field_is_still_refused() {
         err
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// ZERO-LENGTH FIELDS — the FOURTH arm of the blob-fallback class (roborev round 5).
+//
+// `field_len == 0` used to call `create_empty_value_for_type`, whose fallback arm was
+// `Value::blob(Vec::new())`, so an empty `int` field surfaced as an empty BLOB and an
+// empty nested structured field could too. That is acceptance criterion 5 verbatim. The
+// helper is now DELETED rather than fixed — an arm that does not exist cannot be
+// reached by a sixth caller.
+//
+// SEMANTICS, from `cassandra-5.0.8` and not from CQLite's prior behaviour:
+// `AbstractType.isEmptyValueMeaningless()` is documented "Returns true for types where
+// empty should be handled like null like Int32Type", defaults FALSE, and is overridden
+// TRUE by `Int32Type:56`, `LongType`, `BooleanType`, `UUIDType`, `TimestampType`;
+// `AbstractType`'s deserializer is `if (buffer == null || (!buffer.hasRemaining() &&
+// type.isEmptyValueMeaningless())) return null; return type.compose(buffer);`. So an
+// empty fixed-width value is NULL, an empty text/blob is the empty string / empty blob,
+// and an empty UDT is every-component-null (`TupleType.split` returning
+// `copyOfRange(components, 0, 0)`).
+//
+// These cases drive the TWO ACTUAL LOOPS the finding names — `parse_udt_value` (the
+// top-level frozen-UDT column) and `parse_raw_type_value` (the marshal form) — not a
+// per-field proxy.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A UDT def whose three fields cover the three empty-value rules.
+fn empty_rules_def() -> UdtTypeDef {
+    UdtTypeDef {
+        keyspace: "test_udt_collision".to_string(),
+        name: "empties".to_string(),
+        fields: vec![
+            UdtFieldDef {
+                name: "i".to_string(),
+                field_type: CqlType::Int,
+                nullable: true,
+            },
+            UdtFieldDef {
+                name: "t".to_string(),
+                field_type: CqlType::Text,
+                nullable: true,
+            },
+            UdtFieldDef {
+                name: "m".to_string(),
+                field_type: CqlType::Frozen(Box::new(CqlType::Map(
+                    Box::new(CqlType::Text),
+                    Box::new(CqlType::Int),
+                ))),
+                nullable: true,
+            },
+        ],
+    }
+}
+
+#[test]
+fn zero_length_fields_of_a_top_level_udt_column_decode_from_their_declared_type() {
+    // Three fields, each written `[i32 0]`.
+    let mut data = Vec::new();
+    for _ in 0..3 {
+        data.extend_from_slice(&0i32.to_be_bytes());
+    }
+    let (value, consumed) = parser()
+        .parse_udt_value(
+            &data,
+            0,
+            &empty_rules_def(),
+            &column("u", "frozen<empties>"),
+            0,
+        )
+        .expect("three zero-length fields must decode");
+    assert_eq!(consumed, data.len());
+
+    let udt = match unfrozen(&value) {
+        Value::Udt(u) => u.clone(),
+        other => panic!("expected a Udt, got {other:?}"),
+    };
+    // The DEFECT: every one of these used to be an empty `Value::Blob`.
+    assert_eq!(
+        udt.fields[0].value,
+        Some(Value::Null),
+        "an empty fixed-width field is NULL (Int32Type.isEmptyValueMeaningless == true), \
+         not an empty blob"
+    );
+    assert_eq!(
+        udt.fields[1].value,
+        Some(Value::text("")),
+        "an empty text field is the empty string (compose of an empty buffer)"
+    );
+    assert_eq!(
+        udt.fields[2].value.as_ref().map(unfrozen).cloned(),
+        Some(Value::Map(Vec::new())),
+        "an empty frozen<map> field is the empty map, NOT a blob"
+    );
+    for field in &udt.fields {
+        assert!(
+            !matches!(field.value.as_ref().map(unfrozen), Some(Value::Blob(_))),
+            "no zero-length field may decode to a Blob (issue #3631 criterion 5): {:?}",
+            field
+        );
+    }
+}
+
+#[test]
+fn a_zero_length_nested_udt_field_is_all_null_fields_not_a_blob() {
+    // `TupleType.split`: an empty buffer returns `copyOfRange(components, 0, 0)`, so
+    // every declared component is absent — a UDT with all fields null.
+    let def = UdtTypeDef {
+        keyspace: "test_udt_collision".to_string(),
+        name: "outer".to_string(),
+        fields: vec![UdtFieldDef {
+            name: "n".to_string(),
+            field_type: CqlType::Udt("inline".to_string(), vec![("a".to_string(), CqlType::Int)]),
+            nullable: true,
+        }],
+    };
+    let data = 0i32.to_be_bytes().to_vec(); // one field, zero-length
+    let (value, _) = parser()
+        .parse_udt_value(&data, 0, &def, &column("u", "frozen<outer>"), 0)
+        .expect("a zero-length nested UDT field must decode structurally");
+    let outer = match unfrozen(&value) {
+        Value::Udt(u) => u.clone(),
+        other => panic!("expected the outer Udt, got {other:?}"),
+    };
+    match outer.fields[0].value.as_ref().map(unfrozen) {
+        Some(Value::Udt(inner)) => assert_eq!(
+            inner.fields[0].value, None,
+            "the nested UDT's declared field is absent, i.e. null"
+        ),
+        other => panic!("a zero-length nested UDT must be a Udt with null fields, got {other:?}"),
+    }
+}
+
+#[test]
+fn zero_length_fields_of_a_marshal_form_udt_decode_from_their_declared_type() {
+    // The SECOND loop the finding names: `parse_raw_type_value`'s marshal path, driven
+    // by an on-disk `UserType(...)` string rather than by a registry def. Hex-encoded
+    // field names, per Cassandra's marshal spelling.
+    let type_str = concat!(
+        "org.apache.cassandra.db.marshal.UserType(",
+        "test_udt_collision,",
+        "656d7074696573,",                               // "empties"
+        "69:org.apache.cassandra.db.marshal.Int32Type,", // i
+        "74:org.apache.cassandra.db.marshal.UTF8Type",   // t
+        ")"
+    );
+    let mut data = Vec::new();
+    for _ in 0..2 {
+        data.extend_from_slice(&0i32.to_be_bytes());
+    }
+    let (value, _consumed) = parser()
+        .parse_raw_type_value(&data, 0, type_str, "u", 0)
+        .expect("the marshal-form loop must decode zero-length fields too");
+    let udt = match unfrozen(&value) {
+        Value::Udt(u) => u.clone(),
+        other => panic!("expected a Udt, got {other:?}"),
+    };
+    assert_eq!(udt.fields.len(), 2, "got {:?}", udt.fields);
+    assert_eq!(
+        udt.fields[0].value,
+        Some(Value::Null),
+        "an empty Int32Type field is NULL on the marshal path as well"
+    );
+    assert_eq!(udt.fields[1].value, Some(Value::text("")));
+}

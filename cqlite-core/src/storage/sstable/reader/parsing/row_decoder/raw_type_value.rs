@@ -734,9 +734,18 @@ impl V5CompressedLegacyParser {
                         tracing::debug!("Frozen UDT field '{}' is null", field_def.name);
                         None
                     } else if field_len == 0 {
-                        // Empty field
-                        tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
-                        Some(Self::create_empty_value_for_type(&field_def.field_type))
+                        // A ZERO-LENGTH field is decoded from its DECLARED TYPE (issue
+                        // #3631, roborev round 5) — see the sibling comment in
+                        // `udt.rs::parse_udt_value`, which carries the
+                        // `AbstractType.isEmptyValueMeaningless` citation.
+                        // `create_empty_value_for_type`'s fallback is an empty BLOB, so
+                        // this arm degraded an empty `int` — or an empty nested
+                        // structured field — exactly as criterion 5 forbids.
+                        Some(self.parse_simple_udt_field_value_at(
+                            &[],
+                            &field_def.field_type,
+                            depth,
+                        )?)
                     } else {
                         // Field with data. Routed through the shared guard (issue
                         // #3612, R3-F1/N1) so this loop cannot drift from the other

@@ -518,12 +518,28 @@ impl V5CompressedLegacyParser {
                 tracing::debug!("V5CompressedLegacy: UDT field '{}' is null", field_def.name);
                 None
             } else if field_len == 0 {
-                // Empty field - create empty value based on type
-                tracing::debug!(
-                    "V5CompressedLegacy: UDT field '{}' is empty",
-                    field_def.name
-                );
-                Some(Self::create_empty_value_for_type(&field_def.field_type))
+                // A ZERO-LENGTH field is decoded from its DECLARED TYPE, exactly like a
+                // non-empty one (issue #3631, roborev round 5). It used to call
+                // `create_empty_value_for_type`, whose fallback arm is
+                // `Value::blob(Vec::new())` — so an empty `int` field surfaced as an
+                // empty BLOB, and an empty frozen/nested structured field could too.
+                // That is acceptance criterion 5 verbatim, and it was the FOURTH arm of
+                // this class after `parse_cell_path_key`, `parse_simple_udt_field_value`
+                // and `parse_udt_field_value`.
+                //
+                // Semantics, from `cassandra-5.0.8` rather than from CQLite's behaviour:
+                // `AbstractType.isEmptyValueMeaningless()` — "Returns true for types
+                // where empty should be handled like null like Int32Type" — is FALSE by
+                // default and overridden TRUE by the fixed-width types (`Int32Type:56`,
+                // `LongType`, `BooleanType`, `UUIDType`, `TimestampType`), and
+                // `AbstractType`'s deserializer is `if (buffer == null ||
+                // (!buffer.hasRemaining() && type.isEmptyValueMeaningless())) return
+                // null; return type.compose(buffer);`. So: empty fixed-width => NULL;
+                // empty text/blob => the empty string / empty blob (`compose` of an empty
+                // buffer); empty UDT/tuple => every component null, which is
+                // `TupleType.split`'s `if (position == length) return copyOfRange(…, 0,
+                // i)` at i = 0. The one entry point below produces exactly those.
+                Some(self.parse_simple_udt_field_value_at(&[], &field_def.field_type, depth)?)
             } else {
                 // Field with data. `checked_component_len` owns BOTH the negative
                 // rejection and the bounds test, so no loop can have one without
@@ -703,18 +719,6 @@ impl V5CompressedLegacyParser {
             // sit above it were round 4's finding B: they recursed through
             // `parse_udt_value` at depth ZERO and discarded its consumed offset).
             other => self.parse_simple_udt_field_value_at(data, other, depth),
-        }
-    }
-
-    /// Create an empty value for a given CQL type.
-    pub(super) fn create_empty_value_for_type(cql_type: &CqlType) -> Value {
-        match cql_type {
-            CqlType::Text | CqlType::Ascii => Value::text(String::new()),
-            CqlType::Blob => Value::blob(Vec::new()),
-            CqlType::List(_) => Value::List(Vec::new()),
-            CqlType::Set(_) => Value::Set(Vec::new()),
-            CqlType::Map(_, _) => Value::Map(Vec::new()),
-            _ => Value::blob(Vec::new()),
         }
     }
 

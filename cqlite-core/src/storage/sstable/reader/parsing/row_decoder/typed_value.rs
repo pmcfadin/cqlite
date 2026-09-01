@@ -265,8 +265,17 @@ impl V5CompressedLegacyParser {
     ///
     /// A ZERO-LENGTH `data` is the empty collection, not corruption: a UDT field
     /// written with `[i32 size] == 0` carries `ByteBufferUtil.EMPTY_BYTE_BUFFER`, and
-    /// this decoder's callers pass `&[]` for exactly that case (the same rule
-    /// `create_empty_value_for_type` already applies for List/Set/Map).
+    /// this decoder's callers pass `&[]` for exactly that case.
+    ///
+    /// This is the one reading here NOT taken from Cassandra's own serializer, and it is
+    /// stated rather than dressed up: `CollectionType` does NOT override
+    /// `AbstractType.isEmptyValueMeaningless`, so Cassandra would `compose` an empty
+    /// buffer, and `MapSerializer.deserialize` underflows on one — i.e. Cassandra never
+    /// WRITES a zero-length frozen collection (an empty one is the 4 bytes `[i32 0]`).
+    /// CQLite has always read it as the empty collection, and that behaviour is
+    /// PRESERVED deliberately: it is lenient, it is not a blob, and tightening it is not
+    /// this issue's subject (#3631 criterion 5 is about silent degradation to
+    /// `Value::Blob`).
     fn read_collection_count(data: &[u8], ctx: &str) -> Result<(usize, usize)> {
         if data.is_empty() {
             // No header to consume either, so the cursor starts (and ends) at 0.
