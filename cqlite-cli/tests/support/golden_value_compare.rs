@@ -241,6 +241,30 @@ impl<'s, 'p> At<'s, 'p> {
         }
     }
 
+    /// One map ENTRY'S KEY, as its own position.
+    ///
+    /// Unlike [`At::index`] and [`At::field`] this PRESERVES `map_key_spelling`, because a
+    /// key node is the ONE child whose spelling is still the column's — it IS the thing the
+    /// column's writer spelled. Everything else one level in is a frozen value cell (see
+    /// the field's doc), which is why the other two force `ToJsonString`.
+    ///
+    /// Exists so that an UNPAIRABLE key can be reported as a divergence AT ITS OWN NODE
+    /// rather than aborting the whole map: the gap matcher is asked at every node of a
+    /// gap's subtree, so a key-scoped divergence lets the entry VALUES still be walked
+    /// (issue #3726, roborev job 28).
+    fn map_key(&self, index: usize) -> Self {
+        At {
+            depth: Depth::Inside,
+            kinding: Kinding::Natural,
+            path: format!("{}[key {index}]", self.path),
+            skips: self.skips,
+            refusals: self.refusals,
+            suppressions: self.suppressions,
+            gap: self.gap.clone(),
+            map_key_spelling: self.map_key_spelling,
+        }
+    }
+
     /// This same position, with the gap DECLARED here made active for its subtree.
     fn under_gap(&self, divergence: gap::Divergence) -> Self {
         At {

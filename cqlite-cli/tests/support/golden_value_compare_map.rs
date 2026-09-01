@@ -122,6 +122,47 @@ pub(super) fn compare_map(
             Side::Cli,
         )
     };
+    // AN UNPAIRABLE KEY IS A DIVERGENCE AT THE KEY, NOT A VERDICT ON THE MAP.
+    //
+    // A container key on a MULTICELL column cannot be paired at all: the dump wrote it as
+    // the cell PATH (`nameComparator().getString(...)`), the egress writes the raw key
+    // bytes, and neither is a value the other can be canonicalized onto. Propagating that
+    // as an error from here ABORTS THE WHOLE MAP — and since the declared gap then matched
+    // at the column node, the entry VALUES were never walked and arbitrary value corruption
+    // was suppressed with the keys (roborev job 28; measured: a value changed 90 -> 999
+    // produced ZERO diffs).
+    //
+    // The entries are still pairable POSITIONALLY, which is not a fallback but the rule this
+    // function already runs on: a map's entries are compared in EMITTED order, and both
+    // sides preserve it. So each key is reported at its OWN node — where a gap declared on
+    // the column is still active, because the matcher is asked at every node of the gap's
+    // subtree — and the values beside them are compared like any other.
+    let unpairable_keys = container::is_container_type(key_ty)
+        && at.map_key_spelling == container::MapKeySpelling::GetString;
+    if unpairable_keys {
+        if golden.len() != cli.len() {
+            return Err(format!(
+                "map size golden {} vs cli {}",
+                golden.len(),
+                cli.len()
+            ));
+        }
+        for (i, ((gk, gv), entry)) in golden.iter().zip(cli.iter()).enumerate() {
+            let (ck, cv) = pair(entry, egress)?;
+            // The KEY, at its own position. Both sides are handed over RAW: the golden's
+            // object key as the text the dump wrote, the CLI's key as it stands. Neither is
+            // canonicalized, because canonicalizing is exactly what cannot be done here.
+            let key_at = at.map_key(i);
+            compare_value_at(&Value::String(gk.clone()), ck, egress, key_ty, &key_at)
+                .map_err(|why| format!("[key {i}] {why}"))?;
+            // The VALUE, compared like any other map value — this is the coverage the
+            // column-scoped abort used to throw away.
+            let value_at = at.index(&format!("{i}"), Kinding::Natural);
+            compare_value_at(gv, cv, egress, value_ty, &value_at)
+                .map_err(|why| format!("[{i}] {why}"))?;
+        }
+        return Ok(());
+    }
     let mut g: Vec<(Canon, &Value)> = Vec::with_capacity(golden.len());
     for (k, v) in golden {
         g.push((canon_golden_key(k)?, v));

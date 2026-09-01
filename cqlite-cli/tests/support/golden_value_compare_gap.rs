@@ -380,81 +380,41 @@ impl Divergence {
                 matches!(cli, Value::Array(_))
             }
             Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex => {
-                // FORMAT-INDEPENDENT by measurement, not by omission: the CSV lane
-                // decodes this cell into the same `{key,value}` array the JSON egress
-                // emits (the key text does not invert the declared container's
-                // grammar, so `csv_container::decode_object` leaves it as the raw
-                // `0x…` text), so both formats present the identical shape here.
-                let _ = (depth, kinding);
-                // DDL ONLY for the two STRUCTURAL facts, which is the whole rule this
-                // matcher's predecessor stated and this one keeps: a map, whose
-                // declared KEY type is a container, on a MULTICELL column.
+                // ASKED AT THE KEY NODE, NOT AT THE COLUMN (roborev job 28).
                 //
-                // The multicellness comes from `schema::Column::is_multicell()`,
-                // carried here as [`MapKeySpelling`]. It is NOT inferred from whether
-                // the golden's keys parse as JSON. That inference was tried and is
-                // wrong three ways: it decides a STRUCTURAL fact by inspecting a
-                // VALUE, which is the ladder roborev jobs 302/305/306 walked up and
-                // #3500 abandoned; it is PERMISSIVE in the wrong direction, because
-                // "the keys did not parse" is not "this column is multicell", so a
-                // FROZEN map whose golden key is genuinely malformed — an ORACLE fault
-                // the comparison must REPORT — would be suppressed by this gap
-                // instead; and its soundness would rest on an unproven negative, that
-                // no `getString` rendering of any container key type ever parses as
-                // JSON of the declared kind.
-                let CqlType::Map(key_ty, _) = ty else {
-                    return false;
-                };
-                if !is_container_type(key_ty) {
+                // This used to match the whole map — golden object vs CLI `{key,value}`
+                // array — and suppress it ENTIRE. That threw away the entry VALUES, which
+                // ARE comparable: both sides preserve emitted order and the values are
+                // ordinary cells. Measured before fixing: a value changed 90 -> 999 produced
+                // ZERO diffs. `compare::map::compare_map` now reports an unpairable key at
+                // its OWN position (`At::map_key`) and compares the values beside it, so
+                // this matcher describes exactly the key and nothing more.
+                let _ = (depth, kinding, egress);
+                // DDL ONLY for the two structural facts: this position's declared type is a
+                // CONTAINER, on a MULTICELL column. Neither is read from a value — see the
+                // note on `MapKeySpelling` for why inferring multicellness from the key text
+                // is unsound in the permissive direction.
+                if !is_container_type(ty) {
                     return false;
                 }
                 if map_key_spelling != MapKeySpelling::GetString {
                     return false;
                 }
-                // GOLDEN: an object. An EMPTY one is NOT this gap — it exhibits no key
-                // spelling at all, so there would be nothing measured to suppress.
-                let Value::Object(entries) = golden else {
+                // GOLDEN: `getString`'s flat text — a plain string that is NOT the declared
+                // container's `toJSONString` document. Asked through the one function the
+                // comparison pairs with, so the gap and the pairing cannot disagree about
+                // what the golden key is.
+                let Value::String(golden_key) = golden else {
                     return false;
                 };
-                if entries.is_empty() {
+                if golden_map_key_value(golden_key, ty, MapKeySpelling::ToJsonString).is_ok() {
                     return false;
                 }
-                // …and every key is UNDECODED, i.e. not a document the declared key
-                // type's `toJSONString` could have produced.
-                //
-                // READ THE ORDER, BECAUSE IT IS THE WHOLE SAFETY ARGUMENT. This asks
-                // about a VALUE, which the two checks above deliberately do not — and
-                // it is sound here for one reason: it is a CONJUNCT AFTER the DDL, not
-                // a SUBSTITUTE FOR IT. It can only make the gap NARROWER, so it can
-                // only ever move a case from suppressed to REPORTED, which is the
-                // fail-closed direction. The defect it must not become is the earlier
-                // revision where a parse result STOOD IN FOR the multicell fact: that
-                // widened the gap onto frozen columns and swallowed an oracle fault
-                // (see `a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap`).
-                //
-                // What it buys: `sstabledump` writing a DECODED key here would
-                // otherwise leave the gap suppressing a column whose golden side had
-                // improved. The egress is the axis expected to move first, and the CLI
-                // half below covers that one; this covers the other.
-                if entries.keys().any(|key| {
-                    golden_map_key_value(key, key_ty, MapKeySpelling::ToJsonString).is_ok()
-                }) {
-                    return false;
-                }
-                // EGRESS: the `{key,value}` array, of the SAME length, every entry of
-                // which carries a CQL blob literal as its key. Read through
-                // `super::pair`, the lane's one `{key,value}` reader, so a malformed
-                // entry is not this gap either.
-                let Value::Array(rendered) = cli else {
-                    return false;
-                };
-                rendered.len() == entries.len()
-                    && rendered.iter().all(|entry| {
-                        matches!(
-                            super::pair(entry, egress),
-                            Ok((Value::String(text), _)) if is_blob_hex(text)
-                        )
-                    })
+                // EGRESS: a CQL blob literal — the raw key bytes, undecoded. Anything else
+                // here (a decoded container, a null, a number) is NOT this gap and is
+                // reported as an ordinary diff, which is how the egress learning to decode
+                // the cell path retires this declaration.
+                matches!(cli, Value::String(text) if is_blob_hex(text))
             }
         }
     }

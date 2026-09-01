@@ -824,6 +824,69 @@ fn the_multicell_map_key_gap_covers_nothing_else() {
     assert_eq!(undeclared.len(), 6, "the case floor for this bounding");
 }
 
+/// THE GAP COVERS THE KEY, NOT THE MAP — a corrupted VALUE beside an unpairable key is
+/// still REPORTED (roborev job 28, issue #3726).
+///
+/// The declaration used to match at the COLUMN node and suppress the entry values with the
+/// keys. Measured before the fix: this exact input produced **zero** diffs, so arbitrary
+/// value corruption passed. Both sides preserve emitted order and the values are ordinary
+/// cells, so they are comparable without decoding the keys at all — the keys' unpairability
+/// is not a reason to stop looking at anything else in the map.
+#[test]
+fn a_corrupted_value_beside_an_unpairable_key_is_reported() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    // The measured CLI spelling with the SECOND entry's value corrupted 90 -> 999.
+    let corrupted = json!([
+        {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80},
+        {"key": "0x000000110000000564656c746100000004000000040000000400000009", "value": 999}
+    ]);
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &multicell_map_cli(corrupted),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "the corrupted value must be reported: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("999"),
+        "the diff must name the offending value: {:?}",
+        report.diffs
+    );
+    // And the gap is still APPLIED — it suppressed the two unpairable KEYS, which is all it
+    // ever claimed. A stale report here would mean the key half stopped being covered.
+    assert!(
+        report.stale_skips.is_empty(),
+        "the key-scoped gap must still be applied: {:?}",
+        report.stale_skips
+    );
+}
+
+/// The control: with the values AGREEING, the same column is clean and the gap is applied.
+/// Without this, the case above could pass because everything diverges.
+#[test]
+fn an_unpairable_key_alone_is_suppressed_and_the_values_agree() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &multicell_map_cli(measured_cli_map()),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
+}
+
 /// THE OTHER RETIREMENT AXIS: a golden whose keys ARE decoded.
 ///
 /// The gap's golden half requires every key to be UNDECODED — not a document the
