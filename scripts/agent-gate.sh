@@ -6797,6 +6797,10 @@ _record_status_detail() {
 # rather than trusted of each writer (#3312: neutralise where the value is rendered, not
 # per interpolation site — a per-site escape is a list to keep complete). `[:cntrl:]` is
 # the whole class, deliberately, so a control character nobody enumerated is covered too.
+# DEFENCE IN DEPTH, stated as such rather than implied: the one writer today
+# (run_file_size) renders paths git already quotes, so no REACHABLE input carries a
+# control character — this boundary exists so the NEXT writer cannot reintroduce the
+# row-injection route by not thinking about it.
 # LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
 # the defect this issue removes — bounding the value is the WRITER's job (see
 # _fs_abbrev_grown, which elides by a NAMED remainder).
