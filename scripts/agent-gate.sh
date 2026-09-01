@@ -9071,6 +9071,42 @@ fi
 # exit so a green gate never silently lacks its summary file.
 emit_summary() {
   local result="$1"; shift
+
+  # ---- SHARED FULL-GATE METADATA ASSEMBLY (issue #3755, roborev job 335) ----------
+  #
+  # `disk-admission:` used to be pushed by the two builders that happened to remember
+  # it, so a full gate dying in the component-set, fixture, schemas, zero-dataset or
+  # tree-integrity path emitted a block with NO such line — contradicting both AC3 and
+  # this file's own header contract. Adding the call to five more builders would have
+  # left the sixth to the next person; assembling it HERE, in the one function every
+  # block (bar the hand-rolled no-clobber publish, which threads it itself for the same
+  # reason it threads the tree lines) passes through, means a new emit site CANNOT omit
+  # it by being written somewhere else. That is exactly the argument the six-return-path
+  # disposer rests on, one layer up.
+  #
+  # Any incoming `disk-admission:` line is DROPPED and re-emitted from the live global,
+  # so the assembly is idempotent and exactly ONE authoritative line appears no matter
+  # what the caller supplied — the same rule _publish_integrity_fail applies to the
+  # tree and component-set lines.
+  #
+  # FIELD ORDER: the line lands at the END of the caller's meta, immediately before
+  # `logs:`. In the normal full-gate terminal block it previously sat just after
+  # `component-set:`; nothing else moved.
+  #
+  # `set --` rather than a new array threaded through the three renderers below: the
+  # renderers keep their existing `for line in "$@"` untouched, so this change cannot
+  # perturb what they emit for any other line.
+  local -a _es_meta=()
+  local _es_line
+  for _es_line in ${@+"$@"}; do
+    case "$_es_line" in disk-admission:*) continue ;; esac
+    _es_meta+=("$_es_line")
+  done
+  if _emit_wants_disk_admission; then
+    _es_meta+=("$(_disk_admission_meta)")
+  fi
+  set -- ${_es_meta[@]+"${_es_meta[@]}"}
+
   # Write the complete block to the caller-known file FIRST, with plain
   # redirection (no pipe). This is the authoritative artifact and the advertised
   # recovery path. Capture stderr from the redirection so we can report WHY the
@@ -9254,11 +9290,16 @@ _integrity_fail_block() {
     case "$line" in
       tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
       component-set:*) continue ;;
+      disk-admission:*) continue ;;
     esac
     echo "$line"
   done
   _tree_meta_lines
   printf '%s\n' "$(_component_set_meta)"
+  # #3755: this block does NOT go through emit_summary's shared assembly (it is the
+  # hand-rolled no-clobber publish path), so it threads the disk-admission line itself
+  # — the same argument, and the same code shape, as the component-set line above.
+  if _emit_wants_disk_admission; then printf '%s\n' "$(_disk_admission_meta)"; fi
   echo "logs: $LOG_DIR"
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
@@ -19117,6 +19158,10 @@ _DA_EVALUATIONS=0
 # there — so a refusal can never claim a slot was released when none was ever held.
 _DA_MOMENT=""
 _DA_SLOT_NOTE=""
+# 1 once acquire_gate_slot has passed its mode exemptions, i.e. once this run is a class
+# of run the probe applies to. Lets _disk_admission_meta tell "emitted before the probe"
+# (benign, ordering) from "the probe ran and produced nothing" (a defect, and named one).
+_DA_PROBE_REACHED=0
 # Per-measurement outputs of _gate_disk_admission_measure.
 _DA_STATE=""
 _DA_VALUE=""
@@ -19369,15 +19414,45 @@ _gate_disk_admission_line() {
   return 0
 }
 
-# _disk_admission_meta: the line for an emit_summary POSITIONAL slot. Always prints
-# something, so a caller can pass it unconditionally; an exempt or pre-probe block
-# says so rather than implying a check that never ran.
+# _disk_admission_meta: the line for the shared assembly slot. ALWAYS prints something.
+#
+# OMISSION IS THE ONE RENDERING THAT MUST NEVER HAPPEN (roborev job 335). A block with
+# no `disk-admission:` line at all leaves a reader unable to tell "this gate was never
+# probed" from "this block predates the probe" from "somebody forgot a call site" — and
+# the third is the state that ships a hole. So every state has a NAME:
+#
+#   * a verdict exists                -> the verdict
+#   * --only (self-exempt from the cap, so the probe never runs)
+#                                     -> NOT EVALUATED, naming the exemption
+#   * the block was emitted BEFORE acquire_gate_slot (the component-set pre-flight at
+#     the mode dispatch is a real instance)
+#                                     -> NOT EVALUATED, naming the ordering
+#   * the probe RAN and left no verdict
+#                                     -> that is a DEFECT in this file, and it says so
+#                                        rather than rendering as one of the benign
+#                                        states above
 _disk_admission_meta() {
   if [ -n "${DISK_ADMISSION_LINE:-}" ]; then
     printf '%s' "$DISK_ADMISSION_LINE"
+  elif [ -n "${ONLY:-}" ]; then
+    printf '%s' 'disk-admission: NOT EVALUATED (--only self-exempts from the #1825 slot cap, so the #3755 probe never runs) — asserts NOTHING about free space'
+  elif [ "${_DA_PROBE_REACHED:-0}" -eq 0 ]; then
+    printf '%s' 'disk-admission: NOT EVALUATED (this block was emitted BEFORE the #3755 probe, which runs inside acquire_gate_slot) — asserts NOTHING about free space'
   else
-    printf '%s' 'disk-admission: NOT EVALUATED (this block was emitted outside the #3755 slot-grant probe) — it asserts NOTHING about free space'
+    printf '%s' 'disk-admission: INTERNAL (#3755) — the probe was reached but left no verdict; this is a defect in agent-gate.sh, not a property of the filesystem'
   fi
+}
+
+# _emit_wants_disk_admission: which MODES carry the line. The full gate and --only reach
+# the full-gate terminal path and so must carry it (--only as an honest NOT EVALUATED);
+# --lite/--delta are exempt from the cap and from the probe, and the two selftest hooks
+# emit synthetic blocks whose content is pinned by test_agent_gate_summary.sh.
+_emit_wants_disk_admission() {
+  [ "${LITE:-0}" -eq 1 ] && return 1
+  [ "${DELTA:-0}" -eq 1 ] && return 1
+  [ "${SELFTEST:-0}" -eq 1 ] && return 1
+  [ "${LITE_AGG_SELFTEST:-0}" -eq 1 ] && return 1
+  return 0
 }
 
 # _gate_disk_admission_launch: the FIRST evaluation, taken before the daemon is
@@ -19532,6 +19607,7 @@ acquire_gate_slot() {
   # #3755: the LAUNCH evaluation. Placed AFTER the exemptions and BEFORE everything
   # else in this function, so it is reached by exactly the run class that queues and
   # then builds — the full gate — and by nothing else. ADVISORY (see the function).
+  _DA_PROBE_REACHED=1
   _gate_disk_admission_launch
   if [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ]; then
     _gate_disk_admission_bind_launch "cap force-disabled"; return 0
@@ -20585,12 +20661,11 @@ fi
 # was compared against), so a pasted block shows the skew check RAN and names its
 # baseline. Always non-empty on this path — the pre-flight runs at the mode dispatch.
 [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
-# #3755: stamp the disk-admission verdict — the value observed at LAUNCH, the value
-# observed again AT SLOT GRANT, the bar and where the bar came from. Always non-empty
-# on the full-gate path (acquire_gate_slot always evaluates); `--only` self-exempts
-# from the slot cap and therefore from the probe, so its block honestly reads
-# `NOT EVALUATED` rather than implying a check that never ran.
-SUMMARY_META+=("$(_disk_admission_meta)")
+# #3755: `disk-admission:` is NOT pushed here. It is assembled centrally in
+# emit_summary so that EVERY full-gate block carries it, including the early-terminal
+# preflight paths this builder never reaches (roborev job 335). Pushing it here as well
+# would be dropped and re-appended by that assembly — harmless, but it would imply this
+# is where the contract lives, which is what let five paths omit it.
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")

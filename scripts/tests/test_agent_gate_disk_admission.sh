@@ -321,6 +321,14 @@ case "$a_line" in
   '') bad "AC3/AC4: no disk-admission: line in the refusal SUMMARY ($a_subj_sum)" ;;
   *)  bad "AC4: refusal SUMMARY carries the wrong verdict: $a_line" ;;
 esac
+# The shared assembly is IDEMPOTENT: this block's builder passes the line explicitly, so
+# a non-dropping assembly would emit it TWICE.
+a_count=$(grep -c '^disk-admission: ' "$a_subj_sum" 2>/dev/null || printf '0')
+if [ "$a_count" -eq 1 ]; then
+  ok "AC3: exactly ONE disk-admission: line in the block (the shared assembly de-duplicates)"
+else
+  bad "AC3: expected exactly 1 disk-admission: line, found $a_count"
+fi
 # AC3: value observed, bar applied, and BOTH moments named.
 for needle in 'post-slot 10.0GiB' 'bar 40GiB(default)' 'launch 200.0GiB' 'evaluated 2x'; do
   case "$a_line" in
@@ -705,11 +713,21 @@ fi
 
 # --- H2: the daemon dies AFTER the queue. The stale launch reading must NOT decide. ---
 #
-# Driven by a slots dir the gate can `mkdir -p` (it exists) but the daemon cannot write
-# into, so acquisition fails the way it would on a real permissions/ENOSPC fault. The
-# readings are HIGH then LOW: an implementation that reused the launch reading would
+# THE INJECTION MUST NOT BE BYPASSABLE BY PRIVILEGE (roborev job 335). The first version
+# used `chmod 555` on the slots dir, which a privileged user simply writes through: as
+# root the daemon ACQUIRES, the grant-failed path is never taken, and the case fails for
+# a reason that has nothing to do with its subject — a control that does not control,
+# whose green is nonetheless read as evidence.
+#
+# Instead `slot.0` is pre-created as a DIRECTORY. The daemon's acquire sweep does
+# `os.open(path, O_RDWR|O_CREAT)` on exactly that path (with --slots 1 it is the only
+# one it tries) and EISDIR is raised for root and non-root alike; the daemon catches
+# only the flock error, so it dies before acquiring. Nothing about the failure depends
+# on who is running.
+#
+# The readings are HIGH then LOW: an implementation that reused the launch reading would
 # ADMIT, so the refusal can only have come from the SECOND, fresh measurement.
-h2_slots="$tmp/h2-slots"; mkdir -p "$h2_slots"; chmod 555 "$h2_slots"
+h2_slots="$tmp/h2-slots"; mkdir -p "$h2_slots/slot.0"
 h2_script=$(df_script h2 "$HIGH" "$LOW")
 run_stub_gate h2 "$h2_script" \
   CQLITE_GATE_SLOTS_DIR="$h2_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
@@ -756,7 +774,6 @@ if [ "$h2c_status" -eq 0 ] && [ "$h2c_markers" -ge 1 ]; then
 else
   bad "H2 CONTROL: refused despite a fresh above-bar reading (exit $h2c_status, markers $h2c_markers)"
 fi
-chmod 755 "$h2_slots"
 
 # ===========================================================================
 # Case I (roborev job 329, finding 2): the threshold comparison is FLOATING
@@ -823,6 +840,79 @@ if grep -q 'was NOT used AS SET (out-of-range)' "$i3_err" 2>/dev/null; then
 else
   bad "I3: no stderr note naming the out-of-range bar"
 fi
+
+# ===========================================================================
+# Case J (roborev job 335, Medium): EVERY full-gate SUMMARY carries the line —
+# including the EARLY-TERMINAL paths, which no builder of ours ever reaches.
+#
+# Omission is the one rendering that must never happen: a block with no line at
+# all leaves a reader unable to tell "never probed" from "predates the probe"
+# from "somebody forgot a call site", and only the third ships a hole.
+#
+# Driven through a REAL early-terminal path, not a synthetic block: a real full
+# gate (no stub) against a corpus-less CQLITE_DATASETS_ROOT, which exits at a
+# preflight before any component. WHICH preflight it hits depends on the host
+# (the #3544 component-set pre-flight runs BEFORE the probe and needs the
+# network; the #2078 fixture preflight runs AFTER it), so this case MEASURES
+# which path ran and then asserts the rendering that path is required to carry —
+# never a rendering it hoped for.
+# ===========================================================================
+j_root="$tmp/j-empty-datasets"; mkdir -p "$j_root/sstables"
+j_script=$(df_script j "$HIGH" "$HIGH")
+j_sum="$tmp/j.summary.txt"; j_err="$tmp/j.err"
+env PATH="$tmp/shim:$PATH" \
+  DF_SHIM_SCRIPT="$j_script" DF_SHIM_STATE="$tmp/j.dfstate" \
+  AGENT_GATE_SUMMARY_FILE="$j_sum" \
+  CQLITE_DATASETS_ROOT="$j_root" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/j-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_POLL_SECS=0.3 \
+  bash "$GATE" >"$tmp/j.out" 2>"$j_err" &
+j_pid=$!
+mkdir -p "$tmp/j.norun"
+watch_until_exit "$j_pid" "$tmp/j.norun" 900; j_status=$WX_STATUS
+assert_no_timeout "J early-terminal full gate"
+
+j_line=$(grep_line "$j_sum" '^disk-admission: ')
+j_count=$(grep -c '^disk-admission: ' "$j_sum" 2>/dev/null || printf '0')
+case "$j_count" in ''|*[!0-9]*) j_count=0 ;; esac
+
+# Which early terminal did we actually reach? Measured, then asserted against.
+j_path=""
+grep -q '^missing-fixtures: FAIL-CLOSED' "$j_sum" 2>/dev/null && j_path=post-probe-fixtures
+[ -z "$j_path" ] && grep -q '^missing-schemas: FAIL-CLOSED' "$j_sum" 2>/dev/null && j_path=post-probe-schemas
+[ -z "$j_path" ] && grep -q '^component-set: FAIL-CLOSED' "$j_sum" 2>/dev/null && j_path=pre-probe-component-set
+if [ -n "$j_path" ]; then
+  ok "J setup: the run really terminated at an early preflight ($j_path, exit $j_status)"
+else
+  bad "J setup: no early-terminal marker in the block — this case did not exercise an early-terminal path"
+  grep -E '^(RESULT|refusal|component-set|missing-)' "$j_sum" 2>/dev/null | head -4
+fi
+if [ "$j_count" -eq 1 ]; then
+  ok "J: the early-terminal block carries EXACTLY ONE disk-admission: line — the contract has no hole"
+else
+  bad "J: the early-terminal block carries $j_count disk-admission: lines (the contract says exactly 1)"
+fi
+case "$j_path" in
+  post-probe-*)
+    # The probe ran before this preflight, so the block must carry a REAL verdict.
+    case "$j_line" in
+      *'disk-admission: PASS'*'evaluated 2x'*)
+        ok "J: a POST-probe early terminal carries the real verdict, both evaluations named" ;;
+      *'NOT EVALUATED'*)
+        bad "J: a POST-probe early terminal claims NOT EVALUATED — the verdict existed and was dropped: $j_line" ;;
+      *) bad "J: unexpected rendering on a post-probe early terminal: ${j_line:-<none>}" ;;
+    esac ;;
+  pre-probe-*)
+    # This block genuinely precedes the probe; its honest value names the ordering.
+    case "$j_line" in
+      *'NOT EVALUATED'*'emitted BEFORE the #3755 probe'*)
+        ok "J: a PRE-probe early terminal says so, naming the ordering — not a fabricated verdict" ;;
+      *) bad "J: a pre-probe early terminal does not name the ordering: ${j_line:-<none>}" ;;
+    esac ;;
+esac
+# Whatever the path, the block must never claim a verdict the probe did not reach.
+case "$j_line" in
+  *'INTERNAL (#3755)'*) bad "J: the block reports the probe ran but left no verdict — a defect state was reached" ;;
+esac
 
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
