@@ -15,9 +15,13 @@
 //! or a `mod` produced by macro expansion. A `path = …` attribute it cannot read
 //! as a plain string literal — a `#[cfg_attr(…, path = …)]`, or a raw-string
 //! value like `#[path = r"x.rs"]` — is DETECTED and refused loudly, never
-//! resolved and never silently dropped; so is a `#[path]` value that is absolute
-//! OR merely begins with `/` or `\\` (`Path::is_absolute` is platform-dependent,
-//! calling `/etc/passwd` relative on Windows). It DOES model out-of-line
+//! resolved and never silently dropped; so is a `#[path]` value absolute on ANY
+//! platform Rust targets — host-native, leading `/`, leading `\\` (incl. UNC), or
+//! a Windows drive root `C:/` — a closed four-case enumeration, since
+//! `Path::is_absolute` answers only for the HOST. Those three non-native arms
+//! are PORTABILITY arms and cannot be mutation-killed on Linux, where the
+//! host-native check overlaps them; they are pinned by direct unit assertions on
+//! the helper instead. It DOES model out-of-line
 //! modules nested in inline `mod` blocks, `#[path]` on those, and attributes
 //! broken across lines. There is deliberately **no exception list**: an orphan
 //! is a failure to fix, never an entry to add.
@@ -366,6 +370,38 @@ fn mod_decls(src: &str) -> Vec<ModDecl> {
 // The walk
 // ---------------------------------------------------------------------------
 
+/// Is `value` absolute on ANY platform Rust targets? A `#[path]` value that is
+/// absolute *somewhere* is refused, because folding it in-crate as a relative
+/// path is the silent false PASS this guard exists to prevent.
+///
+/// The enumeration below is **COMPLETE**, not a growing list of observed cases.
+/// `std::path` implements exactly two path syntaxes, Unix and Windows, so these
+/// four arms exhaust "absolute somewhere":
+///   1. host-native absolute (`Path::is_absolute`) — whichever host this is;
+///   2. a leading `/` — POSIX-absolute, merely RELATIVE on Windows;
+///   3. a leading `\` — Windows root-relative, and the prefix of every UNC form
+///      (`\\server\share`, `\\?\C:\`), merely relative on Unix;
+///   4. a Windows drive ROOT (`C:/`, `C:\`) — absolute on Windows, merely
+///      relative on Unix.
+///
+/// Arms 2-4 exist because `Path::is_absolute` answers for the HOST, and a guard
+/// whose strength depends on the machine that runs it is not a guard.
+fn is_absolute_on_any_platform(value: &str) -> bool {
+    if Path::new(value).is_absolute() {
+        return true;
+    }
+    let b = value.as_bytes();
+    if matches!(b.first(), Some(b'/') | Some(b'\\')) {
+        return true;
+    }
+    // Drive root. The separator is REQUIRED: `C:notdrive.rs` is drive-relative,
+    // not a root, and a legitimate single-letter module directory (`a/b.rs`)
+    // has no `:` at byte 1 at all — so this arm cannot eat a real path.
+    b.first().is_some_and(|c| c.is_ascii_alphabetic())
+        && b.get(1) == Some(&b':')
+        && matches!(b.get(2), Some(b'/') | Some(b'\\'))
+}
+
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
@@ -443,18 +479,16 @@ impl Walk {
                 // `#[path]` on an out-of-line module resolves relative to the
                 // directory containing the DECLARING FILE, never to `<stem>/`.
                 // Getting this backwards reports 57 false orphans in this repo.
-                // `Path::is_absolute()` alone is platform-dependent: on Windows
-                // it calls `/etc/passwd` RELATIVE, which would fold the value
-                // in-crate and mark an unrelated in-crate file reachable — the
-                // exact silent false PASS this refusal exists to prevent. So a
-                // leading `/` or `\\` is refused explicitly IN ADDITION.
+                // Host-independent by construction — see the helper. `Path::is_absolute`
+                // alone answers only for THIS host, so a value absolute on some
+                // other platform would fold in-crate here and mark an unrelated
+                // in-crate file reachable.
                 assert!(
-                    !Path::new(rel).is_absolute()
-                        && !rel.starts_with('/')
-                        && !rel.starts_with('\\'),
-                    "{}: #[path = {rel:?}] on `mod {}` is an ABSOLUTE path; this guard \
-                     refuses to model absolute #[path] values (an absolute value silently \
-                     folding in-crate marked an unrelated in-crate file reachable)",
+                    !is_absolute_on_any_platform(rel),
+                    "{}: #[path = {rel:?}] on `mod {}` is an ABSOLUTE path on at least one \
+                     platform; this guard refuses to model absolute #[path] values (such a \
+                     value silently folding in-crate marked an unrelated in-crate file \
+                     reachable)",
                     file.display(),
                     decl.name,
                 );
@@ -951,6 +985,62 @@ fn a_cfg_attr_without_a_path_assignment_is_not_refused() {
     assert!(orphans(&[
         ("lib.rs", "#[cfg_attr(test, allow(dead_code))]\nmod a;\n"),
         ("a.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn absoluteness_is_decided_for_every_platform_not_just_this_host() {
+    // Direct unit coverage of the closed four-case enumeration. Arms 2-4 are
+    // PORTABILITY arms: on Linux the host-native check overlaps them, so no
+    // mutation can kill them end-to-end — these assertions are what pin them.
+    for refused in [
+        "/etc/passwd",             // 1 + 2: host-native and POSIX-absolute
+        "\\outside.rs",            // 3: Windows root-relative
+        "\\\\server\\share\\x.rs", // 3: UNC
+        "\\\\?\\C:\\x.rs",         // 3: verbatim UNC
+        "C:/outside.rs",           // 4: drive root, forward slash
+        "C:\\outside.rs",          // 4: drive root, backslash
+        "z:/x.rs",                 // 4: lowercase drive letter
+    ] {
+        assert!(
+            is_absolute_on_any_platform(refused),
+            "should be refused: {refused:?}"
+        );
+    }
+    // The refusal must not eat a legitimate relative value. A refusal that eats
+    // a real path is a worse outcome than the finding it closes.
+    for allowed in [
+        "elsewhere.rs",
+        "config_json.rs",
+        "a/b.rs", // legitimate single-letter module directory
+        "../sibling.rs",
+        "c:notdrive.rs", // `:` with no following separator = drive-RELATIVE
+        "a:b/c.rs",      // ditto
+        "CC:/x.rs",      // two letters before `:` is not a drive
+    ] {
+        assert!(
+            !is_absolute_on_any_platform(allowed),
+            "should be allowed: {allowed:?}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "ABSOLUTE")]
+fn a_windows_drive_rooted_path_attr_is_refused_loudly() {
+    // The end-to-end wiring of arm 4: on Unix this would otherwise resolve as
+    // the in-crate relative path `<moddir>/C:/outside.rs`.
+    let _ = probe(&[("lib.rs", "#[path = \"C:/outside.rs\"]\nmod x;\n")]);
+}
+
+#[test]
+fn a_colon_bearing_or_single_letter_path_attr_still_resolves() {
+    // Green twins for the two shapes arm 4 must NOT eat, end to end.
+    assert!(orphans(&[("lib.rs", "#[path = \"a/b.rs\"]\nmod x;\n"), ("a/b.rs", ""),]).is_empty());
+    assert!(orphans(&[
+        ("lib.rs", "#[path = \"c:notdrive.rs\"]\nmod x;\n"),
+        ("c:notdrive.rs", ""),
     ])
     .is_empty());
 }
