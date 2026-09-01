@@ -6203,23 +6203,38 @@ assert_says 'case (jm10) --help names the failure class the row count belongs to
 assert_says 'case (jm10) --help names the prompt as the DIRECT ARTIFACT to lead with' \
   'That is the DIRECT ARTIFACT'
 assert_says 'case (jm10) --help names the retrieval command' 'roborev show <id> --prompt'
-# THE CORRECTED EVIDENCE AXIS (roborev job 39, finding 2). The first version called the prompt
-# DIRECT EVIDENCE and token accounting a mere FALLBACK, which inverts the trust properties: the
-# prompt is PARTLY BRANCH-INFLUENCED (roborev embeds repository-controlled content at positions
-# indistinguishable from its own text, so a branch can mimic the delivery wording), while the token
-# counts are recorded BY THE DAEMON and unwritable by the reviewed branch. Both halves are asserted
-# — the qualification AND the corroboration property — because dropping either one restores a claim
-# an authorizer would act on.
+# THE EVIDENCE AXIS, CORRECTED TWICE (roborev job 39 finding 2, then job 43 finding 1). Version 1
+# called the prompt DIRECT EVIDENCE and the token counts a mere FALLBACK. Version 2 fixed that and
+# overshot, asserting the counts were "recorded BY THE DAEMON and nothing the reviewed branch can
+# write changes it", i.e. unforgeable corroboration. THAT WAS FALSE IN THE HALF THAT MATTERED: the
+# counts measure THE PROMPT, and the prompt embeds repository-controlled content, so a branch cannot
+# forge the RECORD but can move the MAGNITUDE — and the counts exist to separate a real review from
+# one that received nothing (vacuous baseline ~18.7k input / 0 cached), so padding non-diff prompt
+# content defeats exactly that use. What is asserted now is capability AND limit for each signal,
+# plus the two claims that stop the overshoot returning: neither establishes provenance, and the two
+# are not independent.
 assert_says 'case (jm10) --help says the prompt is NOT self-authenticating' \
   'IT IS NOT SELF-AUTHENTICATING'
 assert_says 'case (jm10) --help names the repository-controlled content that makes it so' \
   'EMBEDS repository-controlled content'
 assert_says 'case (jm10) --help refuses "a human reads it" as a channel separation' \
   'not a channel separation'
-assert_says 'case (jm10) --help gives token accounting its daemon-recorded corroboration property' \
+assert_says 'case (jm10) --help says the counts are daemon-recorded but NOT independent' \
+  'DAEMON-RECORDED BUT NOT INDEPENDENT'
+assert_says 'case (jm10) --help says the branch moves their MAGNITUDE without forging the record' \
+  'MAGNITUDE without forging anything'
+assert_says 'case (jm10) --help says NEITHER signal establishes provenance' \
+  'NEITHER SIGNAL ESTABLISHES'
+assert_says 'case (jm10) --help records the evidence policy as an open question, not settled here' \
+  'is an OPEN QUESTION'
+# THE OVERSHOOT MUST NOT COME BACK. An authorizer acting on "unforgeable" would grant on a number a
+# branch can inflate, so the retired claim is pinned ABSENT as well as the replacement pinned present.
+# ONE assert, on the retired sentence itself. A second one on "unforgeable corroboration" was written
+# and REMOVED: the replacement text contains those two words wrapped across a line break, so the
+# assert would have passed on a LINE-WRAPPING ACCIDENT and reddened on a reflow — a test passing for
+# a reason unrelated to its claim, which is the defect class this file exists to catch.
+assert_lacks 'case (jm10) --help never calls the counts unwritable by the branch' \
   'recorded BY THE DAEMON and nothing'
-assert_says 'case (jm10) --help ranks neither: they are complementary' \
-  'COMPLEMENTARY rather than ranked'
 assert_lacks 'case (jm10) --help no longer demotes token accounting to a fallback' \
   'the FALLBACK, for when the prompt cannot be retrieved'
 # THE DECLARED CROSS-BOX BOUNDARY (roborev job 39, finding 1). The marker travels through GitHub

@@ -441,11 +441,18 @@ indistinguishable from roborev's own text, so a reviewed branch can carry text M
 that delivery wording and an authorizer would read it as roborev's. A human in the loop is
 not a channel separation; it is the same shared channel with a slower parser. So the
 prompt is read for the STRUCTURAL fact it reports, never as proof of its own provenance.
-The TOKEN ACCOUNTING has the opposite property: it is recorded BY THE DAEMON and nothing
-the reviewed branch can write changes it, so it CORROBORATES where the prompt cannot — it
-is NOT a mere fallback for a missing prompt. The two are COMPLEMENTARY rather than ranked:
-where both exist an authorizer should want both, and a request offering only one should
-say which is missing and why.
+THE TOKEN ACCOUNTING IS DAEMON-RECORDED BUT NOT INDEPENDENT, AND IT DOES NOT ESTABLISH
+DELIVERY EITHER. The RECORD is authentic — the daemon writes the counts and the reviewed
+branch cannot rewrite them. Their VALUE is a different claim: the counts measure THE
+PROMPT, and the prompt embeds repository-controlled content, so a branch influences their
+MAGNITUDE without forging anything. That bites exactly where the counts are used — the
+vacuous baseline is about 18.7k input / 0 cached, so padding non-diff prompt content can
+make a review that never received the diff look token-rich. So NEITHER SIGNAL ESTABLISHES
+PROVENANCE, and the two are NOT INDEPENDENT: both are functions of the same
+repository-influenced prompt. The prompt still LEADS and a request should still lead with
+it, with the counts read ALONGSIDE it as a consistency check — never as unforgeable
+corroboration. What evidence SHOULD be required before granting is an OPEN QUESTION,
+PENDING on #3654, and is deliberately not settled here.
 
 THIS RESURRECTS NOTHING OF THE DELETED DELIVERY CLASSIFIER, and the distinction is
 load-bearing rather than a caveat. The classifier failed because it inferred delivery

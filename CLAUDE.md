@@ -1394,10 +1394,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   repository-controlled content at positions indistinguishable from roborev's own text, so a
   reviewed branch can carry text MIMICKING that delivery wording — a human in the loop is not a
   channel separation, it is the same shared channel with a slower parser — so the prompt is read for
-  the STRUCTURAL fact it reports, never as proof of its own provenance. The **token accounting has
-  the opposite property**: recorded BY THE DAEMON, unwritable by the reviewed branch, so it
-  CORROBORATES where the prompt cannot and is **not a mere fallback**. The two are COMPLEMENTARY,
-  not ranked — where both exist an authorizer should want both. **It resurrects nothing of the deleted delivery classifier,
+  the STRUCTURAL fact it reports, never as proof of its own provenance. The **token accounting is
+  DAEMON-RECORDED BUT NOT INDEPENDENT, and it does not establish delivery either**: the RECORD is
+  authentic (the branch cannot rewrite it), but the counts measure THE PROMPT, and the prompt embeds
+  repository-controlled content — so a branch influences their MAGNITUDE without forging anything.
+  That bites where the counts are used: the vacuous baseline is ~18.7k input / 0 cached, so padding
+  non-diff prompt content can make a review that received NO diff look token-rich. **NEITHER SIGNAL
+  ESTABLISHES PROVENANCE, and they are NOT INDEPENDENT** — both are functions of the same
+  repository-influenced prompt. The prompt still LEADS; the counts are read ALONGSIDE it as a
+  consistency check, never as unforgeable corroboration. What evidence SHOULD be required before
+  granting is an OPEN QUESTION, PENDING on #3654 (an earlier revision of this paragraph asserted the
+  counts were unwritable-and-therefore-corroborating; that was false in the half that mattered). **It resurrects nothing of the deleted delivery classifier,
   and that distinction is load-bearing rather than a caveat:** the classifier read injectable prompt
   text AT DECISION TIME to produce an AUTOMATED verdict, while this is a HUMAN reading a STORED
   record as evidence for a HAND-GRANTED waiver — there is no automated verdict to spoof. Nothing in

@@ -316,11 +316,16 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    roborev's own text, so a reviewed branch can carry text *mimicking* that delivery wording and an
    authorizer would read it as roborev's — a human in the loop is not a channel separation, it is the same
    shared channel with a slower parser. So the prompt is read for the **structural fact** it reports, never
-   as proof of its own provenance. The **token accounting has the opposite property**: it is recorded **by
-   the daemon** and nothing the reviewed branch can write changes it, so it **corroborates** where the
-   prompt cannot — it is *not* a mere fallback for a missing prompt. The two are **complementary, not
-   ranked**: where both exist an authorizer should want both, and a request offering only one should say
-   which is missing and why. **It resurrects nothing of the deleted delivery classifier, and that distinction is
+   as proof of its own provenance. The **token accounting is daemon-recorded but not independent, and
+   it does not establish delivery either**: the *record* is authentic (the branch cannot rewrite it), but
+   the counts measure **the prompt**, and the prompt embeds repository-controlled content — so a branch
+   influences their *magnitude* without forging anything. That bites exactly where the counts are used:
+   the vacuous baseline is ~18.7k input / 0 cached, so padding non-diff prompt content can make a review
+   that received **no diff** look token-rich. **Neither signal establishes provenance, and the two are not
+   independent** — both are functions of the same repository-influenced prompt. The prompt still *leads*,
+   and a request should still lead with it, with the counts read *alongside* it as a consistency check —
+   never as unforgeable corroboration. What evidence *should* be required before granting is an **open
+   question, pending on #3654**, and is deliberately not settled here. **It resurrects nothing of the deleted delivery classifier, and that distinction is
    load-bearing rather than a caveat:** the classifier read injectable prompt text *at decision time* to
    produce an **automated verdict**, while this is a **human** reading a **stored record** as evidence for a
    **hand-granted** waiver — there is no automated verdict to spoof. Nothing in the wrapper parses the
