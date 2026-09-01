@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (229 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (261 cases).**
       Seconds, `python3` only, no rig and no root, so there is no excuse for
       skipping it — and it is the cheapest step in this runbook by four orders of
       magnitude. It drives every fail-closed guard with the bad input that guard
@@ -364,7 +364,7 @@ bash ab-throughput.sh \
   --corpus   /data/ab-3649/corpus/sstables \
   --ticket-template ./corpus/ticket.json \
   --work-dir /data/ab-3649/measure-single \
-  --ramp 1 --replicates 7 --step-duration 60s \
+  --ramp 1 --replicates 8 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3 \
   --rows-declared <the corpus row count you recorded> \
@@ -379,7 +379,7 @@ bash ab-throughput.sh \
   --corpus   /data/ab-3649/corpus/sstables \
   --ticket-template ./corpus/ticket.json \
   --work-dir /data/ab-3649/measure-util \
-  --ramp 1,2,4,8 --replicates 7 --step-duration 60s \
+  --ramp 1,2,4,8 --replicates 8 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3 \
   --rows-declared <the corpus row count you recorded> \
@@ -439,6 +439,17 @@ ramp topping out above the requested pin, and dies on any shed at single-stream
 concurrency. So the thing corroboration guards against is separately caught; what
 a `NOT-OBSERVED` run costs you is the independent confirmation, and the report
 says so rather than quietly reducing to the one value it did see.
+
+**Prefer an EVEN `--replicates`.** The within-pair order alternates with
+replicate parity — base first on odd replicates, head first on even — because
+interleaving *across* replicates controls drift between pairs but does nothing
+about a gradient *within* one: if base always ran first, a thermal ramp or a
+neighbour's job starting mid-pair would land on the head arm every single time
+and bias every ratio in the same direction, arriving with a tight interval, which
+is worse than a noisy one. An even count runs each ordering exactly half the
+time; an odd count leaves one pair unbalanced, and the analyzer discloses that
+residual on a `COUNTERBALANCE` line rather than hiding it. **8 is the
+recommendation**; 7 is fine if time is short, with the residual reported.
 
 **On `--replicates` — the floor is 5, and the reason is arithmetic, not taste.**
 
@@ -699,7 +710,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     229 deterministic cases + a case floor; run it first
+  selftest-analyze.sh     261 deterministic cases + a case floor; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

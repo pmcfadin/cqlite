@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 229 deterministic cases over synthetic fixtures, with a case floor |
+| `selftest-analyze.sh` | 261 deterministic cases over synthetic fixtures, with a case floor |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,42 @@ session, not by this lane.
 
 ---
 
-## 9. The second lesson: a parameter accepted without being checked against the claim
+## 9. The third lesson: the dangerous defect is the one no test would have failed on
+
+Round 3's headline finding was that **every pair ran BASE before HEAD**.
+Interleaving across replicates — which the design called for and which was
+implemented correctly — controls drift *between* pairs. It does nothing about a
+gradient *within* one, and a monotonic drift over the ~2 minutes of a pair (a
+thermal ramp, a clock adjustment, a neighbour's job starting) lands on the second
+arm in **every** pair. That is a systematic bias in the exact estimator the paired
+design exists to de-bias, and it would have arrived **with a tight confidence
+interval**, which is worse than a noisy one because it looks trustworthy.
+
+Two things about it are worth keeping.
+
+**It would have produced a confident wrong answer, and no test would have
+failed.** Every statistical case would still pass; the analyzer would still
+render `MEETS-TARGET`; the self-test tally would still read green. There is no
+coverage metric that finds this — only someone asking what the design controls
+for and what it does not.
+
+**And the rule was, at the time, the one piece of driver logic nothing executed**
+— three lines inline in a session loop that needs a rig. So the fix is not only
+to alternate the order but to move the rule into `ab_driver_support.py`, where the
+self-test runs it and RED-verifies it: reverting it to always-base-first now reds
+two cases. That is round 1's lesson applied to the highest-stakes line in the
+file, and the ordering principle worth carrying is: **of the code you cannot
+easily test, find the part whose failure is a wrong ANSWER rather than an ERROR,
+and make that part executable first.**
+
+The counterbalancing is also **counted from the record, not assumed from the
+rule**: each run stores the position it actually ran in, and the analyzer refuses
+a session where the counts differ by more than the one pair an odd replicate
+count forces.
+
+---
+
+## 10. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -345,7 +380,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 10. The first lesson: a green suite over an unexecuted subject
+## 11. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
