@@ -5951,8 +5951,13 @@ reset_stub
 STUB_ANNOUNCE_SHA="$jm_head"
 run_wrapper "$jm_work"
 assert_verdict 'case (jm3) an unrecorded daemon never fails a clean run' PASS 0
-assert_says 'case (jm3) the state is affirmative and names the payload that carries the field' \
-  "^job-machine: NOT RECORDED \(a job record was read but carries no source_machine_id; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not\. Identify the review by the record's git_ref, never by the id alone\)$"
+# THE CAUSE IS THE ONE THIS RUN MEASURED, not a generic sentence: the record was read, the daemon's
+# list for the job's OWN branch was consulted, and neither carried the field. Asserted with the tail
+# that names WHICH payload carries it, because a cause without a remedy is half a diagnostic.
+assert_says 'case (jm3) the state names the cause it actually measured' \
+  "^job-machine: NOT RECORDED \(neither the job record nor the daemon's job list for branch 'feature' carries source_machine_id;"
+assert_says 'case (jm3) and still names the payload that DOES carry the field' \
+  "'roborev list --json' rows carry that field, 'roborev show <id> --json' does not\. Identify the review by the record's git_ref, never by the id alone\)$"
 assert_lacks 'case (jm3) the key is never blank' '^job-machine: *$'
 jm_seen_not_recorded=$(jm_render)
 reset_stub
