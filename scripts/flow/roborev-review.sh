@@ -511,8 +511,11 @@ git_ref MUST equal the marker's <base40>..<head40>. THREE TRAPS IN THOSE COMMAND
 measured on roborev v0.61.2: (1) 'show <id> --json' NESTS git_ref/status/token_usage
 under '.job' and does not carry source_machine_id ANYWHERE, so a top-level jq over that
 payload prints nulls for all four — a check whose output cannot show what it claims;
-(2) 'roborev list' filters by the CURRENT BRANCH by default, so pass --branch explicitly
-or a correct query returns null; (3) the TOP-LEVEL 'id' of a 'show' payload is the REVIEW
+(2) 'roborev list' defaults its branch filter to the CURRENT HEAD OF THE --repo PATH —
+NOT to the branch your shell is standing in (measured: from a cwd that is not a git
+repository at all, '--repo <lane>' returns that lane's branch's rows) — so pass --branch
+explicitly whenever that checkout is not on the job's branch, which is exactly the
+'--recheck-job' case, or a correct query returns null; (3) the TOP-LEVEL 'id' of a 'show' payload is the REVIEW
 row's own sequence and is NOT necessarily the job you asked for — measured over ten
 records, asking for 9 returns id=8 with job_id=9 and job.id=9. So read '.job' (or
 'job_id'), never the top-level 'id', or the answer manufactures exactly the "is this the
@@ -1385,15 +1388,16 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
     local json=""
     case "$payload" in
       show) json=$(roborev show "$1" --json 2>/dev/null || printf '') ;;
-      # ===== THIS READ IS CURRENT-BRANCH-SCOPED, AND DELIBERATELY UNCHANGED (#3654) =====
-      # `roborev list` defaults to "the current repo AND branch" (measured: a bare
-      # `roborev list --json`, and the form below, both return `null` from a branch with no jobs,
-      # while adding `--branch <other>` returns that branch's rows). It is correct here BY
-      # CONSTRUCTION — the wrapper enqueued the review FOR this branch, so the record it is looking
-      # for is on it — and it must NOT grow a `--branch` here: `sha-assert` depends on this read,
-      # and naming the branch is behaviour-neutral only while the invoking cwd's branch equals
-      # `$BRANCH`. Changing it is a separate question from #3654. The supplementary machine read
-      # below is a NEW read and does name the branch; the difference is deliberate and documented there.
+      # ===== THIS READ IS BRANCH-SCOPED BY DEFAULT, AND DELIBERATELY UNCHANGED (#3654) =====
+      # `roborev list` filters by branch, and its DEFAULT follows the CURRENT HEAD OF THE `--repo`
+      # PATH — not the branch the invoking shell is standing in (measured: from a cwd that is not a
+      # git repository at all, `--repo <lane>` returns that lane's branch's rows, and the same
+      # `--repo` run from another lane returns those same rows). It is correct here BY CONSTRUCTION
+      # for the ordinary case — the wrapper enqueued the review for the `--repo` checkout's own
+      # branch — and it must NOT grow a `--branch` here: `sha-assert` depends on this read, and
+      # changing what it selects is a separate question from #3654. The supplementary machine read
+      # below is a NEW read and scopes to the RECORD's own branch; that difference is deliberate and
+      # documented there, and it is what makes the key work on the recheck path.
       list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
     esac
     extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE" || continue
@@ -1433,8 +1437,9 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
 # says so affirmatively.
 #
 # IT IS SCOPED TO THE RECORD'S OWN BRANCH, NOT TO THE AMBIENT ONE (#3654 round 2). `roborev list`
-# is BRANCH-FILTERED, and `$BRANCH` is merely the branch this invocation is running on — so scoping
-# by it answers about a DIFFERENT branch whenever the job was enqueued under another name, and
+# is BRANCH-FILTERED and its default follows the CURRENT HEAD OF THE `--repo` PATH; `$BRANCH` is
+# read from that same HEAD, so both name the branch the CHECKOUT is on and neither names the JOB's
+# — so scoping by it answers about a DIFFERENT branch whenever the job was enqueued elsewhere, and
 # `--recheck-job` is exactly where that happens (an older job, a renamed or rebased lane). That
 # would have rendered `NOT RECORDED` for a record that HAS a `source_machine_id`, silently defeating
 # the operator mitigation this key exists for — the documented "compare `job-machine:` between the
@@ -1470,7 +1475,7 @@ read_machine_fact() { # read_machine_fact <job> -> sets JOB_MACHINE_ID | JOB_MAC
   if [ -n "$id" ]; then JOB_MACHINE_ID="$id"; return 0; fi
   job_branch=$(fact branch)
   if [ -z "$job_branch" ]; then
-    JOB_MACHINE_MISS="the job record does not name its own branch, and the daemon's job list is branch-filtered, so the lookup could not be scoped to this job; it was deliberately NOT retried against the branch this invocation is on, which would answer about a different branch"
+    JOB_MACHINE_MISS="the job record does not name its own branch, and the daemon's job list is branch-filtered, so the lookup could not be scoped to this job; it was deliberately NOT retried against the branch this invocation is on, which would answer about a different branch than the job's"
     return 1
   fi
   json=$(roborev list --json --limit 50 --repo "$REPO" --branch "$job_branch" 2>/dev/null || printf '')

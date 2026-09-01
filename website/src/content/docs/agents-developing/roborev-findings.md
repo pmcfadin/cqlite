@@ -338,7 +338,8 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    # git_ref / status / token_usage are NESTED under .job on this payload:
    roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
    # the issuing daemon is on the LIST row — `show --json` carries source_machine_id NOWHERE.
-   # `roborev list` filters by the CURRENT BRANCH by default, so name it:
+   # `roborev list` defaults its branch filter to the --repo path's CURRENT HEAD, not to the
+   # branch your shell is on — so name --branch when that checkout is not on the job's branch:
    roborev list --json --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref}'
    ```
 

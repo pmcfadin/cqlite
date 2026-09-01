@@ -1412,7 +1412,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   never the id alone** — `roborev show <id> --json | jq '.job | {id, git_ref, branch, status,
   token_usage}'`, because `show` NESTS those fields under `.job` and carries `source_machine_id`
   NOWHERE, while `roborev list --json --repo <abs> --branch <branch>` rows carry the daemon id and
-  `list` filters by the CURRENT BRANCH by default. **Read `.job`, never a `show` payload's TOP-LEVEL
+  `list`'s default branch filter follows the **`--repo` PATH's CURRENT HEAD**, not the branch your
+  shell is standing in — so name `--branch` whenever that checkout is not on the job's branch, which
+  is exactly the `--recheck-job` case. (The earlier claim here, "filters by the CURRENT BRANCH",
+  meant the cwd's and was FALSE: its evidence was a `null` from a `--repo` sitting on `main`, which
+  both readings explain identically — a probe whose output cannot distinguish what it asserts.) **Read `.job`, never a `show` payload's TOP-LEVEL
   `id`**: that is the REVIEW row's own sequence and need not be the job you asked for (measured over
   ten records — asking for 9 returns `id=8`, `job_id=9`, `job.id=9`), so a top-level jq manufactures
   the very "is this the right review?" doubt the check exists to remove. The wrapper is unaffected —

@@ -6131,8 +6131,8 @@ assert_says 'case (jm10) --help reads the daemon id from the LIST payload' \
   "roborev list --json --repo <abs-repo> --branch <branch>"
 assert_lacks 'case (jm10) --help does NOT prescribe the top-level jq that measures nulls' \
   "show <id> --json \| jq '\{id, git_ref"
-assert_says 'case (jm10) --help warns that list defaults to the current branch' \
-  'filters by the CURRENT BRANCH by default'
+assert_says 'case (jm10) --help warns that the list default follows the --repo HEAD, not the shell' \
+  'defaults its branch filter to the CURRENT HEAD OF THE --repo PATH'
 assert_says 'case (jm10) --help states that a local row count proves nothing' \
   'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
 assert_says 'case (jm10) --help names the failure class the row count belongs to' \
@@ -6278,11 +6278,14 @@ else
 fi
 
 printf '== (jm12) #3654 structural: the supplementary machine read NAMES THE BRANCH ==\n'
-# `roborev list` filters by the CURRENT BRANCH by default (measured: a bare list from a branch with
-# no jobs returns null, while --branch <other> returns that branch's rows), and this wrapper is
-# invoked from arbitrary directories with an explicit --repo. A default-scoped machine read would
-# therefore resolve NOTHING whenever the invoking cwd's branch is not the branch under review, and
-# `job-machine:` would read NOT RECORDED for a reason having nothing to do with the record — a key
+# `roborev list` is BRANCH-FILTERED, and its default follows the CURRENT HEAD OF THE `--repo` PATH
+# — measured: from a cwd that is not a git repository at all, `--repo <lane>` returns that lane's
+# branch's rows, and the same `--repo` run from a different lane's branch returns the same rows. So
+# the default is `$BRANCH` (read from that same HEAD), which is the branch the CHECKOUT is on and
+# NOT the job's. The two diverge on exactly the path this key is documented for: a `--recheck-job`
+# of an older job, a renamed or rebased lane, or a checkout since moved on. A default-scoped or
+# `$BRANCH`-scoped machine read then resolves NOTHING for a record that HAS a source_machine_id,
+# and `job-machine:` reads NOT RECORDED for a reason having nothing to do with the record — a key
 # that can only ever report absence. Only a structural assert pins this: every hermetic case runs
 # with the fixture branch checked out, so the stub answers either way.
 _jm_supp=$(sed -n '/^read_machine_fact() {/,/^}/p' "$WRAPPER_REAL")
