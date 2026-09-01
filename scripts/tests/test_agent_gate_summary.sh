@@ -5102,11 +5102,16 @@ if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/
   # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
   # than a bare N — a bare zero in a gate log reads as a verified all-clear.
   fm_census=$(grep -E '^census: ' "$fm_sum" | head -1)
+  # The line carries STATE buckets (which name no status) and STATUS-DERIVED figures. The
+  # `VACUOUS (RECOGNISED)` heading this used to require is GONE on purpose (#3625, roborev
+  # job 371 + sweep): it was a STATUS word counted from the ZERO STATE, and a shipping mode
+  # already emitted a `VACUOUS` row beside `0 VACUOUS`. The state bucket is now
+  # `measured-ZERO` and the status figure is counted from the observed status.
   case "$fm_census" in
-    *'AFFIRMED a count'*'DECLARED-GAP (RECOGNISED)'*'NOT-MEASURED (RECOGNISED)'*'VACUOUS (RECOGNISED)'*'NON-EXHAUSTIVE'*)
-      ok "3625-census-block: the block carries ONE aggregate census line declaring its own non-exhaustiveness" ;;
+    *'AFFIRMED a count'*'DECLARED-GAP (RECOGNISED)'*'NOT-MEASURED (RECOGNISED)'*'measured-ZERO (RECOGNISED)'*'not-applicable (component did not PASS)'*'no-subject (PASSed'*'carry a VACUOUS status'*'NON-EXHAUSTIVE'*)
+      ok "3625-census-block: the block carries ONE aggregate census line whose status-naming qualifiers are DERIVED (not-applicable/did-not-PASS vs no-subject/PASSed, and a VACUOUS count from the status), declaring its own non-exhaustiveness" ;;
     '') bad "3625-census-block: no 'census:' aggregate line in the emitted block" ;;
-    *)  bad "3625-census-block: the census line does not carry the required RECOGNISED/NON-EXHAUSTIVE wording: $fm_census" ;;
+    *)  bad "3625-census-block: the census line does not carry the required RECOGNISED / status-derived / NON-EXHAUSTIVE wording: $fm_census" ;;
   esac
   if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"

@@ -655,11 +655,12 @@ fi
 LOG_DIR="$tmp/agglogs"; mkdir -p "$LOG_DIR"
 _census_write alpha 'COUNT 9 tests passed'
 _census_write beta  'ZERO tests'
-NAMES=(alpha beta fmt format-compat)   # fmt = declared gap; format-compat = no record
-agg=$(census_summary_line "${NAMES[@]}")
+# name/STATUS pairs since #3625/job 371 — see section (Q) for why every status-naming
+# qualifier has to come from the status rather than from the census state.
+agg=$(census_summary_line alpha PASS beta VACUOUS fmt PASS format-compat PASS)
 case "$agg" in
-  'census: 1/4 components AFFIRMED a count; 1 DECLARED-GAP (RECOGNISED); 1 NOT-MEASURED (RECOGNISED); 1 VACUOUS (RECOGNISED);'*'NON-EXHAUSTIVE'*)
-    ok "G1: the aggregate line counts each class separately and reports every non-affirmed class as 'N RECOGNISED'" ;;
+  'census: 1/4 components AFFIRMED a count; 1 DECLARED-GAP (RECOGNISED); 1 NOT-MEASURED (RECOGNISED); 1 measured-ZERO (RECOGNISED);'*'1 row(s) carry a VACUOUS status.'*'NON-EXHAUSTIVE'*)
+    ok "G1: the aggregate line counts each class separately, reports every non-affirmed class as 'N RECOGNISED', and reports the VACUOUS count from the STATUS beside the measured-ZERO state" ;;
   *) bad "G1: got '$agg'" ;;
 esac
 case "$agg" in
@@ -667,10 +668,9 @@ case "$agg" in
     ok "G2: the aggregate line DECLARES its own non-exhaustiveness, so it cannot be read as a verified all-clear" ;;
   *) bad "G2: the aggregate line does not declare its non-exhaustiveness: $agg" ;;
 esac
-NAMES=(fmt)
-agg0=$(census_summary_line "${NAMES[@]}")
+agg0=$(census_summary_line fmt PASS)
 case "$agg0" in
-  *'0 NOT-MEASURED (RECOGNISED)'*'0 VACUOUS (RECOGNISED)'*)
+  *'0 NOT-MEASURED (RECOGNISED)'*'0 measured-ZERO (RECOGNISED)'*)
     ok "G3: a zero class renders '0 ... (RECOGNISED)', never a bare 0 — a bare zero in a gate log reads as a verified all-clear from a scan that is documented as incomplete" ;;
   *) bad "G3: got '$agg0'" ;;
 esac
@@ -1155,6 +1155,166 @@ if [ "$p_fin" -ge 100 ]; then
 else
   bad "P3: only $p_fin progress line(s) print RECORDED_STATUS; the rewrite did not reach every caller"
 fi
+# ---------------------------------------------------------------------------
+# (Q) THE LABEL SWEEP — roborev job 371, and the class it belongs to.
+#
+# FOUR findings across three rounds were ONE shape: a census label or count asserting
+# something the component row contradicts.
+#   1. the progress line printed PASS while the SUMMARY said VACUOUS               (job 368)
+#   2. a FAILing gap: component counted under DECLARED-GAP, not not-applicable  (audit LOW 1)
+#   3. NOT-APPLICABLE labelled `(SKIP/FAIL)` on a row that PASSes                 (job 371)
+#   4. the ZERO state counted under the heading `VACUOUS` — a STATUS word derived from a
+#      STATE. NOT cited: found by sweeping for siblings of 3, and reproduced in a SHIPPING
+#      mode (`--lite-aggregate-selftest` emitted `fmt: VACUOUS (0s)` beside
+#      `0 VACUOUS (RECOGNISED)`).
+#
+# THE RULE: a label may name a STATUS only if it was DERIVED from the observed status.
+# `census_summary_line` therefore takes name/STATUS PAIRS; before job 371 it took names
+# alone, so every status word in it was necessarily an assumption about which statuses
+# reach a given state.
+#
+# THIS SECTION IS THE SWEEP AS AN EXECUTABLE TABLE. It drives EVERY (status x census-state)
+# pair through the real aggregate and the real per-row renderer, and asserts of each that
+# no rendered word contradicts the status. That is what makes the class closed mechanically
+# rather than by my reading of it — a NEW state or a NEW label joins the table or it fails
+# the count floor below.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/sweeplogs"; mkdir -p "$LOG_DIR"
+q_bad=()
+q_n=0
+# <status>|<census record>|<expected aggregate field the row must land in>
+for spec in \
+  'PASS|COUNT 12 tests passed|AFFIRMED' \
+  'PASS|GAP nothing derivable here|DECLARED-GAP' \
+  'PASS|NOT-MEASURED could not read the log|NOT-MEASURED' \
+  'PASS|NOT-APPLICABLE the diff routed to no rust package and no python tier|no-subject' \
+  'VACUOUS|ZERO tests|measured-ZERO' \
+  'FAIL|NOT-APPLICABLE component ended FAIL, so there is no PASS to affirm|not-applicable' \
+  'SKIP|NOT-APPLICABLE component ended SKIP, so there is no PASS to affirm|not-applicable' \
+  'FAIL|UNDECLARED no census kind is declared|UNDECLARED' \
+  'SKIP|UNDECLARED no census kind is declared|UNDECLARED' \
+  'FAIL|WHATEVER an unplanned token|unrecognised' \
+  'VACUOUS|NOT-MEASURED no census record was written|NOT-MEASURED' \
+  ; do
+  q_n=$((q_n + 1))
+  q_st=${spec%%|*}; q_rest=${spec#*|}; q_rec=${q_rest%|*}; q_want=${q_rest##*|}
+  _census_write sweep-subject "$q_rec"
+  q_line=$(census_summary_line sweep-subject "$q_st")
+  # The expected bucket must hold exactly 1, and the OTHER status-derived buckets must
+  # hold 0 — a label that fires for two different pairs is the defect, not the count.
+  case "$q_want" in
+    AFFIRMED)       q_got=$(printf '%s' "$q_line" | sed -n 's/^census: \([0-9]*\)\/1 .*/\1/p') ;;
+    DECLARED-GAP)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) DECLARED-GAP .*/\1/p') ;;
+    NOT-MEASURED)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) NOT-MEASURED (RECOGNISED).*/\1/p') ;;
+    measured-ZERO)  q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) measured-ZERO .*/\1/p') ;;
+    not-applicable) q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p') ;;
+    no-subject)     q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p') ;;
+    UNDECLARED)     q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) UNDECLARED;.*/\1/p') ;;
+    unrecognised)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) unrecognised;.*/\1/p') ;;
+    *)              q_got="(no extractor for $q_want)" ;;
+  esac
+  [ "$q_got" = 1 ] || q_bad+=("[$q_st / ${q_rec%% *}] expected 1 in '$q_want', got '$q_got'")
+  # THE STATUS-DERIVED FIGURES must track the STATUS, never the state.
+  q_vac=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) row(s) carry a VACUOUS status.*/\1/p')
+  if [ "$q_st" = VACUOUS ]; then
+    [ "$q_vac" = 1 ] || q_bad+=("[$q_st / ${q_rec%% *}] a VACUOUS row was counted as '$q_vac' VACUOUS")
+  else
+    [ "$q_vac" = 0 ] || q_bad+=("[$q_st / ${q_rec%% *}] a non-VACUOUS row was counted as '$q_vac' VACUOUS")
+  fi
+  # …and no rendered word may assert the WRONG status. The two directions that bit:
+  q_np=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p')
+  q_ns=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p')
+  if [ "$q_st" = PASS ] && [ "$q_np" != 0 ]; then
+    q_bad+=("[$q_st / ${q_rec%% *}] a PASSing row was counted as 'did not PASS'")
+  fi
+  if [ "$q_st" != PASS ] && [ "$q_ns" != 0 ]; then
+    q_bad+=("[$q_st / ${q_rec%% *}] a non-PASSing row was counted as 'PASSed'")
+  fi
+  # EVERY ROW LANDS IN EXACTLY ONE STATE BUCKET: the seven must sum to N, or a row is
+  # being double-counted or silently dropped. Each field is extracted on its OWN — a single
+  # whole-line regex would fail as a unit on any wording change and report "could not
+  # extract" for all seven, which says nothing about which one moved.
+  # EXPLICIT per-field extractors, not a regex built from the label text: escaping a
+  # label containing `(` into a sed program is a second grammar to get wrong, and it was
+  # (`Unmatched \(`). One hand-written pattern per field, each naming its own field.
+  q_tot=0
+  q_missing=""
+  _qf() { # _qf <label> <sed-program>
+    local v
+    v=$(printf '%s' "$q_line" | sed -n "$2")
+    case "$v" in
+      ''|*[!0-9]*) q_missing="$q_missing '$1'" ;;
+      *)           q_tot=$(( q_tot + v )) ;;
+    esac
+  }
+  _qf 'AFFIRMED'       's/^census: \([0-9][0-9]*\)\/.*/\1/p'
+  _qf 'DECLARED-GAP'   's/.*; \([0-9][0-9]*\) DECLARED-GAP .*/\1/p'
+  _qf 'NOT-MEASURED'   's/.*; \([0-9][0-9]*\) NOT-MEASURED (RECOGNISED).*/\1/p'
+  _qf 'measured-ZERO'  's/.*; \([0-9][0-9]*\) measured-ZERO .*/\1/p'
+  _qf 'not-applicable' 's/.*; \([0-9][0-9]*\) not-applicable (component did not PASS).*/\1/p'
+  _qf 'no-subject'     's/.*; \([0-9][0-9]*\) no-subject (PASSed.*/\1/p'
+  _qf 'UNDECLARED'     's/.*; \([0-9][0-9]*\) UNDECLARED;.*/\1/p'
+  _qf 'unrecognised'   's/.*; \([0-9][0-9]*\) unrecognised;.*/\1/p'
+  if [ -n "$q_missing" ]; then
+    q_bad+=("[$q_st / ${q_rec%% *}] these aggregate fields could not be read, so the bucket sum measured nothing:$q_missing")
+  elif [ "$q_tot" != 1 ]; then
+    q_bad+=("[$q_st / ${q_rec%% *}] the state buckets sum to $q_tot, not 1 — a row is double-counted or dropped")
+  fi
+  # THE PER-ROW SUFFIX MUST NOT ASSERT A STATUS THE ROW DOES NOT HAVE. A bare scan for
+  # status WORDS is the wrong instrument and was tried: `{no census: component ended FAIL,
+  # so there is no PASS to affirm}` legitimately contains "PASS", and a guard that reds on
+  # correct prose is the guard agents learn to waive. What IS checkable is the one place
+  # the suffix makes a status CLAIM — `component ended <X>` — which must name the row's own
+  # status, because it is derived from it.
+  q_ann=$(_census_annotate sweep-subject)
+  case "$q_ann" in
+    *'component ended '*)
+      q_claim=$(printf '%s' "$q_ann" | sed -n 's/.*component ended \([A-Z][A-Z-]*\).*/\1/p')
+      [ "$q_claim" = "$q_st" ] || q_bad+=("[$q_st / ${q_rec%% *}] the row suffix CLAIMS 'component ended $q_claim' on a $q_st row") ;;
+  esac
+done
+if [ "$q_n" -ne 11 ]; then
+  bad "Q1: only $q_n of the 11 (status x census-state) pairs were exercised — the sweep table is not iterating, so a green here would certify nothing"
+elif [ "${#q_bad[@]}" -eq 0 ]; then
+  ok "Q1 (the sweep): all $q_n (status x census-state) pairs land in exactly ONE state bucket, the buckets sum to N, every status-naming qualifier tracks the OBSERVED status, and no per-row suffix names a foreign status"
+else
+  bad "Q1: ${q_bad[*]}"
+fi
+# `_census_kind` must not have grown a state the sweep does not cover. DERIVED from the
+# renderer, so a new census state cannot join without joining this table.
+q_states=$(sed -n '/^_census_annotate() {/,/^}$/p' "$GATE" \
+  | sed -n 's/^[[:space:]]*\(COUNT\|ZERO\|NOT-MEASURED\|GAP\|NOT-APPLICABLE\|UNDECLARED\)).*/\1/p' | sort -u | grep -c .)
+if [ "$q_states" -eq 6 ]; then
+  ok "Q2: the renderer knows exactly the 6 census states this sweep enumerates (COUNT, ZERO, NOT-MEASURED, GAP, NOT-APPLICABLE, UNDECLARED) plus its unrecognised catch-all"
+else
+  bad "Q2: _census_annotate renders $q_states named states, not the 6 the sweep covers — a state was added or removed without joining the table"
+fi
+# THE AGGREGATE TAKES THE STATUS. Structural, because a call site that reverted to
+# names-only would silently make every status qualifier an assumption again — and the
+# ODD-argument refusal is what turns such a site into a loud failure rather than a
+# dropped row.
+q_sites=$(grep -cE '^[^#]*census_summary_line ' "$GATE")
+q_zips=$(grep -cF 'for _ci in "${!' "$GATE")
+if [ "$q_sites" -ge 7 ] && [ "$q_zips" -ge 6 ]; then
+  ok "Q3: $q_sites aggregate emit sites, $q_zips of them zipping name/STATUS pairs (the boundary printer collects its pairs inline) — no site passes names alone"
+else
+  bad "Q3: $q_sites emit site(s) and $q_zips zip(s) — a site may be passing names without statuses"
+fi
+case "$(census_summary_line lonely-name)" in
+  'census: MALFORMED'*'ODD argument count (1)'*)
+    ok "Q4: an ODD argument count is a NAMED refusal — a call site that forgot to zip its statuses fails loudly instead of emitting a line that silently omits a row" ;;
+  *) bad "Q4: got '$(census_summary_line lonely-name)'" ;;
+esac
+# The KEYS-expansion guard, pinned because getting it wrong is SILENT AND CATASTROPHIC and
+# I reproduced it in this very change: `"${!arr[@]+...}"` is read by bash as INDIRECT
+# expansion ("invalid variable name") and ABANDONS the enclosing block — written that way,
+# `--emit-summary-selftest` fell straight through into a REAL 37-component gate. The
+# repository already documented this at run_delta's own keys loop.
+if grep -qF 'for _ci in "${!' "$GATE" && ! grep -qE '^[^#]*for _ci in "\$\{!(NAMES|DN)\[@\]\+' "$GATE"; then
+  ok "Q5: every census zip guards its KEYS expansion with a count check, never the '+' idiom (which bash reads as indirect expansion and which silently abandons the enclosing block)"
+else
+  bad "Q5: a census zip uses the '+' guard on a KEYS expansion — that aborts the block it is in"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1162,7 +1322,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=68
+CENSUS_CASE_FLOOR=72
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
