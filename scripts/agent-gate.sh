@@ -11998,6 +11998,14 @@ run_compaction_byte_parity() {
 # falls back to the in-repo committed fixture when CQLITE_DATASETS_ROOT names a corpus
 # that lacks it. Under the previous keyspace-granular resolution the case skipped.
 #
+# Fourth invocation — scripts/tests/test_issue_3358_failclosed.sh (#3731/#3220 AC3), the
+# same positive control for the OTHER committed-fixture BTI lane,
+# issue_3358_bti_query_token_bound. Its #3220 hardening recorded the RED verification as
+# measurements in a PR comment, which proves a guard fired once and regression-protects
+# nothing: a run with the fixture PRESENT is identical whether or not `fixture()` still
+# fails closed. roborev job 252 raised exactly that. Runs HERE for the same reason as the
+# third invocation — it drives a test binary this component's feature set has built.
+#
 # Third invocation — scripts/tests/test_point_vs_full_failclosed.sh (#3220 AC2), the
 # POSITIVE CONTROL for everything above: a green lane proves nothing unless the same
 # lane FAILs on a fixture that is absent from every candidate root AND on one that is
@@ -12027,7 +12035,16 @@ run_bti_multiclustering() {
   # word as the command.
   local -a ds_env=()
   [ -n "${CQLITE_DATASETS_ROOT:-}" ] && ds_env=(CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT")
+  # DECLARES WHAT IT RUNS, because the SUMMARY annotation structurally cannot. That line
+  # is derived from cargo argv observed in THIS shell, and the interceptors are unexported
+  # by design, so the 6 cargo invocations inside the two fail-closed sub-scripts are
+  # invisible to it: the annotation reads `x2` while this component drives 8. Not drift —
+  # `x2` truthfully names what the renderer saw — but a reader pasting the SUMMARY would
+  # not know either harness ran. The narrowing is therefore declared HERE, in the emitted
+  # log, on the same principle as flight-tests printing what it does not execute.
   echo ">>> [$name] compound-clustering BTI trie shape + SELECT + point-vs-full lanes, fail-closed (#3032/#3220)"
+  echo ">>> [$name] + 2 fail-closed positive controls, 6 further cargo runs NOT named by the SUMMARY annotation:"
+  echo ">>> [$name]     test_point_vs_full_failclosed.sh (#3220 AC2), test_issue_3358_failclosed.sh (#3731 AC3)"
   if env CQLITE_REQUIRE_FIXTURES=1 "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test issue_3032_multiclustering_rows_trie_shape \
@@ -12035,7 +12052,8 @@ run_bti_multiclustering() {
     && env -u CQLITE_REQUIRE_FIXTURES "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test point_vs_full_differential >>"$log" 2>&1 \
-    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1; then
+    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1 \
+    && bash "$REPO_ROOT/scripts/tests/test_issue_3358_failclosed.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
