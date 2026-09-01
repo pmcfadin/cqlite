@@ -190,13 +190,24 @@ Two things to read off it:
   and a list is unhashable in the outer set. The error text (`'list'`, not
   `'dict'`) is what identifies the cause.
 - `stn` **succeeds**, contradicting the obvious prediction that a UDT with a
-  `map`-typed field stays unhashable. It does so only because CQLite decodes a
-  collection field inside a frozen UDT as `Value::Blob`, so the field arrives as
-  hashable `bytes` rather than a `dict`. That is a **decode gap** orthogonal to
-  #3504 (the correct value is `{"a": 1}`), pinned as characterization by
-  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`. `Udt.__hash__`
-  does still propagate `TypeError` for a genuinely unhashable field value; no
-  decoder path reaches that today, so it is asserted on a hand-built value.
+  `map`-typed field stays unhashable.
+
+  **AS MEASURED ON #3504** it did so only because CQLite decoded a collection
+  field inside a frozen UDT as `Value::Blob`, so the field arrived as hashable
+  `bytes` rather than a `dict` — a **decode gap** orthogonal to #3504 (the correct
+  value is `{"a": 1}`), pinned as characterization by
+  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`.
+
+  **THAT DECODE GAP IS CLOSED BY #3722** (one UDT-field decoder, total over
+  `CqlType`, no `_ => Value::Blob`), so the field now decodes to `{"a": 1}` and the
+  paragraph above is a record of what was measured then, NOT of current behaviour.
+  `stn` still succeeds, for a DIFFERENT reason that #3722 verified: it is a
+  UDT-bearing set, so `set_to_py` takes its #804 `list` branch and never hashes the
+  `Udt` at all. The characterization pin named above was updated by #3722 — it had
+  promised it would "red HERE, with this comment attached", and it did.
+
+  `Udt.__hash__` does still propagate `TypeError` for a genuinely unhashable field
+  value, and it is asserted on a hand-built value.
 
 The Node binding has no analogous boundary: it builds a real JS `Set`/`Map`,
 which need no hashable projection at all.
