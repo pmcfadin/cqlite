@@ -2207,31 +2207,47 @@ fi
 BINDING_TIMEOUT_SECS=120
 BINDING_KILL_GRACE=5
 
-# run_binding_leg <subcommand> <marker> <args...> — prints the leg's anchored
-# output, and REFUSES on any non-zero exit. 4 and 5 are both refusals: a
-# positive verdict requires a positive measurement, so an UNMEASURED leg is
-# treated as the bad verdict, never as a clearance (#3752).
+# run_binding_leg <subcommand> <marker> <args...> — MEASURES one leg, leaving
+# its anchored report in the global LEG_OUT, and REFUSES on any non-zero exit.
+# 4 and 5 are both refusals: a positive verdict requires a positive
+# measurement, so an UNMEASURED leg is the bad verdict, never a clearance.
+#
+# CALLED DIRECTLY, NEVER INSIDE `$( )`, AND THE RESULT TRAVELS IN A GLOBAL.
+# `exit 2` inside a command substitution exits only the SUBSHELL: the script
+# would then terminate on `set -e` with the SUBSHELL's status (2 by luck, 3 or 5
+# by the same luck on another path), and the leg's anchored report — captured by
+# that same substitution — would be SWALLOWED, under a refusal message that says
+# it is above. Two defects from one shape: a documented exit code that was an
+# accident, and a diagnostic that named evidence it had just discarded.
+#
+# ON THE REFUSAL PATH THE REPORT GOES TO STDERR, beside the refusal block, so
+# the two cannot be separated by a caller redirecting only one of them.
 run_binding_leg() {
   local sub="$1" marker="$2"
   shift 2
-  local out rc bind_to
+  local rc=0 bind_to
+  LEG_OUT=""
+  # `|| rc=$?` IS LOAD-BEARING, NOT STYLE. Under `set -e` a bare
+  # `LEG_OUT=$(cmd)` whose command exits non-zero terminates the script AT THE
+  # ASSIGNMENT, with the leg's own exit code and none of the handling below —
+  # measured: 4 and 5 would both leave the script, never reaching the refusal
+  # block that translates them into the documented exit 2 and prints the report.
+  # An `||` list is one of the contexts `set -e` does not act on.
   if bind_to=$(resolve_advisory_timeout); then
-    out=$("$bind_to" --kill-after="$BINDING_KILL_GRACE" "$BINDING_TIMEOUT_SECS" \
-      bash "$REVIEW_BINDING_TOOL" "$sub" "$@" 2>&1)
-    rc=$?
+    LEG_OUT=$("$bind_to" --kill-after="$BINDING_KILL_GRACE" "$BINDING_TIMEOUT_SECS" \
+      bash "$REVIEW_BINDING_TOOL" "$sub" "$@" 2>&1) || rc=$?
   else
-    out=$(bash "$REVIEW_BINDING_TOOL" "$sub" "$@" 2>&1)
-    rc=$?
-    out="$out
+    LEG_OUT=$(bash "$REVIEW_BINDING_TOOL" "$sub" "$@" 2>&1) || rc=$?
+    LEG_OUT="$LEG_OUT
 PREMERGE: REVIEW-BINDING unbounded no \`timeout\`/\`gtimeout\` supporting --kill-after is on
 PREMERGE: REVIEW-BINDING unbounded PATH, so this leg ran with NO time bound. It is NOT skipped:
 PREMERGE: REVIEW-BINDING unbounded it changes the verdict, and skipping it would be the silent
 PREMERGE: REVIEW-BINDING unbounded hole it exists to close (#3752)."
   fi
-  printf '%s\n' "$out"
   case "$rc" in
     0) return 0 ;;
     3)
+      [ -n "$LEG_OUT" ] && printf '%s\n' "$LEG_OUT" >&2
       printf '========================================================\n' >&2
       printf 'PREMERGE: TOOL-FAILURE\n' >&2
       printf '  premerge-review-binding.sh %s was called wrongly (exit 3).\n' "$sub" >&2
@@ -2240,12 +2256,13 @@ PREMERGE: REVIEW-BINDING unbounded hole it exists to close (#3752)."
       exit 3
       ;;
     *)
+      [ -n "$LEG_OUT" ] && printf '%s\n' "$LEG_OUT" >&2
       printf '========================================================\n' >&2
       printf '%s — REFUSING TO MERGE\n' "$marker" >&2
       printf '  premerge-review-binding.sh %s exited %s.\n' "$sub" "$rc" >&2
-      printf '  Its anchored report is on stdout above; the verdict is on its\n' >&2
-      printf '  `verdict ` line. Exit 4 is an affirmative refusal; exit 5 means the\n' >&2
-      printf '  check could not be measured, which is ALSO a refusal (#3752).\n' >&2
+      printf '  Its anchored report is immediately above (stderr); the verdict is\n' >&2
+      printf '  on its `verdict ` line. Exit 4 is an affirmative refusal; exit 5\n' >&2
+      printf '  means the check could not be measured, which is ALSO a refusal.\n' >&2
       printf '========================================================\n' >&2
       exit 2
       ;;
@@ -2264,12 +2281,13 @@ if [ -z "$REVIEW_BINDING_TOOL" ] || [ ! -f "$REVIEW_BINDING_TOOL" ]; then
   exit 3
 fi
 
-review_binding_out=$(run_binding_leg review-binding 'PREMERGE: REVIEW-UNBOUND' \
-  "$pr" "$repo" "$certified")
+run_binding_leg review-binding 'PREMERGE: REVIEW-UNBOUND' "$pr" "$repo" "$certified"
+review_binding_out="$LEG_OUT"
 
 advisory_out=$(print_base_staleness_advisory)
 
-hold_check_out=$(run_binding_leg hold-check 'PREMERGE: HOLD' "$pr" "$repo")
+run_binding_leg hold-check 'PREMERGE: HOLD' "$pr" "$repo"
+hold_check_out="$LEG_OUT"
 
 # ---------------------------------------------------------------------------
 # PR HEAD + STATE (#2456)

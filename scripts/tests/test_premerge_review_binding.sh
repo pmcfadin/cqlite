@@ -595,6 +595,40 @@ case "$E2E" in
     ok "wiring: the refusal carries its own distinct marker" ;;
   *) bad "wiring: the refusal did not carry the REVIEW-UNBOUND marker (got: $E2E)" ;;
 esac
+# THE REPORT MUST TRAVEL WITH THE REFUSAL, AND THE EXIT CODE MUST BE A DECISION.
+# The first wiring wrapped the leg in a command substitution. Two consequences,
+# and they are recorded with DIFFERENT evidence because they have different
+# evidence — the honest distinction matters more than a uniform claim:
+#   * REPRODUCED RED: the anchored report was SWALLOWED by that substitution
+#     while the refusal block said it was "on stdout above" (measured against
+#     the pre-fix artifact: 0 report lines reached the caller).
+#   * NOT reproduced, pinned DEFENSIVELY: the exit code. Under `set -e` a bare
+#     `x=$(cmd)` terminates AT THE ASSIGNMENT, so the `case` that translates 4/5
+#     into the documented 2 never ran; the observed code was 2 anyway, by an
+#     accident of how `set -e` unwound the subshell. It was right for the wrong
+#     reason, which is exactly the kind of thing that changes under a refactor.
+case "$E2E" in
+  *"PREMERGE: REVIEW-BINDING verdict UNBOUND"*)
+    ok "wiring: the leg's anchored report travels WITH the refusal, not swallowed" ;;
+  *) bad "wiring: the refusal discarded the report it says is above (got: $E2E)" ;;
+esac
+# The SAME must hold for an UNMEASURED leg, whose raw exit is 5: it must still
+# arrive as the documented refusal (2), not as a bare 5 from an unwound subshell.
+rm -f "$MOCK_ROBOREV_DIR/job-304.json" "$MOCK_ROBOREV_DIR/list.json"
+E2E5=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+E2E5_RC=$?
+if [ "$E2E5_RC" -eq 2 ]; then
+  ok "wiring: an UNMEASURED leg (raw exit 5) arrives as the documented refusal exit 2"
+else
+  bad "wiring: an UNMEASURED leg leaked its raw exit ($E2E5_RC) instead of refusing with 2: $E2E5"
+fi
+case "$E2E5" in
+  *"PREMERGE: REVIEW-BINDING verdict UNMEASURED"*)
+    ok "wiring: the UNMEASURED report also travels with its refusal" ;;
+  *) bad "wiring: the UNMEASURED report was swallowed (got: $E2E5)" ;;
+esac
+roborev_job 304 "$(cd "$WORK" && git rev-parse main~1)" "$REVIEWED_PRE"
 
 # And the success path: a bound review reaches PREMERGE: OK with both reports.
 roborev_job 304 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER"
@@ -635,7 +669,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=37
+CASE_FLOOR=40
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
