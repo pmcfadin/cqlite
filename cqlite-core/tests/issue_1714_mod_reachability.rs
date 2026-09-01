@@ -12,8 +12,12 @@
 //! explicitly, not lexed), `#[path]` ON an inline `mod` block (that form sets the
 //! directory its children resolve in), `mod` declarations that do not begin
 //! their own (trimmed) source line, escape sequences inside a `#[path]` value,
-//! or a `mod` produced by macro expansion. `#[cfg_attr(…, path = …)]` is
-//! DETECTED and refused loudly, never resolved. It DOES model out-of-line
+//! or a `mod` produced by macro expansion. A `path = …` attribute it cannot read
+//! as a plain string literal — a `#[cfg_attr(…, path = …)]`, or a raw-string
+//! value like `#[path = r"x.rs"]` — is DETECTED and refused loudly, never
+//! resolved and never silently dropped; so is a `#[path]` value that is absolute
+//! OR merely begins with `/` or `\\` (`Path::is_absolute` is platform-dependent,
+//! calling `/etc/passwd` relative on Windows). It DOES model out-of-line
 //! modules nested in inline `mod` blocks, `#[path]` on those, and attributes
 //! broken across lines. There is deliberately **no exception list**: an orphan
 //! is a failure to fix, never an entry to add.
@@ -147,9 +151,11 @@ struct ModDecl {
     /// Names of the enclosing inline `mod` blocks, outermost first. rustc
     /// resolves such a child under `<moddir>/<name1>/…/<namen>/`.
     scope: Vec<String>,
-    /// A `#[cfg_attr(…, path = "…")]` preceded this declaration. That form is
-    /// NOT modeled; the walk refuses loudly rather than resolve it wrongly.
-    cfg_attr_path: bool,
+    /// A `path = …` attribute preceded this declaration that could NOT be read
+    /// as a plain string literal — a `#[cfg_attr(…, path = …)]`, or a raw-string
+    /// value like `#[path = r"x.rs"]`. Neither is modeled; the walk refuses
+    /// loudly rather than silently fall back to the default resolution rule.
+    unmodeled_path_attr: bool,
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -157,13 +163,13 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Consume leading `#[...]` / `#![...]` attributes from a trimmed line,
-/// recording any `#[path = "..."]` value in `pending` and flagging any
-/// `#[cfg_attr(…, path = …)]` in `cfg_attr_path`. Returns the remainder.
+/// recording any `#[path = "..."]` value in `pending` and flagging any OTHER
+/// `path = …` form in `unmodeled_path_attr`. Returns the remainder.
 fn eat_attrs<'a>(
     mut t: &'a str,
     s: &Stripped,
     pending: &mut Option<String>,
-    cfg_attr_path: &mut bool,
+    unmodeled_path_attr: &mut bool,
 ) -> &'a str {
     while t.starts_with('#') {
         let after_hash = t[1..].trim_start();
@@ -191,8 +197,11 @@ fn eat_attrs<'a>(
         let inner = t[open + 1..close].trim();
         if let Some(v) = parse_path_attr(inner, s) {
             *pending = Some(v);
-        } else if inner.starts_with("cfg_attr") && mentions_path_assignment(inner) {
-            *cfg_attr_path = true;
+        } else if mentions_path_assignment(inner) {
+            // A `path = …` that did not parse as a plain string literal. Do not
+            // drop it: dropping means the module silently resolves by the
+            // DEFAULT rule, which is the false-PASS direction.
+            *unmodeled_path_attr = true;
         }
         t = t[close + 1..].trim_start();
     }
@@ -208,7 +217,8 @@ fn parse_path_attr(inner: &str, s: &Stripped) -> Option<String> {
 }
 
 /// Does this attribute interior contain a `path = ...` assignment? Used only to
-/// DETECT the unmodeled `#[cfg_attr(…, path = …)]` form, never to resolve it.
+/// DETECT unmodeled `path` forms (`#[cfg_attr(…, path = …)]`, a raw-string
+/// value), never to resolve one.
 fn mentions_path_assignment(inner: &str) -> bool {
     let mut from = 0usize;
     while let Some(idx) = inner[from..].find("path") {
@@ -317,32 +327,32 @@ fn mod_decls(src: &str) -> Vec<ModDecl> {
     let joined = join_bracketed_lines(&s.text);
     let mut out = Vec::new();
     let mut pending: Option<String> = None;
-    let mut pending_cfg_attr_path = false;
+    let mut pending_unmodeled_path = false;
     let mut depth = 0usize;
     let mut stack: Vec<(usize, String)> = Vec::new();
     for line in joined.lines() {
         let t = line.trim();
         let mut inline_name: Option<String> = None;
         if !t.is_empty() {
-            let rest = eat_attrs(t, &s, &mut pending, &mut pending_cfg_attr_path);
+            let rest = eat_attrs(t, &s, &mut pending, &mut pending_unmodeled_path);
             if !rest.is_empty() {
                 match parse_mod_decl(rest) {
                     // An inline `mod x { … }` declares no file, but it DOES
                     // scope every out-of-line child inside it.
                     Some((name, true)) => {
                         pending = None;
-                        pending_cfg_attr_path = false;
+                        pending_unmodeled_path = false;
                         inline_name = Some(name);
                     }
                     Some((name, false)) => out.push(ModDecl {
                         name,
                         path_attr: pending.take(),
                         scope: stack.iter().map(|(_, n)| n.clone()).collect(),
-                        cfg_attr_path: std::mem::take(&mut pending_cfg_attr_path),
+                        unmodeled_path_attr: std::mem::take(&mut pending_unmodeled_path),
                     }),
                     None => {
                         pending = None;
-                        pending_cfg_attr_path = false;
+                        pending_unmodeled_path = false;
                     }
                 }
             }
@@ -408,11 +418,12 @@ impl Walk {
         };
         for decl in mod_decls(&src) {
             assert!(
-                !decl.cfg_attr_path,
-                "{}: `mod {};` is preceded by a #[cfg_attr(…, path = …)] attribute — an \
-                 unmodeled attribute form. This guard refuses it rather than resolve the \
-                 module to the wrong file (issue #1714); wire the module with a plain \
-                 #[path] instead, or extend this walker deliberately",
+                !decl.unmodeled_path_attr,
+                "{}: `mod {};` is preceded by a `path = …` attribute this guard cannot read \
+                 as a plain string literal (a #[cfg_attr(…, path = …)], or a raw-string \
+                 value) — an unmodeled attribute form. It refuses rather than resolve the \
+                 module by the DEFAULT rule and reach the wrong file (issue #1714); wire \
+                 the module with a plain #[path = \"…\"] instead",
                 file.display(),
                 decl.name,
             );
@@ -432,8 +443,15 @@ impl Walk {
                 // `#[path]` on an out-of-line module resolves relative to the
                 // directory containing the DECLARING FILE, never to `<stem>/`.
                 // Getting this backwards reports 57 false orphans in this repo.
+                // `Path::is_absolute()` alone is platform-dependent: on Windows
+                // it calls `/etc/passwd` RELATIVE, which would fold the value
+                // in-crate and mark an unrelated in-crate file reachable — the
+                // exact silent false PASS this refusal exists to prevent. So a
+                // leading `/` or `\\` is refused explicitly IN ADDITION.
                 assert!(
-                    !Path::new(rel).is_absolute(),
+                    !Path::new(rel).is_absolute()
+                        && !rel.starts_with('/')
+                        && !rel.starts_with('\\'),
                     "{}: #[path = {rel:?}] on `mod {}` is an ABSOLUTE path; this guard \
                      refuses to model absolute #[path] values (an absolute value silently \
                      folding in-crate marked an unrelated in-crate file reachable)",
@@ -564,7 +582,7 @@ fn probe(files: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
                 .replace('\\', "/")
         })
         .collect();
-    (orphans, w.unresolved.clone())
+    (orphans, w.unresolved)
 }
 
 /// `probe` asserting no unresolved declarations, returning the orphan list.
@@ -796,6 +814,16 @@ fn a_mod_inside_a_line_comment_does_not_reach_its_file() {
         orphans(&[("lib.rs", "// mod orphan;\n"), ("orphan.rs", "")]),
         vec!["orphan.rs".to_string()]
     );
+    // The assertion above is satisfied by line-anchoring alone (`// mod …` does
+    // not begin with `mod`/`pub`), so it cannot observe the stripper. This one
+    // can: the comment must VANISH for the pending `#[path]` to survive across
+    // it — an unstripped `// c` line is other code, which clears the pending
+    // attribute and sends `tests` to the default resolution.
+    assert!(orphans(&[
+        ("lib.rs", "#[path = \"t.rs\"]\n// c\nmod tests;\n"),
+        ("t.rs", ""),
+    ])
+    .is_empty());
 }
 
 #[test]
@@ -805,9 +833,13 @@ fn a_mod_inside_a_block_comment_does_not_reach_its_file() {
         orphans(&[("lib.rs", "/*\nmod orphan;\n*/\n"), ("orphan.rs", "")]),
         vec!["orphan.rs".to_string()]
     );
-    // Nested block comments close at the right depth.
+    // Nested block comments close at the right DEPTH. The `mod` sits between
+    // the inner close and the outer close, so it is live source to a stripper
+    // that does not count depth (which would report NO orphan) and dead source
+    // to one that does. `/* /* mod orphan; */ */` cannot observe this: it is
+    // stripped either way.
     assert_eq!(
-        orphans(&[("lib.rs", "/* /* mod orphan; */ */\n"), ("orphan.rs", "")]),
+        orphans(&[("lib.rs", "/* /* x */ mod orphan; */\n"), ("orphan.rs", "")]),
         vec!["orphan.rs".to_string()]
     );
 }
@@ -823,9 +855,17 @@ fn a_mod_inside_a_string_literal_does_not_reach_its_file() {
         vec!["orphan.rs".to_string()]
     );
     // Raw string, decided by one backward look at the `#` run before the quote.
+    // The literal CONTAINS a bare `"`, so a scanner that does not recognise it
+    // as raw terminates early and exposes the following line as live source —
+    // reporting a genuinely unreachable file as REACHABLE, the false-PASS
+    // direction. `r#"mod orphan;"#` cannot observe this: both readings stop at
+    // the same quote.
     assert_eq!(
         orphans(&[
-            ("lib.rs", "pub const S: &str = r#\"mod orphan;\"#;\n"),
+            (
+                "lib.rs",
+                "pub const S: &str = r#\"x \"\nmod orphan;\n\"#;\n"
+            ),
             ("orphan.rs", ""),
         ]),
         vec!["orphan.rs".to_string()]
@@ -854,6 +894,55 @@ fn a_cfg_attr_carrying_path_is_refused_loudly() {
     // Not implemented, deliberately: DETECTED and refused, so it can never
     // resolve to the wrong file silently. Zero occurrences in the tree today.
     let _ = probe(&[("lib.rs", "#[cfg_attr(test, path = \"t.rs\")]\nmod x;\n")]);
+}
+
+#[test]
+#[should_panic(expected = "unmodeled attribute form")]
+fn a_raw_string_path_value_is_refused_loudly() {
+    // `#[path = r"x.rs"]` is legal Rust that `parse_path_attr` cannot read (no
+    // leading `"` after the `=`). Silently dropping it would resolve the module
+    // by the DEFAULT rule — a silent wrong answer. Its two sibling unmodeled
+    // forms are refused, so this one is too.
+    let _ = probe(&[("lib.rs", "#[path = r\"x.rs\"]\nmod x;\n"), ("x.rs", "")]);
+}
+
+#[test]
+fn a_path_attr_target_that_does_not_exist_is_reported_loudly() {
+    let (_, unresolved) = probe(&[("lib.rs", "#[path = \"nope.rs\"]\nmod x;\n")]);
+    assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+    assert!(
+        unresolved[0].contains("nope.rs") && unresolved[0].contains("does not exist"),
+        "{unresolved:?}"
+    );
+}
+
+#[test]
+fn an_unreadable_module_file_is_reported_loudly() {
+    // `src/lib.rs` materialized as a DIRECTORY, so `read_to_string` fails. The
+    // walk must record that, not silently reach nothing and report every file
+    // as an orphan with no cause named.
+    let (orphans, unresolved) = probe(&[("lib.rs/inner.rs", "")]);
+    assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+    assert!(
+        unresolved[0].contains("could not be read"),
+        "{unresolved:?}"
+    );
+    assert_eq!(orphans, vec!["lib.rs/inner.rs".to_string()]);
+}
+
+#[test]
+fn a_dot_dot_path_attr_is_normalized_before_comparison() {
+    // Pins `normalize()`: unnormalized, `src/a/../sibling.rs` still passes
+    // `is_file()` (the OS resolves it), so the file is READ but recorded under a
+    // spelling the enumeration never produces — and `sibling.rs` is reported an
+    // orphan despite being reached. No `#[path]` value in cqlite-core uses `..`
+    // today, so nothing else pins this.
+    assert!(orphans(&[
+        ("lib.rs", "mod a;\n"),
+        ("a/mod.rs", "#[path = \"../sibling.rs\"]\nmod x;\n"),
+        ("sibling.rs", ""),
+    ])
+    .is_empty());
 }
 
 #[test]
