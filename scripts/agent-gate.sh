@@ -14698,94 +14698,37 @@ EOF
   # class, and section 19 of test_agent_gate_summary.sh lints this function for exactly it.
   # The stripped copy goes to a file and `grep -c` consumes it whole: an AFFIRMATIVE count,
   # which is what a permissive branch must key on.
-  local _fx_blind="" _fx_blind_n=0 _dsrc _fx_rc _fx_fatal="" _fx_free="" _fx_rrc _fx_cnt _fx_strip _fx_base
-  local _fx_lookup='(^|[^A-Za-z0-9_])(env::)?var(_os)?[[:space:]]*\([[:space:]]*"CQLITE_REQUIRE_FIXTURES"'
-  while IFS= read -r _dsrc; do
-    [ -n "$_dsrc" ] || continue
-    _fx_base=$(basename "${_dsrc%.rs}")
-    _fx_strip="$LOG_DIR/fx-nocomment-$_fx_base.rs"
-    # A failed strip is UNMEASURED, never "no match": the same three-valued rule as the scan.
-    #
-    # `//` TAILS ONLY, VIA sed — DELIBERATELY NOT BLOCK COMMENTS, and both halves of that
-    # decision are roborev round-6 findings against an earlier cut of this very line.
-    #
-    # (1) PORTABILITY. The earlier cut piped through `python3`. But the target derivation
-    #     above tries **jq FIRST, then python3** on purpose (roborev round-18), so a host with
-    #     jq and no python3 DISCOVERS targets fine and would then fail every strip — making
-    #     this lane permanently red on a host the gate otherwise supports. `sed` is in the
-    #     POSIX toolset the rest of this lane already assumes, so it adds no new dependency.
-    #
-    # (2) A REGEX CANNOT DO IT ANYWAY. Rust block comments NEST (`/* /* */ */`), and nesting
-    #     is not a regular language — so `/\*.*?\*/` in python, jq or anything else is
-    #     structurally unable to strip them correctly, and the earlier cut was measured to
-    #     leave a lookup inside a nested comment intact while REPORTING the target
-    #     fixture-aware. Doing it properly needs a stateful Rust-aware scanner that also
-    #     understands string literals — which is a parser, and #3789 already owns replacing
-    #     this whole structural-inference mechanism with per-target DECLARED posture.
-    #
-    # So the claim is REDUCED rather than faked: a lookup commented out with `//` is
-    # correctly not counted, and a lookup inside a `/* … */` block is a DECLARED residual
-    # (see the census line below). That is the standing ruling in this repo — a guard with a
-    # known false-PASS presented as closed is worse than a smaller guard that says what it
-    # does — and it is why this does not grow a fifth carve of the same check.
-    if ! sed 's|//.*||' "$_dsrc" > "$_fx_strip" 2>/dev/null; then
-      _fx_fatal="$_fx_fatal $_fx_base(comment-strip failed)"
-      continue
-    fi
-    # FIXTURE-FREE TARGETS ARE EXEMPT, AND THE TEST IS DERIVED (roborev round 5, F2). Without
-    # this, a NEW gated target that reads no corpus at all would be classified fixture-blind
-    # and RED the full gate — a false red on correct code, which is the guard agents learn to
-    # waive, and it would silently break the automatic-enrolment property this lane claims
-    # ("a new gated file is picked up with NO gate edit"). A target that never references
-    # CQLITE_DATASETS_ROOT consumes no corpus, so the strict flag is meaningless for it and
-    # demanding it would be demanding meaningless fixture handling. LATENT when found
-    # (measured: all 12 currently derived targets reference CQLITE_DATASETS_ROOT, counts 2-10),
-    # so this changes nothing today and closes the false-red for the next target.
-    # RAW-STRING LINES ARE EXCLUDED FROM THE LOOKUP SCAN (roborev round 7). Rust raw strings
-    # can CONTAIN the lookup as data — `r#"std::env::var("CQLITE_REQUIRE_FIXTURES")"#` matched
-    # the pattern, so a target with NO executable lookup read as strict-aware (measured).
-    #
-    # DELIBERATELY LINE-ORIENTED, with the residual DECLARED rather than papered over: a raw
-    # string that SPANS lines still hides its content. Chasing that needs the stateful parser
-    # #3789 owns, and this would be the sixth carve of one check — rounds 3,4,5,6,7 each found
-    # a hole in it, twice in my own preceding fix. So the POLARITY is chosen instead: dropping
-    # the whole line can only cause a FALSE REJECT (a loud lane FAIL), never a false accept.
-    # MEASURED before adopting it: 0 of the 12 derived targets carry a lookup on a line that
-    # also holds a raw-string opener, and all 12 are still accepted after the exclusion.
-    _fx_lookup_src="$LOG_DIR/fx-noraw-$_fx_base.rs"
-    # TRI-STATE, NOT `|| true` (roborev round 8). `|| true` was there to tolerate grep's rc 1
-    # ("no line survived the filter", which is legitimate), but it ALSO swallowed rc >= 2 —
-    # a real read/write failure — leaving a PARTIAL file that the lookup scan would then read
-    # as authoritative. That is the third time this one mechanism has taken the permissive
-    # branch on an unmeasured state (round 6: an unconsumed `_fx_fatal`; round 7: an explicit
-    # JSON null read as absence; now this), so it is spelled out rather than shortened.
-    _fx_raw_rc=0
-    grep -vE 'r#*"' "$_fx_strip" > "$_fx_lookup_src" 2>/dev/null || _fx_raw_rc=$?
-    if [ "$_fx_raw_rc" -ge 2 ]; then
-      _fx_fatal="$_fx_fatal $_fx_base(raw-string filter exit $_fx_raw_rc)"
-      continue
-    fi
-    _fx_reads=0
-    grep -qE 'CQLITE_DATASETS_ROOT' "$_fx_strip" 2>/dev/null && _fx_reads=1 || _fx_rrc=$?
-    if [ "${_fx_rrc:-1}" -ge 2 ]; then
-      _fx_fatal="$_fx_fatal $_fx_base(corpus-reference scan exit ${_fx_rrc})"
-      continue
-    fi
-    if [ "$_fx_reads" -eq 0 ]; then
-      _fx_free="$_fx_free $_fx_base"
-      continue
-    fi
-    _fx_rc=0
-    _fx_cnt=$(grep -cE "$_fx_lookup" "$_fx_lookup_src") || _fx_rc=$?
-    if [ "$_fx_rc" -ge 2 ]; then
-      _fx_fatal="$_fx_fatal $_fx_base(grep exit $_fx_rc)"
-    elif [ "${_fx_cnt:-0}" -eq 0 ]; then
-      _fx_blind_n=$((_fx_blind_n + 1))
-      _fx_blind="$_fx_blind $_fx_base"
-    fi
-  done <<EOF
-$derived_srcs
-EOF
+  # THE PER-TARGET FIXTURE-AWARENESS CHECK IS DESCOPED — LEAD RULING on #3725 (COORD-3725-08).
+  #
+  # It used to scan each derived target's source for an executable `env::var` lookup of
+  # CQLITE_REQUIRE_FIXTURES and FAIL the lane in strict mode for any target that lacked one.
+  # Seven distinct holes were found in it over seven roborev rounds, FIVE of them introduced by
+  # the preceding fix: a bare identifier matching comments and panic strings; a call merely
+  # ENDING in `var`; a `//`-commented lookup; `python3` unavailable on the jq-only hosts the
+  # target derivation deliberately supports; Rust NESTED block comments, which no regex can strip
+  # because nesting is not regular; RAW STRINGS carrying the lookup as data; a `|| true` that
+  # swallowed grep rc >= 2; `stringify!(std::env::var("…"))`, which matches and never executes;
+  # and finally the target's MODULE CLOSURE, since the scan read only each root file and a
+  # `mod fixtures;` child was invisible to it.
+  #
+  # The through-line is not carelessness in any round: "does this source text contain an
+  # EXECUTABLE env lookup" is not decidable by source-text matching, and each fix revealed the
+  # next Rust construct. Removed under this repository's own precedent — #3229's
+  # census-exclusion predictor was REMOVED by owner ruling (deferred to #3283) once its
+  # false-PASS count rose across review rounds, because A GUARD WITH KNOWN DOCUMENTED
+  # FALSE-PASSES IS WORSE THAN NO GUARD: it invites reliance it cannot support.
+  #
+  # WHAT PROVIDES THE COVERAGE INSTEAD, and it is measured rather than inferred:
+  #   * this lane EXPORTS `CQLITE_REQUIRE_FIXTURES=1` on the full gate (below), so a target that
+  #     honours the flag FAILS by name with its corpus absent instead of skip-passing;
+  #   * that the population honours it was verified BEHAVIOURALLY, once: with an EMPTY datasets
+  #     root under strict, every one of the 12 derived targets FAILS — 71 of the 72 integration
+  #     tests fail, the single pass being scan_delta_parity_test's fixture-free synthetic case.
+  #   * #3789 owns the successor: DECLARED per-target fixture posture, validated rather than
+  #     inferred, which is the module-closure-shaped fix this scan could never be.
+  #
+  # So no verdict about per-target awareness is computed or claimed here any more. The census
+  # below states that plainly rather than leaving a reader to assume the old guarantee.
 
   local -a census=()
   census+=("EXECUTES (issue #3725): cargo test -p cqlite-core --no-default-features --features $iso_features --lib + $count derived --test target(s)")
@@ -14801,38 +14744,16 @@ EOF
   census+=("       is picked up with NO gate edit, and a failed derivation FAILs naming the")
   census+=("       derivation rather than falling back to an empty set.")
   census+=("  fixtures: $_fx_note")
-  if [ "$_fx_blind_n" -gt 0 ]; then
-    census+=("       FIXTURE-BLIND — $_fx_blind_n derived target(s) do not read")
-    census+=("       CQLITE_REQUIRE_FIXTURES, the one variable this lane EXPORTS. In STRICT mode")
-    census+=("       (the full gate) this is a FAIL, not a note: a target that ignores the flag")
-    census+=("       can return successfully having compared nothing:$_fx_blind")
-  else
-    census+=("       every CORPUS-READING derived target performs an env lookup of")
-    census+=("       CQLITE_REQUIRE_FIXTURES — the")
-    census+=("       variable this lane exports, and deliberately the only one accepted here:")
-    census+=("       0 RECOGNISED gaps")
-    census+=("       RESIDUAL (R6-F2/R7-F2): \`//\`-commented lookups and single-line RAW STRINGS")
-    census+=("       are excluded; a MULTI-LINE raw string, and a")
-    census+=("       lookup inside a \`/* … */\` BLOCK comment is NOT — Rust block comments NEST,")
-    census+=("       nesting is not regular, so no regex can strip them; a stateful scanner is")
-    census+=("       #3789's subject. A block-commented lookup would read as fixture-aware.")
-    census+=("       SCOPE OF THAT CLAIM (R3-F1): it is STRUCTURAL. It proves an executable")
-    census+=("       env::var/var_os lookup of that literal EXISTS in the target root, outside")
-    census+=("       any // comment and not inside a string (a quoted one needs escaped quotes,")
-    census+=("       which the pattern rejects) and not merely a call whose name ends in 'var'.")
-    census+=("       It does NOT prove every skip path routes through it, and it CANNOT")
-    census+=("       distinguish a wholly fixture-FREE target from a fixture-blind one — which")
-    census+=("       no outcome-based probe can decide either (see the rejected-probe note in")
-    census+=("       this function). RECOGNISED limitation, declared rather than implied.")
-  fi
-  if [ -n "$_fx_free" ]; then
-    census+=("       FIXTURE-FREE (exempt, #3725/R5-F2): reference no CQLITE_DATASETS_ROOT, so they")
-    census+=("       consume no corpus and the strict flag is meaningless for them — demanding it")
-    census+=("       would be a false red on correct code:$_fx_free")
-  else
-    census+=("       fixture-free exemptions: 0 RECOGNISED — every derived target references")
-    census+=("       CQLITE_DATASETS_ROOT, so every one is held to the strict-flag requirement")
-  fi
+  census+=("       PER-TARGET AWARENESS: NOT CHECKED — descoped by lead ruling (#3725).")
+  census+=("       This lane no longer scans each target's source for an executable")
+  census+=("       CQLITE_REQUIRE_FIXTURES lookup: seven rounds found seven holes in that scan,")
+  census+=("       five introduced by the preceding fix, ending at macro tokens and the module")
+  census+=("       closure — source-text matching cannot decide it. Removed under #3229/#3283's")
+  census+=("       precedent that a guard with known false-PASSes is worse than no guard.")
+  census+=("       WHAT COVERS IT: the strict flag above (a target honouring it FAILS by name with")
+  census+=("       its corpus absent), plus a ONE-TIME behavioural measurement — empty root under")
+  census+=("       strict, all 12 derived targets FAIL, 71 of 72 integration tests. #3789 owns the")
+  census+=("       successor: DECLARED per-target posture, validated rather than inferred.")
   census+=("       WHICH corpus is missing is named BY THE TARGET, not by this lane: each strict")
   census+=("       failure prints the KEYSPACE and TABLE it could not open (test_types,")
   census+=("       test_deltas, …), because the #2078 preflight only probes the CANONICAL")
@@ -14882,50 +14803,6 @@ EOF
     echo "==== end census ===="
   } > "$log"
 
-  # A FIXTURE-BLIND TARGET IS A GATE FAILURE IN STRICT MODE, NOT A CENSUS LINE (roborev
-  # round 1, finding 1). Reporting it informationally was this issue's OWN defect one target
-  # over: `scan_delta_parity_test` ignored CQLITE_REQUIRE_FIXTURES, returned successfully
-  # with `test_deltas` absent, and could therefore merge-gate as "passed" having compared
-  # NOTHING — exactly the vacuous pass #3725 exists to remove, relocated next door. The
-  # strict flag is only worth exporting if every target it is exported FOR honours it, so
-  # the gate of record refuses a lane it cannot make strict.
-  #
-  # ONLY in strict mode: under `--only`/`--lite` (or the documented #2078 opt-out) the flag
-  # is deliberately unset for every target, so blindness changes nothing about that run and
-  # failing on it would red a probe on correct code.
-  # AN UNREADABLE SOURCE IS FAIL-CLOSED IN EVERY MODE, strict or not, and BEFORE the
-  # blindness verdict below. `grep` rc >= 2 means the scan itself failed (unreadable file, a
-  # bad pattern), which is neither "reads the flag" nor "does not" — and a three-valued
-  # signal read two-valued always picks the permissive branch. Unlike blindness, this is NOT
-  # mode-dependent: blindness is harmless when the flag is not exported, but a scan we could
-  # not perform tells us nothing in any mode, so it cannot be excused by a lenient run.
-  if [ -n "$_fx_fatal" ]; then
-    _ds_lane_fail "$name" "$log" "$start" \
-      "[$name] FAIL-CLOSED: the strict-fixture scan could not be PERFORMED for:$_fx_fatal" \
-      "        grep exited >= 2 for those target source(s), so whether they honour" \
-      "        CQLITE_REQUIRE_FIXTURES is UNMEASURED — not measured-and-fine. A positive" \
-      "        verdict requires an affirmative measurement, so this is a FAIL rather than an" \
-      "        assumption in either direction." \
-      "        Remedy: make the named target source(s) readable (check permissions and that" \
-      "        cargo metadata's src_path still resolves), then re-run."
-    return 0
-  fi
-
-  if [ "$_fx_mode" = strict ] && [ "$_fx_blind_n" -gt 0 ]; then
-    _ds_lane_fail "$name" "$log" "$start" \
-      "[$name] FAIL-CLOSED: $_fx_blind_n derived target(s) do not read" \
-      "        CQLITE_REQUIRE_FIXTURES — the ONE variable this run exports — so this run" \
-      "        exports the strict flag and those targets IGNORE it; with their corpus" \
-      "        absent they return successfully having compared NOTHING, and the lane would" \
-      "        report PASS. That is the vacuous pass this lane exists to remove (#3725)." \
-      "        FIXTURE-BLIND:$_fx_blind" \
-      "        Remedy: make each named target honour CQLITE_REQUIRE_FIXTURES=1 — an absent" \
-      "        fixture must FAIL by name (the skip_or_fail shape in" \
-      "        cqlite-core/tests/issue_1007_complex_type_parity.rs). There is deliberately" \
-      "        NO lane-specific opt-out: #2078's AGENT_GATE_ALLOW_MISSING_FIXTURES=1 is the" \
-      "        one sanctioned escape hatch and it already turns this lane lenient."
-    return 0
-  fi
 
   echo ">>> [$name] RUSTFLAGS=-D warnings cargo test --no-fail-fast -p cqlite-core --no-default-features --features $iso_features --lib + $count target(s)"
   # --no-fail-fast for the reason legacy-heuristics carries it: cargo test stops after the
