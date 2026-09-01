@@ -504,11 +504,22 @@ if printf '%s' "$out" | grep -q '^claude-auth: FAILED'; then
 else
   bad "claude-auth: an argv echo was accepted as an authenticated answer: $out"
 fi
-# ...and the prompt must not carry the sentinel, or the case above passes by accident.
-if ! grep -q "CLAUDE_AUTH_PROMPT=.*$SENTINEL" "$CAPLIB"; then
-  ok "the probe prompt does not contain the sentinel verbatim (so an echo cannot produce it)"
+# ...and the prompt must not CONTAIN the sentinel, or the case above passes by accident.
+# Read the two constants at RUNTIME by sourcing the library, never by grepping its source:
+# a source-text scan checks a SPELLING, and the defective form spelled it
+# `…: $CLAUDE_AUTH_SENTINEL`, which no literal grep sees. Verified by reverting the prompt:
+# the grep form stayed green, this form reds.
+cap_prompt=$(bash -c '. "$1"; printf "%s" "$CLAUDE_AUTH_PROMPT"' _ "$CAPLIB" 2>/dev/null)
+cap_sent=$(bash -c '. "$1"; printf "%s" "$CLAUDE_AUTH_SENTINEL"' _ "$CAPLIB" 2>/dev/null)
+if [ -z "$cap_prompt" ] || [ -z "$cap_sent" ]; then
+  bad "the probe prompt/sentinel could not be read from the library — no verdict is available"
+elif [ "$cap_sent" != "$SENTINEL" ]; then
+  bad "the library's sentinel ($cap_sent) is not the one this suite plants ($SENTINEL)"
 else
-  bad "the probe prompt embeds the sentinel — an argv echo would satisfy it again"
+  case "$cap_prompt" in
+    *"$cap_sent"*) bad "the probe prompt CONTAINS the sentinel — an argv echo would satisfy it again" ;;
+    *) ok "the probe prompt does not contain the sentinel, so an echo of the input cannot produce it" ;;
+  esac
 fi
 
 # =====================================================================================
