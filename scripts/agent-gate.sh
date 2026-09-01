@@ -6457,39 +6457,186 @@ _fm_render() {
 
 # _fm_annotate <component>: the bracketed suffix appended to a SUMMARY component line.
 # NEVER empty — that is the contract (see the header).
+#
+# #3765 HALF 2 — THE BRACKET IS LABELLED. It used to render bare:
+#     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
+# An unlabelled, test-SHAPED string on a FAIL line reads as the failing test's identity,
+# and a coordination lead acted on exactly that misreading. The label says what the
+# bracket IS — the invocation this component ran — so it can no longer be confused with
+# the `failed-assert:` field beside it. The label is applied HERE, in ONE place, over a
+# bracket-free BODY: the eight renderings below would otherwise be eight chances to
+# spell it differently, which is precisely the drift #3453 removed.
 _fm_annotate() {
+  printf '[invocation: %s]' "$(_fm_annotate_body "$1")"
+}
+
+# _fm_annotate_body <component>: the bracket's CONTENT. Never empty (see the header).
+_fm_annotate_body() {
   local class obs
   if ! class=$(_fm_component_class "$1"); then
     # Not declared anywhere: name that, distinctly from a declared-cargo component whose
     # observation is missing. The guard test makes this unreachable for COMPONENTS.
-    printf '[UNCLASSIFIED — not declared in _fm_component_class (#3453)]'
+    printf 'UNCLASSIFIED — not declared in _fm_component_class (#3453)'
     return 0
   fi
   if obs=$(_fm_render "$1") && [ -n "$obs" ]; then
     case "$class" in
-      no-cargo) printf '[%s !declared-no-cargo]' "$obs" ;;
+      no-cargo) printf '%s !declared-no-cargo' "$obs" ;;
       # An `unobservable` component may ALSO run cargo in this shell. Naming both is the
       # only truthful rendering: the observed sets are real, and they are not the whole
       # story, so the class text rides along ADDITIVELY rather than being displaced.
-      unobservable:*) printf '[%s | + %s]' "$obs" "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
-      *)        printf '[%s]' "$obs" ;;
+      unobservable:*) printf '%s | + %s' "$obs" "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+      *)        printf '%s' "$obs" ;;
     esac
     return 0
   fi
   case "$class" in
-    no-cargo)       printf '[no-cargo]' ;;
-    unobservable:*) printf '[%s]' "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+    no-cargo)       printf 'no-cargo' ;;
+    unobservable:*) printf '%s' "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
     # An `indirect` component with an EMPTY sidecar is a RECORDING GAP, not a licence to
     # claim its driver ran (roborev job 273, F3): every indirect component records its
     # driver's reach at execution time, and record_result's
     # _fm_note_if_no_cargo_observed names a SKIP/FAIL that never got that far. Reaching
     # here means neither happened, so the honest report is UNDECLARED — carrying the same
     # token every existing detector greps for — naming the driver whose outcome is missing.
-    indirect:*)     printf '[UNDECLARED — the outcome of driver '\''%s'\'' was never recorded (#3453)]' "${class#indirect:}" ;;
-    *)              printf '[UNDECLARED]' ;;
+    indirect:*)     printf 'UNDECLARED — the outcome of driver '\''%s'\'' was never recorded (#3453)' "${class#indirect:}" ;;
+    *)              printf 'UNDECLARED' ;;
   esac
   return 0
 }
+
+# ==== FAILED-ASSERT identity on a FAIL line (issue #3765) ====
+#
+# THE DEFECT. A failing component's line read:
+#     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
+# The bracket is the #3453 INVOCATION annotation. It was UNLABELLED and it is
+# test-SHAPED, so a reader identifies `ws0-corpus-gen` as the failing test — which is
+# wrong. The real assert (`FAIL - 1465-skip-declares: …`) lived ONLY in the component
+# log, and CLAUDE.md forbids reading gate.log while simultaneously requiring a flake
+# citation to name the ASSERT rather than the component: unsatisfiable for a FAIL. Real
+# cost: a coordination lead refused a lane's (correct) flake attribution because the
+# bracket "named a different test". Both halves are fixed here — the bracket is now
+# LABELLED `invocation:` (see _fm_annotate), and the FAIL line carries `failed-assert:`.
+#
+# THE STATES ARE FOUR, AND THEY ARE TEXTUALLY DISTINCT, because they are different
+# operator facts and a positive verdict requires an AFFIRMATIVE MEASUREMENT:
+#   `<N> RECOGNISED (<tier>): …`  an identity was extracted (count is the TRUE total;
+#                                 at most FAILASSERT_SHOW names are listed, remainder
+#                                 DECLARED as `+K more`).
+#   `0 RECOGNISED (…)`            the log WAS read and scanned and nothing matched (or
+#                                 it was empty). Never a bare `0`: the recogniser set is
+#                                 documented NON-EXHAUSTIVE, so a bare zero would read
+#                                 as a verified all-clear from an incomplete scan.
+#   `not extractable (<cause>)`   the log could not be read/normalised, or the extractor
+#                                 could not run. NEVER collapsed onto `0 RECOGNISED` —
+#                                 "nothing found" and "could not look" are the two facts
+#                                 this repo most often conflates.
+#   `not recorded (<why>)`        no extraction ran for this line at all (a synthetic
+#                                 self-test block, or a runner that appends to NAMES
+#                                 without reaching an extraction site).
+#
+# SIDECAR, NOT A THIRD RESULT FIELD. `record_result`'s `.result` file is TWO whitespace
+# fields ONLY (~60 call sites and a 2-field `read -r _st _secs` reader that would
+# silently absorb a third), so this rides a per-component sidecar exactly as the #3453
+# feature matrix does.
+#
+# EXTRACTION HAPPENS AT THE COMPONENT BOUNDARY, not at emit: the log is complete and
+# closed there, and every component passes through record_result (the pooled ones from
+# their own subshell, which cannot mutate the parent's arrays but can write a file).
+#
+# #3400 COLOUR IMMUNITY AT THE PARSE SITE. The log is normalised through the gate's own
+# `_ansi_stripped_log` — the ONE stripper — and the STRIPPED path is what the extractor
+# receives, so there is no second copy to drift. `_ansi_stripped_log` FAILs CLOSED on an
+# unreadable log and that is rendered as a NAMED `not extractable`, never as "no failures
+# found". The extractor reads by REDIRECTION, never a pipe.
+FAILASSERT_SHOW=3
+
+# The recogniser set lives in ONE named place, scripts/ci/gate-failed-assert.sh, with a
+# stated rule per entry, MEASURED against the 174 real FAILed component logs retained on
+# a fleet box. Resolved from the checkout with NO env override: the party the field
+# constrains must not choose its own extractor (#3312 job 27).
+_failassert_tool() { printf '%s/scripts/ci/gate-failed-assert.sh' "$REPO_ROOT"; }
+_failassert_sidecar() { printf '%s/%s.failassert' "${LOG_DIR:-}" "$1"; }
+
+# _failassert_write <component> <value>: best-effort append-free write. A failed write
+# costs a visibly `not recorded` field, never a wrong one, and must never fail the
+# component whose failure it describes.
+_failassert_write() {
+  local f
+  f=$(_failassert_sidecar "$1") || return 0
+  printf '%s\n' "$2" > "$f" 2>/dev/null || true
+  return 0
+}
+
+# _failassert_clean <text>: ONE line, no control characters, bounded. Component logs hold
+# repository-controlled paths, and git PERMITS a newline in one — an unsanitised value
+# would emit a SUMMARY line with no key at all.
+_failassert_clean() {
+  printf '%s' "$1" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-240
+}
+
+# _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
+# a failing assert, so PASS/SKIP record nothing and render no field.
+_failassert_record() {
+  local name="$1" status="${2:-}" log="${3:-}" tool src out rc tier count names shown value
+  [ "$status" = FAIL ] || return 0
+  [ -n "$log" ] || log="${LOG_DIR:-}/$name.log"
+  tool=$(_failassert_tool)
+  if [ ! -r "$tool" ]; then
+    _failassert_write "$name" "not extractable (extractor $(_failassert_clean "$tool") is not readable)"
+    return 0
+  fi
+  if [ ! -e "$log" ]; then
+    _failassert_write "$name" "not extractable (component log $(_failassert_clean "$log") does not exist)"
+    return 0
+  fi
+  if [ ! -r "$log" ] || [ ! -f "$log" ]; then
+    _failassert_write "$name" "not extractable (component log $(_failassert_clean "$log") is not a readable file)"
+    return 0
+  fi
+  if [ ! -s "$log" ]; then
+    _failassert_write "$name" "0 RECOGNISED (component log is EMPTY - nothing to scan)"
+    return 0
+  fi
+  # #3400: normalise through the gate's ONE stripper; its non-zero is a NAMED cause.
+  if ! src=$(_ansi_stripped_log "$log" 2>/dev/null) || [ -z "$src" ] || [ ! -r "$src" ]; then
+    _failassert_write "$name" "not extractable (ANSI normalisation of $(_failassert_clean "$log") failed, so nothing could be parsed)"
+    return 0
+  fi
+  out=$(bash "$tool" "$src" 10 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _failassert_write "$name" "not extractable (extractor scripts/ci/gate-failed-assert.sh exited $rc)"
+    return 0
+  fi
+  tier=$(printf '%s\n' "$out" | sed -n 's/^tier=//p' | head -1)
+  count=$(printf '%s\n' "$out" | sed -n 's/^count=//p' | head -1)
+  if [ -z "$tier" ] || [ -z "$count" ] || [ "$count" = 0 ]; then
+    _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
+    return 0
+  fi
+  names=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -"$FAILASSERT_SHOW" | paste -sd '|' -)
+  shown=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -"$FAILASSERT_SHOW" | grep -c .)
+  value="$count RECOGNISED ($tier): $(printf '%s' "$names" | sed 's/|/, /g')"
+  [ "$count" -gt "$shown" ] 2>/dev/null && value="$value (+$((count - shown)) more)"
+  _failassert_write "$name" "$(_failassert_clean "$value")"
+  return 0
+}
+
+# _failassert_render <component> <status>: the value the ONE renderer appends. Emitted on
+# a FAIL line ONLY — a PASS or SKIP has no failing assert, so the field has no subject
+# there and its absence on those lines is the rule, not a silence.
+_failassert_render() {
+  local f v
+  [ "${2:-}" = FAIL ] || return 1
+  f=$(_failassert_sidecar "$1")
+  if [ -r "$f" ]; then
+    IFS= read -r v < "$f" || v=""
+    if [ -n "$v" ]; then printf 'failed-assert: %s' "$v"; return 0; fi
+  fi
+  printf 'failed-assert: not recorded (no extraction ran for this FAIL line)'
+  return 0
+}
+# ==== END failed-assert identity (#3765) ====
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
 # line, used by all six emit sites (full, lite, two delta sites, the aggregation
@@ -6497,7 +6644,13 @@ _fm_annotate() {
 # not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
 # every existing prefix/stage-line assertion still matches.
 _fm_summary_line() {
-  printf '%-18s %s (%s)  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")"
+  # #3765: the failing-assert identity rides on FAIL lines only, through THIS renderer —
+  # a second formatter is exactly the drift #3453 removed. _failassert_render returns
+  # non-zero (and prints nothing) for PASS/SKIP, so those lines are byte-identical to
+  # before apart from the #3765 half-2 `invocation:` label inside the bracket.
+  local _fa
+  _fa=$(_failassert_render "$1" "$2") || _fa=""
+  printf '%-18s %s (%s)  %s%s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "${_fa:+  $_fa}"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -9166,6 +9319,10 @@ record_result() { # <name> <status> <seconds>
   # call — records that fact here, so its SUMMARY line says so rather than reading
   # UNDECLARED.
   _fm_note_if_no_cargo_observed "$1" "$2"
+  # #3765: extract the failing ASSERT identity from this component's log, at the
+  # boundary where the log is complete and closed. Sidecar, never a third .result field
+  # (see the two-fields-only note above). No-op unless the status is FAIL.
+  _failassert_record "$1" "$2"
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
@@ -16915,6 +17072,9 @@ run_scoped_tests() {
     # exit — taken before any cargo runs — rendered `[UNDECLARED]` ("nobody said") instead
     # of the fact we know exactly. Both of this function's terminal paths now note it.
     _fm_note_if_no_cargo_observed "$name" "$status"
+    # #3765: same reason — this function appends to NAMES directly, so the extraction
+    # record_result would have made is written explicitly here (its log IS $log).
+    _failassert_record "$name" "$status" "$log"
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
     return
@@ -17166,6 +17326,8 @@ run_scoped_tests() {
   # #3453 (F4): the SECOND terminal path of this function — see the note at the no-parser
   # exit. record_result is never called here either, so the note is written explicitly.
   _fm_note_if_no_cargo_observed "$name" "$status"
+  # #3765: see the no-parser exit above — explicit, for the same reason.
+  _failassert_record "$name" "$status" "$log"
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
@@ -17328,6 +17490,9 @@ run_delta_node_tests() {
     status=FAIL; OVERALL=FAIL
     echo "--- [node-tests] FAILED; last 40 lines ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
   fi
+  # #3765: extract BEFORE the log is deleted — this runner appends to NAMES directly and
+  # its log is a private mktemp, not $LOG_DIR/<name>.log, so the path is passed in.
+  _failassert_record "node-tests" "$status" "$log"
   rm -f "$log"
   end=$(date +%s)
   NAMES+=("node-tests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
@@ -17349,6 +17514,13 @@ run_delta_shell_selftests() {
   start=$(date +%s)
   if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
   end=$(date +%s)
+  # #3765 DECLARED GAP, recorded rather than left silent: this runner captures each
+  # script's output to a private mktemp it prints and then DELETES, so there is no
+  # component log to scan and no identity to extract. Saying so affirmatively is the
+  # contract; an absent field would be indistinguishable from a defect in the extractor.
+  if [ "$status" = FAIL ]; then
+    _failassert_write shell-selftests "not extractable (this component keeps no component log; its per-file 'shell-selftest: <file> FAIL' verdicts go to the gate's stdout)"
+  fi
   NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
   echo ">>> [shell-selftests] $status ($((end - start))s)"
@@ -17837,10 +18009,22 @@ fi
 # summary, and exits on OVERALL exactly as run_lite does — so the regression test can
 # pin "any component FAIL ⇒ RESULT: FAIL + non-zero exit" without a cargo build.
 if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
+  # #3765: optionally seed a component LOG from a caller-supplied file
+  # (AGENT_GATE_TEST_LITE_LOGS="name=/path ..."), so the failed-assert field can be
+  # driven through its REAL chain — log -> _ansi_stripped_log -> the extractor -> the
+  # sidecar -> the ONE renderer — with no cargo and no 20-minute gate. A name with NO
+  # entry here keeps an absent log, which is itself one of the states under test.
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated pairs
+  for _fapair in ${AGENT_GATE_TEST_LITE_LOGS:-}; do
+    cp -R "${_fapair#*=}" "$LOG_DIR/${_fapair%%=*}.log" 2>/dev/null || true
+  done
   # Seed per-component result files from AGENT_GATE_TEST_LITE_RESULTS="name:status ...".
   # shellcheck disable=SC2086  # intentional word-split over the space-separated pairs
   for _pair in ${AGENT_GATE_TEST_LITE_RESULTS:-}; do
     printf '%s 0\n' "${_pair#*:}" > "$LOG_DIR/${_pair%%:*}.result"
+    # The REAL extraction site record_result uses (#3765) — same function, same
+    # arguments, so this hook cannot certify a code path production does not take.
+    _failassert_record "${_pair%%:*}" "${_pair#*:}"
   done
   # Seed the scoped-tests entry run_scoped_tests appends (and flip OVERALL as it does).
   _scoped_st="${AGENT_GATE_TEST_LITE_SCOPED:-PASS}"
