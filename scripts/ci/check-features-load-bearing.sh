@@ -47,13 +47,16 @@
 #       gates no compilation. `all()`/`any()`/`not()` need no special handling: they
 #       are inside the head's own balanced span.
 #
-#       THE BUILD-SCRIPT ROUTE is an env read through a genuine API — `env::var`,
-#       `std::env::var`, `_os` variants — or an unqualified `var`/`var_os` ONLY when
-#       the file proves the import (`use std::env::var`, braced lists included),
-#       because `var` is an ordinary identifier and an unrelated local function of
-#       that name must not credit a feature. `option_env!` is not accepted: cargo
-#       documents these variables for build-script EXECUTION, and claiming a
-#       compile-time read would assert something unverified.
+#       THE BUILD-SCRIPT ROUTE is an env read through a genuine API, in three
+#       ANCHORED spellings: a full `std::env::var` / `core::env::var` path (leading
+#       `::` allowed, but NOT `my_std::env::var`); a bare `env::var` ONLY when the file
+#       proves the MODULE binding (`use std::env;`, braced lists included, and NOT
+#       `my_env::var`); and a bare `var`/`var_os` ONLY when the file proves the
+#       FUNCTION binding (`use std::env::var`). `env` and `var` are ordinary
+#       identifiers — an unanchored match accepted a LOCAL `mod env` and even the
+#       `env::var` suffix of `my_env::var(...)`, each crediting a dead feature.
+#       `option_env!` is not accepted: cargo documents these variables for build-script
+#       EXECUTION, and claiming a compile-time read would assert something unverified.
 #   E2  OPTIONAL DEPENDENCY — G's dep list enables an optional dependency (`dep:x`).
 #       The "bare optional-dep name" spelling (`wasm = ["wasm-bindgen", ...]`) is
 #       covered by the closure, because cargo SYNTHESISES an implicit feature per
@@ -72,7 +75,11 @@
 #           is live because `observability` activates that dep; `["x?/f"]` alone is
 #           dead.
 #         * A REDUNDANT edge — one that enables what the DEPENDENCY DECLARATION
-#           already enables. `foo = ["serde/derive"]` beside
+#           already enables AND that activates nothing. ACTIVATION IS JUDGED FIRST: a
+#           non-weak edge to an OPTIONAL dependency pulls that dependency into the
+#           build, which is an effect however redundant the forwarded feature is, so
+#           `f = ["foo/x"]` beside `foo = { optional = true, features = ["x"] }` stays
+#           LOAD-BEARING. Getting that order wrong reported a live feature as dead. `foo = ["serde/derive"]` beside
 #           `serde = { features = ["derive"] }` changes nothing, and neither does
 #           `foo = ["dep/default"]` on a dependency that already uses default
 #           features. Cargo metadata resolves workspace-dependency inheritance, so an
@@ -152,6 +159,18 @@
 #     macro (or emitted by a `macro_rules!` body that this scan reads as tokens rather
 #     than expands) has no textual `feature = "NAME"` for the scan to find. Direction:
 #     it would report such a feature DEAD — a false FAIL, which is loud.
+#   * An ORPHAN `.rs` file under a target's source directory — one no `mod` chain
+#     reaches from the target root — is scanned as if it were compiled, so a cfg gate
+#     in dead code can credit a dead feature. Deciding it means resolving Rust's module
+#     graph (`mod`, `#[path]`, `#[cfg]`-gated `mod`, nested inline modules) from bash,
+#     which is the UNBOUNDED-PARSING problem this repo has already paid for once and
+#     removed: #1712 deleted the rustdoc/public-API half of `pub-surface` precisely
+#     because a scanner that must find declarations anywhere in arbitrary source cannot
+#     abstain. Not worth that cost for a case that needs dead code to be committed AND
+#     to name an otherwise-dead feature. Direction: such a file is SCANNED — a residual
+#     false PASS. Pinned by a fixture in
+#     scripts/tests/test_features_load_bearing_guard.sh, so this declaration cannot
+#     drift from the code: a declaration nobody tests is a comment.
 #   * An INDIRECTLY redundant dependency-feature edge is not detected: `dep/x` where
 #     the declaration enables some feature that itself enables `x`. Deciding it needs
 #     the dependency's own feature table, which `--no-deps` does not carry for external
@@ -309,8 +328,9 @@ SKIP_DIR_NAMES = {"target", ".git", "node_modules", "fuzz"}
 # THE DECLARED RESIDUAL, printed on every success. See the script header: this scan is
 # LEXICAL, and two things it cannot decide are named rather than implied away.
 RESIDUAL_NOTE = ("cfg-site detection: lexical, NON-EXHAUSTIVE "
-                 "(a cfg produced by MACRO EXPANSION is not seen; an INDIRECTLY redundant "
-                 "dependency-feature edge is not detected)")
+                 "(a cfg produced by MACRO EXPANSION is not seen; an ORPHAN .rs file under a "
+                 "target's source dir, not reachable from the target root, is scanned as if "
+                 "compiled; an INDIRECTLY redundant dependency-feature edge is not detected)")
 
 STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
 IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -534,15 +554,32 @@ def cfg_feature_sites(code, strings):
 # NOT accepted: cargo documents these variables for build-script EXECUTION, and
 # claiming a compile-time read would be asserting something unverified.
 # ---------------------------------------------------------------------------
-ENV_QUALIFIED_RE = re.compile(r'(?:(?:std|core)' + WS + r'::' + WS + r')?env' + WS + r'::' + WS + r'(?P<fn>var_os|var)' + WS + r'\(' + WS)
-ENV_BARE_RE = re.compile(r'(?<![A-Za-z0-9_])(?<!::)(?P<fn>var_os|var)' + WS + r'\(' + WS)
-USE_ENV_RE = re.compile(r'(?<![A-Za-z0-9_])use[ \t\r\n]+(?:std|core)' + WS + r'::' + WS + r'env' + WS + r'::' + WS + r'(?P<tail>\{[^}]*\}|var_os|var)')
+# THREE spellings, each ANCHORED (roborev job 55, finding 2). An unanchored
+# `env::var(` accepted a LOCAL `mod env` — an ordinary module of that name reading
+# nothing from the process environment — and, having no left anchor at all, it also
+# matched the `env::var` SUFFIX of `my_env::var(...)`. Both credited a dead feature.
+#
+#   ENV_ABS_RE  — a full `std::env::var` / `core::env::var` path (a leading `::` is
+#                 allowed), anchored so `my_std::env::var` and `crate::std::env::var`
+#                 do NOT match.
+#   ENV_MOD_RE  — a bare `env::var`, accepted ONLY when the file proves the module
+#                 binding (`use std::env;`, including a braced `use std::{env, fs};`),
+#                 and anchored so `my_env::var` does not match.
+#   ENV_FN_RE   — a bare `var`/`var_os`, accepted ONLY when the file proves the
+#                 function binding (`use std::env::var`, braced lists included).
+PATH_SEG = r'(?<![A-Za-z0-9_:])(?:::)?'
+ENV_ABS_RE = re.compile(PATH_SEG + r'(?:std|core)' + WS + r'::' + WS + r'env' + WS + r'::' + WS + r'(?P<fn>var_os|var)' + WS + r'\(' + WS)
+ENV_MOD_RE = re.compile(r'(?<![A-Za-z0-9_:])env' + WS + r'::' + WS + r'(?P<fn>var_os|var)' + WS + r'\(' + WS)
+ENV_FN_RE = re.compile(r'(?<![A-Za-z0-9_:])(?P<fn>var_os|var)' + WS + r'\(' + WS)
+USE_ENV_FN_RE = re.compile(r'(?<![A-Za-z0-9_])use[ \t\r\n]+(?:::)?(?:std|core)' + WS + r'::' + WS + r'env' + WS + r'::' + WS + r'(?P<tail>\{[^}]*\}|var_os|var)')
+USE_ENV_MOD_RE = re.compile(r'(?<![A-Za-z0-9_])use[ \t\r\n]+(?:::)?(?:std|core)' + WS + r'::' + WS + r'(?P<tail>env' + WS + r'[;,}]|\{[^}]*\})')
 CARGO_FEATURE_RE = re.compile(r'^CARGO_FEATURE_([A-Z0-9_]+)$')
 
 
 def imported_env_fns(code):
+    """The `std::env` function names this file has imported by name."""
     names = set()
-    for m in USE_ENV_RE.finditer(code):
+    for m in USE_ENV_FN_RE.finditer(code):
         tail = m.group("tail")
         if tail.startswith("{"):
             for part in tail[1:-1].split(","):
@@ -554,27 +591,50 @@ def imported_env_fns(code):
     return names
 
 
+def imports_env_module(code):
+    """True when this file binds the `std::env` MODULE (so a bare `env::var` is std's)."""
+    for m in USE_ENV_MOD_RE.finditer(code):
+        tail = m.group("tail").strip()
+        if tail.startswith("{"):
+            for part in tail[1:-1].split(","):
+                if part.strip() == "env":
+                    return True
+        else:
+            return True
+    return False
+
+
 def build_script_env_features(code, strings):
     """Yield (CARGO_FEATURE_<X> suffix, offset) for every genuine env read."""
-    imported = imported_env_fns(code)
-    for m in ENV_QUALIFIED_RE.finditer(code):
+    imported_fns = imported_env_fns(code)
+    mod_bound = imports_env_module(code)
+    seen = set()
+
+    def emit(m):
         name = strings.get(m.end())
-        if name:
-            hit = CARGO_FEATURE_RE.match(name)
-            if hit:
-                yield hit.group(1), m.start()
-    for m in ENV_BARE_RE.finditer(code):
-        if m.group("fn") not in imported:
+        if not name:
+            return None
+        hit = CARGO_FEATURE_RE.match(name)
+        if not hit or m.start() in seen:
+            return None
+        seen.add(m.start())
+        return hit.group(1), m.start()
+
+    for m in ENV_ABS_RE.finditer(code):
+        got = emit(m)
+        if got:
+            yield got
+    if mod_bound:
+        for m in ENV_MOD_RE.finditer(code):
+            got = emit(m)
+            if got:
+                yield got
+    for m in ENV_FN_RE.finditer(code):
+        if m.group("fn") not in imported_fns:
             continue
-        # Skip a qualified call already reported above (`env::var(` also matches here).
-        pre = code[max(0, m.start() - 2):m.start()]
-        if pre.endswith(":"):
-            continue
-        name = strings.get(m.end())
-        if name:
-            hit = CARGO_FEATURE_RE.match(name)
-            if hit:
-                yield hit.group(1), m.start()
+        got = emit(m)
+        if got:
+            yield got
 
 
 def cargo_feature_env_name(feature):
@@ -869,13 +929,23 @@ for name, rec in members.items():
                 info = rec["dep_keys"].get(key)
                 if info is None:
                     fail("feature '%s' of member '%s' enables '%s', but member '%s' declares no dependency with the key '%s'. Cargo's feature syntax names a dependency by its KEY (its `rename`, when renamed); refusing to credit an edge it could not resolve." % (feat, name, entry, name, key))
-                if edge_is_redundant(info, dfeat):
-                    # The dependency declaration already enables this feature, so the
-                    # edge newly enables NOTHING. Not an effect, and not a closure edge.
-                    continue
-                if not weak and info["optional"]:
+                # ACTIVATION IS JUDGED FIRST, and that ORDER is the fix for a false
+                # FAIL (roborev job 55, finding 1): a non-weak edge to an OPTIONAL
+                # dependency ACTIVATES that dependency, which is an effect no matter
+                # what the declaration already enables. `f = ["foo/x"]` beside
+                # `foo = { optional = true, features = ["x"] }` genuinely pulls `foo`
+                # into the build, so dropping it as redundant reported a LIVE feature
+                # as dead — and a guard that reds on correct input is the guard agents
+                # learn to waive.
+                activates = (not weak) and info["optional"]
+                if activates:
                     acts.add(key)
                     effect = True
+                if edge_is_redundant(info, dfeat) and not activates:
+                    # The dependency declaration already enables this feature and the
+                    # edge activates nothing, so it newly enables NOTHING: not an
+                    # effect, and not a closure edge.
+                    continue
                 if info["member"] is not None:
                     tgt = info["member"]
                     if dfeat not in members[tgt]["features"]:
