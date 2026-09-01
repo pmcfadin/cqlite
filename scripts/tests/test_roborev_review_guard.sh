@@ -6197,7 +6197,7 @@ assert_says 'case (jm10) --help says to verify git_ref, never the id alone' "VER
 assert_says 'case (jm10) --help reads git_ref from the payload that HAS it (.job on show)' \
   "roborev show <id> --json \| jq '\.job \| \{id, git_ref"
 assert_says 'case (jm10) --help reads the daemon id from the LIST payload' \
-  "roborev list --json --repo <abs-repo> --branch <branch>"
+  "roborev list --json --limit <N> --repo <abs-repo> --branch <branch>"
 assert_lacks 'case (jm10) --help does NOT prescribe the top-level jq that measures nulls' \
   "show <id> --json \| jq '\{id, git_ref"
 assert_says 'case (jm10) --help warns that the list default follows the --repo HEAD, not the shell' \
@@ -6446,6 +6446,75 @@ assert_says 'case (jm16) an incomplete-but-READ record is NOT RECORDED' '^job-ma
 assert_lacks 'case (jm16) it never claims no record could be read' '^job-machine: UNAVAILABLE'
 assert_says 'case (jm16) the job-record key independently reports the incompleteness' '^job-record: DEGRADED'
 reset_stub
+
+printf '== (jm20) #3654 r5: the DOCUMENTED manual lookup finds a job beyond the first page ==\n'
+# THE CODE MOVED AND THE DOCUMENTATION DID NOT. The depth fix made the WRAPPER expand its own
+# lookup until found-or-exhausted, while the procedure --help tells a HUMAN to run still took the
+# default page — so a lead following our own written instructions on a deep job got an empty result
+# and no indication why, in exactly the case the code had just learned to handle.
+#
+# IT EXECUTES THE DOCUMENTED COMMAND RATHER THAN GREPPING THE HELP FOR A STRING. A string assert
+# would pass on any text mentioning --limit, including a command that still cannot find the row —
+# the same test-narrowness this issue has now paid for four times. So the command is EXTRACTED from
+# --help, its placeholders substituted as a human would substitute them, and RUN against the stub
+# daemon with the target sixty rows deep.
+if ! command -v jq >/dev/null 2>&1; then
+  printf 'SKIP - jq unavailable; the documented lookup could not be executed\n'
+else
+  CASE_N=$((CASE_N + 1))
+  OUT="$tmp/out-$CASE_N.txt"
+  bash "$WRAPPER_REAL" --help >"$OUT" 2>/dev/null
+  _jm20_cmd=$(grep -E '^ *roborev list --json .*select\(\.id==' "$OUT" | head -1 | sed 's/^ *//')
+  if [ -z "$_jm20_cmd" ]; then
+    bad 'case (jm20) --help prints no roborev list lookup command to execute — the documented procedure is gone'
+  else
+    reset_stub
+    STUB_LIST_DEPTH=60
+    STUB_LIST_BRANCH='issue-earlier-lane'
+    STUB_SOURCE_MACHINE_ID="$JM_UUID"
+    # The stub runs `set -uo pipefail` and dereferences STUB_INVOKED unguarded, so it EXITS if the
+    # variable is unset. run_wrapper supplies it per invocation; a direct call must too, or the
+    # daemon double dies and every probe below returns nothing — which the absence-shaped control
+    # would have read as SUCCESS. That happened while writing this case.
+    STUB_INVOKED="$tmp/jm20-invoked.txt"; : >"$STUB_INVOKED"; export STUB_INVOKED
+    _jm20_base=$(printf '%s' "$_jm20_cmd" \
+      | sed -e "s|<abs-repo>|$jm_work|" -e 's|<branch>|issue-earlier-lane|' -e 's|<id>|4656|')
+    # CONTROL 1 — THE DAEMON ANSWERS AT ALL. An absence-shaped control cannot tell "the row is
+    # deeper than this page" from "the double never ran", and those are exactly the two states this
+    # case must distinguish. So the first page is required to come back FULL of the filler rows.
+    if PATH="$stubbin:$PATH" roborev list --json --limit 50 --repo "$jm_work" \
+         --branch issue-earlier-lane 2>/dev/null | grep -q 'filler-not-the-target'; then
+      ok 'case (jm20) control: the stub daemon answers, and the first page is full of other jobs'
+    else
+      bad 'case (jm20) CONTROL: the stub daemon returned no rows at all, so every probe below would report absence for a reason unrelated to depth'
+    fi
+    # CONTROL 2 — AND THE TARGET IS NOT ON THAT PAGE, or the escalation would succeed trivially.
+    _jm20_ctl=$(printf '%s' "$_jm20_base" | sed 's|<N>|50|')
+    if PATH="$stubbin:$PATH" sh -c "$_jm20_ctl" 2>/dev/null | grep -q "$JM_UUID"; then
+      bad 'case (jm20) CONTROL: the row is already on the first page, so the fixture is not deep enough to test depth'
+    else
+      ok 'case (jm20) control: the first page does NOT hold the row, so only an expanding lookup can find it'
+    fi
+    # THE PROCEDURE ITSELF, followed literally: raise the limit until the row appears.
+    _jm20_found=''
+    if printf '%s' "$_jm20_base" | grep -q '<N>'; then
+      for _jm20_n in 50 200 800; do
+        _jm20_run=$(printf '%s' "$_jm20_base" | sed "s|<N>|$_jm20_n|")
+        if PATH="$stubbin:$PATH" sh -c "$_jm20_run" 2>/dev/null | grep -q "$JM_UUID"; then
+          _jm20_found="$_jm20_n"; break
+        fi
+      done
+    elif PATH="$stubbin:$PATH" sh -c "$_jm20_base" 2>/dev/null | grep -q "$JM_UUID"; then
+      _jm20_found=default
+    fi
+    if [ -n "$_jm20_found" ]; then
+      ok "case (jm20) the documented lookup returns the deep job's daemon id (found at limit $_jm20_found)"
+    else
+      bad 'case (jm20) the documented lookup returns NOTHING for a job past the first page — a lead following our own procedure sees an empty result and no reason why, while the wrapper finds it'
+    fi
+    reset_stub
+  fi
+fi
 
 printf '== (jm11) #3654: a `show` payload whose TOP-LEVEL id is NOT the asked job ==\n'
 # MEASURED SHAPE (ten records): top-level `id` is the REVIEW row's own sequence and can differ from

@@ -513,12 +513,19 @@ branches, different token counts, both correct. A repeated id is therefore NOT e
 of a collision; reading it as one cost a valid waiver a round. The check that settles it:
 
     roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
-    roborev list --json --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref, branch}'
+    roborev list --json --limit <N> --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref, branch}'
 
 git_ref MUST equal the marker's <base40>..<head40>. THREE TRAPS IN THOSE COMMANDS, all
 measured on roborev v0.61.2: (1) 'show <id> --json' NESTS git_ref/status/token_usage
 under '.job' and does not carry source_machine_id ANYWHERE, so a top-level jq over that
 payload prints nulls for all four — a check whose output cannot show what it claims;
+(0) 'roborev list' returns only the newest --limit rows (DEFAULT 50) and offers NO offset
+or cursor, so an OLDER job sits BEYOND the first page and the command returns NOTHING
+though the record exists. That is not a corner case: a --recheck-job names an old job by
+construction, and a heavily-reviewed branch accumulates rows, so "the job is deep" and
+"someone is applying a waiver" are the SAME population. RAISE <N> — 50, 200, 800 — until
+the row appears or the list stops growing. THE WRAPPER'S OWN LOOKUP DOES THIS
+AUTOMATICALLY; only this manual form needs the limit raised by hand;
 (2) 'roborev list' defaults its branch filter to the CURRENT HEAD OF THE --repo PATH —
 NOT to the branch your shell is standing in (measured: from a cwd that is not a git
 repository at all, '--repo <lane>' returns that lane's branch's rows) — so pass --branch
