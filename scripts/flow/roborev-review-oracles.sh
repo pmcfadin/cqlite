@@ -1242,8 +1242,11 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   local kind="$1" base="$2" head="$3" job="$4" observed="${5:-}"
   local rel_errfile rel_json rel_errtext numbers declared probed=0
   local issue read_ok=() unread=() comments result state scan_rc
-  local issue_errfile issue_errtext
+  local issue_errfile issue_errtext read_list unread_list
   ROBOREV_PROBE_OUTCOME="could-not-check"
+  # THE STRUCTURED VALUE, KEPT BESIDE THE RENDERED ONE ON PURPOSE. `_DETAIL` is prose for a human;
+  # `_ISSUE` is the number as data, so a later consumer (or a test) never has to parse the number back
+  # out of a diagnostic string — re-parsing a rendered value is the shape this file exists to refuse.
   ROBOREV_PROBE_ISSUE=""
   ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the probe was never asked"
   if ! command -v gh >/dev/null 2>&1; then
@@ -1400,10 +1403,16 @@ for ref in refs:
       return 0
     fi
   done
+  # Joined explicitly rather than through `${arr[*]}` + IFS: the separator is part of the rendering a
+  # human reads, and a trailing one (what `printf '%s; '` leaves) reads as a truncated list.
+  read_list=""
+  for issue in ${read_ok[@]+"${read_ok[@]}"}; do read_list="${read_list:+$read_list,}$issue"; done
+  unread_list=""
+  for issue in ${unread[@]+"${unread[@]}"}; do unread_list="${unread_list:+$unread_list; }$issue"; done
   # ===== A PARTIAL READ IS `could-not-check` NAMING BOTH HALVES, NEVER `checked` =====
-  if [ "${#unread[@]}" -gt 0 ]; then
+  if [ -n "$unread_list" ]; then
     ROBOREV_PROBE_OUTCOME="could-not-check"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_ok[*]:-none}; NOT read: $(printf '%s; ' "${unread[@]}")"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list"
     return 0
   fi
   if [ "$probed" -lt "$declared" ]; then
@@ -1411,14 +1420,14 @@ for ref in refs:
     # `0 RECOGNISED` rather than a bare `0`. A lane that omits coverage silently is
     # indistinguishable from one that covers it.
     ROBOREV_PROBE_OUTCOME="checked"
-    ROBOREV_PROBE_DETAIL="linked issues ${read_ok[*]} checked — $probed of $declared declared, probe bounded at $ROBOREV_LINKED_ISSUE_PROBE_MAX: no matching marker"
+    ROBOREV_PROBE_DETAIL="linked issues $read_list checked — $probed of $declared declared, probe bounded at $ROBOREV_LINKED_ISSUE_PROBE_MAX: no matching marker"
     return 0
   fi
   ROBOREV_PROBE_OUTCOME="checked"
   if [ "$declared" -eq 1 ]; then
-    ROBOREV_PROBE_DETAIL="linked issue ${read_ok[*]} checked: no matching marker there either"
+    ROBOREV_PROBE_DETAIL="linked issue $read_list checked: no matching marker there either"
   else
-    ROBOREV_PROBE_DETAIL="linked issues ${read_ok[*]} checked: no matching marker there either"
+    ROBOREV_PROBE_DETAIL="linked issues $read_list checked: no matching marker there either"
   fi
   return 0
 }

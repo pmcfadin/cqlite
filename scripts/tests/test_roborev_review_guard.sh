@@ -6121,7 +6121,7 @@ run_wrapper "$w_work"
 assert_verdict 'case (mp8)' FAIL 1
 assert_no_marker_form 'case (mp8)'
 assert_says 'case (mp8) the rendering declares declared / probed / bound' \
-  'linked issues #3544 #3626 #3312 checked — 3 of 4 declared, probe bounded at 3: no matching marker'
+  'linked issues #3544,#3626,#3312 checked — 3 of 4 declared, probe bounded at 3: no matching marker'
 assert_lacks 'case (mp8) the unprobed remainder is not silently claimed as checked' \
   'checked: no matching marker there either'
 if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
