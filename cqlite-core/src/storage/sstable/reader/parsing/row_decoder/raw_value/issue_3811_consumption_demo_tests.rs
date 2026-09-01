@@ -64,13 +64,24 @@
 //!   is labelled with which one, rather than being allowed to imply it covers this
 //!   issue's assert. `rule3_overrun_*` is the only one of these.
 //!
-//! The labels were PROVED, not asserted. `require_fully_consumed_raw`'s call in
-//! `raw_value.rs` was disabled (the defect reintroduced) and this suite re-run:
-//! **14 failed, 10 passed**, and the red set is EXACTLY the 14 cases labelled
-//! DISCRIMINATING — the 8 CONTROL cases and the 2 DISCRIMINATING-ELSEWHERE cases
-//! all stayed green. A test whose claim exceeds what it exercises is the defect
-//! class this labelling exists to prevent, so the labels are a measurement and not
-//! a description.
+//! The labels were PROVED, not asserted — and proved PER GUARD, because there are
+//! now three independent ones and a single blanket disable could not tell which
+//! test pins which. Each guard was disabled ALONE and the suite (33 cases) re-run:
+//!
+//! | disabled guard | red set |
+//! |---|---|
+//! | the outer wrapper assert in `raw_value.rs` | **14** — exactly the original DISCRIMINATING set |
+//! | the two nested self-checks (`parse_nested_udt_from_registry`, `parse_inline_udt_value`) | **2** — exactly `nested_udt_*_is_refused` |
+//! | the four `parse_udt_value` caller checks | **2** — exactly `frozen_udt_header_path_*_is_refused` |
+//!
+//! 18 DISCRIMINATING in total, each attributed to the one guard it pins. The 12
+//! CONTROL cases and the 2 DISCRIMINATING-ELSEWHERE cases stayed green in ALL
+//! THREE runs. That attribution is the point: it is what shows the four
+//! `nested_udt_*` cases exercise the NESTED contract and are not merely re-testing
+//! the outer assert through a deeper value — the outer value in those vectors is
+//! well-formed by construction, and the measurement confirms the outer disable
+//! leaves them green. A test whose claim exceeds what it exercises is the defect
+//! class this labelling exists to prevent, so the labels are a measurement.
 //!
 //! **What that experiment does NOT cover, declared rather than implied, and
 //! narrowed since the first statement of it.** Two groups of call sites need an
