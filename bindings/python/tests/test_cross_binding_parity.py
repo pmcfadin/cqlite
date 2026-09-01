@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -449,15 +450,24 @@ def test_fixtures_declare_no_divergence_allowlist():
 
 
 def test_declared_gaps_are_stated_in_full():
-    """The runtime declaration must cover every gap the README lists (N2)."""
+    """The runtime declaration must cover every gap the README's list has (N2).
+
+    Scoped to the ``## DECLARED GAPS`` SECTION, not the whole file: counting
+    numbered items anywhere would silently absorb an unrelated numbered list
+    added later, which is the same "claim wider than the measurement" defect
+    this test exists to prevent.
+    """
     readme = (PARITY_DIR / "README.md").read_text(encoding="utf-8")
-    documented = readme.count("\n1. ") + sum(
-        readme.count(f"\n{n}. ") for n in range(2, 20)
-    )
-    assert len(DECLARED_GAPS) == 7, "DECLARED_GAPS changed; update the README gap list too"
-    assert documented >= len(DECLARED_GAPS), (
-        f"README documents {documented} numbered gaps but DECLARED_GAPS has "
-        f"{len(DECLARED_GAPS)} — a claim that the run states them all must stay true"
+    marker = "\n## DECLARED GAPS\n"
+    assert marker in readme, "README lost its `## DECLARED GAPS` section"
+    section = readme.split(marker, 1)[1].split("\n## ", 1)[0]
+    documented = [
+        line for line in section.split("\n") if re.match(r"^\d+\. \*\*", line)
+    ]
+    assert len(documented) == len(DECLARED_GAPS), (
+        f"README's DECLARED GAPS section lists {len(documented)} gaps but "
+        f"DECLARED_GAPS has {len(DECLARED_GAPS)} — the claim that every run states "
+        "them all must stay true"
     )
 
 
