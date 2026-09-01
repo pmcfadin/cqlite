@@ -1062,7 +1062,17 @@ Keep files small — agentic context cost scales with file size. Targets (total 
 included): source `~800`, test files `~1500`. The gate's `file-size` ratchet FAILs if your change
 grows an over-threshold `.rs` file (or pushes one over). Touching an over-threshold file → split it
 by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope → re-run with
-`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135.
+`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135. **That override is now
+VISIBLE in the SUMMARY, and the component's status token says so (#3402):**
+`file-size: OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); N
+over-threshold file(s) grown: <paths, elided past 3 with a named ",+N more" remainder>`. `PASS` means the check RAN
+and was SATISFIED; it never means the check was switched off — a bare `file-size: PASS` under an
+engaged override was indistinguishable from a genuine one, so the disclosure depended on the
+author remembering to write it in the PR body. `OPT-OUT` is NON-FAILING (only an exact `FAIL`
+sets `OVERALL=FAIL`), so an acknowledged growth still reaches `RESULT: PASS` — it is now merely
+impossible to hide. It is emitted ONLY for the value **exactly `1`**: a value SET BUT NOT `1`
+(`0`, `true`, `yes`) is not an opt-out, stays a ratchet violation and FAILs, because a
+permissive branch keyed on `!= <bad>` would let a typo waive the ratchet.
 
 ### Testing
 - Integration tests use real SSTable data only; validate against `sstabledump` output via JSONL

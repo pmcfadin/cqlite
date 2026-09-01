@@ -728,8 +728,11 @@ if AGENT_GATE_SUMMARY_FILE="$selftest_sum" bash "$GATE" --emit-summary-selftest 
     case "$line" in
       *'[UNDECLARED]'*|*UNCLASSIFIED*) missing+=("$line") ;;
     esac
-  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS)' "$selftest_sum")
-  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[.+\]' "$selftest_sum")
+  # FIVE tokens: #3625 added VACUOUS and #3402 added OPT-OUT, independently, on the same
+  # reasoning — a hard-coded subset stops SEEING the rows it does not name. The union is the
+  # vocabulary; neither issue's token may be dropped when the other lands.
+  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)' "$selftest_sum")
+  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT) \([0-9]+s\)  \[.+\]' "$selftest_sum")
   if [ "$n_annot" -eq 4 ] && [ "${#missing[@]}" -eq 0 ]; then
     ok "B4: --emit-summary-selftest emits 4 annotated component lines, none UNDECLARED"
   else
@@ -891,7 +894,13 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
   PATH="$use_shim:$PATH" \
     bash "$GATE" --only "$c" > "$log" 2>&1
   local line ann
-  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$sum" 2>/dev/null | head -1)
+  # The component-status token SET, not a subset (#3625's VACUOUS + #3402's OPT-OUT). Stated
+  # precisely rather than overclaimed: `file-size` is class `no-cargo`, so this loop — which
+  # iterates cargo-class components only — cannot reach an OPT-OUT row TODAY. The tokens are
+  # read here because this grep decides "no component line emitted" (a `bad`), and a
+  # name-keyed reader that knows a SUBSET answers that question wrongly the day the set grows
+  # again — which it just did, twice, from two issues at once.
+  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$sum" 2>/dev/null | head -1)
   if [ -z "$line" ]; then
     bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
@@ -1330,7 +1339,7 @@ for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
   AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
   PATH="$shim_dir:$PATH" \
     bash "$GATE" --only "$c" > "$e2_log" 2>&1
-  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$e2_sum" 2>/dev/null | head -1)
+  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$e2_sum" 2>/dev/null | head -1)
   if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
   e2_ran=$((e2_ran + 1))
   e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"
