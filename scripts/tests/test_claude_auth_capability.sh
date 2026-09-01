@@ -173,9 +173,13 @@ EOF
 # plant_claude_echoing_token <dir>: rc 0, and it prints the TOKEN it was handed. Used by
 # the redaction case: the capability script must not relay a secret out of probe output.
 plant_claude_echoing_token() {
+  # The wording is a REAL rejection shape ("Failed to authenticate"), not a generic error:
+  # since #3733's third round only a positively identified rejection earns FAILED, and this
+  # case is about REDACTION on that path — a stub whose text no longer reached FAILED would
+  # still pass while testing a different branch.
   cat >"$1/claude" <<'EOF'
 #!/usr/bin/env bash
-printf 'auth error for credential %s\n' "${CLAUDE_CODE_OAUTH_TOKEN-<unset>}"
+printf 'Failed to authenticate: the API key %s was rejected\n' "${CLAUDE_CODE_OAUTH_TOKEN-<unset>}"
 exit 1
 EOF
   chmod +x "$1/claude"
@@ -464,8 +468,8 @@ fi
 d4=$(mkshim "$tmp/s4")
 plant_claude "$d4" 0 ''
 run_cap "$d4" "$ef2" -- --auth
-if printf '%s' "$out" | grep -q '^claude-auth: FAILED'; then
-  ok "claude-auth: rc 0 with NO sentinel is not VERIFIED"
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+  ok "claude-auth: rc 0 with NO sentinel is not VERIFIED (and is UNMEASURED, not an accusation)"
 else
   bad "claude-auth: rc 0 + empty output produced '$out' — rc alone must not certify"
 fi
@@ -476,8 +480,8 @@ fi
 d5=$(mkshim "$tmp/s5")
 plant_claude "$d5" 1 "$SENTINEL"
 run_cap "$d5" "$ef2" -- --auth
-if printf '%s' "$out" | grep -q '^claude-auth: FAILED'; then
-  ok "claude-auth: the sentinel with rc != 0 is not VERIFIED"
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+  ok "claude-auth: the sentinel with rc != 0 is not VERIFIED (and names no rejection, so UNMEASURED)"
 else
   bad "claude-auth: sentinel + rc 1 produced '$out' — output alone must not certify"
 fi
@@ -499,7 +503,7 @@ exit 0
 EOF
 chmod +x "$d5b/claude"
 run_cap "$d5b" "$ef2" -- --auth
-if printf '%s' "$out" | grep -q '^claude-auth: FAILED'; then
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
   ok "claude-auth: a probe that merely ECHOES the prompt does not satisfy the sentinel"
 else
   bad "claude-auth: an argv echo was accepted as an authenticated answer: $out"
@@ -1365,6 +1369,57 @@ else
 fi
 
 # =====================================================================================
+# 29. `FAILED` IS AN ACCUSATION ABOUT A CREDENTIAL, SO IT MUST BE EARNED.
+#     Every nonzero probe result that was not one narrow network shape used to be
+#     classified FAILED — and FAILED's remedy is "replace the VALUE ... bootstrap never
+#     rewrites it". A rate limit, an API outage, a quota error, a CLI crash and a trust
+#     prompt are none of them evidence that the credential was rejected, so that is a
+#     confident, wrong, ACTIONABLE instruction to throw away a working token. It is this
+#     issue's own history repeating: a measurement of something adjacent reported as the
+#     thing itself.
+#     The rule applied is the doctrine one, verbatim: where the sole oracle could not be
+#     consulted the verdict is non-passing and its text names what was unverifiable — it
+#     must not become an affirmative negative. Nothing is weakened by the move: UNMEASURED
+#     is already non-passing, exits non-zero, and withholds "All checks green" under
+#     --strict exactly as FAILED does. Only the operator's next action differs, which is
+#     the entire point.
+# =====================================================================================
+# claude_auth_case <name> <shim-dir-suffix> <rc> <text> <expected-verdict>
+claude_auth_case() {
+  local nm="$1" sfx="$2" prc="$3" text="$4" want="$5" dd
+  dd=$(mkshim "$tmp/$sfx"); plant_claude "$dd" "$prc" "$text"
+  run_cap "$dd" "$ef2" -- --auth
+  if printf '%s' "$out" | grep -q "^claude-auth: $want"; then
+    ok "claude-auth: $nm -> $want"
+  else
+    bad "claude-auth: $nm expected $want, got: $out"
+  fi
+}
+# Rate limiting and an outage prove nothing about the credential.
+claude_auth_case 'a rate-limit refusal (429)' s29a 1 \
+  'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit"}}' UNMEASURED
+claude_auth_case 'an API outage (503)' s29b 1 \
+  'API Error: 503 Service Unavailable — upstream connect error' UNMEASURED
+claude_auth_case 'an overloaded upstream (529)' s29c 1 \
+  'API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' UNMEASURED
+claude_auth_case 'a quota/credit exhaustion' s29d 1 \
+  'Your credit balance is too low to access the Anthropic API' UNMEASURED
+claude_auth_case 'a CLI crash with no diagnosis' s29e 2 \
+  'node:internal/errors: TypeError: Cannot read properties of undefined' UNMEASURED
+# ...and the shapes that DO name a credential rejection still earn FAILED, or the change
+# would have removed the verdict rather than narrowed it.
+claude_auth_case 'the fleet-measured rejection wording' s29f 1 \
+  'Failed to authenticate: OAuth session expired and could not be refreshed' FAILED
+claude_auth_case 'an invalid API key' s29g 1 \
+  'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}' FAILED
+claude_auth_case 'an explicit re-login demand' s29h 1 \
+  'Invalid API key · Please run /login' FAILED
+# A 401 must not be matched inside a longer number — the guard against a matcher that
+# earns an accusation from a coincidence.
+claude_auth_case 'a 401 embedded in a larger number is NOT a rejection' s29i 1 \
+  'API Error: 1401337 requests queued upstream' UNMEASURED
+
+# =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
 #     `tooling-tests` is a MANDATORY gate component, so a path that exists on ONE box —
 #     or in ONE agent session — makes the gate host-dependent, and if that directory
@@ -1470,7 +1525,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=75
+CASE_FLOOR=84
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

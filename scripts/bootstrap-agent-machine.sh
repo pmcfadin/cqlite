@@ -3044,16 +3044,20 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # THE REMEDY DIFFERS BY VERDICT, and getting that wrong sends an operator in a circle —
   # the #3414 `default` vs `invalid` lesson. NOT-PERSISTED means provision it; FAILED means
   # replace a value that IS there; UNMEASURED means fix the named precondition and re-run.
+  # FAILED IS RESERVED FOR A POSITIVELY IDENTIFIED REJECTION (#3733 round 3): a rate limit,
+  # an outage, a quota error or a CLI crash prove nothing about the credential, so they
+  # report UNMEASURED — equally non-passing, but never "throw this token away".
   case "$CLAUDE_AUTH_V" in
     NOT-PERSISTED)
       info "provision it:  add a CLAUDE_CODE_OAUTH_TOKEN=<token> line to /etc/environment (root:root 0644, its own line, NO inline comment — pam_env takes a trailing '# ...' as part of the value)"
       info "no browser is needed: the credential is a STATIC, SHAREABLE gateway token, so provisioning a box is a file copy plus 'bash scripts/bootstrap-agent-machine.sh --fix-claude-auth' — there is no interactive OAuth step"
       info "bootstrap deliberately NEVER writes the credential itself; it only reports and reaches it" ;;
     FAILED)
-      info "replace the VALUE (not the presence) — the CLAUDE_CODE_OAUTH_TOKEN line in /etc/environment is there and is rejected; bootstrap never rewrites it"
+      info "replace the VALUE (not the presence) — the CLAUDE_CODE_OAUTH_TOKEN line in /etc/environment is there and the API IDENTIFIED IT AS REJECTED; bootstrap never rewrites it"
       info "then re-run, and seed the running tmux server:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth" ;;
     UNMEASURED)
-      info "resolve the condition named above and re-run; check by hand:  bash scripts/claude-auth-capability.sh --auth" ;;
+      info "the credential was NOT exercised end to end; the cause is named above. This is NOT a verdict about the token — a rate limit, an outage, an exhausted quota or a crash never means the value is wrong, so do NOT replace it on this evidence"
+      info "resolve the named condition and re-run; check by hand:  bash scripts/claude-auth-capability.sh --auth" ;;
   esac
 
   # ---- (b) does that credential REACH a tmux-spawned pane? ----

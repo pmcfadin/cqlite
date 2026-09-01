@@ -1928,7 +1928,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   failure is silent until dispatch. Bootstrap now prints two independent verdicts — `claude-auth:`
   (VERIFIED/NOT-PERSISTED/FAILED/UNMEASURED, an affirmative bounded `claude -p` probe of the
   PERSISTED value with the INHERITED one scrubbed, #3414's lesson one subject over) and
-  `claude-tmux-env:`
+  **`FAILED` is an ACCUSATION and is earned, never defaulted to**: it is emitted only for a
+  POSITIVELY IDENTIFIED rejection (an authentication error, a 401 anchored on non-digits,
+  `Failed to authenticate`, `Please run /login`), because its remedy is "replace the value" — a rate
+  limit, an outage, an exhausted quota or a CLI crash prove nothing about the credential and report
+  UNMEASURED with the cause named, equally non-passing. The probe's bound must ESCALATE
+  (`--kill-after=`/`-k`, probed by running it): a SIGTERM-only `timeout` does not bound a child that
+  ignores SIGTERM — measured, rc 124 after the child's own 30s — so where no hard bound exists the
+  probe is NOT RUN. And the credential is never printed **including under `bash -x`**: the redaction
+  boundary is downstream of shell tracing, so every entry point suppresses xtrace and restores the
+  caller's setting. `claude-tmux-env:`
   (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/SERVER-CONFIG-STALE/SERVER-CONFIG-NODIR
   against a LIVE server; VERIFIED/COLD-START-MISSING/COLD-START-INCOMPLETE/COLD-START-NODIR when
   NONE is running; NO-SERVER/UNMEASURED when nothing could be measured). **A SERVERLESS BOX IS

@@ -957,7 +957,13 @@ the *same box* was working an hour earlier.
 
 `bash scripts/bootstrap-agent-machine.sh` runs section 5c and prints two independent, greppable
 lines. **Only `VERIFIED` is an `[ok]` on either line**; everything else is a `[warn]` carrying its
-own remedy, and `NO-SERVER` is UNMEASURED-class — which since the cold-start probe means
+own remedy. **`FAILED` is an accusation about a credential, so it is earned, not defaulted to**: it
+is emitted only for a positively identified authentication rejection, and every other unsuccessful
+probe — rate limit, outage, quota, crash, bound fired, no sentinel — is `UNMEASURED` with its cause
+named. Both are non-passing and both exit non-zero; only the operator's next action differs, and
+telling someone to replace a working token because the API was rate-limiting is exactly the
+"measurement of something adjacent, reported as the thing itself" failure this section exists for.
+Everything else is a `[warn]` carrying its own remedy, and `NO-SERVER` is UNMEASURED-class — which since the cold-start probe means
 "the isolated probe could not run", **not** merely "no server was running": a serverless box is
 measured, not excused (below).
 
@@ -975,7 +981,8 @@ They are two verdicts because they fail independently and the operator actions d
 | Verdict | What it means | What to do |
 |---|---|---|
 | `claude-auth: NOT-PERSISTED` | No `CLAUDE_CODE_OAUTH_TOKEN` line in `/etc/environment`. | Provision it (below). Bootstrap deliberately never writes the credential itself. |
-| `claude-auth: FAILED` | A token IS persisted and it is rejected. | Replace the **value**; bootstrap never rewrites an existing one. |
+| `claude-auth: FAILED` | A token IS persisted and the API **positively identified it as rejected** (an authentication error, a 401, `Failed to authenticate`, `Please run /login`). | Replace the **value**; bootstrap never rewrites an existing one. |
+| `claude-auth: UNMEASURED` | The probe did not succeed and **did not identify a credential rejection**: a rate limit, an API outage or overload, an exhausted quota, an unreachable network, a CLI crash, the hard bound firing, no `claude` on PATH, no `timeout` able to enforce a hard bound, an unreadable `/etc/environment`, or rc 0 with no sentinel. **Equally non-passing** — it withholds "All checks green" and exits non-zero. | Read the named cause and resolve it, then re-run. **Do NOT replace the token on this evidence**: `FAILED` is the only verdict that means the credential was rejected. |
 | `claude-tmux-env: SERVER-MISSING` | A tmux server is running and carries no token. **THE field failure.** | `--fix-claude-auth`. |
 | `claude-tmux-env: SERVER-STALE` | The server's token **differs** from the persisted one. Worse than missing: everything looks provisioned. | `--fix-claude-auth`. |
 | `claude-tmux-env: SERVER-INCOMPLETE` | Token matches, `CLAUDE_CONFIG_DIR` absent — the un-onboarded picker (fact 5). | `--fix-claude-auth`. |

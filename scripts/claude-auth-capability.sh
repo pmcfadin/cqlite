@@ -28,6 +28,9 @@
 #
 #   claude-auth:      is the PERSISTED credential valid for a cold, non-interactive start?
 #                     VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED
+#                     FAILED is reserved for a POSITIVELY IDENTIFIED rejection; every other
+#                     unsuccessful probe (rate limit, outage, quota, crash, no sentinel) is
+#                     UNMEASURED with its cause named — see the matcher block below.
 #   claude-tmux-env:  does that credential REACH a tmux-spawned pane?
 #                     live server:  VERIFIED | SERVER-STALE | SERVER-MISSING |
 #                                   SERVER-INCOMPLETE | SERVER-CONFIG-STALE |
@@ -138,6 +141,33 @@ CLAUDE_AUTH_CONFIG_KEY='CLAUDE_CONFIG_DIR'
 CLAUDE_AUTH_SENTINEL='CQLITE_CLAUDE_AUTH_OK'
 CLAUDE_AUTH_PROMPT='Reply with the UPPERCASE form of the following word, and nothing else: cqlite_claude_auth_ok'
 CLAUDE_AUTH_PROBE_BOUND=90
+
+# ---- classifying an UNSUCCESSFUL probe: three matchers, one accusation ---------------
+# `FAILED` means "the persisted credential was REJECTED", and its remedy is "replace the
+# VALUE — bootstrap never rewrites it". That is a confident, actionable instruction about a
+# credential, so it must be EARNED by a positively identified rejection. Everything else
+# unsuccessful is UNMEASURED with the cause named: the standing rule that where the sole
+# oracle could not be consulted the verdict is non-passing and its text says what was
+# unverifiable — it must not become an affirmative negative.
+#
+# Nothing is weakened by that move. UNMEASURED is already non-passing, exits non-zero, and
+# withholds "All checks green" under `--strict` exactly as FAILED does; only the operator's
+# next action differs, which is the whole point. And it closes a real hazard: a rate limit,
+# an outage, a quota error or a CLI crash used to instruct the operator to throw away a
+# WORKING token — this issue's own history, a measurement of something adjacent reported as
+# the thing itself.
+#
+# The matchers are ORDERED so the safe answer wins a tie: a message naming BOTH a transport
+# failure and a rejection is UNMEASURED, never FAILED.
+#
+# `401`/`429`/`5xx` are anchored on non-digits, because a status code matched inside a
+# larger number would earn an accusation from a coincidence.
+CLAUDE_AUTH_NETWORK_RE='getaddrinfo|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network is unreachable|temporary failure in name resolution|connection error'
+CLAUDE_AUTH_REJECT_RE='invalid api key|invalid x-api-key|invalid[ _-]?token|invalid credentials|authentication[ _-](error|failed|required)|failed to authenticate|unauthorized|(^|[^0-9])401([^0-9]|$)|oauth (token|session) (has )?expired|could not be refreshed|please run /login|not logged in|api key .{0,24}(invalid|rejected|revoked|expired)|credentials? .{0,24}(invalid|rejected|revoked|expired)'
+# NOT a classification of the box — only a better SENTENCE for the same UNMEASURED verdict.
+# An unrecognised shape lands on the generic UNMEASURED branch below, so widening this
+# regex can never change a verdict, only its wording.
+CLAUDE_AUTH_SERVICE_RE='rate.?limit|(^|[^0-9])429([^0-9]|$)|too many requests|quota|credit balance|overloaded|(^|[^0-9])5[0-9][0-9]([^0-9]|$)|service unavailable|internal server error|bad gateway'
 # The cold-start tmux probe is local-only (no network), so it gets a much tighter bound.
 CLAUDE_AUTH_TMUX_PROBE_BOUND=20
 
@@ -457,23 +487,34 @@ claude_auth_verdict_into__untraced() {
     eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file authenticated a cold, non-interactive 'claude -p' run against a FRESH empty config dir (rc 0 AND the sentinel returned)\""
     return 0
   fi
+  # ---- the probe did not succeed. WHY it did not decides the verdict. ----------------
+  # See the matcher block at the top of this file: only a POSITIVELY IDENTIFIED rejection
+  # earns FAILED. `__ov` is already UNMEASURED from the top of the function, so every
+  # branch below except the rejection one simply names its cause.
   if [ "$__rc" = 124 ] || [ "$__rc" = 137 ]; then
     eval "$__od=\"the probe exceeded its \${CLAUDE_AUTH_PROBE_BOUND}s bound and was killed — the credential is UNKNOWN, not ok\""
     return 0
   fi
-  # NETWORK-UNREACHABLE IS UNMEASURED, NOT FAILED — but the matcher is deliberately narrow
-  # and the fallback is the NON-PASSING one, so a shape it does not recognise degrades to
-  # FAILED (a warn either way; only the operator's next action differs).
-  if claude_auth_matches_ci "$__out" 'getaddrinfo|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network is unreachable|temporary failure in name resolution|connection error'; then
+  # TRANSPORT FIRST, so a message naming both a transport failure and a rejection takes the
+  # safe answer: an unreachable API says nothing about the credential.
+  if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_NETWORK_RE"; then
     eval "$__od=\"the probe could not reach the API (\$(claude_auth_redact \"\$__out\")) — the credential is UNKNOWN, not ok\""
     return 0
   fi
-  eval "$__ov=FAILED"
-  if [ "$__rc" -eq 0 ]; then
-    eval "$__od=\"'claude -p' exited 0 but did NOT return the sentinel, so it did not answer: \$(claude_auth_redact \"\$__out\")\""
-  else
-    eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file did NOT authenticate (rc=\$__rc): \$(claude_auth_redact \"\$__out\")\""
+  if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_REJECT_RE"; then
+    eval "$__ov=FAILED"
+    eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file was REJECTED (rc=\$__rc): \$(claude_auth_redact \"\$__out\")\""
+    return 0
   fi
+  if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_SERVICE_RE"; then
+    eval "$__od=\"the API refused for a reason that is NOT credential rejection — a rate limit, an outage, an overload or an exhausted quota (rc=\$__rc): \$(claude_auth_redact \"\$__out\") — the credential is UNKNOWN, not rejected; retry rather than replace it\""
+    return 0
+  fi
+  if [ "$__rc" -eq 0 ]; then
+    eval "$__od=\"'claude -p' exited 0 but did NOT return the sentinel, so it did not answer — which is not evidence that the credential was rejected: \$(claude_auth_redact \"\$__out\")\""
+    return 0
+  fi
+  eval "$__od=\"'claude -p' exited \$__rc and its output identifies NO authentication rejection, so what happened to the credential is UNKNOWN: \$(claude_auth_redact \"\$__out\") — read the output before replacing anything\""
 }
 
 # ---- (b) claude-tmux-env: does the credential REACH a tmux-spawned pane? -----------
@@ -995,7 +1036,12 @@ claude_auth_usage() {
   printf 'usage: %s --auth [--show-probe-output] | --tmux-env | --report | --fix-tmux-env\n' "${0##*/}"
   printf '  --auth          is the PERSISTED credential valid for a cold, non-interactive start?\n'
   printf '                  prints one `claude-auth:` line: VERIFIED|NOT-PERSISTED|FAILED|UNMEASURED\n'
-  printf '                  (exit 0 only for VERIFIED). Makes ONE real, bounded `claude -p` call.\n'
+  printf '                  (exit 0 only for VERIFIED). Makes ONE real, HARD-bounded `claude -p`\n'
+  printf '                  call (the bound escalates to SIGKILL; without one, no probe is run).\n'
+  printf '                  FAILED is reserved for a POSITIVELY IDENTIFIED rejection, because its\n'
+  printf '                  remedy is "replace the value". A rate limit, an outage, a quota error,\n'
+  printf '                  a crash or a missing sentinel are UNMEASURED with the cause named —\n'
+  printf '                  equally non-passing, but never an instruction to discard a token.\n'
   printf '  --tmux-env      does that credential REACH a tmux-spawned pane? prints one\n'
   printf '                  `claude-tmux-env:` line: VERIFIED|SERVER-STALE|SERVER-MISSING|\n'
   printf '                  SERVER-INCOMPLETE|SERVER-CONFIG-STALE|SERVER-CONFIG-NODIR when a\n'
