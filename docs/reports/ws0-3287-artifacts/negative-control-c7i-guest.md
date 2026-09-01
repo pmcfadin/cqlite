@@ -42,39 +42,45 @@ counter the attribution itself is built from.** It is worse than the events alre
 because a run that reached for "just re-measure *both* endpoints on the cheap box, self-consistently"
 would be using it.
 
-The differential (`host/arm-hostile-2g-nomux.csv`), **4-event group, `enabled%=100.00` on every row —
-no multiplexing, so these are counts and not scaled estimates**, window gated to the chase and
-counted user-only:
+The differential is in `host/arm-hostile-2g-nomux.csv` — **4-event group, `enabled%=100.00` on every
+row, asserted by the probe itself** (it FAILs rather than publish a multiplexed value where it claims
+an unmultiplexed one), window gated to the chase, counted user-only.
 
-```
-arm hostile-2g-nomux: 2 GiB random single-dependency pointer chase (working set ~20x the 105 MiB L3)
-  ns_per_access = 254.997          <-- DRAM latency, measured by WALL CLOCK, not by any PMU
-  6763496940,,cycles:u,...,100.00
-  6168870911,,cycle_activity.stalls_l2_miss:u,...,100.00
-           0,,cycle_activity.stalls_l3_miss:u,...,100.00
-           0,,offcore_requests_outstanding.all_data_rd:u,...,100.00
-```
+**Deliberately stated as rep-invariants, not as absolutes.** These counts vary run to run — the box is
+shared, the 12-event group time-shares, and the friendly arm's small counts swing by orders of
+magnitude between identical invocations. Anything quoted below held in **every** rep; for exact
+figures read the committed CSVs, which are the authority. (An earlier draft of this file quoted precise
+absolutes and had to be re-derived twice; a number in prose rots the moment the artifact is
+regenerated.)
+
+| property | every rep | authority |
+|---|---|---|
+| `cycle_activity.stalls_l3_miss` | **exactly 0**, all arms, mux and no-mux | `arm-*.csv` |
+| `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*.csv` |
+| `cache-misses` | **exactly 0**, all arms | `arm-*.csv` |
+| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 85% of all cycles** (billions of cycles) | `arm-hostile-2g-nomux.csv` |
+| `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999 and 1.002 observed) | `arm-*.csv` |
+| `ns_per_access` | **~5–6 ns** L2-resident vs **~180–270 ns** DRAM | `arm-*.txt` |
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
 serial data dependency cannot be L3-resident and the prefetcher cannot help it, so an honest
-L3-miss-stall counter must be large. 6.17 billion cycles — **91.2% of all cycles** — are stalled with
-an **L2**-miss demand load outstanding, and exactly zero of them are attributed to an L3 miss. With a
-working set 20× the L3 that is not a small number; it is physically impossible.
+L3-miss-stall counter must be large. Instead, **>85% of all cycles are stalled with an L2-miss demand
+load outstanding and exactly zero of them are attributed to an L3 miss**, on a working set 20× the
+L3. That is not a small number; it is physically impossible.
 
 **The workload's behaviour is established by WALL CLOCK, not by the PMU, so it is not in doubt — only
-the counter is.** `ns_per_access` runs **6.021** in the L2-resident arm against **241.6–267.7** in the
-DRAM arms, a ~40× access-latency spread produced purely by changing the working-set extent, while
-`instructions:u` differs by **0.2%** between the friendly and hostile-512m arms (119,170,508 vs
-119,391,572, ratio **1.002**) — identical work, identical code path. An L3 hit is ~15–20 ns; 255 ns is
-DRAM. No counter is needed to know these loads left the cache.
+the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~180–270 ns in the DRAM
+arms — a 30–50× access-latency spread produced purely by changing the working-set extent — while
+`instructions` differs by **≤0.2%** between those arms: identical work, identical code path. An L3 hit
+is ~15–20 ns; ~200 ns is DRAM. No counter is needed to know these loads left the cache.
 
 **It is not a `perf` event-table mis-encoding.** The raw programming was probed with #3224's own
 verbatim verified encoding, and the *same event select* with a *different umask* works:
 
-| programmed | meaning | hostile-2g count |
+| programmed | meaning | hostile-2g, every rep |
 |---|---|--:|
-| `cpu/event=0xa3,umask=0x6,cmask=0x6/u` | #3224 §5.2's verified `stalls_l3_miss` encoding | **0** |
-| `cpu/event=0xa3,umask=0x5,cmask=0x5/u` | `stalls_l2_miss` | 6,219,406,412 |
+| `cpu/event=0xa3,umask=0x6,cmask=0x6/u` | #3224 §5.2's verified `stalls_l3_miss` encoding | **exactly 0** |
+| `cpu/event=0xa3,umask=0x5,cmask=0x5/u` | `stalls_l2_miss` | **billions** (`raw_stalls_l2_miss` in `arm-hostile-2g.csv`) |
 
 Same PMU, same event select, adjacent umask. The `umask=0x6` sub-event is unimplemented in this guest
 and reports a measurement-shaped zero.
@@ -82,7 +88,8 @@ and reports a measurement-shaped zero.
 ## Finding 2 — the offcore term #3287 exists to add is the same silent zero
 
 `offcore_requests_outstanding.all_data_rd` and `.cycles_with_data_rd` both program cleanly and return
-`0` in all three arms, including one with **6.17 billion** cycles of outstanding L2-miss demand loads.
+`0` in all three arms, including one where **billions of cycles — over 85% of the total — are stalled
+with an L2-miss demand load outstanding.**
 `offcore_requests.all_data_rd` and `offcore_requests_buffer.sq_full` are absent from the PMU outright.
 
 This is the load-bearing one for #3287's *purpose*. The issue's whole point is that
@@ -142,17 +149,17 @@ at 2,047 and at 489,789 on two runs of the identical command — so **no precise
 single rep**. What is stable across every run is the *direction and order of magnitude*, and the zeros.
 A stuck-at-zero counter is immune to both caveats: 0 × any scale factor is 0, and it was 0 in every rep.
 
-| counter (`:u`, gated) | friendly (L2-resident) | hostile-512m | moves? |
-|---|--:|--:|---|
-| `instructions` | 119,170,508 | 119,391,572 | **no — 1.002, the control property** |
-| `cycles` | 353,500,401 | 13,885,330,730 | yes, ~40× |
-| `cycle_activity.stalls_total` | 293,619,455 | 13,830,318,891 | yes |
-| `cycle_activity.stalls_l2_miss` | 489,789 | 12,359,407,258 | yes, 4+ orders |
-| `l1d_pend_miss.pending` | 141,377,077 | 12,698,528,761 | yes, ~90× |
-| `l1d_pend_miss.fb_full` | 1,557,955 | 9,932,430 | yes |
-| `cycle_activity.stalls_l3_miss` | 0 | **0** | **NO — stuck** |
-| `offcore_requests_outstanding.all_data_rd` | 0 | **0** | **NO — stuck** |
-| `cache-misses` | 0 | **0** | **NO — stuck** |
+| counter (`:u`, gated) | friendly → hostile-512m | verdict |
+|---|---|---|
+| `instructions` | **flat, ratio 1.00** | the control property — same work both arms |
+| `cycles` | up ~30–40× | moves |
+| `cycle_activity.stalls_total` | up ~40× | moves |
+| `cycle_activity.stalls_l2_miss` | up **4–5 orders of magnitude** | moves |
+| `l1d_pend_miss.pending` | up ~70–90× | moves |
+| `l1d_pend_miss.fb_full` | up ~6–90× (rep-noisy) | moves |
+| `cycle_activity.stalls_l3_miss` | **0 → 0** | **STUCK** |
+| `offcore_requests_outstanding.all_data_rd` | **0 → 0** | **STUCK** |
+| `cache-misses` | **0 → 0** | **STUCK** |
 
 `instructions` being flat while `cycles` moves ~40× is the property that makes this a *control*: the
 two arms run the same code over the same allocation and differ only in working-set extent, so the
@@ -192,19 +199,35 @@ excludes init but not teardown, so an unavailable FIFO is a FAIL, never a quiet 
 cycles against 13.9e9 for a real arm — four orders of magnitude — which is the observable that the
 window really is closed around the chase.
 
-**How much it mattered, measured rather than asserted:** ungated, `friendly`'s
-`cycle_activity.stalls_l2_miss` read 2,522,213 and the friendly→hostile **instruction** ratio was
-**9.4**. Gated and `:u`, the same command reads 489,789 and **1.002**. The instruction ratio is the
-control's own validity property — #3224 requires it near 1.0, because that is what proves the arms
-differ only in memory behaviour — so the ungated capture had not merely inflated some ratios, it had
-**broken the control**. The published ratios were wrong and the check that should have said so was
-being computed on contaminated counts.
+**How much it mattered, and the guard has a POSITIVE CONTROL** — full record in
+[`host/gate-guard-positive-control.txt`](host/gate-guard-positive-control.txt). A guard that has never
+been shown to fire is not evidence, so the ungated window was re-measured at the guard's own two probe
+sizes:
 
-**What did NOT change, and why that was predictable:** every capability verdict. Contamination can
-only **add** counts, and no amount of extra work turns a nonzero counter into a zero. The zeros were
-zero ungated, gated, multiplexed, unmultiplexed, at 512 MiB and at 2 GiB, in every rep. That
-invariance is the reason the finding survived its own instrument being wrong — and it is why the
-capability claims are stated on the zeros rather than on the ratios.
+| window | 1e3 accesses | 1e5 accesses | scaling | guard (≥10×) |
+|---|--:|--:|--:|---|
+| **UNGATED** (`--delay-ms` only) | 243,571,204 instr | 244,165,415 instr | **1.00×** | **FAILS — caught** |
+| **GATED** (control FIFO) | 6,297 instr | 600,113 instr | **95.33×** | PASSES |
+
+The ungated count barely moves when the workload does 100× more work, because a **constant ~244
+million instructions** of buffer init and address-space teardown sits inside the window against roughly
+6,300 instructions of actual chase — the signal buried under a factor of ~38,000 of *asymmetric* noise.
+That is what the first revision published ratios from, and it is why the friendly→hostile instruction
+ratio read **9.4** there and reads **1.00** gated. Since that ratio is the control's own validity
+property (#3224 requires it near 1.0), the ungated capture had not merely inflated numbers — it had
+**broken the control while still reporting success**.
+
+Two properties of the guard, both deliberate. It is a **scaling** test, not a tuned ceiling, so it is
+**host-independent**: #3224's absolute ceiling of 1e6 instructions per 1e3 accesses was correct for its
+own machine and importing it would risk a false FAIL elsewhere, so the absolute is *reported* and only
+the scaling property can fail the run. And the discrimination is enormous — 1.00× versus 95.33× against
+a 10× threshold — so the bound needs no tuning and is insensitive to host and load.
+
+**What did NOT change, and why that was predictable:** every capability verdict. Contamination can only
+**add** counts, and no amount of extra work turns a nonzero counter into a zero. The zeros were zero
+ungated, gated, multiplexed, unmultiplexed, at 512 MiB and at 2 GiB, in every rep. That invariance is
+why the finding survived its own instrument being wrong — and it is why the capability claims rest on
+the zeros rather than on the ratios.
 
 **(ii) Events are counted user-only (`:u`).** The hostile arm runs ~40× longer in wall clock at equal
 access count, so it absorbs proportionally more timer/IRQ kernel work; #3224 measured that alone
@@ -219,8 +242,22 @@ took down three of four arms while a 4-event group of symbolic events still succ
 the script still printed "capability probe written" over incomplete evidence — the fail-open class
 this repository's doctrine exists to remove. Now every capture's exit status is recorded
 (`capture-rc:` / `arm-rc:` lines in the artefacts), any failure stamps `VERDICT: UNMEASURED`, and the
-script exits non-zero. **The check earned its keep on its first run**, catching both the `/...:u`
-breakage and the fresh-directory bug below.
+script exits non-zero. **The checks earned their keep on their first runs**, catching the `/...:u`
+breakage, the fresh-directory bug below, and — once CSV parsing was added — the fact that the earlier
+gate probe omitted `instructions` and never read its own CSV, so it could not have detected the
+contamination it advertised.
+
+**Validity is measured, not inferred from an exit status.** A zero exit from `perf` is not evidence
+that the numbers exist, so every arm's CSV is parsed: each requested event must have a row, a numeric
+count (not `<not counted>`/`<not supported>`) and nonzero enabled time — and the group this file relies
+on as *unmultiplexed* must read `enabled%=100.00` or the run FAILs rather than quietly publishing a
+scaled estimate as a count. Three further masked-failure paths went with it: the inventory block
+propagated only its LAST command's status; the event triage funnelled any *unrecognised* `perf` failure
+into `PROGRAMS` with an empty value (a two-valued read of a multi-valued signal, taking the permissive
+answer — now its own `ERROR` disposition that fails the run, because an operational error is not a
+capability answer); and the counter-semantics size check was **vacuous**, since the loop wrote a heading
+per event whether or not any definition was found (now each event is explicitly `FOUND` or
+`NOT-LISTED`). (#3287 roborev job 308, findings 1 and 2.)
 
 **One place where a non-zero exit is an ANSWER, not a failure**, and the distinction is deliberate:
 `perf stat` exits non-zero when an event is absent from the PMU, and in the TMA probe and the

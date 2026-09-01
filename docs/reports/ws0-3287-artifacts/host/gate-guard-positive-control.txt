@@ -1,0 +1,39 @@
+== POSITIVE CONTROL for the gate-integrity guard (#3287 roborev job 308, finding 1) ==
+
+A guard that has never been shown to fire is not evidence. This is the guard finding
+the exact defect it was written for: the ORIGINAL ungated window (benchmark
+--delay-ms only, no `perf -D`, no control FIFO), measured at the same two probe
+sizes the guard uses.
+
+  window          accesses=1e3        accesses=1e5        ratio    guard (>= 10x)
+  --------------  ------------------  ------------------  -------  --------------
+  UNGATED         243,571,204 instr   244,165,415 instr   1.00x    FAILS  <- caught
+  GATED (FIFO)          6,297 instr        600,113 instr  95.33x   PASSES
+
+Read the ungated row: the count barely moves when the workload does 100x more
+work, because a CONSTANT term -- buffer init (page faults + permutation build) and
+exit-time address-space teardown -- of ~244 MILLION instructions sits inside the
+window, against roughly 6,300 instructions of actual 1e3-access chase. The signal
+is buried under a factor of ~38,000 of noise that is ASYMMETRIC between the arms.
+
+That is what the original capture published ratios from, and it is why the
+friendly->hostile instruction ratio read 9.4 there and reads 1.002 gated. The
+instruction ratio is the control's own validity property (#3224 requires it near
+1.0), so the ungated capture had not merely inflated numbers -- it had broken the
+control while still reporting success.
+
+Two properties of the guard worth keeping:
+
+ 1. It is a SCALING test, not a tuned ceiling, so it is host-independent. #3224
+    used an absolute ceiling of 1e6 instructions for 1e3 accesses, correct for its
+    own machine; importing that constant would risk a false FAIL elsewhere. The
+    absolute is still REPORTED for the reader -- it is just not what fails the run.
+ 2. The discrimination is enormous (1.00x vs 95.33x against a 10x threshold), so
+    the bound needs no tuning and is not sensitive to host or load.
+
+Reproduce:
+  cc -O2 -std=c99 -pthread -o ch docs/reports/ws0-3224-artifacts/cache-hostile.c -lm
+  for n in 1000 100000; do
+    taskset -c 2,10 perf stat -x, -e instructions:u -- \
+      ./ch chase --buffer-mib 512 --working-kib 0 --accesses $n --arm pc-$n --delay-ms 1500
+  done

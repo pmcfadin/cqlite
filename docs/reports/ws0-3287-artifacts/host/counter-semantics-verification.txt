@@ -3,18 +3,22 @@
        [Execution stalls while L3 cache miss demand load is outstanding. Unit:
         cpu]
         cpu/event=0xa3,cmask=6,period=1000003,umask=6/
+[semantics: FOUND]
 
 == cycle_activity.stalls_l2_miss ==
   cycle_activity.stalls_l2_miss
        [Execution stalls while L2 cache miss demand load is outstanding. Unit:
         cpu]
         cpu/event=0xa3,cmask=5,period=1000003,umask=5/
+[semantics: FOUND]
 
 == cycle_activity.stalls_total ==
   cycle_activity.stalls_total
        [Total execution stalls. Unit: cpu]
         cpu/event=0xa3,cmask=4,period=1000003,umask=4/
   exe.amx_busy
+[semantics: FOUND]
 
 == offcore_requests_outstanding.all_data_rd ==
+[semantics: NOT-LISTED on this host — no definition to verify against]
 

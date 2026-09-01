@@ -1,7 +1,10 @@
 == #3287 capability probe ==
 L3 as this host sees it: 105 MiB (1 instance)
 window: control-FIFO gated to the chase (-D -1 --control fifo:), events counted :u
-gate-integrity-probe: OK
+gate-integrity: MEASURED-OK — instruction scaling 1e3 -> 1e5 accesses = 95.33x (need >= 10x; ideal ~100x)
+  absolute, REPORTED not asserted: 6297 instructions for 1e3 accesses
+  (#3224 used a tuned ceiling of 1e6 here; this probe asserts the host-independent
+   scaling property instead, so it cannot false-FAIL on a different machine.)
 
 Prediction BEFORE measuring: the 2048MiB arm's working set is many times L3,
 a random single-dependency chase, so it cannot be L3-resident. Any honest
