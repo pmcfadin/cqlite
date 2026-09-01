@@ -347,15 +347,48 @@ if case "$out" in *"never reported as 'no signature'"*) true ;; *) false ;; esac
 else
   bad "8-no-log: the UNMEASURED line claims a clean scan; got: $out"
 fi
-# grep's rc is THREE-valued: a subject that is a DIRECTORY makes grep exit 2 ("Is a
-# directory"). Collapsing >=2 onto "no match" is the two-valued-predicate defect. This
-# variant works as root, where a chmod-000 file is still readable.
+# A subject that is a DIRECTORY. This USED to reach grep (which exits 2, "Is a directory") and was
+# how the three-valued-rc arm was exercised; since #3800 (roborev job 343) the regular-file guard
+# REFUSES it earlier, because `grep` on a FIFO or a device -- which `-e` and `-r` also admit --
+# blocks forever on the path to the terminal emit. The OUTCOME that matters is unchanged and is
+# what this case now asserts: UNMEASURED naming the subject, never a clean scan. The rc>=2 arm it
+# used to reach is still live and is covered by 8b2, which reaches grep on a REGULAR file.
 d="$tmp/c8b"; mkdir -p "$d/write-tests.log"
 out=$(run_line "$d" write-tests FAIL)
-if case "$out" in "disk-exhaustion: UNMEASURED (#3800)"*"write-tests.log(unreadable)"*) true ;; *) false ;; esac; then
-  ok "8b-grep-rc2: a subject grep cannot read (rc>=2) is UNMEASURED, never 'no signature'"
+if case "$out" in "disk-exhaustion: UNMEASURED (#3800)"*"write-tests.log(not-a-regular-file)"*) true ;; *) false ;; esac \
+   && case "$out" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
+  ok "8b-nonregular: a DIRECTORY subject is refused as non-regular and reported UNMEASURED naming it -- neither scanned (grep would error) nor silently skipped (which would read as clean)"
 else
-  bad "8b-grep-rc2: a grep error was collapsed onto 'no match'; got: $out"
+  bad "8b-nonregular: a non-regular subject was not reported as UNMEASURED; got: $out"
+fi
+# (8b2) THE THREE-VALUED grep rc, on a REGULAR file so the guard above does not pre-empt it.
+# `grep`'s rc is three-valued (0 match / 1 no-match / >=2 ERROR) and collapsing >=2 onto "no match"
+# is this repo's two-valued-predicate defect: it would report a clean scan over a subject that was
+# never read. A real grep error on a readable regular file cannot be induced portably, so the
+# failure is INJECTED via a PATH shim -- labelled as such, because an injected condition evidences
+# the ARM and not the likelihood of reaching it.
+d="$tmp/c8b2"; mkdir -p "$d/bin"
+echo 'nothing to see' > "$d/core-tests.log"
+printf '#!/bin/sh
+exit 2
+' > "$d/bin/grep"; chmod +x "$d/bin/grep"
+out=$(
+  PATH="$d/bin:$PATH" run_line "$d" core-tests FAIL
+)
+if case "$out" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests.log(unreadable)"*) true ;; *) false ;; esac \
+   && case "$out" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
+  ok "8b2-grep-rc2: an ERRORING grep (rc 2, injected) over a REGULAR readable subject yields UNMEASURED, never 'no signature' -- the three-valued rc is not collapsed onto no-match"
+else
+  bad "8b2-grep-rc2: a grep ERROR was collapsed onto 'no match'; got: $out"
+fi
+# CONTROL: the same shim exiting 1 (a genuine no-match) must read CLEAN, or 8b2 would pass for any
+# shim at all and would not be distinguishing rc 1 from rc 2.
+printf '#!/bin/sh\nexit 1\n' > "$d/bin/grep"
+out=$(PATH="$d/bin:$PATH" run_line "$d" core-tests FAIL)
+if case "$out" in *"0 RECOGNISED"*) true ;; *) false ;; esac; then
+  ok "8b2-control: the same shim returning rc 1 (a real no-match) reads as the affirmative clean scan, so 8b2 distinguishes ERROR from no-match rather than reacting to any non-zero rc"
+else
+  bad "8b2-control: a no-match grep did not produce the clean reading, so 8b2's rc-2 result is not attributable to the ERROR arm; got: $out"
 fi
 # chmod-000 variant, meaningful only for a non-root invoker.
 d="$tmp/c8c"; mkdir -p "$d"
@@ -1827,6 +1860,75 @@ else
   printf 'SKIP - 22c-record-result-fails: /dev/full unavailable/unwritable, so a GENUINE ENOSPC verdict write cannot be induced (Linux-only). DECLARED, not silently omitted.\n'
 fi
 
+# (23) roborev job 343 -- THE SCAN MUST NOT BE ABLE TO HANG THE GATE.
+#
+# The subject glob accepted any existing, readable `<component>.*.log`, and BOTH `-e` and `-r` are
+# true for a FIFO and for a symlink to a character device. `grep` on either BLOCKS FOREVER -- and
+# this scan runs on the path to the TERMINAL EMIT, so the gate would produce no verdict at all,
+# which is worse than the misattribution the line exists to prevent. Refused rather than skipped:
+# a silently-skipped subject is indistinguishable from one read that matched nothing.
+if command -v mkfifo >/dev/null 2>&1; then
+  d="$tmp/c23"; mkdir -p "$d"
+  mkfifo "$d/core-tests.log" 2>/dev/null || true
+  if [ -p "$d/core-tests.log" ]; then
+    # The whole point is that this RETURNS, so it is bounded: a hang shows up as exit 124, not as
+    # a suite that never finishes.
+    o23=$(
+      timeout 20 bash -c '
+        . "$1"; LOG_DIR="$2"; _disk_env
+        printf "LINE %s\n" "$(_disk_exhaustion_line core-tests FAIL)"
+      ' _ "$EX" "$d" 2>&1
+      printf 'EXIT %s\n' "$?"
+    )
+    ex23=$(printf '%s\n' "$o23" | sed -n 's/^EXIT //p')
+    l23=$(printf '%s\n' "$o23" | sed -n 's/^LINE //p')
+    if [ "${ex23:-x}" = 0 ] \
+       && case "$l23" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests.log(not-a-regular-file)"*) true ;; *) false ;; esac \
+       && case "$l23" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
+      ok "23a-fifo: a FIFO in the subject glob is REFUSED as a non-regular file and counted toward UNMEASURED naming itself -- the scan returns instead of blocking in grep on the path to the terminal emit, and it does not report the affirmative clean reading over a subject it never read"
+    else
+      bad "23a-fifo: expected a bounded return with UNMEASURED naming the non-regular subject; exit='${ex23:-<none>}' (124 = it HUNG) line: $l23"
+    fi
+    # MUTATION CONTROL: without the regular-file guard the same call must HANG, or 23a proves only
+    # that the line mentions the component. The guard is removed from a scratch copy of the shipped
+    # gate and re-extracted, so the control measures the real code path.
+    _fifo_ctl=$(mktemp "$tmp/fifo-ctl.XXXXXX")
+    awk '
+      /^        if \[ ! -f "\$log" \]; then$/ { skip=4; next }
+      skip > 0 { skip--; next }
+      { print }
+    ' "$GATE" > "$_fifo_ctl"
+    if ! grep -q 'not-a-regular-file' "$_fifo_ctl"; then
+      _fifo_ex=$(mktemp "$tmp/fifo-ex.XXXXXX")
+      awk -v s='^DISK_EXHAUSTION_SIGNATURES=[(]$' -v e='^[)]$' '
+        !inb && $0 ~ s { inb=1; print; next } inb { print; if ($0 ~ e) exit }' "$_fifo_ctl" > "$_fifo_ex"
+      grep -m1 '^DISK_MEM_SUBJECTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
+      grep -m1 '^DISK_UNREAD_VERDICTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
+      for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
+                _disk_scan_field _disk_note_capture_failure _disk_note_unread_verdict \
+                _disk_secs_is_int _disk_verdict_read _disk_verdict_read_aggregate \
+                _disk_scan_subject _disk_exhaustion_line; do
+        awk -v s="^${fn}[(][)] [{]\$" -v e='^[}]$' '
+          !inb && $0 ~ s { inb=1; print; next } inb { print; if ($0 ~ e) exit }' "$_fifo_ctl" >> "$_fifo_ex"
+      done
+      printf '_disk_env() { :; }\n' >> "$_fifo_ex"
+      timeout 10 bash -c '. "$1"; LOG_DIR="$2"; _disk_exhaustion_line core-tests FAIL >/dev/null 2>&1' _ "$_fifo_ex" "$d" >/dev/null 2>&1
+      _fifo_rc=$?
+      if [ "$_fifo_rc" = 124 ]; then
+        ok "23a-mutation: with the regular-file guard REMOVED the identical call HANGS (killed at 10s) -- so 23a is measuring the guard and not merely the presence of the component's name in the line"
+      else
+        bad "23a-mutation: without the guard the call returned (rc $_fifo_rc) instead of hanging, so 23a does not demonstrate the hang it claims to prevent"
+      fi
+    else
+      bad "23a-mutation: could not build the control (the regular-file guard survived the removal), so the hang cannot be shown"
+    fi
+  else
+    printf 'SKIP - 23a-fifo: mkfifo did not produce a FIFO on this filesystem, so a blocking subject cannot be induced. DECLARED, not silently omitted.\n'
+  fi
+else
+  printf 'SKIP - 23a-fifo: no mkfifo on this host. DECLARED, not silently omitted.\n'
+fi
+
 # (21c) THE LADDER'S LOWER RUNGS -- roborev job 319 round 2. The first version of 21b's fallback
 # ended `|| true`, which is the shape it was written to remove: if BOTH the marker append and the
 # truncation fail, the original well-formed PASS survives and the parent certifies. The 21b
@@ -1960,9 +2062,15 @@ fi
 # 22c record_result setting OVERALL=FAIL under a REAL /dev/full ENOSPC, which DECLARES its skip
 # elsewhere and so does not raise the floor. 1 + 2 = 3.); +1 (the case-15 positive control added
 # with them, when re-deriving that guard's population from source made its own vacuity reachable.);
-# +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
+# +2 (roborev job 343: the regular-file guard -- a FIFO or a device in the subject glob would make
+# grep BLOCK FOREVER on the path to the terminal emit. Case 23a plus the mutation control that
+# demonstrates the hang with the guard removed; both DECLARE a skip without mkfifo, so they do not
+# raise the floor. What DOES raise it is 8b2 + its control: refusing non-regular subjects made
+# case 8b's directory unable to reach grep, so the three-valued-rc arm needed its own case with an
+# INJECTED erroring grep on a regular file, plus a control proving it distinguishes rc 2 from
+# rc 1.); +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
 # STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
-CASE_FLOOR=82
+CASE_FLOOR=84
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

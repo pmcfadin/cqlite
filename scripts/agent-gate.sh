@@ -6634,6 +6634,22 @@ _disk_exhaustion_line() {
         # files _ansi_stripped_log leaves behind for OTHER guards are structurally excluded.
         [ -e "$log" ] || continue
         found_any=1
+        # #3800 (roborev job 343): REGULAR FILES ONLY, because `grep` on a FIFO or a character
+        # device BLOCKS FOREVER and this scan runs on the path to the TERMINAL EMIT -- so a
+        # non-regular match would hang the gate with no verdict at all, which is a worse outcome
+        # than the misattribution the line exists to prevent. `-e` and `-r` are both TRUE for a
+        # FIFO and for a symlink to `/dev/zero`, so neither of the guards already here excludes
+        # one. `-f` FOLLOWS symlinks, so a symlink to a regular log (which the gate's own helpers
+        # create) is still scanned; only the non-regular shapes are refused.
+        #
+        # Refused, NOT skipped: a silently-skipped subject is indistinguishable from one that was
+        # read and matched nothing, which is the false-clean shape this whole line is built
+        # against. It counts toward UNMEASURED and names itself in our own vocabulary.
+        if [ ! -f "$log" ]; then
+          unread=$(( unread + 1 ))
+          unread_names="${unread_names:+$unread_names,}${log##*/}(not-a-regular-file)"
+          continue
+        fi
         if [ ! -r "$log" ]; then
           unread=$(( unread + 1 ))
           unread_names="${unread_names:+$unread_names,}${log##*/}(unreadable)"

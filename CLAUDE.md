@@ -380,7 +380,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `No space left on device`, `os error 28`, `Disk quota exceeded`, with a bare `ENOSPC` token
   deliberately excluded because this repo's own tests and doctrine contain it — and the line
   DECLARES that non-exhaustiveness on every run. Only **non-PASS** components are scanned (a
-  PASSing log carrying the phrase explains nothing), the **RAW** log is read rather than
+  PASSing log carrying the phrase explains nothing), only **REGULAR FILES** are scanned — `-e` and
+  `-r` are both true for a FIFO and for a symlink to `/dev/zero`, and `grep` on either **BLOCKS
+  FOREVER** on the path to the terminal emit, so a non-regular subject would hang the gate with no
+  verdict at all, which is worse than the misattribution the line prevents (refused and counted
+  toward `UNMEASURED`, never silently skipped, #3800/job 343) — the **RAW** log is read rather than
   `_ansi_stripped_log` (**a disk diagnostic that needs free disk to run is useless exactly when
   it matters**; safe under #3400 because these signatures are pure `strerror`/`io::Error`
   PAYLOAD, never a coloured cargo status word), and **NO log-derived text reaches the block** —
