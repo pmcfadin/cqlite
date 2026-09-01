@@ -1860,6 +1860,54 @@ else
   printf 'SKIP - 22c-record-result-fails: /dev/full unavailable/unwritable, so a GENUINE ENOSPC verdict write cannot be induced (Linux-only). DECLARED, not silently omitted.\n'
 fi
 
+# (24) roborev job 348 -- THE CAPTURE IS BOUNDED, AND A FAILED OPEN IS NOT A CLEAN SCAN.
+#
+# (24a) `-o` means the captured text is the MATCHED PHRASE from our own closed signature set, not
+# the whole log line -- which has no length limit. A command substitution holding an unbounded
+# string is the wrong thing to build into a diagnostic that runs when a resource has been
+# exhausted, on the path to the terminal emit. Measured on a single 2 MB line: the reported line
+# number must still be right, and the RECOGNISED verdict unchanged.
+d="$tmp/c24a"; mkdir -p "$d"
+# Built by DOUBLING, not by appending one character at a time -- the naive loop is O(n^2) in awk
+# and turned this case into a multi-minute hang the first time it was written.
+{
+  printf 'padding line\n'
+  awk 'BEGIN{ s="x"; while (length(s) < 1000000) s = s s; printf "%s No space left on device %s\n", s, s }'
+} > "$d/core-tests.log"
+out=$(run_line "$d" core-tests FAIL)
+if case "$out" in "disk-exhaustion: RECOGNISED (#3800)"*) true ;; *) false ;; esac \
+   && case "$out" in *"core-tests.log:2"*) true ;; *) false ;; esac \
+   && [ "${#out}" -lt 4000 ]; then
+  ok "24a-bounded: a 2 MB matching line is still RECOGNISED at the right line number (2) and the emitted line stays small (${#out} chars) -- the capture holds the matched PHRASE, not the log line"
+else
+  bad "24a-bounded: expected RECOGNISED at line 2 with a small emitted line; len=${#out} got: ${out:0:400}"
+fi
+
+# (24b) A FAILED OPEN IS rc 2, NOT rc 1. With `< "$file"` a failed open is reported by BASH as
+# status 1 -- identical to grep's "no match" -- so a subject that passed `-r` and then could not be
+# opened read as a CLEAN scan. The file is now an OPERAND, so the open is grep's problem and grep
+# says rc 2. Induced with a path that passes the caller's checks and cannot be opened by grep: a
+# file inside a directory stripped of execute permission (search) after the fact.
+d="$tmp/c24b"; mkdir -p "$d/sub"
+echo 'nothing here' > "$d/sub/inner.log"
+chmod 000 "$d/sub" 2>/dev/null || true
+if ! cat "$d/sub/inner.log" >/dev/null 2>&1; then
+  o24b=$(
+    . "$EX"; LOG_DIR="$d"; _disk_env
+    rc=0; _disk_scan_subject file "$d/sub/inner.log" || rc=$?
+    printf 'RC %s\n' "$rc"
+  )
+  chmod 755 "$d/sub" 2>/dev/null || true
+  if [ "$(printf '%s\n' "$o24b" | sed -n 's/^RC //p')" = 2 ]; then
+    ok "24b-open-fail: a subject that cannot be OPENED yields rc 2 (UNMEASURED), not rc 1 -- so a failed open is never reported as 'read successfully, no signature'"
+  else
+    bad "24b-open-fail: an unopenable subject did not yield rc 2; got: $o24b"
+  fi
+else
+  chmod 755 "$d/sub" 2>/dev/null || true
+  printf 'SKIP - 24b-open-fail: this host still reads a file under a mode-000 directory (running as root), so a failed open cannot be induced. DECLARED, not silently omitted.\n'
+fi
+
 # (23) roborev job 343 -- THE SCAN MUST NOT BE ABLE TO HANG THE GATE.
 #
 # The subject glob accepted any existing, readable `<component>.*.log`, and BOTH `-e` and `-r` are
@@ -1867,14 +1915,24 @@ fi
 # this scan runs on the path to the TERMINAL EMIT, so the gate would produce no verdict at all,
 # which is worse than the misattribution the line exists to prevent. Refused rather than skipped:
 # a silently-skipped subject is indistinguishable from one read that matched nothing.
-if command -v mkfifo >/dev/null 2>&1; then
+# `timeout` IS PROBED, NOT ASSUMED (roborev job 348): stock macOS ships `mkfifo` and NOT GNU
+# `timeout` (coreutils installs it as `gtimeout`), and this suite is registered in the MANDATORY
+# `tooling-tests` component -- so an unprobed `timeout` would not skip, it would FAIL the gate on a
+# supported host. The watchdog is not optional here either: without it a regression turns this case
+# from a red into a suite that never returns, which is why the answer is a DECLARED skip rather
+# than running the case unbounded.
+DISK_TIMEOUT=""
+for _t in timeout gtimeout; do
+  if command -v "$_t" >/dev/null 2>&1 && "$_t" 5 true >/dev/null 2>&1; then DISK_TIMEOUT="$_t"; break; fi
+done
+if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
   d="$tmp/c23"; mkdir -p "$d"
   mkfifo "$d/core-tests.log" 2>/dev/null || true
   if [ -p "$d/core-tests.log" ]; then
     # The whole point is that this RETURNS, so it is bounded: a hang shows up as exit 124, not as
     # a suite that never finishes.
     o23=$(
-      timeout 20 bash -c '
+      "$DISK_TIMEOUT" 20 bash -c '
         . "$1"; LOG_DIR="$2"; _disk_env
         printf "LINE %s\n" "$(_disk_exhaustion_line core-tests FAIL)"
       ' _ "$EX" "$d" 2>&1
@@ -1912,7 +1970,7 @@ if command -v mkfifo >/dev/null 2>&1; then
           !inb && $0 ~ s { inb=1; print; next } inb { print; if ($0 ~ e) exit }' "$_fifo_ctl" >> "$_fifo_ex"
       done
       printf '_disk_env() { :; }\n' >> "$_fifo_ex"
-      timeout 10 bash -c '. "$1"; LOG_DIR="$2"; _disk_exhaustion_line core-tests FAIL >/dev/null 2>&1' _ "$_fifo_ex" "$d" >/dev/null 2>&1
+      "$DISK_TIMEOUT" 10 bash -c '. "$1"; LOG_DIR="$2"; _disk_exhaustion_line core-tests FAIL >/dev/null 2>&1' _ "$_fifo_ex" "$d" >/dev/null 2>&1
       _fifo_rc=$?
       if [ "$_fifo_rc" = 124 ]; then
         ok "23a-mutation: with the regular-file guard REMOVED the identical call HANGS (killed at 10s) -- so 23a is measuring the guard and not merely the presence of the component's name in the line"
@@ -1926,7 +1984,7 @@ if command -v mkfifo >/dev/null 2>&1; then
     printf 'SKIP - 23a-fifo: mkfifo did not produce a FIFO on this filesystem, so a blocking subject cannot be induced. DECLARED, not silently omitted.\n'
   fi
 else
-  printf 'SKIP - 23a-fifo: no mkfifo on this host. DECLARED, not silently omitted.\n'
+  printf 'SKIP - 23a-fifo: this host lacks mkfifo and/or a working timeout|gtimeout (stock macOS has the first and not the second), so a blocking subject cannot be induced under a watchdog. DECLARED, not silently omitted.\n'
 fi
 
 # (21c) THE LADDER'S LOWER RUNGS -- roborev job 319 round 2. The first version of 21b's fallback
@@ -2068,9 +2126,13 @@ fi
 # raise the floor. What DOES raise it is 8b2 + its control: refusing non-regular subjects made
 # case 8b's directory unable to reach grep, so the three-valued-rc arm needed its own case with an
 # INJECTED erroring grep on a regular file, plus a control proving it distinguishes rc 2 from
-# rc 1.); +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
+# rc 1.); +1 (roborev job 348: 24a pins the BOUNDED capture (`-o`) against a 2 MB matching line,
+# asserting the line number and the emitted size together. 24b pins that a failed OPEN is rc 2 and
+# not rc 1 -- it DECLARES a skip as root, so it does not raise the floor. The `timeout` probe added
+# in the same round raises nothing; it converts a would-be macOS FAILURE into a declared skip.);
+# +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
 # STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
-CASE_FLOOR=84
+CASE_FLOOR=85
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

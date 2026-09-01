@@ -6586,8 +6586,27 @@ _disk_scan_subject() {
     sig="${entry%%|*}"; phrase="${entry#*|}"
     # `-a` so a subject carrying stray binary bytes is still searched rather than reported
     # as "binary file matches" with no line number.
+    #
+    # `-o` ON BOTH BRANCHES, and it is a MEMORY bound, not a formatting choice (roborev job 348).
+    # Without it each emitted match carries its WHOLE LINE, and a log line has no length limit --
+    # so a command substitution here could hold an arbitrarily large string in a diagnostic whose
+    # entire purpose is to run when the machine has run out of a resource, on the path to the
+    # terminal emit. With `-o` the captured text is the MATCHED PHRASE, i.e. a member of our own
+    # closed signature set, so the capture is bounded by construction rather than by hoping logs
+    # are tidy. It also strengthens #3312 from "no log-derived text reaches the block" to "no
+    # log-derived text is even READ IN": all this function keeps is a line NUMBER.
+    #
+    # The `-m1` asymmetry below is deliberate and is explained at the branch that omits it.
     if [ "$kind" = file ]; then
-      hit="$(LC_ALL=C grep -n -a -m1 -F -e "$phrase" < "$payload" 2>/dev/null)"; rc=$?
+      # THE FILE IS AN OPERAND, NOT A REDIRECTION (roborev job 348). With `< "$payload"`, a failed
+      # OPEN is reported by BASH as status 1 -- indistinguishable from grep's "no match" -- so a
+      # subject that passed the `-r` test and then could not be opened (a race, a revoked
+      # permission, an unmounted filesystem) read as a CLEAN scan. Handing grep the path makes the
+      # open ITS problem, and grep reports an unopenable or unreadable operand as rc 2, which this
+      # function already routes to UNMEASURED. `--` because a component name could in principle
+      # produce a leading dash; with a single operand grep prints no filename prefix, so the
+      # `<lineno>:` parse below is unchanged.
+      hit="$(LC_ALL=C grep -n -o -a -m1 -F -e "$phrase" -- "$payload" 2>/dev/null)"; rc=$?
     else
       # `-m1` IS DELIBERATELY ABSENT ON THIS BRANCH, and it is not a style choice. This gate
       # runs under `set -o pipefail`, and with `-m1` grep exits as soon as it matches, so a
@@ -6599,7 +6618,7 @@ _disk_scan_subject() {
       # capture is most likely to run out of space. Without `-m1` grep consumes all of stdin,
       # printf always completes, and the pipeline status is grep's own. The first matching
       # line is taken in-shell below, so the reported line number is unchanged.
-      hit="$(printf '%s\n' "$payload" | LC_ALL=C grep -n -a -F -e "$phrase" 2>/dev/null)"; rc=$?
+      hit="$(printf '%s\n' "$payload" | LC_ALL=C grep -n -o -a -F -e "$phrase" 2>/dev/null)"; rc=$?
       hit="${hit%%$'\n'*}"
     fi
     if [ "$rc" -eq 0 ]; then
