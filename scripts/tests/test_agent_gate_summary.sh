@@ -115,7 +115,13 @@ trap 'rm -rf "$tmp"' EXIT
 # because that is the order accelerators_line emits them; both are Linux-only and
 # therefore both are optional here, so a Darwin line (which ends at
 # sccache-health) and a Linux line (which carries both) satisfy one grammar.
-ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$'
+# The two #3727 capacity tokens are UNCONDITIONAL and platform-independent, so they are inserted
+# BEFORE the optional Linux-only mold/perf groups rather than appended: that keeps ` perf=` the
+# last token on a Linux line, which is what case 9c-iv's sentinel position depends on, and keeps
+# one grammar serving both a Darwin line (ending at sccache-used) and a Linux one.
+ACCEL_CAP_RE='sccache-cap=([0-9]+\((pinned|default|inherited|stale|invalid)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary)\)|na\(sccache-not-in-use\))'
+ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary)\)|na\(sccache-not-in-use\))'
+ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
 # print nothing (rc 1). `grep -m1` + capture-to-a-variable, deliberately with NO
@@ -1057,6 +1063,149 @@ if accel_health_token_is "$tmp/health-na.txt" na; then
 else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
   grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
+fi
+
+# 9c-v. sccache cache-size cap + occupancy tokens (issue #3727). THE TOKEN THIS SUITE EXISTS FOR:
+#       the fleet ran for months with SCCACHE_CACHE_SIZE declared in .agent-ami/profile.yaml,
+#       never persisted, and every gate SUMMARY silent about the cap actually in force. Each
+#       state is driven by the three #3727 hooks, so no sccache install and no PATH surgery is
+#       needed; the SOURCE classification additionally reads the real SCCACHE_CACHE_SIZE, which
+#       is safe precisely because MAX_BYTES short-circuits any contact with a server.
+#       Rows: <SCCACHE_CACHE_SIZE>|<max_bytes>|<default_bytes>|<expected cap token value>
+for scc_row in \
+  '30G|32212254720|10737418240|32212254720(pinned)' \
+  '|10737418240|10737418240|10737418240(default)' \
+  '|32212254720|10737418240|32212254720(inherited)' \
+  '30G|10737418240|10737418240|10737418240(stale)' \
+  '30GiB|10737418240|10737418240|10737418240(invalid)'; do
+  scc_val=${scc_row%%|*}; scc_rest=${scc_row#*|}
+  scc_max=${scc_rest%%|*}; scc_rest=${scc_rest#*|}
+  scc_dflt=${scc_rest%%|*}; scc_want=${scc_rest#*|}
+  # The SOURCE word alone names the file/label: the expected token carries parentheses, and a
+  # path built from it would be legal-but-hostile to read in a failure message.
+  scc_src=${scc_want#*\(}; scc_src=${scc_src%\)}
+  scc_file="$tmp/scc-cap-$scc_src.txt"
+  # An UNSET row must not become an EMPTY one: set-but-empty is a distinct, measured sccache
+  # state (it is silently discarded), so the two are driven through different invocations.
+  if [ -n "$scc_val" ]; then
+    AGENT_GATE_SUMMARY_FILE="$scc_file" \
+      AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+      AGENT_GATE_TEST_SCCACHE_MAX_BYTES="$scc_max" \
+      AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+      AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES="$scc_dflt" \
+      SCCACHE_CACHE_SIZE="$scc_val" \
+      bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  else
+    env -u SCCACHE_CACHE_SIZE \
+      AGENT_GATE_SUMMARY_FILE="$scc_file" \
+      AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+      AGENT_GATE_TEST_SCCACHE_MAX_BYTES="$scc_max" \
+      AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+      AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES="$scc_dflt" \
+      bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  fi
+  if accel_token_is "$scc_file" sccache-cap "$scc_want"; then
+    ok "sccache-cap: SCCACHE_CACHE_SIZE='$scc_val' + server cap $scc_max -> sccache-cap=$scc_want"
+  else
+    bad "sccache-cap: expected sccache-cap=$scc_want for value '$scc_val' + server cap $scc_max"
+    grep '^accelerators:' "$scc_file" 2>/dev/null || cat "$scc_file"
+  fi
+  assert_accelerators "sccache-cap-$scc_src" "$scc_file"
+done
+
+# 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
+#        not be read must never render blank, never render 0, and never be mistaken for a measured
+#        value — this repo's standing rule that a positive verdict requires an affirmative
+#        measurement, applied to a token an agent reads out of a pasted block.
+scc_unm="$tmp/scc-cap-unmeasured.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_unm" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=unmeasured AGENT_GATE_TEST_SCCACHE_USED_BYTES=unmeasured \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_unm" sccache-cap 'unmeasured(no-stats)' \
+   && accel_token_is "$scc_unm" sccache-used 'unmeasured(no-stats)'; then
+  ok "sccache-cap: an unreadable probe renders unmeasured(no-stats) for BOTH tokens"
+else
+  bad "sccache-cap: an unreadable probe did not render the explicit unmeasurable token"
+  grep '^accelerators:' "$scc_unm" 2>/dev/null || cat "$scc_unm"
+fi
+scc_wrong_hits=0
+for scc_wrong in 0 '' unknown 'unmeasured' '0(pinned)'; do
+  if accel_token_is "$scc_unm" sccache-cap "$scc_wrong"; then
+    bad "sccache-cap: unmeasurable state wrongly matched sccache-cap=$scc_wrong (0/blank read as a value)"
+    scc_wrong_hits=$((scc_wrong_hits + 1))
+  fi
+done
+if [ "$scc_wrong_hits" = 0 ]; then
+  ok "sccache-cap: unmeasurable state matches NONE of 0/blank/unknown/bare-unmeasured/0(pinned)"
+fi
+assert_accelerators "sccache-cap-unmeasured" "$scc_unm"
+
+# 9c-vii. sccache NOT in use -> both capacity tokens are na, exactly as sccache-health is. A
+#         probe with nothing to probe must say so rather than reporting a cap of 0.
+scc_na="$tmp/scc-cap-na.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_na" AGENT_GATE_TEST_SCCACHE_STATE=off \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_na" sccache-cap 'na(sccache-not-in-use)' \
+   && accel_token_is "$scc_na" sccache-used 'na(sccache-not-in-use)' \
+   && accel_health_token_is "$scc_na" na; then
+  ok "sccache-cap: sccache not in use -> cap/used/health all na"
+else
+  bad "sccache-cap: expected na cap/used/health tokens when sccache is not in use"
+  grep '^accelerators:' "$scc_na" 2>/dev/null || cat "$scc_na"
+fi
+
+# 9c-viii. OCCUPANCY AND THE FILL PERCENTAGE, including the at-capacity marker and the measured
+#          legal cap of 0 (`SCCACHE_CACHE_SIZE=0G` yields `0 bytes`, so a percentage is undefined
+#          there and must be named rather than divided).
+scc_full="$tmp/scc-used-full.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_full" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=10737418240 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-used-full.stderr"
+if accel_token_is "$scc_full" sccache-used '10737418240(100%)'; then
+  ok "sccache-used: a cache at its cap renders 100%"
+else
+  bad "sccache-used: expected sccache-used=10737418240(100%) for a cache at its cap"
+  grep '^accelerators:' "$scc_full" 2>/dev/null || cat "$scc_full"
+fi
+if grep -q 'WARN:.*sccache' "$tmp/scc-used-full.stderr"; then
+  ok "sccache-used: a full cache emits a LOUD WARN (eviction/thrash is actionable)"
+else
+  bad "sccache-used: no WARN for a cache at 100% of its cap"
+  echo "------- stderr -------"; cat "$tmp/scc-used-full.stderr"; echo "----------------------"
+fi
+scc_zero="$tmp/scc-used-zero.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_zero" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=0 AGENT_GATE_TEST_SCCACHE_USED_BYTES=0 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_zero" sccache-used '0(cap-zero)'; then
+  ok "sccache-used: a legal zero cap names the undefined percentage instead of dividing"
+else
+  bad "sccache-used: expected sccache-used=0(cap-zero) for a zero cap"
+  grep '^accelerators:' "$scc_zero" 2>/dev/null || cat "$scc_zero"
+fi
+
+# 9c-ix. `sccache-health` IS AN ERROR-COUNTER TOKEN AND CANNOT BE CLEARED BY A CAP RAISE (#3727).
+#        Stated as a TEST rather than only as a comment: the two signals are independent, so a
+#        full cache with zero error counters must report health=ok beside used=100%, and a warn
+#        must survive a generous cap. Anyone who later wires occupancy INTO _sccache_health reds
+#        here, which is the point — the remedies differ (inspect/reset vs raise the cap).
+if accel_health_token_is "$scc_full" ok; then
+  ok "sccache-health: a cache at 100% of its cap with zero error counters is still health=ok (capacity is NOT a health input)"
+else
+  bad "sccache-health: occupancy leaked into the error-counter token (#3727 conflation)"
+fi
+scc_bigwarn="$tmp/scc-health-bigcap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_bigwarn" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_health_token_is "$scc_bigwarn" warn; then
+  ok "sccache-health: a generous cap and an empty cache do NOT clear a non-zero error counter"
+else
+  bad "sccache-health: a cap raise silenced the error-counter token (#3727 conflation)"
 fi
 
 # 9c-iv. Regression guard for the NEXT appended accelerators token (issue #2914).
@@ -5197,7 +5346,16 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=410
+# 410 -> 429: the #3727 capacity-token cases (9c-v..9c-ix) add exactly 19 host-independent
+# verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
+# (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
+# used cap-zero, and the two health-is-not-capacity asserts. COUNTED FROM A REAL RUN, not from
+# arithmetic over the source (this file's own header records that its hand-kept accounting has
+# been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
+# the +19 above is a measured difference and the deliberate ~10 margin is preserved rather than
+# widened. Setting the floor AT the accounted figure would remove that margin, which is what
+# absorbs the host-conditional verdicts enumerated above.
+ASSERT_FLOOR=429
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
