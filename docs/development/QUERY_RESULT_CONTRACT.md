@@ -3,6 +3,22 @@
 What CQLite guarantees about the **shape** of query and `export` output in the `table`, `csv` and
 `json` writers.
 
+## Scope — and the egress this does NOT govern
+
+This contract governs the **display writers**: `TableWriter`, `CSVWriter` and `JSONWriter`
+(`cqlite-cli/src/output/`), i.e. `export --format json|csv` and the REPL/table rendering.
+
+It does **not** govern `impl ToJson for Value` (`cqlite-core/src/query/result.rs`), which
+`export-sstable` and `cqlite-cli/src/commands/support.rs` use. That renderer is deliberately
+different and must stay so: `cqlite-core/src/util/udt_json.rs` records **11 arms** where the two
+disagree on purpose — blobs/uuids/inet as CLI hex vs core base64, timestamps as human strings vs raw
+integers, maps as `[{key, value}]` vs a Display-keyed object — because one renders for a human and
+the other preserves structure for a machine. Only the UDT field rule is shared between them.
+
+`decimal` is a twelfth such arm as of #3644: the display writers emit an unquoted number (§6), while
+`ToJson` emits `{"scale": …, "unscaled": <base64>}`. Both are intended. If you are looking at a
+`decimal` in JSON that does not match §6, check which writer produced it before filing a bug.
+
 ## Why this file exists
 
 Four places in the tree cited `QUERY_RESULT_CONTRACT.md` as their specification while no such file
