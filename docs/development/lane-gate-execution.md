@@ -1197,8 +1197,9 @@ environment the gate read it (63 vars in its `/proc/<pid>/environ`); started und
 `AGENT_GATE_ALLOW_MISSING_FIXTURES` or `CQLITE_ALLOW_FILE_GROWTH` relaxes the gate's own
 validation, which is the one thing a certification run must not do quietly. Both are now at least
 VISIBLE in the emitted block — `missing-fixtures: OPT-OUT (...)` (#2078) and, since #3402,
-`file-size: OPT-OUT (...)` as the component's own status token, naming the variable, the count and
-the grown files. Visibility is not a defence, though: an inherited opt-out is still an opt-out
+`file-size: OPT-OUT (...)` as the component's own status token, naming the variable and the COUNT
+and pointing at `file-size.log` for the file names (the row carries no repository content — see
+CLAUDE.md's campsite-rule section for why that list was removed). Visibility is not a defence, though: an inherited opt-out is still an opt-out
 nobody asked for, and the block only shows it to a reader who looks. Start the gate with a
 deliberate environment.
 

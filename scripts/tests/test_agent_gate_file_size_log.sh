@@ -6,8 +6,10 @@
 # The #3402 defect: with CQLITE_ALLOW_FILE_GROWTH=1 the component reported a bare
 # `file-size: PASS (0s)`, so a pasted SUMMARY — the unit of evidence a PR reviewer reads —
 # could not be told apart from a run where the ratchet was genuinely satisfied. The
-# component now reports its own NON-FAILING `OPT-OUT` token carrying the env var, the
-# count and the grown file names inline. The property that matters most here is the
+# component now reports its own NON-FAILING `OPT-OUT` token carrying the env var and the
+# COUNT, plus a pointer to this component's log — deliberately NOT the file names, which
+# live in file-size.log (#3401) and, for a reviewer, in the PR diff. The property that
+# matters most here is the
 # NEGATIVE one (case 4c): `OPT-OUT` may be emitted ONLY for the affirmative value `1`,
 # because a permissive branch keyed on `!= <bad>` would let a typo waive the ratchet.
 #
@@ -34,7 +36,6 @@
 #       handled — only that the component ran with an empty file list)
 #   4. grown + CQLITE_ALLOW_FILE_GROWTH=1 -> OPT-OUT (the opt-out is RECORDED, and — since
 #      #3402 — VISIBLE in the SUMMARY block, not only in this log)
-#   4b. #3402: four grown files -> the SUMMARY's file list ELIDES with a named remainder
 #   4c. #3402: a MALFORMED override, run for BOTH spellings (`0` and `true`) -> still a
 #       ratchet FAIL, never OPT-OUT
 #   5. base ref unresolvable              -> PASS (advisory only, ratchet skipped)
@@ -153,46 +154,6 @@ mkrepo() {
     if [ "${n:-x}" != "$nhead" ]; then
       bad "fixture $name: worktree $rel has ${n:-<unreadable>} lines, expected $nhead"; return 1
     fi
-  fi
-  REPO="$root"
-}
-
-# mkrepo_multi <name> <count> <committed-lines> <worktree-lines> (#3402) — the multi-file
-# sibling of mkrepo: <count> over-threshold sources (cqlite-core/src/big1.rs …), ALL
-# committed at <committed-lines> and ALL grown to <worktree-lines>. Needed because the
-# SUMMARY's grown-file list elides beyond three entries, which a one-file fixture can
-# never reach. Same contract as mkrepo: publishes the path in the global REPO (never via
-# command substitution, which would run every `bad` in a subshell and DISCARD the failure
-# count), checks its git setup, and RE-MEASURES what it wrote.
-mkrepo_multi() {
-  local name="$1" count="$2" nbase="$3" nhead="$4"
-  local root="$tmp/$name" err="$tmp/$name.setup.err" i n
-  REPO=""
-  if ! mkdir -p "$root/scripts" "$root/cqlite-core/src" 2>"$err"; then
-    bad "fixture $name: mkdir failed — $(tr '\n' ' ' <"$err")"; return 1
-  fi
-  if ! cp "$GATE" "$root/scripts/agent-gate.sh" 2>"$err"; then
-    bad "fixture $name: could not stage the gate script — $(tr '\n' ' ' <"$err")"; return 1
-  fi
-  printf 'target/\n*.log\n.agent-gate-summary.txt\n' >"$root/.gitignore"
-  for i in $(seq 1 "$count"); do lines "$nbase" "$root/cqlite-core/src/big$i.rs"; done
-  if ! ( cd "$root" && git "${GIT_CFG[@]}" init -q -b main . &&
-         git "${GIT_CFG[@]}" add -A &&
-         git "${GIT_CFG[@]}" commit -qm init ) >"$err" 2>&1; then
-    bad "fixture $name: git setup FAILED — $(tr '\n' ' ' <"$err")"; return 1
-  fi
-  for i in $(seq 1 "$count"); do
-    lines "$nhead" "$root/cqlite-core/src/big$i.rs"
-    n=$(wc -l <"$root/cqlite-core/src/big$i.rs" 2>/dev/null | tr -d ' ')
-    if [ "${n:-x}" != "$nhead" ]; then
-      bad "fixture $name: worktree big$i.rs has ${n:-<unreadable>} lines, expected $nhead"; return 1
-    fi
-  done
-  # A fixture that does not present <count> GROWN files makes the elision assert
-  # meaningless, so the count is measured rather than assumed.
-  n=$( cd "$root" 2>/dev/null && git diff --name-only -- '*.rs' 2>/dev/null | grep -c . )
-  if [ "${n:-x}" != "$count" ]; then
-    bad "fixture $name: git reports ${n:-<unreadable>} changed .rs file(s), expected $count"; return 1
   fi
   REPO="$root"
 }
