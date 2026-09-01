@@ -709,12 +709,32 @@ fn inline_module_scoping_nests_and_then_closes() {
 
 #[test]
 fn a_char_literal_brace_does_not_skew_the_inline_module_scope() {
-    // 13 `'{'` / `'}'` char literals live in cqlite-core/src; char literals are
-    // not stripped, so an unguarded brace scan would leave depth permanently
-    // raised and mis-scope every later declaration in the file.
+    // 13 `'{'` / `'}'` char literals live in cqlite-core/src, and char literals
+    // are deliberately not stripped. Both directions must be neutralised, and
+    // each case below FAILS if the guard is removed (verified by mutation).
+    //
+    // A stray `'}'` INSIDE a block would pop the scope early, so `child` would
+    // resolve at file scope. `child.rs` is the decoy for that reading.
+    assert_eq!(
+        orphans(&[
+            (
+                "lib.rs",
+                "mod outer {\n    pub const C: char = '}';\n    mod child;\n}\n"
+            ),
+            ("outer/child.rs", ""),
+            ("child.rs", ""),
+        ]),
+        vec!["child.rs".to_string()]
+    );
+    // A stray `'{'` inside a block would leave the scope UNPOPPED after it
+    // closes, so `after` would wrongly resolve under `outer/`.
     assert!(orphans(&[
-        ("lib.rs", "pub const OPEN: char = '{';\nmod a;\n"),
-        ("a.rs", ""),
+        (
+            "lib.rs",
+            "mod outer {\n    pub const C: char = '{';\n    mod child;\n}\nmod after;\n"
+        ),
+        ("outer/child.rs", ""),
+        ("after.rs", ""),
     ])
     .is_empty());
 }
