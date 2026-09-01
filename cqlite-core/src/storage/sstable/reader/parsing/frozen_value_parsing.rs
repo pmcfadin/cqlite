@@ -204,3 +204,48 @@ fn reject_trailing(data: &[u8], offset: usize, kind: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Decode the INNER type of a `frozen<...>` with FROZEN framing (issue #2339).
+///
+/// A frozen COLLECTION is one opaque value produced by Cassandra's
+/// `CollectionSerializer.serialize()`: `i32-BE count` + `i32-BE length`-prefixed
+/// elements. That is a DIFFERENT framing from the VInt-prefixed NON-frozen
+/// (multicell) collection shape [`super::value_parsing`]'s
+/// `parse_{list,set,map}_value_with` decode, so `frozen<map<..>>` /
+/// `frozen<set<..>>` / `frozen<list<..>>` must dispatch here or they mis-decode
+/// (e.g. a `set<frozen<map<text,int>>>` element reads as an EMPTY map).
+///
+/// Every OTHER inner type — tuple, UDT, scalar, a nested `frozen` — already
+/// decodes correctly through `parse`: tuple/UDT field framing is the same 4-byte
+/// i32-BE shape (`TupleType.buildValue`), and a scalar is its own serialized form
+/// either way. Dispatch is on the DECLARED comparator only, never a byte pattern
+/// (no-heuristics, issue #28).
+///
+/// `parse` is the caller's depth-tracking recursion, and `max_depth` its budget,
+/// so the guard against a pathological nesting depth (issue #1632) stays owned by
+/// one place.
+pub(crate) fn parse_frozen_inner_with(
+    value_data: &[u8],
+    inner: &ComparatorType,
+    depth: usize,
+    max_depth: usize,
+    parse: &dyn Fn(&[u8], &ComparatorType, usize) -> Result<Value>,
+) -> Result<Value> {
+    if depth > max_depth {
+        return Err(Error::corruption(format!(
+            "Value decode recursion depth {depth} exceeds maximum {max_depth}"
+        )));
+    }
+    match inner {
+        ComparatorType::List(element) => {
+            parse_frozen_list_value_with(value_data, element, |d, c| parse(d, c, depth + 1))
+        }
+        ComparatorType::Set(element) => {
+            parse_frozen_set_value_with(value_data, element, |d, c| parse(d, c, depth + 1))
+        }
+        ComparatorType::Map(key, value) => {
+            parse_frozen_map_value_with(value_data, key, value, |d, c| parse(d, c, depth + 1))
+        }
+        other => parse(value_data, other, depth),
+    }
+}

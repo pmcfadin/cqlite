@@ -67,8 +67,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "write-support")]
-use super::read_assembly_composite::{compare_composite, decode_composite};
-#[cfg(feature = "write-support")]
 use crate::schema::{CqlType, TableSchema, UdtRegistry};
 #[cfg(feature = "write-support")]
 use crate::storage::partition_key_codec::deserialize_value_bytes;
@@ -76,9 +74,18 @@ use crate::storage::partition_key_codec::deserialize_value_bytes;
 use crate::types::{ComparatorType, RowCells, Value};
 #[cfg(feature = "write-support")]
 use crate::{Error, Result};
+#[cfg(feature = "write-support")]
+use composite::{compare_composite, decode_composite};
 
 #[cfg(feature = "write-support")]
 use super::model::CellData;
+
+// Composite (frozen tuple / UDT / nested frozen collection) key/element decode +
+// Cassandra-faithful ordering (issue #2339). A CHILD module rather than a sibling
+// so the campsite-rule split adds nothing to `merge/mod.rs`, which is itself far
+// over the size threshold (epic #1116).
+#[path = "read_assembly_composite.rs"]
+mod composite;
 
 /// One column's accumulated cells while grouping a row's flat cell list.
 ///
@@ -314,7 +321,7 @@ fn assemble_complex(
                 // sstabledump golden confirms (`"value":""`). Decode the identity
                 // bytes structurally with the declared element type, then order the
                 // DECODED values with Cassandra's own type comparator (issue #2339;
-                // see `read_assembly_composite` for why raw `cell_path` byte order
+                // see the `composite` module for why raw `cell_path` byte order
                 // is NOT Cassandra's order for a composite).
                 let keyed = decode_composite_elements(name, "set element", elements, &elem_cmp)?;
                 return Ok(Value::Set(
@@ -417,7 +424,7 @@ fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType
 /// non-scalar `Custom`).
 ///
 /// Such a key/element is decoded STRUCTURALLY from its `cell_path` by
-/// `read_assembly_composite::decode_composite` and ordered by
+/// `composite::decode_composite` and ordered by
 /// `compare_composite`, Cassandra's own type comparator (issue #2339). The set of decodable scalars is kept in
 /// lockstep with `deserialize_value_bytes`; branching on the DECLARED type only,
 /// never a byte pattern (no-heuristics, issue #28).
@@ -522,7 +529,7 @@ fn decode_composite_elements(
 /// NOT raw `cell_path` byte order: Cassandra writes a collection's cells in
 /// `cellPathComparator()` order, which for a composite is the declared type's
 /// component-wise comparator, and the two orders genuinely DISAGREE on
-/// Cassandra-written bytes (see [`super::read_assembly_composite`] for the
+/// Cassandra-written bytes (see [`composite`] for the
 /// measured cases). The decode is fallible and already done, so the sort itself is
 /// total; a comparison error (a decoded shape the declared type contradicts) is
 /// captured and surfaced rather than silently mis-ordering.

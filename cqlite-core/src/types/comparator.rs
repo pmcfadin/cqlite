@@ -176,12 +176,7 @@ impl ComparatorType {
         Self::from_cql_type_with_registry(&cql_type, registry, keyspace)
     }
 
-    /// Create a ComparatorType from a CqlType with UDT registry resolution
-    ///
-    /// `pub` (issue #2339) so a caller that already holds a parsed `CqlType` —
-    /// e.g. the merged-read assembler resolving a collection's declared
-    /// element/key type — can resolve UDT references without re-rendering the
-    /// type back to a string for [`Self::from_data_type_with_registry`].
+    /// Create a ComparatorType from a CqlType with UDT registry resolution (`pub` since issue #2339: a caller may already hold a parsed `CqlType`, e.g. the merged-read assembler resolving a collection's element/key type)
     pub fn from_cql_type_with_registry(
         cql_type: &CqlType,
         registry: &UdtRegistry,

@@ -1,5 +1,5 @@
 //! Composite (frozen tuple / UDT / nested frozen collection) collection
-//! key/element handling for the merged-read assembler (issue #2339).
+//! key/element handling for [`super`], the merged-read assembler (issue #2339).
 //!
 //! A non-frozen `set` whose element — or `map` whose key — is an opaque composite
 //! keeps that element's IDENTITY in the cell's authoritative `cell_path`, not in

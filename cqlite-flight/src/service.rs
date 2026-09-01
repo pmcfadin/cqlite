@@ -492,13 +492,10 @@ impl CqliteFlightService {
             // service builds, on every route.
             .with_max_batch_bytes(self.max_batch_bytes)
             .with_udt_registry(registry)
-            // Issue #2339: an UNQUALIFIED UDT reference in the ticket DDL resolves
-            // under the TICKET's keyspace, which is the keyspace the registry above
-            // is keyed by. `parse_cql_schema` gives the parsed schema the literal
-            // placeholder `"default"` for an unqualified `CREATE TABLE` (every
-            // connector ticket sends one), so the merged-read reassembler cannot
-            // use `schema.keyspace` for that lookup — it would miss every UDT and
-            // (correctly, but uselessly) fail closed on a composite element.
+            // Issue #2339: the registry above is keyed by the TICKET's keyspace, and
+            // `parse_cql_schema` gives an unqualified `CREATE TABLE` (every connector
+            // ticket) the placeholder keyspace `"default"` — so the reassembler must
+            // be told the real one or it misses every UDT and fails closed.
             .with_udt_keyspace(&ticket.keyspace);
         // Aggregation pushdown (issue #841): when the ticket carries an
         // aggregation spec, the producer emits PARTIAL aggregate rows under the
