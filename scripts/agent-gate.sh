@@ -7874,6 +7874,12 @@ _tree_identity() {
   # spill file, which is precisely what cannot be written when the disk is full) and handed
   # back on the rc-2 channel for the caller to record as a scan subject. Nothing here reads
   # or renders it.
+  #
+  # SIZE and COST, so neither is a surprise. The text is bounded by the SAME manifest this
+  # function already holds in memory (at most ~2 write errors per recorded path), so it adds
+  # no new order of magnitude and is deliberately NOT truncated -- a cap would introduce a
+  # "did we drop the evidence" question for no measured benefit. On the SUCCESS path it is
+  # EMPTY, and the only cost is one extra fork per capture.
   local -a hashes=()
   local _capdiag=""
   if [ "${#batch[@]}" -gt 0 ]; then
