@@ -7349,29 +7349,73 @@ _census_annotate() {
   esac
 }
 
-# census_summary_line: the ONE aggregate line, built from the same NAMES array the
-# component lines are built from. Every non-affirmed class is reported as
-# `N RECOGNISED` -- never a bare N -- and the line DECLARES ITS OWN NON-EXHAUSTIVENESS,
-# because the gap set is curated: a component that affirms nothing is UNMEASURED, which
-# is not the same statement as verified.
-census_summary_line() { # <component-name>...
-  local c n=0 aff=0 gapn=0 nm=0 vac=0 na=0 und=0 unk=0 state
-  for c in "$@"; do
+# census_summary_line <name> <status> [<name> <status>]... : the ONE aggregate line, built
+# from the same NAMES/STATUSES the component rows are built from.
+#
+# IT TAKES THE STATUS, AND THAT IS THE POINT (roborev job 371, plus the uncited sibling the
+# sweep for it found). This used to take names alone, so every qualifier that names a STATUS
+# had to be an ASSUMPTION about which statuses reach a given census STATE — and this issue
+# has now produced FOUR findings of exactly that shape:
+#   1. the progress line printed PASS while the SUMMARY said VACUOUS (job 368);
+#   2. a FAILing gap: component counted under DECLARED-GAP instead of not-applicable
+#      (census audit LOW 1);
+#   3. NOT-APPLICABLE labelled `(SKIP/FAIL)` on a row that PASSes — the `runtime:` route
+#      legitimately emits PASS + NOT-APPLICABLE, a pair that did not exist when the label
+#      was written (job 371, the cited finding);
+#   4. the ZERO state counted under the heading `VACUOUS` — a STATUS word derived from a
+#      STATE. Not cited, found by sweeping the family, and REPRODUCED in a shipping mode:
+#      `--lite-aggregate-selftest` with a seeded VACUOUS row emits
+#      `fmt: VACUOUS (0s)` beside `0 VACUOUS (RECOGNISED)`. Same contradiction, on the one
+#      counter that names the failure this whole subsystem exists to surface.
+#
+# THE RULE THE FAMILY LEAVES BEHIND: a label may name a STATUS only if it was DERIVED from
+# the observed status. Ask of every word here — is this derived from the state I am
+# rendering, or from an assumption about which states get here? Assumptions were all four.
+#
+# So the counters split in two, and the split is visible in the output:
+#   * SEVEN STATE buckets, one per row, summing to N. They carry no status word — the one
+#     that used to (`VACUOUS`) is now `measured-ZERO`, which is what the state actually is.
+#   * TWO STATUS-DERIVED figures: the `not-applicable` split (did-not-PASS vs PASSed) and
+#     the count of rows whose STATUS is VACUOUS, which no longer has to be inferred from
+#     `measured-ZERO` and would differ from it the moment anything else produced a VACUOUS
+#     row (as the selftest already does).
+#
+# Every non-affirmed class prints as `N RECOGNISED` — never a bare N — and the line DECLARES
+# ITS OWN NON-EXHAUSTIVENESS, because the gap set is curated: a component that affirms
+# nothing is UNMEASURED, which is not the same statement as verified.
+#
+# AN ODD ARGUMENT COUNT IS A NAMED REFUSAL, not a silent drop: it can only be OUR bug (a
+# call site that forgot to zip its status array), and a census line that quietly omits a
+# row is the reporting defect this function exists to remove.
+census_summary_line() { # <name> <status> [<name> <status>]...
+  local c st state n=0 aff=0 gapn=0 nm=0 zero=0 na_np=0 na_pass=0 und=0 unk=0 vac=0
+  if [ $(( $# % 2 )) -ne 0 ]; then
+    printf 'census: MALFORMED — census_summary_line received an ODD argument count (%d); it takes <name> <status> PAIRS, so a call site is not zipping its status array and this block would silently omit a row (#3625).' "$#"
+    return 0
+  fi
+  while [ "$#" -gt 0 ]; do
+    c="$1"; st="$2"; shift 2
     n=$((n + 1))
+    # STATUS-DERIVED, never inferred from the census state.
+    [ "$st" = VACUOUS ] && vac=$((vac + 1))
     state=$(_census_record "$c")
     state=${state%% *}
     case "$state" in
       COUNT)          aff=$((aff + 1)) ;;
       GAP)            gapn=$((gapn + 1)) ;;
       NOT-MEASURED)   nm=$((nm + 1)) ;;
-      ZERO)           vac=$((vac + 1)) ;;
-      NOT-APPLICABLE) na=$((na + 1)) ;;
+      ZERO)           zero=$((zero + 1)) ;;
+      # The ONLY state reachable from BOTH a passing and a non-passing row, so the
+      # qualifier has to come from the row: `_census_measure` writes it for every non-PASS
+      # component, and `_census_scoped_record` writes it on a PASS when the diff routed to
+      # nothing executable.
+      NOT-APPLICABLE) if [ "$st" = PASS ]; then na_pass=$((na_pass + 1)); else na_np=$((na_np + 1)); fi ;;
       UNDECLARED)     und=$((und + 1)) ;;
       *)              unk=$((unk + 1)) ;;
     esac
   done
-  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d VACUOUS (RECOGNISED); %d not-applicable (SKIP/FAIL); %d UNDECLARED; %d unrecognised. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625).' \
-    "$aff" "$n" "$gapn" "$nm" "$vac" "$na" "$und" "$unk"
+  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d measured-ZERO (RECOGNISED); %d not-applicable (component did not PASS); %d no-subject (PASSed; nothing executable was dispatched); %d UNDECLARED; %d unrecognised; %d row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625).' \
+    "$aff" "$n" "$gapn" "$nm" "$zero" "$na_np" "$na_pass" "$und" "$unk" "$vac"
 }
 
 # _status_is_nonfailing <status>: THE CLOSED SET of component statuses that do not fail
@@ -9383,7 +9427,7 @@ _tree_boundary_meta_lines() {
     read -r _st _secs < "$_rf" || true
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
-    _cen_names="$_cen_names $_c"
+    _cen_names="$_cen_names $_c $_st"
     _seen="$_seen $_c "
     _done=$(( _done + 1 ))
   done
@@ -9395,7 +9439,7 @@ _tree_boundary_meta_lines() {
     read -r _st _secs < "$_rf" || true
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
-    _cen_names="$_cen_names $_c"
+    _cen_names="$_cen_names $_c $_st"
     _done=$(( _done + 1 ))
   done
   # The aggregate census line, over exactly the components this truncated table names.
@@ -9403,7 +9447,7 @@ _tree_boundary_meta_lines() {
   # recorded anything): `census: 0/0 components AFFIRMED a count …` is a true statement
   # about a run that got nowhere, and omitting the line would make a stopped block
   # indistinguishable from one produced before this contract existed.
-  # shellcheck disable=SC2086  # intentional word-split: names are [a-z0-9-]+
+  # shellcheck disable=SC2086  # intentional word-split over the name/STATUS pairs
   printf '%s\n' "$(census_summary_line $_cen_names)"
   [ -n "$_rows" ] && printf '%s' "$_rows"
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
@@ -9736,7 +9780,23 @@ if [ "$SELFTEST" -eq 1 ]; then
   AGENT_GATE_FM_COMPONENT=clippy     _fm_observe_cargo_argv clippy --workspace --all-targets --all-features --exclude cqlite-core
   AGENT_GATE_FM_COMPONENT=core-tests _fm_observe_cargo_argv test --package cqlite-core --features cli-helpers
   AGENT_GATE_FM_COMPONENT=smoke      _fm_observe_cargo_argv build --package cqlite-cli --bin cqlite
-  meta+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+  fi
+  meta+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
@@ -18067,8 +18127,25 @@ run_lite() {
   SUMMARY_META+=("$(cpu_budget_line)")
   _tree_meta_array   # #2926
   SUMMARY_META+=("${TREE_META_LINES[@]}")
-  local i
-  SUMMARY_META+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
+  local i _ci
+  local -a _cen_args=()
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+  fi
+  SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
@@ -18408,7 +18485,8 @@ run_delta() {
   # file-size FAIL fails the delta and shows in the block), then append the
   # scoped-tests entry run_scoped_tests already pushed onto NAMES.
   local -a DN=() DS=() DT=()
-  local c rf st secs
+  local -a _cen_args=()
+  local c rf st secs _ci
   for c in file-size fmt; do
     rf="$LOG_DIR/$c.result"
     if [ -f "$rf" ]; then
@@ -18460,7 +18538,23 @@ run_delta() {
     _tree_meta_array
     SUMMARY_META+=("${TREE_META_LINES[@]}")
     SUMMARY_META+=("${file_meta[@]}")
-    SUMMARY_META+=("$(census_summary_line "${DN[@]+"${DN[@]}"}")")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+    # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+    # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+    # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+    # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+    # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+    # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+    # `${#arr[@]}` is set -u-safe even when empty.
+    _cen_args=()
+    if [ "${#DN[@]}" -gt 0 ]; then
+      for _ci in "${!DN[@]}"; do _cen_args+=("${DN[$_ci]}" "${DS[$_ci]}"); done
+    fi
+    SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     done
@@ -18498,7 +18592,23 @@ run_delta() {
   _tree_meta_array   # #2926
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   SUMMARY_META+=("${file_meta[@]}")
-  SUMMARY_META+=("$(census_summary_line "${DN[@]+"${DN[@]}"}")")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#DN[@]}" -gt 0 ]; then
+    for _ci in "${!DN[@]}"; do _cen_args+=("${DN[$_ci]}" "${DS[$_ci]}"); done
+  fi
+  SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
   done
@@ -18681,7 +18791,23 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("$(cpu_budget_line)")
   # #2926: synthetic tree identity (no git state needed for the aggregation self-test).
   SUMMARY_META+=("$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE")
-  SUMMARY_META+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+  fi
+  SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
@@ -19595,7 +19721,23 @@ if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
 fi
-SUMMARY_META+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
+# #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+# that names a status must be derived from the observed one, never assumed from the
+# census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+# character between the two fields, per #3312: remove the shared channel rather than
+# pick a delimiter a value might one day contain.
+# GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+# `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+# bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+# on the array's string contents, ABANDONING the enclosing block before its exit. Already
+# documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+# form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+# `${#arr[@]}` is set -u-safe even when empty.
+_cen_args=()
+if [ "${#NAMES[@]}" -gt 0 ]; then
+  for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+fi
+SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
