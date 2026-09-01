@@ -50,10 +50,10 @@
 
 use std::path::{Path, PathBuf};
 
+use cqlite_core::error::ErrorCategory;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::schema::parse_cql_schema;
 use cqlite_core::storage::sstable::SSTableReader;
-use cqlite_core::error::ErrorCategory;
 use cqlite_core::{Config, Database, Error, Platform, TableId};
 
 #[path = "support/datasets_root.rs"]
@@ -119,7 +119,9 @@ async fn select_all(
     let root = fixture_root(keyspace, table);
     let schema = write_schema(dir.path(), schema_body);
     let db = open_db(&root, &schema, keyspace).await;
-    let result = db.execute(&format!("SELECT * FROM {keyspace}.{table}")).await?;
+    let result = db
+        .execute(&format!("SELECT * FROM {keyspace}.{table}"))
+        .await?;
     Ok(result
         .rows
         .iter()

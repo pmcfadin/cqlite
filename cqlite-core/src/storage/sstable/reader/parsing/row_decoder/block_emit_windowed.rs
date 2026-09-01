@@ -591,32 +591,16 @@ impl V5CompressedLegacyParser {
                                 );
                             }
                             Err(e) => {
-                                // Issue #3721: distinguish a PER-COLUMN decode
-                                // failure (the row decoder refusing to serve a
-                                // short row) from this loop's ordinary
-                                // `Err`-means-end-of-partition-body signal. Only
-                                // a match on the dedicated variant can tell them
-                                // apart; message-text inspection would be a
-                                // heuristic (issue #28).
-                                if matches!(e, Error::ColumnDecode { .. }) {
-                                    tracing::warn!(
-                                        "V5CompressedLegacy: Column decode failure in partition {} at offset {}: {}",
-                                        partition_index, offset, e
-                                    );
-                                    return Err(e);
-                                }
-                                // End of valid data in partition
-                                debug!(
-                                    "V5CompressedLegacy: Partition {} ended after {} rows: {}",
-                                    partition_index, row_count, e
-                                );
-                                if row_count == 0 {
-                                    // If we couldn't parse even one row, log as error
-                                    tracing::error!(
-                                        "V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
-                                        partition_index, offset, e
-                                    );
-                                }
+                                // Issue #3721: `Err` here is normally the
+                                // end-of-partition signal; a per-column decode
+                                // failure is NOT, and only `column_decode_error`
+                                // decides which is which.
+                                column_decode_error::end_of_partition_or_bail(
+                                    e,
+                                    partition_index,
+                                    row_count,
+                                    offset,
+                                )?;
                                 break; // End of valid data in partition
                             }
                         }

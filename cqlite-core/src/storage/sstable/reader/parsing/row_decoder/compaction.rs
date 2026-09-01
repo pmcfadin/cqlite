@@ -661,14 +661,16 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 resolution,
                 None,
             ) {
-                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Ok(Some(next_offset)),
+                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => {
+                    Ok(Some(next_offset))
+                }
                 // Issue #3721: a per-column decode failure reaches the caller even on
                 // the structure-only advance. This path exists to measure byte
                 // consumption; a row whose column decode failed has an UNKNOWN
                 // consumption (the failing parser returns no offset), so answering
                 // `Ok(None)` here would report "end of partition" for a row that is
                 // really there — the same silent truncation, one level up.
-                Err(e) if matches!(e, Error::ColumnDecode { .. }) => Err(e),
+                Err(e) if column_decode_error::is_column_decode(&e) => Err(e),
                 Err(_) => Ok(None),
             };
         }
@@ -716,7 +718,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             // `Ok(None)` for a column that failed to decode would let compaction
             // WRITE OUT a row missing that column and every later one — the read
             // defect turned into durable data loss. Surface it.
-            Err(e) if matches!(e, Error::ColumnDecode { .. }) => Err(e),
+            Err(e) if column_decode_error::is_column_decode(&e) => Err(e),
             Err(_) => Ok(None),
         }
     }

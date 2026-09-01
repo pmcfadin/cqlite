@@ -794,6 +794,10 @@ mod cell_value_complex;
 mod cell_value_scalar;
 mod compaction;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
+                       // Per-column decode-failure policy for row assembly (issue #3721): the rule, the
+                       // fatal-vs-skippable analysis, and the ONE end-of-partition-vs-defect decision
+                       // the block/partition row loops share.
+mod column_decode_error;
 pub(in crate::storage::sstable::reader) use compaction_stream::{
     CompactionPartitionState, PartitionStreamStep,
 };
