@@ -4614,7 +4614,20 @@ fi
 # 1465c. The component-level dataset SKIP must declare the leak-lane state, or a skipped
 #        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
 #        ambiguous between "it ran" and "this gate predates the line".
-if printf '%s' "$nll_component" | grep -q '_node_leak_lane_note SKIP-OPTOUT'; then
+# SIGPIPE-FREE MATCH, DELIBERATELY NOT `printf | grep -q` (#3685). Measured at this site:
+#        `printf '%s' "$nll_component" | grep -q PATTERN` under this suite's `set -uo pipefail`
+#        returned **rc=141** in 30 of 80 runs (37.5%) — `grep -q` exits at the first match, closing
+#        the read end, and whichever of `printf`'s write(2) calls lands after that gets EPIPE. Over
+#        those 80 runs `rc=1` occurred ZERO times: the note was present EVERY time, so the pipeline
+#        was inverting a TRUE assertion into a FAIL. It red two consecutive gates of record on an
+#        identical tree digest (#3414) before the mechanism was found.
+#
+#        DANGER HEURISTIC for the other ~200 sites in #3685 — large variable x EARLY match. Here the
+#        data is 34,397 bytes (it FITS a 65,536-byte pipe, so this is syscall interleaving, NOT
+#        buffer exhaustion) and the first match is at byte 3,372, so grep discards 31,025 bytes it
+#        never reads: near-maximal exposure. A pattern near the END of its data is nearly safe.
+#        `[[ ]]` glob measured 0/80 on the identical variable and load. Only THIS site is changed.
+if [[ $nll_component == *'_node_leak_lane_note SKIP-OPTOUT'* ]]; then
   ok "1465-skip-declares: the #3522 opt-out SKIP branch writes the SKIP-OPTOUT note"
 else
   bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
