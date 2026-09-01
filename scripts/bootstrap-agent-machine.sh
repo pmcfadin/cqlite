@@ -340,7 +340,14 @@ mold_write_block() {
     warn "could not create $cfg_dir — skipping mold linker config"
     return 0
   fi
-  if [ -f "$cfg_dir/config" ]; then
+  # `-f` FOLLOWS the link, so a DANGLING legacy `config` symlink reads as absent and selection
+  # falls through to `config.toml` — leaving the block in a file cargo will ignore the moment the
+  # link's target appears, since cargo prefers the extension-less name (#3756 roborev round 2).
+  # `-L` is the affirmative "a legacy config was declared here" test; the symlink resolution below
+  # then either writes through to the declared target or REFUSES, so a broken link is never
+  # silently replaced. The `config.toml` arm needs no equivalent: its `else` branch already
+  # selects the same path, so a dangling `config.toml` link reaches the resolver either way.
+  if [ -f "$cfg_dir/config" ] || [ -L "$cfg_dir/config" ]; then
     cfg_file="$cfg_dir/config"
   elif [ -f "$cfg_dir/config.toml" ]; then
     cfg_file="$cfg_dir/config.toml"

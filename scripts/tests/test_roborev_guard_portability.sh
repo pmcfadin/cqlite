@@ -377,8 +377,13 @@ add_construct '\-printf[[:space:]]' \
 # WRONG for xargs, whose operand is A COMMAND WITH ITS OWN FLAGS: `find . | xargs rm -rf` would
 # be read as an xargs `-r` and red the gate on the single most common xargs idiom there is. So
 # the run admits OPTION TOKENS ONLY (each must start with `-`), which stops at the command name.
+#
+# A LONG OPTION MUST HAVE A NAME (#3756 roborev round 2). The `--` branch was inherited
+# unbounded, so it also matched the BARE end-of-options delimiter — and `xargs -- rm` is
+# portable (every getopt honours `--`), so the rule red on correct code. `--[a-zA-Z]` keeps
+# `--no-run-if-empty` flagged and lets the delimiter through; both pinned by controls.
 _XARGS_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+)*'
-RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-[a-zA-Z0-9]*r|--)'
+RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-[a-zA-Z0-9]*r|--[a-zA-Z])'
 add_construct "$RE_XARGS_R" \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
   '  printf "" | xargs -0 -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -395,7 +400,11 @@ add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
 # strtod, so `timeout 0.5 cmd` and `timeout .5 cmd` are real invocations — and the ORIGINAL
 # `[0-9]` form caught `0.5`, so requiring an integer would have NARROWED the rule while fixing
 # its false positive. A false-positive fix that loses a true positive is not a fix.
-RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+([0-9]+(\.[0-9]+)?|\.[0-9]+)[smhd]?([[:space:]]|$)'
+# ...AND strtod ACCEPTS AN EXPONENT (#3756 roborev round 2): `timeout 1e2 cmd` and
+# `timeout 1.5e2s cmd` are valid, and the original `[0-9]` form caught both. Same ruling as the
+# fractional case — restore rather than narrow. The exponent needs digits after `e`, so
+# `timeout 2>/dev/null` stays excluded (measured, both directions, in the controls below).
+RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+([0-9]+(\.[0-9]+)?|\.[0-9]+)([eE][+-]?[0-9]+)?[smhd]?([[:space:]]|$)'
 add_construct "$RE_TIMEOUT_UNGUARDED" \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -428,6 +437,21 @@ fi
 #      not otherwise; the scanner cannot know, so it treats a bare word as an operand (the
 #      quiet direction — noise here would be worse than a miss, per the negative controls).
 #   4. A construct built by string concatenation or eval (`cmd="sed -"; cmd="$cmd i"`).
+#
+#   4a. AN xargs OPTION WITH A SEPARATED ARGUMENT (#3756 roborev round 2). `xargs -n 1 -r cmd`
+#      and `xargs -I '{}' -r cmd` are NOT detected: the option run admits only tokens that begin
+#      with `-`, so it stops at `1` / `'{}'` and never reaches the `-r` beyond. Symmetrically,
+#      `xargs -I -r echo` — where `-r` is the replace-STRING, i.e. `-I`'s argument — IS flagged,
+#      a (pathological) false positive with the usual per-line marker as its escape.
+#      THE OBVIOUS WIDENING IS WORSE, AND THAT IS MEASURED RATHER THAN ARGUED. Letting each run
+#      element carry one following non-option token does catch both missed spellings — and it
+#      ALSO flags `find . -print0 | xargs -0 rm -rf`, because nothing here can tell `-n 1`
+#      (option + argument) from `-0 rm` (option + COMMAND). Measured before/after on those three
+#      lines: `. . X` -> `X X X`. Trading a miss for a red on the single most common xargs idiom
+#      there is makes it the lint agents learn to waive, which is strictly worse than the miss.
+#      Telling them apart needs xargs's option-arity table, i.e. a second implementation of an
+#      option grammar — the route this file already refuses two paragraphs above, for the reason
+#      recorded there. So: KNOWN NOT COVERED, by choice, like 1-4.
 #
 #   5. THE BACKSTOP DOES NOT COVER THE WHOLE SCANNED SET, AND 1-4 ARE UNCOVERED OUTSIDE IT
 #      (#3296 round-9 finding 2 — this bullet CORRECTS an earlier claim made right here, that the
@@ -1124,7 +1148,8 @@ printf '%s\n' \
   '  printf "" | xargs -0r rm' \
   '  printf "" | xargs -r rm' \
   '  find . -print0 | xargs -0 --no-run-if-empty rm' \
-  '  git ls-files -z | xargs -0 -I{} -r echo {}' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+  '  git ls-files -z | xargs -0 -I{} -r echo {}' \
+  '  printf "" | xargs --no-run-if-empty rm' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
 _xargs_missed=''
 _xargs_broke=0
 while IFS= read -r _xl; do
@@ -1148,10 +1173,11 @@ printf '%s\n' \
   '  find . -name x | xargs rm -rf' \
   '  find . -print0 | xargs -0 rm -rf' \
   '  printf "" | xargs -n1 rm -r' \
-  '  git ls-files -z | xargs -0 sh -c '"'"'grep -r foo "$@"'"'"' _' >"$tmp/xargs-ok.sh"
+  '  git ls-files -z | xargs -0 sh -c '"'"'grep -r foo "$@"'"'"' _' \
+  '  printf "" | xargs -- rm' >"$tmp/xargs-ok.sh"
 scan_found "$RE_XARGS_R" "$tmp/xargs-ok.sh"
 case $? in
-  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`) is NOT flagged — the option run stops at the command name, so the widening did not red the most common xargs idiom there is' ;;
+  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`) and the BARE end-of-options `xargs -- rm` are NOT flagged — the option run stops at the command name, and a long option must have a name' ;;
   0) bad "structural control: the widened xargs rule flags an xargs whose COMMAND carries -r — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
   *) : ;; # already counted by scan_found
 esac
@@ -1176,7 +1202,9 @@ printf '%s\n' \
   '  timeout 180 bash "$GATE"' \
   '  timeout 0.5 flaky-command' \
   '  timeout .5 flaky-command' \
-  '  timeout 1.5s flaky-command' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+  '  timeout 1.5s flaky-command' \
+  '  timeout 1e2 flaky-command' \
+  '  timeout 1.5e2s flaky-command' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
 _timeout_missed=''
 _timeout_broke=0
 while IFS= read -r _tl; do
@@ -1192,7 +1220,7 @@ done <"$tmp/timeout-bad.sh"
 if [ "$_timeout_broke" -eq 1 ]; then
   : # already counted by scan_found
 elif [ -z "$_timeout_missed" ]; then
-  ok 'structural control: every real `timeout <duration> cmd` spelling is still FLAGGED — integer, GNU suffix, and the FRACTIONAL forms (0.5, .5, 1.5s) that the original [0-9] rule caught. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
+  ok 'structural control: every real `timeout <duration> cmd` spelling is still FLAGGED — integer, GNU suffix, and the FRACTIONAL and EXPONENT forms (0.5, .5, 1.5s, 1e2, 1.5e2s) that the original [0-9] rule caught. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
 else
   bad "structural control: the timeout rule no longer detects:$_timeout_missed — the false-positive fix narrowed it past its subject, which is a coverage loss dressed as a fix"
 fi

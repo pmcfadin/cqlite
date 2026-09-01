@@ -912,6 +912,40 @@ else
   bad "mold/symlink: a symlink to a not-yet-created target was not written through (still-link=$([ -L "$sbQ/.cargo/config.toml" ] && echo yes || echo no) target-exists=$([ -f "$sbQ/dotfiles/cargo-config.toml" ] && echo yes || echo no) begin-count=$(count_begin "$sbQ/dotfiles/cargo-config.toml"))"
 fi
 
+# 6r. A DANGLING LEGACY `~/.cargo/config` SYMLINK REACHES THE RESOLVER (#3756 roborev round 2).
+#     Selection used `-f`, which FOLLOWS the link and therefore reads a dangling one as absent —
+#     so bootstrap wrote `config.toml` instead, and the moment the link's target appeared cargo
+#     would prefer the extension-less `config` and ignore the block entirely. Both halves are
+#     asserted: the declared target is created and carries the block, AND no `config.toml` is
+#     written beside it (writing both is what makes the wrong one win later).
+sbR=$(mktemp -d "$tmp/moldR.XXXXXX"); mkdir -p "$sbR/.cargo" "$sbR/dotfiles"
+ln -s "$sbR/dotfiles/legacy-config" "$sbR/.cargo/config"
+PATH="$stubO:$PATH" HOME="$sbR" CARGO_HOME="$sbR/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbR/.cargo/config" ] && [ -f "$sbR/dotfiles/legacy-config" ] \
+   && [ "$(count_begin "$sbR/dotfiles/legacy-config")" = 1 ] \
+   && [ ! -e "$sbR/.cargo/config.toml" ]; then
+  ok "mold/symlink: a DANGLING legacy ~/.cargo/config symlink selects the legacy name and is written THROUGH to its declared target — not sidestepped into a config.toml that cargo would later ignore"
+else
+  bad "mold/symlink: the dangling legacy config symlink was not handled (still-link=$([ -L "$sbR/.cargo/config" ] && echo yes || echo no) target=$([ -f "$sbR/dotfiles/legacy-config" ] && echo yes || echo no) begin=$(count_begin "$sbR/dotfiles/legacy-config") stray-config.toml=$([ -e "$sbR/.cargo/config.toml" ] && echo yes || echo no))"
+fi
+
+# 6s. ...and an UNRESOLVABLE legacy symlink still REFUSES rather than being replaced. 6r opens a
+#     path that 6p's config.toml case did not cover, so the refusal is re-asserted on it: a
+#     selection change that quietly turned a refusal into a clobber is exactly the regression
+#     6r could introduce.
+sbS=$(mktemp -d "$tmp/moldS.XXXXXX"); mkdir -p "$sbS/.cargo"
+ln -s "$sbS/.cargo/no-such-dir/legacy-config" "$sbS/.cargo/config"
+outS=$(PATH="$stubO:$PATH" HOME="$sbS" CARGO_HOME="$sbS/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ -L "$sbS/.cargo/config" ] && [ ! -e "$sbS/.cargo/no-such-dir" ] \
+   && printf '%s' "$outS" | grep -q "symlink whose target could not be resolved"; then
+  ok "mold/symlink: a legacy config symlink into a NONEXISTENT directory is refused with a named warning and left untouched — 6r widened selection without widening what may be clobbered"
+else
+  bad "mold/symlink: the unresolvable legacy symlink case did not refuse (still-link=$([ -L "$sbS/.cargo/config" ] && echo yes || echo no) dir-created=$([ -e "$sbS/.cargo/no-such-dir" ] && echo yes || echo no))"
+  printf '%s\n' "$outS" | grep -i 'mold\|symlink' | head -5
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +
