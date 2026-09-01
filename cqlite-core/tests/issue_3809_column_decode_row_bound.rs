@@ -199,12 +199,18 @@ fn write_schema(dir: &Path) -> PathBuf {
 }
 
 async fn open_db(root: &Path, schema: &Path) -> Database {
+    open_db_filtered(root, schema, KEYSPACE).await
+}
+
+/// The same ingestion, for a scratch tree holding a DIFFERENT keyspace — the
+/// Cassandra-written row-tombstone control reads `test_tomb`.
+async fn open_db_filtered(root: &Path, schema: &Path, keyspace: &str) -> Database {
     let cfg = IngestionConfig {
         schema_paths: vec![schema.to_path_buf()],
         data_dir: root.to_path_buf(),
         version_hint: None,
         core_config: Config::default(),
-        table_directory_filter: Some(format!("/{KEYSPACE}/")),
+        table_directory_filter: Some(format!("/{keyspace}/")),
     };
     let result = ingest(cfg).await.expect("ingestion succeeds");
     assert!(
@@ -520,4 +526,264 @@ async fn the_unpatched_scratch_copy_reads_every_row() {
         body.contains("compressible_payload_row_00001_"),
         "ck=1's body must be the text Cassandra wrote; got: {body}"
     );
+}
+
+// ─── The PURE ROW TOMBSTONE whose declared size ends inside its metadata ──────
+//     (#3721, roborev job 14)
+//
+// A row carrying ROW_HAS_DELETION with no cell bytes takes a FAST PATH that returns
+// before the column walk — so neither per-column bound nor the post-walk
+// reconciliation above can see it. That path decided "no cells" with `cell_data_start
+// < after_row_offset` being FALSE, i.e. it accepted TWO states as one:
+//
+//   ==  the row's metadata ends exactly at the row's declared end: a genuine pure
+//       tombstone, the state the fast path exists for.
+//   >   the declared `row_size` ends INSIDE the row's own metadata, which no
+//       well-formed row can do (`row_size` is counted from after its own vint and
+//       spans the whole body, `cassandra-5.0.8`
+//       db/rows/UnfilteredSerializer.serialize).
+//
+// The `>` state returned `Ok` with `next_offset` = the row's declared end, i.e. a
+// cursor BEHIND where the row's metadata actually ended: the row loop then re-read
+// this row's own metadata bytes as the next row's header. That misparses the REST OF
+// THE PARTITION, not just one row, and every value it produces looks well-formed.
+//
+// The patch turns Cassandra's own first row into that shape with three one-byte edits,
+// each changing a field IN PLACE (no byte shifts):
+//
+//   0x12  row flags 0x24 -> 0x34   add HAS_DELETION (0x10), so the row header now
+//                                  carries markedForDeleteAt + localDeletionTime
+//                                  vints, read from the bytes Cassandra wrote as the
+//                                  `body` cell's flags (0x1c = 0x08, one byte) and
+//                                  its length vint (0x1d..0x1e = 0x81 0x37, two
+//                                  bytes) -> header_size 4 -> 7, metadata ends 0x1f
+//   0x18  row_size  0x81 -> 0x80 } row_size 316 -> 0 in the SAME two-byte encoding,
+//   0x19  row_size  0x3c -> 0x00 } so the row body ends at 0x1a + 0 = 0x1a — FIVE
+//                                  bytes BEFORE the metadata's own end at 0x1f
+//
+// HAS_ALL_COLUMNS (0x20) stays set, so no missing-columns bitmap is read and the row
+// declares every column present; the fast path is reached purely because the declared
+// extent leaves no room for cell bytes.
+
+/// `HAS_ALL_COLUMNS | HAS_TIMESTAMP | HAS_DELETION`: the flags byte with only
+/// `ROW_HAS_DELETION` (0x10) added to what Cassandra wrote.
+const ROW_FLAGS_WITH_DELETION: u8 = 0x34;
+/// Where the metadata of the HAS_DELETION row ends: `0x18 + header_size(7)` — the
+/// row_size vint (2) + prev-size vint (1) + timestamp delta (1) + markedForDeleteAt
+/// vint (1) + localDeletionTime vint (2). Also `cell_data_start`, since cell data
+/// begins immediately after the row header.
+const TOMBSTONE_METADATA_END: usize = 0x1f;
+
+/// The one edit that makes the row a ROW-LEVEL DELETION.
+const ROW_HAS_DELETION: (usize, u8, u8) =
+    (ROW_FLAGS_BYTE, ROW_FLAGS_VALUE, ROW_FLAGS_WITH_DELETION);
+
+/// `row_size = 5` in the same two-byte encoding: exactly the 5 bytes of row body the
+/// HAS_DELETION metadata occupies after its own vint (`0x1a..0x1f`), so the row's
+/// declared end EQUALS its metadata's end — a well-formed PURE ROW TOMBSTONE.
+const ROW_SIZE_EXACT_METADATA: [(usize, u8, u8); 2] = [
+    (
+        ROW_SIZE_VINT_HIGH_BYTE,
+        ROW_SIZE_VINT_HIGH_VALUE,
+        ROW_SIZE_ZERO_HIGH,
+    ),
+    (ROW_SIZE_VINT_LOW_BYTE, ROW_SIZE_VINT_LOW_VALUE, 0x05),
+];
+
+/// A PURE ROW TOMBSTONE whose declared `row_size` ends INSIDE its own metadata must
+/// FAIL the read with a NAMED, propagating error — never be returned as `Ok` with the
+/// cursor moved BACK to that impossible end (#3721, roborev job 14).
+///
+/// The fast path is the only reader of this row: it returns before the column walk, so
+/// neither the per-column `row_bound_check` nor the post-walk `row_body_reconcile`
+/// (the two cases above) is evaluated even once.
+///
+/// # Measured pre-fix, on exactly these bytes
+///
+/// The fast path returned this row as `Ok` and resumed at its declared end — FIVE bytes
+/// INSIDE the metadata it had just read — so the row loop re-read that metadata as the
+/// next row's header. The read did not fail HERE; it failed 100 bytes later, and about
+/// something else entirely:
+///
+/// ```text
+/// Corruption("range-tombstone marker at offset 131 of partition 0 could not be
+///  represented faithfully … unknown range tombstone bound kind 97")
+/// ```
+///
+/// Bound kind 97 is the ASCII `a` of the text Cassandra wrote — a PHANTOM marker
+/// decoded out of the middle of a cell value, caught only by the unrelated #3808
+/// refusal, naming an offset and a condition that have nothing to do with the malformed
+/// row. That is the harm this case pins: the backward cursor move misparses the REST OF
+/// THE PARTITION, and whether the misparse happens to raise (as here) or to yield
+/// plausible rows (as it would where the following bytes parse) is an accident of the
+/// data. The row must be refused where it is READ.
+#[tokio::test]
+async fn a_pure_row_tombstone_whose_size_ends_inside_its_metadata_fails_the_select() {
+    let patches: Vec<(usize, u8, u8)> = std::iter::once(ROW_HAS_DELETION)
+        .chain(ROW_SIZE_ZERO.iter().copied())
+        .collect();
+    let err = select_bodies(&patches).await.expect_err(
+        "a row-tombstone row whose declared extent ends inside its own metadata has no \
+         readable framing: returning it moves the cursor BACKWARD and misparses the rest of \
+         the partition, so row assembly must return a named error instead",
+    );
+    assert_column_decode_at(
+        &err,
+        // A pure tombstone decodes no column, so none can be named — the same sentinel
+        // the post-walk reconciliation uses when no column ran.
+        "<no column decoded>",
+        // The refusal is measured at the metadata's end, which is where cell data would
+        // have begun.
+        TOMBSTONE_METADATA_END,
+        &[
+            // The condition, the two extents that disagree, the arithmetic between
+            // them, and the consequence of accepting it.
+            "pure row tombstone REFUSED",
+            "HAS_DELETION metadata",
+            &format!("ends at {TOMBSTONE_METADATA_END}"),
+            &format!("declares at {ROW_END_SIZE_ZERO}"),
+            &format!(
+                "{} byte(s) beyond it",
+                TOMBSTONE_METADATA_END - ROW_END_SIZE_ZERO
+            ),
+            "cursor BACK",
+        ],
+    );
+}
+
+/// DISCRIMINATING CONTROL for the case above, on the SAME row of the SAME fixture:
+/// with `row_size` ending EXACTLY where the HAS_DELETION metadata does, the row is a
+/// well-formed pure tombstone and the fast path must ACCEPT it — the refusal above must
+/// come from the declared extent, not from HAS_DELETION with no cell bytes.
+///
+/// Because this patch shortens Cassandra's 316-byte row 1 to 5 bytes, the bytes that
+/// follow are the MIDDLE of the text it wrote, so the read as a whole may still fail on
+/// a phantom row further on (measured: `body` at offset 160, `invalid cell flags 0x61`
+/// — the ASCII `a` of that text). That is the pre-existing behaviour of a walk pointed
+/// at non-row bytes and is not this case's subject, so the assertion is on the ONE
+/// property that discriminates: whatever the read does, it must NOT be the
+/// pure-tombstone refusal, and must not be reported at this row's own extent.
+///
+/// The end-to-end proof that a REAL pure row tombstone reads is the next case, on
+/// Cassandra-written bytes with no patch at all.
+#[tokio::test]
+async fn a_well_formed_pure_row_tombstone_is_accepted_by_the_fast_path() {
+    let patches: Vec<(usize, u8, u8)> = std::iter::once(ROW_HAS_DELETION)
+        .chain(ROW_SIZE_EXACT_METADATA.iter().copied())
+        .collect();
+    if let Err(err) = select_bodies(&patches).await {
+        let text = format!("{err:?}");
+        assert!(
+            !text.contains("pure row tombstone REFUSED"),
+            "a HAS_DELETION row with no cell bytes whose row_size ends EXACTLY at its \
+             metadata's end is well-formed and must not be refused; got: {text}"
+        );
+        if let Error::ColumnDecode { offset, .. } = &err {
+            assert_ne!(
+                *offset, TOMBSTONE_METADATA_END,
+                "the failure must not be attributed to the well-formed tombstone row's own \
+                 extent; got: {text}"
+            );
+        }
+    }
+}
+
+// ─── NEGATIVE CONTROL on Cassandra-written bytes: a REAL pure row tombstone ───
+//
+// The cases above construct their tombstone by editing a row Cassandra wrote for a
+// different purpose. This one reads a row tombstone Cassandra ITSELF wrote, with NO
+// patch of any kind, so nothing about the shape is this test's construction (#3042:
+// an on-disk framing property must be pinned against Cassandra-written bytes).
+//
+// `test_tomb.static_with_tombstones` (committed, single `nb` flush) holds in pk=1,
+// per its committed sstabledump golden:
+//   * a static block with one live cell, `stat_col = 'surviving_static'`
+//   * ck=1  live liveness marker + live `row_col = 'row_1'`
+//   * ck=2  a ROW DELETION with ZERO cells — the pure tombstone this case exists for
+//   * ck=3  live marker whose only regular cell is a cell tombstone
+//   * a range tombstone bound pair covering [ck=4, ck=5] (no rows inside it)
+//   * ck=6  live liveness marker + live `row_col = 'row_6'`
+
+const TOMB_KEYSPACE: &str = "test_tomb";
+const TOMB_TABLE: &str = "static_with_tombstones";
+const TOMB_DIR: &str = "static_with_tombstones-4cdb9780702011f1b8f419c9a388d558";
+const TOMB_SCHEMA_FILE: &str = "tombstone-parity.cql";
+/// The clustering key of the row Cassandra wrote as a PURE ROW TOMBSTONE.
+const TOMB_DELETED_CK: i32 = 2;
+/// Clustering keys whose rows are LIVE, so the case cannot pass on an empty result.
+const TOMB_LIVE_CKS: [i32; 2] = [1, 6];
+
+/// A PURE ROW TOMBSTONE WRITTEN BY CASSANDRA still reads: the fast path's `==` state is
+/// the state it exists for, and tightening it to equality must not refuse it (#3721,
+/// roborev job 14).
+///
+/// Without this the fix could refuse every cell-less row-tombstone row — silently
+/// breaking every tombstoned read — and the refusal case above would still pass. The
+/// tombstoned row must be ABSENT from the result (its deletion is honoured) while the
+/// live rows are present with the values Cassandra wrote, so the case cannot pass
+/// vacuously on a read that returned nothing.
+#[tokio::test]
+async fn a_cassandra_written_pure_row_tombstone_still_reads() {
+    let root = sstables_root_for_table(TOMB_KEYSPACE, TOMB_TABLE).unwrap_or_else(|| {
+        panic!(
+            "{TOMB_KEYSPACE}.{TOMB_TABLE} is COMMITTED to git and must resolve in every \
+             checkout, unconditionally (issue #3220) — {}.\n  remedy: git restore \
+             --source=HEAD -- test-data/datasets/sstables",
+            describe_search(TOMB_KEYSPACE, TOMB_TABLE)
+        )
+    });
+    let schema = datasets_root::schema_path(TOMB_SCHEMA_FILE).unwrap_or_else(|| {
+        panic!(
+            "{TOMB_SCHEMA_FILE} is COMMITTED source under test-data/schemas and must resolve \
+             in every checkout (#3148)"
+        )
+    });
+    // Copy just this table's directory, so the read never depends on the presence of
+    // any other (fetch-only) table in the keyspace.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scratch = tmp.path().join("sstables");
+    let dst = scratch.join(TOMB_KEYSPACE).join(TOMB_DIR);
+    std::fs::create_dir_all(&dst).expect("scratch dir");
+    let src = root.join(TOMB_KEYSPACE).join(TOMB_DIR);
+    for entry in std::fs::read_dir(&src).expect("read committed fixture dir") {
+        let entry = entry.expect("dir entry");
+        std::fs::copy(entry.path(), dst.join(entry.file_name())).expect("copy component");
+    }
+
+    let db = open_db_filtered(&scratch, &schema, TOMB_KEYSPACE).await;
+    let result = db
+        .execute(&format!(
+            "SELECT pk, ck, row_col FROM {TOMB_KEYSPACE}.{TOMB_TABLE} WHERE pk = 1"
+        ))
+        .await
+        .expect(
+            "a row tombstone Cassandra wrote with no cell bytes is the state the \
+             pure-tombstone fast path exists for — the read must succeed",
+        );
+    let cks: Vec<i32> = result
+        .rows
+        .iter()
+        .filter_map(|row| row.values.iter().find(|(n, _)| n.as_ref() == "ck"))
+        .map(|(_, v)| {
+            let shown = format!("{v:?}");
+            shown
+                .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-')
+                .trim_end_matches(|c: char| !c.is_ascii_digit())
+                .parse::<i32>()
+                .unwrap_or_else(|e| panic!("clustering key must be an int, got {shown}: {e}"))
+        })
+        .collect();
+    assert!(
+        !cks.contains(&TOMB_DELETED_CK),
+        "ck={TOMB_DELETED_CK} is a pure ROW TOMBSTONE and must be honoured (absent from the \
+         result), not surfaced; got clustering keys {cks:?}"
+    );
+    for live in TOMB_LIVE_CKS {
+        assert!(
+            cks.contains(&live),
+            "ck={live} is LIVE in this fixture and must be returned — a result missing it is a \
+             read regression, and an empty result would let this control pass vacuously; got \
+             clustering keys {cks:?}"
+        );
+    }
 }

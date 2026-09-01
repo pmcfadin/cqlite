@@ -659,3 +659,78 @@ pub(super) fn end_of_partition_or_bail(
     }
     Ok(())
 }
+
+/// The pure-row-tombstone FAST PATH's precondition: a `ROW_HAS_DELETION` row with no
+/// cell bytes may be returned only when its metadata ends EXACTLY at the end of the
+/// row body its own header declares (issue #3721, roborev job 14).
+///
+/// # The state this refuses, and why `Ok` was the wrong answer for it
+///
+/// [`super::row_data`] decides "this row has cell bytes" by comparing the metadata's
+/// end (`row_metadata_offset + header_size`) with the row's authoritative end
+/// (`(row_metadata_offset + row_size_vint_len) + row_size`, Cassandra's
+/// `getFilePointer()` arithmetic, issue #237). Three states, and the fast path used to
+/// treat the last two as one:
+///
+/// * `<` — cell bytes follow the header. A row deletion COEXISTS with surviving cells
+///   (issue #932), so the normal column loop runs. Legitimate and common.
+/// * `==` — the columns occupy zero bytes: a genuine pure row tombstone. The fast path
+///   returns it, and MUST keep doing so — that is what the fast path is for.
+/// * `>` — the declared `row_size` ends INSIDE the row's own metadata. In well-formed
+///   data that cannot happen: `row_size` is counted from immediately after its own
+///   VInt and spans the whole row body, so the metadata is a PREFIX of the declared
+///   body in every row Cassandra writes (`cassandra-5.0.8`
+///   `db/rows/UnfilteredSerializer.serialize`/`deserializeRowBody`).
+///
+/// Folding `>` into `==` reported SUCCESS for a row whose extent is impossible, and
+/// the harm is not confined to that row: the fast path returns `row_end` as
+/// `next_offset`, so the cursor moves BACKWARD relative to where the metadata actually
+/// ended. The row loop then re-reads this row's own metadata bytes as the next row's
+/// header and decodes phantom rows out of them — misparsing the REST OF THE PARTITION,
+/// not merely truncating one row. Nothing downstream can see it: the rows produced are
+/// well-formed values at plausible offsets.
+///
+/// The same shape reaching row assembly through a row WITHOUT a deletion is refused
+/// after the column walk, by [`row_body_reconcile`]'s over-consumption arm; a pure
+/// tombstone returns before that walk, so this is the only place it can be caught.
+/// Deliberately checked INSIDE the tombstone branch rather than before it, so no row
+/// that already has a tighter, better-attributed refusal loses it.
+///
+/// `bounds` is `(row_metadata_offset, metadata_end, row_end, data_len)`. Reported as
+/// [`Error::ColumnDecode`] for the reason every other condition in this module is: it
+/// is the variant the row/partition loops match on to tell a row-body failure from
+/// end-of-partition ([`end_of_partition_or_bail`]) — an `Error::Corruption` would be
+/// read as "the partition ended here" and would silently truncate it.
+///
+/// No column decoded (a pure tombstone has none), so the column the failure is
+/// attributed to is the same `<no column decoded>` / `<row body>` sentinel pair
+/// [`row_body_under_consumed`] and [`row_body_over_consumed`] use.
+pub(super) fn pure_tombstone_extent_check(
+    bounds: (usize, usize, usize, usize),
+    row_size: u64,
+) -> Result<()> {
+    let (row_metadata_offset, metadata_end, row_end, data_len) = bounds;
+    if metadata_end <= row_end {
+        return Ok(());
+    }
+    let past = metadata_end.saturating_sub(row_end);
+    let header_size = metadata_end.saturating_sub(row_metadata_offset);
+    let counted_from = row_end.saturating_sub(row_size as usize);
+    let cause = Error::corruption(format!(
+        "pure row tombstone REFUSED: the row's HAS_DELETION metadata at offset \
+         {row_metadata_offset} is {header_size} byte(s) long and so ends at {metadata_end}, \
+         PAST the end of the row body its own header declares at {row_end} ({past} byte(s) \
+         beyond it; authoritative row_size={row_size}, counted from {counted_from}) — the \
+         declared extent ends INSIDE the row's own metadata, so this row has no cell bytes \
+         only because its declared size is impossible. Returning it would move the read \
+         cursor BACK to {row_end}, re-parsing this row's own metadata as the next row's \
+         header and misparsing the rest of the partition. The parse unit is {data_len} \
+         bytes; truncated or corrupt row"
+    ));
+    Err(column_decode_failure(
+        "<no column decoded>",
+        "<row body>",
+        metadata_end,
+        cause,
+    ))
+}

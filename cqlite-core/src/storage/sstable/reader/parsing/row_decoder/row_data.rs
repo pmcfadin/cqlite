@@ -2,8 +2,8 @@ use super::*;
 
 // Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
 use super::column_decode_error::{
-    column_decode_failure, dispatch_type, row_body_exhausted, row_body_reconcile, row_bound_check,
-    walk_end_column,
+    column_decode_failure, dispatch_type, pure_tombstone_extent_check, row_body_exhausted,
+    row_body_reconcile, row_bound_check, walk_end_column,
 };
 
 impl V5CompressedLegacyParser {
@@ -238,12 +238,21 @@ impl V5CompressedLegacyParser {
         //   next_position = row_size_value + position_after_reading_row_size_vint
         let after_row_offset =
             (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
-        // Cell data (if any) begins right after the row header. When that start
-        // reaches the row boundary there are no cells — a pure row tombstone.
+        // Cell data (if any) begins right after the row header. `<` = cells coexist
+        // with the deletion (#932); `==` = a genuine pure row tombstone; `>` = the
+        // declared extent ends INSIDE the metadata, which the fast path must REFUSE
+        // rather than return as `Ok` — see `pure_tombstone_extent_check` (#3721).
         let cell_data_start = row_metadata_offset + row_header.header_size;
         let has_cell_bytes = cell_data_start < after_row_offset;
 
         if row_header.local_deletion_time.is_some() && !has_cell_bytes {
+            let extent = (
+                row_metadata_offset,
+                cell_data_start,
+                after_row_offset,
+                data.len(),
+            );
+            pure_tombstone_extent_check(extent, row_size)?;
             tracing::debug!(
                 "V5CompressedLegacy: Pure row tombstone (deletion_time={:?}), skipping cell parsing",
                 row_header.local_deletion_time
