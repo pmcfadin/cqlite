@@ -789,6 +789,18 @@ impl V5CompressedLegacyParser {
                                         depth + 1,
                                     )
                                 };
+                            // A MANUAL `Frozen<Udt>` unwrap consumes TWO nesting levels
+                            // — the `Frozen` and the `Udt` — so it must charge both, as
+                            // the consolidated decoder does (roborev round 8).
+                            let decode_registry_udt_frozen =
+                                |data: &[u8], def: &crate::types::UdtTypeDef| {
+                                    self.parse_nested_udt_from_registry(
+                                        data,
+                                        def,
+                                        registry,
+                                        depth + 2,
+                                    )
+                                };
                             match &field_def.field_type {
                                 CqlType::Custom(nested_type_name) => {
                                     // `get_udt_qualified` owns "udt:" + keyspace-
@@ -826,7 +838,7 @@ impl V5CompressedLegacyParser {
                                             .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
                                             let inner_value =
-                                                decode_registry_udt(field_data, nested_udt)?;
+                                                decode_registry_udt_frozen(field_data, nested_udt)?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
                                             decode_udt_field(field_data, &field_def.field_type)?
@@ -838,7 +850,7 @@ impl V5CompressedLegacyParser {
                                             registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
                                             let inner_value =
-                                                decode_registry_udt(field_data, nested_udt)?;
+                                                decode_registry_udt_frozen(field_data, nested_udt)?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else if !inline_fields.is_empty() {
                                             let inner_value = self.parse_inline_udt_value(
@@ -862,11 +874,16 @@ impl V5CompressedLegacyParser {
                                 CqlType::Udt(udt_name, inline_fields)
                                     if !inline_fields.is_empty() =>
                                 {
+                                    // `+ 1`, not `+ 2`: this is a DIRECT `Udt`, with no
+                                    // `Frozen` wrapper to charge. A round-7 fix applied
+                                    // `+ 2` here by over-broad edit, which made valid
+                                    // nesting fail one level early and disagree with the
+                                    // registry route (roborev round 8).
                                     self.parse_inline_udt_value(
                                         field_data,
                                         udt_name,
                                         inline_fields,
-                                        depth + 2,
+                                        depth + 1,
                                     )?
                                 }
                                 CqlType::Frozen(inner) => match inner.as_ref() {
@@ -963,9 +980,13 @@ impl V5CompressedLegacyParser {
                                 // Null field
                                 None
                             } else if field_len == 0 {
-                                // Empty field - parse with empty data
+                                // Empty field - parse with empty data, and normalize a
+                                // decoded `Value::Null` to `None` like every other UDT
+                                // construction path, so a 0-length null and a -1 null are
+                                // ONE representation (roborev round 8; this route was
+                                // missed when the normalizer was introduced).
                                 let value = decode_udt_field(&[], &field_def.field_type)?;
-                                Some(value)
+                                Self::udt_field_value(value)
                             } else {
                                 let field_len = Self::checked_component_len(
                                     field_len,
@@ -1026,7 +1047,7 @@ impl V5CompressedLegacyParser {
                                                             field_data,
                                                             nested_udt,
                                                             registry,
-                                                            depth + 1,
+                                                            depth + 2,
                                                         )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else {
@@ -1043,7 +1064,7 @@ impl V5CompressedLegacyParser {
                                                             field_data,
                                                             nested_udt,
                                                             registry,
-                                                            depth + 1,
+                                                            depth + 2,
                                                         )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else if !inline_fields.is_empty() {
@@ -1051,7 +1072,7 @@ impl V5CompressedLegacyParser {
                                                         field_data,
                                                         udt_name,
                                                         inline_fields,
-                                                        depth + 1,
+                                                        depth + 2,
                                                     )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else {
