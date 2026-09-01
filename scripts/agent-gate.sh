@@ -6816,6 +6816,15 @@ _census_sidecar() { printf '%s/%s.census' "${LOG_DIR:-}" "$1"; }
 #   self:<unit>    the component knows its own count and records it directly with
 #                  _census_declare, because its output never reaches a $LOG_DIR log
 #                  this measurer could read.
+#   indirect:<drv> the subject count comes from a DRIVER's own report in the component
+#                  log (pytest's `N passed`, jest's `Tests: … N passed`). ONE RULE
+#                  DIFFERS HERE and it is deliberate: an ABSENT tally is NOT-MEASURED,
+#                  not ZERO. For a cargo lane the subject markers are cargo's OWN
+#                  guaranteed output, so their absence really does mean nothing ran; a
+#                  third-party driver's report format is not ours, so its absence is a
+#                  measurement failure and reading it as proof of vacuity would red a
+#                  healthy lane on a pytest/jest output change. A tally that is PRESENT
+#                  and says zero is still ZERO.
 #   gap:<reason>   no census is derivable yet. The reason is PRINTED, every run.
 #
 # EVERY `libtest`/`compile`/`both` DECLARATION BELOW WAS VERIFIED AT ITS CALL SITE to
@@ -6844,8 +6853,13 @@ _census_kind() {
     # ---- DECLARED GAPS (#3625 phase 1). Each prints its reason on every run.
     fmt)            printf 'gap:cargo fmt --all --check emits no per-file tally to count' ;;
     clippy)         printf 'gap:cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone' ;;
-    python-bindings) printf 'gap:pytest tally is in the component log, not yet parsed (#3625 phase 2)' ;;
-    node-bindings)   printf 'gap:jest tally is in the component log, not yet parsed (#3625 phase 2)' ;;
+    # ---- indirect: cargo runs under a driver this shell cannot observe, but the DRIVER
+    # reports its own tally into the component log, and that tally is the affirmative
+    # subject. #3625's issue text names python-bindings as the CONTRAST that already
+    # answered the question ("576 passed, 61 skipped, 1 xfailed in BOTH runs"); this
+    # lifts that count out of the log and into the block.
+    python-bindings) printf 'indirect:pytest' ;;
+    node-bindings)   printf 'indirect:jest' ;;
     all-features-check) printf 'gap:cargo check/clippy passes execute no tests; the subject is a feature set, not a count' ;;
     oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3625 phase 2)' ;;
     smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3625 phase 2)' ;;
@@ -6936,6 +6950,39 @@ _census_compile_tally() {
   awk '$1 == "Executable" { n += 1 } END { printf "%d\n", n + 0 }' < "$1"
 }
 
+# _census_driver_tally <driver> <stripped-log> -> "COUNT <n>" | "ZERO" | "NONE"
+#
+# The driver's OWN summary, read from the component log. Both drivers write theirs at the
+# END of the run, so the LAST match wins — a jest `--json` run prints its human reporter
+# summary to stderr as well, and a re-run inside one component would otherwise be scored
+# on its first attempt.
+#
+#   pytest  `-q` prints a bare counts line (`576 passed, 61 skipped, 1 xfailed in 62.30s`)
+#           and, with no tests collected, `no tests ran in 0.01s` — the affirmative
+#           zero, which is why it is matched EXPLICITLY rather than inferred from the
+#           absence of a `passed` count.
+#   jest    prints `Tests:       1 skipped, 122 passed, 123 total`. A `Tests:` line with
+#           no `N passed` is a present-and-zero tally.
+#
+# Neither is coloured in a way that matters (both are the driver's own text, and the
+# caller normalises anyway), and both read by REDIRECTION, never a pipe.
+_census_driver_tally() {
+  case "$1" in
+    pytest)
+      awk '
+        /(^|[^0-9])[0-9]+ passed/ { if (match($0, /[0-9]+ passed/)) { seg = substr($0, RSTART, RLENGTH); sub(/ passed$/, "", seg); n = seg + 0; seen = 1 } }
+        /no tests ran/            { n = 0; seen = 1 }
+        END { if (seen != 1) { print "NONE" } else if (n == 0) { print "ZERO" } else { printf "COUNT %d\n", n } }
+      ' < "$2" ;;
+    jest)
+      awk '
+        /^Tests:/ { seen = 1; if (match($0, /[0-9]+ passed/)) { seg = substr($0, RSTART, RLENGTH); sub(/ passed$/, "", seg); n = seg + 0 } else { n = 0 } }
+        END { if (seen != 1) { print "NONE" } else if (n == 0) { print "ZERO" } else { printf "COUNT %d\n", n } }
+      ' < "$2" ;;
+    *) printf 'NONE\n' ;;
+  esac
+}
+
 # _census_measure <component> <status>: take the census and RETURN the record line on
 # stdout (the caller needs the value even if the sidecar write fails), writing it to
 # the sidecar for the parent's renderer.
@@ -6968,11 +7015,25 @@ _census_measure() {
     line="NOT-MEASURED could not read or ANSI-normalise $comp.log, so nothing was counted"
     _census_write "$comp" "$line"; printf '%s' "$line"; return 0
   fi
+  case "$kind" in
+    indirect:*)
+      local drv="${kind#indirect:}" dt
+      dt=$(_census_driver_tally "$drv" "$src" 2>/dev/null) || dt=""
+      rm -f "$src" 2>/dev/null || true
+      case "$dt" in
+        COUNT\ *) line="COUNT ${dt#COUNT } $drv tests passed" ;;
+        ZERO)     line="ZERO $drv tests — the $drv tally in $comp.log reports none" ;;
+        # ABSENT tally: NOT-MEASURED, never ZERO. See the class note on _census_kind.
+        *)        line="NOT-MEASURED no $drv tally found in $comp.log (the driver's report format is not ours, so an absent tally is unmeasured, not proof that nothing ran)" ;;
+      esac
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+  esac
   total=0; seen=0; bins=0
   case "$kind" in
     libtest|both)
       tally=$(_census_libtest_tally "$src" 2>/dev/null) || tally=""
       if [ -z "$tally" ]; then
+        rm -f "$src" 2>/dev/null || true
         line="NOT-MEASURED the libtest/nextest tally over $comp.log could not be computed"
         _census_write "$comp" "$line"; printf '%s' "$line"; return 0
       fi
@@ -6982,10 +7043,16 @@ _census_measure() {
     compile|both)
       bins=$(_census_compile_tally "$src" 2>/dev/null) || bins=""
       if [ -z "$bins" ]; then
+        rm -f "$src" 2>/dev/null || true
         line="NOT-MEASURED the cargo Executable tally over $comp.log could not be computed"
         _census_write "$comp" "$line"; printf '%s' "$line"; return 0
       fi ;;
   esac
+  # The derived `<log>.ansi-stripped` sibling is a FULL COPY of the component log, and
+  # core-tests' runs to tens of MB — retained, it would silently double the size of the
+  # `logs:` bundle every gate keeps. Removed as soon as both tallies are taken; a failed
+  # removal is not the census's business.
+  rm -f "$src" 2>/dev/null || true
   case "$kind" in
     libtest)
       if [ "$seen" -eq 0 ]; then

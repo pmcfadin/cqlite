@@ -59,7 +59,8 @@ trap _on_exit EXIT
 # guard could pass having tested nothing.
 # ---------------------------------------------------------------------------
 for fn in _ansi_stripped_log _census_sidecar _census_kind _census_write _census_read \
-          _census_declare _census_libtest_tally _census_compile_tally _census_measure \
+          _census_declare _census_libtest_tally _census_compile_tally \
+          _census_driver_tally _census_measure \
           _census_status_for _census_finalize _census_record _census_annotate \
           census_summary_line _status_is_nonfailing; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
@@ -104,15 +105,16 @@ fi
 
 undeclared=()
 badkind=()
-n_libtest=0; n_compile=0; n_both=0; n_self=0; n_gap=0
+n_libtest=0; n_compile=0; n_both=0; n_self=0; n_indirect=0; n_gap=0
 for c in ${comps_arr[@]+"${comps_arr[@]}"} $dyn_names; do
   if k=$(_census_kind "$c"); then
     case "$k" in
       libtest)  n_libtest=$((n_libtest + 1)) ;;
       compile)  n_compile=$((n_compile + 1)) ;;
       both)     n_both=$((n_both + 1)) ;;
-      self:?*)  n_self=$((n_self + 1)) ;;
-      gap:?*)   n_gap=$((n_gap + 1)) ;;
+      self:?*)     n_self=$((n_self + 1)) ;;
+      indirect:?*) n_indirect=$((n_indirect + 1)) ;;
+      gap:?*)      n_gap=$((n_gap + 1)) ;;
       *)        badkind+=("$c=$k") ;;
     esac
   else
@@ -125,9 +127,9 @@ else
   bad "A1: undeclared in _census_kind — a component cannot join the gate with a blank census (#3625): ${undeclared[*]}"
 fi
 if [ "${#badkind[@]}" -eq 0 ]; then
-  ok "A2: every declared kind is in the CLOSED set (libtest=$n_libtest compile=$n_compile both=$n_both self=$n_self gap=$n_gap)"
+  ok "A2: every declared kind is in the CLOSED set (libtest=$n_libtest compile=$n_compile both=$n_both self=$n_self indirect=$n_indirect gap=$n_gap)"
 else
-  bad "A2: declared with a kind outside the closed set {libtest,compile,both,self:<unit>,gap:<reason>}: ${badkind[*]}"
+  bad "A2: declared with a kind outside the closed set {libtest,compile,both,self:<unit>,indirect:<driver>,gap:<reason>}: ${badkind[*]}"
 fi
 # The subject the ISSUE names must actually be measured, not gapped away. These are the
 # components the two-run comparison caught at 0s, plus the lane doctrine already records
@@ -375,6 +377,56 @@ case "$got" in
   'UNDECLARED no census kind is declared'*) ok "D16: an undeclared component is refused BY NAME at measurement time" ;;
   *) bad "D16: got '$got'" ;;
 esac
+# ---- indirect:<driver>. python-bindings is the component the ISSUE itself holds up as
+# the contrast that already answered the question, so its tally is lifted into the block.
+printf 'Compiling cqlite-py v0.1.0
+....ss..x.
+576 passed, 61 skipped, 1 xfailed in 62.30s
+' > "$LOG_DIR/python-bindings.log"
+got=$(_census_measure python-bindings PASS)
+case "$got" in
+  'COUNT 576 pytest tests passed') ok "D17: indirect:pytest lifts the driver's own tally (576 passed) out of the component log and into the census" ;;
+  *) bad "D17: got '$got'" ;;
+esac
+printf 'no tests ran in 0.01s
+' > "$LOG_DIR/python-bindings.log"
+got=$(_census_measure python-bindings PASS)
+case "$got" in
+  'ZERO pytest tests'*) ok "D18: pytest's own affirmative 'no tests ran' is ZERO — matched explicitly, not inferred from a missing count" ;;
+  *) bad "D18: got '$got'" ;;
+esac
+printf 'maturin build output and nothing that looks like a pytest summary
+' > "$LOG_DIR/python-bindings.log"
+got=$(_census_measure python-bindings PASS)
+case "$got" in
+  'NOT-MEASURED no pytest tally found'*) ok "D19: an ABSENT driver tally is NOT-MEASURED, never ZERO — a third-party output-format change must not red a healthy lane (the one rule that differs from the cargo kinds)" ;;
+  *) bad "D19: got '$got'" ;;
+esac
+printf 'Test Suites: 27 passed, 27 total
+Tests:       1 skipped, 122 passed, 123 total
+' > "$LOG_DIR/node-bindings.log"
+got=$(_census_measure node-bindings PASS)
+case "$got" in
+  'COUNT 122 jest tests passed') ok "D20: indirect:jest reads the 'Tests:' summary line (122 passed), not the suite line above it" ;;
+  *) bad "D20: got '$got'" ;;
+esac
+printf 'Tests:       0 total
+' > "$LOG_DIR/node-bindings.log"
+got=$(_census_measure node-bindings PASS)
+case "$got" in
+  'ZERO jest tests'*) ok "D21: a jest 'Tests:' line PRESENT with no passing count is a present-and-zero tally -> ZERO" ;;
+  *) bad "D21: got '$got'" ;;
+esac
+# The derived `<log>.ansi-stripped` sibling is a full COPY of the component log; leaving
+# one per component would silently double the retained `logs:` bundle.
+cp "$tmp/c.log" "$LOG_DIR/tombstones-scan.log"
+rm -f "$LOG_DIR/tombstones-scan.log.ansi-stripped"
+_census_measure tombstones-scan PASS >/dev/null
+if [ ! -e "$LOG_DIR/tombstones-scan.log.ansi-stripped" ]; then
+  ok "D22: the derived .ansi-stripped sibling is removed after the tally — the census does not double the size of the retained logs bundle"
+else
+  bad "D22: _census_measure left $LOG_DIR/tombstones-scan.log.ansi-stripped behind"
+fi
 
 # ---------------------------------------------------------------------------
 # (E) THE VERDICT COUPLING IS AFFIRMATIVE (AC2). A positive verdict requires an
