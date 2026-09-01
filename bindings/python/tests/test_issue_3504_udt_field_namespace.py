@@ -1140,29 +1140,43 @@ def test_this_module_names_no_env_routed_corpus_constant():
     belt-and-braces rather than the mechanism.
 
     A SECOND NEEDLE, closing the cheap half of what this guard used to merely
-    declare (roborev #3724 round 4): the env VARIABLE NAME itself, as a STRING
-    literal. A future test that skips the corpus constants and reads
-    `os.environ["<var>"]` DIRECTLY names none of the constants above, so the NAME
-    scan cannot see it — but such a read must contain the variable's name as a
-    literal, and a literal in this file's source plainly IS checkable. Compared
-    EXACTLY against the quoted spellings, which is the whole reason this file's
-    heavy PROSE about the variable stays out of scope: a docstring is ONE `STRING`
-    token holding the entire docstring, and a diagnostic message like
-    `"ambient <var>: "` is a different string again — neither is ever equal to the
-    bare quoted name. So the exemptions do not have to grow to accommodate prose.
+    declare (roborev #3724 round 4): the env VARIABLE NAME itself. A future test
+    that skips the corpus constants and reads `os.environ["<var>"]` DIRECTLY names
+    none of the constants above, so the NAME scan cannot see it — but such a read
+    must contain the variable's name as a string literal, and a literal in this
+    file's source plainly IS checkable.
+
+    Compared by EVALUATED VALUE, not by source spelling (roborev #3724 round 5).
+    Matching two quoted spellings was evadable by writing the same literal
+    differently, and MEASURED on this interpreter (3.12) each of these parses to a
+    single `ast.Constant` whose value is exactly the variable name, so all of them
+    are caught by ONE comparison:
+    `"X"`, `'X'`, `r"X"`, `\"\"\"X\"\"\"`, `f"X"` (no interpolation), and the
+    implicit adjacent-literal concatenation `"CQLITE_" "DATASETS_ROOT"`.
+    Reading the VALUE also SHRINKS this check rather than growing it: one
+    comparison replaces a set of accepted spellings, and the exemptions do not
+    have to grow to accommodate prose, because a docstring's `Constant` holds the
+    ENTIRE docstring and a message like `"ambient <var>: "` is a different string
+    again — neither is ever equal to the bare name. Comments are not in the AST at
+    all. This is `ast` used as the language's own literal reader, NOT dataflow or
+    reachability analysis: nothing here asks whether a read is executable.
 
     DECLARED RESIDUAL, and it is what keeps this guard honest — the half a source
     scan genuinely cannot reach is an INDIRECT read: a helper that returns the
-    value, a COMPUTED or concatenated variable name (`os.environ[prefix + suffix]`),
-    or an alias bound to `os.environ` names neither a corpus constant nor the
+    value, a COMPUTED or concatenated name (`os.environ[prefix + suffix]`, or an
+    INTERPOLATING f-string, which parses to `Constant("CQLITE_")` +
+    `Constant("DATASETS_ROOT")` — neither equal to the whole — MEASURED), or an
+    alias bound to `os.environ`. None of those names a corpus constant or the
     literal, so neither needle fires. That half stays the child-process probe's
     job — it measures the RESOLVED paths under a perturbed environment, whatever
     route a consumer took to read it, so the two are complementary rather than
-    overlapping and neither alone closes the class. Deliberately NOT met with an
-    AST or dataflow "environment read" detector: a recogniser over
-    author-controlled code accumulates false PASSes, and a guard with known false
-    PASSes is worse than no guard at all.
+    overlapping and neither alone closes the class. Deliberately NOT met with a
+    dataflow or reachability "is this an executable environment read" detector: a
+    recogniser over author-controlled code accumulates false PASSes and an
+    exemption list that grows every round, and a guard with known false PASSes is
+    worse than no guard at all.
     """
+    import ast
     import io
     import tokenize
 
@@ -1175,12 +1189,15 @@ def test_this_module_names_no_env_routed_corpus_constant():
     }
 
     # Split for the same reason, and here the split is load-bearing in a second
-    # way: an unsplit literal below would be a STRING token equal to the quoted
-    # needle, so the scan would match its own source and could never pass.
+    # way: an unsplit literal below would itself be a `Constant` equal to the
+    # needle, so the scan would match its own source and could never pass. The
+    # EXPLICIT `+` is what makes the split work — MEASURED: `ast` does NOT fold a
+    # `BinOp`, so this stays two Constants, while an IMPLICIT adjacent-literal
+    # concatenation WOULD be folded into one and would self-match.
     env_var = "CQLITE_" + "DATASETS_ROOT"
-    quoted_env_var = {'"' + env_var + '"', "'" + env_var + "'"}
 
-    source_lines = Path(__file__).read_text().splitlines()
+    source_text = Path(__file__).read_text()
+    source_lines = source_text.splitlines()
     tokens = list(tokenize.tokenize(io.BytesIO(Path(__file__).read_bytes()).readline))
 
     names = {token.string for token in tokens if token.type == tokenize.NAME}
@@ -1193,14 +1210,20 @@ def test_this_module_names_no_env_routed_corpus_constant():
         "CQLITE_DATASETS_ROOT. Build the path from `PROJECT_ROOT` instead."
     )
 
-    # Needle 2 — the env variable's own name, as a bare quoted STRING literal, on
-    # any line that does not declare itself the positive CONTROL.
+    # Needle 2 — the env variable's own name as a string literal VALUE, on any
+    # line that does not declare itself the positive CONTROL. Line numbers come
+    # from the AST nodes, so the diagnostic still names the offending line.
+    env_literal_lines = [
+        node.lineno
+        for node in ast.walk(ast.parse(source_text))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value == env_var
+    ]
     env_offenders = sorted(
-        f"{token.start[0]}: {source_lines[token.start[0] - 1].strip()}"
-        for token in tokens
-        if token.type == tokenize.STRING
-        and token.string in quoted_env_var
-        and "CONTROL" not in source_lines[token.start[0] - 1]
+        f"{lineno}: {source_lines[lineno - 1].strip()}"
+        for lineno in env_literal_lines
+        if "CONTROL" not in source_lines[lineno - 1]
     )
     assert not env_offenders, (
         f"this module reads the {env_var} environment variable directly, outside "
@@ -1214,19 +1237,18 @@ def test_this_module_names_no_env_routed_corpus_constant():
 
     # NON-VACUITY for needle 2, counted SEPARATELY from needle 1's: folding the two
     # totals into one would let a typo in either split hide behind the other's
-    # matches. Counted over the file's TEXT, so MEASURED at 3 -- the ambient
-    # diagnostic read, the perturbation, and the probe's echo, which is physically
-    # in this file even though it lives inside a string literal the token scan
-    # cannot reach. That third one is additionally checked as PROBE SOURCE below;
-    # the two asserts are not redundant, since this one sees only text while that
-    # one sees the probe's own structure.
+    # matches. Counted over the AST nodes the needle actually examines, so MEASURED
+    # at 2 -- the ambient diagnostic read and the perturbation. The probe's own
+    # echo is a THIRD reference, invisible here because it lives inside one big
+    # string literal whose VALUE is the whole probe, and it is checked as PROBE
+    # SOURCE below instead.
     env_control_lines = [
-        line
-        for line in source_lines
-        if any(q in line for q in quoted_env_var) and "CONTROL" in line
+        source_lines[lineno - 1]
+        for lineno in env_literal_lines
+        if "CONTROL" in source_lines[lineno - 1]
     ]
-    assert len(env_control_lines) == 3, (
-        f"expected exactly 3 CONTROL-marked references to {env_var} in this "
+    assert len(env_control_lines) == 2, (
+        f"expected exactly 2 CONTROL-marked references to {env_var} in this "
         f"module's code, got {len(env_control_lines)}: {env_control_lines}. A count "
         "that drifts means either a new consumer wearing the marker, or a split "
         "needle typo that now matches nothing."
@@ -1252,10 +1274,11 @@ def test_this_module_names_no_env_routed_corpus_constant():
     # ...and the same discipline for the probe's reference to the env VARIABLE. The
     # probe legitimately reads it, ONCE, to echo the perturbed value back as the
     # positive control's proof; a second reference would be a consumer.
+    # Substring, not a spelling set: the probe source is a string to this module,
+    # so there is no AST of it to read values from — and a substring test is
+    # spelling-insensitive for the same reason the Node guard's is.
     probe_env_lines = [
-        line
-        for line in _RESOLUTION_PROBE.splitlines()
-        if any(q in line for q in quoted_env_var)
+        line for line in _RESOLUTION_PROBE.splitlines() if env_var in line
     ]
     assert len(probe_env_lines) == 1, (
         f"expected exactly one reference to {env_var} in the probe source, got "
