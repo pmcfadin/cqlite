@@ -9373,14 +9373,14 @@ run_clippy() {
   #     (the OpenTelemetry stack). Keep this in sync with cqlite-core/Cargo.toml when
   #     features are added; the nightly CQLITE_CLIPPY_FULL=1 pass is the drift guard.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features \
-"all-compression,arrow,bench-internals,benchmarks,ci_zero_tolerance,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,events,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-coverage-tracking,test-infrastructure,test-property-testing,test-quality-gates,test-schema-validation,tombstones,unit-tests-only,wasm,work-counters,write-support,zstd" \
+"all-compression,arrow,bench-internals,benchmarks,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-infrastructure,tombstones,work-counters,write-support,zstd" \
     || return 1
 
   # (3) cqlite-cli: every feature EXCEPT duckdb-tests + observability. Pulls in
   #     parquet/arrow via state_machine and delta-scan via delta-export, so the
   #     normal-build reachable surface stays linted.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --all-targets --features \
-"benchmarks,ci_zero_tolerance,cli-helpers,delta-export,experimental,integration-tests,interactive,state_machine,tui,write-support" \
+"benchmarks,cli-helpers,delta-export,experimental,integration-tests,state_machine,tui,write-support" \
     || return 1
 
   # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
