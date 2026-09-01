@@ -2227,27 +2227,76 @@ fi
 # F2. The global launch lock fell back to ${TMPDIR:-/tmp} — a shared, PREDICTABLE, fixed-NAME path any
 # local user can pre-create and hold to refuse every detached launch on the box. It must now REFUSE on
 # a runtime dir it cannot affirmatively verify, and must NOT silently use TMPDIR instead.
+# THE INDUCTION MECHANISM WAS THE VULNERABILITY (roborev job 321 F1). This case used to make the
+# runtime dir unverifiable by setting `XDG_RUNTIME_DIR` to a mode-0777 directory — which worked only
+# because the lock path was READ FROM THAT VARIABLE, and that is precisely the defect job 321 found:
+# a lock selected by caller-controlled env is not global. Fixing it necessarily removed this test's
+# hook. Same shape as #3544, where "the test hook and the vulnerability were the same fact", and the
+# same remedy: SUBSTITUTE THE ARTIFACT rather than reintroduce a settable seam.
+#
+# The canonical path cannot be made unverifiable in situ (`/run/user/$(id -u)` is this session's own
+# and shared with every peer lane on the box), so the VALIDATION BLOCK is extracted and unit-tested
+# with a fake directory. It is taken to the `fi` that closes the REFUSAL, not the first one — the
+# block contains a nested `if _rd_stat=...` whose `fi` is also at column 0.
 _badrt="$TMP/badrt"; _goodtmp="$TMP/goodtmp"
 mkdir -p "$_badrt" "$_goodtmp"; chmod 777 "$_badrt"
-_f2o=$(XDG_RUNTIME_DIR="$_badrt" TMPDIR="$_goodtmp" bash "$LAUNCHER" \
-         --summary "$TMP/f2.txt" --log "$TMP/f2.log" -- --only fmt 2>&1); _f2r=$?
-if [ "$_f2r" = 69 ] && ! [ -e "$_goodtmp/cqlite-gate-launch.lock" ] \
-   && printf '%s' "$_f2o" | grep -q 'per-user runtime directory'; then
-  ok "4b.156 a mode-0777 XDG_RUNTIME_DIR refuses (69) and does NOT fall back to TMPDIR"
+_rt_src=$(awk '
+  /^_rundir="\/run\/user\/\$\(id -u\)"$/ {inb=1}
+  inb {print}
+  inb && /exit 69/ {seen=1; next}
+  inb && seen && /^fi$/ {exit}
+' "$LAUNCHER")
+if [ -z "$_rt_src" ] || ! printf '%s' "$_rt_src" | grep -q 'exit 69'; then
+  bad "4b.156 the runtime-dir validation block could be extracted" \
+      "extraction produced nothing usable — this case proves nothing"
 else
-  bad "4b.156 an unverifiable runtime dir refuses without falling back to TMPDIR" \
-      "exit=$_f2r tmpdir-lock=$([ -e "$_goodtmp/cqlite-gate-launch.lock" ] && echo created || echo absent) out=$(printf '%s' "$_f2o" | head -2 | tr '\n' ' ')"
+  # Substitute the canonical literal in the EXTRACTED copy, and verify the substitution took: a
+  # rewrite that silently missed would leave the case testing the real directory and passing.
+  _rt_fake=$(printf '%s' "$_rt_src" | sed "s#^_rundir=\"/run/user/\$(id -u)\"#_rundir=\"$_badrt\"#")
+  if ! printf '%s' "$_rt_fake" | grep -qF "_rundir=\"$_badrt\""; then
+    bad "4b.156 the canonical literal could be pinned to a fake dir" "substitution did not take"
+  else
+    _f2o=$( TMPDIR="$_goodtmp" bash -c "set -uo pipefail; $_rt_fake" 2>&1 ); _f2r=$?
+    if [ "$_f2r" = 69 ] && ! [ -e "$_goodtmp/cqlite-gate-launch.lock" ] \
+       && printf '%s' "$_f2o" | grep -q 'per-user runtime directory'; then
+      ok "4b.156 a mode-0777 runtime dir refuses (69) and does NOT fall back to TMPDIR"
+    else
+      bad "4b.156 an unverifiable runtime dir refuses without falling back to TMPDIR" \
+          "exit=$_f2r tmpdir-lock=$([ -e "$_goodtmp/cqlite-gate-launch.lock" ] && echo created || echo absent) out=$(printf '%s' "$_f2o" | head -2 | tr '\n' ' ')"
+    fi
+    # CONTROL: the same extracted block must ACCEPT a 0700 dir we own, or the case above passes by
+    # refusing everything and says nothing about the check.
+    _okrt="$TMP/okrt"; mkdir -p "$_okrt"; chmod 700 "$_okrt"
+    _rt_ok=$(printf '%s' "$_rt_src" | sed "s#^_rundir=\"/run/user/\$(id -u)\"#_rundir=\"$_okrt\"#")
+    ( bash -c "set -uo pipefail; $_rt_ok" ) >/dev/null 2>&1
+    [ "$?" = 0 ] \
+      && ok "4b.156b control: a 0700 dir we own is ACCEPTED by the same extracted block" \
+      || bad "4b.156b control: a 0700 dir we own is accepted" "the block refuses everything"
+  fi
 fi
-# CONTROL: a runtime dir we DO own at 0700 must not trip that refusal, or 4b.156 passes by refusing
-# everything and the launcher is simply broken.
+# RE-POINTED, because after job 321 F1 this case was a VACUOUS PASS. It set XDG_RUNTIME_DIR to a
+# valid 0700 dir and asserted no refusal — but that variable no longer selects the lock path, so it
+# passed because the CANONICAL directory happens to be fine, saying nothing about what it claimed.
+# A test that passes for a reason unrelated to its name is worse than one that fails.
+#
+# Its acceptance-control role moved to 4b.156b (which substitutes the artifact). What it asserts now
+# is F1's actual property, BEHAVIOURALLY and as the counterpart to 4b.193's structural check: a
+# caller-set XDG_RUNTIME_DIR must NOT move the global lock. The decisive direction is the ABSENCE of
+# a lock in the caller's directory — the canonical lock usually pre-exists, so its presence proves
+# nothing on its own.
 _goodrt="$TMP/goodrt"; mkdir -p "$_goodrt"; chmod 700 "$_goodrt"
+rm -f "$_goodrt/cqlite-gate-launch.lock"
 _f2c=$(XDG_RUNTIME_DIR="$_goodrt" bash "$LAUNCHER" \
          --summary "$TMP/f2c.txt" --log "$TMP/f2c.log" -- --only fmt 2>&1)
 _f2cu=$(printf '%s' "$_f2c" | sed -n 's/^unit:  *//p'); [ -n "$_f2cu" ] && echo "$_f2cu" >> "$UNITS_FILE"
 if printf '%s' "$_f2c" | grep -q 'per-user runtime directory'; then
-  bad "4b.157 control: a 0700 runtime dir we own is accepted" "refused a dir it should accept"
+  bad "4b.157 a caller-set XDG_RUNTIME_DIR neither refuses nor moves the lock" \
+      "refused on a canonical dir that is fine"
+elif [ -e "$_goodrt/cqlite-gate-launch.lock" ]; then
+  bad "4b.157 a caller-set XDG_RUNTIME_DIR neither refuses nor moves the lock" \
+      "the caller-set dir got the lock — the env still selects the path (job 321 F1)"
 else
-  ok "4b.157 control: a 0700 runtime dir we own does NOT trip the refusal"
+  ok "4b.157 a caller-set XDG_RUNTIME_DIR neither refuses nor MOVES the global lock"
 fi
 [ -n "$_f2cu" ] && systemctl --user stop "$_f2cu" >/dev/null 2>&1
 
@@ -2802,8 +2851,14 @@ else
   bad "4b.193 the global launch lock path is canonical per-UID" \
       "$(grep -n '^_rundir=' "$LAUNCHER" | head -2)"
 fi
-if grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own' "$LAUNCHER"; then
-  bad "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass" "still advertised"
+# Scoped to ECHOED lines, not the whole file: the retired advice is still QUOTED in a comment that
+# explains why it was retired, and a whole-file grep matched that citation and failed on the fixed
+# tree. Third time in this change a test of mine matched its own explanatory text (cf. 4b.187, which
+# matched the safe form it was meant to forbid). The property is "the script does not TELL anyone to
+# do it", so only emitted lines can violate it.
+if grep -E '^\s*echo ' "$LAUNCHER" | grep -q 'export XDG_RUNTIME_DIR to a 0700 dir you own'; then
+  bad "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass" \
+      "still advertised in an emitted line"
 else
   ok "4b.194 the runtime-dir refusal no longer advertises the XDG_RUNTIME_DIR bypass"
 fi
