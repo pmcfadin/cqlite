@@ -110,6 +110,15 @@ cat > "$STUB/npm" <<'STUBEOF'
 # Record the environment the component actually handed us, so the schemas-root
 # plumbing (#3493) is asserted from what was PASSED, not from reading the source.
 [ -n "${STUB_ENV_DUMP:-}" ] && env > "$STUB_ENV_DUMP"
+# Record the ARGV of every npm invocation, one per line, when a case asks for it
+# (roborev #3642, blocker 2). Case 101 claimed "the component proceeds to the suite"
+# while asserting only the `corpus complete` MESSAGE, which agent-gate.sh prints BEFORE
+# `npm test` -- so a return or a failure inserted between the two would have kept that
+# case green. A marker written by the stub is the invocation itself, not a message about
+# it, and its ABSENCE is what case 102 asserts for a rejected corpus.
+if [ -n "${STUB_NPM_INVOCATIONS:-}" ]; then
+  printf '%s\n' "$*" >> "$STUB_NPM_INVOCATIONS"
+fi
 if [ "${STUB_FAIL_BUILD:-0}" = 1 ] && [ "$1" = "run" ] && [ "$2" = "build" ]; then
   echo "stub npm: simulated build failure" >&2
   exit 1
@@ -2336,7 +2345,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Cases 97-101 (issue #3642, residual 2 of #3493): the COMPONENT's interpretation of
+# Cases 97-102 (issue #3642, residual 2 of #3493): the COMPONENT's interpretation of
 # check-dataset-manifest.sh's exit codes, exercised BEHAVIOURALLY.
 #
 # The cases above cover the script's OWN exit codes well (9 = corpus verdict, 2 =
@@ -2366,13 +2375,16 @@ fi
 # one, so the subject is the script being changed rather than the last commit's.
 #
 # Case 101 is the positive control. Without it, cases 97-99 could all be satisfied by a
-# component that FAILs or SKIPs for some reason upstream of the manifest entirely.
+# component that FAILs or SKIPs for some reason upstream of the manifest entirely. Cases
+# 101/102 assert the rc-0 and rc-9 outcomes from a RECORDED npm invocation (the stub
+# appends its argv to $STUB_NPM_INVOCATIONS), not from a message the component prints
+# before the suite starts.
 # ---------------------------------------------------------------------------
 nbgate_ok=0
 if ! command -v git >/dev/null 2>&1; then
-  echo "info - git absent; skipping the node-bindings manifest exit-code mapping cases (97-101)"
+  echo "info - git absent; skipping the node-bindings manifest exit-code mapping cases (97-102)"
 elif [ ! -f "$GATE_SRC4" ]; then
-  echo "info - agent-gate.sh unreadable; skipping the manifest exit-code mapping cases (97-101)"
+  echo "info - agent-gate.sh unreadable; skipping the manifest exit-code mapping cases (97-102)"
 else
   nbgate_repo=$(cd "$(dirname "$GATE")/.." && pwd)
   nbgate_wt="$WORK/nb-gate-wt"
@@ -2380,7 +2392,7 @@ else
     SCRATCH_WORKTREE="$nbgate_wt"; SCRATCH_WORKTREE_REPO="$nbgate_repo"
     nbgate_ok=1
   else
-    bad "cases 97-101: could not create a scratch git worktree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-wt.log" 2>/dev/null)"
+    bad "cases 97-102: could not create a scratch git worktree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-wt.log" 2>/dev/null)"
   fi
 fi
 
@@ -2417,16 +2429,39 @@ JESTSTUB
   # _nbgate_run <tag> <manifest-rc> <optout 0|1> -- run `--only node-bindings` against the
   # scratch tree and echo the component's status line. `--only` is deliberate: it is the
   # single-component probe mode, and it does not change any branch under test here.
+  #
+  # EVERY VARIABLE A CASE'S VERDICT DEPENDS ON IS `env -u`'d HERE, AND THE OPT-OUT IS THEN
+  # RESTORED ONLY WHERE THE CASE ASKED FOR IT (roborev #3642, blocker 1). Omitting the
+  # assignment is NOT the same as unsetting it: `env` INHERITS an exported value, so a
+  # suite run under the documented `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opt-out -- the
+  # very remedy #2078 prints, and a plausible ambient value on a corpus-less box -- turned
+  # case 97's "WITHOUT the opt-out" invocation into an opt-out run: it SKIPped, and case 97
+  # false-FAILED the whole tooling gate on correct code. Measured before the fix:
+  # `AGENT_GATE_ALLOW_MISSING_FIXTURES=1 bash scripts/tests/test_check_dataset_manifest.sh`
+  # -> `case 97 ... gave verdict 'SKIP'`, 156/157.
+  #
+  # The other four are the SAME defect shape and are neutralised for the same reason, not
+  # because a leak was observed: `CQLITE_PARITY_REQUIRE_DATASETS` is the second strict-mode
+  # trigger the component pairs with `CQLITE_REQUIRE_FIXTURES` (the suite scrubs it at the
+  # top too, so this is defence in depth), and `STUB_FAIL_BUILD`/`STUB_ENV_DUMP`/
+  # `STUB_MANIFEST_RC` steer THIS suite's own PATH stubs -- an inherited `STUB_FAIL_BUILD=1`
+  # would fail `npm run build` inside every case here and read as a component defect.
+  # `STUB_MANIFEST_RC` is assigned per case below, which already overrides any inherited
+  # value; the others have no assignment to protect them.
   _nbgate_run() { # <tag> <rc> <optout>
     local tag=$1 rc=$2 optout=$3
     local out="$WORK/nbgate-$tag.log"
     local optenv=()
     [ "$optout" = 1 ] && optenv=(AGENT_GATE_ALLOW_MISSING_FIXTURES=1)
     env -u AGENT_GATE_SUMMARY_FILE -u CQLITE_REQUIRE_FIXTURES \
+      -u CQLITE_PARITY_REQUIRE_DATASETS \
+      -u AGENT_GATE_ALLOW_MISSING_FIXTURES \
+      -u STUB_FAIL_BUILD -u STUB_ENV_DUMP \
       PATH="$STUB:$PATH" \
       CQLITE_GATE_DISABLE_CAP=1 \
       CQLITE_DATASETS_ROOT="$nbgate_ds" \
       STUB_MANIFEST_RC="$rc" \
+      STUB_NPM_INVOCATIONS="$WORK/nbgate-$tag.npm-argv" \
       AGENT_GATE_SUMMARY_FILE="$WORK/nbgate-$tag.summary" \
       "${optenv[@]}" \
       bash "$nbgate_wt/scripts/agent-gate.sh" --only node-bindings >"$out" 2>&1
@@ -2439,11 +2474,25 @@ JESTSTUB
 
   # Case 101 FIRST — the positive control. If a green manifest does not carry the run past
   # the corpus gate, the three verdict cases below prove nothing.
+  #
+  # ASSERTED FROM THE INVOCATION, NOT FROM THE MESSAGE (roborev #3642, blocker 2). The
+  # `corpus complete` line is printed BEFORE `npm test`, so an early return or a failure
+  # inserted between the two satisfied the message while the suite never ran — the case
+  # claimed rc-0 behaviour it did not measure. The npm PATH stub now appends its argv to
+  # $STUB_NPM_INVOCATIONS, so `npm test` having been REACHED is a recorded fact. Both are
+  # required: the message locates the decision, the marker proves what followed it.
+  # Measured RED: inserting `return 0` immediately after that echo in agent-gate.sh keeps
+  # the message and drops the marker; before this change case 101 stayed green, after it
+  # the case FAILs naming the absent `npm test`.
   nbg_log=$(_nbgate_run rc0 0 0)
-  if grep -q 'corpus complete: check-dataset-manifest.sh verified every expected table' "$nbg_log"; then
-    ok "case 101: manifest rc 0 -> the component passes the corpus gate and proceeds to the suite (positive control)"
+  nbg_argv="$WORK/nbgate-rc0.npm-argv"
+  nbg_msg=0; nbg_test=0
+  grep -q 'corpus complete: check-dataset-manifest.sh verified every expected table' "$nbg_log" && nbg_msg=1
+  grep -qE '^test( |$)' "$nbg_argv" 2>/dev/null && nbg_test=1
+  if [ "$nbg_msg" = 1 ] && [ "$nbg_test" = 1 ]; then
+    ok "case 101: manifest rc 0 -> the component passes the corpus gate and INVOKES npm test (recorded in the stub's argv log, not merely announced)"
   else
-    bad "case 101: manifest rc 0 did NOT reach the 'corpus complete' verdict, so cases 97-99 below are not measuring the mapping. Log: $nbg_log"
+    bad "case 101: manifest rc 0 did not reach the suite (corpus-complete message: $nbg_msg, 'npm test' recorded in $nbg_argv: $nbg_test; recorded npm argv: $(tr '\n' '|' < "$nbg_argv" 2>/dev/null || echo '<no argv log>')), so cases 97-100 below are not measuring the mapping. Log: $nbg_log"
   fi
 
   # Case 97 — rc 9 WITHOUT the opt-out is a FAIL, named as an incomplete corpus.
@@ -2453,6 +2502,23 @@ JESTSTUB
     ok "case 97: manifest rc 9 without the opt-out -> node-bindings FAIL, named as an INCOMPLETE corpus"
   else
     bad "case 97: manifest rc 9 without the opt-out gave verdict '${nbg_v:-<none>}' and no incomplete-corpus diagnostic; a corpus this component cannot vouch for must not pass. Log: $nbg_log"
+  fi
+
+  # Case 102 — the OTHER HALF of case 101's claim, from the same recorded marker (roborev
+  # #3642, blocker 2). A FAIL verdict is not the same fact as "the suite did not run": the
+  # component could print the incomplete-corpus diagnostic and still have invoked `npm test`
+  # over a corpus it just refused to vouch for. The rc-9 run above must have reached npm
+  # (`ci`/`run build`/`run typecheck` all precede the manifest check, so the recording is
+  # PROVEN LIVE in this very run — without that half, "no test line" could just mean the
+  # marker was never written) and must NOT have reached `npm test`.
+  nbg_argv9="$WORK/nbgate-rc9.npm-argv"
+  nbg_live=0; nbg_test9=0
+  grep -qE '^(ci|install)( |$)' "$nbg_argv9" 2>/dev/null && nbg_live=1
+  grep -qE '^test( |$)' "$nbg_argv9" 2>/dev/null && nbg_test9=1
+  if [ "$nbg_live" = 1 ] && [ "$nbg_test9" = 0 ]; then
+    ok "case 102: the rc-9 FAIL STOPS the run before the suite — npm ci was recorded and 'npm test' was not (the corpus gate gates, it does not merely complain)"
+  else
+    bad "case 102: the rc-9 run's npm argv log does not show a gated suite (npm ci/install recorded: $nbg_live, 'npm test' recorded: $nbg_test9; argv: $(tr '\n' '|' < "$nbg_argv9" 2>/dev/null || echo '<no argv log>')). Either the component ran the suite over a corpus it refused to vouch for, or the marker was never written and case 101's proof is vacuous."
   fi
 
   # Case 98 — rc 9 WITH the opt-out is a SKIP. The #2078 opt-out has to reach THIS verdict
