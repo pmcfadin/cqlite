@@ -41,6 +41,7 @@ use cqlite_core::platform::Platform;
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{SSTableReader, ScanTokenBound};
+use cqlite_core::storage::sstable::summary_reader::SummaryReader;
 use cqlite_core::storage::write_engine::{
     CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
@@ -56,12 +57,10 @@ const TBL: &str = "items";
 /// always offset 0, so even the OLD forward-only walk would "accidentally"
 /// start at the beginning).
 const N: usize = 400;
-/// The default `min_index_interval` a flush writes `Summary.db` with. Used only
-/// to prove the full-ring case below is discriminating, never to predict a
-/// sample position.
-const DEFAULT_MIN_INDEX_INTERVAL: usize = 128;
-/// Token rank the full-ring case picks: several sample intervals into the token
-/// order, so the floor sample for it is provably not offset 0.
+/// Token rank the full-ring case picks. Deliberately well into the token order,
+/// but the discriminating property is never ASSUMED from this number — the test
+/// MEASURES the floor-sample offset this token would have produced (see
+/// `full_ring_emits_every_partition_not_just_those_past_the_floor_sample`).
 const FULL_RING_RANK: usize = 250;
 
 fn schema() -> TableSchema {
@@ -261,9 +260,12 @@ fn wraparound_range_emits_partitions_from_both_segments() {
 /// wrapping arm, where the walk starts at offset 0 and the filter admits
 /// everything: a full walk, unfiltered in effect.
 ///
-/// The chosen token sits at rank `FULL_RING_RANK`, several `min_index_interval`
-/// intervals into the token order, so the old floor-sample start was provably
-/// PAST the beginning and provably dropped partitions.
+/// That the case DISCRIMINATES is measured, not assumed: the test asks this
+/// fixture's own `Summary.db` for `scan_start_position_for_token(token)` — the
+/// exact offset the old code would have started at — and requires it to be
+/// non-zero. An earlier draft compared two consts (`FULL_RING_RANK >
+/// DEFAULT_MIN_INDEX_INTERVAL`), which is a tautology at runtime and would have
+/// let a changed sampling interval quietly make this case inert.
 #[test]
 fn full_ring_emits_every_partition_not_just_those_past_the_floor_sample() {
     let mut by_token: Vec<(i32, i64)> = (0..N as i32)
@@ -271,17 +273,7 @@ fn full_ring_emits_every_partition_not_just_those_past_the_floor_sample() {
         .collect();
     by_token.sort_by_key(|(_, tok)| *tok);
 
-    // Non-vacuity, part 1: the fixture must actually hold partitions, and the
-    // chosen token must sit far enough into the token order that AT LEAST one
-    // whole summary sample interval precedes it — otherwise the floor sample IS
-    // offset 0 and the old behaviour is indistinguishable from the new one.
     assert_eq!(by_token.len(), N, "fixture must hold all {N} partitions");
-    assert!(
-        FULL_RING_RANK > DEFAULT_MIN_INDEX_INTERVAL,
-        "the full-ring token must sort above at least one whole sample interval \
-         ({DEFAULT_MIN_INDEX_INTERVAL}), or the floor sample is offset 0 and this \
-         case cannot discriminate; rank is {FULL_RING_RANK}"
-    );
     let token = by_token[FULL_RING_RANK].1;
 
     // Every partition, because the full ring admits every token (#2228).
@@ -292,6 +284,37 @@ fn full_ring_emits_every_partition_not_just_those_past_the_floor_sample() {
     let (_temp, data_path) = build_single_gen();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let reader = rt.block_on(open_reader(&data_path));
+
+    // Non-vacuity, and the whole reason this case discriminates: MEASURE the
+    // offset the OLD code would have started at, rather than inferring it from a
+    // hard-coded `min_index_interval`. `scan_start_position_for_token` is this
+    // fixture's own `Summary.db` answering for this exact token, so a non-zero
+    // result is affirmative evidence that the old full-ring path began PAST the
+    // beginning and therefore skipped every partition below that sample. If this
+    // ever measures 0 the case is inert, and saying so is better than a green
+    // test that proves nothing.
+    let old_start_offset = rt.block_on(async {
+        let summary_path = data_path.with_file_name(
+            data_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("fixture Data.db name is valid UTF-8")
+                .replace("-Data.db", "-Summary.db"),
+        );
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        SummaryReader::open(&summary_path, platform)
+            .await
+            .expect("fixture must carry a readable Summary.db")
+            .scan_start_position_for_token(token)
+    });
+    assert_ne!(
+        old_start_offset, 0,
+        "this case cannot discriminate: the floor sample for the full-ring token \
+         (rank {FULL_RING_RANK} of {N}) is already offset 0, so the old \
+         flag-carrying behaviour would have started at the beginning too and this \
+         test would pass either way"
+    );
 
     let bound = ScanTokenBound {
         start_excl: token,
