@@ -157,7 +157,7 @@ fi
 # NAMED refusal that reds the case with the line number and the text. Remedy is always the
 # same — write the reference in the canonical one-line form.
 #
-# BLOCK COMMENTS: THREE STATES, THE THIRD OF WHICH IS A REFUSAL (roborev #3642 round 2).
+# BLOCK COMMENTS: THREE STATES; THE UNDECIDABLE ONES REFUSE (roborev #3642 rounds 2, 4).
 # Two classifications were wrong in OPPOSITE directions, and both were silent. A canonical
 # declaration sitting INSIDE a `/* ... */` block is byte-for-byte the recognised form, so a
 # per-line rule counted an INERT line as a live schema; and a line whose first non-space
@@ -184,8 +184,16 @@ fi
 # caused it, and the remedy is to write the reference (or the string) differently.
 #
 # CLASSIFICATION ORDER, and why each rule is decidable without a lexer:
-#   1. lexical state IN -> REFUSE. The declaration is inert; counting it would assert a
-#      schema the node suite never resolves.
+#   1. lexical state IN -> the line is comment text, DETERMINED, so it is COMMENT (inert)
+#      unless it is the canonical DECL shape, which is REFUSED. Round 2 refused EVERY
+#      occurrence at state IN; that was a FALSE FAIL on correct input (roborev #3642
+#      round 4) — a JSDoc line reading `* Uses foo.cql` redded the tooling gate, and a
+#      guard that reds on correct input is the guard agents learn to waive. Refusing a
+#      state you have POSITIVELY DETERMINED is not caution, it is a wrong answer. The DECL
+#      shape keeps its refusal deliberately: it is the one comment text this scan can
+#      identify EXACTLY, it is never a resolved schema (it must not reach the OK set), and
+#      a commented-out canonical declaration is the plausible way a schema is accidentally
+#      dropped from the node suite coverage. Refusing it costs a correct file nothing.
 #   2. lexical state UNKNOWN -> REFUSE, naming the line the state was lost at.
 #   3. a line carrying `/*` or `*/` MIXES code and comment; telling them apart needs a
 #      lexer, so it REFUSES.
@@ -241,7 +249,14 @@ _setup_js_cql_census() { # <setup.js path>
       if (length(line) > 110) line = substr(line, 1, 110) "..."
     }
     before == "IN" {
-      printf "REFUSE\t%d\tinside the block comment opened at line %d, so this reference is INERT and must not be counted as a resolved schema: %s\n", NR, bsince, line
+      # Lexical status DETERMINED: this line is comment text. Inert, with ONE exception —
+      # a commented-out CANONICAL DECLARATION, refused because it is the plausible way a
+      # schema silently leaves the node suite'"'"'s coverage (see the header).
+      if (line ~ DECL) {
+        printf "REFUSE\t%d\tcanonical declaration commented out inside the block comment opened at line %d: INERT, so it must not be counted as a resolved schema, and refused rather than dropped because a commented-out declaration is how a schema silently leaves the node suite coverage: %s\n", NR, bsince, line
+      } else {
+        printf "COMMENT\t%d\t%s\n", NR, line
+      }
       next
     }
     before == "UNKNOWN" {
@@ -440,6 +455,46 @@ else
     ok "3642-setupjs-refuses-leading-star: an EXECUTABLE line beginning with '*' is REFUSED by name, not read as a block-comment continuation and dropped"
   else
     bad "3642-setupjs-refuses-leading-star: a live reference to 'generator-schema.cql' on a line beginning with '*' produced no named refusal (refusals: '${sjs_star_ref:-<none>}'). Treating a leading '*' as inert silently omits a schema the node suite really resolves — the exact silent miss this census replaced."
+  fi
+
+  # (f) INERT COMMENT PROSE inside a block comment this scan CAN place — the FALSE-FAIL
+  # removed in round 4 (roborev #3642). Round 2 made EVERY `.cql` occurrence at state IN a
+  # refusal. That was right for the shapes the scan cannot place and WRONG here: at state
+  # IN the scan has POSITIVELY DETERMINED the line is comment text, and refusing a state
+  # you have determined is not caution, it is a wrong answer — a JSDoc line mentioning a
+  # schema by name would red the tooling gate on a correct file, which is the guard agents
+  # learn to waive. The requirement is that such a line is INERT: no refusal, and no OK
+  # entry either (it is not a resolved schema).
+  sjs_jsdoc="$tmp/setup-jsdoc.js"
+  cp "$SETUP_JS" "$sjs_jsdoc"
+  {
+    printf '\n/**\n'
+    printf ' * Uses jsdoc-schema.cql when the fixture generator runs.\n'
+    printf ' */\n'
+  } >> "$sjs_jsdoc"
+  sjs_jsdoc_census=$(_setup_js_cql_census "$sjs_jsdoc")
+  sjs_jsdoc_ref=$(_census_refusals "$sjs_jsdoc_census")
+  sjs_jsdoc_names=$(_census_names "$sjs_jsdoc_census")
+  sjs_jsdoc_cmt=$(printf '%s\n' "$sjs_jsdoc_census" | awk -F'\t' '$1 == "COMMENT" && $3 ~ /jsdoc-schema\.cql/')
+  if [ -z "$(printf '%s' "$sjs_jsdoc_ref" | grep 'jsdoc-schema\.cql')" ] \
+     && ! printf '%s\n' "$sjs_jsdoc_names" | grep -qx 'jsdoc-schema\.cql' \
+     && [ -n "$sjs_jsdoc_cmt" ]; then
+    ok "3642-setupjs-comment-prose-inert: a .cql mentioned in JSDoc prose inside a block comment this scan CAN place is classified COMMENT — inert, neither a refusal nor a resolved schema"
+  else
+    bad "3642-setupjs-comment-prose-inert: a JSDoc line mentioning 'jsdoc-schema.cql' inside a placed block comment was not treated as inert (refusals: '${sjs_jsdoc_ref:-<none>}'; OK names: $(printf '%s' "$sjs_jsdoc_names" | tr '\n' ' ')). At state IN the lexical status IS determined, so refusing it is a false FAIL on a correct file; counting it would assert a schema the node suite never resolves."
+  fi
+
+  # (g) a canonical DECL inside a block comment stays FORBIDDEN even though sibling comment
+  # prose is now inert — pinned separately from (d) so the round-4 narrowing cannot widen
+  # into it. Rationale: a commented-out canonical declaration is the plausible way a schema
+  # is accidentally dropped from the node suite's coverage, and it is the ONE comment shape
+  # this scan can identify exactly (the DECL regex), so refusing it costs no correct file
+  # anything and names the drop. Every OTHER comment text is inert per (f).
+  sjs_cmt_decl_ref=$(_census_refusals "$sjs_cmt_census")
+  if printf '%s' "$sjs_cmt_decl_ref" | grep -q 'commented-schema\.cql'; then
+    ok "3642-setupjs-commented-decl-still-refused: a commented-out CANONICAL DECLARATION is still refused by name after the round-4 narrowing made sibling comment prose inert"
+  else
+    bad "3642-setupjs-commented-decl-still-refused: the round-4 narrowing (inert comment prose) also relaxed the commented-out canonical declaration (refusals: '${sjs_cmt_decl_ref:-<none>}'), which is how a schema silently leaves the node suite's coverage"
   fi
 fi
 
