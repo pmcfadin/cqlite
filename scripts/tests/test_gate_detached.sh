@@ -2988,24 +2988,40 @@ fi
 # is the same defect as one that never reaches it. 4b.212b is the positive control for this pin.
 # The substitution is VERIFIED to have applied (exactly one matching line), because a reworded
 # derivation would silently restore the broken root.
+# EVERY PRECONDITION FAILURE NAMES ITSELF in `_INJ_WHY`. The helper has four ways to refuse and the
+# cases all report through one bad() line, so a single canned message ("the anchor moved") would
+# misattribute three of them — a diagnostic that sends the reader to the wrong file is the same class
+# of defect as a comment asserting a property the code lacks.
+_INJ_WHY=""
 _inject_before() {  # <tag> <exact-anchor-line> <injected-line> -> prints copy path | rc 1 on any unmet precondition
-  local tag="$1" d n m
+  local tag="$1" d n
+  _INJ_WHY=""
   d="$TMP/inj-$tag/scripts/flow"                 # .../scripts/flow so the copy derives a REPO_ROOT of the same shape
-  mkdir -p "$d" || return 1
+  mkdir -p "$d" || { _INJ_WHY="could not create $d"; return 1; }
   n=$(_INJ_A="$2" awk '$0==ENVIRON["_INJ_A"]{c++} END{print c+0}' "$LAUNCHER")
-  [ "$n" = 1 ] || return 1
+  [ "$n" = 1 ] || { _INJ_WHY="the anchor line matches $n times in the launcher, not 1 (the site moved or was reworded)"; return 1; }
   _INJ_A="$2" _INJ_I="$3" awk '{ if ($0==ENVIRON["_INJ_A"]) print ENVIRON["_INJ_I"]; print }' \
-      "$LAUNCHER" > "$d/gate-detached.sh" || return 1
+      "$LAUNCHER" > "$d/gate-detached.sh" || { _INJ_WHY="could not write the copy"; return 1; }
   _pin_repo_root "$d/gate-detached.sh" || return 1
+  # THE COPY MUST PARSE. It is generated text, and a substitution that produced invalid shell would
+  # otherwise be observed only as the launcher "refusing" — which several of these cases EXPECT, so it
+  # would read as a pass.
+  bash -n "$d/gate-detached.sh" 2>/dev/null || { _INJ_WHY="the generated copy does not parse (bash -n)"; return 1; }
   printf '%s' "$d/gate-detached.sh"
 }
 _pin_repo_root() {  # <copy-path> — replace the self-derived REPO_ROOT with this checkout's
-  local f="$1" n
+  local f="$1" n line
   n=$(awk '/^REPO_ROOT=\$\(cd /{c++} END{print c+0}' "$f")
-  [ "${n:-0}" = 1 ] || return 1
-  _PIN_R="$REPO_ROOT" awk '{ if ($0 ~ /^REPO_ROOT=\$\(cd /) printf "REPO_ROOT=%c%s%c\n", 34, ENVIRON["_PIN_R"], 34
-                             else print }' "$f" > "$f.pin" && mv "$f.pin" "$f" || return 1
-  grep -qxF "REPO_ROOT=\"$REPO_ROOT\"" "$f" || return 1
+  [ "${n:-0}" = 1 ] || { _INJ_WHY="the launcher's REPO_ROOT derivation matches $n times, not 1"; return 1; }
+  # SHELL-ESCAPED, never wrapped in raw double quotes (roborev job 53 on this change, Low). A checkout
+  # path may contain a `"`, a backtick or a `$(...)`; inside double quotes that is invalid shell at
+  # best and COMMAND SUBSTITUTION EXECUTED BY EVERY COPY at worst. `printf %q` emits a literal, which
+  # is what a generated assignment needs. This fleet's lane paths are tame, so nothing here would have
+  # broken today — which is exactly why it is worth fixing now rather than when someone's checkout is not.
+  line=$(printf 'REPO_ROOT=%q' "$REPO_ROOT")
+  _PIN_L="$line" awk '{ if ($0 ~ /^REPO_ROOT=\$\(cd /) print ENVIRON["_PIN_L"]; else print }' \
+      "$f" > "$f.pin" && mv "$f.pin" "$f" || { _INJ_WHY="could not rewrite REPO_ROOT in the copy"; return 1; }
+  grep -qxF "$line" "$f" || { _INJ_WHY="the pinned REPO_ROOT did not verify in the copy"; return 1; }
 }
 # NEGATIVE CONTROL. A bare "no locks survived" is not evidence on its own: an assertion that can
 # never fail passes for free. Neutering every CALL (never the definition) must make the same
@@ -3100,7 +3116,7 @@ else
                         'rm -f "$LOGFILE"; ln -s /dev/null "$LOGFILE"   # INJECTED: the job-200 race') || _f3a=""
   if [ -z "$_f3a" ]; then
     bad "4b.207 the late symlink refusal releases the whole reservation" \
-        "the point-of-use symlink check is no longer a unique anchor line in the launcher"
+        "could not build the injected copy: ${_INJ_WHY:-<no reason recorded>}"
   else
     _f3s="$TMP/f3a-sum"; _f3l="$TMP/f3a.log"
     _f3o=$(bash "$_f3a" --summary "$_f3s" --log "$_f3l" -- --only fmt 2>&1); _f3r=$?
@@ -3144,7 +3160,7 @@ else
                         'rm -f "$LOGFILE"; mkdir -p "$LOGFILE"   # INJECTED: make the `>` fail') || _f3b=""
   if [ -z "$_f3b" ]; then
     bad "4b.209 the truncation refusal releases the whole reservation" \
-        "the pre-launch truncate is no longer a unique anchor line in the launcher"
+        "could not build the injected copy: ${_INJ_WHY:-<no reason recorded>}"
   else
     _f3bs="$TMP/f3b-sum"; _f3bl="$TMP/f3b.log"
     _f3bo=$(bash "$_f3b" --summary "$_f3bs" --log "$_f3bl" -- --only fmt 2>&1); _f3br=$?
@@ -3166,7 +3182,7 @@ else
                         'systemd-run() { return 1; }   # INJECTED: the start job fails') || _f3d=""
   if [ -z "$_f3d" ]; then
     bad "4b.210 a FAILED systemd-run releases the reservation when the unit is affirmatively terminal" \
-        "the systemd-run invocation is no longer a unique anchor line in the launcher"
+        "could not build the injected copy: ${_INJ_WHY:-<no reason recorded>}"
   else
     _f3ds="$TMP/f3d-sum"; _f3dl="$TMP/f3d.log"
     _f3do=$(bash "$_f3d" --summary "$_f3ds" --log "$_f3dl" -- --only fmt 2>&1); _f3dr=$?
@@ -3189,7 +3205,7 @@ else
                         'systemd-run() { return 1; }; _unit_is_live() { return 0; }   # INJECTED: start fails, unit reads LIVE') || _f3e=""
   if [ -z "$_f3e" ]; then
     bad "4b.211 a failed systemd-run KEEPS the reservation when the unit is live or unmeasurable" \
-        "the systemd-run invocation is no longer a unique anchor line in the launcher"
+        "could not build the injected copy: ${_INJ_WHY:-<no reason recorded>}"
   else
     _f3es="$TMP/f3e-sum"; _f3el="$TMP/f3e.log"
     _f3eo=$(bash "$_f3e" --summary "$_f3es" --log "$_f3el" -- --only fmt 2>&1); _f3er=$?
@@ -3213,7 +3229,7 @@ else
                         '_hb_seen=0   # INJECTED: force the post-launch refusal') || _f3f=""
   if [ -z "$_f3f" ]; then
     bad "4b.212 the post-launch heartbeat refusal KEEPS the whole reservation" \
-        "the post-launch refusal is no longer a unique anchor line in the launcher"
+        "could not build the injected copy: ${_INJ_WHY:-<no reason recorded>}"
   else
     _f3fs="$TMP/f3f-sum"; _f3fl="$TMP/f3f.log"
     _f3fo=$(bash "$_f3f" --summary "$_f3fs" --log "$_f3fl" -- --only fmt 2>&1); _f3fr=$?
@@ -3236,7 +3252,7 @@ else
   _f3g=$(_inject_before control-nochange 'if [ "$_hb_seen" -ne 1 ]; then' ':   # INJECTED: no-op') || _f3g=""
   if [ -z "$_f3g" ]; then
     bad "4b.212b control: an UNINJECTED copy still launches a monitorable gate" \
-        "could not build the control copy"
+        "could not build the control copy: ${_INJ_WHY:-<no reason recorded>}"
   else
     _f3gs="$TMP/f3g-sum"; _f3gl="$TMP/f3g.log"
     _f3go=$(bash "$_f3g" --summary "$_f3gs" --log "$_f3gl" -- --only fmt 2>&1); _f3gr=$?
