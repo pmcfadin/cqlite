@@ -229,6 +229,12 @@ fi
 # --fix-claude-auth (issue #3733): seed the RUNNING tmux server from the ALREADY-PERSISTED
 # value, and nothing else. Implied by --yes, mirroring --fix-gate-pin.
 #
+# IT REQUIRES `claude-auth: VERIFIED` FIRST (round 3). Seeding a credential nothing has
+# validated over whatever a running server currently holds can BREAK a working box, and the
+# unattended `.agent-ami/profile.yaml` path is where that would happen unwatched. The
+# refusal is loud and names the hand-run override
+# (`scripts/claude-auth-capability.sh --fix-tmux-env`, which seeds unconditionally).
+#
 # IT PERSISTS NOTHING. The repair for the field failure is not another file: the token is
 # already in /etc/environment, and the broken thing is a long-running process whose start
 # environment predates it. `tmux setenv -g` fixes exactly that, and writing a second 644
@@ -3067,16 +3073,39 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # THE REPAIR IS ATTEMPTED ONLY WHERE IT CAN HELP. `tmux setenv -g` needs a running
   # server, so NO-SERVER and UNMEASURED are left alone: running it there would print a
   # failure that says nothing about the box.
+  #
+  # AND ONLY WHERE THE THING IT WOULD SEED IS KNOWN GOOD (#3733, round 3). The gate used to
+  # read the TMUX verdict alone and never consulted `claude-auth:` — so on a box whose
+  # PERSISTED token is FAILED or UNMEASURED while the RUNNING server holds a WORKING one,
+  # `--yes` overwrote the working value with the broken one and every lane spawned
+  # afterwards failed to authenticate. THE REPAIR BROKE A WORKING BOX, unattended: this is
+  # what `.agent-ami/profile.yaml` runs. SERVER-STALE is exactly where it fires — "the
+  # server's token DIFFERS from the persisted one" reads identically whether the server's
+  # copy is the stale one or the only working one on the machine, and nothing in THAT line
+  # can tell them apart. The other line can, and it was already measured a few lines above.
+  #
+  # There is deliberately no override flag: the hand-run
+  # `bash scripts/claude-auth-capability.sh --fix-tmux-env` seeds unconditionally and is
+  # named in the refusal, so an operator who really means it is one documented command away
+  # — while the unattended path cannot take that decision on its own.
   if [ "$CLAUDE_TMUX_V" != VERIFIED ] && { [ "$AUTO_YES" = 1 ] || [ "$FIX_CLAUDE_AUTH" = 1 ]; }; then
-    case "$CLAUDE_TMUX_V" in
-      SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
-        info "repairing: seeding the running tmux server from the persisted value (nothing is written to disk)"
-        claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
-        # RE-MEASURED, never assumed: `tmux setenv` exiting 0 is a claim about the command,
-        # not about the server's environment, and this whole section exists because those
-        # are different facts.
-        claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D ;;
-    esac
+    if [ "$CLAUDE_AUTH_V" != VERIFIED ]; then
+      # LOUD, not silent: a repair that quietly does not happen reads as "nothing was
+      # wrong", and the operator then never learns why the box is still broken.
+      warn "claude-auth: REFUSING to seed the running tmux server — the PERSISTED credential is $CLAUDE_AUTH_V, not VERIFIED, and seeding would push a value nothing has validated over whatever the server currently holds (which may be the only working credential on this box)"
+      info "fix the PERSISTED credential first (the claude-auth remedy above), then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth"
+      info "to seed anyway, deliberately and by hand:  bash scripts/claude-auth-capability.sh --fix-tmux-env"
+    else
+      case "$CLAUDE_TMUX_V" in
+        SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
+          info "repairing: seeding the running tmux server from the persisted value (nothing is written to disk)"
+          claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
+          # RE-MEASURED, never assumed: `tmux setenv` exiting 0 is a claim about the command,
+          # not about the server's environment, and this whole section exists because those
+          # are different facts.
+          claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D ;;
+      esac
+    fi
   fi
   if [ "$CLAUDE_TMUX_V" = VERIFIED ]; then
     ok "claude-tmux-env: VERIFIED ($(claude_auth_redact "$CLAUDE_TMUX_D"))"

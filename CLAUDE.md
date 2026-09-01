@@ -1956,7 +1956,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   an `[ok]`.
   Only `VERIFIED` is an `[ok]` on either; `NO-SERVER` is UNMEASURED-class. Repair with
   `bash scripts/bootstrap-agent-machine.sh --fix-claude-auth` (implied by `--yes`), which seeds the
-  RUNNING server and **writes no file** — the token is never printed and never copied. Re-authing an
+  RUNNING server and **writes no file** — and which **REFUSES unless `claude-auth:` is VERIFIED**,
+  because seeding an unvalidated credential over a server that may hold the box's ONLY working one
+  is the repair BREAKING a working box, unattended (`SERVER-STALE` reads identically in both
+  directions; only the other line can tell them apart). The hand-run
+  `scripts/claude-auth-capability.sh --fix-tmux-env` is the deliberate override, named in the
+  refusal — the token is never printed and never copied. Re-authing an
   unattended box needs **no browser**: it is a static shareable gateway token, so provisioning is a
   file copy plus the seed. Full mechanism + recovery: `docs/development/fleet-runbook.md`,
   "Claude credential reachability".

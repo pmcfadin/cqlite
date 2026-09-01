@@ -1078,7 +1078,7 @@ bash scripts/claude-auth-capability.sh --report
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOKEN" | sudo tee -a /etc/environment >/dev/null
 
 # 3. Repair the RUNNING tmux server. This is the step that fixes the field failure, and it
-#    writes NOTHING to disk.
+#    writes NOTHING to disk. It REQUIRES `claude-auth: VERIFIED` -- see the note below.
 bash scripts/bootstrap-agent-machine.sh --fix-claude-auth     # `--yes` does it too
 #    ...or by hand:
 tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN "$TOKEN"
@@ -1090,6 +1090,18 @@ bash scripts/claude-auth-capability.sh --report
 
 A pane created **before** the seeding keeps its old environment — tmux copies the server
 environment at pane creation. Kill and respawn the lane; you do not need to restart the server.
+
+**Bootstrap will not seed unless `claude-auth:` is `VERIFIED`.** Both `--fix-claude-auth` and
+`--yes` refuse — loudly, naming the precondition — when the persisted credential is `FAILED`,
+`NOT-PERSISTED` or `UNMEASURED`. The reason is a real inversion: on a box whose persisted token is
+bad while the *running server* holds a working one, seeding overwrites the working value with the
+broken one and every lane spawned afterwards fails to authenticate — the repair breaking a working
+box, unattended, since `.agent-ami/profile.yaml` runs bootstrap this way. `SERVER-STALE` is exactly
+where it fires, because "the server's token differs from the persisted one" reads the same whether
+the server's copy is the stale one or the only good one on the machine; only the *other* line can
+tell those apart. Fix the persisted credential first. If you really do mean to seed an unvalidated
+value, the hand-run `bash scripts/claude-auth-capability.sh --fix-tmux-env` still does it
+unconditionally — that is the deliberate override, and the refusal names it.
 
 ### Can an unattended box be re-authenticated without a human at a browser? **Yes.**
 
