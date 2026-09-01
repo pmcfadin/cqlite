@@ -737,6 +737,63 @@ cannot fail on it: `--lite` runs every fix round and must not require the networ
 **There is deliberately no opt-out**, for the same reason as `missing-schemas:` — a branch behind
 `main` can always rebase, so an escape hatch could only buy a vacuous green.
 
+## Disk exhaustion is NAMED in the block (issue #3800)
+
+A full gate that dies because the **disk filled** used to report, in the one artifact
+doctrine tells an agent to retain, `minimal-build: FAIL (611s)` beside 36/37 PASS and
+`tree-integrity: PASS`. Nothing named the host, so the reader debugged a minimal-features
+build that was never broken. Measured: `lane-3634/target` at **101G mid-full-gate, peaking at
+143G** on a 295G disk shared with two other lanes at 68G and 57G, **0 bytes free** at the
+failure; a re-run on the **same tree at the same sha** PASSed once a peer freed space.
+
+Every terminal block — full, `--lite`, `--delta` (including its REFUSED path) and both hidden
+selftest hooks — now carries exactly one `disk-exhaustion:` line, on the `missing-fixtures:` /
+`missing-schemas:` marker precedent. Its value set is **closed**:
+
+- `RECOGNISED (#3800)` — names the signature, the component, `<log>:<line>`, and states the
+  FAIL is **environmental**: free space and re-run.
+- `0 RECOGNISED (#3800)` — either every subject log was **read** and nothing matched, or there
+  was no non-PASS component to scan. Never a bare `0`: a bare zero reads as a verified
+  all-clear from a scan that documents itself as incomplete.
+- `UNMEASURED (#3800)` — a subject log could not be read. **UNMEASURED is never "no ENOSPC"**;
+  the clean verdict is keyed on the affirmative fact that every subject log was read, never on
+  the absence of a match. `grep`'s exit status is read as three-valued for exactly this reason.
+
+Properties worth knowing:
+
+- **It is an ATTRIBUTION, never a verdict.** It never reads, sets or influences
+  `OVERALL`/`RESULT`. A matched signature is evidence about the **host**, not proof the diff is
+  innocent, and this marker does not own the verdict.
+- **The signature set is CLOSED** — `No space left on device`, `os error 28`,
+  `Disk quota exceeded` — and the line declares that non-exhaustiveness on every run. A bare
+  `ENOSPC` token is deliberately **excluded**: it occurs in this repository's own test names,
+  comments and doctrine, so it would fire on a log that merely mentions the class.
+- **Only non-PASS components are scanned.** A PASSing component's log carrying the phrase
+  describes a run that recovered and explains nothing.
+- **It reads the RAW log, not `_ansi_stripped_log`.** That helper materialises a sibling file,
+  and *a disk-exhaustion diagnostic that needs free disk in order to run is useless exactly when
+  it matters*. Safe under #3400 because these three signatures are pure **payload** (libc
+  `strerror`, LLVM/`ld`, Rust's `io::Error` Display) and never a coloured cargo status word — a
+  claim the suite measures with a real ANSI-coloured fixture rather than asserting.
+- **No log-derived text reaches the block.** Only our signature *name*, the component name
+  (from the gate's own `COMPONENTS`) and an integer line number. A component log is compiler-
+  and test-controlled; interpolating it would let a newline break the block frame and forge a
+  `RESULT:` line.
+- **The free-space field is a start→emit DELTA**, measured with POSIX `df -Pk` (macOS is a
+  first-class gate host and `df -h` output differs by platform). An instantaneous emit-time read
+  is misleading: peers free space between the failure and the emit, which is this issue's own
+  re-run evidence. An unmeasurable `df` renders `free: UNMEASURED` and does **not** downgrade the
+  log-scan verdict — the two facts are independent.
+
+Pinned by `scripts/tests/test_agent_gate_disk_exhaustion.sh` (hermetic, in `tooling-tests`,
+registered above that component's python3 SKIP branch because it needs nothing beyond bash).
+
+**This is a diagnostic, not a capacity fix.** Nothing here makes the slot cap disk-aware,
+refuses or queues a gate on low free space, budgets disk per lane, or shares one
+`CARGO_TARGET_DIR` per box; that is tracked under #3434 / #3763 / #3755. Related: per-worktree
+`target/` for a full gate is **~100–145GB**, not the ~25–30GB `docs/development/gate-ops.md`
+claimed until #3800 — three concurrent full gates need roughly 430G on a 295G disk.
+
 ## Running the gate
 
 ```bash

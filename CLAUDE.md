@@ -361,6 +361,32 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
     shows the check RAN. **There is deliberately NO opt-out env var, and none may be added**:
     committed source in a checkout is never legitimately absent, so an escape hatch could only buy a
     vacuous green.
+- **A DISK-EXHAUSTION FAIL now NAMES ITSELF in the block — `disk-exhaustion:` is an
+  ATTRIBUTION, never a verdict (#3800).** A full gate that died because the disk filled used
+  to report only `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
+  an agent obeying the retain-only-the-SUMMARY rule debugged a minimal-features build that was
+  never broken. Every terminal block (full, `--lite`, `--delta` incl. its REFUSED path, both
+  selftest hooks) now carries ONE `disk-exhaustion:` line with a CLOSED value set:
+  `RECOGNISED (#3800)` naming the signature, the component and `<log>:<line>`;
+  `0 RECOGNISED (#3800)` (**never a bare `0`**) either for a scan that read every subject log
+  and matched nothing, or for a run with no non-PASS component; and `UNMEASURED (#3800)` when a
+  subject log could not be read — **UNMEASURED is never "no ENOSPC"**, and the clean verdict is
+  keyed on the affirmative *every subject log was READ*. The **signature set is CLOSED** —
+  `No space left on device`, `os error 28`, `Disk quota exceeded`, with a bare `ENOSPC` token
+  deliberately excluded because this repo's own tests and doctrine contain it — and the line
+  DECLARES that non-exhaustiveness on every run. Only **non-PASS** components are scanned (a
+  PASSing log carrying the phrase explains nothing), the **RAW** log is read rather than
+  `_ansi_stripped_log` (**a disk diagnostic that needs free disk to run is useless exactly when
+  it matters**; safe under #3400 because these signatures are pure `strerror`/`io::Error`
+  PAYLOAD, never a coloured cargo status word), and **NO log-derived text reaches the block** —
+  only our signature name, the component name from `COMPONENTS`, and an integer (#3312). The
+  free-space field is a **start→emit DELTA**, because peers free space between the failure and
+  the emit — that is #3800's own re-run evidence (same tree, same sha, opposite verdicts). It
+  **never changes `OVERALL`/`RESULT`**: a matched signature is evidence about the HOST, not
+  proof the diff is innocent, and this marker does not own the verdict. Capacity management (a
+  disk-aware slot cap, per-lane budgets, a shared `CARGO_TARGET_DIR`) is **#3434/#3763/#3755**,
+  not here. Per-worktree `target/` is **~100–145GB** for a full gate, not the ~25–30GB
+  `docs/development/gate-ops.md` claimed until now.
 - **A gate script BEHIND `origin/main` cannot certify (#3544).** `agent-gate.sh` is read from
   the tree under test, so a branch cut before a component-set expansion runs the OLD script and
   reports a true `N/N nonpass=0` while being **silent about every component added since**
