@@ -1407,6 +1407,17 @@ Contract:
   named non-fatal class: a `Cargo.lock`-**only** difference stamps
   `tree-integrity: PASS (lockfile-settled: …)` (the gate runs cargo without `--locked`,
   #2962); a lockfile change alongside anything else is fatal.
+- **Name new lane-local scratch `.lane-<name>` (#3760).** A gitignored path inside a
+  worktree is safe to write mid-gate *precisely because* it is ignored; an
+  untracked-and-visible one is `tree-mutated-midrun` and VOIDS the run. Lane scratch
+  used to be ignored by ENUMERATION, so the next unlisted name reproduced the defect —
+  #3414 created `.gate-of-record-sha.txt` mid-gate and lost 40 minutes. `.gitignore` now
+  reserves an un-anchored `.lane-*` namespace, so a new scratch name is covered by
+  construction; **source may never live under a `.lane-*` path**, which is what makes
+  swallowing a `.lane-<name>/` subtree whole safe (hence no `!.lane-*/` negation, unlike
+  the job-209 `.agent-gate-*` entries). Before writing ANY file into a worktree while a
+  gate runs: `git check-ignore -v <path>`. Pinned by
+  `scripts/tests/test_lane_scratch_ignored.sh` (`tooling-tests`).
 - **Stated limitation**: gitignored *inputs* — chiefly the fetched
   `test-data/datasets/**` SSTable binaries — are outside the digest. Their stability is
   covered by the existing `datasets:` and `ci-pins:` stamps, not by this guard.

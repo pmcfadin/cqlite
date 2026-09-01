@@ -687,6 +687,15 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
+  **Corollary — NAME NEW LANE-LOCAL SCRATCH `.lane-<name>` (#3760).** A gitignored file inside a
+  worktree is safe to write mid-gate precisely BECAUSE it is ignored; an untracked-and-visible one
+  is `tree-mutated-midrun` and voids the run — which is how #3414 lost 40 minutes to an unlisted
+  `.gate-of-record-sha.txt`. `.gitignore` reserves an un-anchored `.lane-*` namespace so the next
+  scratch name is covered by construction; **never put source under a `.lane-*` path** (that
+  reservation is why the whole `.lane-<name>/` subtree is swallowed with no `!.lane-*/` negation,
+  unlike the job-209 `.agent-gate-*` entries). Verify with `git check-ignore -v <path>` BEFORE
+  writing anything into a worktree while a gate runs. Guard:
+  `scripts/tests/test_lane_scratch_ignored.sh` (`tooling-tests`).
 - **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
   `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare

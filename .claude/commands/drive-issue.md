@@ -57,6 +57,9 @@ When you are blocked on a lead/owner response (Seam-1 spec approval, a decision 
    identity (issue, machine, worktree, session, session pid + start window, actor) inside a bounded
    prologue and REFUSES to overwrite a marker that is not yours — a hand-written marker carries no
    stamp and Delta 4 will refuse to rehydrate from it.
+   (The marker's own name `.drive-issue-state.md` is kept for compatibility; any NEW lane-local
+   scratch file must be `.lane-<name>` — the reserved gitignored namespace, #3760 — verified with
+   `git check-ignore -v <path>` before writing.)
 3. **Arm the cron**: `CronList` first — if a job named `drive-issue-<N>` already exists, do NOT
    create another. Else `CronCreate` name `drive-issue-<N>`, interval ~15 minutes, prompt exactly:
    `/drive-issue <N>`. The command is resume-safe (Delta 4), so each firing rehydrates, checks for
