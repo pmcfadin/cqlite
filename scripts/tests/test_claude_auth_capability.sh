@@ -67,6 +67,14 @@ TOK='sk-cqlite-test-TOKEN-3733-do-not-print'
 TOK_OTHER='sk-cqlite-test-STALE-3733-do-not-print'
 SENTINEL='CQLITE_CLAUDE_AUTH_OK'
 
+# THE CONFIG-DIR FIXTURES ARE REAL PATHS, because VERIFIED now requires the directory to
+# EXIST — a nonexistent CLAUDE_CONFIG_DIR sends `claude` to an un-onboarded config and
+# produces the first-run picker, which is this issue's reported symptom. CFGDIR exists,
+# CFGDIR_OTHER exists and is a DIFFERENT directory, CFGDIR_GHOST is never created.
+CFGDIR="$tmp/claude-config";       mkdir -p "$CFGDIR"
+CFGDIR_OTHER="$tmp/claude-config-other"; mkdir -p "$CFGDIR_OTHER"
+CFGDIR_GHOST="$tmp/claude-config-never-created"
+
 # EVERY case's combined stdout+stderr is appended here, and case "no leak" greps it once.
 TRANSCRIPT="$tmp/transcript.log"; : >"$TRANSCRIPT"
 # run_cap <shimdir> <envfile-or-empty> [extra env assignments...] -- <cap args...>
@@ -141,7 +149,7 @@ EOF
 # `setenv` is always accepted and RECORDED — as key plus VALUE LENGTH, never the value, so
 # the recording file cannot become the leak this suite forbids.
 plant_tmux() {
-  local d="$1" mode="$2"
+  local d="$1" mode="$2" cfg="${3:-$CFGDIR}"
   cat >"$d/tmux" <<EOF
 #!/usr/bin/env bash
 log="$d/tmux-calls.log"
@@ -150,10 +158,10 @@ case "\$1" in
     case '$mode' in
       no-server)  printf 'no server running on /tmp/tmux-1000/default\n' >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
-      missing)    printf 'CLAUDE_CONFIG_DIR=/data/claude-config\nPATH=/usr/bin\n'; exit 0 ;;
-      stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=/data/claude-config\n' '$TOK_OTHER'; exit 0 ;;
+      missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
+      stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
       incomplete) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n-CLAUDE_CONFIG_DIR\n' '$TOK'; exit 0 ;;
-      complete)   printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=/data/claude-config\n' '$TOK'; exit 0 ;;
+      complete)   printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK' '$cfg'; exit 0 ;;
     esac ;;
   set-environment|setenv)
     shift
@@ -207,7 +215,7 @@ ok "scripts/claude-auth-capability.sh present"
 #    unprovisioned box, and the remedy differs from FAILED's, so it is its own verdict.
 # =====================================================================================
 d=$(mkshim "$tmp/s1"); ef="$tmp/env1"
-mkenvfile "$ef" '# a comment' 'CLAUDE_CONFIG_DIR=/data/claude-config' 'PATH=/usr/bin'
+mkenvfile "$ef" '# a comment' "CLAUDE_CONFIG_DIR=$CFGDIR" 'PATH=/usr/bin'
 plant_claude_probe_env "$d"
 plant_tmux "$d" complete
 run_cap "$d" "$ef" -- --auth
@@ -240,7 +248,7 @@ fi
 # 2. VERIFIED — persisted token, and the probe returns BOTH rc 0 AND the sentinel.
 # =====================================================================================
 d2=$(mkshim "$tmp/s2"); ef2="$tmp/env2"
-mkenvfile "$ef2" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" 'CLAUDE_CONFIG_DIR=/data/claude-config'
+mkenvfile "$ef2" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" "CLAUDE_CONFIG_DIR=$CFGDIR"
 plant_claude_probe_env "$d2"
 run_cap "$d2" "$ef2" -- --auth
 if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
@@ -492,6 +500,48 @@ else
 fi
 
 # =====================================================================================
+# 20a-c. `NONEMPTY` IS NOT `CORRECT` — the CLAUDE_CONFIG_DIR half of the tmux verdict.
+#     The check used to be "the server names SOMETHING" else VERIFIED, so a stale, wrong
+#     or nonexistent directory read as an [ok]. That is the two-valued-predicate shape
+#     CLAUDE.md warns about — only the bad state is tested, so every unknown state inherits
+#     the permissive branch — and it undermines the exact verdict this issue turns on: a
+#     wrong config dir sends `claude` to an un-onboarded directory, which IS the first-run
+#     picker. VERIFIED now requires an AFFIRMATIVE match against the persisted value AND
+#     the directory to exist; each failure keeps its own name because the remedies differ
+#     (re-seed the server vs. provision the directory vs. nothing to compare against).
+# =====================================================================================
+d20a=$(mkshim "$tmp/s20a"); plant_tmux "$d20a" complete "$CFGDIR_OTHER"
+run_cap "$d20a" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CONFIG-STALE'; then
+  ok "claude-tmux-env: SERVER-CONFIG-STALE when the server's CLAUDE_CONFIG_DIR DIFFERS from the persisted one"
+else
+  bad "claude-tmux-env: a differing config dir did not get its own verdict: $out"
+fi
+
+ef_ghost="$tmp/env-ghost-cfg"
+mkenvfile "$ef_ghost" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" "CLAUDE_CONFIG_DIR=$CFGDIR_GHOST"
+d20b=$(mkshim "$tmp/s20b"); plant_tmux "$d20b" complete "$CFGDIR_GHOST"
+run_cap "$d20b" "$ef_ghost" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CONFIG-NODIR'; then
+  ok "claude-tmux-env: SERVER-CONFIG-NODIR when the config dir MATCHES the persisted value but does not exist"
+else
+  bad "claude-tmux-env: a nonexistent config dir was accepted: $out"
+fi
+
+# No persisted CLAUDE_CONFIG_DIR at all: there is nothing to compare the server against,
+# and a comparison with nothing is not a verdict (the same rule case 14 applies to the
+# token). UNMEASURED, never VERIFIED.
+ef_nocfg="$tmp/env-nocfg"
+mkenvfile "$ef_nocfg" "CLAUDE_CODE_OAUTH_TOKEN=$TOK"
+d20c=$(mkshim "$tmp/s20c"); plant_tmux "$d20c" complete
+run_cap "$d20c" "$ef_nocfg" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "claude-tmux-env: UNMEASURED when nothing persisted names a CLAUDE_CONFIG_DIR to compare against"
+else
+  bad "claude-tmux-env: an unverifiable config dir inherited the permissive branch: $out"
+fi
+
+# =====================================================================================
 # 20. THE PLATFORM GUARD APPLIES TO **BOTH** VERDICTS. /etc/environment + pam_env is a
 #     Linux mechanism, and the header block has always documented both lines as UNMEASURED
 #     off Linux — but the guard was applied only to `claude-auth:`, so a macOS host could
@@ -541,7 +591,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # ALWAYS run — a floor set to the TOTAL would red whenever a legitimately skippable case
 # (the uname stub, the real-tmux isolation case) skips, and a floor that reds on correct
 # input is the floor agents learn to delete.
-CASE_FLOOR=30
+CASE_FLOOR=33
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

@@ -1928,7 +1928,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   failure is silent until dispatch. Bootstrap now prints two independent verdicts — `claude-auth:`
   (VERIFIED/NOT-PERSISTED/FAILED/UNMEASURED, an affirmative bounded `claude -p` probe of the
   PERSISTED value with the INHERITED one scrubbed, #3414's lesson one subject over) and
-  `claude-tmux-env:` (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/NO-SERVER/UNMEASURED).
+  `claude-tmux-env:`
+  (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/SERVER-CONFIG-STALE/SERVER-CONFIG-NODIR/
+  NO-SERVER/UNMEASURED). **A tmux VERIFIED is an AFFIRMATIVE match**: the server's
+  `CLAUDE_CONFIG_DIR` must EQUAL the persisted one AND that directory must EXIST — testing only
+  "is it absent" was the two-valued predicate that always picks the permissive answer, and a wrong
+  config dir IS the un-onboarded picker. Both lines are Linux-scoped because the BASELINE is
+  `/etc/environment`/pam_env (tmux itself runs on macOS); off Linux both are UNMEASURED, never
+  an `[ok]`.
   Only `VERIFIED` is an `[ok]` on either; `NO-SERVER` is UNMEASURED-class. Repair with
   `bash scripts/bootstrap-agent-machine.sh --fix-claude-auth` (implied by `--yes`), which seeds the
   RUNNING server and **writes no file** — the token is never printed and never copied. Re-authing an

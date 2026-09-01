@@ -94,8 +94,10 @@
 #      tmux SERVER, fixed at server start, so a server predating provisioning hands out
 #      panes with neither variable however correct the disk is, and NOTHING ON DISK
 #      distinguishes such a box. Verdicts: VERIFIED / NOT-PERSISTED / FAILED / UNMEASURED
-#      and VERIFIED / SERVER-STALE / SERVER-MISSING / SERVER-INCOMPLETE / NO-SERVER /
-#      UNMEASURED. Only VERIFIED is an [ok] on either line (same posture as `git-push:`
+#      and VERIFIED / SERVER-STALE / SERVER-MISSING / SERVER-INCOMPLETE /
+#      SERVER-CONFIG-STALE / SERVER-CONFIG-NODIR / NO-SERVER / UNMEASURED (a VERIFIED pane
+#      environment needs the server's CLAUDE_CONFIG_DIR to EQUAL the persisted one AND that
+#      directory to EXIST — nonempty is not correct). Only VERIFIED is an [ok] on either line (same posture as `git-push:`
 #      and `gate-pin:`); NO-SERVER is UNMEASURED-class. The TOKEN VALUE IS NEVER PRINTED,
 #      and bootstrap writes it to NO file — /etc/environment already holds it and a second
 #      copy is what openspec/specs/worker-environment-preflight/spec.md forbids.
@@ -3049,7 +3051,7 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # failure that says nothing about the box.
   if [ "$CLAUDE_TMUX_V" != VERIFIED ] && { [ "$AUTO_YES" = 1 ] || [ "$FIX_CLAUDE_AUTH" = 1 ]; }; then
     case "$CLAUDE_TMUX_V" in
-      SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE)
+      SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
         info "repairing: seeding the running tmux server from the persisted value (nothing is written to disk)"
         claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
         # RE-MEASURED, never assumed: `tmux setenv` exiting 0 is a claim about the command,
@@ -3064,9 +3066,12 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
     warn "claude-tmux-env: $CLAUDE_TMUX_V ($CLAUDE_TMUX_D)"
   fi
   case "$CLAUDE_TMUX_V" in
-    SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE)
+    SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
       info "repair the RUNNING server (no reboot, no re-login, nothing written to disk):  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth   (--yes does it too)"
       info "or by hand:  tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN \"\$TOKEN\"; tmux setenv -g CLAUDE_CONFIG_DIR \"\$CLAUDE_CONFIG_DIR\"" ;;
+    SERVER-CONFIG-NODIR)
+      info "seeding cannot help: the server's CLAUDE_CONFIG_DIR MATCHes the persisted value and that DIRECTORY does not exist — re-seeding writes the same missing path back"
+      info "provision the directory (or correct the CLAUDE_CONFIG_DIR line in /etc/environment), then:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth" ;;
     NO-SERVER)
       info "nothing to repair yet — but the NEXT server inherits the environment of whatever STARTS it, so start it from a PAM session (ssh/login), not from a stale process tree"
       info "and note 'tmux new-session <command>' runs no login shell, so /etc/profile.d never executes for a spawned lane: a lane spawner must pass -e for BOTH variables or rely on a seeded server" ;;

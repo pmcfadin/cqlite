@@ -961,7 +961,8 @@ own remedy, and `NO-SERVER` is UNMEASURED-class (nothing was running to ask).
 
 ```
 claude-auth:      VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED
-claude-tmux-env:  VERIFIED | SERVER-STALE | SERVER-MISSING | SERVER-INCOMPLETE | NO-SERVER | UNMEASURED
+claude-tmux-env:  VERIFIED | SERVER-STALE | SERVER-MISSING | SERVER-INCOMPLETE
+                  | SERVER-CONFIG-STALE | SERVER-CONFIG-NODIR | NO-SERVER | UNMEASURED
 ```
 
 They are two verdicts because they fail independently and the operator actions differ:
@@ -973,6 +974,8 @@ They are two verdicts because they fail independently and the operator actions d
 | `claude-tmux-env: SERVER-MISSING` | A tmux server is running and carries no token. **THE field failure.** | `--fix-claude-auth`. |
 | `claude-tmux-env: SERVER-STALE` | The server's token **differs** from the persisted one. Worse than missing: everything looks provisioned. | `--fix-claude-auth`. |
 | `claude-tmux-env: SERVER-INCOMPLETE` | Token matches, `CLAUDE_CONFIG_DIR` absent — the un-onboarded picker (fact 5). | `--fix-claude-auth`. |
+| `claude-tmux-env: SERVER-CONFIG-STALE` | Token matches, but the server's `CLAUDE_CONFIG_DIR` **differs** from the persisted one — panes are pointed at a directory nobody provisioned. | `--fix-claude-auth`. |
+| `claude-tmux-env: SERVER-CONFIG-NODIR` | The config dir matches the persisted value and **that directory does not exist**. Seeding writes the same missing path back, so it cannot help. | Create the directory, or correct the `CLAUDE_CONFIG_DIR` line in `/etc/environment`, then `--fix-claude-auth`. |
 | `claude-tmux-env: NO-SERVER` | No server to measure. | Nothing to repair; the **next** server inherits whatever starts it. |
 
 Run the same two checks by hand at any time, without the rest of bootstrap:
@@ -983,6 +986,14 @@ bash scripts/claude-auth-capability.sh --auth            # the persisted-credent
 bash scripts/claude-auth-capability.sh --tmux-env        # the pane-reachability question alone
 bash scripts/claude-auth-capability.sh --fix-tmux-env    # seed the running server, then re-measure
 ```
+
+`VERIFIED` on the second line is an **affirmative match**, not an absence of bad news: the
+server's `CLAUDE_CONFIG_DIR` must **equal** the persisted value **and** that directory must
+**exist**. Testing only "is it absent" is the two-valued predicate that always picks the
+permissive answer, and a wrong config dir produces exactly the reported symptom.
+**Declared residual:** *exists* is not *onboarded* — whether the directory holds usable
+onboarding state is deliberately not probed, because that means depending on an internal
+JSON field shape that can change upstream.
 
 The probe reads the token from `/etc/environment`, **scrubs the inherited one** (and `BASH_ENV`/
 `ENV` with it), and requires **both** rc 0 **and** a sentinel back from a bounded `claude -p`. The

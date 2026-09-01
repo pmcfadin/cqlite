@@ -30,7 +30,16 @@
 #                     VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED
 #   claude-tmux-env:  does that credential REACH a tmux-spawned pane?
 #                     VERIFIED | SERVER-STALE | SERVER-MISSING | SERVER-INCOMPLETE |
-#                     NO-SERVER | UNMEASURED
+#                     SERVER-CONFIG-STALE | SERVER-CONFIG-NODIR | NO-SERVER | UNMEASURED
+#
+# NONEMPTY IS NOT CORRECT. VERIFIED requires the server's CLAUDE_CONFIG_DIR to EQUAL the
+# persisted value AND that directory to EXIST — testing only "is it absent" and letting
+# every other state fall through to VERIFIED is the two-valued predicate that always picks
+# the permissive answer, and a wrong config dir is the un-onboarded first-run picker this
+# file exists to catch. DECLARED RESIDUAL: `exists` is not `onboarded`. Whether a config
+# directory holds usable onboarding state is deliberately NOT probed — it would mean
+# depending on an internal JSON field shape that can change upstream, and a check that
+# silently stops matching reports VERIFIED for the wrong reason.
 #
 # ONLY `VERIFIED` IS A SUCCESS, on either line. NO-SERVER is UNMEASURED-class: nothing was
 # running to ask, so nothing was measured. An unmeasured capability never inherits the
@@ -292,7 +301,7 @@ claude_auth_verdict_into() {
 claude_tmux_env_verdict_into() {
   local __ov="$1" __od="$2"
   local __file='' __state='' __tok='' __out='' __err='' __rc=0
-  local __stok='' __sstate='' __scfg='' __scfgstate=''
+  local __stok='' __sstate='' __scfg='' __scfgstate='' __cfg='' __cfgstate=''
   eval "$__ov=UNMEASURED"; eval "$__od="
 
   if ! claude_auth_env_file_into __file; then
@@ -352,8 +361,35 @@ claude_tmux_env_verdict_into() {
     eval "$__od=\"the server's \$CLAUDE_AUTH_TOKEN_KEY MATCHes \$__file but it carries no \$CLAUDE_AUTH_CONFIG_KEY (\$__scfgstate) — 'tmux new-session <command>' runs no login shell, so /etc/profile.d never supplies it either and the pane gets the un-onboarded first-run picker\""
     return 0
   fi
+
+  # ---- the CONFIG DIR half: NONEMPTY IS NOT CORRECT ---------------------------------
+  # This used to be the whole test — "the server names something" and otherwise VERIFIED —
+  # which is the two-valued predicate CLAUDE.md warns about: only the bad state was tested,
+  # so a STALE, WRONG or NONEXISTENT directory inherited the permissive branch. It matters
+  # here more than anywhere: a wrong CLAUDE_CONFIG_DIR sends `claude` to an un-onboarded
+  # directory, and THAT is the first-run picker this issue exists for. So VERIFIED requires
+  # an AFFIRMATIVE match — equal to the persisted value AND the directory exists.
+  claude_auth_read_key_into __cfg __cfgstate "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
+  if [ "$__cfgstate" != present ] || [ -z "$__cfg" ]; then
+    eval "$__od=\"the server names a \$CLAUDE_AUTH_CONFIG_KEY but \$__file provides no persisted value to compare it against (\$__cfgstate) — PRESENT is not CORRECT, and a comparison with nothing is not a verdict\""
+    return 0
+  fi
+  if [ "$__scfg" != "$__cfg" ]; then
+    eval "$__ov=SERVER-CONFIG-STALE"
+    eval "$__od=\"the server's \$CLAUDE_AUTH_CONFIG_KEY DIFFERS from the one persisted in \$__file (server: \$__scfg) — panes are pointed at a config directory nobody provisioned, which is the un-onboarded first-run picker even though the token is right\""
+    return 0
+  fi
+  # `[ -d ]` is two-valued, so an UNREADABLE parent collapses onto 'does not exist'. That
+  # is deliberately the NON-permissive answer: an unknown must never resolve to the good
+  # case. Its remedy differs from SERVER-CONFIG-STALE's — re-seeding the server writes the
+  # same nonexistent path back, so `--fix-claude-auth` cannot help here.
+  if [ ! -d "$__scfg" ]; then
+    eval "$__ov=SERVER-CONFIG-NODIR"
+    eval "$__od=\"the server's \$CLAUDE_AUTH_CONFIG_KEY MATCHes \$__file but that directory does not exist (or cannot be read as one): \$__scfg — a pane gets a config dir claude will treat as un-onboarded\""
+    return 0
+  fi
   eval "$__ov=VERIFIED"
-  eval "$__od=\"the running tmux server's global environment carries a \$CLAUDE_AUTH_TOKEN_KEY MATCHing \$__file, and a \$CLAUDE_AUTH_CONFIG_KEY — a pane spawned now inherits both\""
+  eval "$__od=\"the running tmux server's global environment carries a \$CLAUDE_AUTH_TOKEN_KEY MATCHing \$__file, and a \$CLAUDE_AUTH_CONFIG_KEY MATCHing it whose directory EXISTS — a pane spawned now inherits both\""
 }
 
 # claude_tmux_show_key_into <outvar_value> <outvar_state> <show-environment-output> <key>:
@@ -436,7 +472,9 @@ claude_auth_usage() {
   printf '                  (exit 0 only for VERIFIED). Makes ONE real, bounded `claude -p` call.\n'
   printf '  --tmux-env      does that credential REACH a tmux-spawned pane? prints one\n'
   printf '                  `claude-tmux-env:` line: VERIFIED|SERVER-STALE|SERVER-MISSING|\n'
-  printf '                  SERVER-INCOMPLETE|NO-SERVER|UNMEASURED (exit 0 only for VERIFIED).\n'
+  printf '                  SERVER-INCOMPLETE|SERVER-CONFIG-STALE|SERVER-CONFIG-NODIR|\n'
+  printf '                  NO-SERVER|UNMEASURED (exit 0 only for VERIFIED). VERIFIED needs the\n'
+  printf '                  server CLAUDE_CONFIG_DIR to EQUAL the persisted one and to EXIST.\n'
   printf '  --report        both lines.\n'
   printf '  --fix-tmux-env  seed the RUNNING tmux server from the persisted value, then\n'
   printf '                  re-measure. Writes NO file; the token value is never printed.\n'
