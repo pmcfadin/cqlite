@@ -143,9 +143,24 @@ if [[ "$DRY_RUN" -eq 0 ]] && $ENGINE inspect "$CONTAINER_NAME" >/dev/null 2>&1; 
   $ENGINE rm -f $CONTAINER_NAME"
 fi
 
+# CLEANUP REMOVES THE CONTAINER ONLY IF *THIS* INVOCATION CREATED IT.
+#
+# The pre-flight above refuses when the fixed CONTAINER_NAME already exists, but a
+# name check is not a lock: two concurrent invocations can BOTH pass it, and then
+# the loser's `docker run` fails on the duplicate name — at which point an
+# unconditional `rm -f "$CONTAINER_NAME"` in its EXIT trap would delete the
+# WINNER's container out from under a live generation. The victim sees its
+# Cassandra vanish mid-run, which reads as an infrastructure flake rather than as
+# another process killing it.
+#
+# So ownership is tracked explicitly: the flag is set ONLY after `docker run`
+# returns 0, and cleanup is a no-op otherwise. A container this script did not
+# create is never touched — the same rule the pre-flight already follows by
+# refusing instead of reclaiming.
+CONTAINER_CREATED=0
 cleanup() {
-  if [[ "$DRY_RUN" -eq 0 ]]; then
-    log "Cleaning up container..."
+  if [[ "$DRY_RUN" -eq 0 && "$CONTAINER_CREATED" -eq 1 ]]; then
+    log "Cleaning up container (created by this invocation)..."
     $ENGINE rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 }
@@ -302,12 +317,26 @@ log "Starting $KEYSPACE generation (issue #3747)"
 log "Output directory: $OUT_DIR"
 
 log "Starting $CASSANDRA_IMAGE container ($CONTAINER_NAME)..."
-run $ENGINE run -d \
+if ! run $ENGINE run -d \
   --name "$CONTAINER_NAME" \
   -e MAX_HEAP_SIZE=1G \
   -e HEAP_NEWSIZE=256m \
   -e CASSANDRA_CLUSTER_NAME=cqlite-issue3747 \
-  "$CASSANDRA_IMAGE"
+  "$CASSANDRA_IMAGE"; then
+  # No ownership flag is set, so the EXIT trap will NOT remove a container that
+  # a concurrent invocation may legitimately own.
+  fail "container '$CONTAINER_NAME' could not be started (a concurrent invocation \
+may already own that name); refusing to remove it."
+fi
+# Ownership established: from here the EXIT trap is allowed to remove it.
+#
+# An explicit `if`, NOT `[[ ... ]] && CONTAINER_CREATED=1`. That one-liner returns
+# non-zero whenever the test is false, and under `set -e` it survives only via the
+# &&-list exemption — a subtlety no reader of a script that runs `rm -rf` should
+# have to re-derive. Spell it out.
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  CONTAINER_CREATED=1
+fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   wait_cassandra
