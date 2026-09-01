@@ -1918,6 +1918,23 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `--fix-credentials` wires the credential path only (no toolchain installs) and `--strict` turns any
   warning into exit 1, which is what `.agent-ami/profile.yaml`'s `verify.run` uses. The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
+- **A BOX CAN BE FULLY PROVISIONED ON DISK AND STILL UNABLE TO START A LANE (#3733).** The only
+  working Claude credential is the env var `CLAUDE_CODE_OAUTH_TOKEN`, provisioned in
+  `/etc/environment` (pam_env) alone — and **a tmux pane's environment comes from the tmux SERVER,
+  fixed at server start**, so a server predating provisioning hands out panes with neither that
+  variable nor `CLAUDE_CONFIG_DIR` and every new session lands on the first-run login chooser.
+  `tmux new-session <command>` runs **no login shell**, so `/etc/profile.d` never reaches a spawned
+  lane either: **nothing on disk distinguishes a working box from a broken one**, which is why the
+  failure is silent until dispatch. Bootstrap now prints two independent verdicts — `claude-auth:`
+  (VERIFIED/NOT-PERSISTED/FAILED/UNMEASURED, an affirmative bounded `claude -p` probe of the
+  PERSISTED value with the INHERITED one scrubbed, #3414's lesson one subject over) and
+  `claude-tmux-env:` (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/NO-SERVER/UNMEASURED).
+  Only `VERIFIED` is an `[ok]` on either; `NO-SERVER` is UNMEASURED-class. Repair with
+  `bash scripts/bootstrap-agent-machine.sh --fix-claude-auth` (implied by `--yes`), which seeds the
+  RUNNING server and **writes no file** — the token is never printed and never copied. Re-authing an
+  unattended box needs **no browser**: it is a static shareable gateway token, so provisioning is a
+  file copy plus the seed. Full mechanism + recovery: `docs/development/fleet-runbook.md`,
+  "Claude credential reachability".
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
   not prose. `worker-supervisor.sh` stamps `refs/lane-claims/<machine>/<issue>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a
