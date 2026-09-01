@@ -571,7 +571,13 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   which REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
   token `AUTHOR-PERFORMED`, never `PASS` — *an author's hand audit is not an independent one; weight it
   accordingly*, and it is sanctioned at all because *an audit whose working is shown is auditable, whereas
-  an absent one is not*. All six pipeline-gating agent definitions carry the matching report-of-record
+  an absent one is not*. **The classifier enforces that working too, by calling the SAME function the
+  writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
+  NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
+  reached the token that PROCEEDS at the merge point while the writer would have refused all three. A
+  non-emptiness test standing in for a validity test, and the same fact checked in two places with two
+  strengths; a report asserting the token without usable working is now
+  `NOT-RUN (report ungrammatical: …)`, naming the field and the defect. All six pipeline-gating agent definitions carry the matching report-of-record
   clause: the class is *spawns whose silence gates a merge*, so `flow-closer` (which owns the merge) and
   `sstable-developer` (which had queued work it never did) are in it beside the four reviewers.
   **The claim is about the CONSUMER and not about the agents, and stating it narrowly is the point:**

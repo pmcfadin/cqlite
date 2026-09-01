@@ -223,3 +223,13 @@ That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and `premerge-
 prints it on its own `PREMERGE: C-VERDICT` line — never folded into `PREMERGE: OK` — for the same
 reason the roborev wrapper's `WAIVED` is textually distinct from `PASS`: **nobody grepping the
 passing token may read a substitute as the real thing.**
+
+**The classifier holds a HAND-WRITTEN report to the same bar, because it calls the same function
+the writer does (#3751 round 1).** `verdict` reads reports the writer never produced — that is what
+a report of record IS — and it used to accept any NON-EMPTY `performed-by`/`reason`/`evidence`, so
+`performed-by: nobody`, `reason: x`, `evidence: tbd` all reached the token that PROCEEDS at the
+merge point while `record-author-performed` would have refused each one. That is a non-emptiness
+test standing in for a validity test, and the same fact checked in two places with two strengths.
+One judgement (`author_working_defect`) now has two RENDERINGS — a usage error naming the flag for
+the writer, a `NOT-RUN (report ungrammatical: …)` cause naming the field for the classifier — and
+two renderings cannot drift into two strengths.

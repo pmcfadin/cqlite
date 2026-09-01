@@ -43,6 +43,15 @@
 #                     never-opened  (ALWAYS carries a parenthesised cause)
 #   AUTHOR-PERFORMED  a disclosed substitute with its working recorded     6
 #
+# `AUTHOR-PERFORMED` is reported ONLY when the working is actually there: the required
+# disclosure verbatim, a `performed-by` of exactly `author`/`peer`, and a `reason` and an
+# `evidence` that pass the SAME placeholder judgement `record-author-performed` applies
+# (`author_working_defect`, one function, called by the writer AND by this classifier). A
+# report asserting the token without usable working is `NOT-RUN (report ungrammatical: …)`,
+# naming the field and the defect — a non-emptiness test standing in for a validity test let
+# `performed-by: nobody` / `reason: x` / `evidence: tbd` reach the PROCEEDING token (#3751
+# round 1, F3).
+#
 # Two rules make the grammar CLOSED rather than prefix-tested: the recorded result is
 # reduced to its FIRST WORD and matched by STRING EQUALITY, and any unrecognised value is
 # `NOT-RUN`, never passed through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
@@ -101,7 +110,9 @@
 #                           --performed-by author|peer
 #         The sanctioned FALLBACK, never recorded as independent. Requires the WORKING:
 #         a substantive reason, a named evidence artifact, and who performed it.
-#         Placeholders are refused exactly as `claim.sh --reason` refuses them.
+#         Placeholders are refused exactly as `claim.sh --reason` refuses them — by the same
+#         function `verdict` classifies a HAND-WRITTEN report with, so the two sides cannot
+#         hold the same value to two different strengths.
 #
 # EXIT CODES
 #   0   success (OPEN-OK, STATUS, RECORD-OK, verdict PASS)
@@ -171,8 +182,13 @@ one_line() {
   printf '%s' "${1:-}" | LC_ALL=C tr -d '\000' | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
 }
 
-# reject_placeholder <flag> <raw-value> <example> — the claim.sh (#2945) refusal, reused
-# rather than reinvented. THREE gates, in this order and for these reasons:
+# placeholder_defect <raw-value> — THE ONE JUDGEMENT, shared by every caller that has to
+# decide whether a free-text value RECORDS SOMETHING. It prints `<kind>|<token>` for the first
+# defect it finds and NOTHING when the value is usable; it never exits, so a caller that must
+# refuse (the writer) and a caller that must CLASSIFY (the verdict reader) can share it.
+#
+# This is the claim.sh (#2945) refusal, reused rather than reinvented. THREE gates, in this
+# order and for these reasons:
 #   1. an UNSUBSTITUTED '<…>' is refused on the RAW text, BEFORE sanitization, because
 #      sanitization turns `--reason c-audit:<slug>` into `c-audit:-slug` — not a sentinel,
 #      so the placeholder gate would ACCEPT it and record an unresolved template as the
@@ -185,23 +201,91 @@ one_line() {
 #      3 recordable chars, so the length gate passes and the record says `reason=why`,
 #      exactly as uninformative as no reason at all. Case-insensitive; this is the
 #      placeholder vocabulary of help text and templates, not an attempt at judging prose.
-reject_placeholder() {
-  local flag="$1" raw="$2" example="$3" tok
+placeholder_defect() {
+  local raw="${1:-}" tok
   case "$raw" in
-    *'<'*'>'*)
-      die_usage "$flag '$raw' still carries an UNSUBSTITUTED placeholder (<…>) — substitute it, e.g. $flag $example"
-      ;;
+    *'<'*'>'*) printf 'unsubstituted|\n'; return 0 ;;
   esac
   tok="$(sanitize_field "$raw")"
   if [ "$tok" = "unspecified" ] || [ "${#tok}" -lt 3 ]; then
-    die_usage "$flag must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$raw' records as '$tok', which is indistinguishable from saying nothing"
+    printf 'unrecordable|%s\n' "$tok"; return 0
   fi
   case "$(printf '%s' "$tok" | LC_ALL=C tr 'A-Z' 'a-z')" in
     why | reason | todo | tbd | tba | xxx | xxxx | placeholder | fixme | none | foo | bar | baz | n/a)
+      printf 'placeholder|%s\n' "$tok"; return 0
+      ;;
+  esac
+}
+
+# reject_placeholder <flag> <raw-value> <example> — the USAGE-refusing face of
+# placeholder_defect, for a value that arrives as a command-line flag. One judgement, two
+# faces: the messages differ per gate because the caller's next move does.
+reject_placeholder() {
+  local flag="$1" raw="$2" example="$3" defect kind tok
+  defect="$(placeholder_defect "$raw")"
+  kind="${defect%%|*}"
+  tok="${defect#*|}"
+  case "$kind" in
+    unsubstituted)
+      die_usage "$flag '$raw' still carries an UNSUBSTITUTED placeholder (<…>) — substitute it, e.g. $flag $example"
+      ;;
+    unrecordable)
+      die_usage "$flag must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$raw' records as '$tok', which is indistinguishable from saying nothing"
+      ;;
+    placeholder)
       die_usage "$flag '$raw' records as the PLACEHOLDER '$tok' — as uninformative as saying nothing. Say what it IS, e.g. $flag $example"
       ;;
   esac
-  printf '%s\n' "$tok"
+  printf '%s\n' "$(sanitize_field "$raw")"
+}
+
+# author_working_defect <performed-by> <reason> <evidence> — THE ONE PLACE the AUTHOR-PERFORMED
+# WORKING IS JUDGED (#3751 round 1, F3), called by BOTH the writer
+# (`record-author-performed`) and the CLASSIFIER that reads a report the writer never produced.
+# The same fact must not be checked in two places with two strengths, and it WAS: the
+# classifier accepted any NON-EMPTY value, so a hand-written `performed-by: nobody`,
+# `reason: x`, `evidence: tbd` reached the token that PROCEEDS at the merge point while the
+# writer would have refused all three. `verdict` reads hand-written reports by design — that is
+# what a report of record IS — so the classifier is the side that has to be as strong.
+#
+# Prints `<field>|<kind>|<token>` for the FIRST defect, or NOTHING when the triple records real
+# working. Kinds: absent | not-in-set | unsubstituted | unrecordable | placeholder. It never
+# exits: the writer maps a defect to a usage error, the classifier to a NOT-RUN cause.
+author_working_defect() {
+  local pb="${1:-}" reason="${2:-}" evidence="${3:-}" d
+  [ -n "$pb" ] || { printf 'performed-by|absent|\n'; return 0; }
+  case "$pb" in
+    author | peer) ;;
+    # SANITIZED for the RETURNED token only: it is rendered into a verdict line, and the raw
+    # value comes from a report written by the very agent being judged. Every DECISION above is
+    # made on the raw value, so this is display-only (#3312's rule, same as the cause).
+    *) printf 'performed-by|not-in-set|%s\n' "$(sanitize_field "$pb")"; return 0 ;;
+  esac
+  [ -n "$reason" ] || { printf 'reason|absent|\n'; return 0; }
+  d="$(placeholder_defect "$reason")"
+  [ -z "$d" ] || { printf 'reason|%s\n' "$d"; return 0; }
+  [ -n "$evidence" ] || { printf 'evidence|absent|\n'; return 0; }
+  d="$(placeholder_defect "$evidence")"
+  [ -z "$d" ] || { printf 'evidence|%s\n' "$d"; return 0; }
+}
+
+# author_defect_prose <field|kind|token> — render one defect as the tail of a NOT-RUN cause.
+# The operator action differs per field and per kind ("that is not a performer" / "that reason
+# says nothing" / "you left a template in it" are three different next moves), which is the
+# same reason the five NOT-RUN causes are named separately.
+author_defect_prose() {
+  local d="${1:-}" field kind tok
+  field="${d%%|*}"
+  kind="${d#*|}"; kind="${kind%%|*}"
+  tok="${d##*|}"
+  case "$kind" in
+    absent)        printf 'with no %s recorded\n' "$field" ;;
+    not-in-set)    printf "with performed-by '%s', which is not 'author' or 'peer'\n" "$tok" ;;
+    unsubstituted) printf 'whose %s still carries an UNSUBSTITUTED placeholder\n' "$field" ;;
+    unrecordable)  printf "whose %s records as '%s' — fewer than 3 recordable characters\n" "$field" "$tok" ;;
+    placeholder)   printf "whose %s is the PLACEHOLDER '%s'\n" "$field" "$tok" ;;
+    *)             printf 'with an unusable %s\n' "$field" ;;
+  esac
 }
 
 # validate_kind <kind> — a stage kind names a FILE, so it is validated rather than trusted:
@@ -430,7 +514,7 @@ CLAUSE
 # ONE place decides the token, so `status` and `verdict` can never form two opinions about
 # the same file (the divergence #3564 records one directory over).
 classify_report() {
-  local rpath="$1" open="$2" line value tok cause body
+  local rpath="$1" open="$2" line value tok cause body defect
 
   if [ "$open" -ne 1 ]; then
     printf 'NOT-RUN|stage never opened\n'; return 0
@@ -482,8 +566,19 @@ classify_report() {
       if ! LC_ALL=C grep -qF -- "$AUTHOR_DISCLOSURE" "$rpath"; then
         printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED without the required disclosure\n'; return 0
       fi
-      if [ -z "$(read_field "$rpath" performed-by)" ] || [ -z "$(read_field "$rpath" evidence)" ] || [ -z "$(read_field "$rpath" reason)" ]; then
-        printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED without its working (reason/evidence/performed-by)\n'; return 0
+      # THE WORKING IS JUDGED BY THE SAME FUNCTION THE WRITER USES (#3751 round 1, F3).
+      # A NON-EMPTINESS test standing in for a validity test is the shape this repo pins:
+      # `performed-by: nobody`, `reason: x`, `evidence: tbd` are all non-empty and all
+      # unusable, and each one reached the token that PROCEEDS at the merge point while
+      # `record-author-performed` would have refused it. The cause NAMES the field and the
+      # defect, because the operator action differs per field.
+      defect="$(author_working_defect \
+        "$(read_field "$rpath" performed-by)" \
+        "$(read_field "$rpath" reason)" \
+        "$(read_field "$rpath" evidence)")"
+      if [ -n "$defect" ]; then
+        printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED %s\n' "$(author_defect_prose "$defect")"
+        return 0
       fi
       printf 'AUTHOR-PERFORMED|\n'
       ;;
@@ -624,16 +719,45 @@ cmd_record_author_performed() {
   # (design.md §4): "an audit I performed and showed my working for is auditable, whereas an
   # absent one is not" is the reason the fallback is sanctioned AT ALL, so a recording
   # without the working would be the absent audit wearing the sanctioned token.
-  [ -n "$reason" ] || die_usage "record-author-performed: --reason <why> is required — say why an independent audit was not available; a substitute with no stated reason is not a disclosure"
-  [ -n "$evidence" ] || die_usage "record-author-performed: --evidence <artifact> is required — name the artifact that SHOWS THE WORKING (a file, a PR comment, a commit); an audit with no evidence is indistinguishable from an absent one"
-  [ -n "$performed_by" ] || die_usage "record-author-performed: --performed-by author|peer is required — peer-C is preferred and self-C is the sanctioned fallback, so which one happened is the whole disclosure"
-  case "$performed_by" in
-    author | peer) ;;
-    *) die_usage "record-author-performed: --performed-by must be exactly 'author' or 'peer', got '$performed_by'" ;;
-  esac
+  #
+  # JUDGED BY author_working_defect — the SAME function `verdict` classifies a hand-written
+  # report with (#3751 round 1, F3). Only the RENDERING differs: a flag the caller can fix
+  # gets a usage error naming the flag and an example, where the classifier gets a NOT-RUN
+  # cause. Two renderings of one judgement cannot drift into two strengths; two judgements did.
+  local defect field kind tok flag raw example
+  defect="$(author_working_defect "$performed_by" "$reason" "$evidence")"
+  if [ -n "$defect" ]; then
+    field="${defect%%|*}"
+    kind="${defect#*|}"; kind="${kind%%|*}"
+    tok="${defect##*|}"
+    case "$field" in
+      performed-by) flag="--performed-by"; raw="$performed_by"; example="author" ;;
+      reason) flag="--reason"; raw="$reason"
+        example="'no peer agent available on this box; C performed by hand against the spec deltas'" ;;
+      *) flag="--evidence"; raw="$evidence"; example="docs/round-artifacts/issue-3751-hand-c-audit.md" ;;
+    esac
+    case "$field:$kind" in
+      performed-by:absent)
+        die_usage "record-author-performed: --performed-by author|peer is required — peer-C is preferred and self-C is the sanctioned fallback, so which one happened is the whole disclosure" ;;
+      performed-by:not-in-set)
+        die_usage "record-author-performed: --performed-by must be exactly 'author' or 'peer', got '$performed_by'" ;;
+      reason:absent)
+        die_usage "record-author-performed: --reason <why> is required — say why an independent audit was not available; a substitute with no stated reason is not a disclosure" ;;
+      evidence:absent)
+        die_usage "record-author-performed: --evidence <artifact> is required — name the artifact that SHOWS THE WORKING (a file, a PR comment, a commit); an audit with no evidence is indistinguishable from an absent one" ;;
+      *:unsubstituted)
+        die_usage "record-author-performed: $flag '$raw' still carries an UNSUBSTITUTED placeholder (<…>) — substitute it, e.g. $flag $example" ;;
+      *:unrecordable)
+        die_usage "record-author-performed: $flag must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$raw' records as '$tok', which is indistinguishable from saying nothing" ;;
+      *:placeholder)
+        die_usage "record-author-performed: $flag '$raw' records as the PLACEHOLDER '$tok' — as uninformative as saying nothing. Say what it IS, e.g. $flag $example" ;;
+      *)
+        die_usage "record-author-performed: $flag is unusable ($kind)" ;;
+    esac
+  fi
   local reason_tok evidence_tok
-  reason_tok="$(reject_placeholder "record-author-performed: --reason" "$reason" "'no peer agent available on this box; C performed by hand against the spec deltas'")"
-  evidence_tok="$(reject_placeholder "record-author-performed: --evidence" "$evidence" "docs/round-artifacts/issue-3751-hand-c-audit.md")"
+  reason_tok="$(sanitize_field "$reason")"
+  evidence_tok="$(sanitize_field "$evidence")"
 
   load_stage "$issue" "$kind"
   if [ "$STAGE_OPEN" -ne 1 ]; then

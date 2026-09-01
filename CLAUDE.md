@@ -1140,7 +1140,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   Where no independent audit can be obtained, the SANCTIONED FALLBACK is
   `record-author-performed --reason <why> --evidence <artifact> --performed-by author|peer`, which
   REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
-  token `AUTHOR-PERFORMED`, never `PASS` — *an author's hand audit is not an independent one; weight
+  token `AUTHOR-PERFORMED`, never `PASS`. **The CLASSIFIER enforces that working too, by calling the
+  SAME function the writer does (#3751 round 1)** — `verdict` reads HAND-WRITTEN reports by design,
+  and it used to accept any NON-EMPTY `performed-by`/`reason`/`evidence`, so `performed-by: nobody`,
+  `reason: x`, `evidence: tbd` reached the token that PROCEEDS at the merge point while the writer
+  would have refused all three: *a non-emptiness test standing in for a validity test*, and the same
+  fact checked in two places with two strengths — *an author's hand audit is not an independent one; weight
   it accordingly*, and it is sanctioned at all because *an audit whose working is shown is
   auditable, whereas an absent one is not*.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies

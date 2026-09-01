@@ -102,6 +102,14 @@ form: *"an author's hand audit is not an independent one; weight it accordingly.
 - **WHEN** `--reason` is a placeholder (`why`/`todo`/`tbd`) or carries an unsubstituted `<…>`
 - **THEN** the recording is REFUSED as a usage error
 
+#### Scenario: the classifier is as strong as the writer
+- **WHEN** a HAND-WRITTEN report asserts `result: AUTHOR-PERFORMED` with the disclosure but with a
+  `performed-by` outside `author|peer`, or a `reason`/`evidence` the writer would refuse as a
+  placeholder, too short or an unsubstituted `<…>`
+- **THEN** `verdict` reports `NOT-RUN (report ungrammatical: AUTHOR-PERFORMED …)`, naming the field and
+  the defect — never `AUTHOR-PERFORMED`
+- **AND** a hand-written report WITH real working still reports `AUTHOR-PERFORMED` (the positive control)
+
 ### Requirement: The mechanism is recorded, with its limits
 
 The change SHALL commit a root-cause record stating, from committed source, that no agent in

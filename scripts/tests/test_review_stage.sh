@@ -346,6 +346,69 @@ rs "$R7" verdict c --issue 500
 rc_is 5 "author-performed: the token WITHOUT the disclosure is refused (exit 5, fail-closed)"
 has "AUTHOR-PERFORMED without the required disclosure" "author-performed: the refusal names the missing disclosure"
 
+# THE CLASSIFIER IS AS STRONG AS THE WRITER (#3751 round 1, F3). `verdict` reads reports the
+# WRITER never produced — a hand-written one — and it used to accept any NON-EMPTY
+# performed-by/reason/evidence, so `performed-by: nobody`, `reason: x`, `evidence: tbd` reached
+# the token that PROCEEDS at the merge point while `record-author-performed` would have refused
+# all three. The same fact must not be checked in two places with two strengths.
+#
+# hand_ap <report-path> <performed-by> <reason> <evidence> — a HAND-WRITTEN
+# AUTHOR-PERFORMED report carrying the required disclosure verbatim, so every case below fails
+# for the reason it names and not for a missing disclosure.
+hand_ap() {
+  { printf 'result: AUTHOR-PERFORMED\n\n'
+    printf 'performed-by: %s\n' "$2"
+    printf 'reason: %s\n' "$3"
+    printf 'evidence: %s\n' "$4"
+    printf '\n%s\n' "an author's hand audit is not an independent one; weight it accordingly"
+  } >"$1"
+}
+AP_R="$(REPORT_OF "$R7" 500 c)"
+
+# POSITIVE CONTROL FIRST: a hand-written report WITH real working still reads AUTHOR-PERFORMED.
+# Without this, a classifier that refused every hand-written report would satisfy every case
+# below — and the sanctioned fallback would be unreachable outside the writer.
+hand_ap "$AP_R" author 'no peer agent available on this box; hand C against the spec deltas' \
+  'docs/round-artifacts/issue-500-hand-c.md'
+rs "$R7" verdict c --issue 500
+rc_is 6 "hand-written AP: a hand report WITH its working still reads AUTHOR-PERFORMED (exit 6)"
+has "RESULT: AUTHOR-PERFORMED " "hand-written AP: the positive control reports the token"
+
+# THE FINDING'S OWN TRIPLE. Every field is present and non-empty, and every one is unusable.
+hand_ap "$AP_R" nobody x tbd
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: performed-by=nobody / reason=x / evidence=tbd is NOT-RUN, never AUTHOR-PERFORMED"
+hasnt "RESULT: AUTHOR-PERFORMED" "hand-written AP: the unusable triple does not reach the proceeding token"
+has "report ungrammatical: AUTHOR-PERFORMED" "hand-written AP: reported as ungrammatical, naming the token"
+
+# EACH FIELD, BY NAME — the operator action differs per field, exactly as it does for the five
+# NOT-RUN causes.
+hand_ap "$AP_R" nobody 'no peer agent available; hand C against the spec deltas' 'docs/x.md'
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: an out-of-set performed-by is refused by the CLASSIFIER too"
+has "performed-by" "hand-written AP: the refusal names performed-by"
+has "not 'author' or 'peer'" "hand-written AP: the refusal names the closed performer set"
+
+hand_ap "$AP_R" author 'x' 'docs/x.md'
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: a reason with fewer than 3 recordable characters is refused"
+has "recordable characters" "hand-written AP: the refusal names the recordable-characters rule"
+
+hand_ap "$AP_R" author 'tbd' 'docs/x.md'
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: a PLACEHOLDER reason is refused by the classifier, as by the writer"
+has "PLACEHOLDER" "hand-written AP: the refusal names it as a placeholder"
+
+hand_ap "$AP_R" author 'hand-c-audit:<slug>' 'docs/x.md'
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: an UNSUBSTITUTED <…> in the reason is refused by the classifier"
+has "UNSUBSTITUTED" "hand-written AP: the refusal names the unsubstituted template"
+
+hand_ap "$AP_R" author 'no peer agent available; hand C against the spec deltas' 'tbd'
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: a PLACEHOLDER evidence is refused (the working must be NAMED)"
+has "evidence" "hand-written AP: the refusal names the evidence field"
+
 # --- 9. record-author-performed: the refusal matrix ----------------------------
 R8="$(newrepo)"
 rs "$R8" open c --issue 600 --agent spec-auditor
