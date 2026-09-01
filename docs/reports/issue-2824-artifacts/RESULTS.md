@@ -14,7 +14,8 @@
 structurally incapable of exhibiting the effect AC1 asks about.** The lever is neither
 validated nor invalidated here. AC1's cold-i4i clause remains **UNMEASURED**.
 
-Raw artifacts: `ab/summary.csv`, `ab/scan-attributable.csv`, `ab/host.txt`, `ab/construction.md`,
+Raw artifacts: `ab/summary.csv`, `ab/scan-attributable.csv`, `ab/drain.csv`, `ab/advice-census.txt`,
+`ab/host.txt`, `ab/construction.md`,
 `ab/strace-madvise.{baseline,patched}.txt`. Harness: `cold-warm-ab.sh`.
 
 ## What ran
@@ -66,6 +67,85 @@ The arms differ in exactly one issued advice, `MADV_WILLNEED`; the #2210 `MADV_R
 present and untouched in both; **neither arm ever issues `MADV_SEQUENTIAL`** (#1143), verified at runtime
 rather than only by unit assert. The four `MADV_DONTNEED` calls are the runtime releasing thread stacks —
 identical in both arms, and not from the reader.
+
+## Method — reproducible without a script (the harness is deliberately not committed)
+
+The driver script is **not in the tree**, following the #2210 precedent for exactly this class of work
+(`docs/reports/issue-2210-madv-random-point-mmap-ab.md` kept its madvise A/B harness out as a scratchpad
+microbench). It took 22 review findings across 7 passes, three of them caused by the fix for the
+preceding one, and with the lever killed it has no future user — #3853 needs a different harness against
+i4i with a per-operation latency distribution this one never provided. So the method is recorded here
+instead, in full.
+
+**Environment** (all recorded in `ab/host.txt` by the run itself):
+
+| | |
+|---|---|
+| host class | `c7i.4xlarge`, 16 vCPU, 30 GiB — **not** an i4i, so AC1's i4i clause is UNMEASURED |
+| kernel | `6.17.0-1019-aws` |
+| corpus device | `/dev/nvme1n1`, model `Amazon Elastic Block Store`, `read_ahead_kb=128`, **measured 132 MB/s** on a cold `dd` |
+| corpus | `ws0.events` from `tools/ws0-corpus-gen` (4,000,000 rows / 40,000 partitions), `Data.db` 2,774,760,422 bytes (~630,000 pages) |
+| binaries | `ws0-scan-bench` built from ONE tree differing by one match arm — see `ab/construction.md` |
+
+**Build the two arms** (the construction assertion is the important part — see `ab/construction.md`):
+
+```bash
+cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- --out /data/ws0-2824
+# patched = HEAD of the reverted branch WITH `PrefetchMode::Auto => Some(memmap2::Advice::WillNeed)`
+# baseline = the same tree with that ONE arm returning None. Build both from one checkout,
+# reverting only that arm between builds; never build them across a rebase.
+cargo build --release -p ws0-corpus-gen --bin ws0-scan-bench
+```
+
+**Per round** (4 rounds; arm order REVERSES on even rounds, so each arm runs first exactly twice — the
+reversal only balances for exactly two arms and an even round count):
+
+```bash
+for phase in floor cold warm; do
+  # floor and cold each drop the page cache first; warm deliberately does not.
+  # Before each drop, poll /sys/block/nvme1n1/stat field 9 (in-flight) to 0, bounded,
+  # and RECORD the outcome (ab/drain.csv: DRAINED / TIMEOUT / UNREADABLE) — `sync` does
+  # not wait for reads and drop_caches skips pages still under I/O.
+  sync; sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'    # floor, cold only
+  /usr/bin/time -f "%e %M %F %R" -o <tm> \
+    env CQLITE_PREFETCH=<off|auto> CQLITE_DISK_ACCESS_MODE=mmap \
+    ./ws0-scan-bench --corpus /data/ws0-2824 <--setup-only|--passes 1>
+done
+```
+
+- `floor` = `--setup-only` at **`CQLITE_PREFETCH=off`**. Opens the reader, reads index/summary, performs
+  no scan. At `off` neither binary issues advice, so no asynchronous read-ahead outlives it to pre-warm
+  the cold phase that follows — at `auto` the patched floor would do exactly that, for one arm only.
+- `cold` = `--passes 1` at `CQLITE_PREFETCH=auto` — the policy under test.
+- `warm` = `--passes 1` at `auto`, cache left resident.
+- `LC_ALL=C` throughout: GNU `time` renders `%e` per locale and a decimal comma shifts every CSV column.
+- Both env vars are pinned because they **override** the compiled default; an inherited value would give
+  both arms the same policy and compare nothing.
+
+**Validity checks the run performed, all recorded:**
+
+- every scanning phase's JSON must parse, report **non-zero rows**, and match the first observed
+  `rows`/`cells`/`table_dirs` exactly — recorded as `work-shape:` in `ab/host.txt`
+  (`rows=4000000 cells=48000000`). Two arms scanning different work would otherwise complete cleanly.
+- the two arms' `sha256` must differ (one binary under two labels is an A/B that compares nothing).
+- `run: COMPLETE` in `ab/host.txt`; an aborted run leaves `ABORTED`.
+
+**Advice census** (`ab/advice-census.txt`), taken **after** all rounds so it cannot pollute a measurement,
+since it runs at `auto` and therefore issues real read-ahead:
+
+```bash
+env CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap \
+  strace -f -e trace=madvise -o <out> ./ws0-scan-bench --corpus /data/ws0-2824 --setup-only
+```
+
+Count **successful** calls only — `madvise` failure is non-fatal to the reader, so counting attempts
+would make a run with no effective prefetch look identical to a working one. `strace -f` splits a
+syscall interrupted by another thread into `<unfinished ...>` and `<... madvise resumed>) = R` lines, so
+neither half carries both the advice name and the return value; pair them **by pid** before counting, or
+2 of the 4 real `MADV_DONTNEED` calls read as failures.
+
+**Derivation:** `scan_major_faults = cold(major_faults) − floor(major_faults)`, per arm per round
+(`ab/scan-attributable.csv`). See the residual note below for what that quantity does and does not mean.
 
 ## Reading it
 
