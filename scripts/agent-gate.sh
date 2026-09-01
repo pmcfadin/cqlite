@@ -716,7 +716,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 46 cases over throwaway
+#                      features-load-bearing component: 48 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -15045,7 +15045,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 46 cases over throwaway fixture
+# proof for the features-load-bearing component: 48 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16534,7 +16534,11 @@ run_tooling_tests() {
   # pruning (a member's own `target/` is source; cargo's reported target_directory is not),
   # crediting at the cfg_attr recursion bound, all three `cfg!` delimiters, and a
   # STRUCTURAL assert that this very invocation stays inside its `command -v python3`
-  # guard. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # guard. Round 9 (job 65) adds the two fail-closed/soundness cases: an UNREADABLE source
+  # directory is a NAMED refusal rather than a silent omission (os.walk swallowed the
+  # error, so a live feature whose only site lived there was reported dead), and cargo's
+  # env-name normalization is matched exactly, so a punctuation-bearing feature name is
+  # credited. Every fixture is a LOCAL path workspace with no registry dependency and every
   # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
   # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
   # and must depend on neither a network nor a GNU userland.

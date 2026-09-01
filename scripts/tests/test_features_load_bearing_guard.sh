@@ -177,6 +177,13 @@
 #  47.  GREEN  — SOUNDNESS: `cfg!` takes all three macro delimiters — `cfg!(...)`,
 #                `cfg![...]`, `cfg! { ... }` — and the contract line advertises `cfg!`,
 #                so recognising only parentheses made that advertisement false.
+#  48.  RED    — FAIL-CLOSED: an UNREADABLE source directory is a NAMED refusal, not a
+#                silent omission. `os.walk` swallowed directory errors, so a live feature
+#                whose only site lived there was reported dead — the guard contradicting
+#                its own fail-closed promise.
+#  49.  GREEN  — SOUNDNESS: cargo's env spelling is uppercase with ONLY `-` -> `_`, so
+#                `plus+feat` is read as `CARGO_FEATURE_PLUS+FEAT`. Mapping all punctuation
+#                to `_` made that read never match.
 #  46.  STRUCT  — the gate must invoke THIS SUITE behind a `command -v python3` guard with
 #                a loud SKIP branch: it needs python3, it lives in the SKIP-aware
 #                tooling-tests component, and invoking it unguarded turned a supported
@@ -1260,13 +1267,66 @@ EOF
 expect_green "$D" "case 47"
 ok "SOUNDNESS: cfg!(...), cfg![...] and cfg! { ... } are all recognised, as the contract line advertises"
 
+# --- 48. RED (FAIL-CLOSED): an UNREADABLE source directory is not an empty one -
+# os.walk swallows directory errors by default, so an unreadable source dir was silently
+# omitted and a live feature whose only site lived there was reported DEAD. The guard must
+# now REFUSE, naming the directory.
+D="$(fixture unreadable-source-dir)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'hiddenfeat = []'
+mkdir -p "$D/a/src/locked"
+cat >"$D/a/src/locked/mod.rs" <<'EOF'
+#[cfg(feature = "hiddenfeat")]
+pub fn only_site_of_hiddenfeat() {}
+EOF
+chmod 000 "$D/a/src/locked"
+if [ -r "$D/a/src/locked" ]; then
+  # Running as root (or on a filesystem ignoring mode bits): the case cannot be staged,
+  # and a case that cannot stage its own subject must say so rather than pass vacuously.
+  chmod 755 "$D/a/src/locked"
+  fail_case "case 48: could not make a directory unreadable (running as root?), so this case cannot exercise the traversal-error path — refusing to report it as passed"
+fi
+run_guard "$D" && { chmod 755 "$D/a/src/locked"; cat "$TMPROOT/out.txt"; fail_case "case 48: an UNREADABLE source directory was silently omitted — the guard reported a verdict over sources it could not read"; }
+chmod 755 "$D/a/src/locked"
+grep -q 'could not traverse' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 48: the guard failed but did not NAME the traversal error"; }
+grep -q 'locked' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 48: the diagnostic does not name the directory it could not read"; }
+ok "FAIL-CLOSED: an unreadable source directory is a NAMED refusal, never a silent omission"
+
+# --- 49. GREEN (SOUNDNESS): cargo's own env-name normalization ---------------
+# Cargo permits `+`, `-`, `.` in a feature name and its env spelling uppercases while
+# converting ONLY `-` to `_`, so `plus+feat` is read as `CARGO_FEATURE_PLUS+FEAT`. Mapping
+# every punctuation char to `_` made that read never match, reporting the feature dead.
+D="$(fixture cargo-env-name-grammar)"
+python3 - "$D/a/Cargo.toml" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace('tfeat = []', 'tfeat = []\n"plus+feat" = []\n"dash-feat" = []\n"dot.feat" = []')
+open(p, 'w').write(s)
+PYEOF
+grep -q '"plus+feat" = \[\]' "$D/a/Cargo.toml" || fail_case "case 49: fixture edit did not plant plus+feat"
+# `a/tests/t.rs` is left alone: it is `tfeat`'s only site, and overwriting it would make
+# THAT feature dead and red this case for an unrelated reason.
+cat >"$D/a/build.rs" <<'EOF'
+fn main() {
+    for key in ["CARGO_FEATURE_PLUS+FEAT", "CARGO_FEATURE_DASH_FEAT", "CARGO_FEATURE_DOT.FEAT"] {
+        if std::env::var(key).is_ok() {
+            println!("cargo:rustc-cfg=saw_{}", key.len());
+        }
+    }
+}
+EOF
+expect_green "$D" "case 49"
+ok "SOUNDNESS: cargo's env spelling is matched exactly (uppercase, only \`-\` -> \`_\`), so punctuation-bearing feature names are credited"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=46
+CASE_COUNT_EXPECTED=48
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

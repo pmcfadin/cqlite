@@ -795,7 +795,15 @@ def cfg_feature_sites(code, strings):
 # is nothing to match. A `CARGO_FEATURE_` with no `[A-Z0-9_]` name after it therefore
 # credits EVERY feature of that package — the only reading that cannot report a live
 # feature dead.
-CARGO_FEATURE_MENTION_RE = re.compile(r'CARGO_FEATURE_([A-Z0-9_]*)')
+# CARGO'S OWN GRAMMAR AND NORMALIZATION, matched exactly (roborev job 65). Cargo permits
+# `+`, `-`, `_` and `.` in a feature name, and its environment spelling uppercases the
+# name and converts ONLY `-` to `_` — so `foo+bar` is read as `CARGO_FEATURE_FOO+BAR`.
+# Accepting only `[A-Z0-9_]` reported such a feature dead: a latent false FAIL, which in a
+# fleet-wide mandatory component would have surfaced on someone else's unrelated PR. (No
+# feature in this workspace has such a name today; `+` and `.` are both accepted by
+# `cargo metadata`, measured.) `-` cannot appear in the env spelling at all, being
+# normalized away, but accepting it costs only over-crediting.
+CARGO_FEATURE_MENTION_RE = re.compile(r'CARGO_FEATURE_([A-Z0-9_+.-]*)')
 
 
 def build_script_feature_mentions(raw_text):
@@ -805,8 +813,13 @@ def build_script_feature_mentions(raw_text):
 
 
 def cargo_feature_env_name(feature):
-    """cargo's build-script env spelling: uppercased, non-alphanumerics -> '_'."""
-    return re.sub(r"[^A-Za-z0-9]", "_", feature).upper()
+    """cargo's build-script env spelling: UPPERCASED with `-` -> `_`, and nothing else.
+
+    Mapping every non-alphanumeric to `_` was wrong in the direction that matters: it made
+    `foo+bar` look like `FOO_BAR`, so the real `CARGO_FEATURE_FOO+BAR` read never matched
+    and the feature was reported dead.
+    """
+    return feature.replace("-", "_").upper()
 
 
 # ---------------------------------------------------------------------------
@@ -1046,9 +1059,41 @@ def owners_of(path):
 # ---------------------------------------------------------------------------
 # 4) E1 — reference sites, per OWNING package, over the LEXED text.
 # ---------------------------------------------------------------------------
+# FAIL-CLOSED TRAVERSAL (roborev job 65). `os.walk` swallows every directory error by
+# default, so an unreadable source directory was silently OMITTED and a live feature whose
+# only reference site lived there was reported DEAD — a false FAIL, and a direct
+# contradiction of this guard's own fail-closed promise that "an unmeasured feature set is
+# never an empty one". An unmeasurable directory must NEVER become an empty one.
+def _walk_error(err):
+    fail("could not traverse %s while collecting feature reference sites (%s). An "
+         "unreadable directory is NOT an empty one: a reference site could be in there, "
+         "so refusing to report a verdict rather than silently omit it. Remedy: fix the "
+         "permissions, or remove the directory." % (getattr(err, "filename", "?"), err))
+
+
+# SYMLINKED DIRECTORIES ARE THE SAME CLASS, and were the one sibling this sweep found:
+# `os.walk` does not descend into them by default, so a member whose source directory is a
+# symlink would have been silently skipped (this checkout has one such directory today,
+# `.claude/skills/rust-skills`). Links are now followed, BOUNDED two ways: a realpath
+# visited-set makes a cycle impossible, and a link resolving OUTSIDE the repository root is
+# not followed because ownership is decided by realpath containment — nothing out there can
+# be a member's source, so descending could only cost time.
 scanned_files = 0
-for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
-    dirnames[:] = [d for d in dirnames if not prune_dir(dirpath, d)]
+visited_dirs = {os.path.realpath(REPO_ROOT)}
+for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, followlinks=True):
+    keep = []
+    for d in dirnames:
+        if prune_dir(dirpath, d):
+            continue
+        full_d = os.path.join(dirpath, d)
+        real_d = os.path.realpath(full_d)
+        if real_d in visited_dirs:
+            continue
+        if os.path.islink(full_d) and not (real_d == REPO_ROOT or real_d.startswith(REPO_ROOT + os.sep)):
+            continue
+        visited_dirs.add(real_d)
+        keep.append(d)
+    dirnames[:] = keep
     for fname in filenames:
         if not fname.endswith(".rs"):
             continue
