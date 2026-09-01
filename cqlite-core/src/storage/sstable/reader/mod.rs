@@ -161,7 +161,8 @@ pub(crate) fn index_db_sibling(data_path: &Path) -> Option<PathBuf> {
 
 /// Minimum SSTable size for the point-read path to get its OWN mmap advised
 /// `MADV_RANDOM` (issue #2210). Below this the point source shares the scan's
-/// `Arc<Mmap>` unchanged (no 2nd mapping, no advice): the whole file is small
+/// `Arc<Mmap>` unchanged (no 2nd mapping, so it carries whatever
+/// `mmap_advice_for` gave the scan plane): the whole file is small
 /// enough that the kernel's default read-ahead cheaply makes it resident, and
 /// `MADV_RANDOM` would only add per-page synchronous faults. Above it, scattered
 /// point-lookup faults otherwise waste the ~128 KiB read-ahead window per read,
@@ -170,9 +171,10 @@ pub(crate) fn index_db_sibling(data_path: &Path) -> Option<PathBuf> {
 /// is measurement-derived on Linux/EBS: the win is unambiguous by 4 MiB; 8 MiB
 /// leaves 2x margin above the sub-MB "wash" zone. See
 /// docs/reports/issue-2210-madv-random-point-mmap-ab.md. The SCAN mapping never
-/// gets `MADV_RANDOM`; the default `PrefetchMode::Auto` leaves it unadvised
-/// entirely (measured #1143 behaviour), an explicit `Sequential`/`WillNeed` does
-/// advise it. It backs BOTH `BlockSource::Mapped` and `scan_positional_source`,
+/// gets `MADV_RANDOM`; under the default `PrefetchMode::Auto` it gets
+/// `MADV_WILLNEED` (asynchronous read-ahead, no drop-behind — issue #2824),
+/// `Off` leaves it unadvised, and an explicit `Sequential`/`WillNeed` is honoured
+/// as named. It backs BOTH `BlockSource::Mapped` and `scan_positional_source`,
 /// and the windowed / Summary-guided scan feed reads through the latter
 /// (`ReadAt`), NOT through `BlockSource` (#2876) — so a claim scoped to
 /// `BlockSource` describes nothing that a real scan does.

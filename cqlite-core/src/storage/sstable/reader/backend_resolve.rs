@@ -168,25 +168,49 @@ pub(super) const fn direct_io_available() -> bool {
 /// single call site are gated to `#[cfg(unix)]`. On non-Unix targets the mmap
 /// backend simply issues no read-ahead advice.
 ///
-/// [`PrefetchMode::Auto`] deliberately issues **no** madvise (issue #1143).
-/// `MADV_SEQUENTIAL` couples aggressive read-ahead with *drop-behind*: pages are
-/// evicted from the page cache as soon as the scan moves past them. In isolation
-/// that is fine (mmap scans are ~40% faster than buffered), but under concurrent
-/// write load the page-cache pressure means the just-dropped pages are gone by
-/// the time an overlapping scan needs them again, so re-reads take *synchronous*
-/// major page faults on the tokio worker thread and the read-side p99 tail blows
-/// up (~2x regression). Relying on the kernel's default read-ahead (no
-/// drop-behind) keeps the isolated mmap win while letting the page cache retain
-/// hot pages, which collapses that tail. Callers who genuinely want the
-/// drop-behind behaviour can still request `Sequential` explicitly
+/// # Policy: `Auto` issues `MADV_WILLNEED`, never `MADV_SEQUENTIAL` (#2824, #1143)
+///
+/// [`PrefetchMode::Auto`] issues `MADV_WILLNEED` on the scan mapping (issue
+/// #2824). Cold page-in is the largest term in scan wall-time (measured 60.17
+/// us/row, ~98% of wall-time variance, #2605); `MADV_WILLNEED` queues
+/// **asynchronous** read-ahead for the mapping so those pages are faulted in by
+/// the kernel rather than one synchronous major fault at a time on the reading
+/// thread.
+///
+/// `MADV_SEQUENTIAL` is PROHIBITED here (issue #1143) and this arm must never be
+/// changed to emit it. Its harm is **drop-behind**: the kernel aggressively
+/// evicts pages *behind* the read cursor, so under concurrent write load the
+/// just-dropped pages are gone when an overlapping scan re-reads them, the
+/// re-reads take synchronous major page faults on the tokio worker thread, and
+/// the read-side p99 tail regresses ~2x. `MADV_WILLNEED` has **no** drop-behind
+/// semantics — it queues read-ahead and nothing else — so #1143's mechanism does
+/// not transfer to it. The two advices are not interchangeable. Callers who
+/// genuinely want drop-behind must still ask for it explicitly
 /// (`CQLITE_PREFETCH=sequential` / [`StorageConfig::prefetch`]).
+///
+/// # Which mapping this advises
+///
+/// The sole production call site (`build_block_sources`) applies this to the
+/// **scan** mapping, the one held by `ScanSource::Mapped` and reused by
+/// `scan_positional_source` for the Summary-guided walk and the windowed scan
+/// feed (#2876) — i.e. the hot scan plane. It is never applied to the dedicated
+/// `MADV_RANDOM` point mapping (#2210). Below
+/// `POINT_MMAP_MADV_RANDOM_MIN_BYTES` (8 MiB) there is no second mapping and the
+/// point path shares this one; read-ahead over a file that small is cheap, which
+/// is #2210's own reasoning for not building a separate mapping there.
+///
+/// A failed `madvise` is non-fatal and logged at the call site: opening an
+/// SSTable never fails because the kernel declined an advisory hint.
+///
+/// [`StorageConfig::prefetch`]: crate::config::StorageConfig::prefetch
 #[cfg(unix)]
 pub(super) fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
     match prefetch {
-        // No madvise: rely on the kernel's default read-ahead. Chosen for `Auto`
-        // to avoid `MADV_SEQUENTIAL` drop-behind evicting hot pages under
-        // concurrent write load (issue #1143).
-        PrefetchMode::Off | PrefetchMode::Auto => None,
+        // Explicitly disabled: rely on the kernel's default read-ahead only.
+        PrefetchMode::Off => None,
+        // Default. Asynchronous read-ahead, NO drop-behind (issue #2824); see
+        // the #1143 prohibition above — this arm must never emit `Sequential`.
+        PrefetchMode::Auto => Some(memmap2::Advice::WillNeed),
         // Explicit opt-in to aggressive read-ahead + drop-behind. Best for a
         // one-shot full scan that will not be re-read and should not pin the
         // whole file in the page cache.

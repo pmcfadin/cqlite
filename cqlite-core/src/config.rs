@@ -211,12 +211,13 @@ pub struct StorageConfig {
 
     /// Read-ahead / prefetch strategy applied to the chosen backend.
     ///
-    /// Defaults to [`PrefetchMode::Auto`], which issues **no** mmap `madvise`
-    /// (relying on the kernel's default read-ahead) and only enables the
-    /// direct-I/O prefetch window of [`Self::direct_io_prefetch_bytes`]. Set
-    /// [`PrefetchMode::Off`] to disable explicit hints (relying only on default
-    /// kernel read-ahead / single-block direct reads). Can also be set via
-    /// `CQLITE_PREFETCH` (`off` / `sequential` / `willneed` / `auto`).
+    /// Defaults to [`PrefetchMode::Auto`], which issues `MADV_WILLNEED` on the
+    /// mmap scan mapping (asynchronous read-ahead, no drop-behind — issue #2824)
+    /// and enables the direct-I/O prefetch window of
+    /// [`Self::direct_io_prefetch_bytes`]. Set [`PrefetchMode::Off`] to disable
+    /// explicit hints (relying only on default kernel read-ahead / single-block
+    /// direct reads). Can also be set via `CQLITE_PREFETCH`
+    /// (`off` / `sequential` / `willneed` / `auto`).
     #[serde(default)]
     pub prefetch: PrefetchMode,
 
@@ -265,11 +266,13 @@ pub enum PrefetchMode {
     Sequential,
     /// Hint that the mapped/region bytes will be needed soon (eager fault-in).
     WillNeed,
-    /// Let the backend choose. For mmap this issues **no** madvise and relies on
-    /// the kernel's default read-ahead: `MADV_SEQUENTIAL`'s drop-behind evicts
-    /// hot pages under concurrent write load and inflates the read-side p99 tail
-    /// (issue #1143), so `Auto` avoids it while keeping the isolated mmap win.
-    /// For direct I/O it enables the windowed read-ahead
+    /// Let the backend choose. For mmap this issues `MADV_WILLNEED` on the scan
+    /// mapping (issue #2824): asynchronous read-ahead, which attacks the cold
+    /// page-in cost that dominates scan wall-time. It is deliberately NOT
+    /// `MADV_SEQUENTIAL`, whose drop-behind evicts hot pages under concurrent
+    /// write load and inflates the read-side p99 tail ~2x (issue #1143);
+    /// `MADV_WILLNEED` has no drop-behind semantics, so that mechanism does not
+    /// transfer. For direct I/O it enables the windowed read-ahead
     /// ([`StorageConfig::direct_io_prefetch_bytes`]). Request
     /// [`PrefetchMode::Sequential`] explicitly for `MADV_SEQUENTIAL` behaviour.
     #[default]
