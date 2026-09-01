@@ -1310,9 +1310,38 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   → rust-reviewer + roborev on the lite-green diff   (review-first, DEFAULT)
   → fix rounds: --lite re-cert + diff-scoped targets  (NEVER a full gate per round)
   → open PR
-  → flow-closer { FULL gate ONCE → C → final roborev → merge-on-green → finalize }
+  → flow-closer { rebase → FULL gate ONCE → C → ROBOREV LAST → premerge-assert → arm → finalize }
 ```
 
+- **ROBOREV LAST, and a later rebase VOIDS the roborev round (#3752).** The endgame order is
+  **rebase → gate of record → C → roborev → `premerge-assert` → arm**, and the reason is a
+  **BYTE ASYMMETRY** that decides it by itself: **a roborev round changes no bytes, so reviewing
+  after gating costs nothing and cannot invalidate a gate PASS; a rebase changes bytes, so gating
+  or reviewing before it certifies the wrong tree.** Review-after-gate is free; gate-after-review
+  is not. A rebase REWRITES the reviewed commit, so a PR can truthfully record "roborev: PASS"
+  about a commit that no longer exists on the branch being merged — measured on PR #3735, whose
+  genuine job 304 at `d3812f59` (`findings: NONE`, 1.07M input tokens) became, after the lane's
+  correct rebase, a `git cat-file -t` that reports no such object, with TWO unreviewed commits
+  after the reviewed content, one of them the semantic rebase-conflict fix in the only file that
+  overlapped `main` — i.e. the most review-worthy commit on the branch. So **if you rebase, you
+  are back at the gate**: re-gate, re-review, re-assert, in that order.
+  **POST THE BLOCK ON THE PR.** `premerge-assert.sh`'s `review-binding` leg reads the roborev job
+  id from a `==== ROBOREV REVIEW SUMMARY ====` block recorded in the PR body or a top-level
+  comment, so recording it is what lets the merge gate know a review happened at all.
+  **AND A NON-EMPTY SEMANTIC OVERLAP MEANS GIT CAN MERGE CLEANLY AND STILL BE WRONG.** After a
+  rebase, compute the overlap over `merge-base..origin/main` — **never `HEAD..origin/main`**,
+  which includes reverting your own work (measured 16 files vs the correct 3) — re-run the tests
+  touching every overlapping file, and EXPECT a fix. Any such fix is new code, so it invalidates
+  the gate AND the review.
+- **How a lead actually stops a merge (#3752 AC7).** The sanctioned stop is **converting the PR
+  to draft** (`gh pr ready --undo <pr>`), which GitHub enforces against merging, or a per-tier
+  `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop** — it removes the auto-merge
+  REQUEST, and a plain `gh pr merge --squash` succeeds immediately afterward (measured: #3735
+  merged three minutes after the lead disarmed it). A column-zero `HOLD:` line on the PR or on
+  the issue it closes is now mechanical too, because `premerge-assert`'s `hold-check` leg reads
+  it (30-minute disarm window, a named committed constant with no env override); a lead clears
+  one with a column-zero `GO:` or `RELEASE:` line. But a draft is the only stop that holds
+  without the lane's cooperation.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
@@ -1968,7 +1997,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
   `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
   (#2456/#3465) — refusing to merge unless the PR head still equals the certified SHA **AND** a gate
-  of record exists for it — and re-reads comments for a fresh `HOLD:` order. **The third argument is
+  of record exists for it. Since #3752 it also runs two legs BEFORE its head check, both fail-closed
+  and both refusing on `UNMEASURED` (a positive verdict requires a positive measurement):
+  **`PREMERGE: REVIEW-BINDING`** — the roborev job recorded on the PR must have a reviewed head that
+  is an ANCESTOR of the certified sha (`git merge-base --is-ancestor` is the load-bearing test and
+  runs FIRST; `git cat-file -t` is a DIAGNOSTIC ONLY, because a rebase leaves the old commit dangling
+  and reflog-reachable so it still answers `commit`) with no reviewable code after it by
+  `classify-docs-only.sh`, the reviewed head being derived from the JOB RECORD's `git_ref`
+  (`<base40>..<head40>`), never from the `Enqueued job <N> for <sha>` line, which for a range review
+  names only the BASE; a **code-free PR diff** is a loudly DECLARED `NOT-APPLICABLE`, since a
+  code-free diff cannot be roborev-certified at all. **`PREMERGE: HOLD-CHECK`** — the machine-readable
+  half of the `HOLD:` re-read (below). **The third argument is
   REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
   certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
   22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
