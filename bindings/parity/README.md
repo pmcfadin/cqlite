@@ -234,7 +234,7 @@ by name in the floor.
 | R1 | python `float` `double` | `float` | `int` | `value.rs:40-41`, `into_pyobject` on an `f64` |
 | R2 | python `blob` | `bytes` | `bytearray`, `memoryview` | `value.rs:52`, `PyBytes::new` |
 | R3 | python `set<T>` | `frozenset` | mutable `set` | `set_to_py` / `value_to_hashable_key` build `PyFrozenSet` |
-| R4 | python `duration` | `cqlite.Duration` | anything with `.months/.days/.nanos` | `value.rs:59`, `duration_to_py` |
+| R4 | python `duration` | `cqlite.Duration` | anything with `.months/.days/.nanos` | `value.rs:59-71`, `Py::new(py, Duration {…})` |
 | R5 | node `blob` | `Buffer` | any `Uint8Array` | `value.rs:232`, `create_buffer_copy` |
 | R6 | node `duration` | **exactly** `{days, months, nanos}` | any object containing those keys | `value.rs:335-342`, `duration_to_object` |
 
