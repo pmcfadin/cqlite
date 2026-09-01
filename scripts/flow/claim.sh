@@ -252,8 +252,33 @@ set -euo pipefail
 prog="$(basename "$0")"
 
 die_usage() { echo "$prog: $*" >&2; exit 64; }
-note()      { echo "[claim] $*" >&2; }
-emit()      { echo "CLAIM: $*"; }
+# redact_urls <text> — strip URL userinfo from ANYTHING this script prints.
+#
+# WHY (#3436, roborev round 28, High): CLAIM_REMOTE is the SAME variable
+# advertised-collision-scan.sh already redacts (`redact_remote`, round 7) because it
+# "accepts a URL, and this script printed it VERBATIM". claim.sh interpolated $REMOTE into
+# ~20 diagnostics — including the three new legacy-branch verdicts — with no redaction, so a
+# credential-bearing `https://user:token@host/org/repo.git` wrote the TOKEN into every log,
+# PR comment and CI transcript carrying the output. Two scripts, one env var, one of them
+# leaking, is the split this closes.
+#
+# AT THE ONE EMIT BOUNDARY, NOT PER SITE. CLAUDE.md (roborev job 230) is explicit: "each
+# process neutralises the keywords at its ONE emit boundary ... never per interpolation
+# site — a per-site escape is a list to keep complete." note() and emit() are the only two
+# output boundaries here (everything else printf's a VALUE into a caller's substitution,
+# which then flows through emit), so covering both is complete BY CONSTRUCTION and a future
+# diagnostic cannot reintroduce the leak by forgetting a wrapper.
+#
+# Only userinfo goes. Scheme, host and path are the useful half of "which remote failed",
+# and over-redacting would make that unanswerable — the same trade redact_remote states.
+# A bare path or an ssh-style `git@host:org/repo` has no `://userinfo@` and passes through
+# unchanged. `sed -E` is honoured by GNU and BSD sed alike (macOS is a first-class gate
+# host), and the class is POSIX so no GNU-only escape is involved.
+redact_urls() {
+  printf '%s\n' "$*" | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^[:space:]@/]*@#\1***@#g'
+}
+note()      { echo "[claim] $(redact_urls "$*")" >&2; }
+emit()      { echo "CLAIM: $(redact_urls "$*")"; }
 
 # emit_infra <line> — a transient infrastructure failure (ls-remote/push/delete
 # unreachable): a retryable ERROR, NEVER a lost/absent verdict. Callers pair it

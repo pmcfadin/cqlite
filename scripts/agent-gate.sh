@@ -18170,55 +18170,87 @@ run_tooling_tests() {
     return 0
   fi
 
-  # machine-local lane-lock regression suite (#3436): hermetic (mktemp lane roots, real
-  # `sleep` processes for liveness, no python3/cargo/gh/git/network/datasets, seconds).
-  # Pins scripts/flow/lane-lock.sh, the lock that refuses a SECOND LOCAL SESSION in an
-  # occupied lane directory — the collision `refs/claims/issue-<N>` cannot stop, because
-  # its holder identity is machine+actor and two Claude sessions on one box share both.
-  # #3436 AC4 requires coverage of BOTH directions with neither passing by doing
-  # nothing, so the suite asserts the OCCUPIED line names the FIRST holder's pid, that a
-  # reclaim actually REWROTE the record and logged the displaced token + liveness +
-  # reason, and that every UNKNOWN-* refusal left the record BYTE-IDENTICAL (a genuine
-  # byte comparison in every one of those cases since #3436 FIX 13c — this sentence was
-  # written when only the duplicate-key case compared bytes and the rest compared the
-  # holder token, so a refusal that rewrote acquired-ts would have passed). Placed
-  # BEFORE the python3 gate because it needs no python3 and must never be reached only
-  # on hosts that happen to have one. A failure FAILs the component, mirroring the
-  # keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_lane_lock.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (machine-local lane-lock regression suite #3436); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
-    return 0
-  fi
+  # PLATFORM GATE for the two #3436 suites below (roborev round 28, Medium). macOS is a
+  # FIRST-CLASS gate host — this script carries `Darwin) … taskpolicy -c utility`, a BSD
+  # `stat` branch, a /bin/bash-3.2 floor, and scripts/tests/test_agent_gate_tree_portability.sh
+  # exists solely because a GNU-only construct shipped without a macOS path. The lane lock is
+  # Linux-`/proc`-SPECIFIC BY DESIGN: its holder identity is boot-id + `/proc/<pid>/stat`
+  # start-ticks, and on a host without /proc `acquire` REFUSES with
+  # reason=unresolved-identity. So the suites cannot pass there — test_lane_lock.sh asserts
+  # real acquisitions against real /proc identities, and test_advertised_collision_scan.sh
+  # asserts a NON-EMPTY lock record from a real `lane-lock.sh acquire 600`. Run unguarded,
+  # both would FAIL `tooling-tests` on every macOS gate host.
+  #
+  # THIS IS A SKIP, AND IT IS NOT A COVERAGE HOLE WEARING A SKIP'S CLOTHES. The distinction
+  # CLAUDE.md draws is whether something COVERABLE is being excused: here the subject does not
+  # exist on the platform — the feature is documented as unavailable and its own contract on
+  # such a host is a refusal — so there is no behaviour to cover, as against `node-bindings`,
+  # where the suite would run fine given node. It is DECLARED in the log on every run, for the
+  # same reason flight-tests prints what it does not execute: a lane that omits coverage
+  # silently is indistinguishable from one that covers it.
+  #
+  # Keyed on the gate's OWN `_AGENT_GATE_OS`, which honours AGENT_GATE_TEST_OS — an EXISTING
+  # seam (used by the summary/mold/perf paths), so the guard is exercisable on Linux instead
+  # of being a branch nobody can reach. NOT a bare `[ -d /proc ]` probe: a capability test
+  # that misfires on Linux would silently disable both suites, which is the failure mode this
+  # comment is warning about, and it would be invisible precisely where it matters.
+  if [ "$_AGENT_GATE_OS" != "Linux" ]; then
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh + test_advertised_collision_scan.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name]   the machine-local lane lock is Linux-/proc-specific by design (boot-id + /proc/<pid>/stat"
+    echo ">>> [$name]   start-ticks); on a host without /proc \`acquire\` refuses with reason=unresolved-identity,"
+    echo ">>> [$name]   so there is no behaviour to assert. Every OTHER tooling-tests suite still runs here."
+  else
 
-  # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
-  # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
-  # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
-  # the machine-visible signature of an ADVERTISED collision window -- board
-  # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
-  # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
-  # legitimate release-on-finalize while the board invited a second claimant. The suite
-  # pins each fact's absence separately (a detector firing on two of three facts fails),
-  # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
-  # exits 0, and that it mutates nothing. Same
-  # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
-  # component, mirroring the keyspace-scoping guard.
-  echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
-    return 0
+    # machine-local lane-lock regression suite (#3436): hermetic (mktemp lane roots, real
+    # `sleep` processes for liveness, no python3/cargo/gh/git/network/datasets, seconds).
+    # Pins scripts/flow/lane-lock.sh, the lock that refuses a SECOND LOCAL SESSION in an
+    # occupied lane directory — the collision `refs/claims/issue-<N>` cannot stop, because
+    # its holder identity is machine+actor and two Claude sessions on one box share both.
+    # #3436 AC4 requires coverage of BOTH directions with neither passing by doing
+    # nothing, so the suite asserts the OCCUPIED line names the FIRST holder's pid, that a
+    # reclaim actually REWROTE the record and logged the displaced token + liveness +
+    # reason, and that every UNKNOWN-* refusal left the record BYTE-IDENTICAL (a genuine
+    # byte comparison in every one of those cases since #3436 FIX 13c — this sentence was
+    # written when only the duplicate-key case compared bytes and the rest compared the
+    # holder token, so a refusal that rewrote acquired-ts would have passed). Placed
+    # BEFORE the python3 gate because it needs no python3 and must never be reached only
+    # on hosts that happen to have one. A failure FAILs the component, mirroring the
+    # keyspace-scoping guard.
+    echo ">>> [$name] bash scripts/tests/test_lane_lock.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (machine-local lane-lock regression suite #3436); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+
+    # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
+    # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
+    # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
+    # the machine-visible signature of an ADVERTISED collision window -- board
+    # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
+    # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
+    # legitimate release-on-finalize while the board invited a second claimant. The suite
+    # pins each fact's absence separately (a detector firing on two of three facts fails),
+    # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
+    # exits 0, and that it mutates nothing. Same
+    # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
+    # component, mirroring the keyspace-scoping guard.
+    echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
   fi
 
   # claim-lock suite (#3436 FIX 13d): it needs bash + git + coreutils and NO python3, and
