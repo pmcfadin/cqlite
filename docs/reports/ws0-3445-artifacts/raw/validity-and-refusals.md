@@ -125,56 +125,28 @@ its own load-sensitivity experiment.
 The share is a **ratio measured on a pinned core**, and contention slows numerator and
 denominator together, which is why the slope is ~0. The verdict is not close to load-sensitive.
 
-**AC2 — the conclusion survives the exact contamination that would break it.**
+**AC2 — the corrected 1.06x ratio, and what contention can and cannot do to it.**
 
-The lead's stated fear is precisely right about the direction: contention inflates stalls and
-so pushes vint's stall share **up** toward its cycle share, manufacturing "the dependency IS
-visible". The data shows that direction (slope **+0.0042 pp per unit load**) — and the
-conclusion still holds:
+This paragraph originally argued that contention could not destroy an "anti-concentration"
+finding. **That finding did not exist** — it was a denominator artifact (see the report's §4),
+and AC2's answer is PARITY. So the question is the other one: could contention hide a real
+effect in either direction? Both sides on the in-binary basis:
 
-| | stall share | ratio to cycle share (needs < 1.0) |
+| | slope vs peak load | idle extrapolation |
 |---|--:|--:|
-| most contended stall rep (peak 8.67) | 1.5315% | **0.899x** |
-| mean of the three | 1.3732% | 0.806x |
-| extrapolated to idle | 1.3405% | **0.785x** |
+| cycle share, in-binary | -0.0044 pp/unit | 3.0068% |
+| stall share, in-binary | +0.0441 pp/unit | 2.8199% |
 
-So the anti-concentration finding is **conservative** under contention: quiescence makes it
-*stronger*, not weaker, and even the worst contended rep leaves VInt less stall-dense than the
-average scan cycle. Had the finding been "the dependency IS visible", contention would have
-been a fatal confound and the number would have had to be withheld. It is the other way round.
+| ratio | value |
+|---|--:|
+| at the measured means | **1.061x** |
+| at both idle extrapolations | **0.938x** |
 
-## DECLARED GAP — the quiescence check is PROSPECTIVE; the published reps were not validated by it
-
-Stated as its own heading, not a footnote, because a report implying a control the measurement
-did not have is worse than one declaring the gap.
-
-**The `loadavg before/after` column above is an ENDPOINT PAIR, not an across-rep bound.** It is
-exactly the read that `harness/record-scan.sh`'s own header now calls insufficient: loadavg is a
-decaying average, so the "before" value describes the minute *preceding* the rep, and a peer
-gate can start and finish inside the window without either endpoint moving.
-
-So, precisely:
-
-* **No load data was captured DURING any published rep.** The across-window sampler, the
-  `quiescence-verdict.txt` file and the non-zero refusal exit were all added AFTER the published
-  reps were taken, in `528a1515a` and `519447871`. They are **prospective only**.
-* **No published rep carries a quiescence verdict**, and replaying the new check against the
-  endpoint data is not the same test — so the honest answer to "would any published rep be
-  refused under the new check?" is: **on the endpoint data available, all of them would be**
-  (every rep's endpoint peak exceeds the 3.0 bound; only `ac1-perfprof-1` at 2.58 is close), and
-  **the across-rep data the new check actually reads does not exist for them.**
-* What the published reps WERE validated by: `pct_running == 100.00%` on all six events (rules
-  out counter multiplexing, the usual contention artifact), warm (a full untimed prewarm pass
-  every rep), pinned to one core with affinity read back from the kernel, 0 lost samples, >= 3
-  reps per arm, and the interleaved A/B design for the cross-route comparison.
-* What they were NOT validated by: an across-rep load bound.
-
-The basis for trusting the verdict anyway is measured, not asserted, in `load-sensitivity.txt`
-and summarised in the report: the share is a **ratio on a pinned core**, its slope against peak
-load is **-0.0009 pp per unit** over a 5x load range, and flipping the pre-registered verdict
-needs 10x the entire observed load-induced variation. A reader who rejects that argument should
-treat the numbers as provisional pending a quiesced re-run; the mechanism to do that re-run is
-now in the tree and refuses non-zero if the box is not quiet.
+Both readings sit near 1.0, so the parity conclusion is not an artifact of load. But the
+stall-side rep spread is **0.83 pp (sd 0.42)** across only a 1.5x load range, so **an effect of
+a few percent would sit inside this instrument's noise**. That is a resolution limit, and it is
+why AC2 is reported as NOT CONFIRMED rather than as "no dependency exists". A quiesced re-run
+would narrow that spread and is the single measurement that would most improve this answer.
 
 ## Status of the confirmatory quiet reps
 

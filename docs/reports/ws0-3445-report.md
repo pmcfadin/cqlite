@@ -292,6 +292,7 @@ worst case in each row:
 | **in-binary denominator, mean** | **2.9779%** | **KILL by 0.02 pp** |
 | **in-binary denominator, worst rep** | **3.1259%** | **ABOVE the line** |
 | **in-binary denominator, probe route** | **3.9763%** | **ABOVE the line** |
+| **in-binary denominator, load-extrapolated to idle** | **3.0068%** | **ABOVE the line** |
 
 So: **on the pre-registered basis the verdict is KILL with a 1.30 pp margin and nothing in the
 method threatens it. On an in-binary basis it is MARGINAL** — the mean sits 0.02 pp under the
@@ -363,20 +364,15 @@ gate against gate; a perf run holds no slot). Applied strictly to the >= 2-3 loa
   and denominator together). Total spread over the 5x range is **0.1338 pp**; extrapolated to
   idle the share is **1.7087%** against a measured mean of 1.7027%. Flipping KILL -> FUND needs
   **1.2973 pp — 10x the entire observed load-induced variation.**
-* **AC2 survives the contamination that would break it.** Contention inflates stalls and so
-  pushes vint's stall share *up* toward its cycle share — the exact way a contended rep could
-  manufacture "the dependency IS visible" — and the data shows that direction (**+0.0042 pp per
-  unit load**). It still does not reach the conclusion's boundary: the most contended stall rep
-  gives ratio **0.899x**, the mean 0.806x, and the idle extrapolation **0.785x**. Quiescence
-  would make this finding *stronger*, not weaker. Had it come out the other way, the number
-  would have had to be withheld.
-
-**The quiescence check is PROSPECTIVE and the published reps were not validated by it** — this
-is declared as its own heading in `raw/validity-and-refusals.md`. No load data was captured
-*during* any published rep; the per-rep `loadavg` figures are endpoint pairs, which is the read
-the harness header itself calls insufficient. On that endpoint data every published rep would be
-refused by the new bound. What they *were* validated by: `pct_running == 100.00%`, warm, pinned
-with kernel read-back, 0 lost samples, >= 3 reps, and interleaved A/B for the route comparison.
+* **AC2's corrected ratio is not load-driven either, but its resolution is poor.** Both sides
+  on the in-binary basis: cycle share slope **-0.0044 pp/unit** (idle extrapolation 3.0068%),
+  stall share slope **+0.0441 pp/unit** (idle 2.8199%). The ratio is **1.061x** at the measured
+  means and **0.938x** at both idle extrapolations — near parity on either reading. But the
+  stall-side rep spread is **0.83 pp (sd 0.42)** across a mere 1.5x load range, so a
+  few-percent effect would sit inside the noise. Hence "NOT CONFIRMED", not "absent".
+* **On the in-binary basis the load extrapolation crosses the line**: 3.0068% against 3%. That
+  reinforces §5's point that the in-binary reading is marginal, and is one more reason the
+  denominator ruling matters.
 
 Confirmatory quiet reps were attempted and **not obtained**: the box went to loadavg 67-80 with
 43 concurrent `agent-gate` processes and a peer's `/tmp` cleanup removed the waiting job. None

@@ -1,7 +1,14 @@
-LOAD-SENSITIVITY OF THE PUBLISHED SHARES  (issue #3445)
-Peak = max(loadavg before, loadavg after) for that rep.
+LOAD-SENSITIVITY OF THE PUBLISHED SHARES (issue #3445)
 
-=== Route 1 annotate: vint share of CYCLES ===
+IMPORTANT: 'load' here is max(loadavg before, loadavg after) -- an ENDPOINT PAIR, not an
+across-rep bound. No load data was captured DURING any published rep; see the DECLARED GAP
+in validity-and-refusals.md. This file therefore bounds load sensitivity using the only
+load data that exists for these reps, and that limitation is part of the result.
+
+--------------------------------------------------------------------------
+PRE-REGISTERED (TOTAL) BASIS -- the basis the verdict is taken on
+
+=== cycle share, total basis ===
 rep                     load b/a   peak   share %
 ac1-perfprof-1         1.04/2.58   2.58    1.6621
 ac1-perfprof-2          4.46/6.7   6.70    1.6695
@@ -9,34 +16,51 @@ ac1-perfprof-3         5.33/4.99   5.33    1.7960
 ab-annotate-1          4.38/6.15   6.15    1.6686
 ab-annotate-2        12.84/10.77  12.84    1.6875
 ab-annotate-3           6.15/4.8   6.15    1.7326
-  load range        2.58 .. 12.84  (5.0x)
-  share range       1.6621 .. 1.7960  (spread 0.1338 pp)
-  OLS slope         -0.00090 pp per unit loadavg
-  extrapolated to loadavg 0 (idle): 1.7087 %
+  load range 2.58..12.84 (5.0x)   share spread 0.1338 pp
+  OLS slope -0.00090 pp per unit loadavg    extrapolated to idle 1.7087%
 
-=== AC2: vint share of STALLS ===
+--------------------------------------------------------------------------
+IN-BINARY BASIS -- reported for the sensitivity table and for AC2's like-for-like ratio
+
+=== cycle share, in-binary basis ===
 rep                     load b/a   peak   share %
-ac2-stalls-1           5.83/5.65   5.83    1.3652
-ac2-stalls-2           5.65/8.67   8.67    1.2229
-ac2-stalls-3           8.67/6.15   8.67    1.5315
-  load range        5.83 .. 8.67  (1.5x)
-  share range       1.2229 .. 1.5315  (spread 0.3087 pp)
-  OLS slope         +0.00424 pp per unit loadavg
-  extrapolated to loadavg 0 (idle): 1.3405 %
+ac1-perfprof-1         1.04/2.58   2.58    2.9262
+ac1-perfprof-2          4.46/6.7   6.70    2.9473
+ac1-perfprof-3         5.33/4.99   5.33    3.1259
+ab-annotate-1          4.38/6.15   6.15    2.9276
+ab-annotate-2        12.84/10.77  12.84    2.9337
+ab-annotate-3           6.15/4.8   6.15    3.0070
+  load range 2.58..12.84 (5.0x)   share spread 0.1997 pp
+  OLS slope -0.00436 pp per unit loadavg    extrapolated to idle 3.0068%
 
-=== DOES CONTENTION THREATEN THE AC3 CLIFF? ===
-AC3 threshold                     3.0000 %
-observed mean (annotate)          1.7027 %
-distance to the cliff             1.2973 pp
-total share spread over an 5x load range   0.1338 pp
-=> flipping KILL->FUND needs 10x the ENTIRE observed load-induced variation
-=> at the fitted slope, it would need loadavg 1442 on a 16-core box
+=== STALL share, in-binary basis ===
+rep                     load b/a   peak   share %
+ac2-stalls-1           5.83/5.65   5.83    3.0767
+ac2-stalls-2           5.65/8.67   8.67    2.7865
+ac2-stalls-3           8.67/6.15   8.67    3.6172
+  load range 5.83..8.67 (1.5x)   share spread 0.8307 pp
+  OLS slope +0.04405 pp per unit loadavg    extrapolated to idle 2.8199%
 
-=== DOES CONTENTION THREATEN THE AC2 CONCLUSION? ===
-The lead's stated fear: contention manufactures 'the dependency IS visible'.
-That failure mode inflates stall share, i.e. pushes stall share UP toward the cycle share.
-  stall-share slope vs load       +0.00424 pp per unit loadavg  (UP with load, as feared)
-  highest-load stall rep          1.5315 % (still BELOW the cycle share 1.7027 %)
-  worst-case ratio at max load    0.899x  (conclusion needs < 1.0)
-=> the anti-concentration conclusion survives the very contamination that would break it:
-   even the MOST contended stall rep leaves vint less stall-dense than the scan average.
+==========================================================================
+DOES CONTENTION THREATEN THE AC3 VERDICT (pre-registered total basis)?
+  threshold 3.0000%   mean 1.7027%   margin 1.2973 pp
+  share spread over the 0.1338 pp across a 5.0x load range
+  => flipping the verdict needs 10x the entire observed load-induced variation
+  Mechanism: the share is a RATIO measured on a pinned core, so contention slows
+  numerator and denominator together -- which is why the fitted slope is ~0 and slightly
+  NEGATIVE (-0.00090 pp per unit).
+
+==========================================================================
+DOES CONTENTION THREATEN AC2's CORRECTED 1.06x RATIO?
+  AC2's answer is PARITY, so the question is whether contention could hide a real effect
+  in EITHER direction -- not (as the first, wrong version of this file argued) whether it
+  could destroy an anti-concentration finding that did not exist.
+  cycle share in-binary : slope -0.00436 pp/unit,  idle extrapolation 3.0068%
+  stall share in-binary : slope +0.04405 pp/unit,  idle extrapolation 2.8199%
+  ratio at the measured means      1.061x
+  ratio at both idle extrapolations 0.938x
+  stall-share rep spread           0.8307 pp (sd 0.4216)
+  => the ratio stays near 1.0 on both readings, but the stall-side spread is WIDE, so an
+     effect of a few percent would sit inside this instrument's noise. That is a
+     resolution limit, not a null result, and AC2 is reported as NOT CONFIRMED, never as
+     'no dependency exists'.
