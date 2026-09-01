@@ -107,6 +107,25 @@
 #                already enables the forwarded feature is STILL load-bearing, because the
 #                edge ACTIVATES the dependency. Judging redundancy first reported a live
 #                feature dead — a false FAIL, worse than the false PASS it came from.
+#
+#   ROUND 4 (roborev job 57) — THE CONTRACT. The guard is SOUND (never reports a live
+#   feature dead) and explicitly INCOMPLETE (a dead feature can escape, and every known
+#   route is declared on its own contract line). Cases 29-30 pin the SOUNDNESS direction;
+#   31-32 pin declared escape routes, asserting BOTH that the behaviour occurs AND that
+#   the contract line NAMES it.
+#  29.  GREEN  — SOUNDNESS: a `CARGO_FEATURE_*` read in a build script's HELPER MODULE
+#                (not build.rs itself) still credits its feature. Missing it reported a
+#                live feature dead; the fix scans the whole package directory, which can
+#                only over-credit, and the contract line says so.
+#  30.  GREEN  — SOUNDNESS: a NON-MEMBER path dependency that shares a member's package
+#                NAME, forwarding a feature only the real dependency declares, must not
+#                be reported dead. Name-based resolution looked the feature up in the
+#                MEMBER and refused; resolution is by canonical PATH.
+#  31.  GREEN  — DECLARED: file-wide (not scope-aware) env-import detection — a
+#                `use std::env;` in the file lets a bare `env::var(...)` that actually
+#                resolves to a LOCAL module credit a feature.
+#  32.  GREEN  — DECLARED: a `#[cfg(feature = ...)]` inside an UNEXPANDED `macro_rules!`
+#                body credits its feature though no expansion applies it here.
 #  28.  GREEN  — PINS A DECLARED RESIDUAL, not desired behaviour: an ORPHAN .rs file
 #                under a target's source dir (reachable from no `mod` chain) IS scanned,
 #                so a cfg gate in dead code credits its feature. The success line says
@@ -290,6 +309,16 @@ expect_red_naming() { # <dir> <needle> <label>
     || { cat "$TMPROOT/out.txt"; fail_case "$3: guard failed but its diagnostic never NAMED '$2' — a bare non-zero exit is not evidence"; }
 }
 
+# Every DECLARED escape route must be NAMED in the guard's own contract line, in the
+# same run that exhibits it. A declaration nobody tests is a comment that rots, and a
+# fixture that exhibits an undeclared behaviour is worse than either.
+assert_contract_declares() { # <phrase> <label>
+  grep -q 'CONTRACT: SOUND-BY-DESIGN' "$TMPROOT/out.txt" \
+    || { cat "$TMPROOT/out.txt"; fail_case "$2: the guard printed no CONTRACT line, so this behaviour is undeclared"; }
+  grep -qF -- "$1" "$TMPROOT/out.txt" \
+    || { cat "$TMPROOT/out.txt"; fail_case "$2: the CONTRACT line does not name the escape route this fixture exhibits ('$1')"; }
+}
+
 asserted_count() { # reads the last successful output
   sed -n 's/^features-load-bearing: \([0-9]*\)\/.*/\1/p' "$TMPROOT/out.txt" | head -1
 }
@@ -432,7 +461,11 @@ cat >"$D/a/tests/t.rs" <<'EOF'
 fn t() {}
 EOF
 expect_red_naming "$D" "tfeat" "case 14a"
-D="$(fixture buildscript-red-wrong-file)"
+D="$(fixture buildscript-red-no-script)"
+# A package with NO build script at all gets no env credit: cargo sets these variables
+# for a build script's execution, so without one there is nothing to read them.
+sed -i '/^build = "build.rs"$/d' "$D/a/Cargo.toml"
+rm -f "$D/a/build.rs"
 cat >"$D/a/src/lib.rs" <<'EOF'
 #[cfg(feature = "leafx")]
 pub fn leafx_only() {}
@@ -446,7 +479,7 @@ cat >"$D/a/tests/t.rs" <<'EOF'
 fn t() {}
 EOF
 expect_red_naming "$D" "tfeat" "case 14b"
-ok "a merely textual CARGO_FEATURE_X in build.rs, and a real env read OUTSIDE a build script, each confer no credit"
+ok "a merely textual CARGO_FEATURE_X in build.rs, and a real env read in a package with NO build script, each confer no credit"
 
 # --- 15. RED / 16. GREEN: weak dependency edges ------------------------------
 D="$(fixture weak-red)"
@@ -698,11 +731,115 @@ expect_green "$D" "case 28"
 ORPHAN_COUNT="$(asserted_count)"
 [ "$ORPHAN_COUNT" -eq "$((BASE_COUNT + 1))" ] \
   || fail_case "case 28: expected $((BASE_COUNT + 1)) asserted features, got $ORPHAN_COUNT"
-grep -q 'NON-EXHAUSTIVE' "$TMPROOT/out.txt" \
-  || fail_case "case 28: the success line does not DECLARE its residual, so this credited-orphan behaviour is undeclared"
-grep -q 'ORPHAN' "$TMPROOT/out.txt" \
-  || fail_case "case 28: the declared residual does not NAME the orphan-file case that this fixture demonstrates"
+assert_contract_declares "orphan .rs files under a target source dir" "case 28"
 ok "an ORPHAN .rs file under a target's source dir IS scanned (a credited dead feature) and the success line DECLARES exactly that"
+
+# --- 29. GREEN (SOUNDNESS): a build script's HELPER MODULE env read counts ---
+# The read lives in a/src/buildhelp.rs, reached from build.rs by `#[path]`. Resolving
+# that means implementing Rust's module graph; missing it reported a LIVE feature dead.
+# The guard therefore scans EVERY .rs file of a build-script package — over-permissive
+# on purpose, and declared.
+D="$(fixture buildscript-helper)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+#[path = "src/buildhelp.rs"]
+mod buildhelp;
+
+fn main() {
+    if buildhelp::wants_tfeat() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+cat >"$D/a/src/buildhelp.rs" <<'EOF'
+pub fn wants_tfeat() -> bool {
+    std::env::var("CARGO_FEATURE_TFEAT").is_ok()
+}
+EOF
+expect_green "$D" "case 29"
+assert_contract_declares "package-wide (not module-graph) build-script env scanning" "case 29"
+ok "SOUNDNESS: a CARGO_FEATURE_* read in a build script's HELPER MODULE still credits its feature (and the contract declares the package-wide scan)"
+
+# --- 30. GREEN (SOUNDNESS): a same-named NON-MEMBER path dependency ----------
+# `bx` is a non-member crate whose package NAME is `b`, the same as the member's, and it
+# declares a feature the member does not. Under name-based resolution the guard looked
+# `onlyext` up in the MEMBER, found nothing and REFUSED — a false FAIL on correct input.
+D="$(fixture same-name-nonmember)"
+EXTB="$TMPROOT/extb-same-name-nonmember"
+mkdir -p "$EXTB/src"
+cat >"$EXTB/Cargo.toml" <<'EOF'
+[package]
+name = "b"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+onlyext = []
+EOF
+echo "pub fn nothing() {}" >"$EXTB/src/lib.rs"
+python3 - "$D/a/Cargo.toml" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+dep = 'bee = { path = "../b", package = "b" }'
+s = s.replace(dep, dep + '\nbx = { path = "../../extb-same-name-nonmember", package = "b" }')
+s = s.replace('tfeat = []', 'tfeat = []\nextonly = ["bx/onlyext"]')
+open(p, 'w').write(s)
+PYEOF
+grep -q '^extonly = ' "$D/a/Cargo.toml" || fail_case "case 30: fixture edit did not plant extonly"
+expect_green "$D" "case 30"
+ok "SOUNDNESS: a NON-MEMBER path dependency sharing a member's package name resolves by PATH, so a feature only it declares is not a refusal"
+
+# --- 31. GREEN (DECLARED): file-wide env-import detection --------------------
+# The credited call resolves to `inner::env::var`, NOT std's — but the file contains a
+# `use std::env;`, and scope-aware name resolution is out of bounds. Declared.
+D="$(fixture env-import-file-wide)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+mod inner {
+    pub mod env {
+        pub fn var(_key: &str) -> Option<String> { None }
+    }
+
+    pub fn go() -> bool {
+        env::var("CARGO_FEATURE_TFEAT").is_some()
+    }
+}
+
+fn main() {
+    use std::env;
+    let _ = env::var("PATH");
+    if inner::go() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+expect_green "$D" "case 31"
+assert_contract_declares "file-wide (not scope-aware) env-import detection" "case 31"
+ok "DECLARED: a file-wide \`use std::env;\` lets a bare env::var(...) that resolves to a LOCAL module credit a feature, and the contract says so"
+
+# --- 32. GREEN (DECLARED): cfg inside an UNEXPANDED macro body --------------
+D="$(fixture macro-body-cfg)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\nmacrofeat = []/' "$D/a/Cargo.toml"
+grep -q '^macrofeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 32: fixture edit did not plant macrofeat"
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+macro_rules! never_invoked {
+    () => {
+        #[cfg(feature = "macrofeat")]
+        pub fn gated_by_expansion() {}
+    };
+}
+EOF
+expect_green "$D" "case 32"
+assert_contract_declares "cfgs inside unexpanded macro bodies" "case 32"
+ok "DECLARED: a cfg inside an UNEXPANDED macro_rules! body credits its feature, and the contract names that escape route"
 
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
@@ -710,7 +847,7 @@ ok "an ORPHAN .rs file under a target's source dir IS scanned (a credited dead f
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=28
+CASE_COUNT_EXPECTED=32
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

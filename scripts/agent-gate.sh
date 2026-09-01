@@ -285,6 +285,18 @@
 #                      [features] block contains (7 here), and a find(1) sweep
 #                      reaches non-member manifests cargo never builds. `fuzz/` is
 #                      its own excluded workspace and out of scope.
+#                      CONTRACT (#1698, roborev job 57): the scan is SOUND — it does
+#                      not report a LIVE feature dead, every ambiguity resolving
+#                      toward CREDITING — and explicitly INCOMPLETE: a dead feature
+#                      can escape. The guard prints a second success line stating
+#                      that and enumerating its five known escape routes plus the one
+#                      remaining soundness LIMIT (a cfg whose feature name is
+#                      produced by MACRO EXPANSION is not seen), and THIS COMPONENT
+#                      REQUIRES that line — a guard that quietly stopped declaring
+#                      its own incompleteness would imply coverage it lacks. The
+#                      asymmetry is deliberate: a false PASS leaves a dead flag in
+#                      place (the status quo), a false FAIL reds correct input and
+#                      makes this the guard everyone waives.
 #                      Fail-closed and affirmative — a failed `cargo metadata`, an
 #                      unreadable member/feature table, a `pkg/feature` edge naming
 #                      a feature that does not exist, an unreadable source file, a
@@ -687,7 +699,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 28 cases over throwaway
+#                      features-load-bearing component: 32 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -14983,7 +14995,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 28 cases over throwaway fixture
+# proof for the features-load-bearing component: 32 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16449,9 +16461,14 @@ run_tooling_tests() {
   # REGRESSION that a non-weak edge to an OPTIONAL dependency stays load-bearing even
   # when the forwarded feature is already enabled, and the guard's DECLARED orphan-file
   # residual — that last one asserts the success line NAMES the behaviour it exhibits, so
-  # the declaration cannot drift from the code. Every fixture is a LOCAL path workspace
-  # with no registry dependency, so the suite runs offline (verified under
-  # CARGO_NET_OFFLINE=1) — this component is mandatory and must not depend on a network.
+  # the declaration cannot drift from the code. Four more (job 57) pin THE CONTRACT: two
+  # SOUNDNESS cases (a build script's helper-module env read, and a non-member path
+  # dependency sharing a member's package name) each MEASURED to FAIL on the previous
+  # guard — those were false FAILs, the direction the contract forbids — plus two more
+  # declared escape routes, each asserting both that the behaviour occurs AND that the
+  # contract line names it. Every fixture is a LOCAL path workspace with no registry
+  # dependency, so the suite runs offline (verified under CARGO_NET_OFFLINE=1) — this
+  # component is mandatory and must not depend on a network.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
   # scripts/ci/) because the guard has no test-only seam and must never grow one.
   echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
