@@ -961,7 +961,11 @@ if [ -z "$NO_WAIT" ]; then
     # leaks (roborev job 238). This is a regression of a known class here: an earlier revision leaked
     # 868 of them by assigning SNAP_DIR inside a subshell. Clean up explicitly before handing over.
     [ -n "${SNAP_DIR:-}" ] && rm -rf "$SNAP_DIR" 2>/dev/null
-    exec bash "$0" "${GL_ORIG_ARGS[@]}" --no-wait
+    # Same bash-3.2 + `set -u` empty-array rule as gate-detached.sh (roborev job 319). NOT reachable
+    # with an empty array today — a no-arg run exits at the usage check long before here — so this is
+    # uniformity, not a live defect. The safe form costs nothing and does not depend on that staying
+    # true, which is the argument this file already makes for its other defensive expansions.
+    exec bash "$0" ${GL_ORIG_ARGS[@]+"${GL_ORIG_ARGS[@]}"} --no-wait
   fi
 fi
 _hb2_snap=$(_snap_of "$HB" heartbeat2) || _hb2_snap=""

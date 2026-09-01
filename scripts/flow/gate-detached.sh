@@ -112,7 +112,8 @@ immediately — the gate keeps running.
 EXIT CODES
   0   the gate was launched and proved monitorable
   1   refused (unusable summary/log path, or the gate published no heartbeat)
-  69  this host cannot run a cgroup-detached gate (no working `systemd-run --user`)
+  69  this host lacks a capability this script needs: no working `systemd-run --user`, no
+      0700 per-user runtime directory, or no `flock`
 
 WHY, and the threat model it does and does not cover: see the comment header of this file and
 docs/development/lane-gate-execution.md.
@@ -930,6 +931,20 @@ if [ ! -d "$_rundir" ] || [ "$_rd_owner" != "$(id -u)" ] || [ "$_rd_mode" != 700
   echo "               so /run/user/$(id -u) is present, or export XDG_RUNTIME_DIR to a 0700 dir you own." >&2
   exit 69
 fi
+# VALIDATE `flock` BEFORE THE FIRST USE, NOT AFTER (roborev job 319, Low). This lock is taken by
+# EVERY launch, and the only `command -v flock` check in this file sits in the RECLAMATION path far
+# below — reachable only when a summary path is already contended. So on a systemd host without
+# `flock` the bare failure of the call below was reported as "another launch holds the global launch
+# lock": a false diagnosis pointing at a peer that does not exist, whose stated remedies (retry, use
+# a distinct directory) can never work. A missing tool is a CAPABILITY refusal, so it exits 69 like
+# its sibling above rather than 1 — the request was well-formed and this host cannot serve it.
+if ! command -v flock >/dev/null 2>&1; then
+  echo "gate-detached: 'flock' is not available, so the artifact-set check and the reservation" >&2
+  echo "               cannot be made atomic and concurrent launches cannot be serialised." >&2
+  echo "               This is a MISSING TOOL on this host, not contention with another launch." >&2
+  echo "               Remedy: install it (util-linux: 'apt-get install -y util-linux')." >&2
+  exit 69
+fi
 _dirlock="$_rundir/cqlite-gate-launch.lock"
 if ! ( : >> "$_dirlock" ) 2>/dev/null; then
   echo "gate-detached: cannot create the directory lock '$_dirlock', so the artifact-set check and the" >&2
@@ -1152,7 +1167,7 @@ for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   fi
 done
 if [ "$_extra_ok" != 1 ]; then
-  for _l in "${_extra_locks[@]}"; do rm -f -- "$_l" 2>/dev/null || true; done
+  for _l in ${_extra_locks[@]+"${_extra_locks[@]}"}; do rm -f -- "$_l" 2>/dev/null || true; done
   rm -f "$_reserve" 2>/dev/null || true
   echo "gate-detached: could not reserve every write destination for this launch." >&2
   echo "               One of '$SUMMARY.heartbeat' or '$LOGFILE' is claimed by another run, so a gate" >&2
@@ -1199,11 +1214,19 @@ fi
 # controlled on one path arrived by another (the others: .gitignore vs `_tree_excluded`, and a
 # summary refusal I had added myself bypassing four guards) — the deny-list was never wrong, it was
 # just not the only door.
+# ${ARRAY[@]+"${ARRAY[@]}"}, NOT "${ARRAY[@]}" (roborev job 319, Medium). This script runs under
+# `set -uo pipefail` (line 82) and the repo supports stock macOS /bin/bash 3.2, where an EMPTY array
+# expanded as "${ARRAY[@]}" counts as UNBOUND and aborts. A bare `gate-detached.sh` — the ADVERTISED
+# default full-gate invocation — leaves GATE_ARGS empty, so the headline use of this script was the
+# one that broke, and only on the hosts we do not develop on: local bash is 5.2, where the same line
+# is fine. Not a new class here — `agent-gate.sh` carries the identical fix and citation (job-2108).
+# The `+` form expands to NOTHING when unset/empty and to the quoted elements otherwise, so it is
+# also correct on bash 5; the rollback loop over `_extra_locks` gets it for the same reason.
 if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
      --property=StandardInput=null \
      --property="StandardOutput=append:$LOGFILE" \
      --property="StandardError=append:$LOGFILE" \
-     "$_env_abs" -i "$_bash_abs" "$ENV_SCRIPT" "${GATE_ARGS[@]}"; then
+     "$_env_abs" -i "$_bash_abs" "$ENV_SCRIPT" ${GATE_ARGS[@]+"${GATE_ARGS[@]}"}; then
   echo "gate-detached: systemd-run failed to start unit $UNIT (see $LOGFILE)" >&2
   exit 1
 fi
