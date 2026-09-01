@@ -276,7 +276,17 @@ run_lane() {
 control_out="$tmp/control.log"
 control_env=()
 [ -n "${CQLITE_DATASETS_ROOT:-}" ] && control_env=(CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT")
-run_lane "$control_out" "${control_env[@]}"
+# `${arr[@]+"${arr[@]}"}` — an EMPTY array expands to NOTHING under `set -u` instead of
+# aborting. On Bash 3.2, which is what macOS ships and this repo supports, a bare
+# `"${control_env[@]}"` on an empty array is an UNBOUND VARIABLE error under `set -u`
+# (roborev job 296, Medium). That is reachable on the DOCUMENTED standalone invocation:
+# measured here, with CQLITE_DATASETS_ROOT unset the script reaches this line and the
+# control lane passes (the checkout resolver finds the corpus by itself), so `control_env`
+# is legitimately empty. The failure mode is the worst one for a fail-closed harness — it
+# aborts BEFORE any case runs, i.e. a silent non-run.
+# Same idiom and rationale as scripts/tests/test_ws0_embedded_steps_execute.sh:1363 and
+# scripts/bootstrap-agent-machine.sh:621 — reusing the repo's form, not inventing one.
+run_lane "$control_out" ${control_env[@]+"${control_env[@]}"}
 control_rc=$?
 if [ "$control_rc" -eq 0 ]; then
   ok "control: the target passes against the ambient corpus"
