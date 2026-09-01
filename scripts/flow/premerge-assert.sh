@@ -20,8 +20,9 @@
 # certified sha never verified that a certified sha EXISTS. The gate-of-record
 # convention was honour-system doctrine; this script is the one point every merge
 # passes through, so the convention becomes a mechanism here: a summary file
-# carrying a FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`, and
-# provenance (`commit:` + `tree-start:`) covering the certified sha is REQUIRED.
+# carrying a FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`,
+# `dirty: no` (#3648), and provenance (`commit:` + `tree-start:`) covering the
+# certified sha is REQUIRED.
 #
 # TWO DISTINCT ESCAPES, ONE MECHANISM
 #   * #3408 — NO GATE AT ALL. That PR merged on 22 `--lite` PASSes and not one
@@ -617,6 +618,54 @@ assert_covers() {
   fi
 }
 
+# assert_clean_tree <what> <value>: the run that block records must have executed
+# against a COMMITTED tree (#3648).
+#
+# WHY THIS IS ENFORCED AND NOT MERELY REPORTED. A gate that ran with `dirty: yes`
+# certified sha PLUS uncommitted tracked edits — not the sha. The gate's tree
+# capture uses `--exclude-standard`, so `dirty: yes` is real uncommitted TRACKED
+# content, never a gitignored log. The escape is then ordinary: a full gate PASSes
+# at HEAD X with edits in the worktree, the edits are discarded or simply never
+# committed, X is pushed and merged — and the gate of record covered a tree that
+# is NOT the one that lands. `commit:`/`tree-start:` cannot see it: both name X in
+# exactly that run. Measured on this box over 3232 full-gate summaries: 306 (9.5%)
+# ran dirty, but only 19 (0.59%) were dirty AND `RESULT: PASS`, so enforcement at
+# the merge point fires on precisely the hazard and almost nothing else.
+#
+# The compare is AFFIRMATIVE — `= no`, never `!= yes` — for the same reason the
+# RESULT/tree-integrity token compares are: a `!= yes` test is a two-valued
+# predicate over a multi-state signal and would hand every unmeasured state
+# (`unverified`, an absent field, a future value) the PERMISSIVE branch. An absent
+# or unrecognised value therefore REFUSES; it is never skipped and never read as
+# clean, exactly as a non-hex `commit:`/`tree-start:` placeholder refuses rather
+# than being skipped.
+#
+# THERE IS NO ENV OPT-OUT AND NONE MAY BE ADDED. A dirty tree is always
+# re-gateable — commit or discard, then re-run — so an escape hatch could only
+# buy a vacuous green, which is the shape this whole script exists to refuse.
+assert_clean_tree() {
+  local what="$1" val="$2"
+  if [ "$val" = no ]; then
+    return 0
+  fi
+  if [ -z "$val" ]; then
+    refuse_no_gate \
+      "The $what records NO 'dirty:' value on its 'commit:' line — nothing was measured" \
+      "about whether that run executed against a committed tree, so it cannot certify one." \
+      "REMEDY: re-run the FULL gate on a clean tree and pass THAT summary."
+  fi
+  refuse_no_gate \
+    "The $what records 'dirty: $val' — the gate of record must be 'dirty: no' (#3648)." \
+    "'yes' means that run certified the sha PLUS uncommitted TRACKED edits (the gate's" \
+    "capture is --exclude-standard, so this is never a gitignored log). Anything that is" \
+    "neither 'yes' nor 'no' means the state was never established — and an unestablished" \
+    "state is not a clean one. Either way the tree that was gated is not provably the tree" \
+    "that will merge: commit:/tree-start: name the same sha in both cases and cannot see it." \
+    "REMEDY: commit the edits (or discard them), then re-run the FULL gate on the clean" \
+    "tree and pass that summary. There is deliberately NO opt-out: a dirty tree is always" \
+    "re-gateable, so an override could only buy a vacuous green."
+}
+
 # assert_pass_block <what>: the verdict half every accepted block must satisfy —
 # terminated, RESULT: PASS, tree-integrity: PASS, and not a nested sub-gate.
 assert_pass_block() {
@@ -777,14 +826,19 @@ else
   delta_commit="$GP_v_commit"
   delta_ts="$GP_v_ts"
   delta_dirty="$GP_v_dirty"
-  [ -n "$delta_dirty" ] || delta_dirty=unknown
+  # The delta run's OWN tree must be clean too: it is the run that covers the
+  # tree being merged, so a dirty delta re-cert certifies edits that are not in
+  # the PR exactly as a dirty full gate does.
+  assert_clean_tree "delta block" "$delta_dirty"
 fi
 
-# `dirty:` is REPORTED, not enforced — DELIBERATELY. Failing on `dirty: yes` is
-# not in the owner's ruling on #3465 and is not absorbed into this change; it is
-# proposed separately in #3648. This is a decision, not an oversight: print it so
-# a dirty gate of record is VISIBLE at the merge point.
-[ -n "$full_dirty" ] || full_dirty=unknown
+# `dirty:` is REPORTED **AND ENFORCED** (#3648, replacing the deferral note this
+# line used to carry). In CASE B this is the ANCHOR's own tree: a full PASS taken
+# on a dirty tree anchors the whole chain on a tree nobody can reconstruct, so
+# both blocks are held to the same requirement. The evidence line below still
+# prints the value — after this call it can only ever read `dirty: no`, which is
+# the affirmative record that the check RAN.
+assert_clean_tree "full-gate block" "$full_dirty"
 
 # ---------------------------------------------------------------------------
 # THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)

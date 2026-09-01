@@ -153,8 +153,12 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   contract requires the party that LAUNCHED the run, which this script is not), and it cannot prove
   the summary came from a genuine gate rather than a hand-written file — a hostile invoker is out of
   the threat model, since whoever runs the script controls the process. What it closes is **accident
-  and drift**, which is the observed failure mode. `dirty:` is reported in the success line, not
-  enforced (failing on it is proposed separately in #3648).
+  and drift**, which is the observed failure mode. `dirty:` is reported in the success line **and
+  enforced** (#3648): the gate-of-record block — and, in Case B, the delta block too — must read
+  `dirty: no`, matched affirmatively, so an absent or unrecognised value REFUSES rather than being read
+  as clean. A `dirty: yes` run certified the sha PLUS uncommitted tracked edits, which `commit:`/
+  `tree-start:` cannot distinguish from the clean tree. No env opt-out exists and none may be added — a
+  dirty tree is always re-gateable.
   **The OPTIONAL fourth argument is the only way a `--delta` re-cert can certify a merge.** #1892
   *mandates* `--delta` — "never a repeat full gate" — for a test/docs-only diff on top of a full PASS
   at anchor `X`, and mandates that the PR record BOTH blocks, so a 3-arg-only guard red on correct,
