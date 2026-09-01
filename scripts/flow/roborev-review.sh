@@ -875,8 +875,17 @@ JOB_RECORD="SKIP"
 JOB_MACHINE=""
 job_machine_value() { # the job-machine: value, resolved against the CURRENT job-record state
   # A computed state wins; otherwise the run never reached the recompute, and the honest thing to
-  # report is the job-record state AS IT STANDS NOW, not as it stood at initialization.
+  # report is the state AS IT STANDS NOW, not as it stood at initialization.
   if [ -n "$JOB_MACHINE" ]; then printf '%s' "$JOB_MACHINE"; return 0; fi
+  # ROUND 4: THE FALLBACK MUST ALSO CONSULT WHETHER A RECORD WAS READ. Reporting a flat
+  # `UNAVAILABLE (no job record was read)` on every abort is FALSE whenever the run died AFTER the
+  # record poll — a record WAS read, and the only thing missing is the daemon lookup. That is the
+  # same mis-attribution as round 2's (collapsing read-failure onto field-absence): two different
+  # facts flattened into one affirmative sentence.
+  if [ "${JOB_RECORD_READ:-0}" -eq 1 ]; then
+    printf 'NOT RECORDED (a job record WAS read, but the run ended before the daemon lookup completed, so the issuing daemon was never determined — job-record: %s)' "$JOB_RECORD"
+    return 0
+  fi
   printf 'UNAVAILABLE (no job record was read — job-record: %s)' "$JOB_RECORD"
 }
 SHA_ASSERT="SKIP"

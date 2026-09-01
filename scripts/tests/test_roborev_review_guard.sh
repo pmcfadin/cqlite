@@ -3188,6 +3188,12 @@ STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
 RC=$?
 assert_verdict 'case (t9)' FAIL 1
 assert_says 'case (t9) the abort is reported, not silent' 'terminated unexpectedly'
+# THE COMPLEMENT OF (jm19), added with the JOB_RECORD_READ branch (#3654 round 4). This abort lands
+# BEFORE any record read, so UNAVAILABLE is the TRUE state here. Pinning it stops the new branch
+# over-reporting NOT RECORDED on a run that genuinely read nothing: a conditional with only one side
+# pinned is a conditional half-tested, and jm19 pins the other side.
+assert_says 'case (t9) an abort before any record read is UNAVAILABLE, which is true there' \
+  '^job-machine: UNAVAILABLE \(no job record was read'
 assert_one_block 'case (t9)'
 
 printf '== case (u1): token accounting present but UNPARSEABLE is drift, and FAILs ==\n'
@@ -6374,11 +6380,32 @@ if sed_inplace_verified "$_jmb_dir/roborev-review.sh" \
   elif [ -z "$_jmb_rec" ]; then
     bad 'case (jm19) no job-record: line was emitted, so the two keys could not be compared'
   else
+    # (1) THE INTERPOLATED NEIGHBOUR IS CURRENT. This was ONCE THE WHOLE CASE, and that was too
+    # narrow: the value can name the right job-record state inside a sentence whose STATE and
+    # EXPLANATION are both false, so the case passed while the artifact still lied.
     case "$_jmb_mach" in
       *"job-record: $_jmb_rec"*)
         ok "case (jm19) job-machine: names the CURRENT job-record state ($_jmb_rec) on an abort" ;;
       *)
         bad "case (jm19) the two keys contradict each other: job-record: '$_jmb_rec' but job-machine: '$_jmb_mach'" ;;
+    esac
+    # (2) THE STATE TOKEN ITSELF. A record WAS read here, so UNAVAILABLE — whose whole meaning is
+    # "no record could be read" — is the wrong state, whatever it interpolates.
+    case "$_jmb_mach" in
+      'NOT RECORDED ('*)
+        ok 'case (jm19) the state is NOT RECORDED, which is true: a record WAS read and only the lookup is missing' ;;
+      *)
+        bad "case (jm19) the abort path reports state '${_jmb_mach%% (*}' after a record WAS read — only NOT RECORDED is true here" ;;
+    esac
+    # (3) THE EXPLANATION. The sentence a reader actually acts on must not assert the opposite of
+    # what happened; pinned separately because (2) can hold while the prose still says "no record".
+    case "$_jmb_mach" in
+      *'no job record was read'*)
+        bad "case (jm19) the explanation claims no job record was read, but one was: '$_jmb_mach'" ;;
+      *'job record WAS read'*)
+        ok 'case (jm19) the explanation says a record was read and names the lookup as the missing step' ;;
+      *)
+        bad "case (jm19) the explanation neither affirms nor denies the record read, so a reader cannot tell what happened: '$_jmb_mach'" ;;
     esac
   fi
   reset_stub
