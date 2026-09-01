@@ -57,7 +57,7 @@
       "would let one be swapped for a benign case."
     ],
     "min_vectors": 79,
-    "min_errors": 55,
+    "min_errors": 58,
     "required_kinds": [
       "ascii",
       "bigint",
@@ -123,6 +123,9 @@
       "node_set_for_list",
       "node_set_for_tuple",
       "node_uint8array_for_blob",
+      "py_timestamp_naive",
+      "py_timestamp_non_utc_offset",
+      "py_timestamp_sub_millisecond",
       "python_bytearray_for_blob",
       "python_duck_typed_duration",
       "python_int_for_double",
@@ -140,85 +143,1537 @@
     ]
   },
   "vectors": [
-    {"name": "null_int", "type": "int", "python": null, "node": null, "cli": null, "canonical": null},
-    {"name": "null_set", "type": "set<text>", "python": null, "node": null, "cli": null, "canonical": null},
-    {"name": "bool_true", "type": "boolean", "python": true, "node": true, "cli": true, "canonical": true},
-    {"name": "bool_false", "type": "boolean", "python": false, "node": false, "cli": false, "canonical": false},
-    {"name": "tinyint", "type": "tinyint", "python": -128, "node": -128, "cli": -128, "canonical": -128},
-    {"name": "smallint", "type": "smallint", "python": 32767, "node": 32767, "cli": 32767, "canonical": 32767},
-    {"name": "int_small", "type": "int", "python": 42, "node": 42, "cli": 42, "canonical": 42},
-    {"name": "int_min", "type": "int", "python": -2147483648, "node": -2147483648, "cli": -2147483648, "canonical": -2147483648},
-    {"name": "bigint_safe_max", "type": "bigint", "python": {"$": "bigint", "v": "9007199254740991"}, "node": {"$": "bigint", "v": "9007199254740991"}, "cli": 9007199254740991, "canonical": 9007199254740991},
-    {"name": "bigint_above_safe", "type": "bigint", "python": {"$": "bigint", "v": "9007199254740993"}, "node": {"$": "bigint", "v": "9007199254740993"}, "cli": 9007199254740993, "canonical": "9007199254740993"},
-    {"name": "bigint_below_safe_negative", "type": "bigint", "python": {"$": "bigint", "v": "-9223372036854775808"}, "node": {"$": "bigint", "v": "-9223372036854775808"}, "cli": -9223372036854775808, "canonical": "-9223372036854775808"},
-    {"name": "varint_small", "type": "varint", "python": 42, "node": {"$": "bigint", "v": "42"}, "cli": "42", "canonical": 42, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: varint 42 -> \"42\""},
-    {"name": "varint_huge", "type": "varint", "python": {"$": "bigint", "v": "123456789012345678901234567890"}, "node": {"$": "bigint", "v": "123456789012345678901234567890"}, "cli": "123456789012345678901234567890", "canonical": "123456789012345678901234567890", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: varint -> \"123456789012345678901234567890\""},
-    {"name": "counter", "type": "counter", "python": 7, "node": {"$": "bigint", "v": "7"}, "cli": 7, "canonical": 7},
-    {"name": "double_val", "type": "double", "python": 60.24, "node": 60.24, "cli": 60.24, "canonical": 60.24},
-    {"name": "float_widened", "type": "float", "python": 1.840000033378601, "node": 1.840000033378601, "cli": 1.840000033378601, "canonical": 1.840000033378601},
-    {"name": "text_ascii", "type": "text", "python": "hello", "node": "hello", "cli": "hello", "canonical": "hello"},
-    {"name": "text_unicode", "type": "text", "python": "h\u00e9llo \u2603", "node": "h\u00e9llo \u2603", "cli": "h\u00e9llo \u2603", "canonical": "h\u00e9llo \u2603"},
-    {"name": "text_empty", "type": "varchar", "python": "", "node": "", "cli": "", "canonical": ""},
-    {"name": "ascii_field", "type": "ascii", "python": "ascii", "node": "ascii", "cli": "ascii", "canonical": "ascii"},
-    {"name": "blob_bytes", "type": "blob", "python": {"$": "bytes", "hex": "00ff10ab"}, "node": {"$": "bytes", "hex": "00ff10ab"}, "cli": "0x00ff10ab", "canonical": "0x00ff10ab", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: blob -> \"0x00ff10ab\""},
-    {"name": "blob_empty", "type": "blob", "python": {"$": "bytes", "hex": ""}, "node": {"$": "bytes", "hex": ""}, "cli": "0x", "canonical": "0x", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: blob [] -> \"0x\""},
-    {"name": "blob_uppercase_hex_is_lowercased", "type": "blob", "python": {"$": "bytes", "hex": "deadbeef"}, "node": {"$": "bytes", "hex": "deadbeef"}, "cli": "0xDEADBEEF", "canonical": "0xdeadbeef", "_source": "synthetic: MEASURED ValueFormatter emits LOWERCASE hex (\"0xdeadbeef\"), so this uppercase input is a parser probe, not a leg rendering. The old name `..._from_cli` asserted a provenance it never had (issue #1455, F7 step 4)."},
-    {"name": "uuid_lower", "type": "uuid", "python": {"$": "uuid", "v": "15291a77-d739-4e73-8397-b787442f3a1f"}, "node": "15291a77-d739-4e73-8397-b787442f3a1f", "cli": "15291a77-d739-4e73-8397-b787442f3a1f", "canonical": "15291a77-d739-4e73-8397-b787442f3a1f", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: uuid -> lowercase hyphenated"},
-    {"name": "uuid_upper_normalizes", "type": "timeuuid", "python": {"$": "uuid", "v": "78F64100-A251-11F0-A18D-D6726A637A4C"}, "node": "78F64100-A251-11F0-A18D-D6726A637A4C", "cli": "78F64100-A251-11F0-A18D-D6726A637A4C", "canonical": "78f64100-a251-11f0-a18d-d6726a637a4c", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: timeuuid -> lowercase; the UPPERCASE input is a parser probe"},
-    {"name": "timestamp_epoch", "type": "timestamp", "python": {"$": "datetime", "ms": 0}, "node": {"$": "datetime", "ms": 0}, "cli": "1970-01-01 00:00:00.000+0000", "canonical": 0, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Timestamp(0) -> \"1970-01-01 00:00:00.000+0000\""},
-    {"name": "timestamp_pre_epoch", "type": "timestamp", "python": {"$": "datetime", "ms": -1000}, "node": {"$": "datetime", "ms": -1000}, "cli": "1969-12-31 23:59:59.000+0000", "canonical": -1000, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Timestamp(-1000) -> \"1969-12-31 23:59:59.000+0000\""},
-    {"name": "timestamp_millis", "type": "timestamp", "python": {"$": "datetime", "ms": 1759713125394}, "node": {"$": "datetime", "ms": 1759713125394}, "cli": "2025-10-06 01:12:05.394+0000", "canonical": 1759713125394, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Timestamp(1759713125394) -> \"2025-10-06 01:12:05.394+0000\""},
-    {"name": "date_epoch", "type": "date", "python": {"$": "date", "v": "1970-01-01"}, "node": {"$": "date", "v": "1970-01-01"}, "cli": "1970-01-01", "canonical": "1970-01-01", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Date(0) -> \"1970-01-01\""},
-    {"name": "date_pre_epoch", "type": "date", "python": {"$": "date", "v": "1969-07-20"}, "node": {"$": "date", "v": "1969-07-20"}, "cli": "1969-07-20", "canonical": "1969-07-20", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Date(-165) -> \"1969-07-20\""},
-    {"name": "date_modern", "type": "date", "python": {"$": "date", "v": "2025-06-18"}, "node": {"$": "date", "v": "2025-06-18"}, "cli": "2025-06-18", "canonical": "2025-06-18", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Date(20257) -> \"2025-06-18\""},
-    {"name": "time_midnight", "type": "time", "python": 0, "node": {"$": "bigint", "v": "0"}, "cli": "00:00:00.000000000", "canonical": 0, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Time(0) -> \"00:00:00.000000000\""},
-    {"name": "time_nanos", "type": "time", "python": 4325394017000, "node": {"$": "bigint", "v": "4325394017000"}, "cli": "01:12:05.394017000", "canonical": 4325394017000, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Time(4325394017000) -> \"01:12:05.394017000\""},
-    {"name": "time_last_nano_of_day", "type": "time", "python": 86399999999999, "node": {"$": "bigint", "v": "86399999999999"}, "cli": "23:59:59.999999999", "canonical": 86399999999999, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Time(86399999999999) -> \"23:59:59.999999999\""},
-    {"name": "duration_zero", "type": "duration", "python": {"$": "duration", "months": 0, "days": 0, "nanos": "0"}, "node": {"$": "duration", "months": 0, "days": 0, "nanos": "0"}, "cli": "0ns", "canonical": {"months": 0, "days": 0, "nanos": 0}, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {0,0,0} -> \"0ns\""},
-    {"name": "duration_all_parts", "type": "duration", "python": {"$": "duration", "months": 1, "days": 2, "nanos": "3"}, "node": {"$": "duration", "months": 1, "days": 2, "nanos": "3"}, "cli": "1mo2d3ns", "canonical": {"months": 1, "days": 2, "nanos": 3}, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {1,2,3} -> \"1mo2d3ns\""},
-    {"name": "duration_negative_parts", "type": "duration", "python": {"$": "duration", "months": -1, "days": -2, "nanos": "-3"}, "node": {"$": "duration", "months": -1, "days": -2, "nanos": "-3"}, "cli": "-1mo-2d-3ns", "canonical": {"months": -1, "days": -2, "nanos": -3}, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {-1,-2,-3} -> \"-1mo-2d-3ns\""},
-    {"name": "duration_nanos_only", "type": "duration", "python": {"$": "duration", "months": 0, "days": 0, "nanos": "46702000000000"}, "node": {"$": "duration", "months": 0, "days": 0, "nanos": "46702000000000"}, "cli": "46702000000000ns", "canonical": {"months": 0, "days": 0, "nanos": 46702000000000}, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {0,0,46702000000000} -> \"46702000000000ns\""},
-    {"name": "duration_months_only", "type": "duration", "python": {"$": "duration", "months": 14, "days": 0, "nanos": "0"}, "node": {"$": "duration", "months": 14, "days": 0, "nanos": "0"}, "cli": "14mo", "canonical": {"months": 14, "days": 0, "nanos": 0}, "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {14,0,0} -> \"14mo\""},
-    {"name": "decimal_plain", "type": "decimal", "python": {"$": "decimal", "v": "31595.67"}, "node": "31595.67", "cli": "31595.67", "canonical": "31595.67", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=2 unscaled=3159567"},
-    {"name": "decimal_trailing_zeros_preserved", "type": "decimal", "python": {"$": "decimal", "v": "0.10"}, "node": "0.10", "cli": "0.10", "canonical": "0.10", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=2 unscaled=10"},
-    {"name": "decimal_negative", "type": "decimal", "python": {"$": "decimal", "v": "-1.50"}, "node": "-1.50", "cli": "-1.50", "canonical": "-1.50", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=2 unscaled=-150"},
-    {"name": "decimal_exponent_expands", "type": "decimal", "python": {"$": "decimal", "v": "1E+3"}, "node": "1e3", "cli": "1000", "canonical": "1e3", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-3 unscaled=1"},
-    {"name": "decimal_small_exponent_expands", "type": "decimal", "python": {"$": "decimal", "v": "1.5E-3"}, "node": "0.0015", "cli": "0.0015", "canonical": "0.0015", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=4 unscaled=15"},
-    {"name": "decimal_zero", "type": "decimal", "python": {"$": "decimal", "v": "0"}, "node": "0", "cli": "0", "canonical": "0", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=0 unscaled=0"},
-    {"name": "inet_v4", "type": "inet", "python": {"$": "inet", "v": "154.47.65.214"}, "node": "154.47.65.214", "cli": "154.47.65.214", "canonical": "154.47.65.214", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Inet([154,47,65,214]) -> \"154.47.65.214\""},
-    {"name": "inet_v6", "type": "inet", "python": {"$": "inet", "v": "::1"}, "node": "::1", "cli": "::1", "canonical": "::1", "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Inet(::1) -> \"::1\""},
-    {"name": "list_int_order_preserved", "type": "list<int>", "python": {"$": "list", "items": [3, 1, 2]}, "node": {"$": "list", "items": [3, 1, 2]}, "cli": [3, 1, 2], "canonical": [3, 1, 2]},
-    {"name": "list_empty", "type": "list<int>", "python": {"$": "list", "items": []}, "node": {"$": "list", "items": []}, "cli": [], "canonical": []},
-    {"name": "set_text_sorted", "type": "set<text>", "python": {"$": "set", "items": ["b", "a", "c"]}, "node": {"$": "set", "items": ["b", "a", "c"]}, "cli": ["b", "a", "c"], "canonical": ["a", "b", "c"]},
-    {"name": "set_int_sorted_numerically", "type": "set<int>", "python": {"$": "set", "items": [10, 2, 1]}, "node": {"$": "set", "items": [10, 2, 1]}, "cli": [10, 2, 1], "canonical": [1, 2, 10]},
-    {"name": "set_text_codepoint_order", "type": "set<text>", "python": {"$": "set", "items": ["\ud83d\ude00", "\ue000"]}, "node": {"$": "set", "items": ["\ud83d\ude00", "\ue000"]}, "cli": ["\ud83d\ude00", "\ue000"], "canonical": ["\ue000", "\ud83d\ude00"]},
-    {"name": "set_decimal_sorted_by_canonical_string", "type": "set<decimal>", "python": {"$": "set", "items": [{"$": "decimal", "v": "70.17"}, {"$": "decimal", "v": "49.14"}]}, "node": {"$": "set", "items": ["70.17", "49.14"]}, "cli": ["70.17", "49.14"], "canonical": ["49.14", "70.17"], "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=2 unscaled=7017 / 4914"},
-    {"name": "map_text_text_sorted_by_key", "type": "map<text, text>", "python": {"$": "map", "entries": [["z", "1"], ["a", "2"]]}, "node": {"$": "map", "entries": [["z", "1"], ["a", "2"]]}, "cli": [{"key": "z", "value": "1"}, {"key": "a", "value": "2"}], "canonical": [["a", "2"], ["z", "1"]]},
-    {"name": "map_text_bigint", "type": "map<text, bigint>", "python": {"$": "map", "entries": [["want", {"$": "bigint", "v": "104237"}]]}, "node": {"$": "map", "entries": [["want", {"$": "bigint", "v": "104237"}]]}, "cli": [{"key": "want", "value": 104237}], "canonical": [["want", 104237]]},
-    {"name": "map_empty", "type": "map<text, text>", "python": {"$": "map", "entries": []}, "node": {"$": "map", "entries": []}, "cli": [], "canonical": []},
-    {"name": "map_of_frozen_list", "type": "map<text, frozen<list<int>>>", "python": {"$": "map", "entries": [["b", {"$": "list", "items": [2, 1]}], ["a", {"$": "list", "items": [3]}]]}, "node": {"$": "map", "entries": [["b", {"$": "list", "items": [2, 1]}], ["a", {"$": "list", "items": [3]}]]}, "cli": [{"key": "b", "value": [2, 1]}, {"key": "a", "value": [3]}], "canonical": [["a", [3]], ["b", [2, 1]]]},
-    {"name": "set_of_frozen_list_sorted_structurally", "type": "set<frozen<list<int>>>", "python": {"$": "set", "items": [{"$": "tuple", "items": [2]}, {"$": "tuple", "items": [1, 9]}]}, "node": {"$": "set", "items": [{"$": "list", "items": [2]}, {"$": "list", "items": [1, 9]}]}, "cli": [[2], [1, 9]], "canonical": [[1, 9], [2]], "_why": "Nested container in a HASHABLE position: the Python leg is a frozenset OF TUPLES (value_hashable.rs projects list -> tuple), the Node leg a Set of Arrays (no projection), the CLI a bare array of arrays."},
-    {"name": "tuple_declared_gap_plain_array", "type": "tuple<int, text>", "python": {"$": "tuple", "items": [1, "a"]}, "node": {"$": "list", "items": [1, "a"]}, "cli": [1, "a"], "canonical": [1, "a"]},
-    {"name": "decimal_negative_zero", "type": "decimal", "python": {"$": "decimal", "v": "-0"}, "node": "-0", "cli": "-0", "canonical": "-0", "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: unscaled 0 has no sign, so no renderer emits it)"},
-    {"name": "decimal_negative_zero_scaled", "type": "decimal", "python": {"$": "decimal", "v": "-0.00"}, "node": "-0.00", "cli": "-0.00", "canonical": "-0.00", "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: no renderer emits it)"},
-    {"name": "decimal_leading_zeros_stripped", "type": "decimal", "python": {"$": "decimal", "v": "0000123.4500"}, "node": "0000123.4500", "cli": "0000123.4500", "canonical": "123.4500", "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (leading zeros: no renderer emits them)"},
-    {"name": "decimal_exponent_branch_strips_leading_zeros", "type": "decimal", "python": {"$": "decimal", "v": "0001E+5000"}, "node": "0001e5000", "cli": "0001e5000", "canonical": "1e5000", "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (leading zeros: no renderer emits them)"},
-    {"name": "decimal_at_plain_bound", "type": "decimal", "python": {"$": "decimal", "v": "1E+4095"}, "node": "1e4095", "cli": "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "canonical": "1e4095", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-4095 unscaled=1"},
-    {"name": "decimal_over_plain_bound", "type": "decimal", "python": {"$": "decimal", "v": "1E+4096"}, "node": "1e4096", "cli": "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "canonical": "1e4096", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-4096 unscaled=1"},
-    {"name": "decimal_pathological_exponent", "type": "decimal", "python": {"$": "decimal", "v": "1E+1000000000"}, "node": "1e1000000000", "cli": "1e1000000000", "canonical": "1e1000000000", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-1000000000 unscaled=1 (both legs exceed the 1e6 scale cap)"},
-    {"name": "decimal_pathological_negative_exponent", "type": "decimal", "python": {"$": "decimal", "v": "-7E-2000000000"}, "node": "-7e-2000000000", "cli": "-7e-2000000000", "canonical": "-7e-2000000000", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=2000000000 unscaled=-7 (both exceed the cap)"},
-    {"name": "double_integral_value", "type": "double", "python": 2.0, "node": 2.0, "cli": 2.0, "canonical": 2.0},
-    {"name": "set_of_frozen_set", "type": "set<frozen<set<int>>>", "_why": "set inside a set stays a frozenset on the python leg (value_hashable.rs).", "python": {"$": "set", "items": [{"$": "set", "items": [2]}, {"$": "set", "items": [1, 9]}]}, "node": {"$": "set", "items": [{"$": "set", "items": [2]}, {"$": "set", "items": [1, 9]}]}, "cli": [[2], [1, 9]], "canonical": [[1, 9], [2]]},
-    {"name": "map_key_frozen_list", "type": "map<frozen<list<int>>, text>", "_why": "A map KEY is a hashable position: the python key is a TUPLE, the node key an Array.", "python": {"$": "map", "entries": [[{"$": "tuple", "items": [1, 2]}, "x"]]}, "node": {"$": "map", "entries": [[{"$": "list", "items": [1, 2]}, "x"]]}, "cli": [{"key": [1, 2], "value": "x"}], "canonical": [[[1, 2], "x"]]},
-    {"name": "map_key_frozen_map", "type": "map<frozen<map<text, int>>, text>", "_why": "The exotic half of the hashable projection: value_hashable.rs turns a MAP in a key position into a TUPLE OF 2-TUPLES, not a dict. The node leg keeps a real Map.", "python": {"$": "map", "entries": [[{"$": "tuple", "items": [{"$": "tuple", "items": ["a", 1]}]}, "x"]]}, "node": {"$": "map", "entries": [[{"$": "map", "entries": [["a", 1]]}, "x"]]}, "cli": [{"key": [{"key": "a", "value": 1}], "value": "x"}], "canonical": [[[["a", 1]], "x"]]},
-    {"name": "map_value_frozen_list_is_not_projected", "type": "map<text, frozen<list<int>>>", "_why": "A map VALUE is NOT a hashable position (map_to_py projects only the key), so the python leg keeps a real list here \u2014 the asymmetry a context-free check would miss.", "python": {"$": "map", "entries": [["a", {"$": "list", "items": [2, 1]}]]}, "node": {"$": "map", "entries": [["a", {"$": "list", "items": [2, 1]}]]}, "cli": [{"key": "a", "value": [2, 1]}], "canonical": [["a", [2, 1]]]},
-    {"name": "tuple_containing_a_list", "type": "tuple<int, frozen<list<text>>>", "_why": "A tuple ELEMENT is not a hashable position either: the python leg holds a real list.", "python": {"$": "tuple", "items": [1, {"$": "list", "items": ["b", "a"]}]}, "node": {"$": "list", "items": [1, {"$": "list", "items": ["b", "a"]}]}, "cli": [1, ["b", "a"]], "canonical": [1, ["b", "a"]]},
-    {"name": "list_of_frozen_set", "type": "list<frozen<set<text>>>", "_why": "A list ELEMENT is not hashable-projected: the inner set is still a frozenset/Set.", "python": {"$": "list", "items": [{"$": "set", "items": ["b", "a"]}]}, "node": {"$": "list", "items": [{"$": "set", "items": ["b", "a"]}]}, "cli": [["b", "a"]], "canonical": [["a", "b"]]},
-    {"name": "decimal_negative_scale_cli_expands_positionally", "type": "decimal", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-5000 unscaled=1", "_why": "F7: the CLI renders this as `1` followed by 5000 zeros while both bindings render `1e5000` \u2014 MEASURED, not assumed. Before the integer fold the harness red on this perfectly valid value, which is a false red on correct input.", "python": {"$": "decimal", "v": "1E+5000"}, "node": "1e5000", "cli": "100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "canonical": "1e5000"},
-    {"name": "decimal_negative_scale_cli_expands_negative_value", "type": "decimal", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-5000 unscaled=-7", "python": {"$": "decimal", "v": "-7E+5000"}, "node": "-7e5000", "cli": "-700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "canonical": "-7e5000"},
-    {"name": "decimal_negative_scale_one", "type": "decimal", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-1 unscaled=1", "_why": "The smallest instance of the same divergence: CLI `10`, bindings `1e1`.", "python": {"$": "decimal", "v": "1E+1"}, "node": "1e1", "cli": "10", "canonical": "1e1"},
-    {"name": "decimal_large_positive_scale_both_positional", "type": "decimal", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=5000 unscaled=1", "_why": "The CONTROL for F7: a large POSITIVE scale is positional on ALL THREE legs (measured, both renderers emit the same 5002-char string), so the divergence is specific to a negative scale and the fix must not disturb this.", "python": {"$": "decimal", "v": "1E-5000"}, "node": "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", "cli": "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", "canonical": "1e-5000"},
-    {"name": "decimal_above_scale_cap_both_exponent", "type": "decimal", "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string", "_parts": "scale=-1000001 unscaled=1", "_why": "The other CONTROL: above each renderer's own 1e6 scale cap BOTH emit exponent form, so the legs already agreed here and still must.", "python": {"$": "decimal", "v": "1E+1000001"}, "node": "1e1000001", "cli": "1e1000001", "canonical": "1e1000001"}
+    {
+      "name": "null_int",
+      "type": "int",
+      "python": null,
+      "node": null,
+      "cli": null,
+      "canonical": null
+    },
+    {
+      "name": "null_set",
+      "type": "set<text>",
+      "python": null,
+      "node": null,
+      "cli": null,
+      "canonical": null
+    },
+    {
+      "name": "bool_true",
+      "type": "boolean",
+      "python": true,
+      "node": true,
+      "cli": true,
+      "canonical": true
+    },
+    {
+      "name": "bool_false",
+      "type": "boolean",
+      "python": false,
+      "node": false,
+      "cli": false,
+      "canonical": false
+    },
+    {
+      "name": "tinyint",
+      "type": "tinyint",
+      "python": -128,
+      "node": -128,
+      "cli": -128,
+      "canonical": -128
+    },
+    {
+      "name": "smallint",
+      "type": "smallint",
+      "python": 32767,
+      "node": 32767,
+      "cli": 32767,
+      "canonical": 32767
+    },
+    {
+      "name": "int_small",
+      "type": "int",
+      "python": 42,
+      "node": 42,
+      "cli": 42,
+      "canonical": 42
+    },
+    {
+      "name": "int_min",
+      "type": "int",
+      "python": -2147483648,
+      "node": -2147483648,
+      "cli": -2147483648,
+      "canonical": -2147483648
+    },
+    {
+      "name": "bigint_safe_max",
+      "type": "bigint",
+      "python": {
+        "$": "bigint",
+        "v": "9007199254740991"
+      },
+      "node": {
+        "$": "bigint",
+        "v": "9007199254740991"
+      },
+      "cli": 9007199254740991,
+      "canonical": 9007199254740991
+    },
+    {
+      "name": "bigint_above_safe",
+      "type": "bigint",
+      "python": {
+        "$": "bigint",
+        "v": "9007199254740993"
+      },
+      "node": {
+        "$": "bigint",
+        "v": "9007199254740993"
+      },
+      "cli": 9007199254740993,
+      "canonical": "9007199254740993"
+    },
+    {
+      "name": "bigint_below_safe_negative",
+      "type": "bigint",
+      "python": {
+        "$": "bigint",
+        "v": "-9223372036854775808"
+      },
+      "node": {
+        "$": "bigint",
+        "v": "-9223372036854775808"
+      },
+      "cli": -9223372036854775808,
+      "canonical": "-9223372036854775808"
+    },
+    {
+      "name": "varint_small",
+      "type": "varint",
+      "python": 42,
+      "node": {
+        "$": "bigint",
+        "v": "42"
+      },
+      "cli": "42",
+      "canonical": 42,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: varint 42 -> \"42\""
+    },
+    {
+      "name": "varint_huge",
+      "type": "varint",
+      "python": {
+        "$": "bigint",
+        "v": "123456789012345678901234567890"
+      },
+      "node": {
+        "$": "bigint",
+        "v": "123456789012345678901234567890"
+      },
+      "cli": "123456789012345678901234567890",
+      "canonical": "123456789012345678901234567890",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: varint -> \"123456789012345678901234567890\""
+    },
+    {
+      "name": "counter",
+      "type": "counter",
+      "python": 7,
+      "node": {
+        "$": "bigint",
+        "v": "7"
+      },
+      "cli": 7,
+      "canonical": 7
+    },
+    {
+      "name": "double_val",
+      "type": "double",
+      "python": 60.24,
+      "node": 60.24,
+      "cli": 60.24,
+      "canonical": 60.24
+    },
+    {
+      "name": "float_widened",
+      "type": "float",
+      "python": 1.840000033378601,
+      "node": 1.840000033378601,
+      "cli": 1.840000033378601,
+      "canonical": 1.840000033378601
+    },
+    {
+      "name": "text_ascii",
+      "type": "text",
+      "python": "hello",
+      "node": "hello",
+      "cli": "hello",
+      "canonical": "hello"
+    },
+    {
+      "name": "text_unicode",
+      "type": "text",
+      "python": "héllo ☃",
+      "node": "héllo ☃",
+      "cli": "héllo ☃",
+      "canonical": "héllo ☃"
+    },
+    {
+      "name": "text_empty",
+      "type": "varchar",
+      "python": "",
+      "node": "",
+      "cli": "",
+      "canonical": ""
+    },
+    {
+      "name": "ascii_field",
+      "type": "ascii",
+      "python": "ascii",
+      "node": "ascii",
+      "cli": "ascii",
+      "canonical": "ascii"
+    },
+    {
+      "name": "blob_bytes",
+      "type": "blob",
+      "python": {
+        "$": "bytes",
+        "hex": "00ff10ab"
+      },
+      "node": {
+        "$": "bytes",
+        "hex": "00ff10ab"
+      },
+      "cli": "0x00ff10ab",
+      "canonical": "0x00ff10ab",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: blob -> \"0x00ff10ab\""
+    },
+    {
+      "name": "blob_empty",
+      "type": "blob",
+      "python": {
+        "$": "bytes",
+        "hex": ""
+      },
+      "node": {
+        "$": "bytes",
+        "hex": ""
+      },
+      "cli": "0x",
+      "canonical": "0x",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: blob [] -> \"0x\""
+    },
+    {
+      "name": "blob_uppercase_hex_is_lowercased",
+      "type": "blob",
+      "python": {
+        "$": "bytes",
+        "hex": "deadbeef"
+      },
+      "node": {
+        "$": "bytes",
+        "hex": "deadbeef"
+      },
+      "cli": "0xDEADBEEF",
+      "canonical": "0xdeadbeef",
+      "_source": "synthetic: MEASURED ValueFormatter emits LOWERCASE hex (\"0xdeadbeef\"), so this uppercase input is a parser probe, not a leg rendering. The old name `..._from_cli` asserted a provenance it never had (issue #1455, F7 step 4)."
+    },
+    {
+      "name": "uuid_lower",
+      "type": "uuid",
+      "python": {
+        "$": "uuid",
+        "v": "15291a77-d739-4e73-8397-b787442f3a1f"
+      },
+      "node": "15291a77-d739-4e73-8397-b787442f3a1f",
+      "cli": "15291a77-d739-4e73-8397-b787442f3a1f",
+      "canonical": "15291a77-d739-4e73-8397-b787442f3a1f",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: uuid -> lowercase hyphenated"
+    },
+    {
+      "name": "uuid_upper_normalizes",
+      "type": "timeuuid",
+      "python": {
+        "$": "uuid",
+        "v": "78F64100-A251-11F0-A18D-D6726A637A4C"
+      },
+      "node": "78F64100-A251-11F0-A18D-D6726A637A4C",
+      "cli": "78F64100-A251-11F0-A18D-D6726A637A4C",
+      "canonical": "78f64100-a251-11f0-a18d-d6726a637a4c",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: timeuuid -> lowercase; the UPPERCASE input is a parser probe"
+    },
+    {
+      "name": "timestamp_epoch",
+      "type": "timestamp",
+      "python": {
+        "$": "datetime",
+        "ms": 0
+      },
+      "node": {
+        "$": "datetime",
+        "ms": 0
+      },
+      "cli": "1970-01-01 00:00:00.000+0000",
+      "canonical": 0,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Timestamp(0) -> \"1970-01-01 00:00:00.000+0000\""
+    },
+    {
+      "name": "timestamp_pre_epoch",
+      "type": "timestamp",
+      "python": {
+        "$": "datetime",
+        "ms": -1000
+      },
+      "node": {
+        "$": "datetime",
+        "ms": -1000
+      },
+      "cli": "1969-12-31 23:59:59.000+0000",
+      "canonical": -1000,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Timestamp(-1000) -> \"1969-12-31 23:59:59.000+0000\""
+    },
+    {
+      "name": "timestamp_millis",
+      "type": "timestamp",
+      "python": {
+        "$": "datetime",
+        "ms": 1759713125394
+      },
+      "node": {
+        "$": "datetime",
+        "ms": 1759713125394
+      },
+      "cli": "2025-10-06 01:12:05.394+0000",
+      "canonical": 1759713125394,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Timestamp(1759713125394) -> \"2025-10-06 01:12:05.394+0000\""
+    },
+    {
+      "name": "date_epoch",
+      "type": "date",
+      "python": {
+        "$": "date",
+        "v": "1970-01-01"
+      },
+      "node": {
+        "$": "date",
+        "v": "1970-01-01"
+      },
+      "cli": "1970-01-01",
+      "canonical": "1970-01-01",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Date(0) -> \"1970-01-01\""
+    },
+    {
+      "name": "date_pre_epoch",
+      "type": "date",
+      "python": {
+        "$": "date",
+        "v": "1969-07-20"
+      },
+      "node": {
+        "$": "date",
+        "v": "1969-07-20"
+      },
+      "cli": "1969-07-20",
+      "canonical": "1969-07-20",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Date(-165) -> \"1969-07-20\""
+    },
+    {
+      "name": "date_modern",
+      "type": "date",
+      "python": {
+        "$": "date",
+        "v": "2025-06-18"
+      },
+      "node": {
+        "$": "date",
+        "v": "2025-06-18"
+      },
+      "cli": "2025-06-18",
+      "canonical": "2025-06-18",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Date(20257) -> \"2025-06-18\""
+    },
+    {
+      "name": "time_midnight",
+      "type": "time",
+      "python": 0,
+      "node": {
+        "$": "bigint",
+        "v": "0"
+      },
+      "cli": "00:00:00.000000000",
+      "canonical": 0,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Time(0) -> \"00:00:00.000000000\""
+    },
+    {
+      "name": "time_nanos",
+      "type": "time",
+      "python": 4325394017000,
+      "node": {
+        "$": "bigint",
+        "v": "4325394017000"
+      },
+      "cli": "01:12:05.394017000",
+      "canonical": 4325394017000,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Time(4325394017000) -> \"01:12:05.394017000\""
+    },
+    {
+      "name": "time_last_nano_of_day",
+      "type": "time",
+      "python": 86399999999999,
+      "node": {
+        "$": "bigint",
+        "v": "86399999999999"
+      },
+      "cli": "23:59:59.999999999",
+      "canonical": 86399999999999,
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Time(86399999999999) -> \"23:59:59.999999999\""
+    },
+    {
+      "name": "duration_zero",
+      "type": "duration",
+      "python": {
+        "$": "duration",
+        "months": 0,
+        "days": 0,
+        "nanos": "0"
+      },
+      "node": {
+        "$": "duration",
+        "months": 0,
+        "days": 0,
+        "nanos": "0"
+      },
+      "cli": "0ns",
+      "canonical": {
+        "months": 0,
+        "days": 0,
+        "nanos": 0
+      },
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {0,0,0} -> \"0ns\""
+    },
+    {
+      "name": "duration_all_parts",
+      "type": "duration",
+      "python": {
+        "$": "duration",
+        "months": 1,
+        "days": 2,
+        "nanos": "3"
+      },
+      "node": {
+        "$": "duration",
+        "months": 1,
+        "days": 2,
+        "nanos": "3"
+      },
+      "cli": "1mo2d3ns",
+      "canonical": {
+        "months": 1,
+        "days": 2,
+        "nanos": 3
+      },
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {1,2,3} -> \"1mo2d3ns\""
+    },
+    {
+      "name": "duration_negative_parts",
+      "type": "duration",
+      "python": {
+        "$": "duration",
+        "months": -1,
+        "days": -2,
+        "nanos": "-3"
+      },
+      "node": {
+        "$": "duration",
+        "months": -1,
+        "days": -2,
+        "nanos": "-3"
+      },
+      "cli": "-1mo-2d-3ns",
+      "canonical": {
+        "months": -1,
+        "days": -2,
+        "nanos": -3
+      },
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {-1,-2,-3} -> \"-1mo-2d-3ns\""
+    },
+    {
+      "name": "duration_nanos_only",
+      "type": "duration",
+      "python": {
+        "$": "duration",
+        "months": 0,
+        "days": 0,
+        "nanos": "46702000000000"
+      },
+      "node": {
+        "$": "duration",
+        "months": 0,
+        "days": 0,
+        "nanos": "46702000000000"
+      },
+      "cli": "46702000000000ns",
+      "canonical": {
+        "months": 0,
+        "days": 0,
+        "nanos": 46702000000000
+      },
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {0,0,46702000000000} -> \"46702000000000ns\""
+    },
+    {
+      "name": "duration_months_only",
+      "type": "duration",
+      "python": {
+        "$": "duration",
+        "months": 14,
+        "days": 0,
+        "nanos": "0"
+      },
+      "node": {
+        "$": "duration",
+        "months": 14,
+        "days": 0,
+        "nanos": "0"
+      },
+      "cli": "14mo",
+      "canonical": {
+        "months": 14,
+        "days": 0,
+        "nanos": 0
+      },
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: {14,0,0} -> \"14mo\""
+    },
+    {
+      "name": "decimal_plain",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "31595.67"
+      },
+      "node": "31595.67",
+      "cli": "31595.67",
+      "canonical": "31595.67",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=2 unscaled=3159567"
+    },
+    {
+      "name": "decimal_trailing_zeros_preserved",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0.10"
+      },
+      "node": "0.10",
+      "cli": "0.10",
+      "canonical": "0.10",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=2 unscaled=10"
+    },
+    {
+      "name": "decimal_negative",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "-1.50"
+      },
+      "node": "-1.50",
+      "cli": "-1.50",
+      "canonical": "-1.50",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=2 unscaled=-150"
+    },
+    {
+      "name": "decimal_exponent_expands",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "1E+3"
+      },
+      "node": "1e3",
+      "cli": "1000",
+      "canonical": "1e3",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-3 unscaled=1"
+    },
+    {
+      "name": "decimal_small_exponent_expands",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "1.5E-3"
+      },
+      "node": "0.0015",
+      "cli": "0.0015",
+      "canonical": "0.0015",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=4 unscaled=15"
+    },
+    {
+      "name": "decimal_zero",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0"
+      },
+      "node": "0",
+      "cli": "0",
+      "canonical": "0",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=0 unscaled=0"
+    },
+    {
+      "name": "inet_v4",
+      "type": "inet",
+      "python": {
+        "$": "inet",
+        "v": "154.47.65.214"
+      },
+      "node": "154.47.65.214",
+      "cli": "154.47.65.214",
+      "canonical": "154.47.65.214",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Inet([154,47,65,214]) -> \"154.47.65.214\""
+    },
+    {
+      "name": "inet_v6",
+      "type": "inet",
+      "python": {
+        "$": "inet",
+        "v": "::1"
+      },
+      "node": "::1",
+      "cli": "::1",
+      "canonical": "::1",
+      "_source": "measured: leg strings OBSERVED by executing ValueFormatter::format_value (cli) and cqlite_ffi_common::decimal::decimal_to_string (bindings); this round: Inet(::1) -> \"::1\""
+    },
+    {
+      "name": "list_int_order_preserved",
+      "type": "list<int>",
+      "python": {
+        "$": "list",
+        "items": [
+          3,
+          1,
+          2
+        ]
+      },
+      "node": {
+        "$": "list",
+        "items": [
+          3,
+          1,
+          2
+        ]
+      },
+      "cli": [
+        3,
+        1,
+        2
+      ],
+      "canonical": [
+        3,
+        1,
+        2
+      ]
+    },
+    {
+      "name": "list_empty",
+      "type": "list<int>",
+      "python": {
+        "$": "list",
+        "items": []
+      },
+      "node": {
+        "$": "list",
+        "items": []
+      },
+      "cli": [],
+      "canonical": []
+    },
+    {
+      "name": "set_text_sorted",
+      "type": "set<text>",
+      "python": {
+        "$": "set",
+        "items": [
+          "b",
+          "a",
+          "c"
+        ]
+      },
+      "node": {
+        "$": "set",
+        "items": [
+          "b",
+          "a",
+          "c"
+        ]
+      },
+      "cli": [
+        "b",
+        "a",
+        "c"
+      ],
+      "canonical": [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "name": "set_int_sorted_numerically",
+      "type": "set<int>",
+      "python": {
+        "$": "set",
+        "items": [
+          10,
+          2,
+          1
+        ]
+      },
+      "node": {
+        "$": "set",
+        "items": [
+          10,
+          2,
+          1
+        ]
+      },
+      "cli": [
+        10,
+        2,
+        1
+      ],
+      "canonical": [
+        1,
+        2,
+        10
+      ]
+    },
+    {
+      "name": "set_text_codepoint_order",
+      "type": "set<text>",
+      "python": {
+        "$": "set",
+        "items": [
+          "😀",
+          ""
+        ]
+      },
+      "node": {
+        "$": "set",
+        "items": [
+          "😀",
+          ""
+        ]
+      },
+      "cli": [
+        "😀",
+        ""
+      ],
+      "canonical": [
+        "",
+        "😀"
+      ]
+    },
+    {
+      "name": "set_decimal_sorted_by_canonical_string",
+      "type": "set<decimal>",
+      "python": {
+        "$": "set",
+        "items": [
+          {
+            "$": "decimal",
+            "v": "70.17"
+          },
+          {
+            "$": "decimal",
+            "v": "49.14"
+          }
+        ]
+      },
+      "node": {
+        "$": "set",
+        "items": [
+          "70.17",
+          "49.14"
+        ]
+      },
+      "cli": [
+        "70.17",
+        "49.14"
+      ],
+      "canonical": [
+        "49.14",
+        "70.17"
+      ],
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=2 unscaled=7017 / 4914"
+    },
+    {
+      "name": "map_text_text_sorted_by_key",
+      "type": "map<text, text>",
+      "python": {
+        "$": "map",
+        "entries": [
+          [
+            "z",
+            "1"
+          ],
+          [
+            "a",
+            "2"
+          ]
+        ]
+      },
+      "node": {
+        "$": "map",
+        "entries": [
+          [
+            "z",
+            "1"
+          ],
+          [
+            "a",
+            "2"
+          ]
+        ]
+      },
+      "cli": [
+        {
+          "key": "z",
+          "value": "1"
+        },
+        {
+          "key": "a",
+          "value": "2"
+        }
+      ],
+      "canonical": [
+        [
+          "a",
+          "2"
+        ],
+        [
+          "z",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "map_text_bigint",
+      "type": "map<text, bigint>",
+      "python": {
+        "$": "map",
+        "entries": [
+          [
+            "want",
+            {
+              "$": "bigint",
+              "v": "104237"
+            }
+          ]
+        ]
+      },
+      "node": {
+        "$": "map",
+        "entries": [
+          [
+            "want",
+            {
+              "$": "bigint",
+              "v": "104237"
+            }
+          ]
+        ]
+      },
+      "cli": [
+        {
+          "key": "want",
+          "value": 104237
+        }
+      ],
+      "canonical": [
+        [
+          "want",
+          104237
+        ]
+      ]
+    },
+    {
+      "name": "map_empty",
+      "type": "map<text, text>",
+      "python": {
+        "$": "map",
+        "entries": []
+      },
+      "node": {
+        "$": "map",
+        "entries": []
+      },
+      "cli": [],
+      "canonical": []
+    },
+    {
+      "name": "map_of_frozen_list",
+      "type": "map<text, frozen<list<int>>>",
+      "python": {
+        "$": "map",
+        "entries": [
+          [
+            "b",
+            {
+              "$": "list",
+              "items": [
+                2,
+                1
+              ]
+            }
+          ],
+          [
+            "a",
+            {
+              "$": "list",
+              "items": [
+                3
+              ]
+            }
+          ]
+        ]
+      },
+      "node": {
+        "$": "map",
+        "entries": [
+          [
+            "b",
+            {
+              "$": "list",
+              "items": [
+                2,
+                1
+              ]
+            }
+          ],
+          [
+            "a",
+            {
+              "$": "list",
+              "items": [
+                3
+              ]
+            }
+          ]
+        ]
+      },
+      "cli": [
+        {
+          "key": "b",
+          "value": [
+            2,
+            1
+          ]
+        },
+        {
+          "key": "a",
+          "value": [
+            3
+          ]
+        }
+      ],
+      "canonical": [
+        [
+          "a",
+          [
+            3
+          ]
+        ],
+        [
+          "b",
+          [
+            2,
+            1
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "set_of_frozen_list_sorted_structurally",
+      "type": "set<frozen<list<int>>>",
+      "python": {
+        "$": "set",
+        "items": [
+          {
+            "$": "tuple",
+            "items": [
+              2
+            ]
+          },
+          {
+            "$": "tuple",
+            "items": [
+              1,
+              9
+            ]
+          }
+        ]
+      },
+      "node": {
+        "$": "set",
+        "items": [
+          {
+            "$": "list",
+            "items": [
+              2
+            ]
+          },
+          {
+            "$": "list",
+            "items": [
+              1,
+              9
+            ]
+          }
+        ]
+      },
+      "cli": [
+        [
+          2
+        ],
+        [
+          1,
+          9
+        ]
+      ],
+      "canonical": [
+        [
+          1,
+          9
+        ],
+        [
+          2
+        ]
+      ],
+      "_why": "Nested container in a HASHABLE position: the Python leg is a frozenset OF TUPLES (value_hashable.rs projects list -> tuple), the Node leg a Set of Arrays (no projection), the CLI a bare array of arrays."
+    },
+    {
+      "name": "tuple_declared_gap_plain_array",
+      "type": "tuple<int, text>",
+      "python": {
+        "$": "tuple",
+        "items": [
+          1,
+          "a"
+        ]
+      },
+      "node": {
+        "$": "list",
+        "items": [
+          1,
+          "a"
+        ]
+      },
+      "cli": [
+        1,
+        "a"
+      ],
+      "canonical": [
+        1,
+        "a"
+      ]
+    },
+    {
+      "name": "decimal_negative_zero",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "-0"
+      },
+      "node": "-0",
+      "cli": "-0",
+      "canonical": "-0",
+      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: unscaled 0 has no sign, so no renderer emits it)"
+    },
+    {
+      "name": "decimal_negative_zero_scaled",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "-0.00"
+      },
+      "node": "-0.00",
+      "cli": "-0.00",
+      "canonical": "-0.00",
+      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (a negative zero: no renderer emits it)"
+    },
+    {
+      "name": "decimal_leading_zeros_stripped",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0000123.4500"
+      },
+      "node": "0000123.4500",
+      "cli": "0000123.4500",
+      "canonical": "123.4500",
+      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (leading zeros: no renderer emits them)"
+    },
+    {
+      "name": "decimal_exponent_branch_strips_leading_zeros",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "0001E+5000"
+      },
+      "node": "0001e5000",
+      "cli": "0001e5000",
+      "canonical": "1e5000",
+      "_source": "synthetic: an input shape NO renderer emits; present only to pin the canonicalizer's own string parser, and it makes no claim about any leg (leading zeros: no renderer emits them)"
+    },
+    {
+      "name": "decimal_at_plain_bound",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "1E+4095"
+      },
+      "node": "1e4095",
+      "cli": "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "canonical": "1e4095",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-4095 unscaled=1"
+    },
+    {
+      "name": "decimal_over_plain_bound",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "1E+4096"
+      },
+      "node": "1e4096",
+      "cli": "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "canonical": "1e4096",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-4096 unscaled=1"
+    },
+    {
+      "name": "decimal_pathological_exponent",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "1E+1000000000"
+      },
+      "node": "1e1000000000",
+      "cli": "1e1000000000",
+      "canonical": "1e1000000000",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-1000000000 unscaled=1 (both legs exceed the 1e6 scale cap)"
+    },
+    {
+      "name": "decimal_pathological_negative_exponent",
+      "type": "decimal",
+      "python": {
+        "$": "decimal",
+        "v": "-7E-2000000000"
+      },
+      "node": "-7e-2000000000",
+      "cli": "-7e-2000000000",
+      "canonical": "-7e-2000000000",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=2000000000 unscaled=-7 (both exceed the cap)"
+    },
+    {
+      "name": "double_integral_value",
+      "type": "double",
+      "python": 2.0,
+      "node": 2.0,
+      "cli": 2.0,
+      "canonical": 2.0
+    },
+    {
+      "name": "set_of_frozen_set",
+      "type": "set<frozen<set<int>>>",
+      "_why": "set inside a set stays a frozenset on the python leg (value_hashable.rs).",
+      "python": {
+        "$": "set",
+        "items": [
+          {
+            "$": "set",
+            "items": [
+              2
+            ]
+          },
+          {
+            "$": "set",
+            "items": [
+              1,
+              9
+            ]
+          }
+        ]
+      },
+      "node": {
+        "$": "set",
+        "items": [
+          {
+            "$": "set",
+            "items": [
+              2
+            ]
+          },
+          {
+            "$": "set",
+            "items": [
+              1,
+              9
+            ]
+          }
+        ]
+      },
+      "cli": [
+        [
+          2
+        ],
+        [
+          1,
+          9
+        ]
+      ],
+      "canonical": [
+        [
+          1,
+          9
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "name": "map_key_frozen_list",
+      "type": "map<frozen<list<int>>, text>",
+      "_why": "A map KEY is a hashable position: the python key is a TUPLE, the node key an Array.",
+      "python": {
+        "$": "map",
+        "entries": [
+          [
+            {
+              "$": "tuple",
+              "items": [
+                1,
+                2
+              ]
+            },
+            "x"
+          ]
+        ]
+      },
+      "node": {
+        "$": "map",
+        "entries": [
+          [
+            {
+              "$": "list",
+              "items": [
+                1,
+                2
+              ]
+            },
+            "x"
+          ]
+        ]
+      },
+      "cli": [
+        {
+          "key": [
+            1,
+            2
+          ],
+          "value": "x"
+        }
+      ],
+      "canonical": [
+        [
+          [
+            1,
+            2
+          ],
+          "x"
+        ]
+      ]
+    },
+    {
+      "name": "map_key_frozen_map",
+      "type": "map<frozen<map<text, int>>, text>",
+      "_why": "The exotic half of the hashable projection: value_hashable.rs turns a MAP in a key position into a TUPLE OF 2-TUPLES, not a dict. The node leg keeps a real Map.",
+      "python": {
+        "$": "map",
+        "entries": [
+          [
+            {
+              "$": "tuple",
+              "items": [
+                {
+                  "$": "tuple",
+                  "items": [
+                    "a",
+                    1
+                  ]
+                }
+              ]
+            },
+            "x"
+          ]
+        ]
+      },
+      "node": {
+        "$": "map",
+        "entries": [
+          [
+            {
+              "$": "map",
+              "entries": [
+                [
+                  "a",
+                  1
+                ]
+              ]
+            },
+            "x"
+          ]
+        ]
+      },
+      "cli": [
+        {
+          "key": [
+            {
+              "key": "a",
+              "value": 1
+            }
+          ],
+          "value": "x"
+        }
+      ],
+      "canonical": [
+        [
+          [
+            [
+              "a",
+              1
+            ]
+          ],
+          "x"
+        ]
+      ]
+    },
+    {
+      "name": "map_value_frozen_list_is_not_projected",
+      "type": "map<text, frozen<list<int>>>",
+      "_why": "A map VALUE is NOT a hashable position (map_to_py projects only the key), so the python leg keeps a real list here — the asymmetry a context-free check would miss.",
+      "python": {
+        "$": "map",
+        "entries": [
+          [
+            "a",
+            {
+              "$": "list",
+              "items": [
+                2,
+                1
+              ]
+            }
+          ]
+        ]
+      },
+      "node": {
+        "$": "map",
+        "entries": [
+          [
+            "a",
+            {
+              "$": "list",
+              "items": [
+                2,
+                1
+              ]
+            }
+          ]
+        ]
+      },
+      "cli": [
+        {
+          "key": "a",
+          "value": [
+            2,
+            1
+          ]
+        }
+      ],
+      "canonical": [
+        [
+          "a",
+          [
+            2,
+            1
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "tuple_containing_a_list",
+      "type": "tuple<int, frozen<list<text>>>",
+      "_why": "A tuple ELEMENT is not a hashable position either: the python leg holds a real list.",
+      "python": {
+        "$": "tuple",
+        "items": [
+          1,
+          {
+            "$": "list",
+            "items": [
+              "b",
+              "a"
+            ]
+          }
+        ]
+      },
+      "node": {
+        "$": "list",
+        "items": [
+          1,
+          {
+            "$": "list",
+            "items": [
+              "b",
+              "a"
+            ]
+          }
+        ]
+      },
+      "cli": [
+        1,
+        [
+          "b",
+          "a"
+        ]
+      ],
+      "canonical": [
+        1,
+        [
+          "b",
+          "a"
+        ]
+      ]
+    },
+    {
+      "name": "list_of_frozen_set",
+      "type": "list<frozen<set<text>>>",
+      "_why": "A list ELEMENT is not hashable-projected: the inner set is still a frozenset/Set.",
+      "python": {
+        "$": "list",
+        "items": [
+          {
+            "$": "set",
+            "items": [
+              "b",
+              "a"
+            ]
+          }
+        ]
+      },
+      "node": {
+        "$": "list",
+        "items": [
+          {
+            "$": "set",
+            "items": [
+              "b",
+              "a"
+            ]
+          }
+        ]
+      },
+      "cli": [
+        [
+          "b",
+          "a"
+        ]
+      ],
+      "canonical": [
+        [
+          "a",
+          "b"
+        ]
+      ]
+    },
+    {
+      "name": "decimal_negative_scale_cli_expands_positionally",
+      "type": "decimal",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-5000 unscaled=1",
+      "_why": "F7: the CLI renders this as `1` followed by 5000 zeros while both bindings render `1e5000` — MEASURED, not assumed. Before the integer fold the harness red on this perfectly valid value, which is a false red on correct input.",
+      "python": {
+        "$": "decimal",
+        "v": "1E+5000"
+      },
+      "node": "1e5000",
+      "cli": "100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "canonical": "1e5000"
+    },
+    {
+      "name": "decimal_negative_scale_cli_expands_negative_value",
+      "type": "decimal",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-5000 unscaled=-7",
+      "python": {
+        "$": "decimal",
+        "v": "-7E+5000"
+      },
+      "node": "-7e5000",
+      "cli": "-700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "canonical": "-7e5000"
+    },
+    {
+      "name": "decimal_negative_scale_one",
+      "type": "decimal",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-1 unscaled=1",
+      "_why": "The smallest instance of the same divergence: CLI `10`, bindings `1e1`.",
+      "python": {
+        "$": "decimal",
+        "v": "1E+1"
+      },
+      "node": "1e1",
+      "cli": "10",
+      "canonical": "1e1"
+    },
+    {
+      "name": "decimal_large_positive_scale_both_positional",
+      "type": "decimal",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=5000 unscaled=1",
+      "_why": "The CONTROL for F7: a large POSITIVE scale is positional on ALL THREE legs (measured, both renderers emit the same 5002-char string), so the divergence is specific to a negative scale and the fix must not disturb this.",
+      "python": {
+        "$": "decimal",
+        "v": "1E-5000"
+      },
+      "node": "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "cli": "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "canonical": "1e-5000"
+    },
+    {
+      "name": "decimal_above_scale_cap_both_exponent",
+      "type": "decimal",
+      "_source": "measured: the cli/node strings below were OBSERVED by executing ValueFormatter::format_value and cqlite_ffi_common::decimal::decimal_to_string",
+      "_parts": "scale=-1000001 unscaled=1",
+      "_why": "The other CONTROL: above each renderer's own 1e6 scale cap BOTH emit exponent form, so the legs already agreed here and still must.",
+      "python": {
+        "$": "decimal",
+        "v": "1E+1000001"
+      },
+      "node": "1e1000001",
+      "cli": "1e1000001",
+      "canonical": "1e1000001"
+    }
   ],
   "rows": [
     {
@@ -379,60 +1834,685 @@
     }
   ],
   "errors": [
-    {"name": "udt_refused", "stage": "parse_type", "type": "address_type", "expect": "unsupported CQL type"},
-    {"name": "unknown_scalar_refused", "stage": "parse_type", "type": "wat", "expect": "unsupported CQL type"},
-    {"name": "unbalanced_angle", "stage": "parse_type", "type": "map<text, text", "expect": "unbalanced"},
-    {"name": "set_wrong_arity", "stage": "parse_type", "type": "set<int, text>", "expect": "takes exactly one argument"},
-    {"name": "map_wrong_arity", "stage": "parse_type", "type": "map<text>", "expect": "takes exactly two arguments"},
-    {"name": "scalar_with_type_args", "stage": "parse_type", "type": "int<text>", "expect": "does not take type arguments"},
-    {"name": "empty_type_string", "stage": "parse_type", "type": "", "expect": "empty CQL type string"},
-    {"name": "trailing_tokens", "stage": "parse_type", "type": "int>", "expect": "trailing tokens"},
-    {"name": "tuple_arity_mismatch", "stage": "canonicalize", "type": "tuple<int, text>", "legs": {"python": {"$": "tuple", "items": [1]}, "node": {"$": "list", "items": [1]}, "cli": [1]}, "expect": "tuple arity mismatch"},
-    {"name": "uuid_not_hyphenated", "stage": "canonicalize", "type": "uuid", "legs": {"node": "not-a-uuid", "cli": "not-a-uuid"}, "expect": "not a hyphenated UUID"},
-    {"name": "uuid_wrong_python_type", "stage": "canonicalize", "type": "uuid", "legs": {"python": "15291a77-d739-4e73-8397-b787442f3a1f"}, "expect": "declared uuid expects a uuid.UUID"},
-    {"name": "cli_timestamp_unparseable", "stage": "canonicalize", "type": "timestamp", "legs": {"cli": "2025-10-06T01:12:05Z"}, "expect": "unparseable CLI timestamp"},
-    {"name": "cli_date_unparseable", "stage": "canonicalize", "type": "date", "legs": {"cli": "06/18/2025"}, "expect": "unparseable CLI date"},
-    {"name": "cli_time_unparseable", "stage": "canonicalize", "type": "time", "legs": {"cli": "1:2:3"}, "expect": "unparseable CLI time"},
-    {"name": "cli_duration_unparseable", "stage": "canonicalize", "type": "duration", "legs": {"cli": "3 days"}, "expect": "unparseable CLI duration"},
-    {"name": "cli_duration_empty", "stage": "canonicalize", "type": "duration", "legs": {"cli": ""}, "expect": "unparseable CLI duration"},
-    {"name": "decimal_not_a_number", "stage": "canonicalize", "type": "decimal", "legs": {"node": "abc", "cli": "abc"}, "expect": "not a decimal string"},
-    {"name": "cli_blob_missing_prefix", "stage": "canonicalize", "type": "blob", "legs": {"cli": "ff00"}, "expect": "declared blob expects a JSON"},
-    {"name": "cli_blob_not_hex", "stage": "canonicalize", "type": "blob", "legs": {"cli": "0xzz"}, "expect": "not hex"},
-    {"name": "node_blob_not_bytes", "stage": "canonicalize", "type": "blob", "legs": {"node": "0xff00"}, "expect": "declared blob expects a Node Buffer"},
-    {"name": "boolean_wrong_type", "stage": "canonicalize", "type": "boolean", "legs": {"python": 1, "node": 1, "cli": 1}, "expect": "declared boolean expects a"},
-    {"name": "cli_map_entry_malformed", "stage": "canonicalize", "type": "map<text, text>", "legs": {"cli": [{"k": "a"}]}, "expect": "malformed CLI map entry"},
-    {"name": "node_map_not_a_map", "stage": "canonicalize", "type": "map<text, text>", "legs": {"node": {"$": "list", "items": []}}, "expect": "declared map<> expects a JavaScript Map"},
-    {"name": "python_list_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"python": {"$": "list", "items": ["a"]}}, "expect": "declared set<> expects a Python frozenset"},
-    {"name": "python_tuple_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"python": {"$": "tuple", "items": ["a"]}}, "expect": "declared set<> expects a Python frozenset"},
-    {"name": "python_tuple_for_list", "stage": "canonicalize", "type": "list<int>", "legs": {"python": {"$": "tuple", "items": [1]}}, "expect": "declared list<> expects a Python list"},
-    {"name": "python_set_for_list", "stage": "canonicalize", "type": "list<int>", "legs": {"python": {"$": "set", "items": [1]}}, "expect": "declared list<> expects a Python list"},
-    {"name": "python_list_for_tuple", "stage": "canonicalize", "type": "tuple<int>", "legs": {"python": {"$": "list", "items": [1]}}, "expect": "declared tuple<> expects a Python tuple"},
-    {"name": "python_list_for_map", "stage": "canonicalize", "type": "map<text, int>", "legs": {"python": {"$": "list", "items": []}}, "expect": "declared map<> expects a Python dict"},
-    {"name": "python_list_element_in_a_hashable_position", "stage": "canonicalize", "type": "set<frozen<list<int>>>", "_why": "A `list` element is not even CONSTRUCTIBLE inside a frozenset, so the wrong shape that IS reachable is a non-tuple element; the hashable-position branch is what must name it.", "legs": {"python": {"$": "set", "items": ["not-a-tuple"]}}, "expect": "hashable position"},
-    {"name": "python_scalar_key_where_a_projected_map_is_declared", "stage": "canonicalize", "type": "map<frozen<map<text, int>>, text>", "legs": {"python": {"$": "map", "entries": [["a", "x"]]}}, "expect": "hashable position", "_why": "A dict is unhashable and so cannot BE a dict key; the reachable wrong shape is a scalar key where value_hashable.rs would have produced a tuple of 2-tuples."},
-    {"name": "node_array_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"node": {"$": "list", "items": ["a"]}}, "expect": "declared set<> expects a JavaScript Set"},
-    {"name": "node_set_for_list", "stage": "canonicalize", "type": "list<int>", "legs": {"node": {"$": "set", "items": [1]}}, "expect": "declared list<> expects a JavaScript Array"},
-    {"name": "node_set_for_tuple", "stage": "canonicalize", "type": "tuple<int>", "legs": {"node": {"$": "set", "items": [1]}}, "expect": "declared tuple<> expects a JavaScript Array"},
-    {"name": "node_map_for_set", "stage": "canonicalize", "type": "set<text>", "legs": {"node": {"$": "map", "entries": []}}, "expect": "declared set<> expects a JavaScript Set"},
-    {"name": "node_number_for_bigint", "stage": "canonicalize", "type": "bigint", "_why": "value.rs uses create_bigint_from_i64 for bigint; a `number` is a regression that would pass silently for every value below 2^53.", "legs": {"node": 5}, "expect": "declared bigint expects a JavaScript bigint"},
-    {"name": "node_number_for_counter", "stage": "canonicalize", "type": "counter", "_why": "value.rs uses create_bigint_from_i64 for counter; a `number` is a regression that would pass silently for every value below 2^53.", "legs": {"node": 5}, "expect": "declared counter expects a JavaScript bigint"},
-    {"name": "node_number_for_varint", "stage": "canonicalize", "type": "varint", "_why": "value.rs uses create_bigint_from_i64 for varint; a `number` is a regression that would pass silently for every value below 2^53.", "legs": {"node": 5}, "expect": "declared varint expects a JavaScript bigint"},
-    {"name": "node_bigint_for_tinyint", "stage": "canonicalize", "type": "tinyint", "_why": "value.rs uses create_int32 for tinyint; a BigInt is a regression.", "legs": {"node": {"$": "bigint", "v": "5"}}, "expect": "declared tinyint expects a JavaScript number"},
-    {"name": "node_bigint_for_smallint", "stage": "canonicalize", "type": "smallint", "_why": "value.rs uses create_int32 for smallint; a BigInt is a regression.", "legs": {"node": {"$": "bigint", "v": "5"}}, "expect": "declared smallint expects a JavaScript number"},
-    {"name": "node_bigint_for_int", "stage": "canonicalize", "type": "int", "_why": "value.rs uses create_int32 for int; a BigInt is a regression.", "legs": {"node": {"$": "bigint", "v": "5"}}, "expect": "declared int expects a JavaScript number"},
-    {"name": "node_number_for_time", "stage": "canonicalize", "type": "time", "_why": "value.rs:249 uses create_bigint_from_i64 for Time.", "legs": {"node": 4325394017000}, "expect": "declared time expects a JavaScript bigint"},
-    {"name": "node_number_for_duration_nanos", "stage": "canonicalize", "type": "duration", "_why": "The NESTED one: duration_to_object BigInts only `nanos` (value.rs:339-340).", "legs": {"node": {"$": "duration_raw", "months": 1, "days": 2, "nanos": 3}}, "expect": "declared duration.nanos expects a JavaScript bigint"},
-    {"name": "node_bigint_for_duration_months", "stage": "canonicalize", "type": "duration", "_why": "months/days are create_int32 plain numbers (value.rs:337-338).", "legs": {"node": {"$": "duration_raw", "months": {"$": "bigint", "v": "1"}, "days": 2, "nanos": {"$": "bigint", "v": "3"}}}, "expect": "declared duration.months expects a JavaScript number"},
-    {"name": "node_present_undefined_scalar", "stage": "canonicalize", "type": "text", "_why": "Declared gap 5 accommodates an ABSENT property; a present `undefined` is a regression, and JSON.stringify would drop it from the artifact silently.", "legs": {"node": {"$": "undefined"}}, "expect": "PRESENT but holds undefined"},
-    {"name": "node_present_undefined_in_a_list", "stage": "canonicalize", "type": "list<int>", "_why": "The same rule must reach container ELEMENTS (a sparse array's hole).", "legs": {"node": {"$": "list", "items": [1, {"$": "undefined"}]}}, "expect": "PRESENT but holds undefined"},
-    {"name": "python_int_for_double", "stage": "canonicalize", "type": "double", "_why": "value.rs:40-41 sends both Float32 and Float through into_pyobject on an f64.", "legs": {"python": 2}, "expect": "declared double expects a Python float"},
-    {"name": "python_int_for_float", "stage": "canonicalize", "type": "float", "legs": {"python": 2}, "expect": "declared float expects a Python float"},
-    {"name": "python_bytearray_for_blob", "stage": "canonicalize", "type": "blob", "_why": "value.rs:52 is PyBytes::new; bytearray/memoryview are shapes it cannot produce.", "legs": {"python": {"$": "bytearray", "hex": "00ff"}}, "expect": "declared blob expects Python bytes"},
-    {"name": "python_memoryview_for_blob", "stage": "canonicalize", "type": "blob", "legs": {"python": {"$": "memoryview", "hex": "00ff"}}, "expect": "declared blob expects Python bytes"},
-    {"name": "python_mutable_set_for_set", "stage": "canonicalize", "type": "set<text>", "_why": "set_to_py and value_to_hashable_key both build PyFrozenSet.", "legs": {"python": {"$": "mutable_set", "items": ["a"]}}, "expect": "declared set<> expects a Python frozenset"},
-    {"name": "python_duck_typed_duration", "stage": "canonicalize", "type": "duration", "_why": "Anything with three attributes used to pass; the binding produces cqlite.Duration.", "legs": {"python": {"$": "duck_duration", "months": 1, "days": 2, "nanos": "3"}}, "expect": "declared duration expects a cqlite.Duration"},
-    {"name": "node_uint8array_for_blob", "stage": "canonicalize", "type": "blob", "_why": "create_buffer_copy (value.rs:232) always produces a Buffer; Buffer is a Uint8Array SUBCLASS, so the old isBytes() test accepted a strictly wider set.", "legs": {"node": {"$": "uint8array", "hex": "00ff"}}, "expect": "declared blob expects a Node Buffer"},
-    {"name": "node_duration_extra_key", "stage": "canonicalize", "type": "duration", "_why": "duration_to_object sets exactly months/days/nanos; the old membership test ignored extras entirely.", "legs": {"node": {"$": "duration_raw", "months": 1, "days": 2, "nanos": {"$": "bigint", "v": "3"}, "weeks": 4}}, "expect": "EXACTLY the keys {days, months, nanos}"},
-    {"name": "node_duration_missing_key", "stage": "canonicalize", "type": "duration", "legs": {"node": {"$": "duration_raw", "months": 1, "days": 2}}, "expect": "EXACTLY the keys {days, months, nanos}"}
+    {
+      "name": "udt_refused",
+      "stage": "parse_type",
+      "type": "address_type",
+      "expect": "unsupported CQL type"
+    },
+    {
+      "name": "unknown_scalar_refused",
+      "stage": "parse_type",
+      "type": "wat",
+      "expect": "unsupported CQL type"
+    },
+    {
+      "name": "unbalanced_angle",
+      "stage": "parse_type",
+      "type": "map<text, text",
+      "expect": "unbalanced"
+    },
+    {
+      "name": "set_wrong_arity",
+      "stage": "parse_type",
+      "type": "set<int, text>",
+      "expect": "takes exactly one argument"
+    },
+    {
+      "name": "map_wrong_arity",
+      "stage": "parse_type",
+      "type": "map<text>",
+      "expect": "takes exactly two arguments"
+    },
+    {
+      "name": "scalar_with_type_args",
+      "stage": "parse_type",
+      "type": "int<text>",
+      "expect": "does not take type arguments"
+    },
+    {
+      "name": "empty_type_string",
+      "stage": "parse_type",
+      "type": "",
+      "expect": "empty CQL type string"
+    },
+    {
+      "name": "trailing_tokens",
+      "stage": "parse_type",
+      "type": "int>",
+      "expect": "trailing tokens"
+    },
+    {
+      "name": "tuple_arity_mismatch",
+      "stage": "canonicalize",
+      "type": "tuple<int, text>",
+      "legs": {
+        "python": {
+          "$": "tuple",
+          "items": [
+            1
+          ]
+        },
+        "node": {
+          "$": "list",
+          "items": [
+            1
+          ]
+        },
+        "cli": [
+          1
+        ]
+      },
+      "expect": "tuple arity mismatch"
+    },
+    {
+      "name": "uuid_not_hyphenated",
+      "stage": "canonicalize",
+      "type": "uuid",
+      "legs": {
+        "node": "not-a-uuid",
+        "cli": "not-a-uuid"
+      },
+      "expect": "not a hyphenated UUID"
+    },
+    {
+      "name": "uuid_wrong_python_type",
+      "stage": "canonicalize",
+      "type": "uuid",
+      "legs": {
+        "python": "15291a77-d739-4e73-8397-b787442f3a1f"
+      },
+      "expect": "declared uuid expects a uuid.UUID"
+    },
+    {
+      "name": "cli_timestamp_unparseable",
+      "stage": "canonicalize",
+      "type": "timestamp",
+      "legs": {
+        "cli": "2025-10-06T01:12:05Z"
+      },
+      "expect": "unparseable CLI timestamp"
+    },
+    {
+      "name": "cli_date_unparseable",
+      "stage": "canonicalize",
+      "type": "date",
+      "legs": {
+        "cli": "06/18/2025"
+      },
+      "expect": "unparseable CLI date"
+    },
+    {
+      "name": "cli_time_unparseable",
+      "stage": "canonicalize",
+      "type": "time",
+      "legs": {
+        "cli": "1:2:3"
+      },
+      "expect": "unparseable CLI time"
+    },
+    {
+      "name": "cli_duration_unparseable",
+      "stage": "canonicalize",
+      "type": "duration",
+      "legs": {
+        "cli": "3 days"
+      },
+      "expect": "unparseable CLI duration"
+    },
+    {
+      "name": "cli_duration_empty",
+      "stage": "canonicalize",
+      "type": "duration",
+      "legs": {
+        "cli": ""
+      },
+      "expect": "unparseable CLI duration"
+    },
+    {
+      "name": "decimal_not_a_number",
+      "stage": "canonicalize",
+      "type": "decimal",
+      "legs": {
+        "node": "abc",
+        "cli": "abc"
+      },
+      "expect": "not a decimal string"
+    },
+    {
+      "name": "cli_blob_missing_prefix",
+      "stage": "canonicalize",
+      "type": "blob",
+      "legs": {
+        "cli": "ff00"
+      },
+      "expect": "declared blob expects a JSON"
+    },
+    {
+      "name": "cli_blob_not_hex",
+      "stage": "canonicalize",
+      "type": "blob",
+      "legs": {
+        "cli": "0xzz"
+      },
+      "expect": "not hex"
+    },
+    {
+      "name": "node_blob_not_bytes",
+      "stage": "canonicalize",
+      "type": "blob",
+      "legs": {
+        "node": "0xff00"
+      },
+      "expect": "declared blob expects a Node Buffer"
+    },
+    {
+      "name": "boolean_wrong_type",
+      "stage": "canonicalize",
+      "type": "boolean",
+      "legs": {
+        "python": 1,
+        "node": 1,
+        "cli": 1
+      },
+      "expect": "declared boolean expects a"
+    },
+    {
+      "name": "cli_map_entry_malformed",
+      "stage": "canonicalize",
+      "type": "map<text, text>",
+      "legs": {
+        "cli": [
+          {
+            "k": "a"
+          }
+        ]
+      },
+      "expect": "malformed CLI map entry"
+    },
+    {
+      "name": "node_map_not_a_map",
+      "stage": "canonicalize",
+      "type": "map<text, text>",
+      "legs": {
+        "node": {
+          "$": "list",
+          "items": []
+        }
+      },
+      "expect": "declared map<> expects a JavaScript Map"
+    },
+    {
+      "name": "python_list_for_set",
+      "stage": "canonicalize",
+      "type": "set<text>",
+      "legs": {
+        "python": {
+          "$": "list",
+          "items": [
+            "a"
+          ]
+        }
+      },
+      "expect": "declared set<> expects a Python frozenset"
+    },
+    {
+      "name": "python_tuple_for_set",
+      "stage": "canonicalize",
+      "type": "set<text>",
+      "legs": {
+        "python": {
+          "$": "tuple",
+          "items": [
+            "a"
+          ]
+        }
+      },
+      "expect": "declared set<> expects a Python frozenset"
+    },
+    {
+      "name": "python_tuple_for_list",
+      "stage": "canonicalize",
+      "type": "list<int>",
+      "legs": {
+        "python": {
+          "$": "tuple",
+          "items": [
+            1
+          ]
+        }
+      },
+      "expect": "declared list<> expects a Python list"
+    },
+    {
+      "name": "python_set_for_list",
+      "stage": "canonicalize",
+      "type": "list<int>",
+      "legs": {
+        "python": {
+          "$": "set",
+          "items": [
+            1
+          ]
+        }
+      },
+      "expect": "declared list<> expects a Python list"
+    },
+    {
+      "name": "python_list_for_tuple",
+      "stage": "canonicalize",
+      "type": "tuple<int>",
+      "legs": {
+        "python": {
+          "$": "list",
+          "items": [
+            1
+          ]
+        }
+      },
+      "expect": "declared tuple<> expects a Python tuple"
+    },
+    {
+      "name": "python_list_for_map",
+      "stage": "canonicalize",
+      "type": "map<text, int>",
+      "legs": {
+        "python": {
+          "$": "list",
+          "items": []
+        }
+      },
+      "expect": "declared map<> expects a Python dict"
+    },
+    {
+      "name": "python_list_element_in_a_hashable_position",
+      "stage": "canonicalize",
+      "type": "set<frozen<list<int>>>",
+      "_why": "A `list` element is not even CONSTRUCTIBLE inside a frozenset, so the wrong shape that IS reachable is a non-tuple element; the hashable-position branch is what must name it.",
+      "legs": {
+        "python": {
+          "$": "set",
+          "items": [
+            "not-a-tuple"
+          ]
+        }
+      },
+      "expect": "hashable position"
+    },
+    {
+      "name": "python_scalar_key_where_a_projected_map_is_declared",
+      "stage": "canonicalize",
+      "type": "map<frozen<map<text, int>>, text>",
+      "legs": {
+        "python": {
+          "$": "map",
+          "entries": [
+            [
+              "a",
+              "x"
+            ]
+          ]
+        }
+      },
+      "expect": "hashable position",
+      "_why": "A dict is unhashable and so cannot BE a dict key; the reachable wrong shape is a scalar key where value_hashable.rs would have produced a tuple of 2-tuples."
+    },
+    {
+      "name": "node_array_for_set",
+      "stage": "canonicalize",
+      "type": "set<text>",
+      "legs": {
+        "node": {
+          "$": "list",
+          "items": [
+            "a"
+          ]
+        }
+      },
+      "expect": "declared set<> expects a JavaScript Set"
+    },
+    {
+      "name": "node_set_for_list",
+      "stage": "canonicalize",
+      "type": "list<int>",
+      "legs": {
+        "node": {
+          "$": "set",
+          "items": [
+            1
+          ]
+        }
+      },
+      "expect": "declared list<> expects a JavaScript Array"
+    },
+    {
+      "name": "node_set_for_tuple",
+      "stage": "canonicalize",
+      "type": "tuple<int>",
+      "legs": {
+        "node": {
+          "$": "set",
+          "items": [
+            1
+          ]
+        }
+      },
+      "expect": "declared tuple<> expects a JavaScript Array"
+    },
+    {
+      "name": "node_map_for_set",
+      "stage": "canonicalize",
+      "type": "set<text>",
+      "legs": {
+        "node": {
+          "$": "map",
+          "entries": []
+        }
+      },
+      "expect": "declared set<> expects a JavaScript Set"
+    },
+    {
+      "name": "node_number_for_bigint",
+      "stage": "canonicalize",
+      "type": "bigint",
+      "_why": "value.rs uses create_bigint_from_i64 for bigint; a `number` is a regression that would pass silently for every value below 2^53.",
+      "legs": {
+        "node": 5
+      },
+      "expect": "declared bigint expects a JavaScript bigint"
+    },
+    {
+      "name": "node_number_for_counter",
+      "stage": "canonicalize",
+      "type": "counter",
+      "_why": "value.rs uses create_bigint_from_i64 for counter; a `number` is a regression that would pass silently for every value below 2^53.",
+      "legs": {
+        "node": 5
+      },
+      "expect": "declared counter expects a JavaScript bigint"
+    },
+    {
+      "name": "node_number_for_varint",
+      "stage": "canonicalize",
+      "type": "varint",
+      "_why": "value.rs uses create_bigint_from_i64 for varint; a `number` is a regression that would pass silently for every value below 2^53.",
+      "legs": {
+        "node": 5
+      },
+      "expect": "declared varint expects a JavaScript bigint"
+    },
+    {
+      "name": "node_bigint_for_tinyint",
+      "stage": "canonicalize",
+      "type": "tinyint",
+      "_why": "value.rs uses create_int32 for tinyint; a BigInt is a regression.",
+      "legs": {
+        "node": {
+          "$": "bigint",
+          "v": "5"
+        }
+      },
+      "expect": "declared tinyint expects a JavaScript number"
+    },
+    {
+      "name": "node_bigint_for_smallint",
+      "stage": "canonicalize",
+      "type": "smallint",
+      "_why": "value.rs uses create_int32 for smallint; a BigInt is a regression.",
+      "legs": {
+        "node": {
+          "$": "bigint",
+          "v": "5"
+        }
+      },
+      "expect": "declared smallint expects a JavaScript number"
+    },
+    {
+      "name": "node_bigint_for_int",
+      "stage": "canonicalize",
+      "type": "int",
+      "_why": "value.rs uses create_int32 for int; a BigInt is a regression.",
+      "legs": {
+        "node": {
+          "$": "bigint",
+          "v": "5"
+        }
+      },
+      "expect": "declared int expects a JavaScript number"
+    },
+    {
+      "name": "node_number_for_time",
+      "stage": "canonicalize",
+      "type": "time",
+      "_why": "value.rs:249 uses create_bigint_from_i64 for Time.",
+      "legs": {
+        "node": 4325394017000
+      },
+      "expect": "declared time expects a JavaScript bigint"
+    },
+    {
+      "name": "node_number_for_duration_nanos",
+      "stage": "canonicalize",
+      "type": "duration",
+      "_why": "The NESTED one: duration_to_object BigInts only `nanos` (value.rs:339-340).",
+      "legs": {
+        "node": {
+          "$": "duration_raw",
+          "months": 1,
+          "days": 2,
+          "nanos": 3
+        }
+      },
+      "expect": "declared duration.nanos expects a JavaScript bigint"
+    },
+    {
+      "name": "node_bigint_for_duration_months",
+      "stage": "canonicalize",
+      "type": "duration",
+      "_why": "months/days are create_int32 plain numbers (value.rs:337-338).",
+      "legs": {
+        "node": {
+          "$": "duration_raw",
+          "months": {
+            "$": "bigint",
+            "v": "1"
+          },
+          "days": 2,
+          "nanos": {
+            "$": "bigint",
+            "v": "3"
+          }
+        }
+      },
+      "expect": "declared duration.months expects a JavaScript number"
+    },
+    {
+      "name": "node_present_undefined_scalar",
+      "stage": "canonicalize",
+      "type": "text",
+      "_why": "Declared gap 5 accommodates an ABSENT property; a present `undefined` is a regression, and JSON.stringify would drop it from the artifact silently.",
+      "legs": {
+        "node": {
+          "$": "undefined"
+        }
+      },
+      "expect": "PRESENT but holds undefined"
+    },
+    {
+      "name": "node_present_undefined_in_a_list",
+      "stage": "canonicalize",
+      "type": "list<int>",
+      "_why": "The same rule must reach container ELEMENTS (a sparse array's hole).",
+      "legs": {
+        "node": {
+          "$": "list",
+          "items": [
+            1,
+            {
+              "$": "undefined"
+            }
+          ]
+        }
+      },
+      "expect": "PRESENT but holds undefined"
+    },
+    {
+      "name": "python_int_for_double",
+      "stage": "canonicalize",
+      "type": "double",
+      "_why": "value.rs:40-41 sends both Float32 and Float through into_pyobject on an f64.",
+      "legs": {
+        "python": 2
+      },
+      "expect": "declared double expects a Python float"
+    },
+    {
+      "name": "python_int_for_float",
+      "stage": "canonicalize",
+      "type": "float",
+      "legs": {
+        "python": 2
+      },
+      "expect": "declared float expects a Python float"
+    },
+    {
+      "name": "python_bytearray_for_blob",
+      "stage": "canonicalize",
+      "type": "blob",
+      "_why": "value.rs:52 is PyBytes::new; bytearray/memoryview are shapes it cannot produce.",
+      "legs": {
+        "python": {
+          "$": "bytearray",
+          "hex": "00ff"
+        }
+      },
+      "expect": "declared blob expects Python bytes"
+    },
+    {
+      "name": "python_memoryview_for_blob",
+      "stage": "canonicalize",
+      "type": "blob",
+      "legs": {
+        "python": {
+          "$": "memoryview",
+          "hex": "00ff"
+        }
+      },
+      "expect": "declared blob expects Python bytes"
+    },
+    {
+      "name": "python_mutable_set_for_set",
+      "stage": "canonicalize",
+      "type": "set<text>",
+      "_why": "set_to_py and value_to_hashable_key both build PyFrozenSet.",
+      "legs": {
+        "python": {
+          "$": "mutable_set",
+          "items": [
+            "a"
+          ]
+        }
+      },
+      "expect": "declared set<> expects a Python frozenset"
+    },
+    {
+      "name": "python_duck_typed_duration",
+      "stage": "canonicalize",
+      "type": "duration",
+      "_why": "Anything with three attributes used to pass; the binding produces cqlite.Duration.",
+      "legs": {
+        "python": {
+          "$": "duck_duration",
+          "months": 1,
+          "days": 2,
+          "nanos": "3"
+        }
+      },
+      "expect": "declared duration expects a cqlite.Duration"
+    },
+    {
+      "name": "node_uint8array_for_blob",
+      "stage": "canonicalize",
+      "type": "blob",
+      "_why": "create_buffer_copy (value.rs:232) always produces a Buffer; Buffer is a Uint8Array SUBCLASS, so the old isBytes() test accepted a strictly wider set.",
+      "legs": {
+        "node": {
+          "$": "uint8array",
+          "hex": "00ff"
+        }
+      },
+      "expect": "declared blob expects a Node Buffer"
+    },
+    {
+      "name": "node_duration_extra_key",
+      "stage": "canonicalize",
+      "type": "duration",
+      "_why": "duration_to_object sets exactly months/days/nanos; the old membership test ignored extras entirely.",
+      "legs": {
+        "node": {
+          "$": "duration_raw",
+          "months": 1,
+          "days": 2,
+          "nanos": {
+            "$": "bigint",
+            "v": "3"
+          },
+          "weeks": 4
+        }
+      },
+      "expect": "EXACTLY the keys {days, months, nanos}"
+    },
+    {
+      "name": "node_duration_missing_key",
+      "stage": "canonicalize",
+      "type": "duration",
+      "legs": {
+        "node": {
+          "$": "duration_raw",
+          "months": 1,
+          "days": 2
+        }
+      },
+      "expect": "EXACTLY the keys {days, months, nanos}"
+    },
+    {
+      "name": "py_timestamp_naive",
+      "stage": "canonicalize",
+      "type": "timestamp",
+      "legs": {
+        "python": {
+          "$": "datetime",
+          "ms": 1696554725394,
+          "naive": true
+        }
+      },
+      "expect": "expects a UTC-aware datetime, got a naive one"
+    },
+    {
+      "name": "py_timestamp_non_utc_offset",
+      "stage": "canonicalize",
+      "type": "timestamp",
+      "legs": {
+        "python": {
+          "$": "datetime",
+          "ms": 1696554725394,
+          "tz_offset_minutes": 330
+        }
+      },
+      "expect": "expects a UTC-aware datetime, got offset"
+    },
+    {
+      "name": "py_timestamp_sub_millisecond",
+      "stage": "canonicalize",
+      "type": "timestamp",
+      "legs": {
+        "python": {
+          "$": "datetime",
+          "ms": 1696554725394,
+          "extra_us": 17
+        }
+      },
+      "expect": "expects millisecond-aligned microseconds, got"
+    }
   ]
 }

@@ -100,7 +100,18 @@ def materialize_python(spec: Any) -> Any:
             months=spec["months"], days=spec["days"], nanos=int(spec["nanos"])
         )
     if tag == "datetime":
-        return _EPOCH + _dt.timedelta(milliseconds=spec["ms"])
+        # `extra_us` / `naive` / `tz_offset_minutes` exist ONLY so a refusal case
+        # can plant a shape the binding cannot produce (sub-millisecond, naive,
+        # or a non-UTC offset). A well-formed vector carries none of them.
+        micros = spec["extra_us"] if "extra_us" in spec else 0
+        dt = _EPOCH + _dt.timedelta(milliseconds=spec["ms"], microseconds=micros)
+        if "naive" in spec and spec["naive"]:
+            return dt.replace(tzinfo=None)
+        if "tz_offset_minutes" in spec:
+            return dt.astimezone(
+                _dt.timezone(_dt.timedelta(minutes=spec["tz_offset_minutes"]))
+            )
+        return dt
     if tag == "date":
         return _dt.date.fromisoformat(spec["v"])
     if tag == "bigint":

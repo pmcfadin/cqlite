@@ -578,8 +578,29 @@ class PythonAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared timestamp expects a datetime.datetime, got {_pytype(value)}"
                 )
-            dt = value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
-            delta = dt.astimezone(_dt.timezone.utc) - _EPOCH
+            # The binding builds this as `datetime.fromtimestamp(0, utc) +
+            # timedelta(milliseconds=millis)` (bindings/python/src/value.rs:54),
+            # so it is ALWAYS UTC-aware and ALWAYS millisecond-aligned. The
+            # adapter used to accept a naive datetime (assuming UTC), convert a
+            # non-UTC one, and floor sub-millisecond microseconds — three
+            # normalizations of shapes the binding cannot produce, each of
+            # which would have HIDDEN the regression that produced it.
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise CanonicalError(
+                    "declared timestamp expects a UTC-aware datetime, got a naive one"
+                )
+            offset = value.utcoffset()
+            if offset != _dt.timedelta(0):
+                raise CanonicalError(
+                    "declared timestamp expects a UTC-aware datetime, got offset "
+                    f"{offset}"
+                )
+            if value.microsecond % 1000 != 0:
+                raise CanonicalError(
+                    "declared timestamp expects millisecond-aligned microseconds, got "
+                    f"{value.microsecond}"
+                )
+            delta = value - _EPOCH
             return canon_int(
                 delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
             )
