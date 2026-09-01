@@ -58,15 +58,42 @@
 //!    keeping the refusal makes this change purely a TIGHTENING: no encoding
 //!    that decoded before stops decoding, and no encoding that errored before
 //!    starts decoding.
-//! 4. It agrees with the single-width top-level table #3612 introduced for
-//!    cell-path keys (`int => &[4]`, no `0`).
+//! 4. **It DISAGREES with #3612's cell-path-key width table — deliberately.**
+//!    `complex_column/cell_path_key.rs::cql_short_allowed_widths` admits zero
+//!    for the "or 0" family (`"int" | "float" => &[0, 4]`, `"uuid" |
+//!    "timeuuid" => &[0, 16]`, …), mirroring `size != N && !isEmpty`
+//!    literally; [`Self::fixed_width_admissible_width`] below admits `N` ONLY.
+//!    Both are right for their own POSITION, and the positions differ:
+//!
+//!    * #3612's table guards a multicell **cell-path KEY** — the bare key bytes
+//!      of a map entry, framed by an UNSIGNED VInt path length. That framing has
+//!      no out-of-band null spelling, so `0` there is simply a length Cassandra's
+//!      own `validate` accepts, and mirroring it is the only faithful choice.
+//!      (Its zero entry is not currently reachable through the multicell-map
+//!      caller, which short-circuits on an empty path — it is faithfulness to the
+//!      serializer, not a live admission. Were it reached, the key would still be
+//!      decoded through this module afterwards, so the NARROWER rule below is what
+//!      would decide it: admitting zero there does not smuggle a zero-length value
+//!      past this guard.)
+//!    * This table guards a **NESTED element/field** already bounded by a SIGNED
+//!      `[i32 BE len]` prefix, where null is spelled `-1` (point 1). `len == 0`
+//!      is therefore not the null case here, and admitting it would mean
+//!      inventing a value (point 2).
+//!
+//!    #3612's comment says a single table "cannot drift"; there are now TWO and
+//!    they differ ON PURPOSE. Do NOT "fix" either one to match the other: the
+//!    tables are only comparable together with the null framing of the position
+//!    each guards, so changing one requires changing that framing first.
 //!
 //! The refusal is loud and named (`Error::FixedWidthLengthMismatch`), never a
-//! silently substituted value. **If a real Cassandra-written fixture is ever
-//! found carrying a zero-length fixed-width element in this position, the fix
-//! is to loosen the six "or 0" arms to yield `Value::Null` — not to reinstate
-//! the `< N` guard**, which is what let a wrong length through in the first
-//! place.
+//! silently substituted value. Its DISPOSITION, however, is not the same as a
+//! wrong width's: a zero length is refused but TOLERATED by the enclosing
+//! collection/row read (the disposition it had before issue #3723), while a
+//! wrong width is FATAL. That split, and why, is in `fatal_decode_error.rs`.
+//! **If a real Cassandra-written fixture is ever found carrying a zero-length
+//! fixed-width element in this position, the fix is to loosen the six "or 0"
+//! arms to yield `Value::Null` — not to reinstate the `< N` guard**, which is
+//! what let a wrong length through in the first place.
 
 use super::*;
 
