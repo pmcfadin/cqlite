@@ -1766,10 +1766,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   sites a later change adds) — runs under `env -i` + an allowlist ADMITting only `PATH` and `TMPDIR`
   (tighter than the pre-flight's: no network here, so no `HOME`, no `SSH_*`, no proxy), with
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` plus an explicit empty `--template=`. The reads are
-  also **bounded** by the runner this script already resolves for the advisory; where no
-  `timeout`/`gtimeout` exists they run UNBOUNDED and the evidence line SAYS so
-  (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) rather than refusing — a hang is a LIVENESS failure that
-  yields no verdict, not a false pass, and refusing a box without `timeout` would red correct input.
+  also **bounded** by the runner this script already resolves for the advisory, with
+  `anchor-reads: bounded-<n>s+<g>s` as the affirmative record — and **where no `timeout`/`gtimeout`
+  supporting `--kill-after` exists the check REFUSES** (`ANCHOR-UNVERIFIABLE`, naming a one-command
+  remedy). **That REVERSES the first ruling here, which said run unbounded and declare it, on the ground
+  that a hang is a LIVENESS failure yielding no verdict rather than a false pass.** What that missed: **a
+  hang in this guard BLOCKS THE MERGE ANYWAY**, so the real comparison is never merge-vs-refuse but
+  *hang forever with no diagnosis* vs *refuse now with a named cause and remedy* — same outcome for the
+  merge, and the refusal strictly dominates. "It cannot produce a false pass" was true and IRRELEVANT,
+  because the alternative was never a pass. Hand-rolling a portable bounded runner is ruled OUT: that is
+  new process-lifetime code, the family that produced three defects in this issue's own test scaffolding,
+  and a fourth inside a merge guard costs more than one named install command.
   **THE COMMIT-GRAPH IS TRUSTED METADATA, SO IT IS DISABLED — AND THE MEASUREMENT IS NOT THE ONE THE
   FINDING PREDICTED** (roborev job 361). `objects/info/commit-graph` reaches the scratch through the
   alternate, is NOT content-addressed, and git trusts its parent edges. Measured on git 2.43.0 against a

@@ -213,7 +213,8 @@
 #       broken box — fix the box, do NOT re-run the gate), `PREMERGE: GH-FAILURE`
 #       (auth/network/no-such-PR), `PREMERGE: ANCHOR-UNVERIFIABLE` (#3653 — this
 #       box could not measure whether the anchor is on this PR's history: no git,
-#       no work tree, an absent object, or a shallow/unproven history).
+#       no work tree, an absent object, a shallow/unproven history, a read that
+#       TIMED OUT, or no `timeout`/`gtimeout` available to bound the reads at all).
 #
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -euo pipefail
@@ -467,13 +468,34 @@ refuse_tool_failure() {
 # `ADVISORY_TIMEOUT_SECS`/`ADVISORY_KILL_GRACE`; no second timing implementation
 # is written, and `timeout(1)` owns and reaps its own child, so job 279's rule
 # against signalling a process group you no longer own is not in play here.
-# WHERE NO RUNNER EXISTS the reads run UNBOUNDED and SAY SO on the evidence line
-# (`anchor-reads: UNBOUNDED(...)`) — they are NOT refused. This is a LIVENESS
-# property, not a correctness one: a hang produces NO verdict, where the graft
-# produced a WRONG one, and an unbounded read cannot manufacture a false pass.
-# Turning "this box has no `timeout`" into a merge refusal would be the guard
-# that reds on correct input. What must never happen is the bounded path
-# silently becoming unbounded, hence the affirmative token rather than silence.
+# WHERE NO SUPPORTED RUNNER EXISTS THE CHECK REFUSES — `ANCHOR-UNVERIFIABLE`,
+# naming the remedy. THIS REVERSES AN EARLIER DECISION IN THIS SAME FILE, and the
+# reasoning is recorded because the earlier reasoning was persuasive and wrong.
+#
+# The earlier rule was: run unbounded, declare it on the evidence line, and do NOT
+# refuse — because a hang is a LIVENESS failure that yields no verdict rather than
+# a false pass, and refusing a box with no coreutils would be the guard that reds
+# on correct input.
+#
+# WHAT THAT MISSED: a hang in this guard BLOCKS THE MERGE ANYWAY. So the real
+# comparison was never "merge proceeds vs merge refused" — it is **hang forever
+# with no diagnosis vs refuse immediately with a named cause and remedy**. Those
+# have the SAME outcome for the merge, and the refusal strictly dominates: same
+# non-merge, plus a diagnosis. "It cannot produce a false pass" was true and
+# IRRELEVANT, because the alternative was never a pass. The second half of the old
+# argument still stands, and is why the refusal names a ONE-COMMAND remedy rather
+# than being a dead end.
+#
+# AND THE THIRD OPTION IS RULED OUT ON PURPOSE: do NOT hand-roll a portable
+# bounded runner here. That is new PROCESS-LIFETIME code, and process lifetime is
+# the family that has already produced three defects in this issue's own test
+# scaffolding (an orphaning decoy, a vacuous census, an unregistered decoy
+# cleanup). The cost of failing closed is bounded and fixed by one named command;
+# the cost of a fourth lifetime bug inside a merge guard is not.
+#
+# The `anchor-reads: bounded-<n>s+<g>s` affirmation is KEPT for the path that does
+# run, and there is deliberately NO `UNBOUNDED` spelling left to emit: a run that
+# would have needed one never reaches the evidence line.
 export GIT_NO_LAZY_FETCH=1
 export GIT_NO_REPLACE_OBJECTS=1
 
@@ -576,16 +598,27 @@ ANCHOR_READS="UNRECORDED"
 # value on purpose: there is no measurement this script can take that would make
 # it false, so a variable would only invite a future arm to omit it.
 ANCHOR_PROVENANCE="ancestry over this box's SHARED object store: objects+metadata TRUSTED, not verified (#3746)"
+# _anchor_resolve_bound <anchor> <certified> — REFUSES when there is no supported
+# runner (see the reversal in the header). The two shas are taken only so the
+# refusal can name them, exactly like every other UNVERIFIABLE cause.
 _anchor_resolve_bound() {
-  local name
+  local anchor="$1" head="$2" name
   if name=$(resolve_advisory_timeout) && ANCHOR_BOUND_RUNNER=$(command -v "$name" 2>/dev/null) &&
      [ -n "$ANCHOR_BOUND_RUNNER" ]; then
     ANCHOR_READS="bounded-${ADVISORY_TIMEOUT_SECS}s+${ADVISORY_KILL_GRACE}s"
-  else
-    ANCHOR_BOUND_RUNNER=""
-    ANCHOR_READS="UNBOUNDED(no-timeout-runner-supporting--kill-after)"
+    return 0
   fi
-  return 0
+  ANCHOR_BOUND_RUNNER=""
+  refuse_anchor_unverifiable "$anchor" "$head" \
+    "no timeout/gtimeout on PATH supporting --kill-after, so the ancestry reads cannot be BOUNDED" \
+    "These reads touch the SHARED object store, where a malformed loose object (a" \
+    "FIFO) or a stalled mount makes them never return. UNBOUNDED they would HANG" \
+    "this guard — which BLOCKS THE MERGE ANYWAY, with no diagnosis. So the choice is" \
+    "not merge-vs-refuse: it is hang-forever-silently vs refuse-now-with-a-cause," \
+    "and the refusal strictly dominates. A SIGTERM-only bound is not a bound either" \
+    "(a child can ignore TERM), which is why --kill-after is PROBED, not assumed." \
+    "REMEDY: install GNU coreutils (its timeout is gtimeout on macOS, and IS" \
+    "accepted here), then re-run this assert. No gate re-run is needed."
 }
 
 # _anchor_run <git-args...> — ONE place every git call in this check goes
@@ -788,7 +821,7 @@ assert_anchor_on_history() {
   fi
   # Resolve the bound BEFORE the first read, so no read is ever unbounded by
   # accident rather than by the measured absence of a runner.
-  _anchor_resolve_bound
+  _anchor_resolve_bound "$anchor" "$head"
   if ! _anchor_lane rev-parse --git-dir >/dev/null 2>&1; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the current directory is not inside a git work tree (cwd: $(pwd))" \
@@ -1711,11 +1744,12 @@ if [ -n "$delta_file" ]; then
   # ONE suffix the renderer consumes — never appended per verdict arm, or the two
   # spellings would drift.
   #
-  # `anchor-reads:` is AFFIRMATIVE in both directions (job 358): `bounded-<n>s+<g>s`
-  # or `UNBOUNDED(no-timeout-runner-supporting--kill-after)`. An unbounded run is
-  # legitimate — a hang cannot manufacture a false pass, and refusing a box with
-  # no `timeout` would red correct input — but it must never be SILENT, because a
-  # bounded path degrading into an unbounded one unnoticed is the real hazard.
+  # `anchor-reads:` is the AFFIRMATIVE record that the bound was applied
+  # (`bounded-<n>s+<g>s`). Since the reversal documented in the header there is no
+  # UNBOUNDED spelling: a box with no supported runner REFUSES before reaching
+  # here, so this token can never silently mean "we gave up on bounding". Printed
+  # rather than assumed, because a bounded path degrading unnoticed is the hazard
+  # the token exists for.
   printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s anchor-reads: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s | %s\n' \
     "$delta_anchor" "$ANCHOR_ANCESTRY" "$ANCHOR_READS" "$delta_commit" "$delta_ts" "$delta_dirty" \
     "$delta_file" "$ANCHOR_PROVENANCE"

@@ -132,9 +132,11 @@ carry).
   `GIT_TEMPLATE_DIR`/`--template=` seed a planted `info/grafts` into the new repository — so every git
   call, discovery reads included, runs under `env -i` + an allowlist (`PATH`, `TMPDIR`, then
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`) with an explicit empty `--template=`. The reads are
-  bounded by the advisory's own runner; with no `timeout`/`gtimeout` they run unbounded and the evidence
-  line affirms it (`anchor-reads: bounded-…` / `UNBOUNDED(…)`) instead of refusing, because a hang yields
-  no verdict rather than a false pass. The **commit-graph is disabled** on those reads
+  bounded by the advisory's own runner, recorded affirmatively as `anchor-reads: bounded-<n>s+<g>s` — and
+  with **no `timeout`/`gtimeout` supporting `--kill-after` the check REFUSES**, naming a one-command
+  remedy. That reverses an earlier ruling ("run unbounded, declare it, never refuse"): a hang in this
+  guard blocks the merge anyway, so the choice is *hang silently* vs *refuse with a cause*, and the
+  refusal strictly dominates. Hand-rolling a portable runner is ruled out as new process-lifetime code. The **commit-graph is disabled** on those reads
   (`-c core.commitGraph=false`, job 361): it reaches the scratch through the alternate, is not
   content-addressed, and git trusts its parent edges — measured, a forged graph changes what
   `rev-list --parents` reports, though on git 2.43.0 it did NOT change `merge-base --is-ancestor`, so the

@@ -75,7 +75,43 @@ if ! T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX" 2>/dev/null) ||
   printf 'FAIL - every path in this suite would resolve under / instead.\n' >&2
   exit 1
 fi
-trap 'rm -rf "$T"' EXIT
+# CLEANUP IS A FUNCTION SO IT CAN GROW, AND IT IS REGISTERED BEFORE ANY RESOURCE
+# EXISTS (CLAUDE.md job 282). The decoy of case 44(l) is a TERM-IGNORING process
+# blocked on a FIFO: if its recognition fails, or the suite is interrupted, it
+# would otherwise sit blocked forever. The trap reads DECOY_CLEANUP_PID at FIRE
+# time, so installing the handler here — before the decoy exists — is exactly the
+# ordering job 282 asks for. Signals get handlers too, because bash runs no EXIT
+# trap for a signal left at its default disposition; each re-raises so the process
+# still dies of what it was sent.
+#
+# ORDER IS LOAD-BEARING: the decoy is reaped BEFORE `rm -rf "$T"`, because it
+# blocks on a FIFO inside $T and removing the FIFO does NOT unblock an open() that
+# is already waiting.
+DECOY_CLEANUP_PID=""
+DECOY_CLEANUP_NEEDLE=""
+suite_cleanup() {
+  to_kill_decoy
+  rm -rf "$T"
+}
+# to_kill_decoy — kill the registered decoy, VALIDATING ITS ARGV FIRST so a pid
+# that has been recycled into something else is never signalled (job 279:
+# ownership ends at reap, not at exit; on this fleet the inheritor of a released
+# pid is most likely a peer lane's gate). Safe to call any number of times.
+to_kill_decoy() {
+  local args
+  [ -n "$DECOY_CLEANUP_PID" ] || return 0
+  args=$(ps -p "$DECOY_CLEANUP_PID" -o args= 2>/dev/null) || args=""
+  if [ -n "$args" ] && [ -n "$DECOY_CLEANUP_NEEDLE" ] &&
+     [ "${args#*"$DECOY_CLEANUP_NEEDLE"}" != "$args" ]; then
+    kill -KILL "$DECOY_CLEANUP_PID" 2>/dev/null
+  fi
+  DECOY_CLEANUP_PID=""
+  return 0
+}
+trap 'suite_cleanup' EXIT
+trap 'suite_cleanup; trap - INT;  kill -INT  $$' INT
+trap 'suite_cleanup; trap - TERM; kill -TERM $$' TERM
+trap 'suite_cleanup; trap - HUP;  kill -HUP  $$' HUP
 
 # --- gh mock -----------------------------------------------------------------
 # A fake `gh` on PATH. Since the script parses via gh's built-in `--jq`, the
@@ -1858,12 +1894,21 @@ else
   ok "TEMPLATE: SKIPPED (positive control did not fire — arm UNEXERCISED, declared not silent)"
 fi
 
-# --- 44(h): NO BOUNDED RUNNER -> UNBOUNDED, AFFIRMED, NOT REFUSED (job 358) --
-# A hang is a LIVENESS failure, not a correctness one: it produces NO verdict,
-# where a graft produced a WRONG one, and an unbounded read cannot manufacture a
-# false pass. So a box with no `timeout`/`gtimeout` must still MERGE — refusing
-# would be the guard that reds on correct input — but the degradation must be
-# VISIBLE, because a bounded path silently becoming unbounded is the real hazard.
+# --- 44(h): NO BOUNDED RUNNER -> REFUSE (job 370 finding 1, REVERSING job 358) --
+#
+# THIS ARM ASSERTS THE OPPOSITE OF WHAT IT USED TO, and the reversal is recorded
+# here as well as in the shipped header, because the old expectation was
+# reasonable and wrong. It used to require that a box with no `timeout`/`gtimeout`
+# still MERGED, with the degradation affirmed on the evidence line, on the ground
+# that a hang is a liveness failure and cannot manufacture a false pass.
+#
+# What that missed: A HANG IN THIS GUARD BLOCKS THE MERGE ANYWAY. The real
+# comparison is hang-forever-with-no-diagnosis vs refuse-now-with-a-named-remedy —
+# same outcome for the merge, and the refusal strictly dominates. So the arm now
+# requires exit 3 with `ANCHOR-UNVERIFIABLE`, AND requires the CAUSE to name the
+# absent runner: a refusal for some other UNVERIFIABLE reason (an absent object,
+# a shallow history) would satisfy the exit code while proving nothing about
+# bounding.
 NOTO="$T/bin-no-timeout"
 mkdir -p "$NOTO"
 noto_ok=1
@@ -1885,32 +1930,50 @@ if [ "$noto_ok" -eq 1 ]; then
   done
 fi
 if [ "$noto_ok" -ne 1 ]; then
-  printf 'ARM NOT TAKEN: unbounded-reads token (job 358) — could not build a PATH holding git/awk/tr/\n'
-  printf 'ARM NOT TAKEN: env/mktemp/rm/gh but NEITHER timeout nor gtimeout.\n'
-  ok "unbounded: SKIPPED (fixture unbuildable — arm UNEXERCISED, declared not silent)"
+  printf 'ARM NOT TAKEN: no-bounded-runner refusal (job 370) — could not build a PATH holding git/awk/\n'
+  printf 'ARM NOT TAKEN: tr/env/mktemp/rm/gh but NEITHER timeout nor gtimeout.\n'
+  ok "no-runner: SKIPPED (fixture unbuildable — arm UNEXERCISED, declared not silent)"
 else
-  ok "unbounded fixture: the fixture PATH has git but NEITHER timeout nor gtimeout"
+  ok "no-runner fixture: the fixture PATH has git but NEITHER timeout nor gtimeout"
   OUT=$(cd "$ANC_REPO" && PATH="$NOTO" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
     "${BASH:-/bin/bash}" "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
   RC=$?
-  if [ "$RC" -ne 0 ]; then
-    bad "unbounded: a box with no timeout runner must still MERGE, not be refused (exit $RC) (got: $OUT)"
+  if [ "$RC" -ne 3 ]; then
+    bad "no-runner: with no bounded runner the check must REFUSE at exit 3, not run unbounded (exit $RC) (got: $OUT)"
   else
-    ok "unbounded: with no bounded runner the merge is NOT refused (exit 0)"
+    ok "no-runner: with no bounded runner the check REFUSES at exit 3 rather than running unbounded"
     case "$OUT" in
-      *"anchor-reads: UNBOUNDED("*)
-        ok "unbounded: the evidence line AFFIRMS the degradation instead of staying silent" ;;
-      *) bad "unbounded: expected an affirmative anchor-reads: UNBOUNDED(...) token (got: $OUT)" ;;
+      *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+        ok "no-runner: the refusal carries the ANCHOR-UNVERIFIABLE marker" ;;
+      *) bad "no-runner: expected the ANCHOR-UNVERIFIABLE marker (got: $OUT)" ;;
+    esac
+    # THE REASON MUST BE THE ABSENT RUNNER. Without this the arm would pass on any
+    # other UNVERIFIABLE cause and prove nothing about bounding.
+    case "$OUT" in
+      *"cannot be BOUNDED"*)
+        ok "no-runner: the cause names the ABSENT RUNNER, not some other UNVERIFIABLE reason" ;;
+      *) bad "no-runner: the cause must name the unbounded-reads problem (got: $OUT)" ;;
     esac
     case "$OUT" in
+      *"is not present in this repository"* | *"NOT PROVEN COMPLETE"* | *"not inside a git work tree"* | *"timed out after"*)
+        bad "no-runner: refused for a DIFFERENT cause than the missing runner — the arm proves nothing (got: $OUT)" ;;
+      *) ok "no-runner: the refusal is NOT an absent-object, shallow, work-tree or timeout cause" ;;
+    esac
+    case "$OUT" in
+      *"install GNU coreutils"*)
+        ok "no-runner: the refusal names a ONE-COMMAND remedy (install coreutils / gtimeout)" ;;
+      *) bad "no-runner: the refusal must name the remedy (got: $OUT)" ;;
+    esac
+    # And it must not claim a bound, nor emit an ancestry verdict it never reached.
+    case "$OUT" in
       *"anchor-reads: bounded-"*)
-        bad "unbounded: the line claims the reads were bounded on a box with no runner (got: $OUT)" ;;
-      *) ok "unbounded: the line does NOT claim a bound it did not have" ;;
+        bad "no-runner: the output claims the reads were bounded on a box with no runner (got: $OUT)" ;;
+      *) ok "no-runner: the output does NOT claim a bound it did not have" ;;
     esac
     case "$OUT" in
       *"anchor-ancestry: BOUND"*)
-        ok "unbounded: the ancestry verdict is still produced (the bound is liveness, not correctness)" ;;
-      *) bad "unbounded: the ancestry verdict should be unaffected by the missing runner (got: $OUT)" ;;
+        bad "no-runner: the output claims an ancestry verdict it refused before reaching (got: $OUT)" ;;
+      *) ok "no-runner: no ancestry verdict is claimed — the check refused before the walk" ;;
     esac
   fi
 fi
@@ -2145,17 +2208,31 @@ TOFLOW="$T/flow-timeout"
 # WHY A DURATION AND NOT A SUFFIX: `sleep` takes numeric operands only, so a
 # textual tag cannot be appended to its argv. The uniqueness therefore lives in
 # the NUMBER. `printf '9%09d'` keeps it a fixed 10 digits with a floor of ~285
-# years, so a short checksum can never yield a sleep that exits during the run
-# and makes the leak check pass for the wrong reason.
+# years, so a small token can never yield a sleep that exits during the run and
+# makes the leak check pass for the wrong reason.
+#
+# THE TOKEN IS THE PID, AND THAT IS A GUARANTEE RATHER THAN A PROBABILITY. The
+# first version hashed `$T` with `cksum … % 1000000000`, which is LOSSY: two
+# concurrent runs could collide, and a collision hands the whole-box cleanup a
+# peer's process to SIGKILL. A PID IS UNIQUE AMONG LIVE PROCESSES, and live
+# processes are exactly what the census inspects — so two simultaneous runs
+# cannot collide, by construction. The cksum path is GONE rather than kept as a
+# fallback: a second derivation is a second thing to be wrong, and this one needs
+# no external tool.
+#
+# The residual, stated: a stale sleep left by a DEAD earlier run whose pid was
+# later recycled to this one would be seen as this run's leak. That direction is
+# benign — the stray really is garbage and killing it really is correct cleanup —
+# and it can only arise if an earlier run leaked, which these arms now assert
+# against.
 to_derive_sentinel() {
-  local tok
-  tok=$(printf '%s' "$1" | cksum 2>/dev/null | awk '{print ($1 % 1000000000)}') || tok=""
+  local tok="$1"
   case "$tok" in
-    ''|*[!0-9]*) tok=$(( $$ % 1000000000 )) ;;   # a live pid is unique among live processes
+    ''|*[!0-9]*) printf '%s\n' "INVALID-TOKEN"; return 0 ;;
   esac
-  printf 'sleep %s\n' "$(printf '9%09d' "$tok")"
+  printf 'sleep %s\n' "$(printf '9%09d' "$(( tok % 1000000000 ))")"
 }
-TOSENTINEL=$(to_derive_sentinel "$T")
+TOSENTINEL=$(to_derive_sentinel "$$")
 to_shape=0
 # A REAL bounding runner is REQUIRED for these arms. Without one the $BIN shim
 # discards the bound (see its own comment) and a hung read would hang FOREVER —
@@ -2442,6 +2519,11 @@ DECOY
   chmod +x "$DECOY_DIR/git"
   bash "$DECOY_DIR/git" merge-base --is-ancestor deadbeef deadbeef >/dev/null 2>&1 &
   decoy_pid=$!
+  # REGISTERED IMMEDIATELY, on the line after the spawn (job 282). Everything
+  # below this point — a failed recognition, a `bad`, an interrupt, a normal exit
+  # — is covered by the trap installed at the top of this file.
+  DECOY_CLEANUP_PID="$decoy_pid"
+  DECOY_CLEANUP_NEEDLE="$DECOY_DIR/git"
   printf '%s\n' "$decoy_pid" >"$DECOY_PID"
   # Give it a moment to appear in the process table, then CONFIRM it is really
   # alive with the expected argv — a decoy that died makes every property below
@@ -2465,9 +2547,14 @@ DECOY
   fi
 fi
 if [ "$decoy_shape" -ne 1 ]; then
+  # REAP BEFORE DECLARING THE SKIP: recognition may have failed with the decoy
+  # STILL ALIVE and blocked on its FIFO. Reporting a skip while leaving it running
+  # is the leak this arm exists to guard against (roborev job 370, finding 2). The
+  # exit trap would also get it, but a skip should not depend on that.
+  to_kill_decoy
   printf 'ARM NOT TAKEN: leak-check self-test (job 367) — a live decoy process carrying a shim-like argv\n'
   printf 'ARM NOT TAKEN: could not be started on this host, so the leak checks discriminating power is\n'
-  printf 'ARM NOT TAKEN: UNPROVEN on this run.\n'
+  printf 'ARM NOT TAKEN: UNPROVEN on this run. Any partially-started decoy has been reaped.\n'
   ok "leak self-test: SKIPPED (decoy unavailable — arm UNEXERCISED, declared not silent)"
 else
   ok "leak self-test fixture: a live decoy carrying a shim-like argv really exists"
@@ -2497,6 +2584,10 @@ else
     kill -KILL "$decoy_pid" 2>/dev/null
     wait "$decoy_pid" 2>/dev/null || true
   fi
+  # Registration cleared once the resource is gone — the other half of job 282's
+  # rule (register the moment it exists, clear the moment it is reaped), so the
+  # exit trap cannot later signal a pid this arm no longer owns.
+  DECOY_CLEANUP_PID=""
   sleep 1
   v=$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")
   if [ "$v" = GONE ] || [ "$v" = ZOMBIE ]; then
@@ -2534,19 +2625,37 @@ fi
 # (1) DERIVATION — two different scratch roots must yield two different
 #     sentinels. This is the actual property: `$T` is run-unique, so a peer
 #     lane's suite derives a different argv and neither census can see the other.
-sent_a=$(to_derive_sentinel "/tmp/premerge-assert-test.AAAAAA")
-sent_b=$(to_derive_sentinel "/tmp/premerge-assert-test.BBBBBB")
+sent_a=$(to_derive_sentinel 111)
+sent_b=$(to_derive_sentinel 222)
 if [ -n "$sent_a" ] && [ "$sent_a" != "$sent_b" ]; then
-  ok "sentinel: two different scratch roots derive DIFFERENT sentinels — a peer lane cannot collide with this run"
+  ok "sentinel: two different pids derive DIFFERENT sentinels — a concurrent run cannot collide with this one"
 else
-  bad "sentinel: two scratch roots derived the SAME sentinel ('$sent_a') — the census would count a peer lane's process as this run's leak, and the cleanup would SIGKILL it"
+  bad "sentinel: two pids derived the SAME sentinel ('$sent_a') — the census would count a peer run's process as this run's leak, and the cleanup would SIGKILL it"
+fi
+# (1b) The derivation must be INJECTIVE over the pid range, not merely different
+#      for two samples: `% 1000000000` is applied, so a pid could in principle
+#      alias. Asserted over the whole plausible pid space rather than argued —
+#      `/proc/sys/kernel/pid_max` where readable, else the 4194304 Linux default.
+pid_max=$(cat /proc/sys/kernel/pid_max 2>/dev/null) || pid_max=""
+case "$pid_max" in ''|*[!0-9]*) pid_max=4194304 ;; esac
+if [ "$pid_max" -lt 1000000000 ]; then
+  ok "sentinel: pid_max ($pid_max) is below the modulus, so the pid -> sentinel map is INJECTIVE — no aliasing is possible"
+else
+  bad "sentinel: pid_max ($pid_max) reaches the modulus, so two live pids could alias to one sentinel"
 fi
 # (2) THIS RUN's sentinel really is the derived one, not a constant someone
 #     reintroduced beside it.
-if [ "$TOSENTINEL" = "$(to_derive_sentinel "$T")" ]; then
-  ok "sentinel: the live TOSENTINEL is the value derived from this run's scratch root"
+if [ "$TOSENTINEL" = "$(to_derive_sentinel "$$")" ]; then
+  ok "sentinel: the live TOSENTINEL is the value derived from this run's own pid"
 else
-  bad "sentinel: TOSENTINEL ('$TOSENTINEL') is not the value derived from \$T — something is overriding the derivation"
+  bad "sentinel: TOSENTINEL ('$TOSENTINEL') is not the value derived from \$\$ — something is overriding the derivation"
+fi
+# (2b) A non-numeric token must be REFUSED loudly, never silently turned into a
+#      shared default — that is how a fixed sentinel would sneak back.
+if [ "$(to_derive_sentinel "not-a-pid")" = "INVALID-TOKEN" ]; then
+  ok "sentinel: a non-numeric token yields INVALID-TOKEN, never a silent shared default"
+else
+  bad "sentinel: a non-numeric token did not refuse — a bad token must not degrade into a shared value"
 fi
 # (3) SHAPE — `sleep ` plus a fixed 10 digits. The width floor is not cosmetic:
 #     a short duration could EXPIRE mid-run and make the leak check pass because
