@@ -36,10 +36,11 @@
 #                           a clean result prints `0 INCREASE RECOGNISED`, never a bare
 #                           `0`, because a bare zero in a gate log reads as a verified
 #                           all-clear from a scan that may not have happened.
-#   UNMEASURABLE            exit 3 — no cargo on PATH, `cargo tree` non-zero (an offline
-#                           registry, a broken lockfile), a timeout, or output the parser
-#                           does not recognise. The gate component maps this to SKIP
-#                           NAMING THE CAUSE. It is NOT a pass.
+#   UNMEASURABLE            exit 3 — no cargo on PATH, NO WAY TO BOUND THE PROBE (see
+#                           below), `cargo tree` non-zero (an offline registry, a broken
+#                           lockfile), a timeout, or output the parser does not recognise.
+#                           The gate component maps this to SKIP NAMING THE CAUSE. It is
+#                           NOT a pass.
 #   BASELINE UNUSABLE       exit 4 — the committed baseline is missing or does not parse
 #                           under the closed grammar below. Also a SKIP naming the cause:
 #                           with no baseline there is no comparison, so there is no
@@ -113,10 +114,15 @@ MANIFEST="$REPO_ROOT/$MANIFEST_REL"
 # The ONE spelling of the measured invocation. Named once so the script, its diagnostics
 # and the baseline header cannot drift into three descriptions of two commands.
 readonly PROBE_DESC='cargo tree -d --workspace'
-# A bound on the probe, applied only when `timeout` is available. A cargo blocked on a
-# registry lock must not hang a gate component; an absent `timeout` runs unbounded, which
-# is what every other cargo-invoking component already does.
+# THE BOUND ON THE PROBE, AND IT IS A REAL BOUND OR THERE IS NO PROBE.
+#
+# `timeout <n> cmd` sends SIGTERM ONLY. A cargo — or any child of it — that ignores,
+# blocks or is stuck in an uninterruptible wait then keeps running and `timeout` keeps
+# WAITING, so the claimed bound is not a bound at all and this component can hang a gate
+# indefinitely on a registry lock or a credential prompt. `-k <grace>` is what makes it
+# real: SIGKILL, which nothing can ignore, <grace> seconds after the SIGTERM.
 readonly PROBE_TIMEOUT_SECS=600
+readonly PROBE_KILL_GRACE_SECS=30
 
 MODE=check
 
@@ -130,8 +136,9 @@ counts against scripts/ci/dep-duplicates-baseline.txt.
 
   (no flags)      Measure and compare. Exit 0 = compared (verdict NO-INCREASE or
                   ADVISORY-INCREASE — an increase is ADVISORY and never fails).
-                  Exit 3 = UNMEASURABLE, cause named (no cargo, cargo tree failed,
-                  timed out, unparseable output). Exit 4 = the committed baseline is
+                  Exit 3 = UNMEASURABLE, cause named (no cargo, no timeout(1) to
+                  bound the probe with, cargo tree failed, timed out, unparseable
+                  output). Exit 4 = the committed baseline is
                   missing or does not parse. Exit 2 = usage error.
   --regenerate    Re-measure and rewrite the baseline from the current graph. THE one
                   documented regeneration command; run it after a change that
@@ -205,18 +212,36 @@ CARGO_BIN="$(type -P cargo || true)"
 [ -n "$CARGO_BIN" ] || unmeasurable cargo-absent "no cargo binary on PATH (type -P cargo found nothing)"
 [ -f "$MANIFEST" ] || unmeasurable workspace-manifest-absent "$MANIFEST_REL is not a file — this is not a workspace root"
 
+# RESOLVE THE BOUNDING TOOL, AND REQUIRE IT TO HAVE THE CAPABILITY WE DEPEND ON.
+# `gtimeout` is the GNU coreutils spelling on macOS (a first-class gate host), where
+# `timeout` may not exist at all. `-k` is probed AFFIRMATIVELY rather than assumed: a
+# tool that rejects the flag would exit 125 and be reported as a cargo failure, which is
+# a wrong diagnosis, and "the flag was not rejected" is the only evidence that the hard
+# kill will actually happen.
+TIMEOUT_BIN="$(type -P timeout || true)"
+[ -n "$TIMEOUT_BIN" ] || TIMEOUT_BIN="$(type -P gtimeout || true)"
+if [ -n "$TIMEOUT_BIN" ] && ! "$TIMEOUT_BIN" -k 1 1 true >/dev/null 2>&1; then
+  TIMEOUT_BIN=""
+fi
+# FAIL-CLOSED WHERE THE PROBE CANNOT BE BOUNDED, and this is the deliberate choice at
+# this branch: a missing capability must NOT inherit the permissive branch (CLAUDE.md —
+# the component-set pre-flight refuses on exactly this ground). The permissive branch
+# here would be an UNBOUNDED `cargo tree`, i.e. an ADVISORY component that can hang the
+# whole gate with no verdict — strictly worse than one that says, by name, that it could
+# not measure. So the probe is NOT RUN, and no `INVOKED` line is printed, because none
+# happened.
+[ -n "$TIMEOUT_BIN" ] || unmeasurable probe-unboundable \
+  "no timeout(1) accepting -k on PATH (tried timeout, gtimeout), so the ${PROBE_TIMEOUT_SECS}s bound on '$PROBE_DESC' cannot be ENFORCED; the probe was NOT run rather than run unbounded"
+
 TREE_RAW="$WORK_DIR/tree.txt"
 TREE_ERR="$WORK_DIR/tree.err"
 probe_rc=0
-if [ -n "$(type -P timeout || true)" ]; then
-  CARGO_TERM_COLOR=never timeout "$PROBE_TIMEOUT_SECS" \
-    "$CARGO_BIN" tree -d --workspace --manifest-path "$MANIFEST" \
-    >"$TREE_RAW" 2>"$TREE_ERR" || probe_rc=$?
-else
-  CARGO_TERM_COLOR=never \
-    "$CARGO_BIN" tree -d --workspace --manifest-path "$MANIFEST" \
-    >"$TREE_RAW" 2>"$TREE_ERR" || probe_rc=$?
-fi
+# The bound is STATED before it is applied, so a gate log shows what the probe was
+# actually bounded by rather than leaving a reader to trust this comment.
+say "probe bound: $TIMEOUT_BIN ${PROBE_TIMEOUT_SECS}s then SIGKILL after a further ${PROBE_KILL_GRACE_SECS}s"
+CARGO_TERM_COLOR=never "$TIMEOUT_BIN" -k "$PROBE_KILL_GRACE_SECS" "$PROBE_TIMEOUT_SECS" \
+  "$CARGO_BIN" tree -d --workspace --manifest-path "$MANIFEST" \
+  >"$TREE_RAW" 2>"$TREE_ERR" || probe_rc=$?
 # The EXPLICIT REACH SIGNAL the gate component reads (#3453): "cargo was invoked, and
 # here is what it returned". Printed unconditionally, before any verdict, so a component
 # that has to record whether its driver was REACHED can do so from a signal rather than
@@ -224,7 +249,12 @@ fi
 say "probe $PROBE_DESC INVOKED (rc $probe_rc)"
 if [ "$probe_rc" -ne 0 ]; then
   detail="rc $probe_rc"
-  [ "$probe_rc" -eq 124 ] && detail="timed out after ${PROBE_TIMEOUT_SECS}s"
+  # 124 = SIGTERM at the bound. 137 = 128+9, i.e. SIGKILL — the bound's HARD KILL after
+  # a SIGTERM that was ignored, OR an external killer (the OOM killer signals the same
+  # way). The two are not distinguishable from an exit status, so the detail names both
+  # rather than asserting the one that reads better.
+  [ "$probe_rc" -eq 124 ] && detail="timed out after ${PROBE_TIMEOUT_SECS}s (SIGTERM at the bound)"
+  [ "$probe_rc" -eq 137 ] && detail="killed by SIGKILL (rc 137) — the ${PROBE_TIMEOUT_SECS}s bound's hard kill after an ignored SIGTERM, or an external killer such as the OOM killer"
   first_err=""
   if [ -r "$TREE_ERR" ]; then
     while IFS= read -r line; do

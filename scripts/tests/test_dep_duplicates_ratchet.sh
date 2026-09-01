@@ -44,6 +44,13 @@
 #                             fresh baseline still reports ADVISORY-INCREASE (proving the
 #                             file was written from the measurement, not a template)
 #   P13 usage              -> an unrecognized argument exits 2
+#   P14 no bounded probe   -> a PATH with no timeout(1) is exit 3,
+#                             `cause=probe-unboundable`, and NO probe is claimed: a
+#                             missing capability may not inherit the permissive branch,
+#                             and the permissive branch is an unbounded cargo run
+#   P15 the bound is HARD  -> a SIGTERM-IGNORING cargo is SIGKILLed at the bound (the
+#                             `-k` half; `timeout <n>` alone would wait forever), reported
+#                             exit 3 `cause=cargo-tree-failed` naming the SIGKILL
 #   L1  the real tree      -> the committed guard + committed baseline agree; BOTH
 #                             affirmative verdicts pass and a documented UNMEASURABLE is
 #                             reported SKIPPED (see G3 for why)
@@ -199,6 +206,13 @@ case "$OUT" in
   *'ADVISORY-INCREASE'*) bad "P1: a clean census must not print the ADVISORY-INCREASE token" ;;
   *) ok "P1: a clean census does not print ADVISORY-INCREASE (the tokens are distinguishable)" ;;
 esac
+# The bound is STATED, on every measuring run: a bound nobody can see in a gate log is a
+# bound a reader has to take on trust (and this suite's P15 is what proves it is enforced).
+case "$OUT" in
+  *'probe bound: '*'then SIGKILL after a further '*)
+    ok "P1: the run STATES the bound it applied to the probe (tool, bound, hard-kill grace)" ;;
+  *) bad "P1: no 'probe bound:' line — the applied bound is invisible in the gate log" ;;
+esac
 
 # --- P2: a crate grew ------------------------------------------------------
 d=$(new_tree p2); plant_cargo "$d" 0 tree_grew; run_guard "$d"
@@ -341,6 +355,78 @@ assert_case "P12d: growth beyond the REGENERATED baseline is still ADVISORY-INCR
 # --- P13: usage ----------------------------------------------------------
 d=$(new_tree p13); plant_cargo "$d" 0 tree_baseline; run_guard "$d" --bogus
 assert_case "P13: an unrecognized argument exits 2 (repo convention)" 2 "unrecognized argument '--bogus'"
+
+# --- P14: the probe cannot be BOUNDED -------------------------------------
+# A host with no usable `timeout` must NOT fall through to an unbounded `cargo tree`: a
+# missing capability may not inherit the permissive branch, and the permissive branch
+# here is an ADVISORY component that can hang the whole gate with no verdict at all.
+# PATH is rebuilt from scratch with the handful of binaries the guard genuinely needs and
+# NO timeout/gtimeout — the same substitution discipline as everywhere else in this file
+# (no seam, no env var: the guard has none).
+d=$(new_tree p14); plant_cargo "$d" 0 tree_baseline
+mkdir -p "$d/minbin"
+p14_missing=""
+for _b in bash env mktemp rm sed awk mv dirname; do
+  _p="$(type -P "$_b" || true)"
+  if [ -n "$_p" ]; then ln -sf "$_p" "$d/minbin/$_b"; else p14_missing="$p14_missing $_b"; fi
+done
+ln -sf "$d/bin/cargo" "$d/minbin/cargo"
+if [ -n "$p14_missing" ]; then
+  skipped "P14: this host is missing$p14_missing, so a timeout-less PATH cannot be built without also removing what the guard needs"
+elif [ -n "$(PATH="$d/minbin" type -P timeout || true)" ] || [ -n "$(PATH="$d/minbin" type -P gtimeout || true)" ]; then
+  bad "P14: the constructed minimal PATH still resolves a timeout binary — the case would pass for the wrong reason"
+else
+  OUT="$(PATH="$d/minbin" bash "$d/$GUARD_REL" 2>&1)"; RC=$?
+  assert_case "P14: a host where the probe cannot be BOUNDED is UNMEASURABLE (exit 3), naming probe-unboundable — never an unbounded run" \
+    3 'SKIP-UNMEASURABLE cause=probe-unboundable' 'was NOT run rather than run unbounded' 'NOT a pass'
+  case "$OUT" in
+    *'INVOKED'*) bad "P14: with no way to bound the probe the guard must not claim a probe was INVOKED" ;;
+    *)           ok "P14: with no way to bound the probe NO invocation is claimed (the reach signal is not fabricated)" ;;
+  esac
+fi
+
+# --- P15: the bound is a HARD bound (SIGTERM alone is not one) -------------
+# THE DEFECT THIS PINS: `timeout <n>` sends SIGTERM ONLY, so a cargo (or a child) that
+# ignores it keeps running while `timeout` keeps WAITING — the bound is claimed and not
+# enforced. `-k` makes it real. The planted cargo IGNORES SIGTERM, so this case can only
+# pass if the hard kill actually happens.
+#
+# The 600s/30s constants are not settable by flag or environment (deliberately — no seam),
+# so this case SUBSTITUTES THE ARTIFACT: it rewrites them in its OWN scratch copy of the
+# guard and VERIFIES the rewrite took, because a silently-unapplied edit would make the
+# case time out under its own outer bound and read as an unrelated failure.
+d=$(new_tree p15)
+sed -i.bak -e 's/^readonly PROBE_TIMEOUT_SECS=600$/readonly PROBE_TIMEOUT_SECS=1/' \
+           -e 's/^readonly PROBE_KILL_GRACE_SECS=30$/readonly PROBE_KILL_GRACE_SECS=1/' \
+           "$d/$GUARD_REL"
+cat > "$d/bin/cargo" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-}" = tree ]; then
+  # IGNORE SIGTERM, exactly the process this bound has to survive.
+  trap '' TERM
+  while [ "$SECONDS" -lt 25 ]; do sleep 1 2>/dev/null || :; done
+  echo "shim cargo: outlived the bound — the hard kill did NOT happen"
+  exit 0
+fi
+exit 97
+SHIM
+chmod +x "$d/bin/cargo"
+if grep -qx 'readonly PROBE_TIMEOUT_SECS=1' "$d/$GUARD_REL" \
+   && grep -qx 'readonly PROBE_KILL_GRACE_SECS=1' "$d/$GUARD_REL"; then
+  ok "P15: the scratch copy's bound was really shortened (the substitution took, so P15 cannot pass or fail for the wrong reason)"
+else
+  bad "P15: could not shorten the bound in the scratch copy — the constants were renamed or reformatted"
+fi
+# An OUTER bound, not a wall-clock threshold assert: if the guard's own bound does NOT
+# work the outer timeout kills it and rc is 124, which fails the assertion below with the
+# guard's own claim visible. Nothing here depends on how long anything took.
+OUT="$(PATH="$d/bin:$PATH" timeout 60 bash "$d/$GUARD_REL" 2>&1)"; RC=$?
+assert_case "P15: a SIGTERM-IGNORING cargo is HARD-KILLED at the bound and reported UNMEASURABLE (exit 3), not waited on forever" \
+  3 'probe bound:' 'INVOKED (rc 137)' 'SKIP-UNMEASURABLE cause=cargo-tree-failed' 'SIGKILL'
+case "$OUT" in
+  *'outlived the bound'*) bad "P15: the planted cargo ran to completion — the bound was not enforced" ;;
+  *)                      ok "P15: the planted cargo did NOT outlive the bound" ;;
+esac
 
 # --- L1: the live tree ---------------------------------------------------
 if [ -z "$(type -P cargo || true)" ]; then

@@ -16288,7 +16288,10 @@ run_pub_surface() {
 # `verdict NO-INCREASE|ADVISORY-INCREASE` line, which it can only print AFTER it has
 # read counts out of real `cargo tree` output and parsed the baseline — and never on the
 # absence of an error. Every other outcome is a SKIP NAMING THE CAUSE: the guard absent
-# from the checkout, no cargo on PATH, `cargo tree` non-zero or timed out, output the
+# from the checkout, no cargo on PATH, no `timeout(1)` accepting `-k` with which to BOUND
+# the probe (the guard then does not run it at all — an unbounded `cargo tree` could hang
+# this component with no verdict, and a missing capability must not inherit the permissive
+# branch), `cargo tree` non-zero or timed out, output the
 # parser does not recognise, a missing or ungrammatical baseline, an unexpected exit
 # status, or a zero exit with NO verdict line (a guard that returned early measured
 # nothing, and that is a SKIP, not a pass). A SKIP is visible in the SUMMARY and is not a
