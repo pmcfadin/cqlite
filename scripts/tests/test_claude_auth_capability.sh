@@ -2069,10 +2069,10 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # case (the real-tmux isolation case, 3 assertions) skips, and a floor that reds on correct
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
-# non-Linux branch in every case. Raised 91 -> 119 by round 4 (the digest identity of a
-# delivered credential, the sudo-posture cases, and the bounding class): 122 cases run, and
-# the real-tmux isolation case is still the only legitimately skippable one.
-CASE_FLOOR=119
+# non-Linux branch in every case. Raised 91 -> 121 by round 4 (the digest identity of a
+# delivered credential, the sudo-posture cases, and the bounding class): 124 cases run, and
+# the real-tmux isolation case (3 assertions) is still the only legitimately skippable one.
+CASE_FLOOR=121
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
