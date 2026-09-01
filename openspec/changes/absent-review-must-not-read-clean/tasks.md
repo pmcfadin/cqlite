@@ -38,10 +38,24 @@
       CDN stale window; a `0` then means not-yet-published, not published-and-wrong.
 
 ## 6. Landing coordination
-- [ ] 6.1 Coordinate the `premerge-assert.sh` arity change with #3752's `--roborev-block`-shaped flag so
-      in-flight lanes pay ONE re-certification visit, not two (lead ruling 2026-09-01T18:19:24Z).
-      Landing ORDER is the lead's call; this change assumes neither.
-- [ ] 6.2 Owner rollout condition (Seam-1 approval 2026-09-01T18:36:42Z): whichever of #3751/#3752
+- [x] 6.1 Coordinate the `premerge-assert.sh` arity change with #3752's assert so in-flight lanes pay ONE
+      re-certification visit, not two (lead ruling 2026-09-01T18:19:24Z). **MEASURED against PR #3842
+      (#3752) 2026-09-01T21:1xZ, not assumed: #3752 adds NO caller-facing flag** — it calls a new
+      `scripts/flow/premerge-review-binding.sh` from INSIDE `premerge-assert.sh` and derives the
+      roborev/head binding itself. So the arity change is `--c-verdict` ALONE, and the two asserts compose
+      in EITHER landing order with no second arity visit: this change assumes neither order, and its
+      missing-flag census names each absent flag independently (item 2.1) so a later required flag does not
+      make its exit 3 order-dependent. Residual, disclosed rather than resolved here: both branches touch
+      `premerge-assert.sh`, `CLAUDE.md`, `website/.../delivery-pipeline.md`, `.claude/agents/flow-closer.md`,
+      `.claude/skills/flow-implement/SKILL.md` and `scripts/tests/test_premerge_assert.sh`, so whichever
+      merges SECOND rebases and resolves text conflicts — a merge-order cost, not an interface cost.
+- [~] 6.2 Owner rollout condition (Seam-1 approval 2026-09-01T18:36:42Z): whichever of #3751/#3752
       merges SECOND must not force a second sweep of open PRs, and the merge-time notice posted to
       open PRs must name the remedy commands for BOTH new asserts, so an in-flight lane pays ONE
       re-certification visit covering both.
+      **Prepared, posted at merge time (the only moment it can be true):** ONE notice per open PR naming
+      BOTH remedies — (a) #3751: add `--c-verdict AUTO` to the `premerge-assert.sh` call (or
+      `--c-verdict <path>` naming a captured `review-stage.sh verdict` line); (b) #3752: ensure the PR
+      records a roborev round covering the certified head, which needs NO argument change because that
+      assert derives the binding internally. Since #3752 adds no arity, an in-flight lane's ONE visit is
+      the `--c-verdict` addition regardless of which lands first.
