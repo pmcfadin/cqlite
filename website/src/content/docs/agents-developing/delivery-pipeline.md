@@ -475,11 +475,14 @@ a `DEAD-*` verdict — it must abstain. The **refreshing** carrier `refs/lane-cl
 supervisor iteration, needs no such rule: there an absent or recycled pid really does mean the lane is
 gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are correct.
 
-What lane liveness rests on here is the **coordination lead's sweep** plus the **#3436
-board-signature read** (Ready + pushed branch + no claim ref) — and both are **operating mechanisms,
-not committed tooling**: there is no sweep command and no board-signature script in this repository,
-and #3436's reading of that signature *conflicts* with the runbook's "parked-by-design" reading of
-the same shape, unresolved. Full record, including the primitives that do exist:
+What lane liveness rests on here is the **coordination lead's sweep** plus **two board signatures
+that mean different things and must not be merged**: a **held `refs/claims/issue-<N>` with no live
+session** is the **dead-lane** signal — a vanished `/drive-issue` lane keeps its claim ref, since the
+ref outlives the process — while **Ready + pushed branch + no claim ref** is #3436's
+**unclaimed-work** signature, i.e. work performed without claiming, and is **not** evidence that a
+lane died. All of it is **operating mechanism, not committed tooling**: there is no sweep command and
+no board-signature script in this repository, and #3436's reading of the second *conflicts* with the
+runbook's "parked-by-design" reading of the same shape, unresolved. Full record, including the primitives that do exist:
 `docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*.
 
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in

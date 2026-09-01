@@ -1971,10 +1971,13 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   TRANSIENT CLAIMING SHELL's pid, never refreshed (measured dead while its lane ran ⇒ it would
   false-`DEAD` healthy lanes), and `refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE and
   force-updated, so N lanes overwrite each other (the same masking the retired per-machine claim ref
-  had). Lane liveness here rests on the coordination sweep plus the **#3436 board-signature read**
-  (Ready + pushed branch + no claim ref) — **operating mechanisms, NOT committed tooling: no such
-  script or command exists in this repo**, and #3436's reading of that signature CONFLICTS with the
-  runbook's "parked-by-design" reading of the same shape, unresolved. AC4 survives the descope, and
+  had). Lane liveness here rests on the coordination sweep plus **TWO board signatures that mean
+  DIFFERENT things**: a **HELD `refs/claims/issue-<N>` with no live session** is the DEAD-LANE signal
+  (a vanished `/drive-issue` lane keeps its claim ref — the ref outlives the process), while **Ready +
+  pushed branch + NO claim ref** is #3436's **UNCLAIMED-WORK** signature and is NOT evidence a lane
+  died. Both are **operating mechanisms, NOT committed tooling: no such script or command exists in
+  this repo**, and #3436's reading of the second CONFLICTS with the runbook's "parked-by-design"
+  reading of the same shape, unresolved. AC4 survives the descope, and
   **EXCLUSION IS THE ABSTENTION**: the two populated carriers are NOT ENUMERATED, so they produce no
   row and no verdict of any kind — describing that by naming a verdict (`UNKNOWN-*` or otherwise) is
   false, as is the unqualified "a stale pid must never yield `DEAD-*`". AC4 is a COUNTERFACTUAL for a

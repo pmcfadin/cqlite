@@ -879,8 +879,9 @@ machine + heartbeat age (issue #2089). Interpretation:
   a supervisor-less `/drive-issue` fleet* below (#3548)
 - **Ready but branch already on origin** → parked-by-design (e.g. spec approved, awaiting a
   team) — pickup is *resume that branch*, never a fresh claim. **This exact signal is AMBIGUOUS and the
-  ambiguity is unresolved**: #3436 reads *Ready + pushed branch + no claim ref* as a LOST lane, and this
-  bullet reads it as benign. Nothing mechanical tells the two apart today — check the branch's last commit
+  ambiguity is unresolved**: #3436 reads *Ready + pushed branch + no claim ref* as UNCLAIMED WORK (a
+  session driving an issue it never claimed), and this bullet reads the same shape as benign. Neither
+  reading is a lane-DEATH signal — that one is a HELD claim ref with no live session. Nothing mechanical tells the two apart today — check the branch's last commit
   time and whether a session is actually driving it before deciding
 
 ## Recovery scenarios (all safe by construction)
@@ -936,19 +937,24 @@ yield `DEAD-*`") — both are false about the code.
 
 1. **The coordination lead's sweep** — a human-driven loop over the board and the open PRs. It is what
    has been catching stalls in practice, including a lane parked 56 minutes on a missed request.
-2. **The #3436 board-signature read** — *Ready + pushed branch + no claim ref* as the signature of a
-   lost lane.
+2. **Two board signatures, which mean different things** (the distinction the recovery row above
+   spells out): a **held `refs/claims/issue-<N>` with no live session** is the **dead-lane** signal —
+   a vanished `/drive-issue` lane retains its claim ref, because the ref outlives the process — while
+   ***Ready* + pushed branch + no claim ref** is the **#3436 unclaimed-work** signature: work
+   performed without claiming, **not** evidence that a lane died.
 
 **Both are OPERATING MECHANISMS, tracked by #3436 (open, `status:in-review`) — NOT committed tooling.**
 There is no `board-signature` script, no sweep command, and no flag in this repository; a `grep` for
 either term finds nothing. Do not go looking for one, and do not add its name to this page until
 something in `scripts/` actually implements it.
 
-**And the signature is ambiguous today.** The *Reading the board* section above reads *Ready + branch
-already on origin* as **parked-by-design**, while #3436 reads the same shape as a **lost lane**. That
-conflict is real and unresolved: nothing mechanical distinguishes them, so an operator has to check
-the branch's last commit time and whether a session is driving it. Until #3436 lands a mechanism, treat
-the signature as a prompt to look, never as a verdict.
+**And the unclaimed-work signature is ambiguous today.** The *Reading the board* section above reads
+*Ready + branch already on origin* as **parked-by-design**, while #3436 reads the same shape as **work
+being performed without a claim**. That conflict is real and unresolved: nothing mechanical
+distinguishes them, so an operator has to check the branch's last commit time and whether a session is
+driving it. Until #3436 lands a mechanism, treat that signature as a prompt to look, never as a verdict
+— and note that neither reading makes it a lane-death signal; for that, look for a **held** claim ref
+with nothing driving it.
 
 **Known non-lane artifacts a naive lane-liveness scan calls dead (#3548).** Measured, from the ad-hoc
 `lane-watchdog.sh` — **not** from `dead-lanes`, which enumerates only claim refs and therefore cannot

@@ -3084,6 +3084,18 @@ require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)
 # DELETED with this round: the "AC4 positive half" assertion (that a REFRESHING carrier legitimately
 # yields `DEAD-*`). The counterfactual phrasing cannot be re-absolutised without failing the phrase
 # below, which is what that assertion was guarding, so it pinned wording nobody needs.
+# THE TWO BOARD SIGNATURES, SEPARATELY (roborev job 40). The help said lane liveness on a
+# supervisor-less fleet rests on the #3436 read "Ready + pushed branch + no claim ref" in a context
+# presenting it as the DEAD-LANE signal — which is backwards in the operator-misleading direction: a
+# vanished /drive-issue lane RETAINS its `refs/claims/issue-<N>` (the ref outlives the process), so the
+# death signal is a HELD claim with no live session, while the no-claim-ref shape is #3436's
+# UNCLAIMED-WORK signature and says nothing about a death. It was the same defect roborev had already
+# fixed in the runbook, surviving in a second file. Both phrases are pinned, so deleting either — or
+# merging them back into one signature — reds this case, and the two files carry one wording.
+require_help_phrase "held-claim signature, presented as THE dead-lane signal" \
+  'A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL'
+require_help_phrase "#3436 unclaimed-work signature, explicitly NOT a lane death" \
+  '`Ready` + pushed branch + NO claim ref is the #3436 UNCLAIMED-WORK signature — work performed without claiming, NOT evidence that a lane died'
 require_help_phrase "exclusion-IS-the-abstention mechanism (what TEST 82 proves)" \
   'are NOT ENUMERATED by this command, so they produce no row and no verdict at all — not `DEAD-*`, not `UNKNOWN-*`, nothing'
 require_help_phrase "AC4 as a COUNTERFACTUAL about a non-refreshing carrier" \

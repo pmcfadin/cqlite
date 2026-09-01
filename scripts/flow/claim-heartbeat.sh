@@ -258,9 +258,14 @@
 #   the subject set is EMPTY — measured on all three boxes: lane-claims=0,
 #   machine-claims=0, production supervisors ZERO — so this command reports nothing and
 #   exits 1. That reinforces the rule above rather than softening it: EXIT 1 MEANS
-#   "NOTHING WAS REPORTED", NEVER a clean bill of health (#3467). On such a fleet lane
-#   liveness rests on the coordination sweep plus the #3436 board-signature read (Ready +
-#   pushed branch + no claim ref) — operating mechanisms, NOT committed commands. See
+#   "NOTHING WAS REPORTED", NEVER a clean bill of health (#3467). On such a fleet lane liveness
+#   rests on the coordination sweep plus TWO BOARD SIGNATURES THAT MEAN DIFFERENT THINGS AND MUST
+#   NOT BE MERGED (roborev job 40; same wording as docs/development/fleet-runbook.md so the two
+#   cannot drift): (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL
+#   — a vanished `/drive-issue` lane RETAINS its claim ref, because the ref outlives the process,
+#   so this is where dead-lane investigation goes on such a fleet. (b) `Ready` + pushed branch +
+#   NO claim ref is the #3436 UNCLAIMED-WORK signature — work performed without claiming, NOT
+#   evidence that a lane died. All of these are operating mechanisms, NOT committed commands. See
 #   docs/development/fleet-runbook.md.
 #
 #   THE TWO POPULATED NAMESPACES ARE DELIBERATELY NOT READ, measured rather than priced
