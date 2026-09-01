@@ -2334,6 +2334,156 @@ else
   echo "info - agent-gate.sh unreadable; skipping the node-ci exemption pins (cases 93-96)"
 fi
 
+# ---------------------------------------------------------------------------
+# Cases 97-101 (issue #3642, residual 2 of #3493): the COMPONENT's interpretation of
+# check-dataset-manifest.sh's exit codes, exercised BEHAVIOURALLY.
+#
+# The cases above cover the script's OWN exit codes well (9 = corpus verdict, 2 =
+# tooling malfunction). What they do not cover is what run_node_bindings DOES with them:
+#
+#   rc 9 + AGENT_GATE_ALLOW_MISSING_FIXTURES=1  -> SKIP  (the #2078 opt-out reaches this
+#                                                         verdict, not just the absent-corpus one)
+#   rc 9 without the opt-out                    -> FAIL, named as an INCOMPLETE CORPUS
+#   any other non-zero                          -> FAIL, named as a TOOLING failure, and
+#                                                  the opt-out deliberately does NOT excuse it
+#   rc 0                                        -> the component proceeds to the suite
+#
+# That mapping was verified BY HAND once during #3493 and by nothing since. A hand
+# verification is not a test: the three branches differ by one comparison each, and
+# collapsing any two of them (dropping the `-eq 9` guard on the opt-out branch, say)
+# leaves every other assertion in this repository green while the opt-out silently starts
+# excusing a tooling malfunction -- an unanswered question read as a judged corpus.
+#
+# BEHAVIOURAL AND HERMETIC AT ~3s PER CASE, which is why it is affordable where the rest
+# of this component's behaviour is not. The expensive half of run_node_bindings (npm ci,
+# the napi build, typecheck, the jest run) is satisfied by STUBS on PATH; the manifest
+# script itself is SUBSTITUTED in a scratch git worktree so it exits with the code the
+# case chose. Substituting the ARTIFACT, never adding a seam to agent-gate.sh: a
+# test-only environment hook would be one more thing a real invoker can set (#3312).
+#
+# The scratch worktree gets the WORKING TREE's agent-gate.sh copied over the checked-out
+# one, so the subject is the script being changed rather than the last commit's.
+#
+# Case 101 is the positive control. Without it, cases 97-99 could all be satisfied by a
+# component that FAILs or SKIPs for some reason upstream of the manifest entirely.
+# ---------------------------------------------------------------------------
+nbgate_ok=0
+if ! command -v git >/dev/null 2>&1; then
+  echo "info - git absent; skipping the node-bindings manifest exit-code mapping cases (97-101)"
+elif [ ! -f "$GATE_SRC4" ]; then
+  echo "info - agent-gate.sh unreadable; skipping the manifest exit-code mapping cases (97-101)"
+else
+  nbgate_repo=$(cd "$(dirname "$GATE")/.." && pwd)
+  nbgate_wt="$WORK/nb-gate-wt"
+  if git -C "$nbgate_repo" worktree add --detach "$nbgate_wt" HEAD >"$WORK/nb-gate-wt.log" 2>&1; then
+    SCRATCH_WORKTREE="$nbgate_wt"; SCRATCH_WORKTREE_REPO="$nbgate_repo"
+    nbgate_ok=1
+  else
+    bad "cases 97-101: could not create a scratch git worktree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-wt.log" 2>/dev/null)"
+  fi
+fi
+
+if [ "$nbgate_ok" = 1 ]; then
+  # The SUBJECT: this checkout's agent-gate.sh, not HEAD's.
+  cp "$GATE_SRC4" "$nbgate_wt/scripts/agent-gate.sh"
+
+  # Substituted manifest: exits with the code the case picks, and says so in the log so a
+  # case can prove the component actually reached it.
+  cat > "$nbgate_wt/test-data/scripts/check-dataset-manifest.sh" <<'DMSTUB'
+#!/usr/bin/env bash
+echo "substituted check-dataset-manifest.sh: exiting ${STUB_MANIFEST_RC:-0} for root '${1:-<none>}'"
+exit "${STUB_MANIFEST_RC:-0}"
+DMSTUB
+
+  # `./node_modules/.bin/jest --listTests` is invoked by PATH-independent relative path, so
+  # it is substituted too. It must agree with the component's INDEPENDENT `find` inventory
+  # (the #3522 two-oracle reconciliation), so it lists the same committed suites.
+  mkdir -p "$nbgate_wt/bindings/node/node_modules/.bin"
+  cat > "$nbgate_wt/bindings/node/node_modules/.bin/jest" <<'JESTSTUB'
+#!/bin/sh
+d=$(cd "$(dirname "$0")/../.." && pwd)
+find "$d/__test__" -name '*.test.js' | sort
+JESTSTUB
+  chmod +x "$nbgate_wt/bindings/node/node_modules/.bin/jest"
+
+  # A corpus root that SATISFIES _node_bindings_corpus_present, so the pre-npm absent-corpus
+  # SKIP branch does not fire and the run reaches the manifest verdict. That is the exact
+  # state #3493's post-rebase round was about: a PARTIAL corpus reports "present" here.
+  nbgate_ds="$WORK/nb-gate-ds"
+  mkdir -p "$nbgate_ds/sstables/test_basic/simple_table-$UUID"
+  printf 'x\n' > "$nbgate_ds/sstables/test_basic/simple_table-$UUID/nb-1-big-Data.db"
+
+  # _nbgate_run <tag> <manifest-rc> <optout 0|1> -- run `--only node-bindings` against the
+  # scratch tree and echo the component's status line. `--only` is deliberate: it is the
+  # single-component probe mode, and it does not change any branch under test here.
+  _nbgate_run() { # <tag> <rc> <optout>
+    local tag=$1 rc=$2 optout=$3
+    local out="$WORK/nbgate-$tag.log"
+    local optenv=()
+    [ "$optout" = 1 ] && optenv=(AGENT_GATE_ALLOW_MISSING_FIXTURES=1)
+    env -u AGENT_GATE_SUMMARY_FILE -u CQLITE_REQUIRE_FIXTURES \
+      PATH="$STUB:$PATH" \
+      CQLITE_GATE_DISABLE_CAP=1 \
+      CQLITE_DATASETS_ROOT="$nbgate_ds" \
+      STUB_MANIFEST_RC="$rc" \
+      AGENT_GATE_SUMMARY_FILE="$WORK/nbgate-$tag.summary" \
+      "${optenv[@]}" \
+      bash "$nbgate_wt/scripts/agent-gate.sh" --only node-bindings >"$out" 2>&1
+    printf '%s' "$out"
+  }
+  _nbgate_verdict() { # <log>
+    grep -Eo '^>>> \[node-bindings\] (PASS|FAIL|SKIP) \(' "$1" 2>/dev/null \
+      | head -1 | awk '{print $3}'
+  }
+
+  # Case 101 FIRST — the positive control. If a green manifest does not carry the run past
+  # the corpus gate, the three verdict cases below prove nothing.
+  nbg_log=$(_nbgate_run rc0 0 0)
+  if grep -q 'corpus complete: check-dataset-manifest.sh verified every expected table' "$nbg_log"; then
+    ok "case 101: manifest rc 0 -> the component passes the corpus gate and proceeds to the suite (positive control)"
+  else
+    bad "case 101: manifest rc 0 did NOT reach the 'corpus complete' verdict, so cases 97-99 below are not measuring the mapping. Log: $nbg_log"
+  fi
+
+  # Case 97 — rc 9 WITHOUT the opt-out is a FAIL, named as an incomplete corpus.
+  nbg_log=$(_nbgate_run rc9 9 0)
+  nbg_v=$(_nbgate_verdict "$nbg_log")
+  if [ "$nbg_v" = FAIL ] && grep -q 'the corpus at .* is INCOMPLETE' "$nbg_log"; then
+    ok "case 97: manifest rc 9 without the opt-out -> node-bindings FAIL, named as an INCOMPLETE corpus"
+  else
+    bad "case 97: manifest rc 9 without the opt-out gave verdict '${nbg_v:-<none>}' and no incomplete-corpus diagnostic; a corpus this component cannot vouch for must not pass. Log: $nbg_log"
+  fi
+
+  # Case 98 — rc 9 WITH the opt-out is a SKIP. The #2078 opt-out has to reach THIS verdict
+  # and not only the absent-corpus one: the pre-npm branch keys on
+  # _node_bindings_corpus_present, which a PARTIAL corpus satisfies.
+  nbg_log=$(_nbgate_run rc9opt 9 1)
+  nbg_v=$(_nbgate_verdict "$nbg_log")
+  if [ "$nbg_v" = SKIP ] && grep -q 'reports an INCOMPLETE corpus' "$nbg_log"; then
+    ok "case 98: manifest rc 9 + AGENT_GATE_ALLOW_MISSING_FIXTURES=1 -> node-bindings SKIP (the #2078 opt-out reaches the manifest verdict, not just the absent-corpus one)"
+  else
+    bad "case 98: manifest rc 9 under the #2078 opt-out gave verdict '${nbg_v:-<none>}', expected SKIP; the documented remedy would not work in the state that prints it. Log: $nbg_log"
+  fi
+  # The SKIP must also be RECORDED, not merely printed: an opt-out is only worth having if
+  # it is both visible and effective, and the SUMMARY block is where it becomes visible.
+  if grep -qE '^node-bindings: *SKIP' "$WORK/nbgate-rc9opt.summary" 2>/dev/null; then
+    ok "case 99: the rc-9 opt-out SKIP is RECORDED as SKIP in the gate SUMMARY block"
+  else
+    bad "case 99: the rc-9 opt-out SKIP is not recorded as SKIP in the SUMMARY ($(grep -E '^node-bindings:' "$WORK/nbgate-rc9opt.summary" 2>/dev/null | head -1))"
+  fi
+
+  # Case 100 — any OTHER non-zero code is a TOOLING failure, and the opt-out does NOT
+  # excuse it. Run WITH the opt-out on purpose: that is the direction that can go wrong.
+  # The opt-out excuses missing fixtures, not an unanswered question.
+  nbg_log=$(_nbgate_run rc2opt 2 1)
+  nbg_v=$(_nbgate_verdict "$nbg_log")
+  if [ "$nbg_v" = FAIL ] && grep -q 'TOOLING failure, not a corpus verdict' "$nbg_log"; then
+    ok "case 100: manifest rc 2 under the #2078 opt-out -> node-bindings FAIL as a TOOLING failure (the opt-out excuses missing fixtures, not an unanswered question)"
+  else
+    bad "case 100: manifest rc 2 under the opt-out gave verdict '${nbg_v:-<none>}' without the tooling-failure diagnostic; a malfunctioning checker would be read as a judged corpus. Log: $nbg_log"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
