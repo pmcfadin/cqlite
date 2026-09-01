@@ -43,5 +43,5 @@ DISPOSITION. Not fixed in #1698, deliberately: the four CLI ones need moving fro
 the crate's LIB into integration-test targets, and the other two are substantive
 expectations (a no-heuristics assertion and a VInt length) each worth its own
 investigation. Doing any of that inside a dead-feature-flag cleanup would be a
-different change wearing this one's number. Filed separately; #1698's own
+different change wearing this one's number. Filed as ISSUE #3856; #1698's own
 `--lite` FAIL is cited against it rather than papered over.
