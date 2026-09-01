@@ -959,6 +959,99 @@ refused_pair() {
   fi
 }
 
+# =============================================================================
+# THE ANCESTRY FIXTURE (#3653) — A REAL SYNTHETIC REPOSITORY
+# =============================================================================
+# Case B's #3653 binding asks a REPOSITORY a question (`git merge-base
+# --is-ancestor <anchor> <certified>`), and it asks it of the CURRENT WORKING
+# DIRECTORY's repository with no env override (#3312's enforcer rule). So every
+# Case B case that reaches that check needs REAL shas in a REAL repository —
+# fabricated 40-hex constants are absent objects and land, correctly, on
+# UNVERIFIABLE. One fixture serves BOTH arms:
+#
+#     c0 ─── c1 (ANCHOR) ─── c2 (CERTIFIED head)        [branch feature]
+#      └──── cF (FOREIGN anchor: NOT an ancestor of c2)  [branch other]
+#
+# Built with `git init` in the scratch dir, so it is hermetic, bounded by
+# construction and identical on every host — the same discipline (and the same
+# fixture-self-consistency assertions) as the wiring case at the end of this file.
+ANC_REPO="$T/ancestry-repo"
+anc_shape=0
+R_ANCHOR=""; R_CERT=""; R_FOREIGN=""
+mkdir -p "$ANC_REPO"
+if git init -q -b mainline "$ANC_REPO" >/dev/null 2>&1; then
+  git -C "$ANC_REPO" config user.email t@t
+  git -C "$ANC_REPO" config user.name t
+  anc_commit() {
+    printf 'content %s\n' "$1" >>"$ANC_REPO/$1.txt"
+    git -C "$ANC_REPO" add -- "$1.txt" >/dev/null &&
+      git -C "$ANC_REPO" commit -q -m "$1" >/dev/null
+  }
+  anc_commit c0 &&
+    git -C "$ANC_REPO" checkout -q -b other &&
+    anc_commit cF &&
+    R_FOREIGN=$(git -C "$ANC_REPO" rev-parse HEAD) &&
+    git -C "$ANC_REPO" checkout -q -b feature mainline &&
+    anc_commit c1 &&
+    R_ANCHOR=$(git -C "$ANC_REPO" rev-parse HEAD) &&
+    anc_commit c2 &&
+    R_CERT=$(git -C "$ANC_REPO" rev-parse HEAD) &&
+    anc_shape=1
+fi
+# FIXTURE SELF-CONSISTENCY. Every property the cases below rely on is asserted
+# here, because a fixture that is not the shape the case claims makes the case
+# vacuous — green while proving nothing.
+anc_is_hex40() { case "$1" in *[!0-9a-f]*|'') return 1 ;; esac; [ "${#1}" -eq 40 ]; }
+if [ "$anc_shape" -eq 1 ]; then
+  anc_is_hex40 "$R_ANCHOR" && anc_is_hex40 "$R_CERT" && anc_is_hex40 "$R_FOREIGN" || anc_shape=0
+fi
+if [ "$anc_shape" -eq 1 ]; then
+  git -C "$ANC_REPO" merge-base --is-ancestor "$R_ANCHOR" "$R_CERT" || anc_shape=0
+  git -C "$ANC_REPO" merge-base --is-ancestor "$R_FOREIGN" "$R_CERT" && anc_shape=0
+  [ "$(git -C "$ANC_REPO" rev-parse --is-shallow-repository 2>/dev/null)" = false ] || anc_shape=0
+fi
+if [ "$anc_shape" -eq 1 ]; then
+  ok "ancestry fixture: c1 IS an ancestor of c2, cF is NOT, and the repo is proven complete"
+else
+  bad "ancestry fixture: the synthetic repo is not the shape the #3653 cases claim (anchor '$R_ANCHOR', certified '$R_CERT', foreign '$R_FOREIGN') — those cases would be vacuous"
+fi
+
+# The two abbreviations the gate writes for each fixture sha (`%.7s` / `%.12s`).
+RA7=$(printf '%.7s' "$R_ANCHOR");  RA12=$(printf '%.12s' "$R_ANCHOR")
+RC7=$(printf '%.7s' "$R_CERT");    RC12=$(printf '%.12s' "$R_CERT")
+
+# run_anc <expected-exit> <desc> <args...> — run() with the CURRENT DIRECTORY
+# inside the ancestry fixture, which is the repository the #3653 binding reads.
+# Still the NEUTRAL scratch copy of the assert (so no case scans the ambient
+# checkout) and still the gh mock, answering with the fixture's own head.
+run_anc() {
+  local want="$1" desc="$2"
+  shift 2
+  OUT=$(cd "$ANC_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" "$@" 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+# anc_delta <file> <anchor-sha> — a delta block at the fixture's certified head,
+# anchored at <anchor-sha>. ONE builder, ONE varying input: that is what makes
+# the accept arm and the RED arm differ in EXACTLY ONE PROPERTY (asserted below).
+anc_delta() {
+  delta_summary "$1" "$2" "$RC7" "$RC12" PASS PASS \
+    "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $2)"
+}
+RANCFULL="$T/anc-full.txt"
+full_summary "$RANCFULL" "$RA7" "$RA12" PASS PASS
+RGOODDELTA="$T/anc-delta-good.txt"
+anc_delta "$RGOODDELTA" "$R_ANCHOR"
+RFORDELTA="$T/anc-delta-foreign.txt"
+anc_delta "$RFORDELTA" "$R_FOREIGN"
+
 ANCHORFULL="$T/anchor-full.txt"
 full_summary "$ANCHORFULL" "$A7" "$A12" PASS PASS
 GOODDELTA="$T/good-delta.txt"
@@ -972,24 +1065,28 @@ refused "anchor-only full summary at a MOVED head (3 args) -> refuse" \
   "$ANCHORFULL" "does not match the certified sha"
 
 # --- Case 28(b): the anchored delta PAIR at that same moved head -> accept ---
-if run 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
-  2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA"; then
+# MIGRATED to the REAL ancestry fixture (#3653): the fabricated ANCHOR/CERTIFIED
+# constants are absent objects, so this case now lands on ANCHOR-UNVERIFIABLE
+# unless it runs in a repository that HOLDS the two shas. Everything it asserted
+# is preserved, at the fixture's own shas, plus the new affirmative token.
+if run_anc 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
+  2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA"; then
   case "$OUT" in
-    *"PREMERGE: OK $CERTIFIED"*) ok "delta pair: prints PREMERGE: OK <sha>" ;;
+    *"PREMERGE: OK $R_CERT"*) ok "delta pair: prints PREMERGE: OK <sha>" ;;
     *) bad "delta pair: missing PREMERGE: OK (got: $OUT)" ;;
   esac
   case "$OUT" in
-    *"PREMERGE: GATE-OF-RECORD commit: $A7 tree-start: $A12"*)
+    *"PREMERGE: GATE-OF-RECORD commit: $RA7 tree-start: $RA12"*)
       ok "delta pair: the GATE-OF-RECORD line names the ANCHOR's provenance" ;;
     *) bad "delta pair: GATE-OF-RECORD line must name the anchor (got: $OUT)" ;;
   esac
   case "$OUT" in
-    *"PREMERGE: DELTA-RECERT anchor: $ANCHOR commit: $C7 tree-start: $C12"*)
+    *"PREMERGE: DELTA-RECERT anchor: $R_ANCHOR anchor-ancestry: BOUND commit: $RC7 tree-start: $RC12"*)
       ok "delta pair: a DISTINCT DELTA-RECERT line names the anchor + the merged tree" ;;
     *) bad "delta pair: missing the DELTA-RECERT evidence line (got: $OUT)" ;;
   esac
   case "$OUT" in
-    *"summary: $GOODDELTA"*) ok "delta pair: the DELTA-RECERT line names the delta summary file" ;;
+    *"summary: $RGOODDELTA"*) ok "delta pair: the DELTA-RECERT line names the delta summary file" ;;
     *) bad "delta pair: DELTA-RECERT must name the delta summary file (got: $OUT)" ;;
   esac
 fi
@@ -1110,10 +1207,10 @@ refused_pair "anchor commit: non-hex -> refuse (a real sha is still required)" \
 # the same property, so both are held to the requirement.
 
 # 33(x)(a) POSITIVE CONTROL — both clean -> exit 0, both evidence lines report it.
-if run 0 "delta pair with BOTH blocks dirty: no -> exit 0" \
-  2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA"; then
+if run_anc 0 "delta pair with BOTH blocks dirty: no -> exit 0" \
+  2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA"; then
   case "$OUT" in
-    *"GATE-OF-RECORD commit: $A7"*"dirty: no"*"DELTA-RECERT anchor:"*"dirty: no"*)
+    *"GATE-OF-RECORD commit: $RA7"*"dirty: no"*"DELTA-RECERT anchor:"*"dirty: no"*)
       ok "dirty (case B): BOTH evidence lines report the clean tree" ;;
     *) bad "dirty (case B): both evidence lines must report dirty: no (got: $OUT)" ;;
   esac
@@ -1326,8 +1423,8 @@ if run 0 "success path prints the SCOPE disclaimer" 2421 "$CERTIFIED" "$GOOD"; t
     *) bad "scope: the clause must state what was NOT proven (got: $OUT)" ;;
   esac
 fi
-if run 0 "success path prints SCOPE in the anchored-delta case too" \
-  2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA"; then
+if run_anc 0 "success path prints SCOPE in the anchored-delta case too" \
+  2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA"; then
   case "$OUT" in
     *"PREMERGE: SCOPE"*) ok "scope: the delta pair carries the same disclaimer" ;;
     *) bad "scope: the delta pair must carry the SCOPE clause too (got: $OUT)" ;;
@@ -1345,7 +1442,7 @@ for shape in direct delta; do
   if [ "$shape" = direct ]; then
     run 0 "SCOPE retained (direct)" 2421 "$CERTIFIED" "$GOOD" || continue
   else
-    run 0 "SCOPE retained (anchored delta)" 2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA" || continue
+    run_anc 0 "SCOPE retained (anchored delta)" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" || continue
   fi
   missing=""
   for needle in "$SCOPE1" "$SCOPE2" "$SCOPE3"; do

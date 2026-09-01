@@ -61,9 +61,16 @@
 #   CASE B (4 args) — ANCHORED DELTA. The full block is the ANCHOR (its sha need
 #     NOT be the certified sha), and the fourth argument must be a `--delta`
 #     block that (i) is a PASS with an intact tree, (ii) names that exact anchor
-#     in `delta-anchor:`, and (iii) whose OWN `commit:`/`tree-start:` cover the
-#     certified sha. The chain is therefore closed end to end: full PASS at X →
-#     delta re-cert anchored at X → delta ran on Y → Y is the PR head.
+#     in `delta-anchor:`, (iii) whose OWN `commit:`/`tree-start:` cover the
+#     certified sha, and (iv) whose anchor is ON THE CERTIFIED SHA'S HISTORY
+#     (#3653 — `git merge-base --is-ancestor`, three-valued: BOUND proceeds,
+#     NOT-ANCESTOR is exit 2, and anything UNMEASURABLE is exit 3 under
+#     `PREMERGE: ANCHOR-UNVERIFIABLE`). Without (iv) the anchor's identity rested
+#     on the delta run's SELF-DECLARED `delta-anchor:` line, so ANY full-gate
+#     PASS plus a delta naming it satisfied the chain — the #3616 cross-lane
+#     class surviving in the one path Case A's sha binding does not cover.
+#     The chain is therefore closed end to end: full PASS at X, X on this PR's
+#     history → delta re-cert anchored at X → delta ran on Y → Y is the PR head.
 #
 # In BOTH cases a full-gate PASS must EXIST, and the merged tree is covered
 # either directly (A) or by an anchored delta re-cert on top of it (B). What is
@@ -79,8 +86,8 @@
 # block was recovered from a coloured CAPTURE rather than from the summary file
 # (#3400: colour survives redirection).
 #
-# TWO RESIDUALS, STATED RATHER THAN FAKED
-# ---------------------------------------
+# FOUR RESIDUALS, STATED RATHER THAN FAKED
+# ----------------------------------------
 #  1. `run-id:` CANNOT be verified here. The #2874 reader contract says a reader
 #     must confirm the summary's `run-id:` matches the run IT launched — this
 #     script did not launch the gate, so it has nothing to compare against. It
@@ -91,12 +98,22 @@
 #  2. This assert proves a summary EXISTS claiming a full-gate PASS covering this
 #     sha with an intact tree. It cannot prove that summary was produced by a
 #     genuine gate run rather than hand-written. A HOSTILE INVOKER IS OUT OF THE
-#     THREAT MODEL — whoever runs this script controls the process and could
-#     edit the script, fake the file, or skip the script entirely; no check
-#     inside a process defends against the party that controls the process. What
-#     this guard defends is ACCIDENT AND DRIFT, which is the observed failure
-#     mode: a diligent worker with no step in its path telling it the gate of
-#     record was never run.
+#     THREAT MODEL — whoever runs this script controls the process and could edit
+#     the script or fabricate the file; no check inside a process defends against
+#     the party that controls the process. What this guard defends is ACCIDENT
+#     AND DRIFT, which is the observed failure mode: a diligent worker with no
+#     step in its path telling it the gate of record was never run.
+#
+#     "SKIP THE SCRIPT ENTIRELY" IS A DIFFERENT AND LARGER GAP, AND IT IS **IN**
+#     THE MODEL (#3653). It used to be filed above, under the hostile invoker —
+#     which was not true: #3408's actual escape was ACCIDENT/DRIFT (22 `--lite`
+#     PASSes and no full gate, because nothing in the merge path ever asked for
+#     the block), and by the triage rule's own terms an accident route is a
+#     defect, not out of model. Stated honestly: THIS GUARD CANNOT MAKE ITSELF
+#     INVOKED; THE DOCUMENTS THAT ROUTE WORKERS HERE ARE THE CONTROL (CLAUDE.md's
+#     flow-closer bullet, `.claude/agents/flow-closer.md`, `.claude/agents/
+#     flow-lead.md`). A mechanism that closed it would have to live where the
+#     merge is issued, not inside the check the merge path may never call.
 #  3. THE CERTIFIED TREE IS NOT THE MERGED TREE (#3650). A squash-merge composes
 #     this diff with main's CURRENT tip, not with the base the branch was written
 #     against, so for any PR whose base is behind main the tree this script
@@ -135,6 +152,19 @@
 #     So the three `PREMERGE: SCOPE` lines are RETAINED: slice 1 does not close
 #     the gap they disclose, and removing them would be exactly the overclaim
 #     this residual exists to prevent.
+#  4. THE #3653 ANCHOR BINDING IS A LOCAL-REPOSITORY FACT (Case B only). It
+#     proves the anchor is an ancestor of the certified sha AS THIS CHECKOUT'S
+#     OBJECT STORE RECORDS IT. Two things it therefore does NOT prove. (a) It
+#     says NOTHING about whether the anchor is on the PR AS GITHUB SEES IT: the
+#     local branch could hold commits that were never pushed, and no `gh` call
+#     here reads the PR's commit list. The `commit:`/`tree-start:` binding plus
+#     the head compare are what tie the whole chain to the sha GitHub will merge.
+#     (b) A MANIPULATED LOCAL OBJECT STORE or a `refs/replace/*` entry could make
+#     a foreign anchor look like an ancestor — INVOKER-CLASS and out of model by
+#     residual 2, and narrowed anyway by the two git pins at the check
+#     (`GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`), which close the
+#     replacement-ref route because it also fires BY ACCIDENT (a `git replace`
+#     left behind by an unrelated debugging session).
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -150,14 +180,19 @@
 #         NOT proven, #3650), "PREMERGE: ADVISORY ..." (the non-blocking
 #         base-staleness report, #3650 slice 1 — it NEVER changes this exit
 #         code) and "PREMERGE: GATE-OF-RECORD ..."
-#         (plus "PREMERGE: DELTA-RECERT ..." in Case B)
-#   2   no/invalid gate of record, OR head moved (mismatch), OR PR closed/merged
-#       — LOUD multi-line refusal
-#   3   gh/network failure, a required TOOL failing, or a usage error — fail
-#       closed, never merge on uncertainty. The three are distinguished by the
-#       printed marker, NOT by the code: `PREMERGE: USAGE` (you called it wrong),
-#       `PREMERGE: TOOL-FAILURE` (a broken box — fix the box, do NOT re-run the
-#       gate), `PREMERGE: GH-FAILURE` (auth/network/no-such-PR).
+#         (plus "PREMERGE: DELTA-RECERT ... anchor-ancestry: BOUND ..." in Case B,
+#          the affirmative record that the #3653 ancestry binding RAN)
+#   2   no/invalid gate of record (INCLUDING a Case B anchor that is NOT on the
+#       certified sha's history, #3653), OR head moved (mismatch), OR PR
+#       closed/merged — LOUD multi-line refusal
+#   3   gh/network failure, a required TOOL failing, an UNMEASURABLE anchor
+#       ancestry, or a usage error — fail closed, never merge on uncertainty. The
+#       four are distinguished by the printed marker, NOT by the code:
+#       `PREMERGE: USAGE` (you called it wrong), `PREMERGE: TOOL-FAILURE` (a
+#       broken box — fix the box, do NOT re-run the gate), `PREMERGE: GH-FAILURE`
+#       (auth/network/no-such-PR), `PREMERGE: ANCHOR-UNVERIFIABLE` (#3653 — this
+#       box could not measure whether the anchor is on this PR's history: no git,
+#       no work tree, an absent object, or a shallow/unproven history).
 #
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -euo pipefail
@@ -258,6 +293,176 @@ refuse_tool_failure() {
   printf '  assert — do NOT re-run the gate. Refusing to merge (fail closed).\n' >&2
   printf '========================================================\n' >&2
   exit 3
+}
+
+# ---------------------------------------------------------------------------
+# CASE B ONLY — THE DELTA ANCHOR MUST BE ON THE CERTIFIED SHA'S HISTORY (#3653)
+# ---------------------------------------------------------------------------
+# WHAT WAS MISSING. In Case B the anchor's identity rested entirely on the DELTA
+# run's SELF-DECLARED `delta-anchor:` line: the checks above prove the full block
+# and the delta block AGREE about a sha, never that the sha is on THIS PR. So any
+# full-gate PASS, plus a delta naming it, satisfied the chain — the #3616
+# cross-lane class surviving in the one path Case A's sha binding does not cover.
+# `git merge-base --is-ancestor <anchor> <certified>` closes it offline and for
+# free. (The accident path was ALSO narrowed by scripts/agent-gate.sh's own
+# fail-closed `--delta` diff classification, which refuses anything but a
+# test/docs-only diff between anchor and head — but a constraint that lives in
+# ANOTHER script is not a constraint stated where this guard is read.)
+#
+# THE VERDICT IS THREE-VALUED, because `--is-ancestor`'s rc 1 is ITSELF
+# three-valued (#3544): in a SHALLOW clone rc 1 also means "the connecting
+# history is absent", so rc 1 is definitive ONLY in a repository proven complete.
+# Reading it two-valued would refuse a correct merge in a shallow checkout — the
+# guard agents learn to waive.
+#   BOUND         rc 0 -> proceed, and RECORD it on the `PREMERGE: DELTA-RECERT`
+#                 evidence line. An affirmative record is required: a silent pass
+#                 is indistinguishable from a check that never ran.
+#   NOT-ANCESTOR  rc 1 AND both objects present AND the repository proven
+#                 complete -> exit 2 via refuse_no_gate ("your chain is wrong").
+#   UNVERIFIABLE  anything that could not be MEASURED -> exit 3 under its OWN
+#                 marker. An unmeasurable result is UNKNOWN, never ok (never
+#                 derive a pass from the ABSENCE of a bad signal), and exit 3 is
+#                 this script's home for "this box could not measure it — fix the
+#                 box, do NOT re-run the gate", a DIFFERENT operator action from
+#                 exit 2's "re-certify with a correct anchor".
+#
+# AMBIENT GIT STATE IS PINNED, the same two pins scripts/flow/base-staleness.sh
+# carries and for the same reasons — both are cheap, and each turns a silently
+# wrong answer into an ordinary git failure:
+#   * `GIT_NO_LAZY_FETCH=1` — in a PARTIAL/PROMISOR clone a plain OBJECT READ
+#     fetches over the network and WRITES packfiles, so "this is an offline
+#     check" would be an intention rather than a property. A missing object then
+#     fails its git call, which routes here to UNVERIFIABLE — the correct verdict
+#     for an unmeasurable read. Honoured only from git 2.36, so like
+#     base-staleness.sh this is a DECLARED precondition, not a detected one.
+#   * `GIT_NO_REPLACE_OBJECTS=1`, plus `--no-replace-objects` on every call — one
+#     local `refs/replace/*` entry rewrites the ancestry `merge-base` walks, i.e.
+#     it can make a foreign anchor LOOK like an ancestor. Honoured by every git
+#     that has replacement refs at all, so it needs no version measurement.
+# Neither is settable by the caller, and the repository read is the CURRENT
+# WORKING DIRECTORY's, with no env override (#3312: the constrained party must
+# not choose its own enforcer, and "which repository decides whether my anchor is
+# on this PR" is exactly what a lane wanting to skip a re-cert would redirect).
+#
+# THESE READS ARE DELIBERATELY **NOT** WRAPPED IN `env -i` + an allowlist, unlike
+# scripts/agent-gate.sh's component-set pre-flight. That wrapper exists where a
+# git call can REACH A REMOTE and the answer's provenance is a fetch. Here every
+# read is lane-local and addressed BY A SHA, and everything addressed by a sha is
+# CONTENT-ADDRESSED — so there is nothing an environment can bend that the two
+# pins above do not already cover. Do not "fix" this by adding one.
+export GIT_NO_LAZY_FETCH=1
+export GIT_NO_REPLACE_OBJECTS=1
+
+# The value published on the DELTA-RECERT evidence line. Initialised to a value
+# that would be VISIBLY wrong rather than left unset: if a future reordering ever
+# printed the line without running the check, the operator must see that, not a
+# `set -u` crash and not a plausible-looking blank.
+ANCHOR_ANCESTRY=UNRECORDED
+
+# refuse_anchor_unverifiable <anchor> <certified> <cause> <remedy-line>... —
+# exit 3 under a marker TEXTUALLY DISTINCT from `PREMERGE: NO-GATE-OF-RECORD`
+# (exit 2 — your chain is wrong) and from `PREMERGE: TOOL-FAILURE` (a broken
+# parser on this box). "This box could not measure the ancestry" is a third
+# operator action and gets its own name, for the same reason nit 8 split USAGE
+# from GH-FAILURE: the exit CODES cannot carry that distinction.
+refuse_anchor_unverifiable() {
+  local anchor="$1" head="$2" cause="$3"
+  shift 3
+  printf '========================================================\n' >&2
+  printf 'PREMERGE: ANCHOR-UNVERIFIABLE — REFUSING TO MERGE\n' >&2
+  printf '  delta anchor:  %s\n' "$anchor" >&2
+  printf '  certified sha: %s\n' "$head" >&2
+  printf '  cause: %s\n' "$cause" >&2
+  while [ "$#" -gt 0 ]; do
+    printf '  %s\n' "$1" >&2
+    shift
+  done
+  printf '  An UNMEASURABLE ancestry is UNKNOWN, never ok: a pass may not be derived\n' >&2
+  printf '  from the ABSENCE of a bad signal. This is NOT a verdict about your chain\n' >&2
+  printf '  and NOT a parser failure — it is "THIS BOX could not measure it". Fix the\n' >&2
+  printf '  checkout/box and re-run this assert; do NOT re-run the gate.\n' >&2
+  printf '========================================================\n' >&2
+  exit 3
+}
+
+# assert_anchor_on_history <anchor-40-hex> <certified-40-hex> — the #3653
+# binding. Sets ANCHOR_ANCESTRY=BOUND on the one passing verdict; every other
+# outcome refuses. Exit codes are captured WITHOUT tripping `set -e`.
+assert_anchor_on_history() {
+  local anchor="$1" head="$2" rc=0 shallow=""
+
+  if ! command -v git >/dev/null 2>&1; then
+    refuse_anchor_unverifiable "$anchor" "$head" "git is not on PATH" \
+      "REMEDY: install git, or run this assert from a box that has it."
+  fi
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "the current directory is not inside a git work tree (cwd: $(pwd))" \
+      "REMEDY: run this assert from the ISSUE'S WORKTREE. The repository whose" \
+      "history the anchor must lie on is the CURRENT DIRECTORY's, and there is" \
+      "deliberately no env override naming a different one (#3312)."
+  fi
+  # Presence is probed per object so the diagnostic can name WHICH one is absent
+  # — the two have different remedies in practice (an anchor from a rebased-away
+  # branch vs a certified head that was never fetched).
+  if ! git --no-replace-objects cat-file -e "$anchor^{commit}" >/dev/null 2>&1; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "the ANCHOR commit is not present in this repository" \
+      "An absent object cannot be shown to lie on any history, and its absence is" \
+      "not evidence that it does not (it may simply never have been fetched)." \
+      "REMEDY: fetch the branch that carries it (git fetch origin <branch>) and" \
+      "re-run this assert."
+  fi
+  if ! git --no-replace-objects cat-file -e "$head^{commit}" >/dev/null 2>&1; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "the CERTIFIED commit is not present in this repository" \
+      "REMEDY: fetch the PR branch (git fetch origin <branch>) and re-run this" \
+      "assert from a checkout that holds the sha being merged."
+  fi
+
+  rc=0
+  git --no-replace-objects merge-base --is-ancestor "$anchor" "$head" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ANCHOR_ANCESTRY=BOUND
+    return 0
+  fi
+  if [ "$rc" -ne 1 ]; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "git merge-base --is-ancestor exited $rc — an ERROR, not an answer" \
+      "Only 0 (ancestor) and 1 (not, or history absent) are answers; anything else" \
+      "is git reporting that it could not decide." \
+      "REMEDY: run that command by hand to see git's own diagnostic, fix the" \
+      "checkout, then re-run this assert."
+  fi
+
+  # rc 1 is itself THREE-valued (#3544). It is a VERDICT only in a repository
+  # proven complete; `--is-shallow-repository` must answer the literal `false`.
+  # An empty answer (a git too old to know the option, or a failed call) is
+  # UNMEASURED and takes the same refusing branch as `true` — the permissive
+  # branch is never the default for an unestablished state.
+  shallow=$(git --no-replace-objects rev-parse --is-shallow-repository 2>/dev/null) || shallow=""
+  if [ "$shallow" != false ]; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "--is-ancestor said 'no', but this repository is NOT PROVEN COMPLETE (git rev-parse --is-shallow-repository = '$shallow')" \
+      "In a SHALLOW clone rc 1 ALSO means 'the connecting history is absent'" \
+      "(#3544), so 'no' is a verdict only where the history is complete. An answer" \
+      "that is not the literal 'false' — 'true', empty, or a git too old to answer" \
+      "— is UNMEASURED, and an unmeasured ancestry is never read as a pass." \
+      "REMEDY: git fetch --unshallow (or fetch the missing history), then re-run."
+  fi
+
+  refuse_no_gate \
+    "The delta block's 'delta-anchor:' sha is NOT on the certified sha's history." \
+    "delta anchor:  $anchor" \
+    "certified sha: $head" \
+    "git merge-base --is-ancestor <anchor> <certified> answers NO, in a repository" \
+    "proven complete: the anchor is not on THIS PR's history. Case B's anchor" \
+    "identity otherwise rests on the delta run's SELF-DECLARED 'delta-anchor:'" \
+    "line, so an unbound anchor lets ANY full-gate PASS anchor THIS merge — the" \
+    "#3616 cross-lane class (a peer lane's real, valid summary) surviving in the" \
+    "one path Case A's sha binding does not cover (#3653)." \
+    "REMEDY: re-run 'scripts/agent-gate.sh --delta <anchor>' with an anchor that IS" \
+    "on this PR's history, and pass THAT pair — never a foreign full-gate summary."
 }
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1141,16 @@ fi
 assert_clean_tree "full-gate block" "$full_dirty" full "$full_ndirty" commit:
 assert_clean_tree "full-gate block" "$full_tsdirty" full "$full_ntsdirty" tree-start:
 
+# CASE B ONLY (#3653) — the anchor must be on the certified sha's history.
+# Placed LAST among the offline gate-of-record checks, and deliberately: every
+# cheaper structural refusal above reports FIRST (so the diagnostic still names
+# the first thing that is wrong), and running it after the full block's own
+# `dirty:` enforcement keeps a dirty anchor reported as dirty rather than as
+# unverifiable. It is the only check here that reads a repository.
+if [ -n "$delta_file" ]; then
+  assert_anchor_on_history "$delta_anchor" "$certified"
+fi
+
 # ---------------------------------------------------------------------------
 # THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)
 # ---------------------------------------------------------------------------
@@ -1028,7 +1243,10 @@ fi
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
   "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
 if [ -n "$delta_file" ]; then
-  printf 'PREMERGE: DELTA-RECERT anchor: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-    "$delta_anchor" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
+  # `anchor-ancestry:` is the AFFIRMATIVE record that the #3653 binding RAN. After
+  # assert_anchor_on_history it can only ever read BOUND — which is the point: a
+  # silent pass is indistinguishable from a check that was never reached.
+  printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
+    "$delta_anchor" "$ANCHOR_ANCESTRY" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
 fi
 exit 0
