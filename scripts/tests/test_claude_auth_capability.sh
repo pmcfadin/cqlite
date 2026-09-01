@@ -24,9 +24,17 @@
 #   * rc alone and output alone are each INSUFFICIENT for VERIFIED (both halves required);
 #   * NO run prints a token-shaped value anywhere on stdout/stderr.
 #
-# HOST SAFETY. Nothing here reads the real /etc/environment or touches the real tmux
-# server: the env-file seam stands in (inert without CQLITE_BOOTSTRAP_TEST_MODE=1) and
-# `claude`/`tmux` are recording PATH shims. No network call is ever made.
+# HOST SAFETY, STATED AS WHAT IS ACTUALLY TRUE. Nothing here reads the real
+# /etc/environment or touches the real tmux server: the env-file seam stands in (inert
+# without CQLITE_BOOTSTRAP_TEST_MODE=1) and `claude`/`tmux` are recording PATH shims. The
+# two cases that run the REAL bootstrap additionally stub `gh`/`sudo`/`roborev`/`cargo` and
+# pin the board identity, because bootstrap's OTHER sections otherwise make live GitHub API
+# calls, run `sudo`, and (through `roborev check-agents`, which starts the configured agent)
+# clone a repository into $HOME — all of which this header once flatly denied, measured on a
+# fleet box with recording PATH shims. The one thing still executed for real is a handful of
+# READ-ONLY local `git` queries against a directory that is not a repository.
+# `gh auth switch` — the one call that would MUTATE operator state, restored only by a trap
+# a SIGKILL defeats — is refused by the stub AND asserted never to have been attempted.
 #
 # Run standalone:   bash scripts/tests/test_claude_auth_capability.sh
 # Or via the gate:  scripts/agent-gate.sh runs it in the `tooling-tests` component.
@@ -698,10 +706,77 @@ mkroot() {
 }
 bs_root="$tmp/bs-root"; mkroot "$bs_root"
 export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"; export GIT_CONFIG_NOSYSTEM=1; : >"$GIT_CONFIG_GLOBAL"
+
+# EVERY OTHER SECTION OF BOOTSTRAP IS STUBBED OUT, and this is not tidiness — it was a
+# HOST-SAFETY DEFECT. With only `claude`/`tmux` planted, these two invocations ran the REAL
+# rest of bootstrap. MEASURED with recording shims on this box: each run made
+# `gh auth status`, `gh api graphql`, `gh project view` (live API calls), `sudo -n true`,
+# and — via `roborev check-agents` -> codex — a `git ls-remote` plus a
+# `git fetch --depth 1 https://github.com/openai/plugins.git` into $HOME. Twice per suite
+# run, inside the MANDATORY `tooling-tests` gate component, against a header that claimed
+# "No network call is ever made". Worse, on a box whose active gh account differs from
+# CQLITE_PROJECT_ACCOUNT with no GH_TOKEN in the environment, bootstrap runs
+# `gh auth switch` — real, host-visible mutation restored only by a trap a `kill -9`
+# defeats. It was inert here only because this box happens to export GH_TOKEN.
+# Same stub set, and the same reasoning, as mk_push_bin in test_bootstrap_agent_machine.sh.
+BS_GH_LOG="$tmp/bs-gh-calls.log"; : >"$BS_GH_LOG"
+BS_ACCOUNT='cqlite-bootstrap-test'
+plant_bootstrap_quiet_stubs() {
+  local d="$1" t
+  # `gh`: satisfies the auth + board sections offline. It reports the account the run PINS
+  # as CQLITE_PROJECT_ACCOUNT, so bootstrap's `gh auth switch` branch is structurally
+  # unreachable whatever the host's GH_TOKEN state — and `auth switch` is RECORDED and
+  # REFUSED anyway, so the case below can assert it never happened rather than assume it.
+  cat >"$d/gh" <<EOF
+#!/usr/bin/env bash
+printf 'gh %s\n' "\$*" >>'$BS_GH_LOG'
+case "\$1" in
+  auth)
+    case "\$2" in
+      status)
+        echo "github.com"
+        echo "  ✓ Logged in to github.com account $BS_ACCOUNT (keyring)"
+        echo "  - Active account: true"
+        echo "  - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'"
+        exit 0 ;;
+      token) echo 'gh-stub-token'; exit 0 ;;
+      switch) echo 'stub: refusing to mutate gh state' >&2; exit 1 ;;
+    esac
+    exit 0 ;;
+  project) echo '{"id":"PVT_stub"}'; exit 0 ;;
+  api)     echo 'PVT_stub'; exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$d/gh"
+  # `sudo`: strip its own flags and run the command unprivileged. Without it these runs
+  # fall through to the REAL sudo (and, in other sections, the REAL /etc/environment).
+  cat >"$d/sudo" <<'EOF'
+#!/usr/bin/env bash
+while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec "$@"
+EOF
+  chmod +x "$d/sudo"
+  # `roborev` is what reached the network: bootstrap runs `roborev check-agents`, roborev
+  # runs the configured agent (codex), and codex clones openai/plugins into $HOME.
+  for t in roborev codex cargo cargo-nextest sccache mold; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$d/$t"; chmod +x "$d/$t"
+  done
+  printf '#!/usr/bin/env bash\ncase "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac\nexit 0\n' >"$d/perf"
+  chmod +x "$d/perf"
+}
 d18=$(mkshim "$tmp/s18"); plant_claude_probe_env "$d18"; plant_tmux "$d18" complete
-bs_out=$(PATH="$d18:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
-         CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" HOME="$tmp/home" \
-         bash "$bs_root/scripts/bootstrap-agent-machine.sh" --skip-smoke --skip-push-probe --skip-claude-auth 2>&1)
+plant_bootstrap_quiet_stubs "$d18"
+# run_bootstrap <args...> -> $bs_out. The board identity is PINNED so the run cannot vary
+# with the host operator's exported CQLITE_PROJECT_* values.
+run_bootstrap() {
+  PATH="$d18:/tmp/claude-1000/-data-lanes-lane-3733/79e9ae65-0d74-43a4-8eec-94f951c28acf/scratchpad/rec:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
+    CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" HOME="$tmp/home" \
+    CQLITE_PROJECT_ACCOUNT="$BS_ACCOUNT" CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    bash "$bs_root/scripts/bootstrap-agent-machine.sh" "$@" 2>&1
+}
+bs_out=$(run_bootstrap --skip-smoke --skip-push-probe --skip-claude-auth)
 printf '%s\n' "$bs_out" >>"$TRANSCRIPT"
 if printf '%s' "$bs_out" | grep -q 'claude-auth: OPT-OUT'; then
   ok "bootstrap: --skip-claude-auth emits a LOUD claude-auth: OPT-OUT verdict"
@@ -713,9 +788,7 @@ if printf '%s' "$bs_out" | grep -q 'All checks green'; then
 else
   ok "bootstrap: the opt-out WITHHOLDS 'All checks green'"
 fi
-bs_out2=$(PATH="$d18:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
-          CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" HOME="$tmp/home" \
-          bash "$bs_root/scripts/bootstrap-agent-machine.sh" --skip-smoke --skip-push-probe 2>&1)
+bs_out2=$(run_bootstrap --skip-smoke --skip-push-probe)
 printf '%s\n' "$bs_out2" >>"$TRANSCRIPT"
 if printf '%s' "$bs_out2" | grep -q 'claude-auth: VERIFIED' \
    && printf '%s' "$bs_out2" | grep -q 'claude-tmux-env: VERIFIED'; then
@@ -724,9 +797,21 @@ else
   bad "bootstrap: the verdict lines are missing from the run"
   printf '%s\n' "$bs_out2" | sed -n '/Claude credential/,/^$/p'
 fi
+# HOST SAFETY, ASSERTED RATHER THAN INTENDED: `gh auth switch` mutates the operator's real
+# gh state and is restored only by a trap a SIGKILL defeats. The stub refuses it and logs
+# every gh call, so this is a measurement of what the two runs above actually did.
+if [ -s "$BS_GH_LOG" ] && ! grep -q '^gh auth switch' "$BS_GH_LOG"; then
+  ok "bootstrap cases: no 'gh auth switch' was attempted (and gh WAS exercised, so the log is not vacuous)"
+else
+  bad "bootstrap cases: gh auth switch was attempted, or gh was never called at all: $(cat "$BS_GH_LOG" 2>/dev/null | head -5)"
+fi
+
 # CONTRADICTORY INTENTS ARE A USAGE ERROR, not a silent resolution (the --fix-gate-pin rule).
 usage_rc=0
-usage_out=$(bash "$bs_root/scripts/bootstrap-agent-machine.sh" --skip-claude-auth --fix-claude-auth 2>&1) || usage_rc=$?
+# Under the stub PATH too: this run exits at ARGUMENT PARSING, before any section, but a
+# host-safety property that holds only because of where a check sits in the file is one
+# refactor away from not holding.
+usage_out=$(PATH="$d18:$PATH" bash "$bs_root/scripts/bootstrap-agent-machine.sh" --skip-claude-auth --fix-claude-auth 2>&1) || usage_rc=$?
 printf '%s\n' "$usage_out" >>"$TRANSCRIPT"
 if [ "$usage_rc" = 2 ] && printf '%s' "$usage_out" | grep -q 'contradictory'; then
   ok "bootstrap: --skip-claude-auth beside --fix-claude-auth is a usage error (exit 2)"
@@ -987,7 +1072,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=54
+CASE_FLOOR=55
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
