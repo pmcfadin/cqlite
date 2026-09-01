@@ -35,6 +35,7 @@ __all__ = [
     "CqlType",
     "parse_type",
     "types_from_columns",
+    "subtree_has_udt",
     "canonical_compare",
     "canonical_sort_key",
     "canon_python",
@@ -207,6 +208,10 @@ _SCALAR_KINDS = (
 # ---------------------------------------------------------------------------
 
 
+def _pytype(v: Any) -> str:
+    return type(v).__name__
+
+
 def _rank(v: Any) -> int:
     if v is None:
         return 0
@@ -371,10 +376,12 @@ def _canon_duration(months: int, days: int, nanos: int) -> dict:
 class _Adapter:
     name = "?"
 
-    def as_seq(self, value: Any) -> Iterable[Any]:
+    def as_seq(self, value: Any, t: "CqlType", hashable: bool = False) -> Iterable[Any]:
         raise NotImplementedError
 
-    def as_map(self, value: Any) -> Iterable[Tuple[Any, Any]]:
+    def as_map(
+        self, value: Any, t: "CqlType", hashable: bool = False
+    ) -> Iterable[Tuple[Any, Any]]:
         raise NotImplementedError
 
     def scalar(self, value: Any, kind: str) -> Any:
@@ -382,19 +389,83 @@ class _Adapter:
 
 
 class PythonAdapter(_Adapter):
-    """Native values from the PyO3 binding."""
+    """Native values from the PyO3 binding.
+
+    The container check is TYPE-SPECIFIC (issue #1455, F4). Accepting list,
+    tuple and set interchangeably normalized away exactly the regression this
+    harness exists to catch -- a binding returning an ``Array``/``list`` for a
+    declared ``set<...>``, or a ``Set`` for a declared ``list<...>``, is a
+    change to a public API shape and must RED, not be silently reconciled.
+
+    THREE intentional projections are allowed, each derived from the binding's
+    own source rather than from CQLite's prior behaviour:
+
+    1. ``set<...>`` whose element subtree contains a UDT arrives as a ``list``
+       (#804/#3500). Measured: ``bindings/python/src/value.rs::set_to_py``
+       branches on ``items.iter().any(contains_udt)`` -- UDT-containment, NOT
+       unhashability. Currently UNREACHABLE here, because ``parse_type``
+       refuses UDT type names outright; it is implemented and tested so that
+       adding UDT support cannot silently turn a correct binding red.
+    2. Inside a HASHABLE position -- a ``set`` element or a ``map`` KEY --
+       every container is projected by
+       ``bindings/python/src/value_hashable.rs::value_to_hashable_key``:
+       ``list``/``tuple`` become a Python ``tuple``, ``set`` stays a
+       ``frozenset``, and ``map`` becomes a ``tuple`` of 2-``tuple``s. So a
+       ``set<frozen<list<int>>>`` is a ``frozenset`` OF ``tuple``s, not of
+       lists, and requiring a ``list`` there would red on correct input.
+    3. The #804 ``list`` allowance applies ONLY outside a hashable position:
+       that same source comment records that recursion inside
+       ``value_to_hashable_key`` never re-enters ``set_to_py``, so the UDT
+       branch is unreachable there.
+    """
 
     name = "python"
 
-    def as_seq(self, value: Any) -> Iterable[Any]:
-        if isinstance(value, (list, tuple, set, frozenset)):
-            return list(value)
-        raise CanonicalError(f"expected a sequence/set, got {type(value).__name__}")
+    def as_seq(self, value: Any, t: CqlType, hashable: bool = False) -> Iterable[Any]:
+        kind = t.kind
+        if kind == "list":
+            if hashable:
+                # Projection 2: hashable positions carry a tuple.
+                if isinstance(value, tuple):
+                    return list(value)
+                raise CanonicalError(
+                    "declared list<> in a hashable position (set element / map key) expects a "
+                    f"Python tuple — value_hashable.rs projects it — got {_pytype(value)}"
+                )
+            if isinstance(value, list):
+                return value
+            raise CanonicalError(f"declared list<> expects a Python list, got {_pytype(value)}")
+        if kind == "tuple":
+            if isinstance(value, tuple):
+                return list(value)
+            raise CanonicalError(f"declared tuple<> expects a Python tuple, got {_pytype(value)}")
+        if kind == "set":
+            if isinstance(value, (frozenset, set)):
+                return list(value)
+            if not hashable and isinstance(value, list) and subtree_has_udt(t):
+                # Projection 1 (#804/#3500): SET<FROZEN<UDT>> is a list.
+                return value
+            raise CanonicalError(
+                f"declared set<> expects a Python frozenset/set, got {_pytype(value)}"
+            )
+        raise CanonicalError(f"as_seq called for non-sequence kind {kind!r}")
 
-    def as_map(self, value: Any) -> Iterable[Tuple[Any, Any]]:
+    def as_map(self, value: Any, t: CqlType, hashable: bool = False) -> Iterable[Tuple[Any, Any]]:
+        if hashable:
+            # Projection 2: a map inside a hashable position is a tuple of
+            # 2-tuples (value_hashable.rs), never a dict.
+            if isinstance(value, tuple) and all(
+                isinstance(pair, tuple) and len(pair) == 2 for pair in value
+            ):
+                return list(value)
+            raise CanonicalError(
+                "declared map<> in a hashable position (set element / map key) expects a Python "
+                f"tuple of (key, value) tuples — value_hashable.rs projects it — got "
+                f"{_pytype(value)}"
+            )
         if isinstance(value, dict):
             return list(value.items())
-        raise CanonicalError(f"expected a dict, got {type(value).__name__}")
+        raise CanonicalError(f"declared map<> expects a Python dict, got {_pytype(value)}")
 
     def scalar(self, value: Any, kind: str) -> Any:
         import decimal as _decimal
@@ -466,15 +537,26 @@ class CliAdapter(_Adapter):
 
     name = "cli"
 
-    def as_seq(self, value: Any) -> Iterable[Any]:
+    def as_seq(self, value: Any, t: CqlType, hashable: bool = False) -> Iterable[Any]:
+        # DECLARED, and NOT a hole this fix can close: the CLI renders list,
+        # set AND tuple all as a bare JSON array
+        # (cqlite-cli/src/output/json.rs), so this leg cannot distinguish the
+        # three at all. F4's type-specific container check is therefore
+        # enforceable on the python and node legs ONLY; here the check is just
+        # "is it an array". See README gap 1.
         if isinstance(value, list):
             return value
-        raise CanonicalError(f"expected a JSON array, got {type(value).__name__}")
+        raise CanonicalError(
+            f"declared {t.kind}<> expects a JSON array, got {type(value).__name__}"
+        )
 
-    def as_map(self, value: Any) -> Iterable[Tuple[Any, Any]]:
-        # The CLI renders a map as [{"key": k, "value": v}, ...].
+    def as_map(self, value: Any, t: CqlType, hashable: bool = False) -> Iterable[Tuple[Any, Any]]:
+        # The CLI renders a map as [{"key": k, "value": v}, ...], at every
+        # nesting depth -- there is no hashable-position projection on this leg.
         if not isinstance(value, list):
-            raise CanonicalError(f"expected a JSON array of entries, got {type(value).__name__}")
+            raise CanonicalError(
+                f"declared map<> expects a JSON array of entries, got {type(value).__name__}"
+            )
         out = []
         for entry in value:
             if not isinstance(entry, dict) or set(entry.keys()) != {"key", "value"}:
@@ -560,31 +642,58 @@ CLI_ADAPTER = CliAdapter()
 # ---------------------------------------------------------------------------
 
 
-def _canon(value: Any, t: CqlType, ad: _Adapter) -> Any:
+def subtree_has_udt(t: CqlType) -> bool:
+    """True when a UDT appears anywhere in ``t``'s type tree (#804/#3500).
+
+    Currently always False in practice, because :func:`parse_type` REFUSES a
+    UDT type name (see ``_validate_arity``). It exists so that the #804
+    ``SET<FROZEN<UDT>>`` -> ``list`` projection is already allowed for on the
+    day UDT support lands, instead of the container check turning a correct
+    binding red. ``test_set_of_udt_projection_is_allowed`` builds the type tree
+    directly to keep this branch live and tested.
+    """
+    if t.kind == "udt":
+        return True
+    return any(subtree_has_udt(a) for a in t.args)
+
+
+def _canon(value: Any, t: CqlType, ad: _Adapter, hashable: bool = False) -> Any:
+    """``hashable`` marks a SET-ELEMENT or MAP-KEY position.
+
+    The Python binding projects every container inside such a position through
+    ``value_hashable.rs``; the node and cli legs do not (measured:
+    ``bindings/node/src/value.rs`` recurses through ``value_to_napi``
+    unconditionally, and the CLI writer has no key-specific path). Once set,
+    the flag never clears -- ``value_to_hashable_key`` recurses into itself.
+    """
     if value is None:
         return None
     kind = t.kind
     if kind == "list":
-        return [_canon(x, t.args[0], ad) for x in ad.as_seq(value)]
+        return [_canon(x, t.args[0], ad, hashable) for x in ad.as_seq(value, t, hashable)]
     if kind == "set":
-        items = [_canon(x, t.args[0], ad) for x in ad.as_seq(value)]
+        # Elements of a set are in a HASHABLE position.
+        items = [_canon(x, t.args[0], ad, True) for x in ad.as_seq(value, t, hashable)]
         items.sort(key=canonical_sort_key)
         return items
     if kind == "map":
+        # KEYS are in a hashable position; VALUES are not (map_to_py projects
+        # only the key through value_to_hashable_key).
         entries = [
-            [_canon(k, t.args[0], ad), _canon(v, t.args[1], ad)] for k, v in ad.as_map(value)
+            [_canon(k, t.args[0], ad, True), _canon(v, t.args[1], ad, hashable)]
+            for k, v in ad.as_map(value, t, hashable)
         ]
         entries.sort(key=lambda e: canonical_sort_key(e[0]))
         return entries
     if kind == "tuple":
         # DECLARED GAP (README): a tuple canonicalizes to a PLAIN array, because
         # neither the Node binding nor the CLI can distinguish tuple from list.
-        items = list(ad.as_seq(value))
+        items = list(ad.as_seq(value, t, hashable))
         if len(items) != len(t.args):
             raise CanonicalError(
                 f"tuple arity mismatch: declared {len(t.args)}, value has {len(items)}"
             )
-        return [_canon(x, t.args[i], ad) for i, x in enumerate(items)]
+        return [_canon(x, t.args[i], ad, hashable) for i, x in enumerate(items)]
     return ad.scalar(value, kind)
 
 

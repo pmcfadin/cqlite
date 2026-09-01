@@ -323,16 +323,51 @@ function isBytes(v) {
   return v instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(v));
 }
 
+/** `[object Set]` -> `Set`, etc. — a readable container name for a refusal. */
+function containerName(v) {
+  const tag = Object.prototype.toString.call(v);
+  const m = /^\[object (.+)\]$/.exec(tag);
+  return m ? m[1] : tag;
+}
+
 const nodeAdapter = {
   name: 'node',
-  asSeq(value) {
+  /**
+   * TYPE-SPECIFIC container check (issue #1455, F4).
+   *
+   * Accepting Array and Set interchangeably normalized away exactly the
+   * regression this harness exists to catch: an `Array` where `set<...>` is
+   * declared (or a `Set` where `list<...>` is) is a change to a public API
+   * shape and must RED.
+   *
+   * ONE intentional projection, and it stays a DECLARED GAP rather than
+   * becoming a refusal: `tuple` and `list` are BOTH `Array` on this leg
+   * (`bindings/node/src/value.rs:290` -> `list_to_array`), so a tuple/list
+   * confusion is undetectable here by construction. README gap 1.
+   *
+   * There is deliberately NO hashable-position parameter, unlike the Python
+   * adapter: measured, `set_to_js_set` / `map_to_js_map` /
+   * `list_to_array` all recurse through `value_to_napi` UNCONDITIONALLY, so
+   * this binding has no key projection to accommodate.
+   */
+  asSeq(value, t) {
+    if (t.kind === 'set') {
+      if (value instanceof Set) return Array.from(value);
+      throw new CanonicalError(
+        `declared set<> expects a JavaScript Set, got ${containerName(value)}`,
+      );
+    }
+    // list AND tuple: both are a plain Array on this leg (declared gap 1).
     if (Array.isArray(value)) return value;
-    if (value instanceof Set) return Array.from(value);
-    throw new CanonicalError(`expected an Array/Set, got ${Object.prototype.toString.call(value)}`);
+    throw new CanonicalError(
+      `declared ${t.kind}<> expects a JavaScript Array, got ${containerName(value)}`,
+    );
   },
   asMap(value) {
     if (value instanceof Map) return Array.from(value.entries());
-    throw new CanonicalError(`expected a Map, got ${Object.prototype.toString.call(value)}`);
+    throw new CanonicalError(
+      `declared map<> expects a JavaScript Map, got ${containerName(value)}`,
+    );
   },
   scalar(value, kind) {
     if (kind === 'boolean') {
@@ -394,21 +429,21 @@ const nodeAdapter = {
 function canon(value, t, ad) {
   if (value === null || value === undefined) return null;
   const { kind } = t;
-  if (kind === 'list') return ad.asSeq(value).map((x) => canon(x, t.args[0], ad));
+  if (kind === 'list') return ad.asSeq(value, t).map((x) => canon(x, t.args[0], ad));
   if (kind === 'set') {
-    const items = ad.asSeq(value).map((x) => canon(x, t.args[0], ad));
+    const items = ad.asSeq(value, t).map((x) => canon(x, t.args[0], ad));
     items.sort(canonicalCompare);
     return items;
   }
   if (kind === 'map') {
-    const entries = ad.asMap(value).map(([k, v]) => [canon(k, t.args[0], ad), canon(v, t.args[1], ad)]);
+    const entries = ad.asMap(value, t).map(([k, v]) => [canon(k, t.args[0], ad), canon(v, t.args[1], ad)]);
     entries.sort((x, y) => canonicalCompare(x[0], y[0]));
     return entries;
   }
   if (kind === 'tuple') {
     // DECLARED GAP (README): a tuple canonicalizes to a PLAIN array, because
     // neither the Node binding nor the CLI can distinguish tuple from list.
-    const items = ad.asSeq(value);
+    const items = ad.asSeq(value, t);
     if (items.length !== t.args.length) {
       throw new CanonicalError(
         `tuple arity mismatch: declared ${t.args.length}, value has ${items.length}`,
