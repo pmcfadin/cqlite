@@ -40,20 +40,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serde_json`'s `arbitrary_precision`/`RawValue` in Rust). The digits themselves
   are unchanged — only the quotes are gone.
 
-  **Known residual**, recorded rather than omitted: a `decimal` whose magnitude is
-  ZERO at a NEGATIVE scale still renders as a QUOTED string. `format_decimal`
-  spells that value `00` (`"0"` followed by one zero per unit of negative scale),
-  which is not valid JSON — a leading zero followed by a digit — so the egress
-  falls back to a string rather than emitting an unparseable document. Java's
-  `BigDecimal.toString()` spells the same value `0E+1`, so this is a FORMATTER
-  divergence in `cqlite-core/src/util/value_fmt.rs`, not an egress decision; the
-  egress deliberately does not invent a spelling. Pinned by
+  **Also changed, in `cqlite-core`'s text formatter and therefore in ALL text
+  egress (`json`, `csv`, `table`): a `decimal` whose magnitude is ZERO at a
+  NEGATIVE scale now renders `0e1` (scale `-1`) instead of `00`.**
+  `ValueFormatter::format_decimal` (`cqlite-core/src/util/value_fmt.rs`) spelled
+  that value `"0"` followed by one zero per unit of negative scale, which is not
+  valid JSON — a leading zero followed by a digit — so the JSON egress had to
+  quote it. It now takes the SAME bounded exponent form `<digits>e<-scale>` that
+  the issue #1754 over-bound branch already emitted, which is a valid JSON number
+  and preserves the scale (`BigDecimal(0, -1)` is not `BigDecimal(0, 0)`, so
+  collapsing to `0` would discard information). A NON-zero magnitude at a negative
+  scale was already valid JSON and is unchanged (`5` at scale `-1` → `50`).
+  **This is a JSON-VALIDITY fix, NOT spelling parity**: `0e1` is still not Java's
+  `BigDecimal.toString()` spelling `0E+1`, and the wider `format_decimal` vs
+  `BigDecimal.toString()` divergence class (a non-zero magnitude at a negative
+  scale → Java `1.23E+3` vs CQLite `1230`; an adjusted exponent below −6 → Java
+  `1E-10` vs CQLite `0.0000000001`) is untouched and tracked separately — no
+  committed fixture covers it, and it would move `csv`/`table` output for many
+  more values. Pinned by
+  `cqlite-core/tests/issue_3644_decimal_zero_negative_scale.rs` and
   `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`
-  (`a_zero_magnitude_at_a_negative_scale_falls_back_to_a_json_string`). The same
-  fallback also covers the `<corrupt-decimal:…>` marker an over-bound magnitude
-  produces (issue #1754).
+  (`a_zero_magnitude_at_a_negative_scale_is_an_unquoted_exponent_form`).
 
-  Not affected: `table` and `csv` output (unchanged text), and
+  **Known residual**, recorded rather than omitted: the quoted-string fallback
+  remains, and after the fix above the only rendering known to take it is the
+  `<corrupt-decimal:…>` marker an over-bound magnitude produces (issue #1754).
+  That is not a JSON number, so the egress emits it as a string rather than an
+  unparseable document; it deliberately does not invent a spelling.
+
+  Not affected by the QUOTING change (their text was never quoted; the
+  zero-at-negative-scale spelling above does reach them): `table` and `csv`
+  output, and
   `cqlite-core`'s `impl ToJson for Value`, which is a different renderer and still
   emits `{"scale": …, "unscaled": <base64>}` — see
   `docs/development/QUERY_RESULT_CONTRACT.md`.

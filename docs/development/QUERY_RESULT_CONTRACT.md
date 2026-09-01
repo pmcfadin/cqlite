@@ -147,14 +147,18 @@ artifact**. Reading them as an egress oracle produces exactly the wrong answer f
   `DecimalType.java:314-317` (both `Objects.toString(...)`, and `DecimalType` deliberately overrides
   the quoting `AbstractType.java:186-189`). Emitted with full precision, not via `f64`. A value whose
   formatted text is not a valid JSON number falls back to a JSON string rather than emitting invalid
-  JSON — reachable for the `<corrupt-decimal:…>` marker (issue #1754) and for a ZERO magnitude at a
-  NEGATIVE scale, which `format_decimal` spells `00`.
+  JSON — after #3644 the only rendering known to take that path is the `<corrupt-decimal:…>` marker
+  (issue #1754). A ZERO magnitude at a NEGATIVE scale used to take it too (`format_decimal` spelled
+  it `00`, which JSON forbids); that was fixed at the FORMATTER, which now renders the case in its
+  bounded exponent form (`0e1` at scale `-1`) — a valid JSON number that preserves the scale. A
+  NON-zero magnitude at a negative scale was already valid and stays positional (`50`).
 
   **This is a claim about the JSON KIND, not about the SPELLING, and the spelling deviates.** The
   kind matches `IntegerType`/`DecimalType`. The digits are `ValueFormatter`'s
   (`format_decimal`/`format_varint`), which is not `BigDecimal.toString()`, and the two diverge in
-  reachable cases: a negative scale (Java `1.23E+3` vs CQLite `1230`), an adjusted exponent below
-  −6 (Java `1E-10` vs CQLite `0.0000000001`), and `123e-4` where Java gives `1.23E-2`. Every one is
+  reachable cases: a negative scale (Java `1.23E+3` vs CQLite `1230`, and Java `0E+1` vs CQLite
+  `0e1` — #3644 made the zero case a valid JSON NUMBER, not Java's spelling), an adjusted exponent
+  below −6 (Java `1E-10` vs CQLite `0.0000000001`), and `123e-4` where Java gives `1.23E-2`. Every one is
   **value-equal as a JSON number**, so a consumer parsing the number is unaffected — but §7's
   standard is that a deviation from the oracle is named rather than left to be rediscovered, and the
   recorded `map` deviation below sets the same bar. Correcting the spelling is a change to

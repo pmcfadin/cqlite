@@ -39,9 +39,14 @@
 //! rendering). `serde_json` itself is the authority on validity here; nothing
 //! re-implements the JSON number grammar.
 //!
-//! That path is REACHABLE for well-formed data too, not only for the corruption
-//! marker: a ZERO magnitude at a NEGATIVE scale formats as `"0"` followed by N
-//! zeros (`00`), which JSON forbids. See the `Err` arm of [`numeric_cell`].
+//! The corruption marker is the only rendering known to reach that fallback. A
+//! ZERO magnitude at a NEGATIVE scale used to reach it too — `format_decimal`
+//! spelled it `00`, which JSON forbids — and that was fixed AT THE FORMATTER
+//! (#3644): it now renders `0e1`, a valid JSON number, in the same bounded
+//! exponent form the #1754 branch already used. So guard 1 (the leading
+//! character) catches every rendering that is known to be unusable, and guard 2
+//! is retained as defence in depth over a formatter that promises no JSON
+//! property — see the `Err` arm of [`numeric_cell`].
 
 use cqlite_core::util::udt_json::udt_render_fields;
 use cqlite_core::Value;
@@ -131,23 +136,25 @@ fn numeric_cell(value: &Value) -> JsonCell {
     // hurts most.
     match RawValue::from_string(text.clone()) {
         Ok(raw) => JsonCell::Raw(raw),
-        // REACHABLE, and the class is: a ZERO magnitude at a NEGATIVE scale.
-        // `Value::Decimal { scale: -1, unscaled: vec![0x00] }` — Cassandra's
-        // `0E+1`, exactly how `BigInteger.ZERO` at a negative scale serializes —
-        // makes `format_decimal`'s `decimal_str` `"0"`, and its `scale <= 0`
-        // branch then appends `"0".repeat(1)`, giving `"00"`. Guard 1 passes (a
-        // leading digit) and `serde_json` rejects it, because JSON forbids a
-        // leading zero followed by another digit. A NON-zero unscaled at a
-        // negative scale is fine (`5` at scale `-1` → `"50"`, valid JSON), so the
-        // class is exactly `"0"` followed by N zeros.
+        // NO KNOWN INPUT REACHES THIS ARM, and that is stated rather than implied.
+        // It HAD one: `Value::Decimal { scale: -1, unscaled: vec![0x00] }` —
+        // `BigInteger.ZERO` at a negative scale, Cassandra's `0E+1` — formatted as
+        // `00`, which passes guard 1 (a leading digit) and `serde_json` then
+        // rejects, JSON forbidding a leading zero followed by another digit. That
+        // was fixed at the FORMATTER (#3644): `format_decimal` now renders the
+        // zero-magnitude/negative-scale case in its existing bounded exponent form
+        // (`0e1`), so the whole class is a valid JSON number before it gets here.
+        // The other non-numeric rendering, the `<corrupt-decimal:…>` marker, never
+        // reaches guard 2 either — guard 1 rejects its leading `<`.
         //
-        // That `format_decimal` spells this `00` where Java's
-        // `BigDecimal.toString()` gives `0E+1` is a FORMATTER divergence, reported
-        // separately — NOT something this layer papers over. The egress must not
-        // invent a spelling; it emits the text it was given, as a JSON STRING,
-        // because a raw `00` would make the whole document unparseable. Pinned by
-        // `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`
-        // (`a_zero_magnitude_at_a_negative_scale_falls_back_to_a_json_string`).
+        // The arm STAYS, for two reasons. `format_decimal` guarantees nothing about
+        // JSON: it is a text formatter whose contract is totality, so a future
+        // spelling change there must degrade to a quoted string here rather than
+        // emit an unparseable document. And removing it would mean `expect()`ing
+        // the `Result`, which library code may not do. It is therefore defence in
+        // depth over an unreachable state — deliberately NOT covered by a test,
+        // because no `Value` can construct the text that would exercise it, and a
+        // test seam that could would be a settable hole in the fail-safe.
         Err(_) => JsonCell::Plain(JsonValue::String(text)),
     }
 }

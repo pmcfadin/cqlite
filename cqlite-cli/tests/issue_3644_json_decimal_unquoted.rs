@@ -441,11 +441,14 @@ mod writer_paths {
         );
     }
 
-    /// FAIL-SAFE. `ValueFormatter::format_value` is total and renders an
+    /// FAIL-SAFE, and after #3644's formatter fix it is the ONLY rendering known
+    /// to take this path. `ValueFormatter::format_value` is total and renders an
     /// over-bound `decimal` as the marker `<corrupt-decimal:…>`
     /// (`cqlite-core/src/util/value_fmt.rs`, the 32 KiB ceiling from issue #1754).
     /// That is not a JSON number, so it MUST fall back to a quoted string —
-    /// emitting it raw would produce an unparseable document.
+    /// emitting it raw would produce an unparseable document. It is guard 1 (the
+    /// leading character) that rejects it, not `serde_json`; the `Err` arm behind
+    /// guard 2 has no constructible input and says so in `json_cell.rs`.
     #[test]
     fn a_non_numeric_rendering_falls_back_to_a_json_string() {
         let (batch, streaming) = cell_lexemes(Value::Decimal {
@@ -461,44 +464,61 @@ mod writer_paths {
         assert_eq!(batch, streaming, "the two writers must agree");
     }
 
-    /// FAIL-SAFE, the second REACHABLE class, and it is ordinary well-formed data:
-    /// a ZERO magnitude at a NEGATIVE scale. `format_decimal` makes `decimal_str`
-    /// `"0"` and its `scale <= 0` branch appends `"0".repeat(1)`, so the text is
-    /// `00` — which JSON forbids (a leading zero followed by a digit). It
-    /// therefore falls back to a quoted string rather than emitting an
-    /// unparseable document.
+    /// A ZERO magnitude at a NEGATIVE scale — `BigInteger.ZERO` at scale `-1`,
+    /// Cassandra's `0E+1` — is an UNQUOTED number, in `format_decimal`'s bounded
+    /// exponent form.
     ///
-    /// Java's `BigDecimal.toString()` spells this value `0E+1`, so `00` is a
-    /// FORMATTER divergence reported separately (`format_decimal`, not this
-    /// egress). This case pins what the egress does with the text it is GIVEN: it
-    /// does not invent a spelling, and it does not emit invalid JSON.
+    /// It used to be the one well-formed class that fell back to a quoted string:
+    /// `format_decimal` spelled it `00` (`"0"` followed by one zero per unit of
+    /// negative scale), which JSON forbids, so the egress had to quote it to keep
+    /// the document parseable. #3644 fixed that at the FORMATTER — the case now
+    /// takes the same `<digits>e<-scale>` form the #1754 over-bound branch already
+    /// emitted, so it is `0e1`: a valid JSON number that PRESERVES the scale
+    /// (`BigDecimal(0, -1)` is not `BigDecimal(0, 0)`, and collapsing to `0` would
+    /// discard that).
+    ///
+    /// HONEST SCOPE: `0e1` is still NOT Java's `BigDecimal.toString()` spelling
+    /// `0E+1`. What is fixed is JSON VALIDITY, not spelling parity — the wider
+    /// `BigDecimal.toString()` divergence class (a non-zero magnitude at a
+    /// negative scale, an adjusted exponent below −6) is untouched, needs its own
+    /// per-column parity evidence, and would move `table`/`csv` output too. The
+    /// formatter-level boundary is pinned by
+    /// `cqlite-core/tests/issue_3644_decimal_zero_negative_scale.rs`.
     #[test]
-    fn a_zero_magnitude_at_a_negative_scale_falls_back_to_a_json_string() {
+    fn a_zero_magnitude_at_a_negative_scale_is_an_unquoted_exponent_form() {
         // `BigInteger.ZERO` at scale -1 — Cassandra's `0E+1`.
         assert_both(
             Value::Decimal {
                 scale: -1,
                 unscaled: vec![0x00],
             },
-            "\"00\"",
+            "0e1",
         );
-        // Two zeros, to show the class is "`0` followed by N zeros" and not one
-        // special value.
+        // The scale is carried, not collapsed: a different negative scale is a
+        // different lexeme.
         assert_both(
             Value::Decimal {
                 scale: -2,
                 unscaled: vec![0x00],
             },
-            "\"000\"",
+            "0e2",
         );
-        // A NON-zero unscaled at a negative scale is a valid JSON number and
-        // stays unquoted — the negative scale alone is not the trigger.
+        // A NON-zero unscaled at a negative scale was ALREADY valid JSON and is
+        // deliberately left positional — the fix is scoped to the zero magnitude.
         assert_both(
             Value::Decimal {
                 scale: -1,
                 unscaled: vec![0x05],
             },
             "50",
+        );
+        // Zero at scale 0 stays the bare `0` — `scale < 0` is the trigger.
+        assert_both(
+            Value::Decimal {
+                scale: 0,
+                unscaled: vec![0x00],
+            },
+            "0",
         );
     }
 
