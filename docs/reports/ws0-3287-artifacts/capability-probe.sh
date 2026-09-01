@@ -482,8 +482,17 @@ if [ "$GATE_OK" = 1 ]; then
   I2=$(csv_val "$D/gate-probe-100000.csv" instructions:u)
   if [[ "$I1" =~ ^[0-9]+$ ]] && [[ "$I2" =~ ^[0-9]+$ ]] && [ "$I1" -gt 0 ]; then
     GATE_RATIO=$(awk -v a="$I1" -v b="$I2" 'BEGIN{printf "%.2f", b/a}')
-    awk -v a="$I1" -v b="$I2" 'BEGIN{exit !(b >= 10*a)}' || { GATE_OK=0
-      note_fail "WINDOW NOT GATED: instructions $I1 (1e3) -> $I2 (1e5), ratio ${GATE_RATIO}x. A window closed on the chase scales ~100x; near 1x means init/teardown is inside it, which is asymmetric between arms and corrupts every ratio."; }
+    # TWO-SIDED, and the ceiling is PHYSICAL rather than picked. instructions =
+    # constant + k*accesses, so with a 100x work ratio the instruction ratio is
+    # (C + 1e5k)/(C + 1e3k), which is bounded ABOVE by 100 and approaches it only
+    # as the constant term vanishes. A ratio above 100 is therefore not a better
+    # window, it is arithmetic that cannot happen — a misparsed or mismatched pair
+    # of probe counts — and the one-sided form would have called it a PASS. 150
+    # leaves 50% headroom so no correct host can be red. (Class swept from roborev
+    # job 320 f3, which found the same shape in the enabled% guard; both bounds in
+    # this script are now two-sided, and these are the only two.)
+    awk -v a="$I1" -v b="$I2" 'BEGIN{exit !(b >= 10*a && b <= 150*a)}' || { GATE_OK=0
+      note_fail "WINDOW NOT GATED: instructions $I1 (1e3) -> $I2 (1e5), ratio ${GATE_RATIO}x, required [10x,150x]. A window closed on the chase scales ~100x; near 1x means init/teardown is inside it, which is asymmetric between arms and corrupts every ratio. Above 100x is arithmetically impossible for a 100x work ratio, so it means the counts are not what they are labelled."; }
   else
     GATE_OK=0; note_fail "gate probe: unreadable instruction counts — window closure UNMEASURED"
   fi
@@ -544,8 +553,8 @@ reading() { # $1 rendered-name  $2 group  -> raw per-arm counts, no verdict
   fi
   echo
   echo "-- GATE A: TMA (raw record; #3287 AC1 turns on what tma-probe.txt shows) --"
-  echo "  perf stat -M TopdownL1 : $TMA_L1"
-  echo "  perf stat -M TopdownL2 : $TMA_L2"
+  echo "  perf stat --all-user -M TopdownL1 : $TMA_L1"
+  echo "  perf stat --all-user -M TopdownL2 : $TMA_L2"
   echo "  READ tma-probe.txt: a metric group that produced real level-2 metric rows"
   echo "  with numeric shares answers AC1 yes; a not-found/not-supported diagnostic"
   echo "  answers it no; anything else means the step must be re-run. This script"

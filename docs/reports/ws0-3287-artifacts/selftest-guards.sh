@@ -65,6 +65,8 @@ mk_env() { # $1 dir
 #                                                    only the ':u' form is permitted
 #        SHIM_ARM_MISLABEL=1                      -> the benchmark reports a buffer
 #                                                    size other than the one asked for
+#        SHIM_GATE_ABSURD=1                       -> gate-probe instruction counts whose
+#                                                    ratio exceeds the 100x work ratio
 args=("$@")
 if [[ " ${args[*]} " == *" --version "* ]]; then echo "perf version shim"; exit 0; fi
 if [[ " ${args[*]} " == *" list "* ]]; then
@@ -142,7 +144,12 @@ IFS=, read -ra evs <<<"$EV"
 for e in "${evs[@]}"; do
   name="$e"; [ -n "${SHIM_STRIP_MOD:-}" ] && name="${e%:u}"
   case "$e" in
-    instructions:u) if [ -n "${SHIM_UNGATED:-}" ]; then v=243571204; else v=$((accesses*6)); fi ;;
+    instructions:u)
+      if   [ -n "${SHIM_UNGATED:-}" ]; then v=243571204
+      elif [ -n "${SHIM_GATE_ABSURD:-}" ]; then
+        # ratio 1e6 between the two gate probes: impossible for a 100x work ratio
+        if [ "$accesses" = 1000 ]; then v=1; else v=1000000; fi
+      else v=$((accesses*6)); fi ;;
     cycles:u)                v=$((accesses*30)) ;;
     cycle_activity.stalls_total:u)   v=$((accesses*20)) ;;
     cycle_activity.stalls_l2_miss:u) if [ "$work" = 0 ]; then v=$((accesses*15)); else v=100; fi ;;
@@ -278,6 +285,18 @@ d="$TMP/c4"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_ENABLED=74.00 run_probe "$
 if [ "$rc" != 0 ] && grep -q 'enabled%=74.00' "$d/stderr.txt"; then
   ok "enabled%<100 -> rejected (small groups exist BECAUSE every value must be a count)"
 else bad "a multiplexed group was accepted as counts (rc=$rc)" "$d"; fi
+
+# --- 3c. an IMPOSSIBLE scaling ratio must be rejected too ---------------------
+# Class swept from job 320 f3 rather than waiting for a review round to find the
+# second instance. instructions = constant + k*accesses, so against a 100x work
+# ratio the instruction ratio cannot EXCEED 100x; a larger one is not a better
+# window but counts that are not what they are labelled. The old `>= 10x` called
+# it a PASS.
+d="$TMP/c3c"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_GATE_ABSURD=1 run_probe "$d")
+if [ "$rc" != 0 ] && grep -q 'WINDOW NOT GATED' "$d/stderr.txt" \
+   && grep -q '150x' "$d/stderr.txt"; then
+  ok "scaling ratio above the 100x work ratio -> rejected (arithmetically impossible, so the counts are mislabelled)"
+else bad "an impossible scaling ratio was accepted as a gated window (rc=$rc)" "$d"; fi
 
 # --- 4b. an IMPOSSIBLE enabled% must be rejected too --------------------------
 # roborev job 320: the bound was one-sided (`>= 99.999`), so 150 -- or any misparsed
@@ -471,15 +490,15 @@ echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=18
+FLOOR=19
 if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
   echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
   exit 1
 fi
 # A SKIP is counted for the floor but must never substitute for verification: the
-# 15 shim-driven cases depend on nothing about this host, so if any of them failed
+# 16 shim-driven cases depend on nothing about this host, so if any of them failed
 # to RUN, something is wrong with the suite rather than with the machine.
-SHIM_FLOOR=15
+SHIM_FLOOR=16
 if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
   echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1
