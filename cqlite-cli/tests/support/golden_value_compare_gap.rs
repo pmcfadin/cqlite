@@ -219,6 +219,29 @@ pub enum Divergence {
     /// [`Divergence::NestedFrozenUdtRendersAsBlobHex`] declares one level down. The
     /// egress-side defect (a real `SELECT` returns the decoded tuple) is a
     /// read-fidelity bug in CQLite and separable from this lane.
+    ///
+    /// # SUPERSEDED BY #3612, AND NO COMMITTED CASE DECLARES IT ANY MORE
+    ///
+    /// `8c503f7cf` (#3612 / PR #3736) taught `cqlite-core` to decode a multicell composite
+    /// cell-path map key STRUCTURALLY, so the egress half of this divergence — raw key bytes
+    /// as a `0x` blob literal — is no longer something CQLite produces. Measured on the
+    /// committed fixture after rebasing onto it: the CLI now emits
+    /// `[{label:charlie,rank:3},8]` where it previously emitted
+    /// `0x0000001300000007636861726c69650…`.
+    ///
+    /// `m_tuple_udt` has therefore moved to [`Divergence::NestedFrozenValueLeftUndecodedByGolden`],
+    /// which its five sibling columns already declare and which describes what is left exactly:
+    /// the GOLDEN still leaves the key as `getString`'s colon-joined text while the egress
+    /// decodes it. That is the self-retirement this gap was built to undergo, and it happened
+    /// for the reason predicted rather than by accident.
+    ///
+    /// KEPT, NOT DELETED, and the reason is scope rather than sentiment. Removing it is right
+    /// and is NOT free: the guard that pins the DDL-over-parse rule
+    /// (`gaps::a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap`) tests that rule
+    /// THROUGH this variant, so deleting it means retargeting that guard onto
+    /// `container::golden_map_key_value` directly — better placed, but a change of its own with
+    /// its own review and gate. The variant is INERT in the meantime: a `Divergence` suppresses
+    /// nothing unless a `Skip` names it, and none does. Removal is proposed as a follow-up.
     MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
 }
 
