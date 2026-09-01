@@ -1400,7 +1400,16 @@ _sccache_cap_probe() {
     invalid)
       echo "agent-gate: WARN: sccache-cap=invalid — sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}', and the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is exactly the fallback it would use: the value is having NO effect. The accepted form is <digits>[KkMmGgTt] with BINARY multipliers: measured, '30G' is 30 GiB while '30GiB' and '30GB' are discarded with NO diagnostic anywhere, and a bare integer means BYTES. Fix the VALUE, then 'sccache --stop-server' to apply it (#3727)" >&2 ;;
     invalid-stale)
-      echo "agent-gate: WARN: sccache-cap=invalid-stale — TWO faults at once. sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' (accepted form: <digits>[KkMmGgTt] binary multipliers; '30GiB'/'30GB' are discarded with no diagnostic, a bare integer means BYTES), AND the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is neither that fallback nor anything derived from this value — so this gate cannot say where it came from. FIX THE VALUE FIRST: 'sccache --stop-server' on its own would LOWER the cap to sccache's default (${_SCC_DEFAULT_BYTES} bytes), because the restart would discard the value too (#3727)" >&2 ;;
+      # THE DIRECTION IS COMPUTED, NOT ASSUMED (#3727 roborev round 3, f2). This used to say a
+      # restart "would LOWER the cap to sccache's default" unconditionally — false whenever the
+      # running non-default cap is BELOW the default, where a restart RAISES it. The hazard being
+      # warned about is that the restart replaces the enforced cap with the FALLBACK, and which
+      # way that moves is exactly the comparison this branch already made, so it is read from the
+      # comparison rather than guessed. (Both arms are reachable: this branch is entered only when
+      # the running cap differs from the default, in either direction.)
+      _scc_dir_word=RAISE
+      [ "$_SCC_CAP_BYTES" -gt "$_SCC_DEFAULT_BYTES" ] 2>/dev/null && _scc_dir_word=LOWER
+      echo "agent-gate: WARN: sccache-cap=invalid-stale — TWO faults at once. sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' (accepted form: <digits>[KkMmGgTt] binary multipliers; '30GiB'/'30GB' are discarded with no diagnostic, a bare integer means BYTES), AND the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is neither that fallback nor anything derived from this value — so this gate cannot say where it came from. FIX THE VALUE FIRST: 'sccache --stop-server' on its own would ${_scc_dir_word} the cap to sccache's default (${_SCC_DEFAULT_BYTES} bytes), because the restart would discard the value too (#3727)" >&2 ;;
   esac
   if [ "$_SCC_USED_KIND" = bytes ] && [ "$_SCC_USED_PCT" != cap-zero ]; then
     local pctnum="${_SCC_USED_PCT%\%}"

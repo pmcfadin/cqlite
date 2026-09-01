@@ -1078,13 +1078,18 @@ for scc_row in \
   '|32212254720|10737418240|32212254720(inherited)' \
   '30G|10737418240|10737418240|10737418240(stale)' \
   '30GiB|10737418240|10737418240|10737418240(invalid)' \
-  '30GiB|32212254720|10737418240|32212254720(invalid-stale)'; do
+  '30GiB|32212254720|10737418240|32212254720(invalid-stale)' \
+  '30GiB|5368709120|10737418240|5368709120(invalid-stale-below)'; do
   scc_val=${scc_row%%|*}; scc_rest=${scc_row#*|}
   scc_max=${scc_rest%%|*}; scc_rest=${scc_rest#*|}
   scc_dflt=${scc_rest%%|*}; scc_want=${scc_rest#*|}
   # The SOURCE word alone names the file/label: the expected token carries parentheses, and a
   # path built from it would be legal-but-hostile to read in a failure message.
   scc_src=${scc_want#*\(}; scc_src=${scc_src%\)}
+  # Two rows share the `invalid-stale` TOKEN and differ only in whether the enforced cap is above
+  # or below sccache's default (issue #3727 roborev round 3, f2), so the row carries a
+  # `-below` suffix for the file/label and the expected token drops it.
+  scc_want=${scc_want/-below)/)}
   scc_file="$tmp/scc-cap-$scc_src.txt"
   # An UNSET row must not become an EMPTY one: set-but-empty is a distinct, measured sccache
   # state (it is silently discarded), so the two are driven through different invocations.
@@ -1138,6 +1143,26 @@ if grep -q 'invalid-stale' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
 else
   bad "sccache-cap: the invalid-stale WARN does not warn that stopping the server first lowers the cap"
   cat "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null | head -3
+fi
+
+# 9c-v-c. THE DIRECTION OF THE CAP CHANGE IS COMPUTED, NOT ASSUMED (issue #3727 roborev round 3).
+#         The invalid-stale WARN tells the operator that a bare `sccache --stop-server` replaces the
+#         enforced cap with sccache's FALLBACK; which WAY that moves depends on whether the running
+#         cap is above or below the default, and the text used to say "LOWER" unconditionally. Both
+#         rows above are re-read here, so a hard-coded direction reds whichever arm it is wrong for.
+if grep -q 'would LOWER the cap' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
+   && ! grep -q 'would RAISE the cap' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null; then
+  ok "sccache-cap: an enforced cap ABOVE sccache's default warns that a restart would LOWER it"
+else
+  bad "sccache-cap: the above-default arm did not warn about LOWERING the cap"
+  cat "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null | head -3
+fi
+if grep -q 'would RAISE the cap' "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null \
+   && ! grep -q 'would LOWER the cap' "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null; then
+  ok "sccache-cap: an enforced cap BELOW sccache's default warns that a restart would RAISE it (the direction is read from the comparison)"
+else
+  bad "sccache-cap: the below-default arm still claimed the restart would LOWER the cap"
+  cat "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null | head -3
 fi
 
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
@@ -5423,7 +5448,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 439: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 29 host-independent
+# 410 -> 443: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 33 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
@@ -5432,10 +5457,11 @@ fi
 # A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +29 above is a measured difference and the deliberate ~10 margin is preserved rather than
+# the +33 above is a measured difference (the last four: the below-default invalid-stale row's
+# token + grammar, and the two direction asserts) and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=439
+ASSERT_FLOOR=443
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

@@ -117,9 +117,13 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
 * raising the value has **no effect until `sccache --stop-server`** (the next compile restarts it);
 * an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
   carries `sccache-cap=<bytes>(<source>)` read from the running server, and why
-  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates three facts (the
-  `/etc/environment` line, a fresh profile-free session, and the running server) before it will say
-  `sccache-cap: VERIFIED`. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
+  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the
+  `/etc/environment` line, the running server, **and the value seen by three contexts a gate can be
+  launched from** — a non-login PAM session, a login shell (which also runs `/etc/profile.d`) and
+  the invoking shell itself, whose environment `gate-detached.sh` forwards — comparing every
+  exported `SCCACHE_*` variable, not just the cap, before it will say `sccache-cap: VERIFIED`. Any
+  disagreement is `CONFLICTING-SOURCES`; a difference in an `SCCACHE_*` name it does not classify as
+  routing is `UNMEASURED` naming that name, never a pass on a partial match. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
   running a different cap keeps it.
 
 A third fact, measured while building that check and worth knowing before you read any
@@ -155,10 +159,11 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
   server enforces exactly that fallback, so the value is having no effect. Fix the value, then
   `sccache --stop-server`.
 - `…(invalid-stale)` — TWO faults: sccache discards the value **and** the running server enforces
-  something that is neither the fallback nor derived from it. **Fix the value FIRST** — stopping
-  the server on its own would *lower* the cap to sccache's default, because the restart discards
-  the value too. (Env-value validity and running-server provenance are independent axes; one
-  label for both would invent a causal link and invert the remedy — #3727.)
+  something that is neither the fallback nor derived from it. **Fix the value FIRST** — stopping the
+  server on its own replaces the enforced cap with sccache's default, which *lowers* it when the
+  running cap is above the default and *raises* it when below; the WARN computes which. (Env-value
+  validity and running-server provenance are independent axes; one label for both would invent a
+  causal link and invert the remedy — #3727.)
 - `…(unattributed)` — the attribution differential did not establish that a *running* server
   answered (the reading moved with the client's env, or the second read failed), so this is the cap
   that *will* apply rather than one proven to be in force. Most commonly: no server is up yet.

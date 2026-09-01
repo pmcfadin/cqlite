@@ -1385,10 +1385,13 @@ exit 0'
   # unhandled `-i` would add a warn to every sandbox built on this helper — the base_warns drift.
   # The SAME value is injected for both session types, so 5b2's two-session comparison agrees and
   # this helper stays a one-warning sandbox.
+  # SCCACHE_DIR is injected alongside the cap for the reason mksccshims records: 5b2 scrubs the
+  # caller's SCCACHE_* before opening the session, so a stub that injects only the cap manufactures a
+  # ROUTING disagreement with the invoking context and every sandbox here gains a warn.
   mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 if [ "${1:-}" = "-i" ]; then shift; fi
-exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=30G "$@"'
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=30G ${SCC_STUB_SESSION_DIR:+SCCACHE_DIR="$SCC_STUB_SESSION_DIR"} "$@"'
   mk_push_gh "$dir" "$setup"
 }
 
@@ -1406,6 +1409,7 @@ run_push() {
   # matching the 30G in this sandbox's env file and sudo shim (issue #3727).
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" SCC_STUB_MAX=32212254720 \
+    SCCACHE_CACHE_SIZE=30G SCCACHE_DIR="$repo/scc-cache" SCC_STUB_SESSION_DIR="$repo/scc-cache" \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
@@ -4274,6 +4278,13 @@ if [ "${1:-}" = "-u" ]; then shift 2; fi
 if [ "${1:-}" = "-i" ]; then scc_login=1; shift; fi
 if [ "$scc_login" = 1 ] && [ -n "${SCC_SHIM_LOGIN_FAIL:-}" ]; then exit 1; fi
 scc_extra=()
+# A PAM session gets its ROUTING from the same place it gets the cap (on this fleet SCCACHE_DIR is in
+# /etc/environment), and section 5b2 SCRUBS the invoking SCCACHE_DIR before opening the session so that
+# routing cannot be reported as the session own routing. A stub that injected only the cap would
+# therefore report an EMPTY SCCACHE_DIR for both sessions while the invoking context has one — a
+# routing disagreement manufactured by the harness. SCC_STUB_SESSION_DIR is passed through a
+# non-SCCACHE name precisely because the SCCACHE_* names are the ones being scrubbed.
+[ -n "${SCC_STUB_SESSION_DIR:-}" ] && scc_extra+=("SCCACHE_DIR=$SCC_STUB_SESSION_DIR")
 if [ "$scc_login" = 1 ]; then
   [ -n "${SCC_SHIM_LOGIN_DIR+set}" ] && scc_extra+=("SCCACHE_DIR=$SCC_SHIM_LOGIN_DIR")
 fi'
@@ -4307,6 +4318,14 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$scc_val\" \${scc_e
 # runscc <script> <shim-dir> <env-file> [NAME=VALUE...] [--flag...] — one bootstrap run.
 # BOTH variables are scrubbed from every call: this suite runs on fleet boxes that export
 # them, and an inherited value would otherwise decide the verdict instead of the case's input.
+#
+# SINCE ROUND 4, THE INVOKING ENVIRONMENT IS ONE OF THE THREE CONTEXTS 5b2 COMPARES (#3727 roborev
+# round 3, f1) — because that is the context a worker launches gates from. So a case that expects a
+# verdict OTHER than CONFLICTING-SOURCES must pass `SCCACHE_CACHE_SIZE=<v>` explicitly, matching
+# what its `sudo` shim injects into the sessions: the scrub leaves the invoker UNSET, which is a
+# genuine disagreement with a session that sees a value. `env` applies its `-u` options before the
+# NAME=VALUE assignments, so passing it still works. Cases that WANT the disagreement (12b-d2,
+# 12b-q, 12b-r) leave it scrubbed or set it deliberately.
 runscc() {
   local script="$1" shims="$2" envfile="$3"; shift 3
   local -a scc_env=() scc_flags=()
@@ -4317,7 +4336,13 @@ runscc() {
       *) scc_env+=("$a") ;;
     esac
   done
-  env -u CQLITE_GATE_MAX_CONCURRENCY -u SCCACHE_CACHE_SIZE \
+  # THE ROUTING IS PINNED, NOT INHERITED. Section 5b2 compares every exported SCCACHE_* across the
+  # three contexts, so a host whose own SCCACHE_DIR/SCCACHE_SERVER_PORT differ from the stub sessions'
+  # would make every case here report a routing conflict — host state deciding the verdict, which is
+  # what this harness removes everywhere else. One fixed value for the invoker, the same one handed to
+  # the `sudo` stub through SCC_STUB_SESSION_DIR (a non-SCCACHE name, because 5b2 scrubs SCCACHE_*).
+  env -u CQLITE_GATE_MAX_CONCURRENCY -u SCCACHE_CACHE_SIZE -u SCCACHE_SERVER_PORT \
+    SCCACHE_DIR="$tmp/scc-session-cache" SCC_STUB_SESSION_DIR="$tmp/scc-session-cache" \
     PATH="$shims" CARGO_HOME="$tmp/pin-cargo" HOME="$tmp/scc-home" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envfile" \
     ${scc_env[@]+"${scc_env[@]}"} \
@@ -4368,7 +4393,7 @@ else
   scc_shims_v="$tmp/scc-shims-v"
   scc_env_v="$tmp/scc-env-v"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=30G\n' >"$scc_env_v"
   mksccshims "$scc_shims_v" "file:$scc_env_v"
-  scc_out_v=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
+  scc_out_v=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_v=$(scc_slice "$scc_out_v")
   if out_has "$scc_sl_v" -E '\[ok\].*sccache-cap: VERIFIED' \
      && [ "$(scc_warns "$scc_sl_v")" = 0 ] && [ "$(scc_oks "$scc_sl_v")" = 1 ]; then
@@ -4394,7 +4419,7 @@ else
   #        remedy must be `sccache --stop-server` and must NOT tell the operator to edit a value
   #        that is already correct (a remedy the operator has already complied with is worse
   #        than none, because it stops them looking).
-  scc_out_nh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
+  scc_out_nh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
   scc_sl_nh=$(scc_slice "$scc_out_nh")
   if out_has "$scc_sl_nh" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
      && out_has "$scc_sl_nh" 'sccache --stop-server' \
@@ -4410,7 +4435,7 @@ else
   #        system-wide file, so a server started outside that source gets sccache's default.
   scc_shims_lit="$tmp/scc-shims-lit"; mksccshims "$scc_shims_lit" 30G
   scc_env_empty="$tmp/scc-env-empty"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_empty"
-  scc_out_nsw=$(runscc "$scc_bs" "$scc_shims_lit" "$scc_env_empty" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
+  scc_out_nsw=$(runscc "$scc_bs" "$scc_shims_lit" "$scc_env_empty" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_nsw=$(scc_slice "$scc_out_nsw")
   if out_has "$scc_sl_nsw" -E '\[warn\].*sccache-cap: NOT-SYSTEM-WIDE' \
      && out_has "$scc_sl_nsw" -- '--fix-sccache-cap' \
@@ -4421,21 +4446,42 @@ else
     printf '%s\n' "$scc_sl_nsw" | head -6
   fi
 
-  # 12b-d. FAILED, and the scrub that makes it honest: bootstrap's OWN environment carries a
-  #        value (the normal state of a re-run on a fleet box) while nothing is persisted and
-  #        the session sees nothing. An unscrubbed probe would certify exactly the failure this
-  #        section exists to catch.
+  # 12b-d1. FAILED needs ALL THREE contexts blind. Nothing persisted, no shim injection, and the
+  #         invoking environment scrubbed by runscc — so no launch path sees a cap and the verdict is
+  #         the affirmative FAILED rather than a disagreement.
   scc_shims_none="$tmp/scc-shims-none"; mksccshims "$scc_shims_none" -
   scc_out_f=$(runscc "$scc_bs" "$scc_shims_none" "$scc_env_empty" SCC_STUB_MAX=32212254720 \
-    SCCACHE_CACHE_SIZE=30G SCC_STUB_LOG="$scc_log")
+    SCC_STUB_LOG="$scc_log")
   scc_sl_f=$(scc_slice "$scc_out_f")
   if out_has "$scc_sl_f" -E '\[warn\].*sccache-cap: FAILED' \
      && ! out_has "$scc_sl_f" -E '\[ok\].*sccache-cap' \
      && out_has "$scc_sl_f" -- '--fix-sccache-cap'; then
-    ok "sccache-cap: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
+    ok "sccache-cap: with every launch context blind the verdict is FAILED, and the remedy names the flag"
   else
-    bad "sccache-cap: an inherited value was accepted as evidence the box is capped"
+    bad "sccache-cap: an unpinned box with no disagreement did not report FAILED"
     printf '%s\n' "$scc_sl_f" | head -6
+  fi
+
+  # 12b-d2. THE SCRUB, RESTATED FOR THREE CONTEXTS (issue #3727, rounds 1 and 3). Bootstrap's OWN
+  #         environment carries a value — the normal state of a re-run on a fleet box — while nothing
+  #         is persisted and no session sees it. An unscrubbed probe would certify exactly the failure
+  #         this section exists to catch; and since round 3 the invoking shell is itself one of the
+  #         compared contexts, so the honest verdict is not FAILED but CONFLICTING-SOURCES: a gate
+  #         launched from THIS shell would get 30G while one launched from a fresh PAM session gets
+  #         nothing. Either way it must never be VERIFIED, and the invoking shell must be NAMED
+  #         rather than silently treated as the answer.
+  scc_out_inh=$(runscc "$scc_bs" "$scc_shims_none" "$scc_env_empty" SCC_STUB_MAX=32212254720 \
+    SCCACHE_CACHE_SIZE=30G SCC_STUB_LOG="$scc_log")
+  scc_sl_inh=$(scc_slice "$scc_out_inh")
+  if ! out_has "$scc_sl_inh" -E '\[ok\].*sccache-cap' \
+     && out_has "$scc_sl_inh" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
+     && out_has "$scc_sl_inh" 'INVOKING SHELL' \
+     && out_has "$scc_sl_inh" "'30G'" \
+     && out_has "$scc_sl_inh" '<UNSET>'; then
+    ok "sccache-cap: an INHERITED-but-not-persisted value is never VERIFIED — it is a CONFLICTING-SOURCES that NAMES the invoking shell against the blind sessions"
+  else
+    bad "sccache-cap: an inherited value was accepted as evidence, or the invoking shell was not named"
+    printf '%s\n' "$scc_sl_inh" | head -6
   fi
 
   # 12b-e. THE ONE DECLARED AMBIGUITY. A value that resolves to sccache's OWN default cannot be
@@ -4445,7 +4491,7 @@ else
     scc_shims_amb="$tmp/scc-shims-amb-$scc_amb"; mksccshims "$scc_shims_amb" "$scc_amb"
     scc_env_amb="$tmp/scc-env-amb-$scc_amb"
     printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=%s\n' "$scc_amb" >"$scc_env_amb"
-    scc_out_amb=$(runscc "$scc_bs" "$scc_shims_amb" "$scc_env_amb" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
+    scc_out_amb=$(runscc "$scc_bs" "$scc_shims_amb" "$scc_env_amb" SCCACHE_CACHE_SIZE="$scc_amb" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
     scc_sl_amb=$(scc_slice "$scc_out_amb")
     if out_has "$scc_sl_amb" -E '\[warn\].*sccache-cap: UNMEASURED' \
        && out_has "$scc_sl_amb" "sccache's OWN default cap" \
@@ -4462,7 +4508,7 @@ else
   #        of the tool that owns it, so the answer is UNMEASURED — never an [ok], and never a
   #        bash reimplementation of the grammar.
   scc_shims_nb="$tmp/scc-shims-nb"; mksccshims "$scc_shims_nb" 30G no-sccache
-  scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCC_STUB_MAX=32212254720)
+  scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720)
   scc_sl_nb=$(scc_slice "$scc_out_nb")
   if out_has "$scc_sl_nb" -E '\[warn\].*sccache-cap: UNMEASURED' \
      && out_has "$scc_sl_nb" "no 'sccache' on PATH" \
@@ -4477,7 +4523,7 @@ else
   #        with nothing running, --show-stats answers max_cache_size from the CLIENT's own env
   #        and reports cache_size null, so accepting that number would compare the session value
   #        against itself and call the box VERIFIED.
-  scc_out_ns=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none SCC_STUB_LOG="$scc_log")
+  scc_out_ns=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=none SCC_STUB_LOG="$scc_log")
   scc_sl_ns=$(scc_slice "$scc_out_ns")
   if out_has "$scc_sl_ns" -E '\[warn\].*sccache-cap: UNMEASURED' \
      && out_has "$scc_sl_ns" 'no sccache server is answering' \
@@ -4498,7 +4544,7 @@ else
   #         observation would be over-read), and the stub's argv.
   scc_state_w="$tmp/scc-stub-state-fresh"; rm -f "$scc_state_w"
   scc_log_fresh="$tmp/scc-stub-argv-fresh.log"; : >"$scc_log_fresh"
-  scc_out_fresh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none \
+  scc_out_fresh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=none \
     SCC_STUB_STATE="$scc_state_w" SCC_STUB_LOG="$scc_log_fresh" --fix-sccache-cap)
   scc_sl_fresh=$(scc_slice "$scc_out_fresh")
   if out_has "$scc_sl_fresh" -E '\[ok\].*sccache-cap: VERIFIED' \
@@ -4539,7 +4585,7 @@ else
   #          now a differential (a running server's answer does not move when the client's
   #          SCCACHE_CACHE_SIZE changes; a client's does), and this case pins it.
   scc_log_empty="$tmp/scc-stub-argv-empty.log"; : >"$scc_log_empty"
-  scc_out_empty=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+  scc_out_empty=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_STUB_USED=null SCC_STUB_LOG="$scc_log_empty" --fix-sccache-cap)
   scc_sl_empty=$(scc_slice "$scc_out_empty")
   if out_has "$scc_sl_empty" -E '\[ok\].*sccache-cap: VERIFIED' \
@@ -4557,7 +4603,7 @@ else
   #         same fresh box stays UNMEASURED, names what is missing, and points at the flag.
   scc_state_d="$tmp/scc-stub-state-default"; rm -f "$scc_state_d"
   scc_log_def="$tmp/scc-stub-argv-default.log"; : >"$scc_log_def"
-  scc_out_def=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none \
+  scc_out_def=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=none \
     SCC_STUB_STATE="$scc_state_d" SCC_STUB_LOG="$scc_log_def")
   scc_sl_def=$(scc_slice "$scc_out_def")
   if out_has "$scc_sl_def" -E '\[warn\].*sccache-cap: UNMEASURED' \
@@ -4577,7 +4623,7 @@ else
   #         start (or stop) anything here even under --fix-sccache-cap.
   scc_state_l="$tmp/scc-stub-state-live"; rm -f "$scc_state_l"
   scc_log_live="$tmp/scc-stub-argv-live.log"; : >"$scc_log_live"
-  scc_out_live=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=10737418240 \
+  scc_out_live=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=10737418240 \
     SCC_STUB_STATE="$scc_state_l" SCC_STUB_LOG="$scc_log_live" --fix-sccache-cap)
   if printf '%s\n' "$(scc_slice "$scc_out_live")" | grep -qE '\[warn\].*sccache-cap: NOT-HONOURED' \
      && ! grep -qE -- '--start-server|--stop-server' "$scc_log_live" \
@@ -4597,7 +4643,7 @@ else
   #        agree on 30G): only the login shell disagrees, so a section that certified on one session
   #        would print [ok] here. That is the false certification, and it must be a warn instead.
   scc_log_conf="$tmp/scc-stub-argv-conflict.log"; : >"$scc_log_conf"
-  scc_out_conf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+  scc_out_conf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_SHIM_LOGIN_VALUE=40G SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
   scc_sl_conf=$(scc_slice "$scc_out_conf")
   if out_has "$scc_sl_conf" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
@@ -4633,7 +4679,7 @@ else
   #        verified against one says nothing about the other — the round-2 finding (verify one
   #        object, certify another) reappearing through the round-3 door. On box3 SCCACHE_DIR
   #        escaped the conflict only because both files happen to carry the same value.
-  scc_out_rconf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+  scc_out_rconf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_SHIM_LOGIN_DIR=/some/other/cache SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
   scc_sl_rconf=$(scc_slice "$scc_out_rconf")
   if out_has "$scc_sl_rconf" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
@@ -4649,7 +4695,7 @@ else
   # 12b-s. AN UNMEASURABLE LOGIN SESSION MAY ONLY WEAKEN A POSITIVE CLAIM. The login shell is the
   #        launch path that matters on this fleet, so failing to measure it cannot fall back to the
   #        non-login answer — that is the single-session certification this round removed.
-  scc_out_lfail=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+  scc_out_lfail=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_SHIM_LOGIN_FAIL=1 --fix-sccache-cap)
   scc_sl_lfail=$(scc_slice "$scc_out_lfail")
   if out_has "$scc_sl_lfail" -E '\[warn\].*sccache-cap: UNMEASURED' \
@@ -4664,7 +4710,7 @@ else
   # 12b-h. THE ISOLATION ASSERT, which is the single most important line in the section: if the
   #        isolated probe is answered by a DIFFERENT sccache, its cap says nothing about our
   #        value and the reading must be discarded rather than trusted.
-  scc_out_iso=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+  scc_out_iso=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_STUB_ISO_LOC=/some/other/servers/cache SCC_STUB_LOG="$scc_log")
   scc_sl_iso=$(scc_slice "$scc_out_iso")
   if out_has "$scc_sl_iso" -E '\[warn\].*sccache-cap: UNMEASURED' \
@@ -4695,7 +4741,7 @@ else
   #        issue's own defect wearing a platform label (the mistake #3414 made and removed).
   scc_shims_mac="$tmp/scc-shims-mac"; mksccshims "$scc_shims_mac" 30G
   mk_stub "$scc_shims_mac" uname 'echo Darwin; exit 0'
-  scc_out_mac=$(runscc "$scc_bs" "$scc_shims_mac" "$scc_env_v" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
+  scc_out_mac=$(runscc "$scc_bs" "$scc_shims_mac" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_mac=$(scc_slice "$scc_out_mac")
   if out_has "$scc_sl_mac" -E '\[warn\].*sccache-cap: UNMEASURED' \
      && ! out_has "$scc_sl_mac" -E '\[ok\]'; then
@@ -4711,7 +4757,7 @@ else
   scc_env_7g="$tmp/scc-env-7g"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=7G\n' >"$scc_env_7g"
   scc_before=$(cat "$scc_env_7g")
   scc_shims_7g="$tmp/scc-shims-7g"; mksccshims "$scc_shims_7g" "file:$scc_env_7g"
-  scc_out_7g=$(runscc "$scc_bs_sub" "$scc_shims_7g" "$scc_env_7g" SCC_STUB_MAX=7516192768 \
+  scc_out_7g=$(runscc "$scc_bs_sub" "$scc_shims_7g" "$scc_env_7g" SCCACHE_CACHE_SIZE=7G SCC_STUB_MAX=7516192768 \
     SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
   if [ "$(cat "$scc_env_7g")" = "$scc_before" ]; then
     ok "sccache-cap: --fix-sccache-cap leaves an existing SCCACHE_CACHE_SIZE byte-identical (never rewrites a value)"
@@ -4734,7 +4780,7 @@ else
   #        session creation, so no reboot and no re-login (the PAM stand-in models exactly that).
   scc_env_w="$tmp/scc-env-w"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_w"
   scc_shims_w="$tmp/scc-shims-w"; mksccshims "$scc_shims_w" "file:$scc_env_w"
-  scc_out_w=$(runscc "$scc_bs_sub" "$scc_shims_w" "$scc_env_w" SCC_STUB_MAX=32212254720 \
+  scc_out_w=$(runscc "$scc_bs_sub" "$scc_shims_w" "$scc_env_w" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
   if grep -q '^SCCACHE_CACHE_SIZE=30G$' "$scc_env_w" \
      && grep -q '^# cqlite: sccache object-cache size cap' "$scc_env_w" \
