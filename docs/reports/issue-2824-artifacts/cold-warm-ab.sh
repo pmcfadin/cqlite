@@ -108,11 +108,28 @@ esac
   echo "loadavg-at-start: $(cut -d' ' -f1-3 /proc/loadavg)"
   echo "corpus: $CORPUS"
   echo "corpus-bytes: $(du -sb "$CORPUS" | cut -f1)"
-  _dev=$(findmnt -no SOURCE --target "$CORPUS" 2>/dev/null || echo UNKNOWN)
-  _base=$(lsblk -no PKNAME "$_dev" 2>/dev/null || basename "$_dev")
+  _dev=$(findmnt -no SOURCE --target "$CORPUS" 2>/dev/null || true)
+  [ -n "$_dev" ] || _dev=UNKNOWN
   echo "corpus-device: $_dev"
-  echo "corpus-device-model: $(cat "/sys/block/${_base}/device/model" 2>/dev/null | tr -s ' ' || echo UNKNOWN)"
-  echo "corpus-device-read_ahead_kb: $(cat "/sys/block/${_base}/queue/read_ahead_kb" 2>/dev/null || echo UNKNOWN)"
+  # `lsblk -no PKNAME` EXITS 0 AND PRINTS NOTHING for a whole disk (no parent), so
+  # `|| basename` never fires and every whole-disk device silently recorded
+  # UNKNOWN — an unmeasured value taking the permissive branch. Resolve the base
+  # device affirmatively: parent if there is one, else the device itself.
+  _base=$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 | tr -d ' ')
+  [ -n "$_base" ] || _base=$(basename "$_dev")
+  _model=UNKNOWN; _ra=UNKNOWN
+  if [ -r "/sys/block/${_base}/device/model" ]; then
+    _model=$(tr -s ' ' < "/sys/block/${_base}/device/model" | sed 's/ *$//')
+  fi
+  if [ -r "/sys/block/${_base}/queue/read_ahead_kb" ]; then
+    _ra=$(cat "/sys/block/${_base}/queue/read_ahead_kb")
+  fi
+  echo "corpus-device-base: $_base"
+  echo "corpus-device-model: $_model"
+  echo "corpus-device-read_ahead_kb: $_ra"
+  if [ "$_model" = UNKNOWN ] || [ "$_ra" = UNKNOWN ]; then
+    echo "corpus-device-note: NOT MEASURED — a read-ahead A/B whose device is unknown cannot be interpreted; treat the result as UNATTRIBUTED"
+  fi
   echo "phases-per-arm-per-round: cold (cache dropped) + warm (cache resident), each --passes 1, each timed separately"
   echo "rounds: $ROUNDS  (arm order alternates on even rounds)"
   echo "primary-signal: major page faults (per-process, contention-immune)"
