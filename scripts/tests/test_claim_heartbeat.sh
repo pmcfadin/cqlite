@@ -3067,8 +3067,18 @@ require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid
   '`refs/claims/issue-<N>` — the per-issue lock, populated on every box. It records the pid of the TRANSIENT CLAIMING SHELL and never refreshes it'
 require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)" \
   '`refs/heartbeats/<machine>` — populated on every box, but SINGLE-SLOT PER MACHINE and force-updated by `beat`, so N lanes on one box overwrite each other'
-require_help_phrase "AC4 abstain rule" \
-  'a STALE PID MUST NEVER YIELD A `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead'
+# AC4, IN ITS QUALIFIED FORM, AND BOTH HALVES OF IT (roborev job 17). The first draft asserted the
+# UNQUALIFIED sentence — "a stale pid must never yield a `DEAD-*` verdict" — which is FALSE about this
+# code: `dead-lanes` emits `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` for a `refs/lane-claims/*` pid and is
+# RIGHT to, because the supervisor restamps that ref every iteration. A test freezing the absolute
+# claim would have made the contradiction permanent, so both halves are pinned: the abstain rule for a
+# NON-REFRESHING carrier (which is the case AC4 was measured on, and what TEST 82 enforces
+# behaviourally), and the positive half, so a later edit cannot delete the qualification and restore
+# the false absolute.
+require_help_phrase "AC4 abstain rule, qualified by CARRIER" \
+  'A pid FROM A NON-REFRESHING CARRIER MUST NEVER YIELD A `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead'
+require_help_phrase "AC4 positive half (a refreshing carrier DOES yield DEAD-*)" \
+  'an absent or recycled pid there really does mean the lane is gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are CORRECT verdicts'
 
 # ===========================================================================
 echo "TEST 82: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"

@@ -276,10 +276,17 @@
 #       `refs/machine-claims/<machine>` layout had, i.e. instance 5 of the #3464
 #       retracted-invariant-in-a-second-carrier family.
 #
-#   AC4 SURVIVES THE DESCOPE: whatever detection remains, a STALE PID MUST NEVER YIELD A
-#   `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead. That is why a pid is
-#   read ONLY from a claim ref a supervisor refreshes, and why presence alone is not enough
-#   (the identity check against the claim `ts`, and the UNKNOWN-IDENTITY band, above).
+#   AC4 SURVIVES THE DESCOPE, AND IT IS QUALIFIED BY CARRIER — the unqualified form was FALSE
+#   about this code (roborev job 17). A pid FROM A NON-REFRESHING CARRIER MUST NEVER YIELD A
+#   `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead. That is the case AC4 was
+#   measured on: `refs/claims/issue-<N>` records the transient claiming shell, dead within
+#   minutes of a lane that runs for hours, and `refs/heartbeats/<machine>` carries no per-lane
+#   pid at all. A pid from a REFRESHING carrier is the opposite: `worker-supervisor.sh` restamps
+#   `refs/lane-claims/*` every iteration, so an absent or recycled pid there really does mean the
+#   lane is gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are CORRECT verdicts — see WHOSE
+#   PROCESS, EXACTLY above. Hence a pid is read ONLY from a claim ref a supervisor refreshes,
+#   and presence alone is still not enough (the identity check against the claim `ts`, and the
+#   UNKNOWN-IDENTITY band, above).
 #   `test_claim_heartbeat.sh` pins the namespace containment behaviourally, so a later
 #   read-side change cannot quietly turn the measured false positive into a verdict.
 #
@@ -1353,7 +1360,10 @@ open_pr_state() {
 # health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are
 # NOT read here, for two MEASURED reasons (stale claiming-shell pid; single-slot-per-machine
 # masking) spelled out in the header's SCOPE section — do not point this at them. AC4 still
-# holds: a stale pid must never yield a `DEAD-*` verdict, it must abstain.
+# holds, QUALIFIED BY CARRIER: a pid from a NON-REFRESHING carrier (either of those two) must
+# never yield a `DEAD-*` verdict — abstain. A pid from `refs/lane-claims/*`, which the supervisor
+# RESTAMPS every iteration, legitimately yields `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`; the
+# unqualified form of this sentence contradicted that and was false (roborev job 17).
 #
 # EXIT PRECEDENCE (3 outranks 1, deliberately): a found dead lane is ACTIONABLE NOW,
 # so it wins the exit code, and any incompleteness is still stated in the text rather

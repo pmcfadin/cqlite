@@ -922,6 +922,13 @@ read-side "fix":
   defect the retired per-machine claim ref had (instance 5 of the #3464
   retracted-invariant-in-a-second-carrier family).
 
+**AC4, qualified by carrier (#3548).** A pid from a **non-refreshing** carrier — either of the two
+above — must never yield a `DEAD-*` verdict; the run abstains with an `UNKNOWN-*` one. A pid from the
+**refreshing** carrier `refs/lane-claims/*`, which a supervisor restamps every iteration, legitimately
+yields `DEAD-NO-PROCESS` or `DEAD-PID-REUSED` — there, an absent or recycled pid really does mean the
+lane is gone. The unqualified form of that rule ("a stale pid must never yield `DEAD-*`") is **false
+about the code** and must not be restated anywhere.
+
 **What lane liveness actually rests on here.** Two things, and neither is a script you can run:
 
 1. **The coordination lead's sweep** — a human-driven loop over the board and the open PRs. It is what
