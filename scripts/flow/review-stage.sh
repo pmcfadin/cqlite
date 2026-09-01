@@ -1,0 +1,678 @@
+#!/usr/bin/env bash
+#
+# review-stage.sh — a delegated review stage's verdict, as an ARTIFACT (issue #3751).
+#
+# WHY THIS EXISTS
+# ---------------
+# A delegated review stage (C / rust-reviewer / coverage-reviewer / a closer, …) used to
+# write NOTHING at any point in its life. Its reader therefore had only ABSENCE to reason
+# from, and every consumer of an absence has to CHOOSE how to read it: six lanes chose
+# "not run" correctly and nothing required them to; the seventh read an idle notice as a
+# clean review and merged.
+#
+# This is #3041's mechanism transplanted. The agent gate writes
+# `RESULT: INCOMPLETE (gate did not finish)` into its summary file AT LAUNCH — before the
+# slot is even granted — so a reader can never mistake a just-launched run for a certified
+# one. `open` does the same for a review stage: the report-of-record file is created BEFORE
+# the agent is spawned, carrying a NON-VERDICT sentinel. That converts the question from
+#
+#   "is there a report?"        two-valued, and the PERMISSIVE answer is the dangerous one
+# to
+#   "what does the report say?" three-valued, with the unmeasured state NAMED.
+#
+# WHAT IT DOES AND DOES NOT CLAIM (design.md §5, and the narrow claim is the true one)
+# -----------------------------------------------------------------------------------
+# This mechanism guarantees a correct CONSUMING verdict: an absent review is REPORTED as
+# absent, with its elapsed time, and cannot be read as clean. It does NOT claim that flaky
+# agents now deliver — naming a report path rescued `spec-auditor` and `flow-closer` in
+# measured sessions and did nothing for `rust-reviewer` (0/3, one of them told IN WRITING
+# that an absent file would be recorded as a non-review). Second declared limit, same
+# direction: `verdict` establishes that a VERDICT WAS RECORDED, never that a review was
+# performed — a report whose only content is `result: PASS` reads as PASS. Judging whether
+# the working is real is a human's job (and, for the author-performed substitute below,
+# the whole point of requiring the working to be recorded).
+#
+# THE VERDICT GRAMMAR IS CLOSED (#3544's lesson, applied)
+# ------------------------------------------------------
+#   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<secs> deadline=<secs> agent=<t> report=<abs>
+#
+#   token             meaning                                            exit
+#   PASS              a report was written recording no blocking finding   0
+#   FINDINGS          a report was written recording >=1 blocking finding  4
+#   NOT-RUN           sentinel-only / absent / empty / ungrammatical /     5
+#                     never-opened  (ALWAYS carries a parenthesised cause)
+#   AUTHOR-PERFORMED  a disclosed substitute with its working recorded     6
+#
+# Two rules make the grammar CLOSED rather than prefix-tested: the recorded result is
+# reduced to its FIRST WORD and matched by STRING EQUALITY, and any unrecognised value is
+# `NOT-RUN`, never passed through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
+#
+# `NOT-RUN` carries one of FIVE named causes, because the operator action differs per cause
+# and one token for five states is the collapse this issue is about:
+#   no report written          the stage is open and the report is still the sentinel
+#   report absent              the stage is open and its report file is GONE
+#   report empty               the report file exists and holds nothing recordable
+#   report ungrammatical: <w>  a result line that is unrecognised, absent, or unsupported
+#   stage never opened         no stage was ever opened for this <kind>/<issue>
+#
+# TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
+# ---------------------------------------------------------------------------
+#   <dir>/<kind>.md      the REPORT OF RECORD: what the agent writes, what `verdict` reads.
+#   <dir>/<kind>.stage   the STAGE RECORD: kind/issue/agent/spawned-at/deadline/report path.
+# A single file cannot tell `stage never opened` from `report absent` — deleting it erases
+# the evidence that anything was ever opened, and `verdict` still has to report an agent, a
+# deadline and an elapsed time for a stage whose report has gone missing. So the two facts
+# live in two files: the stage record is the proof the stage EXISTS, the report is the
+# proof of what it CONCLUDED. Both are under `.review-stage/` and both are gitignored.
+#
+# BOTH PATHS ARE VERIFIED GITIGNORED, FAIL-CLOSED
+# -----------------------------------------------
+# These files are written MID-RUN, routinely while the gate of record is running, and #2926
+# FAILs a gate closed on ANY mid-run tree mutation. A gitignored path is invisible to
+# `tree-integrity` (which derives its identity from tracked content plus HEAD); an
+# untracked-but-NOT-ignored file shows as `??` and WOULD dirty the run — and would make
+# `premerge-assert.sh` refuse on `dirty: yes` (#3648). A leading dot proves nothing:
+# measured in this repo, `.frozen-work.md` is NOT ignored while `gate.log` is. So this
+# script ASKS GIT (`git check-ignore -q`) rather than assuming, and REFUSES to write a path
+# git does not confirm. A path outside the repository is also a refusal, not an exemption:
+# `check-ignore` cannot confirm it, and "cannot tell" must never take the permissive branch.
+#
+# THE DEADLINE IS ADVISORY BY DESIGN
+# ----------------------------------
+# It changes what `status` REPORTS, never the verdict. A report that arrives late is still
+# a report; a stage that is silent inside its deadline is still `NOT-RUN`. Letting the clock
+# decide would add a clock to a question already answerable from CONTENT, and would fail a
+# slow-but-real review. `status` therefore exits 0 for every state it can measure — reading
+# status must not be able to decide anything.
+#
+# SUBCOMMANDS
+#   open  <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--report <path>] [--force]
+#         Pre-stamp the sentinel BEFORE spawning. Refuses an already-open stage without
+#         --force; --force NEVER resets `spawned-at` (a second spawn silently restarting the
+#         clock would make the deadline unreadable, and a re-spawn is exactly what a lane
+#         does when the first agent idles). Prints the absolute path AND the paste-ready
+#         clause for the spawn prompt, so the contract reaches the agent VERBATIM rather
+#         than being paraphrased per lane.
+#   status <kind> --issue <N>
+#         Elapsed / deadline / state. ADVISORY ONLY — never changes the verdict.
+#   verdict <kind> --issue <N>
+#         EXACTLY ONE line of the closed grammar above. Exit 0/4/5/6.
+#   record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact>
+#                           --performed-by author|peer
+#         The sanctioned FALLBACK, never recorded as independent. Requires the WORKING:
+#         a substantive reason, a named evidence artifact, and who performed it.
+#         Placeholders are refused exactly as `claim.sh --reason` refuses them.
+#
+# EXIT CODES
+#   0   success (OPEN-OK, STATUS, RECORD-OK, verdict PASS)
+#   2   refused (OPEN-REFUSED, AUTHOR-REFUSED) — a state, not a usage error
+#   4   verdict FINDINGS
+#   5   verdict NOT-RUN
+#   6   verdict AUTHOR-PERFORMED
+#   64  usage error
+#
+# CONSTRAINTS
+#   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile).
+#   `set -euo pipefail`, shellcheck-clean. All informative output is prefixed
+#   `REVIEW-STAGE:`; notes and usage errors go to stderr. `verdict` prints exactly one
+#   line to stdout and nothing else.
+#
+# ---END-HELP---
+set -euo pipefail
+
+prog="$(basename "$0")"
+
+die_usage() { echo "$prog: $*" >&2; exit 64; }
+note()      { echo "[review-stage] $*" >&2; }
+emit()      { echo "REVIEW-STAGE: $*"; }
+
+# The disclosure a hand-performed substitute MUST carry, verbatim (design.md §4, adopting
+# lane-3629's wording). `verdict` REQUIRES it to be present before it will report
+# AUTHOR-PERFORMED: the token means "a disclosed substitute with its working recorded", so a
+# report claiming the token without the disclosure is not one — it is ungrammatical.
+AUTHOR_DISCLOSURE="an author's hand audit is not an independent one; weight it accordingly"
+
+# Default deadline. Advisory (see the header): it is a reporting threshold, never a verdict
+# input, so the value only has to be a plausible "this should have finished by now".
+DEFAULT_DEADLINE_SECS=1800
+
+# --- field hygiene -----------------------------------------------------------
+# sanitize_field <text> — collapse a free-text value into ONE parseable token. Lifted
+# verbatim in behaviour from claim.sh (same reasons, same contract): the stage record and the
+# report are parsed as `<key>: <value>` LINES, so a value carrying a newline could inject a
+# `result:` line and forge a verdict. Keeps [A-Za-z0-9._:/#-] (note ':' is kept so an
+# ISO-8601 timestamp and a path survive, and '=' is NOT, so a value can never introduce a
+# `key=` pair into the verdict line), maps every other run to a single '-', trims, caps at
+# 120 chars, re-trims after the cut (a cut landing on a separator would re-introduce the
+# trailing '-' the trim promised to remove), and never prints an empty token.
+# LC_ALL=C on BOTH tr and sed is load-bearing: BSD/macOS `tr` aborts with "Illegal byte
+# sequence" on non-ASCII input under a UTF-8 locale, and a `--reason` with an em dash is a
+# likely invocation in this repo; under `set -euo pipefail` that would kill the script
+# inside a command substitution, printing no verdict line at all.
+sanitize_field() {
+  local s
+  s="$(printf '%s' "${1:-}" | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
+  s="$(LC_ALL=C printf '%.120s' "$s")"
+  s="${s%-}"
+  [ -n "$s" ] || s="unspecified"
+  printf '%s\n' "$s"
+}
+
+# one_line <text> — flatten to a single line for a diagnostic that is INTERPOLATED into an
+# emitted line. Unlike sanitize_field this preserves spaces and punctuation (a cause is
+# prose a human reads), and only guarantees the one property the grammar needs: no control
+# character can break the one-line contract. Reserved characters of the emitted grammar
+# ('(' / ')') are not stripped — the cause is already inside parentheses and a reader takes
+# the LAST ')' — but a newline would produce a second line, which is the property that
+# matters.
+one_line() {
+  printf '%s' "${1:-}" | LC_ALL=C tr -d '\000' | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
+}
+
+# reject_placeholder <flag> <raw-value> <example> — the claim.sh (#2945) refusal, reused
+# rather than reinvented. THREE gates, in this order and for these reasons:
+#   1. an UNSUBSTITUTED '<…>' is refused on the RAW text, BEFORE sanitization, because
+#      sanitization turns `--reason c-audit:<slug>` into `c-audit:-slug` — not a sentinel,
+#      so the placeholder gate would ACCEPT it and record an unresolved template as the
+#      disclosure. These commands are read by agents that run printed text LITERALLY, which
+#      is the whole premise of this change, so a surviving '<…>' is a caller bug.
+#   2. it must RECORD something: not the `unspecified` sentinel sanitize_field falls back to
+#      (so a literal `--reason unspecified` is refused too), and >=3 recordable characters.
+#   3. the PLACEHOLDER VOCABULARY is refused BY NAME, because a help line showing
+#      `--reason <why>` is run verbatim by these readers and `<why>` sanitizes to `why` —
+#      3 recordable chars, so the length gate passes and the record says `reason=why`,
+#      exactly as uninformative as no reason at all. Case-insensitive; this is the
+#      placeholder vocabulary of help text and templates, not an attempt at judging prose.
+reject_placeholder() {
+  local flag="$1" raw="$2" example="$3" tok
+  case "$raw" in
+    *'<'*'>'*)
+      die_usage "$flag '$raw' still carries an UNSUBSTITUTED placeholder (<…>) — substitute it, e.g. $flag $example"
+      ;;
+  esac
+  tok="$(sanitize_field "$raw")"
+  if [ "$tok" = "unspecified" ] || [ "${#tok}" -lt 3 ]; then
+    die_usage "$flag must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$raw' records as '$tok', which is indistinguishable from saying nothing"
+  fi
+  case "$(printf '%s' "$tok" | LC_ALL=C tr 'A-Z' 'a-z')" in
+    why | reason | todo | tbd | tba | xxx | xxxx | placeholder | fixme | none | foo | bar | baz | n/a)
+      die_usage "$flag '$raw' records as the PLACEHOLDER '$tok' — as uninformative as saying nothing. Say what it IS, e.g. $flag $example"
+      ;;
+  esac
+  printf '%s\n' "$tok"
+}
+
+# validate_kind <kind> — a stage kind names a FILE, so it is validated rather than trusted:
+# `[A-Za-z0-9][A-Za-z0-9._-]*`, which admits `c`, `rust-review`, `coverage`, and refuses
+# every path-traversal and shell-metacharacter shape. Refused, never sanitized: a kind is
+# also how a caller ASKS for a stage, so silently rewriting it would make `open c/../x` and
+# `open c-x` the same stage under two spellings.
+validate_kind() {
+  local k="${1:-}"
+  case "$k" in
+    "" ) die_usage "a <kind> is required (e.g. c, rust-review, coverage)" ;;
+    *[!A-Za-z0-9._-]* ) die_usage "invalid <kind> '$k': allowed characters are [A-Za-z0-9._-]" ;;
+    [!A-Za-z0-9]* ) die_usage "invalid <kind> '$k': must start with a letter or digit" ;;
+  esac
+  printf '%s\n' "$k"
+}
+
+validate_issue() {
+  local n="${1:-}"
+  case "$n" in
+    "" ) die_usage "--issue <N> is required" ;;
+    *[!0-9]* | 0*[!0-9]* ) die_usage "--issue must be a decimal issue number, got '$n'" ;;
+  esac
+  printf '%s\n' "$n"
+}
+
+validate_secs() {
+  local s="${1:-}" flag="${2:---deadline-secs}"
+  case "$s" in
+    "" | *[!0-9]* ) die_usage "$flag must be a non-negative integer number of seconds, got '$s'" ;;
+  esac
+  printf '%s\n' "$s"
+}
+
+# --- paths -------------------------------------------------------------------
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || die_usage "not inside a git worktree (this tool writes into the lane's worktree on purpose — see the header)"
+}
+
+# abs_path <path> — absolutise WITHOUT requiring the file to exist (the report is often the
+# file we are about to create). Relative values resolve against $PWD, which is ordinary CLI
+# semantics; the DEFAULT path is built from the repo root instead, so it does not move with
+# the caller's cwd.
+abs_path() {
+  local p="$1" dir base
+  case "$p" in
+    /*) ;;
+    *) p="$PWD/$p" ;;
+  esac
+  dir="$(dirname "$p")"
+  base="$(basename "$p")"
+  if [ -d "$dir" ]; then
+    printf '%s/%s\n' "$(cd "$dir" && pwd)" "$base"
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+stage_dir()  { printf '%s/.review-stage/issue-%s\n' "$(repo_root)" "$1"; }
+stage_file() { printf '%s/%s.stage\n' "$(stage_dir "$1")" "$2"; }
+default_report() { printf '%s/%s.md\n' "$(stage_dir "$1")" "$2"; }
+
+# assert_ignored <path> <what> — FAIL-CLOSED gitignore verification (see the header). Asks
+# git; refuses on anything that is not an affirmative "yes, ignored". `check-ignore -q` exits
+# 0 = ignored, 1 = NOT ignored, 128 = error (e.g. the path is outside the repository), and
+# every non-zero answer takes the SAME refusing branch: "cannot tell" is not "fine".
+assert_ignored() {
+  local path="$1" what="$2" rc=0
+  git check-ignore -q -- "$path" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    emit "OPEN-REFUSED reason=path-not-gitignored what=$what path=$path check-ignore-rc=$rc"
+    emit "OPEN-REFUSED detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add the path to .gitignore (the default location .review-stage/ already is), or pass a --report path that is."
+    exit 2
+  fi
+}
+
+# read_field <file> <key> — the FIRST `<key>: <value>` line's value, flattened to one line.
+# Empty output means "absent or empty", which every caller treats as unmeasured.
+read_field() {
+  local file="$1" key="$2" line
+  [ -f "$file" ] || return 0
+  line="$(LC_ALL=C grep -m1 -i "^[[:space:]]*${key}:" "$file" 2>/dev/null || true)"
+  [ -n "$line" ] || return 0
+  line="${line#*:}"
+  one_line "$line"
+}
+
+now_epoch() { date -u +%s; }
+now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# --- open --------------------------------------------------------------------
+cmd_open() {
+  local kind="" issue="" agent="" deadline="$DEFAULT_DEADLINE_SECS" report="" force=0
+  kind="$(validate_kind "${1:-}")"; shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --issue) shift; issue="${1:-}" ;;
+      --agent) shift; agent="${1:-}" ;;
+      --deadline-secs) shift; deadline="${1:-}" ;;
+      --report) shift; report="${1:-}" ;;
+      --force) force=1 ;;
+      *) die_usage "open: unknown argument '$1'" ;;
+    esac
+    shift || true
+  done
+  issue="$(validate_issue "$issue")"
+  [ -n "$agent" ] || die_usage "open: --agent <type> is required (the agent whose silence this stage measures)"
+  agent="$(reject_placeholder "open: --agent" "$agent" "spec-auditor")"
+  deadline="$(validate_secs "$deadline" --deadline-secs)"
+
+  local sfile rpath dir
+  sfile="$(stage_file "$issue" "$kind")"
+  if [ -n "$report" ]; then rpath="$(abs_path "$report")"; else rpath="$(default_report "$issue" "$kind")"; fi
+
+  # BOTH files are verified ignored BEFORE anything is created — including the stage record,
+  # which lives under .review-stage/ whatever --report says. Checking only the report would
+  # leave the other write dirtying a running gate.
+  dir="$(dirname "$sfile")"; mkdir -p "$dir"
+  assert_ignored "$sfile" stage-record
+  # The report's PARENT must exist for check-ignore to answer about a path, and for the
+  # write to land; creating it is safe because the directory itself is under a verified
+  # path or under the caller's chosen tree.
+  mkdir -p "$(dirname "$rpath")"
+  assert_ignored "$rpath" report-of-record
+
+  local spawned_iso spawned_epoch reopen_count=0 prior_iso=""
+  spawned_iso="$(now_iso)"
+  spawned_epoch="$(now_epoch)"
+
+  if [ -f "$sfile" ]; then
+    prior_iso="$(read_field "$sfile" spawned-at)"
+    if [ "$force" -ne 1 ]; then
+      emit "OPEN-REFUSED reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(read_field "$sfile" report)"
+      emit "OPEN-REFUSED detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
+      exit 2
+    fi
+    # --force RE-STAMPS THE REPORT AND KEEPS THE CLOCK. A re-spawn is exactly what a lane
+    # does when the first agent idles, and the elapsed time since the FIRST spawn is the
+    # number that says "this stage has produced nothing for 70 minutes". Resetting it would
+    # hide the very fact the stage exists to report.
+    if [ -n "$prior_iso" ]; then
+      spawned_iso="$prior_iso"
+      local prior_epoch
+      prior_epoch="$(read_field "$sfile" spawned-epoch)"
+      case "$prior_epoch" in
+        "" | *[!0-9]* ) note "the existing stage record has no readable spawned-epoch; the clock restarts from now" ;;
+        *) spawned_epoch="$prior_epoch" ;;
+      esac
+    fi
+    local prior_count
+    prior_count="$(read_field "$sfile" reopen-count)"
+    case "$prior_count" in
+      "" | *[!0-9]* ) reopen_count=1 ;;
+      *) reopen_count=$((prior_count + 1)) ;;
+    esac
+  fi
+
+  {
+    printf 'kind: %s\n' "$kind"
+    printf 'issue: %s\n' "$issue"
+    printf 'agent: %s\n' "$agent"
+    printf 'deadline-secs: %s\n' "$deadline"
+    printf 'spawned-at: %s\n' "$spawned_iso"
+    printf 'spawned-epoch: %s\n' "$spawned_epoch"
+    printf 'report: %s\n' "$rpath"
+    printf 'reopen-count: %s\n' "$reopen_count"
+    [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
+  } >"$sfile"
+
+  # THE SENTINEL. `result:` is the FIRST recordable line on purpose: it is what `verdict`
+  # reads, and a reader opening the file sees the non-verdict before anything else.
+  {
+    printf '# review stage: %s — issue #%s\n' "$kind" "$issue"
+    printf '\n'
+    printf 'result: NOT-RUN (no report written)\n'
+    printf '\n'
+    printf 'stage: %s\n' "$kind"
+    printf 'issue: %s\n' "$issue"
+    printf 'agent: %s\n' "$agent"
+    printf 'spawned-at: %s\n' "$spawned_iso"
+    printf 'deadline-secs: %s\n' "$deadline"
+    printf 'report-of-record: %s\n' "$rpath"
+    printf '\n'
+    printf '## How to complete this stage\n'
+    printf '\n'
+    printf 'THIS FILE is your report of record, not your returned message. Replace the\n'
+    printf '`result:` line above with EXACTLY ONE of:\n'
+    printf '\n'
+    printf '    result: PASS        # you reviewed the subject and found no blocking finding\n'
+    printf '    result: FINDINGS    # you reviewed the subject and found >=1 blocking finding\n'
+    printf '\n'
+    printf 'then write your findings below. The token is matched by STRING EQUALITY on its\n'
+    printf 'first word against a closed set, so an invented value (e.g. PASS-BUT-UNMEASURED)\n'
+    printf 'is read as NOT-RUN, never as a pass.\n'
+    printf '\n'
+    printf 'If this line still says NOT-RUN when you finish, this stage is recorded as\n'
+    printf 'NOT-RUN and cannot reach a merge: an absent review is not a clean one (#3751).\n'
+    printf '\n'
+    printf '## Findings\n'
+    printf '\n'
+    printf '(nothing written yet)\n'
+  } >"$rpath"
+
+  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso reopen-count=$reopen_count report=$rpath"
+  printf '%s\n' "$rpath"
+  # THE PASTE-READY CLAUSE. Printed so the contract reaches the agent VERBATIM instead of
+  # being paraphrased per lane — the paraphrase is what varied across the seven measured
+  # sessions.
+  cat <<CLAUSE
+
+--- paste this into the spawn prompt (verbatim) ---
+REPORT OF RECORD (mandatory): write your report to
+  $rpath
+That FILE is your report of record, not your returned message. Write it INCREMENTALLY as
+you go, not at the end. When you finish, replace its \`result:\` line with exactly one of
+\`result: PASS\` (no blocking finding) or \`result: FINDINGS\` (>=1 blocking finding), and
+put your findings below it. If that line still reads \`result: NOT-RUN\` when you stop, this
+stage is recorded as NOT-RUN and BLOCKS the merge — an absent review is not a clean one, and
+no returned message, idle notice or verbal summary substitutes for the file.
+--- end clause ---
+CLAUSE
+}
+
+# --- verdict machinery -------------------------------------------------------
+# classify_report <report-path> <stage-open:0|1> — print "<token>|<cause>" and return 0.
+# ONE place decides the token, so `status` and `verdict` can never form two opinions about
+# the same file (the divergence #3564 records one directory over).
+classify_report() {
+  local rpath="$1" open="$2" line value tok cause body
+
+  if [ "$open" -ne 1 ]; then
+    printf 'NOT-RUN|stage never opened\n'; return 0
+  fi
+  if [ ! -f "$rpath" ]; then
+    printf 'NOT-RUN|report absent\n'; return 0
+  fi
+  # "empty" means nothing RECORDABLE — a file of blank lines is empty in every sense a
+  # reader cares about, and reporting `report ungrammatical` for it would name the wrong
+  # operator action.
+  body="$(LC_ALL=C tr -d '[:space:]' <"$rpath" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    printf 'NOT-RUN|report empty\n'; return 0
+  fi
+
+  line="$(LC_ALL=C grep -m1 -i '^[[:space:]]*result:' "$rpath" 2>/dev/null || true)"
+  if [ -z "$line" ]; then
+    printf "NOT-RUN|report ungrammatical: no 'result:' line\n"; return 0
+  fi
+  value="$(one_line "${line#*:}")"
+  if [ -z "$value" ]; then
+    printf "NOT-RUN|report ungrammatical: empty 'result:' value\n"; return 0
+  fi
+  # REDUCE TO THE FIRST WORD AND MATCH BY STRING EQUALITY — never a prefix test. This is the
+  # whole closure: `PASS-BUT-UNMEASURED` reduces to `PASS-BUT-UNMEASURED`, which equals
+  # nothing in the set, so it is NOT-RUN. A `case` glob or a `grep ^PASS` would accept it.
+  # shellcheck disable=SC2086
+  set -- $value
+  tok="$1"
+  # The recorded cause, when the report names one, is preferred over a guess: an agent that
+  # legitimately records `result: NOT-RUN (could not read the diff)` is telling us something
+  # more precise than "no report written".
+  cause=""
+  case "$value" in
+    *'('*')'*) cause="${value#*(}"; cause="${cause%)*}" ;;
+  esac
+
+  case "$tok" in
+    PASS)     printf 'PASS|\n' ;;
+    FINDINGS) printf 'FINDINGS|\n' ;;
+    NOT-RUN)  printf 'NOT-RUN|%s\n' "${cause:-no report written}" ;;
+    AUTHOR-PERFORMED)
+      # THE TOKEN MEANS "a disclosed substitute WITH ITS WORKING RECORDED", so the working is
+      # REQUIRED before it will be reported. A report asserting the token without the
+      # disclosure, the performer or the evidence is not a disclosed substitute — it is a
+      # pass wearing a rarer name, which is exactly what the distinct token exists to
+      # prevent. Refused as ungrammatical (fail-closed: NOT-RUN blocks, AUTHOR-PERFORMED
+      # is conditionally acceptable).
+      if ! LC_ALL=C grep -qF -- "$AUTHOR_DISCLOSURE" "$rpath"; then
+        printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED without the required disclosure\n'; return 0
+      fi
+      if [ -z "$(read_field "$rpath" performed-by)" ] || [ -z "$(read_field "$rpath" evidence)" ] || [ -z "$(read_field "$rpath" reason)" ]; then
+        printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED without its working (reason/evidence/performed-by)\n'; return 0
+      fi
+      printf 'AUTHOR-PERFORMED|\n'
+      ;;
+    *) printf 'NOT-RUN|report ungrammatical: unrecognised result token %s\n' "'$tok'" ;;
+  esac
+}
+
+# load_stage <issue> <kind> — set the STAGE_* globals from the stage record, or mark it
+# never-opened. Fields that cannot be read are `unknown`, never a fabricated 0 (a counter
+# not observed is an error, never an invented value).
+STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
+STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown
+load_stage() {
+  local issue="$1" kind="$2" sfile epoch
+  sfile="$(stage_file "$issue" "$kind")"
+  STAGE_REPORT="$(default_report "$issue" "$kind")"
+  [ -f "$sfile" ] || return 0
+  STAGE_OPEN=1
+  local v
+  v="$(read_field "$sfile" agent)";         [ -z "$v" ] || STAGE_AGENT="$v"
+  v="$(read_field "$sfile" deadline-secs)"; [ -z "$v" ] || STAGE_DEADLINE="$v"
+  v="$(read_field "$sfile" spawned-at)";    [ -z "$v" ] || STAGE_SPAWNED_ISO="$v"
+  v="$(read_field "$sfile" report)";        [ -z "$v" ] || STAGE_REPORT="$v"
+  epoch="$(read_field "$sfile" spawned-epoch)"
+  case "$epoch" in
+    "" | *[!0-9]* ) STAGE_ELAPSED=unknown ;;
+    *) STAGE_ELAPSED=$(( $(now_epoch) - epoch )); [ "$STAGE_ELAPSED" -ge 0 ] || STAGE_ELAPSED=0 ;;
+  esac
+}
+
+parse_kind_issue() {
+  KI_KIND="$(validate_kind "${1:-}")"; shift || true
+  KI_ISSUE=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --issue) shift; KI_ISSUE="${1:-}" ;;
+      *) die_usage "unknown argument '$1'" ;;
+    esac
+    shift || true
+  done
+  KI_ISSUE="$(validate_issue "$KI_ISSUE")"
+}
+
+# --- verdict -----------------------------------------------------------------
+cmd_verdict() {
+  parse_kind_issue "$@"
+  load_stage "$KI_ISSUE" "$KI_KIND"
+  local cls token cause rendered
+  cls="$(classify_report "$STAGE_REPORT" "$STAGE_OPEN")"
+  token="${cls%%|*}"
+  cause="${cls#*|}"
+  rendered="$token"
+  [ -z "$cause" ] || rendered="$token ($(one_line "$cause"))"
+  # EXACTLY ONE LINE on stdout. Nothing else is printed here, ever: this line is what a
+  # consumer greps, and a second line is a second opinion.
+  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE agent=$STAGE_AGENT report=$STAGE_REPORT"
+  case "$token" in
+    PASS) exit 0 ;;
+    FINDINGS) exit 4 ;;
+    NOT-RUN) exit 5 ;;
+    AUTHOR-PERFORMED) exit 6 ;;
+    *) note "unreachable: unclassified token '$token'"; exit 5 ;;
+  esac
+}
+
+# --- status ------------------------------------------------------------------
+# ADVISORY ONLY. It exits 0 for every state it can measure, on purpose: reading status must
+# not be able to decide anything, and a caller that could branch on its exit status would
+# have built a second, clock-shaped verdict path beside the content-shaped one.
+cmd_status() {
+  parse_kind_issue "$@"
+  load_stage "$KI_ISSUE" "$KI_KIND"
+  local cls token cause state past=unknown
+  cls="$(classify_report "$STAGE_REPORT" "$STAGE_OPEN")"
+  token="${cls%%|*}"
+  cause="${cls#*|}"
+  case "$token" in
+    NOT-RUN)
+      case "$cause" in
+        "no report written") state=sentinel-only ;;
+        "report absent") state=report-absent ;;
+        "report empty") state=report-empty ;;
+        "stage never opened") state=never-opened ;;
+        *) state=report-ungrammatical ;;
+      esac
+      ;;
+    *) state=reported ;;
+  esac
+  case "$STAGE_ELAPSED:$STAGE_DEADLINE" in
+    unknown:* | *:unknown) past=unknown ;;
+    *) if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi ;;
+  esac
+
+  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE past-deadline=$past agent=$STAGE_AGENT spawned-at=$STAGE_SPAWNED_ISO report=$STAGE_REPORT"
+  if [ "$state" = sentinel-only ] && [ "$past" = yes ]; then
+    # A STAGE THAT IS WAITING MUST NOT LOOK LIKE ONE THAT IS HUNG (the gate's
+    # `waiting for gate slot` idiom): name the elapsed time AND the fact that nothing was
+    # produced, so the operator does not have to infer either.
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE PAST DEADLINE: ${STAGE_ELAPSED}s elapsed against a ${STAGE_DEADLINE}s deadline and NOTHING has been produced — the report is still the pre-spawn sentinel. This is ADVISORY: the deadline never changes the verdict, and a report arriving later is still a report. Read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
+  elif [ "$state" = sentinel-only ]; then
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE inside deadline: ${STAGE_ELAPSED}s of ${STAGE_DEADLINE}s elapsed and nothing produced yet — the report is still the pre-spawn sentinel, which is NOT a verdict."
+  elif [ "$state" = never-opened ]; then
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE no stage was ever opened for this kind — there is nothing to wait for. Open one BEFORE spawning: $prog open $KI_KIND --issue $KI_ISSUE --agent <type>"
+  fi
+  exit 0
+}
+
+# --- record-author-performed -------------------------------------------------
+cmd_record_author_performed() {
+  local kind="" issue="" reason="" evidence="" performed_by=""
+  kind="$(validate_kind "${1:-}")"; shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --issue) shift; issue="${1:-}" ;;
+      --reason) shift; reason="${1:-}" ;;
+      --evidence) shift; evidence="${1:-}" ;;
+      --performed-by) shift; performed_by="${1:-}" ;;
+      *) die_usage "record-author-performed: unknown argument '$1'" ;;
+    esac
+    shift || true
+  done
+  issue="$(validate_issue "$issue")"
+
+  # ALL FOUR ARE REQUIRED, and each names what it is for. The recording REQUIRES THE WORKING
+  # (design.md §4): "an audit I performed and showed my working for is auditable, whereas an
+  # absent one is not" is the reason the fallback is sanctioned AT ALL, so a recording
+  # without the working would be the absent audit wearing the sanctioned token.
+  [ -n "$reason" ] || die_usage "record-author-performed: --reason <why> is required — say why an independent audit was not available; a substitute with no stated reason is not a disclosure"
+  [ -n "$evidence" ] || die_usage "record-author-performed: --evidence <artifact> is required — name the artifact that SHOWS THE WORKING (a file, a PR comment, a commit); an audit with no evidence is indistinguishable from an absent one"
+  [ -n "$performed_by" ] || die_usage "record-author-performed: --performed-by author|peer is required — peer-C is preferred and self-C is the sanctioned fallback, so which one happened is the whole disclosure"
+  case "$performed_by" in
+    author | peer) ;;
+    *) die_usage "record-author-performed: --performed-by must be exactly 'author' or 'peer', got '$performed_by'" ;;
+  esac
+  local reason_tok evidence_tok
+  reason_tok="$(reject_placeholder "record-author-performed: --reason" "$reason" "'no peer agent available on this box; C performed by hand against the spec deltas'")"
+  evidence_tok="$(reject_placeholder "record-author-performed: --evidence" "$evidence" "docs/round-artifacts/issue-3751-hand-c-audit.md")"
+
+  load_stage "$issue" "$kind"
+  if [ "$STAGE_OPEN" -ne 1 ]; then
+    # A recording needs the stage's identity (agent, deadline, spawned-at) to produce a
+    # verdict line at all, and a substitute recorded for a stage nobody ever opened has no
+    # subject. Refused, not auto-opened: silently creating the stage here would let the
+    # recording invent its own clock.
+    emit "AUTHOR-REFUSED reason=stage-never-opened kind=$kind issue=$issue"
+    emit "AUTHOR-REFUSED detail=open the stage first, so the recording attaches to a stage with a known agent and clock: $prog open $kind --issue $issue --agent <type>"
+    exit 2
+  fi
+  assert_ignored "$STAGE_REPORT" report-of-record
+
+  {
+    printf '# review stage: %s — issue #%s (AUTHOR-PERFORMED substitute)\n' "$kind" "$issue"
+    printf '\n'
+    printf 'result: AUTHOR-PERFORMED\n'
+    printf '\n'
+    printf 'performed-by: %s\n' "$performed_by"
+    printf 'reason: %s\n' "$reason_tok"
+    printf 'evidence: %s\n' "$evidence_tok"
+    printf 'recorded-at: %s\n' "$(now_iso)"
+    printf 'stage: %s\n' "$kind"
+    printf 'issue: %s\n' "$issue"
+    printf 'agent: %s\n' "$STAGE_AGENT"
+    printf 'spawned-at: %s\n' "$STAGE_SPAWNED_ISO"
+    printf '\n'
+    printf '## Disclosure (required, verbatim)\n'
+    printf '\n'
+    printf '%s\n' "$AUTHOR_DISCLOSURE"
+    printf '\n'
+    printf 'This stage reports the DISTINCT token AUTHOR-PERFORMED, never PASS. A reader\n'
+    printf 'grepping the passing token does not match it, for the same reason the roborev\n'
+    printf "wrapper's WAIVED is distinct: nobody may read a substitute as the real thing.\n"
+    printf 'Peer review is preferred; a hand audit is the sanctioned fallback only, and it\n'
+    printf 'is sanctioned at all because an audit whose working is shown is auditable,\n'
+    printf 'whereas an absent one is not.\n'
+  } >"$STAGE_REPORT"
+
+  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok report=$STAGE_REPORT"
+  emit "RECORD-NOTE kind=$kind issue=$issue $AUTHOR_DISCLOSURE"
+  exit 0
+}
+
+usage() {
+  sed -n '2,/^# ---END-HELP---$/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^---END-HELP---$/d'
+}
+
+case "${1:-}" in
+  open) shift; cmd_open "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  verdict) shift; cmd_verdict "$@" ;;
+  record-author-performed) shift; cmd_record_author_performed "$@" ;;
+  -h | --help | help) usage ;;
+  "") die_usage "a subcommand is required: open <kind> --issue <N> --agent <type> | status <kind> --issue <N> | verdict <kind> --issue <N> | record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact> --performed-by author|peer" ;;
+  *) die_usage "unknown subcommand '$1' (open | status | verdict | record-author-performed)" ;;
+esac
