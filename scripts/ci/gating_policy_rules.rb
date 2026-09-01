@@ -222,14 +222,25 @@ module GatingRegistry
   # postpones the next instance — so the control is the structured field and the
   # prose is documentation. It is a deliberate trade, not an oversight.
   #
-  # AND ONE CLAUSE OF THE ISSUE'S AC5 IS VACUOUS FOR THE CURRENT POPULATION, said
-  # plainly rather than implied: "a NEW pull_request trigger added to an exempt
-  # workflow" cannot be a regression signal here, because ALL 23 exempt entries
-  # already carry one (measured with `pull_request_workflow?` over the real tree).
-  # A stored `pr_triggered:` boolean would be constant across every entry, carry no
-  # information, and become a second source of truth that can drift from the
-  # workflow — so the trigger fact is DERIVED where it is needed
-  # (`enrolment_errors`) and never stored.
+  # AC5'S FIRST CLAUSE NEEDED NO NEW CODE, AND THAT IS SAID PLAINLY RATHER THAN
+  # QUIETLY NOT DONE. "A new `pull_request` trigger added to a workflow" is ALREADY
+  # caught, by `enrolment_errors` below, for any workflow in neither `tiers:` nor
+  # `exempt:` — measured on a scratch tree: a well-formed unregistered PR-triggered
+  # workflow yields EXACTLY ONE error naming the file. And for the EXEMPT population
+  # the clause is vacuous, also measured: all 23 exempt entries ALREADY carry a
+  # `pull_request`/`pull_request_target` trigger (`pull_request_workflow?` over the
+  # real tree), so there is no "new trigger" event left to detect there.
+  #
+  # A stored `pr_triggered:` field would therefore be CONSTANT across every entry,
+  # carry no information, and become a second source of truth able to drift from the
+  # workflow's own `on:` block (#3544: remove the second source, do not reconcile
+  # it). The trigger fact is DERIVED where it is needed and never stored.
+  #
+  # What was genuinely uncovered, and is what this field and the parse-error fix
+  # address, is (a) the unparseable-workflow fail-open in
+  # `load_workflows_with_parse_errors`, which let a PR-triggered workflow escape
+  # `enrolment_errors` ENTIRELY, and (b) the total absence of any check that an
+  # exemption's stated counterpart corresponds to anything that exists.
   def merge_gating_half_errors(entry, label, registry, workflows, gate_components_path, subjects)
     raw = entry["merge_gating_half"]
     if raw.nil?
@@ -389,6 +400,27 @@ module GatingRegistry
   # A file that parses to a NON-MAPPING (a list, a scalar, an empty document) is
   # the same class with a different cause: `workflow["on"]` is unaskable, so the
   # trigger answer is UNKNOWN, and unknown must not be permissive.
+  #
+  # ONE DELIBERATE BEHAVIOUR CHANGE, on a path that is NOT the fail-open, recorded
+  # because a reader would otherwise find it by surprise. When a REGISTERED TIER's
+  # workflow is the unparseable one, `registered_workflow_errors` used to run its
+  # structural rules against the `{}` placeholder (its guard is `next if
+  # workflow.nil?`, and `{}` is not nil). That already FAILED — the verdict was
+  # never wrong — but it failed with two MISLEADING messages. Measured, before and
+  # after, on a scratch tree whose registered `alpha.yml` has an unterminated
+  # `branches: [main`:
+  #
+  #   before: "tier `alpha` (alpha.yml) has no `pull_request`/`pull_request_target`
+  #            trigger …"  + "… the workflow has no jobs mapping"   (it has both)
+  #   after:  ".github/workflows/alpha.yml: could not be parsed as YAML … (line 4
+  #            column 15)"
+  #
+  # `policy_errors` now returns as soon as a parse error exists, so the structural
+  # rules never run against a placeholder and cannot invent a finding about a file
+  # nobody could read. Same fail-closed verdict, an accurate diagnosis instead of
+  # two false ones. Pinned by `registered-tier-broken-yaml` in
+  # scripts/tests/test_gating_registry_policy.sh, which asserts BOTH that the parse
+  # error is named AND that the misleading trigger message is absent.
   def load_workflows_with_parse_errors(workflows_dir)
     errors = []
     workflows = Dir[File.join(workflows_dir, "*.{yml,yaml}")].sort.each_with_object({}) do |file, acc|

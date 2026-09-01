@@ -252,6 +252,32 @@ run_policy() {
 
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 
+# THE NO-FALSE-POSITIVE DIRECTION (issue #3725). A three-valued treatment that reds
+# on VALID input is the guard agents learn to waive, and an error-plumbing change is
+# exactly the shape that inflates a clean tree's error set by one without anyone
+# noticing. So the well-formed cases assert an EXACT error COUNT, not merely a
+# non-zero/zero exit: `expect_exact_errors <label> <n> [<needle>]`.
+#
+# The count is taken from the rule's own output format — one `  - <message>` line
+# per error under a "validation failed:" header — so it moves if a message is added
+# OR removed.
+policy_error_count() { printf '%s\n' "$OUT" | grep -c '^  - ' || true; }
+
+expect_exact_errors() {
+  local label="$1" want="$2" needle="${3:-}"
+  local got
+  got=$(policy_error_count)
+  if [ "$got" -ne "$want" ]; then
+    bad "$label: expected EXACTLY $want error(s), got $got — $OUT"
+    return
+  fi
+  if [ -n "$needle" ] && ! contains "$OUT" "$needle"; then
+    bad "$label: right count ($got) but did not name '$needle' — $OUT"
+    return
+  fi
+  ok "$label (exactly $want error(s)${needle:+, names '$needle'})"
+}
+
 expect_fail_named() {
   local label="$1" needle="$2"
   if [ "$RC" -eq 0 ]; then
@@ -865,6 +891,69 @@ printf -- '- not\n- a\n- workflow\n' >"$DIR/workflows/listy-lane.yml"
 run_policy "$DIR"
 expect_fail_named "a workflow that is not a mapping is a NAMED error" "listy-lane.yml"
 
+echo "== the parse-error fix must not INFLATE a well-formed tree's error set (#3725) =="
+# THE DIRECTION THAT GETS SKIPPED. The fail direction is asserted above; this is the
+# other half. `load_workflows_with_parse_errors` returns errors alongside the
+# workflow map and `policy_errors` prepends them, so the risk it introduces is an
+# EXTRA error on input that is perfectly valid. Both cases below are count-EXACT.
+
+DIR=$(new_case wellformed-clean-count)
+run_policy "$DIR"
+expect_exact_errors "a well-formed, fully enrolled tree yields exactly 0 errors" 0
+
+DIR=$(new_case wellformed-unenrolled-count)
+# The lead's reproduction case 1, pinned: a WELL-FORMED unregistered PR-triggered
+# workflow must still yield exactly ONE error, naming the file — i.e. the enrolment
+# rule that already covers AC5's first clause is untouched, and the parse-error
+# plumbing added nothing to a tree with nothing to parse-fail.
+cat >"$DIR/workflows/zz-newly-pr-triggered.yml" <<'YAML'
+name: Newly PR triggered
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+permissions:
+  contents: read
+concurrency:
+  group: zz-newly
+jobs:
+  run:
+    name: zz newly
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo new
+YAML
+run_policy "$DIR"
+expect_exact_errors "a well-formed unregistered PR workflow still yields exactly 1 error" 1 \
+  "zz-newly-pr-triggered.yml"
+
+echo "== a REGISTERED tier's broken YAML is diagnosed, not mis-diagnosed (#3725) =="
+# THE DELIBERATE BEHAVIOUR CHANGE, pinned in BOTH directions. Before the fix an
+# unparseable REGISTERED tier reached registered_workflow_errors as the `{}`
+# placeholder (its guard is `next if workflow.nil?`) and produced two MISLEADING
+# findings — "has no `pull_request`/`pull_request_target` trigger" and "no jobs
+# mapping" — about a file that has both and merely does not parse. The verdict was
+# always non-zero, so this is a diagnosis fix, not a fail-open fix; it is asserted
+# so a future refactor cannot silently restore the false findings.
+DIR=$(new_case registered-tier-broken-yaml)
+cat >"$DIR/workflows/alpha.yml" <<'YAML'
+name: Alpha tier
+on:
+  pull_request:
+    branches: [main
+jobs:
+  gate:
+    name: Alpha gate
+YAML
+run_policy "$DIR"
+expect_fail_named "an unparseable REGISTERED tier names the parse failure" "alpha.yml: could not be parsed as YAML"
+if contains "$OUT" "has no \`pull_request\`/\`pull_request_target\` trigger"; then
+  bad "an unparseable registered tier still emits the MISLEADING 'no pull_request trigger' finding — $OUT"
+else
+  ok "an unparseable registered tier does NOT claim the workflow lacks a trigger (it has one; it does not parse)"
+fi
+
 echo "== the real repository tree is enrolled =="
 OUT=$(ruby "$REGISTRY_RB" policy --workflows-dir "$REPO_ROOT/.github/workflows" \
   --registry "$REPO_ROOT/.github/ci-gating-tiers.yml" 2>&1)
@@ -1401,7 +1490,8 @@ count_rule_rejections() {
              "$WORK"/case-exempt-half-ghost-component "$WORK"/case-exempt-half-no-manifest \
              "$WORK"/case-exempt-half-garbage-manifest "$WORK"/case-exempt-half-ghost-step \
              "$WORK"/case-exempt-half-none-no-ground "$WORK"/case-exempt-half-none-not-sole \
-             "$WORK"/case-unparseable-workflow "$WORK"/case-non-mapping-workflow; do
+             "$WORK"/case-unparseable-workflow "$WORK"/case-non-mapping-workflow \
+             "$WORK"/case-registered-tier-broken-yaml; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -1414,10 +1504,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 31 ]; then
-  ok "the real rule rejects all 31 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 32 ]; then
+  ok "the real rule rejects all 32 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/31"
+  bad "the real rule rejected only $REAL_REJECTIONS/32"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"
@@ -1440,7 +1530,7 @@ fi
 # deliberately a FLOOR and not an equality, so adding one does not red the suite
 # before its author gets to the bottom of the file. The number counts the cases
 # decided BEFORE this assertion — this one is not in its own subject set.
-CASE_FLOOR=88
+CASE_FLOOR=92
 if [ "$((PASS + FAIL))" -ge "$CASE_FLOOR" ]; then
   ok "the suite ran at least its declared floor of $CASE_FLOOR cases"
 else
