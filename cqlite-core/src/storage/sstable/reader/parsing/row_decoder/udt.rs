@@ -1505,4 +1505,75 @@ mod tests {
         assert_eq!(ks, "test_ks");
         assert_eq!(name, "person");
     }
+
+    /// `udt{f: udt{f: ...}}` nested `levels` deep, with the matching bytes:
+    /// each level frames its single field as `[i32 BE len][bytes]`.
+    fn nested_udt_type_and_bytes(levels: usize) -> (CqlType, Vec<u8>) {
+        let mut ty = CqlType::Int;
+        let mut data = 7i32.to_be_bytes().to_vec();
+        for _ in 0..levels {
+            ty = CqlType::Udt("u".to_string(), vec![("f".to_string(), ty)]);
+            let mut framed = (data.len() as i32).to_be_bytes().to_vec();
+            framed.extend_from_slice(&data);
+            data = framed;
+        }
+        (ty, data)
+    }
+
+    /// BLOCKER A (roborev, #3722): the `CqlType::Udt` field arm re-entered the
+    /// UDT reader at depth **0**, so a UDT nested inside a UDT restarted the
+    /// nesting budget and the guard never fired however deep the nesting went.
+    /// Past the bound this must ERROR, not recurse.
+    #[test]
+    fn nested_udt_field_recursion_is_depth_bounded() {
+        let p = V5CompressedLegacyParser::new(
+            "test_ks".to_string(),
+            "test_table".to_string(),
+            0,
+            0,
+            None,
+        );
+        // Well WITHIN the budget: decodes, so the error below is the BOUND
+        // firing and not nested UDTs failing in general.
+        let (ok_ty, ok_data) = nested_udt_type_and_bytes(MAX_TYPE_NESTING_DEPTH - 2);
+        assert!(p.parse_udt_field_value(&ok_data, &ok_ty, 0).is_ok());
+
+        let (ty, data) = nested_udt_type_and_bytes(MAX_TYPE_NESTING_DEPTH + 2);
+        let err = V5CompressedLegacyParser::new(
+            "test_ks".to_string(),
+            "test_table".to_string(),
+            0,
+            0,
+            None,
+        )
+        .parse_udt_field_value(&data, &ty, 0)
+        .expect_err("nesting past the bound must error, not recurse");
+        assert!(err.to_string().contains("depth"), "got: {err}");
+    }
+
+    /// The same arm built its `Value::Udt` with an EMPTY keyspace, so a UDT
+    /// reached through a UDT field had a different public identity (`_keyspace`
+    /// in the bindings; part of `Udt` equality and hashing, #3504) from the same
+    /// UDT nested directly. It must carry the reader's keyspace.
+    #[test]
+    fn nested_udt_field_carries_the_real_keyspace() {
+        let (ty, data) = nested_udt_type_and_bytes(1);
+        let value = V5CompressedLegacyParser::new(
+            "real_ks".to_string(),
+            "test_table".to_string(),
+            0,
+            0,
+            None,
+        )
+        .parse_udt_field_value(&data, &ty, 0)
+        .expect("one level of nesting must decode");
+        match value {
+            Value::Udt(udt) => {
+                assert_eq!(udt.keyspace, "real_ks", "nested UDT keyspace");
+                assert_eq!(udt.type_name, "u");
+                assert_eq!(udt.fields[0].value, Some(Value::Integer(7)));
+            }
+            other => panic!("expected a Udt, got {other:?}"),
+        }
+    }
 }

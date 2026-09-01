@@ -476,6 +476,14 @@ fn assert_wide_fully_decoded(udt: &UdtValue, ctx: &str) {
         Some("nested"),
         "{ctx}: nested UDT field b"
     );
+    // roborev round 2, BLOCKER A: the nested-UDT field arm built its value with
+    // an EMPTY keyspace, so a UDT reached through a UDT field had a DIFFERENT
+    // public identity (`_keyspace` in the Python/Node bindings; part of `Udt`
+    // equality and hashing, #3504) from the same UDT reached any other way.
+    assert_eq!(
+        nested.keyspace, KEYSPACE,
+        "{ctx}: nested UDT keyspace — `\"\"` is a different public identity (#3504)"
+    );
 
     // ── CONTROLS ───────────────────────────────────────────────────────────
     // `bl` is declared `blob`, so it MUST STILL be a Blob. A fix that simply
