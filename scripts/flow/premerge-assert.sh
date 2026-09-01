@@ -194,12 +194,17 @@
 # WORD and matched by STRING EQUALITY, never a prefix test (#3544).
 #
 # ONE DECLARED RESIDUAL. With an explicit `--c-verdict <path>` this script verifies
-# the verdict's GRAMMAR and TOKEN, not that the stage it came from belongs to THIS
-# issue: the verdict line carries a kind, an agent and a report path, and no sha.
-# The report path IS printed on the success line so a human can see which stage
-# answered. Under `AUTO` the stage is located in the worktree being merged and two
-# stage records are refused as ambiguous, which is the stronger binding — which is
-# why AUTO is the intended form.
+# the verdict's GRAMMAR (including that the stage KIND is `c`) and TOKEN, not that
+# the stage it came from belongs to THIS issue: the verdict line carries a kind, an
+# agent and a report path, and no sha. The report path IS printed on the success
+# line so a human can see which stage answered. Under `AUTO` the binding is
+# MECHANICAL and is why AUTO is the intended form: the stage is located in this
+# worktree, two stage records are refused as ambiguous, and — because every lane on
+# this box is a worktree of ONE shared `.git`, so a peer lane's certified commit
+# RESOLVES here — this worktree's HEAD must EQUAL the certified commit before a
+# locally-located stage is trusted at all (#3751 round 1, F1). Rule 1 asserts
+# `headRefOid` == certified, so HEAD == certified binds the local artifact to THIS
+# PR transitively.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -616,6 +621,57 @@ C_ROUTE
   return 0
 }
 
+# c_assert_head_binds_certified — AUTO locates the C stage in the CURRENT
+# worktree, so before that stage is TRUSTED, this worktree must BE the one that
+# was certified. The binding is HEAD-equality, and it is the whole answer to the
+# question "whose artifact is this?".
+#
+# WHY RESOLVABILITY PROVES NOTHING. On this fleet EVERY lane is a worktree of ONE
+# shared `.git` (measured: `/data/lanes/repo/.git/objects` serves lane-3544,
+# lane-3473 and lane-3629 alike), so a PEER lane's certified commit RESOLVES from
+# any lane — `git rev-parse <peer-sha>` succeeds, `git merge-base` succeeds, the
+# routing diff succeeds. Every one of those reads can therefore be about a commit
+# that has nothing to do with the `.review-stage/` records sitting in THIS
+# directory. That is #3616's peer-artifact class (a closer read a peer lane's gate
+# run dir by RECENCY and was about to merge on it), which this very file exists to
+# refuse.
+#
+# WHY HEAD-EQUALITY IS SUFFICIENT. Rule 1 below already asserts the PR's
+# `headRefOid` == the certified sha. So HEAD == certified binds this worktree's
+# local artifact to THIS PR transitively: certified ties the artifact to the tree,
+# and headRefOid ties the tree to the pull request being merged.
+#
+# CORRECT INPUT IS UNAFFECTED: the closer pushes and then asserts in the lane it
+# just certified, where HEAD is the certified commit by construction. A worktree
+# that has moved on since certification is not a lane whose stage may certify it.
+# Unreadable HEAD is a REFUSAL, never a pass — "cannot tell" must not take the
+# permissive branch.
+c_assert_head_binds_certified() {
+  local head=""
+  if ! head=$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) ||
+    [ -z "$head" ]; then
+    refuse_no_c_verdict \
+      "AUTO locates the '$C_STAGE_KIND' stage in THIS worktree, but this checkout's HEAD" \
+      "could not be read, so the stage cannot be BOUND to the certified commit." \
+      "A stage whose provenance cannot be established may not certify a merge." \
+      "Run this assert from the lane that produced the certified commit, or name the" \
+      "verdict explicitly: --c-verdict <path>."
+  fi
+  head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
+  if [ "$head" != "$certified" ]; then
+    refuse_no_c_verdict \
+      "This worktree's HEAD ($head) is not the certified commit ($certified)," \
+      "so a '$C_STAGE_KIND' stage found HERE is not evidence about the tree being merged." \
+      "Every lane on this box is a worktree of ONE shared .git, so a peer lane's" \
+      "certified commit RESOLVES from any lane — resolvability is not provenance. This is" \
+      "the #3616 peer-artifact class: a stage record in this directory says nothing about" \
+      "whose branch the certified sha belongs to." \
+      "Remedy: run this assert in the lane that produced the certified commit (the closer" \
+      "pushes, then asserts, in the lane it just certified), or name the verdict" \
+      "explicitly with --c-verdict <path>."
+  fi
+}
+
 # c_auto_locate_issue — find THE open C stage in this worktree, by its stage
 # RECORD (`.review-stage/issue-<N>/<kind>.stage`), which is the artifact that
 # proves a stage was opened at all. Prints the issue number, or nothing.
@@ -693,6 +749,12 @@ c_evaluate() {
       refuse_tool_failure "review-stage.sh (expected beside this script${self_dir:+ at $rs})" \
         "the C stage verdict"
     fi
+    # BOUND BEFORE TRUSTED (#3751 round 1, F1). Checked here, immediately before
+    # the local stage is located, and NOT before the routing measurement: routing
+    # is taken against `$certified` EXPLICITLY, so it is correct about the merged
+    # tree whatever this checkout's HEAD is, and refusing earlier would relabel
+    # the UNMEASURED cause an operator needs to read.
+    c_assert_head_binds_certified
     issue=$(c_auto_locate_issue)
     if [ -z "$issue" ]; then
       refuse_no_c_verdict \

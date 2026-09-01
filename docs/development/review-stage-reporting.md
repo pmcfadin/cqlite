@@ -145,10 +145,18 @@ Three further declared limits of the mechanism itself:
   silent inside its deadline is still `NOT-RUN`. Letting a clock decide would add a clock to a
   question already answerable from content, and would fail a slow-but-real review.
 - **With an explicit `--c-verdict <path>`, `premerge-assert.sh` verifies the verdict's grammar
-  and token, not that the stage belongs to THIS issue.** The report path is printed on the
-  success line so a human can see which stage answered; `AUTO` — which locates the stage in the
-  worktree being merged and refuses two stage records as ambiguous — is the stronger binding and
-  is the intended form.
+  and token, not that the stage belongs to THIS issue.** The grammar check is the FULL emitted
+  line — the stage KIND must be `c`, and `elapsed=`/`deadline=`/`agent=`/`report=` must each
+  appear exactly once — so a sibling stage's `PASS` line (a `rust-review` verdict, say) can no
+  longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
+  report path is printed on the success line so a human can see which stage answered. `AUTO` is
+  the intended form because its binding is MECHANICAL: it locates the stage in this worktree,
+  refuses two stage records as ambiguous, and requires this worktree's **HEAD to EQUAL the
+  certified commit** before trusting a locally-located stage. That last requirement exists
+  because every lane on this box is a worktree of ONE shared `.git`, so a peer lane's certified
+  commit RESOLVES from any lane — resolvability is not provenance (#3616's peer-artifact class).
+  Rule 1 asserts `headRefOid` == certified, so HEAD == certified binds the local artifact to
+  THIS PR transitively.
 
 ---
 

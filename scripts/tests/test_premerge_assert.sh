@@ -2647,6 +2647,86 @@ if [ -n "$C_STAGED" ]; then
   fi
 fi
 
+# --- 44e: AUTO's locally-located stage must be BOUND to the certified tree ----
+# THE #3616 PEER-ARTIFACT CLASS, one directory over. On this fleet every lane is a
+# worktree of ONE shared `.git`, so a PEER lane's certified commit RESOLVES from
+# any lane — resolvability proves nothing about whose `.review-stage/` this is.
+# AUTO locates the stage in the CURRENT worktree, so without a binding a lane
+# could certify a merge with a stage that belongs to a different branch entirely.
+# The binding is HEAD-equality: rule 1 asserts the PR's headRefOid == the
+# certified sha, so HEAD == certified binds the local artifact to THIS PR
+# transitively.
+#
+# The fixture is that exact shape: a design-routed repo whose HEAD carries a
+# PASSING c stage, and a SECOND commit (on another branch) that is resolvable here
+# but is NOT HEAD. Certifying the second commit must REFUSE.
+C_PEER=$(c_repo peer design) || C_PEER=""
+C_PEER_SHA=""
+if [ -n "$C_PEER" ]; then
+  # A second commit, resolvable in this repository, NOT on the checked-out branch —
+  # exactly what a peer lane's push looks like through a shared object store. It
+  # also touches openspec/changes/, so its OWN routing measures REQUIRED and the
+  # refusal cannot be an artifact of routing.
+  if git -C "$C_PEER" checkout -q -b peer-lane mainline &&
+    mkdir -p "$C_PEER/openspec/changes/a-peer-lanes-slug" &&
+    printf 'a peer lane content\n' >"$C_PEER/openspec/changes/a-peer-lanes-slug/proposal.md" &&
+    git -C "$C_PEER" add -A >/dev/null 2>&1 &&
+    git -C "$C_PEER" commit -q -m "the PEER lane's PR" >/dev/null 2>&1 &&
+    C_PEER_SHA=$(git -C "$C_PEER" rev-parse HEAD 2>/dev/null) &&
+    git -C "$C_PEER" checkout -q feature &&
+    (cd "$C_PEER" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+      --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' \
+      >"$C_PEER/.review-stage/issue-3751/c.md"; then
+    ok "binding fixture: a PASSING local stage plus a resolvable NON-HEAD commit"
+  else
+    bad "binding fixture: could not build the peer-commit repository — the case would be vacuous"
+    C_PEER_SHA=""
+  fi
+fi
+if [ -n "$C_PEER_SHA" ]; then
+  # POSITIVE CONTROL FIRST: at the repo's OWN HEAD the same stage certifies. Without
+  # this, a binding that refused EVERYTHING would satisfy the case below.
+  if run_in_repo "$C_PEER" 0 \
+    "binding control: AUTO at the worktree's OWN head -> the local stage certifies" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "binding control: HEAD == certified proceeds" ;;
+      *) bad "binding control: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+  BIND_F="$T/gate-peer-bind.txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$C_PEER_SHA")" "$(printf '%.12s' "$C_PEER_SHA")" PASS PASS >"$BIND_F"
+  BIND_OUT=$(cd "$C_PEER" && PATH="$BIN:$PATH" MOCK_GH_OUT="$C_PEER_SHA OPEN" MOCK_GH_FAIL=0 \
+    bash "$NEUTRAL_ASSERT" 2421 "$C_PEER_SHA" "$BIND_F" --c-verdict AUTO 2>&1)
+  BIND_RC=$?
+  if [ "$BIND_RC" -eq 2 ]; then
+    ok "binding: a stage located in a worktree whose HEAD is NOT the certified commit REFUSES"
+  else
+    bad "binding: a FOREIGN certified sha was certified by this lane's stage (exit $BIND_RC, wanted 2)"
+    printf '     output: %s\n' "$BIND_OUT"
+  fi
+  case "$BIND_OUT" in
+    *"PREMERGE: NO-C-VERDICT"*) ok "binding: refused under the NO-C-VERDICT verdict" ;;
+    *) bad "binding: must refuse with NO-C-VERDICT (got: $BIND_OUT)" ;;
+  esac
+  case "$BIND_OUT" in
+    *"HEAD"*"is not the certified commit"*)
+      ok "binding: the refusal NAMES the head/certified divergence" ;;
+    *) bad "binding: the refusal must name the divergence (got: $BIND_OUT)" ;;
+  esac
+  case "$BIND_OUT" in
+    *"shared"*) ok "binding: the refusal says WHY resolvability is not provenance" ;;
+    *) bad "binding: the refusal must explain the shared-object-store reason (got: $BIND_OUT)" ;;
+  esac
+  case "$BIND_OUT" in
+    *"PREMERGE: C-VERDICT PASS"*)
+      bad "binding: a foreign-sha run reported C-VERDICT PASS — the peer artifact certified it" ;;
+    *) ok "binding: no PASS token is emitted for a foreign certified sha" ;;
+  esac
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a
