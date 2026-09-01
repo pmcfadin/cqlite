@@ -193,15 +193,25 @@ exempt:
         component: minimal-build
 
   - workflow: ci.yml
-    reason: "Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run on an unlabelled PR at all — NOT because the local agent gate is a superset of it. It is not: ci.yml executes `cargo test -p cqlite-core --features delta-scan --lib`, and the local gate only COMPILES those tests (feature-iso-delta-scan is `--lib --no-run`). Audited in #3522."
+    reason: >-
+      Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run
+      on an unlabelled PR at all — NOT because the local agent gate is a superset of
+      it. CORRECTED IN #3725: this entry previously ended "the local gate only
+      COMPILES those tests (feature-iso-delta-scan is `--lib --no-run`)", which the
+      same change falsified. feature-iso-delta-scan now EXECUTES — it drops
+      `--no-run` and additionally names the cqlite-core integration targets
+      crate-level-gated on `delta-scan` — so ci.yml's
+      `cargo test -p cqlite-core --features delta-scan --lib` pass now has a
+      merge-gating counterpart, and the delta-scan half of #3522's audit finding is
+      closed. KEEP THIS ENTRY AND run_feature_iso_delta_scan IN STEP, for the reason
+      node-ci.yml's entry records: an exemption that defers to a local component is
+      only as true as that component's scope, and narrowing one for speed is a
+      change to a merge gate. SCOPE DIFFERENCE that remains: ci.yml is a broad lane
+      and its other jobs (the full workspace build/test matrix) are not claimed here.
     issue: "#2910"
     merge_gating_half:
-      - kind: none
-        ground: >-
-          PLACEHOLDER-FREE BUT PROVISIONAL (#3725): as of this entry no gate
-          component EXECUTES ci.yml's `--features delta-scan --lib` pass —
-          feature-iso-delta-scan is `--lib --no-run`. Rewritten in the same change
-          if that component is widened to execute.
+      - kind: gate-component
+        component: feature-iso-delta-scan
 
   - workflow: compaction-parity.yml
     reason: >-
@@ -376,19 +386,25 @@ exempt:
       registered tier, which is why enrolling it as-is would deadlock rather than
       gate. Its PR run remains a real, strict signal (CQLITE_REQUIRE_FIXTURES=1,
       panic-instead-of-skip) that an author should read.
-      THE DECLARED HALVES BELOW DO NOT COVER THE cql-type LEG, and saying so is the
-      point of #3725: core-tests runs `--features cli-helpers`, at which
-      issue_1007_complex_type_parity's crate-level `#![cfg(feature = "delta-scan")]`
-      compiles it to ZERO tests. compaction-byte-parity covers the tombstone leg's
-      issue_1019, and the compression leg's targets run under core-tests; the six
-      delta-scan-gated cases of the cql-type leg run in NO merge-gating lane. That
-      residual is #3725's own subject and #3595 row 10's family.
+      THE THREE DECLARED HALVES BELOW MAP TO THE THREE LEGS, and #3725 is what made
+      the cql-type one true. core-tests (`--features cli-helpers`) executes the
+      compression leg's targets and the tombstone leg's; compaction-byte-parity
+      names the tombstone leg's issue_1019. The cql-type leg was the gap this issue
+      was filed on: at `cli-helpers`, issue_1007_complex_type_parity's crate-level
+      `#![cfg(feature = "delta-scan")]` compiles it to ZERO tests, so its 6 cases
+      ran in no merge-gating lane at all. feature-iso-delta-scan now EXECUTES those
+      targets under CQLITE_REQUIRE_FIXTURES=1. SCOPE DIFFERENCE that remains, stated
+      rather than left to be discovered: this lane compares against a corpus
+      REGENERATED from a cassandra:5.0.2 container, where the gate compares against
+      the published one — so a generator-side regression is still caught only here.
     issue: "#1026"
     merge_gating_half:
       - kind: gate-component
         component: core-tests
       - kind: gate-component
         component: compaction-byte-parity
+      - kind: gate-component
+        component: feature-iso-delta-scan
 
   - workflow: perf-regression.yml
     reason: Label-gated performance lane (ci:perf); a bench delta is advisory and must not block a merge.
