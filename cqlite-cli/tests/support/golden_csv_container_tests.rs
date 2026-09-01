@@ -951,3 +951,6 @@ fn a_member_beyond_a_tuples_arity_is_kept_as_text() {
     let decoded = decode(&json!([1]), "(1, 2)", &ty_of("tuple<int>")).unwrap();
     assert_eq!(decoded, json!(["1", "2"]));
 }
+
+#[path = "golden_csv_container_spelling_tests.rs"]
+mod spelling;
