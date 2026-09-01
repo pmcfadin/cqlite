@@ -3216,6 +3216,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
 
   SCC_RUN_CAP=""
   SCC_RUN_WHY=""
+  SCC_RUN_STATE=""        # ok | no-server | unreadable
+  SCC_SERVER_STARTED=0
   # scc_running_cap: the cap the RUNNING production server is enforcing, in bytes. Deliberately
   # run with the AMBIENT environment — that is the server a gate on this box would talk to, and
   # measured, a running server's reported cap does not move with the client's env.
@@ -3227,7 +3229,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # with itself and calling it VERIFIED — a certification of nothing. So a null size is
   # UNMEASURED, cause named.
   scc_running_cap() {
-    SCC_RUN_CAP=""; SCC_RUN_WHY=""
+    SCC_RUN_CAP=""; SCC_RUN_WHY=""; SCC_RUN_STATE=unreadable
     have sccache || { SCC_RUN_WHY="no 'sccache' on PATH, so no running server can be read"; return 1; }
     if [ -z "$TIMEOUT_BIN" ]; then
       SCC_RUN_WHY="no timeout/gtimeout on PATH — refusing an UNBOUNDED sccache probe"
@@ -3242,6 +3244,9 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     hits=$(printf '%s\n' "$json" | grep -o '"cache_size":[0-9][0-9]*' 2>/dev/null)
     if [ -z "$hits" ]; then
       SCC_RUN_WHY="no sccache server is running (the reported cache_size is null), so there is no cap IN FORCE to compare against — the number --show-stats prints in that state is the CLIENT's own resolution of SCCACHE_CACHE_SIZE, not an enforced cap"
+      # AFFIRMATIVE, not a catch-all: this is the one branch that KNOWS nothing is running, which
+      # is what licenses the starter below. Every other failure stays `unreadable`.
+      SCC_RUN_STATE=no-server
       return 1
     fi
     hits=$(printf '%s\n' "$json" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
@@ -3254,6 +3259,46 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       return 1
     fi
     SCC_RUN_CAP=${hits##*:}
+    SCC_RUN_STATE=ok
+    return 0
+  }
+
+  # scc_start_server_for <value>: START the production sccache server under <value>.
+  #
+  # THIS IS THE FIX FOR A REAL PROVISIONING FAILURE, AND IT IS A FEATURE RATHER THAN A SOFTENED
+  # VERDICT (issue #3727 roborev finding 2). A freshly launched box has no sccache server until
+  # its first cached compilation, so `cache_size` is null, so the cap IN FORCE is genuinely
+  # unmeasurable — and this section would report UNMEASURED and fail `--strict` on EVERY new box
+  # immediately after correctly persisting the value. An alarm that fires on every new box is one
+  # people learn to waive.
+  #
+  # The mechanism this whole section is about supplies the fix: the cap is fixed by whichever
+  # process starts the server FIRST, and nothing later can change it. So bootstrap deliberately
+  # BECOMES that first starter, under the value a fresh session sees — which is the value every
+  # future gate on this box would have started it with. That makes the cap effective NOW instead
+  # of at some later lane's whim, and it turns a fresh box into a verifiable box in one step.
+  #
+  # NOTE THE ASYMMETRY, WHICH IS DELIBERATE: WE START A SERVER THAT DOES NOT EXIST, AND WE NEVER
+  # STOP ONE THAT DOES. A running server may have a peer lane's gate compiling against it right
+  # now, and killing it mid-build to apply a cap is a fleet-hostile act — so a server enforcing a
+  # different cap keeps its NOT-HONOURED verdict and the `sccache --stop-server` REMEDY, for a
+  # human to run between gates.
+  #
+  # Started with the ambient SCCACHE_DIR (that is the production cache a gate would use) and with
+  # SCCACHE_CACHE_SIZE forced to the measured session value; BASH_ENV/ENV are scrubbed for the
+  # same reason the probe scrubs them. The return code is REPORTED but never trusted: the verdict
+  # comes from re-reading the server, because "start-server exited 0" and "a server is running
+  # with this cap" are different claims (and sccache exits 0 when a server is already up).
+  scc_start_server_for() {
+    local v="$1" rc=0
+    have sccache || { SCC_START_WHY="no 'sccache' on PATH"; return 1; }
+    if [ -z "$TIMEOUT_BIN" ]; then
+      SCC_START_WHY="no timeout/gtimeout on PATH — refusing to start a server UNBOUNDED"
+      return 1
+    fi
+    bounded 30 env -u BASH_ENV -u ENV SCCACHE_CACHE_SIZE="$v" \
+      sccache --start-server >/dev/null 2>&1 || rc=$?
+    SCC_START_WHY="'sccache --start-server' exited $rc"
     return 0
   }
 
@@ -3599,49 +3644,74 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
         warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen', which resolves to $SCC_SEEN_BYTES bytes — sccache's OWN default cap — so this check cannot tell an ACCEPTED value from a SILENTLY DISCARDED one)"
         info "sccache accepts <digits>[KkMmGgTt] with BINARY multipliers and silently discards everything else with NO diagnostic: measured, '30G' is 30 GiB while '30GiB' and '30GB' both fall back to the default, and a bare integer means BYTES"
         info "set a cap that DIFFERS from sccache's own default ($SCC_DEFAULT_BYTES bytes) and this becomes measurable — a cap equal to the default caps nothing anyway"
-      elif ! scc_running_cap; then
-        warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the cap actually IN FORCE could not be read: $SCC_RUN_WHY)"
-        info "the value is read by the sccache SERVER at startup, so nothing about a visible variable establishes the cap in force — that is why this half is not assumed"
-      elif [ "$SCC_RUN_CAP" != "$SCC_SEEN_BYTES" ]; then
-        warn "sccache-cap: NOT-HONOURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the RUNNING sccache server enforces $SCC_RUN_CAP bytes — it was started by a process that did not see this value, and sccache reads the cap ONCE, at server startup)"
-        scc_stale_remedy
-      elif [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
-        # No PAM-read system-wide file exists to correlate against, so a machine-wide cap
-        # cannot be told from a sudo- or user-scoped one. No verdict that reports a state is
-        # available here, so none is given (5b's round-14 ruling, same shape).
-        warn "sccache-cap: UNMEASURED (a fresh, profile-free session on this $PLATFORM host sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that ($SCC_RUN_CAP bytes) — but this platform has no PAM-read system-wide file to compare it against, so a machine-wide cap cannot be told apart from a sudo- or user-scoped one that ordinary gate processes never see)"
-        info "on this platform the per-run authority is the gate's own SUMMARY line:  accelerators: ... sccache-cap=<bytes>(pinned)"
       else
-        case "$SCC_FILE_HAS_LINE" in
-          yes)
-            # STRING equality on the raw effective value, deliberately not a numeric or
-            # unit-aware one: `30G`, `030G` and `30G ` are different strings and only sccache
-            # decides what each means. Both are already reduced to BYTES for the effect check
-            # above; this half asks a different question — is the session getting THIS FILE's
-            # value — and normalising here would be a second classifier free to disagree.
-            if [ "$SCC_FILE_VALUE" = "$scc_probe_seen" ]; then
-              ok "sccache-cap: VERIFIED ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and the RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means; this run's own value, BASH_ENV and ENV were scrubbed first)"
-              scc_scope_note
-            else
-              warn "sccache-cap: NOT-SYSTEM-WIDE ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' but this session sees '$scc_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and whichever of them starts the sccache server will cap it with THAT, not with the one measured here)"
-              info "fix the VALUE in $SCC_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"
+        # ---- (3) THE CAP IN FORCE — and where there is NONE, become the first starter ----
+        # See scc_start_server_for for why this is the fix rather than a softened verdict, and
+        # for the start-but-never-stop asymmetry. Gated on an explicit authorisation, exactly as
+        # the /etc/environment write is: a default `bootstrap` run mutates no host state, and
+        # `.agent-ami/profile.yaml`'s verify.run passes --fix-sccache-cap, so the provisioning
+        # path this exists for gets it.
+        scc_run_ok=0
+        SCC_START_WHY=""
+        if scc_running_cap; then
+          scc_run_ok=1
+        elif [ "$SCC_RUN_STATE" = no-server ]; then
+          if [ "$AUTO_YES" = 1 ] || [ "$FIX_SCCACHE_CAP" = 1 ]; then
+            info "no sccache server is running on this box, so this run STARTS one under the value a fresh session sees ('$scc_probe_seen') — the cap is fixed by whichever process starts the server first, so being that process is what makes the cap effective NOW rather than whenever some later lane happens to compile"
+            scc_start_server_for "$scc_probe_seen"
+            if scc_running_cap; then
+              scc_run_ok=1; SCC_SERVER_STARTED=1
+              info "STARTED the sccache server ($SCC_START_WHY); it now reports a cap of $SCC_RUN_CAP bytes"
             fi
-            ;;
-          unparseable)
-            warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that, but the SCCACHE_CACHE_SIZE assignment in $SCC_ENV_FILE could not be PARSED, so it cannot be compared against what the session saw)"
-            ;;
-          unknown)
-            warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that, but $SCC_ENV_FILE could not be READ, so it cannot be confirmed the value is a system-wide cap rather than a sudo- or user-specific one)"
-            ;;
-          *)
-            warn "sccache-cap: NOT-SYSTEM-WIDE (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly the $SCC_SEEN_BYTES bytes it means, but there is NO SCCACHE_CACHE_SIZE line in $SCC_ENV_FILE — so it is reaching this session from a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment, a launcher-injected env) and a server started outside that source gets sccache's default)"
-            if [ "$SCC_FILE_HAS_LINE" = absent-file ]; then
-              scc_fix_hint "this host has no $SCC_ENV_FILE yet — the flag CREATES it carrying '$SCC_ENV_LINE'; the per-user source stays as it is"
-            else
-              scc_fix_hint "persists '$SCC_ENV_LINE' to $SCC_ENV_FILE, which every PAM session reads — the per-user source stays as it is"
-            fi
-            ;;
-        esac
+          fi
+        fi
+        if [ "$scc_run_ok" != 1 ]; then
+          warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the cap actually IN FORCE could not be read: $SCC_RUN_WHY${SCC_START_WHY:+; a start was attempted — $SCC_START_WHY})"
+          info "the value is read by the sccache SERVER at startup, so nothing about a visible variable establishes the cap in force — that is why this half is not assumed"
+          if [ "$SCC_RUN_STATE" = no-server ] && [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
+            info "nothing is running to measure, and a default run does not start one:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   starts the server under the persisted value and verifies the cap it enforces (--yes does it too)"
+          fi
+        elif [ "$SCC_RUN_CAP" != "$SCC_SEEN_BYTES" ]; then
+          warn "sccache-cap: NOT-HONOURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the RUNNING sccache server enforces $SCC_RUN_CAP bytes — it was started by a process that did not see this value, and sccache reads the cap ONCE, at server startup)"
+          scc_stale_remedy
+        elif [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
+          # No PAM-read system-wide file exists to correlate against, so a machine-wide cap
+          # cannot be told from a sudo- or user-scoped one. No verdict that reports a state is
+          # available here, so none is given (5b's round-14 ruling, same shape).
+          warn "sccache-cap: UNMEASURED (a fresh, profile-free session on this $PLATFORM host sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that ($SCC_RUN_CAP bytes) — but this platform has no PAM-read system-wide file to compare it against, so a machine-wide cap cannot be told apart from a sudo- or user-scoped one that ordinary gate processes never see)"
+          info "on this platform the per-run authority is the gate's own SUMMARY line:  accelerators: ... sccache-cap=<bytes>(pinned)"
+        else
+          case "$SCC_FILE_HAS_LINE" in
+            yes)
+              # STRING equality on the raw effective value, deliberately not a numeric or
+              # unit-aware one: `30G`, `030G` and `30G ` are different strings and only sccache
+              # decides what each means. Both are already reduced to BYTES for the effect check
+              # above; this half asks a different question — is the session getting THIS FILE's
+              # value — and normalising here would be a second classifier free to disagree.
+              if [ "$SCC_FILE_VALUE" = "$scc_probe_seen" ]; then
+                ok "sccache-cap: VERIFIED ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and the RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means; this run's own value, BASH_ENV and ENV were scrubbed first)"
+                scc_scope_note
+              else
+                warn "sccache-cap: NOT-SYSTEM-WIDE ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' but this session sees '$scc_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and whichever of them starts the sccache server will cap it with THAT, not with the one measured here)"
+                info "fix the VALUE in $SCC_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"
+              fi
+              ;;
+            unparseable)
+              warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that, but the SCCACHE_CACHE_SIZE assignment in $SCC_ENV_FILE could not be PARSED, so it cannot be compared against what the session saw)"
+              ;;
+            unknown)
+              warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that, but $SCC_ENV_FILE could not be READ, so it cannot be confirmed the value is a system-wide cap rather than a sudo- or user-specific one)"
+              ;;
+            *)
+              warn "sccache-cap: NOT-SYSTEM-WIDE (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly the $SCC_SEEN_BYTES bytes it means, but there is NO SCCACHE_CACHE_SIZE line in $SCC_ENV_FILE — so it is reaching this session from a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment, a launcher-injected env) and a server started outside that source gets sccache's default)"
+              if [ "$SCC_FILE_HAS_LINE" = absent-file ]; then
+                scc_fix_hint "this host has no $SCC_ENV_FILE yet — the flag CREATES it carrying '$SCC_ENV_LINE'; the per-user source stays as it is"
+              else
+                scc_fix_hint "persists '$SCC_ENV_LINE' to $SCC_ENV_FILE, which every PAM session reads — the per-user source stays as it is"
+              fi
+              ;;
+          esac
+        fi
       fi
     else
       # NOT VISIBLE. An affirmative measurement, so no file state can rescue or worsen it — the

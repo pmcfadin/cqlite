@@ -762,7 +762,8 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
   `gate-pin: NOT-HONOURED`.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, the two #3727 sccache
-  capacity tokens `sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|unattributed)` +
+  capacity tokens
+  `sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|invalid-stale|unattributed)` +
   `sccache-used=<bytes>(<N>%)`, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
@@ -774,7 +775,9 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   cap and a full, thrashing cache reads `ok`. `sccache-cap=…(stale)` means the RUNNING SERVER
   predates the value (remedy `sccache --stop-server`, never editing the value: sccache reads
   `SCCACHE_CACHE_SIZE` once, at server startup); `…(default)` on a fleet box means the cap is not
-  provisioned, the #3414 reading one variable over; `…(unattributed)` means `cache_size` came back
+  provisioned, the #3414 reading one variable over; `…(invalid-stale)` means BOTH that the value
+  is discarded AND that the running cap is not its fallback, where the remedy INVERTS (fix the
+  value first — a bare `--stop-server` there LOWERS the cap); `…(unattributed)` means `cache_size` came back
   null, so no RUNNING server is proven to enforce the number — measured, a client with no server
   answers `max_cache_size` from its OWN env, so a cap read out of `--show-stats` is an ENFORCED cap
   only while `cache_size` is an integer. Measured trap: `30G` is 30 GiB but **`30GiB`

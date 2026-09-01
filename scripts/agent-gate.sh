@@ -1225,7 +1225,7 @@ _sccache_value_bytes() {
 # may fall back to 0 or to blank.
 _SCC_CAP_KIND=""     # bytes | unmeasured | na
 _SCC_CAP_BYTES=""
-_SCC_CAP_SOURCE=""   # pinned | default | inherited | stale | invalid
+_SCC_CAP_SOURCE=""   # pinned | default | inherited | stale | invalid | invalid-stale | unattributed
 _SCC_CAP_WHY=""      # no-stats | unparsed | not-unique | no-binary
 _SCC_USED_KIND=""
 _SCC_USED_BYTES=""
@@ -1310,9 +1310,23 @@ _sccache_cap_probe() {
         _SCC_CAP_SOURCE=inherited
       fi
     elif ! _sccache_value_bytes "${SCCACHE_CACHE_SIZE}" implied; then
-      # Set-but-EMPTY lands here too, and correctly: measured, sccache discards an
+      # DISCARDED — and "the value is invalid" and "where the running cap came from" are
+      # TWO INDEPENDENT AXES, which one label used to collapse (#3727 roborev finding 3).
+      # `invalid` used to be emitted for both of the cases below and its WARN claimed the
+      # value "fell back to" the running cap. That is only true where the running cap IS
+      # the fallback; where the server enforces something else, the claim invents a
+      # causal link, and — worse — the remedy inverts: stopping the server would LOWER
+      # the cap, because a restart discards the value too. So the two are named apart.
+      # Set-but-EMPTY lands here as well, and correctly: measured, sccache discards an
       # empty value exactly as it discards `30GiB`.
-      _SCC_CAP_SOURCE=invalid
+      if [ "$cap" = "$_SCC_DEFAULT_BYTES" ]; then
+        # The running cap and the fallback AGREE. Stated as agreement, not causation: a
+        # server deliberately started at exactly the default is indistinguishable, and
+        # the operational fact ("this value is having no effect") is the same either way.
+        _SCC_CAP_SOURCE=invalid
+      else
+        _SCC_CAP_SOURCE=invalid-stale
+      fi
     elif [ "$implied" = "$cap" ]; then
       _SCC_CAP_SOURCE=pinned
     else
@@ -1348,7 +1362,9 @@ _sccache_cap_probe() {
     stale)
       echo "agent-gate: WARN: sccache-cap=stale — SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' is set and accepted, but the RUNNING server enforces ${_SCC_CAP_BYTES} bytes: sccache reads the cap ONCE, at server startup, so this server predates the value. Remedy: 'sccache --stop-server' (the next compile restarts it) — NOT editing the value (#3727)" >&2 ;;
     invalid)
-      echo "agent-gate: WARN: sccache-cap=invalid — sccache SILENTLY DISCARDED SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' and fell back to ${_SCC_CAP_BYTES} bytes. The accepted form is <digits>[KkMmGgTt] with BINARY multipliers: measured, '30G' is 30 GiB while '30GiB' and '30GB' are discarded with NO diagnostic anywhere, and a bare integer means BYTES (#3727)" >&2 ;;
+      echo "agent-gate: WARN: sccache-cap=invalid — sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}', and the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is exactly the fallback it would use: the value is having NO effect. The accepted form is <digits>[KkMmGgTt] with BINARY multipliers: measured, '30G' is 30 GiB while '30GiB' and '30GB' are discarded with NO diagnostic anywhere, and a bare integer means BYTES. Fix the VALUE, then 'sccache --stop-server' to apply it (#3727)" >&2 ;;
+    invalid-stale)
+      echo "agent-gate: WARN: sccache-cap=invalid-stale — TWO faults at once. sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' (accepted form: <digits>[KkMmGgTt] binary multipliers; '30GiB'/'30GB' are discarded with no diagnostic, a bare integer means BYTES), AND the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is neither that fallback nor anything derived from this value — so this gate cannot say where it came from. FIX THE VALUE FIRST: 'sccache --stop-server' on its own would LOWER the cap to sccache's default (${_SCC_DEFAULT_BYTES} bytes), because the restart would discard the value too (#3727)" >&2 ;;
   esac
   if [ "$_SCC_USED_KIND" = bytes ] && [ "$_SCC_USED_PCT" != cap-zero ]; then
     local pctnum="${_SCC_USED_PCT%\%}"
@@ -1535,7 +1551,7 @@ _perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 # See the ACCEL_* detection above (#1848). The sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters — ERROR COUNTERS ONLY,
 # never capacity. The two #3727 tokens after it carry the capacity facts:
-# ` sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|unattributed)` and
+# ` sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|invalid-stale|unattributed)` and
 # ` sccache-used=<bytes>(<N>%)`,
 # each with an explicit `unmeasured(<why>)`/`na(sccache-not-in-use)` rendering so a positive
 # reading is always an affirmative measurement. They sit BEFORE the optional Linux-only groups so

@@ -943,7 +943,7 @@ with sccache and nextest both un-installed and no signal. If a pasted SUMMARY sh
 `absent`, install the tool — the state is visible in the block, not just scrollback.
 
 Two further tokens carry the sccache **capacity** facts (issue #3727):
-`sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|unattributed)` and
+`sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|invalid-stale|unattributed)` and
 `sccache-used=<bytes>(<N>%)`, each with an explicit `unmeasured(<why>)` /
 `na(sccache-not-in-use)` rendering so a positive reading is always an affirmative
 measurement. Both are read from the **running server's** JSON, because sccache reads

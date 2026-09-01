@@ -143,8 +143,14 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
   chose that value.
 - `…(stale)` — the var is set and valid but the server enforces something else. **Remedy
   `sccache --stop-server`**, not editing the value.
-- `…(invalid)` — sccache discards the value (see the grammar table above) and fell back to the
-  default.
+- `…(invalid)` — sccache discards the value (see the grammar table above) **and** the running
+  server enforces exactly that fallback, so the value is having no effect. Fix the value, then
+  `sccache --stop-server`.
+- `…(invalid-stale)` — TWO faults: sccache discards the value **and** the running server enforces
+  something that is neither the fallback nor derived from it. **Fix the value FIRST** — stopping
+  the server on its own would *lower* the cap to sccache's default, because the restart discards
+  the value too. (Env-value validity and running-server provenance are independent axes; one
+  label for both would invent a causal link and invert the remedy — #3727.)
 - `…(unattributed)` — `cache_size` came back null, so no *running* server is proven to enforce this
   number; it is the cap that will apply, most commonly because no server is up.
 - `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires

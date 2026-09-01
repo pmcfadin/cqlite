@@ -119,7 +119,7 @@ trap 'rm -rf "$tmp"' EXIT
 # BEFORE the optional Linux-only mold/perf groups rather than appended: that keeps ` perf=` the
 # last token on a Linux line, which is what case 9c-iv's sentinel position depends on, and keeps
 # one grammar serving both a Darwin line (ending at sccache-used) and a Linux one.
-ACCEL_CAP_RE='sccache-cap=([0-9]+\((pinned|default|inherited|stale|invalid|unattributed)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
+ACCEL_CAP_RE='sccache-cap=([0-9]+\((pinned|default|inherited|stale|invalid|invalid-stale|unattributed)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
 ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
 ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
 
@@ -1077,7 +1077,8 @@ for scc_row in \
   '|10737418240|10737418240|10737418240(default)' \
   '|32212254720|10737418240|32212254720(inherited)' \
   '30G|10737418240|10737418240|10737418240(stale)' \
-  '30GiB|10737418240|10737418240|10737418240(invalid)'; do
+  '30GiB|10737418240|10737418240|10737418240(invalid)' \
+  '30GiB|32212254720|10737418240|32212254720(invalid-stale)'; do
   scc_val=${scc_row%%|*}; scc_rest=${scc_row#*|}
   scc_max=${scc_rest%%|*}; scc_rest=${scc_rest#*|}
   scc_dflt=${scc_rest%%|*}; scc_want=${scc_rest#*|}
@@ -1094,7 +1095,7 @@ for scc_row in \
       AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
       AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES="$scc_dflt" \
       SCCACHE_CACHE_SIZE="$scc_val" \
-      bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+      bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-$scc_src.stderr"
   else
     env -u SCCACHE_CACHE_SIZE \
       AGENT_GATE_SUMMARY_FILE="$scc_file" \
@@ -1112,6 +1113,32 @@ for scc_row in \
   fi
   assert_accelerators "sccache-cap-$scc_src" "$scc_file"
 done
+
+# 9c-v-b. AND THE `invalid` LABEL MAY NOT BE USED WHERE THE RUNNING CAP IS NOT THE FALLBACK
+#         (issue #3727 roborev finding 3). Env-value validity and running-server provenance are
+#         two INDEPENDENT axes: `invalid` asserts that the discarded value fell back to the cap
+#         printed beside it, which is only true when that cap IS sccache's default. Where it is
+#         not, the label would invent a causal link AND invert the remedy — stopping the server
+#         would LOWER the cap, because the restart discards the value too. The row above pins the
+#         positive; this pins that the weaker label is not reused, which a token-equality assert
+#         cannot see on its own.
+scc_isw="$tmp/scc-cap-invalid-stale.txt"
+if accel_token_is "$scc_isw" sccache-cap '32212254720(invalid)' \
+   || accel_token_is "$scc_isw" sccache-cap '32212254720(stale)'; then
+  bad "sccache-cap: an invalid value beside a non-fallback running cap was labelled invalid/stale (the two axes collapsed)"
+else
+  ok "sccache-cap: an invalid value beside a NON-fallback running cap is neither invalid nor stale (axes kept apart)"
+fi
+# ... and the WARN must name the ordering hazard, not merely the state: an operator who stops the
+# server before fixing the value LOWERS the cap. A label without that sentence is a trap.
+if grep -q 'invalid-stale' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
+   && grep -q 'FIX THE VALUE FIRST' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
+   && grep -q 'would LOWER the cap' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null; then
+  ok "sccache-cap: the invalid-stale WARN names the ordering hazard (stopping the server first LOWERS the cap)"
+else
+  bad "sccache-cap: the invalid-stale WARN does not warn that stopping the server first lowers the cap"
+  cat "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null | head -3
+fi
 
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured
@@ -5370,17 +5397,18 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 431: the #3727 capacity-token cases (9c-v..9c-x) add exactly 21 host-independent
+# 410 -> 435: the #3727 capacity-token cases (9c-v..9c-x) add exactly 25 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
-# grammar) = 2. COUNTED FROM A REAL RUN, not from
+# grammar) = 2, and the invalid-stale row + its two axes-kept-apart asserts = 4. COUNTED FROM A
+# REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +21 above is a measured difference and the deliberate ~10 margin is preserved rather than
+# the +25 above is a measured difference and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=431
+ASSERT_FLOOR=435
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
