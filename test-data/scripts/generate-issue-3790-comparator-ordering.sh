@@ -29,23 +29,25 @@
 # ============================================================================
 # OUTPUT LOCATION IS LOAD-BEARING
 #
-# Written CHECKOUT-RELATIVE to
-#   test-data/fixtures/issue_3790/<keyspace>/<table>-<uuid>/
-# and NOT under test-data/datasets/sstables/. That root is itself an "sstables
-# root" — it directly contains the KEYSPACE directory — so a consumer opens it
-# exactly the way the dataset lanes open $CQLITE_DATASETS_ROOT/sstables, and can
-# feed it to cqlite-core/tests/support/datasets_root.rs::first_root_with_table
-# (the resolver's documented PURE, candidate-parameterized form) as an extra
-# candidate root.
+# Written CHECKOUT-RELATIVE into the committed corpus:
+#   test-data/datasets/sstables/<keyspace>/<table>-<uuid>/
+# That is the SECOND built-in candidate root of the TABLE-granular resolver
+# cqlite-core/tests/support/datasets_root.rs::sstables_root_for_table, so a
+# consumer resolves it with no extra candidate root and still finds it on a fleet
+# box whose CQLITE_DATASETS_ROOT (e.g. /data/datasets) does not carry it — the
+# #3220 defect being a resolver that selected by KEYSPACE and then declared the
+# table absent.
 #
-# It is deliberately NOT in the dataset corpus: per test-data/corpus-coverage-
-# policy.md a newly-committed keyspace under test-data/datasets/sstables/ is
-# AUTO-ENROLLED as in-scope/ENFORCED by the #1229 enumeration, and the python +
-# node enumeration guards (bindings/python/tests/corpus.py IN_SCOPE_KEYSPACES,
-# bindings/node/__test__/parity-utils.js) red on a keyspace absent from their
-# explicit maps. Enrolling it therefore means editing three harnesses outside
-# test-data/** in lockstep. Precedent for this location: test-data/fixtures/
-# issue_3504/ and test-data/fixtures/issue_3630/.
+# THE COST, WHICH IS NOT OPTIONAL TO PAY: per test-data/corpus-coverage-policy.md
+# every committed keyspace under that directory must be CLASSIFIED, and an
+# unclassified one REDS the enumeration guard in all three comprehensive
+# harnesses. `test_comparator_order` is classified as a SKIP-SET
+# (parity-fixture) keyspace — validated by the dedicated #3790 Rust ordering
+# test, not by the comprehensive read-parity corpus, and deliberately not
+# enforced because the ordering it pins is the very thing that was wrong. If you
+# rename the keyspace or add another, update the policy row AND all three harness
+# skip sets in the same change; the README beside the fixture tracks which are
+# done.
 # ============================================================================
 #
 # ============================================================================
@@ -78,7 +80,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-OUT_DIR="${OUT_DIR:-$ROOT/fixtures/issue_3790}"
+OUT_DIR="${OUT_DIR:-$ROOT/datasets/sstables}"
 DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-issue3790-cmporder"
 CASSANDRA_IMAGE="cassandra:5.0.2"

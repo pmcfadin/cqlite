@@ -148,15 +148,18 @@
 -- have on disk. Recorded rather than tolerated, because an overclaim in a
 -- committed fixture comment is what stops the next reader checking.
 --
--- COMMITTED CHECKOUT-RELATIVE under test-data/fixtures/issue_3790/, NOT under
--- test-data/datasets/sstables/. That directory is itself an "sstables root" (it
--- directly contains the KEYSPACE directory), so a consumer opens it exactly the
--- way the dataset lanes open `$CQLITE_DATASETS_ROOT/sstables`. See the README
--- beside the fixture for why it is not in the dataset corpus: a newly-committed
--- keyspace there is auto-enrolled as ENFORCED by the #1229 corpus enumeration
--- and reds the python/node enumeration guards until three harnesses outside
--- test-data/** are edited in lockstep. Precedent for the fixtures/ location:
--- test-data/fixtures/issue_3504/ and test-data/fixtures/issue_3630/.
+-- COMMITTED CHECKOUT-RELATIVE into the corpus at
+-- test-data/datasets/sstables/test_comparator_order/collection_order-<uuid>/,
+-- which is the second built-in candidate root of the TABLE-granular resolver
+-- cqlite-core/tests/support/datasets_root.rs::sstables_root_for_table — so a
+-- consumer needs no extra candidate root and still finds it on a box whose
+-- CQLITE_DATASETS_ROOT does not carry it (#3220). The price is corpus
+-- classification: per test-data/corpus-coverage-policy.md this keyspace is in
+-- the SKIP-SET (parity-fixture) — validated by the dedicated #3790 ordering
+-- test, NOT by the comprehensive read-parity corpus, and deliberately not
+-- enforced there because the ordering it pins is the very thing that was wrong.
+-- The skip-set must be stated identically in the policy doc and all three
+-- harnesses; the README beside the fixture records which are done.
 --
 -- THE TWO ROWS:
 --   id=1 — THE FULL CASE. All five collections populated with the complete

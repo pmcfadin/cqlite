@@ -13,8 +13,8 @@ committed `sstabledump` golden, and they are what an ordering test must assert.
 ## What is here
 
 ```
-test-data/fixtures/issue_3790/                                  <- an "sstables root"
-└── test_comparator_order/                                      <- keyspace
+test-data/datasets/sstables/                     <- the checkout's committed corpus root
+└── test_comparator_order/                       <- keyspace
     └── collection_order-3479a500a65e11f1895d413585556a46/      <- table dir
         ├── nb-1-big-Data.db            (701 B)   Cassandra 5.0 `nb` BIG, UNCOMPRESSED
         ├── nb-1-big-Data.db.jsonl      (4.0 KB)  sstabledump golden — the physical-dump oracle
@@ -30,42 +30,63 @@ size **52 KB** on disk (~13.4 KB of file content).
 
 ## How a test resolves it
 
-The fixture root **is** an sstables root (it directly contains the keyspace
-directory), so it is opened exactly the way the dataset lanes open
-`$CQLITE_DATASETS_ROOT/sstables`. Use the TABLE-granular resolver's documented
-PURE form, which takes the candidate list as a parameter:
+It sits in the **checkout's committed corpus**, which is the second built-in
+candidate of the TABLE-granular resolver, so no extra candidate root is needed:
 
 ```rust
 #[path = "support/datasets_root.rs"] mod datasets_root;
-use datasets_root::{first_root_with_table, repo_root, sstables_root_candidates};
+use datasets_root::sstables_root_for_table;
 
-let fixture_root = repo_root().join("test-data/fixtures/issue_3790");
-let mut roots = sstables_root_candidates();      // env corpus, then the checkout corpus
-roots.push(fixture_root);                        // ... then this committed fixture
-let root = first_root_with_table(&roots, "test_comparator_order", "collection_order")
+let root = sstables_root_for_table("test_comparator_order", "collection_order")
     .expect("committed fixture is must_run (#3220): fail closed, never skip");
+let data_db = root
+    .join("test_comparator_order/collection_order-3479a500a65e11f1895d413585556a46")
+    .join("nb-1-big-Data.db");
 ```
 
-`first_root_with_table` judges presence by an actual `*-Data.db` (never by
-directory existence), so it cannot select a root that holds only sidecars. This
-fixture is git-committed, so per #3220 it is **`must_run`** — a consumer must
-fail closed if it is not found, never skip.
+`sstables_root_for_table` walks EVERY candidate root (the `CQLITE_DATASETS_ROOT`
+corpus first, then this checkout) and picks the one that actually carries
+`<keyspace>/<table>-*/…-Data.db`, judged by a real `*-Data.db` and never by
+directory existence. That is what makes a committed fixture findable on a fleet
+box whose `CQLITE_DATASETS_ROOT` (e.g. `/data/datasets`) does not contain it —
+the #3220 defect was a resolver that selected by KEYSPACE and then declared the
+table absent. This fixture is git-committed, so per #3220 it is **`must_run`**: a
+consumer must fail closed if it is not found, never skip.
 
-### Why it is NOT under `test-data/datasets/sstables/`
+### Corpus classification — READ THIS BEFORE ADDING A CONSUMER
 
-That is where `sstables_root_for_table`'s built-in checkout candidate looks, and
-putting it there would need no extra candidate root — but per
-`test-data/corpus-coverage-policy.md` a newly-committed keyspace there is
-**auto-enrolled as in-scope/ENFORCED** by the #1229 corpus enumeration, and the
-Python and Node enumeration guards red on any committed keyspace absent from
-their explicit `IN_SCOPE_KEYSPACES` maps. Enrolling it therefore requires
-lockstep edits to three harnesses outside `test-data/**`
-(`smoke-test-all-tables.sh`, `bindings/python/tests/corpus.py`,
-`bindings/node/__test__/parity-utils.js`) plus a policy-doc row — a cross-cutting
-change, and one that would put a fixture whose whole point is a *known live
-ordering defect* into the enforced read-parity corpus before the fix lands.
-Precedent for this location: `test-data/fixtures/issue_3504/` and
-`test-data/fixtures/issue_3630/`.
+Living under `test-data/datasets/sstables/` is not free. Per
+`test-data/corpus-coverage-policy.md` every committed keyspace there is
+**classified** — in-scope/enforced, skip-pending, or in the documented skip-set —
+and an *unclassified* one **reds** the enumeration guard in each of the three
+comprehensive harnesses.
+
+`test_comparator_order` is classified as a **skip-set (parity-fixture)**
+keyspace, the same category as `test_writeparity`, `test_signed_coll` and
+`test_compaction_tombstone_ttl`: a fixture whose subject is one pinned property,
+validated by a dedicated Rust test rather than by the comprehensive read-parity
+corpus. Two reasons, and the second is the load-bearing one:
+
+1. its subject is an ordering property that only the #3790 test knows how to
+   assert; a row-count smoke pass over it would prove nothing about ordering; and
+2. the comprehensive corpus is a **merge gate**, and this fixture exists because
+   the ordering it pins is (or was) WRONG — enrolling a known-divergent fixture
+   as enforced would red every lane's gate for a defect the fixture is
+   documenting, not regressing.
+
+The skip-set must be stated **identically in four places** (policy + three
+harnesses). Done here:
+
+- [x] `test-data/corpus-coverage-policy.md` — skip-set table row
+- [x] `test-data/scripts/smoke-test-all-tables.sh` — `SKIP_KEYSPACE_NAMES` + reason
+- [ ] `bindings/python/tests/corpus.py` — `SKIP_KEYSPACES`
+- [ ] `bindings/node/__test__/parity-utils.js` — `SKIP_KEYSPACES`
+
+**The two unchecked boxes are outstanding and they are gate-affecting**: until
+they are added, `python-bindings` and `node-bindings` red on
+`test_comparator_order` as an unclassified committed keyspace. They were left to
+the issue owner deliberately — `bindings/**` is outside the fixture-generation
+mandate — and are one map entry each with the reason string from the policy row.
 
 ## Exactly how it was produced
 
@@ -262,7 +283,7 @@ committed binaries in place:
 
 ```
 cargo run -p cqlite-cli --bin cqlite -- read-sstable \
-  test-data/fixtures/issue_3790/test_comparator_order/collection_order-*/nb-1-big-Data.db \
+  test-data/datasets/sstables/test_comparator_order/collection_order-*/nb-1-big-Data.db \
   --format json
 ```
 
