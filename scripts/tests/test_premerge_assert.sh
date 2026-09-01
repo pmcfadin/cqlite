@@ -186,15 +186,63 @@ if ! cp "$ASSERT" "$NEUTRAL_DIR/premerge-assert.sh"; then
 fi
 printf '%s\n' "$NEUTRAL_ADV" >"$NEUTRAL_DIR/base-staleness.sh"
 chmod +x "$NEUTRAL_DIR/base-staleness.sh"
+# review-stage.sh travels with the copy (#3751). premerge-assert resolves it from
+# its OWN directory with no env override (#3312's enforcer rule), so a scratch copy
+# that omits it turns every `--c-verdict AUTO` case into a TOOL-FAILURE about a
+# missing artifact instead of the state the case is about. The REAL script is
+# copied, not a stub: it needs nothing but git and a worktree, so the end-to-end
+# cases below exercise the shipped grammar rather than a second implementation of
+# it.
+if ! cp "$SCRIPT_DIR/../flow/review-stage.sh" "$NEUTRAL_DIR/review-stage.sh"; then
+  printf 'FAIL - could not copy review-stage.sh into the neutral scratch copy\n' >&2
+  exit 1
+fi
 NEUTRAL_ASSERT="$NEUTRAL_DIR/premerge-assert.sh"
 
 # run <expected-exit> <description> <args...> — invokes the NEUTRAL COPY of the
 # assert with the gh mock on PATH, captures combined output + exit code. Sets
 # $OUT and $RC. The shipped artifact is exercised by the wiring case alone.
+# c_inject_into <args...> — publish C_INJ, the caller's args plus
+# `--c-verdict $C_PASS_FILE` unless the case already names the flag or sets
+# NO_C_INJECT=1 (#3751).
+#
+# IT PUBLISHES AN ARRAY RATHER THAN PRINTING. A print-and-read-back version lost a
+# TRAILING EMPTY argument — command substitution strips trailing newlines, so
+# `--c-verdict ""` arrived as `--c-verdict` with no value and the empty-value case
+# passed for the wrong reason (it asserted the wrong diagnostic). An argument
+# vector cannot be round-tripped through a newline-delimited string, so it is not.
+#
+# WHY AN INJECTION RATHER THAN 90 EDITED CALL SITES. `--c-verdict` is REQUIRED, so
+# every pre-#3751 call would exit 3 — turning a suite about gate-of-record
+# provenance into a suite about one new flag, and hiding any real regression behind
+# a uniform usage error. The injected value is an EXPLICIT PATH holding a PASS
+# verdict line, so no routing is measured and those cases keep asserting exactly
+# what they asserted before. The cases that are ABOUT the flag (omission,
+# routing, AUTO) name it or opt out, so the injection can never mask them: Case 44
+# below sets NO_C_INJECT=1 for the omission case, which is the one place a silently
+# injected flag would produce a false pass.
+C_INJ=()
+c_inject_into() {
+  local a inject=1
+  if [ "${NO_C_INJECT:-0}" = 1 ]; then
+    inject=0
+  else
+    for a in "$@"; do
+      case "$a" in --c-verdict | --c-verdict=*) inject=0 ;; esac
+    done
+  fi
+  C_INJ=(${1+"$@"})
+  if [ "$inject" -eq 1 ]; then
+    C_INJ=(${C_INJ[@]+"${C_INJ[@]}"} --c-verdict "$C_PASS_FILE")
+  fi
+}
+
 run() {
   local want="$1" desc="$2"
   shift 2
-  OUT=$(PATH="$BIN:$PATH" bash "$NEUTRAL_ASSERT" "$@" 2>&1)
+  c_inject_into ${1+"$@"}
+  set -- ${C_INJ[@]+"${C_INJ[@]}"}
+  OUT=$(PATH="$BIN:$PATH" bash "$NEUTRAL_ASSERT" ${1+"$@"} 2>&1)
   RC=$?
   if [ "$RC" -ne "$want" ]; then
     bad "$desc (exit $RC, wanted $want)"
@@ -206,6 +254,15 @@ run() {
 
 CERTIFIED="da9a7cb2abc00000000000000000000000000000"   # full 40-char hex
 STALE="ca8eb016def11111111111111111111111111111"       # full 40-char hex
+
+# THE INJECTED C VERDICT (#3751) — a captured `review-stage.sh verdict` PASS line,
+# in the shape review-stage.sh emits it. Every case that is not ABOUT the C flag
+# gets this, so those cases assert what they always asserted. It is a FILE (an
+# explicit path), never AUTO, so no case reads the ambient repository's openspec
+# routing — the same hermeticity rule the neutral advisory copy exists for.
+C_PASS_FILE="$T/c-verdict-pass.txt"
+printf 'REVIEW-STAGE: c RESULT: PASS elapsed=42 deadline=1800 agent=spec-auditor report=%s\n' \
+  "$T/injected-c-report.md" >"$C_PASS_FILE"
 
 # The two abbreviations the gate ACTUALLY writes for $CERTIFIED: `commit:` is
 # `printf '%.7s'` and `tree-start:` is `_tree_short` = `printf '%.12s'`, both of
@@ -1237,7 +1294,8 @@ chmod +x "$BADBIN/awk"
 # The NEUTRAL copy (#3650 review R5 F2), like every non-advisory case: this one
 # refuses at exit 3 before the advisory is reached, but running the shipped
 # artifact here would leave a second path that could regress into an ambient scan.
-OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" \
+  --c-verdict "$C_PASS_FILE" 2>&1)
 RC=$?
 if [ "$RC" -eq 3 ]; then
   case "$OUT" in
@@ -1402,7 +1460,9 @@ flow_copy() {
 run_copy() {
   local want="$1" desc="$2" script="$3"
   shift 3
-  OUT=$(PATH="$BIN:$PATH" bash "$script" "$@" 2>&1)
+  c_inject_into ${1+"$@"}
+  set -- ${C_INJ[@]+"${C_INJ[@]}"}
+  OUT=$(PATH="$BIN:$PATH" bash "$script" ${1+"$@"} 2>&1)
   RC=$?
   if [ "$RC" -ne "$want" ]; then
     bad "$desc (exit $RC, wanted $want)"
@@ -1601,7 +1661,8 @@ chmod +x "$SHIMD/timeout"
 MARK_A="$T/hang-marker-bounded"
 rm -f "$MARK_A"
 if flow_copy adv-hang-bounded "$(hang_stub "$MARK_A")"; then
-  OUT=$(PATH="$SHIMD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  OUT=$(PATH="$SHIMD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" \
+    --c-verdict "$C_PASS_FILE" 2>&1)
   RC=$?
   if [ "$RC" -ne 0 ]; then
     bad "advisory bound: a hanging advisory must not change the exit code (exit $RC, wanted 0)"
@@ -1673,7 +1734,8 @@ done
 MARK_B="$T/hang-marker-unbounded"
 rm -f "$MARK_B"
 if [ "$nobin_ok" -eq 1 ] && flow_copy adv-hang-no-timeout "$(hang_stub "$MARK_B")"; then
-  OUT=$(PATH="$NOBIN" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  OUT=$(PATH="$NOBIN" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" \
+    --c-verdict "$C_PASS_FILE" 2>&1)
   RC=$?
   if [ "$RC" -ne 0 ]; then
     bad "advisory bound: an unavailable bound must not change the exit code (exit $RC, wanted 0)"
@@ -1741,7 +1803,8 @@ fi
 MARK_G="$T/hang-marker-gtimeout"
 rm -f "$MARK_G"
 if [ "$gtd_ok" -eq 1 ] && flow_copy adv-hang-gtimeout "$(hang_stub "$MARK_G")"; then
-  OUT=$(PATH="$GTD" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  OUT=$(PATH="$GTD" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" \
+    --c-verdict "$C_PASS_FILE" 2>&1)
   RC=$?
   if [ "$RC" -ne 0 ]; then
     bad "advisory bound: a gtimeout-only host must not change the exit code (exit $RC, wanted 0)"
@@ -1832,7 +1895,8 @@ SHIM
   MARK_C="$T/hang-marker-term-ignoring"
   rm -f "$MARK_C"
   if flow_copy adv-term-ignoring "$(term_ignoring_stub "$MARK_C")"; then
-    OUT=$(PATH="$KILLD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+    OUT=$(PATH="$KILLD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" \
+    --c-verdict "$C_PASS_FILE" 2>&1)
     RC=$?
     if [ "$RC" -ne 0 ]; then
       bad "advisory bound: a TERM-ignoring advisory must not change the exit code (exit $RC, wanted 0)"
@@ -1968,7 +2032,7 @@ if [ "$wire_shape" -eq 1 ]; then
     "$(printf '%.7s' "$WIRE_SHA")" "$(printf '%.12s' "$WIRE_SHA")" PASS PASS >"$WIREGOOD"
   WIRE_OUT=$(cd "$WIRE_REPO" &&
     PATH="$BIN:$PATH" MOCK_GH_OUT="$WIRE_SHA OPEN" MOCK_GH_FAIL=0 \
-    bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" 2>&1)
+    bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" --c-verdict "$C_PASS_FILE" 2>&1)
   WIRE_RC=$?
   if [ "$WIRE_RC" -ne 0 ]; then
     bad "the SHIPPED script invokes the SHIPPED advisory (exit $WIRE_RC, wanted 0)"
@@ -2132,7 +2196,8 @@ ORDADV
   : >"$ORDER_LOG"
   ORDOUT=$(PATH="$ORDBIN:$BIN:$PATH" PREMERGE_ORDER_LOG="$ORDER_LOG" \
     MOCK_GH_OUT="$CERTIFIED OPEN" MOCK_GH_FAIL=0 \
-    bash "$ORDFLOW/premerge-assert.sh" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+    bash "$ORDFLOW/premerge-assert.sh" 2421 "$CERTIFIED" "$GOOD" \
+    --c-verdict "$C_PASS_FILE" 2>&1)
   ORDRC=$?
   if [ "$ORDRC" -ne 0 ]; then
     bad "order: the success-path case did not exit 0 (rc=$ORDRC, got: $ORDOUT)"
@@ -2158,6 +2223,458 @@ ORDADV
   fi
 fi
 
+
+# =============================================================================
+# Case 44 — THE C (INTENT AUDIT) VERDICT AT THE MERGE POINT (#3751)
+# =============================================================================
+# The consumer half of `scripts/flow/review-stage.sh`. A delegated review stage
+# used to write NOTHING, so its reader had only ABSENCE to reason from; six lanes
+# read that absence as "not run" correctly and nothing required them to, and the
+# seventh read an idle notice as a clean review and merged. These cases pin that
+# an absent C cannot reach a merge, that routing is MEASURED rather than asserted
+# by the caller, and that the disclosed substitute keeps its own token.
+#
+# THE END-TO-END WIRES LIVE HERE, NOT IN test_review_stage.sh, ON PURPOSE. The
+# spec asks for two paired assertions — "premerge-assert REFUSES on a
+# sentinel-only stage" (AC1) and "the merge assert PROCEEDS on a real PASS" (the
+# positive control) — and both need a gh mock, a gate-of-record summary fixture
+# and the neutral scratch copy of the assert. All three live in THIS file;
+# test_review_stage.sh has none of them and would have to grow a second copy of
+# each, which is a second implementation of a fixture and one more thing to drift.
+# What test_review_stage.sh owns is the PRODUCER's grammar; what this file owns is
+# what the merge point DOES with it.
+
+# c_verdict_file <name> <line...> — a captured-verdict fixture. Written with
+# printf so a case can plant a shape review-stage.sh would never emit (an indented
+# copy, two lines, an invented token) — which is the point: this parser must be
+# correct about text it did not produce.
+c_verdict_file() {
+  local f="$T/cv-$1.txt"
+  shift
+  : >"$f"
+  while [ "$#" -gt 0 ]; do
+    printf '%s\n' "$1" >>"$f"
+    shift
+  done
+  printf '%s\n' "$f"
+}
+
+cv_line() {
+  printf 'REVIEW-STAGE: c RESULT: %s elapsed=7 deadline=1800 agent=spec-auditor report=%s\n' \
+    "$1" "$T/planted-c-report.md"
+}
+
+# c_refused <desc> <c-verdict-arg> <needle> — the C refusal is exit 2 with the
+# NO-C-VERDICT verdict; the needle pins the CAUSE, so a case cannot pass by
+# refusing for the wrong reason (the same contract as `refused` above).
+c_refused() {
+  local desc="$1" arg="$2" needle="$3"
+  if run 2 "$desc" 2421 "$CERTIFIED" "$GOOD" --c-verdict "$arg"; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ;;
+      *) bad "$desc: missing NO-C-VERDICT verdict (got: $OUT)"; return 1 ;;
+    esac
+    if [ "${OUT#*"$needle"}" = "$OUT" ]; then
+      bad "$desc: refusal does not name the cause '$needle' (got: $OUT)"
+      return 1
+    fi
+    ok "$desc"
+  fi
+}
+
+# --- 44a: the flag is REQUIRED (item 2.1) ------------------------------------
+# NO_C_INJECT is the ONE place the suite's convenience injection is disabled: if
+# it leaked here this case would pass for the wrong reason, so it is also asserted
+# that the message NAMES the flag rather than merely exiting 3.
+if NO_C_INJECT=1 run 3 "--c-verdict omitted entirely -> exit 3 (usage), never a silent skip" \
+  2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: USAGE"*"MISSING REQUIRED FLAG(S): --c-verdict"*)
+      ok "omission: the usage failure NAMES the missing flag (#3465's break-loudly precedent)" ;;
+    *) bad "omission: exit 3 must name --c-verdict, not merely fail (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"reproduce, inside the enforcer, the exact defect"*)
+      ok "omission: the message says WHY there is no default" ;;
+    *) bad "omission: the refusal must explain why 'not required' is not a default (got: $OUT)" ;;
+  esac
+fi
+
+if NO_C_INJECT=1 run 3 "--c-verdict with NO value -> exit 3 (usage)" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict; then
+  case "$OUT" in
+    *"--c-verdict requires a value"*) ok "no value: the usage failure names the missing value" ;;
+    *) bad "no value: must name the missing value (got: $OUT)" ;;
+  esac
+fi
+
+if run 3 "--c-verdict with an EMPTY value -> exit 3 (never AUTO, never skip)" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict ""; then
+  case "$OUT" in
+    *"EMPTY value"*) ok "empty value: named as a caller bug, not defaulted" ;;
+    *) bad "empty value: must be named (got: $OUT)" ;;
+  esac
+fi
+
+if run 3 "an unknown option -> exit 3 (usage), not silently ignored" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdicts AUTO; then
+  case "$OUT" in
+    *"unknown option '--c-verdicts'"*) ok "unknown option: named verbatim" ;;
+    *) bad "unknown option: must be named (got: $OUT)" ;;
+  esac
+fi
+
+# The `--flag=value` spelling is accepted, because a caller that writes it must not
+# get "unknown option" for a flag that exists.
+if run 0 "--c-verdict=<path> (equals form) -> accepted" \
+  2421 "$CERTIFIED" "$GOOD" "--c-verdict=$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT PASS"*) ok "equals form: parsed as the same value" ;;
+    *) bad "equals form: must reach the same verdict (got: $OUT)" ;;
+  esac
+fi
+
+# --- 44b: an explicit verdict path is held to the closed grammar -------------
+c_refused "C verdict path ABSENT -> refuse" "$T/no-such-c-verdict.txt" "does not exist"
+: >"$T/cv-empty-file.txt"
+c_refused "C verdict path EMPTY -> refuse (the shape a redirect leaves when nothing ran)" \
+  "$T/cv-empty-file.txt" "EMPTY"
+c_refused "C verdict path with no verdict line -> refuse" \
+  "$(c_verdict_file noline 'some prose about a review that happened, allegedly')" \
+  "holds NO verdict line"
+# COLUMN-ZERO ANCHORING (#3312). An indented or quoted copy of a verdict line is
+# DATA — this repository's docs and PR comments are full of such copies — so it
+# must NOT satisfy the check. awk's `$1 ==` would have accepted it.
+c_refused "an INDENTED copy of a verdict line -> counted as ZERO (column-zero anchored)" \
+  "$(c_verdict_file indented "  $(cv_line PASS)" '> more quoted prose')" \
+  "holds NO verdict line"
+c_refused "TWO verdict lines -> refuse as AMBIGUOUS, never last-wins" \
+  "$(c_verdict_file two "$(cv_line NOT-RUN)" "$(cv_line PASS)")" \
+  "2 verdict lines"
+c_refused "verdict NOT-RUN -> refuse, naming the stage and that no verdict was recorded" \
+  "$(c_verdict_file notrun "$(cv_line 'NOT-RUN (no report written)')")" \
+  "reports NOT-RUN"
+c_refused "verdict FINDINGS -> refuse (a blocking intent-audit gap)" \
+  "$(c_verdict_file findings "$(cv_line FINDINGS)")" \
+  "reports FINDINGS"
+# THE ESCAPE HATCH THIS ISSUE EXISTS TO REMOVE: a caller cannot spell
+# "not applicable" into a verdict. Inapplicability is reachable ONLY from AUTO's
+# measurement of the branch.
+c_refused "a hand-written NOT-APPLICABLE token -> refuse (no caller-supplied exemption)" \
+  "$(c_verdict_file na "$(cv_line NOT-APPLICABLE)")" \
+  "not in the closed set"
+c_refused "PASS-BUT-UNMEASURED -> refuse (token-exact, never a PASS* prefix, #3544)" \
+  "$(c_verdict_file pbu "$(cv_line PASS-BUT-UNMEASURED)")" \
+  "not in the closed set"
+c_refused "an empty token after RESULT: -> refuse" \
+  "$(c_verdict_file notok 'REVIEW-STAGE: c RESULT:')" \
+  "NO token after"
+
+if run 0 "verdict PASS from an explicit path -> the merge assert PROCEEDS" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT PASS stage: c source: file"*)
+      ok "PASS: reported on its own PREMERGE: C-VERDICT line, naming its source" ;;
+    *) bad "PASS: the C verdict must be reported on the success path (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"report: $T/injected-c-report.md"*)
+      ok "PASS: the line names WHICH stage report answered (the declared residual's mitigation)" ;;
+    *) bad "PASS: the report path must travel to the success line (got: $OUT)" ;;
+  esac
+fi
+
+# --- 44c: AUTHOR-PERFORMED keeps its own token (item 2.4) -------------------
+if run 0 "verdict AUTHOR-PERFORMED -> proceeds, under its OWN token" \
+  2421 "$CERTIFIED" "$GOOD" \
+  --c-verdict "$(c_verdict_file ap "$(cv_line AUTHOR-PERFORMED)")"; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT AUTHOR-PERFORMED"*)
+      ok "AUTHOR-PERFORMED: printed under its own token on a PREMERGE: C-VERDICT line" ;;
+    *) bad "AUTHOR-PERFORMED: must appear under its own token (got: $OUT)" ;;
+  esac
+  # NEVER FOLDED INTO `OK`, and this is the assertion that says so: a reader
+  # grepping the PASSING token must NOT match a substitute. Same reason the roborev
+  # wrapper's WAIVED is textually distinct from PASS.
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT PASS"*)
+      bad "AUTHOR-PERFORMED: a substitute matched the PASSING token — it was folded into a pass" ;;
+    *) ok "AUTHOR-PERFORMED: a reader grepping 'C-VERDICT PASS' does NOT match a substitute" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*)
+      ok "AUTHOR-PERFORMED: the merge still proceeds (it is the SANCTIONED fallback)" ;;
+    *) bad "AUTHOR-PERFORMED: must not block the merge (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT-NOTE"*"not an independent"*)
+      ok "AUTHOR-PERFORMED: the disclosure travels to the merge point" ;;
+    *) bad "AUTHOR-PERFORMED: the disclosure must be printed (got: $OUT)" ;;
+  esac
+fi
+
+# --- 44d: AUTO MEASURES the routing (items 2.2/2.3), end to end -------------
+# SYNTHETIC REPOSITORIES, so the routing answer is a property of THIS SUITE and
+# not of the lane it happens to run in. Each carries `refs/remotes/origin/main`
+# (the merge-base the measurement is taken against) and a `.gitignore` for
+# `.review-stage/`, because review-stage.sh verifies its write path is ignored
+# fail-closed (#2926) and would otherwise refuse to open a stage at all.
+#
+# The NEUTRAL copy of the assert is used, so the base-staleness advisory is the
+# immediate stub and nothing scans a repository — but review-stage.sh beside it is
+# the SHIPPED artifact, so these cases exercise the real producer grammar.
+
+# c_repo <name> <mode> — build a synthetic repo; print its path, or nothing on
+# failure. mode: oracle (no openspec) | design (an openspec change) |
+# archive (only openspec/changes/archive/**).
+c_repo() {
+  # The `local` declarations are SPLIT: `local name="$1" d="$T/c-repo-$name"` reads
+  # $name before the assignment takes effect and dies under `set -u` — the same
+  # trap flow_copy above documents, and it cost a round here too.
+  local name="$1" mode="$2"
+  local d="$T/c-repo-$name"
+  local p
+  mkdir -p "$d"
+  git init -q -b mainline "$d" >/dev/null 2>&1 || return 1
+  git -C "$d" config user.email t@t
+  git -C "$d" config user.name t
+  printf '.review-stage/\n' >"$d/.gitignore"
+  printf 'seed\n' >"$d/README.md"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m seed >/dev/null 2>&1 || return 1
+  git -C "$d" update-ref refs/remotes/origin/main mainline || return 1
+  git -C "$d" checkout -q -b feature || return 1
+  case "$mode" in
+    oracle)  p="cqlite-core/src/storage/sstable/reader.rs" ;;
+    design)  p="openspec/changes/a-design-routed-slug/proposal.md" ;;
+    archive) p="openspec/changes/archive/2026-01-01-old/proposal.md" ;;
+    *) return 1 ;;
+  esac
+  mkdir -p "$d/$(dirname "$p")"
+  printf 'the PR content\n' >"$d/$p"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m "the PR" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$d"
+}
+
+# run_in_repo <dir> <expected-exit> <desc> <args...> — `run`, from inside a
+# synthetic repository, with that repository's own HEAD as the certified sha and a
+# gate-summary fixture carrying its two abbreviations. Sets $OUT/$RC.
+run_in_repo() {
+  local d="$1" want="$2" desc="$3"
+  shift 3
+  local sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then
+    bad "$desc: could not resolve the synthetic repository's HEAD"
+    return 1
+  fi
+  f="$d/../gate-$(basename "$d").txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$NEUTRAL_ASSERT" 2421 "$sha" "$f" "$@" 2>&1)
+  RC=$?
+  C_REPO_SHA="$sha"
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+C_ORACLE=$(c_repo oracle oracle) || C_ORACLE=""
+C_DESIGN=$(c_repo design design) || C_DESIGN=""
+C_ARCHIVE=$(c_repo archive archive) || C_ARCHIVE=""
+if [ -n "$C_ORACLE" ] && [ -n "$C_DESIGN" ] && [ -n "$C_ARCHIVE" ]; then
+  ok "AUTO fixtures: three synthetic repositories built (oracle / design / archive-only)"
+else
+  bad "AUTO fixtures: the synthetic repositories could not be built — the AUTO cases would be vacuous"
+fi
+
+# NOT-APPLICABLE IS A MEASUREMENT, NOT AN ASSERTION. This repository carries NO
+# openspec change on its branch, and the script says so AFFIRMATIVELY, naming what
+# it measured — it does not merely stay quiet.
+if [ -n "$C_ORACLE" ] &&
+  run_in_repo "$C_ORACLE" 0 "AUTO on an ORACLE-routed branch -> NOT-APPLICABLE, measured" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT NOT-APPLICABLE"*"no openspec change on branch"*)
+      ok "AUTO/oracle: reported affirmatively, naming what was measured" ;;
+    *) bad "AUTO/oracle: must report NOT-APPLICABLE (no openspec change on branch) (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "AUTO/oracle: the merge proceeds without a C verdict" ;;
+    *) bad "AUTO/oracle: an oracle-driven branch must not need C (got: $OUT)" ;;
+  esac
+fi
+
+# ARCHIVING IS NOT A ROUTING SIGNAL. `openspec/changes/archive/**` is what
+# flow-finalize writes AFTER a merge, so a PR that only archives is not
+# design-routed — and `archive` is present on `origin/main` permanently, which is
+# why the measurement is a DIFF and not a listing.
+if [ -n "$C_ARCHIVE" ] &&
+  run_in_repo "$C_ARCHIVE" 0 "AUTO on an ARCHIVE-only branch -> NOT-APPLICABLE" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"no openspec change on branch"*) ok "AUTO/archive: archive/** is excluded from the routing measure" ;;
+    *) bad "AUTO/archive: openspec/changes/archive/** must not route to C (got: $OUT)" ;;
+  esac
+fi
+
+# A DESIGN-ROUTED BRANCH WITH NO STAGE EVER OPENED. This is the state
+# review-stage.sh names `NOT-RUN (stage never opened)`, and it must REFUSE.
+if [ -n "$C_DESIGN" ] &&
+  run_in_repo "$C_DESIGN" 2 "AUTO on a DESIGN-routed branch with no stage -> REFUSE" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"PREMERGE: NO-C-VERDICT"*) ok "AUTO/design: refused at the merge point" ;;
+    *) bad "AUTO/design: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"routing: REQUIRED"*"openspec/changes/a-design-routed-slug"*)
+      ok "AUTO/design: the routing measurement NAMES the change it found" ;;
+    *) bad "AUTO/design: the refusal must name the measured routing (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"No 'c' stage was ever OPENED"*) ok "AUTO/design: the cause is named (stage never opened)" ;;
+    *) bad "AUTO/design: the refusal must name the cause (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"review-stage.sh open c --issue"*) ok "AUTO/design: the refusal prints the remedy" ;;
+    *) bad "AUTO/design: the refusal must name the remedy (got: $OUT)" ;;
+  esac
+fi
+
+# THE AC1 END-TO-END WIRE: open a stage, spawn nothing, and the merge assert
+# REFUSES on the sentinel. This is the whole issue in one case — the state that
+# was previously indistinguishable from a clean review.
+C_STAGED=""
+if [ -n "$C_DESIGN" ]; then
+  if (cd "$C_DESIGN" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1); then
+    C_STAGED=1
+    ok "AC1 wire: a stage was opened in the synthetic repository (sentinel pre-stamped)"
+  else
+    bad "AC1 wire: review-stage.sh open failed in the synthetic repository — the wire is vacuous"
+  fi
+fi
+if [ -n "$C_STAGED" ] &&
+  run_in_repo "$C_DESIGN" 2 "AC1 wire: a SENTINEL-ONLY stage -> the merge assert REFUSES" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"reports NOT-RUN"*) ok "AC1 wire: reported as NOT-RUN, never as clean and never as empty findings" ;;
+    *) bad "AC1 wire: the sentinel must be reported as NOT-RUN (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"no report written"*) ok "AC1 wire: the NOT-RUN CAUSE travels to the merge point" ;;
+    *) bad "AC1 wire: the cause must travel (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"elapsed="*) ok "AC1 wire: the elapsed time travels with the refusal" ;;
+    *) bad "AC1 wire: the verdict line's elapsed= must reach the operator (got: $OUT)" ;;
+  esac
+fi
+
+# THE POSITIVE CONTROL, END TO END (the spec's "the merge assert proceeds"). An
+# implementation that answered NOT-RUN for every input would pass every case above
+# and FAIL this one — which is the whole reason it exists.
+if [ -n "$C_STAGED" ]; then
+  if (cd "$C_DESIGN" && printf 'result: PASS\n\n## Findings\n\nnone.\n' \
+    >".review-stage/issue-3751/c.md"); then
+    ok "positive control: a real report was written over the sentinel"
+  else
+    bad "positive control: could not write the report — the control is vacuous"
+  fi
+  if run_in_repo "$C_DESIGN" 0 \
+    "POSITIVE CONTROL: a real C report -> the merge assert PROCEEDS (exit 0)" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*"source: AUTO issue=3751"*)
+        ok "positive control: the verdict is PASS and names the stage it read" ;;
+      *) bad "positive control: must report C-VERDICT PASS from AUTO (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK $C_REPO_SHA"*) ok "positive control: the merge point reaches OK" ;;
+      *) bad "positive control: must reach PREMERGE: OK (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# ROUTING THAT CANNOT BE MEASURED IS TREATED AS REQUIRED. The certified sha here
+# is the suite's synthetic $CERTIFIED, which exists in NO repository, so the
+# measurement fails — and a failure to measure must never take the permissive
+# branch (the standing rule against deriving a pass from the absence of a signal).
+if [ -n "$C_ORACLE" ]; then
+  UNM_OUT=$(cd "$C_ORACLE" && PATH="$BIN:$PATH" MOCK_GH_OUT="$CERTIFIED OPEN" MOCK_GH_FAIL=0 \
+    bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" --c-verdict AUTO 2>&1)
+  UNM_RC=$?
+  if [ "$UNM_RC" -ne 2 ]; then
+    bad "AUTO/unmeasured: an unmeasurable routing must REFUSE (exit $UNM_RC, wanted 2)"
+    printf '     output: %s\n' "$UNM_OUT"
+  else
+    ok "AUTO/unmeasured: an unmeasurable routing REFUSES rather than passing"
+    case "$UNM_OUT" in
+      *"routing: UNMEASURED"*"is not present in this checkout"*)
+        ok "AUTO/unmeasured: the cause is named, not collapsed onto NOT-APPLICABLE" ;;
+      *) bad "AUTO/unmeasured: the refusal must name why it could not measure (got: $UNM_OUT)" ;;
+    esac
+    case "$UNM_OUT" in
+      *"NOT-APPLICABLE"*)
+        bad "AUTO/unmeasured: an unmeasured routing was reported as NOT-APPLICABLE — the permissive branch" ;;
+      *) ok "AUTO/unmeasured: UNMEASURED is never rendered as NOT-APPLICABLE" ;;
+    esac
+  fi
+fi
+
+# TWO STAGE RECORDS IN ONE WORKTREE IS AMBIGUOUS. 1:1:1:1 puts exactly one issue
+# in a worktree, so two records mean the caller is not where it thinks it is —
+# the #3616 wrong-run-dir class, one directory over.
+if [ -n "$C_STAGED" ]; then
+  if (cd "$C_DESIGN" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 4242 \
+    --agent spec-auditor >/dev/null 2>&1); then
+    if run_in_repo "$C_DESIGN" 2 "AUTO with TWO c stage records -> refuse as AMBIGUOUS" \
+      --c-verdict AUTO; then
+      case "$OUT" in
+        *"stage records exist"*"AMBIGUOUS"*)
+          ok "AUTO/ambiguous: two stages refuse rather than one being picked" ;;
+        *) bad "AUTO/ambiguous: must refuse naming the ambiguity (got: $OUT)" ;;
+      esac
+    fi
+  else
+    bad "AUTO/ambiguous: could not open a second stage — the case is vacuous"
+  fi
+fi
+
+# --- case floor (#3544) ------------------------------------------------------
+# A span-replacing edit once silently deleted FOUR cases from a suite in this repo
+# that then reported `failed: 0` at 102 instead of 105 — a green tally over a
+# shrunken suite, which is #3751's own subject inside a test file. This suite grew
+# a large section in one edit (Case 44), which is exactly the shape that loses
+# cases quietly.
+#
+# THE FLOOR CARRIES A SMALL MARGIN, AND THAT IS DERIVED, NOT DEFENSIVE. Unlike
+# test_review_stage.sh (bash + git only, no host-conditional assertion, so an
+# EXACT floor is correct there), this suite's Case 41 bound cases branch on the
+# HOST: whether `timeout`/`gtimeout` exist and accept `--kill-after` decides which
+# assertions execute, so an exact floor would red on a legitimately-configured
+# machine — the guard agents learn to waive. The margin is the size of that
+# displacement and nothing more: the ONE host-gated block is the TERM-ignoring
+# escalation case, which `skip -`s where no real `timeout`/`gtimeout` supporting
+# `--kill-after` exists (it DELEGATES to a real runner rather than reimplementing
+# the escalation it tests) and carries at most 6 assertions — measured by counting
+# the `ok`/`bad` calls inside it, not guessed. Every other case runs on every host.
+# 245 executed here minus that 6 is the floor. Adding cases never reds it (it is a
+# lower bound); deleting a section does, which is the point. Move it consciously,
+# in the same diff as the shrink it accounts for.
+ASSERT_FLOOR=239
+EXECUTED=$((PASS + FAIL))
+if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
+  bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
+fi
+
 # --- summary -----------------------------------------------------------------
-printf '\n=== premerge-assert: %d passed, %d failed ===\n' "$PASS" "$FAIL"
+printf '\n=== premerge-assert: %d passed, %d failed (executed %d, floor %d) ===\n' \
+  "$PASS" "$FAIL" "$((PASS + FAIL))" "$ASSERT_FLOOR"
 [ "$FAIL" -eq 0 ]
