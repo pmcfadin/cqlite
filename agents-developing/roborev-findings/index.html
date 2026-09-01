@@ -413,7 +413,86 @@ process that never ran. The block declares <strong><code dir="auto">MODE: rechec
 legitimate but can never be pasted as evidence of a <em>fresh</em> review. Demonstrated end to end: absence
 FAIL → waiver naming that base/head/job → recheck ⇒ <code dir="auto">WAIVED</code> + <code dir="auto">RESULT: PASS</code>, with zero reviewer
 invocations; and a recheck of a <em>different</em> job stays <code dir="auto">STALE</code>.
-<strong>The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged</strong>, so
+<strong>REQUEST A WAIVER ONLY WHEN THE HEAD IS FINAL — pushed, conflict-free, post-gate, and reviewed AT
+THAT SHA (issue #3460).</strong> The binding above is <code dir="auto">base</code> AND <code dir="auto">head</code> AND <code dir="auto">job</code>, each compared for <strong>exact
+equality</strong> and each against a <strong>different</strong> value:</p>
+<ul>
+<li><code dir="auto">head</code> against the run’s own <code dir="auto">HEAD_SHA</code> (<code dir="auto">git rev-parse HEAD</code>, assigned <strong>once</strong> before mode
+dispatch — no path derives head from the job record, <code dir="auto">--recheck-job</code> included);</li>
+<li><code dir="auto">base</code> against <code dir="auto">RANGE_BASE_SHA</code>, which is the <strong>merge-base and <em>not</em> the base ref’s tip</strong> (#3392) —
+copy it from the block’s <code dir="auto">assert-base:</code> line, <strong>never</strong> from <code dir="auto">base:</code>;</li>
+<li><code dir="auto">job</code> against this run’s job id.</li>
+</ul>
+<p>So <strong>any commit landing after the request makes the grant unapplicable</strong> — the run reports
+<code dir="auto">waiver: STALE</code> and the FAIL stands. The order is therefore:</p>
+<ol>
+<li><strong>push</strong> every local commit;</li>
+<li><strong>rebase or resolve</strong> until the PR is no longer <code dir="auto">CONFLICTING</code>;</li>
+<li><strong>gate of record</strong>;</li>
+<li>a <strong>roborev confirmation pass on that final sha</strong>;</li>
+<li><em>then</em> request the waiver, naming <strong>that</strong> round’s <code dir="auto">base</code>/<code dir="auto">head</code>/<code dir="auto">job</code>.</li>
+</ol>
+<p><strong><code dir="auto">--recheck-job</code> is not an escape.</strong> #3392 stabilised the <em>base</em> comparison against a moving <code dir="auto">main</code>,
+and nothing can make a <em>head</em> binding survive a genuine content change — that is what the binding is
+for.</p>
+<p><strong>The confirmation pass is the step that gets skipped, and skipping it has its own failure shape.</strong>
+#3367 found its gated sha had never been reviewed at all: round 25 reviewed <code dir="auto">6f5fc2b7c</code> and two
+commits landed after it; #2605 hit the same shape. The final sha needs its <strong>own</strong> review round, and
+<em>that</em> round’s job id is the one the waiver must name.</p>
+<p><strong>The trap catches a lane doing the careful thing, which is why it is written down rather than left
+to judgement.</strong> The absence diagnostic prints <code dir="auto">base … head … job …</code>, and those values are <em>correct at
+the moment it prints them</em>. <strong>The failing block itself says nothing about a push invalidating them</strong> —
+only <code dir="auto">--help</code> does (“a push, a different base or a re-run each need a fresh one”), which is not where
+a lane reading a FAIL is looking. So copying the verified triple straight into a request is
+simultaneously the obvious action and the wrong one whenever anything is still going to move the
+head. Measured cost: <strong>three independent lanes on one day</strong> (2026-08-28) — #1705/PR #3382 (grant
+received, then a conflict with just-merged #1701 had to be resolved), #1699/PR #3403 (the triple was
+exact and the PR was <code dir="auto">CONFLICTING</code> at the same moment), #3248/PR #3455 (fixes committed but unpushed,
+<strong>and</strong> <code dir="auto">CONFLICTING</code>) — each spending an authorization on code that would not merge, and asking the
+authorizer to judge a review that no longer described the diff.</p>
+<p><strong>Do not loosen the binding to make this easier.</strong> All three instances are the binding <em>working</em>, and
+a waiver riding to a later review is the hole #3312 exists to close.</p>
+<p><strong>Two of the four conditions are mechanized and two are not — know which.</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>condition</th><th>mechanized?</th><th>what enforces it</th></tr></thead><tbody><tr><td>pushed</td><td><strong>yes</strong></td><td><code dir="auto">push-assert</code> fails the round <em>before any review is enqueued</em> — <code dir="auto">FAIL (unpushed commits)</code> when the remote branch exists and local is ahead, <code dir="auto">FAIL (branch absent on remote &#x3C;remote>)</code> when it was never pushed</td></tr><tr><td>reviewed at that sha</td><td><strong>yes</strong></td><td><code dir="auto">sha-assert</code> fails when the record’s range head ≠ local <code dir="auto">HEAD</code>; the head binding catches it again at waiver time</td></tr><tr><td>conflict-free</td><td><strong>no</strong></td><td><code dir="auto">mergeable</code> / <code dir="auto">CONFLICTING</code> appears <strong>nowhere</strong> in the wrapper, the waiver scanner or <code dir="auto">premerge-assert.sh</code></td></tr><tr><td>post-gate</td><td><strong>no</strong></td><td>nothing correlates the reviewed sha with a gate of record</td></tr></tbody></table>
+<p>So a pushed, reviewed, still-<code dir="auto">CONFLICTING</code> head passes every check and yields a triple that dies on
+the rebase. Mechanizing those two, and splitting the staleness <strong>verdict token</strong> (<code dir="auto">STALE</code> for all
+three causes today, though its <em>detail</em> already names the diverged field and both values) into
+<code dir="auto">head moved</code> / <code dir="auto">base moved</code> / <code dir="auto">job mismatch</code>, is <strong>issue #3827</strong> — whose demonstration is <em>circular
+rather than impossible</em>: every sanctioned invocation is the branch’s own
+<code dir="auto">scripts/flow/roborev-review.sh</code>, so the round that reviews a wrapper change runs the <strong>changed</strong>
+wrapper (the property #3544 records for <code dir="auto">agent-gate.sh</code> — not the read-from-root self-certification
+bar of #3229).</p>
+<p><strong>The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged</strong>, so
 field order and value boundaries are enforced and <code dir="auto">reason=TODO </code> / whitespace-only reasons are refused
 like their untrimmed forms — per-field extraction had enforced neither.
 <strong>AND THREE LAYERS STOP THE ARTIFACT BECOMING THE CREDENTIAL — the sharpest instance of this issue’s
