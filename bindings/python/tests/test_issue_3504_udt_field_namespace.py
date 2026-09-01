@@ -237,10 +237,10 @@ def test_a_null_colliding_field_does_not_null_the_type_name(rows):
 def test_projected_map_key_holds_exactly_one_type_entry(rows):
     """SCENARIO: a field named `_type` no longer yields a duplicate pair.
 
-    The subject is `fcm` — `frozen<map<frozen<collide>, int>>` — and NOT the
-    non-frozen `cm`. Measured on this fixture: a non-frozen map is multicell, so
-    its key lives in the cell path, which decodes to `Value::Blob` for a frozen
-    UDT and never reaches the projection at all (pinned below).
+    The subject is `fcm` — `frozen<map<frozen<collide>, int>>`. Its multicell
+    sibling `cm` reaches the same projection since #3612 (pinned below, asserted
+    against this very case); before that fix a non-frozen map's cell-path key
+    decoded to `Value::Blob` and never reached the projection at all.
 
     On `main` the projection flattened the UDT into a `frozenset` holding a pair
     for `_type` (the injected type name), a pair for `_keyspace`, and then one per
@@ -321,31 +321,50 @@ def test_frozen_set_of_udt_elements_keep_their_identity(rows):
     }
 
 
-def test_non_frozen_map_udt_key_never_reaches_the_projection(rows):
-    """RECORDED GAP (decode-level, out of #3504's scope): `cm`/`tm` keys are blobs.
+def test_non_frozen_map_udt_key_projects_like_the_frozen_control(rows):
+    """FIXED (#3612): a MULTICELL map's UDT key now reaches the projection.
 
-    A NON-frozen `map<frozen<udt>, int>` is multicell, so its key lives in the
-    CELL PATH, and `parse_cell_path_key`
-    (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs`)
-    matches a closed set of PRIMITIVE cell-path types and falls back to
-    `Value::Blob` for a frozen UDT. So such a key decodes to `bytes` and never
-    reaches the UDT projection.
+    This test used to pin the DEFECT. A NON-frozen `map<frozen<udt>, int>` is
+    multicell, so its key lives in the CELL PATH, and `parse_cell_path_key`
+    (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs`)
+    used to match a closed set of PRIMITIVE cell-path types and fall back to
+    `Value::Blob` for a frozen UDT — so `cm`/`tm` keys arrived as `bytes` and
+    never reached the UDT projection at all. It now delegates to the structural
+    decoder, so the key is a `cqlite.Udt` exactly as the FROZEN spelling's is.
 
-    Pinned here as characterization, not as a desirable shape: it is the spelling
-    a user would most naturally write, and without this assertion a future reader
-    would reasonably assume `cm` covers site 4 — it does not, which is why the
-    fixture also carries the frozen `fcm`/`ftm`. Details:
-    `test-data/fixtures/issue_3504/README.md`.
+    Asserted AGAINST the frozen control rather than against literals: `cm` and
+    `fcm` are the two legal spellings of the same `map<frozen<collide>, int>` and
+    the fixture stores the same key in both, so the strongest statement is that
+    they project EQUAL. Mirrors `test_projected_map_key_holds_exactly_one_type_entry`
+    (the `fcm` case) so both spellings visibly carry one contract.
     """
-    for column in ("cm", "tm"):
+    for column, frozen_control, expected_type in (
+        ("cm", "fcm", "collide"),
+        ("tm", "ftm", "collide_twin"),
+    ):
         cell = rows[1][column]
         assert isinstance(cell, dict) and len(cell) == 1, column
         key = next(iter(cell))
-        assert isinstance(key, bytes), (
-            f"{column}: expected the documented Blob cell-path key, "
-            f"got {type(key).__name__} — if this now decodes to a UDT the "
-            "recorded gap has closed and this test should become a positive assertion"
+        assert isinstance(key, cqlite.Udt), (
+            f"{column}: a multicell map's UDT key must project to cqlite.Udt, "
+            f"got {type(key).__name__} (issue #3612)"
         )
+        assert key.type_name == expected_type
+        assert key.keyspace == "test_udt_collision"
+        assert dict(key.fields) == {
+            "_type": "key-type-marker",
+            "_keyspace": "key-keyspace-marker",
+            "__proto__": "key-proto-marker",
+            "real_field": 100,
+        }
+        # The parity statement: the multicell and frozen spellings of one map
+        # present the same key, so a caller cannot tell them apart.
+        control_key = next(iter(rows[1][frozen_control]))
+        assert key == control_key, (
+            f"{column} vs {frozen_control}: the two spellings of one "
+            "map<frozen<udt>, int> must project the SAME key"
+        )
+        assert hash(key) == hash(control_key)
 
 
 # =============================================================================

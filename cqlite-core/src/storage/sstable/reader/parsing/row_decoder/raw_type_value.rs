@@ -737,23 +737,17 @@ impl V5CompressedLegacyParser {
                         // Empty field
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
                         Some(Self::create_empty_value_for_type(&field_def.field_type))
-                    } else if field_len < 0 {
-                        // Validation: reject other negative values
-                        return Err(Error::corruption(format!(
-                            "Frozen UDT field '{}': invalid negative field length {}",
-                            field_def.name, field_len
-                        )));
                     } else {
-                        // Field with data
-                        let field_len = field_len as usize;
-                        if current_offset + field_len > udt_data.len() {
-                            return Err(Error::corruption(format!(
-                                "Frozen UDT field '{}': need {} bytes but only {} available",
-                                field_def.name,
-                                field_len,
-                                udt_data.len() - current_offset
-                            )));
-                        }
+                        // Field with data. Routed through the shared guard (issue
+                        // #3612, R3-F1/N1) so this loop cannot drift from the other
+                        // three: it owns BOTH the negative rejection and the
+                        // `checked_add` bounds test.
+                        let field_len = Self::checked_component_len(
+                            field_len,
+                            &field_def.name,
+                            current_offset,
+                            udt_data.len(),
+                        )?;
 
                         let field_data = &udt_data[current_offset..current_offset + field_len];
                         current_offset += field_len;
@@ -971,15 +965,12 @@ impl V5CompressedLegacyParser {
                                     Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
                                 Some(value)
                             } else {
-                                let field_len = field_len as usize;
-                                if current_offset + field_len > udt_data.len() {
-                                    return Err(Error::corruption(format!(
-                                        "Frozen UDT field '{}' extends beyond data (need {}, have {})",
-                                        field_def.name,
-                                        field_len,
-                                        udt_data.len() - current_offset
-                                    )));
-                                }
+                                let field_len = Self::checked_component_len(
+                                    field_len,
+                                    &field_def.name,
+                                    current_offset,
+                                    udt_data.len(),
+                                )?;
 
                                 let field_data =
                                     &udt_data[current_offset..current_offset + field_len];

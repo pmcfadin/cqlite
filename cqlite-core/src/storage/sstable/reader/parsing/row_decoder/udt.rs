@@ -495,24 +495,16 @@ impl V5CompressedLegacyParser {
                     field_def.name
                 );
                 Some(Self::create_empty_value_for_type(&field_def.field_type))
-            } else if field_len < 0 {
-                // Validation: reject other negative values
-                return Err(Error::corruption(format!(
-                    "UDT field '{}': invalid negative field length {}",
-                    field_def.name, field_len
-                )));
             } else {
-                // Field with data
-                let field_len = field_len as usize;
-                if current_offset + field_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "UDT field '{}': need {} bytes but only {} available at offset {}",
-                        field_def.name,
-                        field_len,
-                        data.len() - current_offset,
-                        current_offset
-                    )));
-                }
+                // Field with data. `checked_component_len` owns BOTH the negative
+                // rejection and the bounds test, so no loop can have one without
+                // the other (issue #3612, R3-F1).
+                let field_len = Self::checked_component_len(
+                    field_len,
+                    &field_def.name,
+                    current_offset,
+                    data.len(),
+                )?;
 
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
@@ -979,13 +971,12 @@ impl V5CompressedLegacyParser {
                 let value = Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
                 Some(value)
             } else {
-                let field_len = field_len as usize;
-                if current_offset + field_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Nested UDT field '{}' extends beyond data",
-                        field_def.name
-                    )));
-                }
+                let field_len = Self::checked_component_len(
+                    field_len,
+                    &field_def.name,
+                    current_offset,
+                    data.len(),
+                )?;
 
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
@@ -1143,13 +1134,8 @@ impl V5CompressedLegacyParser {
                 let value = Self::parse_simple_udt_field_value(&[], field_type)?;
                 Some(value)
             } else {
-                let field_len = field_len as usize;
-                if current_offset + field_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Inline UDT field '{}' extends beyond data",
-                        field_name
-                    )));
-                }
+                let field_len =
+                    Self::checked_component_len(field_len, field_name, current_offset, data.len())?;
 
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;

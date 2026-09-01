@@ -38,6 +38,16 @@ directory is checkout-relative, so no env var can hide it. Precedent:
 | **CLI `--format json`** (`cqlite-cli/src/output/json.rs`) | **#3629** | `cqlite-cli/tests/issue_3629_cli_udt_json_namespace.rs` |
 | **`cqlite-core` `ToJson for Value`** (`src/query/result.rs`) | **#3629** | `cqlite-core/tests/issue_3629_core_tojson_udt_namespace.rs` |
 
+**#3612 changed WHICH COLUMNS reach three of these four sites, without changing
+the sites themselves.** Before it, only the FROZEN columns (`fcm`/`ftm`/`fs`)
+delivered a structured `Value::Udt`; the multicell `cm`/`tm` keys arrived as an
+opaque `Value::Blob` from the cell-path fallback and reached no UDT renderer at
+all. They now decode structurally, so `cm`/`tm` additionally exercise the two
+bindings and the CLI's `--format json` — a second, MULTICELL route into the same
+renderers. `cqlite-core`'s `ToJson` is the exception and stays a non-subject for
+these columns, because its `Map` arm `Display`-stringifies every key regardless of
+type.
+
 The two #3629 sites were an independent SECOND COPY of the same defect and are now
 one shared rule, `cqlite-core/src/util/udt_json.rs::udt_to_json_object` — declared
 fields and nothing else, generic over the field-VALUE renderer because the two
@@ -131,17 +141,27 @@ FIELD is `None`.
 
 ### Why both a non-frozen and a frozen map column
 
-Measured against the generated fixture: a **non-frozen** `map<frozen<udt>,int>`
-is multicell, so its key lives in the CELL PATH, and
-`parse_cell_path_key` (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs`)
-matches a closed set of **primitive** cell-path types and falls back to
-`Value::Blob` for a frozen UDT. `cm`/`tm` therefore decode to
-`Map([(Blob(<serialized udt bytes>), int)])` and never reach a `Value::Udt`.
-A **frozen** map is a single value cell decoded by `parse_map_with_types`, which
-resolves the key type through the `UdtRegistry` — so `fcm`/`ftm`/`fs` are the
-columns that actually exercise the projection. Both shapes are committed: the
-frozen ones as the test subject, the non-frozen ones because they are the natural
-user spelling and they document the gap.
+A **non-frozen** `map<frozen<udt>,int>` is multicell, so its key lives in the
+CELL PATH; a **frozen** map is a single value cell whose key type resolves
+through the on-disk marshal element type / the `UdtRegistry`. The two spellings
+took different decode paths, and only one of them worked.
+
+**Historically** (and this is why both shapes are committed):
+`parse_cell_path_key` matched a closed set of **primitive** cell-path types and
+fell back to `Value::Blob` for a frozen UDT, so `cm`/`tm` decoded to
+`Map([(Blob(<serialized udt bytes>), int)])` and never reached a `Value::Udt`,
+while `fcm`/`ftm`/`fs` did. #3504's projection work therefore had to use the
+frozen columns as its subject, and the non-frozen ones documented the gap.
+
+**FIXED by #3612.** The cell-path key site (now
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs`)
+delegates to the structural decoder `parse_value_from_raw_bytes`, so `cm`/`tm`
+decode to `Map([(Udt{…}, int)])` — the SAME key value the frozen `fcm`/`ftm`
+produce, which is what
+`cqlite-core/tests/issue_3612_multicell_map_composite_key.rs` asserts against
+this fixture's `sstabledump` golden. So all four map columns now exercise the
+projection, and the pair `cm`/`fcm` is a standing parity control: a regression
+in either decode path makes the two disagree.
 
 ## Table 2: `udt_hashable_shapes` — the projection totality boundary (R1-2)
 

@@ -1,4 +1,18 @@
+use super::marshal_element::MarshalCollectionElements;
 use super::*;
+
+// Issue #3612: the cell-path KEY decoder, split out of this file (campsite
+// #1116). A MULTICELL map's key lives in the cell path and used to be decoded
+// from a narrow allowlist here, falling back to an opaque `Value::Blob` for a
+// composite key and ~10 scalar families. Its only caller is the map branch
+// below, so it nests here rather than beside the whole-value decoders.
+mod cell_path_key;
+#[cfg(test)]
+mod cell_path_key_tests;
+// Issue #3612 (R3-F1): the guarded component-length conversion, shared with the
+// UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
+// why it lives here).
+mod component_len;
 
 /// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
 /// element's expiry, as input to [`ExpiryHomogeneity::fold`].
@@ -648,9 +662,60 @@ impl V5CompressedLegacyParser {
         } else if dt.starts_with("map<")
             || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
         {
-            // Parse map entries
-            let (key_type, value_type) = self.extract_map_types(&column.data_type)?;
+            // Parse map entries.
+            //
+            // KEY TYPE SELECTION — prefer the AUTHORITATIVE MARSHAL spelling, the
+            // same way the FROZEN map reader does (`cell_value_complex`, issue
+            // #1340). This is a parity requirement, not a refinement (issue #3612,
+            // R7): decoding the multicell key from the SCHEMA short form while the
+            // frozen reader decodes it from the marshal form makes the two spellings
+            // of one map produce `Value` keys that compare and hash DIFFERENTLY on
+            // the public Rust surface.
+            //
+            // MEASURED on the committed `test_nested_udt_keys` fixture, from
+            // Cassandra's own `Statistics.db`: the two columns' marshal key types are
+            // IDENTICAL — `m_tuple_udt` is
+            // `MapType(TupleType(UserType(..),Int32Type),Int32Type)` and
+            // `f_map_tuple_udt` is that same `MapType(..)` under one outer
+            // `FrozenType`, which `extract_marshal_collection_elements` strips. The
+            // SCHEMA form is what diverges: `frozen<tuple<frozen<key_part>, int>>`
+            // carries `frozen` at BOTH levels, so decoding from it produced
+            // `Frozen(Tuple([Frozen(Udt), Int]))` against the frozen reader's
+            // `Tuple([Udt, Int])`. Starting both readers from the same string is
+            // therefore the ROOT-CAUSE fix; peeling wrappers afterwards could not
+            // reach the INNER one.
+            //
+            // Precedence (marshal over schema) is Cassandra's own, not ours: see
+            // `map_key_type_for_decode`'s doc, which carries the `SerializationHeader
+            // .getType` citation and the scope qualifications. It is the one home for
+            // this rule, so the justification lives there too.
+            let (schema_key_type, schema_value_type) = self.extract_map_types(&column.data_type)?;
+            let marshal_map_elements = Self::extract_marshal_collection_elements(complex_type);
+            let marshal_key = match &marshal_map_elements {
+                Some(MarshalCollectionElements::Map(k, _v)) => Some(*k),
+                _ => None,
+            };
+            // ONE shared rule, `map_key_type_for_decode` — see its doc. It picks the
+            // same string the FROZEN map reader receives, so both decode identically
+            // and key parity holds by construction rather than by a value-level
+            // wrapper fixup on this side (roborev round 8, finding 1).
+            let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key_type);
+            // VALUE type selection stays on the SCHEMA form, exactly as before R7. R7's
+            // marshal preference was widened to the value half too, but MEASURED over the
+            // committed corpus it was a strict no-op -- 5 multicell `map<..>` columns, 3
+            // UDT-bearing on the KEY and 0 on the VALUE -- so it shipped a behaviour change
+            // no lane executed. Removing it restores the pre-R7 status quo rather than
+            // creating an asymmetry (value selection was on the schema form all along);
+            // the key half's marshal preference is justified separately in
+            // `map_key_type_for_decode`'s doc. #3612 is about KEYS.
+            let value_type = schema_value_type;
             let mut entries = Vec::with_capacity(prealloc_cap);
+            // Issue #3612 (roborev round 8, finding 2): count the entries whose key
+            // could not be modelled, and report ONCE below. The decoder used to
+            // `warn!` per entry, which on a large scan is `entries x rows` identical
+            // lines — a log flood that can exhaust storage and that destroys the
+            // only number an operator needs, namely how many entries were affected.
+            let mut opaque_key_entries: usize = 0;
 
             for i in 0..cell_count_usize {
                 let cell =
@@ -714,7 +779,17 @@ impl V5CompressedLegacyParser {
                         cell.path_bytes.len()
                     );
                     // For cell path keys, parse directly without expecting length prefixes
-                    Some(self.parse_cell_path_key(&cell.path_bytes, &key_type, &column.name)?)
+                    let mut opaque = false;
+                    let decoded = self.parse_cell_path_key_reporting(
+                        &cell.path_bytes,
+                        &key_type,
+                        &column.name,
+                        &mut opaque,
+                    )?;
+                    if opaque {
+                        opaque_key_entries += 1;
+                    }
+                    Some(decoded)
                 } else {
                     None
                 };
@@ -740,6 +815,22 @@ impl V5CompressedLegacyParser {
                         entries.push((key_value, Value::Null));
                     }
                 }
+            }
+
+            // ONE line per column per row, carrying the COUNT. Content unchanged
+            // from the per-entry version it replaces; only its cardinality changed.
+            if opaque_key_entries > 0 {
+                tracing::warn!(
+                    target: "cqlite::decode",
+                    column = %column.name,
+                    declared_type = %key_type,
+                    affected_entries = opaque_key_entries,
+                    total_entries = cell_count_usize,
+                    "multicell map key type is not one this reader can decode; those \
+                     keys are surfaced as opaque bytes (issue #3612). Check that the \
+                     schema (or the on-disk SerializationHeader) resolves it, e.g. \
+                     that a UDT named here is registered."
+                );
             }
 
             Value::Map(entries)
@@ -1504,112 +1595,6 @@ impl V5CompressedLegacyParser {
         }
 
         Ok((key_type, value_type))
-    }
-
-    /// Parse a cell path key (for map keys stored in cell paths).
-    /// Cell path keys are stored as raw bytes WITHOUT length prefixes.
-    fn parse_cell_path_key(&self, data: &[u8], type_str: &str, column_name: &str) -> Result<Value> {
-        let normalized_type = type_str.to_lowercase();
-
-        match normalized_type.as_str() {
-            // Text types: raw UTF-8 bytes (no length prefix)
-            "org.apache.cassandra.db.marshal.utf8type"
-            | "org.apache.cassandra.db.marshal.asciitype"
-            | "org.apache.cassandra.db.marshal.varchartype"
-            | "text"
-            | "varchar"
-            | "ascii" => {
-                std::str::from_utf8(data)
-                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in map key: {}", e)))?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-
-            // UUID types: 16 bytes
-            "org.apache.cassandra.db.marshal.uuidtype"
-            | "org.apache.cassandra.db.marshal.timeuuidtype"
-            | "uuid"
-            | "timeuuid" => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "Map key UUID requires 16 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
-            }
-
-            // Int types: 4 bytes big-endian
-            "org.apache.cassandra.db.marshal.int32type" | "int" => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Map key int requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-
-            // BigInt types: 8 bytes big-endian
-            "org.apache.cassandra.db.marshal.longtype" | "bigint" | "counter" => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Map key bigint requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-
-            // Date types: 4 bytes (days since epoch with Integer.MIN_VALUE offset)
-            "org.apache.cassandra.db.marshal.simpledatetype" | "date" => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Map key date requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                // Cassandra DATE: 4-byte unsigned int with Integer.MIN_VALUE offset
-                let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
-                Ok(Value::Date(days_since_epoch))
-            }
-
-            // Timestamp types: 8 bytes (milliseconds since epoch)
-            "org.apache.cassandra.db.marshal.timestamptype" | "timestamp" => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Map key timestamp requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
-
-            // Fallback: return as blob
-            _ => {
-                tracing::debug!(
-                    "Map key type '{}' for column '{}' parsed as blob ({} bytes)",
-                    type_str,
-                    column_name,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-        }
     }
 }
 
