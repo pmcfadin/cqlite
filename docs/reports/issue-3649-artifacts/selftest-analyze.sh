@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=164
+CASE_FLOOR=178
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -538,7 +538,7 @@ fi
 NEEDLES=("PA""SS" "RE""SULT:" "AGENT-""GATE" "ROB""OREV" "PRE""MERGE")
 structural_bad=0
 for target in "$ANALYZER" "$DRIVER" "$HERE/ab_common.py" "$HERE/ab_input.py" \
-              "$HERE/ab_stats.py"; do
+              "$HERE/ab_stats.py" "$HERE/ab_driver_support.py"; do
   [ -f "$target" ] || continue
   for needle in "${NEEDLES[@]}"; do
     if grep -q -- "$needle" "$target"; then
@@ -561,6 +561,19 @@ if [ -f "$DRIVER" ] && bash -n "$DRIVER"; then
   ok "ab-throughput.sh parses"
 else
   bad "ab-throughput.sh is absent or does not parse"
+fi
+if python3 -m py_compile "$HERE/ab_driver_support.py" 2>/dev/null; then
+  ok "ab_driver_support.py compiles"
+else
+  bad "ab_driver_support.py does not compile"
+fi
+# A comment asserting a mechanism that does not exist is the decay this repo
+# lints for: the driver's helpers are a FILE now, so nothing may claim they are
+# read out of the script by a sed extraction.
+if grep -q 'sed' "$DRIVER" && grep -qi 'extract' "$DRIVER"; then
+  bad "the driver still claims its helpers are extracted by sed"
+else
+  ok "the driver makes no claim about a sed extraction of its helpers"
 fi
 
 echo
@@ -1377,8 +1390,8 @@ else
   run_driver --no-such-flag
   check_driver "an unrecognised driver flag exits 3" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 2
-  check_driver "the driver refuses fewer than 3 replicates" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 4
+  check_driver "the driver refuses fewer than 5 replicates" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json"
   check_driver "the driver refuses to run without a pinned admission ceiling" 3
@@ -1424,6 +1437,88 @@ else
     --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --repo "$HERE" \
     --base-ref no-such-rev-3649 --head-ref HEAD
   check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable
+
+  # P1-3: every ramp element, through the same validator the helper exposes.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,abc
+  check_driver "the driver refuses a ramp with a non-numeric element" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 2
+  check_driver "the driver refuses a ramp that maps to no analyzer section" 3
+
+  # P0-3: --rows-declared reached int() unvalidated.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --rows-declared 3,999,890
+  check_driver "the driver refuses a --rows-declared with separators" 3
+
+  # P1-6: an ordinary operator mistake must not leak an unanchored line.
+  mkdir -p "$TMP/notarepo"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --repo "$TMP/notarepo"
+  check_driver "--repo pointing at a directory that is not a repository" 3
+  if grep -qi 'fatal:' "$TMP/err.txt"; then
+    bad "a raw git 'fatal:' line leaked past the anchor"
+  else
+    ok "a non-repository --repo is reported anchored, with no raw git output"
+  fi
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --repo "$TMP/no-such-dir-3649"
+  check_driver "--repo pointing at a directory that does not exist" 3
+  if [ -s "$TMP/err.txt" ]; then
+    ok "a missing --repo produces a diagnostic, not a silent exit 1"
+  else
+    bad "a missing --repo produced no output at all"
+  fi
+
+  # P1-5: two sessions in one work directory. The second must be refused BEFORE
+  # it can truncate the first's ledger.
+  mkdir -p "$TMP/w-locked/results" "$TMP/w-locked/.session-lock"
+  printf '{"arm":"base","replicate":1,"file":"base-r01.jsonl"}\n' \
+    > "$TMP/w-locked/results/runs.jsonl"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --min-sstables 1
+  check_driver "a second session in a work directory already in use" 2 work-dir-busy
+  if [ -s "$TMP/w-locked/results/runs.jsonl" ]; then
+    ok "the refused session did not truncate the running session's ledger"
+  else
+    bad "a refused session destroyed the other session's run ledger"
+  fi
+
+  # P1-7: a worktree at the right commit but carrying uncommitted edits builds
+  # code the manifest does not describe.
+  SCRATCH="$TMP/scratchrepo"
+  mkdir -p "$SCRATCH"
+  (
+    cd "$SCRATCH"
+    git init -q .
+    git config user.email selftest@example.invalid
+    git config user.name selftest
+    printf 'one\n' > f.txt && git add f.txt && git commit -qm one
+    printf 'two\n' > f.txt && git commit -qam two
+  ) > /dev/null 2>&1
+  mkdir -p "$TMP/w-dirty"
+  git -C "$SCRATCH" worktree add -q --detach "$TMP/w-dirty/wt-base" HEAD > /dev/null 2>&1
+  printf 'uncommitted\n' >> "$TMP/w-dirty/wt-base/f.txt"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-dirty" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1
+  check_driver "a reused worktree at the right commit but not clean" 2 worktree-dirty
+
+  # P1-6: `die` used to claim a manifest unconditionally. The claim must be true.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-claim"
+  if grep -q '^AB-3649: manifest .*records the runs that did complete$' "$TMP/out.txt" \
+     && [ -f "$TMP/w-claim/results/manifest.json" ]; then
+    ok "when an abort claims a manifest, the manifest is actually there"
+  else
+    bad "an abort's manifest claim does not match what is on disk"
+  fi
+  if grep -q '^AB-3649: manifest ' "$TMP/out.txt" \
+     && ! grep -q 'NOT WRITTEN' "$TMP/out.txt"; then
+    ok "the claim and the file agree on this path"
+  else
+    bad "the manifest claim is inconsistent with itself"
+  fi
 
   # A refusal must still leave a manifest, so the analyzer sees the shortfall as
   # a fact rather than as an absence.
