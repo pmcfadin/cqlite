@@ -2041,6 +2041,28 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   the same input answered differently by subcommand. Both were UNTESTED because the axis matrix
   named `write verify show` by hand, so it is now DERIVED from the dispatch table and a
   subcommand with no declared arguments REDS rather than joining uncovered.
+  (11) **A `-L`-only refusal is a type rule with one row: the class is EVERY non-regular type,
+  and the FIFO is the one that HANGS.** Clause (10) taught the lock sidecar to refuse a symlink
+  and left FIFO, socket, device and directory accepted — the third consecutive round whose fix
+  reached one member of its own class. `: >>"$lock"` on a **FIFO BLOCKS INDEFINITELY** waiting
+  for a reader (measured: `timeout 10` ⇒ rc 124, **no verdict line at all**), which is the worst
+  available breach of contract (c) — not a wrong verdict but NO verdict, forever, in a lane
+  nobody is watching; a device would serialize NOTHING while appearing to succeed. So the rule
+  is stated over the TYPE — only `absent` or `regular` may be opened, everything else including
+  a type the probe cannot NAME is one refusal reporting what the entry actually is — and the
+  symlink check is FOLDED IN rather than kept beside it, because two checks are two messages to
+  keep true. The same sweep covers `--body-file`, where `-r` is TRUE for a FIFO and the `cat`
+  then blocks (and `/dev/zero` streams without end into the snapshot: a filled disk, not a
+  hang), but there the question is what the path **RESOLVES to**, since a symlink to a real
+  notes file is the caller's own ordinary artifact — **the same probe answering two different
+  questions would be a defect either way.** The probes are pure `test` builtins: they STAT and
+  never OPEN, so probing cannot itself block. Where a probe CANNOT close the gap it is replaced
+  rather than added to: the `mv`-diagnostic file was a redirection into the derived name
+  `$tmp.err`, and a stat before a redirect only describes a file that no longer has to be the
+  one opened — so it is now `mktemp`, which creates with `O_EXCL` and therefore cannot open a
+  pre-planted entry of any type. **And a test whose subject is a HANG must be BOUNDED and must
+  assert rc != 124 explicitly**: unbounded, a regression does not fail the suite, it hangs it,
+  and the thing that notices is the gate's stall watchdog minutes later.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

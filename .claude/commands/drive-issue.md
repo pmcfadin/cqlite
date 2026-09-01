@@ -91,9 +91,14 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
     the turn. Do not "fix" it by rewriting the marker.
   - `LIVENESS-UNKNOWN` (7) → liveness could not be measured. STOP the same way and say so in your
     report; never adopt on unproven information.
-  - `ERROR` (1) → an I/O or internal failure: an unreadable marker, a SYMLINK at the marker or
-    lock path (dangling or not — a link is a deliberate artifact, so it is refused rather than
-    followed or replaced), no `flock` on this host, the
+  - `ERROR` (1) → an I/O or internal failure: an unreadable marker, a NON-REGULAR entry at the
+    marker or lock path — a symlink (dangling or not), FIFO, socket, device or directory: the
+    detail names which one, and the rule is over the TYPE rather than a list, because this
+    script owns those paths and never follows, opens or replaces what it did not create. (A
+    FIFO is the reason it is fatal rather than tidy: opening one BLOCKS FOREVER, which is a
+    verdict-less stall in an unattended lane.) A non-regular `--body-file` is a `USAGE` (64)
+    refusal for the same reason, asking what the path RESOLVES to, so a symlink to a real
+    notes file still works. Also: no `flock` on this host, the
     shared liveness library missing, a helper the writer depends on failing, or an IDENTITY AXIS
     THAT COULD NOT BE MEASURED — the detail names it (`axis=machine`: `hostname -s` failed and
     `CLAIM_MACHINE` is unset, so the stamp would record the `unspecified` placeholder and alias
