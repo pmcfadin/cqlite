@@ -429,7 +429,7 @@ has "case4 (#3402): the SUMMARY row gives the COUNT of grown files" \
 # What it must carry instead is a pointer to where the names DO live, plus — asserted from
 # the other side — proof that no path leaked onto it.
 has "case4 (#3402): the SUMMARY row POINTS AT the component log for the file list" \
-    "$sumrow4" "file-size.log"
+    "$sumrow4" "see file-size.log under logs:"
 lacks "case4 (#3402): the row renders NO repository path — the whole mangling family is unreachable" \
     "$sumrow4" "cqlite-core/src/big.rs"
 has "case4 (#3402): the row keeps its feature-matrix annotation ahead of the detail" \
@@ -468,6 +468,44 @@ has "case4 (#3402): the block's RESULT is the passing PARTIAL, not FAIL" \
 # actually specified. The names live in the log (#3401's whole subject) and, for a PR
 # reviewer, in the diff itself — the grown files are the files the PR changed.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Case 4h (#3402, roborev job 25) — the detail must carry NOTHING from the environment.
+# `$LOG_DIR` is `mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX"`, so interpolating any path
+# under it put CALLER-CONTROLLED text into a field whose contract says gate-authored — and a
+# TMPDIR containing the completion probe's verdict token then tripped the withholding guard,
+# taking the override name and the growth count with it. Exactly the disclosure this issue
+# exists to produce, destroyed by an environment variable.
+#
+# The fixture IS the hostile TMPDIR: a directory literally named `RESULT: PASS`, which is a
+# legal directory name and reaches LOG_DIR by the ordinary route. The needles assert the
+# disclosure SURVIVES it, and that no part of the path rode onto the row.
+# ---------------------------------------------------------------------------
+hostile_tmp="$tmp/RESULT: PASS"
+if ! mkdir -p "$hostile_tmp" 2>/dev/null; then
+  bad "case4h: could not create the hostile TMPDIR fixture — the environment route is UNMEASURED"
+  bad "case4h: (env-var needle not reached)"
+  bad "case4h: (count needle not reached)"
+  bad "case4h: (forged-verdict needle not reached)"
+else
+  mkrepo hostiletmp cqlite-core/src/big.rs 900 950 main; r4h="$REPO"
+  out4h="$tmp/hostiletmp.out"
+  run_only_file_size "$r4h" "$out4h" CQLITE_ALLOW_FILE_GROWTH=1 TMPDIR="$hostile_tmp"
+  sumrow4h="$tmp/hostiletmp.sumrow"
+  fs_summary_row "$r4h/.sum" "$sumrow4h" ||
+    bad "case4h (#3402): the run emitted no usable file-size row — the TMPDIR asserts are UNMEASURED"
+  has "case4h (#3402): a hostile TMPDIR does NOT cost the override name" \
+      "$sumrow4h" "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
+  has "case4h (#3402): a hostile TMPDIR does NOT cost the growth count" \
+      "$sumrow4h" "1 over-threshold file(s) grown"
+  if [ ! -s "$sumrow4h" ]; then
+    bad "case4h (#3402): no file-size row captured — the forged-verdict check could not run"
+  elif grep -Eq 'RESULT: (PASS|FAIL)' "$sumrow4h"; then
+    bad "case4h (#3402): the TMPDIR's verdict token reached the row — it would forge a verdict"
+  else
+    ok "case4h (#3402): no part of the TMPDIR reached the row — the pointer composes, it does not carry"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Case 4c (#3402), run for BOTH malformed spellings — THE FALSE-PASS ROUTE, and the reason the emit is keyed on the
@@ -928,10 +966,14 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
 # FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
 # 75 (#3401) -> 107 -> 112 -> 114 -> 116 across #3402's review rounds, then DOWN to 105 on
-# job 23, when the inline grown-path list was removed: cases 4b/4e/4g went with it (-12) and
-# case 4 gained a log-pointer needle plus a no-repository-path needle (+1 net). A census
-# that only ever rises is a census nobody re-derives — this one is recomputed from the run.
-EXPECTED_CHECKS=105
+# job 23, when the inline grown-path list was removed (cases 4b/4e/4g went with it, -12, and
+# case 4 gained a log-pointer needle plus a no-repository-path needle, +1 net), then 105 ->
+# 108 on job 25 (+3 case4h: a hostile TMPDIR must not cost the disclosure). A census that
+# only ever rises is a census nobody re-derives — this one is recomputed from the run, and
+# the first value written here was WRONG (109, guessed from the number of asserts typed
+# rather than counted from a run: `fs_summary_row || bad` contributes nothing unless it
+# fires).
+EXPECTED_CHECKS=108
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"

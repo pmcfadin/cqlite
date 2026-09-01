@@ -6782,6 +6782,14 @@ _status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
 # GATE-AUTHORED — fixed wording plus values the component computed. No repository-derived
 # content (paths, branch names, commit subjects) may be interpolated into it.
 #
+# WATCH THE PATHS, which is how this contract was broken the first day it existed (roborev
+# job 25): `$LOG_DIR` is `mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX"`, so ANY path under it
+# is caller-influenced, not gate-authored. Interpolating one put a `TMPDIR` containing the
+# probe's verdict token straight into this field, where the guard below would withhold the
+# WHOLE detail and take the override name and the growth count with it. Name the FILE and let
+# the block's own `logs:` line supply the directory — a pointer that composes rather than one
+# that carries.
+#
 # That is a CONTRACT, not an observation, and it is what makes the reader's job small. A
 # two-field trusted/untrusted sidecar was built here when the row still rendered grown-file
 # PATHS, and was removed with them: the untrusted half had no writer left, and unused
@@ -17998,7 +18006,7 @@ run_file_size() {
       # changed. What the row must carry is what a pasted SUMMARY cannot get anywhere else:
       # that the ratchet was NOT enforced, and over how many files.
       _record_status_detail "$name" \
-        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown — see $log"
+        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown — see file-size.log under logs:"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"
@@ -18173,8 +18181,13 @@ run_file_size() {
     # at a file that rejected every write is the false-pointer failure #3401 review FIX 2
     # already removed from stdout, and it must not reappear one artifact over. `sib_ok` is
     # final here and nowhere earlier — this block must stay BELOW the landed-line check.
+    # A FILENAME, not a path (roborev job 25). $sib is under LOG_DIR, which mktemp created
+    # under the caller's TMPDIR, so interpolating it puts caller-controlled text into a field
+    # this boundary's contract says is gate-authored. The SUMMARY already publishes the
+    # directory on its own `logs:` line, so naming the file composes to the same place with
+    # nothing borrowed from the environment.
     local _fs_detail_where=""
-    [ "$sib_ok" = 1 ] && _fs_detail_where=" — see $sib"
+    [ "$sib_ok" = 1 ] && _fs_detail_where=" — see file-size.persistence-error.log under logs:"
     if [ "$ratchet_verdict" = FAIL ]; then
       _record_status_detail "$name" \
         "TWO failures: a REAL size-ratchet violation AND a log-persistence failure ($log_persist_err)$_fs_detail_where"
