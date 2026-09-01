@@ -606,11 +606,40 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        tracing::debug!(
+                        // Issue #3721: PROPAGATE. This arm is shared by BOTH the
+                        // compaction / elements-out read (`parse_complex_column_inner`
+                        // above, under `compaction_complex_out.is_some()`) and the
+                        // user-facing read (`parse_complex_column`), so both surface
+                        // the condition to their caller identically.
+                        //
+                        // WHICH CLASS GOES WHERE, and why every class here is fatal:
+                        // neither complex parser returns an offset alongside its `Err`,
+                        // so at this call site the resume point is UNKNOWN for every
+                        // error class — a framing failure (a bad vint, an out-of-range
+                        // cell count, a truncated cell) and a value failure (a cell-path
+                        // key or element value that does not decode as its declared
+                        // type) are indistinguishable from here. Cassandra's own
+                        // serializer offers no way to derive a resume offset from a
+                        // failed decode, so "skip this column and continue at the
+                        // correct offset" cannot be justified for ANY class without
+                        // inventing offset recovery. Fail closed.
+                        //
+                        // The pre-#3721 answer was `break`, which left the loop and
+                        // returned the cells gathered SO FAR as `Ok`: this column AND
+                        // every later on-disk column silently vanished while the
+                        // `SELECT` reported success. Measured on a real fixture, a
+                        // `test_da.simple_table` read kept `active`/`age`/`created` and
+                        // dropped `name` + `salary` with exit 0.
+                        tracing::warn!(
                             "V5CompressedLegacy:   ✗ Complex column {} '{}' at offset {} FAILED: {}",
                             col_idx, column.name, offset, e
                         );
-                        break;
+                        return Err(Error::column_decode(
+                            column.name.clone(),
+                            complex_type,
+                            offset,
+                            e,
+                        ));
                     }
                 }
             } else {
@@ -768,7 +797,21 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        tracing::debug!(
+                        // Issue #3721: PROPAGATE — the simple-column half of the same
+                        // defect. The comment this replaces was honest about the
+                        // mechanism ("we exit the loop cleanly") and silent about the
+                        // consequence: a clean loop exit IS a truncated row, returned
+                        // as `Ok`.
+                        //
+                        // WHICH CLASS GOES WHERE: every class here is fatal, and for a
+                        // sharper reason than on the complex arm. A simple cell's
+                        // FRAMING is type-dependent — a fixed-width type consumes its
+                        // width with no length prefix, a variable-width type reads a
+                        // vint length first — so when the value decode fails, the number
+                        // of bytes the cell occupies is exactly what is not known. There
+                        // is no resume offset to recover, from Cassandra's serializer or
+                        // anywhere else, so there is no skippable class to carve out.
+                        tracing::warn!(
                             "V5CompressedLegacy:   ✗ Column {} '{}' ({}) at offset {} FAILED: {}",
                             col_idx,
                             column.name,
@@ -776,10 +819,12 @@ impl V5CompressedLegacyParser {
                             offset,
                             e
                         );
-                        // CRITICAL FIX: Stop parsing remaining columns when we hit an error
-                        // The offset doesn't advance here, but we exit the loop cleanly
-                        // rather than continuing with invalid offset
-                        break;
+                        return Err(Error::column_decode(
+                            column.name.clone(),
+                            header_type.unwrap_or(&column.data_type),
+                            offset,
+                            e,
+                        ));
                     }
                 }
             }

@@ -25,6 +25,51 @@ pub enum Error {
     #[error("Data corruption: {0}")]
     Corruption(String),
 
+    /// A SINGLE column's value could not be decoded during row assembly
+    /// (issue #3721).
+    ///
+    /// Raised by the row decoder's per-column loop
+    /// (`storage::sstable::reader::parsing::row_decoder::row_data`) for BOTH the
+    /// complex (non-frozen collection / multicell UDT) and the simple (scalar)
+    /// column paths, wrapping the underlying decode failure as its `source`.
+    ///
+    /// # Why this is its OWN variant rather than a `Corruption` message
+    ///
+    /// The row decoder used to answer a per-column decode failure with a bare
+    /// `break` out of the column loop, so the row was assembled from the cells
+    /// gathered SO FAR and returned as `Ok`: the failing column and **every later
+    /// on-disk column** silently vanished and the `SELECT` reported success. A
+    /// successful read with missing columns is indistinguishable from a row that
+    /// legitimately has no value there, so nothing downstream can defend against
+    /// it. Cassandra does not serve a short row either — a cell it cannot read
+    /// raises out of `UnfilteredSerializer` and fails the read.
+    ///
+    /// The block/partition row loops above the decoder deliberately treat an
+    /// ordinary row-parse `Err` as *end of the partition body* (a well-formed
+    /// SSTable's last row is followed by a marker the loop detects by failing to
+    /// parse another row). A per-column decode failure is NOT that condition, and
+    /// the only way those loops can tell the two apart is by MATCHING on a
+    /// dedicated variant — never by inspecting message text, which would be a
+    /// heuristic (issue #28). Hence a variant and not a `Corruption` string.
+    #[error(
+        "column '{column}' (declared {column_type}) failed to decode at byte offset \
+         {offset} of the row: {source}"
+    )]
+    ColumnDecode {
+        /// Name of the column whose value could not be decoded.
+        column: String,
+        /// The type CQLite decoded the column WITH — the authoritative on-disk
+        /// SerializationHeader marshal type where one is present, else the
+        /// supplied schema's declared type.
+        column_type: String,
+        /// Byte offset, within the decompressed block buffer, of the failing
+        /// column's cell.
+        offset: usize,
+        /// The underlying decode failure.
+        #[source]
+        source: Box<Error>,
+    },
+
     /// Schema validation errors
     #[error("Schema error: {0}")]
     Schema(String),
@@ -285,6 +330,22 @@ impl Error {
         Self::Corruption(msg.into())
     }
 
+    /// Wrap a per-column decode failure with the column it belongs to
+    /// (issue #3721).
+    pub fn column_decode(
+        column: impl Into<String>,
+        column_type: impl Into<String>,
+        offset: usize,
+        source: Error,
+    ) -> Self {
+        Self::ColumnDecode {
+            column: column.into(),
+            column_type: column_type.into(),
+            offset,
+            source: Box::new(source),
+        }
+    }
+
     /// Create a schema error
     pub fn schema(msg: impl Into<String>) -> Self {
         Self::Schema(msg.into())
@@ -447,6 +508,9 @@ impl Error {
 
             // These errors are typically not recoverable
             Error::Corruption(_) => false,
+            // A column that cannot be decoded will not decode on a retry: the
+            // bytes and the declared type are both unchanged (issue #3721).
+            Error::ColumnDecode { .. } => false,
             Error::Schema(_) => false,
             Error::CqlParse(_) => false,
             Error::Configuration(_) => false,
@@ -507,6 +571,7 @@ impl Error {
             Error::Io(_) => ErrorCategory::System,
             Error::Serialization { .. } => ErrorCategory::Data,
             Error::Corruption(_) => ErrorCategory::Data,
+            Error::ColumnDecode { .. } => ErrorCategory::Data,
             Error::Schema(_) => ErrorCategory::Schema,
             Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,

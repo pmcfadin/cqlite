@@ -645,7 +645,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         use crate::storage::sstable::reader::compaction_row::CompactionRow;
         // Structure-only (issue #3058): advance over the row WITHOUT allocating a
         // per-cell metadata map, a complex-element map or a `CompactionRow` — the
@@ -661,8 +661,15 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 resolution,
                 None,
             ) {
-                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Some(next_offset),
-                Err(_) => None,
+                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Ok(Some(next_offset)),
+                // Issue #3721: a per-column decode failure reaches the caller even on
+                // the structure-only advance. This path exists to measure byte
+                // consumption; a row whose column decode failed has an UNKNOWN
+                // consumption (the failing parser returns no offset), so answering
+                // `Ok(None)` here would report "end of partition" for a row that is
+                // really there — the same silent truncation, one level up.
+                Err(e) if matches!(e, Error::ColumnDecode { .. }) => Err(e),
+                Err(_) => Ok(None),
             };
         }
         // Compaction mode: capture per-column complex elements and request
@@ -700,9 +707,17 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                     row_timestamp: row_ts,
                     row_data,
                 });
-                Some(next_offset)
+                Ok(Some(next_offset))
             }
-            Err(_) => None,
+            // Issue #3721: the compaction / elements-out read arm. This is the
+            // caller of `parse_row_data_with_offset_impl` with
+            // `compaction_complex_out = Some(..)`, i.e. the arm at
+            // `row_data.rs`'s `if compaction_complex_out.is_some()`. Handing back
+            // `Ok(None)` for a column that failed to decode would let compaction
+            // WRITE OUT a row missing that column and every later one — the read
+            // defect turned into durable data loss. Surface it.
+            Err(e) if matches!(e, Error::ColumnDecode { .. }) => Err(e),
+            Err(_) => Ok(None),
         }
     }
 }

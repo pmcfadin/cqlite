@@ -148,7 +148,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         match self.parser.parse_row_data_with_offset(
             data,
             offset,
@@ -233,9 +233,13 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                         ));
                     }
                 }
-                Some(next_offset)
+                Ok(Some(next_offset))
             }
-            Err(_) => None,
+            // Issue #3721: a per-column decode failure reaches the caller instead of
+            // being folded into the `Ok(None)` end-of-partition signal, which would
+            // return a SHORT partition from a successful scan.
+            Err(e) if matches!(e, Error::ColumnDecode { .. }) => Err(e),
+            Err(_) => Ok(None),
         }
     }
 

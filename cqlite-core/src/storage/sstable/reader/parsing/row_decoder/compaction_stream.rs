@@ -233,7 +233,9 @@ impl V5CompressedLegacyParser {
         // A data row: decode exactly one, emit it, and report its consumed bytes.
         let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
             Vec::new();
-        match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
+        // Issue #3721: `?` — a per-column decode failure must reach the streaming
+        // caller, never be folded into the `None` (end-of-partition) arm below.
+        match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted)? {
             Some(next_offset) => {
                 // Confirm the row is fully framed WITHIN the window: a next_offset
                 // STRICTLY PAST the buffer end means we decoded a truncated row on a

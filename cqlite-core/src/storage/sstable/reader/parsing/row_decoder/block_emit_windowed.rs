@@ -591,6 +591,20 @@ impl V5CompressedLegacyParser {
                                 );
                             }
                             Err(e) => {
+                                // Issue #3721: distinguish a PER-COLUMN decode
+                                // failure (the row decoder refusing to serve a
+                                // short row) from this loop's ordinary
+                                // `Err`-means-end-of-partition-body signal. Only
+                                // a match on the dedicated variant can tell them
+                                // apart; message-text inspection would be a
+                                // heuristic (issue #28).
+                                if matches!(e, Error::ColumnDecode { .. }) {
+                                    tracing::warn!(
+                                        "V5CompressedLegacy: Column decode failure in partition {} at offset {}: {}",
+                                        partition_index, offset, e
+                                    );
+                                    return Err(e);
+                                }
                                 // End of valid data in partition
                                 debug!(
                                     "V5CompressedLegacy: Partition {} ended after {} rows: {}",

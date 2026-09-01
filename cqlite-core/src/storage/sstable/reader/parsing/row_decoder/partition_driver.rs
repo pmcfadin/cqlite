@@ -94,9 +94,19 @@ pub(super) trait SlidingPartitionPolicy {
     ) -> MarkerOutcome;
 
     /// Decode and handle one data row at `offset`, pushing any emitted row into
-    /// `pending`. Returns `Some(next_offset)` on success, or `None` when the row
-    /// could not be parsed (the driver treats that as end-of-partition on the
-    /// final chunk, else `NeedMore`).
+    /// `pending`.
+    ///
+    /// Three outcomes, and the distinction between the last two is issue #3721:
+    ///
+    /// * `Ok(Some(next_offset))` — the row was decoded and consumed those bytes.
+    /// * `Ok(None)` — the row FRAMING could not be parsed here. This is the
+    ///   ordinary end-of-partition-body signal (a well-formed partition's last row
+    ///   is followed by bytes that are not a row), so the driver treats it as
+    ///   end-of-partition on the final chunk and `NeedMore` otherwise.
+    /// * `Err(e)` — the row was framed but a COLUMN inside it could not be
+    ///   decoded ([`crate::Error::ColumnDecode`]). Serving the row without that
+    ///   column, or ending the partition early, would both be silent data loss, so
+    ///   the driver propagates it to its caller.
     fn on_data_row(
         &mut self,
         data: &[u8],
@@ -105,7 +115,7 @@ pub(super) trait SlidingPartitionPolicy {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Option<usize>;
+    ) -> Result<Option<usize>>;
 
     /// Called once per partition, AFTER its last row, on every `Emitted` return —
     /// immediately before `pending` is flushed to the external emit. A
@@ -271,7 +281,11 @@ impl V5CompressedLegacyParser {
                 }
             }
 
-            match policy.on_data_row(data, offset, schema, reader, &resolution, &mut pending) {
+            // Issue #3721: `?` — a per-column decode failure is NOT the
+            // end-of-partition signal and must reach the caller, never be folded
+            // into the `None` arm below (which would truncate the partition and
+            // report success).
+            match policy.on_data_row(data, offset, schema, reader, &resolution, &mut pending)? {
                 Some(next_offset) => {
                     offset = next_offset;
                     if offset >= data.len() {
@@ -452,16 +466,16 @@ mod tests {
             _reader: &crate::storage::sstable::reader::types::SSTableReader,
             _resolution: &RowColumnResolution,
             pending: &mut Vec<Self::Row>,
-        ) -> Option<usize> {
+        ) -> Result<Option<usize>> {
             match data.get(offset) {
                 Some(&b) if b == STUB_ROW_BYTE => {
                     pending.push(StubRow(b));
                     self.buffered += 1;
-                    Some(offset + 1)
+                    Ok(Some(offset + 1))
                 }
-                // Anything else: "row failed to parse" — the driver treats this as
-                // end-of-partition on the final chunk, else `NeedMore`.
-                _ => None,
+                // Anything else: "row framing failed to parse" — the driver treats
+                // this as end-of-partition on the final chunk, else `NeedMore`.
+                _ => Ok(None),
             }
         }
     }
