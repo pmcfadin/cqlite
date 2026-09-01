@@ -2152,5 +2152,53 @@ fi
 kill_sleeper "$S46"
 rm -rf "$D46"
 
+# ===========================================================================
+echo "TEST 47: a SET-but-EMPTY identity env var is a usage error, not 'unset' (roborev round 32)"
+# ===========================================================================
+# `LANE_LOCK_X="$var"` with an UNSET var is the classic spelling, and `${X:-default}` silently
+# turns it into the default -- so the caller believes it named an identity while the lock
+# records another. For LANE_LOCK_PID that meant falling through to the ancestor walk and
+# acquiring under a DIFFERENT process, reopening the shared-parent re-entrancy hole an explicit
+# pid exists to close. resolve_pid's own `''` case arm was written to refuse it and was
+# UNREACHABLE, because the `-n`/`:-` gate above had already excluded the empty case.
+# All three vars are token components (machine, actor, pid), so a wrong one is a wrong HOLDER;
+# enumerated for the reason TEST 46 enumerates subcommands -- a spot-check passes a partial fix.
+D47="$(mktemp -d)"; mkdir -p "$D47/lane-910"
+for v47 in LANE_LOCK_PID LANE_LOCK_ACTOR LANE_LOCK_MACHINE; do
+  o47="$(LANE_ROOT="$D47" env "$v47=" bash "$LL" probe 910 2>&1)"; rc47=$?
+  if [ "$rc47" -eq 64 ] && printf '%s' "$o47" | grep -q 'SET but EMPTY'; then
+    ok "($v47) set-but-empty is a usage error (rc=64), not a silent fallback to the default"
+  else
+    bad "($v47) set-but-empty was accepted: rc=$rc47
+$o47"
+  fi
+done
+# The numeric arm was DEAD CODE before this change; assert it is live now.
+# `acquire`, NOT `probe`: probe on a FREE lane returns without resolving an identity at all,
+# so the numeric arm never runs and the case passed vacuously (caught by it failing here).
+o47n="$(LANE_ROOT="$D47" LANE_LOCK_PID=abc bash "$LL" acquire 910 --lane-dir "$D47/lane-910" 2>&1)"; rc47n=$?
+if [ "$rc47n" -eq 64 ] && printf '%s' "$o47n" | grep -q 'must be numeric'; then
+  ok "(numeric) a non-numeric LANE_LOCK_PID is still refused — the case arm is reachable"
+else
+  bad "(numeric) expected a numeric refusal; got rc=$rc47n
+$o47n"
+fi
+# CONTROLS. Without these the three refusals above would also pass if the guard refused
+# EVERYTHING, which would brick every ordinary invocation.
+o47u="$(LANE_ROOT="$D47" bash "$LL" probe 910 2>&1)"; rc47u=$?
+if [ "$rc47u" -eq 0 ] || printf '%s' "$o47u" | grep -q 'LANE-LOCK:'; then
+  ok "(control) genuinely UNSET vars still take the documented default"
+else
+  bad "(control) an ordinary invocation with no env vars was refused: rc=$rc47u
+$o47u"
+fi
+o47h="$(LANE_ROOT="$D47" LANE_LOCK_PID= bash "$LL" --help 2>&1)"; rc47h=$?
+if [ "$rc47h" -eq 0 ]; then
+  ok "(control) --help stays EXEMPT, as it is for require_lane_root_abs — usage must print on a misconfigured box"
+else
+  bad "(control) --help was refused over an env var it does not read: rc=$rc47h"
+fi
+rm -rf "$D47"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

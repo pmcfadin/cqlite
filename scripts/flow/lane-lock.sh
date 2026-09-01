@@ -600,9 +600,15 @@ resolve_pid() {
   local candidate="" scope=""
   if [ -n "$explicit" ]; then
     candidate="$explicit"; scope=explicit
-  elif [ -n "${LANE_LOCK_PID:-}" ]; then
+  elif [ -n "${LANE_LOCK_PID+set}" ]; then
+    # `+set` (PRESENCE), not `:-` (NON-EMPTINESS) — #3436, roborev round 32. With `:-` an
+    # explicitly EMPTY LANE_LOCK_PID failed `-n` and fell through to the ancestor walk below,
+    # so a wrapper doing LANE_LOCK_PID="$pid" with an unset variable acquired under a
+    # DIFFERENT process — the shared-parent re-entrancy hole an explicit pid exists to close.
+    # The `''` arm just below was written to refuse exactly that and was UNREACHABLE, because
+    # the `-n` gate had already excluded the empty case: a refusal that could never fire.
     case "${LANE_LOCK_PID}" in
-      *[!0-9]* | '') die_usage "LANE_LOCK_PID must be numeric (got '${LANE_LOCK_PID}')" ;;
+      *[!0-9]* | '') die_usage "LANE_LOCK_PID must be numeric (got '${LANE_LOCK_PID}'); it is SET but empty, which is a usage error, not 'unset' — an unset variable in LANE_LOCK_PID=\"\$pid\" would otherwise silently resolve a different process's identity" ;;
     esac
     candidate="${LANE_LOCK_PID}"; scope=explicit
   else
@@ -2109,9 +2115,33 @@ SUBCOMMAND="${1:-}"
 # relative value is a lock BYPASS (two cwds, two lock roots, both acquire), so it must
 # fail before anything reads a path. `--help` is exempt: printing usage must work on a
 # misconfigured box, and it touches no path.
+# SET-BUT-EMPTY IS A USAGE ERROR FOR EVERY IDENTITY-BEARING ENV VAR (#3436, roborev round 32).
+# Same reasoning as `--pid ''` and `--expect ''`, one channel over: `LANE_LOCK_X="$var"` with an
+# UNSET var is the classic spelling, and `${X:-default}` silently turns it into the default, so
+# the caller believes it named an identity while the lock records another. All three of these
+# are token components — machine, actor, pid — so a wrong one is a wrong HOLDER.
+#
+# ONE BOUNDARY IN THE MAIN SHELL, not a check at each of the ~8 read sites: a per-site guard is
+# a list to keep complete, and round 31 proved that the hard way (3 of 5 --pid sites patched on
+# the first attempt). It CANNOT live inside a helper called from `$(...)` either — die_usage
+# exits 64, and inside a command substitution that kills only the SUBSHELL while the script
+# sails on, which is this file's most-repeated bug (rounds 19, 22, 23).
+# `--help` is exempt for the same reason require_lane_root_abs exempts it: printing usage must
+# work on a misconfigured box.
+require_identity_env_nonempty() {
+  local v val
+  for v in LANE_LOCK_PID LANE_LOCK_ACTOR LANE_LOCK_MACHINE; do
+    eval "val=\${$v+set}"
+    [ -n "$val" ] || continue          # genuinely unset: the documented default applies
+    eval "val=\${$v}"
+    [ -n "$val" ] && continue
+    die_usage "$v is SET but EMPTY. That is a usage error, not 'unset': it is a component of the HOLDER IDENTITY, and \`$v=\"\$var\"\` with an unset var would silently fall back to the default and record an identity you did not name. Unset it, or give it a value."
+  done
+}
+
 case "$SUBCOMMAND" in
   -h | --help | help) : ;;
-  *) require_lane_root_abs ;;
+  *) require_lane_root_abs; require_identity_env_nonempty ;;
 esac
 case "$SUBCOMMAND" in
   -h | --help | help) print_help ;;
