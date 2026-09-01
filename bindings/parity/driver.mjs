@@ -1,0 +1,156 @@
+/**
+ * Node leg of the 3-way cross-binding parity harness (issue #1455).
+ *
+ * Runs each fixture's SELECT through the napi binding, canonicalizes every row
+ * with `canonical.mjs`, and writes `out/node.<fixture>.json`.
+ *
+ * Runnable standalone:
+ *
+ *     node bindings/parity/driver.mjs --out-dir bindings/parity/out
+ *
+ * Exit status: 0 on success; non-zero when the datasets are present but a
+ * query throws or returns ZERO rows. A 0-row pass over a present corpus is the
+ * exact false-green this repository forbids, so it is an ERROR, never a skip.
+ */
+
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { canonRowNode, parseType } from './canonical.mjs';
+
+const require = createRequire(import.meta.url);
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(HERE, '..', '..');
+const FIXTURES_PATH = path.join(HERE, 'fixtures.json');
+const DEFAULT_OUT_DIR = path.join(HERE, 'out');
+
+// The binding is loaded by PATH (`../node/lib/index.js`), never by package
+// name: the repo's Node tests do the same, because the package name resolves
+// only from a published install.
+const BINDING_PATH = path.join(REPO_ROOT, 'bindings', 'node', 'lib', 'index.js');
+
+export function resolveDatasetsRoot(explicit) {
+  const raw = explicit || process.env.CQLITE_DATASETS_ROOT;
+  const root = raw ? path.resolve(raw) : path.join(REPO_ROOT, 'test-data', 'datasets');
+  const candidate = path.join(root, 'sstables');
+  return fs.existsSync(candidate) ? candidate : root;
+}
+
+export function loadFixtures(p = FIXTURES_PATH) {
+  return JSON.parse(fs.readFileSync(p, 'utf8')).fixtures;
+}
+
+export function fixtureTypes(fixture) {
+  const types = {};
+  for (const [name, text] of Object.entries(fixture.columns)) types[name] = parseType(text);
+  return types;
+}
+
+export async function runFixture(fixture, datasets) {
+  const { Database } = require(BINDING_PATH);
+  const schema = path.join(REPO_ROOT, fixture.schema);
+  if (!fs.existsSync(schema)) throw new Error(`schema not found: ${schema}`);
+  const types = fixtureTypes(fixture);
+  const db = await Database.open(datasets, { schema });
+  let rows;
+  let observed = [];
+  try {
+    const result = await db.executeNative(fixture.query);
+    rows = result.rows.map((row) => {
+      observed = Object.keys(row);
+      return canonRowNode(row, types);
+    });
+  } finally {
+    await db.close();
+  }
+  if (!rows.length) {
+    throw new Error(
+      `fixture '${fixture.name}' returned 0 rows from ${datasets} (query: ${fixture.query})`,
+    );
+  }
+  return {
+    fixture: fixture.name,
+    leg: 'node',
+    query: fixture.query,
+    observed_columns: observed.slice().sort(),
+    rows,
+  };
+}
+
+function parseArgs(argv) {
+  const out = { outDir: DEFAULT_OUT_DIR, datasetsRoot: null, fixtures: [] };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--out-dir') { out.outDir = argv[++i]; } else if (a === '--datasets-root') {
+      out.datasetsRoot = argv[++i];
+    } else if (a === '--fixture') { out.fixtures.push(argv[++i]); } else {
+      throw new Error(`unrecognized argument: ${a}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Stable JSON for the artifact: object keys are written in the order
+ * `JSON.stringify` produces for a fresh object, which for canonical rows is
+ * the DECLARED column order. The comparator reads the parsed JSON, never the
+ * text, so byte-identical artifacts are a convenience, not a contract.
+ */
+function writeArtifact(target, payload) {
+  fs.writeFileSync(target, `${JSON.stringify(payload, null, 1)}\n`, 'utf8');
+}
+
+async function main() {
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    process.stderr.write(`${e.message}\n`);
+    return 2;
+  }
+  const datasets = resolveDatasetsRoot(args.datasetsRoot);
+  fs.mkdirSync(args.outDir, { recursive: true });
+
+  let fixtures = loadFixtures();
+  if (args.fixtures.length) {
+    const wanted = new Set(args.fixtures);
+    fixtures = fixtures.filter((f) => wanted.has(f.name));
+    const found = new Set(fixtures.map((f) => f.name));
+    const missing = [...wanted].filter((n) => !found.has(n));
+    if (missing.length) {
+      process.stderr.write(`unknown fixture(s): ${JSON.stringify(missing)}\n`);
+      return 2;
+    }
+  }
+  if (!fixtures.length) {
+    process.stderr.write('no fixtures selected\n');
+    return 2;
+  }
+
+  let failures = 0;
+  for (const fixture of fixtures) {
+    try {
+      // Sequential on purpose: one Database handle at a time keeps the memory
+      // profile flat and makes a failure attributable to ONE fixture.
+      // eslint-disable-next-line no-await-in-loop
+      const payload = await runFixture(fixture, datasets);
+      const target = path.join(args.outDir, `node.${fixture.name}.json`);
+      writeArtifact(target, payload);
+      process.stdout.write(`OK   ${fixture.name}: ${payload.rows.length} rows -> ${target}\n`);
+    } catch (e) {
+      process.stderr.write(`FAIL ${fixture.name}: ${e && e.message ? e.message : e}\n`);
+      failures += 1;
+    }
+  }
+  return failures ? 1 : 0;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  main().then((code) => { process.exitCode = code; }).catch((e) => {
+    process.stderr.write(`FATAL: ${e && e.stack ? e.stack : e}\n`);
+    process.exitCode = 1;
+  });
+}
