@@ -71,24 +71,41 @@ EXTRACT_OK=1
 # The array first (the closed signature set), then every function the line depends on.
 # Column-zero anchors are what make this honest: a `^  ` shape would extract nothing and
 # the fail-closed checks below would fire rather than a silent empty source file.
+#
+# #3800 (roborev job 301) added the SECOND KIND OF SUBJECT -- the gate's own in-memory
+# capture-failure text -- so the extracted set now also carries `DISK_MEM_SUBJECTS`, the
+# recorder, the one shared signature loop, and the REAL `_tree_identity` plus its helpers.
+# The last group is what lets the /dev/full case below drive a GENUINE ENOSPC through the
+# shipped capture rather than assert that a line exists.
 {
   # awk uses ERE, where `\(` is not a portable literal paren -- bracket expressions are.
   extract_region '^DISK_EXHAUSTION_SIGNATURES=[(]$' '^[)]$'
+  # A one-line array declaration has no region to extract; take the SHIPPED line itself so
+  # this suite still measures the shipped source and never a copy typed here.
+  grep -m1 '^DISK_MEM_SUBJECTS=()$' "$GATE"
   for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
-            _disk_free_field _disk_scan_field _disk_exhaustion_line; do
+            _disk_free_field _disk_scan_field _disk_note_capture_failure \
+            _disk_scan_subject _disk_exhaustion_line \
+            _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
+            _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
+            _tree_emit_capture_diag _tree_note_capture_failure; do
     extract_region "^${fn}[(][)] [{]\$" '^[}]$'
   done
 } >> "$EX"
 
-for want in DISK_EXHAUSTION_SIGNATURES _disk_safe _disk_abbrev _disk_df_probe _disk_gib \
-            _disk_free_leg _disk_free_field _disk_scan_field _disk_exhaustion_line; do
+for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS _disk_safe _disk_abbrev \
+            _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
+            _disk_note_capture_failure _disk_scan_subject _disk_exhaustion_line \
+            _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
+            _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
+            _tree_emit_capture_diag _tree_note_capture_failure; do
   if ! grep -q "^${want}" "$EX"; then
     bad "extract: '$want' was NOT extracted from the shipped agent-gate.sh -- every case below would be vacuous"
     EXTRACT_OK=0
   fi
 done
 if [ "$EXTRACT_OK" -eq 1 ]; then
-  ok "extract: the shipped signature set + 8 helpers were extracted from scripts/agent-gate.sh"
+  ok "extract: the shipped signature set, the in-memory subject channel and 21 helpers (incl. the REAL _tree_identity) were extracted from scripts/agent-gate.sh"
 fi
 if bash -n "$EX" 2>/dev/null; then
   ok "extract: the extracted region is syntactically valid bash (the cases run the real thing)"
@@ -112,6 +129,10 @@ run_line() {  # <logdir> <name> <status> ...
     LOG_DIR="$ldir"
     DISK_TARGET_PATH=""; DISK_LOGS_PATH=""
     DISK_FREE_START_TARGET=""; DISK_FREE_START_LOGS=""
+    # #3800: the in-memory subject channel and the START-capture cross-check are cleared,
+    # so the component-log cases below measure the component-log arm alone. Case 17 seeds
+    # them deliberately.
+    DISK_MEM_SUBJECTS=(); TREE_CAPTURE_FAILED=0
     _disk_exhaustion_line "$@"
   )
 }
@@ -233,10 +254,10 @@ if case "$out" in "disk-exhaustion: 0 RECOGNISED (#3800)"*) true ;; *) false ;; 
 else
   bad "5-clean: expected a leading 'disk-exhaustion: 0 RECOGNISED (#3800)'; got: $out"
 fi
-if case "$out" in *"scanned 1 non-PASS component log(s) (minimal-build)"*"every subject log was READ"*) true ;; *) false ;; esac; then
-  ok "5-clean: the clean verdict is keyed on the AFFIRMATIVE fact (every subject log was READ) and names its subject"
+if case "$out" in *"scanned 1 non-PASS component log(s) (minimal-build)"*"0 in-memory subject(s)"*"every subject was READ"*) true ;; *) false ;; esac; then
+  ok "5-clean: the clean verdict is keyed on the AFFIRMATIVE fact (every subject was READ) and names BOTH kinds of subject"
 else
-  bad "5-clean: the clean verdict does not state that every subject log was read; got: $out"
+  bad "5-clean: the clean verdict does not state that every subject (both kinds) was read; got: $out"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────

@@ -6175,6 +6175,41 @@ DISK_EXHAUSTION_SIGNATURES=(
   'disk-quota-exceeded|Disk quota exceeded'
 )
 
+# THE SECOND KIND OF SUBJECT: IN-MEMORY CAPTURE-FAILURE TEXT (#3800, roborev job 301).
+#
+# ADDING A MARKER TO A BLOCK DOES NOT MAKE THAT BLOCK'S CAUSE OBSERVABLE TO THE MARKER.
+# That is the transferable lesson of this round, and it is worth stating before the code.
+# The scan's subject set was NON-PASS COMPONENT LOGS. The tree-integrity COMPONENT-BOUNDARY
+# block was then given the attribution BECAUSE a `tree-integrity: FAIL` is reachable from
+# ENOSPC -- and on that very path the evidence CANNOT REACH THE SUBJECT SET: _tree_identity
+# fails independently of any component, the manifest write's error text lands in NO component
+# log, and the components themselves are typically still PASS. So the block would have emitted
+# an affirmative `0 RECOGNISED` on precisely the path the line was added for -- a FALSE CLEAN
+# READING, and this repository's standing anti-pattern (a positive verdict keyed on the ABSENCE
+# of a bad signal in a subject set that cannot contain it). When you extend a diagnostic to a
+# new failure path, ask what the SUBJECT SET is ON THAT PATH and whether the evidence can
+# physically land in it -- not merely whether the line is emitted.
+#
+# IT IS IN MEMORY, NOT A FILE, AND THAT IS THE WHOLE POINT -- the same reasoning that keeps
+# this scanner off `_ansi_stripped_log`. This is a DISK-EXHAUSTION diagnostic: under ENOSPC a
+# spill file cannot be written, so a file-backed subject would be EMPTY exactly on the run
+# that had the answer.
+#
+# Entries are "<subject-label>|<text>", split on the FIRST `|`. The LABEL is OURS -- a fixed
+# string chosen at the recording site, from this file's own vocabulary. The TEXT is
+# OS/libc/git-controlled and is NEVER interpolated into the emitted line: it is scanned and
+# discarded, exactly like a component log (#3312).
+DISK_MEM_SUBJECTS=()
+
+# _disk_note_capture_failure <subject-label> <text>
+#
+# Record one in-memory subject. <text> MAY be empty: that is an HONEST record of a failure
+# whose text was not captured, and it renders UNMEASURED naming the subject -- never a clean
+# reading. Appending is unconditional and cheap; the scan decides what it means.
+_disk_note_capture_failure() {
+  DISK_MEM_SUBJECTS+=("${1:-<unnamed subject>}|${2:-}")
+}
+
 # Startup free-space capture (populated immediately after LOG_DIR is created).
 #
 # DISK_MIDRUN -- THE SCAN WINDOW, declared rather than assumed. 0 (the default) means a
@@ -6309,7 +6344,11 @@ _disk_free_field() {
 _disk_scan_field() {
   local partial=''
   [ "${DISK_MIDRUN:-0}" = 1 ] && partial='; SUBJECT SET ALSO PARTIAL -- only the components whose verdict was RECORDED BY THIS BOUNDARY are scanned; the components that had not run are not subjects and their absence is NOT a clean reading'
-  printf 'scan: CLOSED signature set {no-space-left-on-device, os-error-28, disk-quota-exceeded} over non-PASS component logs only; NON-EXHAUSTIVE by construction -- a disk-full failure worded any other way is a DECLARED false negative%s' "$partial"
+  # The subject set is TWO KINDS and says so (#3800, roborev job 301): a reader must be able
+  # to tell whether the gate's OWN capture-failure text was in scope, because on the
+  # tree-capture ENOSPC path it is the ONLY place the evidence exists.
+  printf 'scan: CLOSED signature set {no-space-left-on-device, os-error-28, disk-quota-exceeded} over non-PASS component logs PLUS the gate own IN-MEMORY capture-failure subjects (%s recorded this run); NON-EXHAUSTIVE by construction -- a disk-full failure worded any other way is a DECLARED false negative%s' \
+    "${#DISK_MEM_SUBJECTS[@]}" "$partial"
 }
 
 # _disk_exhaustion_line <name> <status> [<name> <status> ...]
@@ -6345,12 +6384,53 @@ _disk_scan_field() {
 # GREP'S EXIT STATUS IS THREE-VALUED and is read as such: 0 = matched, 1 = READ and did not
 # match, >=2 = could NOT be read. Collapsing >=2 onto "no match" is the two-valued-predicate
 # defect this repository keeps finding -- it always picks the permissive answer. The clean
-# verdict is keyed on the AFFIRMATIVE fact (every subject log was READ), never on `!= matched`.
+# verdict is keyed on the AFFIRMATIVE fact (every subject was READ), never on `!= matched`.
+
+# _disk_scan_subject <kind> <payload> -- THE ONE signature loop, over EITHER kind of subject.
+# There is deliberately no second matching implementation: a component log and an in-memory
+# capture-failure text differ only in how the bytes reach grep, and two loops would be two
+# places for the closed set to drift.
+#   <kind> = file  -> <payload> is a PATH, read by REDIRECTION (never through a sibling temp
+#                     file -- see the note above).
+#   <kind> = text  -> <payload> is IN-MEMORY text, fed to grep through a PIPE.
+#
+# A HERE-STRING (`<<<`) IS DELIBERATELY NOT USED for the text kind: bash materialises a
+# here-string as a TEMPORARY FILE, which under ENOSPC is exactly what cannot be written --
+# reintroducing the disk dependency this scanner exists to survive. A pipe is safe here where
+# the read-by-redirection rule governs files, because NOTHING is accumulated in the subshell:
+# only grep's own exit status is consumed, and grep is the last element of the pipeline.
+#
+# Sets DISK_SCAN_SIG (our signature NAME) and DISK_SCAN_LN (an integer). rc 0 = matched,
+# 1 = READ and did not match, 2 = could NOT be read.
+_disk_scan_subject() {
+  local kind="$1" payload="$2" entry sig phrase hit rc
+  DISK_SCAN_SIG=""; DISK_SCAN_LN=0
+  for entry in "${DISK_EXHAUSTION_SIGNATURES[@]}"; do
+    sig="${entry%%|*}"; phrase="${entry#*|}"
+    # `-a` so a subject carrying stray binary bytes is still searched rather than reported
+    # as "binary file matches" with no line number.
+    if [ "$kind" = file ]; then
+      hit="$(LC_ALL=C grep -n -a -m1 -F -e "$phrase" < "$payload" 2>/dev/null)"; rc=$?
+    else
+      hit="$(printf '%s\n' "$payload" | LC_ALL=C grep -n -a -m1 -F -e "$phrase" 2>/dev/null)"; rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+      DISK_SCAN_SIG="$sig"
+      case "${hit%%:*}" in ''|*[!0-9]*) DISK_SCAN_LN=0 ;; *) DISK_SCAN_LN="${hit%%:*}" ;; esac
+      return 0
+    elif [ "$rc" -ne 1 ]; then
+      return 2                       # grep ERROR: could not tell. NEVER "no signature".
+    fi
+  done
+  return 1
+}
+
 _disk_exhaustion_line() {
   local total=0 nonpass=0 read_ok=0 unread=0 matched=0
-  local nonpass_names="" unread_names=""
-  local m_sig="" m_comp="" m_status="" m_log="" m_ln=""
-  local n s log entry sig phrase hit rc found_any log_read out extra
+  local nonpass_names="" unread_names="" mem_names=""
+  local mem_total=0 mem_read=0
+  local m_kind=log m_sig="" m_comp="" m_status="" m_log="" m_ln="" m_label=""
+  local n s log rc found_any ment mlabel mtext subj what out extra
   local ldir="${LOG_DIR:-}"
 
   while [ "$#" -ge 2 ]; do
@@ -6371,29 +6451,15 @@ _disk_exhaustion_line() {
           unread_names="${unread_names:+$unread_names,}${log##*/}(unreadable)"
           continue
         fi
-        log_read=0
-        for entry in "${DISK_EXHAUSTION_SIGNATURES[@]}"; do
-          sig="${entry%%|*}"; phrase="${entry#*|}"
-          # RAW log, read by REDIRECTION (never a pipe into a while-read, whose accumulated
-          # verdict would die with the subshell) and never through a sibling temp file.
-          # `-a` so a log carrying stray binary bytes is still searched rather than reported
-          # as "binary file matches" with no line number.
-          hit="$(LC_ALL=C grep -n -a -m1 -F -e "$phrase" < "$log" 2>/dev/null)"; rc=$?
-          if [ "$rc" -eq 0 ]; then
-            log_read=1
-            if [ "$matched" -eq 0 ]; then
-              m_sig="$sig"; m_comp="$n"; m_status="$s"; m_log="${log##*/}"; m_ln="${hit%%:*}"
-            fi
-            matched=$(( matched + 1 ))
-            break
-          elif [ "$rc" -eq 1 ]; then
-            log_read=1
-          else
-            log_read=-1   # grep ERROR: could not tell. NEVER "no signature".
-            break
+        _disk_scan_subject file "$log"; rc=$?
+        if [ "$rc" -eq 0 ]; then
+          read_ok=$(( read_ok + 1 ))
+          if [ "$matched" -eq 0 ]; then
+            m_kind=log; m_sig="$DISK_SCAN_SIG"; m_comp="$n"; m_status="$s"
+            m_log="${log##*/}"; m_ln="$DISK_SCAN_LN"
           fi
-        done
-        if [ "$log_read" -eq 1 ]; then
+          matched=$(( matched + 1 ))
+        elif [ "$rc" -eq 1 ]; then
           read_ok=$(( read_ok + 1 ))
         else
           unread=$(( unread + 1 ))
@@ -6408,14 +6474,57 @@ _disk_exhaustion_line() {
     fi
   done
 
+  # THE IN-MEMORY SUBJECTS (#3800, roborev job 301). Scanned with the SAME closed set,
+  # through the SAME loop, and COUNTED IN THE CENSUS -- so `0 RECOGNISED` can only ever be
+  # claimed on a run where they were read too.
+  for ment in ${DISK_MEM_SUBJECTS[@]+"${DISK_MEM_SUBJECTS[@]}"}; do
+    mlabel="${ment%%|*}"; mtext="${ment#*|}"
+    mem_total=$(( mem_total + 1 ))
+    if [ -z "$mtext" ]; then
+      # RECORDED but EMPTY: the failure happened and produced no text we captured. That is
+      # UNMEASURED naming the subject -- an absent measurement is never a clean one.
+      unread=$(( unread + 1 ))
+      unread_names="${unread_names:+$unread_names,}$mlabel(no text captured)"
+      continue
+    fi
+    _disk_scan_subject text "$mtext"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      mem_read=$(( mem_read + 1 ))
+      mem_names="${mem_names:+$mem_names,}$mlabel"
+      if [ "$matched" -eq 0 ]; then
+        m_kind=mem; m_sig="$DISK_SCAN_SIG"; m_label="$mlabel"
+      fi
+      matched=$(( matched + 1 ))
+    elif [ "$rc" -eq 1 ]; then
+      mem_read=$(( mem_read + 1 ))
+      mem_names="${mem_names:+$mem_names,}$mlabel"
+    else
+      unread=$(( unread + 1 ))
+      unread_names="${unread_names:+$unread_names,}$mlabel(unscannable)"
+    fi
+  done
+
+  # THE CROSS-CHECK, from a signal this scanner does not set. TREE_CAPTURE_FAILED is raised by
+  # the START capture's own failure branch. Set with NOTHING on the in-memory channel, the
+  # capture's failure text was never recorded -- an older path, or a path added without wiring
+  # the recorder -- and the honest verdict is UNMEASURED NAMING THAT, never `0 RECOGNISED`.
+  if [ "${TREE_CAPTURE_FAILED:-0}" = 1 ] && [ "$mem_total" -eq 0 ]; then
+    mem_total=$(( mem_total + 1 ))
+    unread=$(( unread + 1 ))
+    unread_names="${unread_names:+$unread_names,}tree-identity capture(failure text NOT RECORDED)"
+  fi
+
   case "$m_ln" in ''|*[!0-9]*) m_ln=0 ;; esac
 
   if [ "$matched" -gt 0 ]; then
-    # RECOGNISED. NOTHING LOG-DERIVED IS INTERPOLATED: only OUR signature NAME from the closed
-    # set, the component name (which comes from the gate's own COMPONENTS array, not from the
-    # log), the log BASENAME (component name + a fixed suffix) and an integer line number. The
-    # matched TEXT is never echoed -- a component log is compiler- and test-controlled, and a
-    # newline in it would break the block frame and could forge a RESULT line (#3312).
+    # RECOGNISED. NOTHING SUBJECT-DERIVED IS INTERPOLATED: only OUR signature NAME from the
+    # closed set, the component name (which comes from the gate's own COMPONENTS array, not
+    # from the log), the log BASENAME (component name + a fixed suffix), an integer line
+    # number, and -- for an in-memory subject -- OUR OWN fixed subject LABEL. The matched TEXT
+    # is never echoed: a component log is compiler- and test-controlled and a capture's stderr
+    # is OS-controlled, and a newline in either would break the block frame and could forge a
+    # RESULT line (#3312). An in-memory subject is named in OUR vocabulary and carries NO
+    # `<log>:<line>`, because it has none to report.
     #
     # IT REPORTS EVIDENCE, NEVER A CONCLUSION (#3800, roborev job 299). An earlier wording said
     # "NOT a defect in the diff", which is an assertion this scan cannot support and which
@@ -6424,18 +6533,25 @@ _disk_exhaustion_line() {
     # PRINT one of the signatures into its own log, and a diff CAN itself drive disk usage (a
     # new feature-matrix lane, a large fixture, a runaway build). So the line says what was
     # OBSERVED and what to DO about it, and explicitly declines to clear the diff.
+    if [ "$m_kind" = mem ]; then
+      subj="signature '$m_sig' in IN-MEMORY subject '$m_label' (the gate own capture, which reaches NO component log)"
+      what="this tree-capture failure"
+    else
+      subj="signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln"
+      what="this $m_status"
+    fi
     extra=""
-    [ "$matched" -gt 1 ] && extra="$extra ($matched non-PASS component logs matched; first reported)."
-    [ "$unread" -gt 0 ] && extra="$extra ($unread further subject log(s) could NOT be read: $(_disk_abbrev "$unread_names" 4))."
-    out="disk-exhaustion: RECOGNISED (#3800) -- signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln; CONSISTENT WITH disk exhaustion on this HOST: free space and re-run before treating this $m_status as a defect in the diff. EVIDENCE, NOT PROOF -- the diff is NOT thereby cleared (a test can print the phrase, and a diff can itself drive disk usage). This is an ATTRIBUTION and does NOT change RESULT.$extra $(_disk_free_field). $(_disk_scan_field)"
-  elif [ "$nonpass" -eq 0 ]; then
+    [ "$matched" -gt 1 ] && extra="$extra ($matched subject(s) matched; first reported)."
+    [ "$unread" -gt 0 ] && extra="$extra ($unread further subject(s) could NOT be read: $(_disk_abbrev "$unread_names" 4))."
+    out="disk-exhaustion: RECOGNISED (#3800) -- $subj; CONSISTENT WITH disk exhaustion on this HOST: free space and re-run before treating $what as a defect in the diff. EVIDENCE, NOT PROOF -- the diff is NOT thereby cleared (a test can print the phrase, and a diff can itself drive disk usage). This is an ATTRIBUTION and does NOT change RESULT.$extra $(_disk_free_field). $(_disk_scan_field)"
+  elif [ "$nonpass" -eq 0 ] && [ "$mem_total" -eq 0 ]; then
     out="disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan ($total/$total PASS). $(_disk_free_field). $(_disk_scan_field)"
   elif [ "$unread" -gt 0 ]; then
-    # UNMEASURED IS NEVER PERMISSIVE. A log that could not be read is never reported as
+    # UNMEASURED IS NEVER PERMISSIVE. A subject that could not be read is never reported as
     # "no signature": that is a pass derived from the ABSENCE of a bad signal.
-    out="disk-exhaustion: UNMEASURED (#3800) -- $unread of $(( read_ok + unread )) subject log(s) could NOT be read ($(_disk_abbrev "$unread_names" 4)); a log that could NOT be read is never reported as 'no signature'. $(_disk_free_field). $(_disk_scan_field)"
+    out="disk-exhaustion: UNMEASURED (#3800) -- $unread of $(( read_ok + mem_read + unread )) subject(s) could NOT be read ($(_disk_abbrev "$unread_names" 4)); a subject that could NOT be read is never reported as 'no signature'. $(_disk_free_field). $(_disk_scan_field)"
   else
-    out="disk-exhaustion: 0 RECOGNISED (#3800) -- scanned $read_ok non-PASS component log(s) ($(_disk_abbrev "$nonpass_names" 6)); every subject log was READ and no signature from the CLOSED set matched. $(_disk_free_field). $(_disk_scan_field)"
+    out="disk-exhaustion: 0 RECOGNISED (#3800) -- scanned $read_ok non-PASS component log(s) ($(_disk_abbrev "${nonpass_names:-<none>}" 6)) and $mem_read in-memory subject(s) ($(_disk_abbrev "${mem_names:-<none>}" 4)); every subject was READ and no signature from the CLOSED set matched. $(_disk_free_field). $(_disk_scan_field)"
   fi
 
   # ONE emit boundary, ONE sanitisation: the rendered line is guaranteed to be exactly one
@@ -7751,10 +7867,23 @@ _tree_identity() {
   done
 
   # ONE batched `git hash-object --stdin-paths` (no -w) for every ordinary file.
+  #
+  # #3800 (roborev job 301): this write, and the manifest write below, are the TWO places a
+  # capture dies under ENOSPC -- and their error text is the ONLY evidence such a run will
+  # ever produce, because it reaches no component log. It is accumulated IN MEMORY (never a
+  # spill file, which is precisely what cannot be written when the disk is full) and handed
+  # back on the rc-2 channel for the caller to record as a scan subject. Nothing here reads
+  # or renders it.
   local -a hashes=()
+  local _capdiag=""
   if [ "${#batch[@]}" -gt 0 ]; then
-    printf '%s\n' "${batch[@]}" \
-      | git --no-optional-locks hash-object --no-filters --stdin-paths > "$out.hashes" 2>/dev/null
+    # `2>&1 >file` -- ORDER IS LOAD-BEARING: fd2 is pointed at the command substitution's
+    # PIPE first, and only then is fd1 pointed at the hash list. The reverse order would
+    # write the error text INTO the data file.
+    _capdiag="$(
+      printf '%s\n' "${batch[@]}" \
+        | git --no-optional-locks hash-object --no-filters --stdin-paths 2>&1 >"$out.hashes"
+    )"
     while IFS= read -r h; do hashes+=("$h"); done < "$out.hashes"
     rm -f "$out.hashes" 2>/dev/null || true
     if [ "${#hashes[@]}" -ne "${#batch[@]}" ]; then
@@ -7783,6 +7912,12 @@ _tree_identity() {
   # and _tree_render_path adds the fourth member (`\s` = space) at RENDER time, where the
   # space is the character that would forge a list boundary.
   local i k=0 esc escv tab=$'\t'
+  # #3800: the manifest write's own stderr, captured IN MEMORY (see the note at the
+  # hash-object batch above). Same fd ordering rule: `2>&1` FIRST, so the error text goes to
+  # the command substitution's pipe and never into the manifest it is complaining about.
+  # The subshell is harmless -- this block writes files and sets no variable used afterwards.
+  _capdiag="${_capdiag:+$_capdiag
+}$(
   {
     printf 'H\t%s\0' "$head"
     printf 'H\t%s\n' "$head" >&3
@@ -7796,18 +7931,44 @@ _tree_identity() {
     done
     printf 'N\t%s\0' "${#paths[@]}"
     printf 'N\t%s\n' "${#paths[@]}" >&3
-  } > "$out" 3> "$out.report"
+  } 2>&1 > "$out" 3> "$out.report"
+)"
 
   [ "${#paths[@]}" -gt 0 ] && dirty=yes
 
   # Validate our OWN output before anyone can compare it (#2926 review B1/C2): header,
   # trailer and body count, on BOTH views. A truncated manifest is rejected here.
   local digest
-  _tree_manifest_ok "$out" nul "$head" "${#paths[@]}" || return 2
-  _tree_manifest_ok "$out.report" nl "$head" "${#paths[@]}" || return 2
-  digest=$(_tree_digest_file "$out") || return 2
-  _tree_digest_ok "$digest" || return 2
+  # #3800: EVERY rc-2 exit carries the captured failure text on stdout FIRST. The channel is
+  # disjoint by RETURN CODE, which the text cannot influence: on rc 0 the identity line is
+  # printed and nothing else, on rc 1 nothing at all, and only on rc 2 -- where no caller
+  # parses stdout as an identity -- is the diagnostic present. The caller records it as an
+  # in-memory scan subject and NEVER renders it (#3312).
+  _tree_manifest_ok "$out" nul "$head" "${#paths[@]}" || { _tree_emit_capture_diag "$_capdiag"; return 2; }
+  _tree_manifest_ok "$out.report" nl "$head" "${#paths[@]}" || { _tree_emit_capture_diag "$_capdiag"; return 2; }
+  digest=$(_tree_digest_file "$out") || { _tree_emit_capture_diag "$_capdiag"; return 2; }
+  _tree_digest_ok "$digest" || { _tree_emit_capture_diag "$_capdiag"; return 2; }
   printf '%s\t%s\t%s\t%s\n' "$head" "$dirty" "$digest" "$fallbacks"
+}
+
+# _tree_emit_capture_diag <text> -- print a capture's own failure text on the rc-2 channel,
+# and nothing when there is none (an EMPTY capture is a real state the caller must be able to
+# distinguish from a captured one: it renders UNMEASURED, never clean).
+_tree_emit_capture_diag() {
+  [ -n "${1:-}" ] || return 0
+  printf '%s\n' "$1"
+}
+
+# _tree_note_capture_failure <subject-label> <rc> <diag> -- the ONE piece of caller glue that
+# turns a failed capture into a scan subject for the `disk-exhaustion:` attribution (#3800,
+# roborev job 301). Only the rc-2 channel carries text (see _tree_identity); every other
+# failure shape records the subject with NO text, which reads UNMEASURED naming it. Called
+# from the PARENT shell at each capture-failure site, because `id=$(_tree_identity ...)` is a
+# subshell and a global set inside it would not survive.
+_tree_note_capture_failure() {
+  local label="${1:-tree-identity capture}" rc="${2:-}" diag="${3:-}"
+  [ "$rc" = 2 ] || diag=""
+  _disk_note_capture_failure "$label" "$diag"
 }
 
 # _tree_mtime <path> -> mtime (sub-second where the platform's stat offers it, else whole
@@ -7880,6 +8041,12 @@ _tree_capture_start() {
   # tree can never be proven unchanged from here, so the run is doomed to FAIL — it is
   # NOT downgraded to SKIP, which is reserved for "there is no git worktree" (#2926 B1).
   if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
+    # #3800: the capture's OWN failure text becomes an in-memory scan subject BEFORE anything
+    # else, so the `disk-exhaustion:` attribution on the block this failure produces has an
+    # evidence source at all. TREE_CAPTURE_FAIL_REASON is a FIXED CONSTANT that can never name
+    # disk, and the manifest lives in $LOG_DIR -- so an ENOSPC here is exactly the case the
+    # attribution exists for, and it reaches NO component log.
+    _tree_note_capture_failure "tree-identity manifest write (start capture)" "$rc" "$id"
     TREE_GUARDED=1
     TREE_CAPTURE_FAILED=1
     TREE_START_HEAD=""; TREE_START_DIRTY=""; TREE_START_DIGEST=""
@@ -8928,6 +9095,10 @@ _assert_tree_integrity() {
     # rc 1 = git momentarily unavailable: the authoritative terminal capture decides.
     # rc 2 / an unvalidatable identity = fail closed here.
     [ "$rc" -eq 1 ] && return 0
+    # #3800: record the capture's own failure text as an in-memory scan subject before the
+    # block is published. On a SIDE lane this global dies with the subshell, which is why
+    # _apply_tree_integrity_marker records its own (text-less) subject on the drain path.
+    _tree_note_capture_failure "tree-identity manifest write (boundary capture after $comp)" "$rc" "$id"
     _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON" capture-failed
     return $?
   fi
@@ -9062,6 +9233,15 @@ _tree_boundary_meta_lines() {
   # outputs -- so the attribution and the table can never disagree about which components are
   # non-PASS. DISK_MIDRUN=1 makes BOTH halves of the line declare their partial window; it is
   # saved and restored because this renderer must leave no state behind for the terminal emit.
+  #
+  # AND MARKING THIS BLOCK WAS NOT ENOUGH ON ITS OWN (#3800, roborev job 301). The component
+  # pairs below CANNOT carry the evidence for the cause named above: on the ENOSPC path
+  # _tree_identity fails independently of any component, its write-error text lands in no
+  # component log, and the components are typically still PASS -- so the line would have
+  # rendered an affirmative `0 RECOGNISED` on precisely the path it was added for. The
+  # evidence reaches the scan through the IN-MEMORY subject channel (DISK_MEM_SUBJECTS),
+  # recorded by _tree_note_capture_failure at each capture-failure site; _disk_exhaustion_line
+  # reads it from that global, so no extra argument is threaded through here.
   _de_prev="${DISK_MIDRUN:-0}"
   DISK_MIDRUN=1
   _disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"}
@@ -9140,6 +9320,13 @@ _apply_tree_integrity_marker() {
   kind=${m%%$'\t'*};   rest=${m#*$'\t'}
   comp=${rest%%$'\t'*}; reason=${rest#*$'\t'}
   TREE_MARKER_SEEN=1
+  # #3800: a SIDE-lane capture failure recorded its in-memory subject inside a BACKGROUNDED
+  # subshell, so that text is gone by the time the parent drains the marker. Record the
+  # subject here WITHOUT text rather than say nothing: it renders UNMEASURED naming the
+  # subject, which is the honest reading -- the alternative is a `0 RECOGNISED` that means
+  # "nobody looked".
+  [ "$kind" = capture-failed ] \
+    && _disk_note_capture_failure "tree-identity capture (SIDE lane, component $comp)" ""
   _tree_detection_mark "$kind" "$comp" "$reason"
   echo "agent-gate: tree-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason) (#2926)" >&2
   return 0
@@ -9188,6 +9375,9 @@ _tree_finalize() {
   # rc 1 (no git) AND rc 2 (capture ran but could not be validated) BOTH land here: the
   # tree cannot be proven unchanged, so the run fails closed either way.
   if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
+    # #3800: same recording as the start and boundary captures -- the terminal capture's
+    # manifest is written into $LOG_DIR too, so ENOSPC reaches it identically.
+    _tree_note_capture_failure "tree-identity manifest write (terminal capture)" "$rc" "$id"
     TREE_END_LINE="tree-end: (terminal capture failed)"
     TREE_END_DIGEST="unavailable"
     _tree_fail_closed "<terminal>" "terminal capture failed — the tree cannot be proven unchanged"
