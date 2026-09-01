@@ -173,11 +173,12 @@ exempt:
       KEEP THIS ENTRY AND run_node_bindings IN STEP: an exemption that defers to a
       local component is only as true as that component's scope, and #1255's narrowing
       to 1 file in 27 is what made this entry false for ~2 days of a deterministic
-      main-red without blocking a merge. The two single lines the typecheck and
-      corpus claims above rest on are PINNED by cases 93-96 of
+      main-red without blocking a merge. The three single lines the typecheck and
+      corpus claims above rest on - `npm run typecheck`, check-dataset-manifest.sh and
+      `npm test`, plus the ORDER of the last two - are PINNED by cases 93-96 of
       scripts/tests/test_check_dataset_manifest.sh (gate component tooling-tests), and
       the component's interpretation of check-dataset-manifest.sh's exit codes by its
-      cases 97-101, so deleting either line reds the gate instead of silently
+      cases 97-102, so deleting any of them reds the gate instead of silently
       falsifying this sentence (#3642).
     issue: "#2910"
   - workflow: observability-gate.yml
