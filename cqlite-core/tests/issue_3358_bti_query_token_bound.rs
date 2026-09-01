@@ -279,7 +279,6 @@ fn non_wraparound_range_emits_only_its_segment() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: false,
     };
     let got = rt.block_on(emitted_rows_by_pk(&reader, Some(bound)));
 
@@ -327,7 +326,6 @@ fn wraparound_range_emits_both_segments_and_nothing_between() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: true,
     };
     let got = rt.block_on(emitted_rows_by_pk(&reader, Some(bound)));
 
