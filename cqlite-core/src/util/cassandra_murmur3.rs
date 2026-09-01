@@ -144,13 +144,13 @@ pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
 /// The minimum token of Cassandra's Murmur3 ring — `Murmur3Partitioner.MINIMUM`.
 ///
 /// `git show cassandra-5.0.8:src/java/org/apache/cassandra/dht/Murmur3Partitioner.java`
-/// line 50: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
+/// field `MINIMUM`: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
 ///
 /// It is the token of the **empty** partition key and of nothing else: the javadoc on
-/// `getToken` (lines 250-255) states that "all generated token are strictly bigger than
+/// `getToken` states that "all generated token are strictly bigger than
 /// MINIMUM ... we don't want MINIMUM to correspond to any key because the range
 /// (MINIMUM, X] doesn't include MINIMUM but we use such range to select all data whose
-/// token is smaller than X", and `normalize` (lines 291-295) enforces that by remapping
+/// token is smaller than X", and `normalize(long)` enforces that by remapping
 /// a hashed `Long.MIN_VALUE` to `Long.MAX_VALUE`.
 ///
 /// Named rather than spelled `i64::MIN` at each site so the ring minimum is greppable:
@@ -165,7 +165,7 @@ pub const CASSANDRA_MINIMUM_TOKEN: i64 = i64::MIN;
 ///
 /// An **empty** key short-circuits to [`CASSANDRA_MINIMUM_TOKEN`] without hashing,
 /// exactly as Cassandra does (`Murmur3Partitioner.getToken(ByteBuffer, long[])`,
-/// cassandra-5.0.8 lines 261-267: `if (key.remaining() == 0) return MINIMUM;`).
+/// cassandra-5.0.8: `if (key.remaining() == 0) return MINIMUM;`).
 /// The hash of the empty input is `h1 == 0` and `normalize(0) == 0`, so without
 /// this branch an empty key would be placed on the ring at token 0 (issue #3633).
 pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
@@ -558,7 +558,7 @@ mod tests {
     /// value at seed 0 and must stay asserted as-is. It does NOT contradict
     /// `cassandra_murmur3_token(b"") == CASSANDRA_MINIMUM_TOKEN`: Cassandra's
     /// `Murmur3Partitioner.getToken(ByteBuffer, long[])` (cassandra-5.0.8, lines
-    /// 261-267) returns `MINIMUM` for a zero-length key BEFORE consulting the hash,
+    /// returns `MINIMUM` for a zero-length key BEFORE consulting the hash,
     /// so the raw hash and the token legitimately differ at empty input. Do not
     /// "reconcile" the two — changing this assertion would break the port of
     /// `MurmurHash.hash3_x64_128`.
@@ -632,8 +632,8 @@ mod tests {
     ///
     /// Oracle (pinned Cassandra 5.0.8, the only format authority here):
     /// `git show cassandra-5.0.8:src/java/org/apache/cassandra/dht/Murmur3Partitioner.java`
-    /// - line 50: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
-    /// - lines 261-267: `private LongToken getToken(ByteBuffer key, long[] hash)` is
+    /// - field `MINIMUM`: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
+    /// - `private LongToken getToken(ByteBuffer key, long[] hash)` is
     ///   `{ if (key.remaining() == 0) return MINIMUM; return new LongToken(normalize(hash[0])); }`
     ///
     /// So Cassandra returns `Long.MIN_VALUE` for a zero-length key, short-circuiting
@@ -680,7 +680,7 @@ mod tests {
             );
             // A non-empty key never lands on MINIMUM: `normalize` maps `i64::MIN`
             // to `i64::MAX` precisely so the ring minimum stays unreachable
-            // (Murmur3Partitioner.normalize, cassandra-5.0.8 lines 291-295).
+            // (Murmur3Partitioner.normalize(long), cassandra-5.0.8).
             assert_ne!(cassandra_murmur3_token(key), CASSANDRA_MINIMUM_TOKEN);
         }
     }
