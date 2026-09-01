@@ -973,6 +973,11 @@ fi
 #     the name is a symlink to a regular file; `basename` then strips the slash and hands `mv`
 #     that very symlink. The guard therefore re-tests `$write_target` itself, and this case
 #     drives exactly that route: config.toml -> "…/second/" -> a regular file.
+#     THE REFUSAL MOVED EARLIER IN ROUND 6, and the alternation below records that rather than
+#     hiding it: a trailing-slash target is now rejected BY NAME before canonicalisation, so this
+#     case exits through the trailing-slash message instead of the write-target re-check. What is
+#     ASSERTED has not moved — nothing is clobbered and both links survive — and sibling case 6x
+#     drives the same malformed shape onto a REGULAR file, which is the destructive route.
 sbU=$(mktemp -d "$tmp/moldU.XXXXXX"); mkdir -p "$sbU/.cargo"
 printf 'user = 1\n' >"$sbU/.cargo/actual.toml"
 ln -s "$sbU/.cargo/actual.toml" "$sbU/.cargo/second"
@@ -980,7 +985,7 @@ ln -s "$sbU/.cargo/second/" "$sbU/.cargo/config.toml"
 outU=$(PATH="$stubO:$PATH" HOME="$sbU" CARGO_HOME="$sbU/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if [ -L "$sbU/.cargo/second" ] && [ "$(count_begin "$sbU/.cargo/actual.toml")" = 0 ] \
-   && printf '%s' "$outU" | grep -qE "could not be resolved|which is itself a symlink or a directory"; then
+   && printf '%s' "$outU" | grep -qE "could not be resolved|which is itself a symlink or a directory|trailing '/' denotes a directory it does not name"; then
   ok "mold/symlink: a trailing-slash target naming a SECOND symlink is refused — the intermediate guards can be bypassed by normalisation, so the no-clobber test is re-run on the write target itself"
 else
   bad "mold/symlink: the trailing-slash second-symlink case was not refused (second-is-link=$([ -L "$sbU/.cargo/second" ] && echo yes || echo no) actual-begin=$(count_begin "$sbU/.cargo/actual.toml"))"
@@ -1027,6 +1032,52 @@ if [ ! -e "$sbW/dotfiles/legacy-config" ] && [ ! -e "$sbW/dotfiles/modern-config
 else
   bad "mold/symlink: the two-dangling-symlinks case was not refused (legacy=$([ -e "$sbW/dotfiles/legacy-config" ] && echo materialised || echo no) modern=$([ -e "$sbW/dotfiles/modern-config" ] && echo materialised || echo no))"
   printf '%s\n' "$outW" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6x. A TRAILING-SLASH TARGET NAMING A REGULAR FILE DESTROYS NOTHING (#3756 roborev round 6,
+#     HIGH — data loss). `config.toml -> "…/regular-file/"` defeats BOTH guards: a trailing
+#     slash forces directory resolution, so `-L` reads false for a symlink and `-d` reads false
+#     for a regular file. `dirname`/`basename` then STRIP the slash and hand `mv` the real file
+#     underneath — and because the preserve read used the un-normalised path it saw nothing, so
+#     the append became an OVERWRITE and the file's contents were gone.
+#
+#     Two things are asserted, because the fix has two halves: the malformed target is REFUSED
+#     (a trailing slash denotes a directory it does not name), and — the half that makes the
+#     whole class unreachable — the preserve read and the write now derive from the SAME
+#     resolved path, so no future normalisation can move one without the other.
+sbX=$(mktemp -d "$tmp/moldX.XXXXXX"); mkdir -p "$sbX/.cargo" "$sbX/data"
+printf 'irreplaceable = "user data"\n' >"$sbX/data/regular-file"
+beforeX=$(cat "$sbX/data/regular-file")
+ln -s "$sbX/data/regular-file/" "$sbX/.cargo/config.toml"
+outX=$(PATH="$stubO:$PATH" HOME="$sbX" CARGO_HOME="$sbX/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ "$beforeX" = "$(cat "$sbX/data/regular-file")" ] \
+   && [ -L "$sbX/.cargo/config.toml" ] \
+   && [ "$(count_begin "$sbX/data/regular-file")" = 0 ] \
+   && printf '%s' "$outX" | grep -q "trailing '/' denotes a directory it does not name"; then
+  ok "mold/symlink: a trailing-slash target naming a REGULAR FILE is refused by name — the file keeps its contents byte-for-byte and the symlink is untouched (this path used to OVERWRITE it)"
+else
+  bad "mold/symlink: the trailing-slash regular-file case lost data or was not refused (content-preserved=$([ "$beforeX" = "$(cat "$sbX/data/regular-file")" ] && echo yes || echo NO) still-link=$([ -L "$sbX/.cargo/config.toml" ] && echo yes || echo no) block-written=$(count_begin "$sbX/data/regular-file"))"
+  echo "--- file now ---"; cat "$sbX/data/regular-file"; echo "----------------"
+  printf '%s\n' "$outX" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6y. THE PRESERVE READ FOLLOWS THE RESOLVED PATH, NOT THE LINK (#3756 roborev round 6, the
+#     class fix). With resolution moved ahead of the read, a symlinked config's EXISTING user
+#     content must survive the append — asserted through a symlink so the two derivations are
+#     genuinely different paths, which is the condition under which they used to diverge.
+sbY=$(mktemp -d "$tmp/moldY.XXXXXX"); mkdir -p "$sbY/.cargo" "$sbY/store"
+printf '[net]\nretry = 17\n' >"$sbY/store/cargo-config.toml"
+ln -s "$sbY/store/cargo-config.toml" "$sbY/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbY" CARGO_HOME="$sbY/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if grep -qx 'retry = 17' "$sbY/store/cargo-config.toml" \
+   && [ "$(count_begin "$sbY/store/cargo-config.toml")" = 1 ] \
+   && [ -L "$sbY/.cargo/config.toml" ]; then
+  ok "mold/symlink: user content in a SYMLINKED config survives the append — the preserve read and the write derive from one resolved path, so an append cannot silently become an overwrite"
+else
+  bad "mold/symlink: symlinked-config user content did not survive (retry-line=$(grep -c 'retry = 17' "$sbY/store/cargo-config.toml") begin=$(count_begin "$sbY/store/cargo-config.toml"))"
+  cat "$sbY/store/cargo-config.toml"
 fi
 
 # --- 7. git push credentials (issue #2942) ---------------------------------
@@ -1861,7 +1912,18 @@ if ! printf '%s' "$out7pk" | grep -q 'gh auth setup-git' \
   ok "push: a failed cleanup attributes NO cause and gives no credential advice — it reports the observation"
 else
   bad "push: an unsupportable cause (or credential advice) was attached to a failed cleanup"
-  push_plain "$out7pk" | grep -E 'CLAIM:|cause|setup-git' | head -4
+  # PRINT THE EVIDENCE THIS ASSERTION TURNS ON, which is FOUR separate conditions — three
+  # negative and one positive. The old diagnostic grepped `CLAIM:|cause|setup-git`, which
+  # covers only two of them, so an intermittent failure caused by `--fix-credentials` or
+  # `ref-deletion policy` appearing printed a line that looked entirely correct and named
+  # nothing (measured: two occurrences on #3756, neither attributable from the output).
+  # Same rule as #3758 nit 7, one case over.
+  printf '     which condition failed: setup-git=%s fix-credentials=%s deletion-policy=%s no-cause-attributed=%s\n' \
+    "$(printf '%s' "$out7pk" | grep -c 'gh auth setup-git')" \
+    "$(printf '%s' "$out7pk" | grep -c -- '--fix-credentials')" \
+    "$(printf '%s' "$out7pk" | grep -ci 'ref-deletion policy')" \
+    "$(push_plain "$out7pk" | grep -c 'no cause is attributed')"
+  push_plain "$out7pk" | grep -nE 'CLAIM:|cause|setup-git|--fix-credentials|ref-deletion policy' | head -8
 fi
 # The verdict must come from claim.sh's ANCHORED verdict line AND its exit status, not
 # from a substring anywhere in the captured stream. A claim.sh that prints the token in

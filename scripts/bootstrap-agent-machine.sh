@@ -334,7 +334,7 @@ mold_target_section() {
 # and a both-files machine never has the block land in the ignored file.
 mold_write_block() {
   local linker="$1"
-  local cfg_dir cfg_file preserved
+  local cfg_dir cfg_file preserved write_target tmpw
   cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
   if ! mkdir -p "$cfg_dir" 2>/dev/null; then
     warn "could not create $cfg_dir — skipping mold linker config"
@@ -369,53 +369,15 @@ mold_write_block() {
   else
     cfg_file="$cfg_dir/config.toml"
   fi
-  preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
-  if [ -f "$cfg_file" ]; then
-    awk -v b="$MOLD_BEGIN" -v e="$MOLD_END" '
-      { lines[NR] = $0 }
-      END {
-        start = 0
-        for (i = 1; i <= NR; i++) if (lines[i] == b) { start = i; break }
-        if (start == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
-        endi = 0
-        for (i = start; i <= NR; i++) if (lines[i] == e) { endi = i; break }
-        if (endi == 0) endi = NR
-        rmstart = start
-        if (start > 1 && lines[start-1] == "") rmstart = start - 1
-        for (i = 1; i <= NR; i++) if (i < rmstart || i > endi) print lines[i]
-      }
-    ' "$cfg_file" >"$preserved"
-  else
-    : >"$preserved"
-  fi
-  # Fail-safe #1: a user-defined [target.<triple>-unknown-linux-gnu] section OUTSIDE
-  # our markers would collide with the block we append (TOML table redefinition =
-  # cargo parse error on EVERY invocation). Never risk it — warn and write nothing,
-  # leaving the file byte-identical.
-  if grep -Eq '^\[target\.(x86_64|aarch64)-unknown-linux-gnu\]' "$preserved"; then
-    warn "existing [target.<triple>-unknown-linux-gnu] section in $cfg_file — writing NO mold block (a second table would be a cargo parse error); add \"-C link-arg=-fuse-ld=mold\" to that section by hand, or remove it and re-run bootstrap"
-    rm -f "$preserved"
-    return 0
-  fi
-  # Fail-safe #2: a pre-existing [build] rustflags (or a dotted build.rustflags) is
-  # first-match-wins over our target.rustflags — writing the block would SILENTLY
-  # disable the user's global flags. Same posture: warn and write nothing.
-  if awk '
-      /^\[build\]/ { inbuild = 1; next }
-      /^\[/        { inbuild = 0 }
-      inbuild && /^[[:space:]]*rustflags[[:space:]]*=/ { found = 1 }
-      /^[[:space:]]*build\.rustflags[[:space:]]*=/     { found = 1 }
-      END { exit(found ? 0 : 1) }
-    ' "$preserved"; then
-    warn "existing [build] rustflags in $cfg_file — writing NO mold block (target.rustflags would silently disable the user's build rustflags); add \"-C link-arg=-fuse-ld=mold\" to that rustflags list by hand, or remove it and re-run bootstrap"
-    rm -f "$preserved"
-    return 0
-  fi
-  # Atomic write: build the new content in a temp file in the SAME directory, then
-  # rename over the target — so an ENOSPC/interrupt mid-write can never leave a
-  # truncated config (which would break every cargo invocation). Resolve a symlink
-  # to its target so we never silently replace a symlinked config with a plain file.
-  local write_target="$cfg_file" tmpw
+  # THE SYMLINK IS RESOLVED BEFORE ANYTHING IS READ, SO THE FILE WE PRESERVE AND THE FILE WE
+  # WRITE ARE THE SAME FILE BY CONSTRUCTION (#3756 roborev round 6). They used to be derived
+  # separately — `$preserved` from `$cfg_file`, the rename from a resolved `$write_target` — and
+  # any normalisation that moved one and not the other turned an APPEND into an OVERWRITE: a
+  # target text ending in `/` made the preserve read see nothing (a trailing slash forces
+  # directory resolution) while the write, with the slash stripped, landed on a real regular file
+  # and destroyed it. Resolving first REMOVES the second derivation instead of trying to keep two
+  # of them in step.
+  write_target="$cfg_file"
   if [ -L "$cfg_file" ]; then
     # PORTABLE SYMLINK RESOLUTION (#3756). `readlink -f` is GNU-only — BSD/macOS readlink
     # has no -f — and the previous form's `|| echo "$cfg_file"` made that failure SILENT:
@@ -451,13 +413,24 @@ mold_write_block() {
     # Measured on a fixture where `link -> real/inner`: `cd link/..` gives the PARENT OF THE
     # LINK, `cd -P link/..` gives `real`. Writing the block to the wrong file is bad; doing it
     # while believing we resolved the link is worse.
+    # A TARGET WHOSE TEXT ENDS IN `/` IS REFUSED, NOT NORMALISED (#3756 roborev round 6, HIGH).
+    # A trailing slash DENOTES a directory, and it also defeats both guards when it does not name
+    # one: `-L` resolves the path as a directory and so reads false for a symlink, `-d` reads
+    # false for a regular file — and then `dirname`/`basename` STRIP the slash and hand `mv` the
+    # real file underneath. Normalising a malformed path is how a check stops describing the
+    # thing that gets used; that is the third finding in this one family, so the malformed input
+    # is refused rather than repaired.
+    case "$_wt" in
+      */)
+        warn "$cfg_file resolves to $_wt, whose trailing '/' denotes a directory it does not name — skipping mold linker config rather than normalising the path into a different file"
+        return 0 ;;
+    esac
     _wd=''
     if [ ! -L "$_wt" ] && [ ! -d "$_wt" ]; then
       _wd=$(cd -P "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
     fi
     if [ -z "$_wd" ]; then
       warn "$cfg_file is a symlink whose target could not be resolved — skipping mold linker config rather than replacing the symlink with a plain file"
-      rm -f "$preserved"
       return 0
     fi
     write_target="$_wd/$(basename "$_wt")"
@@ -470,10 +443,55 @@ mold_write_block() {
     # for an output that was computed from it.
     if [ -L "$write_target" ] || [ -d "$write_target" ]; then
       warn "$cfg_file resolves to $write_target, which is itself a symlink or a directory — skipping mold linker config rather than replacing it"
-      rm -f "$preserved"
       return 0
     fi
   fi
+  preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
+  if [ -f "$write_target" ]; then
+    awk -v b="$MOLD_BEGIN" -v e="$MOLD_END" '
+      { lines[NR] = $0 }
+      END {
+        start = 0
+        for (i = 1; i <= NR; i++) if (lines[i] == b) { start = i; break }
+        if (start == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+        endi = 0
+        for (i = start; i <= NR; i++) if (lines[i] == e) { endi = i; break }
+        if (endi == 0) endi = NR
+        rmstart = start
+        if (start > 1 && lines[start-1] == "") rmstart = start - 1
+        for (i = 1; i <= NR; i++) if (i < rmstart || i > endi) print lines[i]
+      }
+    ' "$write_target" >"$preserved"
+  else
+    : >"$preserved"
+  fi
+  # Fail-safe #1: a user-defined [target.<triple>-unknown-linux-gnu] section OUTSIDE
+  # our markers would collide with the block we append (TOML table redefinition =
+  # cargo parse error on EVERY invocation). Never risk it — warn and write nothing,
+  # leaving the file byte-identical.
+  if grep -Eq '^\[target\.(x86_64|aarch64)-unknown-linux-gnu\]' "$preserved"; then
+    warn "existing [target.<triple>-unknown-linux-gnu] section in $cfg_file — writing NO mold block (a second table would be a cargo parse error); add \"-C link-arg=-fuse-ld=mold\" to that section by hand, or remove it and re-run bootstrap"
+    rm -f "$preserved"
+    return 0
+  fi
+  # Fail-safe #2: a pre-existing [build] rustflags (or a dotted build.rustflags) is
+  # first-match-wins over our target.rustflags — writing the block would SILENTLY
+  # disable the user's global flags. Same posture: warn and write nothing.
+  if awk '
+      /^\[build\]/ { inbuild = 1; next }
+      /^\[/        { inbuild = 0 }
+      inbuild && /^[[:space:]]*rustflags[[:space:]]*=/ { found = 1 }
+      /^[[:space:]]*build\.rustflags[[:space:]]*=/     { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "$preserved"; then
+    warn "existing [build] rustflags in $cfg_file — writing NO mold block (target.rustflags would silently disable the user's build rustflags); add \"-C link-arg=-fuse-ld=mold\" to that rustflags list by hand, or remove it and re-run bootstrap"
+    rm -f "$preserved"
+    return 0
+  fi
+  # Atomic write: build the new content in a temp file in the SAME directory, then
+  # rename over the target — so an ENOSPC/interrupt mid-write can never leave a
+  # truncated config (which would break every cargo invocation). Resolve a symlink
+  # to its target so we never silently replace a symlinked config with a plain file.
   tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
     || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }
   {
