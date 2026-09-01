@@ -630,7 +630,7 @@ clearing path is a permanent blocker and *a guard that never permits work is bro
 `DEAD-*` (boot id differs, pid absent, pid reused, zombie) is **auto-reclaimed by the next `acquire`**, with
 the reclaim recorded in the audit log — no human, no flag. **A reboot clears everything**: the boot id
 changes, so every pre-reboot record reads `DEAD-REBOOT`, making a box restart a global un-brick. `UNKNOWN-*`
-is cleared deliberately with `reclaim <N> --expect <token> --reason <why>` (compare-and-swap, recorded) or
+is cleared deliberately with `reclaim <N> --expect <lease> --reason <why>` (compare-and-swap, recorded) or
 `release <N> --force`, which only *deletes*, needs no identity of its own and therefore works from anywhere.
 
 **Scope, stated because a lock read as covering more than it does is its own false-clean.** It is

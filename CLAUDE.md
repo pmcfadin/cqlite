@@ -3119,7 +3119,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   that never permits work is broken, not fail-closed*: `DEAD-*` is auto-reclaimed by the next
   `acquire`, recorded in the audit log, no human involved; **a reboot clears everything** (the boot id
   changes, so every pre-reboot record reads `DEAD-REBOOT` — a box restart is a global un-brick);
-  `UNKNOWN-*` is cleared deliberately with `reclaim <N> --expect <token> --reason <why>` (CAS,
+  `UNKNOWN-*` is cleared deliberately with `reclaim <N> --expect <lease> --reason <why>` (CAS,
   recorded) or `release <N> --force`, which only DELETES, needs no identity of its own and therefore
   works from anywhere.
   **THIS PARAGRAPH USED TO PRINT `( cd "$wt" && … acquire <N> )` — the exact form the next

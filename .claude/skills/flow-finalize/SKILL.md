@@ -137,7 +137,7 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    incident: PR merged from `issue-1143-read-p99-regression`, glob also matched + deleted the separate
    active `issue-1143-scan-window-offload`). Use the guardrailed script instead — it targets ONLY the
    merged PR's branch, refuses on >1 lock for the issue (1:1:1:1 violation), and refuses to remove a
-   dirty/unpushed worktree:
+   dirty/unpushed worktree.
    **Release the locks FIRST, while the lane directory still exists** — the claim ref, the actual
    cross-machine lock (#2665), and the machine-local lane lock. The PR is merged, so the open-PR
    guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize).
@@ -146,7 +146,6 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    INSIDE the lane — so releasing afterwards is refused as not-holder and leaks the record. Round 12
    wrote that warning into the comment below and left the steps in the old order, which is why a
    later review found it again: an instruction is not a sequence.
-   open-PR guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize):
    ```bash
    bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
    # ...and drop the MACHINE-LOCAL lane lock (#3436). THIS IS NOW REQUIRED, not cosmetic:
