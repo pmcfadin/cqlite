@@ -222,6 +222,43 @@ JSON number for all of them (a decimal string for `varint`), so nothing there
 either. The enforcement lives where the surface is unambiguous, which is the
 only place a strictness rule can be added without risking a false red.
 
+### Every scalar's native type is EXACT, not merely compatible
+
+The same rule as the containers, applied to every remaining adapter branch: a
+leg accepts only the native type its binding can actually produce. Each was
+verified at source before being tightened, and each has a refusal case pinned
+by name in the floor.
+
+| # | leg / kind | now requires | was also accepting | source |
+|---|---|---|---|---|
+| R1 | python `float` `double` | `float` | `int` | `value.rs:40-41`, `into_pyobject` on an `f64` |
+| R2 | python `blob` | `bytes` | `bytearray`, `memoryview` | `value.rs:52`, `PyBytes::new` |
+| R3 | python `set<T>` | `frozenset` | mutable `set` | `set_to_py` / `value_to_hashable_key` build `PyFrozenSet` |
+| R4 | python `duration` | `cqlite.Duration` | anything with `.months/.days/.nanos` | `value.rs:59`, `duration_to_py` |
+| R5 | node `blob` | `Buffer` | any `Uint8Array` | `value.rs:232`, `create_buffer_copy` |
+| R6 | node `duration` | **exactly** `{days, months, nanos}` | any object containing those keys | `value.rs:335-342`, `duration_to_object` |
+
+R5 is the subtle one: `Buffer` **is** a `Uint8Array` subclass, so the old
+`isBytes()` test accepted a strictly wider set and a regression returning a
+bare `Uint8Array` would have canonicalized identically. R4 removed a second
+defect on the way — the old `getattr(value, "months", None)` form read a
+legitimate `months=None` as a missing attribute.
+
+### R7 is DECLINED, deliberately — not an omission
+
+The CLI leg's `float`/`double` branch still accepts a Python `int` as well as a
+`float`, and it should stay that way. `serde_json` renders a whole `f64` as
+`N.0` today, so in practice `json.loads` always yields a `float` — but
+**nothing in that contract guarantees it**, and B4 in this very harness is the
+standing evidence that number-shape assumptions across a JSON boundary are
+exactly where a false red comes from (an integral `double` really did arrive as
+a Python `int` on the node leg, and collapsing the shape tag was the fix). The
+cost of leaving it is a strictly wider accept on ONE branch of ONE leg; the
+cost of tightening it is a lane that reds on correct input, which is the lane
+agents learn to waive. Recorded here so it is a decision with a reason rather
+than a gap someone re-litigates. The same reasoning is stated at the branch in
+`canonical.py`.
+
 ### A PRESENT `undefined` is a regression, not an absence
 
 Declared gap 5 accommodates an **absent** property — the Node binding
