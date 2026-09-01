@@ -884,6 +884,26 @@ YAML
 run_policy "$DIR"
 expect_fail_named "an unparseable workflow is a NAMED error, never a silent exclusion" "broken-lane.yml"
 
+DIR=$(new_case empty-workflow)
+# THE SAME PERMISSIVE COLLAPSE, ONE BRANCH OVER (roborev round 1, Low). A file that
+# PARSES SUCCESSFULLY to an empty document returns `nil`, which is NOT a loader
+# failure — so the guard that suppresses double-reporting after a `rescue` was also
+# swallowing this. An empty workflow is a realistic ACCIDENT (a truncated write, a
+# bad merge resolution, a `>` where `>>` was meant), and treating it as "a workflow
+# with no triggers" is an ANSWER manufactured from absence of data: the loader
+# cannot tell a legitimately-empty file from a truncated one, so it must not answer
+# the trigger question at all.
+: >"$DIR/workflows/truncated-lane.yml"
+run_policy "$DIR"
+expect_fail_named "an EMPTY workflow document is a NAMED error, not a trigger-less workflow" "truncated-lane.yml"
+
+DIR=$(new_case comment-only-workflow)
+# Same `nil` parse, different spelling — pinned separately because a future reader
+# fixing one shape must not conclude the other is covered.
+printf '# all that survived the merge resolution\n# on: pull_request\n' >"$DIR/workflows/gutted-lane.yml"
+run_policy "$DIR"
+expect_fail_named "a COMMENT-ONLY workflow document is a NAMED error" "gutted-lane.yml"
+
 DIR=$(new_case non-mapping-workflow)
 # Parses cleanly, but to a LIST — so `workflow["on"]` is not askable either. Same
 # class, different cause: the answer is UNKNOWN, and unknown must not be permissive.
@@ -1491,7 +1511,8 @@ count_rule_rejections() {
              "$WORK"/case-exempt-half-garbage-manifest "$WORK"/case-exempt-half-ghost-step \
              "$WORK"/case-exempt-half-none-no-ground "$WORK"/case-exempt-half-none-not-sole \
              "$WORK"/case-unparseable-workflow "$WORK"/case-non-mapping-workflow \
-             "$WORK"/case-registered-tier-broken-yaml; do
+             "$WORK"/case-registered-tier-broken-yaml \
+             "$WORK"/case-empty-workflow "$WORK"/case-comment-only-workflow; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -1504,10 +1525,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 32 ]; then
-  ok "the real rule rejects all 32 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 34 ]; then
+  ok "the real rule rejects all 34 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/32"
+  bad "the real rule rejected only $REAL_REJECTIONS/34"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"
@@ -1530,7 +1551,7 @@ fi
 # deliberately a FLOOR and not an equality, so adding one does not red the suite
 # before its author gets to the bottom of the file. The number counts the cases
 # decided BEFORE this assertion — this one is not in its own subject set.
-CASE_FLOOR=92
+CASE_FLOOR=94
 if [ "$((PASS + FAIL))" -ge "$CASE_FLOOR" ]; then
   ok "the suite ran at least its declared floor of $CASE_FLOOR cases"
 else

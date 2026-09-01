@@ -57,6 +57,18 @@ module GatingRegistry
   EMITTING_JOB_CONDITION = "!cancelled()"
   LAUNDERING_CONDITION = "always()"
 
+  # A LOADER FAILURE IS NOT A PARSE RESULT (roborev round 1, Low). `load_yaml`
+  # returns `nil` for a successfully parsed EMPTY document, and the `rescue`
+  # branches below also need to signal "this file could not be read at all" — so
+  # `nil` cannot carry both meanings without collapsing one onto the other, which
+  # is exactly how the empty-document case survived the parse-failure fix.
+  #
+  # A UNIQUE OBJECT, not a Symbol or a String: any sentinel VALUE could in
+  # principle be produced by parsing some document, and a collision would silently
+  # mark real content "already reported". `equal?` on a private frozen object can
+  # never be true for anything the parser builds.
+  LOADER_FAILED = Object.new.freeze
+
   # A shell statement that can end the job non-zero. `exit 0` is deliberately
   # excluded; `exit $rc` / `exit "$rc"` count.
   FAILING_EXIT = /(?<![\w.-])exit\s+(?:"?\$|[1-9])/
@@ -397,9 +409,27 @@ module GatingRegistry
   # rule keeps a Hash to ask questions of — but the error travels beside it and
   # `policy_errors` returns non-empty, so nothing can pass on the placeholder.
   #
-  # A file that parses to a NON-MAPPING (a list, a scalar, an empty document) is
-  # the same class with a different cause: `workflow["on"]` is unaskable, so the
-  # trigger answer is UNKNOWN, and unknown must not be permissive.
+  # A file that parses to a NON-MAPPING (a list, a scalar) is the same class with a
+  # different cause: `workflow["on"]` is unaskable, so the trigger answer is
+  # UNKNOWN, and unknown must not be permissive.
+  #
+  # AND SO IS AN EMPTY DOCUMENT, which is its own branch because it is NOT a loader
+  # failure (roborev round 1, Low). `load_yaml` returns `nil` for an empty or
+  # comment-only file — a SUCCESSFUL parse — and the first cut of this fix used
+  # `nil` both as that result and as the rescue branches' "already reported"
+  # signal, so the guard `unless parsed.nil? || parsed.is_a?(Hash)` swallowed the
+  # empty case: the permissive collapse this method exists to remove, surviving one
+  # branch over. Hence LOADER_FAILED, and three distinct outcomes.
+  #
+  # WHY IT MATTERS BEYOND TIDINESS: an empty workflow file is a realistic ACCIDENT
+  # — a truncated write, a bad merge resolution, a `>` where `>>` was meant — and
+  # treating it as "a workflow with no triggers" is an ANSWER manufactured from the
+  # ABSENCE of data. The loader cannot tell a legitimately-empty file from a
+  # truncated one, so it must not answer the trigger question at all; under the old
+  # behaviour such a file escaped the enrolment rule exactly as the unparseable one
+  # did. Both are the same rule: a "cannot tell" must not inherit the permissive
+  # answer. Measured before adding it: ZERO of the 42 real workflows parse to nil,
+  # so this cannot red a correct tree.
   #
   # ONE DELIBERATE BEHAVIOUR CHANGE, on a path that is NOT the fail-open, recorded
   # because a reader would otherwise find it by surprise. When a REGISTERED TIER's
@@ -431,13 +461,20 @@ module GatingRegistry
         errors << "#{workflows_dir}/#{name}: could not be parsed as YAML, so whether it carries a " \
                   "`pull_request` trigger CANNOT be determined; an unreadable workflow is NOT treated " \
                   "as non-PR-triggered (YAML parse failed: #{e.message.lines.first&.strip})"
-        nil
+        LOADER_FAILED
       rescue SystemCallError, IOError => e
         errors << "#{workflows_dir}/#{name}: could not be read, so whether it carries a " \
                   "`pull_request` trigger CANNOT be determined (#{e.class}: #{e.message})"
-        nil
+        LOADER_FAILED
       end
-      unless parsed.nil? || parsed.is_a?(Hash)
+
+      if parsed.equal?(LOADER_FAILED)
+        nil # already reported above, with the cause that produced it
+      elsif parsed.nil?
+        errors << "#{workflows_dir}/#{name}: is an EMPTY YAML document (empty file, or nothing but " \
+                  "comments), so whether it carries a `pull_request` trigger CANNOT be determined; " \
+                  "an empty workflow is NOT treated as non-PR-triggered"
+      elsif !parsed.is_a?(Hash)
         errors << "#{workflows_dir}/#{name}: parses to #{parsed.class}, not a workflow mapping, so " \
                   "whether it carries a `pull_request` trigger CANNOT be determined; an unreadable " \
                   "workflow is NOT treated as non-PR-triggered"
