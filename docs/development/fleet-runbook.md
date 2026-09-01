@@ -950,6 +950,19 @@ conflict is real and unresolved: nothing mechanical distinguishes them, so an op
 the branch's last commit time and whether a session is driving it. Until #3436 lands a mechanism, treat
 the signature as a prompt to look, never as a verdict.
 
+**Known non-lane artifacts a naive lane-liveness scan calls dead (#3548).** Measured, from the ad-hoc
+`lane-watchdog.sh` — **not** from `dead-lanes`, which enumerates only claim refs and therefore cannot
+report any of these:
+
+- **`lane-3451-mainred`** and **`lane-3401-telemetry`** were both reported `DEAD-NO-SESSION`.
+  **Neither is a lane.**
+- `lane-3401-telemetry` is `flow-finalize`'s own `telemetry-<N>` worktree, which **every delivery
+  creates** — so this is a recurring, structural false positive, not a one-off.
+- Acting on either report would have spawned `/drive-issue` **against a nonexistent issue number**.
+- Therefore: **an issue number parsed out of a directory name is not evidence that the issue exists.**
+  Before acting on any lane-liveness report, confirm the issue number is real AND that the directory
+  is a lane rather than a `telemetry-<N>` finalize worktree.
+
 The primitives that DO exist and are worth running by hand on a suspect box: `dmesg | grep -i "out of
 memory"` (step 1 below — an OOM kill is the most common cause), `bash scripts/flow/claim.sh status <N>`
 (who holds the per-issue lock), `bash scripts/flow/claim-heartbeat.sh list` (machine-level heartbeat
