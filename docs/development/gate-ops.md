@@ -261,10 +261,14 @@ worktree; additionally prune stale worktrees' `target/` dirs and size the shared
 **When it happens anyway, the SUMMARY now says so (#3800).** ENOSPC used to surface as a
 bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
 doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
-minimal-features build that was never broken. Every terminal block now carries a
-`disk-exhaustion:` line naming a recognised signature, the component and the log line, plus a
-start→emit free-space delta; see the gate section of `CLAUDE.md` for its closed value set. It
-is an **attribution, never a verdict**: it never changes `RESULT`.
+minimal-features build that was never broken. Every SUMMARY block **that carries a component
+table** now carries a `disk-exhaustion:` line naming a recognised signature, the component and
+the log line, plus a start→emit free-space delta; see the gate section of `CLAUDE.md` for its
+closed value set. Blocks emitted before any component runs (the pre-flight FAIL-CLOSED blocks,
+the `--delta` usage errors and refused-before-execution blocks, the self-test hooks) are
+**declared exempt at the site** and already name their own cause. It is an **attribution, never
+a verdict**: it never changes `RESULT`, and a matched signature is evidence about the host, not
+proof the diff is innocent.
 
 **This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
 queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per

@@ -746,9 +746,10 @@ build that was never broken. Measured: `lane-3634/target` at **101G mid-full-gat
 143G** on a 295G disk shared with two other lanes at 68G and 57G, **0 bytes free** at the
 failure; a re-run on the **same tree at the same sha** PASSed once a peer freed space.
 
-Every terminal block — full, `--lite`, `--delta` (including its REFUSED path) and both hidden
-selftest hooks — now carries exactly one `disk-exhaustion:` line, on the `missing-fixtures:` /
-`missing-schemas:` marker precedent. Its value set is **closed**:
+Every SUMMARY block **that carries a component table** — the full gate's terminal, `--lite`'s,
+`--delta`'s, `--delta`'s python-tier REFUSED block and the two hidden selftest hooks — now
+carries exactly one `disk-exhaustion:` line, on the `missing-fixtures:` / `missing-schemas:`
+marker precedent. Its value set is **closed**:
 
 - `RECOGNISED (#3800)` — names the signature, the component and `<log>:<line>`, says the
   observation is **consistent with disk exhaustion on this host**, and gives the remedy: free
@@ -770,6 +771,28 @@ Properties worth knowing:
 - **It is an ATTRIBUTION, never a verdict.** It never reads, sets or influences
   `OVERALL`/`RESULT`. A matched signature is evidence about the **host**, not proof the diff is
   innocent, and this marker does not own the verdict.
+- **Its SCOPE is "carries a component table", not "is terminal" — and the exclusions are
+  DECLARED at the site.** The script has 25 `emit_summary` / `_emit_terminal_summary` call
+  sites; **6** carry a component table and all 6 append the line. The other **19** — the three
+  pre-flight FAIL-CLOSED blocks, the `component-set` FAIL, the two summary-integrity FAILs, the
+  shared forwarder, the five self-test hooks, the four `--delta` usage ERRORs, the two
+  `--delta` refused-**before-execution** blocks and the `--only` no-Data.db pre-flight — are
+  emitted where no component has run. They have **nothing to attribute**: the line could only
+  render a misleading `0 RECOGNISED … (0/0 PASS)`, and each block already names its own cause
+  with its own dedicated marker, so adding it there would be noise that dilutes this marker's
+  meaning. Each carries a `# disk-exhaustion-exempt: <reason>` comment, on the
+  `component-set-exempt:` idiom, and the suite censuses **every** emit site as
+  MARKED / EXEMPT / GAP — a new emit site carrying neither REDS it.
+  The `--delta` REFUSED paths split and the distinction matters: the **python-tier** refusal
+  HAS a component table (file-size / fmt / scoped-tests run before it) and IS marked; the two
+  **refused-before-execution** blocks say `NOT RUN — refused before execution` in their own
+  `delta-scope:` line and are exempt.
+  This claim read *"every terminal block"* until roborev job 299, and the then-structural test
+  **could not detect** that it was false: it derived its subject set from sites containing
+  `_fm_summary_line`, i.e. exactly the already-compliant sites. **A guard whose subject set is
+  the compliant set is a guard that cannot fail** — the same shape as #3544's own
+  claim-exceeds-check finding, and the reason the replacement enumerates every site and lets
+  the unaccounted ones fall into `GAP`.
 - **The signature set is CLOSED** — `No space left on device`, `os error 28`,
   `Disk quota exceeded` — and the line declares that non-exhaustiveness on every run. A bare
   `ENOSPC` token is deliberately **excluded**: it occurs in this repository's own test names,

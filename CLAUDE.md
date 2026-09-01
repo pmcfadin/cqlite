@@ -365,8 +365,9 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   ATTRIBUTION, never a verdict (#3800).** A full gate that died because the disk filled used
   to report only `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
   an agent obeying the retain-only-the-SUMMARY rule debugged a minimal-features build that was
-  never broken. Every terminal block (full, `--lite`, `--delta` incl. its REFUSED path, both
-  selftest hooks) now carries ONE `disk-exhaustion:` line with a CLOSED value set:
+  never broken. Every SUMMARY block **that carries a COMPONENT TABLE** (the full gate's
+  terminal, `--lite`'s, `--delta`'s, `--delta`'s python-tier REFUSED block, the two selftest
+  hooks) now carries ONE `disk-exhaustion:` line with a CLOSED value set:
   `RECOGNISED (#3800)` naming the signature, the component and `<log>:<line>`;
   `0 RECOGNISED (#3800)` (**never a bare `0`**) either for a scan that read every subject log
   and matched nothing, or for a run with no non-PASS component; and `UNMEASURED (#3800)` when a
@@ -383,7 +384,28 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   free-space field is a **start→emit DELTA**, because peers free space between the failure and
   the emit — that is #3800's own re-run evidence (same tree, same sha, opposite verdicts). It
   **never changes `OVERALL`/`RESULT`**: a matched signature is evidence about the HOST, not
-  proof the diff is innocent, and this marker does not own the verdict. Capacity management (a
+  proof the diff is innocent, and this marker does not own the verdict — so the `RECOGNISED`
+  text says the signature is **consistent with disk exhaustion on this HOST** and to free space
+  and re-run **before** treating the non-PASS as a defect in the diff, and states plainly that
+  this is **evidence, not proof**. It said "NOT a defect in the diff" until roborev job 299:
+  an assertion the scan cannot support (a failing test may legitimately *print* a signature,
+  and a diff can itself drive disk usage) and one that contradicted this same bullet.
+  **THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL", AND THE 19 EXCLUSIONS ARE
+  DECLARED AT THE SITE.** Of the script's 25 `emit_summary`/`_emit_terminal_summary` call
+  sites, 6 carry a table and all 6 append the line; the other 19 (the three pre-flight
+  FAIL-CLOSED blocks, the `component-set` FAIL, the two summary-integrity FAILs, the shared
+  forwarder, the five self-test hooks, the four `--delta` usage ERRORs, the two `--delta`
+  refused-**before-execution** blocks, the `--only` no-Data.db pre-flight) are emitted where no
+  component has run, so they have **nothing to attribute** — the line could only render a
+  misleading `0 RECOGNISED … (0/0 PASS)` — and each already names its own cause with its own
+  marker. Each carries a `# disk-exhaustion-exempt: <reason>` and
+  `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses **every** site as
+  MARKED/EXEMPT/GAP, so a new emit site with neither REDS that suite. The claim read "every
+  terminal block" until job 299, and the then-structural test **could not see** that it was
+  false: it derived its subject set from sites containing `_fm_summary_line`, i.e. exactly the
+  sites already compliant — **a guard whose subject set is the compliant set cannot fail**.
+  Note the `--delta` REFUSED paths split: the python-tier one HAS a table and IS marked; the
+  two refused-before-execution ones do not and are exempt. Capacity management (a
   disk-aware slot cap, per-lane budgets, a shared `CARGO_TARGET_DIR`) is **#3434/#3763/#3755**,
   not here. Per-worktree `target/` is **~100–145GB** for a full gate, not the ~25–30GB
   `docs/development/gate-ops.md` claimed until now.

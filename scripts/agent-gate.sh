@@ -6103,9 +6103,26 @@ EXPLICIT_SUMMARY_FILE=0
 # on a 295G disk shared with two other active lanes, 0 bytes free at the failure; a re-run on
 # the SAME tree at the SAME sha PASSed once a peer freed space.
 #
-# This block adds ONE `disk-exhaustion:` line to every terminal SUMMARY, on the
-# `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)` precedent:
-# a distinct, textually-separable marker key carrying a CLOSED value set.
+# This block adds ONE `disk-exhaustion:` line to every SUMMARY block THAT CARRIES A COMPONENT
+# TABLE, on the `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)`
+# precedent: a distinct, textually-separable marker key carrying a CLOSED value set.
+#
+# THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL" (#3800, roborev job 299). The
+# script has 25 `emit_summary`/`_emit_terminal_summary` call sites; 6 carry a component table
+# and all 6 append this line. The other 19 -- the three pre-flight FAIL-CLOSED blocks, the
+# #3544 component-set FAIL, the two summary-integrity FAILs, the shared forwarder, the five
+# self-test hooks, the four --delta usage ERRORs, the two --delta refused-BEFORE-EXECUTION
+# blocks and the --only no-Data.db pre-flight -- are emitted where NO component has run (or,
+# for the two integrity FAILs, where the block carries no component table and its cause is a
+# concurrent peer). They have nothing to attribute: the line could only render a misleading
+# `0 RECOGNISED ... (0/0 PASS)`, and each block already names its own cause with its own
+# dedicated marker, so adding it there would be noise that dilutes this marker's meaning. Each
+# of those 19 therefore carries a `# disk-exhaustion-exempt: <reason>` comment naming why, and
+# `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses EVERY emit site as
+# MARKED / EXEMPT / GAP -- a new emit site with neither REDS that suite. An earlier wording of
+# this contract claimed "every terminal block", which was false and which the then-structural
+# test could not see: it derived its subject set from sites containing `_fm_summary_line`, i.e.
+# only the sites already compliant.
 #
 # IT IS AN ATTRIBUTION, NEVER A VERDICT. Nothing here reads, sets or influences OVERALL /
 # RESULT, in any mode. Turning a FAIL green because the cause LOOKS environmental would be
@@ -8956,9 +8973,11 @@ _tree_boundary_meta_lines() {
   # block carries NO `disk-exhaustion:` line. Its cause is already named and is a DIFFERENT
   # one -- a mid-run tree mutation (#2926) -- and the block is emitted from a component
   # boundary that may be mid-run, where a start->emit free-space delta would be measuring a
-  # window the run has not finished. Every TERMINAL emit site (full, --lite, --delta incl. its
-  # REFUSED path, both selftest hooks) does carry the line; that set is derived from source
-  # and asserted in scripts/tests/test_agent_gate_disk_exhaustion.sh.
+  # window the run has not finished. Every emit site that carries a COMPONENT TABLE does carry
+  # the line -- the full gate's terminal, --lite's, --delta's, --delta's python-tier REFUSED
+  # block and the --emit-summary-selftest hook; every OTHER site is exempt with a stated reason
+  # at the site. That whole set is derived from source and censused in
+  # scripts/tests/test_agent_gate_disk_exhaustion.sh.
   _tree_meta_render_lines
   # The per-component verdict table, as far as the run got. Canonical order for the mode
   # ACTUALLY RUNNING (#2926 review J2 — this iterated the full gate's COMPONENTS, which does
@@ -15155,7 +15174,7 @@ run_pub_surface() {
 # Also runs scripts/tests/test_agent_gate_disk_exhaustion.sh (#3800), the pin for the
 # `disk-exhaustion:` SUMMARY marker. A full gate died of ENOSPC and the ONE artifact agents
 # retain said `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
-# the reader debugged a minimal-features build that was never broken. 39 cases EXTRACT the
+# the reader debugged a minimal-features build that was never broken. 47 cases EXTRACT the
 # shipped `_disk_exhaustion_line` + helpers out of this file and run them: each signature of
 # the CLOSED set; an ANSI-COLOURED log (the payload carries no escapes, #3400) plus the proof
 # that the scan materialises NO sibling file — a diagnostic needing free disk is useless under
@@ -15164,8 +15183,10 @@ run_pub_surface() {
 # grep's THREE-valued rc, so an unreadable subject is UNMEASURED and never "no signature"; the
 # mixed cases in both directions; a hostile log carrying a forged `RESULT: PASS` and SUMMARY
 # marker proving no log text is interpolated; per-component sub-logs in and cross-boundary logs
-# out; and a STRUCTURAL check that derives the emit-site set from this file rather than
-# hard-coding a count. Hermetic: temp dirs plus the two hidden selftest hooks — no cargo, no
+# out; the RECOGNISED line reporting EVIDENCE rather than the diff's innocence (roborev job
+# 299), with a NEGATIVE case pinning the retired claim out; and a CENSUS that derives EVERY
+# emit site from this file -- MARKED / EXEMPT / GAP, with a positive control on each arm --
+# rather than hard-coding a count. Hermetic: temp dirs plus the two hidden selftest hooks — no cargo, no
 # python3, no datasets, no network — so it is registered ABOVE the python3 SKIP branch and
 # never SKIPs.
 run_tooling_tests() {
