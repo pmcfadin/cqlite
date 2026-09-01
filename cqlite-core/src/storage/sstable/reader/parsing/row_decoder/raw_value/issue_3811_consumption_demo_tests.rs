@@ -718,6 +718,104 @@ fn nested_udt_partial_prefix_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// Census finding C — the STRUCTURAL nested-UDT field arm
+// (`parse_udt_field_value`'s `CqlType::Udt` branch, `udt.rs:669`)
+//
+// Found by the AC6 experiment, not by reading source: re-measuring EVERY guard
+// site independently (rather than the four `parse_udt_value` callers jointly, as
+// an earlier revision of the table did) showed this one with a red set of ZERO.
+// The `nested_udt_*` cases above do NOT reach it — a marshal-form nested field
+// resolves through `parse_nested_udt_from_registry` (`udt.rs:1090`) — so it was
+// covered by nothing, in exactly the way roborev's round-4 finding describes.
+//
+// It is reached when the outer `UdtTypeDef` carries a field whose type is a
+// STRUCTURAL `CqlType::Udt(name, fields)`: `parse_udt_value`'s field loop hands
+// that to `parse_udt_field_value`, whose `CqlType::Udt` arm recurses and now
+// checks the count it gets back.
+// ---------------------------------------------------------------------------
+
+/// A registry holding `outer_struct { label text, addr <STRUCTURAL nested UDT> }`.
+/// The nested field type is built as `CqlType::Udt` rather than spelled as a
+/// marshal string, which is the whole point: it is what selects `udt.rs:669`
+/// over `udt.rs:1090`.
+fn parser_structural_nested() -> V5CompressedLegacyParser {
+    let mut reg = UdtRegistry::new();
+    reg.register_udt(
+        UdtTypeDef::new(KEYSPACE.to_string(), "outer_struct".to_string())
+            .with_field("label".to_string(), CqlType::Text, true)
+            .with_field(
+                "addr".to_string(),
+                CqlType::Udt(
+                    "addr".to_string(),
+                    vec![
+                        ("street".to_string(), CqlType::Text),
+                        ("city".to_string(), CqlType::Text),
+                    ],
+                ),
+                true,
+            ),
+    );
+    V5CompressedLegacyParser::new(KEYSPACE.to_string(), "t".to_string(), 0, 0, None)
+        .with_udt_registry(reg)
+}
+
+/// The OUTER value is well-formed in every case below (its component prefix
+/// counts the nested bytes exactly), so the outer wrapper assert is satisfied and
+/// cannot be what refuses — only the nested decode can be.
+fn decode_structural_nested(addr_bytes: &[u8]) -> Result<Value> {
+    parser_structural_nested().parse_value_from_raw_bytes(
+        &outer_with_nested(addr_bytes),
+        "outer_struct",
+        "col",
+        0,
+    )
+}
+
+/// **CONTROL / NON-DISCRIMINATING.**
+#[test]
+fn structural_nested_udt_exact_decodes_ok() {
+    let value = decode_structural_nested(&case1_exact())
+        .expect("a well-formed structural nested UDT decodes");
+    match value {
+        Value::Udt(udt) => assert_eq!(udt.fields.len(), 2, "outer field count"),
+        other => panic!("expected Value::Udt, got {other:?}"),
+    }
+}
+
+/// **CONTROL / NON-DISCRIMINATING** — `TupleType.split` rule 1 is legal at depth
+/// on this arm too, so the guard must not reject an omitted trailing field.
+#[test]
+fn structural_nested_udt_legally_short_decodes_ok() {
+    decode_structural_nested(&case4_legally_short())
+        .expect("a legally short structural nested encoding is accepted (rule 1)");
+}
+
+/// **DISCRIMINATING — attributes to `udt.rs:669` alone.** Rule 4 inside the
+/// nested field: the outer prefix says 19 bytes and 19 follow, so the outer
+/// check passes; the nested decode reads 18 of them.
+#[test]
+fn structural_nested_udt_trailing_garbage_is_refused() {
+    assert_refused_short(
+        decode_structural_nested(&case2_trailing_garbage()),
+        18,
+        19,
+        "structural-nested/trailing (rule 4)",
+    );
+}
+
+/// **DISCRIMINATING — `udt.rs:669`.** Rule 2 inside the nested field, one byte
+/// away from the legal omission above.
+#[test]
+fn structural_nested_udt_partial_prefix_is_refused() {
+    assert_refused_short(
+        decode_structural_nested(&case3_partial_prefix()),
+        11,
+        12,
+        "structural-nested/partial (rule 2)",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Census finding C — the bounded callers of the REPORTING `parse_udt_value`
 // that discarded its count (`udt.rs:80` via `decode_frozen_udt_from_header_type`)
 // ---------------------------------------------------------------------------
