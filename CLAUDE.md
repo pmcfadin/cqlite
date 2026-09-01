@@ -263,13 +263,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 
   ```bash
   bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
-  # exit 0 = PASS | 1 = NOT-PASS | 4 = COULD-NOT-MEASURE | 64 = USAGE
+  # exit 0 = PASS | 1 = NOT-PASS | 5 = NOT-COMPLETE (the ONLY retryable code — poll on 5,
+  #                 never on 4) | 4 = COULD-NOT-MEASURE (permanent) | 64 = USAGE
   ```
 
   A completed run whose component **SKIPped or is ABSENT is NOT a pass**: a SKIP means the check never
   ran, which is the vacuous pass itself — and note a SKIPping component still leaves `RESULT: PARTIAL`
   and **exit 3**, so exit 3 alone is a completion signal and never a green. `COULD-NOT-MEASURE` is
-  never read as a pass. `--mode record`/`lite`/`delta` are **named refusals** naming their authority
+  never read as a pass. It also refuses to answer about a LITE/DELTA block, requires the block's
+  `tree-integrity:` token to be `PASS` (a mutated-mid-run run is non-certifying, #2926, and that
+  invalidates every component in the block — unlike a *sibling* component's FAIL, which says nothing
+  about yours), and bounds every read to the validated block, because the shared reader's framing
+  check constrains counts and ordering and NOT that no stale lines sit outside the span. `--mode record`/`lite`/`delta` are **named refusals** naming their authority
   (`scripts/flow/premerge-assert.sh` owns the gate-of-record grammar, binds the certified sha and
   refuses `PARTIAL` token-exactly), so the component grammar can never be misused as a certification.
 

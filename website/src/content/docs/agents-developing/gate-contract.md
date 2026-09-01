@@ -1060,7 +1060,9 @@ read it:
 >
 > # COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:
 > bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
-> # exit 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE. A completed run whose component SKIPped is NOT a pass.
+> # exit 0 PASS / 1 NOT-PASS / 5 NOT-COMPLETE (the ONLY retryable code) / 4 COULD-NOT-MEASURE
+> # (permanent) / 64 USAGE. A completed run whose component SKIPped is NOT a pass, and a LITE or
+> # DELTA block, or one whose tree-integrity token is not PASS, is REFUSED rather than answered.
 > ```
 >
 > A terminal `RESULT: INCOMPLETE` means "still running, or died" — never a certification.

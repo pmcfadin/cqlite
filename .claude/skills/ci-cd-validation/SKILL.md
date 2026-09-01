@@ -35,7 +35,8 @@ that grammar spins on green there. Poll `--only` by **EXIT STATUS** (`3` = compl
 observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`; then read the
 component's verdict SEPARATELY, from its own line:
 `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name> --run-id <id>` (exit 0 PASS /
-1 NOT-PASS / 4 COULD-NOT-MEASURE). A completed run whose component **SKIPped or is absent is NOT a pass** —
+1 NOT-PASS / 5 NOT-COMPLETE, the only retryable code / 4 COULD-NOT-MEASURE, permanent / 64 USAGE). A
+completed run whose component **SKIPped or is absent is NOT a pass** —
 and a SKIPping component still exits 3, so exit 3 is completion and never a green.
 
 **Every invocation — full, lite, and `--only` — MUST use the summary-file redirect** (#1175/#2079). The

@@ -403,7 +403,7 @@ RESULT: INCOMPLETE (gate did not finish)
 
 It is overwritten with `RESULT: PASS` / `RESULT: FAIL` only at the terminal emit. The sentinel is deliberate and load-bearing: it is what makes a killed/orphaned/queued gate detectable (and since #2926 it also carries `tree-start:`, so a killed run still records the tree it began on).
 
-**Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. The single correct completion predicate, in agents, skills, docs, and any helper that polls a summary file, is:
+**Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. There is one correct completion predicate PER RUN MODE — never one for both (#3750) — and in agents, skills, docs, and any helper that polls a summary file they are:
 
 ```bash
 # RECORD grammar — full / --lite / --delta. Anchored + token-terminated, and it MUST keep refusing PARTIAL.
@@ -417,7 +417,11 @@ grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE
 # And COMPLETION IS NOT A VERDICT: `PARTIAL` says the run ENDED, not that your component passed. Read the
 # component's OWN line, as a separate assertion. A completed run whose component SKIPped is NOT a pass.
 bash scripts/gate-component-verdict.sh "$AGENT_GATE_SUMMARY_FILE" \
-     --mode only --component tooling-tests --run-id <id>   # 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE
+     --mode only --component tooling-tests --run-id <id>
+# 0 PASS / 1 NOT-PASS / 5 NOT-COMPLETE (the ONLY retryable code — poll on 5, never on 4) /
+# 4 COULD-NOT-MEASURE (permanent) / 64 USAGE. It REFUSES a LITE/DELTA block and any block whose
+# `tree-integrity:` token is not PASS, rather than answering about a run the gate called
+# non-certifying.
 ```
 
 Corollaries:
