@@ -6789,16 +6789,22 @@ _record_status_detail() {
 }
 
 # _status_detail <component> (#3402): read it back, reduced to ONE line with no control
-# characters. This value is interpolated into the SUMMARY block, and every reader of that
-# block parses it LINE-WISE — the #2908/#3041 completion probe, premerge-assert's
+# characters at all. This value is interpolated into the SUMMARY block, and every reader
+# of that block parses it LINE-WISE — the #2908/#3041 completion probe, premerge-assert's
 # single-block assert, the #3453 annotation census. A multi-line or CR-bearing detail
-# would INJECT rows into the block, so the reduction happens at this ONE boundary rather
-# than being trusted of each writer (#3312: neutralise at the emit boundary, not per site).
+# would INJECT rows into the block, and a detail carrying an ESC would put ANSI into a
+# block that gets pasted into PR comments, so BOTH are removed at this ONE emit boundary
+# rather than trusted of each writer (#3312: neutralise where the value is rendered, not
+# per interpolation site — a per-site escape is a list to keep complete). `[:cntrl:]` is
+# the whole class, deliberately, so a control character nobody enumerated is covered too.
+# LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
+# the defect this issue removes — bounding the value is the WRITER's job (see
+# _fs_abbrev_grown, which elides by a NAMED remainder).
 _status_detail() {
   local f
   f=$(_status_detail_file "$1")
   [ -n "${LOG_DIR:-}" ] && [ -s "$f" ] || return 0
-  head -1 "$f" 2>/dev/null | tr -d '\r\n\t'
+  head -1 "$f" 2>/dev/null | tr -d '[:cntrl:]'
 }
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
