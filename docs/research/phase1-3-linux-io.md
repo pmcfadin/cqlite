@@ -70,11 +70,17 @@ every field Data.db**, i.e. page-cache reads with **kernel-default read-ahead an
 
 ### 1c. The one real gap: no explicit read-ahead on the cold sequential scan
 
-> **SUPERSEDED IN PART, 2026-09-01 (issue #2824).** `Auto` now issues **`MADV_WILLNEED`** on the scan
-> mapping (`mmap_advice_for`, `cqlite-core/src/storage/sstable/reader/backend_resolve.rs`); the
-> `reader/mod.rs:316` anchor below is also stale. The `MADV_SEQUENTIAL` prohibition and its
-> drop-behind rationale are UNCHANGED and still binding. The paragraph is left as written because it
-> is a dated research snapshot, not live doctrine.
+> **STILL ACCURATE, AND RE-CONFIRMED BY MEASUREMENT, 2026-09-01 (issue #2824).** The `WILLNEED`
+> flip this paragraph motivates was built, measured and **rejected**; `Auto` still issues no
+> `madvise`. Two reasons, both recorded in `docs/reports/issue-2824-artifacts/RESULTS.md`:
+> (1) `SSTableManager::new` opens **every** SSTable under the data dir at `Database::open`, so
+> advising at open fires whole-file read-ahead for every table of every keyspace before any query
+> is seen — point-lookup-only workloads pay it in full; (2) on this lane's EBS volume
+> (132 MB/s measured, 128 KiB read-ahead window) the default window already saturates the device,
+> so there was no headroom to demonstrate a benefit in either direction. The lever needs
+> scan-lifetime plumbing and an i4i rig, both filed separately. The `MADV_SEQUENTIAL` prohibition
+> and its drop-behind rationale are UNCHANGED and still binding. The `reader/mod.rs:316` anchor
+> below is stale; the function now lives in `reader/backend_resolve.rs`.
 
 `Auto` deliberately issues **no `madvise`** (`mmap_advice_for`, `reader/mod.rs:316`; issue #1143):
 `MADV_SEQUENTIAL` couples aggressive read-ahead with **drop-behind**, which evicts hot pages under

@@ -1,37 +1,34 @@
-# Tasks — madvise-willneed-dontneed (issue #2824, SLICE 1)
+# Tasks — madvise-willneed-dontneed (issue #2824)
 
-## 1. The policy flip
-- [x] 1.1 `backend_resolve.rs` `mmap_advice_for`: split the `Off | Auto` arm so `Auto` returns
-      `Some(Advice::WillNeed)` and `Off` keeps returning `None`. Rewrite the policy doc comment above it
-      to state the #2824 rationale and to keep the #1143 `MADV_SEQUENTIAL` prohibition explicit.
-- [x] 1.2 Correct the now-false claim in the `POINT_MMAP_MADV_RANDOM_MIN_BYTES` doc comment
-      (`reader/mod.rs:173-175`) that "the default `PrefetchMode::Auto` leaves it unadvised entirely".
-- [x] 1.3 Correct the `PrefetchMode::Auto` variant doc and the `StorageConfig::prefetch` field doc
-      (`config.rs:212-219`, `:275-276`).
+Outcome: **priced re-scope**, lead ruling on REQ-2824-03. The lever does not ship.
 
-## 2. Retarget the #1143 pin — never delete it
-- [x] 2.1 `reader/tests.rs:626` `test_mmap_advice_for_auto_is_no_madvise`: rename and rewrite to assert
-      the durable invariant — `Auto` never yields `Sequential` — plus the new positive pin
-      `Auto == Some(WillNeed)`. Keep the `Off`/`Sequential`/`WillNeed` asserts. The doc comment must
-      explain why `WillNeed` does not carry #1143's drop-behind mechanism.
-- [x] 2.2 Correct the four factually-wrong doc-comment lines in
-      `tests/issue_1143_mmap_prefetch_tail_guard.rs` (`:7`, `:14`, `:29`, `:305`) that state
-      `Auto -> None`. The test body and its observational-only posture are unchanged.
-- [x] 2.3 `tests/config_knob_behavior_guard.rs:218-226`: upgrade the `storage.prefetch`
-      `Evidence::Reserved` string now that `Auto`'s advice is directly asserted.
+## 1. Build the lever (done, then reverted)
+- [x] 1.1 Flip `mmap_advice_for` so `Auto` returns `Some(Advice::WillNeed)`.
+- [x] 1.2 Retarget the #1143 pin to `Auto != Sequential`; correct every doc that said `Auto -> None`.
+- [x] 1.3 `--lite` green; rust-reviewer, 5 findings, all fixed.
+- [x] 1.4 **Reverted in full** after the blocker below. `Auto == None` is strictly stronger than
+      `Auto != Sequential`, so the revert costs no protection.
 
-## 3. Slice boundary
-- [x] 3.1 Assert no `MADV_DONTNEED` / `unchecked_advise` is introduced anywhere in this diff.
-- [x] 3.2 Assert no `posix_fadvise` is introduced on the mmap path.
+## 2. Measure it
+- [x] 2.1 Build both A/B arms from ONE tree differing by one match arm; verify by `strace` that they
+      differ by exactly one `madvise` call. (An earlier pair built across a rebase was discarded.)
+- [x] 2.2 Cold/warm A/B, page cache dropped per cold phase, arms alternated per round.
+- [x] 2.3 Result: no effect, no regression — and the device is EBS at 132 MB/s with a 128 KiB window,
+      so there is no headroom to detect the effect either way.
 
-## 4. Measurement
-- [x] 4.1 Run `docs/reports/issue-2824-artifacts/cold-warm-ab.sh` baseline-vs-patched over the
-      `ws0.events` fixture, page cache dropped per cold arm.
-- [x] 4.2 Record the result with the host, and state the i4i magnitude as UNMEASURED.
-- [x] 4.3 Run `issue_1143_mmap_prefetch_tail_guard.rs` and record it green.
+## 3. The blocker
+- [x] 3.1 roborev job 340: High — advising at open advises before the workload is known.
+- [x] 3.2 Verify the load-bearing claim independently: `SSTableManager::new` opens EVERY SSTable under
+      the data dir at `Database::open`. **Confirmed.**
+- [x] 3.3 Establish that the fix needs the same scan-lifetime seam as AC2, so #2824's "policy flip on
+      built machinery" premise fails for both halves.
+- [x] 3.4 Escalate as REQ-2824-03 rather than decide it. Lead ruled option 1.
 
-## 5. Delivery
-- [x] 5.1 `--lite` green each fix round.
-- [x] 5.2 rust-reviewer + roborev on the lite-green diff, before any full gate.
-- [ ] 5.3 PR, then flow-closer endgame.
-- [ ] 5.4 File slice 2 (AC2) carrying the four findings.
+## 4. Land the re-scope
+- [x] 4.1 Revert all `*.rs` and the two guide chapters to `origin/main`, byte for byte.
+- [x] 4.2 Rewrite proposal + spec delta to the outcome; keep the durable requirements.
+- [x] 4.3 Correct the two documents whose addenda assumed the flip shipped.
+- [ ] 4.4 File the scan-lifetime advice plumbing issue, unmilestoned, cross-referencing job 340.
+- [ ] 4.5 `scripts/ci/classify-docs-only.sh` decides whether roborev applies — do not judge by path shape.
+- [ ] 4.6 flow-closer: full gate of record -> premerge-assert -> merge on green.
+- [ ] 4.7 Finalize, telemetry, closing comment.

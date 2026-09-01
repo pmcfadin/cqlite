@@ -1,131 +1,101 @@
-# Proposal: `madvise(WILLNEED)` under Auto-mmap + `MADV_DONTNEED` post-scan-once (issue #2824)
+# Proposal: `madvise(WILLNEED)` under Auto-mmap — BUILT, MEASURED, REJECTED (issue #2824)
 
 **Milestone:** 0.17 scan-path throughput program (epic #2817, manifest item M10) · **Priority:** P2 ·
-**Routing:** **design-driven** — this is a *policy* change on already-built machinery, and the deliverable
-is a contract plus a recorded measurement, not a parse fix with an external oracle. The one place an
-oracle exists (does the advice reach the plane the hot scan reads through?) is used below, and it
-**falsified the issue's own framing once already** — see "The RE-SPEC, and why it no longer applies".
-· **Issue:** #2824 · **Refs:** #1143 (the `MADV_SEQUENTIAL` prohibition), #2210 (the `MADV_RANDOM`
-point plane), #2876 (the scan positional plane), #2412, #2605/PR #3446, #2818 (M0)
+**Routing:** design-driven · **Issue:** #2824 · **Outcome:** **priced re-scope — the lever does not
+ship.** Lead ruling on REQ-2824-03, 2026-09-01. · **Refs:** #1143, #2210, #2876, #2412, #2605/PR #3446,
+#2818, roborev job 340
 
-## Why
+## Outcome first
 
-Cold page-in is measured at **60.17 us/row — 3x all producer CPU combined, and 98% of wall-time
-variance** (#2605 / PR #3446). The 2026-08-30 adjudication funded this lever on that number: it is the
-only funded lever touching the largest wall-clock term.
+`PrefetchMode::Auto` still maps to **no** `madvise`. This change ships **no behavioural code** — the
+`Auto -> WillNeed` flip was implemented, reviewed, measured, and then **reverted**. What ships is the
+investigation, the A/B harness, and the recorded measurement, because the finding is that **issue #2824
+as filed is not implementable**:
 
-The machinery is already built and simply gated off. `mmap_advice_for`
-(`cqlite-core/src/storage/sstable/reader/backend_resolve.rs:184`) maps `PrefetchMode::Auto -> None`, so
-the default configuration issues **no** `madvise` at all on the scan mapping. Turning it on is a
-one-arm change to a `match`; the work in this change is establishing that the flip is *safe* and
-*reaches the right plane*, and measuring it.
+> "Flip `Auto` to issue the **already-built** `madvise(MADV_WILLNEED)` at open … This is a **policy flip
+> on built machinery**, not new IO code."
 
-## The RE-SPEC, and why it no longer applies
+Both halves — `WILLNEED` at open and `MADV_DONTNEED` post-scan-once — depend on scan-lifetime plumbing
+that does not exist. Filed separately, targeted at the i4i rig.
 
-The owner's RE-SPEC on #2824 held that the flip "advises a mapping the hot scan path barely touches" —
-that the field's scan read partition bodies through the dedicated `MADV_RANDOM` point mapping, not
-through the scan mmap. **That was true when written and is no longer true.**
+## Why the flip cannot ship: advising at open is advising the whole data directory
 
-**#2876 landed.** Post-#2876, `scan_positional_source`
-(`cqlite-core/src/storage/sstable/reader/mod.rs:~343`) reuses *the same* never-`MADV_RANDOM` `Arc<Mmap>`
-that `ScanSource::Mapped` holds — precisely the mapping `build_block_sources` advises
-(`reader/mod.rs:832`). The Summary-guided walk and the windowed scan feed read through that plane. So
-the advice now lands on the hot scan plane by construction, and #2876's own source comment says a claim
-scoped to `BlockSource` "describes nothing that a real scan does" — the inverse of which is that a claim
-scoped to *this* mapping describes exactly what a scan does.
+`SSTableManager::new` calls `load_existing_sstables()`
+(`cqlite-core/src/storage/sstable/manager_open.rs:61`), which walks `base_path` recursively to
+`MAX_SSTABLE_SCAN_DEPTH = 3` (`cqlite-core/src/storage/sstable/mod.rs:121`) collecting every
+`*-Data.db` and **opens all of them in a loop** (`manager_open.rs:300`). That path is reached from
+`StorageEngine::open` -> `Database::open` (`cqlite-core/src/lib.rs:240`) — the library, the CLI
+interactive and ingest paths, and both the Node and Python bindings.
 
-The RE-SPEC's second condition is also discharged: it asked to "re-measure after #2876 lands and M0
-(#2818) re-measures". Both are closed, and the 2026-08-30 adjudication (FUNDED, P3 -> P2, sealed, board
-Ready) postdates the RE-SPEC.
+Defaults are `prefetch = Auto` and `disk_access_mode = Auto`, and `resolve_disk_access_mode` selects
+mmap for any file at or above `mmap_min_size_bytes` (4096) under the RAM fraction. So with the flip:
 
-Its two standing prohibitions are **carried unchanged**: no `MADV_SEQUENTIAL`, and
-`issue_1143_mmap_prefetch_tail_guard.rs` stays green.
+> **`Database::open` issues one whole-file `MADV_WILLNEED` per SSTable, for every SSTable of every table
+> of every keyspace under the data directory, before any query is seen.**
 
-## #1143 is not reintroduced, and the guard is retargeted rather than deleted
+A point-lookup-only workload pays that in full, including for tables it never touches. Point lookups
+open **zero** additional readers precisely because everything was opened already
+(`manager_point_read.rs:135` clones `Arc`s out of the pre-populated map), so bloom and summary gating
+cannot help — the read-ahead is queued before any filter runs, and the `MADV_RANDOM` advice on the
+later point mapping (#2210) cannot cancel it.
 
-#1143 was a ~2x p99 tail regression caused by `MADV_SEQUENTIAL`, whose harm is **drop-behind**: the
-kernel aggressively evicts pages behind the read cursor, evicting hot pages under concurrent write load.
-`MADV_WILLNEED` has **no drop-behind semantics** — it queues asynchronous read-ahead and nothing else.
-The two advices are not interchangeable and the #1143 mechanism does not transfer.
+`cqlite-flight` is not a startup storm (it never calls `Database::open`) but has the same shape per
+table on first touch: `enumerate_generations` -> `open_added` opens every generation with
+`Config::default()`, and token pruning happens *after* the opens. Compaction and merge are unaffected —
+they force buffered I/O, so no `madvise` is issued.
 
-The durable #1143 pin is the **unit** assert `mmap_advice_for(PrefetchMode::Auto) == None`
-(`cqlite-core/src/storage/sstable/reader/tests.rs:626`); the integration test's latency comparison is
-**observational only, by its own header** (`issue_1143_mmap_prefetch_tail_guard.rs:18-29` — it logs
-p50/p99 ratios and asserts nothing on timing, because a co-scheduled pause makes a ratio-vs-ratio assert
-flake). That unit assert states the *implementation of the day*, not the invariant. The invariant #1143
-actually needs is **`Auto` never yields `Sequential`**. This change **retargets** the assert to that
-invariant — it is never deleted, and the integration guard runs unchanged.
+Found by roborev job 340 (High) and independently verified against the source before acting.
 
-## `MADV_DONTNEED` does not evict page cache — the claim is bounded, not the mechanism
+## Why the obvious fixes are not available
 
-AC2 of the issue reads: "`MADV_DONTNEED` is issued post-scan-once **so a full-ring scan does not leave
-the page cache warm** past its usefulness (B4 peak hygiene)."
+- **Defer the advice to scan start** (roborev's suggestion) is correct in principle and needs the
+  scan-lifetime seam: nine scan entry points in three shapes, and no reader-scoped scan-in-flight state
+  to hang a guard on. That is the same plumbing AC2 needs.
+- **Advise a bounded prefix** would be an unmeasured heuristic (#28), and this lane cannot derive a
+  threshold — see below.
+- **Leave it to explicit opt-in** is a no-op: `PrefetchMode::WillNeed` already maps to
+  `Advice::WillNeed` today. The issue was specifically about the *default*.
 
-The mechanism does not deliver that property. Per `madvise(2)`, after `MADV_DONTNEED` on a **file-backed**
-mapping, subsequent accesses "result in **repopulating the memory contents from the up-to-date contents of
-the underlying mapped file** (for shared file mappings …)". It zaps the process's PTEs and frees **RSS**;
-the pages remain in page cache. The call that evicts page cache is `posix_fadvise(POSIX_FADV_DONTNEED)`,
-which this issue explicitly scopes to the buffered/direct backends only.
+## Why the benefit could not be demonstrated either
 
-This change therefore **implements the mechanism exactly as specified and states the claim accurately**:
-`MADV_DONTNEED` post-scan-once bounds **peak RSS** by dropping the scan mapping's resident PTEs. No
-requirement, comment, or PR text in this change may claim page-cache eviction on the mmap plane. If
-page-cache eviction on the mmap plane is the property wanted, it is a different lever and is filed
-separately rather than smuggled in here.
+`docs/reports/issue-2824-artifacts/RESULTS.md`. On this lane the flip measured **no effect and no
+regression**: cold major faults 52 -> 50 across ~630,000 file pages, warm unchanged. But the corpus
+device is **EBS**, measured at **132 MB/s** with a **128 KiB** read-ahead window, so the default window
+already saturates the device and the read is bandwidth-bound. There is **no headroom to detect the
+effect in either direction**, and a null result here says nothing about i4i — whose local NVMe at
+multiple GB/s is the regime where a 128 KiB window at low queue depth would *not* saturate and
+whole-file `WILLNEED` would raise queue depth.
 
-Raised on the issue thread as REQ-2824-01 item (2), with this as the stated default.
+So the position at decision time was a **confirmed cost** against an **unconfirmed benefit**. The lead
+ruled that 0.17's criterion is cheap *measured* wins, and that shipping on those terms would be the
+anti-pattern the Phase-1 adjudication killed levers for.
 
-## What this change does NOT do
+## `MADV_DONTNEED` does not do what the issue's AC2 says
 
-- **No `MADV_SEQUENTIAL`**, ever, on any plane (#1143).
-- **No `posix_fadvise` on the mmap path.** The fadvise lever stays behind the explicit buffered/direct
-  backends, exactly as the issue scopes it.
-- **No new size threshold invented.** #2210's `POINT_MMAP_MADV_RANDOM_MIN_BYTES` is measurement-derived;
-  this change adds no unmeasured heuristic to sit beside it (no-heuristics mandate, #28).
-- **No i4i measurement.** See below.
+AC2's rationale — "so a full-ring scan does not leave the page cache warm" — is not delivered by its
+mechanism. Per `madvise(2)`, after `MADV_DONTNEED` on a **file-backed** mapping subsequent accesses
+repopulate "from the up-to-date contents of the underlying mapped file"; the call frees the process's
+resident PTEs and therefore **RSS**, and the pages remain in page cache. Page-cache eviction is
+`posix_fadvise(POSIX_FADV_DONTNEED)`, which #2824 explicitly scopes to the buffered and direct backends.
 
-## Measurement, and the residual this change ships with
+This is recorded as a standing claim boundary so the successor issue does not inherit the wording
+unexamined.
 
-AC1 asks for cold-p99 on a **cold i4i scan**. This lane runs on a **c7i.4xlarge** with local NVMe and no
-route to an i4i rig, so that number is **not obtainable here**. What is delivered instead:
+## What ships
 
-- a cold-vs-warm A/B on this box's local NVMe over the committed `ws0.events` performance fixture
-  (`tools/ws0-corpus-gen`, ~2.8 GB), `drop_caches` between arms, baseline vs. patched;
-- the #1143 integration guard green;
-- the warm arm checked for regression.
+- `docs/reports/issue-2824-artifacts/RESULTS.md` — the measurement and its four declared limits.
+- `docs/reports/issue-2824-artifacts/ab/construction.md` — the A/B construction assertion: both arms
+  built from one tree differing by one match arm, verified by `strace` to differ by exactly one
+  `madvise` call, plus the runtime confirmation that `MADV_SEQUENTIAL` is issued by neither arm and the
+  #2210 point mapping is untouched.
+- `docs/reports/issue-2824-artifacts/cold-warm-ab.sh` — the harness, fail-closed when it cannot drop
+  the page cache.
+- Corrections to two documents that asserted the old anchors, and this spec delta.
 
-The **i4i magnitude is an explicit residual**, recorded in the PR and filed as a follow-up for the rig
-lane. Raised on the issue thread as REQ-2824-01 item (1), with this as the stated default.
+## What does not ship, and where it went
 
-The fixture is **CQLite-written and CQLite-read** and is a **performance fixture only, never a
-correctness oracle** (#3042) — it holds the bytes constant across two measurement arms in one session
-and nothing more. It is also **uncompressed** (#1406), which is noted where the result is reported.
-
-## This change is SLICE 1 of 2 — AC1 only
-
-The design investigation found AC2 (`MADV_DONTNEED` post-scan-once) to be a materially larger and
-riskier change than "a policy flip on built machinery":
-
-1. **No single post-scan seam.** Nine scan entry points in three shapes — materializing async fns
-   (`scan_inner`, `iterate_all_partitions[_cancellable]`, `iterate_all_partitions_for_compaction`,
-   `iterate_all_partitions_via_full_index`, `bti_scan_with_metadata[_cancellable]`), callback-driven
-   walks (`summary_scan/mod.rs:424/:468/:535`, `full_index_stream.rs:145/:420`), and spawned-task +
-   channel streams (`per_row_scan_stream.rs:145`, `batched_scan_stream.rs:181`) — share no wrapper.
-2. **No reader-scoped scan state exists.** `SSTableReader` (`reader/types.rs:243-380`) has no scan
-   counter, id, or guard, so AC2 requires adding one and threading it through all nine.
-3. **It cannot be unconditional.** Concurrent scans on one reader are a deliberate, tested property
-   (#815 removed the scan mutex; `reader/tests.rs:903`, `compaction_cancel_tests.rs:435`,
-   `benches/concurrent_scan.rs` + its `scaling_floors` perf gate). Firing `MADV_DONTNEED` when one scan
-   ends would zap a mapping another is mid-read on — and below the 8 MiB threshold `point_source` *is*
-   the scan mapping (`reader/mod.rs:970`), so it would degrade the point plane too.
-4. **It needs `unsafe`.** memmap2 0.9.11 puts `DontNeed` in `UncheckedAdvice`, not the safe `Advice`
-   enum, so `mmap_advice_for`'s `Option<Advice>` return cannot carry it.
-
-And it is in **tension with AC1**: implemented unconditionally, any workload that scans an SSTable more
-than once — a full-ring scan iterating, compaction re-reading — re-faults everything on every scan after
-the first, which is the warm regression AC1 forbids. Nothing in the reader knows whether a scan is
-one-shot, and inventing that predicate would be a heuristic (#28).
-
-Raised on the issue thread as REQ-2824-02 with this split as the stated default. Slice 2 is filed
-separately and carries findings 1-4. The issue stays **open** and this slice is stamped with
-`delivery-telemetry --slice`.
+The scan-lifetime advice plumbing — one seam serving `WILLNEED` at scan start *and* `DONTNEED` at scan
+end — is filed as its own issue, unmilestoned, cross-referencing roborev job 340 and the #2824 thread.
+It should be measured on the i4i rig, where the benefit is demonstrable, and it must re-run
+`benches/concurrent_scan.rs`'s `scaling_floors` gate because concurrent scans over one reader are a
+supported, tested property (#815).
