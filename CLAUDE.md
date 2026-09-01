@@ -1099,12 +1099,50 @@ order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` outp
 
 ```
 implement (TDD) → --lite each fix round (summary-file redirect)
-  → rust-reviewer + roborev on the lite-green diff   (review-first, DEFAULT)
+  → review-stage.sh open  → rust-reviewer + roborev on the lite-green diff  (review-first, DEFAULT)
+  → review-stage.sh verdict  (NOT-RUN blocks; an idle notice is not a verdict)
   → fix rounds: --lite re-cert + diff-scoped targets  (NEVER a full gate per round)
   → open PR
-  → flow-closer { FULL gate ONCE → C → final roborev → merge-on-green → finalize }
+  → flow-closer { FULL gate ONCE → open→C→verdict → final roborev → merge-on-green → finalize }
 ```
 
+- **EVERY DELEGATED STAGE'S VERDICT IS A FILE, PRE-STAMPED BEFORE THE SPAWN (#3751).** A review
+  stage used to write NOTHING at any point, so its reader had only ABSENCE to reason from — and
+  every consumer of an absence has to CHOOSE how to read it. Nine measured spawns across four
+  lanes and three agent types produced no report; nine for nine the lanes recorded "not run" and
+  disclosed it, **which is discipline, not mechanism**. So `scripts/flow/review-stage.sh` transplants
+  #3041's idiom: `open <kind> --issue <N> --agent <type>` creates the report-of-record file
+  **before the agent is spawned**, carrying a non-verdict sentinel, and prints the absolute path
+  plus **a paste-ready clause to put in the spawn prompt verbatim** (the paraphrase is what varied
+  across the measured sessions). `verdict` then emits ONE line of a CLOSED grammar —
+  `{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}`, first word, **string equality, never a prefix
+  test** (#3544) — exiting `0/4/5/6`; `status` reports elapsed/deadline and is **advisory, never a
+  verdict input**. `NOT-RUN` always names ONE OF FIVE causes (`no report written`, `report absent`,
+  `report empty`, `report ungrammatical: <what>`, `stage never opened`) because the operator action
+  differs per cause. **An idle notice is strictly WEAKER than the gate's `INCOMPLETE` sentinel** —
+  at least the sentinel names itself a non-verdict — so never read one as a completed review. All
+  six pipeline-gating agent definitions carry the matching report-of-record clause (Q1=(a): the
+  class is *spawns whose silence gates a merge*, so `flow-closer`, which owns the merge, and
+  `sstable-developer`, which had queued work it never did, are in it beside the four reviewers).
+  Writes go under `.review-stage/`, whose ignore status is **verified with `git check-ignore`,
+  fail-closed**, so a stage opened mid-run cannot dirty a running gate (#2926) or make
+  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **THE CLAIM IS ABOUT THE CONSUMER AND NOT
+  ABOUT THE AGENTS, and stating it narrowly is the point**: naming a report path was effective for
+  `spec-auditor` and `flow-closer` and did NOTHING for `rust-reviewer` (0 of 3, one of them told IN
+  WRITING that an absent file would be recorded as a non-review) — and the mechanical reason
+  surfaced while writing that clause, which is that `rust-reviewer` had **no write channel at all**
+  (`Read, Glob, Grep`), so the contract was unsatisfiable by construction. It now carries `Write`
+  for that one purpose; note this grants nothing its siblings lacked, since three of the four
+  "read-only" reviewers already carry `Bash` — **"read-only" here was always prose, never a
+  mechanism.** Full record incl. the census, the tally and the limits:
+  `docs/development/review-stage-reporting.md`. `verdict` establishes that a VERDICT WAS RECORDED,
+  never that a review was PERFORMED — a report whose only content is `result: PASS` reads as PASS.
+  Where no independent audit can be obtained, the SANCTIONED FALLBACK is
+  `record-author-performed --reason <why> --evidence <artifact> --performed-by author|peer`, which
+  REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
+  token `AUTHOR-PERFORMED`, never `PASS` — *an author's hand audit is not an independent one; weight
+  it accordingly*, and it is sanctioned at all because *an audit whose working is shown is
+  auditable, whereas an absent one is not*.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
@@ -1647,10 +1685,42 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `Agent` tool**, so **C is spawned by the lead at the closer's `NEEDS-SPAWN` request** (the closer
   stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
   then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
+  **The closer `open`s the C stage BEFORE emitting that packet and carries the report path in it
+  (`report: <abs path>`, a REQUIRED field), so the lead's spawn and the closer's later read agree on
+  ONE path (#3751)** — a report written where nobody reads it is indistinguishable from no report at
+  all — and on re-invoke it reads `review-stage.sh verdict c --issue <N>`, **not the prose it was
+  re-invoked with**: a lead handing back a confident summary over a `NOT-RUN` stage is reporting a
+  review that did not happen.
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
-  (#2456/#3465) — refusing to merge unless the PR head still equals the certified SHA **AND** a gate
-  of record exists for it — and re-reads comments for a fresh `HOLD:` order. **The third argument is
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>`
+  (#2456/#3465/#3751) — refusing to merge unless the PR head still equals the certified SHA **AND** a
+  gate of record exists for it **AND** the C intent audit has a recorded verdict where C is required
+  — and re-reads comments for a fresh `HOLD:` order.
+  **`--c-verdict` IS REQUIRED AND HAS NO DEFAULT: OMITTING IT IS EXIT 3 (#3751)**, the #3465
+  precedent — a silent "C is not required" would reproduce, inside the enforcer, the exact defect the
+  enforcer exists to close. It is a NAMED flag rather than a fifth positional so it composes with
+  #3752's sibling required flag in EITHER landing order, and the missing-flag census names each
+  absent flag independently, so its exit 3 does not depend on being the only required flag. **AND
+  THE ROUTING IS MEASURED FROM THE CERTIFIED TREE, NEVER TAKEN FROM THE CALLER** — a
+  caller-supplied *"C does not apply here"* is precisely the escape hatch #3751 removes. `AUTO`
+  asks git what THIS BRANCH does to `openspec/changes/`: the diff between
+  merge-base(`origin/main`, `<certified>`) and `<certified>`, with `openspec/changes/archive/**`
+  excluded (archiving is flow-finalize's work, not a routing signal). Non-empty ⇒ design-routed ⇒
+  **C REQUIRED**, and an absent or `NOT-RUN` verdict REFUSES the merge naming the stage and the
+  cause; empty ⇒ affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. **A plain
+  LISTING of `openspec/changes/` cannot answer it** (measured 2026-09-01: `origin/main` carries
+  `archive` PLUS two sibling lanes' in-flight change directories, so every branch would read
+  design-routed and the "measurement" would be vacuous), and the base is the **MERGE-BASE, never
+  `origin/main`'s TIP** (#3392: a tip comparison reports another lane's newly-landed change as a
+  difference of THIS branch and reds a correct oracle-driven PR). **Any failure to measure — no git,
+  no `origin/main`, the certified commit absent from this checkout — is `UNMEASURED` and is TREATED
+  AS REQUIRED**: never derive a pass from the absence of a bad signal. There is deliberately NO
+  spelling of the flag that means "not applicable": a supplied PATH can only carry a review-stage
+  verdict token, so a file asserting `NOT-APPLICABLE` is refused as an unrecognised token, and
+  inapplicability is reachable ONLY through AUTO's measurement. Only `PASS` and `AUTHOR-PERFORMED`
+  proceed; the second is printed **under its own token on a `PREMERGE: C-VERDICT` line and is NEVER
+  folded into `PREMERGE: OK`**, for the same reason the roborev wrapper's `WAIVED` is distinct from
+  `PASS` — a reader must be able to see that the intent audit was performed by the diff's author. **The third argument is
   REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
   certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
   22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
