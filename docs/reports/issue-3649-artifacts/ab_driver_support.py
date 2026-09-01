@@ -32,7 +32,7 @@ import os
 import re
 import sys
 
-from ab_common import err, out
+from ab_common import MIN_CORPUS_BYTES_FLOOR, MIN_SSTABLES_FLOOR, err, out
 
 NOT_OBSERVED = "NOT-OBSERVED"
 
@@ -41,7 +41,8 @@ USAGE = [
     "ab_driver_support.py effective-flag <flag> <global-value> <extra-string>",
     "ab_driver_support.py server-argv <bin> <data-dir> <listen> <batch> <maxbytes> "
     "<wait> <scans> <extra>",
-    "ab_driver_support.py validate-resolved <batch> <maxbytes> <wait> <scans>",
+    "ab_driver_support.py resolve-session <batch> <maxbytes> <wait> <scans> "
+    "<min-bytes> <min-sstables> <ramp> <control> <base-extra> <head-extra>",
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
@@ -208,6 +209,24 @@ def validate_ticket(path):
         err("cause-detail %s: top level is not an object" % path)
         return 1
     problems = []
+    # MIRRORS `pathsafe::validate_snapshot` (cqlite-flight/src/pathsafe.rs:60-73):
+    # present-but-EMPTY is rejected there, at ticket parse time. The census used
+    # to be the only place this was checked, and it accepted an empty name and
+    # then resolved the LIVE directory -- so the session censused one directory,
+    # built both arms, and only then had every request refused by the server's
+    # own ticket validation. Checked HERE, at pre-flight, because that is before
+    # the expensive step. `null` remains legal: it means the live directory.
+    snapshot = ticket.get("snapshot")
+    if snapshot is not None and (
+        not isinstance(snapshot, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot)
+    ):
+        err("cause ticket-identifier-invalid")
+        err(
+            "cause-detail %s: snapshot is %r; cqlite-flight rejects an empty or "
+            "non-conforming snapshot name at ticket parse time, so this would fail "
+            "every request AFTER both arms had been built" % (path, snapshot)
+        )
+        return 1
     for field, why in _TICKET_NARROWING:
         if ticket.get(field) is not None:
             problems.append("%s (%s = %r)" % (why, field, ticket[field]))
@@ -359,8 +378,12 @@ def census_served(data_dir, ticket_path):
             )
             return 1
     snapshot = ticket.get("snapshot")
+    # MIRRORS `pathsafe::validate_snapshot` (cqlite-flight/src/pathsafe.rs:60-73):
+    # empty is REJECTED there, so `*` here accepted a ticket the server refuses --
+    # and it failed after both builds, the same rig economics as the relative
+    # work directory. Sixth instance of validator-versus-consumer.
     if snapshot is not None and (
-        not isinstance(snapshot, str) or not re.fullmatch(r"[A-Za-z0-9_-]*", snapshot)
+        not isinstance(snapshot, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot)
     ):
         err("cause ticket-identifier-invalid")
         err("cause-detail %s: snapshot is %r" % (ticket_path, snapshot))
@@ -461,6 +484,23 @@ def effective_flag(flag, global_value, extra):
     return value
 
 
+#: EVERY INPUT THE SESSION RESOLVER TAKES. The driver must pass all of them, and
+#: a structural case in selftest-analyze.sh asserts the call site does.
+#:
+#: THIS LIST IS THE STRUCTURAL MOVE. Three separate findings have been "a guard
+#: exists on one entry point and a later path routes around it": the batch-size
+#: floor via per-arm extras, the corpus floors via a lowered threshold, and a
+#: per-arm `--max-concurrent-scans` against a globally-validated value. Guarding
+#: each resolved value one at a time is the same trap as reconciling record
+#: fields one at a time -- so there is now ONE resolver, it is the only producer
+#: of session configuration, and the driver reads nothing else. A new option
+#: cannot route around a guard because nothing else produces the values.
+RESOLVER_INPUTS = (
+    "--batch-size", "--max-batch-bytes", "--admission-wait-timeout-ms",
+    "--max-concurrent-scans", "--min-corpus-bytes", "--min-sstables",
+    "--ramp", "--control", "--base-server-extra", "--head-server-extra",
+)
+
 #: The per-arm overridable options, and the ONLY ones an extras string may name.
 #: Each is emitted exactly once in the constructed argv, resolved from the global
 #: value and this arm's override -- NOT appended after it. The project's Clap
@@ -469,8 +509,15 @@ def effective_flag(flag, global_value, extra):
 #: is rejected by the real binary. A stub cannot catch that, because the
 #: permissiveness is in the parser rather than in a format -- so the argv is
 #: constructed to make the duplicate unexpressible instead.
-OVERRIDABLE = ("--batch-size", "--max-batch-bytes", "--admission-wait-timeout-ms",
-               "--max-concurrent-scans")
+#: `--max-concurrent-scans` is deliberately NOT here. It was declared overridable
+#: and validated globally, so any effective override failed at run time -- and
+#: the honest fix is to reject it rather than thread a per-arm ceiling through,
+#: because two arms admitted at different concurrencies shed at different ramp
+#: steps, which leaves them with different surviving ladders. The analyzer
+#: already refuses that as `ramp-steps-not-comparable`, so a per-arm admission
+#: ceiling cannot produce a comparable measurement in the first place. The ramp
+#: bound is also a session-level property, computed against one ceiling.
+OVERRIDABLE = ("--batch-size", "--max-batch-bytes", "--admission-wait-timeout-ms")
 
 NOT_REQUESTED = "NOT-REQUESTED"
 
@@ -547,6 +594,80 @@ def server_argv(binary, data_dir, listen, batch, maxbytes, wait, scans, extra):
     if wait != NOT_REQUESTED:
         argv += ["--admission-wait-timeout-ms", wait]
     return argv
+
+
+def resolve_session(batch, maxbytes, wait, scans, min_bytes, min_sstables,
+                    ramp, control, base_extra, head_extra):
+    """THE ONLY PRODUCER OF SESSION CONFIGURATION.
+
+    Takes every raw input, applies every rule, and returns the complete resolved
+    configuration -- or a list of problems. The driver reads nothing else, so a
+    guard here cannot be routed around by a path added later; there is no other
+    path that produces these values.
+    """
+    problems = []
+    steps = parse_ramp(ramp)
+    if steps is None or ramp_section(steps) is None:
+        problems.append("--ramp %r is not a usable ramp" % ramp)
+        steps = [1]
+
+    resolved = {}
+    for arm, extra in (("base", base_extra), ("head", head_extra)):
+        words = extra.split()
+        index = 0
+        while index < len(words):
+            if words[index] not in OVERRIDABLE:
+                problems.append(
+                    "%s: %r is not resolvable per arm (recognised: %s)"
+                    % (arm, words[index], " ".join(OVERRIDABLE))
+                )
+                break
+            if index + 1 >= len(words):
+                problems.append("%s: %r has no value" % (arm, words[index]))
+                break
+            index += 2
+        resolved[arm] = {
+            "batch_size_observed": effective_flag("--batch-size", batch, extra),
+            "max_batch_bytes_observed": effective_flag(
+                "--max-batch-bytes", maxbytes, extra),
+            "wait_timeout_ms_observed": effective_flag(
+                "--admission-wait-timeout-ms", wait, extra),
+            "max_concurrent_scans": scans,
+        }
+        problems += [
+            "%s: %s" % (arm, problem)
+            for problem in validate_resolved(
+                resolved[arm]["batch_size_observed"],
+                resolved[arm]["max_batch_bytes_observed"],
+                resolved[arm]["wait_timeout_ms_observed"],
+                scans,
+            )
+        ]
+
+    # THE FLOORS ARE FLOORS. Lowerable only under a control label, where the
+    # verdict is disclaimed -- otherwise a measurement could authorise its own
+    # validity by choosing a smaller number.
+    if not control:
+        if not re.fullmatch(r"[0-9]+", min_bytes) or int(min_bytes) < MIN_CORPUS_BYTES_FLOOR:
+            problems.append(
+                "--min-corpus-bytes %r is below the documented floor of %d; a "
+                "measurement may not lower it. Run it as a --control if you mean to"
+                % (min_bytes, MIN_CORPUS_BYTES_FLOOR)
+            )
+        if not re.fullmatch(r"[0-9]+", min_sstables) or int(min_sstables) < MIN_SSTABLES_FLOOR:
+            problems.append(
+                "--min-sstables %r is below the documented floor of %d; below it a "
+                "single-source served table takes #3058's fast path on BOTH arms "
+                "and the ratio is 1.0 by construction"
+                % (min_sstables, MIN_SSTABLES_FLOOR)
+            )
+
+    if re.fullmatch(r"[0-9]+", scans) and steps and steps[-1] > int(scans):
+        problems.append(
+            "--ramp tops out at %d but --max-concurrent-scans is %s; every request "
+            "past the ceiling is shed (#2420)" % (steps[-1], scans)
+        )
+    return resolved, problems
 
 
 def pair_order(replicate):
@@ -759,6 +880,19 @@ def main(argv):
             return 2
         bound = parse_listening(rest[0])
         sys.stdout.write((bound or "NOT-OBSERVED") + "\n")
+        return 0
+    if command == "resolve-session":
+        if len(rest) != len(RESOLVER_INPUTS):
+            err("usage-error resolve-session needs %d arguments, one per declared "
+                "input: %s" % (len(RESOLVER_INPUTS), " ".join(RESOLVER_INPUTS)))
+            return 2
+        resolved, problems = resolve_session(*rest)
+        if problems:
+            err("cause session-config-invalid")
+            for problem in problems:
+                err("cause-detail %s" % problem)
+            return 1
+        sys.stdout.write(json.dumps(resolved, sort_keys=True) + "\n")
         return 0
     if command == "validate-resolved":
         if len(rest) != 4:

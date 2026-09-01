@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=301
+CASE_FLOOR=316
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -557,6 +557,38 @@ else
   bad "a newline in a manifest field broke the output anchor"
 fi
 
+# THE STRUCTURAL MOVE OF ROUND 9: one resolver, and the driver reads nothing
+# else. Asserted structurally, because the failure mode is a NEW option added
+# later that bypasses it -- which no behavioural case can anticipate.
+if python3 - "$DRIVER" "$HERE" <<'PYINNER'
+import re
+import sys
+
+sys.path.insert(0, sys.argv[2])
+import ab_driver_support as S
+
+source = open(sys.argv[1], encoding="utf-8").read()
+uncommented = re.sub(r"^\s*#.*$", "", source, flags=re.M)
+problems = []
+if "resolve-session" not in source:
+    problems.append("the driver does not call resolve-session")
+if re.search(r"\beval\b", uncommented):
+    problems.append("the driver uses `eval` on a value it did not construct")
+for flag in S.RESOLVER_INPUTS:
+    if flag not in source:
+        problems.append("resolver input %s is not an option this driver accepts" % flag)
+if len(S.RESOLVER_INPUTS) < 8:
+    problems.append("the resolver input list has shrunk below its floor")
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "one resolver produces the session configuration, and the driver uses no eval"
+else
+  bad "the session configuration has more than one producer (see stderr above)"
+fi
+
 # 22. THE STRUCTURAL PROPERTY. The static text of the shipped scripts carries
 #     none of the reserved gate/review marker strings, so no run of them can be
 #     pasted or grepped as a certification. The needles are split so this guard
@@ -773,6 +805,15 @@ check_support "a ticket setting the ignored wraparound flag" 0
 printf '{"version":2,"keyspace":"ks","table":"t","token_start":5,"token_end":5}\n' > "$TMP/tk-eq.json"
 run_support validate-ticket "$TMP/tk-eq.json"
 check_support "a ticket whose equal token endpoints ARE the whole ring" 0
+# `pathsafe::validate_snapshot` REJECTS an empty name, so accepting one here
+# burned both builds before the load generator refused it -- the same rig
+# economics as the relative work directory. Sixth validator-versus-consumer.
+printf '{"version":2,"keyspace":"ks","table":"t","snapshot":""}\n' > "$TMP/tk-emptysnap.json"
+run_support validate-ticket "$TMP/tk-emptysnap.json"
+check_support "a ticket with an empty snapshot name, which the server rejects" 1 ticket-identifier-invalid
+printf '{"version":2,"keyspace":"ks","table":"t","snapshot":"snap-1_a"}\n' > "$TMP/tk-snap.json"
+run_support validate-ticket "$TMP/tk-snap.json"
+check_support "a ticket with a valid snapshot name" 0
 for narrowing in '"limit":100' '"predicates":[{"c":"x"}]' '"filter":"x>1"' '"aggregation":"count"' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
   printf '{"version":2,"keyspace":"ks","table":"t",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
   run_support validate-ticket "$TMP/tk-bad.json"
@@ -823,8 +864,15 @@ fi
 # parse failure -- and this is checkable WITHOUT the binary, which is what makes
 # it worth having, because no stub reproduces Clap.
 argv_dupe_bad=''
-for extra in "" "--max-batch-bytes 1" "--batch-size 1" "--max-concurrent-scans 4"; do
+for extra in "" "--max-batch-bytes 1" "--batch-size 1" "--admission-wait-timeout-ms 5000"; do
+  set +e
   argv="$(python3 "$SUPPORT" server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "$extra" 2>/dev/null)"
+  argv_rc=$?
+  set -e
+  if [ "$argv_rc" != "0" ]; then
+    argv_dupe_bad="$argv_dupe_bad [extra='$extra' refused]"
+    continue
+  fi
   dupes="$(printf '%s\n' "$argv" | grep '^--' | sort | uniq -d)"
   [ -z "$dupes" ] || argv_dupe_bad="$argv_dupe_bad [extra='$extra' dupes=$(printf '%s' "$dupes" | tr '\n' ',')]"
 done
@@ -837,6 +885,14 @@ run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "-
 check_support "an unrecognised per-arm option, which could only be appended" 1 server-extra-unrecognised
 run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--max-batch-bytes"
 check_support "a per-arm option with no value" 1 server-extra-unrecognised
+# FINDING 3 (round 9): `--max-concurrent-scans` was declared per-arm overridable
+# and validated globally, so any effective override failed at run time. Rejected
+# rather than threaded through, because two arms admitted at different
+# concurrencies shed at different ramp steps and the analyzer already refuses the
+# resulting mismatched ladders -- a per-arm ceiling cannot produce a comparable
+# measurement, so there is nothing to thread.
+run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--max-concurrent-scans 4"
+check_support "a per-arm admission ceiling, which cannot be comparable" 1 server-extra-unrecognised
 
 # FINDING 1: the server must not inherit this shell's environment. Structural,
 # because the failure is a variable that is ABSENT here and present on a rig.
@@ -2006,7 +2062,7 @@ PYINNER
   # do not. Getting this wrong is how the case previously reported the right exit
   # code from the wrong guard.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1 \
+    --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1 --control selftest \
     --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD
   check_driver "the driver refuses overlapping server and client CPU sets" 3
 
@@ -2015,10 +2071,10 @@ PYINNER
   check_driver "an absent ticket template" 2 ticket-template-absent
 
   run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --repo "$SCRATCH"
+    --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
   check_driver "a served directory holding no Data.db files" 2 corpus-empty
   run_driver --corpus "$TMP/nosuchtable" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-nodir" --min-corpus-bytes 1 --repo "$SCRATCH"
+    --work-dir "$TMP/w-nodir" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
   check_driver "a ticket naming a table that is not under the data root" 2 served-dir-absent
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
@@ -2030,7 +2086,7 @@ PYINNER
   # have counted two and let a single-source served table through -- the exact
   # phantom the guard exists to stop.
   run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --repo "$SCRATCH"
+    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
   check_driver "a served table with one SSTable and a decoy elsewhere under the data root" \
     2 corpus-too-few-sstables
   # ...and the size floor is likewise a claim about the served table: this corpus
@@ -2053,7 +2109,7 @@ PYINNER
   head -c 400000 /dev/zero > "$TMP/symcorpus/elsewhere/real-Data.db"
   ln -sf "$TMP/symcorpus/elsewhere/real-Data.db" "$TMP/symcorpus/ks/tbl/nb-2-big-Data.db"
   run_driver --corpus "$TMP/symcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-sym" --min-corpus-bytes 1 --repo "$SCRATCH"
+    --work-dir "$TMP/w-sym" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
   check_driver "a symlinked decoy standing in for a second SSTable" 2 corpus-too-few-sstables
   # A HARD link -- which is what a Cassandra snapshot is -- canonicalises inside
   # the directory and must still count, or the check would red on real corpora.
@@ -2085,16 +2141,16 @@ PYINNER
   fi
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --merge-path sideways
+    --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --control selftest --merge-path sideways
   check_driver "an unrecognised --merge-path value" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-same" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
+    --work-dir "$TMP/w-same" --min-corpus-bytes 1 --control selftest --min-sstables 1 --repo "$SCRATCH" \
     --base-ref HEAD --head-ref HEAD
   check_driver "two arm refs resolving to the same commit" 2 arm-refs-identical
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
+    --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --control selftest --min-sstables 1 --repo "$SCRATCH" \
     --base-ref no-such-rev-3649 --head-ref HEAD
   check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable
 
@@ -2114,12 +2170,60 @@ PYINNER
   # not cover by accident.
   ( cd "$TMP" && bash "$DRIVER" --corpus "$TMP/tinycorpus" \
       --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-      --work-dir ./relwd --repo "$SCRATCH" --min-corpus-bytes 1 --min-sstables 1 \
+      --work-dir ./relwd --repo "$SCRATCH" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
       --base-ref HEAD~1 --head-ref HEAD ) > "$TMP/out.txt" 2>&1 || true
   if grep -qE "^AB-3649: work-dir /" "$TMP/out.txt"; then
     ok "a relative --work-dir is canonicalised to an absolute path before anything derives from it"
   else
     bad "a relative --work-dir was not canonicalised: $(grep -m1 '^AB-3649: work-dir' "$TMP/out.txt")"
+  fi
+
+  # FINDING 2 (round 9): THE FLOORS ARE FLOORS. An unlabelled measurement may not
+  # lower them -- the third route to #3058's bypass was simply passing
+  # `--min-sstables 1` and serving a single-source table.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --min-sstables 1
+  check_driver "a measurement lowering the SSTable floor" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --min-corpus-bytes 1
+  check_driver "a measurement lowering the corpus-size floor" 3
+  if grep -q 'documented floor' "$TMP/err.txt"; then
+    ok "the floors are refused by name, with the documented minimum stated"
+  else
+    bad "the floor refusal did not name the documented minimum"
+  fi
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --min-sstables 1 --min-corpus-bytes 1 \
+    --control floor-probe --work-dir "$TMP/w-floorctl" --repo "$SCRATCH" \
+    --base-ref HEAD~1 --head-ref HEAD
+  if [ "$RC" != "3" ]; then
+    ok "a labelled control may lower the floors, where its verdict is disclaimed"
+  else
+    bad "a labelled control could not lower the floors (exit $RC)"
+  fi
+
+  # FINDING 1 (round 9): no `eval` on operator-supplied values.
+  #
+  # HONEST ACCOUNTING OF WHAT THIS CASE PROVES. The primary guarantee is
+  # STRUCTURAL -- the no-`eval` assert below -- because with the resolver in
+  # place a dangerous payload is REFUSED before it could reach an interpreter,
+  # so a "did it execute" check cannot fail however the code is written. What
+  # this case binds is (a) the refusal itself, which is behavioural and can fail,
+  # and (b) the absence of side effects, which would catch an `eval` placed
+  # UPSTREAM of validation -- exactly where the original one was.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --control inject \
+    --head-server-extra '--max-batch-bytes $(touch '"$TMP"'/PWNED)' \
+    --work-dir "$TMP/w-inject" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH"
+  if [ "$RC" = "3" ] && grep -qE 'session-config-invalid|not resolvable per arm' "$TMP/err.txt"; then
+    ok "a shell-metacharacter payload in a per-arm flag is refused, not resolved"
+  else
+    bad "a shell-metacharacter payload was not refused (exit $RC)"
+  fi
+  if [ -e "$TMP/PWNED" ]; then
+    bad "a command substitution in a per-arm flag value was EXECUTED by the driver"
+  else
+    ok "...and produced no side effect, which would catch an eval before validation"
   fi
 
   # FINDING 1 (round 8): per-arm extras are a SECOND route to the batch-size
@@ -2145,9 +2249,12 @@ PYINNER
     --max-concurrent-scans 4 --shape limit-k
   check_driver "the driver refuses a non-full shape for a measurement session" 3
   printf '{"version":2,"keyspace":"ks","table":"t","limit":100}\n' > "$TMP/tk-narrow.json"
+  # NOT a control: the ticket check applies to measurements only, so labelling
+  # this one would skip the very guard it names. It therefore also cannot lower
+  # the corpus floors -- and does not need to, because the ticket is validated
+  # before the census runs.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow" --min-corpus-bytes 1 \
-    --min-sstables 1 --repo "$SCRATCH"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow" --repo "$SCRATCH"
   check_driver "the driver refuses a ticket carrying a LIMIT" 2 ticket-not-full-ring
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-narrow-ctl" --min-corpus-bytes 1 \
@@ -2199,7 +2306,7 @@ PYINNER
   # session directory is created.
   mkdir -p "$TMP/w-locked/.session-lock"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --min-sstables 1 \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
     --repo "$SCRATCH"
   check_driver "a second session in a work directory already in use" 2 work-dir-busy
   if [ -z "$(find "$TMP/w-locked" -maxdepth 1 -type d -name 'run-*' 2>/dev/null)" ]; then
@@ -2214,7 +2321,7 @@ PYINNER
   git -C "$SCRATCH" worktree add -q --detach "$TMP/w-dirty/wt-base" HEAD > /dev/null 2>&1
   printf 'uncommitted\n' >> "$TMP/w-dirty/wt-base/f.txt"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-dirty" --min-corpus-bytes 1 \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-dirty" --min-corpus-bytes 1 --control selftest \
     --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1
   check_driver "a reused worktree at the right commit but not clean" 2 worktree-dirty
 
@@ -2460,9 +2567,14 @@ STUBEOF
   chmod +x "$SHIMBIN/cargo" "$SHIMBIN/stub-cqlite-flight" "$SHIMBIN/stub-flight-loadgen"
 
   # A served corpus big enough for the floors this case passes.
+  # SPARSE, so the end-to-end sessions clear the DOCUMENTED corpus floor without
+  # writing 256 MiB. The floors are no longer lowerable for a measurement, and
+  # running the e2e cases as controls instead would mean the measurement path was
+  # never executed -- which is the coverage hole this whole section exists to
+  # close. `truncate` reports the size the census reads and costs no blocks.
   mkdir -p "$TMP/e2e-corpus/ks/tbl"
-  head -c 20000 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-1-big-Data.db"
-  head -c 20000 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-2-big-Data.db"
+  truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-1-big-Data.db"
+  truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-2-big-Data.db"
   printf '{"version":2,"keyspace":"ks","table":"tbl","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
     > "$TMP/e2e-ticket.json"
 
@@ -2476,7 +2588,7 @@ STUBEOF
         --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
         --work-dir "$wd" --repo "$SCRATCH" \
         --base-ref HEAD~1 --head-ref HEAD \
-        --max-concurrent-scans 16 --min-corpus-bytes 1 --min-sstables 2 \
+        --max-concurrent-scans 16 \
         --replicates 5 --step-duration 1s "$@" \
         > "$TMP/out.txt" 2> "$TMP/err.txt"
     RC=$?
@@ -2514,7 +2626,7 @@ import sys
 
 corpus = json.load(open(sys.argv[1], encoding="utf-8"))["corpus"]
 raise SystemExit(
-    0 if corpus["data_db_files"] == 2 and corpus["data_db_bytes"] == 40000 else 1
+    0 if corpus["data_db_files"] == 2 and corpus["data_db_bytes"] == 300000000 else 1
 )
 PYINNER
   then
@@ -2671,6 +2783,49 @@ PYINNER
   echo "          is covered structurally instead (the server-argv cases above assert no"
   echo "          option is emitted twice); nothing in this suite can reproduce Clap."
 fi
+
+echo
+echo "-- the analyzer enforces the DOCUMENTED floors, not the recorded ones --"
+
+# THE THIRD ROUTE TO #3058's BYPASS: the operator simply lowers the bar. The
+# analyzer must not derive validity from a threshold the session under test
+# chose, so it checks the documented minimum and ignores `min_*_required`.
+for breach in files bytes; do
+  mkfixture "$TMP/floor-$breach" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/floor-$breach/manifest.json" "$breach" <<'PYINNER'
+import json
+import sys
+
+path, breach = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+if breach == "files":
+    manifest["corpus"]["data_db_files"] = 1
+    manifest["corpus"]["min_sstables_required"] = 1
+else:
+    manifest["corpus"]["data_db_bytes"] = 4096
+    manifest["corpus"]["min_bytes_required"] = 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/floor-$breach"
+  check_verdict "a measurement whose corpus is below the $breach floor" UNMEASURED 7 single-stream
+  check_cause "a corpus below the documented $breach floor" corpus-below-floor
+done
+# ...and a labelled control may sit below them, because its verdict is disclaimed.
+python3 - "$TMP/floor-files/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["control"] = "floor-probe"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/floor-files"
+check_verdict "a labelled control below the floors" MEETS-TARGET 0 single-stream
 
 echo
 echo "-- every shared field is reconciled, or excused by name --"

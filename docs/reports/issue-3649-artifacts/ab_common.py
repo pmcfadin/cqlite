@@ -48,6 +48,22 @@ def err(line=""):
     sys.stderr.write(PREFIX + sanitize(line) + "\n")
 
 
+# THE DOCUMENTED FLOORS, IN ONE PLACE, READ BY BOTH SIDES.
+#
+# These are not defaults an operator may lower for a measurement -- they are the
+# conditions under which a target-band verdict means anything. The #3058
+# single-source bypass has now been reachable three separate ways (a recursive
+# census, a symlinked decoy, and simply passing `--min-sstables 1`), and the
+# third route existed because the analyzer trusted the threshold the SESSION
+# UNDER TEST reported instead of the documented minimum. A verdict must not
+# derive its validity from a number its own subject chose.
+#
+# Lowerable only under an explicit `--control` label, where the verdict is
+# already disclaimed.
+MIN_CORPUS_BYTES_FLOOR = 268435456
+MIN_SSTABLES_FLOOR = 2
+
+
 class Unmeasured(Exception):
     """Every input the harness cannot measure. Carries a NAMED cause.
 

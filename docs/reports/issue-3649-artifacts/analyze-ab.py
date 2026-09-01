@@ -65,7 +65,13 @@ no result, never as a permissive default.
 import os
 import sys
 
-from ab_common import Unmeasured, err, out
+from ab_common import (
+    MIN_CORPUS_BYTES_FLOOR,
+    MIN_SSTABLES_FLOOR,
+    Unmeasured,
+    err,
+    out,
+)
 from ab_input import (
     MODE_SINGLE_STREAM,
     MODE_UTILIZATION,
@@ -349,6 +355,34 @@ def analyze(mode, path, opts):
             "label the session --control <label> to have its verdict disclaimed"
             % shape,
         )
+
+    # THE FLOORS, ENFORCED INDEPENDENTLY OF WHAT THE SESSION RECORDED. The
+    # manifest carries the thresholds the session chose; this checks the
+    # DOCUMENTED minimums instead. A verdict must not derive its validity from a
+    # number its own subject picked -- and #3058's bypass has now been reachable
+    # three ways, the third being an operator simply passing `--min-sstables 1`.
+    # Same reason the shape is re-checked here rather than trusting that this
+    # driver produced the manifest.
+    if not control:
+        corpus = manifest["corpus"]
+        if corpus["data_db_bytes"] < MIN_CORPUS_BYTES_FLOOR:
+            raise Unmeasured(
+                "corpus-below-floor",
+                "the served corpus holds %d Data.db bytes, below the documented "
+                "floor of %d. The manifest's own min_bytes_required is deliberately "
+                "not consulted: a measurement cannot authorise itself by recording "
+                "a smaller threshold"
+                % (corpus["data_db_bytes"], MIN_CORPUS_BYTES_FLOOR),
+            )
+        if corpus["data_db_files"] < MIN_SSTABLES_FLOOR:
+            raise Unmeasured(
+                "corpus-below-floor",
+                "the served corpus holds %d *-Data.db file(s), below the documented "
+                "floor of %d. Below it a single-source served table takes #3058's "
+                "fast path on BOTH arms, neither executes the code #2820 changed, "
+                "and the ratio is 1.0 by construction"
+                % (corpus["data_db_files"], MIN_SSTABLES_FLOOR),
+            )
 
     pairs, admission, session = collect_pairs(
         manifest, manifest_dir, mode, declared_steps

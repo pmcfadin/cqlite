@@ -272,32 +272,48 @@ fi
 # ramp that maps to no analyzer section.
 [ -f "$SUPPORT" ] || usage_error \
   "ab_driver_support.py is not beside this script at $SUPPORT; the driver's ramp validator, record validator and startup parser all live there"
-# EACH ARM'S EFFECTIVE CONFIGURATION, COMPUTED ONCE AND RECORDED AS DATA. The
-# per-run asserts below and the analyzer's cross-arm comparison both read these,
-# so a control that deliberately serves one arm differently is EXPECTED rather
-# than merely excused -- and a measurement, which declares no difference, still
-# gets strict equality.
-eff() { # <flag> <global> <extra>
-  python3 "$SUPPORT" effective-flag "$1" "$2" "$3"
-}
+# ONE RESOLVER, AND THE DRIVER READS NOTHING ELSE. Every server-configuration
+# value comes from this single call: per-arm effective values, the documented
+# corpus floors, the range checks, the ramp-versus-admission bound. Three
+# findings have been "a guard exists on one entry point and a later path routes
+# around it", so the fix is not another guard -- it is that there is only one
+# path that produces these values.
+#
+# NO `eval`. The previous version built the same values with `eval "VAR=\"$(...)\""`,
+# which executes a command substitution embedded in an operator-supplied flag
+# value: control and data sharing a channel (#3312), introduced by the fix for a
+# parse problem. Associative arrays carry the values instead, and the resolver's
+# JSON is read by a helper rather than interpreted by the shell.
+declare -A EXPECT_BATCH EXPECT_MAXBYTES EXPECT_WAIT EXPECT_SCANS
+SESSION_JSON="$(python3 "$SUPPORT" resolve-session \
+  "$BATCH_SIZE" "${MAX_BATCH_BYTES:-NOT-REQUESTED}" \
+  "${ADMISSION_WAIT_TIMEOUT_MS:-NOT-REQUESTED}" "$MAX_CONCURRENT_SCANS" \
+  "$MIN_CORPUS_BYTES" "$MIN_SSTABLES" "$RAMP" "$CONTROL" \
+  "$BASE_SERVER_EXTRA" "$HEAD_SERVER_EXTRA")" \
+  || usage_error "the session configuration is unusable (the causes are named above)"
+while IFS=$'\t' read -r _arm _field _value; do
+  case "$_field" in
+    batch_size_observed)       EXPECT_BATCH["$_arm"]="$_value" ;;
+    max_batch_bytes_observed)  EXPECT_MAXBYTES["$_arm"]="$_value" ;;
+    wait_timeout_ms_observed)  EXPECT_WAIT["$_arm"]="$_value" ;;
+    max_concurrent_scans)      EXPECT_SCANS["$_arm"]="$_value" ;;
+  esac
+done < <(printf '%s' "$SESSION_JSON" | python3 -c '
+import json, sys
+for arm, fields in sorted(json.load(sys.stdin).items()):
+    for field, value in sorted(fields.items()):
+        sys.stdout.write("%s\t%s\t%s\n" % (arm, field, value))
+')
 for _arm in base head; do
-  if [ "$_arm" = "base" ]; then _extra="$BASE_SERVER_EXTRA"; else _extra="$HEAD_SERVER_EXTRA"; fi
-  eval "EXPECT_${_arm}_BATCH=\"$(eff --batch-size "$BATCH_SIZE" "$_extra")\""
-  eval "EXPECT_${_arm}_MAXBYTES=\"$(eff --max-batch-bytes "${MAX_BATCH_BYTES:-NOT-REQUESTED}" "$_extra")\""
-  eval "EXPECT_${_arm}_WAIT=\"$(eff --admission-wait-timeout-ms "${ADMISSION_WAIT_TIMEOUT_MS:-NOT-REQUESTED}" "$_extra")\""
-  eval "EXPECT_${_arm}_SCANS=\"$(eff --max-concurrent-scans "$MAX_CONCURRENT_SCANS" "$_extra")\""
+  [ -n "${EXPECT_BATCH[$_arm]:-}" ] || usage_error \
+    "the session resolver returned no batch size for the $_arm arm"
 done
-export AB_EXPECT_BASE_BATCH="$EXPECT_base_BATCH" AB_EXPECT_HEAD_BATCH="$EXPECT_head_BATCH"
-export AB_EXPECT_BASE_MAXBYTES="$EXPECT_base_MAXBYTES" AB_EXPECT_HEAD_MAXBYTES="$EXPECT_head_MAXBYTES"
-export AB_EXPECT_BASE_WAIT="$EXPECT_base_WAIT" AB_EXPECT_HEAD_WAIT="$EXPECT_head_WAIT"
-export AB_EXPECT_BASE_SCANS="$EXPECT_base_SCANS" AB_EXPECT_HEAD_SCANS="$EXPECT_head_SCANS"
-say "expected-config base batch-size $EXPECT_base_BATCH max-batch-bytes $EXPECT_base_MAXBYTES wait-timeout-ms $EXPECT_base_WAIT max-concurrent-scans $EXPECT_base_SCANS"
-for _arm in base head; do
-  eval "_b=\$EXPECT_${_arm}_BATCH; _m=\$EXPECT_${_arm}_MAXBYTES; _w=\$EXPECT_${_arm}_WAIT; _s=\$EXPECT_${_arm}_SCANS"
-  python3 "$SUPPORT" validate-resolved "$_b" "$_m" "$_w" "$_s" \
-    || usage_error "the $_arm arm's RESOLVED server configuration is unusable (the cause is named above); per-arm extras are a second route to every global flag, so the check is on the resolved value"
-done
-say "expected-config head batch-size $EXPECT_head_BATCH max-batch-bytes $EXPECT_head_MAXBYTES wait-timeout-ms $EXPECT_head_WAIT max-concurrent-scans $EXPECT_head_SCANS"
+export AB_EXPECT_BASE_BATCH="${EXPECT_BATCH[base]}" AB_EXPECT_HEAD_BATCH="${EXPECT_BATCH[head]}"
+export AB_EXPECT_BASE_MAXBYTES="${EXPECT_MAXBYTES[base]}" AB_EXPECT_HEAD_MAXBYTES="${EXPECT_MAXBYTES[head]}"
+export AB_EXPECT_BASE_WAIT="${EXPECT_WAIT[base]}" AB_EXPECT_HEAD_WAIT="${EXPECT_WAIT[head]}"
+export AB_EXPECT_BASE_SCANS="${EXPECT_SCANS[base]}" AB_EXPECT_HEAD_SCANS="${EXPECT_SCANS[head]}"
+say "expected-config base batch-size ${EXPECT_BATCH[base]} max-batch-bytes ${EXPECT_MAXBYTES[base]} wait-timeout-ms ${EXPECT_WAIT[base]} max-concurrent-scans ${EXPECT_SCANS[base]}"
+say "expected-config head batch-size ${EXPECT_BATCH[head]} max-batch-bytes ${EXPECT_MAXBYTES[head]} wait-timeout-ms ${EXPECT_WAIT[head]} max-concurrent-scans ${EXPECT_SCANS[head]}"
 
 RAMP_INFO="$(python3 "$SUPPORT" validate-ramp "$RAMP")" \
   || usage_error "--ramp $RAMP was refused (the cause is named above)"
@@ -847,14 +863,10 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   local arm="$1" rep="$2" position="$3"
   local tag; tag="$(printf '%s-r%02d' "$arm" "$rep")"
   local bin="${ARM_BIN_DIR[$arm]}"
-  local expect_batch_pre expect_maxbytes_pre expect_wait_pre expect_scans_pre
-  if [ "$arm" = "base" ]; then
-    expect_batch_pre="$EXPECT_base_BATCH"; expect_maxbytes_pre="$EXPECT_base_MAXBYTES"
-    expect_wait_pre="$EXPECT_base_WAIT"; expect_scans_pre="$EXPECT_base_SCANS"
-  else
-    expect_batch_pre="$EXPECT_head_BATCH"; expect_maxbytes_pre="$EXPECT_head_MAXBYTES"
-    expect_wait_pre="$EXPECT_head_WAIT"; expect_scans_pre="$EXPECT_head_SCANS"
-  fi
+  local expect_batch_pre="${EXPECT_BATCH[$arm]}"
+  local expect_maxbytes_pre="${EXPECT_MAXBYTES[$arm]}"
+  local expect_wait_pre="${EXPECT_WAIT[$arm]}"
+  local expect_scans_pre="${EXPECT_SCANS[$arm]}"
   local jsonl="$RUN_DIR/$tag.jsonl"
   local server_log="$LOG_DIR/$tag.server.log"
 
