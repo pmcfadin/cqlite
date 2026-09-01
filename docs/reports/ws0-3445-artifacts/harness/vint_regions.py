@@ -45,35 +45,38 @@ def run(cmd: list[str]) -> str:
     return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
 
-def disasm(binary: str) -> tuple[list[int], dict[int, str], dict[int, str]]:
-    """(ascending addresses, addr -> mnemonic, addr -> full text) over `.text`."""
-    addrs: list[int] = []
+# SWEEP (b)/(dedup), roborev r6: `disasm` and `nm_table` used to live here as SECOND
+# implementations of parsers `vint_share` already had -- the same duplication that produced two
+# different notions of an "unresolved" frame and, before that, a whole second addr2line parser.
+# The mnemonic/text maps are the only thing this script needs beyond `vint_share`'s, so it takes
+# the ADDRESS parsing from there and adds only the per-address decode text.
+
+
+def disasm(binary: str) -> tuple[list[int], dict[int, str], dict[int, str], object]:
+    """(addresses, addr->mnemonic, addr->full text, parse accounting)."""
+    vsh = _vint_share()
+    acct = vsh.ParseAccounting("objdump decode lines")
     mnem: dict[int, str] = {}
     text: dict[int, str] = {}
-    for line in run(["objdump", "-d", "--no-show-raw-insn", binary]).splitlines():
+    for line in vsh.run(["objdump", "-d", "--no-show-raw-insn", binary]).splitlines():
         m = re.match(r"^\s+([0-9a-f]+):\t(.*)$", line)
         if not m:
+            if re.match(r"^\s+[0-9a-f]+:", line):
+                acct.skip(line)
             continue
         a = int(m.group(1), 16)
         body = m.group(2).strip()
-        addrs.append(a)
         mnem[a] = body.split()[0] if body else ""
         text[a] = body
-    addrs.sort()
-    return addrs, mnem, text
+        acct.keep()
+    addrs = sorted(mnem)
+    return addrs, mnem, text, acct
 
 
-def nm_table(binary: str) -> tuple[list[int], list[str]]:
-    syms = []
-    for line in run(["nm", "-C", "--defined-only", binary]).splitlines():
-        parts = line.split(" ", 2)
-        if len(parts) == 3 and parts[1].lower() in ("t", "w"):
-            try:
-                syms.append((int(parts[0], 16), parts[2].strip()))
-            except ValueError:
-                continue
-    syms.sort()
-    return [a for a, _ in syms], [n for _, n in syms]
+def nm_table(binary: str) -> tuple[list[int], list[str], object]:
+    """Text symbols via `vint_share.nm_symbols` -- one implementation, not two."""
+    sym_addrs, syms, acct = _vint_share().nm_symbols(binary)
+    return sym_addrs, [n for _, n in syms], acct
 
 
 def sym_of(addr: int, sym_addrs: list[int], sym_names: list[str]) -> str:
@@ -147,15 +150,23 @@ def main() -> int:
     ap.add_argument("--binary", required=True)
     ap.add_argument("--perf-data", help="perf.data to weight opcodes/callers by cycles")
     ap.add_argument("--json-out")
-    ap.add_argument("--max-no-chain", type=float, default=20.0,
+    ap.add_argument("--max-unparseable", type=lambda v: _vint_share()._pct(v), default=1.0,
+                    help="percent of inputs any parsing loop may fail to parse before REFUSING "
+                         "(SWEEP (b)); same bound and same helper as vint_share.py")
+    ap.add_argument("--max-no-chain", type=lambda v: _vint_share()._pct(v), default=20.0,
                     help="percent of IN-BINARY cycles at addresses DWARF cannot describe, above "
                          "which this REFUSES to publish the cycle-weighted tables. Same bound "
                          "vint_share.py enforces: a guard added to one consumer of a dataset and "
                          "not the other is a guard with a hole in it")
     args = ap.parse_args()
 
-    addrs, mnem, text = disasm(args.binary)
-    sym_addrs, sym_names = nm_table(args.binary)
+    addrs, mnem, text, dis_acct = disasm(args.binary)
+    sym_addrs, sym_names, nm_acct = nm_table(args.binary)
+    for acct in (dis_acct, nm_acct):
+        msg = acct.require(args.max_unparseable)
+        if msg:
+            print(f"vint_regions.py: REFUSED — {msg}", file=sys.stderr)
+            return 1
 
     anchors = fingerprint_anchors(addrs, mnem, text)
     bswaps = [a for a in addrs if mnem.get(a) == "bswap"]
@@ -195,8 +206,12 @@ def main() -> int:
         # cycle-weighted table, and a wrong rebase yields a complete, confident, WRONG one
         # exactly as it would in vint_share.py -- so it must REFUSE on the same terms rather
         # than inherit the neighbouring script's diligence by proximity.
-        sym_addrs2, syms2 = vsh.nm_symbols(args.binary)
-        ok, bad = vsh.verify_base(persym, sym_addrs2, syms2)
+        sym_addrs2, syms2, _nm2 = vsh.nm_symbols(args.binary)
+        ok, bad, vb_acct = vsh.verify_base(persym, sym_addrs2, syms2)
+        vb_msg = vb_acct.require(args.max_unparseable)
+        if vb_msg:
+            print(f"vint_regions.py: REFUSED — {vb_msg}", file=sys.stderr)
+            return 1
         checked = ok + bad
         mismatch_pct = 100.0 * bad / checked if checked else 100.0
         if mismatch_pct > 0.5:
@@ -210,6 +225,7 @@ def main() -> int:
         result["rebase_selfcheck"] = {
             "addresses_checked": checked, "mismatches": bad,
             "mismatch_pct": mismatch_pct, "verdict": "PASS",
+            "coverage": vb_acct.as_dict(),
         }
         schains = vsh.inline_chains(args.binary, sorted(by_addr))
         by_op: collections.Counter = collections.Counter()

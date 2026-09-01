@@ -11,8 +11,31 @@
     "addresses_checked": 4782,
     "mismatches": 0,
     "mismatch_pct": 0.0,
-    "verdict": "PASS"
+    "verdict": "PASS",
+    "coverage": {
+      "what": "PIE rebase self-check addresses",
+      "kept": 4782,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    }
   },
+  "parse_accounting": [
+    {
+      "what": "nm symbol table",
+      "kept": 4543,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    },
+    {
+      "what": "objdump instruction lines",
+      "kept": 1008741,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    }
+  ],
   "skid_band": {
     "k=0": {
       "narrow_cycles": 408206123,

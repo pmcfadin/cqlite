@@ -15,7 +15,14 @@
     "addresses_checked": 3430,
     "mismatches": 0,
     "mismatch_pct": 0.0,
-    "verdict": "PASS"
+    "verdict": "PASS",
+    "coverage": {
+      "what": "PIE rebase self-check addresses",
+      "kept": 3430,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    }
   },
   "cycle_weighted": {
     "cycles_total_all_dsos": 103303359427,

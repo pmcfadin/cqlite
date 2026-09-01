@@ -55,6 +55,27 @@ done
 # Must contain at least one DIGIT: the character-class test alone accepts "." and "..",
 # which awk then reads as 0, silently taking the "check disabled" branch and reporting
 # UNCHECKED for what is actually a malformed bound. A malformed bound must REFUSE.
+# SWEEP (a), roborev r6: ONE validator, used by every numeric argument. `--period`, `--secs`,
+# `--cpu` and `--settle` had NO validation at all -- `--secs abc` reached `sleep abc`, and a
+# negative `--period` reached perf. Sharing one function means a new numeric argument cannot be
+# added without validation, which is the standard the --stat-events derivation set.
+require_uint() {  # name value [min]
+  local n=$1 v=$2 min=${3:-0}
+  case "$v" in
+    ''|*[!0-9]*) echo "record-scan.sh: $n must be a non-negative integer: '$v'" >&2; exit 2;;
+  esac
+  if [ "$v" -lt "$min" ]; then
+    echo "record-scan.sh: $n must be >= $min: '$v'" >&2; exit 2
+  fi
+}
+require_uint --period "$PERIOD" 1
+require_uint --secs "$SECS" 1
+require_uint --settle "$SETTLE" 0
+require_uint --cpu "$CPU" 0
+if [ "$CPU" -ge "$(nproc)" ]; then
+  echo "record-scan.sh: --cpu ($CPU) is not a cpu on this box (nproc=$(nproc))" >&2; exit 2
+fi
+
 case "$MAX_LOAD" in
   ''|*[!0-9.]*|*.*.*) echo "record-scan.sh: --max-load must be a number (0 disables): '$MAX_LOAD'" >&2; exit 2;;
   *[0-9]*) ;;
@@ -187,21 +208,41 @@ stop_sampler
 # Both figures count only WELL-FORMED sample lines (3 fields), so a malformed line can
 # neither hide a peak nor inflate the sample count past the unmeasured-quiescence refusal.
 PEAK=$(awk 'NF==3 { if ($2+0 > m) m = $2+0 } END { printf "%.2f", m }' "$OUT/load-samples.txt")
-NSAMP=$(awk 'NF==3' "$OUT/load-samples.txt" | wc -l)
-# EXPECTED sample count, derived from the interval and the duration rather than a constant:
-# start + interior samples + the synchronous closing one. Requiring only 2 would accept an
-# endpoint-only observation (roborev r4), so at least 3 are required AND the count must be
-# within a tolerance of what the interval should have produced -- a sampler that died early
-# leaves a plausible-looking peak over a window it did not actually watch.
-EXPECTED=$(( SECS / LOAD_SAMPLE_SECS ))
-MIN_SAMPLES=3
-if [ "$EXPECTED" -lt "$MIN_SAMPLES" ]; then EXPECTED=$MIN_SAMPLES; fi
-# Allow generous slack for scheduling under load, but never fewer than 3 or half the expectation.
-FLOOR=$(( EXPECTED / 2 ))
-if [ "$FLOOR" -lt "$MIN_SAMPLES" ]; then FLOOR=$MIN_SAMPLES; fi
-if [ "$NSAMP" -lt "$FLOOR" ]; then
-  printf 'verdict=REFUSED\nreason=quiescence-undersampled\nsamples=%s\nexpected_at_least=%s\npeak_load=%s\nmax_load=%s\n' \
-    "$NSAMP" "$FLOOR" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+# COVERAGE, NOT A COUNT (roborev r6 finding 1 / SWEEP (c)).
+#
+# A count cannot distinguish "sampled throughout the window" from "sampled at the start and once
+# at the end" -- which is the ONE distinction this sampler exists to make. The previous floor was
+# half the expected count, so with defaults a sampler recording at 0, 5 and 10 s and then DYING
+# still passed once the synchronous closing sample landed at 40 s, leaving three quarters of the
+# window unobserved. Raising the number would not have fixed it; the predicate was wrong.
+#
+# So the verdict is taken on the observed TIMESTAMPS: the samples must SPAN the window and no
+# GAP between consecutive samples may exceed a small multiple of the requested interval. That is
+# the property "the box was quiet across the whole rep" actually requires.
+#
+# Timestamps are HH:MM:SS UTC from the sampler; converted to seconds, with midnight rollover
+# handled by adding a day to any negative delta.
+COV=$(awk 'NF==3 {
+             split($1, t, ":"); s = t[1]*3600 + t[2]*60 + t[3]
+             if (n > 0) { d = s - prev; if (d < 0) d += 86400; if (d > maxgap) maxgap = d; span += d }
+             prev = s; n++
+           }
+           END { printf "%d %d %d", n+0, span+0, maxgap+0 }' "$OUT/load-samples.txt")
+NSAMP=$(printf '%s' "$COV" | cut -d' ' -f1)
+SPAN=$(printf '%s' "$COV" | cut -d' ' -f2)
+MAXGAP=$(printf '%s' "$COV" | cut -d' ' -f3)
+# The window the samples must cover is the measurement itself. Allow the span to fall short by
+# one interval (the first sample lands after the loop's first read) and a gap of up to 3
+# intervals (scheduling under load), but no more.
+MIN_SPAN=$(( SECS - LOAD_SAMPLE_SECS - 1 ))
+if [ "$MIN_SPAN" -lt 1 ]; then MIN_SPAN=1; fi
+MAX_ALLOWED_GAP=$(( LOAD_SAMPLE_SECS * 3 ))
+if [ "$NSAMP" -lt 3 ]; then
+  printf 'verdict=REFUSED\nreason=quiescence-undersampled\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+elif [ "$SPAN" -lt "$MIN_SPAN" ] || [ "$MAXGAP" -gt "$MAX_ALLOWED_GAP" ]; then
+  printf 'verdict=REFUSED\nreason=quiescence-coverage-gap\nsamples=%s\nspan_secs=%s\nmin_span_secs=%s\nmax_gap_secs=%s\nallowed_gap_secs=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$SPAN" "$MIN_SPAN" "$MAXGAP" "$MAX_ALLOWED_GAP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
 elif [ "$(awk -v p="$PEAK" -v m="$MAX_LOAD" 'BEGIN{print (m+0==0) ? "off" : ((p+0>m+0)?"bad":"ok")}')" = bad ]; then
   printf 'verdict=REFUSED\nreason=box-not-quiet-across-rep\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
     "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
@@ -209,8 +250,8 @@ elif [ "$(awk -v m="$MAX_LOAD" 'BEGIN{print (m+0==0)?"off":"on"}')" = off ]; the
   printf 'verdict=UNCHECKED\nreason=max-load-check-disabled\nsamples=%s\npeak_load=%s\n' \
     "$NSAMP" "$PEAK" > "$OUT/quiescence-verdict.txt"
 else
-  printf 'verdict=OK\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
-    "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+  printf 'verdict=OK\nsamples=%s\nspan_secs=%s\nmax_gap_secs=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$SPAN" "$MAXGAP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
 fi
 
 touch "$RUNDIR/stop"

@@ -59,6 +59,7 @@ import bisect
 import collections
 import json
 import re
+import math
 import subprocess
 import sys
 
@@ -77,6 +78,57 @@ DECODER_FRAMES = (
 )
 READ_VINT_MODULE = "cqlite_core::parser::vint::"
 WRITE_VINT_MODULE = "cqlite_core::storage::serialization::vint::"
+
+
+class ParseAccounting:
+    """Counts what an input-parsing loop KEPT and what it SKIPPED, and refuses on too much skip.
+
+    SWEEP (b), roborev r6. The reported finding was `verify_base` silently skipping addresses
+    whose symbol offset would not parse -- a small parseable subset could then produce a
+    passing mismatch percentage while most sampled addresses never participated in the check
+    that exists to catch a wrong PIE rebase. But that shape -- *iterate, fail to parse an item,
+    `continue` without recording it* -- is not unique to that function, so every such loop in
+    both scripts now reports through this object instead of dropping items quietly.
+
+    A skipped input that nothing counts is the "an absent measurement is not a zero" defect,
+    which this issue has now corrected in three separate places. This is the mechanism that
+    stops a fourth.
+    """
+
+    def __init__(self, what: str):
+        self.what = what
+        self.kept = 0
+        self.skipped = 0
+        self.examples: list[str] = []
+
+    def keep(self) -> None:
+        self.kept += 1
+
+    def skip(self, item: str = "") -> None:
+        self.skipped += 1
+        if item and len(self.examples) < 3:
+            self.examples.append(item.strip()[:120])
+
+    @property
+    def total(self) -> int:
+        return self.kept + self.skipped
+
+    @property
+    def pct_skipped(self) -> float:
+        return (100.0 * self.skipped / self.total) if self.total else 100.0
+
+    def as_dict(self) -> dict:
+        return {"what": self.what, "kept": self.kept, "skipped": self.skipped,
+                "pct_skipped": self.pct_skipped, "examples": self.examples}
+
+    def require(self, max_pct: float) -> str | None:
+        """Return a refusal message, or None when within bound. Never raises."""
+        if self.total == 0:
+            return f"{self.what}: NOTHING parsed (0 inputs) — refusing rather than reporting on none"
+        if self.pct_skipped > max_pct:
+            return (f"{self.what}: {self.skipped}/{self.total} inputs unparseable "
+                    f"({self.pct_skipped:.2f}% > {max_pct}%); examples: {self.examples}")
+        return None
 
 
 def run(cmd: list[str], **kw) -> str:
@@ -138,30 +190,48 @@ def pie_bias(binary: str, map_vaddr: int, map_fileoff: int) -> int:
     )
 
 
-def nm_symbols(binary: str) -> tuple[list[int], list[tuple[int, str]]]:
-    """Sorted (address, name) symbol table with sizes, for the base self-check."""
+def nm_symbols(binary: str) -> tuple[list[int], list[tuple[int, str]], ParseAccounting]:
+    """Sorted (address, name) text symbols, plus what was skipped (SWEEP (b))."""
+    acct = ParseAccounting("nm symbol table")
     syms: list[tuple[int, str]] = []
     for line in run(["nm", "-C", "--defined-only", binary]).splitlines():
+        if not line.strip():
+            continue
         parts = line.split(" ", 2)
-        if len(parts) == 3 and parts[1].lower() in ("t", "w"):
-            try:
-                syms.append((int(parts[0], 16), parts[2].strip()))
-            except ValueError:
-                continue
+        # Only text/weak symbols are of interest; a non-text symbol is not a SKIPPED input, it
+        # is a different kind of input, so it is not counted against the skip bound.
+        if len(parts) == 3 and parts[1].lower() not in ("t", "w"):
+            continue
+        if len(parts) != 3:
+            acct.skip(line)
+            continue
+        try:
+            syms.append((int(parts[0], 16), parts[2].strip()))
+            acct.keep()
+        except ValueError:
+            acct.skip(line)
     syms.sort()
-    return [a for a, _ in syms], syms
+    return [a for a, _ in syms], syms, acct
 
 
-def instruction_addresses(binary: str) -> list[int]:
-    """Every instruction address in `.text`, ascending — the skid walk's step unit."""
-    out = run(["objdump", "-d", "--no-show-raw-insn", binary])
+def instruction_addresses(binary: str) -> tuple[list[int], ParseAccounting]:
+    """Every instruction address in `.text`, ascending — the skid walk's step unit.
+
+    Accounted (SWEEP (b)): if the objdump format were ever to change, the regex would match
+    nothing, `insns` would be empty, and `skid_shift` would silently return every sample
+    unshifted -- a skid band of zero width reported as if it had been measured.
+    """
+    acct = ParseAccounting("objdump instruction lines")
     addrs = []
-    for line in out.splitlines():
-        m = re.match(r"^\s+([0-9a-f]+):\t", line)
-        if m:
-            addrs.append(int(m.group(1), 16))
+    for line in run(["objdump", "-d", "--no-show-raw-insn", binary]).splitlines():
+        if re.match(r"^\s+([0-9a-f]+):\t", line):
+            addrs.append(int(re.match(r"^\s+([0-9a-f]+):", line).group(1), 16))
+            acct.keep()
+        elif re.match(r"^\s+[0-9a-f]+:", line):
+            # Looks like an instruction line but did not parse: that IS a skipped input.
+            acct.skip(line)
     addrs.sort()
-    return addrs
+    return addrs, acct
 
 
 def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict[int, str], int, int, int]:
@@ -214,7 +284,7 @@ def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict
 
 
 def verify_base(persym: dict[int, tuple[str, int | None]], sym_addrs: list[int],
-                syms: list[tuple[int, str]]) -> tuple[int, int]:
+                syms: list[tuple[int, str]]) -> tuple[int, int, ParseAccounting]:
     """Is the PIE rebase right? Answered by ADDRESS, not by comparing two demanglers.
 
     perf reports each sample as `symbol + symoff`, so `file_addr - symoff` is where perf
@@ -231,15 +301,23 @@ def verify_base(persym: dict[int, tuple[str, int | None]], sym_addrs: list[int],
     Comparing addresses removes the whole class: there is nothing left to spell.
     """
     starts = set(sym_addrs)
+    acct = ParseAccounting("PIE rebase self-check addresses")
     ok = bad = 0
     for fa, (pname, symoff) in persym.items():
         if not pname or symoff is None:
+            # FINDING 2 (roborev r6): this used to `continue` SILENTLY. A small parseable
+            # subset could then yield a passing mismatch percentage while most sampled
+            # addresses never participated in the check -- and this check is what caught the
+            # two rebase bugs that would otherwise have shipped a complete, confident, wrong
+            # table. A weak version of it is the only thing between us and a repeat.
+            acct.skip(f"0x{fa:x} sym={pname!r} symoff={symoff!r}")
             continue
+        acct.keep()
         if (fa - symoff) in starts:
             ok += 1
         else:
             bad += 1
-    return ok, bad
+    return ok, bad, acct
 
 
 def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[tuple[str, str]]]:
@@ -438,16 +516,56 @@ def skid_shift(by_addr: collections.Counter, insns: list[int], k: int) -> collec
     return shifted
 
 
+def _pct(value: str) -> float:
+    """A percentage in [0, 100], finite. SWEEP (a), roborev r6.
+
+    `float("nan")` parses happily and every comparison against it is FALSE, so
+    `--max-no-chain nan` silently DISABLED the refusal it names. `inf` disables it too, and a
+    negative value makes it fire always. One validated parse used by every numeric argument, so
+    a new threshold cannot be added without validation -- the same standard the `--stat-events`
+    derivation set: the check must not be silently weakenable from the command line.
+    """
+    try:
+        v = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number")
+    if not math.isfinite(v):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not finite; nan/inf would silently disable the guard it bounds")
+    if not (0.0 <= v <= 100.0):
+        raise argparse.ArgumentTypeError(f"{value!r} must be a percentage in [0, 100]")
+    return v
+
+
+def _nonneg_int(value: str) -> int:
+    """A finite, non-negative integer. SWEEP (a): `--skid-max` had no validation at all."""
+    try:
+        v = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer")
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"{value!r} must be >= 0")
+    if v > 64:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is implausible as an instruction-shift band (max 64)")
+    return v
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--perf-data", required=True)
     ap.add_argument("--binary", required=True)
     ap.add_argument("--json-out")
-    ap.add_argument("--skid-max", type=int, default=3)
-    ap.add_argument("--max-symbol-mismatch", type=float, default=0.5,
+    ap.add_argument("--skid-max", type=_nonneg_int, default=3)
+    ap.add_argument("--max-symbol-mismatch", type=_pct, default=0.5,
                     help="percent of addresses where nm and perf may disagree before this "
                          "REFUSES to report a share (default 0.5)")
-    ap.add_argument("--max-no-chain", type=float, default=20.0,
+    ap.add_argument("--max-unparseable", type=_pct, default=1.0,
+                    help="percent of inputs any single parsing loop (nm symbols, objdump "
+                         "instructions, rebase-check addresses) may fail to parse before this "
+                         "REFUSES. SWEEP (b): a skipped input nothing counts is an unmeasured "
+                         "quantity masquerading as zero")
+    ap.add_argument("--max-no-chain", type=_pct, default=20.0,
                     help="percent of IN-BINARY cycles at addresses for which DWARF yields no "
                          "inline chain, above which this REFUSES to report a share. Those "
                          "cycles can only push the share DOWN, so an unbounded quantity here "
@@ -461,9 +579,17 @@ def main() -> int:
               "never a measurement", file=sys.stderr)
         return 1
 
-    sym_addrs, syms = nm_symbols(args.binary)
-    ok, bad = verify_base(persym, sym_addrs, syms)
+    sym_addrs, syms, nm_acct = nm_symbols(args.binary)
+    ok, bad, vb_acct = verify_base(persym, sym_addrs, syms)
     checked = ok + bad
+
+    # Every accounting bound is enforced HERE, in one place, so a new parser cannot be added
+    # without its skip rate being adjudicated (SWEEP (b)).
+    for acct in (nm_acct, vb_acct):
+        msg = acct.require(args.max_unparseable)
+        if msg:
+            print(f"vint_share.py: REFUSED — {msg}", file=sys.stderr)
+            return 1
     mismatch_pct = 100.0 * bad / checked if checked else 100.0
     if mismatch_pct > args.max_symbol_mismatch:
         print(f"vint_share.py: REFUSED — PIE rebase self-check failed: nm and perf disagree on "
@@ -472,7 +598,11 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    insns = instruction_addresses(args.binary)
+    insns, insn_acct = instruction_addresses(args.binary)
+    msg = insn_acct.require(args.max_unparseable)
+    if msg:
+        print(f"vint_share.py: REFUSED — {msg}", file=sys.stderr)
+        return 1
     result = {
         "perf_data": args.perf_data,
         "binary": args.binary,
@@ -489,7 +619,11 @@ def main() -> int:
             "on one basis with a share on the other."
         ),
         "rebase_selfcheck": {"addresses_checked": checked, "mismatches": bad,
-                             "mismatch_pct": mismatch_pct, "verdict": "PASS"},
+                             "mismatch_pct": mismatch_pct, "verdict": "PASS",
+                             # Coverage, not just a pass: how many addresses the check could
+                             # NOT participate in (SWEEP (b) / roborev r6 finding 2).
+                             "coverage": vb_acct.as_dict()},
+        "parse_accounting": [nm_acct.as_dict(), insn_acct.as_dict()],
         "skid_band": {},
     }
     for k in range(0, args.skid_max + 1):
