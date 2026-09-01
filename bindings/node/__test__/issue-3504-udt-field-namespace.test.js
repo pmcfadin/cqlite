@@ -462,6 +462,25 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     const { spawnSync } = require('child_process');
     const os = require('os');
 
+    // The AMBIENT value, appended to every failure below. Half 1's discriminating
+    // power depends on it: SET (as every gate run has it) and an env-routed
+    // resolution reds on the equality alone; UNSET (the usual local run) and only
+    // Half 2 can see it. A maintainer reading a failure needs to know which run
+    // they are looking at, and neither state is the "right" one to run under.
+    const ambientNote =
+      `ambient CQLITE_DATASETS_ROOT: ` +
+      `${process.env.CQLITE_DATASETS_ROOT === undefined ? '(unset)' : process.env.CQLITE_DATASETS_ROOT}`;
+    // jest matchers take no message argument, so the note is added by RETHROWING:
+    // the matcher's own diff is preserved and the ambient value is appended to it.
+    const withAmbient = (assertions) => {
+      try {
+        assertions();
+      } catch (err) {
+        err.message = `${err.message}\n${ambientNote}`;
+        throw err;
+      }
+    };
+
     // Half 1 — AFFIRMATIVE EQUALITY against a `__dirname`-derived repo root. A
     // "the env value is not a prefix" check would go vacuous whenever the
     // variable is unset or coincidentally equals the checkout: a pass derived
@@ -469,8 +488,10 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
     const expectedRoot = path.join(REPO_ROOT, 'test-data', 'fixtures', 'issue_3504');
     const expectedFacts = path.join(expectedRoot, 'binding-parity-facts.json');
-    expect(FIXTURE_ROOT).toBe(expectedRoot);
-    expect(PARITY_FACTS).toBe(expectedFacts);
+    withAmbient(() => {
+      expect(FIXTURE_ROOT).toBe(expectedRoot);
+      expect(PARITY_FACTS).toBe(expectedFacts);
+    });
     // SCHEMA is pinned to the RESOLVED schemas dir, not to the checkout:
     // `CQLITE_SCHEMAS_ROOT` legitimately relocates that directory
     // (`setup.js:67-102`, the gate-validated #3148 contract), so pinning it to
@@ -480,7 +501,7 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
       global.testPaths.SCHEMAS_DIR,
       'issue-3504-udt-collision.cql'
     );
-    expect(SCHEMA).toBe(expectedSchema);
+    withAmbient(() => expect(SCHEMA).toBe(expectedSchema));
 
     // Half 2 — BEHAVIOURAL INVARIANCE, MEASURED IN A CHILD PROCESS.
     //
@@ -536,26 +557,104 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
       }
       const payload = JSON.parse(fs.readFileSync(outPath, 'utf8'));
 
-      // POSITIVE CONTROL — the perturbation really was in effect, and a constant
-      // whose contract is to follow the variable really did move onto it.
-      expect(payload.envSeen).toBe(bogus);
-      expect(payload.controlEnvRouted).toBe(path.join(bogus, 'sstables'));
-      expect(payload.controlEnvRouted).not.toBe(global.testPaths.SSTABLES_DIR);
+      withAmbient(() => {
+        // POSITIVE CONTROL — the perturbation really was in effect, and a
+        // constant whose contract is to follow the variable really did move onto
+        // it.
+        expect(payload.envSeen).toBe(bogus);
+        expect(payload.controlEnvRouted).toBe(path.join(bogus, 'sstables'));
+        expect(payload.controlEnvRouted).not.toBe(global.testPaths.SSTABLES_DIR); // CONTROL
 
-      // THE INVARIANT — unmoved, checkout-derived, and still readable.
-      expect(payload.projectRoot).toBe(REPO_ROOT);
-      expect(payload.fixtureRoot).toBe(expectedRoot);
-      expect(payload.parityFacts).toBe(expectedFacts);
-      // The schemas dir must not move either: it follows CQLITE_SCHEMAS_ROOT,
-      // which the probe leaves exactly as this process has it.
-      expect(payload.schemasDir).toBe(global.testPaths.SCHEMAS_DIR);
-      expect(payload.schema).toBe(expectedSchema);
-      expect(payload.readError).toBeNull();
-      expect(payload.rowIds).toEqual([1, 2, 3]);
+        // THE INVARIANT — unmoved, checkout-derived, and BOTH artifacts read.
+        expect(payload.projectRoot).toBe(REPO_ROOT);
+        expect(payload.fixtureRoot).toBe(expectedRoot);
+        expect(payload.parityFacts).toBe(expectedFacts);
+        // The schemas dir must not move either: it follows CQLITE_SCHEMAS_ROOT,
+        // which the probe leaves exactly as this process has it.
+        expect(payload.schemasDir).toBe(global.testPaths.SCHEMAS_DIR);
+        expect(payload.schema).toBe(expectedSchema);
+        // A read failure is REPORTED without a cause being claimed: the
+        // `beforeAll` guard has already ruled out a broken checkout, but a
+        // decoder regression or a lost force-added binary would look identical
+        // here, and naming one would assert what this test has not established.
+        expect(payload.readError).toBeNull();
+        expect(payload.rowIds).toEqual([1, 2, 3]);
+        // AC5 covers the parity-facts FILE as much as the corpus, so the probe
+        // OPENED it rather than only recording its path. Non-vacuity: an emptied
+        // or renamed reference would otherwise let the path equality above stand
+        // in for a file nobody opened. Asserted NON-ZERO rather than at an exact
+        // count, which is #3724's own subject to widen.
+        expect(payload.parityFactsError).toBeNull();
+        expect(payload.parityFactsUdts).toBeGreaterThan(0);
+      });
     } finally {
       fs.rmSync(bogus, { recursive: true, force: true });
       fs.rmSync(path.dirname(outPath), { recursive: true, force: true });
     }
+  });
+
+  test('this file names no env-routed corpus constant outside its positive control', () => {
+    // THE CLASS THIS CLOSES, WHICH THE ENVIRONMENT CASES ONLY SAMPLE. The test
+    // above pins the CONSTANTS this module resolves today. A future test added to
+    // this file that builds its OWN path from `setup.js`'s env-routed corpus
+    // constants is invisible to it: that path would resolve through
+    // `CQLITE_DATASETS_ROOT` while every assertion above stayed green, because
+    // those assertions are about `FIXTURE_ROOT`/`PARITY_FACTS` and not about the
+    // file's other consumers. This repository has ALREADY paid for exactly that
+    // defect, in this very directory — `setup.js`'s round-10 note records
+    // `write.test.js` and `write-smoke.test.js` building the schemas path
+    // themselves and BYPASSING the resolver, so the variable was honoured by part
+    // of the suite and ignored by the rest.
+    //
+    // Answered from THIS FILE'S OWN SOURCE. The needles are SPLIT, and here that
+    // split is the MECHANISM rather than belt-and-braces: unlike the Python
+    // sibling, which tokenizes and so can ignore strings by type, this scan is
+    // textual, so an unsplit literal would match its own source and the test
+    // could never pass.
+    //
+    // Two line classes are exempt, both deliberately:
+    //   * a PURE COMMENT line (trimmed, starts with `//`, `*` or `/*`) — this
+    //     file discusses the env-routed constants at length in prose, and prose
+    //     is not a consumer;
+    //   * a line carrying the `CONTROL` marker — the positive control legitimately
+    //     READS the env-routed constant, in the test above and in the probe
+    //     source. Requiring it to SAY so is what stops the exemption silently
+    //     growing into a consumer.
+    //
+    // DECLARED BOUND, because a guard that overstates its reach is worse than
+    // none: a consumer reading `process.env` DIRECTLY names no constant and is
+    // invisible here. That half is what the child-process probe above measures,
+    // so the two are complementary rather than overlapping.
+    const forbidden = ['SSTABLES' + '_DIR', 'TEST_DATA' + '_ROOT', 'DATASETS' + '_AVAILABLE'];
+    const source = fs.readFileSync(__filename, 'utf8');
+
+    const offenders = [];
+    source.split('\n').forEach((line, index) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
+        return;
+      }
+      if (line.includes('CONTROL')) {
+        return;
+      }
+      for (const name of forbidden) {
+        if (line.includes(name)) {
+          offenders.push(`${index + 1}: ${trimmed}`);
+          return;
+        }
+      }
+    });
+
+    expect(offenders).toEqual([]);
+
+    // NON-VACUITY, and it is load-bearing: every needle is split, so a typo in a
+    // split would silently make the scan look for a name that occurs nowhere and
+    // the test would pass having checked nothing. The two known control lines
+    // must therefore be FOUND — by the same `includes` the scan uses.
+    const controlLines = source
+      .split('\n')
+      .filter((line) => line.includes('CONTROL') && forbidden.some((n) => line.includes(n)));
+    expect(controlLines.length).toBe(2);
   });
 });
 
@@ -646,7 +745,7 @@ const payload = {
   // The POSITIVE CONTROL pair: what the child actually saw, and a constant
   // whose documented contract IS to follow it.
   envSeen: process.env.CQLITE_DATASETS_ROOT,
-  controlEnvRouted: global.testPaths.SSTABLES_DIR,
+  controlEnvRouted: global.testPaths.SSTABLES_DIR, // CONTROL: env-routed BY CONTRACT, never a consumer
   // The INVARIANT: this suite's own resolved constants.
   projectRoot: global.testPaths.PROJECT_ROOT,
   schemasDir: global.testPaths.SCHEMAS_DIR,
@@ -655,7 +754,21 @@ const payload = {
   schema: mod.SCHEMA,
   rowIds: null,
   readError: null,
+  parityFactsUdts: null,
+  parityFactsError: null,
 };
+
+// AC5 covers the parity-facts FILE as much as the corpus, so the probe OPENS it
+// rather than only recording its path — otherwise that half is path-equality
+// only while the corpus half is path-equality PLUS a read-back. Synchronous, so
+// it is recorded before the payload is written below.
+try {
+  payload.parityFactsUdts = Object.keys(
+    JSON.parse(fsProbe.readFileSync(mod.PARITY_FACTS, 'utf8')).udts
+  ).length;
+} catch (err) {
+  payload.parityFactsError = String((err && err.stack) || err);
+}
 // The read is attempted AFTER the paths are recorded, and its failure is
 // REPORTED rather than thrown: an env-routed resolution makes the open fail, and
 // the parent must be able to name the path mismatch that caused it instead of
