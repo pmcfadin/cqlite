@@ -805,6 +805,95 @@ else
   echo "--- repo cfg now ---"; cat "$repo_cfg"; echo "--------------------"
 fi
 
+# 6o. A SYMLINKED ~/.cargo/config.toml SURVIVES THE ATOMIC WRITE ON A BSD/macOS HOST
+#     (issue #3756). The mold write resolves a symlinked config to its target so the
+#     rename never replaces the LINK with a plain file. That resolution used
+#     `readlink -f`, which is GNU-only, behind a `|| echo "$cfg_file"` fallback that
+#     turned the BSD failure into a SILENT wrong answer — the write_target became the
+#     symlink path and the rename destroyed the link. No Linux lane can see it.
+#
+#     THE SHIM IS CONTROLLED FIRST. A differential whose shim does not reproduce the
+#     reported defect proves nothing, so the OLD IDIOM is run against the shim and must
+#     be shown to DESTROY the symlink before the real script is asked to preserve one.
+sbO=$(mktemp -d "$tmp/moldO.XXXXXX"); stubO="$tmp/stubO"; mkdir -p "$stubO"
+mk_stub "$stubO" uname 'echo Linux; exit 0'
+stub_net "$stubO"
+mk_stub "$stubO" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
+mk_stub "$stubO" cc 'exit 0'
+# BSD/macOS readlink: no -f. Apple/FreeBSD readlink(1) takes only -n (and -f is simply
+# not in its option string), so the option is rejected and nothing is printed.
+mk_stub "$stubO" readlink '
+_p=""
+for _a in "$@"; do
+  case "$_a" in
+    -*f*) echo "readlink: illegal option -- f" >&2; exit 1 ;;
+    -*)   ;;
+    *)    _p="$_a" ;;
+  esac
+done
+[ -n "$_p" ] && [ -L "$_p" ] || exit 1
+_l=$(ls -ld -- "$_p") || exit 1
+case "$_l" in *" -> "*) printf "%s\\n" "${_l#* -> }" ;; *) exit 1 ;; esac
+exit 0
+'
+# Shim control A: the shim really is BSD — it refuses -f and still answers the bare form.
+mkdir -p "$sbO/ctl"; : >"$sbO/ctl/real.txt"; ln -s "$sbO/ctl/real.txt" "$sbO/ctl/link.txt"
+ctlO_f=$(PATH="$stubO:$PATH" readlink -f "$sbO/ctl/link.txt" 2>/dev/null); ctlO_frc=$? # portability-lint-allow: probes the SHIM with the GNU-only option on purpose — this line IS the control that the shim rejects it
+ctlO_b=$(PATH="$stubO:$PATH" readlink "$sbO/ctl/link.txt" 2>/dev/null)
+if [ "$ctlO_frc" -ne 0 ] && [ -z "$ctlO_f" ] && [ "$ctlO_b" = "$sbO/ctl/real.txt" ]; then
+  ok "mold/symlink: the BSD readlink shim rejects -f and still resolves the bare form (the shim is the platform it claims to emulate)"
+else
+  bad "mold/symlink: the BSD readlink shim is not BSD-shaped (-f rc=$ctlO_frc out=[$ctlO_f]; bare=[$ctlO_b]) — every verdict below it would be unearned"
+fi
+# Shim control B: THE OLD IDIOM, run under the shim, DESTROYS the symlink. This is the
+# defect being fixed, reproduced, so the fix's green below is a measured difference and
+# not an assumption.
+mkdir -p "$sbO/old"; printf 'real = 1\n' >"$sbO/old/real.toml"
+ln -s "$sbO/old/real.toml" "$sbO/old/config.toml"
+PATH="$stubO:$PATH" bash -c '
+  cfg_file=$1
+  write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file") # portability-lint-allow: this IS the #3756 defect, reproduced on purpose — the control that makes the assertion below a measurement rather than an assumption
+  t=$(mktemp "$(dirname "$write_target")/.old.XXXXXX")
+  printf "rewritten = 1\n" >"$t"
+  mv -f "$t" "$write_target"
+' _ "$sbO/old/config.toml" >/dev/null 2>&1
+if [ ! -L "$sbO/old/config.toml" ] && [ -f "$sbO/old/config.toml" ]; then
+  ok "mold/symlink control: the OLD \`readlink -f … || echo\` idiom REPLACES the symlink with a plain file under BSD readlink — the defect is reproduced, so the fix's verdict below is a difference and not an assumption" # portability-lint-allow: the defect NAME in a diagnostic string, not an invocation
+else
+  bad "mold/symlink control: the old idiom did NOT destroy the symlink under the BSD shim (still-link=$([ -L "$sbO/old/config.toml" ] && echo yes || echo no)) — the shim does not reach the defect, so nothing below it is evidence"
+fi
+# The case itself: bootstrap, unmodified, under the same shim.
+mkdir -p "$sbO/.cargo" "$sbO/elsewhere"
+realO="$sbO/elsewhere/cargo-config.toml"
+printf '[net]\nretry = 3\n' >"$realO"
+ln -s "$realO" "$sbO/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbO" CARGO_HOME="$sbO/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbO/.cargo/config.toml" ] \
+   && [ "$(count_begin "$realO")" = 1 ] \
+   && grep -qx 'retry = 3' "$realO"; then
+  ok "mold/symlink: a symlinked cargo config is written THROUGH to its target on a BSD-readlink host — the link survives, the block lands once, user content is preserved"
+else
+  bad "mold/symlink: the symlinked config was not preserved (still-link=$([ -L "$sbO/.cargo/config.toml" ] && echo yes || echo no) begin-count=$(count_begin "$realO"))"
+  echo "--- link path ---"; ls -ld "$sbO/.cargo/config.toml"
+  echo "--- target ---"; cat "$realO" 2>/dev/null; echo "--------------"
+fi
+
+# 6p. A DANGLING symlink is REFUSED, not silently replaced (#3756). The old fallback
+#     wrote through to the symlink path, which turns an unresolvable link into a plain
+#     file — unrecoverable for the user, where skipping the accelerator config is not.
+sbP=$(mktemp -d "$tmp/moldP.XXXXXX"); mkdir -p "$sbP/.cargo"
+ln -s "$sbP/.cargo/nowhere.toml" "$sbP/.cargo/config.toml"
+outP=$(PATH="$stubO:$PATH" HOME="$sbP" CARGO_HOME="$sbP/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ -L "$sbP/.cargo/config.toml" ] && [ ! -e "$sbP/.cargo/nowhere.toml" ] \
+   && printf '%s' "$outP" | grep -q "symlink whose target could not be resolved"; then
+  ok "mold/symlink: a DANGLING symlinked config is refused with a named warning and left untouched, rather than replaced by a plain file"
+else
+  bad "mold/symlink: the dangling symlink case did not refuse (still-link=$([ -L "$sbP/.cargo/config.toml" ] && echo yes || echo no) target-exists=$([ -e "$sbP/.cargo/nowhere.toml" ] && echo yes || echo no))"
+  printf '%s\n' "$outP" | grep -i 'mold\|symlink' | head -5
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +
@@ -3642,7 +3731,10 @@ FAKEGATE
     # diagnostic must carry the evidence its own assertion turns on (#3758 nit 7).
     cat "$pin_home_aj/.bashrc"
     printf '%s\n' "$out_aj" | grep -iE 'CREATED|not touching|NOT persisted|gate-pin:' | head -8
-    echo "  env-file: mode=$(stat -c %a "$envf_aj" 2>/dev/null) content=[$(cat "$envf_aj" 2>/dev/null | tr '\n' '|')]"
+    # GNU `stat -c` FIRST, BSD `stat -f` fallback: this is a failure diagnostic, and a
+    # diagnostic that prints an empty mode on the one platform class the suite exists to
+    # protect (#3756) is worse than none — it is what stops the next reader looking.
+    echo "  env-file: mode=$(stat -c %a "$envf_aj" 2>/dev/null || stat -f %Lp "$envf_aj" 2>/dev/null) content=[$(cat "$envf_aj" 2>/dev/null | tr '\n' '|')]" # portability-lint-allow: GNU `stat -c` PAIRED with the BSD `stat -f` fallback on the same line
   fi
 
   # 11ak. THE SEAM MUST NOT STEER A ROOT-PRIVILEGED WRITE (issue #3414 roborev round 5,

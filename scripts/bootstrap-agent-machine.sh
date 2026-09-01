@@ -395,7 +395,39 @@ mold_write_block() {
   # to its target so we never silently replace a symlinked config with a plain file.
   local write_target="$cfg_file" tmpw
   if [ -L "$cfg_file" ]; then
-    write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file")
+    # PORTABLE SYMLINK RESOLUTION (#3756). `readlink -f` is GNU-only — BSD/macOS readlink
+    # has no -f — and the previous form's `|| echo "$cfg_file"` made that failure SILENT:
+    # write_target became the SYMLINK PATH, so the atomic rename below replaced the symlink
+    # with a plain file, which is exactly what resolving it exists to prevent. The failure
+    # was invisible on every Linux lane and would only ever be met by a macOS operator.
+    #
+    # Chase the chain with bare `readlink` (POSIX, both flavours) instead, bounded so a
+    # symlink loop cannot spin, then canonicalise the final DIRECTORY with `cd`+`pwd -P`
+    # (this repo's canonicalisation idiom, and what makes the result absolute).
+    local _wt="$cfg_file" _lt _wd _hops=0
+    while [ -L "$_wt" ] && [ "$_hops" -lt 32 ]; do
+      _lt=$(readlink "$_wt" 2>/dev/null) || break
+      [ -n "$_lt" ] || break
+      case "$_lt" in
+        /*) _wt="$_lt" ;;
+        *) _wt="$(dirname "$_wt")/$_lt" ;;
+      esac
+      _hops=$((_hops + 1))
+    done
+    # A result that is STILL a symlink (loop or hop limit), that does not EXIST (dangling),
+    # or whose directory cannot be canonicalised is NOT a resolved target. Refuse rather
+    # than fall back to the symlink path: the fallback IS the defect above, and replacing a
+    # user's symlink is not recoverable, while skipping the accelerator config is.
+    _wd=''
+    if [ ! -L "$_wt" ] && [ -e "$_wt" ]; then
+      _wd=$(cd "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
+    fi
+    if [ -z "$_wd" ]; then
+      warn "$cfg_file is a symlink whose target could not be resolved — skipping mold linker config rather than replacing the symlink with a plain file"
+      rm -f "$preserved"
+      return 0
+    fi
+    write_target="$_wd/$(basename "$_wt")"
   fi
   tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
     || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }
@@ -2294,7 +2326,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # simulate Linux while linking the HOST copy of `stat`, so on a macOS host this check would
       # fail-closed (exit 6) and the create would never happen — a break that the Linux-only
       # justification does not cover. GNU first, BSD fallback; `stat -f %Lp` is the BSD spelling.
-      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null)
+      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null) # portability-lint-allow: GNU `stat -c` PAIRED with the BSD `stat -f` fallback on the same line — the portable spelling, not a GNU-only one
       [ "$_pm" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
       ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
       rm -f "$t" 2>/dev/null

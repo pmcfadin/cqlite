@@ -53,9 +53,13 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+# Anchored on REPO_ROOT rather than spelled with `..` segments: these paths are PRINTED in the
+# scope declaration below and COMPARED against `git ls-files` output, and a `scripts/tests/../flow`
+# spelling is neither readable to a human nor equal to the tracked path (#3756 — an unnormalised
+# member silently counted as UNSCANNED, overstating the gap by 4).
 GUARD="$SCRIPT_DIR/test_roborev_review_guard.sh"
-GATE="$SCRIPT_DIR/../agent-gate.sh"
-FLOW_DIR="$SCRIPT_DIR/../flow"
+GATE="$REPO_ROOT/scripts/agent-gate.sh"
+FLOW_DIR="$REPO_ROOT/scripts/flow"
 
 PASS=0
 FAIL=0
@@ -161,6 +165,8 @@ trap 'rm -rf "$tmp"' EXIT
 # banned constructs, in two places only — its BSD-emulation fixtures and its positive controls —
 # and each such LINE carries a `portability-lint-allow` marker naming why, so the exemption is
 # visible in the diff and every other line of this file is scanned like any other target.
+BOOTSTRAP_SH="$REPO_ROOT/scripts/bootstrap-agent-machine.sh"
+BOOTSTRAP_TEST="$SCRIPT_DIR/test_bootstrap_agent_machine.sh"
 SCAN_FILES=(
   "$GUARD"
   "$SCRIPT_DIR/$(basename "$0")"
@@ -168,7 +174,42 @@ SCAN_FILES=(
   "$FLOW_DIR/roborev-review-checks.sh"
   "$FLOW_DIR/roborev-review-oracles.sh"
   "$FLOW_DIR/roborev-job-facts.py"
+  "$BOOTSTRAP_SH"
+  "$BOOTSTRAP_TEST"
 )
+
+# THE SCOPE IS DECLARED AT RUN TIME, NOT ONLY IN THIS COMMENT (#3756 AC2). A reader of a green
+# run learns which files it covered and — affirmatively, as a MEASURED count and not a constant
+# that decays — how many tracked shell scripts it did NOT. `NOT MEASURED` is its own third state:
+# a census that could not be taken is never rendered as a number, because a number in a scope
+# declaration reads as authority.
+_scope_unscanned_line() {
+  local _tracked _n_tracked=0 _n_unscanned=0 _f _rel _hit
+  _tracked=$(cd "$REPO_ROOT" 2>/dev/null && git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null) || {
+    printf 'unscanned: NOT MEASURED (the tracked-script census could not be taken)\n'; return 0; }
+  [ -n "$_tracked" ] || { printf 'unscanned: NOT MEASURED (the tracked-script census returned nothing)\n'; return 0; }
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    _n_tracked=$((_n_tracked + 1))
+    _hit=no
+    for _f in "${SCAN_FILES[@]}"; do
+      [ "$_f" = "$REPO_ROOT/$_rel" ] && _hit=yes
+    done
+    [ "$_hit" = no ] && _n_unscanned=$((_n_unscanned + 1))
+  done <<EOF_SCOPE
+$_tracked
+EOF_SCOPE
+  printf 'unscanned: %d of %d tracked scripts/**/*.sh are NOT scanned by this lint\n' \
+    "$_n_unscanned" "$_n_tracked"
+}
+printf '\n==== PORTABILITY LINT SCOPE ====\n'
+printf 'This lint is an ENUMERATED subject set, not a derived one. A PASS below says nothing\n'
+printf 'about any file absent from this list.\n'
+for _scope_f in "${SCAN_FILES[@]}"; do
+  printf 'scanned:   %s\n' "${_scope_f#"$REPO_ROOT/"}"
+done
+_scope_unscanned_line
+printf '================================\n\n'
 
 # Three parallel arrays: the ERE, why it is not portable, and a sample violation the ERE
 # MUST detect (the positive control that keeps the pattern honest).
@@ -294,13 +335,23 @@ add_construct '(^|[^[:alnum:]_-])(sed|grep)[[:space:]]+-[a-zA-Z]*z([[:space:]]|$
 add_construct '\-printf[[:space:]]' \
   'find -printf is GNU-only — use -exec or -print with a shell loop' \
   "  find . -printf '%p\\\\n'" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
-add_construct '(^|[^[:alnum:]_-])xargs[[:space:]]+(-[a-zA-Z]*r|--)' \
+# NAMED because the #3756 bootstrap-scope controls below assert about this rule SPECIFICALLY —
+# an index reference would silently retarget when a row is inserted above it.
+RE_XARGS_R='(^|[^[:alnum:]_-])xargs[[:space:]]+(-[a-zA-Z]*r|--)'
+add_construct "$RE_XARGS_R" \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
   '  printf "" | xargs -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
   'base64 -w is GNU-only (BSD/macOS base64 has no wrap flag; use -b or fold)' \
   '  base64 -w0 <f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
-add_construct '(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9]' \
+# THE DURATION MUST BE A COMPLETE TOKEN (#3756). `[0-9]` alone matched the `2` of
+# `command -v timeout 2>/dev/null` — which is not an invocation of timeout(1) at all, it is the
+# very GUARD this rule's own message tells you to write. A lint that reds on the remedy it
+# recommends is the lint agents learn to waive, and it fired on three real call sites. So the
+# duration is now `[0-9]+` plus an optional GNU suffix, and it must END the token: a digit
+# followed by `>` or `<` is a REDIRECTION's file descriptor, never a duration.
+RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9]+[smhd]?([[:space:]]|$)'
+add_construct "$RE_TIMEOUT_UNGUARDED" \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])(mapfile|readarray)([[:space:]]|$)|declare[[:space:]]+-A|\$\{[A-Za-z_][A-Za-z_0-9]*,,\}' \
@@ -590,9 +641,9 @@ for _ci in "${!CONSTRUCT_RE[@]}"; do
     : # a target could not be scanned: the cause is already a counted FAILURE, and a
       # "free of this construct" verdict over a partially-scanned set would be vacuous.
   elif [ -z "$_hits" ]; then
-    ok "structural: the roborev code path is free of this construct — $_why"
+    ok "structural: the scanned set is free of this construct — $_why"
   else
-    bad "structural: GNU-only construct in the roborev code path ($_why):$_hits"
+    bad "structural: GNU-only construct in the scanned set ($_why):$_hits"
   fi
 done
 
@@ -882,6 +933,93 @@ printf '%s\n' "  sed -i 's/a/b/' \"\$f\"" >>"$tmp/self-unmarked.sh" # portabilit
 assert_flagged 'an UNMARKED violation appended to a COPY of this file (so the self-scan is a real scan, not a blanket exemption)' "$tmp/self-unmarked.sh"
 awk '{ gsub(/portability-lint-allow/, "portability-lint-NEUTRALISED"); print }' "$_self" >"$tmp/self-nomarker.sh"
 assert_flagged "this file with its exemption markers NEUTRALISED (proving the markers are load-bearing — the rules really do match this file's own deliberate fixtures)" "$tmp/self-nomarker.sh"
+
+# ---------------------------------------------------------------------------
+# THE BOOTSTRAP PAIR IS IN SCOPE, AND THE RULE THAT MISSED IT IS PROVED TO FIRE THERE (#3756).
+#
+# `xargs -0 -r` shipped in test_bootstrap_agent_machine.sh's tree-identity digest and was caught
+# by a human reviewer, not by this lint — which has carried the `xargs -r` rule verbatim since
+# #3296. The rule was fine; the SUBJECT SET was the gap, and an enumerated set that declares its
+# own non-exhaustiveness is honest without being coverage. Both files are in SCAN_FILES now, and
+# both halves of that are asserted here rather than assumed:
+#   (i)  MEMBERSHIP — dropping either file from SCAN_FILES must FAIL, the same shape as the
+#        self-scan above. Without it a future edit could quietly restore the gap.
+#   (ii) THE RULE ACTUALLY FIRES THERE — membership proves the file is passed to `grep`, not that
+#        the incident's own construct would be caught in it. So the incident construct is PLANTED
+#        into a throwaway COPY of each file and the scan must flag it AND NAME it: a bare "some
+#        rule matched" is not evidence, since the copy is 3000+ lines of real script and an
+#        unrelated rule firing would produce an identical verdict.
+# The pristine copies are asserted CLEAN of the same rule first — otherwise the planted verdict
+# could be inherited from a pre-existing hit and the plant would prove nothing.
+# ---------------------------------------------------------------------------
+_bs_i=0
+for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
+  _bs_i=$((_bs_i + 1))
+  _bs_name=$(basename "$_bs_f")
+  _bs_member=no
+  for _sf in "${SCAN_FILES[@]}"; do
+    [ "$_sf" = "$_bs_f" ] && _bs_member=yes
+  done
+  if [ "$_bs_member" = yes ]; then
+    ok "bootstrap-scope: $_bs_name is one of the SCAN_FILES — the #3756 gap (a GNU-only idiom this lint already knows about, shipped because the file was never scanned) cannot silently reopen"
+  else
+    bad "bootstrap-scope: $_bs_name is NOT in SCAN_FILES — this is the #3756 gap, reopened"
+    continue
+  fi
+  if [ ! -f "$_bs_f" ]; then
+    bad "bootstrap-scope: $_bs_name does not exist at $_bs_f — the plant control below has no subject, so its verdict would be unearned"
+    continue
+  fi
+  # (a) the pristine file must be CLEAN of the incident rule, or (b) proves nothing.
+  scan_found "$RE_XARGS_R" "$_bs_f"
+  case $? in
+    1) ok "bootstrap-scope: $_bs_name is clean of the \`xargs -r\` rule today — so the planted hit below is attributable to the plant and not inherited" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    0) bad "bootstrap-scope: $_bs_name already matches the \`xargs -r\` rule ($(scan_all_hits)) — fix it; until then the plant control below cannot attribute its hit" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    *) continue ;; # already counted by scan_found
+  esac
+  # (b) plant the INCIDENT construct into a copy and require the scan to NAME it.
+  _bs_copy="$tmp/bootstrap-planted-$_bs_i.sh"
+  cat "$_bs_f" >"$_bs_copy"
+  printf '%s\n' '  printf "" | xargs -r rm' >>"$_bs_copy" # portability-lint-allow: plants the #3756 incident construct into a THROWAWAY COPY on purpose
+  scan_found "$RE_XARGS_R" "$_bs_copy"
+  case $? in
+    0)
+      _bs_hit=$(scan_first_hit)
+      case "$_bs_hit" in
+        *"xargs -r"*) # portability-lint-allow: the planted construct as a MATCH PATTERN, not an invocation
+          ok "bootstrap-scope: the \`xargs -r\` rule FIRES on a copy of $_bs_name and NAMES the planted line ($_bs_hit) — the #3756 incident construct would now red the gate instead of a reviewer" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+        *)
+          bad "bootstrap-scope: a hit was reported on the planted copy of $_bs_name but it does not name the planted construct ($_bs_hit) — a bare red is not evidence, an unrelated match produces the same verdict" ;;
+      esac ;;
+    1) bad "bootstrap-scope: the \`xargs -r\` rule does NOT fire on a copy of $_bs_name carrying the #3756 construct — membership without detection is the gap wearing a scan's clothes" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    *) : ;; # already counted by scan_found
+  esac
+done
+
+# NEGATIVE CONTROL for the timeout rule (#3756): `command -v timeout` is the REMEDY this rule's
+# own message recommends, and the old `[0-9]` form matched the `2` of its `2>/dev/null`. Both
+# directions are pinned — the guard must be clean, the real invocation must still be flagged —
+# because a false-positive fix that also loses the true positive is not a fix.
+printf '%s\n' \
+  '  bound=$(command -v timeout 2>/dev/null || true)' \
+  '  if [ "$(command -v timeout 2>/dev/null)" != "" ]; then' \
+  '  exec 2>/dev/null' >"$tmp/timeout-ok.sh"
+scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-ok.sh"
+case $? in
+  1) ok 'structural control: `command -v timeout 2>/dev/null` — the guard this rule RECOMMENDS — is not flagged; a digit followed by `>` is a redirection fd, not a duration' ;;
+  0) bad "structural control: the timeout rule flags its own recommended guard — a lint that reds on the remedy it prints is the lint agents learn to waive: $(scan_all_hits)" ;;
+  *) : ;; # already counted by scan_found
+esac
+printf '%s\n' \
+  '  timeout 30 some-command' \
+  '  timeout 5m other-command' \
+  '  timeout 180 bash "$GATE"' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-bad.sh"
+case $? in
+  0) ok 'structural control: real `timeout <duration> cmd` invocations (bare seconds, a GNU suffix, a longer duration) are still FLAGGED — the false-positive fix did not lose the true positive' ;;
+  1) bad 'structural control: the timeout rule no longer detects a real timeout(1) invocation — the false-positive fix narrowed it past its subject' ;;
+  *) : ;; # already counted by scan_found
+esac
 
 # ===========================================================================
 # (2) THE BSD SHIMS, and the controls that prove they reproduce the reported defects.
