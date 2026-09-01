@@ -74,6 +74,13 @@
 //!   in EMITTED order, because Cassandra stores a map's entries in key-comparator
 //!   order and both sides read the same SSTable (finding N2). Sorting both sides
 //!   first, which this lane used to do, made a reordering compare equal.
+//!
+//!   A map KEY the DDL declares as a CONTAINER is paired the same way, because
+//!   `cassandra-5.0.8 MapType.toJSONString` spells the golden's object key as the
+//!   key value's own `toJSONString` document: it is parsed and compared as an
+//!   ordinary value of the declared key type (issue #3726, [`container`]). The one
+//!   position that is not a `toJSONString` document is a MULTICELL map's key, which
+//!   is a cell PATH — `writeString(getString(...))` — and is a declared gap.
 //! * **UDT fields.** `sstabledump` renders a UDT as a plain field→value object,
 //!   and since #3629 so does the JSON egress: the `_type` discriminator it used to
 //!   add is GONE, so both sides carry the declared fields and nothing else and

@@ -1199,8 +1199,26 @@ pub fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
 ///
 /// The golden's keys are JSON object keys, hence always strings; the CLI's keep
 /// whatever kind the egress gave them. Both go through `canon_typed(…, key_ty, …)`
-/// — the golden's under [`Kinding::Stringified`], the CLI's under
-/// [`Kinding::Natural`] — which is what makes the kind comparison possible.
+/// — the golden's under [`container::golden_map_key_kinding`]'s kinding, the CLI's
+/// under [`Kinding::Natural`] — which is what makes the kind comparison possible.
+///
+/// # A CONTAINER key type (issue #3726)
+///
+/// There is no separate rule for one, which is the point: `cassandra-5.0.8
+/// MapType.toJSONString` writes `keys.toJSONString(kv, protocolVersion)` and quotes
+/// it only when it does not already start with `"`, so a container key's JSON object
+/// key is exactly that key value's own `toJSONString` document. Read through
+/// [`container::golden_map_key_value`] it becomes an ordinary value of the declared
+/// key type, canonicalized by the same [`canon_typed`] recursion as any other
+/// position — at [`Kinding::Natural`], because `toJSONString` is the natural-kind
+/// writer.
+///
+/// This function used to REFUSE such a key outright (`is_scalar_type`), which made
+/// four columns of the committed `test_nested_udt_keys.nested_udt_keys` fixture
+/// inexpressible to the lane rather than merely excluded. The refusal survives only
+/// where the ORACLE contradicts itself: a golden key that is not a `toJSONString`
+/// document is reported, which is exactly the MULTICELL case — there the key is a
+/// cell PATH, written `writeString(getString(...))` (see `gap::Divergence`).
 fn compare_map(
     golden: &Map<String, Value>,
     cli: &[Value],

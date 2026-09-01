@@ -671,10 +671,12 @@ const CASES: &[Case] = &[
         // CLI decodes it. A value disagreement, in the direction OPPOSITE to
         // `NestedFrozenUdtRendersAsBlobHex`.
         //
-        // CLASS 2 — a LANE LIMITATION, not a disagreement: the declared map KEY is
-        // a container and this lane has no pairing rule for one, so the two sides
-        // are never compared. Tracked for real support in #3726; when that lands
-        // these four skips go stale and FAIL, which is what removes them.
+        // CLASS 2 — the golden leaves a MULTICELL map's container-typed KEY as
+        // getString's flat cell-path text while the CLI renders the key's raw bytes
+        // as a 0x blob literal. Also a value disagreement, in BOTH directions at
+        // once: neither side decodes it. It used to be a LANE limitation covering
+        // four columns; issue #3726 closed that for the three FROZEN ones, which are
+        // now compared in full.
         skips: &[
             Skip {
                 path: "s_tuple_udt",
@@ -706,41 +708,29 @@ const CASES: &[Case] = &[
                 divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
                 why: "golden leaves the frozen inner map (UDT as VALUE) as raw serialized hex while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
             },
-            // THE FOUR CONTAINER-KEYED MAPS — a LANE limitation, not a value
-            // disagreement. `compare_map` pairs entries by canonical SCALAR key form
-            // and refuses a container key outright, so these columns are not compared
-            // AT ALL. The skip is whole-column and therefore OVER-SKIPS: it also
-            // suppresses a null, a malformed {key,value} array, a wrong entry count
-            // and a wrong tuple arity here. That cost is accepted and documented
-            // rather than bounded — three review rounds (roborev 302/305/306) showed
-            // that bounding it means reimplementing `compare_map`'s own feature list,
-            // because a Skip is path-scoped to a column and cannot express "compare
-            // everything except the keys". Real support needs a container
-            // representation in `Canon` (scalar-only today); tracked in #3726, and
-            // these four skips go stale and FAIL the lane when it lands.
+            // THE ONE MULTICELL CONTAINER-KEYED MAP. The other three
+            // (`f_map_tuple_udt`, `f_map_set_udt`, `f_map_tuple_list_udt`) were
+            // skipped here under `ContainerMapKeyNotPairableByThisLane` until issue
+            // #3726 gave `Canon` a container representation; they are now compared in
+            // full, in both formats, and their skips are GONE — which is the
+            // self-retiring link that scaffold was accepted for.
+            //
+            // This one cannot follow them, and the reason is MEASURED rather than
+            // structural: it is the only NON-frozen map of the four, so its entries
+            // are separate cells whose key is the cell PATH, which
+            // `cassandra-5.0.8 JsonTransformer.serializeCell` writes with
+            // `writeString(getString(...))`. The golden therefore carries
+            // `TupleType.getString`'s colon-joined text (`"charlie\:3:8"`) while the
+            // CLI renders the key's raw bytes as a blob literal
+            // (`0x000000130000...`) — NEITHER side decodes it, so there is no
+            // container to pair. A value disagreement, and the CQLite half of it (a
+            // real `SELECT` returns the decoded tuple) is a read-fidelity defect
+            // separable from this lane.
             Skip {
                 path: "m_tuple_udt",
                 formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is tuple<key_part, int> — this lane pairs map keys by canonical scalar form only, so the column is NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
-            },
-            Skip {
-                path: "f_map_tuple_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is frozen tuple<key_part, int> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
-            },
-            Skip {
-                path: "f_map_set_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is frozen set<key_part> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array and a wrong entry COUNT are all UNCHECKED here (#3726)",
-            },
-            Skip {
-                path: "f_map_tuple_list_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is frozen tuple<list<key_part>, int> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
+                divergence: Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
+                why: "the ONE multicell map here: golden leaves the key as sstabledump's colon-joined getString cell-path text while the CLI renders the key's raw bytes as a 0x blob literal — neither side decodes it, so the entries cannot be paired and the map's VALUES are NOT compared (the key spellings, the entry count and the {key,value} shape ARE checked)",
             },
         ],
     },

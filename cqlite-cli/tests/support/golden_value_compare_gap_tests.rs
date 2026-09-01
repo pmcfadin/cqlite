@@ -670,3 +670,210 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
         );
     }
 }
+
+// =======================================================================
+// #3726: the MULTICELL map key neither side decodes
+// =======================================================================
+//
+// The retired `ContainerMapKeyNotPairableByThisLane` read NO values at all — it
+// matched from the DDL alone — so it also suppressed a null, a malformed
+// `{key,value}` array, a wrong entry count and a wrong tuple arity in FOUR columns.
+// Its replacement is stated from the two sides' MEASURED shapes, so each of those
+// is now an ordinary diff. Both directions are pinned, per shape.
+
+/// `m_tuple_udt` as declared by the committed
+/// `test-data/schemas/nested-udt-keys.cql`: the one NON-frozen map of the four.
+const MULTICELL_MAP_DDL: &str = "CREATE TYPE key_part (label text, rank int); \
+     CREATE TABLE t (id int PRIMARY KEY, \
+     m map<frozen<tuple<frozen<key_part>, int>>, int>);";
+
+const MULTICELL_MAP_GAP: [(&str, Divergence); 1] = [(
+    "m",
+    Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
+)];
+
+/// The golden's own `m_tuple_udt` cell for the fixture's row `id=1`: two multicell
+/// cells whose PATHS are `TupleType.getString`'s colon-joined text
+/// (`JsonTransformer.serializeCell` writes a cell path with `writeString`).
+fn multicell_map_golden() -> Vec<Row> {
+    vec![row(&[
+        ("id", json!(1)),
+        ("m", json!({"charlie\\:3:8": 80, "delta\\:4:9": 90})),
+    ])]
+}
+
+/// The CLI's own rendering of it, MEASURED with `export --format json`: the key's
+/// raw serialized bytes as a CQL blob literal.
+fn multicell_map_cli(m: Value) -> Vec<Row> {
+    vec![row(&[("id", json!(1)), ("m", m)])]
+}
+
+fn measured_cli_map() -> Value {
+    json!([
+        {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80},
+        {"key": "0x000000110000000564656c746100000004000000040000000400000009", "value": 90}
+    ])
+}
+
+#[test]
+fn the_multicell_map_key_gap_suppresses_exactly_the_measured_shapes() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    // Each side's OWN measured rendering: the JSON egress's `{key,value}` array, and
+    // the CSV egress's flat cell — which `csv_container` decodes into that same
+    // array (the `0x…` text does not invert the declared tuple's grammar, so the key
+    // is left as raw text), which is why one gap covers both formats.
+    let measured_csv = json!(
+        "{0x0000001300000007636861726c696500000004000000030000000400000008: 80, \
+         0x000000110000000564656c746100000004000000040000000400000009: 90}"
+    );
+    for (egress, cli) in [
+        (Egress::Json, measured_cli_map()),
+        (Egress::Csv, measured_csv),
+    ] {
+        let report = compare_rows(
+            &multicell_map_golden(),
+            &multicell_map_cli(cli),
+            &schema,
+            &["id"],
+            &[],
+            &MULTICELL_MAP_GAP,
+            egress,
+        );
+        assert!(report.diffs.is_empty(), "{egress:?}: {:?}", report.diffs);
+        assert!(
+            report.stale_skips.is_empty(),
+            "{egress:?}: the gap must be APPLIED, not stale: {:?}",
+            report.stale_skips
+        );
+    }
+}
+
+/// Every shape the retired whole-column skip used to swallow. Each must now be
+/// reported as an ordinary diff naming the column and the declared gap.
+#[test]
+fn the_multicell_map_key_gap_covers_nothing_else() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let undeclared: &[(&str, Value)] = &[
+        // A NULL where the golden has two entries: the column was rendered, but
+        // empty of everything.
+        ("a null", Value::Null),
+        // The entry COUNT: one of the two entries dropped.
+        (
+            "a dropped entry",
+            json!([{
+                "key": "0x0000001300000007636861726c696500000004000000030000000400000008",
+                "value": 80
+            }]),
+        ),
+        // A malformed `{key,value}` array — read through the lane's one pair reader.
+        ("a malformed pair", json!([{"key": "0x00"}, {"value": 90}])),
+        // The key DECODED, which is what closing the CQLite-side defect looks like:
+        // then this gap is stale and the two sides are compared normally (the golden
+        // still carries getString text, so a diff is the honest outcome).
+        (
+            "a decoded key",
+            json!([
+                {"key": [{"label": "charlie", "rank": 3}, 8], "value": 80},
+                {"key": [{"label": "delta", "rank": 4}, 9], "value": 90}
+            ]),
+        ),
+        // A key that is not a CQL blob literal: arbitrary text, an odd digit count,
+        // a non-hex body.
+        (
+            "arbitrary text as the key",
+            json!([
+                {"key": "charlie:3:8", "value": 80},
+                {"key": "delta:4:9", "value": 90}
+            ]),
+        ),
+        (
+            "an odd-length blob literal",
+            json!([
+                {"key": "0xabc", "value": 80},
+                {"key": "0xdef", "value": 90}
+            ]),
+        ),
+    ];
+    for (name, cli) in undeclared {
+        let report = compare_rows(
+            &multicell_map_golden(),
+            &multicell_map_cli(cli.clone()),
+            &schema,
+            &["id"],
+            &[],
+            &MULTICELL_MAP_GAP,
+            Egress::Json,
+        );
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{name} must be reported under this gap: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains("NOT the divergence"),
+            "{name}: the diff must name the declared gap: {:?}",
+            report.diffs
+        );
+    }
+    assert_eq!(undeclared.len(), 6, "the case floor for this bounding");
+}
+
+/// The golden half is stated against the ORACLE, not against the golden's
+/// appearance: a golden whose keys ARE the declared key type's `toJSONString`
+/// documents is the FROZEN shape this lane now compares in full, so declaring this
+/// gap there suppresses nothing and the gap is reported STALE.
+#[test]
+fn the_multicell_map_key_gap_does_not_match_a_golden_that_decoded() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let decoded_golden = vec![row(&[
+        ("id", json!(1)),
+        (
+            "m",
+            json!({"[{\"label\": \"charlie\", \"rank\": 3}, 8]": 80}),
+        ),
+    ])];
+    let cli = multicell_map_cli(json!([
+        {"key": [{"label": "charlie", "rank": 3}, 8], "value": 80}
+    ]));
+    let report = compare_rows(
+        &decoded_golden,
+        &cli,
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "the gap must retire itself: {:?}",
+        report.stale_skips
+    );
+    assert!(
+        report.stale_skips[0].contains("AGREE"),
+        "{:?}",
+        report.stale_skips
+    );
+}
+
+/// And an EMPTY golden map exhibits no key spelling at all, so there is nothing
+/// measured for the gap to suppress: it must not match, and the gap is stale.
+#[test]
+fn the_multicell_map_key_gap_does_not_match_an_empty_map() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let golden = vec![row(&[("id", json!(1)), ("m", json!({}))])];
+    let report = compare_rows(
+        &golden,
+        &multicell_map_cli(json!([])),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(report.stale_skips.len(), 1, "{:?}", report.stale_skips);
+}
