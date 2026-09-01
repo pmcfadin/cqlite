@@ -33,15 +33,31 @@ PR-side scan (unchanged) ──► granted / unauthorized / stale / malformed / 
 
 Four properties make this cheap and safe, and each is a deliberate reuse rather than a new mechanism:
 
-**1. The scanner is already thread-agnostic, so there is exactly one enforcer.** It reads
-`{"comments":[{"author":{"login":…},"body":…}]}` from stdin and has no concept of a pull request;
-`gh issue view --json comments` returns that same shape. So the sole-nonblank-content rule, the
-column-zero anchor, the structured author association, the allowlist, the field grammar, the
-placeholder refusal and the base/head/job binding are all inherited **by call, with the same
-arguments** — not re-derived, not copied. #3626's rule applies verbatim: *a second implementation of a
-channel rule is a second place for it to diverge, and a divergence in an authorization rule is a
-bypass.* **The scanner needs no change at all**, which is the strongest available evidence that the
-channel rules are not being loosened: there is nothing to loosen them in.
+**1. The scanner is already thread-agnostic, so there is exactly one enforcer — MEASURED, not
+predicted.** It reads `{"comments":[{"author":{"login":…},"body":…}]}` from stdin and has no concept of
+a pull request. **Measured live on issue #3626: `gh issue view <N> --json comments` emits
+`{"comments":[{"author":{"login":…},"body":…}]}`, BYTE-IDENTICAL IN SHAPE to what
+`gh pr view --json comments` emits.** So the sole-nonblank-content rule, the column-zero anchor, the
+structured author association, the allowlist, the field grammar, the placeholder refusal and the
+base/head/job binding are all inherited **by call, with the same arguments** — not re-derived, not
+copied.
+
+**The scanner is therefore reused UNMODIFIED, and that is a decision rather than a convenience.**
+#3626's *reuse, do not reinvent* ruling applies verbatim: **a second implementation of the marker
+grammar would be a second place for it to diverge, and a divergence in an AUTHORIZATION grammar is a
+bypass.** Even a "small" issue-side variant — one that only had to recognise a marker well enough to
+print a diagnostic — would be a second grammar whose agreement with the first is knowable only by
+testing it, never by care, and whose drift is invisible until it grants (or refuses) differently. That
+the scanner needs **no change at all** is also the strongest available evidence that the channel rules
+are not being loosened by this change: there is nothing in the diff to loosen them in, and the guard
+suite asserts the file is untouched.
+
+**The measurement is what licenses the reuse.** Had the two payloads differed in shape, the honest
+options would have been a translation layer (a new component in an authorization path, needing its own
+review) or a second scanner (the rejected alternative above) — not an assumption. The shape is recorded
+here so a future `gh` release that changes it fails against a written expectation rather than silently
+producing an empty comments array, which reads as *"no marker there"* and would resurrect exactly the
+indistinguishable `NONE` this change removes.
 
 **2. The scanner must never EMIT `misplaced`, and the state is therefore set by the shell caller.**
 The scanner cannot know which thread its stdin came from — thread identity is the *caller's*
@@ -66,6 +82,30 @@ is strictly required today — and the list is amended anyway, because a future 
 probe result through the validation would otherwise silently rewrite an accurate diagnostic into a
 generic `unavailable`, i.e. re-collapse exactly the state this change exists to split out. The list is
 a **recognition** list, not a granting list; adding a value to it confers nothing.
+
+**5. THE GRANTING PATH'S PAYLOAD DOES NOT CHANGE SHAPE, AND THE TWO `gh` CALLS STAY SEPARATE.** It is
+tempting to fetch `gh pr view --json comments,closingIssuesReferences` in the existing single call and
+restructure the call sites around the richer payload. **Do not.** Two reasons, and the first is the one
+that matters:
+
+- **The granting path's payload must not change shape as a side effect of adding a diagnostic.** The
+  existing single `--json comments` call is the input to an authorization decision. Widening it means
+  every consumer of that payload — the scanner's stdin included — now receives a document with an extra
+  top-level key, and the reason the scanner is safe to reuse is precisely that its input shape is
+  *fixed and measured*. A diagnostic feature has no business editing the document an authorization is
+  decided from, and a refactor of the granting call sites "while we are here" is how a review round
+  that was about a diagnostic ends up being about the grant.
+- **The probe must be reachable ONLY from a branch that has already failed to grant.** Fetching the
+  relation up front makes the resolver's data available on *every* path, including the granted one, and
+  reachability then rests on where an `if` happens to sit rather than on where the data exists. A
+  separate, LATER, best-effort call on the `none` branch alone makes the ordering structural: on any
+  other state the call is not merely ignored, it is **not made** — which is also what the `gh`
+  invocation-log assert in the test suite can actually measure.
+
+So: the existing `--json comments` call is **unchanged, byte for byte**; the resolver is a second,
+independent, best-effort call issued only after the PR-side scan has returned `none`. The extra
+round-trip on a failing run is the price, and it is the correct trade — the path it sits on has already
+decided the run FAILs.
 
 ## Escalation is only from `none`, and only from a would-have-granted marker
 
@@ -112,6 +152,22 @@ it is what stops the next person looking.
 
 `gh pr view --json closingIssuesReferences` — the structured GitHub relation. **Not** a scan of the PR
 body for `#N`.
+
+**VALIDATED AGAINST THE ACTUAL INCIDENT, not against a constructed example.** Measured live:
+
+```
+$ gh pr view 3710 --json closingIssuesReferences
+[{"number":3544, …}]
+```
+
+That is exactly the misplacement #3759 reports — the markers were on **issue #3544** and **PR #3710
+carried zero** — so the proposed resolver **would have found them on the real case**, with no
+inference, no prose scan and one call. A design validated on the instance that produced the issue is
+worth more than one validated on a fixture someone wrote afterwards, and it also settles the question
+the resolver choice actually turns on: *does the relation point at the thread where coordination
+happens?* On the one case we have, it does — because the lane's coordination thread and the issue the
+PR closes were **the same thread**, which is precisely why the misplacement was the path of least
+resistance.
 
 This is not a preference. #3626 **deleted** a PR-body link requirement, and the ruling is on the
 record: *a PR body is editable at any time by anyone with write access, with NO per-edit attribution,
@@ -190,6 +246,8 @@ before use: an affirmative shape test on a value from a remote payload, not a ho
 | Resolve the linked issue by scanning the PR body for `#N` | #3626 deleted exactly this: a mutable, unattributed artifact, with a Markdown-recogniser class that provably does not close (0 → 11 references, two bypasses accepted at deletion time). |
 | Teach the scanner a `--thread-kind` argument and let it emit `misplaced` | Adds a provenance input to the one component whose inputs must stay fixed; the scanner's thread-agnosticism is what makes there be exactly one enforcer. |
 | Copy the channel rules into a new issue-side scanner | A second implementation of a channel rule is a second place for it to diverge, and a divergence in an authorization rule is a bypass. |
+| Fetch `--json comments,closingIssuesReferences` in the existing single call | Changes the shape of the payload an AUTHORIZATION is decided from, as a side effect of adding a diagnostic — and makes the relation available on the granted path, so reachability rests on an `if` rather than on the data not existing. The existing call stays unchanged; the resolver is separate, later, and only on `none`. |
+| Restructure the existing `gh` call sites "while we are here" | A diagnostic change that refactors the granting path turns a review of a diagnostic into a review of the grant. Out of scope by construction. |
 | Scan *every* issue and PR the marker's author has commented on | Unbounded, and it makes "which thread" meaningless — the diagnostic's value is that it names ONE place to move a comment from. |
 | Run the deferral's disposition leg issue-side too | N extra network calls on a diagnostic path, for advice that is the same either way; and the disposition state is reported precisely once the marker is on the PR. Declared as a scoping, not hidden. |
 | Fail the run when the probe cannot be performed | The probe is a diagnostic. Failing on it would make an unreachable GitHub API a merge blocker for a reason unrelated to the review, and would red on correct input — the guard agents learn to waive. |

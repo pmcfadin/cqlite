@@ -54,6 +54,18 @@ found on** and the remedy: **re-post the identical marker as a top-level comment
 Otherwise the state stays `none` — and the `none` report now **says whether the probe ran**, so
 `NONE` is never silently ambiguous about it.
 
+**The resolver is validated against the actual incident.** Measured live, on the PR that stalled:
+
+```
+$ gh pr view 3710 --json closingIssuesReferences
+[{"number":3544, …}]
+```
+
+The markers were on **issue #3544**; **PR #3710 carried zero**. So the proposed
+`closingIssuesReferences` resolver **would have found them on the real case** — one structured call, no
+prose scan, no inference. That is the whole eight-hour stall, resolvable by a diagnostic that names
+issue #3544 and says "re-post it on the PR".
+
 **This is a diagnosability change, not a loosening.** `MISPLACED` grants nothing, anywhere. The
 `prompt-content:` / `findings:` FAIL stands unchanged, and the author allowlist, the
 sole-nonblank-content rule, the column-zero anchor and the base+head+job binding are all untouched.
@@ -66,12 +78,20 @@ the failure mode where a correct authorization reads as a denial.
   RESIDUALS comment blocks), **`scripts/flow/roborev-review-checks.sh`** (the two report arms),
   `scripts/flow/roborev-review.sh` (`--help` and the key documentation), and
   `scripts/tests/test_roborev_review_guard.sh`.
-- **`scripts/flow/roborev-waiver-scan.py` needs no change, and that is a design result, not luck.**
-  The scanner is already **thread-agnostic**: it consumes `{"comments":[{"author":{"login":…},"body":…}]}`
-  on stdin and knows nothing about pull requests. `gh issue view --json comments` returns that same
-  shape. So the channel rules are inherited **by call** — one enforcer, one grammar, one allowlist —
-  which is #3626's rule verbatim: *a second implementation of a channel rule is a second place for it
-  to diverge, and a divergence in an authorization rule is a bypass.*
+- **`scripts/flow/roborev-waiver-scan.py` is reused UNMODIFIED, and that is a measured design result,
+  not luck.** The scanner is already **thread-agnostic**: it consumes
+  `{"comments":[{"author":{"login":…},"body":…}]}` on stdin and knows nothing about pull requests.
+  **Measured live on issue #3626, `gh issue view <N> --json comments` emits that same document,
+  byte-identical in shape to `gh pr view --json comments`.** So the channel rules are inherited **by
+  call** — one enforcer, one grammar, one allowlist — which is #3626's *reuse, do not reinvent* ruling
+  verbatim: *a second implementation of the marker grammar is a second place for it to diverge, and a
+  divergence in an authorization grammar is a bypass.* The scanner file ends this change untouched, and
+  the guard suite asserts it.
+- **The existing `gh pr view --json comments` call is UNCHANGED and the two calls stay separate.** The
+  resolver is a second, later, best-effort call made **only** on the `none` branch — never a combined
+  `--json comments,closingIssuesReferences` fetch, and no restructuring of the existing call sites. The
+  payload an *authorization* is decided from must not change shape as a side effect of adding a
+  *diagnostic*, and the probe must be reachable only from a branch that has already failed to grant.
 - **`scripts/agent-gate.sh` is NOT touched.**
 - **The design is fixed by the owner's numbered "Proposed" section.** This change specs it; it does
   not redesign it.

@@ -66,13 +66,24 @@ issue(s)**, using **the same scanner**, **the same marker kind**, and **the same
 scan returns `granted`, the state SHALL become `misplaced`; otherwise it SHALL remain `none`.
 
 **One enforcer, inherited by call.** The scanner SHALL NOT be duplicated, forked or given a
-thread-specific variant. It is already **thread-agnostic** — it consumes
+thread-specific variant, and `scripts/flow/roborev-waiver-scan.py` SHALL be **unmodified** by this
+change. It is already **thread-agnostic** — it consumes
 `{"comments":[{"author":{"login":…},"body":…}]}` on standard input and knows nothing about pull
-requests — and `gh issue view --json comments` returns that same shape, so the sole-nonblank-content
+requests — and this is **measured, not assumed**: on issue #3626,
+`gh issue view <N> --json comments` emits `{"comments":[{"author":{"login":…},"body":…}]}`,
+**byte-identical in shape** to what `gh pr view --json comments` emits. So the sole-nonblank-content
 rule, the column-zero anchor, the structured author association, the allowlist, the field grammar, the
-placeholder refusal and the scope binding are all inherited **by call**. *A second implementation of a
-channel rule is a second place for it to diverge, and a divergence in an authorization rule is a
-bypass.* `scripts/flow/roborev-waiver-scan.py` SHALL be unmodified by this change.
+placeholder refusal and the scope binding are all inherited **by call**.
+
+*A second implementation of the marker grammar would be a second place for it to diverge, and a
+divergence in an AUTHORIZATION grammar is a bypass* (#3626's *reuse, do not reinvent* ruling). This
+SHALL hold even for a variant that only had to recognise a marker well enough to print a diagnostic: a
+second grammar's agreement with the first is knowable only by testing it, never by care. **The
+measurement is what licenses the reuse** — had the payloads differed in shape, the options would have
+been a translation layer (a new component in an authorization path, needing its own review) or a second
+scanner (forbidden above), never an assumption — so the shape is recorded here, and a `gh` release that
+changes it SHALL fail against a written expectation rather than silently yield an empty comments array,
+which would read as *"no marker there"* and resurrect the indistinguishable `NONE` this change removes.
 
 **The scanner SHALL NOT emit `misplaced`.** Thread identity is the **caller's** knowledge: the scanner
 cannot know which thread its input came from, and telling it would mean adding a provenance argument to
@@ -229,6 +240,27 @@ a re-pointed relation is a diagnostic naming the wrong issue, or none, and the r
 relation must go with it**; that boundary SHALL be written in the source beside the call, because a
 future edit adding a granting consumer reads the code before it reads a design document.
 
+**THE RESOLVER SHALL BE A SEPARATE, LATER CALL, AND THE GRANTING PATH'S PAYLOAD SHALL NOT CHANGE
+SHAPE.** The existing single `gh pr view --json comments` call SHALL remain **exactly as it is**. The
+relation SHALL NOT be folded into it as
+`gh pr view --json comments,closingIssuesReferences`, and the existing call sites SHALL NOT be
+restructured around a richer payload. Two reasons, the first decisive:
+
+1. **The payload an AUTHORIZATION is decided from must not change shape as a side effect of adding a
+   DIAGNOSTIC.** That document is the scanner's input, and the reason the scanner is safe to reuse
+   unmodified is precisely that its input shape is fixed and measured. Widening it hands every consumer
+   a document with an extra top-level key for a feature that grants nothing — and a refactor of the
+   granting call sites turns a review of a diagnostic into a review of the grant.
+2. **The probe SHALL be reachable only from a branch that has already failed to grant.** Fetching the
+   relation up front makes its data available on every path including the granted one, so reachability
+   would rest on where an `if` sits rather than on the data not existing. Issued as a separate, later
+   call on the `none` branch alone, the ordering is structural: on any other state the call is **not
+   made**, not merely ignored — which is also the only version a `gh` invocation-log assert can
+   measure.
+
+The extra round-trip on a failing run is the accepted cost; the path it sits on has already determined
+that the run FAILs.
+
 Each issue number returned SHALL be validated **affirmatively as digits** before it is used or emitted;
 a value that is not a number SHALL be a could-not-check cause and SHALL NOT be interpolated raw.
 
@@ -253,6 +285,18 @@ SHALL say so.
 #### Scenario: A non-numeric value in the relation payload
 - **WHEN** the relation payload carries a value that is not a number
 - **THEN** it is not used and not interpolated raw, and the outcome is a could-not-check cause
+
+#### Scenario: The granting call is unchanged and the resolver is a separate call
+- **WHEN** this change is applied
+- **THEN** the existing `gh pr view --json comments` invocation is unchanged, no invocation requests `comments,closingIssuesReferences` together, and the relation is fetched by its own later call
+
+#### Scenario: The relation is never fetched on a state that already granted or already diagnosed
+- **WHEN** the PR-side scan returns `granted`, `unauthorized`, `stale`, `malformed`, `count-mismatch` or `unavailable`
+- **THEN** the `gh` invocation log shows no `closingIssuesReferences` call and no linked-issue comment call for that run
+
+#### Scenario: The relation resolves the incident's own linked issue
+- **WHEN** the resolver runs against a pull request whose declared closing reference is the coordination issue the marker was posted on, as measured on PR #3710 → issue #3544
+- **THEN** that issue is the thread probed, so the misplacement that produced this change is detectable by the mechanism this change specifies
 
 ### Requirement: The probe is best-effort, cannot change any verdict, and declares what it did and did not check
 
@@ -415,8 +459,9 @@ Every case SHALL plant its artifacts in its **own scratch copy of the tree**, **
 or an environment seam: *a test-only seam is one more thing a real invoker can set*, and the harness
 already asserts that none has been reintroduced. The suite SHALL additionally assert **structurally**
 that `roborev-waiver-scan.py` is unmodified, that no consumer of `closingIssuesReferences` feeds a
-granting branch, that no pull-request **body** read was reintroduced, and that `scripts/agent-gate.sh`
-is unmodified.
+granting branch, that **no invocation requests `comments` and `closingIssuesReferences` in one call**
+and the pre-existing `--json comments` invocation is unchanged, that no pull-request **body** read was
+reintroduced, and that `scripts/agent-gate.sh` is unmodified.
 
 Each case whose subject is the **escalation rule** SHALL carry a **planted-mutant contrast** — the
 naive form (probe on every state, or escalate on any issue-side marker) applied to a scratch copy,

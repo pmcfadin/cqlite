@@ -3,16 +3,23 @@
 Ordered. Each numbered group is independently reviewable; group 1 is the only new mechanism, groups
 2–4 wire it, group 5 is doctrine, group 6 is coverage.
 
-## 0. Confirm the premise before writing anything
+## 0. The premise, ALREADY VERIFIED — re-confirm, do not re-derive
 
-- [ ] 0.1 Verify from source (not memory) that `scripts/flow/roborev-waiver-scan.py` is
-      **thread-agnostic**: `main()` reads `{"comments":[…]}` from stdin and nothing in `scan()`,
-      `judge_waive_line()` or `judge_defer_line()` refers to a pull request. If that is false, STOP —
-      the whole design rests on one enforcer serving both threads.
-- [ ] 0.2 Verify that `gh issue view <N> --json comments` returns the **same shape** as
-      `gh pr view --json comments` (`{"comments":[{"author":{"login":…},"body":…}]}`). Record the
-      measurement. A shape difference means a translation layer, and a translation layer in an
-      authorization path needs its own review.
+Two of these were measured live by the lead on 2026-09-01 and are recorded as facts in `design.md`.
+Re-confirm them on the box you implement on (a `gh` upgrade can move either), and STOP rather than
+adapt if one is false: the design rests on them.
+
+- [x] 0.1 `scripts/flow/roborev-waiver-scan.py` is **thread-agnostic** — `main()` reads
+      `{"comments":[…]}` from stdin and nothing in `scan()`, `judge_waive_line()` or
+      `judge_defer_line()` refers to a pull request. **Verified from source.** If it ever becomes
+      false, STOP: the whole design rests on one enforcer serving both threads.
+- [x] 0.2 `gh issue view <N> --json comments` emits `{"comments":[{"author":{"login":…},"body":…}]}`,
+      **byte-identical in shape** to `gh pr view --json comments`. **Measured live on issue #3626.**
+      A shape difference would mean a translation layer — a new component in an authorization path,
+      needing its own review — or a second scanner, which is forbidden; never an assumption.
+- [x] 0.2b `gh pr view 3710 --json closingIssuesReferences` → `[{"number":3544, …}]`. **Measured live:
+      the resolver would have found the markers on the actual incident**, where PR #3710 carried zero
+      and issue #3544 carried both. Quoted in `proposal.md` as the validating measurement.
 - [ ] 0.3 Verify that `waiver:` and `deferral:` are **informational** keys — absent from the closed
       verdict grammar scan and from the affirmation loop (`roborev-review.sh` ~`:163`, ~`:896`) — so a
       new value there cannot make anything pass by itself. This is R2's structural argument; if it is
@@ -34,6 +41,15 @@ Ordered. Each numbered group is independently reviewable; group 1 is the only ne
 - [ ] 1.4 Probe each issue in **GitHub's returned order**, **bounded** (a named constant, with the
       bound stated in the rendering when the declared set exceeds it). Report the **first** thread
       carrying a matching marker; stop there.
+- [ ] 1.2b **The existing `gh pr view --json comments` call stays EXACTLY as it is.** Do NOT fetch
+      `--json comments,closingIssuesReferences` in one call and do NOT restructure the existing call
+      sites: the payload an AUTHORIZATION is decided from must not change shape as a side effect of
+      adding a DIAGNOSTIC (it is the scanner's input, and the fixed measured shape is what licenses
+      reusing the scanner unmodified), and the probe must be reachable only from a branch that has
+      already failed to grant. The resolver is a **separate, later, best-effort** call issued only on
+      the `none` branch — so on every other state the call is **not made**, not merely ignored, which
+      is the only version the `gh` invocation-log assert can measure. The extra round-trip on a failing
+      run is the accepted cost.
 - [ ] 1.5 For each probed thread: `gh issue view <N> --json comments`, piped to **the same
       `$WAIVER_SCAN_TOOL`**, with **the same kind** and **the same** `base`/`head`/`job`/
       `$ROBOREV_WAIVER_AUTHORS` (and `observed` for the deferral). No new arguments, no new grammar, no
@@ -167,7 +183,9 @@ can set).
       probe bounded at N`, and the unprobed remainder is visible rather than silent.
 - [ ] 6.11 Structural assert that `scripts/flow/roborev-waiver-scan.py` is **unmodified** by this
       change (`git diff --name-only`), that no `closingIssuesReferences` consumer feeds a granting
-      branch, and that no PR-**body** read was reintroduced anywhere (`--json body`, a `#N` scan).
+      branch, that **no invocation requests `comments` and `closingIssuesReferences` in one call** and
+      the pre-existing `--json comments` invocation is unchanged (task 1.2b), and that no PR-**body**
+      read was reintroduced anywhere (`--json body`, a `#N` scan).
 - [ ] 6.12 Assert `scripts/agent-gate.sh` is unmodified.
 - [ ] 6.13 Run the suite and record the assertion-count delta; then plant the naive mutant for the
       escalation rule (probe on every state / escalate on any issue-side marker) in a scratch copy and
