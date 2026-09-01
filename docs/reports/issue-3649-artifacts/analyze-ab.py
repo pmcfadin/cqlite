@@ -69,7 +69,6 @@ from ab_common import Unmeasured, err, out
 from ab_input import (
     MODE_SINGLE_STREAM,
     MODE_UTILIZATION,
-    NOT_OBSERVED,
     collect_pairs,
     load_manifest,
 )
@@ -270,10 +269,14 @@ def render_common(manifest, mode, admission):
         )
     )
     out(
-        "admission max-concurrent-scans requested %s observed %s wait-timeout-ms %s"
+        "admission max-concurrent-scans requested %s observed %s corroboration %s "
+        "(%d of %d runs) wait-timeout-ms %s"
         % (
             field(manifest, "workload", "max_concurrent_scans"),
-            admission,
+            admission.value,
+            admission.state,
+            admission.observed,
+            admission.total,
             field(manifest, "workload", "admission_wait_timeout_ms"),
         )
     )
@@ -325,11 +328,76 @@ def analyze(mode, path, opts):
             % (len(pairs), opts["min_pairs"]),
         )
 
+    stats = compute(mode, pairs, opts)
     render_common(manifest, mode, admission)
-    return report(mode, manifest, pairs, admission, opts)
+    return report(mode, manifest, pairs, admission, opts, stats)
 
 
-def report(mode, manifest, pairs, admission, opts):
+def compute(mode, pairs, opts):
+    """Everything statistical, computed and CHECKED before a line is emitted.
+
+    Emission comes after, so a refusal cannot leave a half-rendered section --
+    and every value that reaches a `decide_*` rule has been established finite.
+    """
+    base_rates = [base.rate for _, base, _ in pairs]
+    head_rates = [head.rate for _, _, head in pairs]
+
+    ratios = []
+    for replicate, base, head in pairs:
+        ratio = head.rate / base.rate
+        # BOTH operands can be finite and positive and still produce a ratio that
+        # is not: a subnormal base (1e-320 passes `> 0`) overflows the quotient to
+        # inf, and a subnormal head over a large base underflows it to 0.0, whose
+        # `math.log` raises. Neither needs a hand-edited record.
+        if not S.is_usable_ratio(ratio):
+            raise Unmeasured(
+                "ratio-non-finite",
+                "replicate %d: head %r / base %r is %r, which is not a finite "
+                "positive ratio; no verdict can rest on it"
+                % (replicate, head.rate, base.rate, ratio),
+            )
+        ratios.append(ratio)
+
+    ratio_lo, ratio_hi = S.bootstrap_ci(
+        ratios, S.geometric_mean, opts["seed"], opts["resamples"], opts["ci_level"]
+    )
+    for name, bound in (("lower", ratio_lo), ("upper", ratio_hi)):
+        if not S.is_usable_ratio(bound):
+            raise Unmeasured(
+                "ci-non-finite",
+                "the %s interval bound is %r; a verdict rule compares it happily "
+                "and the renderer would print NON-FINITE beside a confident token"
+                % (name, bound),
+            )
+    if S.interval_is_degenerate(ratio_lo, ratio_hi, ratios):
+        raise Unmeasured(
+            "bootstrap-degenerate",
+            "the computed interval [%r, %r] is exactly (min, max) of the observed "
+            "ratios, so the bootstrap contributed nothing and this is the observed "
+            "RANGE reported as a confidence interval. It happens whenever the "
+            "all-minimum resample is likelier than the tail (probability 1/n**n, "
+            "which at n=3 is 3.7%% against a 2.5%% tail) and whenever every ratio "
+            "is identical. Use more replicates -- the floor is %d and 7 is the "
+            "recommendation" % (ratio_lo, ratio_hi, S.DEFAULT_MIN_PAIRS),
+        )
+
+    base_lo, base_hi = S.bootstrap_ci(
+        base_rates, S.arithmetic_mean, opts["seed"] + 1, opts["resamples"], opts["ci_level"]
+    )
+    head_lo, head_hi = S.bootstrap_ci(
+        head_rates, S.arithmetic_mean, opts["seed"] + 2, opts["resamples"], opts["ci_level"]
+    )
+    return {
+        "base_rates": base_rates,
+        "head_rates": head_rates,
+        "ratios": ratios,
+        "ratio_ci": (ratio_lo, ratio_hi),
+        "base_ci": (base_lo, base_hi),
+        "head_ci": (head_lo, head_hi),
+    }
+
+
+def report(mode, manifest, pairs, admission, opts, stats):
     level_text = "%.0f%%" % (opts["ci_level"] * 100.0)
     control = manifest.get("control")
     control = control if isinstance(control, str) and control else None
@@ -346,9 +414,12 @@ def report(mode, manifest, pairs, admission, opts):
         % (manifest["replicates_requested"], len(pairs))
     )
 
-    base_rates = [base.rate for _, base, _ in pairs]
-    head_rates = [head.rate for _, _, head in pairs]
-    ratios = [head.rate / base.rate for _, base, head in pairs]
+    base_rates = stats["base_rates"]
+    head_rates = stats["head_rates"]
+    ratios = stats["ratios"]
+    ratio_lo, ratio_hi = stats["ratio_ci"]
+    base_lo, base_hi = stats["base_ci"]
+    head_lo, head_hi = stats["head_ci"]
 
     metric = (
         "rows_per_s at concurrency 1"
@@ -384,16 +455,6 @@ def report(mode, manifest, pairs, admission, opts):
                         % (replicate, arm_name, concurrency, count)
                     )
         out("excluded-steps %d RECOGNISED" % shed_total)
-
-    ratio_lo, ratio_hi = S.bootstrap_ci(
-        ratios, S.geometric_mean, opts["seed"], opts["resamples"], opts["ci_level"]
-    )
-    base_lo, base_hi = S.bootstrap_ci(
-        base_rates, S.arithmetic_mean, opts["seed"] + 1, opts["resamples"], opts["ci_level"]
-    )
-    head_lo, head_hi = S.bootstrap_ci(
-        head_rates, S.arithmetic_mean, opts["seed"] + 2, opts["resamples"], opts["ci_level"]
-    )
 
     for replicate, base, head in pairs:
         out(
@@ -484,12 +545,21 @@ def report(mode, manifest, pairs, admission, opts):
             "'merge', so the #3058 single-source fast path may have served some or "
             "all requests -- that path is not the one #2820 changed" % (mode, merge_path)
         )
-    if admission == NOT_OBSERVED:
-        out(
-            "verdict-detail %s ADMISSION the servers' resolved "
-            "--max-concurrent-scans was NOT OBSERVED from their startup lines, so "
-            "the requested value is recorded but not corroborated" % mode
-        )
+    if not admission.corroborated:
+        if admission.state == "none":
+            out(
+                "verdict-detail %s ADMISSION the servers' resolved "
+                "--max-concurrent-scans was NOT OBSERVED from any startup line, so "
+                "the requested value is recorded but corroborated by nothing" % mode
+            )
+        else:
+            out(
+                "verdict-detail %s ADMISSION the resolved --max-concurrent-scans "
+                "was observed for only %d of %d runs; the observed values agree, "
+                "but PARTIAL OBSERVATION IS NOT AGREEMENT -- the unobserved runs "
+                "corroborate nothing"
+                % (mode, admission.observed, admission.total)
+            )
     if control:
         out(
             "verdict-detail %s CONTROL this session is labelled %r, so its verdict "
@@ -512,19 +582,49 @@ def run_section(mode, path, opts):
     try:
         return analyze(mode, path, opts)
     except Unmeasured as exc:
-        err("cause %s %s" % (mode, exc.cause))
-        err("cause-detail %s %s" % (mode, exc.detail))
-        out("verdict %s UNMEASURED" % mode)
-        out("verdict-detail %s no verdict was rendered; cause %s" % (mode, exc.cause))
-        out(
-            "verdict-detail %s a consumer must treat UNMEASURED as no result, never "
-            "as a permissive default" % mode
+        return _unmeasured(mode, exc.cause, exc.detail)
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # A traceback breaks the anchoring invariant AND leaves the section with
+        # NO verdict line, which is worse than a wrong verdict because nothing
+        # downstream can detect it. Every escape becomes an anchored UNMEASURED
+        # with the exception named. SystemExit and KeyboardInterrupt are
+        # BaseException and deliberately still propagate.
+        return _unmeasured(
+            mode,
+            "internal-error",
+            "%s: %s -- this is a defect in the analyzer, not a property of the "
+            "measurement; the section is reported UNMEASURED rather than left "
+            "without a verdict" % (type(exc).__name__, exc),
         )
-        out("---- end section %s ----" % mode)
-        return "UNMEASURED"
+
+
+def _unmeasured(mode, cause, detail):
+    err("cause %s %s" % (mode, cause))
+    err("cause-detail %s %s" % (mode, detail))
+    out("verdict %s UNMEASURED" % mode)
+    out("verdict-detail %s no verdict was rendered; cause %s" % (mode, cause))
+    out(
+        "verdict-detail %s a consumer must treat UNMEASURED as no result, never "
+        "as a permissive default" % mode
+    )
+    out("---- end section %s ----" % mode)
+    return "UNMEASURED"
 
 
 def main(argv):
+    try:
+        return _main(argv)
+    except Exception as exc:  # noqa: BLE001 -- the outermost anchor
+        err("cause internal-error %s: %s" % (type(exc).__name__, exc))
+        out("verdict harness UNMEASURED")
+        out(
+            "verdict-detail harness the analyzer failed before any section could "
+            "be decided; no result was produced"
+        )
+        return SECTION_EXIT["UNMEASURED"]
+
+
+def _main(argv):
     opts = parse_args(argv)
     requested = []
     if opts["single_stream"] is not None:

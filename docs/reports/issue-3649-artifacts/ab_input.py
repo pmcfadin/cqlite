@@ -37,7 +37,9 @@ ratio is not a ratio.
 """
 
 import json
+import math
 import os
+import re
 
 from ab_common import Unmeasured
 
@@ -52,6 +54,14 @@ NOT_OBSERVED = "NOT-OBSERVED"
 
 
 def _require(obj, key, kinds, where):
+    # `key not in obj` on a STRING is a substring test, and `obj[key]` on a
+    # string then raises TypeError -- so `arms.base = "commit cfa93fe99^"` used
+    # to escape as an unanchored traceback instead of a named refusal.
+    if not isinstance(obj, dict):
+        raise Unmeasured(
+            "manifest-field",
+            "%s: expected an object, found %s" % (where, type(obj).__name__),
+        )
     if key not in obj:
         raise Unmeasured("manifest-field", "%s: missing field %r" % (where, key))
     value = obj[key]
@@ -74,14 +84,50 @@ def ramp_steps(manifest):
     steps = []
     for part in raw.split(","):
         part = part.strip()
-        if not part.isdigit() or int(part) < 1:
+        # NOT `str.isdigit()`: it is True for characters like the superscript
+        # two, whose `int()` then raises -- an unanchored traceback from a
+        # manifest field. An explicit ASCII-digit match has no such gap.
+        if not re.fullmatch(r"[0-9]+", part) or int(part) < 1:
             raise Unmeasured(
                 "manifest-field",
                 "manifest.workload.ramp is %r, which is not a comma-separated list "
                 "of positive integers" % raw,
             )
         steps.append(int(part))
+    if not steps:
+        raise Unmeasured("manifest-field", "manifest.workload.ramp is empty")
+    # Strictly increasing, because the reconciliation below identifies a record
+    # BY ITS POSITION in the ladder; duplicates would make that ambiguous.
+    for earlier, later in zip(steps, steps[1:]):
+        if later <= earlier:
+            raise Unmeasured(
+                "manifest-field",
+                "manifest.workload.ramp is %r, which is not strictly increasing" % raw,
+            )
     return steps
+
+
+_DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0}
+
+
+def step_duration_seconds(manifest):
+    """The declared per-step hold, in seconds. Fail-closed: the driver always
+    records it, so an absent or unparseable value means this manifest did not
+    come from a run this analyzer can reconcile."""
+    raw = manifest.get("workload", {})
+    raw = raw.get("step_duration") if isinstance(raw, dict) else None
+    if not isinstance(raw, str):
+        raise Unmeasured(
+            "manifest-field", "manifest.workload.step_duration is missing"
+        )
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m)", raw.strip())
+    if not match:
+        raise Unmeasured(
+            "manifest-field",
+            "manifest.workload.step_duration is %r, expected a duration like "
+            "60s, 500ms or 2m" % raw,
+        )
+    return float(match.group(1)) * _DURATION_UNITS[match.group(2)]
 
 
 def load_manifest(path, mode):
@@ -210,11 +256,28 @@ def _validate_shape(record, path, index):
         )
 
 
-def _validate_usable(record, path, index):
-    """A step that is being COUNTED must carry real work."""
+def _validate_usable(record, path, index, expected_concurrency, declared_duration_s):
+    """A step that is being COUNTED must carry real work, and must describe the
+    step the manifest says it is."""
     where = "%s record %d" % (path, index)
     if record["requests_ok"] < 1:
         raise Unmeasured("run-degenerate", "%s: requests_ok=0" % where)
+
+    # FINITENESS BEFORE POSITIVITY. `inf > 0` is True, so a non-finite rate used
+    # to pass the positivity test, reach `geometric_mean` as `log(inf) = inf`,
+    # and render `ci95% [NON-FINITE, NON-FINITE]` beside a confident verdict --
+    # the renderer asked the question the decision never did. NaN is worse: it
+    # makes the bootstrap's `draws.sort()` order arbitrarily, so the percentile
+    # indices select meaningless elements.
+    for name in ("duration_s", "rows_per_s", "qps"):
+        value = record[name]
+        if not math.isfinite(float(value)):
+            raise Unmeasured(
+                "run-non-finite",
+                "%s: %s is %r -- a non-finite value is not a measurement, and it "
+                "would reach the verdict rule as a comparison that silently "
+                "succeeds" % (where, name, value),
+            )
     if not record["duration_s"] > 0:
         raise Unmeasured("run-degenerate", "%s: duration_s is not positive" % where)
     if not record["rows_per_s"] > 0:
@@ -223,6 +286,47 @@ def _validate_usable(record, path, index):
             "%s: rows_per_s is not positive -- the scan returned no rows, which on "
             "a corpus of the required size means the ticket template does not name "
             "a table that is present" % where,
+        )
+
+    # DECLARED VERSUS OBSERVED. "A value we passed and a value the server
+    # resolved are different facts" -- the principle this harness already applies
+    # to the admission ceiling, now applied to the step records themselves.
+    # Without it, records from an entirely different session (1.5-second steps at
+    # concurrency 32) were analysed as concurrency-1 60-second steps and rendered
+    # a valid-looking verdict.
+    if record["target_concurrency"] != expected_concurrency:
+        raise Unmeasured(
+            "ramp-order-mismatch",
+            "%s: target_concurrency is %d but the manifest declares %d at this "
+            "position in the ramp; the records do not describe the session the "
+            "manifest describes"
+            % (where, record["target_concurrency"], expected_concurrency),
+        )
+    # A deliberately WIDE band: a step's measured elapsed legitimately exceeds
+    # its hold by the tail of the last in-flight request, and a slow full scan
+    # can overshoot substantially. It is here to catch records from a different
+    # session, not to police timing.
+    low = 0.5 * declared_duration_s
+    high = 3.0 * declared_duration_s + 60.0
+    if not low <= record["duration_s"] <= high:
+        raise Unmeasured(
+            "step-duration-mismatch",
+            "%s: duration_s is %.3f, outside [%.3f, %.3f] for a declared step of "
+            "%.3fs; these records did not come from the session this manifest "
+            "describes" % (where, record["duration_s"], low, high, declared_duration_s),
+        )
+    # `rows_per_s` IS `rows_total / duration_s` in flight-loadgen, so these must
+    # agree to float precision. Disagreement means the record was edited.
+    implied = record["rows_per_s"] * record["duration_s"]
+    if record["rows_total"] <= 0 or abs(implied - record["rows_total"]) > max(
+        1e-3 * record["rows_total"], 1.0
+    ):
+        raise Unmeasured(
+            "record-internally-inconsistent",
+            "%s: rows_per_s x duration_s = %.3f but rows_total is %d; "
+            "flight-loadgen computes the first from the second, so they cannot "
+            "disagree in a record it produced"
+            % (where, implied, record["rows_total"]),
         )
 
 
@@ -237,7 +341,7 @@ class RunPoint(object):
         self.shed = shed
 
 
-def load_run(path, mode, declared_steps):
+def load_run(path, mode, declared_steps, expected_round, declared_duration_s):
     records = _read_records(path)
     expected = 1 if mode == MODE_SINGLE_STREAM else len(declared_steps)
     if len(records) != expected:
@@ -248,6 +352,15 @@ def load_run(path, mode, declared_steps):
         )
     for index, record in enumerate(records, start=1):
         _validate_shape(record, path, index)
+        # The round label is stamped by the driver from the (arm, replicate) it
+        # is running, so a file listed under the wrong entry is caught here
+        # rather than silently analysed as the arm it is filed under.
+        if record.get("round") != expected_round:
+            raise Unmeasured(
+                "round-label-mismatch",
+                "%s record %d: round is %r but this file is listed as %r in the "
+                "manifest" % (path, index, record.get("round"), expected_round),
+            )
 
     if mode == MODE_SINGLE_STREAM:
         record = records[0]
@@ -260,21 +373,29 @@ def load_run(path, mode, declared_steps):
                 "measurement of merge throughput"
                 % (path, record["requests_unavailable"], record["target_concurrency"]),
             )
-        _validate_usable(record, path, 1)
-        return RunPoint(
-            record["rows_per_s"], records, record["target_concurrency"], (1,), ()
-        )
+        _validate_usable(record, path, 1, 1, declared_duration_s)
+        return RunPoint(record["rows_per_s"], records, 1, (1,), ())
 
     # Utilization: exclude shed steps, report each exclusion, peak over the rest.
     shed = []
     surviving = []
     for index, record in enumerate(records, start=1):
+        expected_concurrency = declared_steps[index - 1]
         if record["requests_unavailable"] > 0:
+            # Even an EXCLUDED step must be the step it claims to be, or the
+            # surviving-ladder comparison is over a ladder we did not verify.
+            if record["target_concurrency"] != expected_concurrency:
+                raise Unmeasured(
+                    "ramp-order-mismatch",
+                    "%s record %d: target_concurrency is %d but the manifest "
+                    "declares %d at this position in the ramp"
+                    % (path, index, record["target_concurrency"], expected_concurrency),
+                )
             shed.append(
                 (record["target_concurrency"], record["requests_unavailable"])
             )
             continue
-        _validate_usable(record, path, index)
+        _validate_usable(record, path, index, expected_concurrency, declared_duration_s)
         surviving.append(record)
     if not surviving:
         raise Unmeasured(
@@ -298,8 +419,38 @@ def admission_of(entry):
     return str(value)
 
 
+class Admission(object):
+    """What is actually known about the ceiling the arms were served under.
+
+    THREE states, because two were not enough. `len(observed) > 1` refuses a
+    disagreement, but one arm observed and the other not is neither agreement nor
+    disagreement -- and it used to reduce to the single observed value and print
+    it with no caveat, i.e. an absence silently upgraded into corroboration. The
+    docstring of this module says the ceiling must agree across EVERY run; it now
+    says which runs it actually agreed across.
+    """
+
+    def __init__(self, value, observed, total):
+        self.value = value
+        self.observed = observed
+        self.total = total
+
+    @property
+    def state(self):
+        if self.observed == 0:
+            return "none"
+        if self.observed < self.total:
+            return "partial"
+        return "agreed"
+
+    @property
+    def corroborated(self):
+        return self.state == "agreed"
+
+
 def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     """Resolve the manifest's declared runs into replicate-indexed pairs."""
+    declared_duration_s = step_duration_seconds(manifest)
     seen = {}
     admissions = {}
     for entry in manifest["runs"]:
@@ -327,12 +478,16 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
         path = filename
         if not os.path.isabs(path):
             path = os.path.join(manifest_dir, path)
-        seen[key] = load_run(path, mode, declared_steps)
+        expected_round = "%s-r%02d" % (arm, replicate)
+        seen[key] = load_run(
+            path, mode, declared_steps, expected_round, declared_duration_s
+        )
         admissions[key] = admission_of(entry)
 
     # Both arms must have been served under the SAME admission ceiling, or the
     # ratio is between two differently-throttled servers.
-    observed = {v for v in admissions.values() if v != NOT_OBSERVED}
+    values = [v for v in admissions.values() if v != NOT_OBSERVED]
+    observed = set(values)
     if len(observed) > 1:
         raise Unmeasured(
             "admission-mismatch",
@@ -368,5 +523,7 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
             )
         pairs.append((rep, base, head))
 
-    admission = observed.pop() if observed else NOT_OBSERVED
+    admission = Admission(
+        observed.pop() if observed else NOT_OBSERVED, len(values), len(admissions)
+    )
     return pairs, admission

@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=110
+CASE_FLOOR=134
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -561,6 +561,179 @@ if [ -f "$DRIVER" ] && bash -n "$DRIVER"; then
   ok "ab-throughput.sh parses"
 else
   bad "ab-throughput.sh is absent or does not parse"
+fi
+
+echo
+echo "-- the DRIVER's record validator, which nothing used to execute --"
+
+# This is the section whose absence let a 110-case green suite coexist with a
+# driver that hard-coded ONE step record while advertising --ramp. run_one needs
+# a rig; its validator does not, and it now lives in an executable file.
+SUPPORT="$HERE/ab_driver_support.py"
+
+mkstep() { # <out> <round> <concurrency> [rate] [shed] [duration]
+  python3 - "$1" "$2" "$3" "${4:-100000}" "${5:-0}" "${6:-60}" <<'PYINNER'
+import json
+import sys
+
+path, label, concurrency, rate, shed, duration = sys.argv[1:7]
+rate, duration = float(rate), float(duration)
+record = {
+    "schema": "flight-loadgen.step/v1",
+    "round": label,
+    "endpoint": "http://127.0.0.1:8815",
+    "ts_unix_ms": 1780000000000,
+    "seed": 42,
+    "step": 0,
+    "target_concurrency": int(concurrency),
+    "shape": "full",
+    "duration_s": duration,
+    "requests_ok": 5,
+    "requests_unavailable": int(shed),
+    "requests_error": 0,
+    "error_codes": {},
+    "qps": 5 / duration,
+    "rows_per_s": rate,
+    "bytes_per_s": rate * 200.0,
+    "rows_total": int(rate * duration),
+    "bytes_total": int(rate * duration * 200),
+    "latency_ms": {"p50": 1.0, "p95": 1.1, "p99": 1.2, "max": 1.3, "samples": 5},
+}
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+}
+
+run_support() { # <args...>
+  set +e
+  python3 "$SUPPORT" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+check_support() { # <description> <expected-exit> [expected-cause]
+  local desc="$1" want_rc="$2" want_cause="${3:-}"
+  if [ "$RC" != "$want_rc" ]; then
+    bad "$desc (exit $RC, expected $want_rc)"
+    return
+  fi
+  if ! anchored; then
+    bad "$desc (an output line does not carry the AB-3649 anchor)"
+    return
+  fi
+  if [ -n "$want_cause" ] && ! grep -q "^AB-3649: cause $want_cause\$" "$TMP/err.txt"; then
+    bad "$desc (cause '$want_cause' absent; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+    return
+  fi
+  ok "$desc -> exit $RC${want_cause:+ cause $want_cause}"
+}
+
+# THE CASE THAT WOULD HAVE CAUGHT IT: a four-step replicate against a four-step
+# ramp. The old validator refused this, so every --ramp 1,2,4,8 session died
+# after two release builds and a full measurement pass.
+rm -f "$TMP/ramp.jsonl"
+for c in 1 2 4 8; do mkstep "$TMP/ramp.jsonl" base-r01 "$c"; done
+run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1,2,4,8
+check_support "a four-step replicate against a four-step ramp" 0
+if [ "$(grep -c '^AB-3649: run base-r01 step ' "$TMP/out.txt")" = "4" ]; then
+  ok "every step of a ramp replicate is reported, not just the first"
+else
+  bad "the validator did not report every step of a ramp replicate"
+fi
+
+rm -f "$TMP/one.jsonl"; mkstep "$TMP/one.jsonl" base-r01 1
+run_support validate-replicate "$TMP/one.jsonl" base-r01 1
+check_support "a one-step replicate against a --ramp 1 session" 0
+
+run_support validate-replicate "$TMP/one.jsonl" base-r01 1,2,4,8
+check_support "one record where the ramp declares four" 1 replicate-invalid
+run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1
+check_support "four records where the ramp declares one" 1 replicate-invalid
+
+run_support validate-replicate "$TMP/ramp.jsonl" head-r01 1,2,4,8
+check_support "a replicate whose round label names the other arm" 1 replicate-invalid
+
+rm -f "$TMP/wrongc.jsonl"
+for c in 1 2 4 16; do mkstep "$TMP/wrongc.jsonl" base-r01 "$c"; done
+run_support validate-replicate "$TMP/wrongc.jsonl" base-r01 1,2,4,8
+check_support "a step whose concurrency is not the declared one" 1 replicate-invalid
+
+rm -f "$TMP/shed1.jsonl"; mkstep "$TMP/shed1.jsonl" base-r01 1 100000 4
+run_support validate-replicate "$TMP/shed1.jsonl" base-r01 1
+check_support "a shed at single-stream concurrency is fatal to the driver" 1 replicate-invalid
+
+# On a ramp the analyzer EXCLUDES shed steps, so the driver must not contradict
+# it by dying -- it says so loudly instead.
+rm -f "$TMP/shedr.jsonl"
+mkstep "$TMP/shedr.jsonl" base-r01 1
+mkstep "$TMP/shedr.jsonl" base-r01 2
+mkstep "$TMP/shedr.jsonl" base-r01 4
+mkstep "$TMP/shedr.jsonl" base-r01 8 100000 6
+run_support validate-replicate "$TMP/shedr.jsonl" base-r01 1,2,4,8
+check_support "a shed ramp step is reported, not fatal, so the two agree" 0
+if grep -q '^AB-3649: run base-r01 step 3 concurrency 8 SHED requests-unavailable 6' "$TMP/out.txt"; then
+  ok "the driver names the shed step and says the analyzer will exclude it"
+else
+  bad "the driver did not name the shed step"
+fi
+
+rm -f "$TMP/inf.jsonl"
+python3 - "$TMP/inf.jsonl" <<'PYINNER'
+import json
+import sys
+
+record = {
+    "schema": "flight-loadgen.step/v1", "round": "base-r01", "target_concurrency": 1,
+    "duration_s": 60.0, "requests_ok": 5, "requests_unavailable": 0,
+    "requests_error": 0, "rows_per_s": float("inf"), "rows_total": 1,
+    "latency_ms": {"p50": 1.0},
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_support validate-replicate "$TMP/inf.jsonl" base-r01 1
+check_support "a non-finite rate refused by the driver too" 1 replicate-invalid
+
+for bad_ramp in "1,abc" "1,²" "2" "4,2" "1,1" "0"; do
+  run_support validate-ramp "$bad_ramp"
+  if [ "$RC" = "1" ] && anchored; then
+    ok "the ramp validator refuses '$bad_ramp'"
+  else
+    bad "the ramp validator accepted '$bad_ramp' (exit $RC)"
+  fi
+done
+run_support validate-ramp "1,2,4,8"
+if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "8 utilization" ]; then
+  ok "a valid ramp yields its top step and the section that can consume it"
+else
+  bad "the ramp validator did not report top and section for a valid ramp"
+fi
+run_support validate-ramp "1"
+if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "1 single-stream" ]; then
+  ok "--ramp 1 maps to the single-stream section"
+else
+  bad "--ramp 1 did not map to the single-stream section"
+fi
+
+printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_concurrent_scans=16 max_concurrent_scans_source=flag' > "$TMP/startup.log"
+if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.log" scans)" = "16" ] \
+   && [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.log" source)" = "flag" ]; then
+  ok "the startup parser reads the ceiling and its provenance from a real line"
+else
+  bad "the startup parser did not read the plain-format startup line"
+fi
+printf '%s\n' '{"fields":{"max_concurrent_scans":8,"max_concurrent_scans_source":"derived"},"message":"cqlite-flight starting"}' > "$TMP/startup.json"
+if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.json" scans)" = "8" ] \
+   && [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.json" source)" = "derived" ]; then
+  ok "the startup parser also reads a JSON-formatted startup line"
+else
+  bad "the startup parser did not read a JSON startup line"
+fi
+if [ "$(python3 "$SUPPORT" parse-startup /nonexistent scans)" = "NOT-OBSERVED" ] \
+   && [ "$(printf 'nothing here\n' > "$TMP/quiet.log"; python3 "$SUPPORT" parse-startup "$TMP/quiet.log" scans)" = "NOT-OBSERVED" ]; then
+  ok "an unreadable or silent server log yields NOT-OBSERVED, never a value"
+else
+  bad "the startup parser invented a value it could not read"
 fi
 
 echo

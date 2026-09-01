@@ -46,7 +46,9 @@ UTILIZATION_TOKENS = ("RISES", "FALLS", "INCONCLUSIVE")
 DEFAULT_SEED = 3649
 DEFAULT_RESAMPLES = 10000
 DEFAULT_CI_LEVEL = 0.95
-DEFAULT_MIN_PAIRS = 3
+# 5, not 3. At n <= 3 a 10000-draw percentile bootstrap is not an interval at
+# all -- see `interval_is_degenerate` for the arithmetic.
+DEFAULT_MIN_PAIRS = 5
 
 
 def geometric_mean(values):
@@ -55,8 +57,20 @@ def geometric_mean(values):
     The geometric mean of head/base is the reciprocal of the geometric mean of
     base/head, which is not true of the arithmetic mean -- so the direction in
     which the ratio happens to be written cannot move the answer.
+
+    Callers MUST have established that every value is finite and strictly
+    positive: `math.log(0.0)` raises and `math.log(inf)` is `inf`. Both are
+    reachable from real inputs that pass a naive `> 0` test -- a ratio can
+    underflow to 0.0 from two finite operands, and overflow to inf from a
+    subnormal denominator -- so the check lives at the input boundary
+    (`ab_input`) and again on the computed ratios (`analyze-ab`), not here.
     """
     return math.exp(sum(math.log(v) for v in values) / len(values))
+
+
+def is_usable_ratio(value):
+    """Finite and strictly positive -- the precondition of everything above."""
+    return isinstance(value, float) and math.isfinite(value) and value > 0.0
 
 
 def arithmetic_mean(values):
@@ -70,6 +84,27 @@ def median(values):
     if n % 2:
         return ordered[mid]
     return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def interval_is_degenerate(ci_low, ci_high, values):
+    """Did the bootstrap contribute anything, or is this just the observed range?
+
+    THE ARITHMETIC. The percentile bounds are nearest-rank over `resamples`
+    draws, so at the 2.5% tail the lower bound is draw number
+    `ceil(0.025 * resamples)`. The all-minimum resample -- every one of the n
+    draws landing on the smallest value -- has probability `1 / n**n`. At n = 3
+    that is 1/27 = 3.7%, which EXCEEDS the 2.5% tail, so the 2.5th percentile of
+    the draws IS `min(values)`, and by symmetry the 97.5th IS `max(values)`. The
+    "95% confidence interval" is then exactly the observed range, at coverage far
+    below 95%, and three identical pairs produce a ZERO-WIDTH interval that
+    trivially lands inside any band containing them.
+
+    This is measured, not predicted: it is checked against the interval the
+    bootstrap ACTUALLY returned rather than against a hard-coded n. So it keeps
+    working if someone changes the resample count, the tail, or the floor -- and
+    it also catches the all-values-identical case, which is degenerate at any n.
+    """
+    return ci_low == min(values) and ci_high == max(values)
 
 
 def _nearest_rank(sorted_values, quantile):
