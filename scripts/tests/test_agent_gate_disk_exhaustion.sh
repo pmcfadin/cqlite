@@ -492,6 +492,15 @@ fi
 DISK_CENSUS_AWK="$tmp/disk-emit-census.awk"
 cat >"$DISK_CENSUS_AWK" <<'DISK_CENSUS_PROG'
 { line[NR] = $0 }
+function _real_exemption(t,   r) {
+  if (t !~ /disk-exhaustion-exempt:[ \t]*[^ \t]/) return 0
+  r = t; sub(/^.*disk-exhaustion-exempt:[ \t]*/, "", r)
+  sub(/[ \t]+$/, "", r)
+  if (r == "") return 0
+  if (r ~ /^<.*>$/) return 0
+  if (tolower(r) ~ /^(why|todo|tbd|reason)\.?$/) return 0
+  return 1
+}
 function _marking_fn(fn,   k, inside) {
   inside = 0
   for (k = 1; k <= NR; k++) {
@@ -525,10 +534,16 @@ END {
     }
     if (verdict == "GAP") {
       # The exemption: the site line itself, or a CONTIGUOUS comment block above it.
-      if (args ~ /disk-exhaustion-exempt:[ \t]*[^ \t]/) verdict = "EXEMPT"
+      # The reason must be SUBSTANTIVE -- _real_exemption refuses an unsubstituted `<...>`
+      # placeholder and the bare why/todo/tbd vocabulary, exactly as scripts/flow/claim.sh:795
+      # refuses them for --reason. Without it, the `disk-exhaustion-exempt: <reason>`
+      # PLACEHOLDER inside this contract's OWN doctrine comment would silently exempt any emit
+      # site a future edit happens to add beneath it: an artifact that DESCRIBES the escape
+      # hatch BECOMING it, which is #3312's shape one directory over.
+      if (_real_exemption(args)) verdict = "EXEMPT"
       else for (k = i - 1; k > 0; k--) {
         if (line[k] !~ /^[ \t]*#/) break
-        if (line[k] ~ /disk-exhaustion-exempt:[ \t]*[^ \t]/) { verdict = "EXEMPT"; break }
+        if (_real_exemption(line[k])) { verdict = "EXEMPT"; break }
       }
     }
     printf "%s\t%d\t%s\n", verdict, i, substr(l, 1, 70)
@@ -679,6 +694,27 @@ if ! cmp -s "$GATE" "$ctl_a"; then
 else
   bad "14-control-a: could not build the control (no exemption comment matched) -- the census cannot be shown to discriminate"
 fi
+# (d) DOWNGRADE one real exemption reason to an UNSUBSTITUTED PLACEHOLDER => it must stop
+#     counting as an exemption. A refusal that has never been SEEN to fire is not evidence
+#     (and the placeholder literally occurs in this contract's own doctrine comment, so the
+#     refusal is load-bearing, not decorative).
+ctl_d="$tmp/disk-census-control-d.sh"
+awk 'BEGIN { done = 0 }
+     { if (!done && $0 ~ /disk-exhaustion-exempt:[ \t]*[^ \t]/) {
+         done = 1
+         sub(/disk-exhaustion-exempt:.*$/, "disk-exhaustion-exempt: <reason>")
+       }
+       print }' "$GATE" >"$ctl_d"
+if ! cmp -s "$GATE" "$ctl_d"; then
+  d_gaps=$(disk_census "$ctl_d" | grep -c '^GAP	')
+  if [ "$d_gaps" -ge 1 ]; then
+    ok "14-control-d: an exemption reason downgraded to the '<reason>' PLACEHOLDER stops exempting ($d_gaps GAP) -- the placeholder refusal is live, not inert"
+  else
+    bad "14-control-d: a placeholder '<reason>' still exempted its site -- the refusal is inert, so this contract's own doctrine comment could exempt a future site beneath it"
+  fi
+else
+  bad "14-control-d: could not build the control (no exemption reason matched) -- the placeholder refusal cannot be shown to discriminate"
+fi
 # (b) REMOVE THE _disk_exhaustion_line CALL from one component-table site => that site must
 #     stop being MARKED, which the census reports as a GAP (it carries no exemption).
 ctl_b="$tmp/disk-census-control-b.sh"
@@ -791,8 +827,11 @@ fi
 # the table-bearing subset, two positive controls and the distinct-reasons assert); +4 (#3800
 # final round: the table-site derivation went from ONE renderer's name to the row FORMAT, adding
 # 14-renderers, the two-distinct-renderers assert and control (c)'s two cases -- the permanent
-# pin against the blind spot that let the tree-integrity boundary site ship exempt).
-CASE_FLOOR=42
+# pin against the blind spot that let the tree-integrity boundary site ship exempt); +1 (control
+# (d): the EXEMPT arm now refuses an unsubstituted `<...>` placeholder reason, as
+# scripts/flow/claim.sh:795 already does for --reason, and a refusal nobody has seen fire is not
+# evidence -- this contract's own doctrine comment contains that placeholder).
+CASE_FLOOR=43
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
