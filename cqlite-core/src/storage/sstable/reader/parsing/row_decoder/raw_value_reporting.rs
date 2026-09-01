@@ -70,14 +70,15 @@ pub(super) fn require_fully_consumed_raw(
         return Ok(());
     }
     if consumed < len {
+        // Wording deliberately SHARED with `cell_path_key.rs`'s existing
+        // consumption refusal ("decoded only N of M byte(s)"): it is the same
+        // rule, and a caller matching on the message must not have to know which
+        // of the two layers refused. #3820 folds the two into one function.
         return Err(Error::corruption(format!(
-            "Bounded value '{}' (type '{}'): decoded {} of {} bytes, {} trailing byte(s) unconsumed \
-             (Cassandra TupleType.split refuses this: \"but got more\" / \"Not enough bytes to read Nth component\")",
-            column_name,
-            type_str,
-            consumed,
-            len,
-            len - consumed
+            "Bounded value '{}' of type '{}' decoded only {} of {} byte(s); the whole \
+             slice must be the value (trailing bytes, or a partial trailing component \
+             header, are corruption — Cassandra TupleType.split rules 2 and 4)",
+            column_name, type_str, consumed, len
         )));
     }
     Err(Error::corruption(format!(
@@ -157,16 +158,12 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 Ok((
-                    Value::Text(crate::storage::sstable::reader::value_borrow::borrow_active(
-                        data,
-                    )),
+                    Value::Text(crate::storage::sstable::reader::value_borrow::borrow_active(data)),
                     data.len(),
                 ))
             }
             "blob" | "bytes" => Ok((
-                Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(
-                    data,
-                )),
+                Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(data)),
                 data.len(),
             )),
             "int" => {
@@ -303,9 +300,7 @@ impl V5CompressedLegacyParser {
                 ))
             }
             "varint" => Ok((
-                Value::Varint(crate::storage::sstable::reader::value_borrow::borrow_active(
-                    data,
-                )),
+                Value::Varint(crate::storage::sstable::reader::value_borrow::borrow_active(data)),
                 data.len(),
             )),
             "decimal" => {
@@ -321,9 +316,7 @@ impl V5CompressedLegacyParser {
                 Ok((Value::Decimal { scale, unscaled }, data.len()))
             }
             "inet" => Ok((
-                Value::Inet(crate::storage::sstable::reader::value_borrow::borrow_active(
-                    data,
-                )),
+                Value::Inet(crate::storage::sstable::reader::value_borrow::borrow_active(data)),
                 data.len(),
             )),
             // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>).
@@ -475,13 +468,45 @@ impl V5CompressedLegacyParser {
                     data.len()
                 );
                 Ok((
-                    Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(
-                        data,
-                    )),
+                    Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(data)),
                     data.len(),
                 ))
             }
         }
+    }
+
+    /// Issue #3811 (census finding F): a CELL-level frozen collection or tuple
+    /// must consume its declared blob exactly.
+    ///
+    /// These decoders return `blob_end` as their offset because that offset is a
+    /// STREAM POSITION the row loop advances by — it is not a consumption
+    /// report, and it must keep being `blob_end`. The consequence, until now, was
+    /// that bytes left inside the declared blob were *unobservable*: a
+    /// `frozen<list<int>>` cell whose blob is four bytes longer than its elements
+    /// require decoded clean and the row stayed byte-aligned, so nothing
+    /// downstream ever noticed. Cassandra refuses it —
+    /// `cassandra-5.0.8:src/java/org/apache/cassandra/serializers/ListSerializer.java:135`
+    /// (`"Unexpected extraneous bytes after list value"`; the identical guard is
+    /// `SetSerializer.java:127-128` and `MapSerializer.java:147`), and for tuples
+    /// `TupleType.split` rule 4.
+    pub(super) fn require_frozen_extent(
+        actual_end: usize,
+        blob_end: usize,
+        kind: &str,
+        column_name: &str,
+    ) -> Result<()> {
+        if actual_end == blob_end {
+            return Ok(());
+        }
+        Err(Error::corruption(format!(
+            "Frozen {} '{}': decoded to offset {} but the declared blob ends at {} \
+             ({} extraneous byte(s) inside the cell value; Cassandra refuses this)",
+            kind,
+            column_name,
+            actual_end,
+            blob_end,
+            blob_end.saturating_sub(actual_end)
+        )))
     }
 
     /// Issue #3811 (census finding D): a fixed-width scalar needs at least its

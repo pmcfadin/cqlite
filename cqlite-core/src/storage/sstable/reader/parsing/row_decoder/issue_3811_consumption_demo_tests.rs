@@ -219,7 +219,12 @@ fn assert_city_absent(value: &Value, ctx: &str) {
 /// Assert a bounded decode was REFUSED, and that the refusal is the consumption
 /// contract's and not some unrelated error. `expected_consumed`/`expected_len`
 /// pin WHICH boundary fired, so a test cannot pass on a coincidental corruption.
-fn assert_refused_short(result: Result<Value>, expected_consumed: usize, expected_len: usize, ctx: &str) {
+fn assert_refused_short(
+    result: Result<Value>,
+    expected_consumed: usize,
+    expected_len: usize,
+    ctx: &str,
+) {
     match result {
         Ok(v) => panic!(
             "{ctx}: expected the bounded-consumption refusal (Cassandra TupleType.split), got Ok({v:?})"
@@ -227,7 +232,7 @@ fn assert_refused_short(result: Result<Value>, expected_consumed: usize, expecte
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains(&format!("decoded {expected_consumed} of {expected_len} bytes")),
+                msg.contains(&format!("decoded only {expected_consumed} of {expected_len} byte(s)")),
                 "{ctx}: expected a short-consumption refusal naming {expected_consumed}/{expected_len}, got: {msg}"
             );
         }
