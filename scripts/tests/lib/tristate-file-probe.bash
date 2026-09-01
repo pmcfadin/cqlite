@@ -224,3 +224,41 @@ probe_write_code_lines() {
   done
   return 0
 }
+
+# assert_src_present_all <ok-msg> <absent-msg> <file> <ere>...
+# EVERY pattern must be present. A conjunction spelled as `grep -q … && grep -q …`
+# has the same fold as a single one, twice over, and an unreadable subject there
+# makes it impossible to say WHICH half was not measured.
+assert_src_present_all() {
+  local okmsg=$1 badmsg=$2 f=$3 re
+  shift 3
+  for re in "$@"; do
+    probe_file_match "$f" "$re"
+    case "$?" in
+      0) ;;
+      1)
+        bad "$badmsg"
+        return
+        ;;
+      *)
+        bad "$(_probe_unmeasured "$okmsg" "$f")"
+        return
+        ;;
+    esac
+  done
+  ok "$okmsg"
+}
+
+# assert_src_present_line <ok-msg> <absent-msg> <file> <whole-line>
+# The `grep -q -x -F` form: whole-line-exact, no regex, no substring.
+assert_src_present_line() {
+  local got
+  got=$(probe_count "$3" line-exact "$4")
+  if [ "$?" -ne 0 ]; then
+    bad "$(_probe_unmeasured "$1" "$3")"
+  elif [ "$got" -gt 0 ]; then
+    ok "$1"
+  else
+    bad "$2"
+  fi
+}
