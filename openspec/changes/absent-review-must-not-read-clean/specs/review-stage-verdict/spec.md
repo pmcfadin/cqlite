@@ -151,6 +151,18 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **AND** re-opening the stage with `--force` at the certified commit and re-running C certifies it (the
   positive control: a guard with no way past it is the guard agents learn to waive)
 
+#### Scenario: an interrupted open cannot publish a stale verdict
+- **WHEN** `open` (or `open --force`) writes its two files and is interrupted between them — by a failed
+  write, or by the process being killed
+- **THEN** the REPORT has been reset to the sentinel BEFORE the stage record is written, so the record is
+  the PUBLICATION MARKER and every partial state is a NON-VERDICT: no record reads as `stage never
+  opened`, and a record beside a sentinel report reads as `no report written`
+- **AND** the previous report's verdict is NEVER paired with the newly-recorded `head-sha:` — writing the
+  record first made a `result: PASS` from an audit of an OLDER tree satisfy both of the merge point's
+  bindings at once, and a check could only have REPORTED that pairing, because the harm is a WRITE
+- **AND** an uninterrupted `--force` re-open still yields a usable stage that can record a fresh verdict
+  (the positive control)
+
 #### Scenario: a sibling stage's PASS cannot certify C
 - **WHEN** the verdict line names a stage kind other than `c`, or omits any of
   `elapsed=`/`deadline=`/`agent=`/`report=`, or carries one of them twice

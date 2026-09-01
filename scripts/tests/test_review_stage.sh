@@ -1070,6 +1070,192 @@ rc_is 5 "unreadable: an EMPTY (but readable) report is still exit 5"
 has "NOT-RUN (report empty)" "unreadable: 'report empty' still names the empty state, distinctly"
 hasnt "report unreadable" "unreadable: an empty report is not reported as unreadable"
 
+# --- 11f. THE STAGE RECORD IS THE PUBLICATION MARKER (round 4, H1) ----------------
+# THE DEFECT: `open --force` wrote the NEW stage record (carrying the NEW `head-sha:`) BEFORE it
+# replaced the previous report with the sentinel. In that window — or PERMANENTLY, if the second
+# write failed or the process was killed between them — a previous `result: PASS` was paired with
+# the NEW commit, which is exactly the pair `premerge-assert.sh` accepts: it checks the recorded
+# head-sha against the certified sha and reads the report's verdict, and both answers were then
+# "yes". Round 3's own `head-sha` binding thus inherited a resource-lifetime bug.
+#
+# THE FIX IS AN ORDER, NOT A CHECK: reset the REPORT to the sentinel FIRST and write the STAGE
+# RECORD LAST, so the record is the PUBLICATION MARKER and every partial state fails closed (no
+# record ⇒ `stage never opened`; a record whose report is the sentinel ⇒ `no report written`).
+#
+# HOW IT IS OBSERVED. The order is not visible from the outside once both writes have landed, so
+# these cases run an INSTRUMENTED copy of the shipped script whose `commit_write` appends the
+# ON-DISK state after every successful write, and can `exit 90` at the first one to simulate a
+# kill. The probe is inserted at the ONE post-`mv` success point by an ANCHORED substitution
+# whose match count is asserted — an instrumentation that silently matched nothing would make
+# every assertion below vacuous. It is order-AGNOSTIC (it fires after whichever write is first),
+# so it detects the defect rather than assuming the fixed order.
+RS_PROBE="$T/review-stage-probe.sh"
+PROBE_HITS="$(LC_ALL=C grep -c '^  WRITE_TMP=""$' "$RS" || true)"
+if [ "$PROBE_HITS" = "1" ]; then
+  ok "marker-order: the probe anchor matches EXACTLY ONE line of the shipped script"
+else
+  bad "marker-order: the probe anchor matched $PROBE_HITS lines — the instrumentation below would be vacuous or misplaced"
+fi
+awk '
+  { print }
+  /^  WRITE_TMP=""$/ && !done {
+    done = 1
+    print "  if [ -n \"${PROBE_OUT:-}\" ]; then"
+    print "    _pr_head=\"$( (LC_ALL=C grep -m1 \"^head-sha:\" \"${PROBE_SFILE:-/nonexistent}\" 2>/dev/null || printf \"head-sha: none\\n\") | LC_ALL=C sed -e \"s/^head-sha:[[:space:]]*//\" )\""
+    print "    _pr_tok=\"$( (LC_ALL=C grep -m1 \"^result:\" \"${PROBE_RPATH:-/nonexistent}\" 2>/dev/null || printf \"result: none\\n\") | LC_ALL=C sed -e \"s/^result:[[:space:]]*//\" -e \"s/[[:space:]].*$//\" )\""
+    print "    printf \"PROBE after=%s record-head=%s report-token=%s\\n\" \"$what\" \"$_pr_head\" \"$_pr_tok\" >>\"$PROBE_OUT\""
+    print "    if [ -n \"${PROBE_KILL:-}\" ]; then exit 90; fi"
+    print "  fi"
+  }
+' "$RS" >"$RS_PROBE"
+if bash -n "$RS_PROBE" 2>/dev/null; then
+  ok "marker-order: the instrumented copy is syntactically valid"
+else
+  bad "marker-order: the instrumented copy does not parse — the assertions below are vacuous"
+fi
+
+# rsp <repo> <probe-log> <sfile> <rpath> <kill:0|1> <args...> — the instrumented run.
+rsp() {
+  local repo="$1" log="$2" sf="$3" rp="$4" kill="$5"; shift 5
+  : >"$log"
+  if [ "$kill" = "1" ]; then
+    OUT="$(cd "$repo" && PROBE_OUT="$log" PROBE_SFILE="$sf" PROBE_RPATH="$rp" PROBE_KILL=1 bash "$RS_PROBE" "$@" 2>&1)"
+  else
+    OUT="$(cd "$repo" && PROBE_OUT="$log" PROBE_SFILE="$sf" PROBE_RPATH="$rp" bash "$RS_PROBE" "$@" 2>&1)"
+  fi
+  RC=$?
+}
+# nth_probe <log> <n> — the n'th recorded on-disk state, or empty.
+nth_probe() { LC_ALL=C sed -n "${2}p" "$1" 2>/dev/null || true; }
+
+# (a) THE ORDER, on a first open: the report is published FIRST and the record LAST.
+R11F="$(newrepo)"
+printf 'seed\n' >"$R11F/seed.txt"
+git -C "$R11F" add seed.txt >/dev/null 2>&1
+git -C "$R11F" -c user.email=t@example.invalid -c user.name=t commit -q -m A >/dev/null 2>&1
+SHA_A="$(git -C "$R11F" rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$SHA_A" ]; then
+  ok "marker-order: the scratch repo has a resolvable HEAD (the head-sha binding is measurable)"
+else
+  bad "marker-order: could not commit in the scratch repo — the head-sha assertions would be vacuous"
+fi
+SF_A="$R11F/.review-stage/issue-900/c.stage"
+RP_A="$(REPORT_OF "$R11F" 900 c)"
+LOG_A="$T/probe-a.log"
+rsp "$R11F" "$LOG_A" "$SF_A" "$RP_A" 0 open c --issue 900 --agent spec-auditor
+rc_is 0 "marker-order: the instrumented first open succeeds"
+NPROBE="$(LC_ALL=C grep -c . "$LOG_A" 2>/dev/null || true)"
+if [ "$NPROBE" = "2" ]; then
+  ok "marker-order: both writes were observed (2 probe records)"
+else
+  bad "marker-order: $NPROBE probe record(s) observed, expected 2 (log: $(cat "$LOG_A" 2>/dev/null))"
+fi
+P1="$(nth_probe "$LOG_A" 1)"
+P2="$(nth_probe "$LOG_A" 2)"
+case "$P1" in
+  *"after=report-of-record"*) ok "marker-order: the REPORT is written FIRST" ;;
+  *) bad "marker-order: the first write was not the report (got: $P1)" ;;
+esac
+case "$P2" in
+  *"after=stage-record"*) ok "marker-order: the STAGE RECORD is written LAST — it is the publication marker" ;;
+  *) bad "marker-order: the last write was not the stage record (got: $P2)" ;;
+esac
+case "$P1" in
+  *"record-head=none"*) ok "marker-order: no stage record exists yet while the sentinel is published (a partial state reads 'stage never opened')" ;;
+  *) bad "marker-order: a stage record already existed at the first write (got: $P1)" ;;
+esac
+
+# (b) THE PAIRING THE DEFECT PRODUCED: a forced re-open over a report recording PASS, at a
+#     commit NEWER than the one the stage was opened at. The forbidden on-disk state is
+#     (record head-sha == the NEW commit) AND (report reads PASS) — the pair premerge-assert
+#     accepts. It must not exist at ANY write boundary.
+rs "$R11F" open c --issue 901 --agent spec-auditor
+rc_is 0 "marker-order: the stage under test opened at commit A"
+printf 'result: PASS\n\naudited at A.\n' >"$(REPORT_OF "$R11F" 901 c)"
+printf 'more\n' >>"$R11F/seed.txt"
+git -C "$R11F" add seed.txt >/dev/null 2>&1
+git -C "$R11F" -c user.email=t@example.invalid -c user.name=t commit -q -m B >/dev/null 2>&1
+SHA_B="$(git -C "$R11F" rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$SHA_B" ] && [ "$SHA_B" != "$SHA_A" ]; then
+  ok "marker-order: a second commit B exists and differs from A"
+else
+  bad "marker-order: could not create a distinct commit B (A=$SHA_A B=$SHA_B)"
+fi
+SF_B="$R11F/.review-stage/issue-901/c.stage"
+RP_B="$(REPORT_OF "$R11F" 901 c)"
+LOG_B="$T/probe-b.log"
+rsp "$R11F" "$LOG_B" "$SF_B" "$RP_B" 0 open c --issue 901 --agent spec-auditor --force
+rc_is 0 "marker-order: the forced re-open succeeds"
+FORBIDDEN="$(LC_ALL=C grep -c "record-head=$SHA_B report-token=PASS" "$LOG_B" 2>/dev/null || true)"
+if [ "$FORBIDDEN" = "0" ]; then
+  ok "marker-order: at NO write boundary is the NEW head-sha paired with the OLD PASS report (the H1 defect)"
+else
+  bad "marker-order: $FORBIDDEN boundary/boundaries paired the new head-sha with the stale PASS (log: $(cat "$LOG_B" 2>/dev/null))"
+fi
+PB1="$(nth_probe "$LOG_B" 1)"
+case "$PB1" in
+  *"report-token=NOT-RUN"*) ok "marker-order: the report is reset to the sentinel at the FIRST boundary" ;;
+  *) bad "marker-order: the report was not yet the sentinel at the first boundary (got: $PB1)" ;;
+esac
+case "$PB1" in
+  *"record-head=$SHA_A"*) ok "marker-order: the record still names the OLD commit while the report is being reset" ;;
+  *) bad "marker-order: the record was already re-stamped before the report was reset (got: $PB1)" ;;
+esac
+
+# (c) THE INTERRUPTED STATE, PERMANENTLY: the same forced re-open, killed at the first write.
+#     Whatever is on disk afterwards must NOT read as a verdict for the new tree. This is the
+#     half a check could not deliver — a check placed after the harmful write could only report
+#     it — so the property is that the harmful pairing is never REACHED.
+rs "$R11F" open c --issue 902 --agent spec-auditor
+rc_is 0 "marker-order: the kill case's stage opened at commit B"
+printf 'result: PASS\n\naudited at B.\n' >"$(REPORT_OF "$R11F" 902 c)"
+printf 'more still\n' >>"$R11F/seed.txt"
+git -C "$R11F" add seed.txt >/dev/null 2>&1
+git -C "$R11F" -c user.email=t@example.invalid -c user.name=t commit -q -m C >/dev/null 2>&1
+SHA_C="$(git -C "$R11F" rev-parse HEAD 2>/dev/null || true)"
+SF_C="$R11F/.review-stage/issue-902/c.stage"
+RP_C="$(REPORT_OF "$R11F" 902 c)"
+LOG_C="$T/probe-c.log"
+rsp "$R11F" "$LOG_C" "$SF_C" "$RP_C" 1 open c --issue 902 --agent spec-auditor --force
+rc_is 90 "marker-order: the simulated kill fired at the first write"
+NPC="$(LC_ALL=C grep -c . "$LOG_C" 2>/dev/null || true)"
+if [ "$NPC" = "1" ]; then
+  ok "marker-order: exactly ONE write completed before the kill"
+else
+  bad "marker-order: $NPC write(s) completed before the kill, expected 1"
+fi
+SENT="$(LC_ALL=C grep -c '^result: NOT-RUN' "$RP_C" 2>/dev/null || true)"
+if [ "$SENT" = "1" ]; then
+  ok "marker-order: the interrupted state leaves the SENTINEL on disk, not the stale PASS"
+else
+  bad "marker-order: the report on disk is not the sentinel after the kill ($(LC_ALL=C grep -m1 '^result:' "$RP_C" 2>/dev/null))"
+fi
+DISKHEAD="$(LC_ALL=C sed -n 's/^head-sha:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
+if [ "$DISKHEAD" = "$SHA_B" ]; then
+  ok "marker-order: the record still names the commit the audit was actually made at, so the merge point refuses on the sha too"
+else
+  bad "marker-order: the record's head-sha is '$DISKHEAD', expected the pre-kill '$SHA_B'"
+fi
+rs "$R11F" verdict c --issue 902
+rc_is 5 "marker-order: the interrupted stage reads NOT-RUN — the partial state fails CLOSED"
+hasnt "RESULT: PASS" "marker-order: no PASS survives the interrupted re-open"
+has "no report written" "marker-order: and the cause names the sentinel, so the operator knows to re-spawn"
+
+# (d) POSITIVE CONTROL: the UNINTERRUPTED forced re-open leaves a USABLE stage — otherwise (c)
+#     could pass on a script that broke --force altogether, and a guard that reds on correct
+#     input is the guard agents learn to waive.
+rs "$R11F" open c --issue 902 --agent spec-auditor --force
+rc_is 0 "marker-order CONTROL: a complete forced re-open succeeds"
+printf 'result: PASS\n\nre-audited at C.\n' >"$RP_C"
+rs "$R11F" verdict c --issue 902
+rc_is 0 "marker-order CONTROL: the re-opened stage can record a PASS again"
+DISKHEAD2="$(LC_ALL=C sed -n 's/^head-sha:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
+if [ "$DISKHEAD2" = "$SHA_C" ]; then
+  ok "marker-order CONTROL: the completed re-open re-stamped head-sha to the CURRENT commit"
+else
+  bad "marker-order CONTROL: head-sha is '$DISKHEAD2' after a complete re-open, expected '$SHA_C'"
+fi
+
 # --- 12. OUTSIDE A GIT WORKTREE: the documented exit fires, and no path is fabricated ------
 # `repo_root` used to `die_usage` itself, and its only caller was `$(repo_root)` inside a
 # COMMAND SUBSTITUTION — so `exit 64` terminated the SUBSHELL, the diagnostic printed once per
@@ -1150,7 +1336,16 @@ fi
 # of the assertions rather than a precondition for running them, so a box lacking either FAILS the
 # case rather than displacing it. The EXACT floor therefore still holds by the two shapes recorded
 # above, and it moves to the new measured count.
-ASSERT_FLOOR=285
+#
+# ROUND 4 ADDED 25 HOST-INDEPENDENT ASSERTIONS (285 -> 310) in section 11f (the stage record is
+# the publication marker: the write ORDER, the forbidden new-sha/stale-verdict pairing at every
+# write boundary, the interrupted state, and the uninterrupted positive control). EVERY assertion
+# in it is UNCONDITIONAL — each `if` calls exactly one of `ok`/`bad`, and its extra requirements
+# (git commits in the scratch repo, `awk` for the instrumented copy) are the SUBJECT of asserted
+# preconditions rather than a precondition for running: a box that cannot commit, or an `awk`
+# that produces no instrumented copy, FAILS the case rather than displacing it. So the EXACT
+# floor still holds by the two shapes recorded above.
+ASSERT_FLOOR=310
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

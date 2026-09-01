@@ -188,6 +188,16 @@ Three further declared limits of the mechanism itself:
   gate INVALIDATES it) applied to the intent audit, and an audit of an older tree may not
   certify a newer one. The remedy every one of those refusals prints is the same: re-open the
   stage with `--force` at this commit and re-run C.
+- **A partially-written `open` cannot publish a stale verdict (round 4, H1).** The two files are
+  not writable atomically together, so the ORDER decides which partial state is reachable — and
+  with the stage record written FIRST, the newly-stamped `head-sha:` sat beside the PREVIOUS
+  report, so binding (b) was satisfied by the new commit while the verdict read was a `PASS` from
+  an audit of the OLD tree. Measured: killed between the two writes, `verdict` reported
+  `RESULT: PASS` exit 0 for a tree nobody had audited, permanently. So the REPORT is reset to the
+  sentinel FIRST and the **stage record is written LAST, as the publication marker**: no record
+  reads as `stage never opened`, a record beside a sentinel reads as `no report written`, and
+  every partial state is a non-verdict. A check could not have delivered this — the harm is a
+  WRITE, so the control has to be that the pairing is never REACHED.
 
 ---
 

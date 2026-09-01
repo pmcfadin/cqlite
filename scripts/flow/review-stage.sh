@@ -103,6 +103,15 @@
 # live in two files: the stage record is the proof the stage EXISTS, the report is the
 # proof of what it CONCLUDED. Both are under `.review-stage/` and both are gitignored.
 #
+# AND THE STAGE RECORD IS THE PUBLICATION MARKER (#3751 round 4, H1). Two files cannot be
+# written atomically together, so ONE of the two orders leaves a false certification behind
+# when a write fails or the process is killed between them: with the RECORD first, the NEW
+# `head-sha:` sat beside the PREVIOUS report, so a `result: PASS` from an audit of an older
+# tree satisfied both of the merge point's bindings at once (measured — `verdict` reported
+# `RESULT: PASS` exit 0 for a tree nobody had audited). So the REPORT is reset to the sentinel
+# FIRST and the record is written LAST: no record reads as `stage never opened`, a record beside
+# a sentinel reads as `no report written`, and every partial state is a NON-VERDICT.
+#
 # AND THE STAGE RECORD CARRIES THE COMMIT IT WAS OPENED AT (#3751 round 3, G1)
 # --------------------------------------------------------------------------
 # `premerge-assert.sh --c-verdict AUTO` locates the C stage in the CURRENT worktree and
@@ -791,23 +800,26 @@ cmd_open() {
     esac
   fi
 
-  prepare_write "$sfile" stage-record
-  {
-    printf 'kind: %s\n' "$kind"
-    printf 'issue: %s\n' "$issue"
-    printf 'agent: %s\n' "$agent"
-    printf 'deadline-secs: %s\n' "$deadline"
-    printf 'spawned-at: %s\n' "$spawned_iso"
-    printf 'spawned-epoch: %s\n' "$spawned_epoch"
-    printf 'report: %s\n' "$rpath"
-    # RE-STAMPED ON EVERY OPEN, INCLUDING --force — deliberately unlike `spawned-at` above. A
-    # forced re-open re-writes the sentinel, so the re-spawned agent audits the tree that is
-    # there NOW; carrying an older sha forward would bind the verdict to a tree nobody read.
-    printf 'head-sha: %s\n' "$head_sha"
-    printf 'reopen-count: %s\n' "$reopen_count"
-    [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
-  } >&9
-  commit_write "$sfile" stage-record
+  # THE WRITE ORDER IS LOAD-BEARING: THE REPORT IS RESET FIRST AND THE STAGE RECORD IS WRITTEN
+  # LAST, SO THE RECORD IS THE PUBLICATION MARKER (#3751 round 4, H1).
+  #
+  # The two writes cannot be atomic together, so SOME partial state is reachable — by a failed
+  # second write, or by a kill between them. The only question is WHICH partial state, and one of
+  # the two orders is a false certification. `premerge-assert.sh` proceeds when the record's
+  # `head-sha:` equals the certified sha AND the report records a verdict, so writing the RECORD
+  # first paired the NEW commit with the PREVIOUS report — a `result: PASS` from an audit of an
+  # older tree, certifying the newer one. Measured: killed between the two writes, `verdict`
+  # reported `RESULT: PASS` exit 0 for a tree nobody had audited.
+  #
+  # Reversed, every partial state is a NON-VERDICT, and each is already a named refusal:
+  #   report written, record NOT yet   -> `stage never opened` (a first open) or the OLD record,
+  #                                       still naming the commit the audit was really made at,
+  #                                       beside a SENTINEL report -> `no report written`
+  #   both written                     -> the fresh sentinel, which is the normal open state
+  # A CHECK COULD NOT DELIVER THIS. The harm is a WRITE, so the control has to be that the
+  # harmful pairing is never REACHED — a check placed after it could only report it. Section 11f
+  # of `scripts/tests/test_review_stage.sh` observes the on-disk state at BOTH write boundaries
+  # and pins that the forbidden pair (new head-sha + stale verdict) exists at neither.
 
   # THE SENTINEL. `result:` is the FIRST recordable line on purpose: it is what `verdict`
   # reads, and a reader opening the file sees the non-verdict before anything else.
@@ -856,6 +868,26 @@ cmd_open() {
     printf '(nothing written yet)\n'
   } >&9
   commit_write "$rpath" report-of-record
+
+  # THE STAGE RECORD, WRITTEN LAST: its EXISTENCE is what publishes the stage (see the order
+  # note above), so it must not appear until the report beside it is the sentinel.
+  prepare_write "$sfile" stage-record
+  {
+    printf 'kind: %s\n' "$kind"
+    printf 'issue: %s\n' "$issue"
+    printf 'agent: %s\n' "$agent"
+    printf 'deadline-secs: %s\n' "$deadline"
+    printf 'spawned-at: %s\n' "$spawned_iso"
+    printf 'spawned-epoch: %s\n' "$spawned_epoch"
+    printf 'report: %s\n' "$rpath"
+    # RE-STAMPED ON EVERY OPEN, INCLUDING --force — deliberately unlike `spawned-at` above. A
+    # forced re-open re-writes the sentinel, so the re-spawned agent audits the tree that is
+    # there NOW; carrying an older sha forward would bind the verdict to a tree nobody read.
+    printf 'head-sha: %s\n' "$head_sha"
+    printf 'reopen-count: %s\n' "$reopen_count"
+    [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
+  } >&9
+  commit_write "$sfile" stage-record
 
   emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha reopen-count=$reopen_count report=$(field_value "$rpath")"
   # THE RAW PATH, ON A LINE OF ITS OWN — deliberately NOT through `field_value`. A caller
