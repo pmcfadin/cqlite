@@ -1015,18 +1015,25 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // `!= N` (issue #3612 round 3 addendum)
 // ---------------------------------------------------------------------------
 //
-// !! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE UNIT-ONLY. A READ CANNOT REACH
-// !! THEM (issue #3612, R6-F2(a)).
+// !! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE NOW REACHED BY A REAL READ
+// !! (issue #3747). This note previously said the opposite; do not restore it.
 //
-// The sole production caller decodes a key only `if !cell.path_bytes.is_empty()`
+// #3612 wrote these cases as UNIT-ONLY, and that was accurate AT THE TIME: the
+// sole production caller decoded a key only `if !cell.path_bytes.is_empty()`
 // (`complex_column.rs`, the multicell map branch), so a zero-length cell path
-// never reaches `parse_cell_path_key` at all — and, worse, that branch drops the
-// whole entry rather than surfacing it, because the `if let Some(key_value) =
-// decoded_key` below it never fires. So these cases pin what the FUNCTION does
-// with an empty slice, which is what makes the width table a faithful mirror of
-// Cassandra's serializers; they do NOT evidence end-to-end support for an empty
-// map key, and must not be cited as such (CLAUDE.md wiring evidence: a feature is
-// done only when its public surface exercises it).
+// never reached `parse_cell_path_key` at all — and, worse, that branch DROPPED
+// the whole entry, because the `if let Some(key_value) = decoded_key` below it
+// never fired. #3612 filed that swallow as #3747 rather than fixing it.
+//
+// #3747 has since REMOVED that guard, so the map branch now decodes every
+// cell path, empty included, and these cases describe behaviour a `SELECT` and a
+// compaction read actually exercise. The end-to-end evidence is separate and
+// lives where it belongs — `cqlite-core/tests/issue_3747_empty_map_key.rs`,
+// against a Cassandra-written fixture and its `sstabledump` golden — because a
+// unit test still does not constitute wiring evidence on its own (CLAUDE.md: a
+// feature is done only when its public surface exercises it). What changed is
+// that these cases are no longer UNREACHABLE; they are the function-level half
+// of a property whose public-surface half is now also covered.
 //
 // That filter is PRE-EXISTING, not part of #3612, and it means a legal empty
 // `text`/`blob` map key is silently dropped from query and compaction results —
@@ -1045,7 +1052,8 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 /// error either way, which is exactly why encoding the `0` is a fidelity fix and
 /// not a behaviour change. Asserted on the MESSAGE, which is the only thing that
 /// distinguishes "the width table refused it" from "the decoder refused it".
-/// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
+/// Reached by a real read since #3747 removed the caller's empty-path guard;
+/// see the REACHABILITY note above.
 #[test]
 fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
     let p = parser();
@@ -1077,8 +1085,9 @@ fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
 /// the WIDTH TABLE, because these four serializers alone have no `isEmpty`
 /// allowance. This is the half that makes the three-way split load-bearing rather
 /// than decorative. (`inet` is NOT one of them — see
-/// `an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read`.)
-/// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
+/// `an_empty_inet_key_decodes_and_is_reachable_by_a_read`.)
+/// Reached by a real read since #3747 removed the caller's empty-path guard;
+/// see the REACHABILITY note above.
 #[test]
 fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
     let p = parser();
@@ -1103,14 +1112,15 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `inet` is NOT a fifth strict case, and it is the ONE family where the empty
 /// buffer decodes rather than merely passing the width table.
 ///
-/// UNIT-ONLY, and this one needs saying loudest because its NAME reads like a
-/// capability claim: "is legal and decodes" is a statement about THIS FUNCTION,
-/// not about a read. No `SELECT` or compaction read can reach it — the caller
-/// filters an empty `path_bytes` and drops the entry (see the REACHABILITY note
-/// above, issue #3612 R6-F2(a)). Kept rather than deleted because it is the only
-/// thing pinning the corrected `[0, 4, 16]` row against the three places that
-/// previously called `inet` "the fifth strict case"; renamed so the name states
-/// the scope.
+/// This case carried the loudest UNIT-ONLY warning in the file, because its name
+/// reads like a capability claim and no read could reach it. **That is no longer
+/// true**: #3747 removed the caller's empty-path guard, so a `SELECT` over a
+/// `map<inet,…>` with an empty key really does reach this arm and really does
+/// return an empty `Value::Inet`. The test is renamed accordingly — a name that
+/// asserts unreachability is worse than no name once the code has moved.
+///
+/// It remains the only thing pinning the corrected `[0, 4, 16]` row against the
+/// three places that previously called `inet` "the fifth strict case".
 ///
 /// `InetAddressSerializer.validate` RETURNS EARLY on empty
 /// (`if (accessor.isEmpty(value)) return;`) and only then delegates to
@@ -1121,7 +1131,7 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `isEmpty` test together with the `throw` from the `catch (UnknownHostException)`
 /// block below it. Read whole methods, not greps of their `if`s.
 #[test]
-fn an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read() {
+fn an_empty_inet_key_decodes_and_is_reachable_by_a_read() {
     let p = parser();
     assert_eq!(
         p.parse_cell_path_key(&[], "inet", "k").unwrap(),

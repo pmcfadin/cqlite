@@ -43,9 +43,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // `cqlite_core::ingestion` (the SELECT-surface entry point) is gated behind
-// `cli-helpers`, which is the feature set the gate's `core-tests` component and
-// CI's `pr-gate-core` both enable — so the SELECT lanes below EXECUTE there.
-// The compaction lane (AC4) needs no such feature and runs in every set.
+// `cli-helpers`.
+//
+// WHERE THESE LANES ACTUALLY EXECUTE — stated precisely, because an earlier
+// revision of this comment claimed `pr-gate-core` runs them and that is FALSE:
+//   * the local gate's `core-tests` component DOES run them — it invokes
+//     `cargo test -p cqlite-core --features cli-helpers`, which builds and runs
+//     every `--test` target in the package, this one included.
+//   * `pr-gate-core` does NOT. It runs `--lib` plus exactly ONE named integration
+//     target (`--test query_semantics_oracle_parity`, pr-gate.yml), so this file
+//     is COMPILED there by clippy and EXECUTED there by nothing.
+// So these lanes gate THIS merge (the gate of record runs `core-tests`), but they
+// are not part of `required` and will not protect a future PR through CI alone.
+// Wiring them into `pr-gate-core` is a change to a merge gate and is deliberately
+// NOT bundled into a decode fix; it is raised on the issue instead.
+//
+// Without `--features cli-helpers` only the AC4 compaction lane runs — 1 of 5 —
+// which is the "compiling a feature is not covering it" trap in miniature.
 #[cfg(feature = "cli-helpers")]
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::platform::Platform;
