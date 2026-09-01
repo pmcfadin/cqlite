@@ -6114,6 +6114,55 @@ assert_says 'case (jm10) --help records that the marker grammar is unchanged' \
 # — so a run of it necessarily carries the stem.
 reset_stub
 
+printf '== (jm11) #3654: a `show` payload whose TOP-LEVEL id is NOT the asked job ==\n'
+# MEASURED SHAPE (ten records): top-level `id` is the REVIEW row's own sequence and can differ from
+# the job asked for — asking for 9 returns id=8, job_id=9, job.id=9. Two things must hold, and the
+# second is what this change could have broken: the facts must still come from the JOB row (find_job
+# matches id/job_id/job and then PREFERS the object carrying git_ref), and the OUTER row's own
+# `source_machine_id` must NOT leak into the facts — a decoy machine id attributed to the wrong row
+# is worse than none, because it reads as a measurement.
+if [ ! -f "$_jm_tool" ] || ! command -v python3 >/dev/null 2>&1; then
+  printf 'SKIP - roborev-job-facts.py or python3 unavailable; the id-divergence case did not run\n'
+else
+  printf '{"id":8,"job_id":9,"uuid":"outer-uuid","source_machine_id":"DECOY","prompt":"p","job":{"id":9,"git_ref":"aaa..bbb","status":"done","model":"m"}}' \
+    | python3 "$_jm_tool" 9 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+  if [ "$(sed -n 's/^git_ref=//p' "$_jm_facts" | head -1)" = 'aaa..bbb' ]; then
+    ok 'case (jm11) the nested job row is still selected when the top-level id names another review'
+  else
+    bad 'case (jm11) the id-divergent payload selected the wrong row — the required facts would come from the review row'
+  fi
+  if grep -q '^source_machine_id=DECOY$' "$_jm_facts"; then
+    bad 'case (jm11) the OUTER review row supplied source_machine_id — the daemon id would be attributed to a row that is not the job'
+  else
+    ok 'case (jm11) no source_machine_id leaks from the outer review row (the fact follows the selected row)'
+  fi
+fi
+
+printf '== (jm12) #3654 structural: the supplementary machine read NAMES THE BRANCH ==\n'
+# `roborev list` filters by the CURRENT BRANCH by default (measured: a bare list from a branch with
+# no jobs returns null, while --branch <other> returns that branch's rows), and this wrapper is
+# invoked from arbitrary directories with an explicit --repo. A default-scoped machine read would
+# therefore resolve NOTHING whenever the invoking cwd's branch is not the branch under review, and
+# `job-machine:` would read NOT RECORDED for a reason having nothing to do with the record — a key
+# that can only ever report absence. Only a structural assert pins this: every hermetic case runs
+# with the fixture branch checked out, so the stub answers either way.
+_jm_supp=$(sed -n '/^read_machine_fact() {/,/^}/p' "$WRAPPER_REAL")
+if [ -z "$_jm_supp" ]; then
+  bad 'case (jm12) could not locate read_machine_fact to inspect'
+elif printf '%s\n' "$_jm_supp" | grep -qE 'roborev list --json .*--branch "\$BRANCH"'; then
+  ok 'case (jm12) the supplementary machine read is scoped to the branch under review'
+else
+  bad 'case (jm12) the supplementary machine read does not name --branch "$BRANCH" — it would inherit roborev list'"'"'s current-branch default and resolve nothing whenever cwd is not on the branch under review'
+fi
+# AND THE RECORD READ IS DELIBERATELY LEFT ALONE: `sha-assert` depends on it, and naming the branch
+# there is behaviour-neutral only while the invoking cwd's branch equals $BRANCH. Pinned so a future
+# "consistency" edit has to argue with this line rather than silently change a load-bearing read.
+if grep -qE '^ *list\) json=\$\(roborev list --json --limit 50 --repo "\$REPO" 2>/dev/null' "$WRAPPER_REAL"; then
+  ok 'case (jm12) the RECORD read is unchanged (no --branch) — that read is sha-assert'"'"'s, and out of scope here'
+else
+  bad 'case (jm12) the job-record list read has changed shape — sha-assert depends on it, and #3654 must not have touched it'
+fi
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
