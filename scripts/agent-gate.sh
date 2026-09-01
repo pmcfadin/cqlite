@@ -6260,16 +6260,22 @@ _disk_note_unread_verdict() {
   DISK_UNREAD_VERDICTS+=("${1:-<unnamed component>}|${2:-unspecified}")
 }
 
-# _disk_verdict_read <component> <result-file> <required:0|1>
+# _disk_verdict_read <component> <result-file>
 #
 # THE ONE READER of a per-component `.result`. Every site that reads one calls this, so the
 # "could the verdict be read" question has a single answer and a single recording point --
 # the consolidation this round chose over a fourth private carve.
 #
 # Sets DISK_VERDICT_ST / DISK_VERDICT_SECS. rc 0 = read AND well-formed; rc 1 = present but
-# unreadable or MALFORMED (recorded); rc 2 = ABSENT (recorded only when <required> is 1 --
-# an absent `.result` for a component that was never SELECTED simply means it did not run,
-# which is not a measurement failure).
+# unreadable or MALFORMED (RECORDED); rc 2 = ABSENT (NOT recorded).
+#
+# ABSENCE IS DELIBERATELY NOT THIS FUNCTION'S CALL, and the reason is double-recording rather
+# than taste. Every reader below skips an absent `.result` because absence there means "the
+# component was not selected", which is not a measurement failure. The ONE site where absence
+# IS an error -- the fail-closed guard over SELECTED_MAIN/SELECTED_SIDE -- is asserting
+# PRESENCE, not reading, and records through the shared `_disk_note_unread_verdict` itself; if
+# this function recorded absence too, a component could be noted once by the guard and again
+# by the reconstruction pass and appear twice in the UNMEASURED census.
 #
 # The STATUS token is validated against the closed set record_result can write
 # (PASS/FAIL/SKIP) and the seconds field against an integer (a leading `-` is admitted so a
@@ -6277,12 +6283,9 @@ _disk_note_unread_verdict() {
 # the file CREATED and EMPTY -- open+truncate succeeds, the write does not -- so the empty
 # and short-write shapes are exactly what this catches.
 _disk_verdict_read() {
-  local comp="${1:-}" rf="${2:-}" required="${3:-0}"
+  local comp="${1:-}" rf="${2:-}"
   DISK_VERDICT_ST=""; DISK_VERDICT_SECS=""
-  if [ ! -f "$rf" ]; then
-    [ "$required" = 1 ] && _disk_note_unread_verdict "$comp" "verdict file ABSENT"
-    return 2
-  fi
+  [ -f "$rf" ] || return 2
   if [ ! -r "$rf" ]; then
     _disk_note_unread_verdict "$comp" "verdict file UNREADABLE"
     return 1
@@ -9332,7 +9335,7 @@ _tree_boundary_meta_lines() {
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
-    _disk_verdict_read "$_c" "$_rf" 0 || true
+    _disk_verdict_read "$_c" "$_rf" || true
     _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
     _de_pairs+=("$_c" "$_st")
@@ -9343,7 +9346,7 @@ _tree_boundary_meta_lines() {
     [ -f "$_rf" ] || continue
     _c="${_rf##*/}"; _c="${_c%.result}"
     case "$_seen" in *" $_c "*) continue ;; esac
-    _disk_verdict_read "$_c" "$_rf" 0 || true
+    _disk_verdict_read "$_c" "$_rf" || true
     _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
     _de_pairs+=("$_c" "$_st")
@@ -18002,7 +18005,7 @@ aggregate_lite_components() {
     [ -f "$rf" ] || continue   # not run (e.g. --only skip) — do not add, do not fail
     # #3800 (job 304): the ONE reader, so a `.result` this lane could not READ becomes an
     # UNMEASURED subject of the `disk-exhaustion:` line instead of a silent synthetic FAIL.
-    _disk_verdict_read "$c" "$rf" 0 || true
+    _disk_verdict_read "$c" "$rf" || true
     st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
     [ -n "$st" ] || { st=FAIL; secs=0; }
     LN+=("$c"); LS+=("$st"); LT+=("${secs}s")
@@ -18402,15 +18405,22 @@ run_delta() {
   # scoped-tests entry run_scoped_tests already pushed onto NAMES.
   local -a DN=() DS=() DT=()
   local c rf st secs
+  # #3800 (job 304): the ONE reader here too. Both shapes are measurement failures in THIS
+  # loop -- unlike the full gate's reconstruction, an absent `.result` for file-size/fmt means
+  # the component did not reach record_result, which is already treated as a synthetic FAIL --
+  # so absence is recorded explicitly beside the reader's malformed recording, and the
+  # `disk-exhaustion:` line reports the component as UNMEASURED rather than scanning a clean
+  # log and claiming `0 RECOGNISED`.
   for c in file-size fmt; do
     rf="$LOG_DIR/$c.result"
     if [ -f "$rf" ]; then
-      st=""; secs=""
-      read -r st secs < "$rf" || true
+      _disk_verdict_read "$c" "$rf" || true
+      st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
       [ -n "$st" ] || { st=FAIL; secs=0; }
       DN+=("$c"); DS+=("$st"); DT+=("${secs}s")
       [ "$st" = FAIL ] && OVERALL=FAIL
     else
+      _disk_note_unread_verdict "$c" "verdict file ABSENT"
       DN+=("$c"); DS+=(FAIL); DT+=("0s"); OVERALL=FAIL
     fi
   done
@@ -19565,7 +19575,7 @@ for _c in "${COMPONENTS[@]}"; do
   # #3800 (job 304): the ONE reader. An unreadable/malformed verdict is recorded as an
   # UNMEASURED subject of the `disk-exhaustion:` line; the reconstruction itself is
   # unchanged and still fail-closed (an unrecognised status is not PASS).
-  _disk_verdict_read "$_c" "$_rf" 0 || true
+  _disk_verdict_read "$_c" "$_rf" || true
   _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
   NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
   [ "$_st" = FAIL ] && OVERALL=FAIL

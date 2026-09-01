@@ -83,8 +83,17 @@ EXTRACT_OK=1
   # A one-line array declaration has no region to extract; take the SHIPPED line itself so
   # this suite still measures the shipped source and never a copy typed here.
   grep -m1 '^DISK_MEM_SUBJECTS=()$' "$GATE"
+  # #3800 (roborev job 304): the THIRD kind of subject -- a `.result` verdict the gate could
+  # not READ -- plus the ONE reader every `.result` site now routes through, and
+  # `record_result` itself so the in-memory arm of the fix is measured as shipped.
+  grep -m1 '^DISK_UNREAD_VERDICTS=()$' "$GATE"
+  # `record_result` needs its OWN anchor: its shipped header line carries a trailing
+  # `# <name> <status> <seconds>` comment, so the loop's `[{]$` anchor would extract NOTHING
+  # and the fail-closed check below would fire. Anchored without the end-of-line assertion.
+  extract_region '^record_result[(][)] [{]' '^[}]$'
   for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
+            _disk_note_unread_verdict _disk_verdict_read \
             _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -93,9 +102,10 @@ EXTRACT_OK=1
   done
 } >> "$EX"
 
-for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS _disk_safe _disk_abbrev \
+for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
-            _disk_note_capture_failure _disk_scan_subject _disk_exhaustion_line \
+            _disk_note_capture_failure _disk_note_unread_verdict _disk_verdict_read \
+            record_result _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
             _tree_emit_capture_diag _tree_note_capture_failure; do
@@ -105,7 +115,7 @@ for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS _disk_safe _disk_abbrev
   fi
 done
 if [ "$EXTRACT_OK" -eq 1 ]; then
-  ok "extract: the shipped signature set, the in-memory subject channel and 21 helpers (incl. the REAL _tree_identity) were extracted from scripts/agent-gate.sh"
+  ok "extract: the shipped signature set, BOTH gate-internal subject channels and 24 helpers (incl. the REAL _tree_identity and the shipped record_result) were extracted from scripts/agent-gate.sh"
 fi
 if bash -n "$EX" 2>/dev/null; then
   ok "extract: the extracted region is syntactically valid bash (the cases run the real thing)"
@@ -132,7 +142,7 @@ run_line() {  # <logdir> <name> <status> ...
     # #3800: the in-memory subject channel and the START-capture cross-check are cleared,
     # so the component-log cases below measure the component-log arm alone. Case 17 seeds
     # them deliberately.
-    DISK_MEM_SUBJECTS=(); TREE_CAPTURE_FAILED=0
+    DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=(); TREE_CAPTURE_FAILED=0
     _disk_exhaustion_line "$@"
   )
 }
@@ -466,6 +476,38 @@ if [ "$declared" -eq "$total_rend" ]; then
   ok "13-declared-gap: all $total_rend renderings (RECOGNISED / clean / no-subject / UNMEASURED) declare the closed set's non-exhaustiveness"
 else
   bad "13-declared-gap: only $declared of $total_rend renderings declare the scan's own non-exhaustiveness"
+fi
+
+# (13b) THE SUBJECT SET IS DECLARED TOO (#3800, roborev job 304). Declaring the SIGNATURE set
+# as closed while leaving the SUBJECT set implicit is what let three consecutive rounds each
+# find a different unwatched gate-internal writer. Every rendering must name the three kinds
+# of subject AND name the known writers that sit outside them -- a reader of a pasted block
+# must be able to check the boundary, not infer it.
+subj_dec=0; subj_named=0; total_rend=0
+for probe_out in \
+  "$(run_line "$tmp/c1" minimal-build FAIL)" \
+  "$(run_line "$tmp/c5" minimal-build FAIL)" \
+  "$(run_line "$tmp/c6" fmt PASS)" \
+  "$(run_line "$tmp/c8" minimal-build FAIL)" ; do
+  total_rend=$((total_rend + 1))
+  case "$probe_out" in
+    *"DECLARED SUBJECT SET"*"(a) logs of non-PASS components"*"(b) the gate OWN in-memory capture-failure subjects"*"(c) components whose .result verdict could NOT be read"*)
+      subj_dec=$((subj_dec + 1)) ;;
+  esac
+  case "$probe_out" in
+    *"gate-internal writers OUTSIDE the subject set"*"_fm_* sidecars"*"node-bindings.leak-lane"*"summary-integrity.fail"*"heartbeat file"*)
+      subj_named=$((subj_named + 1)) ;;
+  esac
+done
+if [ "$subj_dec" -eq "$total_rend" ]; then
+  ok "13b-subject-set: all $total_rend renderings declare the SUBJECT set and name its three kinds (logs / in-memory captures / unread verdicts)"
+else
+  bad "13b-subject-set: only $subj_dec of $total_rend renderings declare the subject set -- the scan states which SIGNATURES it can miss but not which WRITERS it cannot see"
+fi
+if [ "$subj_named" -eq "$total_rend" ]; then
+  ok "13b-subject-set-writers: all $total_rend renderings NAME the known gate-internal writers outside the subject set, so the boundary is checkable rather than a hedge"
+else
+  bad "13b-subject-set-writers: only $subj_named of $total_rend renderings name the un-covered writers"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -859,7 +901,7 @@ run_mem() {  # run_mem <mode> <text> [<component> <status> ...]
     LOG_DIR="$tmp/c17-empty"
     DISK_TARGET_PATH=""; DISK_LOGS_PATH=""
     DISK_FREE_START_TARGET=""; DISK_FREE_START_LOGS=""
-    DISK_MEM_SUBJECTS=(); TREE_CAPTURE_FAILED=0
+    DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=(); TREE_CAPTURE_FAILED=0
     case "$mode" in
       record)     _disk_note_capture_failure 'tree-identity manifest write (start capture)' "$text" ;;
       empty)      _disk_note_capture_failure 'tree-identity manifest write (start capture)' "" ;;
@@ -987,7 +1029,7 @@ else
     LOG_DIR="$tmp/c17-empty"
     DISK_TARGET_PATH=""; DISK_LOGS_PATH=""
     DISK_FREE_START_TARGET=""; DISK_FREE_START_LOGS=""
-    DISK_MEM_SUBJECTS=(); TREE_CAPTURE_FAILED=0
+    DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=(); TREE_CAPTURE_FAILED=0
     id=$(_tree_identity "$r/manifest"); rc=$?
     printf 'RC %s\n' "$rc"
     printf 'DIAGSIG %s\n' "$(printf '%s' "$id" | grep -c 'No space left on device')"
@@ -1024,6 +1066,223 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────
+# (19) THE THIRD KIND OF SUBJECT: A `.result` VERDICT THE GATE COULD NOT READ
+# (#3800, roborev job 304).
+#
+# THE DEFECT THIS PINS. `record_result` writes `$LOG_DIR/<component>.result`. Under ENOSPC
+# that write fails, its error text goes to GATE STDERR -- neither a component log nor an
+# in-memory subject -- and the parent's fail-closed guard then synthesises `FAIL 0` for a
+# component whose OWN log is CLEAN, because the component may genuinely have SUCCEEDED and
+# died on the write. Both existing subject channels are therefore empty and the scan
+# rendered an affirmative `0 RECOGNISED`: the identical false-clean shape to round 3's
+# tree-capture case, one writer over.
+#
+# Every case below therefore pairs an unreadable verdict with a DELIBERATELY CLEAN component
+# log, and each has a MUTATION CONTROL in the same shell that removes the new channel and
+# shows the false clean reading come straight back -- a green with no such contrast could be
+# passing for any reason at all.
+# ─────────────────────────────────────────────────────────────────────────────────
+_disk_env() {   # the shared subshell preamble: shipped code, deterministic free field
+  DISK_TARGET_PATH=""; DISK_LOGS_PATH=""
+  DISK_FREE_START_TARGET=""; DISK_FREE_START_LOGS=""
+  DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=(); TREE_CAPTURE_FAILED=0
+}
+
+# (19a) ABSENT `.result` + CLEAN component log -> UNMEASURED, never `0 RECOGNISED`. Recorded
+# exactly as the shipped fail-closed guard records it (19g asserts the guard really does).
+d="$tmp/c19a"; mkdir -p "$d"
+{ echo 'running 37 tests'; echo 'test result: ok. 37 passed; 0 failed'; } > "$d/binding-rust-tests.log"
+o19a=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _disk_note_unread_verdict binding-rust-tests "verdict file ABSENT"
+  printf 'LINE %s\n' "$(_disk_exhaustion_line fmt PASS binding-rust-tests FAIL)"
+  DISK_UNREAD_VERDICTS=()
+  printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS binding-rust-tests FAIL)"
+)
+l19a=$(printf '%s\n' "$o19a" | sed -n 's/^LINE //p')
+m19a=$(printf '%s\n' "$o19a" | sed -n 's/^MUTANT //p')
+if case "$l19a" in "disk-exhaustion: UNMEASURED (#3800)"*"binding-rust-tests(verdict file ABSENT)"*) true ;; *) false ;; esac \
+   && case "$l19a" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
+  ok "19a-absent-verdict: a component whose .result is ABSENT, whose own log is CLEAN, is UNMEASURED naming it -- never '0 RECOGNISED'"
+else
+  bad "19a-absent-verdict: expected UNMEASURED naming the unread verdict; got: $l19a"
+fi
+if case "$m19a" in "disk-exhaustion: 0 RECOGNISED (#3800) -- scanned 1 non-PASS component log(s) (binding-rust-tests)"*) true ;; *) false ;; esac; then
+  ok "19a-mutation: dropping the unread-verdict channel returns the SAME run to the affirmative '0 RECOGNISED ... every subject was READ' -- which IS the false clean reading this round removes, and proves 19a measures the new arm"
+else
+  bad "19a-mutation: the verdict did not collapse to the false clean reading when the channel was emptied, so 19a is not measuring the new arm; got: $m19a"
+fi
+
+# (19b) MALFORMED `.result` -- the EMPTY file an ENOSPC write actually leaves behind
+# (open+truncate succeeds, the write does not). Driven through the SHIPPED `_disk_verdict_read`.
+d="$tmp/c19b"; mkdir -p "$d"
+: > "$d/core-tests.result"
+echo 'test result: ok. 3562 passed; 0 failed' > "$d/core-tests.log"
+o19b=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _disk_verdict_read core-tests "$d/core-tests.result"; printf 'RC %s\n' "$?"
+  printf 'N %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
+  printf 'LINE %s\n' "$(_disk_exhaustion_line fmt PASS core-tests FAIL)"
+  DISK_UNREAD_VERDICTS=()
+  printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS core-tests FAIL)"
+)
+r19b=$(printf '%s\n' "$o19b" | sed -n 's/^RC //p')
+n19b=$(printf '%s\n' "$o19b" | sed -n 's/^N //p')
+l19b=$(printf '%s\n' "$o19b" | sed -n 's/^LINE //p')
+m19b=$(printf '%s\n' "$o19b" | sed -n 's/^MUTANT //p')
+if [ "${r19b:-}" = 1 ] && [ "${n19b:-0}" = 1 ] \
+   && case "$l19b" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests(verdict file MALFORMED)"*) true ;; *) false ;; esac \
+   && case "$l19b" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
+  ok "19b-malformed-empty: the EMPTY .result an ENOSPC write leaves behind reads rc 1, records ONE unread verdict, and renders UNMEASURED naming it"
+else
+  bad "19b-malformed-empty: expected rc 1 + 1 recorded subject + UNMEASURED; rc='${r19b:-<none>}' recorded='${n19b:-<none>}' line: $l19b"
+fi
+if case "$m19b" in "disk-exhaustion: 0 RECOGNISED (#3800) -- scanned 1 non-PASS component log(s) (core-tests)"*) true ;; *) false ;; esac; then
+  ok "19b-mutation: emptying the channel restores the affirmative clean reading over the SAME unreadable verdict"
+else
+  bad "19b-mutation: the malformed-verdict arm is not what makes 19b pass; got: $m19b"
+fi
+
+# (19c) A SHORT WRITE, not merely an empty one: a partially-flushed `.result` whose STATUS
+# token is truncated. The status is validated against the CLOSED set record_result can write
+# (PASS/FAIL/SKIP), so `PAS 12` is MALFORMED rather than a silently-adopted verdict.
+d="$tmp/c19c"; mkdir -p "$d"
+printf 'PAS 1' > "$d/write-tests.result"
+echo 'test result: ok. 88 passed' > "$d/write-tests.log"
+o19c=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _disk_verdict_read write-tests "$d/write-tests.result"; printf 'RC %s\n' "$?"
+  printf 'LINE %s\n' "$(_disk_exhaustion_line write-tests FAIL)"
+)
+r19c=$(printf '%s\n' "$o19c" | sed -n 's/^RC //p')
+l19c=$(printf '%s\n' "$o19c" | sed -n 's/^LINE //p')
+if [ "${r19c:-}" = 1 ] && case "$l19c" in "disk-exhaustion: UNMEASURED (#3800)"*"write-tests(verdict file MALFORMED)"*) true ;; *) false ;; esac; then
+  ok "19c-short-write: a truncated STATUS token is MALFORMED (the token is checked against the closed PASS/FAIL/SKIP set), not adopted as a verdict"
+else
+  bad "19c-short-write: a truncated status token was not caught; rc='${r19c:-<none>}' line: $l19c"
+fi
+
+# (19d) NEGATIVE CONTROL -- the arm must DISCRIMINATE. A WELL-FORMED `.result` records
+# nothing, reads rc 0, returns its two fields, and leaves the clean reading intact.
+d="$tmp/c19d"; mkdir -p "$d"
+printf 'PASS 412\n' > "$d/core-tests.result"
+echo 'error[E0308]: mismatched types' > "$d/minimal-build.log"
+o19d=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _disk_verdict_read core-tests "$d/core-tests.result"; printf 'RC %s\n' "$?"
+  printf 'ST %s\n' "$DISK_VERDICT_ST"; printf 'SECS %s\n' "$DISK_VERDICT_SECS"
+  printf 'N %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
+  printf 'LINE %s\n' "$(_disk_exhaustion_line core-tests PASS minimal-build FAIL)"
+)
+if [ "$(printf '%s\n' "$o19d" | sed -n 's/^RC //p')" = 0 ] \
+   && [ "$(printf '%s\n' "$o19d" | sed -n 's/^ST //p')" = PASS ] \
+   && [ "$(printf '%s\n' "$o19d" | sed -n 's/^SECS //p')" = 412 ] \
+   && [ "$(printf '%s\n' "$o19d" | sed -n 's/^N //p')" = 0 ] \
+   && case "$(printf '%s\n' "$o19d" | sed -n 's/^LINE //p')" in "disk-exhaustion: 0 RECOGNISED (#3800)"*) true ;; *) false ;; esac; then
+  ok "19d-negative-control: a WELL-FORMED .result reads rc 0 with both fields, records NOTHING, and leaves the clean reading intact -- the arm discriminates rather than firing on every component"
+else
+  bad "19d-negative-control: a well-formed .result did not read cleanly; got: $o19d"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# (19e) THE RECORD_RESULT IN-MEMORY ARM, DRIVEN BY A REAL ENOSPC. `record_result` is
+# extracted from the shipped script and its four unrelated chokepoint hooks (`_hb_ensure`,
+# the feature-matrix note, the two integrity asserts) are stubbed -- this case is about the
+# VERDICT WRITE and nothing else. The `.result` path is a symlink to /dev/full, so the write
+# gets the platform's own strerror. Every component PASSes, so under the OLD subject set the
+# scan had nothing at all to look at.
+#
+# /dev/full is LINUX-ONLY (macOS is a first-class gate host), so the branch is guarded and
+# the skip is DECLARED with the same case count -- a silent skip is the vacuous pass this
+# suite exists to prevent.
+# ─────────────────────────────────────────────────────────────────────────────────
+if [ "$df_usable" -ne 1 ]; then
+  ok "19e-record-result-enospc: DECLARED SKIP -- this host has no writable /dev/full, so a REAL ENOSPC on the verdict write cannot be induced hermetically"
+  ok "19e-record-result-enospc: DECLARED SKIP (second half) -- the mutation control that removes the in-memory subject is skipped with it"
+else
+  d="$tmp/c19e"; mkdir -p "$d"
+  ln -s /dev/full "$d/minimal-build.result"
+  o19e=$(
+    . "$EX"; LOG_DIR="$d"; _disk_env
+    _hb_ensure() { :; }
+    _fm_note_if_no_cargo_observed() { :; }
+    _assert_summary_integrity() { :; }
+    _assert_tree_integrity() { :; }
+    record_result minimal-build PASS 611
+    printf 'N %s\n' "${#DISK_MEM_SUBJECTS[@]}"
+    printf 'LINE %s\n' "$(_disk_exhaustion_line fmt PASS minimal-build PASS)"
+    DISK_MEM_SUBJECTS=()
+    printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS minimal-build PASS)"
+  )
+  n19e=$(printf '%s\n' "$o19e" | sed -n 's/^N //p')
+  l19e=$(printf '%s\n' "$o19e" | sed -n 's/^LINE //p')
+  m19e=$(printf '%s\n' "$o19e" | sed -n 's/^MUTANT //p')
+  if [ "${n19e:-0}" = 1 ] \
+     && case "$l19e" in "disk-exhaustion: RECOGNISED (#3800)"*"'no-space-left-on-device'"*"IN-MEMORY subject 'component verdict write (minimal-build.result)'"*) true ;; *) false ;; esac; then
+    ok "19e-record-result-enospc: a REAL ENOSPC on the shipped record_result verdict write is captured IN MEMORY and RECOGNISED, with EVERY component PASS (nothing in either older subject set could have shown it)"
+  else
+    bad "19e-record-result-enospc: the verdict-write failure was not captured/attributed; recorded='${n19e:-<none>}' line: $l19e"
+  fi
+  if case "$m19e" in "disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan"*) true ;; *) false ;; esac; then
+    ok "19e-mutation: removing the in-memory subject collapses the SAME real-ENOSPC run to the affirmative '0 RECOGNISED -- no non-PASS component to scan'"
+  else
+    bad "19e-mutation: the verdict did not collapse when the in-memory subject was removed; got: $m19e"
+  fi
+fi
+
+# (19f) NEGATIVE CONTROL FOR THE SAME ARM, and a guard on the wrapper itself: a NORMAL
+# record_result must record NOTHING and must still write exactly the two-field verdict. The
+# fix moved that redirect inside a command substitution, so "the write still happens, byte
+# for byte" is a property this case has to assert rather than assume.
+d="$tmp/c19f"; mkdir -p "$d"
+o19f=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _hb_ensure() { :; }
+  _fm_note_if_no_cargo_observed() { :; }
+  _assert_summary_integrity() { :; }
+  _assert_tree_integrity() { :; }
+  record_result minimal-build PASS 611; printf 'RC %s\n' "$?"
+  printf 'N %s\n' "${#DISK_MEM_SUBJECTS[@]}"
+)
+if [ "$(printf '%s\n' "$o19f" | sed -n 's/^RC //p')" = 0 ] \
+   && [ "$(printf '%s\n' "$o19f" | sed -n 's/^N //p')" = 0 ] \
+   && [ "$(cat "$d/minimal-build.result" 2>/dev/null)" = "PASS 611" ] \
+   && [ "$(wc -l < "$d/minimal-build.result" | tr -d ' ')" = 1 ]; then
+  ok "19f-record-result-clean: a successful verdict write records NOTHING on the in-memory channel and still emits exactly the two-field 'PASS 611' line (the capture wrapper did not change the artifact)"
+else
+  bad "19f-record-result-clean: a successful record_result mis-behaved; probe: $o19f file: '$(cat "$d/minimal-build.result" 2>/dev/null)'"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# (19g)(19h) STRUCTURAL, over the SHIPPED script. The cases above prove the scan ARM works;
+# these prove it is WIRED -- the same distinction that let the tree-integrity boundary site
+# ship with a marker whose evidence could never reach it.
+# ─────────────────────────────────────────────────────────────────────────────────
+# (19g) the fail-closed missing-result guard is where a MISSING verdict is DETECTED, so it is
+# where the subject must be recorded. Both lanes, derived from the shipped source.
+g_side=$(awk '/^for _sc in "\$\{SELECTED_SIDE/,/^done$/' "$GATE" | grep -c '_disk_note_unread_verdict')
+g_main=$(awk '/^for _mc in "\$\{SELECTED_MAIN/,/^done$/' "$GATE" | grep -c '_disk_note_unread_verdict')
+if [ "$g_side" -ge 1 ] && [ "$g_main" -ge 1 ]; then
+  ok "19g-guard-wired: BOTH lanes of the shipped fail-closed missing-result guard record the component as an unread verdict, so the synthetic FAIL can never be scanned against a clean log and reported clean"
+else
+  bad "19g-guard-wired: the missing-result guard does not record an unread verdict (side=$g_side main=$g_main) -- the synthetic FAIL is back to being an unmeasured verdict the scan calls clean"
+fi
+# (19h) ONE READER. A second, private `read -r <st> <secs> < <a .result>` anywhere in the
+# shipped script is a reader that records nothing -- exactly how this family keeps
+# regenerating. Derived from source: every such read must be inside _disk_verdict_read.
+raw_reads=$(awk '
+  /^_disk_verdict_read\(\) \{/ { inb=1 }
+  inb && /^\}$/ { inb=0; next }
+  !inb && /read -r [A-Za-z_]+ [A-Za-z_]+ < / { print FILENAME ":" FNR ": " $0 }
+' "$GATE")
+if [ -z "$raw_reads" ]; then
+  ok "19h-one-reader: no two-field verdict read outside _disk_verdict_read -- every .result site routes through the ONE reader that records unreadability"
+else
+  bad "19h-one-reader: a private two-field verdict read survives outside _disk_verdict_read (it records nothing, so its unreadable verdicts render clean):
+$raw_reads"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────
 # CASE FLOOR. A span-replacing edit that silently deletes cases must RED this suite, not
 # green it -- `failed: 0` over a shrunken subject set is the vacuous pass these suites are
 # for (#3544's own lesson, one directory over). Raise it deliberately when adding cases.
@@ -1049,7 +1308,18 @@ fi
 # take the LOWER. The 8th case-17 entry is 17f, the 400 KB payload that pins the in-memory
 # branch against pipefail+SIGPIPE turning a MATCH into UNMEASURED -- found by measurement while
 # writing this round, not predicted.)
-CASE_FLOOR=53
+# writing this round, not predicted.); +13 (roborev job 304: the THIRD KIND OF SUBJECT -- a
+# `.result` verdict the gate could not READ. 13b asserts the emitted line declares its SUBJECT
+# set and NAMES the writers outside it, in all four renderings: 2. Case 19 pins the arm --
+# absent verdict + clean log, its mutation control, the EMPTY .result an ENOSPC write really
+# leaves, its mutation control, a truncated STATUS token, and the well-formed negative control
+# that makes the arm discriminate: 6. The record_result in-memory arm at /dev/full plus its
+# mutation control: 2 (and a 2-case DECLARED SKIP where /dev/full is unavailable, so the count
+# is host-independent), with a success control that also proves the capture wrapper still
+# writes the two-field artifact byte for byte: 1. Two STRUCTURAL cases prove the arm is WIRED
+# rather than merely working -- the guard records, and no private two-field verdict read
+# survives outside the ONE reader: 2. 2+6+2+1+2 = 13.)
+CASE_FLOOR=66
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
