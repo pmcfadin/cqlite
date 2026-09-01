@@ -134,8 +134,13 @@ CREATE TYPE IF NOT EXISTS plain (
 -- unhashable_fields: a UDT declaring a `map`-typed field — the shape that WOULD
 -- be unhashable in Python if the field decoded to a `dict`. It exists for the
 -- SECOND table below, as the subject that turned a prediction into a
--- MEASUREMENT: it projects successfully today only because a collection field
--- inside a frozen UDT decodes to `Value::Blob` (roborev R1-2).
+-- MEASUREMENT: it used to project successfully only because a collection field
+-- inside a frozen UDT decoded to `Value::Blob` (roborev R1-2). Since #3631 the
+-- field DOES decode to a `dict` — and it still projects, because the container
+-- #3500 chose for a UDT-bearing set is a Python `list`, which hashes nothing.
+-- The field is also this repo's only committed collection-typed UDT field, which
+-- is why #3631's `list`/`set` coverage is at the decoder level with
+-- Cassandra-derived bytes rather than from this corpus.
 CREATE TYPE IF NOT EXISTS unhashable_fields (
     label text,
     m     frozen<map<text, int>>
@@ -202,13 +207,16 @@ CREATE TABLE IF NOT EXISTS udt_collide (
 --   * stn frozen<set<frozen<tuple<frozen<unhashable_fields>, int>>>>
 --                    — MEASURED: also SUCCEEDS, contradicting the obvious
 --                      prediction. `Udt.__hash__` does hash its field values, and
---                      a `dict` would be unhashable — but CQLite decodes a
+--                      a `dict` would be unhashable — but CQLite decoded a
 --                      collection field inside a FROZEN UDT as `Value::Blob`, so
---                      the field arrives as `bytes`, which is hashable. That
---                      decode gap is orthogonal to #3504 and is pinned as
---                      characterization by the Python suite, together with the
---                      real residual (a hand-built `cqlite.Udt` with a `dict`
---                      field still raises).
+--                      the field arrived as `bytes`, which is hashable.
+--                      #3631 FIXED that decode (the field is now `{"a": 1}`) and
+--                      `stn` STILL SUCCEEDS — re-measured, not predicted: #3500
+--                      renders a UDT-bearing set as a Python `list`, and building
+--                      a list hashes nothing, so `Udt.__hash__` is not reached on
+--                      this path at all. The residual is unchanged: a hand-built
+--                      `cqlite.Udt` with a `dict` field still raises, and no
+--                      decoder path puts one where hashing is required.
 --
 -- Each shape lives in its OWN ROW (`stu`+`mtu` in row 1, `ssu` in row 2, `stn` in
 -- row 3): the `TypeError` is raised while CONVERTING a row, so a row carrying

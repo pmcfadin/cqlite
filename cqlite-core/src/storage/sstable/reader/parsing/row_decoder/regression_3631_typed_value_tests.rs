@@ -24,7 +24,7 @@
 //! * `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java` (a
 //!   `TupleType`) — per-field `[i32 size][bytes]`, `-1` for a null field.
 //!
-//! `MAP_A_1_GOLDEN_BYTES` below are the EXACT 20 bytes the Cassandra-written fixture
+//! `MAP_A_1_GOLDEN_BYTES` below are the EXACT 17 bytes the Cassandra-written fixture
 //! carries for `unhashable_fields.m`, quoted so this hand-built layer stays anchored
 //! to the real corpus instead of drifting into a self-consistent fiction.
 

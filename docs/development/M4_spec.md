@@ -981,11 +981,24 @@ longer reached a `frozenset` at depth 2 while the ordinary `list` branch applied
 `{"key": …, "value": …}` array, so schema-aware normalization remains the fix for that residue. The
 UDT half of the residue is gone — #3504 made the projected UDT the same object the other two render.
 
-One measurement worth keeping, because it falsified the obvious prediction: a UDT declaring a
-`frozen<map<text,int>>` FIELD also projects successfully, even though `Udt.__hash__` hashes its field
-values and a `dict` would be unhashable. A collection field inside a frozen UDT decodes to
-`Value::Blob`, so it arrives as hashable `bytes`. That decode gap is orthogonal to both issues and is
-pinned as characterization in `bindings/python/tests/test_issue_3504_udt_field_namespace.py`.
+One measurement worth keeping, because it falsified the obvious prediction TWICE: a UDT declaring a
+`frozen<map<text,int>>` FIELD projects successfully, even though `Udt.__hash__` hashes its field
+values and a `dict` would be unhashable. The first explanation was a DECODE GAP — a collection field
+inside a frozen UDT decoded to `Value::Blob`, so it arrived as hashable `bytes` — and the prediction
+recorded with it was that fixing the decode would make the projection raise again.
+
+**#3631 fixed that decode (instance B) and the projection STILL succeeds.** Re-measured on the same
+committed corpus with two independently-built bindings: the field is now `{"a": 1}`, and the shape
+projects because #3500 renders a UDT-bearing set as a Python `list`, which hashes nothing — so
+`Udt.__hash__` is never reached on this path. The lesson is the one this section already carries: a
+prediction about a projection boundary has to be MEASURED at both ends, because the container and the
+field move independently. The boundary table lives in
+`test-data/fixtures/issue_3504/README.md` and the pins in
+`bindings/python/tests/test_issue_3504_udt_field_namespace.py`.
+
+The `Udt.__hash__` residual is unchanged and still has no decoder path that reaches it: a hand-built
+`cqlite.Udt` with a `dict` field raises, and no container puts a decoded one where hashing is
+required.
 
 **MULTICELL map keys were the remaining gap; #3612 CLOSED it.** A non-frozen (multicell)
 `map<K, V>` carries each key in the cell PATH, and `parse_cell_path_key` used to decode cell-path

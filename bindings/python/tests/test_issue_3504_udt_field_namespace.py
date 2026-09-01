@@ -761,7 +761,7 @@ def test_a_udt_with_a_collection_field_projects_with_that_field_as_a_dict():
     assert position == 30
     assert udt.type_name == "unhashable_fields"
     assert udt.fields["label"] == "unhashable"
-    # FIXED (#3631 instance B): the structured value, not the 20 serialized bytes.
+    # FIXED (#3631 instance B): the structured value, not the 17 serialized bytes.
     # Pinned by VALUE and not merely by type, because a `dict` of the wrong content
     # would satisfy an isinstance check while proving nothing about the decode.
     assert udt.fields["m"] == {"a": 1}, (

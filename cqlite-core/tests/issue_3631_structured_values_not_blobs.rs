@@ -26,7 +26,9 @@
 //!   — `writeCollectionSize` is `output.putInt(elements)` (4-byte BE i32 count) and
 //!   `writeValue` is `putInt(size)` + bytes (`putInt(-1)` for null). So a frozen
 //!   `map<text,int>` holding `{"a": 1}` is exactly
-//!   `00000001 00000001 61 00000004 00000001` — the 20 bytes this fixture carries.
+//!   `00000001 00000001 61 00000004 00000001` — the 17 bytes this fixture
+//!   carries (COUNTED, not eyeballed: 4 + 4 + 1 + 4 + 4; an earlier revision of this
+//!   line, and of five sibling comments, said 20).
 //! * `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java` (a
 //!   `TupleType`) — per-field `[i32 size][bytes]`, `-1` for null.
 //!
@@ -179,7 +181,7 @@ fn unfrozen(v: &Value) -> &Value {
 /// `unhashable_fields` declares `m frozen<map<text,int>>`.
 ///
 /// Golden: `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`. Before #3631 `m` arrived
-/// as the 20 raw bytes `00000001 00000001 61 00000004 00000001`.
+/// as the 17 raw bytes `00000001 00000001 61 00000004 00000001`.
 #[tokio::test]
 async fn instance_b_collection_field_of_a_frozen_udt_decodes_to_a_map() {
     let rows = rows_by_id("udt_hashable_shapes").await;
@@ -226,7 +228,7 @@ async fn instance_b_collection_field_of_a_frozen_udt_decodes_to_a_map() {
         unfrozen(m),
         &Value::Map(vec![(Value::text("a"), Value::Integer(1))]),
         "a `frozen<map<text,int>>` field of a frozen UDT must decode to the golden's \
-         {{\"a\": 1}}, not to its 20 serialized bytes (issue #3631 instance B)"
+         {{\"a\": 1}}, not to its 17 serialized bytes (issue #3631 instance B)"
     );
 }
 
@@ -241,5 +243,5 @@ async fn instance_b_collection_field_of_a_frozen_udt_decodes_to_a_map() {
 // have. So the `list` and `set` halves are covered at the DECODER's own level, with
 // bytes DERIVED FROM CASSANDRA SOURCE rather than captured from CQLite's output, in
 // `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/regression_3631_typed_value_tests.rs`
-// — which also re-decodes the EXACT 20 bytes this fixture carries for
+// — which also re-decodes the EXACT 17 bytes this fixture carries for
 // `unhashable_fields.m`, tying that hand-built layer back to this real corpus.

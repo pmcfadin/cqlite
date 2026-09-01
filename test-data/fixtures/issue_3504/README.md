@@ -176,27 +176,44 @@ converting a row, so a row holding both would hide the projectable cell.
 Measured per row (point read; `origin/main`'s binding built into the same venv
 for the "before" column):
 
-| row | column | type | before #3504 | after |
+| row | column | type | before #3504 | after #3504 |
 |---|---|---|---|---|
 | 1 | `stu` | `frozen<set<frozen<tuple<frozen<collide>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 10)})` |
 | 1 | `mtu` | `frozen<map<frozen<tuple<frozen<collide>,int>>,int>>` | `TypeError: unhashable type: 'dict'` | `{(Udt, 20): 5}` |
 | 2 | `ssu` | `frozen<set<frozen<set<frozen<collide>>>>>` | `TypeError: unhashable type: 'list'` | **identical** — still raises |
 | 3 | `stn` | `frozen<set<frozen<tuple<frozen<unhashable_fields>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 30)})` |
 
-Two things to read off it:
+### RE-MEASURED at #3631 (acceptance criterion 9) — the boundary moved AGAIN
 
-- `ssu` still fails for a reason #3504 never touched: the **inner** set has a UDT
-  element, so `set_to_py` renders it as a Python `list` for CLI parity (#804),
-  and a list is unhashable in the outer set. The error text (`'list'`, not
-  `'dict'`) is what identifies the cause.
-- `stn` **succeeds**, contradicting the obvious prediction that a UDT with a
-  `map`-typed field stays unhashable. It does so only because CQLite decodes a
-  collection field inside a frozen UDT as `Value::Blob`, so the field arrives as
-  hashable `bytes` rather than a `dict`. That is a **decode gap** orthogonal to
-  #3504 (the correct value is `{"a": 1}`), pinned as characterization by
-  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`. `Udt.__hash__`
-  does still propagate `TypeError` for a genuinely unhashable field value; no
-  decoder path reaches that today, so it is asserted on a hand-built value.
+The table above is #3504's measurement and is kept as history. #3500 then changed
+the CONTAINER of the set columns, and #3631 changed the `stn` UDT's FIELD, so both
+sides were re-measured rather than predicted: two independently-built bindings, the
+same committed corpus, one point read per row.
+
+| column | on `origin/main` (`626465c87`, i.e. before #3631) | with #3631 |
+|---|---|---|
+| `stu` | `list` — `[(Udt(collide…), 10)]` | **identical** |
+| `mtu` | `dict` — `{(Udt(collide…), 20): 5}` | **identical** |
+| `ssu` | `list` — `[[Udt(collide…)]]` | **identical** |
+| `stn` | `list`, field `m` = **`bytes`** (the 17 serialized bytes) | `list`, field `m` = **`{"a": 1}`** |
+
+Three things to read off THAT:
+
+- **The prediction #3504 recorded for `stn` — "fixing the decode may make this raise
+  again" — is FALSE, and only measurement says so.** `Udt.__hash__` would indeed
+  reject a `dict` field, but it is never reached here: #3500 made a UDT-bearing set
+  render as a Python `list` (`contains_udt` traverses the whole subtree), and building
+  a list hashes nothing. So `stn` projects successfully both before and after; only
+  the field's TYPE changed.
+- **`ssu` no longer raises** — on `origin/main`, before #3631. That is #3500's
+  container change, not this issue's: nothing in #3631 touches a `set`-of-`set`. It is
+  recorded here because the older table says "still raises", which stopped being true
+  before this change and would otherwise read as a #3631 effect.
+- The `Udt.__hash__` residual is still real and still has no decoder path that reaches
+  it, so it stays asserted on a HAND-BUILT `cqlite.Udt` in
+  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`. The decoder now
+  produces a `Udt` with a `dict` field; no container puts one where hashing is
+  required.
 
 The Node binding has no analogous boundary: it builds a real JS `Set`/`Map`,
 which need no hashable projection at all.

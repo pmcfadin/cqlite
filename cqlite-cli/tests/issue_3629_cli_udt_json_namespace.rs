@@ -236,7 +236,7 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         Some(&json!([{"key": "a", "value": 1}])),
         "a `frozen<map<text,int>>` field of a frozen UDT must render structurally \
          (the CLI's key/value array spelling of a CQL map), not as the hex of its \
-         20 serialized bytes (issue #3631 instance B)"
+         17 serialized bytes (issue #3631 instance B)"
     );
 }
 

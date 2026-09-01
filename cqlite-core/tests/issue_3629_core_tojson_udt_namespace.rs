@@ -251,7 +251,7 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         udt.get("m"),
         Some(&json!({"'a'": 1})),
         "a `frozen<map<text,int>>` field of a frozen UDT must render structurally, \
-         not as the base64 of its 20 serialized bytes (issue #3631 instance B)"
+         not as the base64 of its 17 serialized bytes (issue #3631 instance B)"
     );
 }
 

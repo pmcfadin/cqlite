@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (both bindings, the CLI and `cqlite-core`, observable): a COLLECTION-,
+  tuple- or UDT-typed field of a frozen UDT now decodes from its declared type
+  instead of degrading to an opaque blob (#3631, instance B).** The field decoder
+  `parse_simple_udt_field_value` matched a CLOSED SET of primitive types and fell
+  back to `Value::Blob` for everything else — while the field's declared `CqlType`
+  was the `match` scrutinee, i.e. in hand and unread. That is the silent degradation
+  #28 (no-heuristics) forbids, and its own doc comment described it as a limitation.
+  A UDT declaring `frozen<map<text,int>>` surfaced that field to every consumer as
+  bytes.
+
+  - **Before** (Python): `udt.fields["m"] == b'\x00\x00\x00\x01…'` (17 bytes)
+  - **After**: `udt.fields["m"] == {"a": 1}` — the value `sstabledump`'s golden
+    already rendered for the same Cassandra-written bytes
+
+  The new decoder (`row_decoder/typed_value.rs`) is driven by the declared `CqlType`,
+  with every structured shape taken from `cassandra-5.0.8`
+  (`CollectionSerializer.pack`/`writeValue`, `TupleType`/`UserType` per-field
+  `[i32 size][bytes]`). A declared type it cannot express is an explicit
+  `Error::unsupported_format` NAMING the type — never a blob. It is also strict about
+  byte accounting, which is a behaviour change on malformed input: trailing bytes
+  after a decoded value, a partial trailing component-length prefix, a zero-count
+  collection with a payload behind it, and an oversized fixed-width scalar are all
+  refused instead of silently truncating, per `TupleType.split`'s three rules
+  (`position == length` returns, `position + 4 > length` throws,
+  `position < length` throws).
+
+  **Instance A of #3631 — a NON-frozen `map<frozen<udt>, int>` cell-path key — is
+  NOT part of this change.** It was fixed independently by #3612 / PR #3736 and is
+  documented there.
+
+  **Scope note:** the committed corpus declares exactly one collection-typed UDT
+  field (`unhashable_fields.m`), so the `list`/`set`/`tuple` halves are covered at
+  the decoder's own level with Cassandra-derived bytes, and the fixture oracle covers
+  the `map` one. No fixture coverage is claimed for `list`/`set`.
+
+  **Python hashability boundary (#3500), re-measured rather than predicted:** the
+  `stn` shape still projects successfully — #3500 renders a UDT-bearing set as a
+  Python `list`, which hashes nothing, so `Udt.__hash__` is not reached. The table is
+  in `test-data/fixtures/issue_3504/README.md`.
+
 - **BREAKING (CLI `--format json` and `cqlite-core`'s `ToJson`, observable): a UDT
   renders as its DECLARED FIELDS AND NOTHING ELSE — the injected `_type` key is
   gone (#3629).** This is the CLI-side half of #3504's class, on a third surface and
