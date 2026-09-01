@@ -90,6 +90,36 @@ mk_only_summary() {
   } > "$path"
 }
 
+# mk_block <path> <opener-suffix> <run-id> <RESULT> [line...] — a block with an
+# ARBITRARY opener/closer variant (LITE / DELTA), for the mode-enforcement cases.
+mk_block() {
+  local path="$1" suf="$2" rid="$3" result="$4"; shift 4
+  { echo "==== AGENT-GATE${suf} SUMMARY ===="
+    echo "run-id: $rid"
+    echo "commit: abc1234 branch: issue-3750 dirty: no"
+    echo "tree-integrity: PASS"
+    local l; for l in "$@"; do printf '%s\n' "$l"; done
+    [ -n "$result" ] && echo "RESULT: $result"
+    echo "==== END AGENT-GATE${suf} SUMMARY ===="
+  } > "$path"
+}
+# mk_beat <path> <run-id> <age-secs> [interval] — copied field-for-field from
+# scripts/tests/test_gate_liveness.sh's fixture, so the shared reader sees the shape it
+# really parses.
+mk_beat() {
+  local iv="${4:-20}"
+  { echo "==== AGENT-GATE HEARTBEAT ===="
+    echo "run-id: $2"
+    echo "gate-pid: 4242"
+    echo "parent-check: starttime"
+    echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "interval: $iv"
+    echo "beat-seq: 7"
+    echo "beat-epoch: $(( $(date +%s) - $3 ))"
+    echo "==== END AGENT-GATE HEARTBEAT ===="
+  } > "$1"
+}
+
 # ---------------------------------------------------------------------------
 # expect <label> <want-verdict> <want-rc> <needle> -- <verdict-script args...>
 #
@@ -113,7 +143,9 @@ expect() {
   if printf '%s' "$out" | grep -qE 'RESULT:[[:space:]]*[A-Z]'; then
     bad "$label" "output carries a RESULT: token (pastable as a gate verdict): $(printf '%s' "$out" | head -3)"; return
   fi
-  if printf '%s' "$out" | grep -qF 'gate-component-verdict.'; then
+  # The mktemp SUFFIX, not the bare name: the script's own file name is
+  # `gate-component-verdict.sh`, which --help legitimately prints.
+  if printf '%s' "$out" | grep -qE 'gate-component-verdict\.[A-Za-z0-9]{6}'; then
     bad "$label" "output names the PRIVATE SNAPSHOT path, which will not exist when anyone reads it: $(printf '%s' "$out" | head -2)"; return
   fi
   if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
@@ -348,6 +380,238 @@ else
   bad "7.2 control: gate-liveness.sh does NOT report COMPLETE for an INCOMPLETE block" \
       "out=$(printf '%s' "$_gl" | head -1)"
 fi
+
+echo "=== section 8: every read is BOUNDED BY THE VALIDATED BLOCK (B1) ==="
+# gate-liveness.sh:143-149 DECLARES its own residual: a well-formed blend is
+# indistinguishable, and its structure check constrains only the COUNTS and ORDERING of
+# opener/closer/RESULT/run-id — never that no lines sit OUTSIDE the span. So a stale tail
+# left by a PREVIOUS write to the same path is inside the FILE and outside the BLOCK, and
+# a whole-file grep reads it as this run's verdict. That is a false PASS in a tool whose
+# entire subject is the vacuous pass.
+S8="$TMP/outside-above.txt"
+{ comp_line tooling-tests PASS 1112s '[stale tail of a previous write]'
+  echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only fmt) - does NOT count as the gate"
+  comp_line fmt FAIL 3s
+  echo "RESULT: FAIL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$S8"
+expect "8.1 a stale component line ABOVE the opener is NOT this run's verdict" \
+  NOT-PASS 1 "absent" -- "$S8" --mode only --component tooling-tests --run-id run-1
+
+S8b="$TMP/outside-below.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only fmt) - does NOT count as the gate"
+  comp_line fmt FAIL 3s
+  echo "RESULT: FAIL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+  comp_line tooling-tests PASS 1112s '[stale tail]'
+} > "$S8b"
+expect "8.2 a stale component line BELOW the closer is NOT this run's verdict either" \
+  NOT-PASS 1 "absent" -- "$S8b" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: the SAME line INSIDE the block still reads PASS, or 8.1/8.2 would pass against
+# a reader that had simply stopped finding component lines at all.
+S8c="$TMP/inside.txt"
+mk_only_summary "$S8c" run-1 PARTIAL tooling-tests "$(comp_line tooling-tests PASS 1112s)"
+expect "8.3 control: the same line INSIDE the block still reads PASS" \
+  PASS 0 "tooling-tests" -- "$S8c" --mode only --component tooling-tests --run-id run-1
+
+# TWO openers: the extent is not unique, so no read can be bounded. Refuse.
+S8d="$TMP/two-blocks.txt"
+{ cat "$S8c"; cat "$S8c"; } > "$S8d"
+expect "8.4 two blocks in one file => the extent is not unique, so refuse" \
+  COULD-NOT-MEASURE 4 "" -- "$S8d" --mode only --component tooling-tests --run-id run-1
+
+echo "=== section 9: --mode only is ENFORCED against the artifact, not merely validated (B2) ==="
+# --mode was validated and then never read again, so the record/lite/delta refusals were
+# defeated by declaring `--mode only` and pointing at the other artifact. Measured: a LITE
+# block's `clippy: PASS` was returned as a component verdict — for --lite's PER-PACKAGE
+# SCOPED clippy — which is exactly the misreading the --mode lite refusal text claims to
+# prevent.
+S9L="$TMP/lite.txt"
+mk_block "$S9L" " LITE" run-1 PASS "MODE: lite (FAST ITERATION — NOT the gate of record)" \
+  "$(comp_line clippy PASS 219s)"
+expect "9.1 a LITE block under --mode only is REFUSED by name, never answered" \
+  COULD-NOT-MEASURE 4 "lite" -- "$S9L" --mode only --component clippy --run-id run-1
+
+S9D="$TMP/delta.txt"
+mk_block "$S9D" " DELTA" run-1 PASS "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION)" \
+  "$(comp_line fmt PASS 8s)"
+expect "9.2 a DELTA block under --mode only is REFUSED by name" \
+  COULD-NOT-MEASURE 4 "delta" -- "$S9D" --mode only --component fmt --run-id run-1
+
+# TRAP 1: `--only` takes a COMMA-SEPARATED LIST (agent-gate.sh's `--only` arg), so a
+# membership test written as equality REDS a correct `--only fmt,clippy` run.
+S9C="$TMP/only-list.txt"
+mk_only_summary "$S9C" run-1 PARTIAL "fmt,clippy" \
+  "$(comp_line fmt PASS 8s)" "$(comp_line clippy PASS 219s)"
+expect "9.3 control: a COMMA-LIST --only run is answered, not red (trap 1)" \
+  PASS 0 "clippy" -- "$S9C" --mode only --component clippy --run-id run-1
+
+# A component line present for a component the run did NOT select is a contradiction
+# between the block's own scope and its content — refuse rather than pick one.
+S9X="$TMP/scope-contradiction.txt"
+mk_only_summary "$S9X" run-1 PARTIAL fmt \
+  "$(comp_line fmt PASS 8s)" "$(comp_line tooling-tests PASS 1112s)"
+expect "9.4 a line for a component the --only scope EXCLUDES is a contradiction, not a pass" \
+  COULD-NOT-MEASURE 4 "scope" -- "$S9X" --mode only --component tooling-tests --run-id run-1
+
+# TRAP 2: the tree-integrity BOUNDARY emit writes NO `mode:` line at all, so requiring one
+# unconditionally REDS a legitimate --only block. A full-marker block with no `mode:` line
+# must still be answerable.
+S9N="$TMP/no-mode-line.txt"
+mk_summary "$S9N" run-1 PARTIAL "$(comp_line tooling-tests PASS 1112s)"
+expect "9.5 control: a full-marker block with NO mode: line is still answerable (trap 2)" \
+  PASS 0 "tooling-tests" -- "$S9N" --mode only --component tooling-tests --run-id run-1
+
+echo "=== section 10: the INTEGRITY lines invalidate every component in the block (B3) ==="
+# A mutated-mid-run run stamps `tree-integrity: FAIL (tree-mutated-midrun; …)` and a FAIL
+# verdict while the component line still reads PASS. Emitting PASS from such a block
+# contradicts #2926/#2874 and this diff's own gate-ops.md text. Unlike a SIBLING
+# component's FAIL (case 3.3, which is correct to ignore), the integrity lines invalidate
+# the WHOLE block.
+SA1="$TMP/tree-mutated.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: FAIL (tree-mutated-midrun; head aaaa→bbbb; detected-after-component: tooling-tests)"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: FAIL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SA1"
+expect "10.1 tree-integrity FAIL + a PASSing component line => NOT-PASS" \
+  NOT-PASS 1 "tree-integrity" -- "$SA1" --mode only --component tooling-tests --run-id run-1
+
+# TRAP: a THIRD legitimate value exists. SKIP means the check never ran, which is
+# unmeasurable — never FAIL.
+for _v in "SKIP (no capture)" "PENDING" "PASSENGER"; do
+  _f="$TMP/ti-$(printf '%s' "$_v" | tr -c 'A-Za-z' '-').txt"
+  { echo "==== AGENT-GATE SUMMARY ===="
+    echo "run-id: run-1"
+    echo "tree-integrity: $_v"
+    echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+    comp_line tooling-tests PASS 1112s
+    echo "RESULT: PARTIAL"
+    echo "==== END AGENT-GATE SUMMARY ===="
+  } > "$_f"
+  expect "10.2[$_v] a tree-integrity token outside {PASS,FAIL} is COULD-NOT-MEASURE, never FAIL" \
+    COULD-NOT-MEASURE 4 "tree-integrity" -- "$_f" --mode only --component tooling-tests --run-id run-1
+done
+
+SA3="$TMP/ti-absent.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SA3"
+expect "10.3 an ABSENT tree-integrity line is COULD-NOT-MEASURE, never assumed benign" \
+  COULD-NOT-MEASURE 4 "tree-integrity" -- "$SA3" --mode only --component tooling-tests --run-id run-1
+
+SA4="$TMP/ti-twice.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "tree-integrity: FAIL (tree-mutated-midrun)"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SA4"
+expect "10.4 two tree-integrity lines is ambiguous, never resolved in favour of PASS" \
+  COULD-NOT-MEASURE 4 "tree-integrity" -- "$SA4" --mode only --component tooling-tests --run-id run-1
+
+SA5="$TMP/summary-integrity.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "summary-integrity: FAIL (foreign run-id observed; detected-after-component: fmt)"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: FAIL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SA5"
+expect "10.5 a summary-integrity line (only ever FAIL) invalidates the block too" \
+  NOT-PASS 1 "summary-integrity" -- "$SA5" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: the check is TOKEN-terminated, not whole-value equality — the gate emits
+# `tree-integrity: PASS (selftest)` and `PASS (lockfile-settled: …)`.
+SA6="$TMP/ti-detail.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS (lockfile-settled: Cargo.lock)"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SA6"
+expect "10.6 control: tree-integrity PASS with trailing detail is still a PASS" \
+  PASS 0 "tooling-tests" -- "$SA6" --mode only --component tooling-tests --run-id run-1
+
+echo "=== section 11: --help obeys the SAME four invariants as every verdict (B4) ==="
+# CLAUDE.md #3312 instance 2, verbatim: the artifact that DESCRIBED the escape hatch became
+# it. --help printed the header, which spelled the forbidden literals out — so the sentence
+# explaining why the token must never be emitted WAS the emitted token, and an unanchored
+# record probe over --help MATCHED. The bespoke check that used to sit here asserted none of
+# the four invariants, which is how it shipped. So --help now goes through `expect_raw`,
+# which applies exactly the invariant block every verdict case gets.
+expect_raw_help() {
+  local out rc bad_any=0
+  out=$(bash "$VERDICT" --help 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || { bad "11.1 --help exits 0" "rc=$rc"; bad_any=1; }
+  local unanchored
+  unanchored=$(printf '%s\n' "$out" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
+  if [ -n "$unanchored" ]; then
+    bad "11.2 every --help line carries the gate-verdict: anchor" "$(printf '%s' "$unanchored" | head -2)"; bad_any=1
+  else ok "11.2 every --help line carries the gate-verdict: anchor"; fi
+  if printf '%s' "$out" | grep -qE 'RESULT:[[:space:]]*[A-Z]'; then
+    bad "11.3 --help carries no bare RESULT token" "$(printf '%s' "$out" | grep -E 'RESULT:[[:space:]]*[A-Z]' | head -2)"; bad_any=1
+  else ok "11.3 --help carries no bare RESULT token"; fi
+  if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
+    bad "11.4 --help carries no AGENT-GATE block marker" "$(printf '%s' "$out" | grep -F '==== AGENT-GATE' | head -2)"; bad_any=1
+  else ok "11.4 --help carries no AGENT-GATE block marker"; fi
+  # The whole point, stated as the property rather than as a spelling: the UNANCHORED
+  # record probe — the one every stale poll site still carries — must not match --help.
+  if printf '%s\n' "$out" | grep -qE 'RESULT: (PASS|FAIL)'; then
+    bad "11.5 the unanchored record probe does NOT match --help output"; bad_any=1
+  else ok "11.5 the unanchored record probe does NOT match --help output"; fi
+  [ "$bad_any" -eq 0 ] && ok "11.1 --help exits 0"
+  # AND it must still TEACH both grammars, or the fix would be "delete the content".
+  if printf '%s' "$out" | grep -qF 'PARTIAL' && printf '%s' "$out" | grep -qF '[[:space:]]'; then
+    ok "11.6 --help still teaches both anchored, token-terminated grammars"
+  else
+    bad "11.6 --help still teaches both anchored, token-terminated grammars"
+  fi
+}
+expect_raw_help
+
+echo "=== section 12: a missing OPTION VALUE is an anchored USAGE refusal, not a bash error ==="
+# `${2:?…}` exits 1 with an UNANCHORED bash diagnostic where this script documents an
+# anchored USAGE refusal at 64. The suite had no case per option, which is why it shipped.
+for _o in --mode --component --run-id --heartbeat; do
+  expect "12[$_o] a missing value is an anchored USAGE refusal at 64" \
+    USAGE 64 "$(printf '%s' "$_o" | tr -d '-')" -- "$S8c" "$_o"
+done
+# The closed name grammar must be NEWLINE-SAFE: a line-based check validates $'fmt\nx',
+# and COMP_RE then becomes a multi-pattern grep with a bare `^fmt`. It only failed to
+# produce a PASS by accident, and safe-by-accident is not safe.
+expect "12.5 a component name containing a NEWLINE is refused by the grammar itself" \
+  USAGE 64 "" -- "$S8c" --mode only --component "$(printf 'fmt\nx')"
+
+echo "=== section 13: RETRYABLE and PERMANENT do not share an exit code ==="
+# The #3750 hang shape, reproduced one directory over inside its own fix: a caller polling
+# the exit code cannot tell "keep waiting" from "never measurable", so it spins forever.
+S13="$TMP/running.txt"
+mk_summary "$S13" run-1 "INCOMPLETE (gate did not finish)"
+mk_beat "$S13.heartbeat" run-1 5 20
+expect "13.1 a LIVE run gets its own RETRYABLE verdict and exit code" \
+  NOT-COMPLETE 5 "" -- "$S13" --mode only --component tooling-tests --run-id run-1
+# And the permanent states keep exit 4, so the two are distinguishable by code alone.
+expect "13.2 control: a permanently truncated block stays PERMANENT (4), not retryable" \
+  COULD-NOT-MEASURE 4 "" -- "$SC" --mode only --component tooling-tests --run-id run-1
 
 # ---------------------------------------------------------------------------
 # CASE FLOOR (#3544). A span-replacing edit once silently deleted four cases from a
