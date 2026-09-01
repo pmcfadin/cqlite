@@ -19223,6 +19223,10 @@ _DA_EVALUATIONS=0
 # there — so a refusal can never claim a slot was released when none was ever held.
 _DA_MOMENT=""
 _DA_SLOT_NOTE=""
+# The resolved target dir the CURRENTLY retained _DA_MOUNT was measured against. The
+# pairing is explicit so a later measurement can PROVE the retained mount still describes
+# the same subject rather than assume it (roborev job 345).
+_DA_MOUNT_FOR_TARGET=""
 # Per-measurement outputs of _gate_disk_admission_measure.
 _DA_STATE=""
 _DA_VALUE=""
@@ -19540,9 +19544,23 @@ _gate_gib_render() { awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/de
 # moments call THIS — that identity is the whole of AC1.
 _gate_disk_admission_measure() {
   local probe crc
-  # _DA_MOUNT is deliberately NOT cleared: it names the SUBJECT FILESYSTEM, which is the
-  # same one at both moments, so an UNMEASURED second reading must not erase the identity
-  # the first one established. It is an identity, never a verdict.
+  # THE MOUNT IS RETAINED ONLY WHERE THE SUBJECT IS PROVEN THE SAME (roborev job 345, Low).
+  #
+  # The earlier rule — "_DA_MOUNT names the subject filesystem, which is the same one at
+  # both moments" — stopped being true the moment the target dir was RE-RESOLVED at slot
+  # grant (which it is, deliberately: a `.cargo/config.toml` edited during a long queue
+  # changes where the build will write). A post-queue measurement that fails could then
+  # pair the NEW target dir with the OLD mount, and the remedy line would send an operator
+  # to clean the wrong filesystem — this whole change's failure mode in miniature: a
+  # specific, confident, wrong answer.
+  #
+  # So the mount is carried forward ONLY when the newly resolved subject is IDENTICAL to
+  # the one it was measured against, tracked explicitly rather than assumed because
+  # nothing looked different; otherwise it is cleared and the block reads `fs unknown`.
+  # DECLARED RESIDUAL: identity is by RESOLVED PATH, so a remount of the same path between
+  # the two moments is not detected. That bound is acceptable here and nowhere else in this
+  # block, because the mount is DISPLAY AND REMEDY only — no verdict has ever depended on
+  # it — whereas every value a verdict does depend on is re-measured outright.
   _DA_STATE=""; _DA_VALUE=""; _DA_WHY=""
   probe=$(_gate_disk_admission_probe)
   case "$probe" in
@@ -19553,6 +19571,7 @@ _gate_disk_admission_measure() {
       _DA_TARGET_DIR="${probe%%$'\t'*}"
       [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
       _DA_MOUNT="${probe#*$'\t'}"
+      _DA_MOUNT_FOR_TARGET="$_DA_TARGET_DIR"
       _DA_VALUE=$(_gate_gib_render "$kib")
       [ -n "$_DA_VALUE" ] || _DA_VALUE="${kib}KiB"
       # Keyed on the AFFIRMATIVE value (the reading CLEARS the bar), never on the
@@ -19571,8 +19590,15 @@ _gate_disk_admission_measure() {
       _DA_WHY="${probe%%$'\t'*}"
       _DA_TARGET_DIR="${probe#*$'\t'}"
       [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      # Keep the previous mount ONLY if it was measured against THIS subject; an empty or
+      # differing target dir means the retained value describes something else.
+      if [ -z "$_DA_TARGET_DIR" ] || [ "$_DA_MOUNT_FOR_TARGET" != "$_DA_TARGET_DIR" ]; then
+        _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET=""
+      fi
       ;;
-    *)              _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised ;;
+    *)
+      _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised
+      _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET="" ;;
   esac
   return 0
 }
@@ -20661,8 +20687,71 @@ dispatch_component() {
 is_side_component() {
   [ "$(_component_lane "$1")" = side ]
 }
+# ---- ONE RESOLVED TARGET DIRECTORY, SHARED BY THE PROBE AND THE BUILDS (#3755) ----
+#
+# THE DEFECT (roborev job 345, and it is fallout from the fix one round earlier rather
+# than a separate bug). The #3755 probe stopped modelling cargo's target-dir precedence
+# and started ASKING cargo — which exposed that the side lane was still modelling it,
+# with the exact expression the probe had just shed: `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`.
+# So with `CARGO_BUILD_TARGET_DIR` or a `[build] target-dir` set, the guard measured
+# cargo's resolved directory while several large side-lane builds wrote somewhere else,
+# and the run could begin below the intended floor on the filesystem that actually fills.
+#
+# A finding whose grammar is "these two disagree" says CONSOLIDATE, not patch. Measuring
+# both filesystems would keep two resolutions alive and add multi-subject verdict logic on
+# top; deriving one from the other leaves ONE resolver and ONE truth, and the probe and the
+# builds then agree BY CONSTRUCTION rather than by reconciliation.
+#
+# *** BEHAVIOUR CHANGE, stated rather than left to be inferred: when a config-based target
+# dir is in effect (`[build] target-dir`, or `CARGO_BUILD_TARGET_DIR`), SIDE-LANE BUILDS
+# ARE NOW PLACED UNDER IT instead of under `$REPO_ROOT/target`. That is the CORRECT
+# placement — it is where cargo would have put them had we not overridden it with a
+# modelled path — and it fixes a second-order defect the old base had on its own terms: it
+# silently ignored an operator's configured target dir and wrote into the repo instead,
+# which is the "fills the wrong volume" class #3434 exists for. Nothing changes when no
+# such config is set, which is every lane on this fleet today. ***
+#
+# Resolved ONCE, in the MAIN shell, before any lane starts. Not lazily inside
+# run_side_component: that runs inside the backgrounded SIDE sub-pool, where (a) a cache
+# write lands in a subshell and is discarded, so every side component would re-resolve, and
+# (b) concurrent resolutions would race on `_component_set_bounded`'s SHARED capture files.
+_GATE_SIDE_BASE=""
+_GATE_SIDE_BASE_NOTE=""
+
+# _gate_side_target_base_init: resolve the side lane's base exactly once, in the main shell.
+_gate_side_target_base_init() {
+  local r
+  [ -n "$_GATE_SIDE_BASE" ] && return 0
+  if [ -n "${_DA_TARGET_DIR:-}" ]; then
+    # The #3755 probe already asked cargo, at slot grant. Reuse its answer verbatim — a
+    # second call could only produce a second opinion.
+    _GATE_SIDE_BASE="$_DA_TARGET_DIR"
+    _GATE_SIDE_BASE_NOTE="cargo-resolved (shared with the #3755 admission probe)"
+    return 0
+  fi
+  # No probe verdict: `--only` self-exempts from the slot cap and therefore from the probe,
+  # and it still runs components. Ask the SAME resolver rather than reintroducing the model.
+  r=$(_gate_resolve_target_dir)
+  case "$r" in
+    'OK '*)
+      _GATE_SIDE_BASE="${r#OK }"
+      _GATE_SIDE_BASE_NOTE="cargo-resolved (the #3755 probe does not run in this mode)" ;;
+    *)
+      # Resolution genuinely failed. The side lane must still build somewhere, so this is
+      # the ONE place the legacy modelled base survives — and it is LOUD, never silent,
+      # because it is the configuration in which the probe and the builds can disagree.
+      _GATE_SIDE_BASE="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+      _GATE_SIDE_BASE_NOTE="UNRESOLVED (${r#UNRESOLVED }) — legacy modelled base"
+      echo "agent-gate: WARN: could not resolve cargo's target directory (${r#UNRESOLVED }); SIDE-lane builds fall back to the modelled base $_GATE_SIDE_BASE, which may not be where cargo writes (#3755)" >&2 ;;
+  esac
+  return 0
+}
+
 run_side_component() {
-  local base="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  # Reads the value resolved in the main shell. The `:-` is a guard for a dispatch path
+  # that never called the init, not a second resolution: resolving HERE would be inside the
+  # SIDE sub-pool, which is exactly what the init exists to avoid.
+  local base="${_GATE_SIDE_BASE:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}}"
   CARGO_TARGET_DIR="$base/agent-gate-side/$1" dispatch_component "$1"
 }
 
@@ -20691,6 +20780,9 @@ SIDE_LANE_PID=""
 launch_components() {
   local -a main_lane=() side_lane=()
   local c
+  # #3755: resolve the side lane's target base HERE, in the main shell, before any lane is
+  # launched — one resolver, one truth, shared with the admission probe.
+  _gate_side_target_base_init
   for c in "${COMPONENTS[@]}"; do
     [ "$c" = file-size ] && continue
     _pool_selected "$c" || continue

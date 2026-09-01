@@ -96,6 +96,30 @@ trap cleanup EXIT
 # A per-run state file keeps the counter, so concurrent runs never share one.
 # ---------------------------------------------------------------------------
 mkdir -p "$tmp/shim"
+# A PATH-shim `cargo` used ONLY by the cases that need the resolved target dir to CHANGE
+# between the two measurements. It lives in its own directory so the default cases keep
+# using the real cargo (Case K's whole point).
+mkdir -p "$tmp/cargoshim"
+# NON-`metadata` invocations are delegated to the REAL cargo and consume NO scripted
+# line. Found the hard way: the gate's accelerator detection runs `cargo nextest
+# --version` at startup, which ate script line 1, so BOTH resolutions read the same
+# value and the "subject moved" case silently became a "subject unchanged" case — a
+# control that did not control, the third instance of that family on this branch.
+_REAL_CARGO=$(command -v cargo 2>/dev/null || printf '/nonexistent/cargo')
+cat > "$tmp/cargoshim/cargo" <<CSHIM
+#!/usr/bin/env bash
+if [ "\${1:-}" != metadata ]; then exec "$_REAL_CARGO" "\$@"; fi
+CSHIM
+cat >> "$tmp/cargoshim/cargo" <<'CSHIM'
+n=$(cat "$CARGO_SHIM_STATE" 2>/dev/null || printf '0')
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+n=$((n + 1)); printf '%s' "$n" > "$CARGO_SHIM_STATE"
+val=$(sed -n "${n}p" "$CARGO_SHIM_SCRIPT" 2>/dev/null)
+[ -n "$val" ] || val=$(tail -n 1 "$CARGO_SHIM_SCRIPT" 2>/dev/null)
+printf '{"target_directory":"%s","packages":[],"workspace_members":[],"version":1}\n' "$val"
+CSHIM
+chmod +x "$tmp/cargoshim/cargo"
+
 cat > "$tmp/shim/df" <<'SHIM'
 #!/usr/bin/env bash
 n=$(cat "$DF_SHIM_STATE" 2>/dev/null || printf '0')
@@ -1050,6 +1074,142 @@ if [ "$(df_calls k-nocargo)" -eq 0 ]; then
 else
   bad "target-dir/k-nocargo: df was called $(df_calls k-nocargo) time(s) against an unresolved subject"
 fi
+
+# ===========================================================================
+# Case L (roborev job 345, Medium): the PROBE and the BUILDS resolve the target
+# directory the SAME way — one resolver, one truth.
+#
+# The probe stopped modelling cargo in round 5, which exposed that
+# run_side_component still did, with the very expression the probe had shed. So a
+# config-based target dir made the guard measure cargo's directory while several
+# large side-lane builds wrote somewhere else entirely.
+#
+# Asserted against the REAL functions: both bodies are EXTRACTED VERBATIM from the
+# shipped agent-gate.sh and executed (the idiom test_cargo_output_parsers.sh uses),
+# so unwiring them reds this suite instead of greening it. Only two things are
+# substituted, and neither is the subject: `dispatch_component`, replaced by a
+# recorder, and `_gate_resolve_target_dir`, scripted — the resolver itself is
+# covered against the REAL cargo by Case K, and stubbing it here isolates the
+# wiring question this case exists to answer.
+# ===========================================================================
+l_extract() { awk -v f="^$1\\\(\\\) \\\{$" '$0 ~ f {p=1} p {print} p && /^\}$/ {exit}' "$GATE"; }
+
+for fn in _gate_side_target_base_init run_side_component; do
+  if [ -n "$(l_extract "$fn")" ]; then
+    ok "side-base: extracted the REAL $fn from the shipped gate"
+  else
+    bad "side-base: could not extract $fn — this case would be testing nothing"
+  fi
+done
+
+# l_side_base <resolver-answer> <_DA_TARGET_DIR> <CARGO_TARGET_DIR> -> the base
+# run_side_component actually passes, via the real bodies.
+l_side_base() {
+  local answer="$1" datd="$2" ctd="$3"
+  (
+    set -uo pipefail
+    REPO_ROOT="/repo-root"
+    _DA_TARGET_DIR="$datd"
+    CARGO_TARGET_DIR="$ctd"
+    _GATE_SIDE_BASE=""; _GATE_SIDE_BASE_NOTE=""
+    # `$answer`, never `$1`: inside a function body `$1` is THAT FUNCTION's first
+    # argument, so the obvious `printf '%s' "$1"` printed the empty string and every
+    # scripted answer read as UNRESOLVED — a stub that silently stubbed nothing.
+    _L_ANSWER="$answer"
+    _gate_resolve_target_dir() { printf '%s' "$_L_ANSWER"; }
+    dispatch_component() { printf '%s' "${CARGO_TARGET_DIR%/agent-gate-side/*}"; }
+    eval "$(l_extract _gate_side_target_base_init)"
+    eval "$(l_extract run_side_component)"
+    _gate_side_target_base_init 2>/dev/null
+    run_side_component smoke
+  ) 2>/dev/null
+}
+# The PRE-FIX body, reproduced verbatim, for the differential.
+l_prefix_base() { printf '%s' "${2:-/repo-root/target}"; }
+
+l_case() {
+  local label="$1" expect="$2" resolver="$3" datd="$4" ctd="$5"
+  local got; got=$(l_side_base "$resolver" "$datd" "$ctd")
+  if [ "$got" = "$expect" ]; then
+    ok "side-base/$label: the REAL run_side_component bases on $expect"
+  else
+    bad "side-base/$label: expected base $expect, got '${got:-<none>}'"
+  fi
+  local was; was=$(l_prefix_base "$resolver" "$ctd")
+  if [ "$was" = "$expect" ]; then
+    ok "side-base/$label CONTROL: the pre-fix body also produced $expect (over-correction guard, not a differential)"
+  else
+    ok "side-base/$label CONTROL: the PRE-FIX body produced $was, NOT $expect — the builds wrote to a filesystem the probe never measured"
+  fi
+}
+# (a) the probe already resolved it: reuse that answer verbatim, never re-ask.
+l_case probe-verdict  /cfg-target  'OK /never-asked' /cfg-target ''
+# (b) no probe verdict (--only): ask the SAME resolver.
+l_case only-mode      /cfg-target  'OK /cfg-target'  ''           ''
+# (c) CARGO_TARGET_DIR set: cargo resolves it, and the base follows cargo's answer.
+l_case cargo-td       /env-target  'OK /env-target'  ''           /env-target
+# (d) resolution FAILS: the legacy modelled base survives HERE and only here.
+l_case unresolved     /repo-root/target 'UNRESOLVED target-dir-cargo-unavailable' '' ''
+
+# The behaviour change, stated as an assertion rather than left in prose: with a
+# config-based target dir the side base is NO LONGER under the repo.
+l_cfg=$(l_side_base 'OK /cfg-target' /cfg-target '')
+case "$l_cfg" in
+  /repo-root/*) bad "side-base: a config-based target dir still lands under the repo — the disagreement survives" ;;
+  *) ok "side-base: with a config-based target dir, side-lane builds are placed under it, not under the repo (declared behaviour change)" ;;
+esac
+# ...and the placement suffix is unchanged, so nothing else about the side lane moved.
+l_full=$(
+  ( set -uo pipefail
+    REPO_ROOT=/repo-root; _DA_TARGET_DIR=/cfg-target; CARGO_TARGET_DIR=""
+    _GATE_SIDE_BASE=""; _GATE_SIDE_BASE_NOTE=""
+    _gate_resolve_target_dir() { printf 'OK /cfg-target'; }
+    dispatch_component() { printf '%s' "$CARGO_TARGET_DIR"; }
+    eval "$(l_extract _gate_side_target_base_init)"; eval "$(l_extract run_side_component)"
+    _gate_side_target_base_init 2>/dev/null; run_side_component smoke ) 2>/dev/null)
+if [ "$l_full" = "/cfg-target/agent-gate-side/smoke" ]; then
+  ok "side-base: the per-component suffix is unchanged (<base>/agent-gate-side/<name>)"
+else
+  bad "side-base: unexpected per-component path '$l_full'"
+fi
+
+# ===========================================================================
+# Case M (roborev job 345, Low): a fresh target dir is never paired with a stale
+# mount. The target dir is deliberately RE-RESOLVED at slot grant, so if it moved
+# during the queue the retained mount describes a different filesystem — and the
+# remedy line would send an operator to clean the wrong one.
+# ===========================================================================
+m_case() {
+  local label="$1" td1="$2" td2="$3" expect_fs="$4" why="$5"
+  local cs="$tmp/$label.cargoscript"
+  printf '%s\n%s\n' "$td1" "$td2" > "$cs"
+  local ds; ds=$(df_script "$label" "$HIGH" FAIL)
+  RS_PATH_PREFIX="$tmp/cargoshim"
+  run_stub_gate "$label" "$ds" \
+    CARGO_SHIM_SCRIPT="$cs" CARGO_SHIM_STATE="$tmp/$label.cargostate" \
+    CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+    CQLITE_GATE_STUB_SLEEP=1
+  RS_PATH_PREFIX=""
+  local err=$RS_ERR line
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120
+  assert_no_timeout "$label"
+  line=$(grep_line "$err" '^agent-gate: disk-admission: ')
+  case "$line" in
+    *"fs $expect_fs;"*) ok "stale-mount/$label: $why" ;;
+    *) bad "stale-mount/$label: expected 'fs $expect_fs', got: ${line:-<none>}" ;;
+  esac
+  case "$line" in
+    *"target-dir $td2 "*) ok "stale-mount/$label: the line names the RE-RESOLVED target dir ($td2)" ;;
+    *) bad "stale-mount/$label: the line does not name the re-resolved target dir: ${line:-<none>}" ;;
+  esac
+}
+# The subject MOVED during the queue -> the mount measured for the old one is dropped.
+m_case m-moved   /td-A /td-B unknown \
+  "the mount is CLEARED when the re-resolved subject differs (no fresh-dir/stale-mount pairing)"
+# CONTROL: the subject is unchanged -> the mount IS retained. Without this, a rule that
+# simply always cleared would pass the case above and lose real information.
+m_case m-same    /td-A /td-A /shimfs \
+  "the mount is RETAINED when the re-resolved subject is PROVEN identical"
 
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
