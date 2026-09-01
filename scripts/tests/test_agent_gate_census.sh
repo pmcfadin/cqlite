@@ -95,10 +95,21 @@ else
     ok "A0: parsed ${#comps_arr[@]} components from the gate's COMPONENTS array"
   fi
 fi
-dyn_names=$(grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" | sed -E 's/.*\("(.*)"\)/\1/' | sort -u)
+# Two derived sources, because the emit path has two of them and enumerating only one is
+# how #3453's job-277-F2 escaped one directory over — MEASURED here, not theorised: the
+# `record_result "<literal>"` half was missing from the first draft of this file, and the
+# #2926 `tree-selftest` hook (which records a verdict under a name no static set carries)
+# went undeclared and rendered its row FAIL in a real self-test block.
+#   (1) the run_delta_* helpers' `NAMES+=("<literal>")` appends;
+#   (2) any `record_result "<literal>"` call, from a NON-COMMENT line.
+# `NAMES+=("$var")` / `record_result "$var"` sites are the COMPONENTS-driven paths already
+# covered by comps_arr, so nothing is silently dropped.
+dyn_names=$( { grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" | sed -E 's/.*\("(.*)"\)/\1/'
+               grep -E '^[^#]*record_result "[a-z0-9][a-z0-9-]*"' "$GATE" \
+                 | sed -E 's/.*record_result "([a-z0-9][a-z0-9-]*)".*/\1/'; } | sort -u)
 dyn_n=$(printf '%s\n' "$dyn_names" | grep -c . || true)
-if [ "${dyn_n:-0}" -lt 1 ]; then
-  bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names — the domain would silently collapse to COMPONENTS"
+if [ "${dyn_n:-0}" -lt 4 ]; then
+  bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names (expected at least the 4 known: node-tests, scoped-tests, shell-selftests, tree-selftest) — the domain would silently shrink toward COMPONENTS, which is exactly how an undeclared name reaches a block"
 else
   ok "A0b: dynamic summary-name set DERIVED from the emit path: $dyn_n name(s) [$(printf '%s' "$dyn_names" | tr '\n' ' ')]"
 fi

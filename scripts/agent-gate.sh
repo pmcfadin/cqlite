@@ -6846,6 +6846,12 @@ _census_kind() {
     # `--no-run` for a test-only crate with no changed --test target, so BOTH subjects
     # are legitimate there and neither alone may be required.
     integration-tests|scoped-tests)                                    printf 'both' ;;
+    # tree-selftest: the #2926 hidden self-test hook records a verdict under this name
+    # (`record_result "tree-selftest" PASS 0`), so it reaches a SUMMARY component line and
+    # must be declared — a name that can be printed and cannot be classified is the hole
+    # this table exists to close. It is a HOOK: it exercises the tree-integrity guard and
+    # verifies nothing about the codebase, so there is no subject to count.
+    tree-selftest)   printf 'gap:the #2926 tree-integrity self-test hook exercises the guard and has no codebase subject to count' ;;
     # The DYNAMIC --delta entries. Both delete their log before returning and both
     # already hold an exact, affirmative subject count, so they record it themselves.
     node-tests)      printf 'self:changed jest test file(s)' ;;

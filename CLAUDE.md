@@ -779,7 +779,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   is now a closed set (PASS, SKIP) and everything else fails. Two states are DECLARED and
   deliberately NON-FATAL, because a lane that reds on correct input is the lane agents learn to
   waive: `NOT-MEASURED` (an unreadable log, a failed ANSI strip, an unrecognised driver report)
-  and `gap:<reason>` (13 components today — fmt, clippy, all-features-check, the shell/python
+  and `gap:<reason>` (14 components today — fmt, clippy, all-features-check, the shell/python
   guards, smoke, tooling-tests — each PRINTING its reason every run). Neither is ever read as
   verified: the aggregate line counts them separately and always as `N RECOGNISED`, never a bare
   `N`, and it DECLARES its own non-exhaustiveness, because the gap set is curated. One asymmetry
@@ -788,7 +788,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   node-bindings/jest) an ABSENT tally is `NOT-MEASURED`, since a third-party report format is not
   ours and its absence is a measurement failure, not proof of vacuity. Declaration site:
   `_census_kind` (a CLOSED set; an undeclared component is a named FAIL, so a new component
-  cannot join with a blank census). Guard: `scripts/tests/test_agent_gate_census.sh`
+  cannot join with a blank census). **Its domain is WIDER than `COMPONENTS`, and getting that
+  wrong was measured, not theorised**: a name reaches a component line from `COMPONENTS`, from a
+  `NAMES+=("<literal>")` append in the `run_delta_*` helpers, AND from a `record_result
+  "<literal>"` call — the #2926 `tree-selftest` hook is the third kind, and enumerating only the
+  first two rendered its row `FAIL` in a real self-test block. Guard: `scripts/tests/test_agent_gate_census.sh`
   (`tooling-tests`), which plants a no-op in a real component under `--only`, requires the block
   to NAME it, and carries a positive control on the same lane differing in ONE property.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and

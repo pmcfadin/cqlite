@@ -148,7 +148,7 @@ The design was followed. Four deltas, each with its reason:
 | `both` | 2 | integration-tests, scoped-tests |
 | `indirect:<driver>` | 2 | python-bindings (pytest), node-bindings (jest) |
 | `self:<unit>` | 2 | node-tests, shell-selftests |
-| `gap:<reason>` | 13 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, file-size, roborev-lints, pub-surface, binding-unwind-profile, delivery-telemetry, tooling-tests |
+| `gap:<reason>` | 14 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, file-size, roborev-lints, pub-surface, binding-unwind-profile, delivery-telemetry, tooling-tests, tree-selftest |
 
 Every `libtest`/`compile`/`both` declaration was verified AT ITS CALL SITE to write its
 cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redirect, or (for
@@ -156,6 +156,18 @@ cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redi
 `record_result`. A mis-declaration is the one failure mode this subsystem must not have: it
 would make a legitimately green component measure `ZERO` and read `VACUOUS`.
 
-The 13 gaps are a real, declared reduction in coverage. They print their reason on every
+The 14 gaps are a real, declared reduction in coverage. They print their reason on every
 run and are counted separately on the aggregate `census:` line as `N DECLARED-GAP
 (RECOGNISED)`; none of them is one of the components the issue's two-run table names.
+
+### A fifth delta, found by a neighbouring test rather than by design
+
+**The name domain is COMPONENTS + `NAMES+=("<literal>")` + `record_result "<literal>"`.** The
+first draft enumerated only the first two — the same enumeration `_fm_component_class`'s guard
+uses — and that is narrower than the emit path: the #2926 hidden tree-integrity self-test hook
+records a verdict under the name `tree-selftest`, which is in neither static set. Undeclared, it
+rendered a real self-test block's row as `FAIL`, caught by
+`scripts/tests/test_agent_gate_tree_provenance.sh` J2. `tree-selftest` is now declared (a `gap:`
+— it exercises the guard and has no codebase subject to count) and the completeness derivation in
+`scripts/tests/test_agent_gate_census.sh` reads BOTH emit sources, with a floor of 4 derived
+names so a broken derivation cannot silently shrink the domain back toward `COMPONENTS`.
