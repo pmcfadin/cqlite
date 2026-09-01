@@ -62,15 +62,25 @@ src-design fix) yourself. When a step needs a spawn, you **STOP and emit a NEEDS
 packet** to the lead, then **end your turn**; the lead performs the spawn and re-invokes
 you with the result. Exact format (a fenced block, one per needed spawn):
 ```
-NEEDS-SPAWN {role: spec-auditor|sstable-developer, issue: N, anchor: <path or issue>, reason: <1 line>, resume-token: <stage>}
+NEEDS-SPAWN {role: spec-auditor|sstable-developer, issue: N, anchor: <path or issue>, report: <abs path>, reason: <1 line>, resume-token: <stage>}
 ```
 - `role` — `spec-auditor` (C intent audit) or `sstable-developer` (src-design fix).
 - `anchor` — what the spawned agent binds to: `openspec/changes/<slug>/specs/**` for C, or
   the issue/finding for a fix.
+- `report` — **the REPORT OF RECORD path, and it is REQUIRED (#3751).** You `open` the stage
+  BEFORE emitting the packet (`scripts/flow/review-stage.sh open <kind> --issue <N> --agent
+  <role>`), which pre-stamps a non-verdict sentinel and prints both the path and a paste-ready
+  clause. Put that path here so **the lead's spawn and your later read agree on ONE path**: the
+  lead pastes the clause verbatim into the spawn prompt, and you read `verdict` from the same
+  stage. Without this field the two sides can name different paths, and a report written to the
+  path nobody reads is indistinguishable from no report at all.
 - `resume-token` — the stage to resume at when the lead re-invokes you: `C`, `fix`,
   `re-gate`, `merge`.
 This is a two-sided handshake: the lead knows to spawn on a NEEDS-SPAWN packet and to
 re-invoke you carrying the spawned agent's verdict/report. You never idle-wait on a spawn.
+**And the agent's REPLY is never the verdict — the stage's is (#3751).** On re-invoke, read
+`review-stage.sh verdict <kind> --issue <N>`; a lead re-invoking you with prose but a
+`NOT-RUN` stage is reporting a review that did not happen, however confident the prose.
 
 ## NEVER idle-wait on the gate — poll the summary file on a hard deadline (#1855/#2668)
 A subagent that **idle-waits** on a 12–25 min gate is killed by the 600s stall watchdog
@@ -191,15 +201,38 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    even `RESULT: PASS`), your verdict is at the sibling `/tmp/gate-<N>.txt.integrity-fail.*`
    (glob it) or the run's `logs:` bundle — read that instead, and treat a `summary-integrity:
    FAIL` line as a hard FAIL, never a bare INCOMPLETE.
-2. **C — intent audit (design-routed only).** You have no `Agent` tool, so you **emit a
-   NEEDS-SPAWN packet and end your turn** — the lead spawns `spec-auditor` (explicit model)
-   anchored to `openspec/changes/<slug>/specs/**` and re-invokes you with its verdict:
+2. **C — intent audit (design-routed only). OPEN THE STAGE FIRST (#3751).** Pre-stamp the
+   report of record BEFORE anything is spawned, so the state "C produced nothing" is READABLE
+   rather than inferred from silence:
+   ```bash
+   bash scripts/flow/review-stage.sh open c --issue <N> --agent spec-auditor
+   #   -> prints the absolute report path AND the paste-ready spawn clause
    ```
-   NEEDS-SPAWN {role: spec-auditor, issue: <N>, anchor: openspec/changes/<slug>/specs/**, reason: C intent audit before merge, resume-token: C}
+   You have no `Agent` tool, so you then **emit a NEEDS-SPAWN packet and end your turn**,
+   carrying that path in `report:` — the lead spawns `spec-auditor` (explicit model) anchored to
+   `openspec/changes/<slug>/specs/**`, pastes the printed clause verbatim into the spawn prompt,
+   and re-invokes you:
    ```
-   On re-invoke, the verdict MUST be PASS (every requirement `satisfied` with a
-   public-surface test as evidence). An `unmet`/uncovered/unjustified-`partial` requirement
-   blocks merge → route back (see step 4 escalation).
+   NEEDS-SPAWN {role: spec-auditor, issue: <N>, anchor: openspec/changes/<slug>/specs/**, report: <path from `open`>, reason: C intent audit before merge, resume-token: C}
+   ```
+   On re-invoke, **read the STAGE, not the prose**:
+   ```bash
+   bash scripts/flow/review-stage.sh verdict c --issue <N>   # 0 PASS / 4 FINDINGS / 5 NOT-RUN / 6 AUTHOR-PERFORMED
+   ```
+   The verdict MUST be `PASS` (every requirement `satisfied` with a public-surface test as
+   evidence). `FINDINGS` — an `unmet`/uncovered/unjustified-`partial` requirement — blocks merge
+   → route back (see step 4 escalation). **`NOT-RUN` also blocks, and it is NOT a clean review**:
+   it means the stage produced nothing (sentinel-only / absent / empty / ungrammatical /
+   never-opened, and the token names which). Re-spawn it (`open --force` re-stamps the report and
+   KEEPS the original clock, so the elapsed time still reads true), or use `status` to report how
+   long it has produced nothing. If no independent audit can be obtained, the SANCTIONED
+   FALLBACK — never a hand-asserted pass — is to record the substitute WITH ITS WORKING:
+   ```bash
+   bash scripts/flow/review-stage.sh record-author-performed c --issue <N> \
+     --reason <why-no-independent-audit> --evidence <artifact> --performed-by author|peer
+   ```
+   That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and premerge-assert prints
+   it on its own line — an author's hand audit is not an independent one; weight it accordingly.
 3. **Final roborev confirmation pass — this GATES arming auto-merge.** Because review-first
    already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
    invocation (#2964), with the certified tip **PUSHED** (the wrapper asserts it) and **BOTH**
@@ -268,10 +301,23 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    literal path step 1 wrote, `/tmp/gate-<N>.txt`:
    ```bash
    # CASE A — the usual shape: the full gate ran on the head being merged.
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt --c-verdict AUTO
    # CASE B — #1892 post-gate polish: full PASS at anchor X, then a test/docs-only diff.
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt \
+     --c-verdict AUTO
    ```
+   **`--c-verdict` is REQUIRED and has no default (#3751)** — omitting it is a usage failure
+   (exit 3), the #3465 precedent, because a silent "C is not required" would reproduce the defect
+   inside the enforcer. `AUTO` is the form to use: it MEASURES whether C is required from the
+   CERTIFIED tree (what this branch does to `openspec/changes/`, against its merge-base with
+   `origin/main`, `archive/**` excluded) and then reads the stage you opened in step 2. A branch
+   with no OpenSpec change reports `c-verdict: NOT-APPLICABLE (no openspec change on branch)`
+   affirmatively; an absent or `NOT-RUN` C on a design-routed branch REFUSES the merge, naming
+   the stage and the cause; and a routing it cannot MEASURE is treated as REQUIRED. There is no
+   value you can pass that means "C does not apply here" — that exemption is the escape hatch
+   #3751 removes, and routing is measurable from the branch. Pass an explicit
+   `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
+   cannot locate the stage.
    The third argument is **REQUIRED** (an optional one would leave the convention
    honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
    gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never
@@ -284,8 +330,9 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    `MODE: delta`, `RESULT: PASS`, `tree-integrity: PASS`, a `delta-anchor:` naming exactly that
    anchor, and its OWN `commit:`/`tree-start:` at `<certified-sha>`. The chain is closed end to
    end: full PASS at X → delta anchored at X → delta ran on the merged tree.
-   It exits `0` (prints `PREMERGE: OK <sha>`, `PREMERGE: SCOPE …` **and**
-   `PREMERGE: GATE-OF-RECORD …`, plus `PREMERGE: DELTA-RECERT …` in Case B) only when the
+   It exits `0` (prints `PREMERGE: OK <sha>`, `PREMERGE: SCOPE …`, `PREMERGE: GATE-OF-RECORD …`
+   **and** `PREMERGE: C-VERDICT …`, plus `PREMERGE: DELTA-RECERT …` in Case B and
+   `PREMERGE: C-VERDICT-NOTE …` when the C token is `AUTHOR-PERFORMED`) only when the
    summary holds exactly one `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`,
    `tree-integrity: PASS`, no `nested-under:` line, and `commit:`/`tree-start:` covering
    `<certified-sha>` (Case A) or the delta chain above (Case B), **and** the PR is OPEN **and**

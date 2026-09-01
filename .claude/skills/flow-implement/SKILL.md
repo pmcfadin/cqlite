@@ -125,7 +125,28 @@ never gate stdout or review churn.
    Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is the `flow-closer`'s single
    gate of record (step 7).
 5. **Review-first — DEFAULT, BEFORE the first full gate (issues #2086/#2087/#2088).** On the **lite-green**
-   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW. **`scripts/flow/roborev-review.sh`
+   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW.
+
+   **OPEN THE REVIEW STAGE BEFORE THE SPAWN, READ ITS VERDICT AFTER (#3751).** A delegated review
+   stage that writes nothing leaves its reader only ABSENCE to reason from, and an idle notice is
+   *weaker* evidence than the gate's `INCOMPLETE` sentinel — at least the sentinel names itself a
+   non-verdict. So the artifact is pre-stamped BEFORE the agent exists:
+   ```bash
+   bash scripts/flow/review-stage.sh open rust-review --issue <N> --agent rust-reviewer
+   #   -> prints the absolute report path AND a paste-ready clause; paste that clause into the
+   #      spawn prompt VERBATIM (the paraphrase is what varied across the measured sessions)
+   #   ... spawn rust-reviewer with that clause ...
+   bash scripts/flow/review-stage.sh verdict rust-review --issue <N>
+   ```
+   `verdict` emits exactly one line of a CLOSED grammar and exits `0` PASS / `4` FINDINGS / `5`
+   NOT-RUN / `6` AUTHOR-PERFORMED. **`NOT-RUN` is not a clean review** — it means sentinel-only,
+   absent, empty, ungrammatical or never-opened, and the token NAMES which, because the operator
+   action differs per cause. Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
+   (`open --force` KEEPS the original clock, so the elapsed time still reads true), or read
+   `status` for how long it has produced nothing. **Never infer a clean review from an idle
+   notice** — that is the exact false certification #3751 exists to prevent.
+   `review-stage.sh` writes only under `.review-stage/`, which is gitignored and verified so
+   fail-closed, so it cannot dirty a running gate (#2926/#3648). **`scripts/flow/roborev-review.sh`
    is the ONLY sanctioned roborev invocation (#2964)** — there is no `/roborev-review-branch` slash
    command, and a bare `roborev review --branch --base origin/main` is **NON-SANCTIONED** (from a worktree
    it resolves against the ROOT checkout and enqueues `origin/main`, reporting clean having reviewed

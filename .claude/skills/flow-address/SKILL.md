@@ -62,11 +62,18 @@ Resolve them in the worktree and reply per thread.
    matches what you changed (#3465) and re-arm `gh pr merge --auto --squash --delete-branch`:
    ```bash
    # A CODE fix moved the certified SHA -> it needs a NEW full gate at the new head:
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <full-gate-summary>
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <full-gate-summary> --c-verdict AUTO
    # A TEST/DOCS-ONLY fix on top of a full PASS at anchor X -> #1892's --delta re-cert,
    # never a repeat full gate; pass BOTH the anchor's full summary AND the delta summary:
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <anchor-full-summary> <delta-summary>
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <anchor-full-summary> <delta-summary> \
+     --c-verdict AUTO
    ```
+   `--c-verdict` is REQUIRED and has no default (#3751): omitting it is exit 3, never a silent
+   "C is not required". `AUTO` MEASURES whether C is required from the certified tree and reads
+   the `c` stage's verdict; a design-routed branch whose C stage is absent or `NOT-RUN` is
+   REFUSED. If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
+   stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`, which KEEPS the
+   original clock) and read its `verdict` again.
    The third argument is REQUIRED and must always be a FULL-gate `RESULT: PASS` block; `--lite` is
    refused by name everywhere, and a `--delta` block is accepted ONLY as the optional fourth argument
    (where the script checks that its `delta-anchor:` names the third argument's block and that its own
