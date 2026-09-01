@@ -354,7 +354,14 @@ export CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1
 # 5c's green path instead of skipping it, which is strictly better coverage than the
 # opt-out would have bought.
 PUSH_CLAUDE_TOKEN='sk-cqlite-sandbox-3733-not-a-real-credential'
-PUSH_CLAUDE_CONFIG_DIR='/sandbox/claude-config' 
+# A REAL directory, not a decorative literal: the tmux verdict now requires the config dir
+# the server names to EQUAL the persisted one AND to EXIST, because a nonexistent one is
+# the un-onboarded first-run picker. A fixture naming `/sandbox/claude-config` staged the
+# section to SERVER-CONFIG-NODIR, base_warns went 1 -> 2, and the three end-to-end cases
+# below would have gone back to skipping — which is precisely the drift the baseline
+# assertion above exists to catch.
+PUSH_CLAUDE_CONFIG_DIR="$tmp/sandbox-claude-config"
+mkdir -p "$PUSH_CLAUDE_CONFIG_DIR"
 
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
