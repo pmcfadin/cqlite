@@ -36,3 +36,7 @@
 - [ ] 6.1 Coordinate the `premerge-assert.sh` arity change with #3752's `--roborev-block`-shaped flag so
       in-flight lanes pay ONE re-certification visit, not two (lead ruling 2026-09-01T18:19:24Z).
       Landing ORDER is the lead's call; this change assumes neither.
+- [ ] 6.2 Owner rollout condition (Seam-1 approval 2026-09-01T18:36:42Z): whichever of #3751/#3752
+      merges SECOND must not force a second sweep of open PRs, and the merge-time notice posted to
+      open PRs must name the remedy commands for BOTH new asserts, so an in-flight lane pays ONE
+      re-certification visit covering both.
