@@ -304,6 +304,52 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    cached; vacuous baseline ~18.7k / 0). That trade was chosen deliberately over a machine guessing from
    injectable text.
 
+   **That cost is true at review time and false after the fact, which is where the best absence evidence
+   lives (#3654).** The prompt roborev *sent* is **retained in the job record** and retrievable later —
+   `roborev show <id> --prompt` — even though the snapshot file it names is transient and already deleted,
+   and a delivery-by-path prompt says so in its own words under `### Combined Diff`. That is **direct**
+   evidence a diff was delivered, where token accounting is **inference** (a large number is merely
+   *consistent* with a real review). So the **stored prompt is the PREFERRED evidence in an absence-waiver
+   request and a request leads with it**; token accounting is the **fallback**, for when the prompt cannot
+   be retrieved. **It resurrects nothing of the deleted delivery classifier, and that distinction is
+   load-bearing rather than a caveat:** the classifier read injectable prompt text *at decision time* to
+   produce an **automated verdict**, while this is a **human** reading a **stored record** as evidence for a
+   **hand-granted** waiver — there is no automated verdict to spoof. Nothing in the wrapper parses the
+   prompt for delivery mode, and nothing may be added that does.
+
+   **And `job=` is daemon-scoped, which nobody had written down (#3654).** Each fleet box runs its own
+   roborev daemon with its own database and its own sequential ids, so **two boxes can legitimately present
+   the same id for different reviews** — measured: `job=265` on two lanes 50 minutes apart, different
+   ranges, branches and token counts, both correct — and the coordination lead read the repetition as a
+   collision and **withheld a valid waiver**. The failure is symmetric and the other direction is worse: a
+   lead who therefore treats `job=` as uninformative discards the one field binding an authorization to a
+   *review* rather than to a *range*. So **verify the record's `git_ref`, never the id alone**:
+
+   ```bash
+   # git_ref / status / token_usage are NESTED under .job on this payload:
+   roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
+   # the issuing daemon is on the LIST row — `show --json` carries source_machine_id NOWHERE.
+   # `roborev list` filters by the CURRENT BRANCH by default, so name it:
+   roborev list --json --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref}'
+   ```
+
+   **A local row count is not evidence of uniqueness.** `roborev list … | jq '[.[] | select(.id==N)] |
+   length'` returns `1` whether or not another box holds that id, because `list` only ever sees the **local**
+   daemon — one more probe whose output is **identical under the two states it claims to separate** (the
+   `RESULT: INCOMPLETE` launch sentinel read as a verdict; a gate run dir found by `ls -t`;
+   `mergeable: MERGEABLE` on a marker-bearing merge commit). Run on both `job=265` lanes it gave the right
+   answer for a reason that did not hold.
+
+   **The block therefore names the daemon: `job-machine:`, beside `job:`.** It is **informational** — in
+   neither the verdict scan nor the affirmation backstop, so no state of it can red a correct run — with
+   three affirmative renderings: the uuid when a record carried `source_machine_id`; `NOT RECORDED` when a
+   record **was** read and carries none (a real state, since `show --json` never carries the field — hence
+   the wrapper's one supplementary `list` read, without which the key would report nothing on every real
+   run); and `UNAVAILABLE` when no record could be read, naming the `job-record:` state it inherits. **The
+   marker grammar is unchanged**: no machine field was added to either kind — the authorizer would have to
+   know it, it is derivable from the record, and every field in a hand-typed control line is one more way
+   for a legitimate authorization to read `MALFORMED`.
+
    **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
    credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
    **dedicated, column-zero line** of a PR comment:
