@@ -1631,6 +1631,93 @@ $s33n"
 fi
 
 # ===========================================================================
+case_begin 34-shift-never-leaks-bash-diagnostics "an option with a MISSING value emits the anchored USAGE line and nothing of bash's own"
+# ===========================================================================
+# roborev job 30 G3, and the SECOND instance of round 5's F2 class: that round captured or
+# suppressed 21 EXTERNAL commands' native stderr and left the SHELL's own. `shift 2` past the
+# end returns non-zero, and bash prints its own UNPREFIXED `shift: 2: shift count out of range`
+# BEFORE the anchored `|| die_usage` message whenever `shift_verbose` or POSIX mode is on.
+#
+# REACHABLE WITHOUT A HOSTILE INVOKER, which is what makes it a defect rather than a note:
+# `BASHOPTS` is read from the ENVIRONMENT by every non-interactive bash at startup, so a
+# caller (a wrapper script, a CI step, an exported shell profile) turns it on for every child
+# without touching this file. The fix is to validate the argument COUNT before shifting, which
+# makes the behaviour environment-independent; the shim here is only how the latent breakage is
+# made observable.
+sv_run() {  # sv_run <dir> <args...> — run under shift_verbose; prints output, returns rc
+  local d="$1"; shift
+  local out rc
+  out=$( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" BASHOPTS=shift_verbose \
+    bash "$DS" "$@" 2>&1 ); rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
+}
+L34=$(lane lane34)
+# EVERY option site in the file, plus every subcommand invoked with NO issue argument (the
+# leading `shift`). Driven from a TABLE so a new option is covered by adding a row, not by
+# remembering to write a case.
+SHIFT_ROWS="write:--stage
+write:--request-id
+write:--pr
+write:--branch
+write:--body-file
+write:--actor
+write:--clear
+verify:--actor
+adopt:--reason
+adopt:--actor
+write:
+verify:
+adopt:
+show:"
+sv_fail=0; sv_rows=0
+for row in $SHIFT_ROWS; do
+  sub="${row%%:*}"; opt="${row#*:}"
+  sv_rows=$((sv_rows + 1))
+  if [ -n "$opt" ]; then
+    out=$(sv_run "$L34" "$sub" 3822 "$opt"); rc=$?
+  else
+    out=$(sv_run "$L34" "$sub"); rc=$?
+  fi
+  why=''
+  all_lines_anchored "$out" || why="$why unanchored-line"
+  [ "$(verdict_count "$out")" = 1 ] || why="$why verdicts=$(verdict_count "$out")"
+  [ "$(verdict_of "$out")" = USAGE ] || why="$why token=$(verdict_of "$out")"
+  [ "$rc" -eq 64 ] || why="$why rc=$rc"
+  if [ -n "$why" ]; then
+    sv_fail=$((sv_fail + 1))
+    printf 'note   %s %s ->%s\n%s\n' "$sub" "${opt:-<no-issue-arg>}" "$why" "$(printf '%s' "$out" | cat -v)"
+  fi
+done
+if [ "$sv_fail" -eq 0 ]; then
+  ok "all $sv_rows shift sites emit ONE anchored 'verdict USAGE' and exit 64 — no bash diagnostic escapes the anchor"
+else
+  bad "$sv_fail of $sv_rows shift sites leaked a bash diagnostic, emitted no/two verdicts, or used the wrong exit code"
+fi
+# NON-VACUITY IN TWO DIRECTIONS. (i) The shim really is on: an equivalent `shift 2` past the end
+# in a throwaway script DOES print bash's unprefixed diagnostic under the same environment, so a
+# clean sweep above is a property of the script and not of an inert fixture.
+sv_probe="$T/shift-probe.sh"; printf 'set -- one\nshift 2 || true\n' >"$sv_probe"
+sv_ctl=$(env BASHOPTS=shift_verbose bash "$sv_probe" 2>&1)
+if printf '%s\n' "$sv_ctl" | grep -q 'shift count out of range'; then
+  ok "POSITIVE CONTROL: the same environment DOES make bash print an unprefixed shift diagnostic, so the sweep above measured something"
+else
+  bad "shift_verbose did not reach the child at all — the sweep above proves nothing (control output: $sv_ctl)"
+fi
+# (ii) The COUNT guard did not turn a valid option into a usage error.
+sv_ok=$(sv_run "$L34" write 3822 --stage implement); sv_okrc=$?
+sv_ok2=$(sv_run "$L34" write 3822 --clear stage); sv_okrc2=$?
+sv_ok3=$(sv_run "$L34" show 3822); sv_okrc3=$?
+if [ "$sv_okrc" -eq 0 ] && [ "$(verdict_of "$sv_ok")" = WRITTEN ] \
+   && [ "$sv_okrc2" -eq 0 ] && [ "$(verdict_of "$sv_ok2")" = WRITTEN ] \
+   && [ "$sv_okrc3" -eq 0 ] && [ "$(verdict_of "$sv_ok3")" = SHOWN ]; then
+  ok "NON-VACUITY: options WITH their values still work under the same environment (write/--clear/show all succeed)"
+else
+  bad "the count guard rejects valid invocations: write=$sv_okrc/$(verdict_of "$sv_ok") clear=$sv_okrc2/$(verdict_of "$sv_ok2") show=$sv_okrc3/$(verdict_of "$sv_ok3")"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1645,6 +1732,7 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 29-missing-liveness-library 30-native-diagnostics-stay-anchored
 31-adoption-provenance-survives
 32-failed-scan-is-not-no-match 33-signals-emit-one-verdict
+34-shift-never-leaks-bash-diagnostics
 28-case-floor"
 CASE_FLOOR=31
 executed=0

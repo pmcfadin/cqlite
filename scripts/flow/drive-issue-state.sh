@@ -958,6 +958,11 @@ assert_assembled_marker() {
 # string inside a path. Every emit site in this script is in the main shell for that reason.
 WROTE_PATH=''; WRITE_ERR=''
 write_marker() {
+  # ARGUMENT-COUNT GUARD BEFORE THE SHIFT (roborev job 30 G3, internal site) — see `refuse`.
+  if [ "$#" -lt 3 ]; then
+    WRITE_ERR="internal: write_marker was called with $# argument(s); an issue, an actor and a body-file slot are required"
+    return 1
+  fi
   local issue="$1" actor="$2" bodyfile="$3"; shift 3
   local wt path tmp ts session pid win lo hi
   wt="$(pwd -P)"
@@ -1058,24 +1063,30 @@ write_marker() {
 # Subcommands
 # ---------------------------------------------------------------------------
 cmd_write() {
-  local issue="${1:-}"; shift || true
+  # COUNT-CHECKED, NOT `shift || true` (roborev job 30 G3): a `shift` past the end prints
+  # bash's own UNPREFIXED diagnostic under `shift_verbose`/POSIX mode — both settable from the
+  # ENVIRONMENT (`BASHOPTS`) by a caller who never touches this file — which breaks contract
+  # (a) before the anchored USAGE line is ever reached.
+  local issue="${1:-}"
+  [ "$#" -eq 0 ] || shift
   require_numeric_issue "$issue" write
   local stage='' request='' pr='' branch='' bodyfile='' actor_raw='' clears=''
   local prior_session='' prior_pid='' prior_ts='' adopt_reason=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --stage)      stage="${2:-}";      shift 2 || die_usage "--stage needs a value" ;;
-      --request-id) request="${2:-}";    shift 2 || die_usage "--request-id needs a value" ;;
-      --pr)         pr="${2:-}";         shift 2 || die_usage "--pr needs a value" ;;
-      --branch)     branch="${2:-}";     shift 2 || die_usage "--branch needs a value" ;;
-      --body-file)  bodyfile="${2:-}";   shift 2 || die_usage "--body-file needs a value" ;;
-      --actor)      actor_raw="${2:-}";  shift 2 || die_usage "--actor needs a value" ;;
+      --stage)      [ "$#" -ge 2 ] || die_usage "--stage needs a value";      stage="$2";      shift 2 ;;
+      --request-id) [ "$#" -ge 2 ] || die_usage "--request-id needs a value"; request="$2";    shift 2 ;;
+      --pr)         [ "$#" -ge 2 ] || die_usage "--pr needs a value";         pr="$2";         shift 2 ;;
+      --branch)     [ "$#" -ge 2 ] || die_usage "--branch needs a value";     branch="$2";     shift 2 ;;
+      --body-file)  [ "$#" -ge 2 ] || die_usage "--body-file needs a value";  bodyfile="$2";   shift 2 ;;
+      --actor)      [ "$#" -ge 2 ] || die_usage "--actor needs a value";      actor_raw="$2";  shift 2 ;;
       --clear)
-        case "${2:-}" in
-          stage | request-id | pr | branch) clears="$clears ${2}" ;;
-          *) die_usage "--clear takes one of stage|request-id|pr|branch (got '$(sane "${2:-<none>}")') — the field set is CLOSED so a typo erases nothing silently" ;;
+        [ "$#" -ge 2 ] || die_usage "--clear needs a field name"
+        case "$2" in
+          stage | request-id | pr | branch) clears="$clears $2" ;;
+          *) die_usage "--clear takes one of stage|request-id|pr|branch (got '$(sane "$2")') — the field set is CLOSED so a typo erases nothing silently" ;;
         esac
-        shift 2 || die_usage "--clear needs a field name" ;;
+        shift 2 ;;
       *) die_usage "write: unknown option '$(sane "$1")'" ;;
     esac
   done
@@ -1191,11 +1202,16 @@ cmd_write() {
 }
 
 cmd_verify() {
-  local issue="${1:-}"; shift || true
+  # COUNT-CHECKED, NOT `shift || true` (roborev job 30 G3): a `shift` past the end prints
+  # bash's own UNPREFIXED diagnostic under `shift_verbose`/POSIX mode — both settable from the
+  # ENVIRONMENT (`BASHOPTS`) by a caller who never touches this file — which breaks contract
+  # (a) before the anchored USAGE line is ever reached.
+  local issue="${1:-}"
+  [ "$#" -eq 0 ] || shift
   require_numeric_issue "$issue" verify
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --actor) shift 2 || die_usage "--actor needs a value" ;;
+      --actor) [ "$#" -ge 2 ] || die_usage "--actor needs a value"; shift 2 ;;
       *) die_usage "verify: unknown option '$(sane "$1")'" ;;
     esac
   done
@@ -1227,13 +1243,18 @@ assert_reason() {
 }
 
 cmd_adopt() {
-  local issue="${1:-}"; shift || true
+  # COUNT-CHECKED, NOT `shift || true` (roborev job 30 G3): a `shift` past the end prints
+  # bash's own UNPREFIXED diagnostic under `shift_verbose`/POSIX mode — both settable from the
+  # ENVIRONMENT (`BASHOPTS`) by a caller who never touches this file — which breaks contract
+  # (a) before the anchored USAGE line is ever reached.
+  local issue="${1:-}"
+  [ "$#" -eq 0 ] || shift
   require_numeric_issue "$issue" adopt
   local reason='' reason_given=0 actor_raw=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --reason) reason="${2-}"; reason_given=1; shift 2 || die_usage "--reason needs a value" ;;
-      --actor)  actor_raw="${2:-}"; shift 2 || die_usage "--actor needs a value" ;;
+      --reason) [ "$#" -ge 2 ] || die_usage "--reason needs a value"; reason="$2"; reason_given=1; shift 2 ;;
+      --actor)  [ "$#" -ge 2 ] || die_usage "--actor needs a value"; actor_raw="$2"; shift 2 ;;
       *) die_usage "adopt: unknown option '$(sane "$1")'" ;;
     esac
   done
@@ -1292,7 +1313,12 @@ cmd_adopt() {
 }
 
 cmd_show() {
-  local issue="${1:-}"; shift || true
+  # COUNT-CHECKED, NOT `shift || true` (roborev job 30 G3): a `shift` past the end prints
+  # bash's own UNPREFIXED diagnostic under `shift_verbose`/POSIX mode — both settable from the
+  # ENVIRONMENT (`BASHOPTS`) by a caller who never touches this file — which breaks contract
+  # (a) before the anchored USAGE line is ever reached.
+  local issue="${1:-}"
+  [ "$#" -eq 0 ] || shift
   require_numeric_issue "$issue" show
   read_marker
   emit "field issue=$(sane "$S_issue")"
@@ -1320,6 +1346,9 @@ cmd_show() {
 }
 
 SUB="${1:-}"
+# The four `shift`s below cannot fail: `$SUB` is non-empty only when `$#` >= 1, and an empty
+# `$SUB` takes the `''` arm. Stated rather than guarded, because a guard whose condition is
+# unreachable is a guard nobody can test (roborev job 30 G3 swept every OTHER site).
 case "$SUB" in
   write)  shift; cmd_write  "$@" ;;
   verify) shift; cmd_verify "$@" ;;

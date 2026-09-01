@@ -1982,7 +1982,13 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   DEFERRED across it). That phase is only OBSERVABLE because the rename moved OUT of a `$( )`:
   measured on bash 5.2, a trapped signal arriving while the shell waits for a COMMAND
   SUBSTITUTION inside a FUNCTION is DISCARDED — the trap never runs — while the same signal
-  during a plain command is delivered normally.
+  during a plain command is delivered normally. (6) Same shape once more, at the SHELL's own
+  diagnostics: correction (2) captured 21 EXTERNAL commands' stderr and left `shift`'s, which
+  bash prints UNPREFIXED under `shift_verbose`/POSIX mode — both reachable from the inherited
+  `BASHOPTS`, so by a caller and not only by the invoker. Every `shift` now validates `$#`
+  FIRST. **The transferable rule from (4)-(6): when a round's fix names a site, sweep the
+  CLASS and add coverage driven by a TABLE, or the next round finds the same defect one exit
+  path over** — which is what happened here three times running.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
