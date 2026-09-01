@@ -205,12 +205,20 @@ async fn plain_udt_renders_declared_fields_and_nothing_else() {
 /// `unhashable_fields` (`label text, m frozen<map<text,int>>`) declares no
 /// `_type`. Golden: `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`.
 ///
-/// MEASURED DECODE GAP, orthogonal to #3629: a COLLECTION field inside a FROZEN
-/// UDT decodes to `Value::Blob`, so `m` renders as base64 rather than the
-/// golden's `{"a": 1}` (the same gap the Python suite pins as characterization —
-/// see the fixture schema's `unhashable_fields` note). The property under test
-/// here is the FIELD NAMESPACE, so `m`'s value is asserted as the measured blob
-/// and labelled, not silently golden-matched.
+/// The decode gap this used to characterize is FIXED (issue #3631 instance B): a
+/// COLLECTION field inside a FROZEN UDT decoded to `Value::Blob`, so `m` rendered
+/// as base64. It now decodes structurally, so this assert is INVERTED — an object,
+/// not a string.
+///
+/// One residual, stated rather than golden-matched: the object's KEY renders
+/// `"'a'"`, not `"a"`. A JSON object key must be a string, so `to_json`
+/// DISPLAY-stringifies every map key, and a `text` key's Display form carries the
+/// CQL quotes. That convention predates this issue (it is what the
+/// `*_map_udt_key_is_display_stringified` cases in this file pin) and is a
+/// RENDERING question, not a decode one — the decoded `Value` is
+/// `Map([(Text("a"), Integer(1))])`, asserted against the golden directly in
+/// `cqlite-core/tests/issue_3631_structured_values_not_blobs.rs`. Filed as a
+/// rendering follow-up rather than silently normalized here.
 #[tokio::test]
 async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
     let rows = rows_by_id("udt_hashable_shapes").await;
@@ -235,13 +243,15 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         Some(&json!(30)),
         "the tuple's second element is the golden's 30"
     );
-    // Characterization of the orthogonal decode gap (NOT the #3629 property):
-    // the golden's `{"a": 1}` arrives as the frozen map's serialized bytes.
-    assert!(
-        udt.get("m").is_some_and(J::is_string),
-        "known gap: a collection field inside a frozen UDT decodes to a blob; \
-         got {:?}",
-        udt.get("m")
+    // Issue #3631 instance B: the golden's `{"a": 1}` now arrives as an OBJECT.
+    // The key spelling is `to_json`'s display-stringification of a `text` map key
+    // (see the doc comment); the pin is exact so a change in either the decode or
+    // the rendering is visible.
+    assert_eq!(
+        udt.get("m"),
+        Some(&json!({"'a'": 1})),
+        "a `frozen<map<text,int>>` field of a frozen UDT must render structurally, \
+         not as the base64 of its 20 serialized bytes (issue #3631 instance B)"
     );
 }
 

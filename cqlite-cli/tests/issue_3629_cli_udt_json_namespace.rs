@@ -194,11 +194,18 @@ async fn plain_udt_renders_declared_fields_and_nothing_else() {
 /// `unhashable_fields` (`label text, m frozen<map<text,int>>`) declares no
 /// `_type`. Golden: `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`.
 ///
-/// MEASURED DECODE GAP, orthogonal to #3629: a COLLECTION field inside a FROZEN
-/// UDT decodes to `Value::Blob`, so `m` renders as the CLI's `0x…` hex rather
-/// than the golden's `{"a": 1}`. The property under test is the FIELD NAMESPACE,
-/// so `m`'s value is asserted as the measured blob and labelled, not
-/// silently golden-matched.
+/// The decode gap this used to characterize is FIXED (issue #3631 instance B): a
+/// COLLECTION field inside a FROZEN UDT decoded to `Value::Blob`, so `m` rendered
+/// as the CLI's `0x…` hex. It now decodes structurally, so this assert is
+/// INVERTED.
+///
+/// The CLI spells a decoded map as an ARRAY OF `{"key":…,"value":…}` OBJECTS, not
+/// as a JSON object — its established rendering for a CQL map, whose keys need not
+/// be strings (the golden's `{"a": 1}` is `sstabledump`'s spelling of the same
+/// value). That is a RENDERING convention, not a decode question: the decoded
+/// `Value` is `Map([(Text("a"), Integer(1))])`, asserted against the golden in
+/// `cqlite-core/tests/issue_3631_structured_values_not_blobs.rs`. Pinned exactly
+/// here so a change in either layer is visible.
 #[tokio::test]
 async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
     let rows = rows_by_id("udt_hashable_shapes").await;
@@ -223,15 +230,13 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         Some(&json!(30)),
         "the tuple's second element is the golden's 30"
     );
-    // Characterization of the orthogonal decode gap (NOT the #3629 property).
+    // Issue #3631 instance B: structural, not `0x…` hex.
     assert_eq!(
-        udt.get("m")
-            .and_then(J::as_str)
-            .map(|s| s.starts_with("0x")),
-        Some(true),
-        "known gap: a collection field inside a frozen UDT decodes to a blob, \
-         rendered here as CLI hex; got {:?}",
-        udt.get("m")
+        udt.get("m"),
+        Some(&json!([{"key": "a", "value": 1}])),
+        "a `frozen<map<text,int>>` field of a frozen UDT must render structurally \
+         (the CLI's key/value array spelling of a CQL map), not as the hex of its \
+         20 serialized bytes (issue #3631 instance B)"
     );
 }
 
