@@ -100,40 +100,41 @@
 //!   them adds no availability risk for data Cassandra would have read.
 //! * **NEVER `Err` merely because CQLITE cannot model the declared type.**
 //!   Cassandra reads such a key fine; only this reader cannot. That case returns
-//!   the opaque `Value::Blob` the shared decoder produced, with a `warn!` naming
-//!   the column and the declared type, so the row stays whole and the gap is
-//!   visible in the log rather than in a missing column.
+//!   the opaque `Value::Blob` the shared decoder produced and reports it to the
+//!   caller, which `warn!`s once per column per row naming the column, the
+//!   declared type and how many entries were affected — so the row stays whole and
+//!   the gap is visible in the log rather than in a missing column.
 //!
 //! The swallow itself is a PRE-EXISTING defect of row assembly, not of this
 //! module, and is tracked separately (see the PR for #3612).
 //!
-//! ## Why the `warn!` below is NOT deduplicated (assessed, then declined)
-//! It fires once per undecodable map ENTRY, per row — the call site is inside
-//! `complex_column`'s `for i in 0..cell_count_usize` entry loop — so a scan of a
-//! table with an unmodelled map key type emits `entries × rows` lines. The volume
-//! is real and it is a poor disclosure: an operator stops reading a flood.
+//! ## The undecodable-key signal is REPORTED to the caller; nothing here `warn!`s
 //!
-//! It is left alone anyway, because the two available places to hold "already
-//! warned" state are both worse than the flood:
+//! There is no `warn!` in this module. [`Self::parse_cell_path_key_reporting`]
+//! runs ONCE PER MAP ENTRY and only SETS an `opaque_out` flag; `complex_column`'s
+//! map branch counts the entries whose key came back opaque and emits at most ONE
+//! line per column per ROW, carrying that count as `affected_entries`. WHY that is
+//! the right cardinality is stated ONCE, on `parse_cell_path_key_reporting`'s own
+//! doc comment, and is deliberately not restated here — an earlier revision of
+//! this header argued the OPPOSITE (that caller-side aggregation was "deliberately
+//! NOT taken"), outlived the change that took it, and contradicted that doc
+//! comment. One statement, at the site that owns the signal.
+//!
+//! What is recorded here, because the aggregate does not answer it, is a DIFFERENT
+//! question: the per-row line is not additionally DEDUPLICATED across rows, and
+//! neither available place to hold "already warned" state is worth its cost.
 //!
 //! * **Per reader instance.** There is no natural home — `V5CompressedLegacyParser`
-//!   is plain owned data with no interior mutability and `parse_cell_path_key`
-//!   takes `&self`, so this needs a new `Mutex`/`RefCell` field taken once per map
-//!   entry on the hot decode path. And it would not even work: the instance is
-//!   built PER BLOCK (`parsing/block_entries.rs`'s `parse_block_entries_at_now`,
-//!   called per block from the scan stream) and per point read, so the dedupe
-//!   window is one block, not one scan. That buys a constant factor — thousands of
-//!   lines instead of millions — for a lock on every entry.
+//!   is plain owned data with no interior mutability and the decode entry point
+//!   takes `&self`, so this needs a new `Mutex`/`RefCell` field touched on the hot
+//!   decode path. And it would not even work: the instance is built PER BLOCK
+//!   (`parsing/block_entries.rs`'s `parse_block_entries_at_now`, called per block
+//!   from the scan stream) and per point read, so the dedupe window is one block,
+//!   not one scan — a constant factor, for a lock.
 //! * **A process-lifetime `static` latch** (`Once`/`AtomicBool`) is worse than the
-//!   flood, not merely insufficient: it would suppress the warning for a DIFFERENT
-//!   table read later in the same process, turning a noisy disclosure into a
-//!   missing one.
-//!
-//! A middle option exists and is deliberately NOT taken here: aggregating in the
-//! caller's entry loop into one line per column per ROW carrying the entry count
-//! costs nothing structurally (a local counter, no shared state) but is still
-//! per-row, i.e. the same constant-factor argument. Doing it is a call for whoever
-//! owns the logging contract, not something to slip into a decode fix.
+//!   repetition, not merely insufficient: it would suppress the warning for a
+//!   DIFFERENT table read later in the same process, turning a noisy disclosure
+//!   into a missing one.
 //!
 //! # Decoder enumeration and exactness disposition (issue #3612 round 2)
 //!
@@ -157,7 +158,7 @@
 //! | UDT, marshal + registry-bare-name (`parse_raw_type_value`, whose UDT work is TWO inline field loops in `raw_type_value.rs` — the marshal one and the registry-bare one — not a call to `parse_udt_value`) | reported offset, was DISCARDED — now checked |
 //! | `frozen<T>` / `FrozenType(T)` | recursion for the VALUE; exactness is the inner arm's, and for a fixed-width inner it comes from the width table, which is why that table peels frozen first (B1) |
 //! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
-//! | unknown type → opaque `Value::Blob` | whole slice by construction; also `warn!`s |
+//! | unknown type → opaque `Value::Blob` | whole slice by construction; also raises the caller-aggregated opaque-key signal (the `warn!` is the caller's — see above) |
 //!
 //! ## The residual: NESTED CONSUMPTION IS UNCHECKED AT EVERY LEVEL BELOW THE FIRST
 //!
@@ -185,7 +186,7 @@
 //! WHY IT IS NOT FIXED HERE, measured rather than asserted. The root cause is that
 //! `parse_value_from_raw_bytes` has NO consumption channel at all — it returns a
 //! `Value` — so no caller could check even if it wanted to. Adding one is a
-//! recursive signature change across 44 call sites of that function plus 8 further
+//! recursive signature change across that function's ~45 call sites plus 8 further
 //! decoders in the same path (`parse_raw_type_value`, `parse_udt_value`,
 //! `parse_nested_udt_from_registry`, `parse_inline_udt_value`,
 //! `parse_tuple_elements_raw`, `parse_frozen_sequence_value_raw`,
@@ -300,7 +301,8 @@
 //! # The asymmetry across the three cell-path/key readers (issue #3612)
 //!
 //! For a key type CQLite models nowhere, TWO of the three serve an opaque
-//! `Value::Blob`: this multicell path (plus a `warn!`) and the frozen-map reader
+//! `Value::Blob`: this multicell path (plus the caller-aggregated `warn!`) and the
+//! frozen-map reader
 //! (`parse_frozen_map_value`, via `read_frozen_element`). The THIRD — the
 //! multi-generation MERGED read — FAILS CLOSED instead, returning
 //! `Error::unsupported_format` from `composite_collection_unsupported` before any
@@ -324,21 +326,14 @@
 use super::*;
 
 impl V5CompressedLegacyParser {
-    /// Parse a MULTICELL map's cell-path key.
-    ///
-    /// `data` is the bare serialized key (the CellPath's VInt length prefix is
-    /// already stripped by the caller). `type_str` is the map's declared KEY type
-    /// in whatever spelling the authoritative source provided — a CQL short form
-    /// from the schema (`frozen<collide>`, `int`) or a Cassandra marshal form from
-    /// `Statistics.db` (`org.apache.cassandra.db.marshal.UserType(…)`) — and is
-    /// forwarded WITH ITS CASE INTACT (see the module header).
-    /// Decode a cell-path key, DISCARDING the undecodable-key signal; see
-    /// [`Self::parse_cell_path_key_reporting`], which is the production entry point.
+    /// Parse a MULTICELL map's cell-path key, DISCARDING the undecodable-key
+    /// signal; see [`Self::parse_cell_path_key_reporting`], which is the
+    /// production entry point and carries the contract.
     ///
     /// TEST-ONLY, and gated so `-D dead-code` says so honestly: the only production
     /// caller (`complex_column`'s map branch) takes the reporting form, because it
     /// aggregates the signal across a row's entries. This wrapper exists solely to
-    /// keep this module's 62 unit call sites on the simpler signature; an
+    /// keep this module's unit call sites on the simpler signature; an
     /// `#[allow(dead_code)]` would have silenced a true statement instead.
     #[cfg(test)]
     pub(super) fn parse_cell_path_key(
@@ -351,7 +346,15 @@ impl V5CompressedLegacyParser {
         self.parse_cell_path_key_reporting(data, type_str, column_name, &mut opaque)
     }
 
-    /// Decode a cell-path key and REPORT whether it surfaced as opaque bytes.
+    /// Decode a MULTICELL map's cell-path key and REPORT whether it surfaced as
+    /// opaque bytes.
+    ///
+    /// `data` is the bare serialized key (the CellPath's VInt length prefix is
+    /// already stripped by the caller). `type_str` is the map's declared KEY type
+    /// in whatever spelling the authoritative source provided — a CQL short form
+    /// from the schema (`frozen<collide>`, `int`) or a Cassandra marshal form from
+    /// `Statistics.db` (`org.apache.cassandra.db.marshal.UserType(…)`) — and is
+    /// forwarded WITH ITS CASE INTACT (see the module header).
     ///
     /// `opaque_out` is set when the declared type is one this reader cannot model,
     /// so the caller can aggregate. It is a caller-side signal rather than a
@@ -423,13 +426,14 @@ impl V5CompressedLegacyParser {
             }
         }
         // The declared type is one this reader cannot model, so the shared
-        // decoder handed back the raw bytes. Report it LOUDLY but do NOT return
+        // decoder handed back the raw bytes. Report it to the caller — which
+        // `warn!`s once per column per row with the count — but do NOT return
         // `Err`: an `Err` here is swallowed by row assembly into a silently
         // truncated row (see the module header's error-budget rule), which is
         // more destructive than the opaque value, and Cassandra itself reads
-        // such a key without complaint. The `warn!` distinguishes this from a
-        // key DECLARED `blob`, which is a correct decode and stays silent —
-        // which is the misleading-diagnostic half of issue #3612.
+        // such a key without complaint. Raising the signal only HERE is what
+        // distinguishes this from a key DECLARED `blob`, which is a correct
+        // decode and stays silent — the misleading-diagnostic half of #3612.
         if matches!(probe, Value::Blob(_)) && !self.cell_path_key_declares_blob(type_str) {
             *opaque_out = true;
         }
@@ -501,8 +505,8 @@ impl V5CompressedLegacyParser {
         // (`Ok(Value::Frozen(Box::new(inner)))`) exactly.
         //
         // The re-wrap is REQUIRED, and its absence used to be masked. This
-        // dispatcher previously returned the bare inner value because
-        // `parse_cell_path_key` peeled and then re-applied a wrapper of its own; with
+        // dispatcher previously returned the bare inner value because the
+        // cell-path key entry point peeled and re-applied a wrapper of its own; with
         // that fixup deleted (roborev round 8), not wrapping here would make a
         // SCHEMA-form key diverge from the frozen reader in the opposite direction —
         // `frozen<set<int>>` reaches BOTH readers unchanged (its marshal is not
@@ -665,7 +669,8 @@ impl V5CompressedLegacyParser {
     /// for INSPECTION ONLY.
     ///
     /// Deliberately takes and returns a reference: the checks in
-    /// `parse_cell_path_key` must look through a wrapper, and the returned value
+    /// [`Self::parse_cell_path_key_reporting`] must look through a wrapper, and the
+    /// returned value
     /// must NOT be changed by having done so. The previous owned version rebound
     /// `decoded`, which turned an inspection into a presentation change and is the
     /// shape of roborev round 8's finding — parity is now the shared key-type
