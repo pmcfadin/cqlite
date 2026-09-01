@@ -687,7 +687,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 20 cases over throwaway
+#                      features-load-bearing component: 25 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -14969,7 +14969,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 20 cases over throwaway fixture
+# proof for the features-load-bearing component: 25 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16424,7 +16424,13 @@ run_tooling_tests() {
   # (roborev job 50): a renamed cross-member dependency key, a weak `dep?/feature` edge
   # both standalone and alongside its activation, a build script, and a NESTED MEMBER
   # sitting in the outer member's own tests/ directory — the overlap the real workspace
-  # has between the root package's tests/ and cqlite-integration-tests.
+  # has between the root package's tests/ and cqlite-integration-tests. Five further
+  # cases (job 52) pin the LEXICAL pass and the ANCHORED cfg heads: a
+  # `doc(cfg(feature = ...))` in a cfg_attr tail, a raw/byte string carrying a whole cfg
+  # attribute, a local `var("CARGO_FEATURE_X")` with no proven `use std::env::var`, and a
+  # redundant dependency-feature edge (external and workspace) each confer NOTHING. Every
+  # one was MEASURED to pass on the pre-fix guard, so each is a real differential rather
+  # than a case that would green either way.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
   # scripts/ci/) because the guard has no test-only seam and must never grow one.
   echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"

@@ -81,6 +81,23 @@
 #                across the package boundary in either direction.
 #  19.  USAGE  — an unrecognized argument exits 2 (repo convention).
 #  20.  GREEN  — --help exits 0 and documents that there is no opt-out.
+#
+#   THE ROUND-2 CLASS (roborev job 52): the scanner used to match TEXT over Rust it did
+#   not lexically understand. These pin the ONE lexical pass and the ANCHORED heads that
+#   replaced it, each in the direction that was a false PASS:
+#  21.  RED    — `doc(cfg(feature = "x"))` inside a `cfg_attr` TAIL confers nothing: it
+#                is documentation, and the `cfg(` in it is not an anchored head.
+#  22.  RED    — a RAW STRING (any hash count) containing a whole `#[cfg(feature = …)]`
+#                attribute confers nothing. Its bytes never reach the code text.
+#  23.  RED+GREEN — an unrelated local `var("CARGO_FEATURE_X")` in build.rs confers
+#                nothing; the SAME call with `use std::env::var` proved in the file
+#                does. `var` is an ordinary identifier.
+#  24.  RED    — a REDUNDANT external dependency edge (`serde/derive` beside
+#                `serde = { features = ["derive"] }`) confers nothing, with a
+#                NON-redundant sibling edge (`serde/rc`) as the control that the
+#                redundancy test is not simply refusing every external edge.
+#  25.  RED    — the same for a WORKSPACE-member edge whose dependency declaration
+#                already enables the forwarded feature.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -445,13 +462,116 @@ grep -qi 'no bypass flag' "$TMPROOT/out.txt" \
   || fail_case "case 20: --help does not state that there is no bypass flag / no environment opt-out"
 ok "--help exits 0 and states there is no bypass flag and no environment opt-out"
 
+# --- 21. RED: doc(cfg(...)) in a cfg_attr TAIL is documentation, not a gate ----
+D="$(fixture doc-cfg)"
+cat >"$D/a/src/lib.rs" <<'EOF'
+#[cfg_attr(docsrs, doc(cfg(feature = "leafx")))]
+pub fn always() {}
+EOF
+expect_red_naming "$D" "leafx" "case 21"
+ok "a \`doc(cfg(feature = ...))\` inside a cfg_attr TAIL confers no credit"
+
+# --- 22. RED: a raw string containing a cfg attribute is not a site -----------
+D="$(fixture raw-string)"
+cat >"$D/a/src/lib.rs" <<'EOF'
+pub const SNIPPET: &str = r#"
+#[cfg(feature = "leafx")]
+pub fn gated() {}
+"#;
+pub const NESTED: &str = r##"#[cfg(feature = "leafx")] mod m;"##;
+pub const BYTES: &[u8] = br#"#[cfg(feature = "leafx")]"#;
+pub fn always() {}
+EOF
+expect_red_naming "$D" "leafx" "case 22"
+ok "a RAW/byte string (any hash count) carrying a whole cfg attribute confers no credit"
+
+# --- 23. RED then GREEN: `var` must be a proven environment API --------------
+D="$(fixture bare-var-red)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+fn var(_key: &str) -> Option<String> { None }
+
+fn main() {
+    if var("CARGO_FEATURE_TFEAT").is_some() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+expect_red_naming "$D" "tfeat" "case 23a"
+D="$(fixture bare-var-green)"
+cat >"$D/a/tests/t.rs" <<'EOF'
+#[test]
+fn t() {}
+EOF
+cat >"$D/a/build.rs" <<'EOF'
+use std::env::{var, var_os};
+
+fn main() {
+    let _ = var_os("PATH");
+    if var("CARGO_FEATURE_TFEAT").is_ok() {
+        println!("cargo:rustc-cfg=has_tfeat");
+    }
+}
+EOF
+expect_green "$D" "case 23b"
+ok "an unrelated local \`var("CARGO_FEATURE_X")\` confers nothing; the same call with a PROVEN \`use std::env::var\` does"
+
+# --- 24. RED: a REDUNDANT external dependency edge ---------------------------
+D="$(fixture redundant-external)"
+python3 - "$D/a/Cargo.toml" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+dep = 'bee = { path = "../b", package = "b" }'
+s = s.replace(dep, dep + '\nserde = { version = "1", features = ["derive"] }')
+# `redext` forwards a feature the DECLARATION already enables (a no-op); `newext`
+# forwards one it does not (a real effect) — the control.
+s = s.replace('tfeat = []', 'tfeat = []\nredext = ["serde/derive"]\nnewext = ["serde/rc"]')
+open(p, 'w').write(s)
+PYEOF
+grep -q '^redext = ' "$D/a/Cargo.toml" || fail_case "case 24: fixture edit did not plant redext"
+expect_red_naming "$D" "redext" "case 24"
+if grep -q 'newext' "$TMPROOT/out.txt"; then
+  cat "$TMPROOT/out.txt"
+  fail_case "case 24: the NON-redundant sibling edge serde/rc was also reported dead — the redundancy test is refusing every external edge, not just the no-op one"
+fi
+ok "a REDUNDANT external dependency edge confers no credit, while a non-redundant sibling still does"
+
+# --- 25. RED: a REDUNDANT workspace-member dependency edge -------------------
+D="$(fixture redundant-workspace)"
+python3 - "$D/a/Cargo.toml" "$D/b/Cargo.toml" "$D/b/src/lib.rs" <<'PYEOF'
+import sys
+a, b, blib = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(b).read().replace('bfeat = []', 'bfeat = []\nbfeat2 = []')
+open(b, 'w').write(s)
+s = open(blib).read() + '\n#[cfg(feature = "bfeat2")]\npub fn bfeat2_only() {}\n'
+open(blib, 'w').write(s)
+s = open(a).read()
+# The declaration already enables bfeat2, so forwarding it enables nothing. `fwd`
+# (bee/bfeat) is deliberately untouched, so this case isolates the redundant edge.
+s = s.replace('bee = { path = "../b", package = "b" }',
+              'bee = { path = "../b", package = "b", features = ["bfeat2"] }')
+s = s.replace('tfeat = []', 'tfeat = []\nredws = ["bee/bfeat2"]')
+open(a, 'w').write(s)
+PYEOF
+grep -q '^redws = ' "$D/a/Cargo.toml" || fail_case "case 25: fixture edit did not plant redws"
+expect_red_naming "$D" "redws" "case 25"
+if grep -qE '^ +[^ ]+  fwd ' "$TMPROOT/out.txt"; then
+  cat "$TMPROOT/out.txt"
+  fail_case "case 25: fwd was reported dead too — its own edge (bee/bfeat) is not redundant, so the redundancy test is over-reaching"
+fi
+ok "a REDUNDANT workspace-member edge confers no credit, and a non-redundant edge on the same dependency is unaffected"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=20
+CASE_COUNT_EXPECTED=25
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
