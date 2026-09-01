@@ -440,13 +440,18 @@ class PythonAdapter(_Adapter):
                 return list(value)
             raise CanonicalError(f"declared tuple<> expects a Python tuple, got {_pytype(value)}")
         if kind == "set":
-            if isinstance(value, (frozenset, set)):
+            # R3: a `frozenset`, NEVER a mutable `set` — `set_to_py` and
+            # `value_to_hashable_key` both build `PyFrozenSet`, so a mutable set
+            # is a shape this binding cannot produce. `isinstance` would accept
+            # a frozenset subclass, which is fine; what is refused is `set`,
+            # which is NOT a frozenset subclass.
+            if isinstance(value, frozenset):
                 return list(value)
             if not hashable and isinstance(value, list) and subtree_has_udt(t):
                 # Projection 1 (#804/#3500): SET<FROZEN<UDT>> is a list.
                 return value
             raise CanonicalError(
-                f"declared set<> expects a Python frozenset/set, got {_pytype(value)}"
+                f"declared set<> expects a Python frozenset, got {_pytype(value)}"
             )
         raise CanonicalError(f"as_seq called for non-sequence kind {kind!r}")
 
@@ -474,29 +479,50 @@ class PythonAdapter(_Adapter):
 
         if kind == "boolean":
             if not isinstance(value, bool):
-                raise CanonicalError(f"boolean column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared boolean expects a Python bool, got {_pytype(value)}"
+                )
             return value
         if kind in _INT_KINDS:
             return canon_int(value)
         if kind in _FLOAT_KINDS:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise CanonicalError(f"{kind} column got {type(value).__name__}")
-            return float(value)
+            # R1: a Python `float`, NEVER an int. Verified at source —
+            # `bindings/python/src/value.rs:40-41` sends both Float32 and Float
+            # through `into_pyobject` on an `f64`, so an int is a shape this
+            # binding cannot produce. `isinstance(True, int)` is also why bool
+            # had to be excluded explicitly before; requiring `float` outright
+            # subsumes that.
+            if not isinstance(value, float):
+                raise CanonicalError(
+                    f"declared {kind} expects a Python float, got {_pytype(value)}"
+                )
+            return value
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
-                raise CanonicalError(f"{kind} column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared {kind} expects a Python str, got {_pytype(value)}"
+                )
             return value
         if kind == "blob":
-            if not isinstance(value, (bytes, bytearray, memoryview)):
-                raise CanonicalError(f"blob column got {type(value).__name__}")
-            return canon_hex(bytes(value))
+            # R2: `bytes`, not bytearray/memoryview — `value.rs:52` is
+            # `PyBytes::new`, so the mutable/view forms are shapes this binding
+            # cannot produce.
+            if not isinstance(value, bytes):
+                raise CanonicalError(
+                    f"declared blob expects Python bytes, got {_pytype(value)}"
+                )
+            return canon_hex(value)
         if kind in _UUID_KINDS:
             if not isinstance(value, _uuidmod.UUID):
-                raise CanonicalError(f"{kind} column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared {kind} expects a uuid.UUID, got {_pytype(value)}"
+                )
             return canon_uuid_str(str(value))
         if kind == "timestamp":
             if not isinstance(value, _dt.datetime):
-                raise CanonicalError(f"timestamp column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared timestamp expects a datetime.datetime, got {_pytype(value)}"
+                )
             dt = value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
             delta = dt.astimezone(_dt.timezone.utc) - _EPOCH
             return canon_int(
@@ -504,20 +530,35 @@ class PythonAdapter(_Adapter):
             )
         if kind == "date":
             if isinstance(value, _dt.datetime) or not isinstance(value, _dt.date):
-                raise CanonicalError(f"date column got {type(value).__name__}")
+                raise CanonicalError(
+                    "declared date expects a datetime.date (NOT a datetime), got "
+                    f"{_pytype(value)}"
+                )
             return value.isoformat()
         if kind == "time":
             return canon_int(value)
         if kind == "duration":
-            months = getattr(value, "months", None)
-            days = getattr(value, "days", None)
-            nanos = getattr(value, "nanos", None)
-            if months is None or days is None or nanos is None:
-                raise CanonicalError(f"duration column got {type(value).__name__}")
-            return _canon_duration(months, days, nanos)
+            # R4: the actual `cqlite.Duration`, not "anything with three
+            # attributes" — a duck-typed stand-in is a shape the binding cannot
+            # produce, and the old `getattr(..., None)` form also read a
+            # legitimate `months=None` as a missing attribute.
+            try:
+                import cqlite
+            except ImportError as exc:  # pragma: no cover - the binding is a test dep
+                raise CanonicalError(
+                    "declared duration expects a cqlite.Duration, but the cqlite module "
+                    f"is not importable ({exc})"
+                ) from exc
+            if not isinstance(value, cqlite.Duration):
+                raise CanonicalError(
+                    f"declared duration expects a cqlite.Duration, got {_pytype(value)}"
+                )
+            return _canon_duration(value.months, value.days, value.nanos)
         if kind == "decimal":
             if not isinstance(value, _decimal.Decimal):
-                raise CanonicalError(f"decimal column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared decimal expects a decimal.Decimal, got {_pytype(value)}"
+                )
             # `str()`, NEVER `format(value, "f")`: the "f" presentation expands the
             # scale to POSITIONAL notation before normalize_decimal_string's
             # DECIMAL_PLAIN_MAX_CHARS guard can refuse it, so a Decimal carrying a
@@ -527,7 +568,10 @@ class PythonAdapter(_Adapter):
             return normalize_decimal_string(str(value))
         if kind == "inet":
             if not isinstance(value, (_ip.IPv4Address, _ip.IPv6Address)):
-                raise CanonicalError(f"inet column got {type(value).__name__}")
+                raise CanonicalError(
+                    "declared inet expects an ipaddress.IPv4Address/IPv6Address, got "
+                    f"{_pytype(value)}"
+                )
             return str(value)
         raise CanonicalError(f"unsupported scalar kind {kind!r}")
 
@@ -567,32 +611,49 @@ class CliAdapter(_Adapter):
     def scalar(self, value: Any, kind: str) -> Any:
         if kind == "boolean":
             if not isinstance(value, bool):
-                raise CanonicalError(f"boolean column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared boolean expects a JSON boolean, got {_pytype(value)}"
+                )
             return value
         if kind == "varint":
             if not isinstance(value, str):
-                raise CanonicalError(f"varint column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared varint expects a JSON decimal string, got {_pytype(value)}"
+                )
             return canon_int(int(value))
         if kind in _INT_KINDS:
             return canon_int(value)
         if kind in _FLOAT_KINDS:
+            # R7 is DECLINED, deliberately: see the README. An int is accepted
+            # here because nothing in serde_json's contract guarantees a whole
+            # f64 always renders as `N.0`, and B4 is the standing evidence that
+            # number-shape assumptions across a JSON boundary are where a false
+            # red comes from.
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise CanonicalError(f"{kind} column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared {kind} expects a JSON number, got {_pytype(value)}"
+                )
             return float(value)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
-                raise CanonicalError(f"{kind} column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared {kind} expects a JSON string, got {_pytype(value)}"
+                )
             return value
         if kind == "blob":
             if not isinstance(value, str) or not value.startswith("0x"):
-                raise CanonicalError(f"blob column got {value!r}")
+                raise CanonicalError(
+                    f"declared blob expects a JSON \"0x…\" string, got {value!r}"
+                )
             body = value[2:].lower()
             if not _HEX_RE.match(body):
                 raise CanonicalError(f"blob column is not hex: {value!r}")
             return "0x" + body
         if kind in _UUID_KINDS:
             if not isinstance(value, str):
-                raise CanonicalError(f"{kind} column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared {kind} expects a JSON string, got {_pytype(value)}"
+                )
             return canon_uuid_str(value)
         if kind == "timestamp":
             m = _CLI_TIMESTAMP_RE.match(value if isinstance(value, str) else "")
@@ -624,11 +685,15 @@ class CliAdapter(_Adapter):
             return _canon_duration(months, days, nanos)
         if kind == "decimal":
             if not isinstance(value, str):
-                raise CanonicalError(f"decimal column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared decimal expects a JSON string, got {_pytype(value)}"
+                )
             return normalize_decimal_string(value)
         if kind == "inet":
             if not isinstance(value, str):
-                raise CanonicalError(f"inet column got {type(value).__name__}")
+                raise CanonicalError(
+                    f"declared inet expects a JSON string, got {_pytype(value)}"
+                )
             return value
         raise CanonicalError(f"unsupported scalar kind {kind!r}")
 

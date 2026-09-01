@@ -456,7 +456,7 @@ def test_container_kinds_are_type_specific_not_interchangeable():
     node legs can enforce it — the CLI renders all three as a bare JSON array
     (README gap 1).
     """
-    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset/set"):
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset"):
         canon_python(["a"], parse_type("set<text>"))
     with pytest.raises(CanonicalError, match=r"declared list<> expects a Python list"):
         canon_python(("a",), parse_type("list<text>"))
@@ -466,8 +466,47 @@ def test_container_kinds_are_type_specific_not_interchangeable():
         canon_python([], parse_type("map<text, text>"))
     # ...and the correct shapes still pass.
     assert canon_python(frozenset({"b", "a"}), parse_type("set<text>")) == ["a", "b"]
+    # R3: a MUTABLE set is refused — the binding only ever builds a frozenset.
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset"):
+        canon_python({"a"}, parse_type("set<text>"))
     assert canon_python(["b", "a"], parse_type("list<text>")) == ["b", "a"]
     assert canon_python(("b", "a"), parse_type("tuple<text, text>")) == ["b", "a"]
+
+
+def test_python_scalar_natives_are_exact_not_merely_compatible():
+    """R1-R4: the Python adapter accepts only what the binding can produce.
+
+    The scalar analogue of F4/F5. Each is verified at
+    ``bindings/python/src/value.rs``: floats are ``into_pyobject`` on an ``f64``
+    (`:40-41`), blobs are ``PyBytes::new`` (`:52`), sets are ``PyFrozenSet``,
+    and a duration is a ``cqlite.Duration``. A wider accept normalizes away a
+    regression that only ever surfaces later, which is the class this closes.
+    """
+    import decimal
+    import types
+
+    import cqlite
+
+    # R1 — float/double must be a float, never an int.
+    with pytest.raises(CanonicalError, match=r"declared double expects a Python float"):
+        canon_python(2, parse_type("double"))
+    assert canon_python(2.0, parse_type("double")) == 2.0
+    # R2 — blob must be bytes, not bytearray/memoryview.
+    for wrong in (bytearray(b"\x00\xff"), memoryview(b"\x00\xff")):
+        with pytest.raises(CanonicalError, match=r"declared blob expects Python bytes"):
+            canon_python(wrong, parse_type("blob"))
+    assert canon_python(b"\x00\xff", parse_type("blob")) == "0x00ff"
+    # R4 — duration must BE a cqlite.Duration, not merely look like one.
+    duck = types.SimpleNamespace(months=1, days=2, nanos=3)
+    with pytest.raises(CanonicalError, match=r"declared duration expects a cqlite.Duration"):
+        canon_python(duck, parse_type("duration"))
+    assert canon_python(cqlite.Duration(1, 2, 3), parse_type("duration")) == {
+        "months": 1,
+        "days": 2,
+        "nanos": 3,
+    }
+    # And the sibling scalars still accept exactly their own native type.
+    assert canon_python(decimal.Decimal("1.50"), parse_type("decimal")) == "1.50"
 
 
 def test_hashable_position_projection_is_allowed_not_red():
@@ -512,10 +551,10 @@ def test_set_of_udt_projection_is_allowed():
     assert PYTHON_ADAPTER.as_seq([], udt_set, False) == []
     # ...and it is refused inside a HASHABLE position, where value_hashable.rs
     # never re-enters set_to_py, so the UDT branch is unreachable there.
-    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset/set"):
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset"):
         PYTHON_ADAPTER.as_seq([], udt_set, True)
     # ...and refused for a subtree WITHOUT a UDT, which is F4's whole point.
-    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset/set"):
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset"):
         canon_python([[1]], parse_type("set<frozen<list<int>>>"))
 
 

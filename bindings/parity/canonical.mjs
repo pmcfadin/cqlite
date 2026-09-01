@@ -319,8 +319,8 @@ function canonDuration(months, days, nanos) {
 // Node adapter
 // ---------------------------------------------------------------------------
 
-function isBytes(v) {
-  return v instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(v));
+function isBuffer(v) {
+  return typeof Buffer !== 'undefined' && Buffer.isBuffer(v);
 }
 
 /** `[object Set]` -> `Set`, etc. — a readable container name for a refusal. */
@@ -405,36 +405,51 @@ const nodeAdapter = {
   },
   scalar(value, kind) {
     if (kind === 'boolean') {
-      if (typeof value !== 'boolean') throw new CanonicalError(`boolean column got ${typeof value}`);
+      if (typeof value !== 'boolean') {
+        throw new CanonicalError(`declared boolean expects a JavaScript boolean, got ${typeof value}`);
+      }
       return value;
     }
     if (INT_KINDS.has(kind)) {
       return canonInt(requireJsType(value, NODE_INT_JS_TYPE.get(kind), kind));
     }
     if (FLOAT_KINDS.has(kind)) {
-      if (typeof value !== 'number') throw new CanonicalError(`${kind} column got ${typeof value}`);
+      // `create_double` (value.rs:222-223) — always a JS number.
+      requireJsType(value, 'number', kind);
       return value;
     }
     if (TEXT_KINDS.has(kind)) {
-      if (typeof value !== 'string') throw new CanonicalError(`${kind} column got ${typeof value}`);
+      requireJsType(value, 'string', kind);
       return value;
     }
     if (kind === 'blob') {
-      if (!isBytes(value)) throw new CanonicalError(`blob column got ${typeof value}`);
+      // R5: a Node `Buffer`, not any Uint8Array — `create_buffer_copy`
+      // (value.rs:232) always produces a Buffer, so a bare Uint8Array is a
+      // shape this binding cannot produce. Buffer IS a Uint8Array subclass,
+      // so the old isBytes() test accepted a strictly wider set.
+      if (!isBuffer(value)) {
+        throw new CanonicalError(
+          `declared blob expects a Node Buffer, got ${containerName(value)}`,
+        );
+      }
       return canonHex(value);
     }
     if (UUID_KINDS.has(kind)) {
-      if (typeof value !== 'string') throw new CanonicalError(`${kind} column got ${typeof value}`);
+      requireJsType(value, 'string', kind);
       return canonUuidStr(value);
     }
     if (kind === 'timestamp') {
-      if (!(value instanceof Date)) throw new CanonicalError('timestamp column is not a Date');
+      if (!(value instanceof Date)) {
+        throw new CanonicalError(`declared timestamp expects a JavaScript Date, got ${containerName(value)}`);
+      }
       const ms = value.getTime();
       if (!Number.isFinite(ms)) throw new CanonicalError('timestamp column is an Invalid Date');
       return canonInt(ms);
     }
     if (kind === 'date') {
-      if (!(value instanceof Date)) throw new CanonicalError('date column is not a Date');
+      if (!(value instanceof Date)) {
+        throw new CanonicalError(`declared date expects a JavaScript Date, got ${containerName(value)}`);
+      }
       const iso = value.toISOString();
       return iso.slice(0, iso.indexOf('T'));
     }
@@ -442,9 +457,22 @@ const nodeAdapter = {
       return canonInt(requireJsType(value, NODE_INT_JS_TYPE.get('time'), 'time'));
     }
     if (kind === 'duration') {
-      if (value === null || typeof value !== 'object'
-          || !('months' in value) || !('days' in value) || !('nanos' in value)) {
-        throw new CanonicalError('duration column is not {months, days, nanos}');
+      if (value === null || typeof value !== 'object') {
+        throw new CanonicalError(
+          `declared duration expects a JavaScript object, got ${containerName(value)}`,
+        );
+      }
+      // R6: EXACTLY the three keys. `duration_to_object` (value.rs:335-342)
+      // sets months/days/nanos and nothing else, so an extra property is a
+      // shape this binding cannot produce — and the old membership test
+      // ignored extras entirely.
+      const durKeys = Object.keys(value).sort();
+      if (durKeys.length !== 3 || durKeys[0] !== 'days' || durKeys[1] !== 'months'
+          || durKeys[2] !== 'nanos') {
+        throw new CanonicalError(
+          'declared duration expects EXACTLY the keys {days, months, nanos}, got '
+          + `{${durKeys.join(', ')}}`,
+        );
       }
       // The NESTED one is easy to miss: months/days are plain numbers and only
       // `nanos` is a BigInt (duration_to_object, value.rs:337-340).
@@ -455,11 +483,11 @@ const nodeAdapter = {
       );
     }
     if (kind === 'decimal') {
-      if (typeof value !== 'string') throw new CanonicalError(`decimal column got ${typeof value}`);
+      requireJsType(value, 'string', 'decimal');
       return normalizeDecimalString(value);
     }
     if (kind === 'inet') {
-      if (typeof value !== 'string') throw new CanonicalError(`inet column got ${typeof value}`);
+      requireJsType(value, 'string', 'inet');
       return value;
     }
     throw new CanonicalError(`unsupported scalar kind '${kind}'`);

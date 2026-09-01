@@ -65,6 +65,8 @@ def materialize_python(spec: Any) -> Any:
     if not isinstance(spec, dict) or "$" not in spec:
         raise ValueError(f"untagged vector spec: {spec!r}")
     tag = spec["$"]
+    if tag == "uint8array":
+        raise ValueError("the `uint8array` vector tag is node-only")
     if tag == "duration_raw":
         raise ValueError(
             "the `duration_raw` vector tag is node-only; it exists to plant a wrong "
@@ -82,6 +84,20 @@ def materialize_python(spec: Any) -> Any:
         return _uuid.UUID(spec["v"])
     if tag == "bytes":
         return bytes.fromhex(spec["hex"])
+    # Python-only REFUSAL tags (issue #1455, R1-R4): shapes the binding cannot
+    # produce, materialized so the strictness rules have something to refuse.
+    if tag == "bytearray":
+        return bytearray.fromhex(spec["hex"])
+    if tag == "memoryview":
+        return memoryview(bytes.fromhex(spec["hex"]))
+    if tag == "mutable_set":
+        return {materialize_python(x) for x in spec["items"]}
+    if tag == "duck_duration":
+        import types as _types
+
+        return _types.SimpleNamespace(
+            months=spec["months"], days=spec["days"], nanos=int(spec["nanos"])
+        )
     if tag == "datetime":
         return _EPOCH + _dt.timedelta(milliseconds=spec["ms"])
     if tag == "date":

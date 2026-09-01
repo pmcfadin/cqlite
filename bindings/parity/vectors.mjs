@@ -71,15 +71,23 @@ export function materializeNode(spec) {
     // of them -- a bare JSON number stays a number, a {"$":"bigint"} tag
     // becomes a BigInt. The plain `duration` tag above always builds the
     // CORRECT shape, which is what the value vectors use.
-    case 'duration_raw': return {
-      months: materializeNode(spec.months),
-      days: materializeNode(spec.days),
-      nanos: materializeNode(spec.nanos),
-    };
+    case 'duration_raw': {
+      // Every key except `$` is materialized individually, so a case can plant
+      // both a wrong FIELD TYPE (F5) and an EXTRA key (R6).
+      const out = {};
+      for (const [k, v] of Object.entries(spec)) {
+        if (k !== '$') out[k] = materializeNode(v);
+      }
+      return out;
+    }
+    // R5: a bare Uint8Array where the binding always produces a Buffer.
+    case 'uint8array': return Uint8Array.from(Buffer.from(spec.hex, 'hex'));
     // A tuple is indistinguishable from a list on this leg (DECLARED GAP).
     case 'list': case 'tuple': return spec.items.map(materializeNode);
     case 'set': return new Set(spec.items.map(materializeNode));
     case 'map': return new Map(spec.entries.map(([k, v]) => [materializeNode(k), materializeNode(v)]));
+    case 'bytearray': case 'memoryview': case 'mutable_set': case 'duck_duration':
+      throw new Error(`the \`${spec.$}\` vector tag is python-only`);
     default: throw new Error(`unknown vector tag: ${spec.$}`);
   }
 }
