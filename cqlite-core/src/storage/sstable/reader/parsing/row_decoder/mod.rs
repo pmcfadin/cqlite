@@ -789,15 +789,11 @@ mod block_emit;
 mod block_emit_windowed;
 mod cell_kind;
 mod cell_value;
-// campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
-mod cell_value_complex;
-mod cell_value_scalar;
+mod cell_value_complex; // campsite split of `cell_value` (#1795): complex ladder
+mod cell_value_scalar; // campsite split of `cell_value` (#1795): scalar arms
+mod column_decode_error; // issue #3721: the per-column decode-failure policy
 mod compaction;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
-                       // Per-column decode-failure policy for row assembly (issue #3721): the rule, the
-                       // fatal-vs-skippable analysis, and the ONE end-of-partition-vs-defect decision
-                       // the block/partition row loops share.
-mod column_decode_error;
 pub(in crate::storage::sstable::reader) use compaction_stream::{
     CompactionPartitionState, PartitionStreamStep,
 };
