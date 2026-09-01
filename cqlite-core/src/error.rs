@@ -261,6 +261,29 @@ pub enum Error {
     #[error("Unsupported query: {0}")]
     UnsupportedQuery(String),
 
+    /// A fixed-width CQL value's declared length is not a length the pinned
+    /// Cassandra 5.0.8 serializer for that type admits (issue #3723).
+    ///
+    /// Raised by the bounded element/field decoder, where the value slice has
+    /// already been delimited by its own `[i32 BE len]` prefix, so the slice
+    /// length IS the declared length. Reading only the first `expected` bytes
+    /// and discarding the rest made two distinct on-disk encodings decode to
+    /// the same `Value` — see the issue.
+    #[error(
+        "Fixed-width length mismatch: CQL type '{cql_type}' at '{context}' \
+         admits exactly {expected} byte(s), got {actual}"
+    )]
+    FixedWidthLengthMismatch {
+        /// Canonical CQL short form of the type whose width was violated.
+        cql_type: String,
+        /// Column / element description the value was read for.
+        context: String,
+        /// The only byte width this decoder admits for `cql_type`.
+        expected: usize,
+        /// The declared length actually present on disk.
+        actual: usize,
+    },
+
     /// The operation was cooperatively cancelled (issue #2264).
     ///
     /// Raised by a long-running scan (e.g. the compaction streaming read) when
@@ -447,6 +470,8 @@ impl Error {
 
             // These errors are typically not recoverable
             Error::Corruption(_) => false,
+            // A wrong on-disk length is corrupt input, not a transient fault.
+            Error::FixedWidthLengthMismatch { .. } => false,
             Error::Schema(_) => false,
             Error::CqlParse(_) => false,
             Error::Configuration(_) => false,
@@ -507,6 +532,7 @@ impl Error {
             Error::Io(_) => ErrorCategory::System,
             Error::Serialization { .. } => ErrorCategory::Data,
             Error::Corruption(_) => ErrorCategory::Data,
+            Error::FixedWidthLengthMismatch { .. } => ErrorCategory::Data,
             Error::Schema(_) => ErrorCategory::Schema,
             Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,

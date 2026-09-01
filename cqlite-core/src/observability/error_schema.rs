@@ -159,7 +159,12 @@ pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
 
         Error::Serialization { .. } | Error::TypeConversion(_) => ObsErrorCategory::Serialization,
 
-        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ObsErrorCategory::Corruption,
+        // Issue #3723: a fixed-width value whose declared on-disk length is not a
+        // width the pinned Cassandra serializer admits is corrupt input, so it shares
+        // the `Corruption` bucket rather than reading as a parse-capability gap.
+        Error::Corruption(_)
+        | Error::CorruptCommitLogFrame(_)
+        | Error::FixedWidthLengthMismatch { .. } => ObsErrorCategory::Corruption,
 
         Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 
