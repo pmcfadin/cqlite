@@ -2214,6 +2214,126 @@ else
   echo "info - agent-gate.sh unreadable; skipping the leak-lane declaration case"
 fi
 
+# ---------------------------------------------------------------------------
+# Cases 93-95 (issue #3642, residual 1 of #3493): the two lines that make the
+# node-ci.yml exemption TRUE must be pinned.
+#
+# `.github/ci-gating-tiers.yml` excuses node-ci.yml from `required` by asserting that the
+# local gate's `node-bindings` component "runs `npm run typecheck`" and "pairs `npm test`
+# with check-dataset-manifest.sh". Both claims rest on SINGLE LINES inside
+# run_node_bindings. Delete either and the registry sentence becomes false silently —
+# which is #3493's own defect class (an exemption is only as true as the named
+# component's scope) reintroduced one level down, at line granularity.
+#
+# STRUCTURAL, like case 92 and for the same reason: the behavioural facts cost a full
+# npm ci + napi build (~138s measured) to prove one line's presence, inside a
+# tooling-tests component already near ~950s. The property being asserted IS a property
+# of the source.
+#
+# EACH PIN CARRIES ITS OWN DISCRIMINATION CONTROL. A presence grep that has never been
+# seen to fail is not evidence: a typo in the pattern, or an awk scan that stopped seeing
+# the function after a refactor, both report "present" for every input. So each pin is
+# also run against a scratch copy of agent-gate.sh with exactly that line deleted, and
+# must report it ABSENT there. That is the RED, executed on every run rather than
+# remembered from the day the pin was written.
+# ---------------------------------------------------------------------------
+GATE_SRC4=$(cd "$(dirname "$GATE")" && pwd)/agent-gate.sh
+
+# _nb_body_line <file> <awk-pattern> -- line number of the FIRST non-comment line inside
+# run_node_bindings matching <awk-pattern> (after leading whitespace is trimmed), or 0.
+#
+# The comment filter is load-bearing: run_node_bindings' body carries long comments that
+# NAME `npm run typecheck` and `check-dataset-manifest.sh` in prose, so a scan that did
+# not exclude them would report the command present after the command itself was deleted
+# -- the pin would be satisfied by the documentation of the thing it is pinning.
+_nb_body_line() { # <file> <awk-pattern>
+  awk -v pat="$2" '
+    /^run_node_bindings\(\) \{/ { inf = 1; next }
+    inf && /^\}/                { inf = 0 }
+    inf {
+      line = $0
+      sub(/^[ \t]+/, "", line)
+      if (line ~ /^#/) next
+      if (!found && line ~ pat) found = NR
+    }
+    END { print found + 0 }
+  ' "$1"
+}
+
+# _nb_strip_line <src> <dst> <awk-pattern> -- copy <src> to <dst> with the FIRST
+# non-comment line of run_node_bindings matching <awk-pattern> removed. Substituting the
+# ARTIFACT rather than adding a seam to the gate (CLAUDE.md: a test-only seam is one more
+# thing a real invoker can set).
+_nb_strip_line() { # <src> <dst> <awk-pattern>
+  awk -v pat="$3" '
+    /^run_node_bindings\(\) \{/ { inf = 1; print; next }
+    inf && /^\}/                { inf = 0 }
+    {
+      if (inf && !done) {
+        line = $0
+        sub(/^[ \t]+/, "", line)
+        if (line !~ /^#/ && line ~ pat) { done = 1; next }
+      }
+      print
+    }
+  ' "$1" > "$2"
+}
+
+# _nb_pin <label> <awk-pattern> <symbol> -- assert the line is present in the real gate
+# AND that deleting it is detected. Two `ok`s per pin: presence, and discrimination.
+_nb_pin() { # <label> <awk-pattern> <symbol>
+  local label=$1 pat=$2 sym=$3
+  local n stripped m
+  n=$(_nb_body_line "$GATE_SRC4" "$pat")
+  if [ "$n" -gt 0 ]; then
+    ok "$label: run_node_bindings runs $sym (agent-gate.sh:$n) — the node-ci.yml exemption in .github/ci-gating-tiers.yml asserts it does"
+  else
+    bad "$label: run_node_bindings NO LONGER runs $sym — the node-ci.yml exemption in .github/ci-gating-tiers.yml claims it does, so that exemption is now FALSE. Restore the line or correct the registry entry in the same diff (#3642/#3493)."
+    return 0
+  fi
+  stripped="$WORK/nb-stripped-$$-$(echo "$sym" | tr -c 'a-zA-Z0-9' '-')"
+  _nb_strip_line "$GATE_SRC4" "$stripped" "$pat"
+  m=$(_nb_body_line "$stripped" "$pat")
+  if [ "$m" -eq 0 ]; then
+    ok "$label: the pin DISCRIMINATES — a copy with the $sym line deleted is reported absent"
+  else
+    bad "$label: the pin does NOT discriminate — a copy with the $sym line deleted still reports it present at line $m, so this pin would pass over its own defect"
+  fi
+}
+
+if [ -f "$GATE_SRC4" ]; then
+  # Sanity: the scan must actually be seeing the function body. A renamed function or a
+  # changed brace style would make every pattern "absent", turning three pins into three
+  # reds with a misleading cause -- or, with the polarity of a naive scan, three vacuous
+  # greens.
+  nb_body_lines=$(awk '/^run_node_bindings\(\) \{/{i=1} i&&/^\}/{i=0} i{n++} END{print n+0}' "$GATE_SRC4")
+  if [ "$nb_body_lines" -lt 100 ]; then
+    bad "cases 93-95: the run_node_bindings body scan saw only $nb_body_lines line(s); the scan is not seeing the function, so the pins below assert nothing"
+  else
+    _nb_pin "case 93" '^npm run typecheck$' 'npm run typecheck'
+    _nb_pin "case 94" '^bash .*check-dataset-manifest[.]sh' 'check-dataset-manifest.sh'
+    _nb_pin "case 95" '^npm test( |$)' 'npm test'
+
+    # And the PAIRING the registry entry claims: the corpus check runs BEFORE the suite.
+    # Presence of both is not the claim -- "pairs `npm test` with check-dataset-manifest.sh,
+    # which checks the CORPUS is complete rather than that the suite ran" only holds if the
+    # corpus verdict gates the run. A manifest check placed AFTER npm test could only report
+    # a corpus the suite had already been green over (CLAUDE.md: a check placed after the
+    # harmful effect can only report it).
+    nb_dm=$(_nb_body_line "$GATE_SRC4" '^bash .*check-dataset-manifest[.]sh')
+    nb_test=$(_nb_body_line "$GATE_SRC4" '^npm test( |$)')
+    if [ "$nb_dm" -gt 0 ] && [ "$nb_test" -gt 0 ]; then
+      if [ "$nb_dm" -lt "$nb_test" ]; then
+        ok "case 96: check-dataset-manifest.sh (line $nb_dm) runs BEFORE npm test (line $nb_test) — the corpus verdict gates the suite rather than reporting on it"
+      else
+        bad "case 96: check-dataset-manifest.sh (line $nb_dm) now runs AFTER npm test (line $nb_test); a corpus check downstream of the suite can only report a corpus the suite was already green over"
+      fi
+    fi
+  fi
+else
+  echo "info - agent-gate.sh unreadable; skipping the node-ci exemption pins (cases 93-96)"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
