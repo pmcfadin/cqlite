@@ -880,7 +880,7 @@ DELTA_MODE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of rec
 
 # delta_block [anchor] [commit] [tree-start] [tree-integrity] [result] [mode] \
 #             [anchor-parenthetical] [dirty] -> STDOUT.  "-" omits a line entirely.
-# The 9th parameter is the delta run's OWN `dirty:` value (#3648), rendered by the
+# The 8th parameter is the delta run's OWN `dirty:` value (#3648), rendered by the
 # same helpers as the full block's.
 # Line SHAPES are copied from scripts/agent-gate.sh's delta emit site
 # (anchor_meta + SUMMARY_MODE_LINE), trailing fields included.
