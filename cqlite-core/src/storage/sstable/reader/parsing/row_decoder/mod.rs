@@ -865,6 +865,9 @@ mod regression_1795_overflow_tests;
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
 
+#[cfg(test)]
+mod issue_3811_consumption_demo_tests;
+
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
     ///
