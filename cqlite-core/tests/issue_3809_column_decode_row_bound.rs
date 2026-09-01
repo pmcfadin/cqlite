@@ -147,10 +147,15 @@ fn fixture_root() -> PathBuf {
     })
 }
 
-/// Copy the fixture into a scratch tree, optionally replacing ONE byte of `Data.db`,
+/// Copy the fixture into a scratch tree, replacing zero or more bytes of `Data.db`,
 /// and omitting the checksum components (a byte edit invalidates them, and the
 /// controls below prove their absence is not what fails a read).
-fn patched_copy(patch: Option<(usize, u8)>) -> (tempfile::TempDir, PathBuf) {
+///
+/// Each patch is `(offset, expected_current_byte, new_byte)` and the CURRENT byte is
+/// ASSERTED before it is replaced, so a corpus regeneration that moves any of these
+/// fields fails loudly here instead of silently patching some other field and
+/// selecting a different condition.
+fn patched_copy(patches: &[(usize, u8, u8)]) -> (tempfile::TempDir, PathBuf) {
     let src = fixture_root().join(KEYSPACE).join(DIR);
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("sstables");
@@ -172,12 +177,11 @@ fn patched_copy(patch: Option<(usize, u8)>) -> (tempfile::TempDir, PathBuf) {
                  select the condition under test",
                 bytes.len()
             );
-            if let Some((at, to)) = patch {
+            for &(at, expect, to) in patches {
                 assert_eq!(
-                    bytes[at], BODY_LEN_VINT_LOW_VALUE,
-                    "byte {at:#x} must be the {BODY_LEN_VINT_LOW_VALUE:#x} Cassandra wrote as \
-                     the low half of the first row's `body` length vint; found {:#x} — the \
-                     fixture changed and this patch no longer edits that vint",
+                    bytes[at], expect,
+                    "byte {at:#x} must be the {expect:#x} Cassandra wrote there; found {:#x} \
+                     — the fixture changed and this patch no longer edits the field it names",
                     bytes[at]
                 );
                 bytes[at] = to;
@@ -213,8 +217,8 @@ async fn open_db(root: &Path, schema: &Path) -> Database {
 /// `SELECT *` over a scratch copy — the PUBLIC read path. Returns the `body` value
 /// of every row keyed by `ck`, so a case can assert on the VALUE and not merely on
 /// the row count (a wrong value with the right count is the defect).
-async fn select_bodies(patch: Option<(usize, u8)>) -> Result<Vec<(i32, String)>, Error> {
-    let (tmp, root) = patched_copy(patch);
+async fn select_bodies(patches: &[(usize, u8, u8)]) -> Result<Vec<(i32, String)>, Error> {
+    let (tmp, root) = patched_copy(patches);
     let schema = write_schema(tmp.path());
     let db = open_db(&root, &schema).await;
     let result = db
@@ -285,10 +289,11 @@ fn assert_column_decode_at(err: &Error, column: &str, at: usize, needles: &[&str
 /// consumer can tell from a right one.
 #[tokio::test]
 async fn a_cell_reaching_past_its_row_fails_the_select_instead_of_returning_the_next_rows_bytes() {
-    let err = select_bodies(Some((
+    let err = select_bodies(&[(
         BODY_LEN_VINT_LOW_BYTE,
+        BODY_LEN_VINT_LOW_VALUE,
         BODY_LEN_VINT_LOW_VALUE + SKEW,
-    )))
+    )])
     .await
     .expect_err(
         "a cell that consumes bytes past its own row's authoritative end has read another \
@@ -315,10 +320,11 @@ async fn a_cell_reaching_past_its_row_fails_the_select_instead_of_returning_the_
 /// comes from `row_size`), so it must fail too.
 #[tokio::test]
 async fn a_row_body_left_partly_unconsumed_fails_the_select_instead_of_returning_a_short_value() {
-    let err = select_bodies(Some((
+    let err = select_bodies(&[(
         BODY_LEN_VINT_LOW_BYTE,
+        BODY_LEN_VINT_LOW_VALUE,
         BODY_LEN_VINT_LOW_VALUE - SKEW,
-    )))
+    )])
     .await
     .expect_err(
         "bytes inside a row body accounted for by no column mean the cursor was misaligned \
@@ -338,14 +344,166 @@ async fn a_row_body_left_partly_unconsumed_fails_the_select_instead_of_returning
     );
 }
 
-// ─── CONTROLS: the one patched byte is what fails the read ───────────────────
+// ─── The row whose DECLARED SIZE ends inside its own METADATA (#3721, roborev job 13)
+//
+// The two cases above both reach the row-extent reconciliation through a COLUMN's
+// decoder. The shape below reaches it with NO column decoded at all, which is the
+// state no per-column bound check can see — and which an earlier revision of the
+// reconciliation asserted away with a `debug_assert!`, i.e. PANICKED on in any debug
+// build. The patch turns Cassandra's own first row into that shape with three
+// one-byte edits, each of which changes a field IN PLACE (no byte shifts):
+//
+//   0x12  row flags   0x24 -> 0x04   clear HAS_ALL_COLUMNS, keep HAS_TIMESTAMP, so a
+//                                    missing-columns bitmap VInt is now expected
+//   0x1c  bitmap      0x08 -> 0x01   bit 0 SET = on-disk column 0 (`body`) is ABSENT;
+//                                    this byte was the `body` cell's flags byte, which
+//                                    the bitmap now consumes (header_size 4 -> 5)
+//   0x18  row_size    0x81 -> 0x80 } row_size 316 -> 0, still a TWO-byte vint, so the
+//   0x19  row_size    0x3c -> 0x00 } row body ends at 0x1a + 0 = 26 — BEFORE the
+//                                    metadata's own end at 0x18 + 5 = 29
+//
+// A table with NO data columns reaches the identical state (`columns_in_order` empty,
+// so the loop body never runs); no committed fixture has such a table — verified over
+// every `CREATE TABLE` in `test-data/schemas/**` — so the all-columns-absent bitmap is
+// how the state is constructed here.
+
+/// The first row's flags byte, and the `HAS_ALL_COLUMNS | HAS_TIMESTAMP` Cassandra
+/// wrote there.
+const ROW_FLAGS_BYTE: usize = 0x12;
+const ROW_FLAGS_VALUE: u8 = 0x24;
+/// `HAS_TIMESTAMP` alone: `HAS_ALL_COLUMNS` (0x20) cleared, so the row header carries
+/// a missing-columns bitmap (`Columns.serializer` subset encoding).
+const ROW_FLAGS_NO_ALL_COLUMNS: u8 = 0x04;
+/// The byte the cleared flag turns into that bitmap — Cassandra wrote the `body`
+/// cell's flags byte (0x08) here.
+const BITMAP_BYTE: usize = 0x1c;
+const BITMAP_OLD_VALUE: u8 = 0x08;
+/// Bit 0 set = on-disk column 0 (`body`, the table's only data column) is MISSING, so
+/// the row declares NO column present and no column's decoder runs.
+const BITMAP_ALL_ABSENT: u8 = 0x01;
+/// The two bytes of the row_size vint, and the 316 Cassandra encoded in them.
+const ROW_SIZE_VINT_HIGH_BYTE: usize = 0x18;
+const ROW_SIZE_VINT_HIGH_VALUE: u8 = 0x81;
+const ROW_SIZE_VINT_LOW_BYTE: usize = 0x19;
+const ROW_SIZE_VINT_LOW_VALUE: u8 = 0x3c;
+/// `row_size = 0` in the SAME two-byte encoding (leading `10` = one extra byte, all
+/// value bits zero), so nothing shifts.
+const ROW_SIZE_ZERO_HIGH: u8 = 0x80;
+const ROW_SIZE_ZERO_LOW: u8 = 0x00;
+/// Where the row's metadata ENDS, with the bitmap byte the cleared `HAS_ALL_COLUMNS`
+/// flag adds included: `0x18 + header_size(5)`. With no column decoded this is also
+/// where the cursor stops, since only a column's decoder advances it.
+const ROW_METADATA_END: usize = 0x1d;
+/// The row body's end with `row_size = 0`: counted from AFTER the row_size vint
+/// (issue #237), i.e. `0x1a + 0` — three bytes BEFORE the metadata ends.
+const ROW_END_SIZE_ZERO: usize = 0x1a;
+
+/// Every edit that makes the row declare no present column.
+const ALL_COLUMNS_ABSENT: [(usize, u8, u8); 2] = [
+    (ROW_FLAGS_BYTE, ROW_FLAGS_VALUE, ROW_FLAGS_NO_ALL_COLUMNS),
+    (BITMAP_BYTE, BITMAP_OLD_VALUE, BITMAP_ALL_ABSENT),
+];
+/// The two further edits that shrink the declared row body to zero bytes.
+const ROW_SIZE_ZERO: [(usize, u8, u8); 2] = [
+    (
+        ROW_SIZE_VINT_HIGH_BYTE,
+        ROW_SIZE_VINT_HIGH_VALUE,
+        ROW_SIZE_ZERO_HIGH,
+    ),
+    (
+        ROW_SIZE_VINT_LOW_BYTE,
+        ROW_SIZE_VINT_LOW_VALUE,
+        ROW_SIZE_ZERO_LOW,
+    ),
+];
+
+/// A row whose declared `row_size` ends INSIDE its own metadata, with every column
+/// absent, must FAIL the read with a NAMED error — never PANIC (#3721, roborev job
+/// 13).
+///
+/// No column is decoded, so neither per-column bound runs even once: the pre-decode
+/// `row_body_exhausted` check is evaluated only for a column the bitmap declares
+/// PRESENT, and the post-decode `row_bound_check` only for a column whose decoder
+/// ran. The reconciliation at the end of row assembly therefore saw a cursor PAST the
+/// row's end, a state it `debug_assert!`ed could not happen — so it PANICKED on
+/// malformed bytes in every debug build (measured, at `row_data.rs:870`), which is
+/// the same class of defect as an `unwrap()` in library code. Issue #3721 exists
+/// because malformed data produced a SILENT SUCCESS; a panic on a different
+/// malformed shape is not the fix.
+///
+/// The report must also be ACCURATE about what happened: no column consumed anything,
+/// so the cursor's position is where the row's own METADATA ended, and the message
+/// says that rather than blaming a column set that never ran.
+#[tokio::test]
+async fn a_row_whose_declared_size_ends_inside_its_metadata_fails_the_select_instead_of_panicking()
+{
+    let patches: Vec<(usize, u8, u8)> = ALL_COLUMNS_ABSENT
+        .iter()
+        .chain(ROW_SIZE_ZERO.iter())
+        .copied()
+        .collect();
+    let err = select_bodies(&patches).await.expect_err(
+        "a row whose declared extent ends inside its own metadata cannot be read, and no \
+         column's bound check can see it — row assembly must return a named error, and must \
+         never panic on malformed bytes",
+    );
+    assert_column_decode_at(
+        &err,
+        // No column was decoded, so none can be named — and the report says exactly
+        // that instead of attributing the overrun to a column whose decoder never ran.
+        "<no column decoded>",
+        // The cursor is where the row's metadata ended: nothing else advances it.
+        ROW_METADATA_END,
+        &[
+            // The condition, why no column can be blamed, the two extents that
+            // disagree, and the arithmetic between them.
+            "row body over-consumed with NO column decoded",
+            "every one of them is ABSENT",
+            &format!("cursor at offset {ROW_METADATA_END}"),
+            &format!("{} byte(s) PAST", ROW_METADATA_END - ROW_END_SIZE_ZERO),
+            &format!("row body its header declares at {ROW_END_SIZE_ZERO}"),
+            "declared size ends INSIDE its metadata",
+            // The column set the row declares but cannot hold.
+            "1 on-disk column(s)",
+        ],
+    );
+}
+
+/// DISCRIMINATING CONTROL for the case above: the SAME all-columns-absent row with
+/// Cassandra's own `row_size` left intact is a DIFFERENT state and must be reported as
+/// that one — the row's 316-byte body is then accounted for by no column at all, which
+/// is under-consumption.
+///
+/// Without this, a fix that refused every all-columns-absent row would satisfy the
+/// case above. It also pins the "no column decoded" attribution: there is no column to
+/// name, and the report says so rather than naming an unrelated one.
+#[tokio::test]
+async fn the_same_all_columns_absent_row_with_its_real_row_size_is_reported_as_under_consumption() {
+    let err = select_bodies(&ALL_COLUMNS_ABSENT).await.expect_err(
+        "a row body no column accounts for means the cursor was misaligned inside it, so the \
+         read must fail",
+    );
+    assert_column_decode_at(
+        &err,
+        "<no column decoded>",
+        ROW_METADATA_END,
+        &[
+            "row body under-consumed",
+            &format!("{ROW_BODY_END}"),
+            &format!("{} byte(s)", ROW_BODY_END - ROW_METADATA_END),
+            "no column decoded",
+        ],
+    );
+}
+
+// ─── CONTROLS: the patched bytes are what fail the read ─────────────────────
 
 /// The SAME scratch copy, UNPATCHED, returns every row with the value Cassandra
 /// wrote. Without this, a fix that failed every read of a checksum-less SSTable — or
 /// of this fixture at all — would satisfy both cases above.
 #[tokio::test]
 async fn the_unpatched_scratch_copy_reads_every_row() {
-    let rows = select_bodies(None)
+    let rows = select_bodies(&[])
         .await
         .expect("the unpatched scratch copy must read cleanly");
     assert_eq!(

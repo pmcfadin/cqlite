@@ -2,8 +2,8 @@ use super::*;
 
 // Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
 use super::column_decode_error::{
-    column_decode_failure, dispatch_type, row_body_exhausted, row_body_under_consumed,
-    row_bound_check,
+    column_decode_failure, dispatch_type, row_body_exhausted, row_body_reconcile, row_bound_check,
+    walk_end_column,
 };
 
 impl V5CompressedLegacyParser {
@@ -858,36 +858,19 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        // Issue #3809: RECONCILE the column walk against the row's authoritative extent.
-        // `after_cells_offset` is the same value as `after_row_offset` above (both are
-        // `(row_metadata_offset + row_size_vint_len) + row_size`), recomputed here where
-        // the return offset is formed. Over-consumption is refused per column by
-        // `row_bound_check`, so this catches the CONVERSE — see
-        // `row_body_under_consumed` for why a deficit is never benign, and for the
-        // enumeration of every legitimately non-advancing path (none can reach here
-        // short).
+        // Issue #3809/#3721: RECONCILE the column walk against the row's authoritative
+        // extent (`after_cells_offset` is `after_row_offset` above, recomputed where the
+        // return offset is formed). All THREE outcomes are named and each RETURNS a
+        // value — short, exact, long — in `row_body_reconcile`; none is asserted,
+        // because a malformed SSTable must produce an `Err`, never a panic. The `!=`
+        // guard keeps the hot path clear of the failure path's column lookup.
         if offset != after_cells_offset {
-            debug_assert!(
-                offset < after_cells_offset,
-                "over-consumption is refused per column by column_escaped_row_bound"
-            );
-            let last = last_decoded_idx.map(|idx| {
-                let ctp = &columns_in_order[idx];
-                let declared = ctp
-                    .schema
-                    .map(|c| c.data_type.as_str())
-                    .or(ctp.header_type)
-                    .unwrap_or("blob");
-                (
-                    Arc::clone(&ctp.name),
-                    dispatch_type(declared, ctp.header_type),
-                )
-            });
-            return Err(row_body_under_consumed(
+            let last = walk_end_column(columns_in_order, last_decoded_idx);
+            row_body_reconcile(
                 last.as_ref().map(|(n, t)| (&**n, t.as_str())),
                 (offset, after_cells_offset),
                 (columns_in_order.len(), cells.len()),
-            ));
+            )?;
         }
 
         // No trailing field - next partition/row starts immediately

@@ -120,6 +120,9 @@
 //! does not prevent. Every windowed caller keeps only the target partition's rows,
 //! so nothing is lost.
 
+use std::cmp::Ordering;
+use std::sync::Arc;
+
 use crate::error::{Error, Result};
 
 /// Build the [`Error::ColumnDecode`] a row-assembly column handler propagates,
@@ -360,6 +363,131 @@ pub(super) fn row_body_under_consumed(
         row_end.saturating_sub(offset)
     ));
     column_decode_failure(name, ty, offset, cause)
+}
+
+/// The per-column walk finished PAST the row's authoritative end (issue #3721 /
+/// #3809). The exact converse of [`row_body_under_consumed`], and the whole-row form
+/// of [`column_escaped_row_bound`].
+///
+/// # Why this exists as an ERROR and not as an assertion (roborev job 13)
+///
+/// Over-consumption is refused PER COLUMN by [`row_bound_check`] — but that check
+/// runs only for a column whose decoder actually RAN, and the pre-decode
+/// [`row_body_exhausted`] bound only for a column the row's bitmap declares PRESENT.
+/// A row whose bitmap declares EVERY column absent — or a table with no data columns
+/// — walks no column at all, so neither check is evaluated even once and nothing
+/// refuses a cursor that was already past the row end when the loop was entered.
+/// That happens when a malformed row's declared `row_size` ends INSIDE its own
+/// metadata: `row_size` is counted from immediately after its own VInt and covers the
+/// whole row body (`cassandra-5.0.8`
+/// `db/rows/UnfilteredSerializer.serialize`/`deserializeRowBody`, the
+/// `getFilePointer()` arithmetic of issue #237), so the metadata is a PREFIX of the
+/// declared body in every well-formed row.
+///
+/// An earlier revision reasoned from the per-column check to a `debug_assert!` here.
+/// The reasoning was not exhaustive and the consequence was a PANIC on malformed
+/// bytes in any debug build — the same class of defect as an `unwrap()` in library
+/// code, and issue #3721 exists precisely because malformed data must produce
+/// neither a silent success NOR a panic. So the three post-walk states are each named
+/// and each RETURNS a value: short → [`row_body_under_consumed`], exact → `Ok`, long
+/// → this. Nothing is asserted. See [`row_body_reconcile`].
+///
+/// # What the report can say in each shape, and why
+///
+/// * **Some column decoded.** WHICH column over-consumed is not knowable here (every
+///   decoder that ran reported success and passed [`row_bound_check`]), exactly as
+///   for [`row_body_under_consumed`]: `last_column` is the column the walk ENDED on,
+///   named so an operator has a starting point, and the deficit belongs to the column
+///   set as a whole.
+/// * **No column decoded.** Then the cursor has not moved since the row's metadata
+///   ended — [`super::row_data`] sets it to `row_metadata_offset + header_size` and
+///   only a column decoder advances it — so its position IS the metadata's end, and
+///   the report says so. That is a DERIVED consequence of the control flow, not an
+///   inference from the bytes (issue #28).
+///
+/// Reported as [`Error::ColumnDecode`] for the reason every other condition in this
+/// module is: that is the variant the row/partition loops match on to tell a row-body
+/// failure from end-of-partition ([`end_of_partition_or_bail`]).
+///
+/// `bounds` is `(offset, row_end)`; `progress` is
+/// `(on_disk_column_count, cells_decoded)`.
+fn row_body_over_consumed(
+    last_column: Option<(&str, &str)>,
+    bounds: (usize, usize),
+    progress: (usize, usize),
+) -> Error {
+    let (offset, row_end) = bounds;
+    let (column_count, cells_decoded) = progress;
+    let past = offset.saturating_sub(row_end);
+    let cause = match last_column {
+        Some((name, _)) => Error::corruption(format!(
+            "row body over-consumed: the {column_count} on-disk column(s) this row declares \
+             left the cursor at offset {offset}, PAST the end of the row body at {row_end} \
+             (from the row header's authoritative row_size), {past} byte(s) beyond it — bytes \
+             belonging to the next row or partition were consumed as this row's data; \
+             {cells_decoded} cell(s) decoded, the walk ended on column '{name}', and which \
+             column over-consumed is not knowable here; truncated or corrupt row body"
+        )),
+        None => Error::corruption(format!(
+            "row body over-consumed with NO column decoded: the row declares \
+             {column_count} on-disk column(s) and every one of them is ABSENT (or the table \
+             has no data columns), so the cursor at offset {offset} is where the row's own \
+             METADATA ended — {past} byte(s) PAST the end of the row body its header declares \
+             at {row_end} (from the authoritative row_size). The row's declared size ends \
+             INSIDE its metadata, so neither this row nor the following row's start can be \
+             framed from that row_size; truncated or corrupt row"
+        )),
+    };
+    let (name, ty) = last_column.unwrap_or(("<no column decoded>", "<row body>"));
+    column_decode_failure(name, ty, offset, cause)
+}
+
+/// The column the finished walk ENDED on, as the `(name, dispatch type)` pair
+/// [`row_body_reconcile`] reports — `None` when no column was decoded at all (every
+/// column bitmap-absent, or a table with no data columns).
+///
+/// This is NOT an attribution of the mismatch (see [`row_body_under_consumed`]): it
+/// is a starting point for an operator. Resolved from the on-disk index the row loop
+/// records, so the hot path stores an index and allocates only on the failure path.
+pub(super) fn walk_end_column(
+    columns_in_order: &[super::ColumnToParse<'_>],
+    last_decoded_idx: Option<usize>,
+) -> Option<(Arc<str>, String)> {
+    let ctp = columns_in_order.get(last_decoded_idx?)?;
+    let declared = ctp
+        .schema
+        .map(|c| c.data_type.as_str())
+        .or(ctp.header_type)
+        .unwrap_or("blob");
+    Some((
+        Arc::clone(&ctp.name),
+        dispatch_type(declared, ctp.header_type),
+    ))
+}
+
+/// RECONCILE the finished per-column walk against the row's authoritative end —
+/// the ONE place the three possible outcomes are decided (issue #3721 / #3809):
+///
+/// * `offset < row_end` — UNDER-consumption: bytes inside this row accounted for by
+///   no column. [`row_body_under_consumed`].
+/// * `offset == row_end` — the columns TILE the body exactly, as well-formed data
+///   always does. `Ok(())`.
+/// * `offset > row_end` — OVER-consumption that reached here without any column's
+///   [`row_bound_check`] refusing it. [`row_body_over_consumed`].
+///
+/// Written as an exhaustive `match` on the comparison so no state is implicit and
+/// none is asserted away: a malformed SSTable must produce an `Err`, never a panic.
+pub(super) fn row_body_reconcile(
+    last_column: Option<(&str, &str)>,
+    bounds: (usize, usize),
+    progress: (usize, usize),
+) -> Result<()> {
+    let (offset, row_end) = bounds;
+    match offset.cmp(&row_end) {
+        Ordering::Less => Err(row_body_under_consumed(last_column, bounds, progress)),
+        Ordering::Equal => Ok(()),
+        Ordering::Greater => Err(row_body_over_consumed(last_column, bounds, progress)),
+    }
 }
 
 /// Is `e` the per-column decode failure that must never be mistaken for the end of
