@@ -12,11 +12,15 @@ on:
       - '.github/workflows/python-ci.yml'
       # Issue #1455: the cross-binding-parity job compares the Python binding
       # against the NODE binding and the CLI through the shared harness in
-      # bindings/parity, so a change to either is a change to this workflow's
-      # subject. Without these paths the harness would merge untested.
+      # bindings/parity, so a change to any of them is a change to this
+      # workflow's subject. Without these paths the harness would merge
+      # untested. cqlite-ffi-common is here for the same reason and is easy to
+      # miss: BOTH bindings depend on it for the decimal, varint, inet and
+      # JSON-number adapters — exactly the conversions this harness compares.
       - 'bindings/parity/**'
       - 'bindings/node/**'
       - 'cqlite-cli/**'
+      - 'cqlite-ffi-common/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -34,11 +38,15 @@ on:
       - '.github/workflows/python-ci.yml'
       # Issue #1455: the cross-binding-parity job compares the Python binding
       # against the NODE binding and the CLI through the shared harness in
-      # bindings/parity, so a change to either is a change to this workflow's
-      # subject. Without these paths the harness would merge untested.
+      # bindings/parity, so a change to any of them is a change to this
+      # workflow's subject. Without these paths the harness would merge
+      # untested. cqlite-ffi-common is here for the same reason and is easy to
+      # miss: BOTH bindings depend on it for the decimal, varint, inet and
+      # JSON-number adapters — exactly the conversions this harness compares.
       - 'bindings/parity/**'
       - 'bindings/node/**'
       - 'cqlite-cli/**'
+      - 'cqlite-ffi-common/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the

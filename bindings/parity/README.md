@@ -16,8 +16,8 @@ surface-layer sibling of the read-path differential
 | `fixtures.json` | The fixtures: query, schema, **declared CQL column types**, and an (empty) `known_divergence` key |
 | `canonical.py` | Canonical form — Python + CLI adapters |
 | `canonical.mjs` | Canonical form — Node adapter (independent twin of `canonical.py`) |
-| `canonical-vectors.json` | Differential pin: 59 vectors both canonicalizers must reproduce exactly |
-| `vectors.py` / `vectors.mjs` | Vector runners for each language |
+| `canonical-vectors.json` | Differential pin: `vectors` both canonicalizers must reproduce exactly, `errors` both must REFUSE, and the `floor` block that stops the table shrinking |
+| `vectors.py` / `vectors.mjs` | Vector runners for each language (`vectors.mjs --emit <path>` writes the JS canonical values THROUGH `JSON.stringify`) |
 | `driver.py` / `driver.mjs` | Per-leg runners; write `out/py.<fixture>.json` / `out/node.<fixture>.json` |
 | `out/` | Artifacts (gitignored) |
 | `../python/tests/test_cross_binding_parity.py` | The comparator (pytest) + negative controls |
@@ -39,9 +39,13 @@ Each leg is also runnable standalone:
 ```bash
 python bindings/parity/driver.py            # -> out/py.<fixture>.json
 node   bindings/parity/driver.mjs           # -> out/node.<fixture>.json
-python bindings/parity/vectors.py           # canonicalizer pin, python + cli
-node   bindings/parity/vectors.mjs          # canonicalizer pin, node
+python bindings/parity/vectors.py           # canonicalizer pin + refusals + floor, python & cli
+node   bindings/parity/vectors.mjs          # canonicalizer pin + refusals + floor, node
+node   bindings/parity/vectors.mjs --emit out/node.vectors.json   # JSON-boundary artifact
 ```
+
+Both vector runners print a per-(vector, leg) tally — a vector failing on more
+than one leg cannot under-count — plus the refusal tally and the floor verdict.
 
 Both drivers **exit non-zero** when the datasets are present but a query raises
 or returns **zero rows**. A 0-row pass over a present corpus is the exact
@@ -93,8 +97,13 @@ Do not change one without re-running `vectors.py` **and** `vectors.mjs`.
 
 ## DECLARED GAPS
 
-These are stated at run time by the test itself, because a lane that omits
-coverage silently is indistinguishable from one that covers it.
+**All seven** are printed by every `test_three_way_parity` run (from
+`DECLARED_GAPS` in the test module), because a lane that omits coverage
+silently is indistinguishable from one that covers it. An earlier revision
+printed three of the seven under a claim that it printed them all — a false
+rationale in a test log is worse than none, because it is what stops the next
+person looking. `test_declared_gaps_are_stated_in_full` keeps the count and the
+README list in step.
 
 1. **Tuple vs list is undetectable.** The issue asked for `tuple` to
    canonicalize as `{"__tuple__": [...]}` so it could not be confused with a
@@ -118,11 +127,20 @@ coverage silently is indistinguishable from one that covers it.
    (`cqlite-cli/src/output/json.rs:156-161`, `serde_json::Number::from_f64`
    returns `None`). No fixture contains one; a future one would need a rule
    agreed across all three writers first.
-5. **Absent vs null columns.** The Python binding omits null columns while the
-   CLI always emits them. The comparator compares the **union** of column names
-   and treats an absent key as `null`, so absence is not a difference — but a
+5. **Absent vs null columns.** Measured, the leg that omits is the **Node**
+   one: `bindings/node/src/row.rs:123-138` SKIPS a metadata column with no
+   matching value (deliberately — null-filling would emit a phantom `col_0:
+   null` for an aggregate). The **Python** binding null-**fills** a shared row
+   shape (`bindings/python/src/result.rs:184-192,447`) and the CLI always emits
+   every column. The comparator compares the **union** of column names and
+   treats an absent key as `null`, so absence is not a difference — but a
    genuinely wrong value still fails, because only the missing side is
-   defaulted.
+   defaulted. `assert_leg_columns` therefore asserts a **subset** relation per
+   leg (a leg may omit a declared column, never invent one) and
+   `assert_union_columns` asserts the union covers the declared set — the same
+   rule the comparator uses, rather than two rules that contradict each other.
+   Both drivers compute `observed_columns` as a **union over every row**, never
+   the last row's keys.
 6. **A uniform defect is invisible.** All three legs read through
    `cqlite-core`. Agreement here is agreement *about CQLite*, not about
    Cassandra. The `sstabledump` JSONL goldens and
@@ -147,6 +165,74 @@ lands". **#1450 is landed**, and all three legs were measured to agree exactly
 on both (`duration_val` = `{0, 0, 46702000000000}`, `work_time` =
 `4325394017000`), so nothing is allowlisted. **A real divergence is a bug to
 report, not an entry to add.**
+
+## Case floors — the subject set cannot shrink to nothing
+
+#3544's own lesson applied to this harness. Every subject set here could
+previously go to zero and stay green: an empty `fixtures.json` yields an EMPTY
+pytest parametrize (one skipped placeholder, no 3-way comparison); an empty
+`canonical-vectors.json` makes both runners print `0/0 vectors OK` and exit 0.
+
+Both tables now carry a committed `floor` block that **both** runners enforce
+before reporting:
+
+* `fixtures.json` → `min_fixtures` **and** `required_names` (a count alone
+  would let a fixture be swapped for a trivial substitute).
+* `canonical-vectors.json` → `min_vectors`, `min_errors`, `required_kinds`
+  (checked against the CQL kinds appearing anywhere in each vector's parsed
+  type tree, so deleting every blob vector reds the runners),
+  `require_nested_container` and `require_null_canonical`.
+
+Verified by planting the break: emptying either table, deleting the `floor`
+block, or removing every blob vector reds **both** `vectors.py` and
+`vectors.mjs`.
+
+## Refusals are pinned too
+
+`canonical-vectors.json`'s `errors` array holds malformed inputs that each
+canonicalizer must **raise** on, with the message naming the reason: a UDT or
+unknown scalar type, an unbalanced `<`, a wrong container arity, a tuple arity
+mismatch, a non-hyphenated UUID, each unparseable CLI temporal/duration form, a
+blob without its `0x` prefix or with non-hex digits, a malformed CLI map entry,
+and a non-decimal decimal string. A canonicalizer that guesses at malformed
+input is the heuristic issue #28 forbids, so "it refused" is a pinned property.
+
+## The JSON boundary
+
+`vectors.mjs`'s in-memory check cannot see serialization:
+`JSON.stringify({h: 1.0})` emits `{"h":1}`, and `json.load` hands Python an
+`int` where the python and cli legs hold a `float`. That would red this lane on
+correct input the first time the corpus grows an integral `double`. Two things
+close it: `shape_tag`/`shapeTag` collapse `int` and `float` to one `"number"`
+tag (JSON has one number type; `bool` is still checked first, so the rule the
+tag enforces — number vs string vs bool vs null — is intact), and
+`test_node_canonical_survives_the_json_round_trip` writes every vector's JS
+canonical value through `JSON.stringify`, re-reads it in Python and compares.
+Verified by planting the break: re-splitting `int`/`float` reds both that test
+and `test_comparator_accepts_an_integral_float_across_the_json_boundary`.
+
+## Fail-closed, never a silent skip
+
+* **Datasets** — `skip_if_no_datasets()` from `conftest.py`: a FAILURE under
+  `CQLITE_REQUIRE_FIXTURES=1`.
+* **Schemas** — committed source, asserted **unconditionally** (#3148).
+  `conftest.skip_if_no_schema` is a plain skip, so a typo'd `schema` path in
+  `fixtures.json` would otherwise drop a fixture even under strict mode.
+* **The CLI binary** — `resolve_parity_cli_binary` wraps `conftest.cli_binary`,
+  whose four skip routes (build failure, timeout, no cargo, missing binary) are
+  NOT strict-aware. In the CI job the invocation is this file alone, whose
+  non-slow tests pass, so #1230's "no tests ran" session floor never fires and
+  all three parity cases would skip while the job reported success having
+  compared nothing. Under either strict switch that skip becomes a failure.
+  `conftest.py` is deliberately not edited — other suites rely on the lenient
+  skip.
+* **The Node leg** — `CQLITE_PARITY_REQUIRE_NODE=1` (its OWN switch;
+  `CQLITE_REQUIRE_FIXTURES` is about the dataset corpus and the existing
+  python-ci `test` job sets it while never provisioning Node, so binding the
+  two would red that job on correct input). Without the switch and without the
+  artifact, the run compares python vs cli and **declares the omitted leg** in
+  its output. `node_leg_disposition()` is a pure function so both branches are
+  unit-tested rather than assumed.
 
 ## Row order
 
