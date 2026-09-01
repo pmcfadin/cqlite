@@ -75,7 +75,7 @@ use crate::error::{Error, Result};
 use crate::storage::sstable::bti::encode_bti_trie_key_from_token;
 use crate::storage::sstable::bti::parser::FLAG_HAS_HASH_BYTE;
 use crate::util::cassandra_murmur3::{
-    cassandra_murmur3_normalize_token, cassandra_murmur3_x64_128,
+    cassandra_murmur3_normalize_token, cassandra_murmur3_x64_128, CASSANDRA_MINIMUM_TOKEN,
 };
 use std::collections::BTreeMap;
 
@@ -183,7 +183,20 @@ impl PartitionsTrieWriter {
         // h1 → normalized token → trie key; h2 as u8 = the leaf filter hash byte
         // (`DecoratedKey.filterHashLowerBits() as u8`).
         let (h1, h2) = cassandra_murmur3_x64_128(raw_key_bytes);
-        let key = encode_bti_trie_key_from_token(cassandra_murmur3_normalize_token(h1));
+        // An EMPTY key takes the ring MINIMUM, not `normalize(h1)` (issue #3633).
+        // `Murmur3Partitioner.getToken(ByteBuffer, long[])` short-circuits a
+        // zero-length key to `MINIMUM` BEFORE consulting the hash, while
+        // `decorateKey` still stores `hash[0]`/`hash[1]` on the `DecoratedKey` --
+        // so the token is MINIMUM and the filter hash byte still comes from the
+        // real `h2`. Reading `cassandra_murmur3_token` here would cost a second
+        // hash pass and lose `h2`, which is why the guard is inlined and the
+        // single pass above is preserved (issue #1681, S4).
+        let token = if raw_key_bytes.is_empty() {
+            CASSANDRA_MINIMUM_TOKEN
+        } else {
+            cassandra_murmur3_normalize_token(h1)
+        };
+        let key = encode_bti_trie_key_from_token(token);
         let hash_byte = h2 as u8;
 
         // Track only the boundary raw keys (min/max trie key). `finish` sorts by
