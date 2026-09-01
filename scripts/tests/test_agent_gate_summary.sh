@@ -1165,25 +1165,27 @@ else
   cat "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null | head -3
 fi
 
-# 9c-v-d. NO HARDCODED DEFAULT, SO AN UNKNOWABLE ONE IS UNATTRIBUTED (issue #3727 roborev round 6,
-#         f2 — and this issue's own declared residual from round 1, found independently). Every
-#         provenance label except pinned/stale is a statement RELATIVE TO sccache's own default cap,
-#         and that default used to be a constant measured on 0.17.0 while the fleet installs sccache
-#         UNVERSIONED — so a build with a different default would have mislabelled `default` as
-#         `inherited` and `invalid` as `invalid-stale`, restart guidance included. It is measured
-#         per emit now; where it cannot be established the cap renders `(unattributed)` and the
-#         WARNs that would quote the default stay silent.
+# 9c-v-d. NO HARDCODED DEFAULT, AND A MISSING ONE DISCARDS ONLY THE LABELS THAT NEED IT (issue
+#         #3727 roborev rounds 6 f2 and 7 f3). The default used to be a constant measured on sccache
+#         0.17.0 while the fleet installs sccache UNVERSIONED, so another build's default would have
+#         mislabelled `default` as `inherited` and `invalid` as `invalid-stale`, restart guidance
+#         included. It is measured per emit now — and round 7 corrected the ORDER: `pinned`/`stale`
+#         compare the CONFIGURED value against the ENFORCED cap and need no default at all, so a
+#         failed default probe must not discard provenance that WAS established. Both halves are
+#         pinned here: unset ⇒ unattributed (the label genuinely needs the default), valid value ⇒
+#         still classified.
 scc_nodflt="$tmp/scc-cap-nodefault.txt"
-AGENT_GATE_SUMMARY_FILE="$scc_nodflt" \
+env -u SCCACHE_CACHE_SIZE \
+  AGENT_GATE_SUMMARY_FILE="$scc_nodflt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=unknown SCCACHE_CACHE_SIZE=30G \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=unknown \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-nodefault.stderr"
 if accel_token_is "$scc_nodflt" sccache-cap '32212254720(unattributed)' \
-   && ! accel_token_is "$scc_nodflt" sccache-cap '32212254720(pinned)'; then
-  ok "sccache-cap: an unmeasurable sccache default renders (unattributed) — no constant stands in for it, and a would-be (pinned) box is not labelled"
+   && ! accel_token_is "$scc_nodflt" sccache-cap '32212254720(inherited)'; then
+  ok "sccache-cap: with the variable UNSET and sccache's default unmeasurable, the cap is (unattributed) — no constant stands in for it, and (inherited) is not guessed"
 else
-  bad "sccache-cap: an unknown default still produced a provenance label"
+  bad "sccache-cap: an unknown default still produced a default-relative label"
   grep '^accelerators:' "$scc_nodflt" 2>/dev/null || cat "$scc_nodflt"
 fi
 if [ ! -s "$tmp/scc-cap-nodefault.stderr" ] || ! grep -q 'WARN: sccache-cap' "$tmp/scc-cap-nodefault.stderr"; then
@@ -1193,6 +1195,51 @@ else
   cat "$tmp/scc-cap-nodefault.stderr" | head -3
 fi
 assert_accelerators "sccache-cap-nodefault" "$scc_nodflt"
+scc_nodflt2="$tmp/scc-cap-nodefault-pinned.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_nodflt2" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=unknown SCCACHE_CACHE_SIZE=30G \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_nodflt2" sccache-cap '32212254720(pinned)'; then
+  ok "sccache-cap: a VALID configured value still classifies as (pinned) with sccache's default unmeasurable — the missing default discards only default-relative labels"
+else
+  bad "sccache-cap: a failed default probe discarded provenance that was established (round 7 f3)"
+  grep '^accelerators:' "$scc_nodflt2" 2>/dev/null || cat "$scc_nodflt2"
+fi
+
+# 9c-v-e. THE NEAR-CAPACITY REMEDY MUST NOT CONTRADICT THE NEIGHBOURING WARN (issue #3727 roborev
+#         round 7, f2). In the migration case this whole issue is about — the environment already at
+#         50G while the running server still enforces 10G — the `stale` WARN correctly says to
+#         restart WITHOUT editing the value, and the fill WARN used to say "raise
+#         SCCACHE_CACHE_SIZE" one line later. Two adjacent warnings giving opposite advice is worse
+#         than one, so the remedy is derived from the SOURCE.
+scc_mig="$tmp/scc-fill-stale.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_mig" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=10737418240 \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=50G \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-fill-stale.stderr"
+if grep -q 'Do NOT edit the value' "$tmp/scc-fill-stale.stderr" 2>/dev/null \
+   && ! grep -q 'Raise SCCACHE_CACHE_SIZE' "$tmp/scc-fill-stale.stderr" 2>/dev/null; then
+  ok "sccache-cap: at capacity with a STALE server the fill WARN says restart, and does NOT contradict it by telling the operator to raise a value that is already larger"
+else
+  bad "sccache-cap: the fill WARN contradicted the stale WARN in the migration case"
+  grep 'WARN' "$tmp/scc-fill-stale.stderr" 2>/dev/null | head -2
+fi
+scc_small="$tmp/scc-fill-pinned.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_small" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=32212254720 \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=30G \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-fill-pinned.stderr"
+if grep -q 'Raise SCCACHE_CACHE_SIZE' "$tmp/scc-fill-pinned.stderr" 2>/dev/null \
+   && ! grep -q 'Do NOT edit the value' "$tmp/scc-fill-pinned.stderr" 2>/dev/null; then
+  ok "sccache-cap: at capacity with a PINNED cap the remedy IS to raise the value (the source-aware branch keeps the useful advice)"
+else
+  bad "sccache-cap: a genuinely too-small pinned cap lost its raise-the-value advice"
+  grep 'WARN' "$tmp/scc-fill-pinned.stderr" 2>/dev/null | head -2
+fi
 
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured
@@ -5477,7 +5524,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 446: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 36 host-independent
+# 410 -> 449: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 39 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
@@ -5486,11 +5533,12 @@ fi
 # A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +36 above is a measured difference (the last three: 9c-v-d's unknown-default token, its
-# no-WARN assert and its grammar check) and the deliberate ~10 margin is preserved rather than
+# the +39 above is a measured difference (the last six: 9c-v-d's unknown-default token, its no-WARN
+# assert, its grammar check and its still-classified-when-valid twin, plus 9c-v-e's two
+# source-aware-remedy asserts) and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=446
+ASSERT_FLOOR=449
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

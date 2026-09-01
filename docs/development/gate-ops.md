@@ -175,14 +175,19 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
   rather than one proven to be in force. Two causes: the attribution differential did not show that
   a *running* server answered (the reading moved with the client's env, or the second read failed) —
   most commonly no server is up yet — or **sccache's own default cap could not be measured**, which
-  every other label is stated relative to. There is deliberately no hardcoded default: this fleet
+  the `default`/`inherited`/`invalid` labels are stated relative to (`pinned` and `stale` compare the
+  configured value against the enforced cap, so they are still produced without it). There is
+  deliberately no hardcoded default: this fleet
   installs sccache unversioned, and a constant would mislabel `default` as `inherited` on a build
   whose default differs (#3727).
 - `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires
   an affirmative measurement, so these never render as `0` or blank.
 - `sccache-used=<bytes>(<N>%)` — occupancy and fill against the enforced cap; `>= 95%` also emits a
   LOUD `WARN:` that the cache is **at/near capacity and therefore at RISK of evicting** objects a
-  later gate would have hit. It does **not** claim eviction is happening: sccache exposes no eviction
+  later gate would have hit. Its remedy is **source-aware**: for a `stale` server whose configured
+  value is already larger it says *restart, do not edit the value* (the same advice as the `stale`
+  WARN beside it, rather than contradicting it); "raise the value" is reserved for the caps that are
+  genuinely too small (#3727). It does **not** claim eviction is happening: sccache exposes no eviction
   counter, so that would be an inference, not a measurement (#3727 — this issue's own title made
   exactly that inference). `(cap-zero)` where the cap is 0.
 

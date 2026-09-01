@@ -1277,6 +1277,7 @@ _SCC_USED_WHY=""
 _SCC_DEFAULT_BYTES=""
 _SCC_SIZE_NULL=0     # `"cache_size":null` was observed (a size, NOT an attribution, signal)
 _SCC_ATTRIBUTED=""   # yes | no | unknown — did the cap come from a RUNNING server?
+_SCC_CFG_BYTES=""    # what the CONFIGURED value means in bytes, when sccache would accept it
 
 # _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, assigned
 # into the variables above (never printed — see the one-probe-per-emit note).
@@ -1367,19 +1368,32 @@ _sccache_cap_probe() {
   if [ -n "$cap" ]; then
     _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"; _SCC_CAP_WHY=""
     local implied=""
-    if [ -z "$_SCC_DEFAULT_BYTES" ]; then
-      # Every remaining label except pinned/stale is a statement RELATIVE TO sccache's own
-      # default, so without it the provenance is unknown — and `unattributed` is precisely
-      # "this gate could not attribute the number". pinned/stale would still be decidable,
-      # but splitting the arm to salvage them would mean two code paths for one unknown, so
-      # the whole classification degrades together and the WARNs (which quote the default)
-      # stay silent.
-      _SCC_CAP_SOURCE=unattributed
-    elif [ "$_SCC_ATTRIBUTED" != yes ]; then
+    _SCC_CFG_BYTES=""
+    # THE CHECKS ARE ORDERED SO A MISSING DEFAULT DISCARDS ONLY THE LABELS THAT NEED IT (issue
+    # #3727 roborev round 7, f3 — a consequence of round 6's own fix). `pinned` and `stale` are
+    # statements about the CONFIGURED value versus the ENFORCED cap and need no default at all,
+    # so testing the default first threw away provenance that WAS established. Attribution
+    # first (nothing else is meaningful without it), then the value-vs-cap comparison, and the
+    # default is required only where the label is stated RELATIVE to it — unset, or discarded.
+    if [ "$_SCC_ATTRIBUTED" != yes ]; then
       # Nothing running is PROVEN to enforce this number — either the reading moved with
       # the client's env (no server is answering) or the differential could not be taken —
       # so no claim about the variable being IN FORCE may be made from it. Fail-closed:
-      # only an affirmative `yes` licenses the other five labels (see the block comment).
+      # only an affirmative `yes` licenses the other labels (see the block comment).
+      _SCC_CAP_SOURCE=unattributed
+    elif [ -n "${SCCACHE_CACHE_SIZE+set}" ] \
+         && _sccache_value_bytes "${SCCACHE_CACHE_SIZE}" implied; then
+      # The variable is set AND sccache would accept it, so the question is answerable without
+      # knowing sccache's default: does the server enforce what the value means?
+      _SCC_CFG_BYTES="$implied"
+      if [ "$implied" = "$cap" ]; then
+        _SCC_CAP_SOURCE=pinned
+      else
+        _SCC_CAP_SOURCE=stale
+      fi
+    elif [ -z "$_SCC_DEFAULT_BYTES" ]; then
+      # Only the labels below need the default, and it could not be measured — so the
+      # provenance is unknown and the WARNs that would quote a default stay silent.
       _SCC_CAP_SOURCE=unattributed
     elif [ -z "${SCCACHE_CACHE_SIZE+set}" ]; then
       # The variable is UNSET: nothing this fleet provisions is in play, so the only
@@ -1390,16 +1404,15 @@ _sccache_cap_probe() {
       else
         _SCC_CAP_SOURCE=inherited
       fi
-    elif ! _sccache_value_bytes "${SCCACHE_CACHE_SIZE}" implied; then
-      # DISCARDED — and "the value is invalid" and "where the running cap came from" are
-      # TWO INDEPENDENT AXES, which one label used to collapse (#3727 roborev finding 3).
-      # `invalid` used to be emitted for both of the cases below and its WARN claimed the
-      # value "fell back to" the running cap. That is only true where the running cap IS
-      # the fallback; where the server enforces something else, the claim invents a
-      # causal link, and — worse — the remedy inverts: stopping the server would LOWER
-      # the cap, because a restart discards the value too. So the two are named apart.
-      # Set-but-EMPTY lands here as well, and correctly: measured, sccache discards an
-      # empty value exactly as it discards `30GiB`.
+    else
+      # DISCARDED (the variable is set and sccache would NOT accept it) — and "the value is
+      # invalid" and "where the running cap came from" are TWO INDEPENDENT AXES, which one
+      # label used to collapse (#3727 roborev round 3, f3). `invalid` used to be emitted for
+      # both cases below and its WARN claimed the value "fell back to" the running cap. That
+      # is only true where the running cap IS the fallback; where the server enforces
+      # something else the claim invents a causal link, and the remedy inverts. So the two
+      # are named apart. Set-but-EMPTY lands here as well, and correctly: measured, sccache
+      # discards an empty value exactly as it discards `30GiB`.
       if [ "$cap" = "$_SCC_DEFAULT_BYTES" ]; then
         # The running cap and the fallback AGREE. Stated as agreement, not causation: a
         # server deliberately started at exactly the default is indistinguishable, and
@@ -1408,10 +1421,6 @@ _sccache_cap_probe() {
       else
         _SCC_CAP_SOURCE=invalid-stale
       fi
-    elif [ "$implied" = "$cap" ]; then
-      _SCC_CAP_SOURCE=pinned
-    else
-      _SCC_CAP_SOURCE=stale
     fi
   else
     _SCC_CAP_KIND=unmeasured; _SCC_CAP_WHY="${why_cap:-no-stats}"
@@ -1467,7 +1476,27 @@ _sccache_cap_probe() {
            # this token to read. (This issue's own title made the same inference; at-capacity was the
            # observation, continuous eviction was the conclusion.) The warning is still worth having,
            # so it states the observation and names the risk rather than asserting the mechanism.
-           echo "agent-gate: WARN: sccache cache is ${pctnum}% of its ${_SCC_CAP_BYTES}-byte cap (${_SCC_USED_BYTES} bytes used) — AT/NEAR CAPACITY, so it is at risk of evicting objects a later gate would have hit (sccache reports no eviction counter, so this is a capacity observation and NOT an eviction measurement). Raise SCCACHE_CACHE_SIZE (<digits>[KkMmGgTt] only) and 'sccache --stop-server' to apply it (#3727)" >&2
+           #
+           # AND THE REMEDY IS SOURCE-AWARE (roborev round 7, f2). It used to say "raise
+           # SCCACHE_CACHE_SIZE" unconditionally, which CONTRADICTS the neighbouring `stale` WARN in
+           # the exact case this issue is about: env already at 50G, server still enforcing 10G. Two
+           # adjacent warnings giving opposite advice is worse than one, so the advice is derived
+           # from the SOURCE and, for a stale server, from whether the configured value is already
+           # larger than the cap in force.
+           _scc_fill_fix="Raise SCCACHE_CACHE_SIZE (<digits>[KkMmGgTt] only) and 'sccache --stop-server' to apply it"
+           case "${_SCC_CAP_SOURCE:-}" in
+             stale)
+               if [ -n "$_SCC_CFG_BYTES" ] && [ "$_SCC_CFG_BYTES" -gt "$_SCC_CAP_BYTES" ] 2>/dev/null; then
+                 _scc_fill_fix="Do NOT edit the value: SCCACHE_CACHE_SIZE already asks for ${_SCC_CFG_BYTES} bytes and only the RUNNING server is behind — 'sccache --stop-server' applies it"
+               else
+                 _scc_fill_fix="The running server does not enforce the configured value, and the configured value is not larger than the cap in force — raise SCCACHE_CACHE_SIZE first, THEN 'sccache --stop-server'"
+               fi ;;
+             invalid|invalid-stale)
+               _scc_fill_fix="FIX the value first — sccache does not accept SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' (accepted form <digits>[KkMmGgTt]) — then 'sccache --stop-server'" ;;
+             unattributed)
+               _scc_fill_fix="Establish what is enforcing this cap before changing anything (this gate could not attribute it); then raise SCCACHE_CACHE_SIZE and 'sccache --stop-server'" ;;
+           esac
+           echo "agent-gate: WARN: sccache cache is ${pctnum}% of its ${_SCC_CAP_BYTES}-byte cap (${_SCC_USED_BYTES} bytes used) — AT/NEAR CAPACITY, so it is at risk of evicting objects a later gate would have hit (sccache reports no eviction counter, so this is a capacity observation and NOT an eviction measurement). ${_scc_fill_fix} (#3727)" >&2
          fi ;;
     esac
   fi
