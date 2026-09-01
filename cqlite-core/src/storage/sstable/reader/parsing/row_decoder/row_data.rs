@@ -1,7 +1,7 @@
 use super::*;
 
 // Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
-use super::column_decode_error::column_decode_failure;
+use super::column_decode_error::{column_decode_failure, dispatch_type};
 
 impl V5CompressedLegacyParser {
     /// Parse row data (header + cells) and return cells with new offset
@@ -610,9 +610,15 @@ impl V5CompressedLegacyParser {
                     }
                     Err(e) => {
                         // Issue #3721: PROPAGATE (rule: `column_decode_error`); the
-                        // two arms above share it, so compaction sees it too.
+                        // two arms above share it, so compaction sees it too. The
+                        // reported type is the DISPATCH type — for a complex column
+                        // the container decodes on the header marshal type while the
+                        // cell-path key / element decode on the SUPPLIED schema type,
+                        // and it is the latter that carries the key/element
+                        // parameters a failure here is usually about.
                         let n = &column.name;
-                        return Err(column_decode_failure(n, complex_type, offset, e));
+                        let ty = dispatch_type(&column.data_type, Some(complex_type));
+                        return Err(column_decode_failure(n, &ty, offset, e));
                     }
                 }
             } else {
@@ -801,9 +807,14 @@ impl V5CompressedLegacyParser {
                     Err(e) => {
                         // Issue #3721: PROPAGATE (see `column_decode_error`); the
                         // `break` this replaces described only its mechanism, and a
-                        // clean loop exit IS a truncated row.
-                        let ty = header_type.unwrap_or(&column.data_type);
-                        return Err(column_decode_failure(&column.name, ty, offset, e));
+                        // clean loop exit IS a truncated row. The reported type is
+                        // the one the cell was DISPATCHED on (`ColumnToParse.kind`,
+                        // resolved from `column.data_type` for both a matched and a
+                        // dropped column), not the on-disk header type it used to
+                        // name — which misidentified the cause whenever the supplied
+                        // schema was the thing that was wrong.
+                        let ty = dispatch_type(&column.data_type, header_type);
+                        return Err(column_decode_failure(&column.name, &ty, offset, e));
                     }
                 }
             }

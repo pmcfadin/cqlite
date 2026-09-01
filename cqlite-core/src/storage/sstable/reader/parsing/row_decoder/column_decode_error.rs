@@ -103,10 +103,9 @@ use crate::error::{Error, Result};
 /// only trace of it, and an operator sees the column, its type and the offset even
 /// when the caller only surfaces the top-level message.
 ///
-/// `column_type` is the type the decode was driven from: the AUTHORITATIVE on-disk
-/// SerializationHeader marshal type where the header carries one, else the
-/// supplied schema's declared type (issue #1081) — both authoritative metadata,
-/// never guessed from bytes.
+/// `column_type` comes from [`dispatch_type`] and is the type the decode was
+/// actually DRIVEN FROM — see there for why that is not always the on-disk header
+/// marshal type.
 pub(super) fn column_decode_failure(
     column_name: &str,
     column_type: &str,
@@ -127,6 +126,41 @@ pub(super) fn column_decode_failure(
 /// a partition body? A MATCH on the variant, never a message-text test (issue #28).
 pub(crate) fn is_column_decode(e: &Error) -> bool {
     matches!(e, Error::ColumnDecode { .. })
+}
+
+/// The type string [`Error::ColumnDecode`] reports: the type the failed decode was
+/// DISPATCHED ON, naming the on-disk header marshal type alongside it whenever the
+/// two differ (issue #3721, roborev blocker 3).
+///
+/// Reporting the header type alone MISIDENTIFIES the cause, and the misreport is
+/// worst exactly where the error matters most — a mis-declared schema. Both column
+/// paths dispatch on the SUPPLIED schema type for a matched column:
+///
+/// * **simple** — `parse_cell_value_schema_order` decodes on `ColumnToParse.kind`,
+///   which `RowColumnResolution::build` resolves from
+///   `schema.map(data_type).unwrap_or(header_type)`, i.e. the supplied type when
+///   the column matched and the header marshal type only for a DROPPED column. In
+///   the row loop that value IS `column.data_type` in both cases (a dropped
+///   column's synthetic `Column` is built FROM the header type). So a `text` column
+///   read as a supplied `INET` used to be reported as its on-disk `UTF8Type`, which
+///   points a reader at the data rather than at the declaration that is wrong.
+/// * **complex** — the CONTAINER is decoded from the header marshal type
+///   (`complex_type`, authoritative for `UserType(...)`, issue #1081) but the
+///   cell-path KEY and the ELEMENT are decoded from the supplied schema type
+///   (`parse_complex_column_inner`'s `column`). A map whose key is mis-declared
+///   `BIGINT` therefore fails on the supplied type while the header says
+///   `MapType(Int32Type, UTF8Type)`, and the element/key type the caller has to fix
+///   appears only in the former.
+///
+/// Naming both when they differ is what makes the report complete: the declared
+/// type identifies the dispatch that failed (including its key/element parameters),
+/// the header type identifies the bytes it was pointed at. Both are authoritative
+/// metadata; neither is inferred from the bytes (issue #28).
+pub(super) fn dispatch_type(declared: &str, header: Option<&str>) -> String {
+    match header {
+        Some(h) if h != declared => format!("{declared} (on-disk {h})"),
+        _ => declared.to_string(),
+    }
 }
 
 /// The ONE response an INDEX-POSITIONED read may make to [`Error::ColumnDecode`]:
