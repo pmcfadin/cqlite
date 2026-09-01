@@ -227,21 +227,18 @@ impl V5CompressedLegacyParser {
             )?))),
             // Recurse STRUCTURALLY on the inline field defs. Rendering the name
             // and re-resolving it would drop them (module header).
+            //
+            // `parse_inline_udt_value` is the one nested-inline-UDT decoder: it
+            // threads `depth + 1` (so this path is bounded by the SAME
+            // `MAX_TYPE_NESTING_DEPTH` budget as every other recursion here) and
+            // stamps `self.keyspace` on the resulting `Value::Udt`. The
+            // pre-#3722 arm built a throwaway `UdtTypeDef` with an EMPTY
+            // keyspace and re-entered at depth 0, so a UDT reached this way both
+            // restarted the nesting budget and carried a DIFFERENT public
+            // identity (`_keyspace` in the bindings; part of `Udt` equality and
+            // hashing, issue #3504) from the same UDT nested directly.
             CqlType::Udt(name, field_defs) => {
-                let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
-                for (field_name, nested_type) in field_defs {
-                    nested_def =
-                        nested_def.with_field(field_name.clone(), nested_type.clone(), true);
-                }
-                let dummy_column = crate::schema::Column {
-                    name: name.clone(),
-                    data_type: "udt".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                };
-                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
-                Ok(value)
+                self.parse_inline_udt_value(data, name, field_defs, depth + 1)
             }
             // An UNRESOLVED type string — a marshal class, or a UDT name to look
             // up in the registry. This is the only arm where a string is all we
