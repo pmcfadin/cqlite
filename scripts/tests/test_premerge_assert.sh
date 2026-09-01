@@ -1384,6 +1384,7 @@ else
   printf '%s\n' "$NEUTRAL_ADV" >"$MUTDIR/base-staleness.sh"
   chmod +x "$MUTDIR/base-staleness.sh"
   # The call site, replaced by the assignment it would have made on success.
+  # shellcheck disable=SC2016  # a LITERAL line of another script; it must not expand here
   MUT_FROM='  assert_anchor_on_history "$delta_anchor" "$certified"'
   MUT_TO='  ANCHOR_ANCESTRY=BOUND   # MUTANT: ancestry check removed'
   if [ "$(grep -c -x -F -- "$MUT_FROM" "$MUTDIR/premerge-assert.sh" | tr -d ' ')" = 1 ]; then
@@ -1497,6 +1498,70 @@ else
       *"PREMERGE: NO-GATE-OF-RECORD"*|*"PREMERGE: TOOL-FAILURE"*)
         bad "ancestry: the no-work-tree case must not read as another verdict (got: $OUT)" ;;
       *) ok "ancestry: the no-work-tree marker is distinct from NO-GATE-OF-RECORD and TOOL-FAILURE" ;;
+    esac
+  fi
+fi
+
+# The CERTIFIED object absent is the OTHER half of the presence probe, and it has
+# its own cause and its own remedy — a rebased-away anchor and a PR branch that
+# was never fetched are different operator actions. Probed separately so a single
+# combined message could not pass for both.
+FAKE_CERT="fedcba9876543210fedcba9876543210fedcba98"
+FC7=$(printf '%.7s' "$FAKE_CERT"); FC12=$(printf '%.12s' "$FAKE_CERT")
+if git -C "$ANC_REPO" cat-file -e "$FAKE_CERT^{commit}" >/dev/null 2>&1; then
+  bad "ancestry UNVERIFIABLE fixture: the 'absent certified' sha is present in the fixture repo"
+else
+  ok "ancestry UNVERIFIABLE fixture: the chosen certified sha really is absent from the fixture repo"
+fi
+delta_summary "$T/anc-delta-fakecert.txt" "$R_ANCHOR" "$FC7" "$FC12" PASS PASS \
+  "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $R_ANCHOR)"
+if run_anc 3 "ancestry UNVERIFIABLE: the CERTIFIED sha absent from this repository -> exit 3" \
+  2421 "$FAKE_CERT" "$RANCFULL" "$T/anc-delta-fakecert.txt"; then
+  case "$OUT" in
+    *"the CERTIFIED commit is not present in this repository"*)
+      ok "ancestry: the absent-CERTIFIED cause is named separately from the absent-ANCHOR one" ;;
+    *) bad "ancestry: expected the absent-CERTIFIED cause (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+      ok "ancestry: an absent certified object also carries the ANCHOR-UNVERIFIABLE marker" ;;
+    *) bad "ancestry: expected ANCHOR-UNVERIFIABLE (got: $OUT)" ;;
+  esac
+fi
+
+# git ABSENT is a cause too, and it must not be mistaken for "the anchor is not
+# an ancestor". A PATH holding only what the parser needs (awk, tr) plus the gh
+# mock — and NOT git — is the whole fixture; the check must refuse before it ever
+# calls git. NON-VACUITY: the fixture PATH is asserted to really lack git.
+NOGIT="$T/bin-nogit"
+mkdir -p "$NOGIT"
+nogit_ok=1
+for _tool in awk tr; do
+  _tp=$(command -v "$_tool" 2>/dev/null) || _tp=""
+  if [ -n "$_tp" ]; then ln -sf "$_tp" "$NOGIT/$_tool"; else nogit_ok=0; fi
+done
+cp "$BIN/gh" "$NOGIT/gh" 2>/dev/null || nogit_ok=0
+if [ "$nogit_ok" -eq 1 ] && PATH="$NOGIT" command -v git >/dev/null 2>&1; then
+  nogit_ok=0
+fi
+if [ "$nogit_ok" -ne 1 ]; then
+  bad "ancestry no-git fixture: could not build a PATH that has awk/tr/gh but NOT git — the arm did NOT run"
+else
+  ok "ancestry no-git fixture: the fixture PATH really has no git on it"
+  # `bash` is invoked by ABSOLUTE path: the fixture PATH deliberately holds only
+  # awk/tr/gh, so a bare `bash` would be "command not found" — a 127 that looks
+  # like a refusal and proves nothing about the check.
+  OUT=$(cd "$ANC_REPO" && PATH="$NOGIT" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    "${BASH:-/bin/bash}" "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 3 ]; then
+    bad "ancestry no-git: git absent must be exit 3, never a pass (got $RC: $OUT)"
+  else
+    ok "ancestry no-git: git absent from PATH -> exit 3, never a silent accept"
+    case "$OUT" in
+      *"PREMERGE: ANCHOR-UNVERIFIABLE"*"git is not on PATH"*)
+        ok "ancestry no-git: the marker and the cause both name what could not be measured" ;;
+      *) bad "ancestry no-git: expected ANCHOR-UNVERIFIABLE naming the absent git (got: $OUT)" ;;
     esac
   fi
 fi
