@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (334 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (348 cases).**
       It runs a **complete two-arm, five-pair session end to end** against stub
       `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, so a driver that cannot
       complete a session fails here rather than on the rig after both release
@@ -173,6 +173,13 @@ the resolved value appears in the captured startup line.
 ## Step 2 — the corpus, and its one hard constraint
 
 ### 2a. It must be COMPRESSED, and CQLite cannot generate it
+
+**ENFORCED as of round 12, not merely documented.** The census requires every
+served SSTable to have a non-empty `CompressionInfo.db` and the analyzer
+re-checks the manifest; a measurement over an uncompressed corpus is refused
+(`corpus-uncompressed`) on both sides. An uncompressed corpus **inflates** the
+ratio toward the target, so this failure would have looked like success. Pass
+`--control <label>` if you deliberately mean to measure one.
 
 The field is **LZ4** (`docs/architecture/throughput-program-2026-07.md` line 21),
 and that document flags *uncompressed* as a **known artifact** of the WS0 loopback
@@ -809,7 +816,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     334 cases incl. full sessions under PATH shims; run it first
+  selftest-analyze.sh     348 cases incl. full sessions under PATH shims; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

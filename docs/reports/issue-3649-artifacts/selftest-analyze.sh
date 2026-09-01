@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=334
+CASE_FLOOR=348
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2191,6 +2191,44 @@ PYINNER
     bad "a relative --work-dir was not canonicalised: $(grep -m1 '^AB-3649: work-dir' "$TMP/out.txt")"
   fi
 
+  # ROUND 12 FINDING 1: the compressed-corpus requirement was documented by us
+  # and enforced by nothing -- and an uncompressed corpus biases the ratio TOWARD
+  # the target, so the failure was in the favourable direction.
+  mkdir -p "$TMP/plaincorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/plaincorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 4096 /dev/zero > "$TMP/plaincorpus/ks/tbl/nb-2-big-Data.db"
+  run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain" --min-corpus-bytes 1 \
+    --min-sstables 1 --control selftest --repo "$SCRATCH"
+  # A control MAY measure an uncompressed corpus; only a measurement may not.
+  if grep -q 'corpus compression UNCOMPRESSED' "$TMP/out.txt"; then
+    ok "an uncompressed corpus is detected and named"
+  else
+    bad "the census did not detect a missing CompressionInfo.db"
+  fi
+  run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain2" --repo "$SCRATCH"
+  check_driver "a measurement over an uncompressed corpus" 2 corpus-uncompressed
+  # A zero-length CompressionInfo.db is ABSENT, not present: this repository
+  # records that an empty one makes SELECT return 0 rows silently.
+  : > "$TMP/plaincorpus/ks/tbl/nb-1-big-CompressionInfo.db"
+  : > "$TMP/plaincorpus/ks/tbl/nb-2-big-CompressionInfo.db"
+  run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain3" --repo "$SCRATCH"
+  check_driver "a zero-length CompressionInfo.db, which reads as absent" 2 corpus-uncompressed
+
+  # ROUND 12 FINDING 2: a ticket missing a required field used to fail after all
+  # three release builds.
+  printf '{"version":2,"keyspace":"ks","table":"t"}\n' > "$TMP/tk-noddl.json"
+  run_support validate-ticket "$TMP/tk-noddl.json"
+  check_support "a ticket with no ddl, which flight-loadgen cannot deserialise" 1 ticket-schema-invalid
+  printf '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)"}\n' > "$TMP/tk-nover.json"
+  run_support validate-ticket "$TMP/tk-nover.json"
+  check_support "a ticket with no version" 1 ticket-schema-invalid
+  printf '{"version":2,"keyspace":"ks","table":"t","ddl":"   "}\n' > "$TMP/tk-blankddl.json"
+  run_support validate-ticket "$TMP/tk-blankddl.json"
+  check_support "a ticket whose ddl is blank" 1 ticket-schema-invalid
+
   # FINDING 2 (round 9): THE FLOORS ARE FLOORS. An unlabelled measurement may not
   # lower them -- the third route to #3058's bypass was simply passing
   # `--min-sstables 1` and serving a single-source table.
@@ -3031,6 +3069,80 @@ PYINNER
 run_analyzer "$TMP/lg-undecl"
 check_verdict "runs naming a client the manifest does not declare" UNMEASURED 7 single-stream
 check_cause "a client the manifest does not declare" loadgen-provenance-mismatch
+
+# The analyzer re-checks compression rather than trusting the manifest's driver.
+mkfixture "$TMP/uncompressed" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/uncompressed/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["compressed"] = False
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/uncompressed"
+check_verdict "a measurement the manifest records as uncompressed" UNMEASURED 7 single-stream
+check_cause "an uncompressed corpus" corpus-uncompressed
+# ...and absence is not compression either.
+python3 - "$TMP/uncompressed/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest["corpus"]["compressed"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/uncompressed"
+check_verdict "a manifest that says nothing about compression" UNMEASURED 7 single-stream
+
+echo
+echo "-- requirements that can be disclosed but not honestly refused --"
+
+# THE SWEEP. A rig class is not reliably derivable from a host string, so
+# refusing on it would red a correct rig the day someone uses i4i.2xlarge -- the
+# guard people learn to waive. Disclosed instead, and the disclosure is pinned.
+mkfixture "$TMP/wronghost" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/wronghost/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = "c7i.4xlarge"
+manifest["host"]["loadavg1"] = "18.4"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/wronghost"
+check_verdict "a session run off the named rig" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: verdict-detail single-stream HOST the acceptance criteria name the field i4i' "$TMP/out.txt"; then
+  ok "a session off the named rig is disclosed, not silently scored"
+else
+  bad "running off the named rig was not disclosed"
+fi
+if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load average' "$TMP/out.txt"; then
+  ok "a contended box at session start is disclosed beside the verdict"
+else
+  bad "a loaded host was not disclosed"
+fi
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: verdict-detail single-stream HOST ' "$TMP/out.txt"; then
+  bad "an i4i session on a quiet box printed a host disclosure it does not need"
+else
+  ok "an i4i session on a quiet box carries no host disclosure"
+fi
+if grep -q '^AB-3649: sections-note only one quantity was supplied' "$TMP/out.txt"; then
+  ok "a single-section report says the criteria need both quantities"
+else
+  bad "a single-section report did not note the missing quantity"
+fi
 
 echo
 echo "-- the none refusal covers EVERY readback, not just admission --"

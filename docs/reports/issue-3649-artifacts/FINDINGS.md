@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 334 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `selftest-analyze.sh` | 348 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -437,7 +437,58 @@ the two declared gaps above.
 
 ---
 
-## 10. The ninth lesson: isolate ONE variable, and know which things may differ
+## 10. The tenth lesson: a documented requirement that nothing checks
+
+Round 12 found a different kind of defect from the eleven before it. Not a
+mechanism that could be satisfied without evidence — **a domain requirement we
+established ourselves and never wired to a check.**
+
+§6 of this document records, with citations, that the corpus must be
+**compressed**: the field is LZ4, the plan of record flags *uncompressed* as a
+known artifact of the WS0 loopback measurements, and `ws0-corpus-gen` cannot
+supply one because CQLite's write surface is uncompressed by construction
+(#1406). The runbook tells the operator so. **The census asked about size and
+count and never about compression**, so an uncompressed corpus cleared every
+floor.
+
+**And the failure was in the favourable direction, which is what makes it worth
+its own lesson.** Removing LZ4 decode removes real CPU from the denominator, so
+an uncompressed corpus **inflates** the measured ratio — toward the target. A
+well-meaning operator pointing at the wrong corpus would have got a number that
+looked like success. A guard whose absence fails conservatively gets found; one
+whose absence flatters the result does not.
+
+**The rule: a requirement you write down is a requirement you must wire to a
+check, or it is a preference.** Both halves are now enforced — the census
+requires every served SSTable to have a non-empty `CompressionInfo.db` (an empty
+one reads as absent, because this repository records that an empty one makes
+`SELECT` return 0 rows silently), and the analyzer re-checks the manifest for the
+usual reason: it does not get to assume which driver produced it.
+
+### The sweep, and what could NOT honestly be enforced
+
+Asked to look for other stated-but-unchecked requirements, four candidates came
+out of the runbook. Two are now enforced, and **two can only be disclosed — which
+is worth recording as a result rather than a shortfall**:
+
+| requirement | disposition |
+|---|---|
+| compressed corpus | **enforced**, driver and analyzer |
+| required ticket fields (`version`, `keyspace`, `table`, `ddl`) | **enforced** at pre-flight, mirrored from `ticket.rs:225-256` |
+| the field i4i rig, not a lane box | **disclosed** — a rig class is not reliably derivable from a host string, and refusing on one would red a correct rig the day someone uses `i4i.2xlarge` |
+| an uncontended box | **disclosed** — the one-minute load average at session start is recorded and a value above 2.0 is named beside the verdict |
+
+**Refusing on a host string would be the guard people learn to waive**, so the
+verdict still renders and the disclosure travels with it. Two further stated
+preferences — CPU pinning and an even replicate count — were already disclosed
+rather than enforced, for the same reason.
+
+The analyzer also now says when **only one quantity** was supplied, because the
+criteria name both and a single-section report cannot cover them.
+
+---
+
+## 11. The ninth lesson: isolate ONE variable, and know which things may differ
 
 Round 10's headline is the only finding in this series that would have produced a
 **confounded number rather than a refusal**: each arm built and used **its own
@@ -522,7 +573,7 @@ without privileges — that a cold session which cannot drop the page cache
 
 ---
 
-## 11. The eighth lesson: make there be ONE path, not a guard on each path
+## 12. The eighth lesson: make there be ONE path, not a guard on each path
 
 Three of round 9's four findings were the same shape, and it is the shape round 8
 only half-closed: **a value with more than one source, guarded at one source
@@ -539,7 +590,7 @@ instead of at the value.**
   globally, so any effective override failed at run time.
 
 Guarding each resolved value one at a time is the same trap as reconciling
-record fields one at a time — §12 (guard the VALUE, and enumerate the SET) — so
+record fields one at a time — §13 (guard the VALUE, and enumerate the SET) — so
 the fix is the same move that closed the
 sharing class: **make there be one path.** A single `resolve-session` step takes
 every raw input, applies every rule, and emits the complete resolved
@@ -556,7 +607,7 @@ carry a disposition — `resolver-input` or `not-server-config`, each with a
 reason. Adding an option without deciding whether it reaches the resolver reds,
 naming the option. RED-verified by adding a plausible `--new-server-knob`.
 
-Same standard as the record/workload disposition tables — §12 (guard the VALUE,
+Same standard as the record/workload disposition tables — §13 (guard the VALUE,
 and enumerate the SET) — **the list may be curated; the completeness must be
 checked against the real thing.**
 
@@ -586,7 +637,7 @@ original was), with the split stated in the case itself.
 
 ---
 
-## 12. The seventh lesson: guard the VALUE, and enumerate the SET
+## 13. The seventh lesson: guard the VALUE, and enumerate the SET
 
 Round 8's three findings are three shapes this lane keeps producing, and two of
 them were fixed by changing *where* a rule lives rather than adding another rule.
@@ -633,7 +684,7 @@ what input your harness writes by habit rather than by choice.**
 
 ---
 
-## 13. The sixth lesson: two correct rules can compose into an unusable whole
+## 14. The sixth lesson: two correct rules can compose into an unusable whole
 
 Round 6's High was that **the runbook's own sensitivity control could not be
 analyzed**. Round 2 required the analyzer to refuse cross-arm server-config
@@ -686,7 +737,7 @@ Two things worth carrying:
 - **Only execution finds this class.** Two individually-correct rules, each with
   its own passing tests, composed into an unusable whole. The case that catches
   it runs the control end to end under the shims — and it exists because
-  §14 (the driver was never executed) had already made that possible.
+  §15 (the driver was never executed) had already made that possible.
 
 **A validator that disagrees with its consumer is now FIVE instances, and the
 count is the argument.** The duration grammar, the census enumeration, the census
@@ -725,7 +776,7 @@ blind here" does not.
 
 ---
 
-## 14. The fifth lesson, and the one that closes the class: the driver was never executed
+## 15. The fifth lesson, and the one that closes the class: the driver was never executed
 
 Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
 helper had been extracted into `ab_driver_support.py` and one call site was left
@@ -742,8 +793,8 @@ that could not complete a single session.
 
 This is the FIFTH instance of one class in this lane — the dead utilization path,
 ten environment-coupled cases, the silent passer among them, the inline parity
-rule, and now the driver itself. §18 (a green suite over an unexecuted subject)
-states the class; §15 (when one mechanism keeps producing findings) says that when a
+rule, and now the driver itself. §19 (a green suite over an unexecuted subject)
+states the class; §16 (when one mechanism keeps producing findings) says that when a
 mechanism keeps producing findings you remove the reason it can. **The reason was
 that the session loop needed a rig, so nothing could run it.** So it no longer
 needs one:
@@ -781,7 +832,7 @@ which is salted per process and would have made the suite non-deterministic.
 
 ---
 
-## 15. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+## 16. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
 
 Four review rounds produced findings in the driver's session lifecycle — the
 work directory, the port, readiness, the census — roughly seven of the last
@@ -813,10 +864,10 @@ improving the sequencing and **removed the shared resource instead**:
 defect.** Not the sequencing around it, not the guard in front of it. Ask what
 resource is being shared and whether it needs to be shared at all — the fix that
 ends the series is usually a deletion. Same shape as removing the second duration
-grammar rather than widening it -- §17 (a parameter accepted without being
+grammar rather than widening it -- §18 (a parameter accepted without being
 checked) -- one level up.
 
-**And a second instance of the mirroring rule from §17 (a parameter accepted
+**And a second instance of the mirroring rule from §18 (a parameter accepted
 without being checked).** The corpus census
 scanned the whole data root recursively while the server reads **one** resolved
 directory, flat. So both size gates could pass on files that are never served —
@@ -835,7 +886,7 @@ nowhere else to decide it.
 
 ---
 
-## 16. The third lesson: the dangerous defect is the one no test would have failed on
+## 17. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -870,7 +921,7 @@ count forces.
 
 ---
 
-## 17. The second lesson: a parameter accepted without being checked against the claim
+## 18. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -904,7 +955,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 18. The first lesson: a green suite over an unexecuted subject
+## 19. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -935,7 +986,7 @@ Two rules worth carrying:
 
 ---
 
-## 19. A process finding: cadence, not partition
+## 20. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -949,7 +1000,7 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §18 (a green suite over an unexecuted subject)
+which is precisely the hole §19 (a green suite over an unexecuted subject)
 describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 
