@@ -46,6 +46,27 @@
 # per-mapping), and the raw `major_faults` column is kept beside it so the
 # subtraction is always visible rather than baked in.
 #
+# TWO ENVIRONMENT CONTROLS, both load-bearing:
+#
+# * `CQLITE_DISK_ACCESS_MODE=mmap` and `CQLITE_PREFETCH` are pinned for every phase.
+#   Both are read from the environment by the reader (`prefetch_mode_via_env`) and
+#   OVERRIDE the compiled default, so an inherited value would give both arms the
+#   same explicit policy — an A/B that runs cleanly and compares nothing. Pinning
+#   the access mode also stops the backend resolving to direct I/O and bypassing
+#   the mmap path under test entirely. Both are recorded in `host.txt`.
+#
+# * The FLOOR phase runs at `CQLITE_PREFETCH=off`, deliberately, and this is a
+#   correctness fix rather than a detail. At `auto` the patched binary issues
+#   `MADV_WILLNEED` over the whole file during the floor run; that read-ahead is
+#   ASYNCHRONOUS and outlives the process (it fills the file's page cache, which is
+#   not process-scoped), while `sync` does not wait for reads and `drop_caches`
+#   skips pages still under I/O. The floor would therefore pre-warm the very cold
+#   phase it precedes, and only for the patched arm. At `off` neither binary issues
+#   any advice, so the floor performs only synchronous index/summary reads that
+#   complete before it exits and are cleanly dropped. It also makes the floor
+#   arm-independent, which is more correct anyway: startup cost is a property of
+#   starting the process, not of the advice policy.
+#
 # Requires: passwordless sudo for /proc/sys/vm/drop_caches (checked, fail-closed).
 set -euo pipefail
 
@@ -211,6 +232,9 @@ esac
   echo "primary-signal: scan-attributable major page faults = cold(major_faults) - floor(major_faults)"
   echo "primary-signal-note: %F is per-process (immune to neighbours) but NOT isolated to the scan mapping; the floor phase estimates the non-scan startup cost. The subtraction is an ESTIMATE, not per-mapping accounting."
   echo "secondary-signal: wall seconds (contended; medians only)"
+  echo "env-pinned-floor: CQLITE_PREFETCH=off CQLITE_DISK_ACCESS_MODE=mmap"
+  echo "env-pinned-cold-warm: CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap"
+  echo "env-inherited-cqlite: $(env | grep -E '^CQLITE_' | sort | tr '\n' ' ' | sed 's/ $//')"
   echo "started-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for entry in "${BINARIES[@]}"; do
     echo "arm: ${entry%%=*}  sha256=$(sha256sum "${entry#*=}" | cut -d' ' -f1)"
@@ -228,10 +252,11 @@ echo "round,arm,floor_major_faults,cold_major_faults,scan_major_faults" > "$OUT/
 LAST_MAJF=""
 
 run_phase() {
-  local round="$1" label="$2" path="$3" phase="$4"; shift 4
+  local round="$1" label="$2" path="$3" phase="$4" prefetch="$5"; shift 5
   local tm="$OUT/${label}.round${round}.${phase}.time"
   local log="$OUT/${label}.round${round}.${phase}.json"
   if ! /usr/bin/time -f "%e %M %F %R" -o "$tm" \
+      env CQLITE_PREFETCH="$prefetch" CQLITE_DISK_ACCESS_MODE=mmap \
       "$path" --corpus "$CORPUS" "$@" > "$log" 2> "$OUT/${label}.round${round}.${phase}.err"; then
     echo "cold-warm-ab: round $round arm $label phase $phase FAILED; see $OUT/${label}.round${round}.${phase}.err" >&2
     exit 4
@@ -251,20 +276,53 @@ for round in $(seq 1 "$ROUNDS"); do
   for entry in "${order[@]}"; do
     label="${entry%%=*}"; path="${entry#*=}"
     echo "--- round $round arm $label ---"
-    # FLOOR: same binary, cold, opens the reader but does not scan. Its faults are
-    # the non-scan cost of starting this process on a cold cache.
+    # FLOOR: same binary, cold, opens the reader but does not scan, at
+    # CQLITE_PREFETCH=off so it issues no read-ahead that could outlive it and
+    # pre-warm the cold phase below. Its faults are the non-scan cost of starting
+    # this process on a cold cache.
     sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
-    run_phase "$round" "$label" "$path" floor --setup-only
+    run_phase "$round" "$label" "$path" floor off --setup-only
     local_floor="$LAST_MAJF"
     sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
-    run_phase "$round" "$label" "$path" cold --passes 1
+    run_phase "$round" "$label" "$path" cold auto --passes 1
     local_cold="$LAST_MAJF"
     echo "$round,$label,$local_floor,$local_cold,$(( local_cold - local_floor ))" >> "$OUT/scan-attributable.csv"
     echo "  [scan-attributable] major_faults=$(( local_cold - local_floor )) (cold $local_cold - floor $local_floor)"
     # No drop here: the corpus is now resident, so this run is the WARM arm.
-    run_phase "$round" "$label" "$path" warm --passes 1
+    run_phase "$round" "$label" "$path" warm auto --passes 1
   done
 done
+
+# ADVICE CENSUS — evidence that the two arms actually differ in the advice they
+# issue, recorded rather than assumed. Deliberately runs AFTER every measurement:
+# it executes at CQLITE_PREFETCH=auto, so on a patched-style arm it issues real
+# whole-file read-ahead, and doing it earlier would pre-warm a later cold phase.
+# It records what each arm DOES; it asserts nothing about what each arm SHOULD do,
+# because the labels are the caller's and this harness does not know their meaning.
+{
+  echo "# madvise census per arm, --setup-only, CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap"
+  if ! command -v strace >/dev/null 2>&1; then
+    echo "UNAVAILABLE: strace is not installed — the advice census was NOT taken."
+    echo "UNAVAILABLE: this run carries no evidence that the arms differ in issued advice."
+  else
+    for entry in "${BINARIES[@]}"; do
+      label="${entry%%=*}"; path="${entry#*=}"
+      st="$OUT/${label}.advice.strace"
+      if env CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap \
+           strace -f -e trace=madvise -o "$st" "$path" --corpus "$CORPUS" --setup-only >/dev/null 2>&1; then
+        printf '%s: WILLNEED=%s RANDOM=%s SEQUENTIAL=%s DONTNEED=%s\n' \
+          "$label" \
+          "$(grep -c MADV_WILLNEED "$st" || true)" \
+          "$(grep -c MADV_RANDOM "$st" || true)" \
+          "$(grep -c MADV_SEQUENTIAL "$st" || true)" \
+          "$(grep -c MADV_DONTNEED "$st" || true)"
+      else
+        echo "$label: CENSUS FAILED — no evidence recorded for this arm"
+      fi
+    done
+    echo "# note: MADV_DONTNEED here is the runtime releasing thread stacks, not the reader."
+  fi
+} | tee "$OUT/advice-census.txt"
 
 {
   echo "finished-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
