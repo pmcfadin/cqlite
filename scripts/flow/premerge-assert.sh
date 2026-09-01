@@ -218,10 +218,17 @@
 #         base-staleness report, #3650 slice 1 — it NEVER changes this exit
 #         code) and "PREMERGE: GATE-OF-RECORD ..."
 #         (plus "PREMERGE: DELTA-RECERT ... anchor-ancestry: BOUND ..." in Case B,
-#          the affirmative record that the #3653 ancestry binding RAN)
+#          the affirmative record that the #3653 ancestry binding RAN), and the
+#          two #3752 legs' own anchored reports: "PREMERGE: REVIEW-BINDING ..."
+#          (the recorded roborev round is bound to the certified head) and
+#          "PREMERGE: HOLD-CHECK ..." (no stop order was recognised)
 #   2   no/invalid gate of record (INCLUDING a Case B anchor that is NOT on the
 #       certified sha's history, #3653), OR head moved (mismatch), OR PR
-#       closed/merged — LOUD multi-line refusal
+#       closed/merged, OR the recorded roborev round does not cover the certified
+#       head (#3752 `PREMERGE: REVIEW-UNBOUND`), OR a stop order is in force
+#       (#3752 `PREMERGE: HOLD`) — LOUD multi-line refusal. An UNMEASURED leg
+#       refuses here too: a positive verdict requires a positive measurement, so
+#       "could not tell" is the bad verdict, never a clearance.
 #   3   gh/network failure, a required TOOL failing, an UNMEASURABLE anchor
 #       ancestry, or a usage error — fail closed, never merge on uncertainty. The
 #       four are distinguished by the printed marker, NOT by the code:
