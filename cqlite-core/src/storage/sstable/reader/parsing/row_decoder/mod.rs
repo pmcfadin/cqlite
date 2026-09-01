@@ -808,11 +808,11 @@ mod row_framing;
 mod udt;
 mod udt_field; // issue #3722: THE single UDT-field value decoder (campsite split of `udt`, #1116)
 mod udt_field_collection; // issue #3722: the collection/tuple arms of `udt_field` (campsite split, #1116)
+mod udt_field_empty; // issue #3722: the zero-length arm of `udt_field` (campsite split, #1116)
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
-// Per-column decode dispatch tag (Epic J / issue #1635). Imported into this
-// module's namespace so the `use super::*` sibling modules (`cell_value`,
-// `row_data`) can name it via `super::*`.
+// Per-column decode dispatch tag (Epic J / issue #1635). Imported into this module's
+// namespace so the `use super::*` siblings (`cell_value`, `row_data`) can name it.
 use cell_kind::CellKind;
 use partition_shadow::{clustering_reversed_flags, PartitionShadow};
 // #1741: shared partition-header need-more classifier used by both sliding

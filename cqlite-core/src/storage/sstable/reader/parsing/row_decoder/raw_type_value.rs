@@ -745,9 +745,11 @@ impl V5CompressedLegacyParser {
                         tracing::debug!("Frozen UDT field '{}' is null", field_def.name);
                         None
                     } else if field_len == 0 {
-                        // Empty field
+                        // Empty field: through THE UDT-field decoder at length 0
+                        // (issue #3722) — the helper this used to call answered
+                        // most types with an opaque `Value::Blob`.
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
-                        Some(Self::create_empty_value_for_type(&field_def.field_type))
+                        Some(self.parse_udt_field_value(&[], &field_def.field_type, 0)?)
                     } else {
                         // Field with data. Routed through the shared guard (issue
                         // #3612, R3-F1/N1) so this loop cannot drift from the other

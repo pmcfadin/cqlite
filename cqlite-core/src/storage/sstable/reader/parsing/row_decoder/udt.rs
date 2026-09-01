@@ -489,12 +489,17 @@ impl V5CompressedLegacyParser {
                 tracing::debug!("V5CompressedLegacy: UDT field '{}' is null", field_def.name);
                 None
             } else if field_len == 0 {
-                // Empty field - create empty value based on type
+                // Empty field: through THE decoder, at length 0 (issue #3722).
+                // It used to call a `create_empty_value_for_type` helper whose
+                // fallback arm was `Value::Blob`, so an empty `varint`,
+                // `decimal`, `time`, `inet`, `tuple` or nested `udt` field came
+                // back an opaque blob. See `udt_field_empty` for the semantics
+                // and their Cassandra sources.
                 tracing::debug!(
                     "V5CompressedLegacy: UDT field '{}' is empty",
                     field_def.name
                 );
-                Some(Self::create_empty_value_for_type(&field_def.field_type))
+                Some(self.parse_udt_field_value(&[], &field_def.field_type, 0)?)
             } else {
                 // Field with data. `checked_component_len` owns BOTH the negative
                 // rejection and the bounds test, so no loop can have one without
@@ -533,18 +538,6 @@ impl V5CompressedLegacyParser {
         };
 
         Ok((Value::Udt(Box::new(udt_value)), current_offset))
-    }
-
-    /// Create an empty value for a given CQL type.
-    pub(super) fn create_empty_value_for_type(cql_type: &CqlType) -> Value {
-        match cql_type {
-            CqlType::Text | CqlType::Ascii => Value::text(String::new()),
-            CqlType::Blob => Value::blob(Vec::new()),
-            CqlType::List(_) => Value::List(Vec::new()),
-            CqlType::Set(_) => Value::Set(Vec::new()),
-            CqlType::Map(_, _) => Value::Map(Vec::new()),
-            _ => Value::blob(Vec::new()),
-        }
     }
 
     /// Parse a CounterContext structure and return the total counter value.

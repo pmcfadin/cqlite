@@ -60,9 +60,10 @@ impl V5CompressedLegacyParser {
     /// Decode ONE UDT field value from the exact bytes of that field.
     ///
     /// `data` is the whole field value: the caller has already consumed the
-    /// field's `[i32 BE len]` prefix and bounded the slice (a `-1` length is a
-    /// null field and never reaches here; a `0` length goes through
-    /// `create_empty_value_for_type` or arrives here as an empty slice).
+    /// field's `[i32 BE len]` prefix and bounded the slice. A `-1` length is a
+    /// null field and never reaches here; a `0` length arrives as an EMPTY slice
+    /// and is decoded by [`Self::empty_udt_field_value`] — see that module for
+    /// what Cassandra's serializers make of an empty buffer.
     ///
     /// `depth` counts CQL type nesting, not bytes, and bounds this function's own
     /// recursion (`frozen<...>` chains) the same way the sibling decoders bound
@@ -82,6 +83,16 @@ impl V5CompressedLegacyParser {
                 depth, MAX_TYPE_NESTING_DEPTH
             )));
         }
+        // A ZERO-LENGTH field is a decode in its own right, not a degenerate
+        // one: Cassandra permits an empty value for most types and its
+        // serializers answer it with null (`udt_field_empty`). Dispatching it
+        // HERE, rather than at each call site, is what makes this the only
+        // UDT-field decoder for empty fields too — the pre-#3722 call sites
+        // answered length 0 from a helper whose fallback was `Value::Blob`.
+        if data.is_empty() {
+            return self.empty_udt_field_value(field_type, depth);
+        }
+
         match field_type {
             // ---------------------------------------------------------------
             // Text-ish: the whole slice IS the value; UTF-8 is a hard error.
