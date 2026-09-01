@@ -759,14 +759,53 @@ FAIL and the two hidden selftest hooks — now carries exactly one `disk-exhaust
   and which contradicted the attribution rule below: a failing test may legitimately *print* a
   signature into its own log, and a diff can itself drive disk usage (a new feature-matrix lane,
   a large fixture, a runaway build).
-- `0 RECOGNISED (#3800)` — either every subject log was **read** and nothing matched, or there
-  was no non-PASS component to scan. Never a bare `0`: a bare zero reads as a verified
-  all-clear from a scan that documents itself as incomplete.
-- `UNMEASURED (#3800)` — a subject log could not be read. **UNMEASURED is never "no ENOSPC"**;
-  the clean verdict is keyed on the affirmative fact that every subject log was read, never on
+- `0 RECOGNISED (#3800)` — either every subject was **read** and nothing matched, or there
+  was no non-PASS component and no in-memory subject to scan. Never a bare `0`: a bare zero
+  reads as a verified all-clear from a scan that documents itself as incomplete.
+- `UNMEASURED (#3800)` — a subject could not be read. **UNMEASURED is never "no ENOSPC"**;
+  the clean verdict is keyed on the affirmative fact that every subject was read, never on
   the absence of a match. `grep`'s exit status is read as three-valued for exactly this reason.
 
 Properties worth knowing:
+
+- **Adding the marker to a block does NOT make that block's cause observable to it — ask what
+  the SUBJECT SET is on the new path** (roborev job 301). This is the most transferable thing
+  in the issue. The #2926 tree-integrity **boundary** block was given the line precisely
+  because `tree-integrity: FAIL` is reachable from ENOSPC: the capture manifest is written into
+  `$LOG_DIR`, and `TREE_CAPTURE_FAIL_REASON` is a **fixed constant** — `tree-capture-failed;
+  the tree cannot be proven unchanged` — that can never name disk. But the scan's subject set
+  was *non-PASS component logs*, and on that path `_tree_identity` fails **independently of any
+  component**, its write-error text lands in **no component log**, and the components are
+  typically **still PASS**. The subject set structurally could not contain the evidence, so the
+  block would have emitted an affirmative `0 RECOGNISED` on **exactly the path the line was
+  added for** — a false clean reading, and the standing anti-pattern of a positive verdict
+  keyed on the absence of a bad signal in a set that cannot hold it. Strictly worse than the
+  exemption it replaced. When you extend a diagnostic to a new failure path, ask whether the
+  evidence can **physically land** in the subject set — not merely whether the line is emitted.
+- **So the subject set is TWO KINDS: non-PASS component logs, plus the gate's own
+  capture-failure text, held IN MEMORY.** `_tree_identity` captures the stderr of its manifest
+  write (and of the batched `git hash-object`) and hands it back on the **rc-2 channel**, which
+  is disjoint from the identity channel **by return code** — a channel the text cannot
+  influence. Each capture-failure site records it as a **named** subject
+  (`DISK_MEM_SUBJECTS`, via `_tree_note_capture_failure`). It is in memory and **never a spill
+  file**, for the same reason the scanner avoids `_ansi_stripped_log`: under ENOSPC the file
+  cannot be written, so a file-backed subject would be empty exactly on the run that had the
+  answer. There is **one signature loop for both kinds** (`_disk_scan_subject file|text`) —
+  never a second matcher — and a here-string is deliberately *not* used for the text kind,
+  because bash materialises `<<<` as a temporary **file**. The in-memory subjects are
+  **counted in the census**, so `0 RECOGNISED` can only be claimed on a run where they were
+  read too. A match is named in **our** vocabulary (`IN-MEMORY subject '<label>'`) with **no
+  fabricated `<log>:<line>`**, and no captured byte is interpolated (#3312 — the text is
+  OS/libc-controlled). A capture recorded with **no text**, and a `TREE_CAPTURE_FAILED` with
+  **nothing recorded on the channel**, are each `UNMEASURED` **naming that**, never clean.
+- **It is pinned by a REAL ENOSPC, not by the line's existence.** The suite points the capture
+  manifest and its `.report` at **`/dev/full`**, so the shipped `_tree_identity` fails with the
+  platform's own `strerror`; fixture provenance (rc 2 **and** real `No space left on device`
+  text) is asserted before the verdict, and a **mutation control** shows the same run collapses
+  to `0 RECOGNISED … (3/3 PASS)` once the in-memory subject is removed — the false reading
+  itself. `/dev/full` is Linux-only and macOS is a first-class gate host, so that case
+  **declares its skip** and a host-independent injected case (with a negative control) carries
+  the property everywhere.
 
 - **It is an ATTRIBUTION, never a verdict.** It never reads, sets or influences
   `OVERALL`/`RESULT`. A matched signature is evidence about the **host**, not proof the diff is

@@ -370,10 +370,10 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   tree-integrity component-BOUNDARY FAIL, the two selftest hooks) now carries ONE
   `disk-exhaustion:` line with a CLOSED value set:
   `RECOGNISED (#3800)` naming the signature, the component and `<log>:<line>`;
-  `0 RECOGNISED (#3800)` (**never a bare `0`**) either for a scan that read every subject log
-  and matched nothing, or for a run with no non-PASS component; and `UNMEASURED (#3800)` when a
-  subject log could not be read — **UNMEASURED is never "no ENOSPC"**, and the clean verdict is
-  keyed on the affirmative *every subject log was READ*. The **signature set is CLOSED** —
+  `0 RECOGNISED (#3800)` (**never a bare `0`**) either for a scan that read every subject
+  and matched nothing, or for a run with no non-PASS component and no in-memory subject; and
+  `UNMEASURED (#3800)` when a subject could not be read — **UNMEASURED is never "no ENOSPC"**,
+  and the clean verdict is keyed on the affirmative *every subject was READ*. The **signature set is CLOSED** —
   `No space left on device`, `os error 28`, `Disk quota exceeded`, with a bare `ENOSPC` token
   deliberately excluded because this repo's own tests and doctrine contain it — and the line
   DECLARES that non-exhaustiveness on every run. Only **non-PASS** components are scanned (a
@@ -395,6 +395,33 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   this is **evidence, not proof**. It said "NOT a defect in the diff" until roborev job 299:
   an assertion the scan cannot support (a failing test may legitimately *print* a signature,
   and a diff can itself drive disk usage) and one that contradicted this same bullet.
+  **AND ADDING THE MARKER TO A BLOCK DOES NOT MAKE THAT BLOCK'S CAUSE OBSERVABLE TO IT
+  (roborev job 301) — ASK WHAT THE SUBJECT SET IS ON THE NEW PATH.** The #2926 tree-integrity
+  BOUNDARY block was given the line precisely because `tree-integrity: FAIL` is reachable from
+  ENOSPC (the capture manifest is written into `$LOG_DIR`, and `TREE_CAPTURE_FAIL_REASON` is a
+  FIXED CONSTANT that can never name disk). On that path the evidence **cannot reach the
+  subject set**: `_tree_identity` fails independently of any component, its write-error text
+  lands in **no component log**, and the components themselves are typically **still PASS** —
+  so the block would have emitted an affirmative `0 RECOGNISED` on exactly the path the line
+  was added for. A **false clean reading**, and this repo's standing anti-pattern (a positive
+  verdict keyed on the ABSENCE of a bad signal in a subject set that cannot contain it) —
+  strictly worse than the exemption it replaced. So the subject set is now **TWO KINDS**:
+  non-PASS component logs, **plus the gate's own capture-failure text**, captured **IN MEMORY**
+  (`DISK_MEM_SUBJECTS`) and handed back on `_tree_identity`'s rc-2 channel, which is disjoint
+  from the identity channel **by return code**. In memory and never a spill file, for the same
+  reason the scanner avoids `_ansi_stripped_log`: under ENOSPC the file cannot be written, so a
+  file-backed subject would be empty exactly on the run that had the answer. **One signature
+  loop, two subject kinds** (`_disk_scan_subject file|text`) — never a second matcher — and the
+  in-memory subjects are **counted in the census**, so `0 RECOGNISED` can only be claimed when
+  they were read too. A match is named in **our** vocabulary (`IN-MEMORY subject '<label>'`)
+  with **no fabricated `<log>:<line>`**, and no captured byte is interpolated (#3312 — the text
+  is OS/libc-controlled). A capture recorded with **no text**, and a `TREE_CAPTURE_FAILED` with
+  **nothing recorded**, are each `UNMEASURED` **naming that**, never clean. Pinned by a REAL
+  ENOSPC: the suite points the manifest and its `.report` at **`/dev/full`**, asserts the
+  platform's own `strerror` text really arrived, and includes the mutation control — emptying
+  the in-memory subjects collapses the same run to `0 RECOGNISED … (3/3 PASS)`, which *is* the
+  false reading. `/dev/full` is Linux-only, so that case **declares its skip** and a
+  host-independent injected case carries the property everywhere.
   **THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL", AND THE 18 EXCLUSIONS ARE
   DECLARED AT THE SITE.** Of the script's 25 `emit_summary`/`_emit_terminal_summary` call
   sites, 7 carry a table and all 7 append the line; the other 18 (the three pre-flight

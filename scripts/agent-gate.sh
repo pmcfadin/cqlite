@@ -15427,7 +15427,7 @@ run_pub_surface() {
 # Also runs scripts/tests/test_agent_gate_disk_exhaustion.sh (#3800), the pin for the
 # `disk-exhaustion:` SUMMARY marker. A full gate died of ENOSPC and the ONE artifact agents
 # retain said `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
-# the reader debugged a minimal-features build that was never broken. 51 cases EXTRACT the
+# the reader debugged a minimal-features build that was never broken. 60+ cases EXTRACT the
 # shipped `_disk_exhaustion_line` + helpers out of this file and run them: each signature of
 # the CLOSED set; an ANSI-COLOURED log (the payload carries no escapes, #3400) plus the proof
 # that the scan materialises NO sibling file — a diagnostic needing free disk is useless under
@@ -15444,9 +15444,23 @@ run_pub_surface() {
 # `_fm_summary_line` alone hid the 7th site -- the #2926 tree-integrity BOUNDARY block, which
 # renders its table with its own printf and whose `tree-capture-failed` reason is a fixed
 # constant that cannot name an ENOSPC on $LOG_DIR. A third control plants into that second
-# renderer specifically. Hermetic: temp dirs plus the two hidden selftest hooks — no cargo, no
-# python3, no datasets, no network — so it is registered ABOVE the python3 SKIP branch and
-# never SKIPs.
+# renderer specifically.
+#   AND MARKING THAT BLOCK DID NOT COVER IT (roborev job 301). ADDING A MARKER TO A BLOCK DOES
+# NOT MAKE THE BLOCK'S CAUSE OBSERVABLE TO THE MARKER: the scan's subject set was NON-PASS
+# COMPONENT LOGS, and on the tree-capture ENOSPC path _tree_identity fails independently of any
+# component, its write-error text reaches NO component log, and the components stay PASS -- so
+# the block would have affirmed `0 RECOGNISED` on exactly the path the line was added for. The
+# capture's stderr is now an IN-MEMORY scan subject (never a spill file: under ENOSPC that is
+# what cannot be written), scanned through the SAME closed set by the SAME loop. Two more case
+# groups pin it: one host-independent, injecting through the shipped recorder with EVERY
+# component PASSING plus a NEGATIVE control, an empty capture, the never-recorded cross-check
+# and both #3312 injection halves; and one that induces a REAL ENOSPC at /dev/full through the
+# shipped `_tree_identity`, asserts fixture provenance first, then the attributed verdict, then
+# a mutation control showing the same run collapses to the false `0 RECOGNISED` without the new
+# subject. /dev/full is Linux-only and macOS is a first-class gate host, so that group DECLARES
+# its skip rather than dropping silently. Hermetic: temp dirs, one throwaway `git init`, and the
+# two hidden selftest hooks — no cargo, no python3, no datasets, no network — so it is
+# registered ABOVE the python3 SKIP branch and never SKIPs.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then

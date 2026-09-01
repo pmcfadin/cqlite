@@ -280,6 +280,21 @@ round on the grounds that "its cause is already named". It is the one MID-RUN em
 halves of its line declare a partial window (`start->boundary, MID-RUN PARTIAL WINDOW`, and
 `SUBJECT SET ALSO PARTIAL` — only the components recorded by that boundary are scanned).
 
+**Marking that block was not the same as covering it (roborev job 301) — the lesson to carry:
+adding a marker to a block does NOT make the block's CAUSE observable to that marker.** The
+scan's subject set was *non-PASS component logs*. On the tree-capture ENOSPC path
+`_tree_identity` fails independently of any component, its write-error text reaches **no**
+component log, and the components are typically **still PASS** — so the block would have
+emitted an affirmative `0 RECOGNISED` on precisely the path the line was added for. When you
+extend a diagnostic to a new failure path, ask what the SUBJECT SET is **on that path** and
+whether the evidence can physically land in it. The fix gives the scan a **second kind of
+subject**: the capture's own stderr, carried back on `_tree_identity`'s rc-2 channel and held
+**in memory** (never a spill file — under ENOSPC that is what cannot be written), scanned by
+the same closed signature set through the same loop and counted in the same census. So on a
+logs-filesystem ENOSPC the block now reads `RECOGNISED … in IN-MEMORY subject 'tree-identity
+manifest write (…)'` even though every component PASSed. A capture whose text was not recorded
+reads `UNMEASURED` naming that — never clean.
+
 **This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
 queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per
 box. That capacity-management work is tracked under **#3434 / #3763 / #3755** — do not read
