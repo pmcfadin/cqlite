@@ -30,7 +30,9 @@
 #             the seam NOTE, since this case is what sets the seam.
 #   empty   — the fixture dir and its `-Data.db` exist but the file is 0 bytes: must be
 #             a hard failure, never a SKIP and never a 0-rows pass.
-#   safety  — neither the git-tracked fixture nor the ambient corpus was mutated.
+#   safety  — the git-tracked fixture was not mutated (SCOPE: the tracked fixture only;
+#             the ambient $CQLITE_DATASETS_ROOT is never a staging target and is not
+#             claimed — see the case-4 header for why).
 #
 # DISCRIMINATION LIMIT, stated rather than implied. The sibling script can prove its
 # staging is surgical from the LANE's own output, because its target drives many fixtures
@@ -214,7 +216,15 @@ _fixture_content_digest() {
   esac
   out=""
   while IFS= read -r -d '' f; do
-    h=$(guard_git -C "$REPO" hash-object -- "$f" 2>/dev/null); rc=$?
+    # `--no-filters` hashes the RAW bytes on disk. Without it `hash-object` applies any
+    # configured clean/EOL filter, so a byte change that NORMALISES to the same content
+    # yields the same blob sha — and `git status` applies the SAME normalisation, so both
+    # legs of this safety check would go blind together. Two legs with a shared blind spot
+    # are one leg (roborev job 294). LATENT today, not live: this repo sets no
+    # `.gitattributes` and `git check-attr -a` reports no attribute on the fixture, so no
+    # filter currently applies. The flag costs nothing and removes the dependence on that
+    # staying true.
+    h=$(guard_git -C "$REPO" hash-object --no-filters -- "$f" 2>/dev/null); rc=$?
     if [ "$rc" -ne 0 ] || [ -z "$h" ]; then
       rm -f "$tmpf"; printf 'UNMEASURED(hash-object-failed)'; return
     fi
@@ -435,8 +445,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. SAFETY: neither the tracked fixture nor the ambient corpus was mutated.
+# 4. SAFETY: the git-tracked (committed) fixture was not mutated by this harness.
 # ---------------------------------------------------------------------------
+# SCOPE, stated to match what is actually MEASURED. The header previously claimed "nor
+# the ambient corpus", which this case never snapshots — a claim wider than its evidence,
+# i.e. this lane's own defect class in the file asserting it (roborev job 294).
+#
+# What IS measured: the git-tracked fixture $FIXTURE_REL, by CONTENT digest + `git status`
+# against a pre-staging baseline.
+# What is NOT, and why that is not a gap here: the AMBIENT root ($CQLITE_DATASETS_ROOT) is
+# not git-tracked, so a git-based digest cannot cover it at all. It is also never a staging
+# TARGET — every staged path this harness writes lives under `$tmp` from `mktemp -d`
+# (`absent_checkout` and `$tmp/absent-env` at the absent lane; `$tmp/empty` holding the
+# COPY that case 3 truncates). The ambient root appears in exactly one place, the CONTROL
+# case's env, where it is only READ. Narrowing the claim is therefore the honest fix rather
+# than bolting on a second, unverifiable oracle over an out-of-tree directory.
+#
 # `git status` is the evidence, so a git that could not ANSWER (not a repo, git missing)
 # must not read as "untouched" — an unanswerable question is not a clean answer. The
 # `-s` check is the independent second leg: case 3 truncates a COPY, and a staging bug
@@ -473,8 +497,10 @@ elif [ ! -s "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
   bad "safety: the tracked $FIXTURE_REL/$DATA_DB is now EMPTY — case 3 truncated the \
 original instead of its copy"
 else
-  ok "safety: this run left the tracked fixture UNCHANGED — CONTENT digest and git \
-status both identical to the pre-staging baseline, and the Data.db still non-empty"
+  ok "safety: this run left the git-tracked fixture UNCHANGED — raw-content digest \
+(hash-object --no-filters) and git status both identical to the pre-staging baseline, \
+and the Data.db still non-empty. Scope: the TRACKED fixture only; the ambient \
+\$CQLITE_DATASETS_ROOT is never a staging target and is not claimed here"
 fi
 
 # Anti-vacuity for THIS harness: `failed: 0` is only meaningful if every case actually
