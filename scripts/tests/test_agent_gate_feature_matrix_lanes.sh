@@ -469,8 +469,28 @@ probe_feature_iso_delta_scan_corpus_absent() {
       echo "     BEFORE the lane runs — the observation would be about the preflight, not the lane."
       return 1
     fi
-    mkdir -p "$partial/sstables" || return 1
-    ln -s "$DATASETS/sstables/test_basic" "$partial/sstables/test_basic" || return 1
+    # A FILE-level symlink farm, not one symlink for the keyspace directory. MEASURED:
+    # the gate's canonical-corpus probe is
+    # `find "$root/sstables/test_basic" -name "*-Data.db"`, and `find` does NOT descend
+    # through a symlinked directory unless given -H/-L — so the tidier single symlink made
+    # the run die at the #2078 preflight (missing-fixtures: FAIL-CLOSED) BEFORE the lane
+    # ever ran, and the observation would have been about the preflight, not the posture.
+    # Real directories + symlinked FILES, so every corpus reader sees an ordinary tree.
+    mkdir -p "$partial/sstables/test_basic" || return 1
+    local rel
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      mkdir -p "$partial/sstables/test_basic/$(dirname "$rel")" || return 1
+      ln -sf "$DATASETS/sstables/test_basic/$rel" "$partial/sstables/test_basic/$rel" || return 1
+    done <<EOF
+$( cd "$DATASETS/sstables/test_basic" && find . -type f | sed 's|^\./||' )
+EOF
+    if [ "$(find "$partial/sstables/test_basic" -name '*-Data.db' | wc -l | tr -d ' ')" -eq 0 ]; then
+      echo "  => HARNESS FAILURE: the canonical-only corpus holds no *-Data.db reachable by find,"
+      echo "     so the #2078 preflight would fail before the lane runs. Refusing to report an"
+      echo "     observation about the preflight as one about the lane."
+      return 1
+    fi
     # Root-level metadata, if the corpus carries any: absent files are not an error here
     # (the property is keyspace reachability), so this is best-effort BY DESIGN.
     local meta
