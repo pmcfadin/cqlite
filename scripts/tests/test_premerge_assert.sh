@@ -1038,19 +1038,37 @@ run_anc() {
   return 0
 }
 
-# anc_delta <file> <anchor-sha> — a delta block at the fixture's certified head,
-# anchored at <anchor-sha>. ONE builder, ONE varying input: that is what makes
-# the accept arm and the RED arm differ in EXACTLY ONE PROPERTY (asserted below).
-anc_delta() {
-  delta_summary "$1" "$2" "$RC7" "$RC12" PASS PASS \
-    "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $2)"
+# anc_pair <tag> <anchor-sha> — build the whole Case B PAIR for one anchor: the
+# ANCHOR's full-gate block (whose own commit:/tree-start: ARE that anchor, which
+# is what the earlier checks require) plus a delta block naming it and covering
+# the fixture's certified head. Files land at $T/anc-full-<tag>.txt and
+# $T/anc-delta-<tag>.txt.
+#
+# ONE builder, ONE varying input — the anchor sha. That is what lets the accept
+# arm and the RED arm below differ in EXACTLY ONE PROPERTY, verifiably: mapping
+# the foreign sha (and its two abbreviations) onto the anchor's must reproduce
+# the accepted pair byte for byte.
+anc_pair() {
+  local tag="$1" a="$2"
+  full_summary "$T/anc-full-$tag.txt" "$(printf '%.7s' "$a")" "$(printf '%.12s' "$a")" PASS PASS
+  delta_summary "$T/anc-delta-$tag.txt" "$a" "$RC7" "$RC12" PASS PASS \
+    "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $a)"
 }
-RANCFULL="$T/anc-full.txt"
-full_summary "$RANCFULL" "$RA7" "$RA12" PASS PASS
+# anc_same_but_anchor <foreign-sha> <foreign-file> <anchor-file> — TRUE when the
+# only difference between the two files is the anchor sha, in every width the
+# gate writes it (40, 12, 7). Widest first, so a narrower substitution cannot
+# eat part of an already-rewritten value.
+anc_same_but_anchor() {
+  sed -e "s/$1/$R_ANCHOR/g" \
+      -e "s/$(printf '%.12s' "$1")/$RA12/g" \
+      -e "s/$(printf '%.7s' "$1")/$RA7/g" "$2" | cmp -s - "$3"
+}
+anc_pair good "$R_ANCHOR"
+anc_pair foreign "$R_FOREIGN"
+RANCFULL="$T/anc-full-good.txt"
 RGOODDELTA="$T/anc-delta-good.txt"
-anc_delta "$RGOODDELTA" "$R_ANCHOR"
+RFORFULL="$T/anc-full-foreign.txt"
 RFORDELTA="$T/anc-delta-foreign.txt"
-anc_delta "$RFORDELTA" "$R_FOREIGN"
 
 ANCHORFULL="$T/anchor-full.txt"
 full_summary "$ANCHORFULL" "$A7" "$A12" PASS PASS
@@ -1279,6 +1297,257 @@ refused_pair "delta block with NO dirty: field -> refuse" \
 full_summary "$T/anchor-dirty-absent.txt" "$A7" "$A12" PASS PASS -
 refused_pair "anchor block with NO dirty: field -> refuse" \
   "$T/anchor-dirty-absent.txt" "$GOODDELTA" "The full-gate block records NO 'dirty:' value"
+
+# =============================================================================
+# Case 44: THE CASE B ANCHOR IS BOUND TO THE CERTIFIED SHA'S HISTORY (#3653)
+# =============================================================================
+# The fixture (built above) is c0 -> c1 (ANCHOR) -> c2 (CERTIFIED), with cF a
+# sibling of c0 that is NOT an ancestor of c2. The accept arm ran at Case 28(b);
+# these are the refusing arms, the load-bearing proof, and the UNVERIFIABLE
+# family.
+
+# --- 44(a): the accept arm's AFFIRMATIVE record ------------------------------
+# A silent pass is indistinguishable from a check that never ran, so the passing
+# verdict must appear in the output. Pinned separately from 28(b)'s composite
+# needle so a reword of the surrounding line cannot take this assertion with it.
+if run_anc 0 "ancestry BOUND: anchor c1 IS an ancestor of the certified head -> exit 0" \
+  2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA"; then
+  case "$OUT" in
+    *"anchor-ancestry: BOUND"*)
+      ok "ancestry: the success path RECORDS the binding affirmatively (anchor-ancestry: BOUND)" ;;
+    *) bad "ancestry: the success path must record anchor-ancestry: BOUND (got: $OUT)" ;;
+  esac
+fi
+
+# --- 44(b): THE RED ARM — one property different, and only one ---------------
+# The two delta summaries come from ONE builder (`anc_delta`) whose only varying
+# input is the anchor sha, so substituting the foreign sha for the anchor sha in
+# the foreign file must reproduce the accepted file BYTE FOR BYTE. Asserted, not
+# assumed: a RED arm that differs in some second property proves nothing about
+# the property under test (MEMORY.md: "a RED arm must differ in one property").
+# THE FOREIGN PAIR IS THE REALISTIC #3616 SHAPE, and it has to be: the checks
+# ABOVE the ancestry binding require the full block's own provenance to BE the
+# delta's anchor, so a foreign anchor pinned against the LOCAL full block refuses
+# earlier, for a different reason. What survives those checks — and what #3653
+# closes — is a peer lane's genuine, internally consistent full-gate PASS plus a
+# delta naming it. That is exactly `anc_pair foreign`.
+if anc_same_but_anchor "$R_FOREIGN" "$RFORDELTA" "$RGOODDELTA" &&
+   anc_same_but_anchor "$R_FOREIGN" "$RFORFULL" "$RANCFULL"; then
+  ok "ancestry RED arm: the foreign pair differs from the accepted pair in EXACTLY ONE property (the anchor sha)"
+else
+  bad "ancestry RED arm: the foreign and accepted pairs differ in more than the anchor sha — the arm would prove nothing"
+fi
+if ! cmp -s "$RFORDELTA" "$RGOODDELTA" && ! cmp -s "$RFORFULL" "$RANCFULL"; then
+  ok "ancestry RED arm: non-vacuity — both halves of the pair are genuinely different files"
+else
+  bad "ancestry RED arm: a half of the foreign pair is IDENTICAL to the accepted one — the arm is vacuous"
+fi
+if run_anc 2 "ancestry NOT-ANCESTOR: a FOREIGN anchor pair -> refuse (exit 2)" \
+  2421 "$R_CERT" "$RFORFULL" "$RFORDELTA"; then
+  case "$OUT" in
+    *"PREMERGE: NO-GATE-OF-RECORD"*)
+      ok "ancestry: a foreign anchor is refused under the NO-GATE-OF-RECORD verdict" ;;
+    *) bad "ancestry: a foreign anchor must carry the NO-GATE-OF-RECORD verdict (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"is NOT on the certified sha's history"*)
+      ok "ancestry: the refusal NAMES the cause (the anchor is not on this PR's history)" ;;
+    *) bad "ancestry: the refusal must name the cause (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"$R_FOREIGN"*) ok "ancestry: the refusal names the ANCHOR sha it rejected" ;;
+    *) bad "ancestry: the refusal must name the anchor sha (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"$R_CERT"*) ok "ancestry: the refusal names the CERTIFIED sha it compared against" ;;
+    *) bad "ancestry: the refusal must name the certified sha (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"#3616"*) ok "ancestry: the refusal names the class it closes (#3616 cross-lane)" ;;
+    *) bad "ancestry: the refusal should name the #3616 class (got: $OUT)" ;;
+  esac
+fi
+
+# --- 44(c): THE MUTATION ARM — the check is LOAD-BEARING ---------------------
+# 44(b) reds today; that alone does not prove the ANCESTRY CHECK is what refuses
+# it, because some other check might be doing the work. So: substitute the
+# ARTIFACT in a scratch tree (the `flow_copy` idiom — never a path variable or a
+# test-only seam, which would be one more thing a real invoker could set), NEUTER
+# the ancestry call there, and require the SAME foreign-anchor call to reach
+# exit 0. If it does not, 44(b) proves nothing.
+MUTDIR="$T/flow-anc-mutant"
+mkdir -p "$MUTDIR"
+mut_ok=0
+if ! cp "$ASSERT" "$MUTDIR/premerge-assert.sh"; then
+  bad "ancestry mutation: could not copy premerge-assert.sh into the scratch tree"
+else
+  printf '%s\n' "$NEUTRAL_ADV" >"$MUTDIR/base-staleness.sh"
+  chmod +x "$MUTDIR/base-staleness.sh"
+  # The call site, replaced by the assignment it would have made on success.
+  MUT_FROM='  assert_anchor_on_history "$delta_anchor" "$certified"'
+  MUT_TO='  ANCHOR_ANCESTRY=BOUND   # MUTANT: ancestry check removed'
+  if [ "$(grep -c -x -F -- "$MUT_FROM" "$MUTDIR/premerge-assert.sh" | tr -d ' ')" = 1 ]; then
+    ok "ancestry mutation: the shipped script has exactly ONE ancestry call site to neuter"
+    # awk rather than sed: the needle contains `$` and `"`, and a literal
+    # whole-line match is what the count above verified.
+    awk -v from="$MUT_FROM" -v to="$MUT_TO" '{ if ($0 == from) print to; else print }' \
+      "$MUTDIR/premerge-assert.sh" >"$MUTDIR/mutated.sh" &&
+      mv "$MUTDIR/mutated.sh" "$MUTDIR/premerge-assert.sh" && mut_ok=1
+  else
+    bad "ancestry mutation: expected exactly one ancestry call site in the shipped script (found $(grep -c -x -F -- "$MUT_FROM" "$MUTDIR/premerge-assert.sh" | tr -d ' '))"
+  fi
+fi
+if [ "$mut_ok" -eq 1 ]; then
+  # ASSERT THE MUTATION TOOK. A mutation that silently failed to apply would make
+  # this whole arm vacuously green — the exact failure mode it exists to catch.
+  if [ "$(grep -c -x -F -- "$MUT_FROM" "$MUTDIR/premerge-assert.sh" | tr -d ' ')" = 0 ] &&
+     [ "$(grep -c -x -F -- "$MUT_TO" "$MUTDIR/premerge-assert.sh" | tr -d ' ')" = 1 ]; then
+    ok "ancestry mutation: the scratch copy really differs from the shipped one in the expected way"
+  else
+    bad "ancestry mutation: the mutation did not apply — the arm would be vacuous"
+    mut_ok=0
+  fi
+fi
+if [ "$mut_ok" -eq 1 ]; then
+  MUTOUT=$(cd "$ANC_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$MUTDIR/premerge-assert.sh" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+  MUTRC=$?
+  if [ "$MUTRC" -eq 0 ]; then
+    ok "ancestry mutation: WITHOUT the check the foreign anchor reaches exit 0 — the check is load-bearing"
+  else
+    bad "ancestry mutation: the foreign-anchor call still fails (exit $MUTRC) with the check removed, so 44(b) proves nothing about it (got: $MUTOUT)"
+  fi
+fi
+
+# --- 44(d): UNVERIFIABLE — an absent object is UNKNOWN, never ok -------------
+# A pass may never be derived from the ABSENCE of a bad signal, so a sha this
+# repository does not hold is exit 3 under its OWN marker, not a silent accept
+# and not exit 2 (which would tell the operator their chain is wrong when the
+# real fault is the checkout).
+ABSENT_SHA="0123456789abcdef0123456789abcdef01234567"
+if git -C "$ANC_REPO" cat-file -e "$ABSENT_SHA^{commit}" >/dev/null 2>&1; then
+  bad "ancestry UNVERIFIABLE fixture: the 'absent' sha is present in the fixture repo"
+else
+  ok "ancestry UNVERIFIABLE fixture: the chosen 40-hex sha really is absent from the fixture repo"
+fi
+anc_pair absent "$ABSENT_SHA"
+if run_anc 3 "ancestry UNVERIFIABLE: an ANCHOR sha absent from this repository -> exit 3" \
+  2421 "$R_CERT" "$T/anc-full-absent.txt" "$T/anc-delta-absent.txt"; then
+  case "$OUT" in
+    *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+      ok "ancestry: an absent anchor object carries the ANCHOR-UNVERIFIABLE marker" ;;
+    *) bad "ancestry: an absent anchor object must carry ANCHOR-UNVERIFIABLE (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"the ANCHOR commit is not present in this repository"*)
+      ok "ancestry: the UNVERIFIABLE refusal names WHICH object is absent" ;;
+    *) bad "ancestry: the UNVERIFIABLE refusal must name the absent object (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"git fetch origin"*) ok "ancestry: the absent-object cause carries its own remedy (fetch the branch)" ;;
+    *) bad "ancestry: the absent-object cause must carry a fetch remedy (got: $OUT)" ;;
+  esac
+  # THE MARKER MUST BE TEXTUALLY DISTINCT from the other two verdicts, because
+  # exit 3 and exit 2 name DIFFERENT operator actions and the codes alone cannot
+  # carry that (the same reason nit 8 split USAGE from GH-FAILURE).
+  case "$OUT" in
+    *"PREMERGE: NO-GATE-OF-RECORD"*)
+      bad "ancestry: UNVERIFIABLE must NOT read as NO-GATE-OF-RECORD (got: $OUT)" ;;
+    *) ok "ancestry: UNVERIFIABLE is textually DISTINCT from NO-GATE-OF-RECORD" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: TOOL-FAILURE"*)
+      bad "ancestry: UNVERIFIABLE must NOT read as TOOL-FAILURE (got: $OUT)" ;;
+    *) ok "ancestry: UNVERIFIABLE is textually DISTINCT from TOOL-FAILURE" ;;
+  esac
+fi
+
+# The CERTIFIED sha absent is its own cause with its own remedy (the two are
+# different operator actions in practice: a rebased-away anchor vs a PR branch
+# that was never fetched).
+NOREPO="$T/anc-not-a-repo"
+mkdir -p "$NOREPO"
+if (cd "$NOREPO" && git rev-parse --git-dir >/dev/null 2>&1); then
+  bad "ancestry UNVERIFIABLE fixture: $NOREPO is inside a git work tree — the no-work-tree case would not fire"
+else
+  ok "ancestry UNVERIFIABLE fixture: the scratch dir really is outside any git work tree"
+  OUT=$(cd "$NOREPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 3 ]; then
+    bad "ancestry UNVERIFIABLE: outside a work tree must be exit 3 (got $RC: $OUT)"
+  else
+    ok "ancestry UNVERIFIABLE: run outside a git work tree -> exit 3"
+    case "$OUT" in
+      *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+        ok "ancestry: the no-work-tree case carries the ANCHOR-UNVERIFIABLE marker" ;;
+      *) bad "ancestry: the no-work-tree case must carry ANCHOR-UNVERIFIABLE (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"not inside a git work tree"*)
+        ok "ancestry: the no-work-tree case names its OWN cause, not the absent-object one" ;;
+      *) bad "ancestry: the no-work-tree case must name its own cause (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"run this assert from the ISSUE'S WORKTREE"*)
+        ok "ancestry: the no-work-tree cause carries its own remedy" ;;
+      *) bad "ancestry: the no-work-tree cause must carry its own remedy (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: NO-GATE-OF-RECORD"*|*"PREMERGE: TOOL-FAILURE"*)
+        bad "ancestry: the no-work-tree case must not read as another verdict (got: $OUT)" ;;
+      *) ok "ancestry: the no-work-tree marker is distinct from NO-GATE-OF-RECORD and TOOL-FAILURE" ;;
+    esac
+  fi
+fi
+
+# --- 44(e): UNVERIFIABLE — rc 1 in a SHALLOW clone is NOT a verdict ----------
+# The subtlest arm, and the reason the check is three-valued at all (#3544):
+# `--is-ancestor` exits 1 both for "not an ancestor" and for "the connecting
+# history is absent". A shallow clone that HOLDS both objects but not the history
+# between them produces rc 1 on a pair whose real relationship is unknown, so it
+# must be UNVERIFIABLE (exit 3) and NOT the exit-2 refusal.
+SHALLOW="$T/anc-shallow"
+shallow_shape=0
+if [ "$anc_shape" -eq 1 ] &&
+   git clone -q --depth 2 --no-local --branch feature "file://$ANC_REPO" "$SHALLOW" >/dev/null 2>&1 &&
+   git -C "$SHALLOW" fetch -q --depth 1 origin other:refs/remotes/origin/other >/dev/null 2>&1; then
+  if [ "$(git -C "$SHALLOW" rev-parse --is-shallow-repository 2>/dev/null)" = true ] &&
+     git -C "$SHALLOW" cat-file -e "$R_FOREIGN^{commit}" >/dev/null 2>&1 &&
+     git -C "$SHALLOW" cat-file -e "$R_CERT^{commit}" >/dev/null 2>&1; then
+    shallow_shape=1
+  fi
+fi
+if [ "$shallow_shape" -eq 1 ]; then
+  ok "ancestry shallow fixture: a SHALLOW clone that holds BOTH objects (so rc 1 is not a verdict)"
+  OUT=$(cd "$SHALLOW" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 3 ]; then
+    bad "ancestry shallow: rc 1 in a shallow clone must be exit 3, not a verdict (got $RC: $OUT)"
+  else
+    ok "ancestry shallow: rc 1 in a repository NOT proven complete -> exit 3, never the exit-2 refusal"
+    case "$OUT" in
+      *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+        ok "ancestry shallow: the shallow case carries the ANCHOR-UNVERIFIABLE marker" ;;
+      *) bad "ancestry shallow: expected the ANCHOR-UNVERIFIABLE marker (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"NOT PROVEN COMPLETE"*)
+        ok "ancestry shallow: the refusal names shallowness as the cause, not 'not an ancestor'" ;;
+      *) bad "ancestry shallow: the refusal must name the incomplete history (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"git fetch --unshallow"*)
+        ok "ancestry shallow: the shallow cause carries its own remedy (git fetch --unshallow)" ;;
+      *) bad "ancestry shallow: the shallow cause must carry the unshallow remedy (got: $OUT)" ;;
+    esac
+  fi
+else
+  # DECLARED, not silently skipped: a host whose git cannot build the fixture
+  # leaves this arm unexercised, and an unexercised arm must say so.
+  bad "ancestry shallow: could not build the shallow fixture on this host — the rc-1-is-three-valued arm did NOT run"
+fi
 
 # =============================================================================
 # #3465 review — the remaining refusal branches
