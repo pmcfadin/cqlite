@@ -310,8 +310,20 @@
 #                      would silently excuse every flag). NO env opt-out and no
 #                      bypass flag, deliberately: a dead flag is always deletable,
 #                      so an escape hatch could only buy a vacuous green.
-#                      NEVER SKIPs: it needs nothing beyond cargo, which every gate
-#                      already has. Its self-test lives in tooling-tests.
+#                      PREREQUISITES: cargo AND python3, both MANDATORY and both
+#                      declared — `cargo metadata` is the only source of truth for
+#                      the feature set, and the reader that parses its JSON and
+#                      lexes Rust is python3. Absent either, this component FAILs
+#                      with a named remedy and NEVER SKIPs: a verdict it did not
+#                      measure is not a verdict, and an escape hatch could only buy
+#                      a vacuous green. (Its SELF-TEST, in the SKIP-aware
+#                      tooling-tests component, does SKIP loudly without python3 —
+#                      its subject cannot run there at all — so this
+#                      never-SKIPping lane is NOT folded into a SKIP-aware one,
+#                      per #3522.)
+#                      `cargo metadata` runs with --locked, so this mandatory
+#                      component can never rewrite Cargo.lock mid-gate and trip
+#                      the tree-integrity check (#2926).
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -14824,9 +14836,14 @@ run_pub_surface() {
 # "referenced somewhere" rule the aggregator laundered all four, which is precisely how
 # they survived. Being ENUMERATED is likewise not an effect — the clippy lists a few
 # thousand lines up NAME features without enabling anything.
-# NEVER SKIPs, deliberately: the guard needs nothing beyond cargo, which every gate
-# already has, and a coverage hole wearing a SKIP's clothes is still a coverage hole
-# (#3522). A missing guard script is a FAIL, not a SKIP.
+# PREREQUISITES ARE DECLARED AND MANDATORY: cargo AND python3. This component NEVER
+# SKIPs — not for a missing guard script, not for a missing interpreter — because a
+# coverage hole wearing a SKIP's clothes is still a coverage hole (#3522), and it says so
+# in its own diagnostics with a named remedy. Its SELF-TEST is a different lane: it lives
+# in the SKIP-aware tooling-tests component and SKIPs loudly there when python3 is
+# absent, since the guard it exercises cannot run at all on such a box. That split is
+# deliberate — #3522's rule is that a never-SKIPping lane must not be FOLDED INTO a
+# SKIP-aware one, and these are two components.
 # THIS COMPONENT IS INDEPENDENT OF THE GUARD (the pub-surface precedent, #1712 r6 F2 /
 # r7 F3 / r9 F4): PASS requires the guard's AFFIRMATIVE MEASUREMENT LINE matched WHOLE
 # — never a prefix, which tests a spelling rather than a state — and the two counts in
@@ -14849,8 +14866,27 @@ run_features_load_bearing() {
   if [ ! -f "$REPO_ROOT/$guard" ]; then
     status=FAIL
     echo ">>> [$name] FAIL: the guard $guard is MISSING (deleted or renamed)."
-    echo "    This component never SKIPs — it needs only cargo, which this gate has —"
-    echo "    so an absent guard is breakage, not an excusable environment."
+    echo "    This component never SKIPs, so an absent guard is breakage, not an"
+    echo "    excusable environment."
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $status (0s)"
+    return 0
+  fi
+  # DECLARED PREREQUISITES, checked HERE so the diagnostic names the real cause rather
+  # than surfacing as "a feature is dead or the guard refused". Both are mandatory and
+  # neither is a SKIP: python3 is the metadata reader and Rust lexer, cargo is the only
+  # source of truth for the feature set.
+  local missing_prereq=""
+  command -v cargo >/dev/null 2>&1 || missing_prereq="cargo"
+  command -v python3 >/dev/null 2>&1 || missing_prereq="${missing_prereq:+$missing_prereq and }python3"
+  if [ -n "$missing_prereq" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: $missing_prereq is not on PATH."
+    echo "    Both cargo and python3 are DECLARED MANDATORY prerequisites of this"
+    echo "    component (cargo metadata is the only source of truth for the feature set;"
+    echo "    python3 is the reader that parses its JSON and lexes Rust). There is no"
+    echo "    fallback derivation for either, and this component never SKIPs — a verdict"
+    echo "    it did not measure is not a verdict. Remedy: install the missing tool."
     record_result "$name" "$status" 0
     echo ">>> [$name] $status (0s)"
     return 0
@@ -16491,16 +16527,32 @@ run_tooling_tests() {
   # component is mandatory and must not depend on a network.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
   # scripts/ci/) because the guard has no test-only seam and must never grow one.
-  echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
-  if ! bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh" >>"$log" 2>&1; then
-    status=FAIL
-    echo "--- [$name] FAILED (features-load-bearing guard self-test #1698); last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
-    return 0
+  # SKIP-AWARE, LOUDLY, and that is the point (roborev job 62): this suite drives
+  # scripts/ci/check-features-load-bearing.sh, whose reader IS python3, so on a box
+  # without python3 its SUBJECT cannot run at all and there is nothing to exercise. This
+  # component is documented SKIP-aware for exactly that situation, and hard-FAILing here
+  # converted a SUPPORTED SKIP into a red gate of record for a reason the component
+  # denied. The MANDATORY half lives where it belongs — the `features-load-bearing`
+  # component declares cargo AND python3 as prerequisites and FAILs (never SKIPs)
+  # without them — so the never-SKIPping lane is a SEPARATE component and is not folded
+  # into this SKIP-aware one (#3522).
+  if command -v python3 >/dev/null 2>&1; then
+    echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (features-load-bearing guard self-test #1698); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+  else
+    echo ">>> [$name] SKIP scripts/tests/test_features_load_bearing_guard.sh (no python3 —"
+    echo "    the guard it exercises is python3-based, so its subject cannot run on this"
+    echo "    box; the features-load-bearing component itself FAILs here with a named"
+    echo "    remedy, which is where that requirement is enforced)"
   fi
 
   # nested/concurrent-gate isolation regression self-test (#2874): the concurrency

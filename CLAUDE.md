@@ -1066,6 +1066,18 @@ deleting a dead flag means cleaning those enumerations IN THE SAME DIFF. Only `d
 exempt (cargo defines its meaning; an empty `default = []` is legitimate). Fail-closed on
 every derivation failure, and there is deliberately **no bypass flag and no env opt-out** —
 a dead flag is always deletable, so an escape hatch could only buy a vacuous green.
+The component's prerequisites are **cargo AND python3, both mandatory and declared**
+(cargo metadata is the only source of truth for the feature set; python3 is the reader
+that parses its JSON and lexes Rust) — absent either it FAILs with a named remedy and
+never SKIPs, while its self-test in the SKIP-aware `tooling-tests` component SKIPs loudly
+on a python3-less box, so the never-SKIPping lane is not folded into a SKIP-aware one
+(#3522). Its `cargo metadata` runs `--locked`, so a mandatory component can never rewrite
+`Cargo.lock` mid-gate and trip the tree-integrity check (#2926). The guard's claim is
+SCOPED and printed: no false FAIL for a gate in a RECOGNISED spelling (`#[cfg]`,
+`#![cfg]`, `cfg!`, `cfg_attr` condition and tail, whitespace and string escapes handled),
+explicitly INCOMPLETE, with the escape routes and the two NOT-SEEN spellings (a
+macro-expanded feature name, a runtime-built build-script env key) enumerated in the
+line — an absolute soundness claim was tried and retracted after six rounds of witnesses.
 Deleted by #1698: `events`, `ci_zero_tolerance` (5 manifests), the four
 `test-infrastructure` leaves, `sstable-writer`, cqlite-cli `interactive` (it sat in
 `default`), `cqlite-core/unit-tests-only` (the cqlite-integration-tests feature of the

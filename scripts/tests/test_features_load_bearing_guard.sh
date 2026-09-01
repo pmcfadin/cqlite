@@ -163,6 +163,21 @@
 #                tried and retracted after six rounds of witnesses; a false rationale in a
 #                gate log is worse than none, so its return is a test failure.
 #
+#
+#   ROUND 7 (roborev job 62) — gate-infrastructure and two bounded recogniser bugs:
+#  43.  GREEN  — SOUNDNESS: `src/target/` and `src/fuzz/` are legitimate module
+#                directories; pruning by BASENAME never scanned them, so a gate there was
+#                reported dead. Pruning is now anchored.
+#  44.  RED    — the control for 43: a `target/` BESIDE a Cargo.toml is cargo build
+#                output and stays pruned, so a generated file cannot credit a feature.
+#  45.  GREEN  — SOUNDNESS: a `cfg_attr` chain 40 levels deep — past the recursion bound
+#                — CREDITS at the bound rather than dropping the gate.
+#  46.  STRUCT  — the gate must invoke THIS SUITE behind a `command -v python3` guard with
+#                a loud SKIP branch: it needs python3, it lives in the SKIP-aware
+#                tooling-tests component, and invoking it unguarded turned a supported
+#                SKIP into a red gate of record. Structural (it reads source), because
+#                running that component takes ~35 minutes.
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -179,11 +194,19 @@ GUARD_REL="scripts/ci/check-features-load-bearing.sh"
 GUARD="$REPO_ROOT/$GUARD_REL"
 
 [ -f "$GUARD" ] || { echo "FAIL: guard script not found at $GUARD"; exit 1; }
-command -v cargo >/dev/null 2>&1 || {
-  echo "FAIL: cargo is not on PATH. This suite does not SKIP: the guard's only"
-  echo "      derivation is cargo metadata, so a skipped run certifies nothing."
-  exit 1
-}
+# ONCE INVOKED, this suite never skips: the CALLER decides whether to run it (the
+# SKIP-aware tooling-tests component skips it when python3 is absent, because the guard
+# it exercises is python3-based and its subject cannot run at all there). A silent
+# in-suite skip would certify nothing while reading green.
+for tool in cargo python3; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "FAIL: $tool is not on PATH. It is a MANDATORY prerequisite of the guard under"
+    echo "      test (cargo metadata is its only source of truth; python3 is its reader),"
+    echo "      and this suite does not SKIP once invoked — a skipped run certifies"
+    echo "      nothing. The caller is responsible for not invoking it on such a box."
+    exit 1
+  }
+done
 
 TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/flb-selftest.XXXXXX")"
 cleanup() { rm -rf "$TMPROOT"; return 0; }
@@ -1066,13 +1089,93 @@ if grep -qi 'sound' "$TMPROOT/out.txt"; then
 fi
 ok "THE CLAIM: the success output states the SCOPED no-false-FAIL claim, enumerates the recognised spellings, says what is NOT SEEN, and makes no soundness claim"
 
+# --- 43. GREEN (SOUNDNESS): a src/target/ module is real source --------------
+# Pruning by BASENAME never scanned any directory called `target` or `fuzz`, but
+# `src/target/` and `src/fuzz/` are legitimate Rust module directories — a gate there, in
+# a RECOGNISED spelling, was reported dead, contradicting the printed claim. Pruning is
+# now by anchored path: `target` only beside a Cargo.toml, `fuzz` only the workspace root.
+D="$(fixture src-target-module)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\ntargetfeat = []\nfuzzfeat = []/' "$D/a/Cargo.toml"
+for f in targetfeat fuzzfeat; do
+  grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 43: fixture edit did not plant $f"
+done
+mkdir -p "$D/a/src/target" "$D/a/src/fuzz"
+cat >"$D/a/src/target/mod.rs" <<'EOF'
+#[cfg(feature = "targetfeat")]
+pub fn in_a_module_called_target() {}
+EOF
+cat >"$D/a/src/fuzz/mod.rs" <<'EOF'
+#[cfg(feature = "fuzzfeat")]
+pub fn in_a_module_called_fuzz() {}
+EOF
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+pub mod target;
+pub mod fuzz;
+EOF
+expect_green "$D" "case 43"
+ok "SOUNDNESS: modules named \`target\` and \`fuzz\` under src/ are real source and are scanned (pruning is by anchored path, not basename)"
+
+# --- 44. GREEN (SOUNDNESS): build output IS still pruned ---------------------
+# The control for 43: a `target/` BESIDE a Cargo.toml is cargo build output and must not
+# be scanned. A generated file there naming an otherwise-dead feature must not credit it.
+D="$(fixture build-output-pruned)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\ngeneratedfeat = []/' "$D/a/Cargo.toml"
+grep -q '^generatedfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 44: fixture edit did not plant generatedfeat"
+mkdir -p "$D/a/target/debug/build"
+cat >"$D/a/target/debug/build/generated.rs" <<'EOF'
+#[cfg(feature = "generatedfeat")]
+pub fn generated() {}
+EOF
+expect_red_naming "$D" "generatedfeat" "case 44"
+ok "the control for 43: a target/ dir BESIDE a Cargo.toml is build output and stays pruned"
+
+# --- 45. GREEN (SOUNDNESS): a cfg_attr chain DEEPER than the recursion bound --
+# The recursion is bounded so a pathological token stream cannot hang a mandatory gate
+# component — but AT the bound the ambiguity is CREDITED, never dropped, because a deeper
+# valid chain is inside the advertised recognised spelling and dropping it would report a
+# live feature dead.
+D="$(fixture deep-cfg-attr-chain)"
+sed -i 's/^tfeat = \[\]$/tfeat = []\ndeepfeat = []/' "$D/a/Cargo.toml"
+grep -q '^deepfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 45: fixture edit did not plant deepfeat"
+python3 - "$D/a/src/lib.rs" <<'PYEOF'
+import sys
+# 40 nested cfg_attr levels — well past the bound — with the real gate at the bottom.
+DEPTH = 40
+inner = '#[' + 'cfg_attr(unix, ' * DEPTH + 'cfg(feature = "deepfeat")' + ')' * DEPTH + ']'
+with open(sys.argv[1], 'a') as fh:
+    fh.write('\n' + inner + '\npub fn very_deeply_gated() {}\n')
+PYEOF
+grep -q 'cfg_attr(unix, cfg_attr' "$D/a/src/lib.rs" || fail_case "case 45: fixture did not build a nested chain"
+expect_green "$D" "case 45"
+ok "SOUNDNESS: a cfg_attr chain deeper than the recursion bound CREDITS at the bound instead of dropping the gate"
+
+# --- 46. STRUCTURAL: the gate invokes this suite behind a python3 guard ------
+# This suite needs python3 (the guard it exercises is python3-based), and it lives in
+# `tooling-tests`, a component documented SKIP-aware for exactly that. Invoking it
+# UNGUARDED there converted a supported SKIP into a red gate of record — so the guard is
+# asserted STRUCTURALLY here, in the file that knows the requirement, rather than left to
+# be rediscovered. Labelled structural on purpose: it reads source, it does not run the
+# component (which takes ~35 minutes).
+GATE="$REPO_ROOT/scripts/agent-gate.sh"
+[ -f "$GATE" ] || fail_case "case 46: scripts/agent-gate.sh not found"
+inv_line="$(grep -n 'bash "\$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh"' "$GATE" | head -1 | cut -d: -f1)"
+[ -n "$inv_line" ] \
+  || fail_case "case 46: no invocation of this suite found in scripts/agent-gate.sh — either it was unwired (then nothing runs it) or the invocation was reworded (then update this case)"
+window_start=$((inv_line > 12 ? inv_line - 12 : 1))
+sed -n "${window_start},${inv_line}p" "$GATE" | grep -q 'command -v python3' \
+  || fail_case "case 46: the invocation at scripts/agent-gate.sh:$inv_line is NOT inside a \`command -v python3\` guard. tooling-tests is SKIP-aware for missing python3; invoking this suite unguarded turns a supported SKIP into a red gate of record (roborev job 62). The MANDATORY requirement belongs to the features-load-bearing component, which FAILs on it."
+sed -n "${inv_line},$((inv_line + 25))p" "$GATE" | grep -q 'SKIP scripts/tests/test_features_load_bearing_guard.sh' \
+  || fail_case "case 46: the python3 guard around scripts/agent-gate.sh:$inv_line has no LOUD SKIP branch. A silently skipped self-test is indistinguishable from one that ran."
+ok "STRUCTURAL: the gate invokes this suite inside a \`command -v python3\` guard with a LOUD SKIP branch, so tooling-tests' documented no-python3 SKIP still governs"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=41
+CASE_COUNT_EXPECTED=45
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

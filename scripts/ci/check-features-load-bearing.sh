@@ -146,9 +146,21 @@
 #       not know and which cannot even resolve. Certifying a manifest cargo never
 #       builds is noise at best and a false verdict at worst.
 #
-# `fuzz/` is its own EXCLUDED workspace (CLAUDE.md: the gate and default builds never
-# compile it), so it is out of this guard's scope — its features are neither
-# certified nor reported here.
+# `fuzz/` — the one at the WORKSPACE ROOT — is its own EXCLUDED workspace (CLAUDE.md:
+# the gate and default builds never compile it), so it is out of this guard's scope: its
+# features are neither certified nor reported here. That exclusion is by exact PATH, not
+# by directory name: a `fuzz` (or `target`) module inside a package's `src/` is ordinary
+# Rust source and IS scanned.
+#
+# # PREREQUISITES: cargo AND python3, BOTH MANDATORY
+#
+# `cargo metadata` is the only source of truth for the feature set (see above), and the
+# reader that parses its JSON and lexes Rust is python3. Neither is optional and there is
+# no fallback derivation for either: this guard FAILS with a named remedy when one is
+# missing, and NEVER SKIPs, because a verdict it did not measure is not a verdict. A
+# POSIX-tool reimplementation was considered and rejected — a second implementation of a
+# JSON parser and a Rust lexer is a second thing to get wrong, and its correctness would
+# only be knowable by differential testing against the first.
 #
 # # THE CONTRACT: A SCOPED NO-FALSE-FAIL CLAIM, AND EXPLICIT INCOMPLETENESS
 #
@@ -290,20 +302,25 @@ fail() {
 command -v cargo >/dev/null 2>&1 \
   || fail "cargo is not on PATH, so the feature set cannot be derived. This guard has no fallback derivation: a textual manifest sweep cannot see cargo's implicit features and reaches non-member manifests. Refusing to report a verdict it did not measure."
 command -v python3 >/dev/null 2>&1 \
-  || fail "python3 is not on PATH; the metadata reader cannot run. Refusing to report a verdict it did not measure."
+  || fail "python3 is not on PATH. It is a MANDATORY prerequisite of this guard, not an optional accelerator: the metadata reader parses cargo's JSON and lexes Rust, and there is no POSIX-tool fallback (a second implementation of either would be a second thing to get wrong). Remedy: install python3 (>=3.6). This guard never SKIPs — a verdict it did not measure is not a verdict."
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/features-load-bearing.XXXXXX")"
 cleanup() { rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 METADATA="$WORK_DIR/metadata.json"
-# --no-deps: only workspace members are certified. --locked is deliberately NOT
-# passed: this guard must not fail because a lockfile needs updating, that is a
-# different check's job.
-if ! (cd "$REPO_ROOT" && cargo metadata --no-deps --format-version 1) >"$METADATA" 2>"$WORK_DIR/metadata.err"; then
+# --no-deps: only workspace members are certified.
+# --locked: this component is MANDATORY on the gate of record, and a `cargo metadata`
+# that resolves dependencies can WRITE Cargo.lock — which would mutate the checkout
+# mid-run and trip the gate's own tree-integrity check (#2926,
+# `tree-mutated-midrun`), presenting as a mystery failure with no obvious cause. With
+# --locked a stale lockfile is a NAMED failure instead of a silent write. Measured: with
+# --no-deps this needs no lockfile at all (a fresh workspace with none resolves fine and
+# none is written), so --locked costs nothing and cannot red a legitimate tree.
+if ! (cd "$REPO_ROOT" && cargo metadata --no-deps --locked --format-version 1) >"$METADATA" 2>"$WORK_DIR/metadata.err"; then
   echo "" >&2
   sed -n '1,40p' "$WORK_DIR/metadata.err" >&2
-  fail "\`cargo metadata --no-deps\` FAILED (see above), so the declared-feature set could not be derived. Fail-closed: an unmeasured feature set is never an empty one. Remedy: fix the manifest error cargo reports."
+  fail "\`cargo metadata --no-deps --locked\` FAILED (see above), so the declared-feature set could not be derived. Fail-closed: an unmeasured feature set is never an empty one. Remedy: fix the manifest error cargo reports, or — if it says the lockfile needs updating — run \`cargo metadata >/dev/null\` and commit the Cargo.lock change. --locked is deliberate: this guard must not silently rewrite the lockfile mid-gate (#2926 tree-integrity)."
 fi
 
 READER="$WORK_DIR/reader.py"
@@ -351,12 +368,34 @@ EXEMPT_FEATURES = {
     "default": "cargo defines its meaning; a cfg on it is meaningless and an empty default = [] is legitimate",
 }
 
-# Directory names never scanned for reference sites.
-#   target/       — build output, not source.
-#   .git/         — not source.
-#   fuzz/         — its own EXCLUDED workspace (out of scope; see the script header).
-#   node_modules/ — vendored JS.
-SKIP_DIR_NAMES = {"target", ".git", "node_modules", "fuzz"}
+# DIRECTORY PRUNING IS BY ANCHORED PATH, NOT BASENAME (roborev job 62). `src/target/`
+# and `src/fuzz/` are legitimate Rust module directories, and pruning every directory
+# that happens to share those names meant a gate written there — in a RECOGNISED
+# spelling — was never scanned and its feature reported dead, contradicting the very
+# claim this guard prints.
+#
+#   `.git`, `node_modules`  — pruned by name at any depth: neither is ever a Rust
+#                             module directory, at any level, so the name IS the
+#                             property.
+#   `target`                — pruned ONLY beside a `Cargo.toml`, which is where cargo
+#                             puts build output. `src/target/` has no sibling manifest
+#                             and is scanned.
+#   `<root>/fuzz`           — pruned as EXACTLY that one path: it is the excluded
+#                             cargo-fuzz workspace (see the header). `src/fuzz/`, or a
+#                             `fuzz` module anywhere else, is scanned.
+PRUNE_BY_NAME = {".git", "node_modules"}
+FUZZ_WORKSPACE = os.path.join(REPO_ROOT, "fuzz")
+
+
+def prune_dir(dirpath, name):
+    full = os.path.join(dirpath, name)
+    if name in PRUNE_BY_NAME:
+        return True
+    if name == "target" and os.path.isfile(os.path.join(dirpath, "Cargo.toml")):
+        return True
+    if os.path.realpath(full) == os.path.realpath(FUZZ_WORKSPACE):
+        return True
+    return False
 
 # THE CONTRACT, printed on every success — SCOPED, because the unqualified version could
 # not be made true (roborev job 60). It read "SOUND-BY-DESIGN: a live feature is not
@@ -394,6 +433,10 @@ STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
 # A feature value this scanner could not read confidently: credits EVERY feature of the
 # owning package (never one wrong name).
 AMBIGUOUS_NAME = "\x02ambiguous\x02"
+# The `cfg_attr` tail recursion is bounded (a cyclic token stream must not hang the
+# gate), and AT the bound the ambiguity is CREDITED rather than dropped — see
+# _cfg_span_features.
+CFG_ATTR_MAX_DEPTH = 16
 IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 
@@ -683,11 +726,16 @@ def _cfg_span_features(code, strings, kind, start, end, depth=0):
     cond_start, cond_end = args[0]
     for got in _predicate_features(code, strings, cond_start, cond_end):
         yield got
-    if depth >= 8:
-        return
     for a_start, a_end in args[1:]:
         m = NESTED_CFG_RE.match(code, a_start, a_end)
         if not m:
+            continue
+        if depth >= CFG_ATTR_MAX_DEPTH:
+            # AT THE LIMIT, CREDIT — never drop (roborev job 62). A deeper valid chain is
+            # inside the advertised recognised spelling, so dropping it would report a
+            # live feature dead; crediting every feature of the package can only let a
+            # dead one escape, which the contract permits and declares.
+            yield AMBIGUOUS_NAME, m.start()
             continue
         inner = balanced_span(code, m.end() - 1)
         if inner is None:
@@ -970,7 +1018,7 @@ def owners_of(path):
 # ---------------------------------------------------------------------------
 scanned_files = 0
 for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
-    dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+    dirnames[:] = [d for d in dirnames if not prune_dir(dirpath, d)]
     for fname in filenames:
         if not fname.endswith(".rs"):
             continue
