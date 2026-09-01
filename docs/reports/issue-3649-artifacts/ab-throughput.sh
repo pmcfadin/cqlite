@@ -521,6 +521,14 @@ if [ -n "$CONTROL" ]; then
 else
   say "control none -- this session is a measurement"
 fi
+# Asymmetric per-arm flags mean the arms are NOT serving the same configuration,
+# so whatever is measured is the injected difference and not the commit pair's.
+# That is the definition of a control, and it may not wear a measurement's
+# verdict -- the analyzer disclaims a labelled session, and this makes sure one
+# exists to disclaim.
+if [ "$BASE_SERVER_EXTRA" != "$HEAD_SERVER_EXTRA" ] && [ -z "$CONTROL" ]; then
+  usage_error "--base-server-extra and --head-server-extra differ, which serves the two arms under different configurations; that is a control, not a measurement. Pass --control <label> so the verdict is disclaimed"
+fi
 if [ -n "$BASE_SERVER_EXTRA" ] || [ -n "$HEAD_SERVER_EXTRA" ]; then
   say "server-extra base [$BASE_SERVER_EXTRA] head [$HEAD_SERVER_EXTRA]"
   [ "$BASE_SERVER_EXTRA" = "$HEAD_SERVER_EXTRA" ] || say \
@@ -589,7 +597,11 @@ CORPUS_FILES="${CENSUS%% *}"
 CENSUS_REST="${CENSUS#* }"
 CORPUS_BYTES="${CENSUS_REST%% *}"
 SERVED_DIR="${CENSUS_REST#* }"
+# EXPORTED, because `write_manifest` reads these from the environment. Unexported,
+# every manifest recorded the census as zero -- and the corpus size is a thing the
+# acceptance criteria explicitly require the report to state.
 export AB_SERVED_DIR="$SERVED_DIR"
+export AB_CORPUS_FILES="$CORPUS_FILES" AB_CORPUS_BYTES="$CORPUS_BYTES"
 say "corpus path $CORPUS served-dir $SERVED_DIR data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES"
 say "corpus census scope THE SERVED DIRECTORY ONLY -- unrelated tables, snapshots and hard-linked copies elsewhere under --data-dir are deliberately not counted"
 [ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "the served directory $SERVED_DIR holds no *-Data.db files"
@@ -708,6 +720,10 @@ say "session directory $RUN_DIR -- owned by this session alone; no earlier sessi
 # ---------------------------------------------------------------------------
 # One replicate of one arm.
 # ---------------------------------------------------------------------------
+parse_startup() { # <server-log> <field>  -- returns a VALUE, not a message
+  python3 "$SUPPORT" parse-startup "$1" "$2" 2>/dev/null || echo NOT-OBSERVED
+}
+
 # Readiness is proved by OUR OWN server's post-bind line, never by a port probe.
 # `cli::log_listening` is emitted only once a listener exists
 # (cqlite-flight/src/cli.rs:228-241), so its presence proves this process owns
@@ -766,7 +782,14 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
 
   local endpoint_addr
   endpoint_addr="$(wait_until_listening "$srv" "$server_log")" || {
-    SRV_PID=''
+    # SRV_PID IS DELIBERATELY LEFT SET. Two opposite hazards, two opposite
+    # orders, and getting them the same way round breaks one of them:
+    #   * inside `reap_server`, the pid is cleared FIRST, so a signal arriving
+    #     mid-reap cannot re-enter and signal the same pid twice;
+    #   * here, the server may be ALIVE and merely silent (it never printed its
+    #     readiness line), so clearing before `die` would strand it -- `cleanup`
+    #     reaps whatever `SRV_PID` still names, and this is precisely the case
+    #     where it must still name something.
     die server-never-listened \
       "the $tag server never reported a post-bind listening line while alive; readiness is taken from ITS OWN post-bind line, not from a port probe, so a port answered by somebody else cannot satisfy it. See $server_log"
   }

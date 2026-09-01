@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=265
+CASE_FLOOR=278
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2104,6 +2104,309 @@ PYINNER
   fi
   run_analyzer "$TMP/w-badref/results"
   check_verdict "the analyzer refuses an absent manifest" UNMEASURED 7
+fi
+
+echo
+echo "-- THE DRIVER, EXECUTED END TO END under PATH shims --"
+
+# WHY THIS SECTION EXISTS. Everything above tests the analyzer and the helpers
+# the driver was refactored to expose. Nothing ran the SESSION LOOP -- and
+# `bash -n` cannot see a command that does not exist or a variable that was never
+# exported, so a driver that died on its first replicate, after both release
+# builds, passed every check this suite had. That is the fifth instance of one
+# class in this lane (see FINDINGS.md §12), and the rule in §9 says stop fixing
+# instances and remove the reason the class exists.
+#
+# So the loop runs here, with the three externals replaced by PATH shims -- the
+# idiom this repo's own gate self-tests use for exactly this
+# (scripts/tests/test_agent_gate_feature_matrix_annotation.sh drives components
+# under a recording PATH-shim `cargo`). No source seam and no test-only flag: a
+# real invoker has nothing extra to trip over.
+#
+# DECLARED GAP, because a lane that omits coverage silently is indistinguishable
+# from one that covers it: the REAL cargo build, the REAL cqlite-flight and the
+# REAL flight-loadgen are NOT exercised anywhere. This proves the driver's own
+# logic -- ordering, plumbing, recording, promotion -- against realistic
+# behaviour, not that cqlite-flight works.
+
+e2e_supported=1
+command -v python3 >/dev/null 2>&1 || e2e_supported=0
+if [ "$e2e_supported" = "0" ]; then
+  bad "the end-to-end section needs python3 and could not run"
+else
+  SHIMBIN="$TMP/shimbin"
+  mkdir -p "$SHIMBIN"
+
+  # --- the stub server: binds a REAL socket, so the ephemeral-port plumbing is
+  # --- exercised rather than simulated, and prints the two lines the driver
+  # --- parses (configuration, then the post-bind readiness line).
+  cat > "$SHIMBIN/stub-cqlite-flight" <<'STUBEOF'
+#!/usr/bin/env python3
+import socket
+import sys
+import time
+
+args = sys.argv[1:]
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+listen = opt("--listen", "127.0.0.1:0")
+host, _, port = listen.partition(":")
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((host, int(port)))
+sock.listen(16)
+bound = "%s:%d" % (host, sock.getsockname()[1])
+
+print(
+    "INFO cqlite_flight: cqlite-flight starting listen=%s batch_size=%s "
+    "max_batch_bytes=%s max_concurrent_scans=%s max_concurrent_scans_source=flag "
+    "admission_wait_timeout_ms=%s"
+    % (
+        listen,
+        opt("--batch-size", "8192"),
+        opt("--max-batch-bytes", "4194304"),
+        opt("--max-concurrent-scans", "16"),
+        opt("--admission-wait-timeout-ms", "30000"),
+    ),
+    flush=True,
+)
+print("INFO cqlite_flight: cqlite-flight listening on %s listening_on=%s" % (bound, bound), flush=True)
+while True:
+    time.sleep(3600)
+STUBEOF
+
+  # --- the stub load generator: CONNECTS to the endpoint it was handed, so a
+  # --- wrong or stale address fails the run rather than passing quietly, and
+  # --- writes one internally-consistent record per ramp step.
+  cat > "$SHIMBIN/stub-flight-loadgen" <<'STUBEOF'
+#!/usr/bin/env python3
+import json
+import socket
+import sys
+
+args = sys.argv[1:]
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+endpoint = opt("--endpoint", "")
+host, _, port = endpoint.replace("http://", "").partition(":")
+# Proves the driver handed us a real, live address -- the whole point of the
+# ephemeral-port change is that this is OUR server and not somebody else's.
+with socket.create_connection((host, int(port)), timeout=10):
+    pass
+
+steps = [int(v) for v in opt("--ramp", "1").split(",")]
+raw = opt("--step-duration", "60s")
+for suffix, scale in (("ms", 0.001), ("m", 60.0), ("s", 1.0)):
+    if raw.endswith(suffix):
+        duration = float(raw[: -len(suffix)]) * scale
+        break
+else:
+    duration = float(raw)
+
+out = opt("--out", "/dev/null")
+label = opt("--round", "")
+# A deterministic rate that differs by arm, with a small per-replicate jitter.
+# The jitter is NOT decoration: without it every ratio is identical, the
+# bootstrap interval has zero width, and the analyzer correctly refuses the
+# session as `bootstrap-degenerate` -- which is the guard working, and would
+# make this case unable to reach a verdict. Derived from crc32 rather than
+# `hash()`, which is salted per process and would make the suite
+# non-deterministic.
+import zlib
+
+rate = 120000.0 if label.startswith("head") else 100000.0
+rate *= 1.0 + ((zlib.crc32(label.encode()) % 11) - 5) / 500.0
+with open(out, "w", encoding="utf-8") as handle:
+    for position, concurrency in enumerate(steps):
+        factor = 1.0 if position == len(steps) - 1 else 0.6
+        value = rate * factor
+        rows = int(value * duration)
+        handle.write(
+            json.dumps(
+                {
+                    "schema": "flight-loadgen.step/v1",
+                    "round": label,
+                    "endpoint": endpoint,
+                    "ts_unix_ms": 1780000000000,
+                    "seed": 42,
+                    "step": position,
+                    "target_concurrency": concurrency,
+                    "shape": opt("--shape", "full"),
+                    "duration_s": duration,
+                    "requests_ok": 5,
+                    "requests_unavailable": 0,
+                    "requests_error": 0,
+                    "error_codes": {},
+                    "qps": 5 / duration,
+                    "rows_per_s": rows / duration,
+                    "bytes_per_s": value * 200.0,
+                    "rows_total": rows,
+                    "bytes_total": rows * 200,
+                    "latency_ms": {"p50": 1.0, "p95": 1.1, "p99": 1.2, "max": 1.3, "samples": 5},
+                }
+            )
+            + "\n"
+        )
+STUBEOF
+
+  # --- the stub cargo: records its argv and produces the two binaries the
+  # --- driver then executes from that arm's own target directory.
+  cat > "$SHIMBIN/cargo" <<'STUBEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AB_SELFTEST_CARGO_LOG:-/dev/null}"
+case "${1:-}" in
+  build)
+    rel="${CARGO_TARGET_DIR:?stub cargo needs CARGO_TARGET_DIR}/release"
+    mkdir -p "$rel"
+    cp "${AB_SELFTEST_SHIMBIN:?}/stub-cqlite-flight" "$rel/cqlite-flight"
+    cp "${AB_SELFTEST_SHIMBIN:?}/stub-flight-loadgen" "$rel/flight-loadgen"
+    chmod +x "$rel/cqlite-flight" "$rel/flight-loadgen"
+    ;;
+esac
+exit 0
+STUBEOF
+  chmod +x "$SHIMBIN/cargo" "$SHIMBIN/stub-cqlite-flight" "$SHIMBIN/stub-flight-loadgen"
+
+  # A served corpus big enough for the floors this case passes.
+  mkdir -p "$TMP/e2e-corpus/ks/tbl"
+  head -c 20000 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-1-big-Data.db"
+  head -c 20000 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-2-big-Data.db"
+  printf '{"version":2,"keyspace":"ks","table":"tbl","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
+    > "$TMP/e2e-ticket.json"
+
+  run_e2e() { # <work-dir> <extra driver args...>
+    local wd="$1"; shift
+    set +e
+    AB_SELFTEST_SHIMBIN="$SHIMBIN" \
+    AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+    PATH="$SHIMBIN:$PATH" \
+      bash "$DRIVER" \
+        --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
+        --work-dir "$wd" --repo "$SCRATCH" \
+        --base-ref HEAD~1 --head-ref HEAD \
+        --max-concurrent-scans 16 --min-corpus-bytes 1 --min-sstables 2 \
+        --replicates 5 --step-duration 1s "$@" \
+        > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+  }
+
+  : > "$TMP/cargo-argv.log"
+  run_e2e "$TMP/e2e-ss" --ramp 1 --no-prewarm
+  if [ "$RC" = "0" ]; then
+    ok "a complete single-stream session runs end to end under the shims"
+  else
+    bad "the driver could not complete a session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  if ! anchored; then
+    bad "a real session emitted a line without the AB-3649 anchor"
+  else
+    ok "every line of a real session carries the anchor"
+  fi
+
+  E2E_DIR="$(find "$TMP/e2e-ss" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$E2E_DIR" ] && [ -f "$E2E_DIR/manifest.json" ]; then
+    ok "the session wrote a manifest into its own run directory"
+  else
+    bad "no session directory with a manifest was produced"
+  fi
+  if [ "$(find "$TMP/e2e-ss" -maxdepth 2 -name '*-r0*.jsonl' 2>/dev/null | wc -l)" = "10" ]; then
+    ok "all ten replicate files (5 pairs x 2 arms) were written"
+  else
+    bad "expected 10 replicate JSONL files, found $(find "$TMP/e2e-ss" -maxdepth 2 -name '*-r0*.jsonl' 2>/dev/null | wc -l)"
+  fi
+  # FINDING 2: the census reached the manifest, rather than defaulting to zero.
+  if [ -n "$E2E_DIR" ] && python3 - "$E2E_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+corpus = json.load(open(sys.argv[1], encoding="utf-8"))["corpus"]
+raise SystemExit(
+    0 if corpus["data_db_files"] == 2 and corpus["data_db_bytes"] == 40000 else 1
+)
+PYINNER
+  then
+    ok "the manifest records the real corpus census, not zeros"
+  else
+    bad "the manifest's corpus census is wrong -- the AC requires the corpus size be stated"
+  fi
+  # The two arms really were built separately, with their own target dirs.
+  if [ "$(grep -c 'target/release\|build --release' "$TMP/cargo-argv.log" 2>/dev/null || echo 0)" -ge 2 ]; then
+    ok "each arm was built once, through its own cargo invocation"
+  else
+    bad "the two arms were not both built"
+  fi
+  # And the analyzer reads what the driver produced -- the two halves meeting is
+  # the property no fixture can establish.
+  if [ -n "$E2E_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --single-stream "$E2E_DIR/manifest.json" \
+      > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token single-stream)" = "MEETS-TARGET" ] && [ "$RC" = "0" ]; then
+      ok "the analyzer consumes a REAL driver manifest and renders a verdict"
+    else
+      bad "the analyzer could not read the driver's own output (verdict '$(verdict_token single-stream)', exit $RC)"
+    fi
+    if grep -q '^AB-3649: counterbalance base-first 3 head-first 2 residual 1 pair(s)$' "$TMP/out.txt"; then
+      ok "the order the driver ACTUALLY ran is what the analyzer counts"
+    else
+      bad "the executed order did not reach the analyzer"
+    fi
+    if grep -q 'corroboration agreed (10 of 10 runs)' "$TMP/out.txt"; then
+      ok "the admission ceiling was read back from every real server start"
+    else
+      bad "the admission readback did not survive a real session"
+    fi
+  fi
+
+  # A ramp session, so the multi-step validation path runs for real too.
+  run_e2e "$TMP/e2e-ut" --ramp 1,2 --no-prewarm
+  if [ "$RC" = "0" ]; then
+    ok "a complete concurrency-ramp session runs end to end"
+  else
+    bad "the ramp session failed (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  UT_DIR="$(find "$TMP/e2e-ut" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$UT_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --utilization "$UT_DIR/manifest.json" > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token utilization)" = "RISES" ]; then
+      ok "a real ramp session yields a utilization verdict"
+    else
+      bad "the utilization section could not read a real ramp session ('$(verdict_token utilization)')"
+    fi
+  fi
+
+  # The prewarm path is a separate branch and has its own way to be wrong.
+  run_e2e "$TMP/e2e-warm" --ramp 1
+  if [ "$RC" = "0" ]; then
+    ok "a session with the warming pass enabled also completes"
+  else
+    bad "the prewarm branch failed (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+
+  # No server may outlive the session: the reap path runs for real here.
+  if pgrep -f "$TMP/e2e-ss.*cqlite-flight" >/dev/null 2>&1 \
+     || pgrep -f "$TMP/e2e-warm.*cqlite-flight" >/dev/null 2>&1; then
+    bad "a stub server outlived its session"
+  else
+    ok "every server was reaped; none outlived its session"
+  fi
+  echo "  note    DECLARED GAP: the real cargo build, cqlite-flight and flight-loadgen are"
+  echo "          exercised by nothing here -- these cases prove the DRIVER's logic only."
 fi
 
 # ---------------------------------------------------------------------------

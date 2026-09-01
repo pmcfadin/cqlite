@@ -344,14 +344,28 @@ def census_served(data_dir, ticket_path):
         return 1
     total = 0
     count = 0
+    # CONTAINMENT, not just scope. `DirSource::data_paths` excludes any entry
+    # whose CANONICAL target escapes the resolved directory
+    # (cqlite-flight/src/producer.rs:215-235, `pathsafe::assert_within`), because
+    # a symlink inside an otherwise-valid directory can point anywhere. Mirroring
+    # the enumeration without the containment check left symlinked decoys
+    # satisfying both floors -- the round-4 fix closed the recursive-scan route
+    # and this one stayed open. A Cassandra snapshot is a HARD link, which
+    # canonicalises inside the directory and is therefore still counted.
     try:
+        served_real = os.path.realpath(served)
         for name in os.listdir(served):
             if not name.endswith("-Data.db"):
                 continue
             path = os.path.join(served, name)
             if not os.path.isfile(path):
                 continue
-            total += os.path.getsize(path)
+            real = os.path.realpath(path)
+            if os.path.dirname(real) != served_real:
+                # Excluded exactly as the server excludes it, and counted by
+                # neither floor.
+                continue
+            total += os.path.getsize(real)
             count += 1
     except OSError as exc:
         err("cause corpus-census-failed")
