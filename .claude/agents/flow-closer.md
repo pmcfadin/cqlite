@@ -122,10 +122,15 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    # immediately and prints the unit, summary, heartbeat and poll command.
    bash scripts/flow/gate-detached.sh --summary /tmp/gate-<N>.txt --log /tmp/gate-<N>.log
    ```
-   If that refuses with **exit 69** (no working `systemd-run --user` on this host), this box
-   cannot run a cgroup-detached gate: emit `NEEDS-SPAWN`/escalate for the gate to be run
-   from a separate login (`ssh` + `nohup`, which gets its own scope). Do **not** fall back
-   to an in-session launch — it will die when you end your turn.
+   **Exit 69 is a CAPABILITY refusal, and it has more than one cause — READ THE MESSAGE,
+   which names the cause and its own remedy.** It is not always "no `systemd-run --user`":
+   it is also an absent/non-0700 per-user runtime directory, and a missing `flock`. The
+   remedy differs, and guessing sends you the wrong way — `ssh` + `nohup` from a separate
+   login fixes the *systemd-run* causes (that login gets its own scope), but it cannot fix
+   a **missing tool**, which is absent from the host no matter who logs in. So: for a
+   systemd-run cause, emit `NEEDS-SPAWN`/escalate for the gate to be run from a separate
+   login; for a named missing capability, escalate to have it installed/enabled. Either
+   way do **not** fall back to an in-session launch — it will die when you end your turn.
    End your turn; on re-invoke, `cat /tmp/gate-<N>.txt` — the complete `==== AGENT-GATE
    SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker; a terminal
    `RESULT: INCOMPLETE` means the run never finished, so there is no verdict to read).
