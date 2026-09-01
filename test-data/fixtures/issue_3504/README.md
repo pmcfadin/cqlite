@@ -97,6 +97,7 @@ dataset tests open that root and query `test_udt_collision.udt_collide`.
 
 ```
 test-data/fixtures/issue_3504/
+├── binding-parity-facts.json           the CROSS-BINDING reference (see below)
 └── test_udt_collision/
     ├── udt_collide-<uuid>/
     │   ├── nb-1-big-Data.db            (+ Index/Summary/Filter/Statistics/CRC/Digest/TOC)
@@ -106,6 +107,14 @@ test-data/fixtures/issue_3504/
 ```
 
 Uncompressed (no `CompressionInfo.db`), BIG `nb`, ~500-byte `Data.db`.
+
+`binding-parity-facts.json` is committed TEXT, not a binary: it records the UDT
+facts (`typeName`/`keyspace`/`fields`) and map values that BOTH bindings must
+produce from row `id 1`. The Python and Node suites each derive that fact set
+from their OWN binding output and assert equality against this one file, so the
+two surfaces are compared as DATA and cannot drift apart independently. It is
+resolved CHECKOUT-RELATIVE for the same reason the binaries are — see its
+`note_on_paths`.
 
 ## Schema and regeneration
 
@@ -126,8 +135,8 @@ Uncompressed (no `CompressionInfo.db`), BIG `nb`, ~500-byte `Data.db`.
 |---|---|---|---|
 | `c` | `frozen<collide>` | `_type='user-supplied-type'`, `_keyspace='user-supplied-keyspace'`, `__proto__='user-supplied-proto'`, `real_field=42` | **site 3**: the rendered UDT. Distinct, recognizable values, so an overwrite is *visible* rather than merely absent. |
 | `p` | `frozen<plain>` | `label='no-colliding-field'`, `real_field=7` | the non-colliding contrast — a UDT with no `_type` field at all, where reading `_type` out of the field namespace must fail. |
-| `cm` | `map<frozen<collide>,int>` | key `_type='key-type-marker'`, `_keyspace='key-keyspace-marker'`, `__proto__='key-proto-marker'`, `real_field=100` → 1 | the shape a user would naturally write. **MEASURED: does NOT reach the Python hashable projection** — see below. |
-| `tm` | `map<frozen<collide_twin>,int>` | same field values → 2 | the same, one type over. |
+| `cm` | `map<frozen<collide>,int>` | key `_type='key-type-marker'`, `_keyspace='key-keyspace-marker'`, `__proto__='key-proto-marker'`, `real_field=100` → 1 | the shape a user would naturally write, and the MULTICELL half of the standing parity control: the key lives in the CELL PATH, so it decodes through different code from the frozen `fcm` below. **MEASURED (post-#3612): reaches both bindings' UDT rendering, with key facts identical to `fcm`'s** — see below. |
+| `tm` | `map<frozen<collide_twin>,int>` | same field values → 2 | the same, one type over. The four map columns' VALUES (1/2/3/4) are pairwise distinct on purpose: the keys are identical, so only the value tells a reader which column's cell they actually got. |
 | `fcm` | `frozen<map<frozen<collide>,int>>` | same field values → 3 | **site 4's actual subject**: decodes to `Frozen(Map([(Udt{…}, 3)]))`, so the key really is a UDT. |
 | `ftm` | `frozen<map<frozen<collide_twin>,int>>` | same field values → 4 | same field NAMES and VALUES as `fcm`'s key under a **different type name**: two projected keys that must stay DISTINCT once type identity leaves the field namespace. |
 | `fs` | `frozen<set<frozen<collide>>>` | `_type='set-member-type'`, `_keyspace='set-member-keyspace'`, `__proto__='set-member-proto'`, `real_field=200` | the set path into the same projection (`set_to_py` shares `value_to_hashable_key` with map keys). |
