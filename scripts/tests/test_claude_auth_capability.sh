@@ -146,17 +146,52 @@ EOF
 #   incomplete  — matching token, NO CLAUDE_CONFIG_DIR
 #   complete    — matching token AND CLAUDE_CONFIG_DIR
 #   broken      — an error that is NOT "no server running"
+#   probefail   — no server AND the isolated cold-start probe cannot be started
 # `setenv` is always accepted and RECORDED — as key plus VALUE LENGTH, never the value, so
 # the recording file cannot become the leak this suite forbids.
+#
+# `new-session` is EMULATED FAITHFULLY: it runs the command through `sh -c`, inheriting the
+# environment the stub itself was started with. That is exactly the delivery property the
+# cold-start probe measures — whether the environment a would-be server is started from
+# reaches a pane — and running the command through `sh -c` rather than a login shell is the
+# measured tmux behaviour (fact 5) the probe depends on.
 plant_tmux() {
   local d="$1" mode="$2" cfg="${3:-$CFGDIR}"
   cat >"$d/tmux" <<EOF
 #!/usr/bin/env bash
 log="$d/tmux-calls.log"
+# A private -L/-S socket may precede the command word; the real tmux accepts it there and
+# the cold-start probe always passes one.
+sock=''
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -L|-S) sock="\$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
 case "\$1" in
+  new-session)
+    shift
+    cmd=''
+    while [ "\$#" -gt 0 ]; do
+      case "\$1" in
+        -d) shift ;;
+        -s|-e|-n|-c) shift 2 ;;
+        *) cmd="\$1"; shift ;;
+      esac
+    done
+    printf 'new-session sock=%s\n' "\$sock" >>"\$log"
+    case '$mode' in
+      probefail) printf 'error connecting to socket\n' >&2; exit 1 ;;
+    esac
+    sh -c "\$cmd"
+    exit \$? ;;
+  kill-server)
+    printf 'kill-server sock=%s\n' "\$sock" >>"\$log"
+    exit 0 ;;
   show-environment)
     case '$mode' in
-      no-server)  printf 'no server running on /tmp/tmux-1000/default\n' >&2; exit 1 ;;
+      no-server|probefail) printf 'no server running on /tmp/tmux-1000/default\n' >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
       stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
@@ -341,8 +376,9 @@ fi
 # 8-12. THE TMUX DIMENSION — the one that actually failed in the field and that no
 #       existing check covers. A pane's environment comes from the SERVER.
 # =====================================================================================
+# `no-server` is NOT in this loop: a serverless box is no longer a single verdict but a
+# whole COLD-START measurement, driven case by case in section 21 below.
 for mode_case in \
-  "no-server:NO-SERVER:no tmux server is running" \
   "missing:SERVER-MISSING:the running server carries no token (THE field failure)" \
   "stale:SERVER-STALE:the running server carries a DIFFERENT token" \
   "incomplete:SERVER-INCOMPLETE:token matches but CLAUDE_CONFIG_DIR is absent" \
@@ -573,6 +609,138 @@ EOF
 fi
 
 # =====================================================================================
+# 21. THE COLD-START PROBE — a box with NO tmux server must still be able to PASS.
+#     `.agent-ami/profile.yaml` runs bootstrap with --strict at the exact moment a freshly
+#     provisioned machine has no tmux server yet, so the old NO-SERVER-always verdict red
+#     on this check's PRIMARY use case with no way out (--fix-claude-auth deliberately
+#     excludes NO-SERVER). The answerable question there is not "what does the live server
+#     hold" but "would a NEWLY created server deliver the credential to a pane" — which is
+#     measurable: start a throwaway server on a PRIVATE socket from the environment
+#     reconstructed from the PERSISTED source, spawn a pane, and see what it receives.
+# =====================================================================================
+d21=$(mkshim "$tmp/s21"); plant_tmux "$d21" no-server
+run_cap "$d21" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+  ok "claude-tmux-env: a box with NO live server PASSES when the persisted environment delivers both variables"
+else
+  bad "claude-tmux-env: a fresh box with a good persisted environment could not pass: $out"
+fi
+if [ "$rc" -eq 0 ]; then
+  ok "claude-tmux-env: that cold-start VERIFIED exits 0 (so --strict on a fresh box can succeed)"
+else
+  bad "claude-tmux-env: cold-start VERIFIED exited $rc"
+fi
+if [ -f "$d21/tmux-calls.log" ] && grep -qE '^kill-server sock=/.*cqlite-tmux-probe\..*/cqlite-authprobe\.sock$' "$d21/tmux-calls.log"; then
+  ok "cold-start probe: the throwaway server is killed on its own PRIVATE socket"
+else
+  bad "cold-start probe: no kill-server on a private socket was recorded: $(cat "$d21/tmux-calls.log" 2>/dev/null)"
+fi
+# The probe must NEVER touch the host's live server: every tmux call it makes carries the
+# private socket, and the only socket-less call is the read-only show-environment probe.
+if [ -f "$d21/tmux-calls.log" ] && ! grep -q 'sock=$' "$d21/tmux-calls.log"; then
+  ok "cold-start probe: no probe call was made against the DEFAULT tmux socket"
+else
+  bad "cold-start probe: a call landed on the host's default socket: $(cat "$d21/tmux-calls.log" 2>/dev/null)"
+fi
+
+# ...and it does NOT pass when the persisted environment is bad. Two shapes, because the
+# remedies differ: nothing to deliver at all, vs. a token but no config dir.
+d21b=$(mkshim "$tmp/s21b"); plant_tmux "$d21b" no-server
+run_cap "$d21b" "$ef" -- --tmux-env      # $ef carries NO token
+if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-MISSING'; then
+  ok "claude-tmux-env: COLD-START-MISSING when the persisted source would deliver no token to a new pane"
+else
+  bad "claude-tmux-env: a tokenless persisted source did not fail the cold-start probe: $out"
+fi
+if [ "$rc" -ne 0 ]; then
+  ok "claude-tmux-env: COLD-START-MISSING exits non-zero"
+else
+  bad "claude-tmux-env: COLD-START-MISSING exited 0"
+fi
+d21c=$(mkshim "$tmp/s21c"); plant_tmux "$d21c" no-server
+run_cap "$d21c" "$ef_nocfg" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-INCOMPLETE'; then
+  ok "claude-tmux-env: COLD-START-INCOMPLETE when a new pane would get the token but no CLAUDE_CONFIG_DIR"
+else
+  bad "claude-tmux-env: a config-dir-less persisted source passed the cold-start probe: $out"
+fi
+d21d=$(mkshim "$tmp/s21d"); plant_tmux "$d21d" no-server
+run_cap "$d21d" "$ef_ghost" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-NODIR'; then
+  ok "claude-tmux-env: COLD-START-NODIR when the delivered CLAUDE_CONFIG_DIR does not exist"
+else
+  bad "claude-tmux-env: a nonexistent delivered config dir passed the cold-start probe: $out"
+fi
+
+# NO-SERVER survives ONLY for the case where the isolated probe genuinely could not run,
+# and it stays UNMEASURED-class: an unmeasured capability never inherits the permissive
+# branch. It is textually distinct from COLD-START-MISSING because the operator actions
+# differ — fix the box's tmux vs. provision the credential.
+d21e=$(mkshim "$tmp/s21e"); plant_tmux "$d21e" probefail
+run_cap "$d21e" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER'; then
+  ok "claude-tmux-env: NO-SERVER (UNMEASURED-class) only when the isolated probe could not run"
+else
+  bad "claude-tmux-env: an unrunnable probe did not report NO-SERVER: $out"
+fi
+if [ "$rc" -ne 0 ]; then
+  ok "claude-tmux-env: NO-SERVER still exits non-zero"
+else
+  bad "claude-tmux-env: NO-SERVER exited 0 — an unmeasured capability must never read as success"
+fi
+# The INHERITED credential must not be able to answer for the PERSISTED one here either:
+# a good token in the ambient environment with nothing persisted is still a fail.
+d21f=$(mkshim "$tmp/s21f"); plant_tmux "$d21f" no-server
+run_cap "$d21f" "$ef" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" "CLAUDE_CONFIG_DIR=$CFGDIR" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-MISSING'; then
+  ok "cold-start probe: an INHERITED credential cannot satisfy the cold-start question (the scrub)"
+else
+  bad "cold-start probe: the inherited environment leaked into the probe: $out"
+fi
+
+# =====================================================================================
+# 22. THE COLD-START PROBE AGAINST THE REAL tmux. The shim cases above pin the wiring and
+#     the verdicts; only real tmux can show that the mechanism WORKS and that it leaves
+#     nothing behind. TMUX_TMPDIR points the whole case at a private, empty socket
+#     directory, so it can neither see nor touch this host's live server.
+# =====================================================================================
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "cold-start probe against the real tmux" "no tmux on this host"
+else
+  TT="$tmp/tmux-tmpdir"; rm -rf "$TT"; mkdir -p "$TT"; chmod 700 "$TT"
+  d22=$(mkshim "$tmp/s22")
+  # TMUX/TMUX_PANE ARE UNSET HERE, AND THAT IS NOT COSMETIC. A tmux CLIENT started inside a
+  # pane connects to the server named in $TMUX and IGNORES TMUX_TMPDIR — measured while
+  # writing this case: the run read THIS HOST'S live server and reported SERVER-STALE. So
+  # the isolation of this case depends on both, and it is invoked directly rather than
+  # through run_cap because `env` stops parsing options at the first assignment.
+  rc=0
+  out=$(PATH="$d22:$PATH" env -u TMUX -u TMUX_PANE \
+        CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" TMUX_TMPDIR="$TT" \
+        bash "$CAPLIB" --tmux-env 2>&1) || rc=$?
+  printf '%s\n' "$out" >>"$TRANSCRIPT"
+  if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+    ok "cold-start probe: REAL tmux, no live server, good persisted environment -> VERIFIED"
+  else
+    bad "cold-start probe: the real-tmux cold path did not verify: $out"
+  fi
+  # NOTHING was created in the shared socket directory at all — the probe used a socket
+  # inside its own working directory, so it can neither collide with nor outlive anything.
+  leftover=$(find "$TT" -type s 2>/dev/null | head -5)
+  if [ -z "$leftover" ]; then
+    ok "cold-start probe: REAL tmux left no server socket in the shared socket directory"
+  else
+    bad "cold-start probe: a tmux socket survived the probe: $leftover"
+  fi
+  stray=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'cqlite-tmux-probe.*' -newer "$TRANSCRIPT" 2>/dev/null | head -3)
+  if [ -z "$stray" ]; then
+    ok "cold-start probe: no working directory was left in the temp root"
+  else
+    bad "cold-start probe: stray working directories: $stray"
+  fi
+fi
+
+# =====================================================================================
 # 19. NO RUN PRINTS A TOKEN-SHAPED VALUE. Asserted over the WHOLE suite transcript, not
 #     per case: the property is about every emit path, and a per-case check only covers
 #     the paths someone remembered.
@@ -591,7 +759,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # ALWAYS run — a floor set to the TOTAL would red whenever a legitimately skippable case
 # (the uname stub, the real-tmux isolation case) skips, and a floor that reds on correct
 # input is the floor agents learn to delete.
-CASE_FLOOR=33
+CASE_FLOOR=43
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

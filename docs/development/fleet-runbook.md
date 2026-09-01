@@ -961,8 +961,11 @@ own remedy, and `NO-SERVER` is UNMEASURED-class (nothing was running to ask).
 
 ```
 claude-auth:      VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED
-claude-tmux-env:  VERIFIED | SERVER-STALE | SERVER-MISSING | SERVER-INCOMPLETE
-                  | SERVER-CONFIG-STALE | SERVER-CONFIG-NODIR | NO-SERVER | UNMEASURED
+claude-tmux-env:  live server: VERIFIED | SERVER-STALE | SERVER-MISSING | SERVER-INCOMPLETE
+                               | SERVER-CONFIG-STALE | SERVER-CONFIG-NODIR
+                  no server:   VERIFIED | COLD-START-MISSING | COLD-START-INCOMPLETE
+                               | COLD-START-NODIR
+                  either:      NO-SERVER | UNMEASURED
 ```
 
 They are two verdicts because they fail independently and the operator actions differ:
@@ -976,7 +979,31 @@ They are two verdicts because they fail independently and the operator actions d
 | `claude-tmux-env: SERVER-INCOMPLETE` | Token matches, `CLAUDE_CONFIG_DIR` absent — the un-onboarded picker (fact 5). | `--fix-claude-auth`. |
 | `claude-tmux-env: SERVER-CONFIG-STALE` | Token matches, but the server's `CLAUDE_CONFIG_DIR` **differs** from the persisted one — panes are pointed at a directory nobody provisioned. | `--fix-claude-auth`. |
 | `claude-tmux-env: SERVER-CONFIG-NODIR` | The config dir matches the persisted value and **that directory does not exist**. Seeding writes the same missing path back, so it cannot help. | Create the directory, or correct the `CLAUDE_CONFIG_DIR` line in `/etc/environment`, then `--fix-claude-auth`. |
-| `claude-tmux-env: NO-SERVER` | No server to measure. | Nothing to repair; the **next** server inherits whatever starts it. |
+| `claude-tmux-env: COLD-START-MISSING` | No server is running, and a throwaway one started from the persisted environment handed its pane **no token**. The next real server will not either. | Provision the token (below). |
+| `claude-tmux-env: COLD-START-INCOMPLETE` | A new server would deliver the token but **no `CLAUDE_CONFIG_DIR`** — `/etc/profile.d` never reaches a spawned pane (fact 5). | Add a `CLAUDE_CONFIG_DIR=` line to `/etc/environment`. |
+| `claude-tmux-env: COLD-START-NODIR` | A new server would deliver both, but that config directory does not exist. | Create it, or correct the `/etc/environment` line. |
+| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`, no private working directory, tmux would not start). **UNMEASURED-class.** | Resolve the named cause and re-run. |
+
+**A box with no tmux server is measured, not excused.** That is the normal state of a freshly
+provisioned machine at the moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a
+blanket non-pass there would red this check on its primary use case with no way out
+(`--fix-claude-auth` deliberately excludes `NO-SERVER` — there is no server to seed). Instead the
+answerable question is asked: *would a newly created server deliver the credential to a pane?* A
+throwaway tmux server is started **on a private socket inside a private working directory**, from
+an environment **reconstructed from `/etc/environment`** with the inherited credential scrubbed;
+one pane reports what it received; the server is killed in a trap on every exit path including
+signals, and the socket goes with the directory. The pane is spawned exactly the way a lane
+spawner spawns one — `tmux new-session <command>` runs the command through `sh -c`, **not** a
+login shell — or the probe would measure the wrong thing. What is reconstructed is the
+**credential** environment, not a whole PAM session: `PATH`/`HOME` and the rest are the running
+process's, because they are what make the probe runnable and are not the subject.
+
+Two measured details worth keeping. A box that has **never** started a server does not say
+`no server running` — tmux 3.4 says `error connecting to <socket> (No such file or directory)`,
+and only a **stale** socket (server died, file remains) gives the familiar wording; both are
+recognised, and anything else (a permission denial, `lost server`) stays `UNMEASURED`. And a tmux
+**client** started inside a pane connects to the server named in `$TMUX` and **ignores**
+`TMUX_TMPDIR` — which is why the probe scrubs `TMUX`/`TMUX_PANE`.
 
 Run the same two checks by hand at any time, without the rest of bootstrap:
 

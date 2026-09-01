@@ -29,8 +29,23 @@
 #   claude-auth:      is the PERSISTED credential valid for a cold, non-interactive start?
 #                     VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED
 #   claude-tmux-env:  does that credential REACH a tmux-spawned pane?
-#                     VERIFIED | SERVER-STALE | SERVER-MISSING | SERVER-INCOMPLETE |
-#                     SERVER-CONFIG-STALE | SERVER-CONFIG-NODIR | NO-SERVER | UNMEASURED
+#                     live server:  VERIFIED | SERVER-STALE | SERVER-MISSING |
+#                                   SERVER-INCOMPLETE | SERVER-CONFIG-STALE |
+#                                   SERVER-CONFIG-NODIR
+#                     no server:    VERIFIED | COLD-START-MISSING |
+#                                   COLD-START-INCOMPLETE | COLD-START-NODIR
+#                     either:       NO-SERVER | UNMEASURED
+#
+# A SERVERLESS BOX IS NOT A DEAD END. That is the NORMAL state of a freshly provisioned
+# machine at the exact moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a
+# blanket non-pass there reds this check on its PRIMARY use case with no way out — the guard
+# agents learn to waive. The answerable question is then not "what does the live server
+# hold" but "would a NEWLY created server deliver the credential to a pane", and it is
+# measured directly: an isolated throwaway tmux server on a PRIVATE socket, started from the
+# PERSISTED environment, spawns one pane and reports what it received. `NO-SERVER` now means
+# only that THAT probe could not run, and it stays UNMEASURED-class. The COLD-START-* names
+# are deliberately distinct from the SERVER-* ones — a live server that lacks the credential
+# and a would-be server that would lack it are different operator actions.
 #
 # NONEMPTY IS NOT CORRECT. VERIFIED requires the server's CLAUDE_CONFIG_DIR to EQUAL the
 # persisted value AND that directory to EXIST — testing only "is it absent" and letting
@@ -85,6 +100,8 @@ CLAUDE_AUTH_CONFIG_KEY='CLAUDE_CONFIG_DIR'
 CLAUDE_AUTH_SENTINEL='CQLITE_CLAUDE_AUTH_OK'
 CLAUDE_AUTH_PROMPT="Reply with exactly this word and nothing else: $CLAUDE_AUTH_SENTINEL"
 CLAUDE_AUTH_PROBE_BOUND=90
+# The cold-start tmux probe is local-only (no network), so it gets a much tighter bound.
+CLAUDE_AUTH_TMUX_PROBE_BOUND=20
 
 claude_auth_test_mode() { [ "${CQLITE_BOOTSTRAP_TEST_MODE:-}" = 1 ]; }
 claude_auth_seam_set()  { [ -n "${CQLITE_CLAUDE_AUTH_ENV_FILE:-}" ]; }
@@ -327,9 +344,21 @@ claude_tmux_env_verdict_into() {
   __out=$(tmux show-environment -g 2>/dev/null)
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
-    if printf '%s' "$__err" | grep -qi 'no server running'; then
-      eval "$__ov=NO-SERVER"
-      eval "$__od='no tmux server is running, so there is no pane environment to measure — this is UNMEASURED-class, never an ok: the next server inherits whatever environment STARTS it'"
+    # TWO WORDINGS MEAN "NO SERVER", and only one of them was recognised. MEASURED on tmux
+    # 3.4: a box that has never started a server has no socket, and tmux says `error
+    # connecting to <path> (No such file or directory)` — which is precisely the FRESHLY
+    # PROVISIONED box this check's primary caller runs on, and it was being reported as
+    # "failed for a reason that is not a missing server". A STALE socket (server died,
+    # file remains) does say `no server running` (also measured). Anything else — a
+    # permission denial, `lost server`, a protocol mismatch — is genuinely UNKNOWN and
+    # keeps the UNMEASURED branch below: this list is affirmative, not a catch-all.
+    if printf '%s' "$__err" | grep -qiE 'no server running|error connecting to .*\(no such file or directory\)'; then
+      # NOT A DEAD END. A freshly provisioned box has no server yet — that is the NORMAL
+      # state at the moment `.agent-ami/profile.yaml` runs bootstrap with --strict — so a
+      # blanket NO-SERVER red on this check's primary use case with no way out. The
+      # answerable question here is not "what does the live server hold" but "would a NEWLY
+      # created server deliver the credential to a pane", and that is directly measurable.
+      claude_tmux_cold_verdict_into "$__ov" "$__od" "$__file"
     else
       eval "$__od=\"'tmux show-environment -g' failed for a reason that is not a missing server: \$(claude_auth_redact \"\$__err\")\""
     fi
@@ -390,6 +419,221 @@ claude_tmux_env_verdict_into() {
   fi
   eval "$__ov=VERIFIED"
   eval "$__od=\"the running tmux server's global environment carries a \$CLAUDE_AUTH_TOKEN_KEY MATCHing \$__file, and a \$CLAUDE_AUTH_CONFIG_KEY MATCHing it whose directory EXISTS — a pane spawned now inherits both\""
+}
+
+# ---- the COLD-START probe: what would a NEWLY created server deliver? --------------
+# A private, throwaway tmux server started from the PERSISTED environment, one pane, and a
+# report of what that pane received. Four constraints, each load-bearing:
+#
+#  * IT NEVER TOUCHES THE HOST'S LIVE SERVER. Every call carries a unique private `-L`
+#    socket, and the server is killed in a trap on EVERY exit path including signals. A
+#    stray tmux server left on a fleet box is a real cost.
+#  * IT IS STARTED FROM THE PERSISTED SOURCE, NOT FROM OURS. The two credential variables
+#    are scrubbed and re-supplied from the pam_env file (BASH_ENV/ENV with them, since a
+#    non-interactive shell would re-inject what was just scrubbed). Bootstrap runs inside an
+#    already-authenticated session, so a server started from its ambient environment would
+#    report success about a value that is not persisted — #3414's lesson.
+#  * IT IS BOUNDED, and refuses rather than running unbounded.
+#  * THE PANE IS SPAWNED THE WAY A LANE SPAWNER SPAWNS ONE. `tmux new-session <command>`
+#    runs the command through `sh -c`, NOT a login shell, so /etc/profile.d never executes
+#    for it (fact 5). A probe using a login shell would measure the wrong thing.
+#
+# SCOPE, stated rather than implied: what is reconstructed is the CREDENTIAL environment,
+# not a whole PAM session. PATH/HOME/TMUX_TMPDIR and the rest are this process's, because
+# they are what makes the probe RUNNABLE and they are not the subject. The claim is
+# therefore "a server started with the persisted credential environment delivers it to a
+# pane", which is exactly the cold-start question.
+CLAUDE_AUTH_PROBE_SOCKET=''
+CLAUDE_AUTH_PROBE_DIR=''
+CLAUDE_AUTH_PROBE_PREV_TRAPS=''
+
+claude_auth_cold_probe_cleanup() {
+  if [ -n "$CLAUDE_AUTH_PROBE_SOCKET" ]; then
+    # rc is deliberately ignored: tmux `exit-empty` means the server may already be gone,
+    # which is a SUCCESSFUL cleanup, not a failure.
+    tmux -S "$CLAUDE_AUTH_PROBE_SOCKET" kill-server >/dev/null 2>&1
+    CLAUDE_AUTH_PROBE_SOCKET=''
+  fi
+  if [ -n "$CLAUDE_AUTH_PROBE_DIR" ]; then
+    rm -rf "$CLAUDE_AUTH_PROBE_DIR"
+    CLAUDE_AUTH_PROBE_DIR=''
+  fi
+}
+claude_auth_cold_probe_restore_traps() {
+  trap - EXIT INT TERM HUP
+  if [ -n "$CLAUDE_AUTH_PROBE_PREV_TRAPS" ]; then eval "$CLAUDE_AUTH_PROBE_PREV_TRAPS"; fi
+  CLAUDE_AUTH_PROBE_PREV_TRAPS=''
+}
+# On a signal: clean up, put the CALLER'S traps back, then re-raise so the caller's own
+# disposition decides what happens. This file is SOURCED by bootstrap, so it must not
+# silently replace a caller's trap or force an exit code of its own.
+claude_auth_cold_probe_signal() {
+  claude_auth_cold_probe_cleanup
+  claude_auth_cold_probe_restore_traps
+  kill -s "$1" $$
+}
+claude_auth_cold_probe_arm_traps() {
+  CLAUDE_AUTH_PROBE_PREV_TRAPS=$(trap -p EXIT INT TERM HUP)
+  trap 'claude_auth_cold_probe_cleanup' EXIT
+  trap 'claude_auth_cold_probe_signal INT' INT
+  trap 'claude_auth_cold_probe_signal TERM' TERM
+  trap 'claude_auth_cold_probe_signal HUP' HUP
+}
+
+# claude_tmux_cold_probe_into <ov_ok> <ov_tok> <ov_toklen> <ov_cfg> <ov_why> <tok> <cfg>
+# ov_ok is 1 only when a pane actually reported. An EMPTY <tok>/<cfg> means "a cold session
+# would receive nothing here", so the variable is left UNSET for the probe — which is what
+# pam_env does with an absent assignment.
+claude_tmux_cold_probe_into() {
+  local __ok="$1" __otok="$2" __olen="$3" __ocfg="$4" __owhy="$5" __ptok="$6" __pcfg="$7"
+  local __dir='' __res='' __sock='' __rc=0
+  eval "$__ok=0"; eval "$__otok=unset"; eval "$__olen=0"; eval "$__ocfg="; eval "$__owhy="
+
+  if ! claude_auth_resolve_timeout; then
+    eval "$__owhy='no timeout/gtimeout on PATH — refusing to start an UNBOUNDED tmux probe'"
+    return 0
+  fi
+  if ! __dir=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-tmux-probe.XXXXXX") || [ ! -d "$__dir" ]; then
+    eval "$__owhy='could not create a private working directory for the isolated probe'"
+    return 0
+  fi
+  __res="$__dir/result"; : >"$__res"
+  # `-S <path>` INSIDE the private working directory, not `-L <name>`: a `-L` socket lives
+  # in the shared /tmp/tmux-<uid>/ and tmux LEAVES THE SOCKET FILE BEHIND when a server
+  # self-exits (measured), so every run would litter a directory it does not own. Here the
+  # socket is removed with the directory. A unix socket path is bounded (sun_path, 108
+  # bytes), so an over-long TMPDIR is a NAMED refusal rather than a mysterious tmux error.
+  __sock="$__dir/cqlite-authprobe.sock"
+  if [ "${#__sock}" -gt 100 ]; then
+    rm -rf "$__dir"
+    eval "$__owhy='the private probe socket path would exceed the unix-socket length limit (TMPDIR is too long) — refusing rather than guessing'"
+    return 0
+  fi
+  CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
+  claude_auth_cold_probe_arm_traps
+
+  # The pane script reports DELIVERY, never the value: set/unset, a LENGTH, and the config
+  # directory (a path, not a secret). Nothing it writes carries the credential.
+  cat >"$__dir/probe.sh" <<'CLAUDE_AUTH_PROBE'
+#!/bin/sh
+t="${CLAUDE_CODE_OAUTH_TOKEN-}"
+{
+  printf 'tok=%s\n' "${CLAUDE_CODE_OAUTH_TOKEN+set}"
+  printf 'toklen=%s\n' "${#t}"
+  printf 'cfg=%s\n' "${CLAUDE_CONFIG_DIR-}"
+  printf 'end\n'
+} >"$1"
+CLAUDE_AUTH_PROBE
+
+  local -a __e=(env -u BASH_ENV -u ENV -u TMUX -u TMUX_PANE
+                -u "$CLAUDE_AUTH_TOKEN_KEY" -u "$CLAUDE_AUTH_CONFIG_KEY")
+  [ -z "$__ptok" ] || __e+=("$CLAUDE_AUTH_TOKEN_KEY=$__ptok")
+  [ -z "$__pcfg" ] || __e+=("$CLAUDE_AUTH_CONFIG_KEY=$__pcfg")
+  # NOT A PIPE: the command runs on its own line and $? is read on the next.
+  if [ "$CLAUDE_AUTH_TIMEOUT_KILL" = 1 ]; then
+    "${__e[@]}" "$CLAUDE_AUTH_TIMEOUT_BIN" --kill-after=5 "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+      tmux -S "$__sock" new-session -d -s cqlite-authprobe "sh '$__dir/probe.sh' '$__res'" >/dev/null 2>&1
+  else
+    "${__e[@]}" "$CLAUDE_AUTH_TIMEOUT_BIN" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+      tmux -S "$__sock" new-session -d -s cqlite-authprobe "sh '$__dir/probe.sh' '$__res'" >/dev/null 2>&1
+  fi
+  __rc=$?
+  if [ "$__rc" -ne 0 ]; then
+    claude_auth_cold_probe_cleanup; claude_auth_cold_probe_restore_traps
+    eval "$__owhy=\"an isolated throwaway tmux server could not be started on a private socket (rc=\$__rc)\""
+    return 0
+  fi
+
+  # `new-session -d` returns as soon as the session exists, so the pane may not have
+  # written yet. The wait is bounded by the SAME timeout binary rather than by a counted
+  # `sleep` loop, so a host whose sleep has no sub-second form cannot stretch it.
+  "$CLAUDE_AUTH_TIMEOUT_BIN" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+    sh -c 'while :; do grep -q "^end$" "$1" 2>/dev/null && exit 0; sleep 0.2; done' _ "$__res" >/dev/null 2>&1
+  __rc=$?
+  if [ "$__rc" -ne 0 ]; then
+    claude_auth_cold_probe_cleanup; claude_auth_cold_probe_restore_traps
+    eval "$__owhy=\"the isolated pane did not report within \${CLAUDE_AUTH_TMUX_PROBE_BOUND}s, so what a new server would deliver is UNKNOWN\""
+    return 0
+  fi
+
+  local __rtok='' __rlen='' __rcfg=''
+  __rtok=$(sed -n 's/^tok=//p' "$__res" 2>/dev/null | tail -1)
+  __rlen=$(sed -n 's/^toklen=//p' "$__res" 2>/dev/null | tail -1)
+  __rcfg=$(sed -n 's/^cfg=//p' "$__res" 2>/dev/null | tail -1)
+  claude_auth_cold_probe_cleanup; claude_auth_cold_probe_restore_traps
+  case "$__rlen" in ''|*[!0-9]*) __rlen=0 ;; esac
+  eval "$__otok=\${__rtok:-unset}"; eval "$__olen=\$__rlen"; eval "$__ocfg=\$__rcfg"
+  eval "$__ok=1"
+}
+
+# claude_tmux_cold_verdict_into <outvar_verdict> <outvar_detail> <env-file>
+# Verdicts: VERIFIED | COLD-START-MISSING | COLD-START-INCOMPLETE | COLD-START-NODIR |
+#           NO-SERVER (UNMEASURED-class: the isolated probe could not run).
+# The COLD-START-* names are deliberately distinct from the SERVER-* ones: "a live server
+# that lacks the credential" and "a would-be server that would lack it" are different
+# operator actions, and a pasted log has to keep them apart.
+claude_tmux_cold_verdict_into() {
+  local __ov="$1" __od="$2" __file="$3"
+  local __tok='' __state='' __cfg='' __cfgstate=''
+  # The out-var names here must NOT collide with the callee's own local parameter names:
+  # `eval "$__ok=1"` on a shadowed `__ok` evaluates `0=1`. Hence the `__pr*` prefix.
+  local __prok=0 __prtok='' __prlen=0 __prcfg='' __prwhy=''
+  eval "$__ov=UNMEASURED"; eval "$__od="
+
+  claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
+  CLAUDE_AUTH_SECRET="$__tok"
+  case "$__state" in
+    unreadable|unparseable)
+      eval "$__ov=NO-SERVER"
+      eval "$__od=\"no tmux server is running, and the cold-start probe cannot be constructed either: \$__file could not be read as a source (\$__state) — UNMEASURED-class, never an ok\""
+      return 0 ;;
+  esac
+  claude_auth_read_key_into __cfg __cfgstate "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
+  case "$__cfgstate" in
+    unreadable|unparseable)
+      eval "$__ov=NO-SERVER"
+      eval "$__od=\"no tmux server is running, and \$__file could not be read for \$CLAUDE_AUTH_CONFIG_KEY (\$__cfgstate), so the cold-start probe cannot be constructed — UNMEASURED-class\""
+      return 0 ;;
+  esac
+
+  claude_tmux_cold_probe_into __prok __prtok __prlen __prcfg __prwhy "$__tok" "$__cfg"
+  if [ "$__prok" != 1 ]; then
+    eval "$__ov=NO-SERVER"
+    eval "$__od=\"no tmux server is running, and the isolated cold-start probe could not run: \$(claude_auth_redact \"\$__prwhy\") — UNMEASURED-class, never an ok\""
+    return 0
+  fi
+
+  if [ "$__prtok" != set ] || [ "$__prlen" -eq 0 ]; then
+    eval "$__ov=COLD-START-MISSING"
+    eval "$__od=\"no tmux server is running, and a throwaway one started from \$__file handed its pane NO \$CLAUDE_AUTH_TOKEN_KEY — so the NEXT real server will not either, and every lane it spawns lands on the first-run login chooser\""
+    return 0
+  fi
+  # A delivered value of unexpected length is not a pass and not a failure of the box: the
+  # measurement itself is untrustworthy, so it degrades to the UNMEASURED-class verdict.
+  if [ "$__prlen" -ne "${#__tok}" ]; then
+    eval "$__ov=NO-SERVER"
+    eval "$__od='the isolated pane received a CLAUDE_CODE_OAUTH_TOKEN of unexpected length, so the probe measured something other than the persisted value — UNMEASURED-class'"
+    return 0
+  fi
+  if [ -z "$__prcfg" ]; then
+    eval "$__ov=COLD-START-INCOMPLETE"
+    eval "$__od=\"a throwaway server started from \$__file delivers the \$CLAUDE_AUTH_TOKEN_KEY but NO \$CLAUDE_AUTH_CONFIG_KEY — 'tmux new-session <command>' runs no login shell, so /etc/profile.d never supplies it and the pane gets the un-onboarded first-run picker\""
+    return 0
+  fi
+  if [ "$__prcfg" != "$__cfg" ]; then
+    eval "$__ov=NO-SERVER"
+    eval "$__od=\"the isolated pane received a \$CLAUDE_AUTH_CONFIG_KEY the probe did not set (\$__prcfg), so the measurement is not about the persisted source — UNMEASURED-class\""
+    return 0
+  fi
+  # Same two-valued caveat as the live path: an unreadable parent collapses onto "does not
+  # exist", which is deliberately the NON-permissive answer.
+  if [ ! -d "$__prcfg" ]; then
+    eval "$__ov=COLD-START-NODIR"
+    eval "$__od=\"a throwaway server started from \$__file delivers both variables, but the \$CLAUDE_AUTH_CONFIG_KEY it delivers does not exist as a directory: \$__prcfg — claude will treat it as un-onboarded\""
+    return 0
+  fi
+  eval "$__ov=VERIFIED"
+  eval "$__od=\"no live tmux server to inspect, so this was measured COLD: an ISOLATED throwaway server on a private socket, started from \$__file with the inherited credential scrubbed, delivered BOTH \$CLAUDE_AUTH_TOKEN_KEY and an existing \$CLAUDE_AUTH_CONFIG_KEY to a pane — a server created now will too\""
 }
 
 # claude_tmux_show_key_into <outvar_value> <outvar_state> <show-environment-output> <key>:
@@ -472,9 +716,13 @@ claude_auth_usage() {
   printf '                  (exit 0 only for VERIFIED). Makes ONE real, bounded `claude -p` call.\n'
   printf '  --tmux-env      does that credential REACH a tmux-spawned pane? prints one\n'
   printf '                  `claude-tmux-env:` line: VERIFIED|SERVER-STALE|SERVER-MISSING|\n'
-  printf '                  SERVER-INCOMPLETE|SERVER-CONFIG-STALE|SERVER-CONFIG-NODIR|\n'
-  printf '                  NO-SERVER|UNMEASURED (exit 0 only for VERIFIED). VERIFIED needs the\n'
-  printf '                  server CLAUDE_CONFIG_DIR to EQUAL the persisted one and to EXIST.\n'
+  printf '                  SERVER-INCOMPLETE|SERVER-CONFIG-STALE|SERVER-CONFIG-NODIR when a\n'
+  printf '                  server is running; COLD-START-MISSING|COLD-START-INCOMPLETE|\n'
+  printf '                  COLD-START-NODIR when none is (an ISOLATED throwaway server on a\n'
+  printf '                  private socket, started from the PERSISTED environment, measures\n'
+  printf '                  what a new one would deliver); NO-SERVER|UNMEASURED when nothing\n'
+  printf '                  could be measured (exit 0 only for VERIFIED). VERIFIED needs the\n'
+  printf '                  CLAUDE_CONFIG_DIR to EQUAL the persisted one and to EXIST.\n'
   printf '  --report        both lines.\n'
   printf '  --fix-tmux-env  seed the RUNNING tmux server from the persisted value, then\n'
   printf '                  re-measure. Writes NO file; the token value is never printed.\n'

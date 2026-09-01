@@ -95,9 +95,13 @@
 #      panes with neither variable however correct the disk is, and NOTHING ON DISK
 #      distinguishes such a box. Verdicts: VERIFIED / NOT-PERSISTED / FAILED / UNMEASURED
 #      and VERIFIED / SERVER-STALE / SERVER-MISSING / SERVER-INCOMPLETE /
-#      SERVER-CONFIG-STALE / SERVER-CONFIG-NODIR / NO-SERVER / UNMEASURED (a VERIFIED pane
-#      environment needs the server's CLAUDE_CONFIG_DIR to EQUAL the persisted one AND that
-#      directory to EXIST — nonempty is not correct). Only VERIFIED is an [ok] on either line (same posture as `git-push:`
+#      SERVER-CONFIG-STALE / SERVER-CONFIG-NODIR against a LIVE server, VERIFIED /
+#      COLD-START-MISSING / COLD-START-INCOMPLETE / COLD-START-NODIR when NO server is
+#      running (a freshly provisioned box: an ISOLATED throwaway tmux server on a private
+#      socket, started from the PERSISTED environment, measures what a NEW server would
+#      deliver to a pane), and NO-SERVER / UNMEASURED when nothing could be measured. A
+#      VERIFIED pane environment needs the CLAUDE_CONFIG_DIR to EQUAL the persisted one AND
+#      that directory to EXIST — nonempty is not correct. Only VERIFIED is an [ok] on either line (same posture as `git-push:`
 #      and `gate-pin:`); NO-SERVER is UNMEASURED-class. The TOKEN VALUE IS NEVER PRINTED,
 #      and bootstrap writes it to NO file — /etc/environment already holds it and a second
 #      copy is what openspec/specs/worker-environment-preflight/spec.md forbids.
@@ -3072,9 +3076,18 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
     SERVER-CONFIG-NODIR)
       info "seeding cannot help: the server's CLAUDE_CONFIG_DIR MATCHes the persisted value and that DIRECTORY does not exist — re-seeding writes the same missing path back"
       info "provision the directory (or correct the CLAUDE_CONFIG_DIR line in /etc/environment), then:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth" ;;
+    COLD-START-MISSING)
+      info "no server is running, and a throwaway one started from the PERSISTED environment handed its pane no credential — so the next real server will not either"
+      info "provision it:  add a CLAUDE_CODE_OAUTH_TOKEN=<token> line to /etc/environment (root:root 0644, its own line, NO inline comment), then re-run" ;;
+    COLD-START-INCOMPLETE)
+      info "a new server would deliver the token but NO CLAUDE_CONFIG_DIR: 'tmux new-session <command>' runs no login shell, so /etc/profile.d never executes for a spawned lane"
+      info "add a CLAUDE_CONFIG_DIR=<dir> line to /etc/environment (pam_env reads it; /etc/profile.d does not reach a spawned pane), then re-run" ;;
+    COLD-START-NODIR)
+      info "a new server would deliver both variables, but the CLAUDE_CONFIG_DIR it delivers does not exist — claude treats that as un-onboarded"
+      info "create the directory, or correct the CLAUDE_CONFIG_DIR line in /etc/environment, then re-run" ;;
     NO-SERVER)
-      info "nothing to repair yet — but the NEXT server inherits the environment of whatever STARTS it, so start it from a PAM session (ssh/login), not from a stale process tree"
-      info "and note 'tmux new-session <command>' runs no login shell, so /etc/profile.d never executes for a spawned lane: a lane spawner must pass -e for BOTH variables or rely on a seeded server" ;;
+      info "no server is running AND the isolated cold-start probe could not run (cause named above), so nothing was measured — resolve it and re-run"
+      info "note 'tmux new-session <command>' runs no login shell, so /etc/profile.d never executes for a spawned lane: a lane spawner must pass -e for BOTH variables or rely on a seeded server" ;;
     UNMEASURED)
       info "check by hand:  bash scripts/claude-auth-capability.sh --tmux-env" ;;
   esac

@@ -1929,8 +1929,17 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (VERIFIED/NOT-PERSISTED/FAILED/UNMEASURED, an affirmative bounded `claude -p` probe of the
   PERSISTED value with the INHERITED one scrubbed, #3414's lesson one subject over) and
   `claude-tmux-env:`
-  (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/SERVER-CONFIG-STALE/SERVER-CONFIG-NODIR/
-  NO-SERVER/UNMEASURED). **A tmux VERIFIED is an AFFIRMATIVE match**: the server's
+  (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/SERVER-CONFIG-STALE/SERVER-CONFIG-NODIR
+  against a LIVE server; VERIFIED/COLD-START-MISSING/COLD-START-INCOMPLETE/COLD-START-NODIR when
+  NONE is running; NO-SERVER/UNMEASURED when nothing could be measured). **A SERVERLESS BOX IS
+  MEASURED, NOT EXCUSED** — that is the normal state of a freshly provisioned machine at the moment
+  `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a blanket non-pass red the check on
+  its own primary use case with no way out (`--fix-claude-auth` has no server to seed). The
+  answerable question is asked instead: an ISOLATED throwaway tmux server on a PRIVATE socket,
+  started from the PERSISTED environment with the inherited credential scrubbed, spawns one pane
+  (via `sh -c`, the way a lane spawner does — never a login shell) and reports what it received;
+  the server dies in a trap on every exit path. `NO-SERVER` now means only that THAT probe could
+  not run. **A tmux VERIFIED is an AFFIRMATIVE match**: the server's
   `CLAUDE_CONFIG_DIR` must EQUAL the persisted one AND that directory must EXIST — testing only
   "is it absent" was the two-valued predicate that always picks the permissive answer, and a wrong
   config dir IS the un-onboarded picker. Both lines are Linux-scoped because the BASELINE is
