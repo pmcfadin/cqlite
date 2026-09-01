@@ -37,7 +37,9 @@
 //! a `text` value is compared as an exact string.
 
 use super::schema::{Column, ColumnKind, CqlType, TableSchema};
-use super::{canon_scalar, canon_typed, csv_container, Canon, Depth, Egress, Kinding, Row};
+use super::{
+    canon_scalar, canon_typed, container, csv_container, Canon, Depth, Egress, Kinding, Row,
+};
 // The declared-gap bookkeeping lives with the divergence it books (see [`gap`]).
 use gap::{Gap, Observed, SkipPaths, Suppressions};
 use serde_json::{Map, Value};
@@ -1143,7 +1145,11 @@ fn shape_error(expected: &str, golden: &Value, cli: &Value, egress: Egress) -> S
 /// `"0"` compared equal to an incorrectly emitted JSON numeric key `0` — defeating
 /// the typed comparison in the one place a map most needs it (issue #1491 review
 /// finding F2).
-fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
+///
+/// `pub` so `super::container` reads the SAME entry spelling when it canonicalizes a
+/// map (issue #3726): a second `{key,value}` reader would be a second notion of what
+/// the egress's map entry is, and the two could then disagree about a malformed one.
+pub fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
     let object = entry.as_object().ok_or_else(|| {
         format!(
             "cli map entry is not an object: {}",
@@ -1166,15 +1172,6 @@ fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
             brief(&describe(entry, egress))
         )),
     }
-}
-
-/// Is this a type whose values are single scalars? Map keys are paired by their
-/// canonical scalar form, so a container key has no pairing rule here.
-fn is_scalar_type(ty: &CqlType) -> bool {
-    !matches!(
-        ty,
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_)
-    )
 }
 
 /// Compare a map: golden object vs the CLI's `{key,value}` pair list, IN EMITTED
@@ -1212,14 +1209,6 @@ fn compare_map(
     value_ty: &CqlType,
     at: &At<'_, '_>,
 ) -> Result<(), String> {
-    if !is_scalar_type(key_ty) {
-        return Err(format!(
-            "the schema declares the map key type `{}`, which is not a scalar — this lane \
-             pairs map keys by their canonical scalar form and has no rule for a container \
-             key",
-            key_ty.describe()
-        ));
-    }
     // A key canonicalization FAILURE is propagated, never swallowed into the
     // comparison key: a `<reason>` string would still meet an identical
     // `<reason>` on the other side and compare equal.
@@ -1240,15 +1229,31 @@ fn compare_map(
     // the row-order key's `brief(&canon.describe())` made two long distinct keys
     // equal. Here the pair is compared as the structured value and rendered only
     // into the message below.
-    let canon_golden_key = |v: &Value| -> Result<Canon, String> {
-        canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Stringified)
+    let canon_golden_key = |key: &str| -> Result<Canon, String> {
+        // WHAT THE GOLDEN'S OBJECT KEY DENOTES is asked of ONE function
+        // (`container::golden_map_key_value`), which the canonical model and the CSV
+        // rendering also call: for a SCALAR key type it is the key text itself, and
+        // for a CONTAINER key type it is that text PARSED, because
+        // `cassandra-5.0.8 MapType.toJSONString` writes
+        // `keys.toJSONString(kv, protocolVersion)` and only quotes it when it does
+        // not already start with `"` — so a container key's object key is exactly the
+        // key value's own toJSONString document (issue #3726). Two spellings of that
+        // rule would be two notions of what the golden key is.
+        let value = container::golden_map_key_value(key, key_ty)?;
+        canon_typed(
+            &value,
+            egress,
+            key_ty,
+            Depth::Inside,
+            container::golden_map_key_kinding(key_ty),
+        )
     };
     let canon_cli_key = |v: &Value| -> Result<Canon, String> {
         canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Natural)
     };
     let mut g: Vec<(Canon, &Value)> = Vec::with_capacity(golden.len());
     for (k, v) in golden {
-        g.push((canon_golden_key(&Value::String(k.clone()))?, v));
+        g.push((canon_golden_key(k)?, v));
     }
     let mut c: Vec<(Canon, &Value)> = Vec::with_capacity(cli.len());
     for entry in cli {

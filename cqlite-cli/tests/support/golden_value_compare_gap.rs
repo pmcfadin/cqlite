@@ -38,8 +38,9 @@
 //! now produce an ordinary diff naming the column, the declared gap and what was
 //! actually seen (see `super::compare_value_at`).
 
+use super::super::container::is_container_type;
 use super::super::schema::CqlType;
-use super::{canon_typed, csv_container, is_scalar_type, Depth, Egress, Kinding};
+use super::{canon_typed, csv_container, Depth, Egress, Kinding};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -177,8 +178,8 @@ pub enum Divergence {
     /// defects must NOT count this one.
     ///
     /// DDL: the declared type is `map<K, V>` where `K` is a container, decided via
-    /// the same `super::is_scalar_type` predicate `compare_map` refuses on, so the
-    /// gap and the refusal cannot disagree about what a container key is.
+    /// the lane's one `container::is_container_type` predicate, so the gap and the
+    /// comparator cannot disagree about what a container key is.
     ///
     /// **WHAT IT SUPPRESSES, STATED RATHER THAN DISCOVERED (roborev jobs 302/305/306).**
     /// This matcher reads NO values, so it also suppresses a null, a scalar, a
@@ -349,7 +350,7 @@ impl Divergence {
                 // and the list of depths is `compare_map`'s feature list. The
                 // over-skip is the accepted, documented cost.
                 let _ = (golden, cli, egress, depth, kinding);
-                matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty))
+                matches!(ty, CqlType::Map(key_ty, _) if is_container_type(key_ty))
             }
         }
     }
