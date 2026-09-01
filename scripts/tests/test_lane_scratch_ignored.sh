@@ -93,10 +93,13 @@ assert_ignored() {
     fail "'$path' is NOT ignored (a lane writing it mid-gate voids the gate of record)"
     return
   fi
-  # format: <source>:<linenum>:<pattern>\t<pathname>
+  # format: <source>:<linenum>:<pattern>\t<pathname>. Strip the two leading
+  # fields from the FRONT rather than taking the last colon-field, so a pattern
+  # that itself contains a colon is still reported whole.
   out="${out%%$'\t'*}"
   src="${out%%:*}"
-  pat="${out##*:}"
+  pat="${out#*:}"
+  pat="${pat#*:}"
   if [ "$src" != ".gitignore" ]; then
     fail "'$path' is ignored, but by '$src', not the committed .gitignore"
     return
