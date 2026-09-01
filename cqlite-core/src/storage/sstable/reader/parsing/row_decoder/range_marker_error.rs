@@ -69,22 +69,28 @@ use crate::error::Error;
 /// `offset` is the marker's own offset; `resume_offset` is the `next_offset` the
 /// enclosing `Ok` arm bound — reported precisely because its presence is what
 /// proves this is not the end of the partition body.
+///
+/// `partition` names the partition however the calling loop can: the block loops
+/// count partitions within the block and pass an INDEX, while the sliding driver
+/// decodes one partition per call and has only its KEY. A `&dyn Display` keeps one
+/// helper (and so one message) for both rather than an index the driver would have
+/// to invent.
 pub(super) fn range_marker_refused(
     cause: Error,
-    partition_index: usize,
+    partition: &dyn std::fmt::Display,
     offset: usize,
     resume_offset: usize,
 ) -> Error {
     tracing::warn!(
         "V5CompressedLegacy: partition {} range-tombstone marker at offset {} is FRAMED (body \
          continues at offset {}) but cannot be represented: {}",
-        partition_index,
+        partition,
         offset,
         resume_offset,
         cause
     );
     Error::corruption(format!(
-        "range-tombstone marker at offset {offset} of partition {partition_index} could not be \
+        "range-tombstone marker at offset {offset} of partition {partition} could not be \
          represented faithfully; the marker is framed and the partition body continues at offset \
          {resume_offset}, so this is corrupt data and not the end of the partition — truncating \
          here would drop the tombstone AND every later row of the partition from a successful \

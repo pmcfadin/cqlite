@@ -348,12 +348,7 @@ impl V5CompressedLegacyParser {
                         //
                         // Per Cassandra's UnfilteredSerializer.java (lines 103, 735-738):
                         // When IS_MARKER (0x02) is set, this is a range tombstone boundary, not a row.
-                        // We skip these markers for now (full implementation would parse deletion ranges).
                         if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
-                            tracing::debug!(
-                                "V5CompressedLegacy: Range tombstone marker at offset {} (partition {}), skipping",
-                                offset, partition_index
-                            );
                             // Issue #1741: when read-side shadowing is active, decode
                             // the marker (bounds + deletion time) and feed the
                             // range-tombstone FSM so covered rows are shadowed;
@@ -373,11 +368,16 @@ impl V5CompressedLegacyParser {
                                             del_primary,
                                             del_secondary,
                                         ) {
-                                            tracing::debug!(
-                                                "V5CompressedLegacy: range tombstone FSM error at offset {}: {}",
-                                                offset, e
-                                            );
-                                            break; // Unrepresentable marker, end partition
+                                            // Issue #3721: FRAMED marker (body
+                                            // continues at `next_offset`) with an
+                                            // unrepresentable bound kind; `break`
+                                            // dropped every later row and said `Ok`.
+                                            return Err(range_marker_error::range_marker_refused(
+                                                e,
+                                                &partition_index,
+                                                offset,
+                                                next_offset,
+                                            ));
                                         }
                                         offset = next_offset;
                                         continue; // Continue to next row/marker

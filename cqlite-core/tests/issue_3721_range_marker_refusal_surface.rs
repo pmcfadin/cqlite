@@ -378,6 +378,20 @@ async fn case(query: &str) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// D2 — `block_emit_windowed`: the full-scan and point/slice read path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn d2_full_scan_surfaces_the_marker_refusal() {
+    case(&format!("SELECT * FROM {KEYSPACE}.{TABLE}")).await;
+}
+
+#[tokio::test]
+async fn d2_point_read_surfaces_the_marker_refusal() {
+    case(&format!("SELECT * FROM {KEYSPACE}.{TABLE} WHERE id = 1")).await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // D1 — `block_emit`: the WRITETIME/TTL cell-metadata scan
 // (`ProjectionFlags::include_cell_metadata` -> `scan_with_cell_metadata` ->
 // `parse_block_with_cell_metadata` -> `parse_block_emit_with_metadata`).

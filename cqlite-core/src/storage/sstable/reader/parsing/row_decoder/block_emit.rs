@@ -138,7 +138,7 @@ impl V5CompressedLegacyParser {
                                 if let Err(e) = sh.feed_range_marker(bv, bk, dp, ds) {
                                     return Err(range_marker_error::range_marker_refused(
                                         e,
-                                        partition_index,
+                                        &partition_index,
                                         offset,
                                         next_offset,
                                     ));
