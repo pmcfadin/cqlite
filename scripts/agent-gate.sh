@@ -262,6 +262,39 @@
 #                      opt-out. Source-only: no cargo, sub-second, offline, no
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
+#   features-load-bearing
+#                      FEATURES-ARE-LOAD-BEARING guard
+#                      (scripts/ci/check-features-load-bearing.sh, issue #1698, epic
+#                      #1685). Derives every feature DECLARED by every workspace
+#                      member from `cargo metadata --no-deps` and asserts each one
+#                      changes something: it, or something in its feature CLOSURE,
+#                      has a cfg reference site in its DECLARING package's sources,
+#                      enables an optional dependency, enables a feature of an
+#                      external dependency, or is named in a target's
+#                      required-features. CREDIT FLOWS UP FROM EFFECTS, NEVER DOWN
+#                      FROM A PARENT — a leaf named only by an aggregator is dead,
+#                      which is exactly how four `test-*` leaves survived for
+#                      months while `all-compression` (credited through its four
+#                      dep-pulling leaves) stays green. Being ENUMERATED is not an
+#                      effect: this script's own clippy feature lists, a workflow
+#                      `--features` argument and a doc table all NAME features
+#                      without enabling anything, so deleting a dead flag means
+#                      cleaning those enumerations in the same diff.
+#                      cargo metadata, not a textual manifest sweep: cargo
+#                      SYNTHESISES implicit features from optional deps that no
+#                      [features] block contains (7 here), and a find(1) sweep
+#                      reaches non-member manifests cargo never builds. `fuzz/` is
+#                      its own excluded workspace and out of scope.
+#                      Fail-closed and affirmative — a failed `cargo metadata`, an
+#                      unreadable member/feature table, a `pkg/feature` edge naming
+#                      a feature that does not exist, an unreadable source file, a
+#                      zero-file scan or a zero-feature run are each a NAMED FAIL,
+#                      never a fallback to an empty feature or effect set (which
+#                      would silently excuse every flag). NO env opt-out and no
+#                      bypass flag, deliberately: a dead flag is always deletable,
+#                      so an escape hatch could only buy a vacuous green.
+#                      NEVER SKIPs: it needs nothing beyond cargo, which every gate
+#                      already has. Its self-test lives in tooling-tests.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -652,6 +685,12 @@
 #                      invisible to a bare `cargo check` — while pulling in none of the
 #                      ~100 integration test files, which assume default features and
 #                      fail here as noise, not leakage. No opt-out.
+#                      Also runs scripts/tests/test_features_load_bearing_guard.sh
+#                      (#1698), the non-vacuity proof for the
+#                      features-load-bearing component: 13 cases over throwaway
+#                      fixture workspaces, each criterion pinned by a green/red
+#                      differential pair, every negative case requiring the
+#                      diagnostic to NAME the planted feature, plus a case floor.
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
 #                      the non-vacuity proof for the pub-surface component. 42 cases,
 #                      source-only (no cargo doc since the #1712 descope), each
@@ -5743,7 +5782,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface features-load-bearing tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -6411,6 +6450,14 @@ _fm_component_class() {
     # invocation" while a child cargo build had in fact run — affirmatively false (roborev
     # job 273, F2).
     tooling-tests) printf 'unobservable:cargo may run inside ~60 nested test scripts (child processes)' ;;
+    # unobservable, for the SAME reason and NOT `no-cargo` (#1698): the guard is a
+    # separate script, so its ONE `cargo metadata --no-deps` runs in a child process
+    # where the unexported interceptors cannot see it. `no-cargo` would be an
+    # affirmatively false claim (cargo DOES run), and `cargo` would render UNDECLARED
+    # on every PASS — the roborev job 273 F2 defect. There is no nameable DRIVER
+    # either: `cargo metadata` is not a build and enables no features, so
+    # `indirect:<driver>` would promise a feature set that does not exist.
+    features-load-bearing) printf 'unobservable:cargo metadata runs inside scripts/ci/check-features-load-bearing.sh (a child process); it is a metadata read, not a build, and enables no features' ;;
     scoped-tests) printf 'cargo' ;;
     # The DYNAMIC --delta entries (roborev job 277 F2). These reach a SUMMARY line via
     # `NAMES+=("<literal>")` in run_delta_*, NOT via COMPONENTS, so classifying only
@@ -14740,6 +14787,118 @@ run_pub_surface() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# features-load-bearing: the FEATURES-ARE-LOAD-BEARING guard (issue #1698, epic #1685
+# "config honesty"). scripts/ci/check-features-load-bearing.sh derives every feature
+# DECLARED by every workspace member from `cargo metadata --no-deps` and asserts each
+# one CHANGES SOMETHING: it, or some feature in its closure, has a cfg reference site in
+# its declaring package's sources, enables an optional dependency, enables a feature of
+# an external dependency, or is named in a target's `required-features`.
+# The defect it exists for: thirteen flags across six manifests — `events`,
+# `ci_zero_tolerance` in five manifests, four `test-*` leaves, `sstable-writer`, a CLI
+# `interactive` that sat in `default`, a `cqlite-core/unit-tests-only` forwarded from
+# another member — had ZERO effect of any kind. Enabling any of them changed nothing
+# that is compiled, linked or run, while reading to every human, every reviewer and
+# THIS SCRIPT'S OWN clippy feature enumerations as a switch that selects behaviour.
+# CREDIT FLOWS UP FROM EFFECTS, NEVER DOWN FROM A PARENT: that asymmetry is what makes
+# a dead leaf detectable while a legitimate aggregator passes. `all-compression` has no
+# effect of its own and is credited THROUGH lz4/snappy/deflate/zstd; the four `test-*`
+# leaves were named by `test-infrastructure` and credited by NOTHING. Under a symmetric
+# "referenced somewhere" rule the aggregator laundered all four, which is precisely how
+# they survived. Being ENUMERATED is likewise not an effect — the clippy lists a few
+# thousand lines up NAME features without enabling anything.
+# NEVER SKIPs, deliberately: the guard needs nothing beyond cargo, which every gate
+# already has, and a coverage hole wearing a SKIP's clothes is still a coverage hole
+# (#3522). A missing guard script is a FAIL, not a SKIP.
+# THIS COMPONENT IS INDEPENDENT OF THE GUARD (the pub-surface precedent, #1712 r6 F2 /
+# r7 F3 / r9 F4): PASS requires the guard's AFFIRMATIVE MEASUREMENT LINE matched WHOLE
+# — never a prefix, which tests a spelling rather than a state — and the two counts in
+# it re-derived here, because `N/M` with N < M would mean the guard reported dead
+# features and exited 0 anyway. A zero exit with no measurement is an early return
+# inside the guard, so it is a NAMED FAIL here instead of a vacuous green.
+run_features_load_bearing() {
+  local name=features-load-bearing
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-features-load-bearing.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: the guard $guard is MISSING (deleted or renamed)."
+    echo "    This component never SKIPs — it needs only cargo, which this gate has —"
+    echo "    so an absent guard is breakage, not an excusable environment."
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $status (0s)"
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
+    # AFFIRMATIVE MEASUREMENT, matched WHOLE. Every element of this line is something
+    # the guard can only know AFTER deriving the member set from cargo, walking the
+    # sources and computing every closure, and the two load-bearing counts must be
+    # NONZERO: "0/0 features load-bearing across 0 manifests; 0 files scanned" is the
+    # vacuous measurement itself.
+    local measured
+    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites$' "$log" || true)"
+    if [ -n "$measured" ]; then
+      # THE SHAPE IS NOT ENOUGH — THE COUNTS MUST COHERE. The guard asserts
+      # load-bearing == asserted before printing, so a line whose numerator differs
+      # from its denominator did not come from the guard (a stub, a truncation, a stale
+      # build) — and it would be reporting dead features under a zero exit. Re-derived
+      # here rather than trusted, because that is what makes this component independent.
+      local flb_n flb_d
+      flb_n="$(printf '%s' "$measured" | sed -E 's|^features-load-bearing: ([0-9]+)/[0-9]+ .*|\1|')"
+      flb_d="$(printf '%s' "$measured" | sed -E 's|^features-load-bearing: [0-9]+/([0-9]+) .*|\1|')"
+      if ! { [ "$flb_d" -gt 0 ] && [ "$flb_n" -eq "$flb_d" ]; }; then
+        echo "❌ [$name] the features-load-bearing measurement line is INCOHERENT:" >&2
+        echo "    $measured" >&2
+        echo "    require: asserted($flb_d) > 0 and load-bearing($flb_n) == asserted($flb_d)." >&2
+        echo "    A line matching the wording but not the arithmetic did not come from the" >&2
+        echo "    guard (stub, truncation or stale build). Refusing to record PASS." >&2
+        measured=""
+      fi
+    fi
+    if [ -n "$measured" ]; then
+      status=PASS
+      # Echo it so a pasted gate log shows the check RAN over a real feature set.
+      echo "$measured"
+    else
+      status=FAIL
+      echo "--- [$name] FAILED: the guard exited 0 but printed NO coherent affirmative"
+      echo "    measurement line (\`features-load-bearing: <N>/<N> declared features"
+      echo "    load-bearing across <M> workspace manifests (<K> exempt: …); <F> Rust source"
+      echo "    files scanned for reference sites\`), so NOTHING was measured and this is NOT"
+      echo "    a PASS (issue #1698). A zero exit with no measurement is an early return"
+      echo "    inside $guard — a real defect in the guard, not a formatting slip; fix the"
+      echo "    guard (or, if its success wording moved, update BOTH it and this component"
+      echo "    AND scripts/tests/test_features_load_bearing_guard.sh)."
+      echo "--- last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: a feature declared in a workspace manifest is DEAD —"
+    echo "    enabling it changes nothing that is compiled, linked or selected — or the"
+    echo "    guard REFUSED over a derivation it could not complete (issue #1698). The"
+    echo "    diagnostic below names each feature and its manifest line."
+    echo "    Remedy, one of: DELETE the feature (and every enumeration that names it —"
+    echo "    this script's clippy feature lists, workflow \`--features\` arguments, the"
+    echo "    CLAUDE.md feature table, docs), or GIVE it an effect (a cfg site in the"
+    echo "    DECLARING package's sources, an optional dependency, or a target"
+    echo "    \`required-features\`). Being NAMED by an aggregator is not an effect."
+    echo "    There is no opt-out: a dead flag is always deletable."
+    echo "--- last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -14803,6 +14962,11 @@ run_pub_surface() {
 # fetch, broken/empty/garbage/absent baseline, deliberate removal, no skew, lite leniency)
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
+# Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
+# proof for the features-load-bearing component: 13 cases over throwaway fixture
+# workspaces, each criterion of the predicate pinned by a green/red differential pair,
+# every negative case required to NAME the planted feature, plus a case floor. It needs
+# cargo and nothing else.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -16232,6 +16396,29 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # features-are-load-bearing guard self-test (#1698): needs cargo (which this
+  # component's host always has) and nothing else — no datasets, no network. Proves
+  # scripts/ci/check-features-load-bearing.sh actually FIRES, and fires for the RIGHT
+  # reason: every criterion of its predicate is pinned by a GREEN/RED differential PAIR
+  # over a throwaway fixture workspace (a green alone is satisfiable by a guard that
+  # credits everything, a red alone by one that credits nothing), and every negative
+  # case requires the diagnostic to NAME the planted feature — a bare non-zero exit is
+  # produced just as well by an unrelated silent abort. The incident class it must red
+  # on is a dead LEAF named only by an aggregator, i.e. that credit does not flow DOWN.
+  # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
+  # scripts/ci/) because the guard has no test-only seam and must never grow one.
+  echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (features-load-bearing guard self-test #1698); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -18523,6 +18710,7 @@ dispatch_component() {
     kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
+    features-load-bearing) run_features_load_bearing ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the
