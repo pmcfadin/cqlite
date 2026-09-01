@@ -347,3 +347,6 @@ trino-connector/docker/field-repro-artifacts/
 # every 10s, so an in-tree copy trips the gate tree-integrity check mid-run, and a
 # worktree is deleted at finalize which would destroy a sampler meant to outlive the issue.
 .ws0-3248/
+
+# Cross-binding parity harness artifacts (issue #1455)
+bindings/parity/out/

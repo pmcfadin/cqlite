@@ -959,6 +959,52 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   prior behavior. Rule: for any on-disk framing/encoding property, the oracle must be
   **Cassandra-written bytes** (or Cassandra source), never CQLite's own output. Long form:
   [validation playbook](https://pmcfadin.github.io/cqlite/agents-developing/validation-playbook/).
+- **Fourth blind spot: EVERY oracle above is PER-SURFACE, so three surfaces can each be green against
+  their own oracle while DISAGREEING WITH EACH OTHER (issue #1455).** Python, Node and the CLI are three
+  independent windows onto one SSTable, and each was checked only against its own reference — Python
+  against the CLI (`test_cli_parity.py`), Node against the sstabledump JSONL goldens
+  (`parity-utils.js`), the CLI against nothing else. Those two normalizers **do not share an oracle, a
+  canonical form, or even a comparison direction** (blob canonicalizes to a `"0x…"` STRING on the Python
+  side and to a `Buffer` on the Node side; timestamp to a millisecond-truncated string vs a `Date` with a
+  ±1 ms tolerance; Node has **no duration rule at all**), so both can pass while a user querying one table
+  three ways gets three answers. The cross-surface differential is
+  `bindings/parity/` + `bindings/python/tests/test_cross_binding_parity.py`: ONE `SELECT`, all three
+  surfaces, canonical JSON, deep-equal per row. **The canonical form is implemented TWICE by construction
+  (`canonical.py` / `canonical.mjs`) and the two are DIFFERENTIALLY PINNED** against a shared
+  `canonical-vectors.json` — a second implementation's agreement is only knowable by testing it, never by
+  care. **SEVEN DECLARED gaps, printed IN FULL at run time from one `DECLARED_GAPS` tuple — because a
+  lane that omits coverage silently is indistinguishable from one that covers it, and a README nobody
+  opens is not a declaration**: (1) `tuple` vs `list` is UNDETECTABLE here — Node and the CLI both emit
+  a plain array and only Python has a distinct type, so it is canonicalized as a plain array; (2) **no
+  `varint` column exists anywhere in `test-data/schemas/*.cql`**, so that rule is pinned by
+  `canonical-vectors.json` alone and by no fixture; (3) UDT columns are REFUSED by the canonicalizer
+  rather than compared, and no fixture uses one; (4) non-finite floats are a real 3-way asymmetry
+  (Python `nan` / Node `NaN` / CLI JSON `null`, `cqlite-cli/src/output/json.rs:156-161`) and are avoided
+  rather than reconciled; (5) a column absent from one leg is compared as `null`, so the harness cannot
+  tell *omitted* from *null* — and the omitting leg is **NODE** (`bindings/node/src/row.rs:130` skips a
+  metadata column with no value, while `bindings/python/src/result.rs:447` null-FILLS a shared row
+  shape; the first draft of this harness blamed Python, which is backwards); (6) **A UNIFORM
+  `cqlite-core` DEFECT IS INVISIBLE TO IT — all three legs read the SAME core, so agreement here is
+  agreement about CQLite, not about Cassandra.** That is #3042's round-trip-invariance lesson one level
+  up: a differential between SURFACES over a shared engine can only find *surface* divergence, and it
+  never substitutes for a Cassandra-written oracle; (7) the 3-way comparison runs in **CI only**.
+  **THAT LAST ONE MEANS THIS HARNESS IS NOT MERGE-GATING.** No local gate component can run it — the
+  gate runs pytest with `RUN_SLOW_TESTS=0` and builds neither the Node native module nor a release
+  `cqlite-cli` — so it lives in `python-ci.yml`'s `cross-binding-parity` job, which is
+  `required`-exempt AND in the heavy `ci:bindings-full` tier, i.e. on a routine unlabeled PR it does not
+  run at all. A cross-binding divergence can therefore still merge; the `.github/ci-gating-tiers.yml`
+  exemption NAMES that residual rather than implying coverage it does not have (#3493). Marking the test
+  `@pytest.mark.slow` is deliberate and not an oversight: unmarked, the gate's `python-bindings`
+  component would instantiate the `cli_binary` fixture and add a full release `cqlite-cli` build to
+  EVERY lane's full gate. **And the fixture-skip route is a defect this harness reproduced inside its own
+  first draft, caught in review**: `conftest.py`'s `cli_binary` fixture `pytest.skip`s on build failure
+  and is NOT strict-aware, and the CI job invokes only this one file — whose other non-slow tests pass,
+  so #1230's session floor never fires. All three parity cases would have skipped and
+  `cross-binding-parity` would have reported SUCCESS having compared nothing. The parity lane therefore
+  wraps that fixture and `pytest.fail`s under strict mode, and both data tables carry committed **case
+  floors** (minimum fixture/vector/refusal counts plus required names and CQL kinds), since an emptied
+  table otherwise yields an empty parametrize that pytest reports as one skipped placeholder — #3544's
+  case-floor lesson, one directory over.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
