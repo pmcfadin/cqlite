@@ -310,6 +310,99 @@ claude_auth_tmux_run() {
     ${CLAUDE_AUTH_TMUX_PREFIX[@]+"${CLAUDE_AUTH_TMUX_PREFIX[@]}"} tmux "$@"
 }
 
+# ---- WHOSE tmux SERVER? THE INVOKING AGENT'S, NEVER "WHICHEVER UID WE HAPPEN TO BE" ----
+# A tmux client with no `-S`/`-L` talks to the DEFAULT SERVER OF THE CURRENT UID. Bootstrap
+# prints — and docs/development/fleet-runbook.md documents — `sudo bash
+# scripts/bootstrap-agent-machine.sh --yes`, so under the recommended invocation every live
+# tmux call addressed ROOT's server while the agent's own, the one that actually spawns
+# lanes, stayed exactly as broken as before. Root usually has NO server, so the read failed
+# with "error connecting", fell through to the cold-start probe — which measures the
+# PERSISTED FILE and passes — and the box was certified VERIFIED while still unable to start
+# a lane. That is this issue's own field failure, reintroduced one layer down.
+#
+# THE IDENTITY IS RESOLVED, AND WHERE IT CANNOT BE, NOTHING IS MEASURED. Three states:
+#   self      — no SUDO_USER, or it names the user we already are: tmux runs unwrapped, and
+#               the ordinary invocation is byte-for-byte what it was.
+#   delegate  — SUDO_USER names someone else and the delegation is constructible: every tmux
+#               call is prefixed so it runs AS THAT LOGIN, and therefore against THAT
+#               server. TMUX/TMUX_PANE are scrubbed on this path only, because a client
+#               started inside a pane connects to the server named in $TMUX and ignores
+#               everything else (measured on this repo's own test suite); TMUX_TMPDIR is
+#               forwarded when set, since it is the only spelling of "not the default
+#               socket directory" available to us.
+#   ambiguous — SUDO_USER is set but unresolvable, or the record contradicts itself
+#               (SUDO_UID naming a different uid), or no delegation tool exists. The verdict
+#               is UNMEASURED and the repair REFUSES. FALLING BACK TO THE CURRENT UID IS THE
+#               PERMISSIVE BRANCH WEARING A DEFAULT'S CLOTHES — it is the very thing that
+#               produced the false VERIFIED.
+#
+# NOT APPLIED TO THE `claude -p` PROBE, deliberately: that one asks whether a CREDENTIAL
+# authenticates against the API, using a throwaway config dir. It is a question about a
+# token, not about a per-user server, and the answer does not depend on who asks.
+CLAUDE_AUTH_TMUX_IDENTITY=''
+CLAUDE_AUTH_TMUX_IDENTITY_USER=''
+CLAUDE_AUTH_TMUX_IDENTITY_WHY=''
+
+# claude_auth_resolve_tmux_identity: sets the three globals above and CLAUDE_AUTH_TMUX_PREFIX.
+# Always rc 0 — the STATE is the answer, and callers must read it rather than an exit code.
+claude_auth_resolve_tmux_identity() {
+  local __su="${SUDO_USER:-}" __me='' __uid='' __euid='' __rc=0
+  local -a __p=()
+  CLAUDE_AUTH_TMUX_IDENTITY=ambiguous
+  CLAUDE_AUTH_TMUX_IDENTITY_USER=''
+  CLAUDE_AUTH_TMUX_IDENTITY_WHY=''
+  CLAUDE_AUTH_TMUX_PREFIX=()
+
+  if [ -z "$__su" ]; then CLAUDE_AUTH_TMUX_IDENTITY=self; return 0; fi
+  # A LOGIN NAME IS VALIDATED BEFORE IT IS USED AS AN ARGUMENT. `id -u -leading-dash` would
+  # be read as an option, and this value comes from the environment.
+  case "$__su" in
+    *[!A-Za-z0-9._-]*|-*|'')
+      CLAUDE_AUTH_TMUX_IDENTITY_WHY='SUDO_USER is not a plain login name, so the invoking agent cannot be identified'
+      return 0 ;;
+  esac
+  __me=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -un 2>/dev/null)
+  __rc=$?
+  if [ "$__rc" -ne 0 ] || [ -z "$__me" ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY='this process cannot name its own user (`id -un` did not answer), so it cannot tell whether it is already the invoking agent'
+    return 0
+  fi
+  if [ "$__su" = "$__me" ]; then CLAUDE_AUTH_TMUX_IDENTITY=self; return 0; fi
+
+  __uid=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -u "$__su" 2>/dev/null)
+  __rc=$?
+  case "$__uid" in ''|*[!0-9]*) __rc=1 ;; esac
+  if [ "$__rc" -ne 0 ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY="SUDO_USER names a login this host cannot resolve to a user, so which tmux server belongs to the invoking agent is UNKNOWN"
+    return 0
+  fi
+  # THE TWO HALVES OF THE SUDO RECORD MUST AGREE. If they do not, one of them is wrong and
+  # nothing here can say which — so this is ambiguity, not a preference.
+  if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID:-}" != "$__uid" ]; then
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY="SUDO_USER resolves to uid $__uid but SUDO_UID says ${SUDO_UID:-} — the sudo record contradicts itself, so the invoking agent cannot be identified"
+    return 0
+  fi
+
+  __euid=$(claude_auth_bounded "$CLAUDE_AUTH_IDENTITY_BOUND" id -u 2>/dev/null)
+  case "$__euid" in ''|*[!0-9]*) __euid='' ;; esac
+  if [ "$__euid" = 0 ] && command -v runuser >/dev/null 2>&1; then
+    __p=(runuser -u "$__su" --)
+  elif command -v sudo >/dev/null 2>&1; then
+    # `-n`, ALWAYS: a password prompt on a provisioning entry point is an unbounded wait
+    # wearing an interactive prompt's clothes.
+    __p=(sudo -n -u "$__su" --)
+  else
+    CLAUDE_AUTH_TMUX_IDENTITY_WHY="the invoking agent is $__su but neither runuser nor sudo is available to run tmux as that login, so only the WRONG server could be reached"
+    return 0
+  fi
+  __p+=(env -u TMUX -u TMUX_PANE)
+  [ -z "${TMUX_TMPDIR:-}" ] || __p+=("TMUX_TMPDIR=$TMUX_TMPDIR")
+  CLAUDE_AUTH_TMUX_PREFIX=("${__p[@]}")
+  CLAUDE_AUTH_TMUX_IDENTITY=delegate
+  CLAUDE_AUTH_TMUX_IDENTITY_USER="$__su"
+  return 0
+}
+
 # ---- identity of a delivered credential: A DIGEST, NEVER A LENGTH ------------------
 # The cold-start probe reports what a would-be tmux server DELIVERS to a pane, and the
 # delivered token used to be checked against `${#persisted}` alone. LENGTH EQUALITY IS NOT
@@ -713,6 +806,15 @@ claude_tmux_env_verdict_into__untraced() {
     eval "$__od='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to run an UNBOUNDED tmux read, because a server that accepts a connection and never answers would hang this provisioning entry point indefinitely'"
     return 0
   fi
+  # WHOSE SERVER (see the identity block above). Under the documented `sudo` invocation the
+  # server that matters belongs to the INVOKING agent, not to root; where that identity
+  # cannot be resolved nothing is measured, because answering about the current UID's server
+  # is how this check certified a box that could not start a lane.
+  claude_auth_resolve_tmux_identity
+  if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = ambiguous ]; then
+    eval "$__od=\"the tmux server to inspect could not be identified: \$CLAUDE_AUTH_TMUX_IDENTITY_WHY — this runs under sudo, and a pane is spawned by the INVOKING agent's server, so answering about this process's own UID would certify the wrong one\""
+    return 0
+  fi
 
   # THE SECRET IS ARMED BEFORE THE FIRST THING THAT CAN BE REDACTED, not after. The
   # `show-environment failed` path below renders tmux's stderr through `claude_auth_redact`,
@@ -957,6 +1059,20 @@ claude_tmux_cold_probe_into() {
       eval "$__owhy='the private working directory path contains a quote or whitespace, which cannot be passed safely as a tmux pane command — refusing'"
       return 0 ;;
   esac
+  # A DELEGATED PROBE MUST BE ABLE TO WRITE ITS OWN WORKING DIRECTORY. `mktemp -d` gives us
+  # a 0700 directory owned by THIS uid, and a tmux started as the invoking agent could
+  # neither create the socket in it nor write the pane report. The probe is delegated for the
+  # same reason the live read is: a per-user tmux config is exactly what can substitute the
+  # credential, so a probe run as root measures ROOT's would-be server and says nothing about
+  # the agent's. A FAILED handover is a REFUSAL, never a quiet fall back to a root-run probe
+  # whose answer would be about the wrong user.
+  if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = delegate ]; then
+    if ! chown -R "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__dir" 2>/dev/null; then
+      rm -rf "$__dir"
+      eval "$__owhy=\"the probe's private working directory could not be handed to the invoking agent (\$CLAUDE_AUTH_TMUX_IDENTITY_USER), so a tmux started as that login could not write into it — refusing rather than measuring the wrong user's cold start\""
+      return 0
+    fi
+  fi
   CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
   claude_auth_probe_arm_traps
 
@@ -1183,6 +1299,18 @@ claude_auth_fix_tmux_env__untraced() {
   if ! claude_auth_resolve_timeout; then
     printf 'claude-auth: fix REFUSED (no timeout/gtimeout on PATH can enforce a HARD bound, and an UNBOUNDED `tmux setenv -g` against a server that never answers would hang this entry point)\n'
     return 1
+  fi
+  # Same identity rule as the read, and it matters MORE here: seeding root's server while
+  # the agent's stays broken reports success and changes nothing that matters.
+  claude_auth_resolve_tmux_identity
+  if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = ambiguous ]; then
+    printf 'claude-auth: fix REFUSED (the tmux server to seed could not be identified: %s) — seeding the server of the UID this process runs as would report success and leave the agent server untouched\n' \
+      "$CLAUDE_AUTH_TMUX_IDENTITY_WHY"
+    return 1
+  fi
+  if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = delegate ]; then
+    printf 'claude-auth: seeding the tmux server of the INVOKING agent (%s), not the one belonging to the UID this process runs as — bootstrap is documented to run under sudo\n' \
+      "$CLAUDE_AUTH_TMUX_IDENTITY_USER"
   fi
   claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
   CLAUDE_AUTH_SECRET="$__tok"

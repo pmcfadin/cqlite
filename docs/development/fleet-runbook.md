@@ -994,7 +994,24 @@ They are two verdicts because they fail independently and the operator actions d
 | `claude-tmux-env: COLD-START-MISSING` | No server is running, and a throwaway one started from the persisted environment handed its pane **no token**. The next real server will not either. | Provision the token (below). |
 | `claude-tmux-env: COLD-START-INCOMPLETE` | A new server would deliver the token but **no `CLAUDE_CONFIG_DIR`** — `/etc/profile.d` never reaches a spawned pane (fact 5). | Add a `CLAUDE_CONFIG_DIR=` line to `/etc/environment`. |
 | `claude-tmux-env: COLD-START-NODIR` | A new server would deliver both, but that config directory does not exist. | Create it, or correct the `/etc/environment` line. |
-| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`/`gtimeout` able to enforce a **hard** bound — one that escalates to SIGKILL via `--kill-after=` or `-k` — no private working directory, tmux would not start). **UNMEASURED-class.** | Resolve the named cause and re-run. |
+| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`/`gtimeout` able to enforce a **hard** bound — one that escalates to SIGKILL via `--kill-after=` or `-k` — no private working directory, no `sha256sum`/`shasum` to compare the delivered credential BY VALUE, the directory could not be handed to the invoking agent, tmux would not start), **or** the pane received a token that is not the persisted one. **UNMEASURED-class.** | Resolve the named cause and re-run. |
+| `claude-tmux-env: UNMEASURED` | Nothing could be read: no `tmux`, no enforceable hard bound for the read, the server did not answer within its bound, **or the tmux server to inspect could not be identified** (see the sudo note below). **Never a fall back to whichever UID the process happens to be.** | Resolve the named cause and re-run. |
+
+**WHOSE tmux SERVER? THE INVOKING AGENT'S.** A tmux client with no `-S`/`-L` talks to the
+**current UID's** default server, and bootstrap both documents and prints
+`sudo bash scripts/bootstrap-agent-machine.sh --yes`. Under sudo, therefore, an unqualified
+`tmux show-environment -g` inspects **root's** server while the agent's own — the one that
+actually spawns lanes — stays broken; root usually has no server at all, so the read fell
+through to the cold-start probe, which measures the persisted FILE and passes. That is a false
+`VERIFIED` on a box that still cannot start a lane. Section 5c now resolves the invoking
+identity from `SUDO_USER` (cross-checked against `SUDO_UID`) and runs **every** tmux
+operation — the read, the repair, and the throwaway cold-start server — as that login via
+`runuser`/`sudo -n`. Where the identity cannot be resolved (an unresolvable login, a
+self-contradicting sudo record, no delegation tool) the verdict is `UNMEASURED` and
+`--fix-claude-auth` **refuses**: falling back to the current UID is the permissive branch
+wearing a default's clothes. Every tmux call is also **hard-bounded**, so a server that accepts
+a connection and never answers reports `UNMEASURED` instead of hanging an unattended
+provisioning run.
 
 **A box with no tmux server is measured, not excused.** That is the normal state of a freshly
 provisioned machine at the moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a

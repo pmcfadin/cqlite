@@ -95,7 +95,11 @@ run_cap() {
   while [ "$#" -gt 0 ] && [ "$1" != '--' ]; do pre+=("$1"); shift; done
   [ "${1:-}" = '--' ] && shift
   rc=0
-  out=$(PATH="$shimdir:$PATH" env \
+  # SUDO_USER/SUDO_UID ARE SCRUBBED BY DEFAULT. The tmux verdict now resolves the INVOKING
+  # agent's identity from them, so a suite run under `sudo` would put every case on the
+  # delegation path and measure something else entirely. Cases that want that posture set
+  # them explicitly, which is also how they stay legible as being about it.
+  out=$(PATH="$shimdir:$PATH" env -u SUDO_USER -u SUDO_UID \
         CQLITE_BOOTSTRAP_TEST_MODE=1 \
         CQLITE_CLAUDE_AUTH_ENV_FILE="$envfile" \
         ${pre[@]+"${pre[@]}"} \
@@ -303,6 +307,59 @@ exit 0
 EOF
   chmod +x "$d/tmux"
 }
+# plant_id <dir> <me> <euid> <known-user> <known-uid>: an `id` that answers about a FIXED
+# identity, so a case can put the script in the posture `sudo` creates (running as root
+# while the INVOKING agent is someone else) without needing root or a second real account.
+# An unknown user is a FAILED lookup, exactly as the real `id` reports one.
+plant_id() {
+  local d="$1" me="$2" euid="$3" ku="$4" kuid="$5"
+  cat >"$d/id" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  '-un')  printf '%s\n' '$me' ;;
+  '-u')   printf '%s\n' '$euid' ;;
+  "-u $ku") printf '%s\n' '$kuid' ;;
+  -u*)    printf 'id: unknown user\n' >&2; exit 1 ;;
+  *)      printf 'id: unsupported in this stub: %s\n' "\$*" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$d/id"
+}
+# plant_delegator <dir> <name>: a `runuser`/`sudo` stub that RECORDS the delegation and then
+# runs the rest of the command line, so the case can assert BOTH that the call was
+# delegated to the right login AND that the delegated command still reached tmux.
+plant_delegator() {
+  local d="$1" nm="$2"
+  cat >"$d/$nm" <<EOF
+#!/usr/bin/env bash
+log="$d/delegate-calls.log"
+user=''
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -u) user="\$2"; shift 2 ;;
+    -n) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+printf '%s user=%s cmd=%s\n' '$nm' "\$user" "\$*" >>"\$log"
+exec "\$@"
+EOF
+  chmod +x "$d/$nm"
+}
+# plant_chown <dir> <rc>: a recording `chown` that succeeds or fails on demand. The cold
+# probe hands its private working directory to the invoking user before a delegated tmux
+# can write into it, and both outcomes are verdict-bearing.
+plant_chown() {
+  local d="$1" crc="$2"
+  cat >"$d/chown" <<EOF
+#!/usr/bin/env bash
+printf 'chown %s\n' "\$*" >>"$d/chown-calls.log"
+exit $crc
+EOF
+  chmod +x "$d/chown"
+}
+
 # plant_absent <dir> <tool>: make <tool> UNRESOLVABLE even though /usr/bin is on PATH.
 # A stub that exits 127 is not the same fact as an absent binary, so this suite instead
 # runs the capability script with a MINIMAL PATH holding only the shim dir plus coreutils.
@@ -1710,14 +1767,23 @@ fi
 # judged whole; whole-line comments blanked; `command -v tmux` is a resolution, not a call;
 # and a line whose `tmux` sits inside a MESSAGE (`printf`) is not an invocation. DECLARED
 # NON-EXHAUSTIVE: it is a textual scan, so a tmux call assembled at run time from a
-# variable is not covered, and neither is one sharing a line with `printf`/`eval` — which is
-# how this library RENDERS messages, several of which name tmux, and a guard that reds on
-# the sentence describing its own subject is the guard agents learn to delete. The positive
-# control below pins what it DOES catch.
+# variable is not covered, and neither is one on a line whose quoting it mis-pairs. Quoted
+# spans are removed before matching, so a tmux named in a MESSAGE is not an invocation — a
+# guard that reds on the sentence describing its own subject is the guard agents learn to
+# delete. The positive control below pins what it DOES catch.
 scan_unbounded_tmux() {
-  sed -e ':a' -e '/\\$/{N;s/\\\n//;ta' -e '}' -e 's/^[[:space:]]*#.*$//' "$1" \
+  # ESCAPED QUOTES GO FIRST, then quoted spans. Rendering a detail through
+  # eval with an escaped inner quote is this file's normal idiom, and without dropping
+  # those backslash-quote pairs the span matcher pairs the WRONG quotes and leaves the
+  # message text exposed as if it were code.
+  # QUOTED SPANS ARE REMOVED SECOND, and that is what makes this decidable rather than a
+  # list of exclusions: an invocation is a bare command WORD, while every mention of tmux in
+  # a MESSAGE lives inside quotes. Excluding `printf`/`eval` lines by name (the first
+  # version) both missed message text in a plain assignment and would have hidden a real
+  # call sharing a line with a printf.
+  sed -e ':a' -e '/\\$/{N;s/\\\n//;ta' -e '}' \
+      -e 's/^[[:space:]]*#.*$//' -e 's/\\"//g' -e 's/"[^"]*"//g' -e "s/'[^']*'//g" "$1" \
     | grep -vE 'command -v tmux' \
-    | grep -vE '(^|[[:space:]])(printf|eval) ' \
     | grep -nE '(^|[^[:alnum:]_.-])tmux[[:space:]]' \
     | grep -vE 'claude_auth_bounded|claude_auth_tmux_run|# bounded-exempt:'
 }
@@ -1740,6 +1806,135 @@ if [ -z "$unb_hits" ]; then
   ok "unbounded-tmux guard: every tmux invocation in the library runs under a hard bound"
 else
   bad "unbounded-tmux guard: an unbounded tmux invocation survives: $unb_hits"
+fi
+
+# =====================================================================================
+# 33. UNDER THE DOCUMENTED `sudo` INVOCATION, THE LIVE TMUX OPERATIONS MUST TARGET THE
+#     INVOKING AGENT'S SERVER — NOT ROOT'S.
+#     Bootstrap prints, and the fleet runbook documents, `sudo bash
+#     scripts/bootstrap-agent-machine.sh --yes`. A tmux client with no `-S`/`-L` talks to
+#     the CURRENT UID's default server, so under sudo both the inspection and the repair
+#     addressed ROOT's server while the agent's own — the one that actually spawns lanes —
+#     stayed broken. Root usually has no server at all, so the read fell through to the
+#     cold-start probe, which measures the PERSISTED FILE and passes: a false cold-start
+#     VERIFIED on a box that still cannot start a lane. That is the precise failure this
+#     whole issue exists to eliminate, reintroduced one layer down.
+#     The identity is RESOLVED, not guessed: where it cannot be resolved the verdict is
+#     UNMEASURED and the repair REFUSES — never a silent fall back to the current UID,
+#     which is the permissive branch wearing a default's clothes.
+# =====================================================================================
+INVOKER='cqlite-lane-invoker'
+# (a) DELEGATED READ. The posture `sudo` creates: running as root, SUDO_USER naming the
+# agent. The tmux call must be delegated to that login AND must still deliver its reading —
+# a delegation that lost the answer would be a different defect with the same log line.
+d33=$(mkshim "$tmp/s33"); plant_tmux "$d33" stale; plant_id "$d33" root 0 "$INVOKER" 4711
+plant_delegator "$d33" runuser
+run_cap "$d33" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=4711" -- --tmux-env
+if [ -f "$d33/delegate-calls.log" ] && grep -q "user=$INVOKER" "$d33/delegate-calls.log" \
+   && grep -q 'cmd=.*tmux' "$d33/delegate-calls.log"; then
+  ok "sudo posture: the live tmux read is delegated to the INVOKING agent, not run as root"
+else
+  bad "sudo posture: no delegated tmux read was recorded: $(cat "$d33/delegate-calls.log" 2>/dev/null)"
+fi
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-STALE'; then
+  ok "sudo posture: ...and the delegated read still produces the invoking user's verdict"
+else
+  bad "sudo posture: the delegated read did not deliver a reading: $out"
+fi
+
+# (b) AN UNRESOLVABLE IDENTITY IS UNMEASURED, NEVER THE CURRENT UID. The tmux stub here is
+# `complete`, i.e. root's server is perfect — so a silent fall back to the current UID
+# reports VERIFIED about the wrong server, which is exactly the false certification.
+d33b=$(mkshim "$tmp/s33b"); plant_tmux "$d33b" complete; plant_id "$d33b" root 0 "$INVOKER" 4711
+plant_delegator "$d33b" runuser
+run_cap "$d33b" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+  bad "sudo posture: an unresolvable invoking identity certified the CURRENT UID's server: $out"
+elif printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "sudo posture: an unresolvable invoking identity is UNMEASURED, never a fall back"
+else
+  bad "sudo posture: unexpected verdict for an unresolvable identity: $out"
+fi
+if [ ! -f "$d33b/tmux-calls.log" ] || ! grep -q 'show-environment' "$d33b/tmux-calls.log"; then
+  ok "sudo posture: ...and no tmux server was consulted at all"
+else
+  bad "sudo posture: a tmux server was consulted despite an ambiguous target: $(cat "$d33b/tmux-calls.log")"
+fi
+# A CONFLICTING identity is ambiguous too: SUDO_UID that does not match the uid SUDO_USER
+# resolves to means the two halves of the record disagree, and one of them is wrong.
+d33c=$(mkshim "$tmp/s33c"); plant_tmux "$d33c" complete; plant_id "$d33c" root 0 "$INVOKER" 4711
+plant_delegator "$d33c" runuser
+run_cap "$d33c" "$ef2" "SUDO_USER=$INVOKER" 'SUDO_UID=1234' -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "sudo posture: SUDO_USER and SUDO_UID disagreeing is ambiguous, not a guess"
+else
+  bad "sudo posture: a conflicting sudo identity did not report UNMEASURED: $out"
+fi
+
+# (c) THE REPAIR OBEYS THE SAME RULE. Seeding root's server while the agent's stays broken
+# is worse than not seeding: it reports success and changes nothing that matters.
+d33d=$(mkshim "$tmp/s33d"); plant_tmux "$d33d" missing; plant_id "$d33d" root 0 "$INVOKER" 4711
+plant_delegator "$d33d" runuser
+run_cap "$d33d" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' -- --fix-tmux-env
+if [ ! -f "$d33d/tmux-calls.log" ] || ! grep -q '^setenv' "$d33d/tmux-calls.log"; then
+  ok "sudo posture: the repair REFUSES to seed when the target server is ambiguous"
+else
+  bad "sudo posture: the repair seeded an ambiguous server: $(cat "$d33d/tmux-calls.log")"
+fi
+if printf '%s' "$out" | grep -qi 'REFUSED'; then
+  ok "sudo posture: ...and it says so rather than reporting a silent success"
+else
+  bad "sudo posture: the ambiguous repair did not name its refusal: $out"
+fi
+d33e=$(mkshim "$tmp/s33e"); plant_tmux "$d33e" missing; plant_id "$d33e" root 0 "$INVOKER" 4711
+plant_delegator "$d33e" runuser
+run_cap "$d33e" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=4711" -- --fix-tmux-env
+if [ -f "$d33e/delegate-calls.log" ] && grep -q "user=$INVOKER cmd=.*setenv" "$d33e/delegate-calls.log"; then
+  ok "sudo posture: the repair seeds the INVOKING agent's server"
+else
+  bad "sudo posture: the repair did not delegate its seed: $(cat "$d33e/delegate-calls.log" 2>/dev/null)"
+fi
+
+# (d) NO SUDO, NO DELEGATION. The ordinary invocation must be unchanged — a wrapper applied
+# when nobody asked for one is its own way of talking to the wrong server.
+d33f=$(mkshim "$tmp/s33f"); plant_tmux "$d33f" complete; plant_id "$d33f" root 0 "$INVOKER" 4711
+plant_delegator "$d33f" runuser
+run_cap "$d33f" "$ef2" -- --tmux-env
+if [ ! -f "$d33f/delegate-calls.log" ]; then
+  ok "sudo posture: with no SUDO_USER the tmux call is NOT wrapped in a delegation"
+else
+  bad "sudo posture: a delegation was applied with no sudo in play: $(cat "$d33f/delegate-calls.log")"
+fi
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+  ok "sudo posture: ...and the ordinary path still reaches its verdict"
+else
+  bad "sudo posture: the ordinary (non-sudo) path regressed: $out"
+fi
+
+# (e) THE COLD-START PROBE IS DELEGATED TOO, because a per-user tmux config is exactly what
+# finding 1 showed can substitute the credential: a probe run as root measures ROOT's
+# would-be server and says nothing about the agent's. Its private working directory must be
+# handed over first, and a handover that FAILS is a refusal — never a quiet root-run probe.
+d33g=$(mkshim "$tmp/s33g"); plant_tmux "$d33g" no-server; plant_id "$d33g" root 0 "$INVOKER" 4711
+plant_delegator "$d33g" runuser; plant_chown "$d33g" 0
+run_cap "$d33g" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=4711" -- --tmux-env
+if [ -f "$d33g/delegate-calls.log" ] && grep -q "user=$INVOKER cmd=.*new-session" "$d33g/delegate-calls.log"; then
+  ok "sudo posture: the cold-start probe's server is started AS THE INVOKING AGENT"
+else
+  bad "sudo posture: the cold-start probe ran as the current UID: $(cat "$d33g/delegate-calls.log" 2>/dev/null)"
+fi
+if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+  ok "sudo posture: ...and the delegated cold-start probe still reaches VERIFIED"
+else
+  bad "sudo posture: the delegated cold-start probe did not verify: $out"
+fi
+d33h=$(mkshim "$tmp/s33h"); plant_tmux "$d33h" no-server; plant_id "$d33h" root 0 "$INVOKER" 4711
+plant_delegator "$d33h" runuser; plant_chown "$d33h" 1
+run_cap "$d33h" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=4711" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER' && printf '%s' "$out" | grep -qi 'could not be handed'; then
+  ok "sudo posture: a failed handover of the probe directory REFUSES (UNMEASURED-class)"
+else
+  bad "sudo posture: a failed ownership handover did not refuse: $out"
 fi
 
 # =====================================================================================

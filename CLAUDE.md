@@ -1944,7 +1944,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   caller's setting. `claude-tmux-env:`
   (VERIFIED/SERVER-STALE/SERVER-MISSING/SERVER-INCOMPLETE/SERVER-CONFIG-STALE/SERVER-CONFIG-NODIR
   against a LIVE server; VERIFIED/COLD-START-MISSING/COLD-START-INCOMPLETE/COLD-START-NODIR when
-  NONE is running; NO-SERVER/UNMEASURED when nothing could be measured). **A SERVERLESS BOX IS
+  NONE is running; NO-SERVER/UNMEASURED when nothing could be measured). **Every tmux operation
+  runs as the INVOKING agent, hard-bounded, and compares the credential BY VALUE**: a client with
+  no `-S`/`-L` talks to the CURRENT UID's server, so under the documented
+  `sudo bash scripts/bootstrap-agent-machine.sh --yes` the check inspected ROOT's server (usually
+  absent, so it fell through to the cold-start probe and PASSED) while the agent's stayed broken;
+  an unresolvable `SUDO_USER` is UNMEASURED and the repair REFUSES, never a fall back to the
+  current UID. The cold-start probe compares the delivered token to the persisted one by SALTED
+  DIGEST, because a same-length substitution satisfies a length check; and an unbounded
+  `show-environment -g`/`setenv -g` hangs an unattended run forever, so a wedged server is
+  UNMEASURED, not a verdict. **A SERVERLESS BOX IS
   MEASURED, NOT EXCUSED** — that is the normal state of a freshly provisioned machine at the moment
   `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a blanket non-pass red the check on
   its own primary use case with no way out (`--fix-claude-auth` has no server to seed). The
