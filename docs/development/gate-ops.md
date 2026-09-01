@@ -124,7 +124,10 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
   exported `SCCACHE_*` variable, not just the cap, before it will say `sccache-cap: VERIFIED`. Any
   disagreement is `CONFLICTING-SOURCES`; a difference in an `SCCACHE_*` name it does not classify as
   routing is `UNMEASURED` naming that name, never a pass on a partial match. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
-  running a different cap keeps it.
+  running a different cap keeps it. Before writing, it also resolves **its own** fleet literal
+  through the isolated oracle and refuses to persist anything that resolves to sccache's default —
+  a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
+  the default (#3727).
 
 A third fact, measured while building that check and worth knowing before you read any
 `--show-stats` output: **with NO server running, `--show-stats` does not start one** (nothing listens
@@ -170,7 +173,10 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
 - `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires
   an affirmative measurement, so these never render as `0` or blank.
 - `sccache-used=<bytes>(<N>%)` — occupancy and fill against the enforced cap; `>= 95%` also emits a
-  LOUD `WARN:` (a cache at its cap is evicting, i.e. thrashing). `(cap-zero)` where the cap is 0.
+  LOUD `WARN:` that the cache is **at/near capacity and therefore at RISK of evicting** objects a
+  later gate would have hit. It does **not** claim eviction is happening: sccache exposes no eviction
+  counter, so that would be an inference, not a measurement (#3727 — this issue's own title made
+  exactly that inference). `(cap-zero)` where the cap is 0.
 
 **`sccache-health` cannot answer any of this.** It is the sum of four ERROR counters with **no**
 capacity, occupancy or eviction input, so a `warn` there can never be cleared by raising the cap, and

@@ -1416,7 +1416,13 @@ _sccache_cap_probe() {
     case "$pctnum" in
       ''|*[!0-9]*) : ;;
       *) if [ "$pctnum" -ge 95 ]; then
-           echo "agent-gate: WARN: sccache cache is ${pctnum}% of its ${_SCC_CAP_BYTES}-byte cap (${_SCC_USED_BYTES} bytes used) — a cache at its cap is EVICTING, i.e. discarding objects a later gate would have hit. Raise SCCACHE_CACHE_SIZE (<digits>[KkMmGgTt] only) and 'sccache --stop-server' to apply it (#3727)" >&2
+           # REPORTS CAPACITY, NOT EVICTION (issue #3727 roborev round 4, f2). This used to say the
+           # cache "is EVICTING" — an inference, not a measurement: being near the cap does not
+           # establish that anything has been evicted, and sccache exposes no eviction counter for
+           # this token to read. (This issue's own title made the same inference; at-capacity was the
+           # observation, continuous eviction was the conclusion.) The warning is still worth having,
+           # so it states the observation and names the risk rather than asserting the mechanism.
+           echo "agent-gate: WARN: sccache cache is ${pctnum}% of its ${_SCC_CAP_BYTES}-byte cap (${_SCC_USED_BYTES} bytes used) — AT/NEAR CAPACITY, so it is at risk of evicting objects a later gate would have hit (sccache reports no eviction counter, so this is a capacity observation and NOT an eviction measurement). Raise SCCACHE_CACHE_SIZE (<digits>[KkMmGgTt] only) and 'sccache --stop-server' to apply it (#3727)" >&2
          fi ;;
     esac
   fi

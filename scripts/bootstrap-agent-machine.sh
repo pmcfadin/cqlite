@@ -3037,11 +3037,17 @@ SCC_ENV_COMMENT='# cqlite: sccache object-cache size cap (issue #3727)'
 SCC_ENV_VALUE='50G'
 SCC_ENV_LINE="SCCACHE_CACHE_SIZE=$SCC_ENV_VALUE"
 
-# A SHAPE GUARD ON OUR OWN CONSTANT — deliberately NOT a classifier of anybody else's value.
-# This decides only whether WE are willing to write OUR literal; what sccache would do with an
-# arbitrary string is asked of sccache (the oracle below). Fail-closed: an unusable literal
-# refuses the write and says so, rather than persisting a line that would be discarded with no
-# diagnostic and never rewritten.
+# A CHEAP SHAPE PRE-FILTER ON OUR OWN CONSTANT — AND IT DOES NOT AUTHORIZE THE WRITE (issue #3727
+# roborev round 4, f1). It used to be the only check, which made it a SECOND IMPLEMENTATION of
+# sccache's grammar — the very thing this section refuses to build for arbitrary values, reintroduced
+# for our own literal — and it had the gap that follows from that: MEASURED, `999999999999999999999G`
+# (21 digits plus a suffix) passes every shape rule and resolves to sccache's 10 GiB DEFAULT, so
+# `--fix-sccache-cap` would have persisted an ineffective cap that this section then never rewrites:
+# permanent and invisible, the exact harm the guard exists to prevent.
+#
+# So the shape test survives only as a fast reject for the obvious cases (an unsubstituted
+# placeholder, an empty value, a bare integer meaning BYTES) that need no fork, and the WRITE is
+# authorized by scc_check_literal below, which ASKS SCCACHE.
 SCC_VALUE_USABLE=1
 case "$SCC_ENV_VALUE" in
   *[!0-9KkMmGgTt]*|''|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*) SCC_VALUE_USABLE=0 ;;
@@ -3239,6 +3245,46 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       return 0
     done
     return 1
+  }
+
+  # scc_check_literal: is OUR OWN cap literal a value sccache will actually APPLY? Asked of the
+  # isolated oracle, never decided by a shape test (roborev round 4, f1). Sets SCC_LITERAL_BYTES and
+  # SCC_LITERAL_STATE; rc 0 = accepted, 1 = would be discarded, 2 = could not be measured.
+  #
+  # "RESOLVES TO SCCACHE'S OWN DEFAULT" IS THE REFUSAL CONDITION, and it covers two cases with one
+  # test — a value sccache DISCARDS, and a value that happens to EQUAL the default. Both are refused,
+  # and deliberately: this section's subject is a cap the fleet CHOSE, so a literal that cannot be
+  # shown to differ from what sccache would do anyway pins nothing, whichever it is. That turns the
+  # one ambiguity this section declares elsewhere into a policy instead of a guess.
+  #
+  # AN UNMEASURABLE ORACLE REFUSES THE WRITE TOO. Persisting a value whose effect could not be
+  # established is how the 21-digit case would have shipped; a box that cannot run the oracle also
+  # cannot certify the cap, so it has nothing to lose by not persisting one.
+  #
+  # DECLARED RESIDUAL, measured: sccache's own parse can OVERFLOW rather than fall back —
+  # `9999999999999999999G` (19 digits) resolves to 2484298143374508032 bytes, a wrapped value that is
+  # neither the default nor what anyone typed. This check ACCEPTS that, because it IS the cap sccache
+  # would apply; what stops it shipping unnoticed is that the persist message NAMES the resolved byte
+  # count, so a wrapped literal is visible at the moment it is written.
+  SCC_LITERAL_BYTES=""
+  SCC_LITERAL_STATE=""
+  scc_check_literal() {
+    local __dflt=""
+    SCC_LITERAL_BYTES=""; SCC_LITERAL_STATE=""
+    if ! scc_bytes_for SCC_LITERAL_BYTES "$SCC_ENV_VALUE"; then
+      SCC_LITERAL_STATE="could not be measured: $SCC_ORACLE_WHY"
+      return 2
+    fi
+    if ! scc_bytes_for __dflt; then
+      SCC_LITERAL_STATE="could not be measured: sccache's own default cap was unreadable, so it cannot be told whether this literal has any effect ($SCC_ORACLE_WHY)"
+      return 2
+    fi
+    if [ "$SCC_LITERAL_BYTES" = "$__dflt" ]; then
+      SCC_LITERAL_STATE="resolves to $SCC_LITERAL_BYTES bytes, which is sccache's OWN default cap — so it either is silently DISCARDED or pins exactly what sccache would do anyway"
+      return 1
+    fi
+    SCC_LITERAL_STATE="resolves to $SCC_LITERAL_BYTES bytes"
+    return 0
   }
 
   SCC_RUN_CAP=""
@@ -3581,10 +3627,29 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # every [warn] is supposed to be actionable (and, concretely, it would have added a warning to
   # every sandbox in this file's own self-test, the drift that has silently disabled cases here
   # four times).
+  # scc_refuse_literal [<why>]: with no argument, the shape pre-filter rejected the literal; with
+  # one, the ORACLE did, and its own words are used — a refusal must say which check refused and on
+  # what evidence, not offer one generic sentence for two different findings.
   scc_refuse_literal() {
-    SCC_PERSIST_NOTE="not persisted (the fleet cap literal '$SCC_ENV_VALUE' in this script is not a <digits>[KkMmGgTt] value)"
-    warn "sccache-cap: this checkout's fleet cap literal is '$SCC_ENV_VALUE', which sccache would SILENTLY DISCARD (the accepted form is <digits>[KkMmGgTt], e.g. 30G; a bare integer means BYTES) — refusing to persist it, because this section never rewrites an existing value and a discarded line would be permanent and invisible"
-    info "substitute the measured cap into SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (and the matching literal in .agent-ami/profile.yaml), then re-run (issue #3727)"
+    local __why="${1:-}"
+    if [ -n "$__why" ]; then
+      SCC_PERSIST_NOTE="not persisted (sccache would not apply the fleet cap literal '$SCC_ENV_VALUE': it $__why)"
+      warn "sccache-cap: this checkout's fleet cap literal is '$SCC_ENV_VALUE', and SCCACHE ITSELF (asked through an isolated probe, not a shape test) says it $__why — refusing to persist it, because this section never rewrites an existing value and an ineffective line would be permanent and invisible"
+    else
+      SCC_PERSIST_NOTE="not persisted (the fleet cap literal '$SCC_ENV_VALUE' in this script is not a <digits>[KkMmGgTt] value)"
+      warn "sccache-cap: this checkout's fleet cap literal is '$SCC_ENV_VALUE', which sccache would SILENTLY DISCARD (the accepted form is <digits>[KkMmGgTt], e.g. 30G; a bare integer means BYTES) — refusing to persist it, because this section never rewrites an existing value and a discarded line would be permanent and invisible"
+    fi
+    info "substitute a measured cap into SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (and the matching literal in .agent-ami/profile.yaml), then re-run (issue #3727)"
+  }
+  # scc_literal_write_ok: the ONE predicate the two write sites consult. Shape first (cheap, no
+  # fork), then the oracle — and the ORACLE is what authorizes.
+  scc_literal_write_ok() {
+    if [ "$SCC_VALUE_USABLE" != 1 ]; then scc_refuse_literal; return 1; fi
+    scc_check_literal
+    case "$?" in
+      0) return 0 ;;
+      *) scc_refuse_literal "$SCC_LITERAL_STATE"; return 1 ;;
+    esac
   }
   if [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
     SCC_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
@@ -3593,8 +3658,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     if [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
       SCC_PERSIST_NOTE="no $SCC_ENV_FILE and no authorisation to create it"
       info "no $SCC_ENV_FILE on this $PLATFORM host — pass --yes or --fix-sccache-cap and it will be CREATED (root:root 0644) so pam_env can consume it"
-    elif [ "$SCC_VALUE_USABLE" != 1 ]; then
-      scc_refuse_literal
+    elif ! scc_literal_write_ok; then
+      : # refused, with the cause already reported by scc_literal_write_ok
     elif [ "$SCC_WRITE_PRIV" != 1 ]; then
       SCC_PERSIST_NOTE="no $SCC_ENV_FILE and no privilege to create it ($SCC_PRIV_STATE)"
       warn "sccache-cap: $SCC_ENV_FILE does not exist and this run cannot create it ($SCC_PRIV_STATE) — the cap was NOT persisted"
@@ -3602,7 +3667,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     elif scc_create_env_file; then
       SCC_FILE_HAS_LINE=yes; SCC_FILE_VALUE="$SCC_ENV_VALUE"
       scc_made=$(ls -ld -- "$SCC_ENV_FILE" 2>/dev/null | awk '{print $1" "$3":"$4}')
-      info "CREATED $SCC_ENV_FILE (${scc_made:-mode/owner unreadable}) carrying '$SCC_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
+      info "CREATED $SCC_ENV_FILE (${scc_made:-mode/owner unreadable}) carrying '$SCC_ENV_LINE' (sccache ${SCC_LITERAL_STATE:-resolves it to an unrecorded byte count}) — pam_env reads it at session creation, so NEW sessions pick it up"
     elif [ "${scc_create_rc:-}" = 3 ]; then
       scc_read_env_file
       SCC_PERSIST_NOTE="not persisted (another writer created $SCC_ENV_FILE first)"
@@ -3624,8 +3689,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   elif [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
     SCC_PERSIST_NOTE="not persisted (neither --yes nor --fix-sccache-cap)"
     info "persist the cap:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   (appends '$SCC_ENV_LINE' to $SCC_ENV_FILE; --yes does it too)"
-  elif [ "$SCC_VALUE_USABLE" != 1 ]; then
-    scc_refuse_literal
+  elif ! scc_literal_write_ok; then
+    : # refused, with the cause already reported by scc_literal_write_ok
   elif [ "$SCC_WRITE_PRIV" != 1 ]; then
     SCC_PERSIST_NOTE="no privilege to write $SCC_ENV_FILE ($SCC_PRIV_STATE)"
     warn "sccache-cap: cannot write $SCC_ENV_FILE ($SCC_PRIV_STATE) — the cap was NOT persisted"
@@ -3649,7 +3714,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       # very run just persisted correctly (5b's 11q/11u lesson).
       SCC_FILE_HAS_LINE=yes
       SCC_FILE_VALUE="$SCC_ENV_VALUE"
-      info "appended '$SCC_ENV_LINE' to $SCC_ENV_FILE — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
+      info "appended '$SCC_ENV_LINE' to $SCC_ENV_FILE (sccache ${SCC_LITERAL_STATE:-resolves it to an unrecorded byte count}) — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
     else
       SCC_PERSIST_NOTE="the append to $SCC_ENV_FILE failed"
       warn "sccache-cap: the append to $SCC_ENV_FILE FAILED — the cap was NOT persisted"

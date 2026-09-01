@@ -572,6 +572,10 @@ scc_resolve() {
     *[!0-9KkMmGgTt]*|""|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*) echo 10737418240; return ;;
   esac
   n=${v%[KkMmGgTt]}; s=${v#"$n"}
+  # An UNREPRESENTABLE value falls back to the default — MEASURED on sccache 0.17.0:
+  # 999999999999999999999G (21 digits) reads back as 10737418240. Modelled because it is the
+  # regression fixture for #3727 round 4 f1, where a shape test accepted such a literal.
+  if [ ${#n} -gt 20 ]; then echo 10737418240; return; fi
   case "$s" in
     K|k) m=1024 ;; M|m) m=1048576 ;; G|g) m=1073741824 ;; T|t) m=1099511627776 ;; *) m=1 ;;
   esac
@@ -4784,8 +4788,9 @@ else
     SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
   if grep -q '^SCCACHE_CACHE_SIZE=30G$' "$scc_env_w" \
      && grep -q '^# cqlite: sccache object-cache size cap' "$scc_env_w" \
-     && printf '%s\n' "$(scc_slice "$scc_out_w")" | grep -qE '\[ok\].*sccache-cap: VERIFIED'; then
-    ok "sccache-cap: --fix-sccache-cap persists the cap AND the same run's probe verifies it"
+     && out_has "$(scc_slice "$scc_out_w")" -E '\[ok\].*sccache-cap: VERIFIED' \
+     && out_has "$(scc_slice "$scc_out_w")" 'resolves to 32212254720 bytes'; then
+    ok "sccache-cap: --fix-sccache-cap persists the cap, NAMES the bytes sccache resolves it to, AND the same run's probe verifies it"
   else
     bad "sccache-cap: the write path did not persist + verify in one run"
     echo "--- env file ---"; cat "$scc_env_w"; scc_slice "$scc_out_w" | head -6
@@ -4836,6 +4841,41 @@ else
   else
     bad "sccache-cap: an unusable cap literal was persisted, or the refusal was silent"
     echo "--- env file ---"; cat "$scc_env_ph"; printf '%s\n' "$scc_sl_ph" | head -4
+  fi
+
+  # 12b-m2. THE SHAPE TEST IS NOT THE ORACLE (issue #3727 roborev round 4, f1). A 21-digit literal
+  #         plus a suffix passes every shape rule this repo could write and MEASURES as sccache's
+  #         10 GiB default — so the shape guard alone would have let `--fix-sccache-cap` persist an
+  #         ineffective cap that the section then never rewrites: permanent and invisible, which is
+  #         the exact harm the guard exists to prevent. The write is now authorized by the ORACLE, so
+  #         this case plants a literal the shape test ACCEPTS and requires the refusal to happen
+  #         anyway, and to be attributed to sccache rather than to a shape rule.
+  scc_bs_big="$tmp/scc-bs-oversized.sh"
+  cp "$scc_bs" "$scc_bs_big"
+  sed -i.bak "s/^SCC_ENV_VALUE='[^']*'\$/SCC_ENV_VALUE='999999999999999999999G'/" "$scc_bs_big" 2>/dev/null \
+    || sed -i '' "s/^SCC_ENV_VALUE='[^']*'\$/SCC_ENV_VALUE='999999999999999999999G'/" "$scc_bs_big" 2>/dev/null
+  rm -f "$scc_bs_big.bak"
+  scc_big_val=$(sed -n "s/^SCC_ENV_VALUE='\(.*\)'\$/\1/p" "$scc_bs_big" | head -1)
+  # The precondition that makes this case meaningful: the planted literal must be one the SHAPE test
+  # would wave through. If it were shape-rejected the case would pass for the wrong reason.
+  if [ "$scc_big_val" = '999999999999999999999G' ] \
+     && printf '%s' "$scc_big_val" | grep -qE '^[0-9]+[KkMmGgTt]$'; then
+    ok "sccache-cap: the oversized-literal fixture is planted AND is shape-valid (so only the oracle can refuse it)"
+  else
+    bad "sccache-cap: could not plant a shape-valid oversized literal — the case below would test nothing"
+  fi
+  scc_env_big="$tmp/scc-env-big"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_big"
+  scc_out_big=$(runscc "$scc_bs_big" "$scc_shims_w" "$scc_env_big" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
+  scc_sl_big=$(scc_slice "$scc_out_big")
+  if ! grep -q 'SCCACHE_CACHE_SIZE' "$scc_env_big" \
+     && out_has "$scc_sl_big" 'SCCACHE ITSELF' \
+     && out_has "$scc_sl_big" 'OWN default cap' \
+     && ! out_has "$scc_sl_big" -E '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: an OVERSIZED but shape-valid literal is refused BY THE ORACLE, not persisted (the second-implementation gap)"
+  else
+    bad "sccache-cap: an oversized shape-valid literal was persisted, or the refusal was not attributed to sccache"
+    echo "--- env file ---"; cat "$scc_env_big"; printf '%s\n' "$scc_sl_big" | head -4
   fi
 
   # 12b-n. THE OPT-OUT is loud and NON-PASSING — a switch that returned `ok` would be a way to
@@ -4903,10 +4943,17 @@ scc_prof_val=$(sed -n 's/^[[:space:]]*SCCACHE_CACHE_SIZE:[[:space:]]*"\(.*\)"[[:
 #        that red is the mechanism working, not a broken test. (Deliberately the SAME shape check
 #        bootstrap applies to its own literal before persisting it — a bare integer is refused
 #        too, because sccache reads one as BYTES.)
-scc_lit_ok() {   # <literal> -> 0 if sccache would accept it as a cap
+# scc_lit_ok <literal>: a SHAPE PRE-FILTER, not a grammar oracle — its job is to catch a placeholder
+# or an obviously-unusable fleet literal in the two committed files. The AUTHORITATIVE check is
+# bootstrap's own oracle at write time (it asks sccache), and 12b-m2 covers the case that motivated
+# the split: a 21-digit literal passes every shape rule and MEASURES as sccache's default. The digit
+# bound here closes the same gap in this guard, with the same caveat — it is a bound, not a parser.
+scc_lit_ok() {
   case "$1" in
     ''|*[!0-9KkMmGgTt]*|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*|*[0-9]) return 1 ;;
   esac
+  local __d=${1%[KkMmGgTt]}
+  [ "${#__d}" -le 18 ] || return 1
   return 0
 }
 if [ ! -r "$scc_profile" ]; then
