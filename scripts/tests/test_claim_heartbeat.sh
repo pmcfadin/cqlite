@@ -11,6 +11,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HB="$SCRIPT_DIR/../flow/claim-heartbeat.sh"
+# The process-liveness primitives now live in a library SHARED with
+# drive-issue-state.sh (issue #3822) — one definition, sourced by both. The
+# function-level cases below extract them from THAT file; extracting from $HB would
+# silently find nothing and, since the extracted file would be empty, assert nothing.
+LIVENESS_LIB="$SCRIPT_DIR/../flow/lib/process-liveness.sh"
 
 PASS=0
 FAIL=0
@@ -1465,11 +1470,11 @@ echo "TEST 50: the signal probe decodes EPERM as PRESENT (round 10, Medium)"
 # rather than reimplemented here — the script cannot be sourced, since sourcing runs its
 # dispatch — so this exercises the real code, and it fails outright if the function is gone.
 probe_fn="$T/signal-probe.sh"
-sed -n '/^signal_probe_class()/,/^}/p' "$HB" >"$probe_fn"
+sed -n '/^signal_probe_class()/,/^}/p' "$LIVENESS_LIB" >"$probe_fn"
 if [ -s "$probe_fn" ]; then
   ok "extracted signal_probe_class from the shipped script ($(wc -l <"$probe_fn" | tr -d ' ') lines)"
 else
-  bad "signal_probe_class is missing from $HB — the EPERM decode does not exist"
+  bad "signal_probe_class is missing from $LIVENESS_LIB — the EPERM decode does not exist"
 fi
 # shellcheck disable=SC1090
 . "$probe_fn" 2>/dev/null || true
@@ -1761,8 +1766,8 @@ echo "TEST 54: absence needs the INDEPENDENT probe to affirm it (round 15, Mediu
 # was alone again and could still establish absence: a false DEAD for a live supervisor.
 # Driven by a ps that hides the pid AND a kill whose failure message is unrecognisable.
 pp_body="$T/presence.sh"
-sed -n '/^signal_probe_class()/,/^}/p' "$HB" >"$pp_body"
-sed -n '/^process_presence()/,/^}/p' "$HB" >>"$pp_body"
+sed -n '/^signal_probe_class()/,/^}/p' "$LIVENESS_LIB" >"$pp_body"
+sed -n '/^process_presence()/,/^}/p' "$LIVENESS_LIB" >>"$pp_body"
 # shellcheck disable=SC1090
 . "$pp_body" 2>/dev/null || true
 if [ "$(type -t process_presence 2>/dev/null)" = "function" ]; then
@@ -2205,6 +2210,13 @@ _bad_copy="$T/hdr-probe.sh"
 # line it can never emit. Getting that wrong is what made my first two probe attempts fail.
 { printf '%s\n' '# displaced header line one' '# leaked_marker_67 this line is above the shebang' \
     'leaked_fn() { :; }'; cat "$HB"; } >"$_bad_copy"
+# The copy needs its SIBLING library alongside it (issue #3822): the script sources
+# lib/process-liveness.sh from its OWN directory and — deliberately — fails closed when
+# that file is unreadable, rather than continuing with the liveness predicates
+# undefined. Without this the probe would measure the missing library, not the header
+# leak it is about, and its NON-VACUITY would silently become vacuous.
+mkdir -p "$T/lib"
+cp "$LIVENESS_LIB" "$T/lib/process-liveness.sh"
 # CAPTURED, NOT PIPED. `bash … | grep -q` under this file's `pipefail` is the #3387 flake: grep -q
 # exits at the first match, SIGPIPEs the upstream, and the PIPELINE status becomes 141 — so a
 # SUCCESSFUL match reads as a failed condition, non-deterministically depending on whether the
