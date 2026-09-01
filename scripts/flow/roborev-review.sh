@@ -83,7 +83,7 @@
 #
 #   ==== ROBOREV REVIEW SUMMARY ====
 #   repo: / branch: / base: / head-sha: / reviewed-sha: / assert-base: / job: /
-#   model: / census: /
+#   job-machine: / model: / census: /
 #   tokens: / push-assert: / census-check: / code-free: / job-record: /
 #   sha-assert: / review-completed: / prompt-content: /
 #   vacuity-tier1: / vacuity-tier2: / findings: / [deferral:] / roborev-exit: / log:
@@ -184,6 +184,29 @@
 #   roborev-exit      PASS | FINDINGS (exit N) | ERROR (exit N) | SKIP
 #   model             <model> | <model> (SUBSTITUTED — requested '<r>') |
 #                     <model> (UNCONFIRMED — no model field in the job record) | -
+#   job-machine       <uuid> (source_machine_id; job ids are per-daemon) |
+#                     NOT RECORDED (...) | UNAVAILABLE (...)
+#                     WHICH DAEMON ISSUED THE `job:` ID ABOVE (#3654). INFORMATIONAL, exactly
+#                     like `census:`/`tokens:`/`waiver:` — it is in neither the verdict-grammar
+#                     scan nor the affirmation loop (both enumerate the verdict-carrying keys by
+#                     name), so it can never make a run pass or fail; a `NOT RECORDED` or
+#                     `UNAVAILABLE` here beside affirmative keys still reaches RESULT: PASS.
+#                     WHY IT EXISTS: **roborev job ids are PER-DAEMON, not global.** Each fleet
+#                     box runs its own daemon with its own database and its own sequential ids,
+#                     so two boxes can legitimately present the SAME id for DIFFERENT reviews —
+#                     measured, `job=265` on two lanes 50 minutes apart — and a coordination lead
+#                     read the repetition as a collision and WITHHELD a valid absence waiver. A
+#                     pasted block is read by people who are not on the box, so it names the
+#                     daemon. It is NOT an authorization field and NOT a uniqueness proof: the
+#                     binding that identifies a review is the record's `git_ref` (see
+#                     `reviewed-sha:`), and the marker grammar is deliberately UNCHANGED — no
+#                     machine field was added to it, because every field in a hand-typed control
+#                     line is another way for a legitimate authorization to read MALFORMED.
+#                     THE THREE STATES ARE AFFIRMATIVE AND CLOSED, never blank: the uuid when a
+#                     record carried `source_machine_id`; `NOT RECORDED` when a job record WAS
+#                     read and carries none (a REAL state — `roborev show <id> --json` does not
+#                     carry the field at all; `roborev list --json` rows do); `UNAVAILABLE` when
+#                     no job record could be read, naming the `job-record:` state it inherits.
 #   census            `<N> file(s), +<A>/-<D>` | -
 #   tokens            `input=<n> cached=<n> output=<n>` | UNAVAILABLE
 # FINDINGS means the reviewer RAN and reported findings (a GENUINE review to triage and
@@ -225,7 +248,7 @@
 # range), `review-completed` (job status + an allow-list of terminal verdict markers),
 # `prompt-content` (the CODE subset of our census inside the prompt actually sent). Prose matching (`vacuity-tier1`) and token accounting (`vacuity-tier2`)
 # CORROBORATE; tier 1 can only ever raise a NOTICE. `base:`, `head-sha:`, `reviewed-sha:`,
-# `assert-base:`, `census:`, `tokens:`, `waiver:` and `deferral:` are INFORMATIONAL — they are in neither
+# `assert-base:`, `job-machine:`, `census:`, `tokens:`, `waiver:` and `deferral:` are INFORMATIONAL — they are in neither
 # the verdict-grammar scan nor the affirmation loop (both enumerate the verdict-carrying keys
 # by name), so none of them can make a run pass or fail on its own.
 #
@@ -399,6 +422,28 @@ census paths in the prompt, so both FAIL. What distinguishes them is a HUMAN plu
 review's token accounting (genuine reviews measured 398k-649k input / 314k-554k cached;
 the vacuous baseline is ~18.7k input / 0 cached).
 
+THAT SENTENCE IS TRUE AT REVIEW TIME AND FALSE AFTER THE FACT, WHICH IS WHERE THE BEST
+EVIDENCE IS (#3654). The prompt roborev SENT is retained in the job record and can be
+retrieved later, even though the snapshot file it names is transient and long deleted:
+
+    roborev show <id> --prompt
+
+A delivery-by-path prompt says so in its own words, under '### Combined Diff' — 'Diff
+too large to include inline ... Read the diff from: <path>' — which is DIRECT evidence
+that a diff was delivered. Token accounting is INFERENCE: a large number is CONSISTENT
+with a real review, nothing more. So the record's stored prompt is the PREFERRED
+evidence in an absence-waiver request and a request should LEAD with it; the token
+accounting is the FALLBACK, for when the prompt cannot be retrieved.
+
+THIS RESURRECTS NOTHING OF THE DELETED DELIVERY CLASSIFIER, and the distinction is
+load-bearing rather than a caveat. The classifier failed because it inferred delivery
+MODE from injectable prompt text AT DECISION TIME, to produce an AUTOMATED verdict —
+roborev's prompt embeds repository-controlled content, so that inference was spoofable
+in both directions. What is described here is a HUMAN reading a STORED record as
+evidence for a HAND-GRANTED waiver: no automated verdict is derived from it, so there
+is nothing to spoof into a PASS. Nothing in this wrapper parses the prompt for delivery
+mode, and nothing may be added that does.
+
 THE WAIVER, therefore: the OWNER or the coordination LEAD may excuse an absence FAIL
 with a PR comment that carries this as a DEDICATED LINE, at column zero, all four
 fields present:
@@ -440,6 +485,44 @@ its base, and binding to the tip made a waiver go STALE the instant the base ref
 which is what made this mechanism a dead letter under fleet load. The authorizer's judgment under (d) was about ONE review and
 its token accounting, so the waiver may not outlive it — a push, a different base or a
 re-run each need a fresh one. A marker missing any field is MALFORMED, never granted.
+
+JOB IDS ARE PER-DAEMON, NOT GLOBAL, SO VERIFY THE RECORD'S git_ref AND NEVER THE ID
+ALONE (#3654). Every fleet box runs its own roborev daemon with its own database and its
+own sequential ids, so two boxes can legitimately present the SAME id for DIFFERENT
+reviews — measured: 'job=265' on two lanes 50 minutes apart, different ranges, different
+branches, different token counts, both correct. A repeated id is therefore NOT evidence
+of a collision; reading it as one cost a valid waiver a round. The check that settles it:
+
+    roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
+    roborev list --json --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref, branch}'
+
+git_ref MUST equal the marker's <base40>..<head40>. TWO TRAPS IN THOSE COMMANDS, both
+measured on roborev v0.61.2: (1) 'show <id> --json' NESTS git_ref/status/token_usage
+under '.job' and does not carry source_machine_id ANYWHERE, so a top-level jq over that
+payload prints nulls for all four — a check whose output cannot show what it claims;
+(2) 'roborev list' filters by the CURRENT BRANCH by default, so pass --branch explicitly
+or a correct query returns null.
+
+AND A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS. This, which reads like a collision
+check, is not one:
+
+    roborev list --json ... | jq '[.[] | select(.id==<id>)] | length'    # always 1
+
+'roborev list' only ever sees the LOCAL daemon, so it returns 1 whether or not another
+box holds the same id. It is structurally incapable of detecting the cross-box collision
+it appears to rule out — a probe whose output is IDENTICAL under the two states it claims
+to separate, the same class as reading the gate's 'RESULT: INCOMPLETE' launch sentinel as
+a verdict, or locating a gate run directory with 'ls -t'. Run on both of the 'job=265'
+lanes, it gave the right answer for a reason that did not hold. Use git_ref.
+
+THE BLOCK NAMES THE DAEMON, so a pasted artifact is self-describing for a reader who is
+not on the box: 'job-machine:' sits beside 'job:' and reports source_machine_id when a
+record carried it, 'NOT RECORDED' when a record was read and carries none, and
+'UNAVAILABLE' when no record could be read. It is INFORMATIONAL and can never pass or
+fail a run. THE MARKER GRAMMAR IS DELIBERATELY UNCHANGED: no machine field was added to
+it, in either marker kind. The authorizer would have to know the value, it is derivable
+from the record, and every field in a hand-typed control line is one more way for a
+legitimate authorization to read MALFORMED.
 
 THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL. (1) The marker must BE the
 line: an indented, '>'-quoted, bulleted or mid-sentence copy does not match, so pasting
@@ -705,6 +788,10 @@ JOB="-"
 MODEL_LINE="-"
 CENSUS="-"
 TOKENS="UNAVAILABLE"
+# WHICH DAEMON ISSUED THE JOB ID (#3654). Initialised to the state a run that never reached a job
+# record is actually in — never blank, and never a bare `-`, which would read as "no daemon" rather
+# than "nothing was read". Recomputed once, below, from the facts the record read produced.
+JOB_MACHINE="UNAVAILABLE (no job record was read — job-record: SKIP)"
 # Populated by roborev_census (in the sourced oracles file); declared here so the
 # array always exists even if that oracle ever returns before filling it.
 # shellcheck disable=SC2034 # read in roborev-review-oracles.sh, not here
@@ -903,6 +990,15 @@ emit_summary() {
   # visible rather than inferred. Placed beside `head-sha:`/`reviewed-sha:`, the other endpoints.
   emit_kv 'assert-base' "${RANGE_BASE_SHA:--} (merge-base of $BASE and HEAD; $BASE tip ${BASE_TIP_SHA:--})"
   emit_kv 'job' "$JOB"
+  # ===== WHICH DAEMON'S JOB ID THAT IS (#3654) =====
+  # INFORMATIONAL, exactly like `assert-base:`/`census:`/`tokens:` — NOT in the verdict-grammar scan
+  # and NOT in the affirmation loop (both enumerate the verdict-carrying keys by name), so it can
+  # never make a run pass or fail on its own. Emitted UNCONDITIONALLY and beside `job:`, because the
+  # thing it disambiguates is the value on the line above it: roborev job ids are PER-DAEMON, and a
+  # block is pasted into PR threads read by people who are not on the box. A conditional emit would
+  # reproduce the defect — a reader with no `job-machine:` line cannot tell "this daemon was not
+  # recorded" from "this wrapper does not report it".
+  emit_kv 'job-machine' "$JOB_MACHINE"
   emit_kv 'model' "$MODEL_LINE"
   emit_kv 'census' "$CENSUS"
   emit_kv 'tokens' "$TOKENS"
@@ -1268,6 +1364,37 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
   return 1
 }
 
+# ===== WHICH DAEMON ISSUED THIS JOB ID — A SUPPLEMENTARY, ISOLATED READ (#3654) =====
+# `source_machine_id` is carried by `roborev list --json` ROWS ONLY: measured on roborev v0.61.2,
+# `roborev show <id> --json` does not carry it anywhere, not even in its nested `job` object. And
+# `read_job_record` above STOPS at the first payload that answers, which on a healthy daemon is
+# `show` — so a machine id read only through that loop would be `NOT RECORDED` on EVERY real run,
+# i.e. a key that reports nothing while looking like it reports something. Hence one extra `list`
+# read, and ONLY when the record already read did not carry the field.
+#
+# ISOLATED ON PURPOSE: it writes to its OWN scratch facts file and never to `$FACTS_FILE`, so it
+# cannot change any fact an assert reads, cannot change which row the record loop chose, and cannot
+# move a verdict. It runs AFTER the record poll loop has settled, so it also cannot perturb the
+# transient-read modelling above it. A failure here is not an error — it yields no id, and the key
+# says so affirmatively.
+read_machine_fact() { # read_machine_fact <job> -> prints the daemon uuid, or nothing
+  local mfacts="$FACTS_FILE.machine" mprompt="$FACTS_FILE.machine.prompt" json="" id=""
+  id=$(fact source_machine_id)
+  if [ -n "$id" ]; then printf '%s' "$id"; return 0; fi
+  json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '')
+  [ -n "$json" ] || return 1
+  : >"$mfacts"
+  : >"$mprompt"
+  if ! extract_job_facts "$1" "$json" "$mfacts" "$mprompt"; then
+    rm -f "$mfacts" "$mprompt"
+    return 1
+  fi
+  id=$(sed -n 's/^source_machine_id=//p' "$mfacts" | head -1)
+  rm -f "$mfacts" "$mprompt"
+  [ -n "$id" ] || return 1
+  printf '%s' "$id"
+}
+
 # REQUIRED to stop polling: the fields without which an assert cannot run at all.
 if [ "$announce_ok" -eq 1 ]; then
   record_polls=0
@@ -1330,6 +1457,25 @@ TOKEN_STATE=$(fact token_state)
 TOK_IN=$(fact input_tokens)
 TOK_CACHED=$(fact cached_input_tokens)
 TOK_OUT=$(fact output_tokens)
+
+# ===== `job-machine:` — THREE AFFIRMATIVE STATES, NEVER BLANK, NEVER FAILING (#3654) =====
+# The states are decided here, once, so the emit site has nothing to infer. Ordered
+# id-then-record-then-nothing, and the last two are told apart by whether a job record was READ at
+# all: "the record does not carry the field" and "there is no record" are different operator
+# actions, and collapsing them onto one value is the shape this repository keeps paying for. The
+# key is INFORMATIONAL — it is in neither the verdict-grammar scan nor the affirmation loop — so
+# none of these three can red an otherwise-clean run.
+JOB_MACHINE_ID=""
+if [ "$announce_ok" -eq 1 ]; then
+  JOB_MACHINE_ID=$(read_machine_fact "$JOB" || printf '')
+fi
+if [ -n "$JOB_MACHINE_ID" ]; then
+  JOB_MACHINE="$JOB_MACHINE_ID (source_machine_id; job ids are per-daemon)"
+elif record_required_present; then
+  JOB_MACHINE="NOT RECORDED (a job record was read but carries no source_machine_id; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not. Identify the review by the record's git_ref, never by the id alone)"
+else
+  JOB_MACHINE="UNAVAILABLE (no job record could be read, so the issuing daemon is unknown — job-record: $JOB_RECORD)"
+fi
 
 # The sanctioned form reviews a RANGE, so the job record's `git_ref` is
 # `<base40>..<head40>` and BOTH endpoints are asserted — strictly stronger than the

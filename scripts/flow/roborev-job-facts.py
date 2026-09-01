@@ -60,7 +60,21 @@ OUTPUT_TOKEN_KEYS = (
     "completionTokens",
 )
 TOKEN_CONTAINER_KEYS = ("token_usage", "tokenUsage", "usage", "token_counts")
-STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict")
+# `source_machine_id` NAMES THE DAEMON THAT ISSUED THE JOB ID (#3654). Job ids are
+# PER-DAEMON: two fleet boxes legitimately presented the same `job=265` for different
+# reviews, and a coordination lead read the repetition as a collision and withheld a
+# valid absence waiver. It is a STRING FACT like the others and nothing more — it is
+# reported so the wrapper's block can NAME the daemon, never asserted on.
+#
+# MEASURED (roborev v0.61.2, this fleet): `roborev list --json` ROWS carry it at top
+# level beside id/git_ref/branch/repo_path; `roborev show <id> --json` does NOT carry it
+# ANYWHERE, not even in its nested `job` object. So its absence from a given payload is a
+# REAL, expected state and must render as such rather than as an empty value.
+#
+# ADDING IT CANNOT CHANGE WHICH ROW `find_job` SELECTS: that function looks only at the
+# id-bearing keys and then prefers a match carrying `git_ref`; STRING_FACTS is read solely
+# by the output loop below, after the row has been chosen.
+STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict", "source_machine_id")
 
 
 def objects(node):
