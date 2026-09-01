@@ -71,11 +71,14 @@ impl TokenFilter {
     /// half-open `(start, end]` membership EXACTLY (including the `start == end`
     /// FULL-ring convention, #2228); `token_filter_lowering_agrees_with_core` pins
     /// that agreement so the two never diverge.
+    ///
+    /// The core bound DERIVES its wrapping from the endpoints the way
+    /// `Range.isWrapAround` does, so this filter's own `wraparound` flag is not
+    /// carried across (issue #3634); the grid test covers both spellings.
     pub fn to_scan_bound(self) -> cqlite_core::storage::sstable::reader::ScanTokenBound {
         cqlite_core::storage::sstable::reader::ScanTokenBound {
             start_excl: self.start,
             end_incl: self.end,
-            wraparound: self.wraparound,
         }
     }
 

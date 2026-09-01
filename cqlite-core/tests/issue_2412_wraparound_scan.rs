@@ -214,7 +214,6 @@ fn wraparound_range_emits_partitions_from_both_segments() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: true,
     };
     let got = rt.block_on(emitted_ids(&reader, Some(bound)));
 
@@ -259,7 +258,6 @@ fn non_wraparound_range_is_unaffected() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: false,
     };
     let got = rt.block_on(emitted_ids(&reader, Some(bound)));
 
