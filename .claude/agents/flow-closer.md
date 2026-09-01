@@ -85,7 +85,9 @@ grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ 
 **Only `PASS`/`FAIL` is a verdict.** `agent-gate.sh` writes
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (via its EXIT
 trap) and only *overwrites* it on completion, so `INCOMPLETE` is a **liveness placeholder, not
-a verdict** — it means "still running, or died". A bare `grep -q` on the bare `RESULT:` token therefore matches
+a verdict** — it means "still running, **queued**, or died" (three states; the sentinel is written
+before the #1825 slot is granted, so a gate that has not started yet already has one). A bare
+`grep -q` on the bare `RESULT:` token therefore matches
 within seconds of gate start and would let you read a just-launched gate as a finished one and
 advance toward merge on a verdict that does not exist (#3041; mechanism follow-up #2908). Always
 anchor the probe on `PASS|FAIL`.
@@ -132,8 +134,15 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    login; for a named missing capability, escalate to have it installed/enabled. Either
    way do **not** fall back to an in-session launch — it will die when you end your turn.
    End your turn; on re-invoke, `cat /tmp/gate-<N>.txt` — the complete `==== AGENT-GATE
-   SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker; a terminal
-   `RESULT: INCOMPLETE` means the run never finished, so there is no verdict to read).
+   SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker).
+   **`RESULT: INCOMPLETE` does NOT mean the run finished without a verdict (#3473 C audit).**
+   This file said exactly that here and states the opposite above, which is the worst kind of
+   doctrine defect: the sentinel is written **at launch**, before the slot is even granted, so
+   `INCOMPLETE` means **still running, queued, or died** — three states, and the first two are
+   the common ones on a re-invoke. Reading it as "the run is over" is how a closer concludes its
+   own live gate is dead, relaunches, and puts **two gates on one summary path** — the exact
+   ambiguity #3473 exists to remove. Do not guess from the sentinel: ask
+   `scripts/gate-liveness.sh` (above), which answers `COMPLETE`/`RUNNING`/`STALLED`/`UNKNOWN`.
    **Never read `gate-<N>.log` into your context** — the SUMMARY file is the only gate text you
    retain. `--lite` never substitutes for this run.
    **Reader contract — VERIFY the run-id, don't trust a bare block (#2874).** The pinned
