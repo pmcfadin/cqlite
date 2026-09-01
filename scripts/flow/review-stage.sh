@@ -113,9 +113,11 @@
 #
 # CONSTRAINTS
 #   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile).
-#   `set -euo pipefail`, shellcheck-clean. All informative output is prefixed
-#   `REVIEW-STAGE:`; notes and usage errors go to stderr. `verdict` prints exactly one
-#   line to stdout and nothing else.
+#   `set -euo pipefail`, written to the same conventions as claim.sh. (NOT verified
+#   shellcheck-clean: shellcheck is not installed on this fleet's boxes and no gate component
+#   runs it, so the claim is not made.) All informative output is prefixed `REVIEW-STAGE:`;
+#   notes and usage errors go to stderr. `verdict` prints exactly one line to stdout and
+#   nothing else.
 #
 # ---END-HELP---
 set -euo pipefail
@@ -534,7 +536,20 @@ cmd_verdict() {
   token="${cls%%|*}"
   cause="${cls#*|}"
   rendered="$token"
-  [ -z "$cause" ] || rendered="$token ($(one_line "$cause"))"
+  # THE CAUSE IS DATA INTERPOLATED INTO A CONTROL LINE, SO ITS ONE RESERVED CHARACTER IS
+  # NEUTRALISED AT THIS ONE EMIT BOUNDARY (#3312's rule). Part of the cause comes from the
+  # REPORT — a self-recorded `result: NOT-RUN (…)` cause, and the unrecognised token this
+  # names verbatim — and the report is written by the very agent whose stage is being judged.
+  # The rest of the line is `key=value` fields a consumer reads, so a cause carrying
+  # `agent=peer` or `elapsed=0` could produce a second, earlier `agent=`/`elapsed=` pair and a
+  # scanning consumer would read the report's value instead of the measured one. '=' is
+  # therefore mapped to '~' HERE, where the value is rendered, and NOT in the parser: every
+  # decision (the token, the exit code) is made on the RAW value before this line is built, so
+  # this is display-only and cannot change a verdict. Refusing instead of redacting would be
+  # wrong — the cause is a diagnostic the operator has to read, and an unreadable NOT-RUN is
+  # worse than a slightly-spelled one. The TOKEN needs no such treatment: it comes from a
+  # closed set matched by string equality.
+  [ -z "$cause" ] || rendered="$token ($(one_line "$cause" | LC_ALL=C tr '=' '~'))"
   # EXACTLY ONE LINE on stdout. Nothing else is printed here, ever: this line is what a
   # consumer greps, and a second line is a second opinion.
   emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE agent=$STAGE_AGENT report=$STAGE_REPORT"
