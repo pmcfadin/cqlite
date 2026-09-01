@@ -228,6 +228,26 @@ print_help() {
   awk 'NR>=2 && /^# ---END-HELP---/{exit} NR>=2 {sub(/^# ?/,""); print}' "$0"
 }
 
+# TEMP FILES ARE REGISTERED THE MOMENT THEY EXIST, and the trap is installed BEFORE any of
+# them is created — otherwise a refusal between `mktemp` and `mv` leaves a stray
+# `.drive-issue-state.md.XXXXXX` in the lane, which is exactly the kind of unexplained file
+# a later session reads as state. The handlers cover signals too: bash runs no EXIT trap
+# for a signal with its default disposition.
+TMP_FILES=''
+cleanup_tmp() {
+  local f
+  for f in $TMP_FILES; do [ -z "$f" ] || rm -f "$f"; done
+  TMP_FILES=''
+}
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp; exit 130' INT
+trap 'cleanup_tmp; exit 143' TERM
+trap 'cleanup_tmp; exit 129' HUP
+
+# register_tmp <path> — remember a temp file for cleanup. Paths here are always mktemp
+# output (no spaces, no newlines), so a space-separated list is safe.
+register_tmp() { TMP_FILES="$TMP_FILES $1"; }
+
 # The shared three-valued process-liveness primitives (#3822). A MISSING library is fatal
 # and NAMED — never a silent continue with the predicates undefined, which would make
 # every liveness answer an empty string and (worse) could read as "gone".
@@ -547,6 +567,7 @@ write_marker() {
 
   tmp="$(mktemp "$path.XXXXXX")" || {
     WRITE_ERR="cannot create a temporary file next to $(sane "$path") — nothing was written"; return 1; }
+  register_tmp "$tmp"
   {
     printf '%s\n' "$STAMP_BEGIN"
     printf 'issue: %s\n' "$issue"
@@ -605,6 +626,7 @@ cmd_write() {
       # Preserve an OWNED marker's body: `write` updates the stamp and the recorded stage,
       # not the author's notes.
       carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
+      register_tmp "$carried"
       marker_body >"$carried"
       assert_body_safe "$carried"
       body_src="$carried"
@@ -692,6 +714,7 @@ cmd_adopt() {
 
   local carried f_stage=''
   carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
+  register_tmp "$carried"
   marker_body >"$carried"
   assert_body_safe "$carried"
   [ -z "$stage" ] || f_stage="stage: $stage"

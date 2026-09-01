@@ -434,7 +434,10 @@ p15=$!
 run "$L15" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$p15" -- write 3822 >/dev/null 2>&1
 # Rewrite the recorded start window into the distant past: the pid is LIVE but it
 # cannot be the process that stamped this marker (pid reuse).
-sed -i 's/^session-pid-start-earliest: .*/session-pid-start-earliest: 1000000000/; s/^session-pid-start-latest: .*/session-pid-start-latest: 1000000002/' "$L15/$MARKER"
+# `sed -i` is NOT portable (BSD/macOS requires an argument to -i), so rewrite via a temp.
+sed -e 's/^session-pid-start-earliest: .*/session-pid-start-earliest: 1000000000/' \
+    -e 's/^session-pid-start-latest: .*/session-pid-start-latest: 1000000002/' \
+    "$L15/$MARKER" >"$T/marker15" && mv "$T/marker15" "$L15/$MARKER"
 ru_out=$(run "$L15" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- verify 3822); ru_rc=$?
 kill "$p15" 2>/dev/null; wait "$p15" 2>/dev/null
 ru_v=$(verdict_of "$ru_out")
@@ -484,7 +487,7 @@ else
 fi
 
 # ===========================================================================
-case_begin 18-write-failure-emits-a-verdict "an I/O failure emits ERROR on STDOUT — the verdict is never captured into a variable"
+case_begin 17-write-failure-emits-a-verdict "an I/O failure emits ERROR on STDOUT — the verdict is never captured into a variable"
 # ===========================================================================
 # Regression pin for a real defect in the first cut: the writer printed its path on
 # stdout and was called inside `$( )`, so a `refuse` inside it exited only the SUBSHELL
@@ -492,26 +495,81 @@ case_begin 18-write-failure-emits-a-verdict "an I/O failure emits ERROR on STDOU
 # verdict at all and put a verdict string inside a path. Every emit site must be in the
 # main shell, which this case measures rather than asserts.
 L18=$(lane lane18)
-chmod 500 "$L18"
-wf_out=$(run "$L18" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>/dev/null); wf_rc=$?
-chmod 700 "$L18"
-if [ "$wf_rc" -ne 0 ] && [ "$(verdict_of "$wf_out")" = ERROR ] && all_lines_anchored "$wf_out"; then
-  ok "an unwritable worktree yields ERROR(rc=$wf_rc) on stdout, anchored — not a swallowed verdict"
+wf_probe="unwritable-worktree"
+if [ "$(id -u)" -eq 0 ]; then
+  # ROOT BYPASSES DIRECTORY PERMISSIONS, so the chmod probe would silently SUCCEED and the
+  # case would pass having measured nothing. Under root the probe is DECLARED unavailable
+  # and replaced by the other route into the same emit path: a marker path that is not a
+  # regular file. Narrower coverage, NAMED rather than hidden.
+  wf_probe="non-regular-marker(root: permission probe unavailable)"
+  mkdir -p "$L18/$MARKER"
 else
-  bad "write failure did not surface a verdict: rc=$wf_rc verdict=$(verdict_of "$wf_out")
+  chmod 500 "$L18"
+fi
+wf_out=$(run "$L18" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>/dev/null); wf_rc=$?
+chmod 700 "$L18" 2>/dev/null || true
+if [ "$wf_rc" -ne 0 ] && [ "$(verdict_of "$wf_out")" = ERROR ] && all_lines_anchored "$wf_out"; then
+  ok "an I/O failure ($wf_probe) yields ERROR(rc=$wf_rc) on stdout, anchored — not a swallowed verdict"
+else
+  bad "write failure did not surface a verdict ($wf_probe): rc=$wf_rc verdict=$(verdict_of "$wf_out")
 $wf_out"
 fi
 
 # ===========================================================================
-case_begin 19-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
+case_begin 18-control-chars-stay-anchored "a hand-edited stamp value carrying control characters cannot break the output anchor"
+# ===========================================================================
+# Contract (b), and the load-bearing half of the anchor: a path (or any hand-edited field)
+# may contain a NEWLINE or an escape sequence, and printed verbatim it emits a line with no
+# DRIVE-STATE: prefix — which every consumer and every case above rests on.
+L17=$(lane lane17)
+run "$L17" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+python3 - "$L17/$MARKER" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace('machine: boxA', 'machine: box\x1b[31mA\x07\x0b')
+open(p, 'w').write(s)
+PYEOF
+cc_out=$(run "$L17" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); cc_rc=$?
+if [ "$cc_rc" -ne 0 ] && [ "$(verdict_of "$cc_out")" = FOREIGN-MACHINE ] && all_lines_anchored "$cc_out" \
+   && ! printf '%s' "$cc_out" | grep -q $'\x1b'; then
+  ok "control characters in a recorded value are masked for display; every line stays anchored"
+else
+  bad "control-character value broke the anchor: rc=$cc_rc
+$(printf '%s' "$cc_out" | cat -v)"
+fi
+
+# ===========================================================================
+case_begin 19-control-char-worktree-refused "a worktree path that cannot be recorded on one line is REFUSED, not recorded lossily"
+# ===========================================================================
+# The worktree axis is stored VERBATIM (a path must compare EXACTLY; sanitizing would alias
+# '/a b' onto '/a-b' and let two lanes verify each other's markers). The filesystem PERMITS
+# a NEWLINE in a directory name, and such a path cannot be recorded on one line at all — so
+# the writer refuses rather than recording an identity it would later mis-compare.
+nl_dir="$T/lane$(printf '20\nnewline')"
+if mkdir -p "$nl_dir" 2>/dev/null; then
+  nl_out=$(run "$nl_dir" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); nl_rc=$?
+  if [ "$nl_rc" -ne 0 ] && [ "$(verdict_of "$nl_out")" = ERROR ] \
+     && all_lines_anchored "$nl_out" && [ ! -f "$nl_dir/$MARKER" ]; then
+    ok "a newline-bearing worktree path is refused (rc=$nl_rc) with an anchored ERROR and nothing written"
+  else
+    bad "newline-bearing worktree path was not refused: rc=$nl_rc
+$(printf '%s' "$nl_out" | cat -v)"
+  fi
+else
+  bad "could not create a newline-bearing directory, so the worktree-recordability refusal was NOT measured (this is a gap, not a pass)"
+fi
+
+# ===========================================================================
+case_begin 20-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
 5-foreign-worktree 6-session-gone-adoptable 7-session-live-peer 8-pid-unrecordable-unknown
 9-writer-refuses-sentinel-body 10-reader-refuses-duplicate-sentinel 11-machine-agrees-with-claim-sh
 12-placeholder-reason-refused 13-write-over-foreign-refuses 14-absent-is-distinct
-15-pid-reuse-recognised 16-closed-verdict-grammar 19-case-floor
-18-write-failure-emits-a-verdict"
-CASE_FLOOR=18
+15-pid-reuse-recognised 16-closed-verdict-grammar 17-write-failure-emits-a-verdict
+18-control-chars-stay-anchored 19-control-char-worktree-refused 20-case-floor"
+CASE_FLOOR=20
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
