@@ -156,7 +156,12 @@ remains the closer’s last look — and since #3465 it is where the gate of rec
 convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
 one full <code dir="auto">==== AGENT-GATE SUMMARY ====</code> block with <code dir="auto">RESULT: PASS</code>, <code dir="auto">tree-integrity: PASS</code>, no
 <code dir="auto">nested-under:</code> line (#2874: a nested sub-gate runs at the SAME tree, so the sha binding provably
-cannot see it) and <code dir="auto">commit:</code>/<code dir="auto">tree-start:</code> covering the certified sha. A <code dir="auto">--lite</code> summary is refused
+cannot see it), <code dir="auto">dirty: no</code> (#3648) and <code dir="auto">commit:</code>/<code dir="auto">tree-start:</code> covering the certified sha. The
+<code dir="auto">dirty:</code> requirement is the third property the sha binding cannot see: a <code dir="auto">dirty: yes</code> run certified
+the sha PLUS uncommitted TRACKED edits (the gate’s capture is <code dir="auto">--exclude-standard</code>, so never a
+gitignored log) and stamps the very same <code dir="auto">commit:</code>/<code dir="auto">tree-start:</code> it would have stamped clean. It is
+matched AFFIRMATIVELY — an absent, empty or unrecognised value REFUSES rather than being read as
+clean — and there is deliberately no env opt-out, because a dirty tree is always re-gateable. A <code dir="auto">--lite</code> summary is refused
 by name anywhere, and a <code dir="auto">--delta</code> summary as the THIRD argument (their headers are distinct by
 construction) — which is exactly the PR #3408 escape: 22 lite PASSes and no full gate.
 <strong>The OPTIONAL fourth argument is how a <code dir="auto">--delta</code> re-cert certifies a merge.</strong> #1892 <em>mandates</em>
@@ -164,7 +169,9 @@ construction) — which is exactly the PR #3408 escape: 22 lite PASSes and no fu
 <code dir="auto">X</code>, and mandates the PR record BOTH blocks — so a 3-arg-only guard red on correct, mandated input.
 In that shape the third argument is the ANCHOR’s full PASS (its sha need not be the certified sha)
 and the fourth is one <code dir="auto">==== AGENT-GATE DELTA SUMMARY ====</code> block carrying <code dir="auto">MODE: delta</code> (asserted
-affirmatively, the inverse of the full block’s belt), <code dir="auto">RESULT: PASS</code>, <code dir="auto">tree-integrity: PASS</code>, a
+affirmatively, the inverse of the full block’s belt), <code dir="auto">RESULT: PASS</code>, <code dir="auto">tree-integrity: PASS</code>,
+<code dir="auto">dirty: no</code> (#3648 — required of the anchor block too, since a dirty anchor hangs the whole chain
+off a tree nobody can reconstruct), a
 <code dir="auto">delta-anchor:</code> naming exactly that anchor — an <code dir="auto">(UNRESOLVED)</code> anchor refuses — and its own
 <code dir="auto">commit:</code>/<code dir="auto">tree-start:</code> at the certified sha. The chain is closed end to end; a delta block ALONE
 is still the #3408 escape and still refused.

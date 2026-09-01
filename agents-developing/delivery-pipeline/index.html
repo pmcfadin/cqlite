@@ -226,8 +226,12 @@ convention honour-system, so the pre-#3465 two-argument call is a loud usage fai
 contract requires the party that LAUNCHED the run, which this script is not), and it cannot prove
 the summary came from a genuine gate rather than a hand-written file — a hostile invoker is out of
 the threat model, since whoever runs the script controls the process. What it closes is <strong>accident
-and drift</strong>, which is the observed failure mode. <code dir="auto">dirty:</code> is reported in the success line, not
-enforced (failing on it is proposed separately in #3648).
+and drift</strong>, which is the observed failure mode. <code dir="auto">dirty:</code> is reported in the success line <strong>and
+enforced</strong> (#3648): the gate-of-record block — and, in Case B, the delta block too — must read
+<code dir="auto">dirty: no</code>, matched affirmatively, so an absent or unrecognised value REFUSES rather than being read
+as clean. A <code dir="auto">dirty: yes</code> run certified the sha PLUS uncommitted tracked edits, which <code dir="auto">commit:</code>/
+<code dir="auto">tree-start:</code> cannot distinguish from the clean tree. No env opt-out exists and none may be added — a
+dirty tree is always re-gateable.
 <strong>The OPTIONAL fourth argument is the only way a <code dir="auto">--delta</code> re-cert can certify a merge.</strong> #1892
 <em>mandates</em> <code dir="auto">--delta</code> — “never a repeat full gate” — for a test/docs-only diff on top of a full PASS
 at anchor <code dir="auto">X</code>, and mandates that the PR record BOTH blocks, so a 3-arg-only guard red on correct,
