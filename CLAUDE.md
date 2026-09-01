@@ -242,15 +242,36 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   MODE**, never one grammar for both:
 
   ```bash
-  # RECORD grammar — full / --lite / --delta. MUST keep REFUSING PARTIAL.
-  grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'          "$AGENT_GATE_SUMMARY_FILE"
+  # RECORD grammar — full / --lite. MUST keep REFUSING PARTIAL (and ERROR and REFUSED).
+  grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'                            "$AGENT_GATE_SUMMARY_FILE"
   # ONLY grammar — `--only <component>` ONLY. NEVER use this on the gate of record.
-  grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'  "$AGENT_GATE_SUMMARY_FILE"
+  grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'                    "$AGENT_GATE_SUMMARY_FILE"
+  # DELTA grammar — `--delta <anchor>` ONLY. It alone can terminate ERROR or REFUSED.
+  grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'      "$AGENT_GATE_SUMMARY_FILE"
   ```
 
-  Both **ANCHORED and token-terminated**, because unanchored the first matches `RESULT: PASSENGER` and
-  the second `RESULT: PARTIALLY` — a spelling check masquerading as a state check, the `PASS*` accepts
-  `PASSthisNeverRan` defect this repo has now made three times. Better than either: ask the shared
+  **THREE MODES, THREE SETS — and `--delta` is the one that bites.** `run_delta` can terminate with
+  `ERROR` (4 emit sites) or `REFUSED` (3 more, reached via `emit_summary "$(_tree_result REFUSED)"`,
+  which is why grepping for `emit_summary REFUSED` finds nothing and the token *looks* unemitted — it
+  **is** emitted, and `gate-liveness.sh`'s comment enumerating it is accurate, not stale). All seven
+  sites are inside `run_delta`, and a full gate emits only `PASS`/`FAIL` — so a `--delta` poller using
+  the RECORD grammar **hangs forever on a terminal outcome**, #3750's own defect in a third mode.
+  Record therefore stays exactly `PASS|FAIL`: widening it would weaken the gate-of-record probe for
+  nothing, and that refusal is load-bearing (AC4). The delta set is **`gate-liveness.sh`'s
+  already-enumerated terminal set, token for token** — ONE source of truth for "what is terminal", not
+  a second list — so it carries `PARTIAL` (which `--delta` cannot emit; that is the `--only` demotion)
+  and the reader's defensive `REFUSED`, with `ERROR` the emit you will actually meet. Better than any
+  of the three: **ask the reader**, which is that one source of truth executable rather than
+  transcribed.
+
+  **Widening a COMPLETION grammar is safe here and would not have been before**: matching
+  `ERROR`/`REFUSED` cannot create a false pass because completion and verdict are now separate
+  assertions (rule 2), so this fix is *enabled* by the split it was a finding against — which is why
+  three completion grammars are not three chances to be wrong.
+
+  All three **ANCHORED and token-terminated**, because unanchored the first matches `RESULT: PASSENGER`,
+  the second `RESULT: PARTIALLY` and the third `RESULT: ERRORS` — a spelling check masquerading as a
+  state check, the `PASS*` accepts `PASSthisNeverRan` defect this repo has now made three times. Better than either: ask the shared
   reader, `bash scripts/gate-liveness.sh <summary-file> --run-id <id>` (exit 0 = COMPLETE), which
   enumerates the terminal set from `agent-gate.sh`, requires the block's END marker and enforces the
   #2874 run-id binding. **One implementation, one grammar** — a caller that re-greps it is a second

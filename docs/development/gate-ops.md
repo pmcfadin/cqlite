@@ -406,13 +406,29 @@ It is overwritten with `RESULT: PASS` / `RESULT: FAIL` only at the terminal emit
 **Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. There is one correct completion predicate PER RUN MODE — never one for both (#3750) — and in agents, skills, docs, and any helper that polls a summary file they are:
 
 ```bash
-# RECORD grammar — full / --lite / --delta. Anchored + token-terminated, and it MUST keep refusing PARTIAL.
+# RECORD grammar — full / --lite. Anchored + token-terminated, and it MUST keep refusing PARTIAL
+# (and ERROR and REFUSED). Widening it would weaken the gate-of-record probe for nothing.
 grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
 
 # ONLY grammar — `--only <component>` ONLY, and NEVER on the gate of record (#3750). `--only` demotes a
 # SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar above spins on green. Prefer the EXIT STATUS
 # (3 = completed PARTIAL); this is the fallback for a detached run whose exit code you never see.
 grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+
+# DELTA grammar — `--delta <anchor>` ONLY, and it is the one that bites (#3750 round 3). `run_delta` can
+# terminate with ERROR (4 emit sites) or REFUSED (3 more, via `emit_summary "$(_tree_result REFUSED)"` —
+# which is why grepping `emit_summary REFUSED` finds nothing and the token looks unemitted; it IS
+# emitted, and gate-liveness.sh's comment enumerating it is accurate, not stale). All seven are inside
+# `run_delta`, so a --delta poller on the RECORD grammar HANGS on a terminal outcome. This set is
+# gate-liveness.sh's own enumerated terminal set token for token — ONE source of truth, not a second
+# list — hence PARTIAL (unemittable by --delta; that is the --only demotion) and the defensive REFUSED.
+grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+
+# Widening a COMPLETION grammar is safe here and would NOT have been before #3750 split completion from
+# verdict: matching ERROR/REFUSED cannot create a false pass, because the verdict is now a separate
+# affirmative read (the PASS token exactly, or the component's own line). Three grammars are therefore
+# not three chances to be wrong. Better than any of them: ask gate-liveness.sh, the single source of
+# truth executable rather than transcribed.
 
 # And COMPLETION IS NOT A VERDICT: `PARTIAL` says the run ENDED, not that your component passed. Read the
 # component's OWN line, as a separate assertion. A completed run whose component SKIPped is NOT a pass.

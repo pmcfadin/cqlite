@@ -790,10 +790,13 @@ fi
 # able to tell which of the THREE modes a site is using, so a site that names two grammars
 # and not the third is a site that teaches the hang.
 _missing=""
-for _f in "$REPO_ROOT/CLAUDE.md" \
-          "$REPO_ROOT/docs/development/gate-ops.md" \
-          "$REPO_ROOT/website/src/content/docs/agents-developing/gate-contract.md" \
-          "$REPO_ROOT/.claude/skills/ci-cd-validation/SKILL.md"; do
+_sites=$(grep -rlF 'RESULT: (PASS|FAIL|PARTIAL)' \
+           "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/docs" "$REPO_ROOT/website/src/content/docs" \
+           "$REPO_ROOT/.claude" 2>/dev/null | grep -v '/openspec/changes/archive/' | sort)
+if [ -z "$_sites" ]; then
+  bad "15.11 the site list could not be derived (nothing publishes the --only grammar?)"
+fi
+for _f in $_sites; do
   grep -qF 'ERROR|REFUSED' "$_f" 2>/dev/null || _missing="$_missing ${_f#$REPO_ROOT/}"
 done
 if [ -z "$_missing" ]; then
@@ -818,11 +821,12 @@ fi
 # predicted (`grep -cE '^(ok|FAIL) '` per leading section number), because a floor written
 # from memory is a floor that silently drifts low. Round 2 moved section 13 from 2 to 4
 # (the taxonomy descope replaced one code-taxonomy case with four liveness-silence ones)
-# and added section 14, so the total rose 63 -> 67. Raised DELIBERATELY: the total is a
-# `-lt` floor, so leaving it at 63 would have let four cases be deleted while the suite
-# still reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2"
-FLOOR=67
+# and added section 14, so the total rose 63 -> 67; round 3 added section 15 (the third
+# per-mode completion grammar), 67 -> 78. Raised DELIBERATELY each time: the total is a
+# `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
+# reported green — this repo's own case-floor lesson.
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11"
+FLOOR=78
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

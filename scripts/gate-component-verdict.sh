@@ -107,14 +107,41 @@
 # --run-id BINDS THE ANSWER TO A RUN (#2874). Pass it whenever you know it: without it a
 # block left by a CONCURRENT PEER in the same checkout answers about the peer's gate.
 #
-# THE TWO DOCUMENTED TEXT-COMPLETION GRAMMARS (fallback only; prefer the exit status).
-# Quoted in their ANCHORED, token-terminated form, which is also the only form safe to
-# print here:
-#   record (full / --lite / --delta):  grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'
+# THE THREE DOCUMENTED TEXT-COMPLETION GRAMMARS, ONE PER RUN MODE (fallback only; prefer
+# the exit status). Quoted in their ANCHORED, token-terminated form, which is also the only
+# form safe to print here:
+#   record (full / --lite):            grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'
 #   only   (--only <component>):       grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'
-# Unanchored, the first also matches a PASSENGER token and the second a PARTIALLY token —
-# a spelling check masquerading as a state check. The record grammar must keep REFUSING
-# the PARTIAL token, and it does.
+#   delta  (--delta <anchor>):         grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'
+# Unanchored, the first also matches a PASSENGER token, the second a PARTIALLY token and the
+# third an ERRORS token — a spelling check masquerading as a state check. The record grammar
+# must keep REFUSING the PARTIAL token, and it does; it refuses ERROR and REFUSED too.
+#
+# WHY --delta NEEDS ITS OWN, AND WHY IT IS NOT IN THE RECORD ONE (#3750 review round 3).
+# `--delta` can terminate with ERROR (4 emit sites in `run_delta`) or REFUSED (3 more, via
+# `emit_summary "$(_tree_result REFUSED)"` — which is why a grep for `emit_summary REFUSED`
+# finds nothing and the token looks unemitted; it IS emitted, and gate-liveness.sh's comment
+# enumerating it is accurate, not stale). Both are `--delta`-ONLY: every one of the seven
+# sites is inside `run_delta`, and a full gate emits only PASS or FAIL. So a `--delta` poller
+# using the RECORD grammar HANGS FOREVER on a terminal outcome — #3750's own defect class in
+# a third mode. Record therefore stays exactly PASS|FAIL (widening it would weaken the
+# gate-of-record probe for nothing, and that refusal is load-bearing), and `--delta` gets its
+# own set.
+#
+# ONE SOURCE OF TRUTH: the delta set is gate-liveness.sh's ALREADY-ENUMERATED terminal set,
+# token for token, rather than a second independent list — so "what is terminal" is decided
+# in one place. It therefore carries PARTIAL (which `--delta` cannot itself emit; that is the
+# `--only` demotion) and REFUSED, which is the reader's DEFENSIVE set; ERROR is the emit a
+# `--delta` run is most likely to hand you. Better than any of the three: ASK the reader,
+# which is that single source of truth executable instead of transcribed.
+#
+# AND WHY WIDENING A COMPLETION GRAMMAR IS SAFE HERE, WHICH IT WOULD NOT HAVE BEEN BEFORE:
+# matching ERROR/REFUSED as COMPLETION cannot create a false pass, because completion and
+# verdict are now SEPARATE assertions — the verdict is an affirmative read of the PASS token
+# exactly (premerge-assert.sh) or of the component's own line (this script). Before that
+# separation the two questions shared one token, and widening would have been dangerous.
+# This fix is thus ENABLED by the change it was a finding against, which is the reason three
+# completion grammars are not three chances to be wrong.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

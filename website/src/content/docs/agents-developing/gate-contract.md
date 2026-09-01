@@ -1050,13 +1050,26 @@ read it:
 > exist. The only correct predicate is:
 >
 > ```bash
-> # RECORD grammar — full / --lite / --delta. Anchored + token-terminated; it MUST keep refusing PARTIAL.
+> # RECORD grammar — full / --lite. Anchored + token-terminated; it MUST keep refusing PARTIAL, and
+> # ERROR and REFUSED with it. Widening it would weaken the gate-of-record probe for nothing.
 > grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
 >
 > # ONLY grammar — `--only <component>` ONLY, never the gate of record (#3750). `--only` demotes a
 > # SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar spins on green. The EXIT STATUS (3) is
 > # primary; this is the fallback for a detached run whose exit code you never observe.
 > grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+>
+> # DELTA grammar — `--delta <anchor>` ONLY. It is the only mode that can terminate ERROR or REFUSED
+> # (7 emit sites, all inside `run_delta`; REFUSED goes through `emit_summary "$(_tree_result REFUSED)"`,
+> # so grepping `emit_summary REFUSED` finds nothing while the token IS emitted). A --delta poller on
+> # the RECORD grammar hangs on a terminal outcome. This set is gate-liveness.sh's own enumerated
+> # terminal set, token for token — ONE source of truth, so it carries PARTIAL (which --delta cannot
+> # emit) and the reader's defensive REFUSED, with ERROR the emit you will actually meet.
+> grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+>
+> # Safe to widen COMPLETION here, and it would not have been before #3750 separated completion from
+> # verdict: the verdict is a separate affirmative read, so three grammars are not three chances to be
+> # wrong. Better than any of them: ask gate-liveness.sh.
 >
 > # COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:
 > bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>

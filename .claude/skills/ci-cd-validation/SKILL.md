@@ -32,7 +32,12 @@ still-queued) gate as certified, and an unanchored form matches `RESULT: PASSENG
 **COMPLETION AND VERDICT ARE TWO ASSERTIONS (#3750).** The record grammar above is for full/`--lite`/`--delta`
 and must keep **REFUSING** `PARTIAL`. An **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so
 that grammar spins on green there. Poll `--only` by **EXIT STATUS** (`3` = completed PARTIAL) where you can
-observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`; then read the
+observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. **`--delta`
+is a THIRD mode with a THIRD set** — it alone can terminate `ERROR` or `REFUSED` (7 emit sites, all in
+`run_delta`; `REFUSED` arrives via `emit_summary "$(_tree_result REFUSED)"`, so it looks unemitted and is
+not), so a `--delta` poller on the record grammar **hangs on a terminal outcome**:
+`grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` — `gate-liveness.sh`'s own
+enumerated terminal set, token for token, so "what is terminal" is decided in ONE place. Then read the
 component's verdict SEPARATELY, from its own line:
 `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name> --run-id <id>` (exit 0 PASS /
 1 NOT-PASS / 4 COULD-NOT-MEASURE, no verdict available whatever the reason / 64 USAGE). It is **NOT a

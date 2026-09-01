@@ -121,7 +121,10 @@ never gate stdout or review churn.
       the record grammar SPINS ON GREEN (#3750) — there the exit status (**3**) is primary, the fallback is
       `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and the component's VERDICT is a SEPARATE read
       (`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>`), because a completed run
-      whose component SKIPped is not a pass.
+      whose component SKIPped is not a pass. And **`--delta` is a THIRD mode with a THIRD set** — it
+      alone can terminate `ERROR` or `REFUSED`, so polling a `--delta` re-cert with the record grammar
+      hangs on a terminal outcome:
+      `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
       Lite's components are exactly `file-size fmt clippy roborev-lints scoped-tests` (the
       `scripts/agent-gate.sh` `LITE_COMPONENTS` array), where clippy is **per-package scoped** (#1844) and
       `scoped-tests` is blast-radius (touched package `--lib` + the diff's new `--test` targets). It is the

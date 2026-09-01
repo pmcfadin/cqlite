@@ -95,7 +95,7 @@ liveness probe on a full/`--lite`/`--delta` summary file is the **RECORD grammar
 `RESULT: PARTIAL`, so the record grammar spins on green (#3750) — use its **exit status `3`**, or
 `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and then read the component's verdict SEPARATELY
 with `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` (a SKIPped component
-is not a pass).
+is not a pass). `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
 
 Likewise you never invoke roborev: the closer runs it through the only sanctioned invocation,
 `bash scripts/flow/roborev-review.sh --agent <agent> --model <model>` (#2964; both flags required). Its

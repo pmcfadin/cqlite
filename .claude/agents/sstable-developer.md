@@ -102,7 +102,7 @@ written by the EXIT trap, **not** a verdict (#3041). An **`--only <component>`**
 `RESULT: PARTIAL`, so that grammar spins on green (#3750): poll its **exit status `3`** or
 `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, then read the component's verdict SEPARATELY —
 `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` — because a completed run
-whose component SKIPped is not a pass.
+whose component SKIPped is not a pass. `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
 (If you omit `AGENT_GATE_SUMMARY_FILE`, `--lite`'s default recovery file is
 `.agent-gate-lite-summary.txt`.) **Rule: never read raw gate stdout / `*.log` into a persistent context** —
 the SUMMARY block is the only gate text you retain.

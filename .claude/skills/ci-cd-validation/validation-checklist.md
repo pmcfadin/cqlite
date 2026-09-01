@@ -29,5 +29,9 @@ read only the summary file — never `gate.log`.
   `3`** where observable, else `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. Verdict:
   `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` — a completed run whose
   component SKIPped or is absent is NOT a pass.
+- **`--delta` is a THIRD mode with a THIRD completion set (#3750).** It alone can terminate `ERROR` or
+  `REFUSED`, so polling it with the record grammar hangs on a terminal outcome:
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` — `gate-liveness.sh`'s own
+  enumerated terminal set, token for token.
 
 See `SKILL.md` (this dir) for the loop and `docs/development/pm-operating-loop.md` for the delivery model.
