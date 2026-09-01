@@ -59,12 +59,14 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (283 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (288 cases).**
       It runs a **complete two-arm, five-pair session end to end** against stub
       `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, so a driver that cannot
       complete a session fails here rather than on the rig after both release
-      builds. **Declared gap, printed by the suite itself: the real binaries are
-      exercised by nothing** — this proves the driver's logic, not the server's.
+      builds — **including the step-4 sensitivity control**, whose deliberately
+      asymmetric arms are run end to end. **Declared gap, printed by the suite
+      itself: the real binaries are exercised by nothing** — this proves the
+      driver's logic, not the server's.
       Seconds, `python3` only, no rig and no root, so there is no excuse for
       skipping it — and it is the cheapest step in this runbook by four orders of
       magnitude. It drives every fail-closed guard with the bad input that guard
@@ -750,7 +752,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     283 cases incl. a full session under PATH shims; run it first
+  selftest-analyze.sh     288 cases incl. full sessions under PATH shims; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

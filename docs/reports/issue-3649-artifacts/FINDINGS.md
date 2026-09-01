@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 282 deterministic cases, including a complete two-arm session run end to end under PATH shims |
+| `selftest-analyze.sh` | 288 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,54 @@ session, not by this lane.
 
 ---
 
-## 9. The fifth lesson, and the one that closes the class: the driver was never executed
+## 9. The sixth lesson: two correct rules can compose into an unusable whole
+
+Round 6's High was that **the runbook's own sensitivity control could not be
+analyzed**. Round 2 required the analyzer to refuse cross-arm server-config
+differences. Round 5 required asymmetric per-arm flags to carry `--control`. Both
+were right. Nothing reconciled them — so the control that deliberately sets the
+head arm's `--max-batch-bytes 1` was refused as `server-config-mismatch` before
+the control label was even considered.
+
+**What makes this worse than an ordinary defect is which check it disabled.** The
+sensitivity control is what tells an operator whether an `INCONCLUSIVE` means
+"there is no effect" or "this box cannot measure one". Losing it does not corrupt
+a number; it removes the ability to interpret the number you get.
+
+**The fix is a declared, structured expectation instead of a blanket rule with an
+exception.** The driver computes each arm's effective configuration once
+(`effective-flag`), records it in the manifest as data, and the analyzer permits
+**exactly** the declared differences, under a control label, only where the
+observed values match the declared ones. An undeclared difference is still a
+refusal, and so is an observation that does not match its own declaration.
+
+Two things worth carrying:
+
+- **`NOT-REQUESTED` is a value, not an absence.** The first version collapsed
+  "this arm takes the server default" to "unknown", which made the sensitivity
+  control's difference *undeclared* — the base arm requests nothing and the head
+  arm overrides. That is the same shape as every partial-observation bug in this
+  lane: a state that means something specific, flattened into "no information".
+- **Only execution finds this class.** Two individually-correct rules, each with
+  its own passing tests, composed into an unusable whole. The case that catches
+  it runs the control end to end under the shims — and it exists because
+  §10 (the driver was never executed) had already made that possible.
+
+**And a sweep, not just a fix.** Findings 1, 3 and 4 were all fallout from the
+round-4 restructure: a new rule colliding with an old one, a manifest field
+recording the requested value instead of the effective one (`prewarm: true` on a
+cold session), and help text pointing at a path the driver no longer writes. So
+the restructure's whole surface got swept — and the sweep found **two self-test
+cases that had been passing vacuously since round 4**, both asserting things
+about `<work-dir>/results/`, a directory the driver stopped writing. A
+restructure that closes a class reliably leaves its own debris, and the debris is
+shallower but not less real. **When a restructure lands, sweep every path,
+default and doc string that named the old design — the cost of that sweep is
+lower than one review round.**
+
+---
+
+## 10. The fifth lesson, and the one that closes the class: the driver was never executed
 
 Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
 helper had been extracted into `ab_driver_support.py` and one call site was left
@@ -328,8 +375,8 @@ that could not complete a single session.
 
 This is the FIFTH instance of one class in this lane — the dead utilization path,
 ten environment-coupled cases, the silent passer among them, the inline parity
-rule, and now the driver itself. §13 (a green suite over an unexecuted subject)
-states the class; §10 (when one mechanism keeps producing findings) says that when a
+rule, and now the driver itself. §14 (a green suite over an unexecuted subject)
+states the class; §11 (when one mechanism keeps producing findings) says that when a
 mechanism keeps producing findings you remove the reason it can. **The reason was
 that the session loop needed a rig, so nothing could run it.** So it no longer
 needs one:
@@ -367,7 +414,7 @@ which is salted per process and would have made the suite non-deterministic.
 
 ---
 
-## 10. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+## 11. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
 
 Four review rounds produced findings in the driver's session lifecycle — the
 work directory, the port, readiness, the census — roughly seven of the last
@@ -399,10 +446,10 @@ improving the sequencing and **removed the shared resource instead**:
 defect.** Not the sequencing around it, not the guard in front of it. Ask what
 resource is being shared and whether it needs to be shared at all — the fix that
 ends the series is usually a deletion. Same shape as removing the second duration
-grammar rather than widening it -- §12 (a parameter accepted without being
+grammar rather than widening it -- §13 (a parameter accepted without being
 checked) -- one level up.
 
-**And a second instance of the mirroring rule from §12 (a parameter accepted
+**And a second instance of the mirroring rule from §13 (a parameter accepted
 without being checked).** The corpus census
 scanned the whole data root recursively while the server reads **one** resolved
 directory, flat. So both size gates could pass on files that are never served —
@@ -421,7 +468,7 @@ nowhere else to decide it.
 
 ---
 
-## 11. The third lesson: the dangerous defect is the one no test would have failed on
+## 12. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -456,7 +503,7 @@ count forces.
 
 ---
 
-## 12. The second lesson: a parameter accepted without being checked against the claim
+## 13. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -490,7 +537,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 13. The first lesson: a green suite over an unexecuted subject
+## 14. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -521,7 +568,7 @@ Two rules worth carrying:
 
 ---
 
-## 14. A process finding: cadence, not partition
+## 15. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -535,7 +582,7 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §13 (a green suite over an unexecuted subject)
+which is precisely the hole §14 (a green suite over an unexecuted subject)
 describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 
