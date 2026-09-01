@@ -6,7 +6,7 @@ observation, because a rep silently dropped is worse than a rep reported as refu
 
 ## Published reps — every rep, every check
 
-| rep | arm | warm (prewarm rows) | rows measured | pinned (kernel read-back) | lost samples | loadavg **before/after (ENDPOINT reads — see gap note)** | peer procs | verdict |
+| rep | arm | warm (prewarm rows) | rows post-barrier (incl. settle) | pinned (kernel read-back) | lost samples | loadavg **before/after (ENDPOINT reads — see gap note)** | peer procs | verdict |
 |---|---|--:|--:|---|--:|--:|--:|---|
 | `ac1-perfprof-1` | annotate | 4,000,000 | 14,213,888 | cpu 2 | 0 | 1.04 / 2.58 | 1 | PUBLISHED |
 | `ac1-perfprof-2` | annotate | 4,000,000 | 12,614,912 | cpu 2 | 0 | 4.46 / 6.70 | 11 | PUBLISHED |

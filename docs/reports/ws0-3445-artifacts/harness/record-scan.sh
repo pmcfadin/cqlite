@@ -158,6 +158,13 @@ else
     -- sleep "$SECS" 2> "$OUT/counters.csv" > "$OUT/perf-stat.stdout" || PERF_RC=$?
 fi
 
+# FINDING (roborev r3): the sampler was killed WITHOUT a final sample and `loadavg_after` was
+# excluded from the peak, so a contention spike in the last sampling interval was invisible --
+# undercutting the very "max across the WHOLE window, not endpoints" property this check exists
+# to establish. Take one synchronous, well-formed sample AFTER the measurement completes and
+# BEFORE stopping the sampler, so the closing interval is inside the adjudicated set.
+NPEER_END=$(pgrep -c -f 'cargo|agent-gate|maturin|rustc' || :)
+echo "$(date -u +%H:%M:%S) $(cut -d' ' -f1 /proc/loadavg) ${NPEER_END:-0}" >> "$OUT/load-samples.txt"
 stop_sampler
 { echo "loadavg_after=$(cut -d' ' -f1-3 /proc/loadavg)"
   echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || :)"
@@ -194,6 +201,13 @@ WORKER_RC=0
 wait "$WPID" || WORKER_RC=$?
 # Its summary is REQUIRED, not optional: the validity ledger's "rows measured" column has
 # no mechanical backing without it.
+# NOTE ON `rows_total` IN THE COPIED SUMMARY (roborev r3 finding): it counts rows from BARRIER
+# RELEASE, which includes the `--settle` interval that precedes the perf window. It is therefore
+# "total post-barrier rows", NOT "rows measured during the perf window", and nothing here claims
+# otherwise. Deriving the windowed count would mean intersecting the worker's progress records
+# with the perf window boundaries; until that exists, the field is LABELLED rather than
+# reinterpreted -- an unsupported column is the same "claims a control it does not have" class
+# this rig has already had to correct twice.
 if ! cp "$RUNDIR/worker-0.summary.json" "$OUT/worker-summary.json" 2>/dev/null; then
   echo "record-scan.sh: worker wrote no summary — refusing to call this a rep" >&2
   if [ "$WORKER_RC" -eq 0 ]; then WORKER_RC=1; fi

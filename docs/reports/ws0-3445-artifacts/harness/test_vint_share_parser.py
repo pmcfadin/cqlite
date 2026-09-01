@@ -61,6 +61,23 @@ check("unresolved address -> empty chain",
       fake_addr2line("0x0000000000001000\n??\n??:0"),
       {0x1000: []})
 
+# 1b. THE ROUND-2 RESIDUAL (roborev r3 finding 1): function `??` with a REAL location. The
+#     previous parser dropped a frame only when BOTH halves were unknown, so this came back as
+#     ["??"] -- truthy -- bypassing the no-chain guard while discarding the one component that
+#     could identify the code. Both halves must survive.
+check("?? function with a real location keeps the location",
+      fake_addr2line("0x0000000000001000\n??\n/data/x/cqlite-core/src/parser/vint.rs:41"),
+      {0x1000: [("??", "/data/x/cqlite-core/src/parser/vint.rs:41")]})
+
+# 1c. ...and such a chain must classify as VInt, not as "other": no usable function anywhere,
+#     but a location inside the decoder's own source file.
+check("?? function + vint.rs location classifies as narrow",
+      vs.classify([("??", "/data/x/cqlite-core/src/parser/vint.rs:41")]), "narrow")
+
+# 1d. A chain with nothing usable classifies as UNRESOLVED, which callers route to no_chain.
+check("wholly unusable chain -> unresolved", vs.classify([]), "unresolved")
+check("?? + ??:0 frame -> unresolved", vs.classify([("??", "??:0")]), "unresolved")
+
 # 2. A real inlined chain keeps every frame, innermost first.
 check("resolved chain keeps all frames",
       fake_addr2line(
@@ -69,8 +86,8 @@ check("resolved chain keeps all frames",
           "/src/parser/vint.rs:41\n"
           "cqlite_core::parser::vint::parse_vuint\n"
           "/src/parser/vint.rs:418"),
-      {0x1000: ["cqlite_core::parser::vint::decode_unsigned",
-                "cqlite_core::parser::vint::parse_vuint"]})
+      {0x1000: [("cqlite_core::parser::vint::decode_unsigned", "/src/parser/vint.rs:41"),
+                ("cqlite_core::parser::vint::parse_vuint", "/src/parser/vint.rs:418")]})
 
 # 3. The `<u8>::leading_ones` case this attribution depends on: an innermost frame in core
 #    whose OUTER frame is the decoder. Both are kept, so `classify` still sees the decoder.
@@ -78,32 +95,42 @@ check("core frame inlined into the decoder is retained",
       fake_addr2line(
           "0x0000000000001000\n<u8>::leading_ones\n/rustc/x/library/core/src/num/uint_macros.rs:201\n"
           "cqlite_core::parser::vint::decode_unsigned\n/src/parser/vint.rs:44"),
-      {0x1000: ["<u8>::leading_ones", "cqlite_core::parser::vint::decode_unsigned"]})
+      {0x1000: [("<u8>::leading_ones", "/rustc/x/library/core/src/num/uint_macros.rs:201"),
+                ("cqlite_core::parser::vint::decode_unsigned", "/src/parser/vint.rs:44")]})
 
 # 4. A frame with a real function but an unknown LINE is information and is kept: dropping it
 #    would swing the error the other way and undercount attributable cycles.
 check("known function with unknown line is kept",
       fake_addr2line("0x0000000000001000\ncqlite_core::parser::vint::decode_unsigned\n??:0"),
-      {0x1000: ["cqlite_core::parser::vint::decode_unsigned"]})
+      {0x1000: [("cqlite_core::parser::vint::decode_unsigned", "??:0")]})
 
 # 5. Mixed batch: a resolved address and an unresolved one must not contaminate each other.
 check("unresolved entry does not leak into its neighbour",
       fake_addr2line(
           "0x0000000000001000\ncqlite_core::parser::vint::decode_unsigned\n/src/parser/vint.rs:41\n"
           "0x0000000000002000\n??\n??:0"),
-      {0x1000: ["cqlite_core::parser::vint::decode_unsigned"], 0x2000: []})
+      {0x1000: [("cqlite_core::parser::vint::decode_unsigned", "/src/parser/vint.rs:41")],
+       0x2000: []})
 
 # 6. classify() must agree: an empty chain is NOT "other" as far as callers are concerned --
 #    they test emptiness first. Pinned so a future refactor cannot fold it back in.
 check("classify treats a decoder frame as narrow",
-      vs.classify(["cqlite_core::parser::vint::decode_unsigned"]), "narrow")
+      vs.classify([("cqlite_core::parser::vint::decode_unsigned", "/src/parser/vint.rs:41")]),
+      "narrow")
 check("classify treats a bare vint-module frame as wide_only",
-      vs.classify(["cqlite_core::parser::vint::parse_vuint"]), "wide_only")
+      vs.classify([("cqlite_core::parser::vint::parse_vuint", "/src/parser/vint.rs:418")]),
+      "wide_only")
+# A usable function that is NOT vint must stay "other" even if some location mentions vint.rs:
+# a real function name is never overridden by the location rescue.
+check("usable non-vint function is not rescued by a vint location",
+      vs.classify([("malloc", "/data/x/cqlite-core/src/parser/vint.rs:41")]), "other")
 
 # 7. The unresolved-frame predicate itself, at its boundaries.
-check("_frame_unresolved: ?? / ??:0", vs._frame_unresolved("??", "??:0"), True)
-check("_frame_unresolved: ?? with real location", vs._frame_unresolved("??", "/src/a.rs:9"), False)
-check("_frame_unresolved: real function, ??:0", vs._frame_unresolved("foo", "??:0"), False)
+check("_func_usable: ??", vs._func_usable("??"), False)
+check("_func_usable: real", vs._func_usable("foo"), True)
+check("_loc_usable: ??:0", vs._loc_usable("??:0"), False)
+check("_loc_usable: ??:?", vs._loc_usable("??:?"), False)
+check("_loc_usable: real", vs._loc_usable("/src/a.rs:9"), True)
 
 print()
 if FAILURES:

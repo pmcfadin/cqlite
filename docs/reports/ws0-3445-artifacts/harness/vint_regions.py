@@ -81,33 +81,26 @@ def sym_of(addr: int, sym_addrs: list[int], sym_names: list[str]) -> str:
     return sym_names[i] if i >= 0 else "?"
 
 
-def chains_for(binary: str, addrs: list[int]) -> dict[int, list[str]]:
-    if not addrs:
-        return {}
-    out = subprocess.run(
-        ["addr2line", "-e", binary, "-i", "-f", "-C", "-a"],
-        input="\n".join(f"0x{a:x}" for a in addrs) + "\n",
-        capture_output=True, text=True, check=True,
-    ).stdout
-    chains: dict[int, list[str]] = {}
-    cur = None
-    expect_func = True
-    for line in out.splitlines():
-        if line.startswith("0x"):
-            cur = int(line.strip(), 16)
-            chains[cur] = []
-            expect_func = True
-            continue
-        if cur is None:
-            continue
-        if expect_func:
-            chains[cur].append(line.strip())
-        expect_func = not expect_func
-    return chains
+# NOTE: this module deliberately has NO chain builder of its own. It had one -- a second
+# addr2line parser returning bare function strings -- and that duplication is exactly how the
+# two scripts came to hold different notions of an "unresolved" frame, which roborev found
+# twice. `vint_share.inline_chains` is the single implementation; this module imports it.
 
 
-def is_vint(chain: list[str]) -> bool:
-    return any(f.startswith(d) for f in chain for d in DECODER_FRAMES)
+def is_vint(chain) -> bool:
+    """Delegates to `vint_share.classify` so the two scripts cannot drift apart.
+
+    This re-implemented the test over function strings, which is exactly how the two ended up
+    with different notions of an "unresolved" frame. One definition, one place.
+    """
+    return _vint_share().classify(chain) == "narrow"
+
+
+def _vint_share():
+    """Import the sibling module, resolving its directory the same way `main` does."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import vint_share
+    return vint_share
 
 
 def fingerprint_anchors(addrs: list[int], mnem: dict[int, str], text: dict[int, str]) -> list[int]:
@@ -133,6 +126,11 @@ def main() -> int:
     ap.add_argument("--binary", required=True)
     ap.add_argument("--perf-data", help="perf.data to weight opcodes/callers by cycles")
     ap.add_argument("--json-out")
+    ap.add_argument("--max-no-chain", type=float, default=20.0,
+                    help="percent of IN-BINARY cycles at addresses DWARF cannot describe, above "
+                         "which this REFUSES to publish the cycle-weighted tables. Same bound "
+                         "vint_share.py enforces: a guard added to one consumer of a dataset and "
+                         "not the other is a guard with a hole in it")
     args = ap.parse_args()
 
     addrs, mnem, text = disasm(args.binary)
@@ -143,7 +141,7 @@ def main() -> int:
 
     # DWARF side: classify every anchor and every bswap, plus a window around each anchor.
     probe = sorted(set(anchors) | set(bswaps))
-    chains = chains_for(args.binary, probe)
+    chains = _vint_share().inline_chains(args.binary, probe)
     anchors_in_vint = [a for a in anchors if is_vint(chains.get(a, []))]
     anchors_outside = [a for a in anchors if not is_vint(chains.get(a, []))]
     bswaps_in_vint = [a for a in bswaps if is_vint(chains.get(a, []))]
@@ -199,8 +197,9 @@ def main() -> int:
         no_chain_cycles = 0
         for a, cyc in by_addr.items():
             ch = schains.get(a)
-            if not ch:
-                # No DWARF chain: counted, never folded into "not VInt". See vint_share.py.
+            if not ch or vsh.classify(ch) == "unresolved":
+                # Absent chain and UNUSABLE chain are the same state and take the same branch,
+                # never folded into "not VInt". See vint_share.py.
                 no_chain_cycles += cyc
                 continue
             if not is_vint(ch):
@@ -218,6 +217,16 @@ def main() -> int:
                 "?",
             )
             by_caller[caller] += cyc
+        nc_pct = 100.0 * no_chain_cycles / in_binary if in_binary else 100.0
+        if nc_pct > args.max_no_chain:
+            print(
+                f"vint_regions.py: REFUSED — {nc_pct:.2f}% of in-binary cycles are at addresses "
+                f"DWARF cannot describe (> {args.max_no_chain}%). The cycle-weighted tables would "
+                f"be undercounted by an unbounded amount.",
+                file=sys.stderr,
+            )
+            return 1
+
         result["cycle_weighted"] = {
             "cycles_total_all_dsos": total,
             "cycles_in_binary": in_binary,
@@ -226,6 +235,16 @@ def main() -> int:
             "no_chain_pct_of_in_binary": 100.0 * no_chain_cycles / in_binary if in_binary else 0.0,
             "vint_pct_of_total": 100.0 * vint_cycles / total if total else 0.0,
             "vint_pct_of_in_binary": 100.0 * vint_cycles / in_binary if in_binary else 0.0,
+            # This table is built from RAW, UNSHIFTED sample IPs, and this host has no PEBS
+            # (../raw/counter-capability-census.md), so an IP can sit a few instructions past
+            # the one that consumed the cycle -- at instruction granularity, the same order as
+            # the quantity reported. INDICATIVE ONLY: no per-instruction concentration claim
+            # may rest on it. The skid band in vint_share.py covers the REGION-level number,
+            # which is the granularity this instrument supports.
+            "by_opcode_caveat": (
+                "UNSHIFTED, non-precise sample IPs (no PEBS on this host). Indicative of where "
+                "cycles land within the region; NOT evidence of per-instruction concentration."
+            ),
             "by_opcode": [
                 {"opcode": o, "cycles": c, "pct_of_vint": 100.0 * c / vint_cycles}
                 for o, c in by_op.most_common()

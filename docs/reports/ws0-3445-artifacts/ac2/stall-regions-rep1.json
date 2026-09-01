@@ -25,6 +25,7 @@
     "no_chain_pct_of_in_binary": 0.0,
     "vint_pct_of_total": 1.3651703000750735,
     "vint_pct_of_in_binary": 3.0767461725474736,
+    "by_opcode_caveat": "UNSHIFTED, non-precise sample IPs (no PEBS on this host). Indicative of where cycles land within the region; NOT evidence of per-instruction concentration.",
     "by_opcode": [
       {
         "opcode": "bswap",
@@ -104,22 +105,10 @@
     ],
     "by_caller": [
       {
-        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_metadata",
-        "cycles": 257203858,
-        "pct_of_vint": 68.65990389749065,
-        "pct_of_total": 0.9373246160686303
-      },
-      {
-        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::read_vint_length_prefixed_bytes",
-        "cycles": 107601614,
-        "pct_of_vint": 28.723972237052855,
-        "pct_of_total": 0.3921311379820553
-      },
-      {
-        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_clustering_prefix",
-        "cycles": 9800147,
-        "pct_of_vint": 2.616123865456487,
-        "pct_of_total": 0.035714546024387936
+        "caller": "?",
+        "cycles": 374605619,
+        "pct_of_vint": 100.0,
+        "pct_of_total": 1.3651703000750735
       }
     ]
   }

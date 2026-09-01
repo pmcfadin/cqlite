@@ -263,10 +263,20 @@ JSON, and the separate `*_in_binary` figures, exist so the mistake is not availa
 All three counting reps report **100.00% `pct_running`** on all six events, so none of this is
 a multiplexing artifact.
 
-Instruction granularity is consistent with parity: within the region the stall distribution
-tracks the cycle distribution (`bswap` 70.5% of vint stalls against 72.7% of vint cycles,
-ratio 0.97). The larger per-opcode ratios (`not` 5.1x, `test` 7.3x, `bsr` 5.5x) sit on opcodes
-carrying 0.26%, 0.12% and 0.06% of vint cycles and are noise, recorded rather than quoted.
+**No instruction-level claim is made, and the earlier version of this paragraph made one it
+could not support.** The per-opcode table (`ac1/vint-regions-*.json`) is built from RAW,
+UNSHIFTED sample IPs, and with no PEBS on this host the skid is of the same order as the
+quantity being reported at instruction granularity — so an apparent concentration can simply be
+a neighbouring instruction's cost landing one slot later. The table now carries a
+`by_opcode_caveat` saying so, and the region-level skid band in `vint_share.py` remains the only
+granularity this instrument supports.
+
+What the table is still good for is *indicative*: within the region, stall weight and cycle
+weight fall in a similar shape (`bswap` 70.5% of VInt stalls against 72.7% of VInt cycles), and
+nothing in it contradicts the region-level parity finding. That is reported as consistency, not
+as evidence of per-instruction concentration. The larger per-opcode ratios (`not` 5.1x, `test`
+7.3x, `bsr` 5.5x) sit on opcodes carrying 0.26%, 0.12% and 0.06% of VInt cycles — noise at any
+granularity, and doubly so unshifted.
 
 **The bound on this answer.** This host exposes no `topdown.slots` and no PEBS, so AC2 cannot
 be answered in Topdown's frontend/backend vocabulary and sample IPs are not precise.

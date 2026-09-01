@@ -242,20 +242,24 @@ def verify_base(persym: dict[int, tuple[str, int | None]], sym_addrs: list[int],
     return ok, bad
 
 
-def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[str]]:
-    """file address -> full inline chain (innermost first), from DWARF via addr2line -i.
+def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[tuple[str, str]]]:
+    """file address -> inline chain as (function, source-location) pairs, innermost first.
 
-    UNRESOLVED ADDRESSES MUST COME BACK EMPTY, and getting that wrong produced a false zero.
-    `addr2line -i -f` emits a FUNCTION line then a FILE:LINE line per inline level, and for
-    an address it cannot resolve it emits the literal `??` and `??:0` (verified against this
-    binary). An earlier version appended only the function line, so an unresolved address
-    yielded `["??"]` -- which is TRUTHY, so it flowed into `classify()` and was booked as
-    "not VInt" instead of "unknown". `no_chain_cycles` was therefore 0 BY CONSTRUCTION and
-    the refusal threshold added to catch that undercount could never fire.
+    BOTH HALVES ARE PRESERVED, and that is the point. `addr2line -i -f` emits a FUNCTION line
+    then a FILE:LINE line per inline level. Two rounds of review landed here, each on a
+    different way of throwing half of it away:
 
-    So both halves of each frame are inspected and a frame counts as resolved only if it
-    names either a function or a source location. A chain with no resolved frame is returned
-    EMPTY, which is what every caller tests for.
+      round 1: only the FUNCTION line was appended, so an address that resolved to nothing
+               came back as `["??"]` -- TRUTHY -- and was booked "not VInt" instead of
+               "unknown". `no_chain_cycles` was then 0 BY CONSTRUCTION.
+      round 2: the fix tested function AND location, but only to DROP a frame when both were
+               unknown. The mirror case survived: function `??` with a REAL location was still
+               appended as `"??"`, again truthy, again bypassing the guard -- while the
+               location it discarded may have been the one thing identifying VInt code.
+
+    The class-level fix is to stop discarding either half. Callers classify on the pair, so a
+    frame is useful if EITHER component is, and a chain is unresolved only when nothing in it
+    is usable.
     """
     if not addrs:
         return {}
@@ -264,7 +268,7 @@ def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[str]]:
         ["addr2line", "-e", binary, "-i", "-f", "-C", "-a"],
         input=stdin, capture_output=True, text=True, check=True,
     ).stdout
-    chains: dict[int, list[str]] = {}
+    chains: dict[int, list[tuple[str, str]]] = {}
     cur: int | None = None
     pending_func: str | None = None
     for line in out.splitlines():
@@ -278,37 +282,58 @@ def inline_chains(binary: str, addrs: list[int]) -> dict[int, list[str]]:
         if pending_func is None:
             pending_func = line.strip()
             continue
-        # `line` is now the FILE:LINE partner of `pending_func`.
-        if not _frame_unresolved(pending_func, line.strip()):
-            chains[cur].append(pending_func)
+        func, loc = pending_func, line.strip()
+        if _func_usable(func) or _loc_usable(loc):
+            chains[cur].append((func, loc))
         pending_func = None
     return chains
 
 
-def _frame_unresolved(func: str, loc: str) -> bool:
-    """Is this addr2line frame a placeholder rather than a real DWARF frame?
+def _func_usable(func: str) -> bool:
+    """Does this frame name a function? `??` is addr2line's placeholder, not a name."""
+    return func not in ("", "??")
 
-    `??` for the function AND a `??:0`-shaped location means DWARF resolved nothing. A frame
-    with a real function but an unknown line (or vice versa) IS information and is kept --
-    discarding it would swing the error the other way and undercount attributable cycles.
+
+def _loc_usable(loc: str) -> bool:
+    """Does this frame name a source location? `??:0` / `??:?` are placeholders."""
+    return loc not in ("", "??", "??:0", "??:?") and not loc.startswith("??:")
+
+
+# Source file of the canonical read-side decoder. Used ONLY to rescue a frame whose function
+# name addr2line could not render but whose LOCATION it could -- the round-2 mirror case.
+# Never used in place of a function name that exists.
+VINT_SOURCE = "cqlite-core/src/parser/vint.rs"
+
+
+def classify(chain: list[tuple[str, str]]) -> str:
+    """Bucket one inline chain. Returns "unresolved" when nothing in it is usable.
+
+    "unresolved" is a FIRST-CLASS answer, never folded into "other": an address DWARF could not
+    describe must not become a positive statement that it is not VInt, because that can only push
+    the share DOWN. Callers route it to `no_chain_cycles`, which is thresholded and refused above
+    a bound in BOTH scripts that consume these chains, not just one of them.
     """
-    fn_unknown = func in ("", "??")
-    loc_unknown = loc in ("", "??:0", "??:?", "??")
-    return fn_unknown and loc_unknown
-
-
-def classify(chain: list[str]) -> str:
-    if any(f.startswith(d) for f in chain for d in DECODER_FRAMES):
+    funcs = [f for f, _ in chain if _func_usable(f)]
+    locs = [l for _, l in chain if _loc_usable(l)]
+    if not funcs and not locs:
+        return "unresolved"
+    if any(f.startswith(d) for f in funcs for d in DECODER_FRAMES):
         return "narrow"
-    if any(READ_VINT_MODULE in f for f in chain):
+    # Mirror case (roborev r3): NO usable function anywhere in the chain, but a location inside
+    # the decoder's own source file. Counted as VInt rather than silently as "other" -- the
+    # conservative direction for a report whose subject is how much VInt costs. A frame whose
+    # function IS known is never overridden by this.
+    if not funcs and any(VINT_SOURCE in l for l in locs):
+        return "narrow"
+    if any(READ_VINT_MODULE in f for f in funcs):
         return "wide_only"
-    if any(WRITE_VINT_MODULE in f for f in chain):
+    if any(WRITE_VINT_MODULE in f for f in funcs):
         return "write_vint"
     return "other"
 
 
-def shares(by_addr: collections.Counter, chains: dict[int, list[str]], total: int,
-           in_binary: int) -> dict:
+def shares(by_addr: collections.Counter, chains: dict[int, list[tuple[str, str]]],
+           total: int, in_binary: int) -> dict:
     """Bucket cycles, reporting shares against BOTH denominators.
 
     An address for which DWARF yielded NO chain is counted in its own bucket, never folded
@@ -320,10 +345,16 @@ def shares(by_addr: collections.Counter, chains: dict[int, list[str]], total: in
     no_chain = 0
     for fa, cyc in by_addr.items():
         ch = chains.get(fa)
+        # Absent chain and unusable chain are the SAME state and take the same branch, so a
+        # future change to one cannot silently diverge from the other.
         if not ch:
             no_chain += cyc
             continue
-        buckets[classify(ch)] += cyc
+        kind = classify(ch)
+        if kind == "unresolved":
+            no_chain += cyc
+            continue
+        buckets[kind] += cyc
     narrow = buckets["narrow"]
     wide = narrow + buckets["wide_only"]
     pct = lambda v, d: (100.0 * v / d) if d else 0.0
