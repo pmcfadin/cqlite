@@ -336,6 +336,19 @@ configuration; the driver reads nothing else. A new option cannot route around a
 guard because nothing else produces the values, and a structural case asserts
 every declared resolver input is an option the driver accepts.
 
+**And the guard's own subject set is DERIVED, not curated — which is what makes
+it a completeness property rather than a list.** `RESOLVER_INPUTS` alone would be
+a second place to forget an option, i.e. the exact failure the resolver exists to
+remove, reintroduced inside its own guard. So the self-test reads every
+`--option)` arm out of the driver's **own dispatch** and requires each one to
+carry a disposition — `resolver-input` or `not-server-config`, each with a
+reason. Adding an option without deciding whether it reaches the resolver reds,
+naming the option. RED-verified by adding a plausible `--new-server-knob`.
+
+Same standard as the record/workload disposition tables — §10 (guard the VALUE,
+and enumerate the SET) — **the list may be curated; the completeness must be
+checked against the real thing.**
+
 **And the analyzer enforces the floors independently.** A verdict must not derive
 its validity from a number its own subject chose, so the documented minimums live
 in `ab_common.py` and the analyzer checks *those*, ignoring the manifest's own

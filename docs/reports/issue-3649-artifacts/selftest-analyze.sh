@@ -574,17 +574,38 @@ if "resolve-session" not in source:
     problems.append("the driver does not call resolve-session")
 if re.search(r"\beval\b", uncommented):
     problems.append("the driver uses `eval` on a value it did not construct")
-for flag in S.RESOLVER_INPUTS:
-    if flag not in source:
-        problems.append("resolver input %s is not an option this driver accepts" % flag)
-if len(S.RESOLVER_INPUTS) < 8:
-    problems.append("the resolver input list has shrunk below its floor")
+# THE SUBJECT SET IS DERIVED, NOT CURATED. Every `--option)` arm in the driver's
+# own dispatch must carry a disposition -- so adding an option without deciding
+# whether it reaches the resolver reds here, which a hand-written list of
+# "server-configuration options" could never do. A curated list inside the guard
+# would be a second place to forget an option, i.e. the exact failure the
+# resolver exists to remove.
+accepted = set(re.findall(r"^\s*(--[a-z-]+)\)", source, re.M))
+if len(accepted) < 20:
+    problems.append("only %d options were derived from the dispatch; the "
+                    "derivation has broken" % len(accepted))
+for flag in sorted(accepted):
+    if flag not in S.OPTION_DISPOSITION:
+        problems.append(
+            "%s is accepted by the driver but has no disposition: decide whether "
+            "it reaches the resolver" % flag)
+for flag, (state, why) in sorted(S.OPTION_DISPOSITION.items()):
+    if state not in ("resolver-input", "not-server-config"):
+        problems.append("%s has an unknown disposition %r" % (flag, state))
+    if not why.strip():
+        problems.append("%s has an empty reason" % flag)
+    if flag not in accepted:
+        problems.append("%s has a disposition but the driver does not accept it" % flag)
+    if (state == "resolver-input") != (flag in S.RESOLVER_INPUTS):
+        problems.append(
+            "%s is dispositioned %r but %s in RESOLVER_INPUTS"
+            % (flag, state, "IS" if flag in S.RESOLVER_INPUTS else "is NOT"))
 for problem in problems:
     sys.stderr.write("AB-3649: %s\n" % problem)
 raise SystemExit(1 if problems else 0)
 PYINNER
 then
-  ok "one resolver produces the session configuration, and the driver uses no eval"
+  ok "every option the driver accepts is dispositioned, and the resolver is its only configuration producer"
 else
   bad "the session configuration has more than one producer (see stderr above)"
 fi

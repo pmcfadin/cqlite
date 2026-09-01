@@ -501,6 +501,48 @@ RESOLVER_INPUTS = (
     "--ramp", "--control", "--base-server-extra", "--head-server-extra",
 )
 
+#: A DISPOSITION FOR EVERY OPTION THE DRIVER ACCEPTS.
+#:
+#: `RESOLVER_INPUTS` alone is a curated list, and a curated list is a second
+#: place to forget an option -- which is the exact failure the resolver exists to
+#: remove, reintroduced inside its own guard. What makes it a completeness
+#: property is that the SUBJECT SET is derived: `selftest-analyze.sh` reads every
+#: `--option)` arm out of the driver's own dispatch and requires each one to
+#: appear here. So adding an option to the driver without deciding whether it
+#: reaches the resolver reds, and the decision has to be written down with a
+#: reason rather than implied by absence.
+#:
+#: Same standard as the record/workload disposition tables: the list is curated,
+#: the COMPLETENESS is checked against the real thing.
+OPTION_DISPOSITION = {
+    "--batch-size": ("resolver-input", "server configuration"),
+    "--max-batch-bytes": ("resolver-input", "server configuration"),
+    "--admission-wait-timeout-ms": ("resolver-input", "server configuration"),
+    "--max-concurrent-scans": ("resolver-input", "server configuration; bounds the ramp"),
+    "--min-corpus-bytes": ("resolver-input", "a documented floor, not lowerable for a measurement"),
+    "--min-sstables": ("resolver-input", "a documented floor; #3058's bypass depends on it"),
+    "--ramp": ("resolver-input", "bounded against the admission ceiling"),
+    "--control": ("resolver-input", "decides whether the floors may be lowered"),
+    "--base-server-extra": ("resolver-input", "per-arm overrides, resolved here"),
+    "--head-server-extra": ("resolver-input", "per-arm overrides, resolved here"),
+    "--corpus": ("not-server-config", "a path the server is pointed at, not a setting"),
+    "--ticket-template": ("not-server-config", "a client-side workload description"),
+    "--base-ref": ("not-server-config", "which commit to build"),
+    "--head-ref": ("not-server-config", "which commit to build"),
+    "--replicates": ("not-server-config", "how many times the session repeats"),
+    "--work-dir": ("not-server-config", "where results are written"),
+    "--repo": ("not-server-config", "where the arms are built from"),
+    "--shape": ("not-server-config", "a load-generator flag; validated against the ticket"),
+    "--step-duration": ("not-server-config", "a load-generator flag"),
+    "--port": ("not-server-config", "the listen address, ephemeral by default"),
+    "--server-cpus": ("not-server-config", "an external pin, verified against /proc"),
+    "--client-cpus": ("not-server-config", "pins the load generator, not the server"),
+    "--merge-path": ("not-server-config", "an environment variable, pinned separately"),
+    "--rows-declared": ("not-server-config", "recorded, never measured"),
+    "--temperature": ("not-server-config", "page-cache state"),
+    "--no-prewarm": ("not-server-config", "whether a warming pass runs"),
+}
+
 #: The per-arm overridable options, and the ONLY ones an extras string may name.
 #: Each is emitted exactly once in the constructed argv, resolved from the global
 #: value and this arm's override -- NOT appended after it. The project's Clap
@@ -520,6 +562,31 @@ RESOLVER_INPUTS = (
 OVERRIDABLE = ("--batch-size", "--max-batch-bytes", "--admission-wait-timeout-ms")
 
 NOT_REQUESTED = "NOT-REQUESTED"
+
+
+def unresolvable_reason(option):
+    """The ONE explanation of why a per-arm option is not resolvable.
+
+    Shared by both refusal sites so the reason cannot drift between them -- and
+    `--max-concurrent-scans` gets its own clause, because "not recognised" would
+    invite the next person to fix it by adding the plumbing.
+    """
+    reason = (
+        "%r is not an option this driver can resolve per arm. Recognised: %s. An "
+        "unrecognised option cannot be merged with the global flags, so it could "
+        "only be APPENDED -- and an option appearing twice is a Clap parse "
+        "failure, not a last-wins override" % (option, " ".join(OVERRIDABLE))
+    )
+    if option == "--max-concurrent-scans":
+        reason += (
+            ". This one is excluded DELIBERATELY, not by omission: two arms "
+            "admitted at different concurrencies shed at different ramp steps, so "
+            "their surviving ladders differ and the analyzer refuses them as "
+            "ramp-steps-not-comparable. Threading a per-arm ceiling through the "
+            "observation check, the ramp bound and the manifest would only buy an "
+            "UNMEASURED verdict"
+        )
+    return reason
 
 
 def validate_resolved(batch, maxbytes, wait, scans):
@@ -566,13 +633,7 @@ def server_argv(binary, data_dir, listen, batch, maxbytes, wait, scans, extra):
     while index < len(words):
         if words[index] not in OVERRIDABLE:
             err("cause server-extra-unrecognised")
-            err(
-                "cause-detail %r is not an option this driver can resolve per arm. "
-                "Recognised: %s. An unrecognised option cannot be merged with the "
-                "global flags, so it could only be APPENDED -- and an option "
-                "appearing twice is a Clap parse failure, not a last-wins override"
-                % (words[index], " ".join(OVERRIDABLE))
-            )
+            err("cause-detail %s" % unresolvable_reason(words[index]))
             return None
         if index + 1 >= len(words):
             err("cause server-extra-unrecognised")
@@ -617,10 +678,7 @@ def resolve_session(batch, maxbytes, wait, scans, min_bytes, min_sstables,
         index = 0
         while index < len(words):
             if words[index] not in OVERRIDABLE:
-                problems.append(
-                    "%s: %r is not resolvable per arm (recognised: %s)"
-                    % (arm, words[index], " ".join(OVERRIDABLE))
-                )
+                problems.append("%s: %s" % (arm, unresolvable_reason(words[index])))
                 break
             if index + 1 >= len(words):
                 problems.append("%s: %r has no value" % (arm, words[index]))
