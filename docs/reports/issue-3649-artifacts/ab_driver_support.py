@@ -39,6 +39,8 @@ NOT_OBSERVED = "NOT-OBSERVED"
 USAGE = [
     "ab_driver_support.py pair-order <replicate>",
     "ab_driver_support.py effective-flag <flag> <global-value> <extra-string>",
+    "ab_driver_support.py server-argv <bin> <data-dir> <listen> <batch> <maxbytes> "
+    "<wait> <scans> <extra>",
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
@@ -161,9 +163,34 @@ _TICKET_NARROWING = (
     ("filter", "carries a filter"),
     ("aggregation", "carries an aggregation"),
     ("columns", "projects a column subset"),
-    ("token_start", "starts at a token bound"),
-    ("token_end", "ends at a token bound"),
 )
+
+
+def _token_range_is_full_ring(ticket):
+    """MIRRORS `FlightTicket::token_in_range` (cqlite-flight/src/ticket.rs:395-421).
+
+    Read from the source rather than assumed, and the source says something
+    narrower than "any token bound is a narrowing":
+
+      * both endpoints absent -> `(None, None)` -> no range filter at all;
+      * endpoints EQUAL -> wrapping is DERIVED as `start >= end`, so membership
+        is `token > start OR token <= end`, which with `start == end` is every
+        token: the full ring, expressed the way a Cassandra wraparound range
+        expresses it;
+      * anything else narrows -- INCLUDING an explicit `(i64::MIN, i64::MAX]`,
+        which is half-open and therefore drops the token equal to `i64::MIN`.
+        That token is real (#3633), so this is not the full ring.
+
+    And `wraparound` is NOT consulted: ticket.rs:244-255 records it as retained
+    for wire compatibility and ignored since #3634, wrapping being derived from
+    the endpoints wherever it is needed. So refusing a ticket for setting it
+    would reject a template the server accepts -- a validator stricter than its
+    consumer, which is the recurring defect this whole family is about.
+    """
+    start, end = ticket.get("token_start"), ticket.get("token_end")
+    if start is None and end is None:
+        return True
+    return start == end and start is not None
 
 
 def validate_ticket(path):
@@ -186,8 +213,12 @@ def validate_ticket(path):
     predicates = ticket.get("predicates")
     if isinstance(predicates, list) and predicates:
         problems.append("carries %d predicate(s)" % len(predicates))
-    if ticket.get("wraparound"):
-        problems.append("sets wraparound")
+    if not _token_range_is_full_ring(ticket):
+        problems.append(
+            "narrows the token range (token_start=%r token_end=%r)"
+            % (ticket.get("token_start"), ticket.get("token_end"))
+        )
+    # `wraparound` is deliberately NOT checked -- see `_token_range_is_full_ring`.
     if problems:
         err("cause ticket-not-full-ring")
         err(
@@ -429,6 +460,56 @@ def effective_flag(flag, global_value, extra):
     return value
 
 
+#: The per-arm overridable options, and the ONLY ones an extras string may name.
+#: Each is emitted exactly once in the constructed argv, resolved from the global
+#: value and this arm's override -- NOT appended after it. The project's Clap
+#: command does not enable self-overrides, so a duplicated option is an argument
+#: PARSE FAILURE, not a last-wins resolution: `--batch-size 8192 --batch-size 1`
+#: is rejected by the real binary. A stub cannot catch that, because the
+#: permissiveness is in the parser rather than in a format -- so the argv is
+#: constructed to make the duplicate unexpressible instead.
+OVERRIDABLE = ("--batch-size", "--max-batch-bytes", "--admission-wait-timeout-ms",
+               "--max-concurrent-scans")
+
+NOT_REQUESTED = "NOT-REQUESTED"
+
+
+def server_argv(binary, data_dir, listen, batch, maxbytes, wait, scans, extra):
+    """The server command line, with every option emitted exactly once.
+
+    `batch`/`maxbytes`/`wait`/`scans` are the ARM'S ALREADY-RESOLVED values (the
+    caller applies `effective-flag` first). `extra` is passed only so its option
+    names can be VALIDATED as recognised -- it is never merged here, because
+    merging twice is how a duplicate reappears.
+    """
+    words = extra.split()
+    index = 0
+    while index < len(words):
+        if words[index] not in OVERRIDABLE:
+            err("cause server-extra-unrecognised")
+            err(
+                "cause-detail %r is not an option this driver can resolve per arm. "
+                "Recognised: %s. An unrecognised option cannot be merged with the "
+                "global flags, so it could only be APPENDED -- and an option "
+                "appearing twice is a Clap parse failure, not a last-wins override"
+                % (words[index], " ".join(OVERRIDABLE))
+            )
+            return None
+        if index + 1 >= len(words):
+            err("cause server-extra-unrecognised")
+            err("cause-detail %r has no value" % words[index])
+            return None
+        index += 2
+
+    argv = [binary, "--data-dir", data_dir, "--listen", listen,
+            "--batch-size", batch, "--max-concurrent-scans", scans]
+    if maxbytes != NOT_REQUESTED:
+        argv += ["--max-batch-bytes", maxbytes]
+    if wait != NOT_REQUESTED:
+        argv += ["--admission-wait-timeout-ms", wait]
+    return argv
+
+
 def pair_order(replicate):
     """Which arm runs FIRST in this replicate's pair.
 
@@ -639,6 +720,17 @@ def main(argv):
             return 2
         bound = parse_listening(rest[0])
         sys.stdout.write((bound or "NOT-OBSERVED") + "\n")
+        return 0
+    if command == "server-argv":
+        if len(rest) != 8:
+            err("usage-error server-argv needs 8 arguments (see --help)")
+            return 2
+        argv = server_argv(*rest)
+        if argv is None:
+            return 1
+        # One token per line: the caller reads it into an array, so a value with
+        # a space cannot silently split.
+        sys.stdout.write("\n".join(argv) + "\n")
         return 0
     if command == "effective-flag":
         if len(rest) != 3:

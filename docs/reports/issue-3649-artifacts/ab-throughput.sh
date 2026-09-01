@@ -362,11 +362,23 @@ mkdir -p "$RUN_DIR" "$LOG_DIR"
 # a Ctrl-C used to leave a live cqlite-flight holding the port.
 # ---------------------------------------------------------------------------
 SRV_PID=''
+SRV_START=''
 
-is_our_server() { # <pid> -- guard a KILL against PID reuse on a busy box
+# IDENTITY, VERIFIED BEFORE EVERY SIGNAL -- not just before the KILL. A pid alone
+# is not an identity: if the server exits during a long load-generator step and
+# bash reaps it, the number can be reused before we signal, and on a nine-lane
+# box the process that inherits it is most likely a PEER'S. This repo has the
+# incident -- a pattern-based `pkill` killed a peer's gate at component 28 of 30.
+# The start time (field 22 of /proc/<pid>/stat) is what makes the pid unique:
+# recorded at launch, compared here, so a reused number fails the check.
+is_our_server() { # <pid>
   [ -n "${1:-}" ] || return 1
   [ -r "/proc/$1/cmdline" ] || return 1
-  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'cqlite-flight'
+  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'cqlite-flight' || return 1
+  # An unrecorded start time cannot confirm identity, and an unconfirmed identity
+  # must not be signalled: no start time means NOT ours.
+  [ -n "${SRV_START:-}" ] || return 1
+  [ "$(awk '{print $22}' "/proc/$1/stat" 2>/dev/null || true)" = "$SRV_START" ]
 }
 
 reap_server() {
@@ -374,6 +386,14 @@ reap_server() {
   local pid="$SRV_PID"
   # Cleared FIRST, so a signal arriving during the reap cannot re-enter it.
   SRV_PID=''
+  # Checked before the TERM as well as before the KILL: the window between the
+  # server exiting and us signalling is exactly where a reused pid lives, and
+  # TERM to a peer's process is no better than KILL to one.
+  if ! is_our_server "$pid"; then
+    SRV_START=''
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
   kill "$pid" 2>/dev/null || true
   local waited=0
   while [ "$waited" -lt 30 ]; do
@@ -388,6 +408,7 @@ reap_server() {
     kill -9 "$pid" 2>/dev/null || true
   fi
   wait "$pid" 2>/dev/null || true
+  SRV_START=''
 }
 
 cleanup() {
@@ -809,6 +830,14 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   local arm="$1" rep="$2" position="$3"
   local tag; tag="$(printf '%s-r%02d' "$arm" "$rep")"
   local bin="${ARM_BIN_DIR[$arm]}"
+  local expect_batch_pre expect_maxbytes_pre expect_wait_pre expect_scans_pre
+  if [ "$arm" = "base" ]; then
+    expect_batch_pre="$EXPECT_base_BATCH"; expect_maxbytes_pre="$EXPECT_base_MAXBYTES"
+    expect_wait_pre="$EXPECT_base_WAIT"; expect_scans_pre="$EXPECT_base_SCANS"
+  else
+    expect_batch_pre="$EXPECT_head_BATCH"; expect_maxbytes_pre="$EXPECT_head_MAXBYTES"
+    expect_wait_pre="$EXPECT_head_WAIT"; expect_scans_pre="$EXPECT_head_SCANS"
+  fi
   local jsonl="$RUN_DIR/$tag.jsonl"
   local server_log="$LOG_DIR/$tag.server.log"
 
@@ -820,19 +849,48 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
 
   local extra=''
   if [ "$arm" = "base" ]; then extra="$BASE_SERVER_EXTRA"; else extra="$HEAD_SERVER_EXTRA"; fi
-  local -a server_cmd=(env "CQLITE_FLIGHT_MERGE_PATH=$MERGE_PATH")
-  [ -n "$SERVER_CPUS" ] && server_cmd+=(taskset -c "$SERVER_CPUS")
-  server_cmd+=("$bin/cqlite-flight" --data-dir "$CORPUS" --listen "127.0.0.1:$PORT"
-               --batch-size "$BATCH_SIZE"
-               --max-concurrent-scans "$MAX_CONCURRENT_SCANS")
-  [ -n "$MAX_BATCH_BYTES" ] && server_cmd+=(--max-batch-bytes "$MAX_BATCH_BYTES")
-  [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ] \
-    && server_cmd+=(--admission-wait-timeout-ms "$ADMISSION_WAIT_TIMEOUT_MS")
-  # shellcheck disable=SC2206
-  [ -n "$extra" ] && server_cmd+=($extra)
-  "${server_cmd[@]}" > "$server_log" 2>&1 &
+
+  # THE ARGV IS CONSTRUCTED, NOT CONCATENATED. Global flags followed by this
+  # arm's extras produced `--batch-size 8192 --batch-size 1`, and the project's
+  # Clap command does not enable self-overrides -- so that is an argument PARSE
+  # FAILURE, not a last-wins resolution. The helper resolves each recognised
+  # option to one value and emits it once; a duplicate is unexpressible rather
+  # than merely unlikely, which matters because no stub reproduces Clap and the
+  # end-to-end harness therefore cannot see this class at all.
+  local -a server_flags=()
+  mapfile -t server_flags < <(
+    python3 "$SUPPORT" server-argv "$bin/cqlite-flight" "$CORPUS" "127.0.0.1:$PORT" \
+      "$expect_batch_pre" "$expect_maxbytes_pre" "$expect_wait_pre" "$expect_scans_pre" "$extra"
+  ) || die server-argv-failed "could not construct the $tag server command line (the cause is named above)"
+  [ "${#server_flags[@]}" -gt 0 ] || die server-argv-failed \
+    "the constructed $tag server command line is empty"
+
+  # THE SERVER RUNS IN A CONTROLLED ENVIRONMENT, NOT AN INHERITED ONE. Every
+  # `CQLITE_*` variable the server honours is a silent override of a value this
+  # manifest claims to record -- and an inherited `RUST_LOG=warn` suppresses the
+  # INFO readiness line, so EVERY session would time out waiting for a server
+  # that had already bound. This repo has the same shape written down for
+  # `gate-detached.sh`, where one lane's exported `RUSTFLAGS` poisoned every
+  # detached gate on the box. Its lesson is why this is an ALLOWLIST and not a
+  # denylist: an allowlist of remembered variables fails silently, so `env -i`
+  # drops everything and each admitted entry is named with its reason.
+  local -a server_env=(
+    env -i
+    "PATH=$PATH"                                  # exec, and the shebang lookup
+    "HOME=${HOME:-/tmp}"                          # some libs probe it on start
+    "TMPDIR=${TMPDIR:-/tmp}"
+    "RUST_LOG=info"                               # the readiness line is INFO
+    "RUST_BACKTRACE=1"                            # a crash is diagnosable
+    "CQLITE_FLIGHT_MERGE_PATH=$MERGE_PATH"        # pinned, recorded, #3058
+  )
+  [ -n "$SERVER_CPUS" ] && server_env+=(taskset -c "$SERVER_CPUS")
+
+  "${server_env[@]}" "${server_flags[@]}" > "$server_log" 2>&1 &
   local srv=$!
   SRV_PID=$srv
+  # The identity, not just the number: a pid is reused, and on a nine-lane box
+  # the process that inherits it is most likely a peer's.
+  SRV_START="$(awk '{print $22}' "/proc/$srv/stat" 2>/dev/null || true)"
 
   local endpoint_addr
   endpoint_addr="$(wait_until_listening "$srv" "$server_log")" || {
@@ -877,13 +935,10 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   # Compared against THIS ARM's declared expectation, not the global request: a
   # control that sets --head-server-extra '--max-batch-bytes 1' expects the head
   # server to report 1, and a driver that called that a mismatch would make the
-  # sensitivity control unrunnable.
-  local expect_batch expect_maxbytes expect_wait
-  if [ "$arm" = "base" ]; then
-    expect_batch="$EXPECT_base_BATCH"; expect_maxbytes="$EXPECT_base_MAXBYTES"; expect_wait="$EXPECT_base_WAIT"
-  else
-    expect_batch="$EXPECT_head_BATCH"; expect_maxbytes="$EXPECT_head_MAXBYTES"; expect_wait="$EXPECT_head_WAIT"
-  fi
+  # sensitivity control unrunnable. These are the same values the argv was built
+  # from, so what is asserted is what was asked for.
+  local expect_batch="$expect_batch_pre" expect_maxbytes="$expect_maxbytes_pre"
+  local expect_wait="$expect_wait_pre"
   if [ "$observed_batch" != "NOT-OBSERVED" ] && [ "$observed_batch" != "$expect_batch" ]; then
     die batch-size-mismatch \
       "$tag: the server reports batch_size=$observed_batch but this arm expects $expect_batch; the Arrow batch row cap is the mechanism #2820 changed, so a measurement whose effective value is unknown is not a measurement"

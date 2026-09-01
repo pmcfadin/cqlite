@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=288
+CASE_FLOOR=295
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -758,13 +758,28 @@ done
 printf '{"version":2,"keyspace":"ks","table":"t","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/tk-full.json"
 run_support validate-ticket "$TMP/tk-full.json"
 check_support "a full-ring, unprojected, unfiltered ticket" 0
-for narrowing in '"limit":100' '"predicates":[{"c":"x"}]' '"filter":"x>1"' '"aggregation":"count"' '"columns":["a"]' '"token_start":42' '"wraparound":true'; do
+# THE VALIDATOR MUST NOT BE STRICTER THAN THE SERVER. Read from
+# cqlite-flight/src/ticket.rs rather than assumed:
+#   * `wraparound` is retained for wire compatibility and NOT CONSULTED since
+#     #3634 (ticket.rs:244-255), so refusing a ticket for setting it would reject
+#     a template the server accepts;
+#   * EQUAL endpoints derive `start >= end`, giving `token > start OR token <= end`
+#     -- every token, the full ring expressed as a Cassandra wraparound range;
+#   * an EXPLICIT (i64::MIN, i64::MAX] is half-open and therefore drops the token
+#     equal to i64::MIN, which is a real token (#3633). Not the full ring.
+printf '{"version":2,"keyspace":"ks","table":"t","wraparound":true}\n' > "$TMP/tk-wrap.json"
+run_support validate-ticket "$TMP/tk-wrap.json"
+check_support "a ticket setting the ignored wraparound flag" 0
+printf '{"version":2,"keyspace":"ks","table":"t","token_start":5,"token_end":5}\n' > "$TMP/tk-eq.json"
+run_support validate-ticket "$TMP/tk-eq.json"
+check_support "a ticket whose equal token endpoints ARE the whole ring" 0
+for narrowing in '"limit":100' '"predicates":[{"c":"x"}]' '"filter":"x>1"' '"aggregation":"count"' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
   printf '{"version":2,"keyspace":"ks","table":"t",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
   run_support validate-ticket "$TMP/tk-bad.json"
   if [ "$RC" = "1" ] && grep -q '^AB-3649: cause ticket-not-full-ring$' "$TMP/err.txt"; then
-    ok "a ticket with $narrowing is refused as not a full-ring scan"
+    ok "a ticket with ${narrowing:0:44} is refused as not a full-ring scan"
   else
-    bad "a ticket with $narrowing was accepted as a full scan (exit $RC)"
+    bad "a ticket with ${narrowing:0:44} was accepted as a full scan (exit $RC)"
   fi
 done
 
@@ -801,6 +816,60 @@ if [ -z "$sweep_bad" ]; then
   ok "every echoed server field is read back from the real startup line, and max_concurrent_streams beside it is not mistaken for max_concurrent_scans"
 else
   bad "the startup sweep could not read:$sweep_bad"
+fi
+
+# FINDING 2: the constructed argv must name each option EXACTLY ONCE. The
+# project's Clap command does not enable self-overrides, so a duplicate is a
+# parse failure -- and this is checkable WITHOUT the binary, which is what makes
+# it worth having, because no stub reproduces Clap.
+argv_dupe_bad=''
+for extra in "" "--max-batch-bytes 1" "--batch-size 1" "--max-concurrent-scans 4"; do
+  argv="$(python3 "$SUPPORT" server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "$extra" 2>/dev/null)"
+  dupes="$(printf '%s\n' "$argv" | grep '^--' | sort | uniq -d)"
+  [ -z "$dupes" ] || argv_dupe_bad="$argv_dupe_bad [extra='$extra' dupes=$(printf '%s' "$dupes" | tr '\n' ',')]"
+done
+if [ -z "$argv_dupe_bad" ]; then
+  ok "the constructed server argv names every option exactly once, whatever the per-arm extras"
+else
+  bad "the constructed argv repeats an option, which the real Clap rejects:$argv_dupe_bad"
+fi
+run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--nope 1"
+check_support "an unrecognised per-arm option, which could only be appended" 1 server-extra-unrecognised
+run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--max-batch-bytes"
+check_support "a per-arm option with no value" 1 server-extra-unrecognised
+
+# FINDING 1: the server must not inherit this shell's environment. Structural,
+# because the failure is a variable that is ABSENT here and present on a rig.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+block = re.search(r"local -a server_env=\((.*?)\n  \)", source, re.S)
+problems = []
+if not block:
+    problems.append("no server_env allowlist found")
+else:
+    body = block.group(1)
+    if "env -i" not in body:
+        problems.append("the server environment is not built with `env -i`")
+    if "RUST_LOG=info" not in body:
+        problems.append("RUST_LOG is not pinned to an INFO-capable filter")
+    # Every admitted entry must be an explicit assignment, never a bare
+    # pass-through of whatever the caller had.
+    for name in re.findall(r'"([A-Z_]+)=', body):
+        if name.startswith("CQLITE_") and name != "CQLITE_FLIGHT_MERGE_PATH":
+            problems.append("unpinned CQLite variable admitted: %s" % name)
+if re.search(r'server_env\+=\(\s*"?\$\{?[A-Za-z_]', source):
+    problems.append("the allowlist is extended with an unquoted caller value")
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the server is launched under `env -i` with a named allowlist and a pinned RUST_LOG"
+else
+  bad "the server would inherit this shell's environment (see stderr above)"
 fi
 
 # THE WITHIN-PAIR ORDER RULE, EXECUTED. This is the one driver decision whose
