@@ -234,6 +234,32 @@ rebased address lies in) refused both, and passes at 0 mismatches on every publi
 harmless. Measured against the codegen-faithful build over every symbol >= 1%: max |delta|
 **0.17 pp**, with `parse_row_data_with_offset_impl` identical at 9.31% in both.
 
+**Quiescence: every published rep was taken on a CONTENDED box, and that is disclosed rather
+than argued around.** This box is shared; a peer lane's `--lite` gate had it at loadavg
+15.8/22.8 during this work, and the gate semaphore does not protect a perf run (it serialises
+gate against gate; a perf run holds no slot). Applied strictly to the >= 2-3 loadavg bar,
+**none of the 18 published reps clears it**. Per-rep before/after loads are in
+`raw/validity-and-refusals.md`. Whether that can move either verdict was then **measured**
+(`raw/load-sensitivity.txt`), using the fact that the published set spans a 5x load range:
+
+* **AC3 is not load-sensitive.** Slope of cycle share vs peak load is **-0.0009 pp per unit**
+  (slightly negative — the share is a ratio on a pinned core, and contention slows numerator
+  and denominator together). Total spread over the 5x range is **0.1338 pp**; extrapolated to
+  idle the share is **1.7087%** against a measured mean of 1.7027%. Flipping KILL -> FUND needs
+  **1.2973 pp — 10x the entire observed load-induced variation.**
+* **AC2 survives the contamination that would break it.** Contention inflates stalls and so
+  pushes vint's stall share *up* toward its cycle share — the exact way a contended rep could
+  manufacture "the dependency IS visible" — and the data shows that direction (**+0.0042 pp per
+  unit load**). It still does not reach the conclusion's boundary: the most contended stall rep
+  gives ratio **0.899x**, the mean 0.806x, and the idle extrapolation **0.785x**. Quiescence
+  would make this finding *stronger*, not weaker. Had it come out the other way, the number
+  would have had to be withheld.
+
+Confirmatory quiet reps were attempted and **not obtained**: the box went to loadavg 67-80 with
+43 concurrent `agent-gate` processes and a peer's `/tmp` cleanup removed the waiting job. None
+is reported, and **no published number was re-rolled** — `harness/record-scan.sh` now samples
+load across each window, refuses on the maximum, and never retries.
+
 **Refusals** (`raw/validity-and-refusals.md`) — recorded as observations, never dropped: two
 10 s development smoke reps (one analysed with the wrong rebase, which is what caused the
 self-check to be written); one width-probe run that emitted **no histogram at all**, recorded
