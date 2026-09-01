@@ -749,7 +749,7 @@ impl V5CompressedLegacyParser {
                         // (issue #3722) — the helper this used to call answered
                         // most types with an opaque `Value::Blob`.
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
-                        Some(self.parse_udt_field_value(&[], &field_def.field_type, 0)?)
+                        Some(self.parse_udt_field_value(&[], &field_def.field_type, depth)?)
                     } else {
                         // Field with data. Routed through the shared guard (issue
                         // #3612, R3-F1/N1) so this loop cannot drift from the other
@@ -808,7 +808,7 @@ impl V5CompressedLegacyParser {
                                             field_data,
                                             udt_name,
                                             inline_fields,
-                                            1,
+                                            depth + 1,
                                         )?
                                     } else {
                                         decode_udt_field(field_data, &field_def.field_type)?
@@ -841,7 +841,7 @@ impl V5CompressedLegacyParser {
                                                 field_data,
                                                 udt_name,
                                                 inline_fields,
-                                                1,
+                                                depth + 1,
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
@@ -862,7 +862,7 @@ impl V5CompressedLegacyParser {
                                         field_data,
                                         udt_name,
                                         inline_fields,
-                                        1,
+                                        depth + 1,
                                     )?
                                 }
                                 CqlType::Frozen(inner) => match inner.as_ref() {
@@ -873,7 +873,7 @@ impl V5CompressedLegacyParser {
                                             field_data,
                                             udt_name,
                                             inline_fields,
-                                            1,
+                                            depth + 1,
                                         )?;
                                         Value::Frozen(Box::new(inner_value))
                                     }
@@ -1000,7 +1000,7 @@ impl V5CompressedLegacyParser {
                                                 field_data,
                                                 udt_name,
                                                 inline_fields,
-                                                1,
+                                                depth + 1,
                                             )?
                                         } else {
                                             Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
@@ -1047,7 +1047,7 @@ impl V5CompressedLegacyParser {
                                                         field_data,
                                                         udt_name,
                                                         inline_fields,
-                                                        1,
+                                                        depth + 1,
                                                     )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else {

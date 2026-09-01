@@ -77,7 +77,7 @@ impl V5CompressedLegacyParser {
         }
 
         let udt_data = &data[offset..offset + blob_len];
-        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
         offset += blob_len;
 
         Ok((udt_value, offset))
@@ -459,6 +459,13 @@ impl V5CompressedLegacyParser {
     /// - For each field in schema order:
     ///   - [4 bytes BE i32]: field length (-1 = null, 0 = empty, >0 = data length)
     ///   - [N bytes]: field data (if length > 0)
+    ///
+    /// The `depth` parameter counts CQL TYPE nesting, not the byte `offset`, and
+    /// bounds the field decodes below. It exists because those decodes previously
+    /// passed a literal 0, which restarted `MAX_TYPE_NESTING_DEPTH` on every UDT
+    /// hop — the defect family roborev found at a new site in five consecutive
+    /// rounds on issue #3722. The four production callers are genuine top-level
+    /// entries (a UDT column value) and legitimately pass 0.
     // NOTE: this UDT decoder is purely structural — it reads the i32-length-prefixed
     // field layout using only the [`UdtTypeDef`] field types. It does NOT need an
     // [`SSTableReader`] (the previous `reader` param was threaded through but never
@@ -469,7 +476,14 @@ impl V5CompressedLegacyParser {
         offset: usize,
         udt_def: &UdtTypeDef,
         _column: &crate::schema::Column,
+        depth: usize,
     ) -> Result<(Value, usize)> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::corruption(format!(
+                "UDT '{}': type nesting depth {} exceeds maximum {}",
+                udt_def.name, depth, MAX_TYPE_NESTING_DEPTH
+            )));
+        }
         // Validate field count to prevent memory exhaustion
         if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
             return Err(Error::schema(format!(
@@ -533,7 +547,7 @@ impl V5CompressedLegacyParser {
                     "V5CompressedLegacy: UDT field '{}' is empty",
                     field_def.name
                 );
-                Some(self.parse_udt_field_value(&[], &field_def.field_type, 0)?)
+                Some(self.parse_udt_field_value(&[], &field_def.field_type, depth)?)
             } else {
                 // Field with data. `checked_component_len` owns BOTH the negative
                 // rejection and the bounds test, so no loop can have one without
@@ -555,7 +569,7 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Parse field value based on its type
-                let value = self.parse_udt_field_value(field_data, &field_def.field_type, 0)?;
+                let value = self.parse_udt_field_value(field_data, &field_def.field_type, depth)?;
                 Some(value)
             };
 
@@ -866,7 +880,7 @@ impl V5CompressedLegacyParser {
                                         field_data,
                                         udt_name,
                                         inline_fields,
-                                        1,
+                                        depth + 1,
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else {
@@ -1644,7 +1658,7 @@ mod tests {
             is_static: false,
         };
         let (value, _) = parser
-            .parse_udt_value(&data, 0, &udt_def, &column)
+            .parse_udt_value(&data, 0, &udt_def, &column, 0)
             .expect("UDT with an empty field must decode");
         assert_empty_varint_field_is_null(&value, "parse_udt_value");
 

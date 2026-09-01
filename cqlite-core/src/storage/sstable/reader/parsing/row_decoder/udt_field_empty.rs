@@ -96,12 +96,20 @@ impl V5CompressedLegacyParser {
             CqlType::Tuple(element_types) => {
                 Ok(Value::Tuple(vec![Value::Null; element_types.len()]))
             }
-            CqlType::Udt(name, field_defs) => {
-                // Same route as the non-empty `Udt` arm, so an empty nested UDT
-                // keeps the real keyspace and the shared depth budget: with no
-                // bytes, every field comes back null.
+            CqlType::Udt(name, field_defs) if !field_defs.is_empty() => {
+                // Inline definition present: decode it directly, so an empty
+                // nested UDT keeps the real keyspace and the shared depth budget
+                // (with no bytes, every field comes back null).
                 self.parse_inline_udt_value(&[], name, field_defs, depth + 1)
             }
+            // NAMED WITHOUT ITS DEFINITION — the registry-backed shape. Routed
+            // through the SAME resolver the non-empty path uses
+            // (`resolve_named_udt_value`), because these were two separate
+            // implementations and this one still produced an empty `Value::Udt`
+            // a round after the other was fixed (roborev round 6 on #3722). An
+            // all-null UDT with its DECLARED fields is the right answer here, not
+            // a UDT with no fields at all.
+            CqlType::Udt(name, _) => self.resolve_named_udt_value(&[], name, depth),
             CqlType::Frozen(inner) => Ok(Value::Frozen(Box::new(self.parse_udt_field_value(
                 &[],
                 inner,

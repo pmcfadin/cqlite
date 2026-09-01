@@ -590,4 +590,49 @@ mod tests {
              finding: {got:?}"
         );
     }
+
+    /// The depth guard over the routes the collection chain does NOT traverse:
+    /// the ZERO-LENGTH field path and the FROZEN-inline path.
+    ///
+    /// roborev round 6's exact criticism of the chain test above was that it
+    /// "only exercises depth zero and does not detect this" — the literal `0`/`1`
+    /// depths on the empty-field and frozen-inline routes. So each route is driven
+    /// AT the budget and one PAST it: at the budget must decode, past must error.
+    /// That is what makes the failure attributable to the guard rather than to the
+    /// route being broken generally.
+    #[test]
+    fn the_empty_and_frozen_routes_are_depth_bounded_too() {
+        let p = parser();
+        let inner = CqlType::Udt("inner_u".to_string(), vec![("a".to_string(), CqlType::Int)]);
+
+        // Route 1: a ZERO-LENGTH field of a nested-UDT type.
+        for (depth, want_ok) in [
+            (MAX_TYPE_NESTING_DEPTH - 1, true),
+            (MAX_TYPE_NESTING_DEPTH + 1, false),
+        ] {
+            let got = p.parse_udt_field_value(&[], &inner, depth);
+            assert_eq!(
+                got.is_ok(),
+                want_ok,
+                "empty nested-UDT field at depth {depth} (budget {MAX_TYPE_NESTING_DEPTH}) \
+                 expected ok={want_ok}, got {got:?}"
+            );
+        }
+
+        // Route 2: the FROZEN-inline path, which wraps and recurses.
+        let frozen = CqlType::Frozen(Box::new(inner.clone()));
+        for (depth, want_ok) in [
+            (MAX_TYPE_NESTING_DEPTH - 2, true),
+            (MAX_TYPE_NESTING_DEPTH + 1, false),
+        ] {
+            let data = (-1i32).to_be_bytes().to_vec();
+            let got = p.parse_udt_field_value(&data, &frozen, depth);
+            assert_eq!(
+                got.is_ok(),
+                want_ok,
+                "frozen<inner_u> at depth {depth} (budget {MAX_TYPE_NESTING_DEPTH}) \
+                 expected ok={want_ok}, got {got:?}"
+            );
+        }
+    }
 }

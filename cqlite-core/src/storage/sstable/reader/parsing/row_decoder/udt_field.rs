@@ -268,31 +268,14 @@ impl V5CompressedLegacyParser {
                 self.parse_inline_udt_value(data, name, field_defs, depth + 1)
             }
             // An EMPTY `field_defs` does not mean "a UDT with no fields" — it
-            // means the type was named without its definition, which is how a
-            // registry-backed UDT arrives. Treating it as an inline zero-field
-            // definition produced an EMPTY `Value::Udt` even when the full
-            // definition was sitting in `self.udt_registry` (roborev round 5 on
-            // #3722), which is a silent data loss rather than a decode error.
-            CqlType::Udt(name, _) => {
-                match self
-                    .udt_registry
-                    .as_ref()
-                    .and_then(|r| r.get_udt_qualified(&self.keyspace, name))
-                {
-                    Some(def) => {
-                        // `depth + 1`, and via the registry decoder so its own
-                        // entry guard applies too.
-                        let registry = self
-                            .udt_registry
-                            .as_ref()
-                            .ok_or_else(|| Error::corruption("UDT registry vanished"))?;
-                        self.parse_nested_udt_from_registry(data, def, registry, depth + 1)
-                    }
-                    // Genuinely unresolvable: no definition anywhere. Keep the
-                    // previous behaviour rather than inventing fields.
-                    None => self.parse_inline_udt_value(data, name, &[], depth + 1),
-                }
-            }
+            // means the type was NAMED WITHOUT ITS DEFINITION, which is how a
+            // registry-backed UDT arrives. ONE resolver, shared with the
+            // zero-length path in `udt_field_empty.rs`: the two arms were
+            // separate implementations and roborev found the empty one still
+            // producing an empty `Value::Udt` a round after the non-empty one was
+            // fixed. Two implementations of one resolution is the drift this
+            // issue exists to remove.
+            CqlType::Udt(name, _) => self.resolve_named_udt_value(data, name, depth),
             // An UNRESOLVED type string — a marshal class, or a UDT name to look
             // up in the registry. This is the only arm where a string is all we
             // have, and it is the one place a genuinely unknown type may still
@@ -300,6 +283,38 @@ impl V5CompressedLegacyParser {
             CqlType::Custom(type_str) => {
                 self.parse_value_from_raw_bytes(data, type_str, "udt field", depth + 1)
             }
+        }
+    }
+
+    /// Decode a UDT that was NAMED without its field definitions, by resolving
+    /// `name` through the `UdtRegistry`.
+    ///
+    /// Shared by the non-empty arm above and by the zero-length arm in
+    /// [`super::udt_field_empty`], so the two cannot answer differently — which
+    /// they did, for one review round.
+    ///
+    /// Falls back to a zero-field inline decode only when no definition exists
+    /// anywhere: that is a genuinely unresolvable type, and inventing fields for
+    /// it would be worse than reporting what was actually named.
+    pub(super) fn resolve_named_udt_value(
+        &self,
+        data: &[u8],
+        name: &str,
+        depth: usize,
+    ) -> Result<Value> {
+        match self
+            .udt_registry
+            .as_ref()
+            .and_then(|r| r.get_udt_qualified(&self.keyspace, name))
+        {
+            Some(def) => {
+                let registry = self
+                    .udt_registry
+                    .as_ref()
+                    .ok_or_else(|| Error::corruption("UDT registry vanished"))?;
+                self.parse_nested_udt_from_registry(data, def, registry, depth + 1)
+            }
+            None => self.parse_inline_udt_value(data, name, &[], depth + 1),
         }
     }
 
