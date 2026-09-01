@@ -337,6 +337,12 @@ trino-connector/docker/field-repro-artifacts/
 # repo, and leaving them untracked stamps `dirty: yes` on the certification block.
 .review-*.md
 .followup-*.md
+# Same class, third instance (#3414 gate #7 prep): a stage-C intent audit's verdict file. A
+# spec-auditor writes it MID-RUN, and an untracked-but-not-ignored write while the gate of
+# record is running is `tree-integrity: FAIL (tree-mutated-midrun)` — which is exactly how
+# gate #6 of this branch died. Ignoring it removes the hazard rather than relying on nobody
+# spawning a C agent at the wrong moment.
+.c-audit-*.md
 # Live box-load sampler output (#3248). MUST stay out of the worktree: it is appended
 # every 10s, so an in-tree copy trips the gate tree-integrity check mid-run, and a
 # worktree is deleted at finalize which would destroy a sampler meant to outlive the issue.
