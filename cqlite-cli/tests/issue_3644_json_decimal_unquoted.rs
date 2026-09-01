@@ -588,10 +588,13 @@ mod writer_paths {
     /// FIRST position with the LAST value (roborev job 17).
     ///
     /// Regression guard for this issue's own refactor: the UDT arm used to build
-    /// a `serde_json::Map`, whose `insert` collapsed duplicates; `JsonCell::Object`
-    /// is a `Vec`, which appended, so the document gained two keys of one name.
-    /// That is an ambiguous document — parsers disagree on which wins — and it is
-    /// the same rule `dedup_keys_last_wins` already applies to row keys.
+    /// a `serde_json::Map`, whose `insert` collapsed duplicates; an intermediate
+    /// `JsonCell::Object` was a plain `Vec`, which appended, so the document
+    /// gained two keys of one name. `Object` now holds an `IndexMap`, whose
+    /// `insert` IS that collapse — this test is what pins the two degrees of
+    /// freedom it leaves (which position, which value). Two keys of one name is an
+    /// ambiguous document — parsers disagree on which wins — and the rule here is
+    /// the one `dedup_keys_last_wins` already applies to row keys.
     ///
     /// REACHABLE, which is why this is a defect and not a note: a duplicate field
     /// is not legal CQL (Cassandra rejects the `CREATE TYPE`), but CQLite's own

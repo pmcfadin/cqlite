@@ -76,6 +76,18 @@ csv = "1.3"
 # Hex encoding for blob display
 hex = "0.4"
 
+# Insertion-ordered map for the `--format json` egress cell tree
+# (`src/output/json_cell.rs`). `IndexMap::insert` keeps a key's FIRST position and
+# writes its LAST value, which is exactly the collapse `serde_json::Map` performs
+# here (this workspace builds serde_json with `preserve_order`, so THAT type IS an
+# `IndexMap`) — so the JSON object cell gets the semantics it needs from the
+# container instead of a hand-rolled dedupe.
+#
+# This adds NO code to the build: serde_json's `preserve_order` already pulls
+# indexmap 2.14 into every cqlite-cli build with the same (default) features, so
+# this is a DECLARATION of a dependency that is already compiled and linked.
+indexmap = "2"
+
 # Configuration parsing
 toml = { workspace = true }
 serde_yaml = { workspace = true }
