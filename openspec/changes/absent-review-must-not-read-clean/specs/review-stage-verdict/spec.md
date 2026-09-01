@@ -12,6 +12,20 @@ non-verdict sentinel recording `spawned-at`, `agent`, `issue`, and a `deadline`.
 - **WHEN** a stage is opened and the spawned agent writes nothing
 - **THEN** the report file EXISTS and its recorded result is the sentinel, not an empty or missing file
 
+#### Scenario: the report path is derived, never caller-supplied
+- **WHEN** any subcommand resolves the report of record for `<kind>`/`<issue>`
+- **THEN** the path is `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed identically by the
+  writer and by EVERY reader, with NO override flag — so no caller-controlled component enters a path
+  this tool builds, reads or writes
+- **AND** `<kind>` (`[A-Za-z0-9][A-Za-z0-9_-]*`) and `<issue>` (decimal digits only) are the WHOLE
+  path-input surface and are refused by name at ONE boundary — no `/`, no `.`, no leading dash, no
+  CR/LF
+- **AND** the stage record does NOT carry the path as a readable field: a value split across lines
+  by a newline-bearing path was read as its PREFIX and could select a DIFFERENT pre-existing report
+  recording `PASS`, so the second source is REMOVED rather than reconciled
+- **AND** no `mkdir` can create a directory outside the checkout, because the parent is derived
+  (it once could: the parent was created BEFORE containment was verified)
+
 #### Scenario: the report path is verified gitignored, fail-closed
 - **WHEN** `open` resolves a report path that `git check-ignore` does not confirm as ignored
 - **THEN** it REFUSES to write, naming the path and the reason

@@ -188,6 +188,24 @@ Three further declared limits of the mechanism itself:
   gate INVALIDATES it) applied to the intent audit, and an audit of an older tree may not
   certify a newer one. The remedy every one of those refusals prints is the same: re-open the
   stage with `--force` at this commit and re-run C.
+- **The report path is DERIVED, and `--report` is GONE (round 4, H2/H3).** It is always
+  `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed the same way by `open` and by every
+  reader — so nothing a caller passes, and nothing written in a data file, can redirect a reader to
+  another file. The override is REMOVED rather than hardened, which is a **deliberate narrowing of
+  the approved design surface**: it was mandated by no spec requirement and used by NOTHING
+  (measured by grep — no agent definition, no skill, no script, no call site), and it was the
+  caller-controlled component behind a finding cluster across four review rounds. Two of those were
+  round 4's: the path was written RAW into the LINE-oriented stage record, so a LEGAL
+  newline-bearing filename split across lines and the reader (`read_field`) took only the PREFIX —
+  which could name a DIFFERENT, pre-existing report recording `PASS` while the sentinel went to the
+  newline-bearing name; and the report's parent directory was created BEFORE repository containment
+  and ignore status were verified, so a REFUSED outside-the-repository path still created
+  directories outside the checkout. Derivation closes both BY CONSTRUCTION — no newline to split
+  on, no containment question to answer — and leaves `<kind>` (`[A-Za-z0-9][A-Za-z0-9_-]*`) and
+  `<issue>` (digits only) as the whole path-input surface, validated at ONE boundary. The stage
+  record no longer carries the path as a readable field either: a second source for a value with
+  one derivation is only a second thing to disagree. If a caller ever needs a custom location,
+  re-add the flag WITH the hardening (CR/LF refused, containment verified before any `mkdir`).
 - **A partially-written `open` cannot publish a stale verdict (round 4, H1).** The two files are
   not writable atomically together, so the ORDER decides which partial state is reachable — and
   with the stage record written FIRST, the newly-stamped `head-sha:` sat beside the PREVIOUS

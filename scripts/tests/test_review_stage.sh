@@ -364,14 +364,19 @@ rc_is 0 "several CONTROL: one column-zero line plus indented and quoted copies s
 has "RESULT: PASS " "several CONTROL: the single record is read"
 
 # --- 5. the path is verified gitignored, fail-closed ----------------------------
-# (a) an explicit --report that git does NOT confirm ignored.
-R3="$(newrepo)"
-rs "$R3" open c --issue 200 --agent spec-auditor --report tracked-report.md
-rc_is 2 "check-ignore: a non-ignored --report is REFUSED (exit 2)"
+# (a) THE REPORT HALF: a repository whose `.gitignore` covers the stage RECORD but not the
+#     REPORT. Since round 4 the path is DERIVED (there is no `--report`), so the way to reach
+#     this refusal is a repository that ignores one of the two files and not the other — which
+#     is also the real-world shape (a hand-written pattern instead of the shipped
+#     `.review-stage/` directory rule).
+R3="$(newrepo '.review-stage/**/*.stage')"
+rs "$R3" open c --issue 200 --agent spec-auditor
+rc_is 2 "check-ignore: a report path git does not confirm ignored is REFUSED (exit 2)"
 has "OPEN-REFUSED reason=path-not-gitignored" "check-ignore: the refusal names the reason"
-has "tracked-report.md" "check-ignore: the refusal names the path"
+has "what=report-of-record" "check-ignore: the refusal names the REPORT half"
+has "path=$R3/.review-stage/issue-200/c.md" "check-ignore: the refusal names the DERIVED path verbatim"
 has "#2926" "check-ignore: the refusal explains the mid-run tree-mutation hazard it prevents"
-if [ -f "$R3/tracked-report.md" ]; then
+if [ -f "$R3/.review-stage/issue-200/c.md" ]; then
   bad "check-ignore: the refusal must not write the file it refused"
 else
   ok "check-ignore: nothing was written at the refused path"
@@ -390,21 +395,18 @@ else
   ok "check-ignore: no stage record was written at the refused path"
 fi
 
-# (c) a path OUTSIDE the repository cannot be confirmed, so it is refused — "cannot tell"
-#     must never take the permissive branch.
-#
-#     THE REFUSAL IS ASSERTED TO NAME **report-of-record** AND THE REQUESTED PATH, so this case
-#     can only pass for its OWN reason. It could not, before: every `newrepo` ran in command
-#     substitution, so the `REPO_SEQ` increment happened in a SUBSHELL and was lost — every case
-#     shared ONE directory, R4 above rewrote its `.gitignore` to `unrelated-pattern`, and this
-#     case then refused at the STAGE-RECORD half (a real refusal, for the wrong reason) without
-#     ever reaching the report path it names. Each repo is now unique BY CONSTRUCTION.
-rs "$R3" open c --issue 202 --agent spec-auditor --report "$T/outside-the-repo.md"
-rc_is 2 "check-ignore: a path outside the repository is REFUSED, not exempted"
-has "path-not-gitignored" "check-ignore: the outside-the-repo refusal names the same reason"
-has "what=report-of-record" "check-ignore: the outside-the-repo refusal names the REPORT half, not the stage record"
-has "path=$T/outside-the-repo.md" "check-ignore: the refusal names the REQUESTED path verbatim"
-hasnt "what=stage-record" "check-ignore: this case reached the report path, not a stage-record refusal"
+# (c) A PATH OUTSIDE THE REPOSITORY IS NO LONGER EXPRESSIBLE, which is why the case that used to
+#     stand here is GONE rather than weakened. It passed `--report "$T/outside-the-repo.md"` and
+#     asserted that `check-ignore`'s "cannot tell" (rc 128) took the refusing branch. With the
+#     path DERIVED from the repo root plus a validated kind and issue (round 4, H2/H3) no
+#     invocation can name a path outside the checkout, so the case would have been asserting
+#     against an unreachable state — and section 13(b) pins the reachable half instead: the
+#     removed flag is a usage error and creates NOTHING outside the checkout. `assert_ignored`
+#     KEEPS its fail-closed shape (every non-zero `check-ignore` answer refuses, not just rc 1),
+#     because it is the property the function is for; it is simply no longer reachable from here.
+#     The refusals above still name the half they are about (`what=report-of-record` /
+#     `what=stage-record`), which is what stopped an earlier version of these cases passing for
+#     the wrong reason.
 
 # --- 6. re-opening does not silently reset the clock ----------------------------
 R5="$(newrepo)"
@@ -813,37 +815,37 @@ printf 'result: PASS\n\nreviewed.\n' >"$AP15"
 rs "$R15" verdict c --issue 805
 rc_is 0 "symlink control: a real report over an atomically-written sentinel still reads PASS"
 
-# (g) A DECLARED CONSEQUENCE of writing through a temporary file: a `--report` in a directory
-#     ignored only by EXTENSION is refused, because the temp name is not matched by that pattern
-#     and WOULD dirty a running gate. Pinned so it is a KNOWN, EXPLAINED refusal rather than a
-#     surprise, and so the diagnostic keeps explaining the path the caller never named.
-#     `.review-stage/` — the default, and the only path the pipeline uses — is ignored as a
-#     DIRECTORY, so this never fires there (asserted by every green case above).
-R16="$(newrepo '.review-stage/
-*.md')"
-mkdir -p "$R16/logs"
-rs "$R16" open c --issue 806 --agent spec-auditor --report logs/mine.md
-rc_is 2 "tempfile: a --report ignored only by EXTENSION is REFUSED (its temp would dirty the tree)"
+# (g) A DECLARED CONSEQUENCE of writing through a temporary file: a repository that ignores the
+#     records by EXTENSION rather than by DIRECTORY is refused, because the temp name matches no
+#     such pattern and WOULD dirty a running gate. Pinned so it is a KNOWN, EXPLAINED refusal
+#     rather than a surprise, and so the diagnostic keeps explaining the path the caller never
+#     named. The SHIPPED `.gitignore` ignores `.review-stage/` as a DIRECTORY, so this never
+#     fires here (asserted by every green case above). Round 4 note: this used to be reached with
+#     a custom `--report` in an extension-ignored directory; with the path DERIVED the same state
+#     is reached through the repository's OWN `.gitignore`, which is the shape that can actually
+#     occur in the field.
+R16="$(newrepo '.review-stage/**/*.md
+.review-stage/**/*.stage')"
+rs "$R16" open c --issue 806 --agent spec-auditor
+rc_is 2 "tempfile: records ignored only by EXTENSION are REFUSED (the temp would dirty the tree)"
 has "what=report-of-record-tempfile" "tempfile: the refusal names the TEMPORARY half"
 has "TEMPORARY file the write goes through" "tempfile: the refusal explains the path the caller never named"
 has "ignore the DIRECTORY instead" "tempfile: the refusal names the remedy"
-if [ -f "$R16/logs/mine.md" ]; then
+if [ -f "$R16/.review-stage/issue-806/c.md" ]; then
   bad "tempfile: the refusal must not write the report it refused"
 else
   ok "tempfile: nothing was written at the refused path"
 fi
 # And the DIRECTORY-ignored form of the same thing is ACCEPTED — the refusal above is about the
-# pattern, not about --report itself, and without this the case above could pass on a blanket
-# refusal of every custom report path.
-R17="$(newrepo '.review-stage/
-mylogs/')"
-mkdir -p "$R17/mylogs"
-rs "$R17" open c --issue 807 --agent spec-auditor --report mylogs/mine.md
-rc_is 0 "tempfile control: a --report under a DIRECTORY-ignored path is accepted"
-if [ -f "$R17/mylogs/mine.md" ] && [ ! -L "$R17/mylogs/mine.md" ]; then
-  ok "tempfile control: the custom report was written as a regular file"
+# PATTERN, not about writing at all, and without this control the case above could pass on a
+# script that refused every write.
+R17="$(newrepo '.review-stage/')"
+rs "$R17" open c --issue 807 --agent spec-auditor
+rc_is 0 "tempfile control: a DIRECTORY-ignored .review-stage/ is accepted"
+if [ -f "$R17/.review-stage/issue-807/c.md" ] && [ ! -L "$R17/.review-stage/issue-807/c.md" ]; then
+  ok "tempfile control: the report was written as a regular file"
 else
-  bad "tempfile control: the custom report was not written"
+  bad "tempfile control: the report was not written"
 fi
 
 # --- 11e. THE TEMPORARY FILE IS UNPREDICTABLE AND CREATED EXCLUSIVELY (round 3, G3) -------
@@ -863,10 +865,9 @@ fi
 # THE IGNORE CHECK IS LEXICAL AND IS TAKEN ON THE EXACT NAME ABOUT TO BE CREATED, so it has no
 # window of its own: `git check-ignore` answers about a path STRING, and the string checked is
 # the string created.
-R11E="$(newrepo '.review-stage/
-*.md')"
-mkdir -p "$R11E/logs"
-# The extension-only-ignored `--report` is used deliberately: its `-tempfile` refusal is the ONE
+R11E="$(newrepo '.review-stage/**/*.md
+.review-stage/**/*.stage')"
+# The extension-only-ignored REPOSITORY is used deliberately: its `-tempfile` refusal is the ONE
 # place the temporary path is NAMED in the output, so it is how a test can observe a name that
 # otherwise never leaves the process. (That refusal is round 1's declared consequence, pinned in
 # its own right by section 11(g) below — this case reuses it as an oracle, it does not replace it.)
@@ -874,11 +875,11 @@ TMPNAME_OF() {
   printf '%s' "$1" | LC_ALL=C tr ' ' '\n' |
     LC_ALL=C grep -A0 '^path=' | LC_ALL=C sed -e 's/^path=//' | LC_ALL=C head -1
 }
-rs "$R11E" open c --issue 810 --agent spec-auditor --report logs/mine.md
-rc_is 2 "tempname: the extension-only-ignored --report still refuses (the oracle for this case)"
+rs "$R11E" open c --issue 810 --agent spec-auditor
+rc_is 2 "tempname: the extension-only-ignored repository still refuses (the oracle for this case)"
 has "what=report-of-record-tempfile" "tempname: and the refusal is about the TEMPORARY half"
 T1="$(TMPNAME_OF "$OUT")"
-rs "$R11E" open c --issue 811 --agent spec-auditor --report logs/mine.md
+rs "$R11E" open c --issue 811 --agent spec-auditor
 T2="$(TMPNAME_OF "$OUT")"
 if [ -n "$T1" ] && [ -n "$T2" ]; then
   ok "tempname: the temporary path was observable in both runs (the case is not vacuous)"
@@ -984,46 +985,68 @@ rc_is 2 "refuse-marker CONTROL: open still refuses a non-ignored path"
 has "OPEN-REFUSED reason=path-not-gitignored" "refuse-marker CONTROL: open's own refusal still says OPEN-REFUSED"
 hasnt "AUTHOR-REFUSED" "refuse-marker CONTROL: open does not borrow the author marker"
 
-# --- 11c. THE report= FIELD GOES THROUGH THE SAME EMIT BOUNDARY (round 2, S1) -------------
-# The cause is neutralised at the emit boundary because a report-supplied `agent=peer` would put
-# a second, earlier `agent=` pair on a line consumers scan. `report=` is interpolated into that
-# SAME line, is CALLER-INFLUENCED (`--report`), and was the one emitted value left raw — so the
-# comment stating "ONE emit boundary" was not what the code did. Same treatment, one function.
+# --- 11c. EVERY DATA VALUE GOES THROUGH THE ONE EMIT BOUNDARY (round 2 S1, round 4 H2) ------
+# The rule: a value INTERPOLATED into one of this tool's `key=value` control lines is DATA, and a
+# consumer scans those lines, so an injected `elapsed=`/`agent=` pair could put a SECOND, EARLIER
+# pair on the line and be read instead of the measured one. `field_value` is the ONE boundary;
+# `sanitize_field` is the stronger one for a value that becomes a RECORD field.
+#
+# ROUND 4 CHANGED WHICH VALUES CAN CARRY THE RESERVED CHARACTER, not the rule. The `report=` path
+# used to be caller-controlled through `--report` (a path like `a=b elapsed=999.md` is a LEGAL
+# filename, so it could not be refused); it is now DERIVED from a strictly-validated kind and
+# issue, so it cannot carry `=` at all. The vectors that REMAIN are asserted here instead: the
+# CAUSE (which comes from the report the tool is judging) and the flag values a caller supplies.
 R11C="$(newrepo)"
-INJ_REPORT="$R11C/.review-stage/issue-810/a=b elapsed=999.md"
-mkdir -p "$R11C/.review-stage/issue-810"
-rs "$R11C" open t2 --issue 810 --agent spec-auditor --report "$INJ_REPORT"
-rc_is 0 "report-field: open accepts a path carrying '=' (it is a legal filename, so refusing would red correct input)"
-# The OPEN-OK LINE only. `open` also prints the path RAW on a line of its own (a caller consumes
-# it) and inside the paste-ready clause — deliberate, and stated in the code: those are whole
-# lines with no `key=value` fields for a pair to be injected into, so there is nothing to anchor.
+rs "$R11C" open t2 --issue 810 --agent 'spec-auditor elapsed=999'
+rc_is 0 "emit-boundary: open accepts an --agent carrying '=' (it is sanitized, not refused)"
 OPEN_OK_LINE="$(printf '%s\n' "$OUT" | LC_ALL=C grep 'OPEN-OK' || true)"
 case "$OPEN_OK_LINE" in
-  *"elapsed=999"*) bad "report-field: the OPEN-OK line carries the path's injected 'elapsed=' pair (got: $OPEN_OK_LINE)" ;;
-  *"a~b elapsed~999.md"*) ok "report-field: the OPEN-OK line neutralises the injected pair and keeps the path readable" ;;
-  *) bad "report-field: could not read an OPEN-OK line to check (got: $OUT)" ;;
+  *"elapsed=999"*) bad "emit-boundary: the OPEN-OK line carries the agent's injected 'elapsed=' pair (got: $OPEN_OK_LINE)" ;;
+  *"agent=spec-auditor-elapsed-999"*) ok "emit-boundary: the OPEN-OK line records the agent with '=' neutralised and still readable" ;;
+  *) bad "emit-boundary: could not read an OPEN-OK line to check (got: $OUT)" ;;
 esac
-
-rs "$R11C" verdict t2 --issue 810
-rc_is 5 "report-field: the verdict of the sentinel-only stage is NOT-RUN"
-hasnt "elapsed=999" "report-field: the VERDICT line does not carry the path's injected 'elapsed=' pair"
-N_ELAPSED=$(printf '%s\n' "$OUT" | LC_ALL=C tr ' ' '\n' | LC_ALL=C grep -c '^elapsed=' || true)
-if [ "$N_ELAPSED" = "1" ]; then
-  ok "report-field: EXACTLY ONE 'elapsed=' field on the verdict line, so a first-match consumer reads the MEASURED value"
+N_ELAPSED=$(printf '%s\n' "$OPEN_OK_LINE" | LC_ALL=C tr ' ' '\n' | LC_ALL=C grep -c '^elapsed=' || true)
+if [ "$N_ELAPSED" = "0" ]; then
+  ok "emit-boundary: no 'elapsed=' pair reached the OPEN-OK line at all"
 else
-  bad "report-field: $N_ELAPSED 'elapsed=' fields on the verdict line (out: $OUT)"
+  bad "emit-boundary: $N_ELAPSED 'elapsed=' field(s) on the OPEN-OK line (out: $OPEN_OK_LINE)"
 fi
-has "a~b elapsed~999.md" "report-field: the path is still READABLE, with '=' neutralised rather than dropped (display-only, like the cause)"
+
+# THE CAUSE: written by the very agent whose stage is being judged, and rendered INSIDE the
+# verdict line's field list. A self-recorded NOT-RUN cause is the vector.
+printf 'result: NOT-RUN (elapsed=999 agent=peer deadline=0)\n\nran out of context.\n' \
+  >"$(REPORT_OF "$R11C" 810 t2)"
+rs "$R11C" verdict t2 --issue 810
+rc_is 5 "emit-boundary: a self-recorded NOT-RUN cause is reported"
+hasnt "elapsed=999" "emit-boundary: the VERDICT line does not carry the cause's injected 'elapsed=' pair"
+hasnt "agent=peer" "emit-boundary: nor its injected 'agent=' pair"
+for FIELD in elapsed agent deadline report; do
+  N=$(printf '%s\n' "$OUT" | LC_ALL=C tr ' ' '\n' | LC_ALL=C grep -c "^$FIELD=" || true)
+  if [ "$N" = "1" ]; then
+    ok "emit-boundary: EXACTLY ONE '$FIELD=' field on the verdict line, so a first-match consumer reads the MEASURED value"
+  else
+    bad "emit-boundary: $N '$FIELD=' fields on the verdict line (out: $OUT)"
+  fi
+done
+has "elapsed~999" "emit-boundary: the cause is still READABLE, with '=' neutralised rather than dropped (display-only)"
+
+# AND THE UNRECOGNISED-TOKEN CAUSE, which quotes the report's own token VERBATIM.
+printf 'result: PASS=elapsed=999\n\nnot a token.\n' >"$(REPORT_OF "$R11C" 810 t2)"
+rs "$R11C" verdict t2 --issue 810
+rc_is 5 "emit-boundary: an unrecognised token is NOT-RUN"
+hasnt "elapsed=999" "emit-boundary: the token quoted into the cause cannot inject a pair either"
 
 rs "$R11C" status t2 --issue 810
-rc_is 0 "report-field: status is advisory (exit 0)"
-hasnt "elapsed=999" "report-field: the STATUS line does not carry the injected pair either"
+rc_is 0 "emit-boundary: status is advisory (exit 0)"
+hasnt "elapsed=999" "emit-boundary: the STATUS line does not carry an injected pair either"
 
+# AND A FLAG VALUE THAT BECOMES A RECORD FIELD: --reason/--evidence go through sanitize_field,
+# which is stricter still ('=' is not in its keep set).
 rs "$R11C" record-author-performed t2 --issue 810 \
-  --reason 'no peer agent available on this box; hand audit against the spec deltas' \
+  --reason 'no peer agent available on this box; elapsed=999 hand audit against the spec deltas' \
   --evidence 'docs/round-artifacts/issue-810-hand.md' --performed-by author
-rc_is 0 "report-field: record-author-performed accepts the stage"
-hasnt "elapsed=999" "report-field: the RECORD-OK line does not carry the injected pair either"
+rc_is 0 "emit-boundary: record-author-performed accepts the stage"
+hasnt "elapsed=999" "emit-boundary: the RECORD-OK line does not carry the reason's injected pair either"
 
 # --- 11b. AN UNREADABLE REPORT IS ITS OWN CAUSE, NOT "report empty" (round 2, B7) ---------
 # The cause list's entire justification is that THE OPERATOR ACTION DIFFERS PER CAUSE: "the file
@@ -1301,6 +1324,119 @@ else
   has "EXIT CODES" "outside-a-worktree CONTROL: --help prints the usage text"
 fi
 
+# --- 13. THE REPORT PATH IS DERIVED — NO CALLER-CONTROLLED COMPONENT (round 4, H2/H3) -----
+# THE FINDINGS, both of which were properties of the `--report` OVERRIDE:
+#   H2 the caller's path was written RAW into the LINE-ORIENTED stage record, so a LEGAL
+#      filename containing a NEWLINE split across lines and the reader (`load_stage`, via
+#      `read_field`) took only the PREFIX — which could name a DIFFERENT, pre-existing report
+#      recording PASS while the sentinel had gone to the newline-bearing name;
+#   H3 `open` created the report's PARENT DIRECTORY before verifying repository containment and
+#      ignore status, so a REFUSED outside-the-repository path still created directories outside
+#      the checkout.
+#
+# BOTH ARE CLOSED BY CONSTRUCTION, NOT BY A CHECK: `--report` is REMOVED, so the path is always
+# `<repo-root>/.review-stage/issue-<N>/<kind>.md`. `<kind>` and `<issue>` are then the WHOLE path
+# input surface, and both are validated strictly (kind `[A-Za-z0-9][A-Za-z0-9_-]*`, issue digits
+# only), so there is no newline to split on and no containment question to answer. The removal is
+# a DELIBERATE NARROWING of the approved design surface: measured, `--report` was mandated by no
+# spec requirement and used by nothing (no agent definition, no skill, no script, no call site),
+# and it was the common source of a finding CLUSTER across four review rounds.
+R13="$(newrepo)"
+
+# (a) THE FLAG IS GONE, and its absence is a USAGE ERROR rather than a silently-ignored argument:
+#     a caller still passing it must be told, not obeyed by accident.
+rs "$R13" open c --issue 900 --agent spec-auditor --report other.md
+rc_is 64 "derived: --report is no longer accepted (unknown argument, exit 64)"
+has "unknown argument" "derived: the usage error names it as an unknown argument"
+if [ -e "$R13/other.md" ]; then
+  bad "derived: the refused run must not create the path the removed flag named"
+else
+  ok "derived: nothing was created at the path the removed flag named"
+fi
+
+# (b) H3 DIRECTLY: the old code ran `mkdir -p "$(dirname "$rpath")"` BEFORE the containment and
+#     ignore verification, so this exact invocation created a directory OUTSIDE the checkout and
+#     THEN refused. With the flag gone the argument is refused before anything is created.
+H3DIR="$T/h3-outside-the-repo"
+rm -rf "$H3DIR"
+rs "$R13" open c --issue 901 --agent spec-auditor --report "$H3DIR/x.md"
+rc_is 64 "derived/H3: an outside-the-repository path cannot even be REQUESTED"
+if [ -d "$H3DIR" ]; then
+  bad "derived/H3: a directory was created OUTSIDE the checkout ($H3DIR) before the refusal"
+else
+  ok "derived/H3: no directory was created outside the checkout"
+fi
+
+# (c) THE DERIVED PATH IS ANCHORED AT THE REPO ROOT, not at the caller's cwd — so it does not
+#     move with the directory the agent happens to be spawned in, and the reader and the writer
+#     cannot disagree about which file the stage means.
+mkdir -p "$R13/sub/deeper"
+OUT="$(cd "$R13/sub/deeper" && bash "$RS" open c --issue 902 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 0 "derived: open from a SUBDIRECTORY succeeds"
+has "$R13/.review-stage/issue-902/c.md" "derived: the path is anchored at the repo ROOT, not at cwd"
+if [ -e "$R13/sub/deeper/.review-stage" ]; then
+  bad "derived: a .review-stage/ tree was created relative to the caller's cwd"
+else
+  ok "derived: nothing was created relative to the caller's cwd"
+fi
+
+# (d) H2's READER HALF: the stage record's `report:` field is no longer READ AS A LOCATION. Plant
+#     a record naming a DIFFERENT, pre-existing report that records PASS — the exact outcome H2
+#     describes — and the verdict must still come from the DERIVED path (the sentinel).
+rs "$R13" open c --issue 903 --agent spec-auditor
+rc_is 0 "derived/H2: the stage under test opened"
+printf 'result: PASS\n\na different report entirely.\n' >"$R13/.review-stage/issue-903/other.md"
+SF13="$R13/.review-stage/issue-903/c.stage"
+LC_ALL=C sed -e "s|^report: .*|report: $R13/.review-stage/issue-903/other.md|" "$SF13" >"$SF13.new" && mv "$SF13.new" "$SF13"
+rs "$R13" verdict c --issue 903
+rc_is 5 "derived/H2: a planted 'report:' naming another PASS report does NOT select it"
+has "RESULT: NOT-RUN (no report written)" "derived/H2: the verdict comes from the DERIVED path's sentinel"
+has "report=$R13/.review-stage/issue-903/c.md" "derived/H2: and the emitted report= names the DERIVED path"
+rs "$R13" status c --issue 903
+has "state=sentinel-only" "derived/H2: status reads the derived path too, so the two cannot disagree"
+
+# (e) H2's NEWLINE MECHANISM, spelled out: a value SPLIT ACROSS LINES, whose FIRST line is a
+#     complete path to another report. `read_field` returns that prefix, so this is precisely the
+#     mis-selection a newline-bearing `--report` produced. Nothing reads the field now.
+rs "$R13" open c --issue 904 --agent spec-auditor
+printf 'result: PASS\n\nanother pre-existing report.\n' >"$R13/.review-stage/issue-904/other.md"
+SF14="$R13/.review-stage/issue-904/c.stage"
+{
+  LC_ALL=C grep -v '^report:' "$SF14"
+  printf 'report: %s\n' "$R13/.review-stage/issue-904/other.md"
+  printf 'and-the-rest-of-the-filename.md\n'
+} >"$SF14.new" && mv "$SF14.new" "$SF14"
+rs "$R13" verdict c --issue 904
+rc_is 5 "derived/H2: a 'report:' value split across LINES cannot select another report either"
+hasnt "RESULT: PASS" "derived/H2: the prefix of a split value is not read as the report location"
+
+# (f) THE WHOLE REMAINING PATH-INPUT SURFACE: <kind>. Conservative on purpose — `.` is refused as
+#     well as `/`, because a kind is a FILENAME component and `[A-Za-z0-9][A-Za-z0-9_-]*` covers
+#     every kind this pipeline uses (`c`, `rust-review`, `fix`, `coverage`).
+for BADKIND in 'c.x' '.c' '-c' 'c d' 'c/x' 'c..' '' ; do
+  rs "$R13" open "$BADKIND" --issue 905 --agent spec-auditor
+  rc_is 64 "derived/kind: '$BADKIND' is refused as a usage error"
+done
+rs "$R13" open "$(printf 'c\nd')" --issue 905 --agent spec-auditor
+rc_is 64 "derived/kind: a kind carrying a NEWLINE is refused"
+rs "$R13" open "$(printf 'c\rd')" --issue 905 --agent spec-auditor
+rc_is 64 "derived/kind: a kind carrying a CR is refused"
+# POSITIVE CONTROL: the kinds the pipeline actually uses are still accepted, or this narrowing
+# would red on correct input.
+for OKKIND in c rust-review coverage fix stage_2 A1 ; do
+  rs "$R13" open "$OKKIND" --issue 906 --agent spec-auditor
+  rc_is 0 "derived/kind CONTROL: '$OKKIND' is accepted"
+done
+
+# (g) AND <issue>: decimal digits only, so no separator and no traversal can enter the directory
+#     component either.
+for BADISSUE in '9 9' '9/9' '9.9' '-9' '9a' '' ; do
+  rs "$R13" open c --issue "$BADISSUE" --agent spec-auditor
+  rc_is 64 "derived/issue: '$BADISSUE' is refused as a usage error"
+done
+rs "$R13" open c --issue "$(printf '907\n908')" --agent spec-auditor
+rc_is 64 "derived/issue: an issue carrying a NEWLINE is refused"
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -1345,7 +1481,19 @@ fi
 # preconditions rather than a precondition for running: a box that cannot commit, or an `awk`
 # that produces no instrumented copy, FAILS the case rather than displacing it. So the EXACT
 # floor still holds by the two shapes recorded above.
-ASSERT_FLOOR=310
+#
+# ROUND 4's SECOND ITEM MOVED THE COUNT AGAIN, IN BOTH DIRECTIONS (310 -> 350). `--report` was
+# REMOVED, so the cases that could only be reached through it were REPLACED rather than deleted:
+# section 5(a) now reaches the report-half ignore refusal through a repository `.gitignore` that
+# covers one file and not the other; 5(c)'s outside-the-repository case is GONE (unreachable by
+# construction — section 13(b) pins the reachable half, that the removed flag is a usage error and
+# creates nothing outside the checkout); 11(g)/(h) and 11e's temp-name oracle use an
+# extension-ignoring repository instead of a custom path; and 11c's `report=` injection vector is
+# replaced by the vectors that REMAIN (the report-supplied cause, and the flag values a caller
+# passes), verified to still RED when the emit boundary is removed. Section 13 then adds the
+# derived-path and strict kind/issue cases. Every assertion added is unconditional, so the EXACT
+# floor still holds by the two shapes recorded above.
+ASSERT_FLOOR=350
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

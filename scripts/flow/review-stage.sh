@@ -95,8 +95,8 @@
 # TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
 # ---------------------------------------------------------------------------
 #   <dir>/<kind>.md      the REPORT OF RECORD: what the agent writes, what `verdict` reads.
-#   <dir>/<kind>.stage   the STAGE RECORD: kind/issue/agent/spawned-at/deadline/report path,
-#                        plus the `head-sha:` the stage was opened AT (see below).
+#   <dir>/<kind>.stage   the STAGE RECORD: kind/issue/agent/spawned-at/deadline, plus the
+#                        `head-sha:` the stage was opened AT (see below).
 # A single file cannot tell `stage never opened` from `report absent` — deleting it erases
 # the evidence that anything was ever opened, and `verdict` still has to report an agent, a
 # deadline and an elapsed time for a stage whose report has gone missing. So the two facts
@@ -138,6 +138,24 @@
 # unborn HEAD, no commits yet) the field records the literal `unresolved` and a note says so —
 # an absent field and an unmeasured one are different facts, and both refuse at the merge point.
 #
+# AND BOTH PATHS ARE DERIVED — THERE IS NO `--report` (#3751 round 4, H2/H3)
+# ------------------------------------------------------------------------
+# The report of record is ALWAYS `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed the
+# same way by `open` and by every reader. The `--report <path>` override is REMOVED, and this is
+# a DELIBERATE NARROWING of the surface: it was mandated by no requirement and used by nothing
+# (no agent definition, no skill, no script, no call site — measured by grep, not assumed), and
+# it was the caller-controlled component that produced a finding CLUSTER across four review
+# rounds. Two of them, both closed BY CONSTRUCTION rather than by a check: the path was written
+# RAW into the LINE-ORIENTED stage record, so a LEGAL newline-bearing filename split across lines
+# and the reader took the PREFIX — which could name a DIFFERENT pre-existing report recording
+# `PASS`; and the report's parent directory was created BEFORE repository containment was
+# verified, so a REFUSED outside-the-repository path still created directories outside the
+# checkout. With the path derived there is no newline to split on and no containment question to
+# answer, and `<kind>`/`<issue>` — validated strictly at ONE boundary — are the whole remaining
+# path-input surface. If a caller ever genuinely needs a custom location, re-add the flag WITH
+# that hardening (a refused CR/LF, containment verified BEFORE any `mkdir`); do not re-add it as
+# it was.
+#
 # BOTH PATHS ARE VERIFIED GITIGNORED, FAIL-CLOSED
 # -----------------------------------------------
 # These files are written MID-RUN, routinely while the gate of record is running, and #2926
@@ -172,7 +190,7 @@
 # status must not be able to decide anything.
 #
 # SUBCOMMANDS
-#   open  <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--report <path>] [--force]
+#   open  <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--force]
 #         Pre-stamp the sentinel BEFORE spawning. Refuses an already-open stage without
 #         --force; --force NEVER resets `spawned-at` (a second spawn silently restarting the
 #         clock would make the deadline unreadable, and a re-spawn is exactly what a lane
@@ -280,12 +298,14 @@ one_line() {
 # maps the ONE reserved character '=' to '~'.
 #
 # WHY IT IS ONE FUNCTION AND NOT A RULE PER SITE: the `cause` and the `report=` path are both
-# DATA on a line whose other fields a consumer scans, and both are influenced by a party this
-# tool is judging — the cause partly by the report's own text, the path by `--report`. A path
-# like `a=b elapsed=999.md` is a LEGAL filename, so it cannot be refused (refusing would red
-# correct input); left raw it put a SECOND `elapsed=` pair on the line, and the comment above
-# the cause claimed "ONE emit boundary" while the neighbouring field had none. Neutralised
-# rather than refused, because both values are diagnostics an operator has to read.
+# DATA on a line whose other fields a consumer scans. The cause is influenced by a party this
+# tool is judging (the report's own text); the PATH was too, through `--report`, and left raw a
+# LEGAL filename like `a=b elapsed=999.md` put a SECOND `elapsed=` pair on the line while the
+# comment above the cause claimed "ONE emit boundary". Since round 4 the path is DERIVED from a
+# strictly-validated kind and issue, so it can no longer carry `=` at all — the boundary is kept
+# for it deliberately, because ONE rule applied to EVERY data value on these lines is what stops
+# the next added field being the one that forgot. Neutralised rather than refused, because both
+# values are diagnostics an operator has to read.
 #
 # DISPLAY-ONLY, WHICH IS THE WHOLE SAFETY ARGUMENT: every decision (the token, the exit code,
 # the paths actually written) is made on the RAW value before any line is built, so this can
@@ -400,16 +420,25 @@ author_defect_prose() {
   esac
 }
 
-# validate_kind <kind> — a stage kind names a FILE, so it is validated rather than trusted:
-# `[A-Za-z0-9][A-Za-z0-9._-]*`, which admits `c`, `rust-review`, `coverage`, and refuses
-# every path-traversal and shell-metacharacter shape. Refused, never sanitized: a kind is
-# also how a caller ASKS for a stage, so silently rewriting it would make `open c/../x` and
-# `open c-x` the same stage under two spellings.
+# validate_kind / validate_issue — THE WHOLE PATH-INPUT SURFACE OF THIS TOOL (#3751 round 4,
+# H2/H3). Since `--report` was removed the report path is DERIVED
+# (`<repo-root>/.review-stage/issue-<N>/<kind>.md`), so `<kind>` and `<issue>` are the ONLY
+# caller-supplied components of any path this script builds, reads or writes. That is why they
+# are validated STRICTLY and at ONE boundary rather than sanitized: a kind is also how a caller
+# ASKS for a stage, so silently rewriting it would make `open c/../x` and `open c-x` the same
+# stage under two spellings.
+#
+# `<kind>` is `[A-Za-z0-9][A-Za-z0-9_-]*` — CONSERVATIVE on purpose. It admits every kind this
+# pipeline uses (`c`, `rust-review`, `fix`, `coverage`) and refuses `/`, `.` (hence `..` and every
+# traversal), a leading dash, every shell metacharacter, and CR/LF. `.` is refused even though a
+# lone dot cannot traverse: a filename component needs no dot here, and the narrower the surface
+# the less there is to reason about. `<issue>` is decimal DIGITS ONLY, so the directory component
+# cannot carry a separator, a newline or a traversal either.
 validate_kind() {
   local k="${1:-}"
   case "$k" in
     "" ) die_usage "a <kind> is required (e.g. c, rust-review, coverage)" ;;
-    *[!A-Za-z0-9._-]* ) die_usage "invalid <kind> '$k': allowed characters are [A-Za-z0-9._-]" ;;
+    *[!A-Za-z0-9_-]* ) die_usage "invalid <kind> '$k': allowed characters are [A-Za-z0-9_-]" ;;
     [!A-Za-z0-9]* ) die_usage "invalid <kind> '$k': must start with a letter or digit" ;;
   esac
   printf '%s\n' "$k"
@@ -419,7 +448,9 @@ validate_issue() {
   local n="${1:-}"
   case "$n" in
     "" ) die_usage "--issue <N> is required" ;;
-    *[!0-9]* | 0*[!0-9]* ) die_usage "--issue must be a decimal issue number, got '$n'" ;;
+    # ONE pattern, and it is exhaustive: anything that is not entirely digits is refused, which
+    # covers a separator, a sign, a space and a newline alike.
+    *[!0-9]* ) die_usage "--issue must be a decimal issue number, got '$n'" ;;
   esac
   printf '%s\n' "$n"
 }
@@ -460,28 +491,21 @@ repo_root() {
   printf '%s\n' "$REPO_ROOT"
 }
 
-# abs_path <path> — absolutise WITHOUT requiring the file to exist (the report is often the
-# file we are about to create). Relative values resolve against $PWD, which is ordinary CLI
-# semantics; the DEFAULT path is built from the repo root instead, so it does not move with
-# the caller's cwd.
-abs_path() {
-  local p="$1" dir base
-  case "$p" in
-    /*) ;;
-    *) p="$PWD/$p" ;;
-  esac
-  dir="$(dirname "$p")"
-  base="$(basename "$p")"
-  if [ -d "$dir" ]; then
-    printf '%s/%s\n' "$(cd "$dir" && pwd)" "$base"
-  else
-    printf '%s\n' "$p"
-  fi
-}
+# `abs_path` IS GONE WITH `--report` (#3751 round 4). It existed to absolutise a
+# caller-supplied path against `$PWD`; every path is now built from the repo root by
+# `stage_dir`/`stage_file`/`report_path` below, so it is already absolute and does not move with
+# the caller's cwd. Nothing absolutises anything any more, which is the point: subtraction cannot
+# introduce a false pass.
 
+# THE THREE PATHS ARE DERIVED FROM (repo root, issue, kind) AND FROM NOTHING ELSE (#3751 round
+# 4, H2/H3). There is no override: `report_path` is THE report of record's location, computed the
+# same way by the writer (`open`) and by every reader (`verdict`, `status`,
+# `record-author-performed`), so the two can never form two opinions about which file a stage
+# means — and no caller-controlled component enters a path, so there is no newline to split a
+# record line on and no repository-containment question to answer.
 stage_dir()  { printf '%s/.review-stage/issue-%s\n' "$(repo_root)" "$1"; }
 stage_file() { printf '%s/%s.stage\n' "$(stage_dir "$1")" "$2"; }
-default_report() { printf '%s/%s.md\n' "$(stage_dir "$1")" "$2"; }
+report_path() { printf '%s/%s.md\n' "$(stage_dir "$1")" "$2"; }
 
 # assert_ignored <path> <what> — FAIL-CLOSED gitignore verification (see the header). Asks
 # git; refuses on anything that is not an affirmative "yes, ignored". `check-ignore -q` exits
@@ -492,7 +516,7 @@ assert_ignored() {
   git check-ignore -q -- "$path" || rc=$?
   if [ "$rc" -ne 0 ]; then
     emit "$REFUSE_MARKER reason=path-not-gitignored what=$what path=$path check-ignore-rc=$rc"
-    emit "$REFUSE_MARKER detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add the path to .gitignore (the default location .review-stage/ already is), or pass a --report path that is."
+    emit "$REFUSE_MARKER detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add .review-stage/ to .gitignore (the shipped .gitignore does, as a DIRECTORY — this tool writes nowhere else)."
     # An optional caller-supplied line, printed only on the refusal path: a refused TEMPORARY
     # path is confusing without it, because the caller never named that path.
     [ -z "$extra" ] || emit "$REFUSE_MARKER detail=$extra"
@@ -556,7 +580,7 @@ assert_no_symlink() {
     cur="$cur/$comp"
     if [ -L "$cur" ]; then
       emit "$REFUSE_MARKER reason=path-is-symlink what=$what path=$path component=$cur"
-      emit "$REFUSE_MARKER detail=git check-ignore verifies a LEXICAL path but a WRITE follows symlinks, so this write would land wherever the link points — possibly a TRACKED file or a path outside the repository — dirtying a running gate of record (tree-integrity FAIL, #2926) and making premerge-assert refuse on dirty: yes (#3648). Remove the link and let this tool create a regular file, or pass a --report path that is one."
+      emit "$REFUSE_MARKER detail=git check-ignore verifies a LEXICAL path but a WRITE follows symlinks, so this write would land wherever the link points — possibly a TRACKED file or a path outside the repository — dirtying a running gate of record (tree-integrity FAIL, #2926) and making premerge-assert refuse on dirty: yes (#3648). Remove the link and let this tool create a regular file."
       exit 2
     fi
     if [ -e "$cur" ] && [ ! -d "$cur" ] && [ "$cur" != "$path" ]; then
@@ -645,12 +669,13 @@ prepare_write() {
     # `mktemp -u` gets the named refusal below rather than a weaker name it cannot see.
     [ -n "$cand" ] || break
     # THE SAME BAR AS THE DESTINATION, and the refusal EXPLAINS itself, because the caller never
-    # named this path. Consequence worth knowing: a --report in a directory ignored only by
-    # EXTENSION (`*.md`) is refused, since the temp name is not matched by that pattern and WOULD
-    # dirty a running gate. `.review-stage/` — the default and the only path the pipeline uses —
-    # is ignored as a DIRECTORY, so this never fires there.
+    # named this path. Consequence worth knowing: a repository whose `.gitignore` covers the
+    # report by EXTENSION rather than by DIRECTORY (`.review-stage/**/*.md` and not
+    # `.review-stage/`) is refused, since the temp name matches no such pattern and WOULD dirty a
+    # running gate. The SHIPPED `.gitignore` ignores `.review-stage/` as a DIRECTORY, so this
+    # never fires here.
     assert_ignored "$cand" "$what-tempfile" \
-      "this is the TEMPORARY file the write goes through (an unpredictable same-directory temp, created O_EXCL and written through a held descriptor, plus an atomic mv -f, so no path is re-resolved between validation and writing and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A --report directory ignored only by EXTENSION does not match it: ignore the DIRECTORY instead, as .review-stage/ is."
+      "this is the TEMPORARY file the write goes through (an unpredictable same-directory temp, created O_EXCL and written through a held descriptor, plus an atomic mv -f, so no path is re-resolved between validation and writing and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A .gitignore pattern that ignores the report by EXTENSION does not match it: ignore the DIRECTORY instead, as the shipped .gitignore does for .review-stage/."
     # CREATE AND OPEN IN ONE STEP. `set -C` (noclobber) makes this `O_CREAT|O_EXCL`, so it
     # refuses an existing path — INCLUDING a symlink, dangling or not — instead of following it.
     # The caller's noclobber setting is preserved: this script does not set it, but a future
@@ -702,14 +727,13 @@ now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 cmd_open() {
   require_repo_root
   REFUSE_MARKER="OPEN-REFUSED"
-  local kind="" issue="" agent="" deadline="$DEFAULT_DEADLINE_SECS" report="" force=0
+  local kind="" issue="" agent="" deadline="$DEFAULT_DEADLINE_SECS" force=0
   kind="$(validate_kind "${1:-}")"; shift || true
   while [ $# -gt 0 ]; do
     case "$1" in
       --issue) shift; issue="${1:-}" ;;
       --agent) shift; agent="${1:-}" ;;
       --deadline-secs) shift; deadline="${1:-}" ;;
-      --report) shift; report="${1:-}" ;;
       --force) force=1 ;;
       *) die_usage "open: unknown argument '$1'" ;;
     esac
@@ -720,13 +744,20 @@ cmd_open() {
   agent="$(reject_placeholder "open: --agent" "$agent" "spec-auditor")"
   deadline="$(validate_secs "$deadline" --deadline-secs)"
 
+  # DERIVED, NEVER SUPPLIED (#3751 round 4, H2/H3). `--report` used to override this, and it was
+  # the only caller-controlled component of any path here: written RAW into the line-oriented
+  # stage record, a LEGAL filename containing a newline split across lines and the reader took the
+  # PREFIX — which could name a DIFFERENT pre-existing report recording PASS while the sentinel
+  # went to the newline-bearing name; and the report's parent directory was created BEFORE
+  # containment was verified, so a REFUSED outside-the-repository path still created directories
+  # outside the checkout. Both are closed BY CONSTRUCTION rather than by a check, because a check
+  # here can only report a write that already happened.
   local sfile rpath dir
   sfile="$(stage_file "$issue" "$kind")"
-  if [ -n "$report" ]; then rpath="$(abs_path "$report")"; else rpath="$(default_report "$issue" "$kind")"; fi
+  rpath="$(report_path "$issue" "$kind")"
 
-  # BOTH files are verified ignored BEFORE anything is created — including the stage record,
-  # which lives under .review-stage/ whatever --report says. Checking only the report would
-  # leave the other write dirtying a running gate.
+  # BOTH files are verified ignored BEFORE anything is created — the report AND the stage record.
+  # Checking only one would leave the other write dirtying a running gate.
   #
   # THE SYMLINK WALK RUNS FIRST, BEFORE THE `mkdir -p`: a component that is a dangling symlink
   # makes `mkdir -p` fail with "File exists", i.e. an unnamed exit 1 under `set -e` instead of a
@@ -735,9 +766,11 @@ cmd_open() {
   assert_no_symlink "$sfile" stage-record
   dir="$(dirname "$sfile")"; mkdir -p "$dir"
   assert_ignored "$sfile" stage-record
-  # The report's PARENT must exist for check-ignore to answer about a path, and for the
-  # write to land; creating it is safe because the directory itself is under a verified
-  # path or under the caller's chosen tree.
+  # The report's PARENT must exist for check-ignore to answer about a path, and for the write to
+  # land. It is the SAME directory as the stage record's, already created above, and it is
+  # `<repo-root>/.review-stage/issue-<N>` BY DERIVATION — so this `mkdir` cannot create anything
+  # outside the checkout whatever the caller passed (#3751 round 4, H3: it once could, because the
+  # caller supplied the path and the containment check came AFTER this line).
   assert_no_symlink "$rpath" report-of-record
   mkdir -p "$(dirname "$rpath")"
   assert_ignored "$rpath" report-of-record
@@ -775,7 +808,7 @@ cmd_open() {
   if [ -f "$sfile" ]; then
     prior_iso="$(read_field "$sfile" spawned-at)"
     if [ "$force" -ne 1 ]; then
-      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$(read_field "$sfile" report)")"
+      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$rpath")"
       emit "$REFUSE_MARKER detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
       exit 2
     fi
@@ -879,7 +912,12 @@ cmd_open() {
     printf 'deadline-secs: %s\n' "$deadline"
     printf 'spawned-at: %s\n' "$spawned_iso"
     printf 'spawned-epoch: %s\n' "$spawned_epoch"
-    printf 'report: %s\n' "$rpath"
+    # NO `report:` FIELD (#3751 round 4, H2). It used to be written here and READ BACK as the
+    # report's LOCATION, which made a line of this record a control channel for the path — the
+    # split-value mis-selection above. The path is DERIVED identically by every reader, so a
+    # second source for it would only be a second thing to disagree: remove the source rather
+    # than reconcile it. The human-facing copy of the path stays in the sentinel report itself
+    # (`report-of-record:`), which is the file an operator opens.
     # RE-STAMPED ON EVERY OPEN, INCLUDING --force — deliberately unlike `spawned-at` above. A
     # forced re-open re-writes the sentinel, so the re-spawned agent audits the tree that is
     # there NOW; carrying an older sha forward would bind the verdict to a tree nobody read.
@@ -1060,19 +1098,26 @@ classify_report() {
 # load_stage <issue> <kind> — set the STAGE_* globals from the stage record, or mark it
 # never-opened. Fields that cannot be read are `unknown`, never a fabricated 0 (a counter
 # not observed is an error, never an invented value).
+#
+# THE REPORT PATH IS DERIVED HERE, NOT READ FROM THE RECORD (#3751 round 4, H2). It used to be
+# read from the record's `report:` line, so the record was a CONTROL channel naming which file
+# holds the verdict: a value split across lines by a newline-bearing `--report` was read as its
+# PREFIX, which could name a DIFFERENT pre-existing report recording `PASS` — measured, that
+# reported `RESULT: PASS` for a stage whose own sentinel had never been replaced. With
+# `--report` gone the path has ONE derivation (`report_path`), used by the writer and by every
+# reader, so nothing in a data file can redirect a reader to another file.
 STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
 STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown
 load_stage() {
   local issue="$1" kind="$2" sfile epoch
   sfile="$(stage_file "$issue" "$kind")"
-  STAGE_REPORT="$(default_report "$issue" "$kind")"
+  STAGE_REPORT="$(report_path "$issue" "$kind")"
   [ -f "$sfile" ] || return 0
   STAGE_OPEN=1
   local v
   v="$(read_field "$sfile" agent)";         [ -z "$v" ] || STAGE_AGENT="$v"
   v="$(read_field "$sfile" deadline-secs)"; [ -z "$v" ] || STAGE_DEADLINE="$v"
   v="$(read_field "$sfile" spawned-at)";    [ -z "$v" ] || STAGE_SPAWNED_ISO="$v"
-  v="$(read_field "$sfile" report)";        [ -z "$v" ] || STAGE_REPORT="$v"
   epoch="$(read_field "$sfile" spawned-epoch)"
   case "$epoch" in
     "" | *[!0-9]* ) STAGE_ELAPSED=unknown ;;

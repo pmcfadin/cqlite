@@ -38,10 +38,23 @@ pass-through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
 ## §1 — `open`: the sentinel and the path
 
 ```
-review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--report <path>]
+review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--force]
 ```
 
-- Default path: `.review-stage/issue-<N>/<kind>.md` inside the worktree.
+- The path is `<repo-root>/.review-stage/issue-<N>/<kind>.md` inside the worktree, **DERIVED and not
+  overridable**. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
+  round 4** — a DELIBERATE NARROWING of this design surface, recorded rather than quietly dropped. It
+  was mandated by no requirement and used by NOTHING (measured by grep: no agent definition, no skill,
+  no script, no call site — only this usage line and the test suite), and it was the caller-controlled
+  component behind a finding CLUSTER across four review rounds: round 1's symlink walk and its
+  extension-vs-directory ignore consequence, round 3's temp-path TOCTOU, and round 4's H2 (the raw
+  path written into a LINE-oriented record, so a legal newline-bearing filename split and the reader
+  took the PREFIX — which could name a DIFFERENT pre-existing report recording `PASS`) and H3 (the
+  parent directory created BEFORE containment was verified, so a REFUSED outside-the-repository path
+  still created directories outside the checkout). With the path derived, `<kind>` and `<issue>` —
+  validated strictly at one boundary — are the whole path-input surface, and both findings are closed
+  BY CONSTRUCTION rather than by a check. If a caller ever appears, re-add the flag WITH the hardening
+  (CR/LF refused; containment verified BEFORE any `mkdir`), never as it was.
 - **The path must be gitignored, verified with `git check-ignore -v`, fail-closed.** Not a convention —
   a measured one. #2926 fails a gate closed on any mid-run tree mutation, and a review stage routinely
   overlaps a running gate. A gitignored path is invisible to `tree-integrity` (which derives its identity

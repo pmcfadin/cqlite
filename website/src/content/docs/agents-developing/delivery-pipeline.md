@@ -622,7 +622,14 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   WEAKER than the gate's `INCOMPLETE` sentinel** — at least the sentinel names itself a non-verdict — so
   never read one as a completed review. Writes go under `.review-stage/`, whose ignore status is
   **verified with `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate
-  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). **And a SYMLINK at the report
+  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED** —
+  `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed identically by the writer and by every
+  reader, with **no `--report` override** (removed in round 4, a deliberate narrowing: the flag was
+  mandated by no requirement, used by nothing, and was the caller-controlled component behind a
+  finding cluster across four rounds — written raw into the LINE-oriented stage record, a legal
+  newline-bearing filename split and the reader took the PREFIX, which could select a different
+  pre-existing report recording `PASS`; and the parent directory was created BEFORE containment was
+  verified, so a refused outside-the-repository path still created directories outside the checkout). **And a SYMLINK at the report
   path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed
   (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an
   ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the
