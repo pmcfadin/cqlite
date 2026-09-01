@@ -151,6 +151,9 @@
 # SUBCOMMANDS
 #   write  <N> [--stage <s>] [--request-id <r>] [--pr <n>] [--branch <b>]
 #              [--body-file <path>] [--actor <id>]
+#              A --body-file is READ EXACTLY ONCE, into a private snapshot, and everything
+#              downstream validates and copies THOSE bytes; a read failure is `verdict ERROR`,
+#              never a silently EMPTY body.
 #              Write/replace the marker in the CURRENT worktree. Writing OVER an existing
 #              marker first passes the SAME ownership verification `verify` applies — you
 #              may not overwrite a live peer's plan either — so a foreign marker refuses
@@ -938,7 +941,12 @@ read_marker() {
     # A DUPLICATE identity key would let the PARSER's choice decide identity, which is the
     # forgery shape this whole prologue exists to remove. Refused, not first-wins.
     [ -z "$dup" ] || refuse MALFORMED 8 "$(sane "$path") records '$(sane "$key")' TWICE in the stamp prologue — which occurrence is the identity is undecidable. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
-  done <"$path"
+    # THE SUPPRESSOR COMES FIRST (roborev job 37 J2's stat-then-act sweep). `marker_class`
+    # established this path a moment ago, and the file can be gone by now — a failed input
+    # redirection makes bash print its OWN unprefixed diagnostic, breaking contract (a), and
+    # bash applies redirections LEFT TO RIGHT, so `<"$path" 2>/dev/null` would leak it. The
+    # failure itself still ends the run through the EXIT-trap backstop's tokened ERROR.
+  done 2>/dev/null <"$path"
 
   local missing=''
   [ -n "$S_issue" ]    || missing="$missing issue"
@@ -1389,7 +1397,20 @@ write_marker() {
     # `cat`'s stderr is SUPPRESSED, not captured: inside a `{ ... } >"$tmp"` group there is
     # nowhere to capture it to, and the group's non-zero status already routes to the
     # anchored WRITE_ERR below (roborev job 26 F2).
-    if [ -n "$bodyfile" ] && [ -s "$bodyfile" ]; then cat "$bodyfile" 2>/dev/null; fi
+    #
+    # THE BODY IS ALWAYS READ; IT IS NEVER STAT-GATED (roborev job 37 J2). This used to be
+    # `[ -n "$bodyfile" ] && [ -s "$bodyfile" ]`, and the `-s` was a STAT STANDING IN FOR A
+    # READ: between that probe and the copy the source can be deleted, truncated, replaced or
+    # be a zero-sized nonregular file, and the false branch then contributed NOTHING while the
+    # run reported `WRITTEN` — a silently EMPTY body in the one file whose whole job is durable
+    # state. It is the same shape as the assembled-marker race: a check placed before the act
+    # can only describe a file that no longer has to be the one acted on. Now the read is the
+    # act — `cat` runs unconditionally, an empty source contributes nothing (which is what an
+    # empty body IS), and a read FAILURE makes the group non-zero and routes to the anchored
+    # WRITE_ERR below, so "the body could not be read" can never be committed as "there was no
+    # body". The caller-supplied file is additionally SNAPSHOTTED once in cmd_write, which
+    # removes the window rather than narrowing it.
+    if [ -n "$bodyfile" ]; then cat "$bodyfile" 2>/dev/null; fi
   } 2>/dev/null >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced (the body could not be read, or the temporary file could not be written)"; return 1; }
   # The last thing before the atomic commit, over the committed bytes themselves.
   assert_assembled_marker "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
@@ -1472,11 +1493,24 @@ cmd_write() {
   require_worktree_axis
   require_session_axis
 
-  local body_src=''
+  # THE CALLER'S BODY FILE IS READ EXACTLY ONCE, INTO A SNAPSHOT WE OWN (roborev job 37 J2).
+  # Everything downstream — the sentinel scan, the assembled-marker validation and the copy into
+  # the marker — then reads THE SAME BYTES. Validating one file and copying another is what let
+  # a body vanish between the two; snapshotting SUBSUMES that window instead of narrowing it,
+  # exactly as `assert_assembled_marker` does for the commit. The `-r` probe is kept for the
+  # ordinary typo, as a friendly USAGE error before any work — it is NOT the guarantee: the
+  # guarantee is that the copy below is an ACT whose failure is checked, not a stat.
+  local body_src='' body_snap=''
   if [ -n "$bodyfile" ]; then
     [ -r "$bodyfile" ] || die_usage "--body-file '$(sane "$bodyfile")' is not readable — nothing was written"
-    assert_body_safe "$bodyfile"
-    body_src="$bodyfile"
+    body_snap="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the --body-file snapshot under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$body_snap"))"
+    { [ -n "$body_snap" ] && [ -f "$body_snap" ]; } || refuse ERROR 1 "mktemp exited 0 for the --body-file snapshot but named no usable temporary file (it emitted: $(sane "$body_snap")) — nothing was written"
+    register_tmp "$body_snap"
+    # `cat`'s own stderr is suppressed (contract (a): its native `cat: ...: No such file or
+    # directory` carries no prefix) and its FAILURE is the refusal — never a silent empty body.
+    cat "$bodyfile" 2>/dev/null >"$body_snap" || refuse ERROR 1 "the --body-file $(sane "$bodyfile") could not be READ (it was deleted, replaced or became unreadable after it was named) — refusing rather than committing an EMPTY body over this lane's durable state; nothing was written"
+    assert_body_safe "$body_snap"
+    body_src="$body_snap"
   fi
 
   # Writing OVER an existing marker passes the SAME ownership verification: you may not

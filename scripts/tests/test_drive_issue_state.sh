@@ -1787,6 +1787,7 @@ unknown-option:USAGE:64
 unknown-subcommand:USAGE:64
 no-subcommand:USAGE:64
 body-carries-sentinel:USAGE:64
+unreadable-body-file:ERROR:1
 absent-marker:ABSENT:3
 marker-not-regular:ERROR:1
 unstamped-marker:UNSTAMPED:8
@@ -1847,6 +1848,13 @@ inv_run() {  # inv_run <row-name> — set the state up, run it, print output, re
     body-carries-sentinel)
       printf 'notes\n%s\nmore\n' "$sentinel" >"$INV_DIR/body-bad.md"
       inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 --body-file "$INV_DIR/body-bad.md" ;;
+    unreadable-body-file)
+      # roborev job 37 J2, in the TABLE as well as its own case: a source whose READ fails must
+      # refuse with one anchored token, never commit an empty body.
+      printf 'plan\n' >"$INV_DIR/body-unreadable.md"
+      sd=$(inv_bin cat 'case "$*" in *body-unreadable.md*) exit 1;; esac
+exec '"$(command -v cat)"' "$@"')
+      inv_exec "$d" "$DS" "$sd" "$SESS_A" $$ write 3822 --body-file "$INV_DIR/body-unreadable.md" ;;
     absent-marker)         inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
     marker-not-regular)    mkdir -p "$d/$MARKER"; inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
     unstamped-marker)      printf 'legacy plan\n' >"$d/$MARKER"; inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
@@ -1986,8 +1994,8 @@ else
 fi
 # ROW FLOOR, the same idea as the case floor: a span-replacing edit that silently drops rows
 # otherwise leaves a green tally over a shrunken table.
-if [ "$inv_count" -ge 32 ]; then
-  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 32) — including all four success verdicts, both signal phases and every refusal token"
+if [ "$inv_count" -ge 33 ]; then
+  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 33) — including all four success verdicts, both signal phases and every refusal token"
 else
   bad "table floor breached: only $inv_count rows ran"
 fi
@@ -2671,6 +2679,125 @@ $(cat "$L43h/$MARKER" 2>/dev/null)"
 fi
 
 # ===========================================================================
+case_begin 44-body-file-is-read-not-stat-gated "a --body-file is READ, never stat-gated: a source that changes after validation can never commit an EMPTY body (roborev job 37 J2)"
+# ===========================================================================
+# THE RACE IS MADE DETERMINISTIC BY A SHIM, not by timing: `flock` runs AFTER the caller's body
+# file has been validated and BEFORE the marker is assembled in BOTH the pre-fix and the fixed
+# script, so a shim that truncates (or deletes) the body there lands exactly in the window the
+# finding names. A timing-based version of this test would prove nothing on a fast box.
+j2_real_flock="$(command -v flock || true)"
+j2_real_cat="$(command -v cat || true)"
+j2_shim() {  # j2_shim <op> <victim> — a PATH dir whose `flock` mutates <victim> then defers
+  # SPLIT DECLARATIONS ON PURPOSE: `local a="$1" d="$a"` expands EVERY word before the builtin
+  # assigns any of them, so the second reference is unbound under `set -u` — which made this
+  # helper return empty, the shim never fire, and the FIXED leg pass vacuously. The positive
+  # control is what caught it.
+  local op="$1"
+  local victim="$2"
+  local d="$T/j2-shim-$op-$RANDOM"
+  mkdir -p "$d"
+  {
+    printf '#!/bin/sh\n'
+    case "$op" in
+      truncate) printf ': > "%s"\n' "$victim" ;;
+      delete)   printf 'rm -f "%s"\n' "$victim" ;;
+    esac
+    printf 'exec %s "$@"\n' "$j2_real_flock"
+  } >"$d/flock"
+  chmod +x "$d/flock"
+  printf '%s\n' "$d"
+}
+# THE PRE-FIX ARTIFACT, substituted in a scratch copy (never a settable seam in the shipped
+# script) and VERIFIED to have taken: without it a green here would prove only that the plant
+# does nothing.
+mkdir -p "$T/j2-scratch/lib"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$T/j2-scratch/lib/"
+j2_pre="$T/j2-scratch/drive-issue-state.sh"
+sed -e 's|^    if \[ -n "\$bodyfile" \]; then cat "\$bodyfile" 2>/dev/null; fi$|    if [ -n "$bodyfile" ] \&\& [ -s "$bodyfile" ]; then cat "$bodyfile" 2>/dev/null; fi|' \
+    -e 's|^    body_src="\$body_snap"$|    body_src="$bodyfile"|' "$DS" >"$j2_pre"
+j2_pin=0
+grep -q '^    if \[ -n "\$bodyfile" \] && \[ -s "\$bodyfile" \]; then cat' "$j2_pre" || j2_pin=$((j2_pin + 1))
+grep -q '^    body_src="\$bodyfile"$' "$j2_pre" || j2_pin=$((j2_pin + 1))
+bash -n "$j2_pre" 2>/dev/null || j2_pin=$((j2_pin + 1))
+if [ "$j2_pin" -eq 0 ]; then
+  ok "PRE-FIX FIXTURE: the scratch copy restores BOTH halves of the stat-then-act shape (the -s gate and the un-snapshotted body_src) and still parses"
+else
+  bad "the pre-fix substitution did not take ($j2_pin check(s) failed) — the positive control below would prove nothing"
+fi
+j2_fail=0
+for j2_op in truncate delete; do
+  # --- the FIXED script: the validated bytes reach the marker whatever happens to the source.
+  L44=$(lane "lane44-$j2_op")
+  body44="$T/body44-$j2_op.md"
+  printf '## plan\n\n- step one\n- step two\n' >"$body44"
+  cp "$body44" "$T/body44-$j2_op.orig"
+  sd44=$(j2_shim "$j2_op" "$body44")
+  o44=$( cd "$L44" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+           "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd44:$PATH" \
+           bash "$DS" write 3822 --body-file "$body44" 2>&1 ); rc44=$?
+  after_sentinel "$L44/$MARKER" "$T/44-$j2_op-body" || true
+  { printf '\n'; cat "$T/body44-$j2_op.orig"; } >"$T/44-$j2_op-canonical"
+  if [ "$rc44" -eq 0 ] && [ "$(verdict_of "$o44")" = WRITTEN ] \
+     && cmp -s "$T/44-$j2_op-body" "$T/44-$j2_op-canonical"; then
+    ok "a body file ${j2_op}d between validation and the copy still commits the VALIDATED bytes byte-for-byte (verdict WRITTEN)"
+  else
+    j2_fail=$((j2_fail + 1))
+    bad "body ${j2_op} race: rc=$rc44 verdict=$(verdict_of "$o44"); body bytes=$(wc -c <"$T/44-$j2_op-body" 2>/dev/null) want=$(wc -c <"$T/44-$j2_op-canonical")
+$o44"
+  fi
+  # --- the PRE-FIX script under the SAME plant: the body is committed EMPTY, silently.
+  L44p=$(lane "lane44p-$j2_op")
+  body44p="$T/body44p-$j2_op.md"
+  printf '## plan\n\n- step one\n- step two\n' >"$body44p"
+  sd44p=$(j2_shim "$j2_op" "$body44p")
+  o44p=$( cd "$L44p" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+            "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd44p:$PATH" \
+            bash "$j2_pre" write 3822 --body-file "$body44p" 2>&1 ); rc44p=$?
+  after_sentinel "$L44p/$MARKER" "$T/44p-$j2_op-body" || true
+  p_bytes=$(LC_ALL=C wc -c <"$T/44p-$j2_op-body" 2>/dev/null | tr -d ' ')
+  if [ "$rc44p" -eq 0 ] && [ "$(verdict_of "$o44p")" = WRITTEN ] && [ "${p_bytes:-0}" -le 1 ]; then
+    ok "POSITIVE CONTROL: the PRE-FIX script under the same ${j2_op} plant reports WRITTEN with an EMPTY body ($p_bytes byte(s)) — the silent data loss is real and the plant reaches it"
+  else
+    j2_fail=$((j2_fail + 1))
+    bad "the positive control did not reproduce the defect (${j2_op}): rc=$rc44p verdict=$(verdict_of "$o44p") body-bytes=$p_bytes"
+  fi
+done
+# --- THE READ-FAILURE PATH ITSELF: a source that cannot be read is a REFUSAL, never an empty
+#     body. Shimmed on `cat` (the snapshot's reader) so the failure is the READ and not a stat.
+L44r=$(lane lane44r)
+body44r="$T/body44r.md"
+printf 'plan text\n' >"$body44r"
+sd44r="$T/j2-shim-cat-$RANDOM"; mkdir -p "$sd44r"
+{
+  printf '#!/bin/sh\n'
+  printf 'case "$*" in *body44r.md*) exit 1;; esac\n'
+  printf 'exec %s "$@"\n' "$j2_real_cat"
+} >"$sd44r/cat"
+chmod +x "$sd44r/cat"
+o44r=$( cd "$L44r" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+          "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd44r:$PATH" \
+          bash "$DS" write 3822 --body-file "$body44r" 2>&1 ); rc44r=$?
+if [ "$rc44r" -eq 1 ] && [ "$(verdict_of "$o44r")" = ERROR ] \
+   && [ "$(verdict_count "$o44r")" = 1 ] && all_lines_anchored "$o44r" \
+   && [ ! -f "$L44r/$MARKER" ]; then
+  ok "a --body-file whose READ fails is ERROR(1) with exactly one anchored verdict and NOTHING written — 'could not be read' is never committed as 'there was no body'"
+else
+  j2_fail=$((j2_fail + 1))
+  bad "a failed body read was not refused: rc=$rc44r verdict=$(verdict_of "$o44r") marker=$([ -f "$L44r/$MARKER" ] && echo present || echo absent)
+$o44r"
+fi
+# --- NON-VACUITY: a genuinely EMPTY --body-file is still legal and writes an empty body.
+L44e=$(lane lane44e)
+: >"$T/body44e.md"
+o44e=$(run "$L44e" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --body-file "$T/body44e.md" 2>&1); rc44e=$?
+if [ "$rc44e" -eq 0 ] && [ "$(verdict_of "$o44e")" = WRITTEN ]; then
+  ok "NON-VACUITY: an EMPTY --body-file is still accepted (an empty source IS an empty body; only a failed READ refuses)"
+else
+  bad "an empty --body-file was refused: rc=$rc44e
+$o44e"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2692,8 +2819,8 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 39-body-bytes-survive-repeated-writes
 40-worktree-axis-must-be-measurable 41-body-without-trailing-newline
 42-verdict-emission-is-a-critical-section
-43-identity-recorded-losslessly 28-case-floor"
-CASE_FLOOR=43
+43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated 28-case-floor"
+CASE_FLOOR=44
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2705,10 +2832,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 149 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 149)"
+if [ "$PASS" -ge 156 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 156)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 149)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 156)"
 fi
 
 # ===========================================================================
