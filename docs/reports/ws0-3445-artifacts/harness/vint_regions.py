@@ -130,7 +130,6 @@ def fingerprint_anchors(addrs: list[int], mnem: dict[int, str], text: dict[int, 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--binary", required=True)
-    ap.add_argument("--samples-json", help="vint_share.py --json-out, for cycle weighting (optional)")
     ap.add_argument("--perf-data", help="perf.data to weight opcodes/callers by cycles")
     ap.add_argument("--json-out")
     args = ap.parse_args()
@@ -168,9 +167,27 @@ def main() -> int:
         sys.path.insert(0, __file__.rsplit("/", 1)[0])
         import vint_share as vsh  # the ONE sample reader, reused rather than re-implemented
 
-        mv, mo = vsh.mmap_record(args.perf_data, args.binary)
-        bias = vsh.pie_bias(args.binary, mv, mo)
         by_addr, persym, total, _ = vsh.read_samples(args.perf_data, args.binary)
+        # The PIE rebase self-check is NOT optional here either. This script publishes a
+        # cycle-weighted table, and a wrong rebase yields a complete, confident, WRONG one
+        # exactly as it would in vint_share.py -- so it must REFUSE on the same terms rather
+        # than inherit the neighbouring script's diligence by proximity.
+        sym_addrs2, syms2 = vsh.nm_symbols(args.binary)
+        ok, bad = vsh.verify_base(persym, sym_addrs2, syms2)
+        checked = ok + bad
+        mismatch_pct = 100.0 * bad / checked if checked else 100.0
+        if mismatch_pct > 0.5:
+            print(
+                f"vint_regions.py: REFUSED — PIE rebase self-check failed: nm and perf "
+                f"disagree on {bad}/{checked} addresses ({mismatch_pct:.2f}%). No "
+                f"cycle-weighted table is printed.",
+                file=sys.stderr,
+            )
+            return 1
+        result["rebase_selfcheck"] = {
+            "addresses_checked": checked, "mismatches": bad,
+            "mismatch_pct": mismatch_pct, "verdict": "PASS",
+        }
         schains = vsh.inline_chains(args.binary, sorted(by_addr))
         by_op: collections.Counter = collections.Counter()
         by_caller: collections.Counter = collections.Counter()

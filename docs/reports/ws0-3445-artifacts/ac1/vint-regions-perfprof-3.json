@@ -11,6 +11,12 @@
       "cqlite_core::storage::sstable::bti::parser::rows::read_unsigned_vint_from_slice"
     ]
   },
+  "rebase_selfcheck": {
+    "addresses_checked": 3250,
+    "mismatches": 0,
+    "mismatch_pct": 0.0,
+    "verdict": "PASS"
+  },
   "cycle_weighted": {
     "cycles_total_all_dsos": 87976583550,
     "vint_cycles": 1580028440,

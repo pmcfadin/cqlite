@@ -269,7 +269,15 @@ def shares(by_addr: collections.Counter, chains: dict[int, list[str]], total: in
 
 
 def skid_shift(by_addr: collections.Counter, insns: list[int], k: int) -> collections.Counter:
-    """Re-attribute every sample K instructions EARLIER in program order."""
+    """Re-attribute every sample K instructions EARLIER in program order.
+
+    The walk is over the binary's flat instruction sequence and so can step across a
+    function boundary for a sample landing within K instructions of a function's start.
+    That is accepted deliberately: this produces a SENSITIVITY BAND, not a corrected
+    attribution, and a boundary-crossing step can only move cycles between buckets in a
+    way the band is meant to expose. Making it boundary-aware would narrow the band, i.e.
+    make the reported uncertainty smaller than the instrument's -- the wrong direction.
+    """
     if k == 0:
         return by_addr
     shifted: collections.Counter = collections.Counter()
