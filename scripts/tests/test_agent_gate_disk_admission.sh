@@ -146,13 +146,19 @@ marker_count() {
 
 # run_stub_gate <case> <df-script> [env assignments...] -> backgrounds a stub gate.
 # Sets, for the caller: RS_PID, RS_RUNDIR, RS_SUMMARY, RS_ERR.
+RS_PATH_PREFIX=""
 run_stub_gate() {
   local case_name="$1" script="$2"; shift 2
   RS_RUNDIR="$tmp/$case_name.run"; mkdir -p "$RS_RUNDIR"
   RS_SUMMARY="$tmp/$case_name.summary.txt"
   RS_ERR="$tmp/$case_name.err"
+  # RS_PATH_PREFIX prepends to the child's PATH. It is a dedicated variable rather than a
+  # `PATH=` in "$@" because `env` applies assignments LEFT TO RIGHT and the function's own
+  # PATH= comes last, so a caller-supplied one is silently overridden — which is exactly
+  # how the k-nocargo case first ran against the REAL cargo and reported a resolution it
+  # was written to prove impossible.
   env "$@" \
-    PATH="$tmp/shim:$PATH" \
+    PATH="${RS_PATH_PREFIX:+$RS_PATH_PREFIX:}$tmp/shim:$PATH" \
     DF_SHIM_SCRIPT="$script" \
     DF_SHIM_STATE="$tmp/$case_name.dfstate" \
     AGENT_GATE_SUMMARY_FILE="$RS_SUMMARY" \
@@ -913,6 +919,137 @@ esac
 case "$j_line" in
   *'INTERNAL (#3755)'*) bad "J: the block reports the probe ran but left no verdict — a defect state was reached" ;;
 esac
+
+# ===========================================================================
+# Case K (roborev job 341, Medium): the probe measures the filesystem CARGO will
+# actually write to, resolved by ASKING CARGO.
+#
+# The pre-fix subject was `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`. Cargo also
+# honours CARGO_BUILD_TARGET_DIR and `[build] target-dir` in a .cargo/config.toml
+# (workspace, $CARGO_HOME, or any ancestor). Point either at another volume and the
+# guard measures a device the build never touches — a confident, specific, WRONG
+# number, which is worse than none because a reader acts on it.
+#
+# Every below case carries the PRE-FIX resolver evaluated on the SAME input, so the
+# defect is shown to have been reachable rather than merely fixed.
+# ===========================================================================
+K_PREFIX_DEFAULT=$(cd "$SCRIPT_DIR/../.." && pwd)/target
+
+# prefix_resolver <env-name> <env-value>: the PRE-FIX subject resolution, reproduced
+# exactly — `${CARGO_TARGET_DIR:-$REPO_ROOT/target}` — under the given single override.
+prefix_resolver() {
+  case "$1" in
+    CARGO_TARGET_DIR) printf '%s' "$2" ;;
+    *) printf '%s' "$K_PREFIX_DEFAULT" ;;
+  esac
+}
+
+# k_case <label> <expected-target-dir> <env-name> <env-value> [more env...]
+# Runs a real stub gate and asserts the line names <expected-target-dir>.
+k_case() {
+  local label="$1" expect="$2" envname="$3"; shift 3
+  local sc; sc=$(df_script "$label" "$HIGH")
+  run_stub_gate "$label" "$sc" \
+    CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+    CQLITE_GATE_STUB_SLEEP=1 "$@"
+  local err=$RS_ERR line
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120
+  assert_no_timeout "$label"
+  line=$(grep_line "$err" '^agent-gate: disk-admission: ')
+  case "$line" in
+    *"target-dir $expect (via cargo metadata)"*)
+      ok "target-dir/$label: resolved to $expect, and the line says HOW" ;;
+    *) bad "target-dir/$label: expected 'target-dir $expect (via cargo metadata)', got: ${line:-<none>}" ;;
+  esac
+  # The differential: what the pre-fix resolver would have picked on this same input.
+  if [ -n "$envname" ]; then
+    local was; was=$(prefix_resolver "$envname" "$expect")
+    if [ "$was" = "$expect" ]; then
+      ok "target-dir/$label CONTROL: the pre-fix resolver also picked $expect (this case is not a differential — it guards against over-correction)"
+    else
+      ok "target-dir/$label CONTROL: the PRE-FIX resolver picked $was, NOT $expect — it measured the wrong filesystem"
+    fi
+  fi
+}
+
+k_ct="$tmp/k-target-ct"
+k_bt="$tmp/k-target-bt"
+k_ch="$tmp/k-cargo-home"; mkdir -p "$k_ch"
+k_cfg="$tmp/k-target-cfg"
+printf '[build]\ntarget-dir = "%s"\n' "$k_cfg" > "$k_ch/config.toml"
+
+k_case k-default   "$K_PREFIX_DEFAULT" ""                     CQLITE_GATE_POLL_SECS=0.3
+k_case k-cargo-td  "$k_ct"  CARGO_TARGET_DIR       CARGO_TARGET_DIR="$k_ct"
+k_case k-build-td  "$k_bt"  CARGO_BUILD_TARGET_DIR CARGO_BUILD_TARGET_DIR="$k_bt"
+k_case k-config-td "$k_cfg" CARGO_HOME             CARGO_HOME="$k_ch"
+# Precedence: env CARGO_TARGET_DIR must beat CARGO_BUILD_TARGET_DIR and the config file.
+k_case k-precedence "$k_ct" CARGO_TARGET_DIR \
+  CARGO_HOME="$k_ch" CARGO_BUILD_TARGET_DIR="$k_bt" CARGO_TARGET_DIR="$k_ct"
+
+# The measurement must follow the RESOLVED directory, not just be reported beside it: a
+# target dir on a filesystem the shim reports as BELOW the bar must REFUSE.
+k_low_script=$(df_script k-low "$LOW")
+run_stub_gate k-low "$k_low_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/k-low-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+  CQLITE_GATE_STUB_SLEEP=2 CARGO_BUILD_TARGET_DIR="$k_bt"
+k_low_sum=$RS_SUMMARY
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; k_low_status=$WX_STATUS; k_low_markers=$WX_MARKERS
+assert_no_timeout "k-low"
+if [ "$k_low_status" -ne 0 ] && [ "$k_low_markers" -eq 0 ]; then
+  ok "target-dir/k-low: a below-bar reading on the RESOLVED target dir refuses (the verdict follows the resolution)"
+else
+  bad "target-dir/k-low: did not refuse (exit $k_low_status, markers $k_low_markers)"
+fi
+if grep -q "target-dir $k_bt (via cargo metadata)" "$k_low_sum" 2>/dev/null; then
+  ok "target-dir/k-low: the refusal SUMMARY names the directory it measured"
+else
+  bad "target-dir/k-low: the refusal SUMMARY does not name the resolved directory"
+fi
+
+# RESOLUTION FAILURE is UNMEASURED with a cause naming TARGET-DIR RESOLUTION — distinct
+# from a df cause and from a bar cause, because they are three different operator
+# actions — and it NEVER falls back to $REPO_ROOT/target, which would reinstate the
+# defect in exactly the configurations that trigger it. Driven by a PATH with no cargo,
+# which is what an absent cargo really looks like to the probe (rc 127).
+mkdir -p "$tmp/k-nocargo-bin"
+cat > "$tmp/k-nocargo-bin/cargo" <<'NOCARGO'
+#!/usr/bin/env bash
+exit 127
+NOCARGO
+chmod +x "$tmp/k-nocargo-bin/cargo"
+k_nc_script=$(df_script k-nocargo "$HIGH")
+RS_PATH_PREFIX="$tmp/k-nocargo-bin"
+run_stub_gate k-nocargo "$k_nc_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/k-nocargo-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+  CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+k_nc_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; k_nc_status=$WX_STATUS; k_nc_markers=$WX_MARKERS
+assert_no_timeout "k-nocargo"
+k_nc_line=$(grep_line "$k_nc_err" '^agent-gate: disk-admission: ')
+case "$k_nc_line" in
+  *'UNMEASURED (target-dir-'*)
+    ok "target-dir/k-nocargo: resolution failure is UNMEASURED with a cause naming TARGET-DIR resolution" ;;
+  *'UNMEASURED (df-'*)
+    bad "target-dir/k-nocargo: a resolution failure is reported as a DF failure — wrong operator action: $k_nc_line" ;;
+  *) bad "target-dir/k-nocargo: expected a target-dir UNMEASURED cause, got: ${k_nc_line:-<none>}" ;;
+esac
+case "$k_nc_line" in
+  *"target-dir $K_PREFIX_DEFAULT"*)
+    bad "target-dir/k-nocargo: fell back to \$REPO_ROOT/target — the defect is reinstated in exactly the configurations that trigger it" ;;
+  *) ok "target-dir/k-nocargo: NO fallback to \$REPO_ROOT/target on a resolution failure" ;;
+esac
+if [ "$k_nc_status" -eq 0 ] && [ "$k_nc_markers" -ge 1 ]; then
+  ok "target-dir/k-nocargo: a resolution failure is NON-FATAL (declared, not un-runnable)"
+else
+  bad "target-dir/k-nocargo: a resolution failure refused the run (exit $k_nc_status)"
+fi
+# The df shim must NOT have been consulted: with no subject there is nothing to measure.
+if [ "$(df_calls k-nocargo)" -eq 0 ]; then
+  ok "target-dir/k-nocargo: df was never called — the probe refuses before measuring an unresolved subject"
+else
+  bad "target-dir/k-nocargo: df was called $(df_calls k-nocargo) time(s) against an unresolved subject"
+fi
 
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"

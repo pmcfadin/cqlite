@@ -19299,20 +19299,123 @@ _gate_disk_admission_clears_bar() {
     </dev/null 2>/dev/null
 }
 
-# _gate_disk_admission_subject: the path whose filesystem the build will fill — the
-# cargo target dir. `target/` legitimately does not exist yet on a cold lane, so walk
-# up to the nearest EXISTING ancestor rather than failing: df answers about a
-# FILESYSTEM, and the not-yet-created directory will live on the one its parent is on.
-# Prints a path, or nothing (which the caller renders as UNMEASURED — never as a
-# permissive default).
+# ---- resolving WHICH filesystem the build will fill (roborev job 341) -------------
+#
+# THE DEFECT. The subject used to be `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`. Cargo also
+# honours `CARGO_BUILD_TARGET_DIR` and `[build] target-dir` in a `.cargo/config.toml`,
+# which may live in the workspace, in `$CARGO_HOME`, or in ANY ancestor directory. Point
+# either at another volume and the guard measures a device the build never touches — so
+# it ADMITS while the real target is below the floor, and symmetrically refuses a run
+# that would have been fine. A confident, specific, wrong number in the SUMMARY is worse
+# than no number, because a reader acts on it.
+#
+# ASK CARGO; DO NOT MODEL CARGO. The effective directory comes from
+# `cargo metadata --no-deps`'s `target_directory`, which IS cargo's own answer after its
+# whole precedence chain (verified here, all three mechanisms and their ordering). This
+# repository's standing ruling is the reason: a port is a second implementation, and a
+# second implementation's correctness is only knowable by differential testing against
+# the original — and env-vs-workspace-vs-ancestor-vs-CARGO_HOME precedence is exactly the
+# chain that looks simple and is not.
+#
+# BOUNDED, because this runs at slot grant while HOLDING the machine-wide slot: a hung
+# probe would burn the slot with no verdict, which is the resource waste #3755 exists to
+# remove, re-created by its own fix. It reuses `_component_set_bounded` — the tree's
+# existing TERM -> grace -> group-KILL ladder with file-captured streams — rather than a
+# second bounding mechanism. Measured cost on this workspace: 0.37 s.
+#
+# NOT CACHED between the two evaluations, deliberately. A `.cargo/config.toml` edited
+# during a long queue changes where the build will write, so re-resolving at slot grant
+# is the same principle as re-measuring free space there.
+#
+# NO FALLBACK TO `$REPO_ROOT/target`. That would reinstate the defect in precisely the
+# configurations that trigger it; an unresolvable target dir is UNMEASURED with a cause
+# that names TARGET-DIR RESOLUTION, distinct from a df failure and from a bad bar,
+# because they are three different operator actions.
+#
+# `cargo metadata` is a PROBE, not a build/test invocation: `_fm_describe_cargo` rejects
+# `metadata`/`tree`/`--version`, so this cannot pollute a component's `[…]` feature-matrix
+# annotation (pinned by test_agent_gate_feature_matrix_annotation.sh).
+_GATE_TARGET_DIR_BOUND_SECS=30
+# The resolved build-output directory and how it was obtained — reported in the SUMMARY,
+# because WHICH directory was measured is now the whole question.
+_DA_TARGET_DIR=""
+_DA_TARGET_NOTE=""
+
+# _gate_resolve_target_dir: prints `OK <path>` or `UNRESOLVED <why>`; returns 0 either
+# way, three-valued like every other probe here.
+_gate_resolve_target_dir() {
+  local md rc path
+  md="$LOG_DIR/disk-admission-cargo-metadata.json"
+  _component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" \
+    cargo metadata --no-deps --format-version 1 >"$md" 2>/dev/null
+  rc=$?
+  case "$rc" in
+    0) ;;
+    127) printf 'UNRESOLVED target-dir-cargo-unavailable'; return 0 ;;
+    124|137) printf 'UNRESOLVED target-dir-probe-timeout'; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED target-dir-probe-unboundable'; return 0 ;;
+    "$_CS_REPLAY_RC") printf 'UNRESOLVED target-dir-output-truncated'; return 0 ;;
+    *) printf 'UNRESOLVED target-dir-probe-failed'; return 0 ;;
+  esac
+  # Parsed as JSON, never with a regex: a path may contain any byte and cargo escapes it.
+  # Bounded for the same reason the probe is. A newline in the value is REFUSED rather
+  # than rendered, because it would split the one-fact-per-line SUMMARY contract.
+  path=$(_component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+p = d.get("target_directory")
+if not isinstance(p, str) or not p or "\n" in p or "\r" in p or "\t" in p:
+    sys.exit(4)
+sys.stdout.write(p)
+' <"$md" 2>/dev/null)
+  rc=$?
+  case "$rc" in
+    0) ;;
+    127) printf 'UNRESOLVED target-dir-no-json-reader'; return 0 ;;
+    124|137) printf 'UNRESOLVED target-dir-parse-timeout'; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED target-dir-parse-unboundable'; return 0 ;;
+    *) printf 'UNRESOLVED target-dir-unparsable'; return 0 ;;
+  esac
+  [ -n "$path" ] || { printf 'UNRESOLVED target-dir-unparsable'; return 0; }
+  printf 'OK %s' "$path"
+}
+
+# _gate_disk_admission_subject: prints `OK<TAB><probe-path><TAB><target-dir>` or
+# `UNRESOLVED<TAB><why>`.
+#
+# EVERY FACT TRAVELS OUT THROUGH THE PRINTED PROTOCOL, never through a global. This
+# function is reached via `$(_gate_disk_admission_probe)`, a COMMAND SUBSTITUTION, so a
+# global assigned here is set in a SUBSHELL and discarded — the same hazard the tree
+# guard records for `_tree_commit_meta` ("sets a global rather than printing, so a caller
+# can never invoke it in a `$( … )` subshell"). Caught here by the resolved directory
+# rendering as `UNRESOLVED` in a block whose df reading had plainly succeeded. TAB is the
+# field separator because BOTH a mount point and a target dir may contain spaces; a TAB
+# in either is refused upstream rather than rendered.
+#
+# The resolved target dir legitimately does not exist yet on a cold lane, so we walk up
+# to the nearest EXISTING ancestor: df answers about a FILESYSTEM, and a directory cargo
+# is about to create lives on the one its parent is on. (`[ -e ]` is two-valued and
+# collapses "cannot tell" onto "absent"; the walk then lands on a higher ancestor of the
+# SAME filesystem, so the collapse costs nothing here — unlike the verdict predicates,
+# where it would.)
 _gate_disk_admission_subject() {
-  local d="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  local r d td
+  r=$(_gate_resolve_target_dir)
+  case "$r" in
+    'OK '*) td="${r#OK }" ;;
+    *) printf 'UNRESOLVED\t%s' "${r#UNRESOLVED }"; return 0 ;;
+  esac
+  d="$td"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -e "$d" ] && { printf '%s' "$d"; return 0; }
+    [ -e "$d" ] && { printf 'OK\t%s\t%s' "$d" "$td"; return 0; }
     d="$(dirname "$d")"
   done
-  [ -e "/" ] && { printf '/'; return 0; }
-  return 1
+  [ -e "/" ] && { printf 'OK\t/\t%s' "$td"; return 0; }
+  printf 'UNRESOLVED\ttarget-dir-no-existing-ancestor'
+  return 0
 }
 
 # _gate_disk_admission_parse: the ONE parse of a `df -Pk` data line, ANCHORED ON THE
@@ -19360,11 +19463,13 @@ _gate_disk_admission_parse() {
 
 # _gate_disk_admission_probe: the THREE-VALUED reading of the subject filesystem.
 # Prints exactly one of
-#     MEASURED <available-kib> <mount-point>
-#     UNMEASURED <why>
+#     MEASURED<TAB><available-kib><TAB><target-dir><TAB><mount-point>
+#     UNMEASURED<TAB><why><TAB><target-dir-or-empty>
 # and returns 0 either way — the CALLER disposes, because the two moments dispose of
-# the same reading differently. The mount point may legitimately contain SPACES, so it
-# is the trailing remainder of the MEASURED payload and never a middle field.
+# the same reading differently. TAB-delimited because BOTH the target dir and the mount
+# point may legitimately contain SPACES; the mount point stays the trailing remainder.
+# The target dir rides in the payload even on the UNMEASURED arms, so a block can still
+# say WHICH directory was being asked about when the reading itself failed.
 #
 # Three-valued on purpose. Every `test`/`[` file predicate is two-valued and therefore
 # has to collapse "cannot tell" onto one of its answers, and it always picks the
@@ -19386,27 +19491,36 @@ _gate_disk_admission_parse() {
 # df cannot leak `command not found` onto the gate's own stderr, where
 # test_agent_gate_summary.sh's minimal-PATH case reads any such line as a defect.
 _gate_disk_admission_probe() {
-  local path out rc parsed avail mount
-  path=$(_gate_disk_admission_subject) || {
-    printf 'UNMEASURED no-existing-ancestor-of-target-dir'; return 0; }
+  local path out rc parsed avail mount subj
+  subj=$(_gate_disk_admission_subject)
+  local td=""
+  case "$subj" in
+    OK$'\t'*)
+      subj="${subj#OK$'\t'}"
+      path="${subj%%$'\t'*}"
+      td="${subj#*$'\t'}" ;;
+    UNRESOLVED$'\t'*)
+      printf 'UNMEASURED\t%s\t' "${subj#UNRESOLVED$'\t'}"; return 0 ;;
+    *) printf 'UNMEASURED\ttarget-dir-resolver-unrecognised\t'; return 0 ;;
+  esac
   out=$(df -Pk "$path" 2>/dev/null); rc=$?
   if [ "$rc" -ne 0 ]; then
-    [ "$rc" -eq 127 ] && { printf 'UNMEASURED df-unavailable'; return 0; }
-    printf 'UNMEASURED df-failed'; return 0
+    [ "$rc" -eq 127 ] && { printf 'UNMEASURED\tdf-unavailable\t%s' "$td"; return 0; }
+    printf 'UNMEASURED\tdf-failed\t%s' "$td"; return 0
   fi
   # The LAST line, not `NR==2`: `-P` guarantees one line per operand, and taking the
   # last one is additionally immune to a leading advisory line some df builds print.
   parsed=$(printf '%s\n' "$out" | _gate_disk_admission_parse)
   case "$parsed" in
     OK$'\t'*) ;;
-    *) printf 'UNMEASURED df-unparsable'; return 0 ;;
+    *) printf 'UNMEASURED\tdf-unparsable\t%s' "$td"; return 0 ;;
   esac
   parsed="${parsed#OK$'\t'}"
   avail="${parsed%%$'\t'*}"
   mount="${parsed#*$'\t'}"
   # Belt on the anchor's own numeric assert: the caller compares this as an integer.
   case "$avail" in
-    ''|*[!0-9]*) printf 'UNMEASURED df-unparsable'; return 0 ;;
+    ''|*[!0-9]*) printf 'UNMEASURED\tdf-unparsable\t%s' "$td"; return 0 ;;
   esac
   # The mount point is rendered VERBATIM into a `key: value` SUMMARY line, and a mount
   # point may contain arbitrary bytes. Spaces are fine (the value is the rest of the
@@ -19415,7 +19529,7 @@ _gate_disk_admission_probe() {
   # rather than refused: this field is DISPLAY ONLY and must never be able to fail a
   # measurement that succeeded.
   mount=$(printf '%s' "$mount" | tr -d '\000-\037\177' 2>/dev/null)
-  printf 'MEASURED %s %s' "$avail" "${mount:-unknown}"
+  printf 'MEASURED\t%s\t%s\t%s' "$avail" "$td" "${mount:-unknown}"
 }
 
 # _gate_gib_render <kib> -> "<n.n>GiB" (display only). Empty when awk cannot answer.
@@ -19432,10 +19546,13 @@ _gate_disk_admission_measure() {
   _DA_STATE=""; _DA_VALUE=""; _DA_WHY=""
   probe=$(_gate_disk_admission_probe)
   case "$probe" in
-    'MEASURED '*)
-      probe="${probe#MEASURED }"
-      local kib="${probe%% *}"
-      _DA_MOUNT="${probe#* }"
+    MEASURED$'\t'*)
+      probe="${probe#MEASURED$'\t'}"
+      local kib="${probe%%$'\t'*}"
+      probe="${probe#*$'\t'}"
+      _DA_TARGET_DIR="${probe%%$'\t'*}"
+      [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      _DA_MOUNT="${probe#*$'\t'}"
       _DA_VALUE=$(_gate_gib_render "$kib")
       [ -n "$_DA_VALUE" ] || _DA_VALUE="${kib}KiB"
       # Keyed on the AFFIRMATIVE value (the reading CLEARS the bar), never on the
@@ -19448,7 +19565,13 @@ _gate_disk_admission_measure() {
         *) _DA_STATE=UNMEASURED; _DA_WHY=comparison-unavailable ;;
       esac
       ;;
-    'UNMEASURED '*) _DA_STATE=UNMEASURED; _DA_WHY="${probe#UNMEASURED }" ;;
+    UNMEASURED$'\t'*)
+      probe="${probe#UNMEASURED$'\t'}"
+      _DA_STATE=UNMEASURED
+      _DA_WHY="${probe%%$'\t'*}"
+      _DA_TARGET_DIR="${probe#*$'\t'}"
+      [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      ;;
     *)              _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised ;;
   esac
   return 0
@@ -19470,7 +19593,13 @@ _gate_disk_admission_render_state() {
 # are present in every rendering, including the failing ones.
 _gate_disk_admission_line() {
   local verdict="$1" detail="$2"
-  DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${_DA_EVALUATIONS}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown})"
+  local td
+  if [ -n "$_DA_TARGET_DIR" ]; then
+    td="$_DA_TARGET_DIR ($_DA_TARGET_NOTE)"
+  else
+    td="UNRESOLVED"
+  fi
+  DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${_DA_EVALUATIONS}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown}; target-dir $td)"
   [ -n "$detail" ] && DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE — $detail"
   return 0
 }
