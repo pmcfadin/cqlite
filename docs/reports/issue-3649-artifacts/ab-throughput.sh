@@ -33,8 +33,9 @@
 # build that did not produce both binaries, an absent or unparseable ticket
 # template, a corpus below the stated minimum size, a server that never bound
 # the port, a server that did not die before the next replicate binds it, a
-# replicate whose JSONL carries any request error, and a replicate that produced
-# anything other than exactly one step record. It never continues silently with
+# reused worktree that is dirty, a replicate whose JSONL carries any request
+# error, and a replicate that produced anything other than ONE STEP RECORD PER
+# DECLARED RAMP STEP. It never continues silently with
 # fewer replicates than requested: the manifest is rewritten after EVERY
 # completed run, so a session that died early leaves a truthful short manifest
 # and `analyze-ab.py` refuses it with `replicate-shortfall` rather than

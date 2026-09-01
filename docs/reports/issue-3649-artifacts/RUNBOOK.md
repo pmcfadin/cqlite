@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (110 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (178 cases).**
       Seconds, `python3` only, no rig and no root, so there is no excuse for
       skipping it — and it is the cheapest step in this runbook by four orders of
       magnitude. It drives every fail-closed guard with the bad input that guard
@@ -378,17 +378,43 @@ the analyzer requires the two arms of each pair to have the **same** surviving
 ladder. Each pass costs `2 × replicates × (steps × step-duration + prewarm +
 server start/stop)`, so budget 5b at roughly four times 5a for a four-step ramp.
 
-**On `--replicates`.** The floor is 3 (the driver refuses below it: a percentile
-bootstrap over two pairs reports an interval it cannot support). **5 is the
-minimum worth reporting and 7 is the recommendation**, for a reason that is
-arithmetic rather than taste: a percentile bootstrap's interval is a resample of
-the observed pairs, so at `n = 5` the 2.5th percentile is effectively pinned by
-the single most extreme pair, and one outlying replicate moves the whole
-interval. At `n = 7` no single pair can do that alone. The cost is linear and
-known in advance — `2 × n × (step + prewarm + server start/stop)` — so pick `n`
-from your remaining time, and **pick it before you see any result**. Raising
-`n` after seeing an inconclusive interval, until it stops being inconclusive, is
-not a measurement.
+**On `--replicates` — the floor is 5, and the reason is arithmetic, not taste.**
+
+A percentile bootstrap resamples the observed pairs with replacement, so its
+lower bound is draw number `ceil(0.025 × 10000) = 250` of the sorted draws. The
+**all-minimum resample** — every one of the `n` draws landing on the smallest
+ratio — has probability `1/nⁿ`. At `n = 3` that is **1/27 = 3.7%, which exceeds
+the 2.5% tail**, so the 2.5th percentile of the draws *is* `min(ratios)` and the
+97.5th *is* `max(ratios)`:
+
+> At `n ≤ 3` the reported "95% confidence interval" **is the observed range**.
+> The bootstrap contributes nothing, coverage is far below 95%, and three
+> identical pairs produce a **zero-width** interval that lands inside any band
+> containing them — i.e. an automatic `MEETS-TARGET`.
+
+At `n = 5` the all-minimum resample has probability 1/3125, so about 3 of 10000
+draws — nowhere near the 250 needed to reach the bound. The floor is therefore
+**5** in both the driver (`--replicates`) and the analyzer (`--min-pairs`), and
+**7 remains the recommendation**: at `n = 5` a single outlying replicate still
+moves the bound noticeably, and at `n = 7` no single pair can.
+
+This is enforced by **measurement, not by a magic number**: `analyze-ab.py`
+refuses with `bootstrap-degenerate` whenever the interval it computed is exactly
+`(min(ratios), max(ratios))`, so the guard keeps working if someone changes the
+resample count, the tail or the floor — and it also catches all-identical ratios,
+which are degenerate at any `n`.
+
+**Declared residual, because it is real:** even at `n = 5–7` a percentile
+bootstrap of a geometric mean *under-covers* — a nominal 95% interval is
+narrower than 95% in truth for small samples. The degeneracy refusal removes the
+pathological case, not the general small-sample optimism. Read a marginal
+`MEETS-TARGET` at `n = 5` accordingly, and prefer more replicates over a
+narrower-looking result.
+
+The cost is linear and known in advance — `2 × n × (steps × step-duration +
+prewarm + server start/stop)` — so pick `n` from your remaining time, and **pick
+it before you see any result**. Raising `n` after seeing an inconclusive
+interval, until it stops being inconclusive, is not a measurement.
 
 **On `--step-duration`.** Long enough that a full-ring scan completes several
 times per step. Check the driver's per-run line: `requests-ok` should be
@@ -567,7 +593,9 @@ docs/reports/issue-3649-artifacts/
   ab_stats.py             the statistics and BOTH verdict rules, with their citations
   ab_input.py             manifest/JSONL loading; every refusal, named
   ab_common.py            the anchored, sanitized emission every module writes through
-  selftest-analyze.sh     110 deterministic cases + a case floor; run it first
+  ab_driver_support.py    the driver's ramp/record validators and startup parser,
+                          as an EXECUTABLE FILE so the self-test can drive them
+  selftest-analyze.sh     178 deterministic cases + a case floor; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output

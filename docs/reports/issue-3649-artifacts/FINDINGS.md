@@ -302,8 +302,40 @@ directly with the egress batching #2820 changed.
 | `ab_stats.py` | the statistics and **both** verdict rules, with their citations beside them |
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
-| `selftest-analyze.sh` | 110 deterministic cases over synthetic fixtures, with a case floor |
+| `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
+| `selftest-analyze.sh` | 178 deterministic cases over synthetic fixtures, with a case floor |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
 session, not by this lane.
+
+---
+
+## 9. The lesson this lane paid for: a green suite over an unexecuted subject
+
+Two independent reviews found that the **utilization half of the instrument had
+no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
+step record while the driver advertised `--ramp <list>` and the runbook
+instructed `--ramp 1,2,4,8`. Every utilization session would have died
+`replicate-invalid` **after two release builds, a prewarm and a full measurement
+pass**.
+
+A 110-case self-test was green throughout, and could not have been otherwise:
+`run_one` needs a rig, so **nothing executed the validator** — it lived as an
+inline `python3 - <<'EOF'` heredoc inside a function no test could call. The
+suite measured completeness of the *analyzer* and said nothing about the
+*driver*, while reading, from its tally, as though it covered both.
+
+This is the repository's own standing question one directory over — *which lane
+EXECUTES this?* — and the answer here was **none**. The fix is structural, not
+another case: both helpers moved into `ab_driver_support.py` as an **executable
+file with subcommands**, and the self-test now drives them with real input,
+including the four-step replicate that would have caught it on the first run.
+
+Two rules worth carrying:
+
+- **A helper that cannot be run on its own cannot be tested on its own.** An
+  inline heredoc inside a rig-only function is unexecutable by construction, and
+  no amount of care around it substitutes for being able to call it.
+- **A case count is evidence about the subject it executes, and about nothing
+  else.** 110/110 was true and it was not evidence that the driver worked.
