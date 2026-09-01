@@ -14816,6 +14816,10 @@ run_pub_surface() {
 # it re-derived here, because `N/M` with N < M would mean the guard reported dead
 # features and exited 0 anyway. A zero exit with no measurement is an early return
 # inside the guard, so it is a NAMED FAIL here instead of a vacuous green.
+# That line also DECLARES the residual of the guard's own method (`cfg-site detection:
+# lexical, NON-EXHAUSTIVE …`) and this component REQUIRES the declaration to be present:
+# a guard whose success text quietly stopped stating what it cannot decide would be
+# implying coverage it does not have.
 run_features_load_bearing() {
   local name=features-load-bearing
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -14842,7 +14846,7 @@ run_features_load_bearing() {
     # NONZERO: "0/0 features load-bearing across 0 manifests; 0 files scanned" is the
     # vacuous measurement itself.
     local measured
-    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites$' "$log" || true)"
+    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites; cfg-site detection: lexical, NON-EXHAUSTIVE \(.+\)$' "$log" || true)"
     if [ -n "$measured" ]; then
       # THE SHAPE IS NOT ENOUGH — THE COUNTS MUST COHERE. The guard asserts
       # load-bearing == asserted before printing, so a line whose numerator differs
@@ -14870,7 +14874,8 @@ run_features_load_bearing() {
       echo "--- [$name] FAILED: the guard exited 0 but printed NO coherent affirmative"
       echo "    measurement line (\`features-load-bearing: <N>/<N> declared features"
       echo "    load-bearing across <M> workspace manifests (<K> exempt: …); <F> Rust source"
-      echo "    files scanned for reference sites\`), so NOTHING was measured and this is NOT"
+      echo "    files scanned for reference sites; cfg-site detection: lexical,"
+      echo "    NON-EXHAUSTIVE (…)\`), so NOTHING was measured and this is NOT"
       echo "    a PASS (issue #1698). A zero exit with no measurement is an early return"
       echo "    inside $guard — a real defect in the guard, not a formatting slip; fix the"
       echo "    guard (or, if its success wording moved, update BOTH it and this component"

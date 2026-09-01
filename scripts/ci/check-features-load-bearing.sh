@@ -24,20 +24,36 @@
 # the FEATURE CLOSURE of F (F itself, plus everything F enables, transitively,
 # following `pkg/feature` edges into other workspace members) has a DIRECT EFFECT:
 #
-#   E1  REFERENCE SITE — G's name is named as a feature INSIDE A REAL CFG PREDICATE
-#       (a `cfg`, `cfg_attr` or `cfg!` token followed by a balanced parenthesised
-#       predicate — `#[cfg]`/`#![cfg]` differ only in what precedes the token, and
-#       `all()`/`any()`/`not()` nesting is inside the same span), or as an actual
-#       `CARGO_FEATURE_G` ENV READ in the package's BUILD SCRIPT, in the sources of
-#       the package that declares G. A bare textual `feature = "G"` is NOT a site:
-#       it occurs in ordinary string literals, in `//!` doc text (this workspace has
-#       a live instance — `arbitrary_precision` in cqlite-ffi-common/src/
-#       json_number.rs appears only in doc comments), in error messages and in
-#       `--features` argument strings, none of which gate anything. Crediting those
-#       credits a DEAD feature, which is the false-PASS direction. For
-#       `cfg_attr(pred, attrs...)` only the FIRST top-level argument is the
-#       predicate: a feature named in the tail
-#       (`#[cfg_attr(docsrs, doc(cfg(feature = "x")))]`) gates nothing by itself.
+#   E1  REFERENCE SITE — G is named as a feature in a REAL, ANCHORED cfg gate in the
+#       sources of the package that declares G, or read as `CARGO_FEATURE_G` from the
+#       environment by that package's BUILD SCRIPT.
+#
+#       ONE LEXICAL PASS, THEN POSITIONAL MATCHING. Text matching over Rust source
+#       credits non-effects, and narrowing the pattern once per instance is choosing a
+#       rarer delimiter — the shape CLAUDE.md rules against (#3312: remove the
+#       channel, do not narrow the delimiter). Round 1 of review found string
+#       literals; round 2 found `doc(cfg(...))`, raw strings and a bare `var()`. All
+#       one class. So each file is lexed ONCE into (a) a `code` text with every
+#       comment byte blanked and every STRING-LITERAL byte — delimiters, prefixes,
+#       any raw-hash count, byte and C strings — replaced by a sentinel, and (b) a
+#       table of those literals by offset. Structure is matched only against `code`,
+#       and a feature NAME is read from the table at the exact offset where
+#       `feature =` ends. Nothing inside a comment or a string can look like code.
+#
+#       ONLY ANCHORED HEADS COUNT: `#[cfg(`, `#![cfg(`, `cfg!(`, and the CONDITION
+#       (first top-level argument) of `#[cfg_attr(` / `#![cfg_attr(`. A `cfg(...)`
+#       nested anywhere else is deliberately NOT a site — most importantly
+#       `#[cfg_attr(docsrs, doc(cfg(feature = "x")))]`, which is DOCUMENTATION and
+#       gates no compilation. `all()`/`any()`/`not()` need no special handling: they
+#       are inside the head's own balanced span.
+#
+#       THE BUILD-SCRIPT ROUTE is an env read through a genuine API — `env::var`,
+#       `std::env::var`, `_os` variants — or an unqualified `var`/`var_os` ONLY when
+#       the file proves the import (`use std::env::var`, braced lists included),
+#       because `var` is an ordinary identifier and an unrelated local function of
+#       that name must not credit a feature. `option_env!` is not accepted: cargo
+#       documents these variables for build-script EXECUTION, and claiming a
+#       compile-time read would assert something unverified.
 #   E2  OPTIONAL DEPENDENCY — G's dep list enables an optional dependency (`dep:x`).
 #       The "bare optional-dep name" spelling (`wasm = ["wasm-bindgen", ...]`) is
 #       covered by the closure, because cargo SYNTHESISES an implicit feature per
@@ -48,12 +64,22 @@
 #       dependency. Enabling a feature of an external crate demonstrably changes that
 #       crate's compiled code, so it is load-bearing by definition. This guard cannot
 #       audit non-workspace sources, and does not need to: the effect is established
-#       by the edge itself. BUT A WEAK EDGE (`x?/feature`) IS NOT AN EFFECT ON ITS
-#       OWN — cargo does nothing with it unless the optional dependency `x` is
-#       activated by something else — so a weak edge is credited only when `x` is
-#       activated somewhere in the ORIGIN's closure (see below). `observability-
-#       testing = ["observability", "opentelemetry_sdk?/testing"]` is live because
-#       `observability` activates that dep; a standalone `["x?/f"]` is dead.
+#       by the edge itself. TWO KINDS OF EDGE ARE NOT EFFECTS, though:
+#         * A WEAK edge (`x?/feature`) — cargo does nothing with it unless the
+#           optional dependency `x` is activated by something else, so it is credited
+#           only when `x` is activated somewhere in the ORIGIN's closure.
+#           `observability-testing = ["observability", "opentelemetry_sdk?/testing"]`
+#           is live because `observability` activates that dep; `["x?/f"]` alone is
+#           dead.
+#         * A REDUNDANT edge — one that enables what the DEPENDENCY DECLARATION
+#           already enables. `foo = ["serde/derive"]` beside
+#           `serde = { features = ["derive"] }` changes nothing, and neither does
+#           `foo = ["dep/default"]` on a dependency that already uses default
+#           features. Cargo metadata resolves workspace-dependency inheritance, so an
+#           inherited `features = [...]` is visible here. Judged over ALL declarations
+#           under the key (normal, dev, build, per-target): credit is withheld only
+#           when every one already enables it, the direction that cannot invent a
+#           false FAIL. Only DIRECT redundancy is decided — see the declared residual.
 #   E3  REQUIRED-FEATURES — G is named in the `required-features` of some target in
 #       some workspace manifest, so it SELECTS whether that target is built at all.
 #       (This is `duckdb-tests`' and `dhat-heap`'s real shape: zero cfg sites, and
@@ -115,6 +141,23 @@
 # compile it), so it is out of this guard's scope — its features are neither
 # certified nor reported here.
 #
+# # THE DECLARED RESIDUAL — printed on every success, never implied away
+#
+# This scan is LEXICAL, not a compiler, so the success line ends with
+# `cfg-site detection: lexical, NON-EXHAUSTIVE` naming the two things it does not
+# decide. A lane that omits coverage silently is indistinguishable from one that covers
+# it, and a positive verdict must rest on an affirmative measurement:
+#
+#   * A cfg produced by MACRO EXPANSION is not seen. A feature name assembled by a
+#     macro (or emitted by a `macro_rules!` body that this scan reads as tokens rather
+#     than expands) has no textual `feature = "NAME"` for the scan to find. Direction:
+#     it would report such a feature DEAD — a false FAIL, which is loud.
+#   * An INDIRECTLY redundant dependency-feature edge is not detected: `dep/x` where
+#     the declaration enables some feature that itself enables `x`. Deciding it needs
+#     the dependency's own feature table, which `--no-deps` does not carry for external
+#     crates. Direction: such an edge is CREDITED — a residual false PASS, declared
+#     here rather than hidden.
+#
 # # FAIL-CLOSED, ALWAYS
 #
 # Every derivation failure is a NAMED FAIL naming the derivation: `cargo metadata`
@@ -150,11 +193,19 @@ Features-are-load-bearing guard for the cqlite workspace (issue #1698).
 
   (no flags)      Derive every feature declared by every workspace member from
                   `cargo metadata --no-deps`, and assert each one is LOAD-BEARING:
-                  it, or something in its feature closure, has a cfg reference site
-                  in its declaring package's sources, enables an optional
-                  dependency, enables a feature of an external dependency, or is
-                  named in some target's `required-features`.
+                  it, or something in its feature closure, has a REAL cfg site in
+                  its declaring package's sources (`#[cfg(`, `#![cfg(`, `cfg!(`, or
+                  the CONDITION of `#[cfg_attr(` — read after ONE lexical pass that
+                  blanks comments and all string literals, so nothing inside a
+                  string, a raw string or a comment can be mistaken for code),
+                  enables an optional dependency, enables a feature of an external
+                  dependency (weak and already-enabled edges excluded — they change
+                  nothing), or is named in some target's `required-features`.
   --help          This message.
+
+The success line DECLARES the residual of the method
+(`cfg-site detection: lexical, NON-EXHAUSTIVE`): a cfg produced by MACRO EXPANSION is
+not seen, and an INDIRECTLY redundant dependency-feature edge is not detected.
 
 Credit flows UP from effects, never DOWN from a parent: a leaf named only by an
 aggregator is dead. Being enumerated (a workflow's `--features`, the gate's clippy
@@ -245,7 +296,7 @@ def fail(msg):
 # reason on this list, in this file, in the same diff.
 # ---------------------------------------------------------------------------
 EXEMPT_FEATURES = {
-    "default": "cargo defines its meaning; `cfg(feature = \"default\")` is meaningless and an empty `default = []` is legitimate",
+    "default": "cargo defines its meaning; a cfg on it is meaningless and an empty default = [] is legitimate",
 }
 
 # Directory names never scanned for reference sites.
@@ -255,135 +306,179 @@ EXEMPT_FEATURES = {
 #   node_modules/ — vendored JS.
 SKIP_DIR_NAMES = {"target", ".git", "node_modules", "fuzz"}
 
+# THE DECLARED RESIDUAL, printed on every success. See the script header: this scan is
+# LEXICAL, and two things it cannot decide are named rather than implied away.
+RESIDUAL_NOTE = ("cfg-site detection: lexical, NON-EXHAUSTIVE "
+                 "(a cfg produced by MACRO EXPANSION is not seen; an INDIRECTLY redundant "
+                 "dependency-feature edge is not detected)")
+
+STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
+IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
 
 # ---------------------------------------------------------------------------
-# Comment stripping. STRING-AWARE, because a feature name IS a string literal:
-# contents are KEPT, comments are dropped. A feature named only in a comment is not
-# an effect — a commented-out cfg site compiles to nothing.
+# ONE LEXICAL PREPROCESSING PASS (roborev job 52, findings 1-3 are ONE class).
+#
+# Text matching over Rust source credits non-effects, and narrowing the pattern once
+# per instance is choosing a rarer delimiter — the shape CLAUDE.md rules against
+# (#3312: remove the channel). So the file is lexed ONCE, here, into:
+#
+#   code    — the same length as the input, with every COMMENT byte replaced by a space
+#             (newlines kept, so line numbers stay exact) and every STRING-LITERAL byte
+#             (delimiters, prefixes and all) replaced by STR_SENTINEL. Structure is
+#             matched ONLY against this text, so nothing inside a comment or a string
+#             — raw, byte, C or plain, any hash count — can ever look like code.
+#   strings — the literals, keyed by their START offset in `code`, with their content.
+#
+# A feature NAME is a string literal, so it cannot simply be stripped: the name is read
+# from `strings` at the exact offset where `feature =` ends. That is what makes the
+# scan positional rather than textual — a `feature = "x"` INSIDE a string or comment
+# contributes no `feature` token to `code` at all, and a real one is only accepted when
+# the literal begins exactly where the predicate expects a value.
+#
+# CHAR LITERALS are blanked too, because `'"'` would otherwise open a string. A
+# LIFETIME (`'a`) is not a literal; its quote is blanked and its name left alone, which
+# is inert either way.
 # ---------------------------------------------------------------------------
-def strip_comments(text):
-    out = []
-    i = 0
+def lex(text):
     n = len(text)
+    code = list(text)
+    strings = {}
+    i = 0
     while i < n:
         c = text[i]
-        # raw string: r"..." / r#"..."# / br#"..."#
-        if c in "rb" and i + 1 < n:
-            j = i
-            if text[j] == "b" and j + 1 < n and text[j + 1] == "r":
-                j += 1
-            if text[j] == "r":
-                k = j + 1
-                hashes = 0
-                while k < n and text[k] == "#":
-                    hashes += 1
-                    k += 1
-                if k < n and text[k] == '"':
-                    terminator = '"' + "#" * hashes
-                    end = text.find(terminator, k + 1)
-                    if end == -1:
-                        out.append(text[i:])
-                        break
-                    out.append(text[i:end + len(terminator)])
-                    i = end + len(terminator)
-                    continue
-        if c == '"':
-            out.append(c)
-            i += 1
-            while i < n:
-                if text[i] == "\\" and i + 1 < n:
-                    out.append(text[i:i + 2])
-                    i += 2
-                    continue
-                out.append(text[i])
-                if text[i] == '"':
-                    i += 1
-                    break
-                i += 1
-            continue
-        if c == "'":
-            # char literal or lifetime; copy the next 1-3 chars verbatim, which is
-            # enough to get past `'\''` and `'"'` without opening a string.
-            if i + 1 < n and text[i + 1] == "\\":
-                out.append(text[i:i + 4])
-                i += 4
-            else:
-                out.append(text[i:i + 3])
-                i += 3
-            continue
+        # --- comments -------------------------------------------------------
         if c == "/" and i + 1 < n and text[i + 1] == "/":
             while i < n and text[i] != "\n":
+                code[i] = " "
                 i += 1
             continue
         if c == "/" and i + 1 < n and text[i + 1] == "*":
-            depth = 1
-            i += 2
-            while i < n and depth > 0:
+            depth = 0
+            while i < n:
                 if text.startswith("/*", i):
                     depth += 1
+                    code[i] = " "
+                    code[i + 1] = " "
                     i += 2
-                elif text.startswith("*/", i):
+                    continue
+                if text.startswith("*/", i):
                     depth -= 1
+                    code[i] = " "
+                    code[i + 1] = " "
                     i += 2
-                else:
-                    if text[i] == "\n":
-                        out.append("\n")
-                    i += 1
+                    if depth == 0:
+                        break
+                    continue
+                if text[i] != "\n":
+                    code[i] = " "
+                i += 1
             continue
-        out.append(c)
+        # --- string literals, with every prefix Rust allows -----------------
+        if c in "rbc\"":
+            start = i
+            j = i
+            prefix_ok = (i == 0 or text[i - 1] not in IDENT_CHARS)
+            if prefix_ok:
+                if text[j] in "bc" and j + 1 < n and text[j + 1] in "r\"":
+                    j += 1
+                raw = False
+                if j < n and text[j] == "r":
+                    raw = True
+                    j += 1
+                hashes = 0
+                while raw and j < n and text[j] == "#":
+                    hashes += 1
+                    j += 1
+                if j < n and text[j] == '"':
+                    if raw:
+                        term = '"' + "#" * hashes
+                        end = text.find(term, j + 1)
+                        if end == -1:
+                            fail_at = start
+                            # Unterminated raw string: not compilable Rust. Blank to EOF
+                            # rather than guess, so no structure is invented after it.
+                            for k in range(fail_at, n):
+                                code[k] = STR_SENTINEL
+                            strings[fail_at] = text[j + 1:n]
+                            i = n
+                            continue
+                        content = text[j + 1:end]
+                        stop = end + len(term)
+                    else:
+                        k = j + 1
+                        buf = []
+                        while k < n:
+                            if text[k] == "\\" and k + 1 < n:
+                                buf.append(text[k + 1] if text[k + 1] != "n" else "\n")
+                                k += 2
+                                continue
+                            if text[k] == '"':
+                                break
+                            buf.append(text[k])
+                            k += 1
+                        content = "".join(buf)
+                        stop = min(k + 1, n)
+                    for k in range(start, stop):
+                        code[k] = STR_SENTINEL
+                    strings[start] = content
+                    i = stop
+                    continue
+        # --- char literals ---------------------------------------------------
+        if c == "'":
+            if i + 1 < n and text[i + 1] == "\\":
+                k = i + 2
+                while k < n and text[k] not in ("'", "\n"):
+                    k += 1
+                if k < n and text[k] == "'":
+                    for m2 in range(i, k + 1):
+                        code[m2] = " "
+                    i = k + 1
+                    continue
+            elif i + 2 < n and text[i + 2] == "'":
+                for m2 in range(i, i + 3):
+                    code[m2] = " "
+                i += 3
+                continue
+            code[i] = " "   # a lifetime/label quote is inert
+            i += 1
+            continue
         i += 1
-    return "".join(out)
+    return "".join(code), strings
 
 
 # ---------------------------------------------------------------------------
-# CFG-CONTEXT extraction. `feature = "x"` ANYWHERE in a file is NOT an effect: it
-# occurs in ordinary string literals, in `//!`/`///` doc text (this workspace has a
-# live instance — `arbitrary_precision` appears in
-# cqlite-ffi-common/src/json_number.rs only inside doc comments), in error messages
-# and in `--features` argument strings. Crediting those credits a DEAD feature, which
-# is the false-PASS direction, so the scan recognises actual cfg SYNTAX: a `cfg`,
-# `cfg_attr` or `cfg!` token followed by a balanced parenthesised predicate. Nesting
-# inside `all()`/`any()`/`not()` needs no special handling — it is inside the same
-# balanced span — and `#[cfg]`/`#![cfg]`/`cfg_attr`/`cfg!` differ only in what
-# precedes the token.
+# ANCHORED cfg HEADS ONLY (job 52 finding 1).
 #
-# For `cfg_attr(pred, attrs...)` ONLY the FIRST top-level argument is the predicate;
-# the tail is attributes to apply, and a feature named there
-# (`#[cfg_attr(docsrs, doc(cfg(feature = "x")))]`) gates nothing by itself. A nested
-# real `cfg(...)` in that tail is still found, because the scan walks every cfg token
-# in the file independently.
+# A bare `cfg(` token is not an effect: `#[cfg_attr(docsrs, doc(cfg(feature = "x")))]`
+# is DOCUMENTATION, and crediting the `cfg(` nested inside its `doc(...)` credits a
+# feature that gates no compilation. So only these four heads count, and each is
+# ANCHORED to the syntax that makes it a real gate:
+#
+#   #[cfg( … )]        #![cfg( … )]        cfg!( … )
+#   #[cfg_attr( COND , … )]    #![cfg_attr( COND , … )]   — the CONDITION only
+#
+# A `cfg(...)` anywhere else — inside `doc(...)`, inside another attribute's token
+# tree, inside a `cfg_attr` TAIL — is deliberately not a site.
 # ---------------------------------------------------------------------------
-CFG_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_])(cfg_attr|cfg)[ \t\r\n]*(!?)[ \t\r\n]*\(')
-FEATURE_PRED_RE = re.compile(r'(?<![A-Za-z0-9_])feature[ \t\r\n]*=[ \t\r\n]*"([^"\\]+)"')
+WS = "[ \t\r\n]*"
+HEAD_RE = re.compile(
+    r'(?P<attr>\#!?\[' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\()'
+    r'|(?P<bang>(?<![A-Za-z0-9_])cfg' + WS + r'!' + WS + r'\()'
+)
+FEATURE_EQ_RE = re.compile(r'(?<![A-Za-z0-9_])feature' + WS + r'=' + WS)
 
 
-def _skip_string(text, i):
-    """i points at the opening quote of a `"..."` literal; return the index after it."""
-    n = len(text)
-    i += 1
-    while i < n:
-        if text[i] == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if text[i] == '"':
-            return i + 1
-        i += 1
-    return n
-
-
-def balanced_span(text, open_idx):
+def balanced_span(code, open_idx):
     """open_idx points at '('. Return (start, end) of the CONTENT, or None if unbalanced.
 
-    String-aware: a `")"` inside a literal must not close the span.
+    No string handling needed: string literals are sentinel-filled in `code`.
     """
-    n = len(text)
     depth = 0
     i = open_idx
+    n = len(code)
     while i < n:
-        c = text[i]
-        if c == '"':
-            i = _skip_string(text, i)
-            continue
+        c = code[i]
         if c == "(":
             depth += 1
         elif c == ")":
@@ -394,15 +489,12 @@ def balanced_span(text, open_idx):
     return None
 
 
-def first_top_level_arg(text, start, end):
+def first_top_level_arg(code, start, end):
     """The first comma-separated argument of a predicate span, at depth 0."""
     depth = 0
     i = start
     while i < end:
-        c = text[i]
-        if c == '"':
-            i = _skip_string(text, i)
-            continue
+        c = code[i]
         if c in "([{":
             depth += 1
         elif c in ")]}":
@@ -413,33 +505,76 @@ def first_top_level_arg(text, start, end):
     return (start, end)
 
 
-def cfg_feature_sites(text):
+def cfg_feature_sites(code, strings):
     """Yield (feature_name, offset) for every feature named in a real cfg predicate."""
-    for m in CFG_TOKEN_RE.finditer(text):
-        token = m.group(1)
-        span = balanced_span(text, m.end() - 1)
+    for m in HEAD_RE.finditer(code):
+        kind = m.group("kind") if m.group("attr") else "cfg"
+        span = balanced_span(code, m.end() - 1)
         if span is None:
-            # An unbalanced cfg( is not a site this scan can read. It is also not
-            # compilable Rust, so it is left to rustc rather than guessed at.
+            # Unbalanced: not compilable Rust. Left to rustc rather than guessed at.
             continue
         start, end = span
-        if token == "cfg_attr":
-            start, end = first_top_level_arg(text, start, end)
-        for fm in FEATURE_PRED_RE.finditer(text, start, end):
-            yield fm.group(1), fm.start()
+        if kind == "cfg_attr":
+            start, end = first_top_level_arg(code, start, end)
+        for fm in FEATURE_EQ_RE.finditer(code, start, end):
+            name = strings.get(fm.end())
+            if name:
+                yield name, fm.start()
 
 
 # ---------------------------------------------------------------------------
-# BUILD-SCRIPT ENV READS. cargo sets CARGO_FEATURE_<NAME> in a build script's
-# environment, so reading one IS a cfg-equivalent effect — but only in a build script,
-# and only as an actual env read. A bare textual `CARGO_FEATURE_X` (a doc comment, a
-# message, a table of names) gates nothing, and crediting it is the same false-PASS
-# route as the plain `feature = "x"` match above.
+# BUILD-SCRIPT ENV READS (job 52 finding 3).
+#
+# cargo sets CARGO_FEATURE_<NAME> in a build script's environment, so reading one IS a
+# cfg-equivalent effect — but only in a BUILD SCRIPT, and only through a genuine
+# environment API. A bare `var("CARGO_FEATURE_X")` is not one: `var` is an ordinary
+# identifier, and an unrelated local function of that name would otherwise credit a
+# dead feature. So `var`/`var_os` unqualified is accepted ONLY when the file proves the
+# import (`use std::env::var`, including a braced list). `option_env!` is deliberately
+# NOT accepted: cargo documents these variables for build-script EXECUTION, and
+# claiming a compile-time read would be asserting something unverified.
 # ---------------------------------------------------------------------------
-ENV_READ_RE = re.compile(
-    r'(?:option_env!|(?:(?:std|core)::)?env::var(?:_os)?|(?<![A-Za-z0-9_:])var(?:_os)?)'
-    r'[ \t\r\n]*\([ \t\r\n]*"CARGO_FEATURE_([A-Z0-9_]+)"'
-)
+ENV_QUALIFIED_RE = re.compile(r'(?:(?:std|core)' + WS + r'::' + WS + r')?env' + WS + r'::' + WS + r'(?P<fn>var_os|var)' + WS + r'\(' + WS)
+ENV_BARE_RE = re.compile(r'(?<![A-Za-z0-9_])(?<!::)(?P<fn>var_os|var)' + WS + r'\(' + WS)
+USE_ENV_RE = re.compile(r'(?<![A-Za-z0-9_])use[ \t\r\n]+(?:std|core)' + WS + r'::' + WS + r'env' + WS + r'::' + WS + r'(?P<tail>\{[^}]*\}|var_os|var)')
+CARGO_FEATURE_RE = re.compile(r'^CARGO_FEATURE_([A-Z0-9_]+)$')
+
+
+def imported_env_fns(code):
+    names = set()
+    for m in USE_ENV_RE.finditer(code):
+        tail = m.group("tail")
+        if tail.startswith("{"):
+            for part in tail[1:-1].split(","):
+                part = part.strip()
+                if part in ("var", "var_os"):
+                    names.add(part)
+        else:
+            names.add(tail)
+    return names
+
+
+def build_script_env_features(code, strings):
+    """Yield (CARGO_FEATURE_<X> suffix, offset) for every genuine env read."""
+    imported = imported_env_fns(code)
+    for m in ENV_QUALIFIED_RE.finditer(code):
+        name = strings.get(m.end())
+        if name:
+            hit = CARGO_FEATURE_RE.match(name)
+            if hit:
+                yield hit.group(1), m.start()
+    for m in ENV_BARE_RE.finditer(code):
+        if m.group("fn") not in imported:
+            continue
+        # Skip a qualified call already reported above (`env::var(` also matches here).
+        pre = code[max(0, m.start() - 2):m.start()]
+        if pre.endswith(":"):
+            continue
+        name = strings.get(m.end())
+        if name:
+            hit = CARGO_FEATURE_RE.match(name)
+            if hit:
+                yield hit.group(1), m.start()
 
 
 def cargo_feature_env_name(feature):
@@ -494,12 +629,24 @@ if not members:
 
 
 # ---------------------------------------------------------------------------
-# 2) DEPENDENCY KEYS. Cargo's feature syntax names a dependency by its KEY — the
-#    `rename` when the manifest renames it (`bee = { package = "b" }` is written
-#    `bee/bfeat`, never `b/bfeat`) — so resolving `pkg/feature` edges by PACKAGE NAME
-#    misses a renamed workspace member and silently classifies it as EXTERNAL, which
-#    auto-credits the edge without ever checking that the forwarded feature exists or
-#    has any effect: a false PASS. The key -> member map is built here, from metadata.
+# 2) DEPENDENCY KEYS, with what each declaration ALREADY ENABLES.
+#
+#    Cargo's feature syntax names a dependency by its KEY — the `rename` when the
+#    manifest renames it (`bee = { package = "b" }` is written `bee/bfeat`, never
+#    `b/bfeat`) — so resolving `pkg/feature` edges by PACKAGE NAME misses a renamed
+#    workspace member, classifies it as EXTERNAL and auto-credits the edge without ever
+#    checking the forwarded feature: a false PASS.
+#
+#    Each declaration's `features` and `uses_default_features` are kept too (job 52
+#    finding 2), because an edge that enables what the DECLARATION already enables
+#    changes nothing: `foo = ["serde/derive"]` with `serde = { features = ["derive"] }`
+#    is a no-op, and so is `foo = ["dep/default"]` on a dependency that already uses
+#    default features. Workspace-dependency inheritance is already resolved in cargo
+#    metadata, so an inherited `features = [...]` is visible here.
+#
+#    Redundancy is judged over ALL declarations under the key (normal, dev, build,
+#    per-target): credit is withheld only when EVERY one of them already enables the
+#    feature, which is the direction that cannot invent a false FAIL.
 # ---------------------------------------------------------------------------
 for name, rec in members.items():
     keys = {}
@@ -508,18 +655,38 @@ for name, rec in members.items():
         if not dname:
             fail("member '%s' has a dependency with no name in cargo metadata. Refusing to resolve feature edges against an unreadable dependency table." % name)
         key = dep.get("rename") or dname
-        # A local (path/workspace) dependency on a member is the only thing whose
-        # features this guard can follow; a registry crate that happens to share a
-        # member's name is external.
         is_local = dep.get("path") is not None or dep.get("source") is None
-        entry = keys.setdefault(key, {"package": dname, "member": None, "optional": False})
+        dfeats = dep.get("features")
+        if dfeats is None:
+            dfeats = []
+        if not isinstance(dfeats, list):
+            fail("member '%s' dependency '%s' has a non-list `features` in cargo metadata. Refusing to guess at its shape." % (name, key))
+        entry = keys.setdefault(key, {"package": dname, "member": None, "optional": False, "decls": []})
         if entry["package"] != dname:
             fail("member '%s' uses the dependency key '%s' for two different packages ('%s' and '%s') in cargo metadata. Refusing to resolve feature edges through an ambiguous key." % (name, key, entry["package"], dname))
         if dep.get("optional"):
             entry["optional"] = True
+        entry["decls"].append({
+            "features": set(dfeats),
+            "default": bool(dep.get("uses_default_features", True)),
+        })
         if is_local and dname in members:
             entry["member"] = dname
     rec["dep_keys"] = keys
+
+
+def edge_is_redundant(info, dep_feature):
+    """True when EVERY declaration under this key already enables dep_feature."""
+    decls = info["decls"]
+    if not decls:
+        return False
+    for d in decls:
+        if dep_feature in d["features"]:
+            continue
+        if dep_feature == "default" and d["default"]:
+            continue
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -535,22 +702,19 @@ for name, rec in members.items():
 #    compiled as a target of TWO packages (which is exactly what `<root>/tests/*.rs`
 #    is here) genuinely references BOTH packages' features, so both are credited.
 #
-#    Two registrations per target:
-#      * its EXACT src_path, which always wins; and
-#      * the TREE under `dirname(src_path)`, which is how a target reaches its module
-#        files (`tests/common/mod.rs`, `src/**`) — EXCEPT for a custom-build target,
-#        whose dirname is the PACKAGE ROOT. Registering that would hand a package the
-#        whole of its own directory again, nested members and all, so a build script
-#        is registered as an exact file only.
+#    Two registrations per target: its EXACT src_path, which always wins, and the TREE
+#    under `dirname(src_path)`, which is how a target reaches its module files —
+#    EXCEPT for a custom-build target, whose dirname is the PACKAGE ROOT. Registering
+#    that would hand a package the whole of its own directory again, nested members and
+#    all, so a build script is registered as an exact file only.
 #
 #    Nested-member exclusion: a file inside a DEEPER member's package directory is not
-#    the shallower member's source, unless it is literally one of the shallower
-#    member's target files.
+#    the shallower member's source, unless it is literally one of its target files.
 # ---------------------------------------------------------------------------
 TREELESS_KINDS = {"custom-build"}
-exact_owners = {}    # realpath -> set(member names)
-tree_owners = []     # (tree_dir, member name)
-buildscript_files = {}   # realpath -> set(member names)
+exact_owners = {}
+tree_owners = []
+buildscript_files = {}
 
 for name, rec in members.items():
     for target in rec["targets"]:
@@ -584,15 +748,13 @@ def owners_of(path):
             continue
         if path == tree_dir or path.startswith(tree_dir + os.sep):
             if deep_dir is not None and len(members[name]["dir"]) < len(deep_dir):
-                # The file lives inside a DEEPER member's package directory; it is
-                # that member's source, not this one's.
                 continue
             owners.add(name)
     return owners
 
 
 # ---------------------------------------------------------------------------
-# 4) E1 — reference sites, per OWNING package.
+# 4) E1 — reference sites, per OWNING package, over the LEXED text.
 # ---------------------------------------------------------------------------
 scanned_files = 0
 for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
@@ -613,23 +775,23 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         except OSError as exc:
             fail("could not read the source file %s (%s) while collecting feature reference sites. Refusing to report a verdict over sources it could not read." % (os.path.relpath(full, REPO_ROOT), exc))
         scanned_files += 1
-        stripped = strip_comments(text)
+        code, strings = lex(text)
         rel = os.path.relpath(full, REPO_ROOT)
-        sites = list(cfg_feature_sites(stripped))
+        sites = list(cfg_feature_sites(code, strings))
         env_sites = []
         if full in buildscript_files:
-            env_sites = [(m.group(1), m.start()) for m in ENV_READ_RE.finditer(stripped)]
+            env_sites = list(build_script_env_features(code, strings))
         for owner in owners:
             record = members[owner]["refsites"]
             for feat, off in sites:
                 if feat not in record:
-                    record[feat] = "%s:%d" % (rel, stripped.count("\n", 0, off) + 1)
+                    record[feat] = "%s:%d" % (rel, code.count("\n", 0, off) + 1)
             if not env_sites or owner not in buildscript_files.get(full, ()):
                 continue
             for env, off in env_sites:
                 for feat in members[owner]["features"]:
                     if cargo_feature_env_name(feat) == env and feat not in record:
-                        record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, stripped.count("\n", 0, off) + 1, env)
+                        record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, code.count("\n", 0, off) + 1, env)
 
 if scanned_files == 0:
     fail("NOT ONE Rust source file of a workspace-member target could be found, so no reference site could possibly have been observed. A positive verdict requires an affirmative measurement; refusing to pass over an empty scan.")
@@ -663,18 +825,21 @@ for name, rec in members.items():
 # 6) DIRECT EFFECTS and CLOSURE EDGES.
 #
 #    A WEAK edge (`dep?/feature`) is NOT an effect on its own: cargo does nothing with
-#    it unless that optional dependency is activated by something else. Crediting it
-#    unconditionally credits a feature that changes nothing — a false PASS — so the `?`
-#    is preserved here and the edge is evaluated per ORIGIN in step 7, live only when
-#    the dependency is activated somewhere in that origin's closure.
+#    it unless that optional dependency is activated by something else. The `?` is
+#    preserved here and the edge is evaluated per ORIGIN in step 7, live only when the
+#    dependency is activated somewhere in that origin's closure.
+#
+#    A REDUNDANT edge is not an effect either (job 52 finding 2): if the dependency
+#    declaration already enables the feature, enabling it again changes nothing, so the
+#    edge is dropped entirely — no credit and no closure edge.
 #
 #    A NON-weak `dep/feature` on an OPTIONAL dependency also ACTIVATES it (cargo's
 #    documented behaviour), so it is both an effect and an activation.
 # ---------------------------------------------------------------------------
-uncond = {}      # (pkg, feat) -> True when an unconditional direct effect exists
-edges = {}       # (pkg, feat) -> [(kind, key, target_node_or_feat, weak)]
-own_deps = {}    # (pkg, feat) -> set of dependency KEYS this feature activates
-ext_edges = {}   # (pkg, feat) -> [(key, dep_feature, weak)]
+uncond = {}
+edges = {}
+own_deps = {}
+ext_edges = {}
 all_nodes = []
 
 for name, rec in members.items():
@@ -704,8 +869,11 @@ for name, rec in members.items():
                 info = rec["dep_keys"].get(key)
                 if info is None:
                     fail("feature '%s' of member '%s' enables '%s', but member '%s' declares no dependency with the key '%s'. Cargo's feature syntax names a dependency by its KEY (its `rename`, when renamed); refusing to credit an edge it could not resolve." % (feat, name, entry, name, key))
+                if edge_is_redundant(info, dfeat):
+                    # The dependency declaration already enables this feature, so the
+                    # edge newly enables NOTHING. Not an effect, and not a closure edge.
+                    continue
                 if not weak and info["optional"]:
-                    # `dep/feat` on an optional dependency activates it too.
                     acts.add(key)
                     effect = True
                 if info["member"] is not None:
@@ -825,7 +993,12 @@ if dead:
     feature, and no target's required-features names it. Being NAMED confers nothing:
     an aggregator that lists a leaf, a workflow `--features` argument, the gate's
     clippy enumerations and a doc table all name features without enabling anything.
-    Nor does a WEAK `dep?/feature` edge whose optional dependency nothing activates.
+    Nor does a WEAK `dep?/feature` edge whose optional dependency nothing activates,
+    nor a REDUNDANT `dep/feature` edge the dependency declaration already enables.
+
+    A cfg site must be a REAL cfg: `#[cfg(...)]`, `#![cfg(...)]`, `cfg!(...)` or the
+    CONDITION of `#[cfg_attr(...)]`. A feature named in a string literal, in doc text,
+    or in a `doc(cfg(...))` inside a `cfg_attr` tail gates no compilation.
 
     Remedy, one of:
       * DELETE the feature from its manifest (and every enumeration that names it:
@@ -840,12 +1013,14 @@ if dead:
 
 # AFFIRMATIVE success line: a count, never a bare "OK". Every element of it is
 # something the guard can only know AFTER deriving the member set from cargo, walking
-# the target sources and computing every closure. The `features-load-bearing` component
-# of scripts/agent-gate.sh matches this line WHOLE.
+# the target sources and computing every closure — and it ends by DECLARING the
+# residual of its own method, because a lane that omits coverage silently is
+# indistinguishable from one that covers it. The `features-load-bearing` component of
+# scripts/agent-gate.sh matches this line WHOLE.
 print(
     "features-load-bearing: %d/%d declared features load-bearing across %d workspace manifests "
-    "(%d exempt: %s); %d Rust source files scanned for reference sites"
-    % (asserted, asserted, len(members), exempt_count, ", ".join(sorted(EXEMPT_FEATURES)), scanned_files)
+    "(%d exempt: %s); %d Rust source files scanned for reference sites; %s"
+    % (asserted, asserted, len(members), exempt_count, ", ".join(sorted(EXEMPT_FEATURES)), scanned_files, RESIDUAL_NOTE)
 )
 PYEOF
 
