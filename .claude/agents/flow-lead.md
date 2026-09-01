@@ -221,9 +221,13 @@ near-independent issues instead of running one to done before starting the next:
   the Autonomy section: **never `ScheduleWakeup`-poll a PR's own CI**). Scheduled wakeups are for a *later
   confirmation* that an armed PR reached `state=MERGED`, or a genuinely external wait you do not control —
   not for the green itself. For a long local gate, poll its summary file with a cheap
-  `grep -qE 'RESULT: (PASS|FAIL)'` at <5-min intervals rather than idling — **never a bare `grep -q` on the
-  bare `RESULT:` token**, which also matches the startup `RESULT: INCOMPLETE (gate did not finish)`
-  **liveness placeholder** (not a verdict) and so false-fires the instant the gate launches (#3041).
+  **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` at <5-min intervals rather than idling —
+  **never a bare `grep -q` on the bare `RESULT:` token**, which also matches the startup
+  `RESULT: INCOMPLETE (gate did not finish)` **liveness placeholder** (not a verdict) and so false-fires the
+  instant the gate launches (#3041). That grammar is for full/`--lite`/`--delta`; an **`--only <component>`**
+  run demotes success to `RESULT: PARTIAL`, so it spins on green there (#3750) — poll exit status `3`, or
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and read the component's verdict SEPARATELY via
+  `scripts/gate-component-verdict.sh --mode only --component <name>`.
   Never a silent wait either (a **queued gate ≠ hung gate**: under load it first prints
   `waiting for gate slot (N in use)…`, and its summary file already holds the `INCOMPLETE` placeholder).
 

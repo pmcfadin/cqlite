@@ -221,14 +221,63 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 
 - Prefer `run_in_background` (or a long timeout) so a subagent never idle-waits and gets
   watchdog-killed (#1855). A queued gate ≠ hung gate: under load it prints `waiting for gate slot`.
-- **Completion probe = `grep -qE 'RESULT: (PASS|FAIL)'` — `INCOMPLETE` is a liveness placeholder, NOT
-  a verdict (#3041; mechanism follow-up #2908).** The gate writes
-  `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (EXIT-trap sentinel,
-  before the #1825 slot is even granted) and only overwrites it with `PASS`/`FAIL` at the terminal
-  emit. So a bare `grep -q` on the bare `RESULT:` token fires the instant the gate starts and would let an agent accept
-  a **just-launched or still-queued** gate as its gate of record — a verdict that does not exist.
-  Anchor every poll (agents, skills, docs, helper scripts) on `PASS|FAIL`; a sentinel-only summary
-  means "still running, died, or queued", never certified.
+- **COMPLETION AND VERDICT ARE TWO ASSERTIONS, AND #3750 IS WHAT HAPPENS WHEN ONE TOKEN IS ASKED TO
+  ANSWER BOTH.** `INCOMPLETE` is a liveness placeholder, NOT a verdict (#3041; mechanism follow-up
+  #2908): the gate writes `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at
+  launch** (EXIT-trap sentinel, before the #1825 slot is even granted) and only overwrites it at the
+  terminal emit. So a bare `grep -q` on the bare `RESULT:` token fires the instant the gate starts and
+  would let an agent accept a **just-launched or still-queued** gate as its gate of record — a verdict
+  that does not exist. A sentinel-only summary means "still running, died, or queued", never certified.
+  **But the corrected probe was published as `grep -qE 'RESULT: (PASS|FAIL)'` for every mode, and
+  `--only` demotes a SUCCESSFUL run to `RESULT: PARTIAL`** (`agent-gate.sh`, deliberately — a component
+  probe must never be pastable as the gate of record). **The documented probe was therefore asymmetric:
+  it terminated on failure and SPUN FOREVER ON SUCCESS.** Measured: a lane spun 8+ minutes past a
+  terminal PASS and then re-ran an 18-minute component that had already passed. Three rules:
+
+  **(1) COMPLETION — the EXIT STATUS IS PRIMARY, the text grammar is the FALLBACK.** *If you can
+  observe an exit status at all, the run has completed* — that is what an exit status means, and a probe
+  keyed on it cannot be defeated by a wording change. `--only` exits **3** (`PARTIAL`), a full-gate PASS
+  exits `0`, anything else `1`. Only where the exit status is unobservable (a **detached** run, a peer's
+  run, `gate-detached.sh`) do you poll text — and then the accepted set is **A PARAMETER OF THE RUN
+  MODE**, never one grammar for both:
+
+  ```bash
+  # RECORD grammar — full / --lite / --delta. MUST keep REFUSING PARTIAL.
+  grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'          "$AGENT_GATE_SUMMARY_FILE"
+  # ONLY grammar — `--only <component>` ONLY. NEVER use this on the gate of record.
+  grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'  "$AGENT_GATE_SUMMARY_FILE"
+  ```
+
+  Both **ANCHORED and token-terminated**, because unanchored the first matches `RESULT: PASSENGER` and
+  the second `RESULT: PARTIALLY` — a spelling check masquerading as a state check, the `PASS*` accepts
+  `PASSthisNeverRan` defect this repo has now made three times. Better than either: ask the shared
+  reader, `bash scripts/gate-liveness.sh <summary-file> --run-id <id>` (exit 0 = COMPLETE), which
+  enumerates the terminal set from `agent-gate.sh`, requires the block's END marker and enforces the
+  #2874 run-id binding. **One implementation, one grammar** — a caller that re-greps it is a second
+  place for all three to drift (roborev job 172 is that defect, already paid for once).
+
+  **(2) VERDICT — read the COMPONENT'S OWN LINE, never the terminal token.** `PARTIAL` says *the run
+  ended*; it does not say *my component passed*, and `PARTIAL` is **true**, so it keeps being emitted.
+  Deriving success from it is a positive verdict taken from a completion marker — the vacuous pass, one
+  level down from the hang. Ask:
+
+  ```bash
+  bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
+  # exit 0 = PASS | 1 = NOT-PASS | 4 = COULD-NOT-MEASURE | 64 = USAGE
+  ```
+
+  A completed run whose component **SKIPped or is ABSENT is NOT a pass**: a SKIP means the check never
+  ran, which is the vacuous pass itself — and note a SKIPping component still leaves `RESULT: PARTIAL`
+  and **exit 3**, so exit 3 alone is a completion signal and never a green. `COULD-NOT-MEASURE` is
+  never read as a pass. `--mode record`/`lite`/`delta` are **named refusals** naming their authority
+  (`scripts/flow/premerge-assert.sh` owns the gate-of-record grammar, binds the certified sha and
+  refuses `PARTIAL` token-exactly), so the component grammar can never be misused as a certification.
+
+  **(3) EVERY POLL SITE SAYS WHICH GRAMMAR IT USES.** A reader must be able to tell a record poll from
+  an `--only` poll at a glance, or the wrong one gets copied — which is exactly how the single published
+  string reached the fleet. Guard: `scripts/tests/test_gate_component_verdict.sh` (in `tooling-tests`)
+  runs both published strings against real fixtures, so a grammar that stops behaving as documented reds
+  the gate instead of hanging a lane.
 - **A gate launched in-session dies with its session's CGROUP, and no detach idiom saves it — run it
   with `scripts/flow/gate-detached.sh` and poll `scripts/gate-liveness.sh` (#3473).** Every process an
   agent session spawns inherits the session's `tmux-spawn-<uuid>.scope`, which carries

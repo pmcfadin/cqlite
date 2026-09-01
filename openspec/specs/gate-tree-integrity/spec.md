@@ -216,7 +216,8 @@ without the tree lines, and no block SHALL carry a duplicated set of them.
 #### Scenario: the RESULT poll predicates are unaffected by the new lines
 - **WHEN** a caller polls a summary file with the **known-buggy** bare-`RESULT:`-token match (it also
   matches the start-of-run `RESULT: INCOMPLETE` placeholder — the #2908/#3041 defect; do NOT copy it) or
-  the **correct** `grep -qE 'RESULT: (PASS|FAIL)'`
+  the **correct** `grep -qE 'RESULT: (PASS|FAIL)'` (or its `--only` counterpart, which additionally
+  accepts a `PARTIAL` verdict token — #3750)
 - **THEN** the added lines SHALL NOT match either predicate, so issue #2908's separate concern is
   neither fixed nor regressed by this change
 

@@ -25,8 +25,18 @@ from this script's summary (between the `AGENT-GATE SUMMARY` markers, ending in 
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** and overwrites it on
 completion, so `INCOMPLETE` is a **liveness placeholder, not a verdict**. If you poll a summary file
 instead of waiting for the process to exit, the predicate is
-`grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"` — a bare `grep -q` on the bare `RESULT:` token fires the
-instant the gate starts and would accept a just-launched (or still-queued) gate as certified.
+the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"` — a bare
+`grep -q` on the bare `RESULT:` token fires the instant the gate starts and would accept a just-launched (or
+still-queued) gate as certified, and an unanchored form matches `RESULT: PASSENGER`.
+
+**COMPLETION AND VERDICT ARE TWO ASSERTIONS (#3750).** The record grammar above is for full/`--lite`/`--delta`
+and must keep **REFUSING** `PARTIAL`. An **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so
+that grammar spins on green there. Poll `--only` by **EXIT STATUS** (`3` = completed PARTIAL) where you can
+observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`; then read the
+component's verdict SEPARATELY, from its own line:
+`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name> --run-id <id>` (exit 0 PASS /
+1 NOT-PASS / 4 COULD-NOT-MEASURE). A completed run whose component **SKIPped or is absent is NOT a pass** —
+and a SKIPping component still exits 3, so exit 3 is completion and never a green.
 
 **Every invocation — full, lite, and `--only` — MUST use the summary-file redirect** (#1175/#2079). The
 summary block is the only gate text an agent retains; never stream raw gate stdout into a persistent

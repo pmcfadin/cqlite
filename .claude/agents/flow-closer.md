@@ -84,7 +84,8 @@ from `RUNNING` — both leave the same `INCOMPLETE` text (#3041) — which is wh
 summary file alone once made one human the fleet's only gate-runner. Keep the `grep` below
 only as the fallback when the heartbeat is absent (`UNKNOWN`, e.g. an older gate):
 ```bash
-grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
+# RECORD grammar — full/--lite/--delta ONLY. It must keep REFUSING PARTIAL.
+grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
 ```
 **Only `PASS`/`FAIL` is a verdict.** `agent-gate.sh` writes
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (via its EXIT

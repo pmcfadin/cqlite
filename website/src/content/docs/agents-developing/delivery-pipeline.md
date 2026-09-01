@@ -536,8 +536,11 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via
   `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall
   watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline, with
-  `grep -qE 'RESULT: (PASS|FAIL)'` — never a bare `grep -q` on the bare `RESULT:` token, which also matches the startup
-  `RESULT: INCOMPLETE` liveness placeholder and would accept a just-launched gate as a verdict, #3041),
+  the anchored **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — never a bare `grep -q` on the
+  bare `RESULT:` token, which also matches the startup `RESULT: INCOMPLETE` liveness placeholder and would accept
+  a just-launched gate as a verdict, #3041; and never that grammar on an `--only` run, which demotes success to
+  `RESULT: PARTIAL` and so spins on green — see #3750 for the per-mode grammars and the separate component-verdict
+  read),
   the **C**
   intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no
   `Agent` tool**, so it never spawns directly: for **C** (and any src-design fix) it emits a structured

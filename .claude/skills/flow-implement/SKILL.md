@@ -114,8 +114,14 @@ never gate stdout or review churn.
       `run-id` mismatch, read the sibling `/tmp/lite-<N>.txt.integrity-fail.*` / `logs:` bundle instead.
       **And only `PASS`/`FAIL` is a verdict (#3041):** the gate stamps
       `RESULT: INCOMPLETE (gate did not finish)` at launch, so if you poll rather than wait for exit,
-      use `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `grep -q` on the bare `RESULT:` token matches that **liveness
-      placeholder** and would read a just-launched run as a finished one.
+      use the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `grep -q` on the
+      bare `RESULT:` token matches that **liveness placeholder** and would read a just-launched run as a
+      finished one, and an UNANCHORED form matches `RESULT: PASSENGER`. That grammar is for full/`--lite`/
+      `--delta` ONLY: an **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so polling it with
+      the record grammar SPINS ON GREEN (#3750) — there the exit status (**3**) is primary, the fallback is
+      `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and the component's VERDICT is a SEPARATE read
+      (`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>`), because a completed run
+      whose component SKIPped is not a pass.
       Lite's components are exactly `file-size fmt clippy roborev-lints scoped-tests` (the
       `scripts/agent-gate.sh` `LITE_COMPONENTS` array), where clippy is **per-package scoped** (#1844) and
       `scoped-tests` is blast-radius (touched package `--lib` + the diff's new `--test` targets). It is the

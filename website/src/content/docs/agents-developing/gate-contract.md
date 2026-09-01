@@ -1050,7 +1050,17 @@ read it:
 > exist. The only correct predicate is:
 >
 > ```bash
-> grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+> # RECORD grammar — full / --lite / --delta. Anchored + token-terminated; it MUST keep refusing PARTIAL.
+> grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+>
+> # ONLY grammar — `--only <component>` ONLY, never the gate of record (#3750). `--only` demotes a
+> # SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar spins on green. The EXIT STATUS (3) is
+> # primary; this is the fallback for a detached run whose exit code you never observe.
+> grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+>
+> # COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:
+> bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
+> # exit 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE. A completed run whose component SKIPped is NOT a pass.
 > ```
 >
 > A terminal `RESULT: INCOMPLETE` means "still running, or died" — never a certification.

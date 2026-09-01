@@ -406,7 +406,18 @@ It is overwritten with `RESULT: PASS` / `RESULT: FAIL` only at the terminal emit
 **Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. The single correct completion predicate, in agents, skills, docs, and any helper that polls a summary file, is:
 
 ```bash
-grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+# RECORD grammar — full / --lite / --delta. Anchored + token-terminated, and it MUST keep refusing PARTIAL.
+grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+
+# ONLY grammar — `--only <component>` ONLY, and NEVER on the gate of record (#3750). `--only` demotes a
+# SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar above spins on green. Prefer the EXIT STATUS
+# (3 = completed PARTIAL); this is the fallback for a detached run whose exit code you never see.
+grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+
+# And COMPLETION IS NOT A VERDICT: `PARTIAL` says the run ENDED, not that your component passed. Read the
+# component's OWN line, as a separate assertion. A completed run whose component SKIPped is NOT a pass.
+bash scripts/gate-component-verdict.sh "$AGENT_GATE_SUMMARY_FILE" \
+     --mode only --component tooling-tests --run-id <id>   # 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE
 ```
 
 Corollaries:

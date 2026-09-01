@@ -22,6 +22,12 @@ read only the summary file — never `gate.log`.
 - **`INCOMPLETE` is a liveness placeholder, not a verdict (#3041).** The startup sentinel puts
   `RESULT: INCOMPLETE (gate did not finish)` in the summary file before any component runs (a queued
   gate already has one), so any completion poll must be
-  `grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"`, never a bare `grep -q` on the bare `RESULT:` token.
+  the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"`, never a
+  bare `grep -q` on the bare `RESULT:` token and never an unanchored form (which matches `RESULT: PASSENGER`).
+- **An `--only <component>` run needs the OTHER grammar, and its verdict is a SEPARATE read (#3750).** `--only`
+  demotes success to `RESULT: PARTIAL`, so the record grammar above spins on green. Completion: **exit status
+  `3`** where observable, else `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. Verdict:
+  `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` — a completed run whose
+  component SKIPped or is absent is NOT a pass.
 
 See `SKILL.md` (this dir) for the loop and `docs/development/pm-operating-loop.md` for the delivery model.
