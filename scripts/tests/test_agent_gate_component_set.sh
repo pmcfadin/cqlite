@@ -397,6 +397,24 @@ cs_region_stream() {
     inr { if (m == "plain") print $0; else printf "%d:%s\n", NR, $0 }' "$gate"
 }
 
+# cs_hook_watchdog <repo> <mode> <secs>: the `--component-set-line` hook run under an INDEPENDENT
+# OUTER WATCHDOG. Stdout is the hook's; the exit status is `timeout`'s, so 124/137 means the
+# watchdog fired.
+#
+# WHY (roborev job 347, item 2): the FIFO cases exist to prove that a blocking read is BOUNDED. If
+# that bounding regresses, the plain `$( … )` form HANGS FOREVER — the case never reaches its
+# elapsed-time assertion, never restores the object it replaced, and the suite stops with no
+# verdict. A test for a hang that itself hangs on failure is not a test. Expiration is a NAMED
+# FAILURE at the call site, never a skip: it is the exact regression the case is for.
+#
+# `timeout` is the suite's own dependency elsewhere, but its absence is reported by the caller as a
+# skipped PRECONDITION rather than assumed — an unbounded run is what this helper exists to avoid,
+# so it must not silently fall back to one.
+cs_hook_watchdog() {
+  local repo="$1" mode="$2" secs="$3"
+  ( fx "$repo" && timeout -k 5 "$secs" bash "$repo/scripts/agent-gate.sh" --component-set-line "$mode" 2>/dev/null )
+}
+
 # cs_region_code <gate>: the region's CODE lines only, numbered. The comment strip is ANCHORED at
 # the start of the payload (`^<digits>:<space>*#`) — an UNANCHORED `:[[:space:]]*#` also matches a
 # `#` anywhere later on the line, so a real call line carrying a trailing `# note: …` was dropped
@@ -1468,6 +1486,10 @@ elif [ -z "$hp_head" ]; then
   bad "3757-head-object-fifo: the fixture's HEAD does not resolve to a commit, so the plant has no subject"
 elif [ "$(field KIND "$hp_ctl")" != ok ]; then
   bad "3757-head-object-fifo: the POSITIVE CONTROL (same fixture, no FIFO) did not reach KIND ok (got '$(field KIND "$hp_ctl")') — the case cannot discriminate"
+elif ! command -v timeout >/dev/null 2>&1; then
+  # A PRECONDITION, NOT A VERDICT: without `timeout` the run cannot be given the independent
+  # watchdog below, and running it unbounded is the hang this case must not risk.
+  echo "skip - 3757-head-object-fifo: no timeout(1) on PATH, so the planted read cannot be run under an independent outer watchdog"
 else
   hp_obj="$hp_objdir/${hp_head:0:2}/${hp_head:2}"
   if [ ! -f "$hp_obj" ]; then
@@ -1475,19 +1497,25 @@ else
   else
     cp "$hp_obj" "$tmp/3757-head-backup" && rm -f "$hp_obj" && mkfifo "$hp_obj"
     hp_t0=$(date +%s)
-    hp_out=$( fx "$hp_fx" && bash "$hp_fx/scripts/agent-gate.sh" --component-set-line lite 2>/dev/null )
+    # UNDER AN INDEPENDENT WATCHDOG (roborev job 347, item 2). Without it, a regression in the
+    # bounding this case tests would hang the SUITE here — no verdict, and the planted FIFO left in
+    # place. 90s is well above the observed 15-16s and well below forever.
+    hp_out=$(cs_hook_watchdog "$hp_fx" lite 90); hp_rc=$?
     hp_el=$(( $(date +%s) - hp_t0 ))
-    # CLEANUP FIRST AND WITHOUT GIT (the include.path case's lesson: a `git config --unset`
-    # cleanup once blocked for 10m43s on the very FIFO it had planted, and `|| true` cannot
-    # rescue a hang).
+    # CLEANUP FIRST AND WITHOUT GIT, AND ON EVERY PATH INCLUDING THE WATCHDOG'S (the include.path
+    # case's lesson: a `git config --unset` cleanup once blocked for 10m43s on the very FIFO it had
+    # planted, and `|| true` cannot rescue a hang). It runs here, before any assertion, so no
+    # branch below can skip it.
     rm -f "$hp_obj" && cp "$tmp/3757-head-backup" "$hp_obj"
     hp_kind=$(field KIND "$hp_out")
     hp_line=$(field COMPONENT_SET_LINE "$hp_out")
-    if [ "$hp_kind" = repo-read-blocked ] && [ "$hp_el" -lt 80 ] \
+    if [ "$hp_rc" -eq 124 ] || [ "$hp_rc" -eq 137 ]; then
+      bad "3757-head-object-fifo: the OUTER WATCHDOG fired after 90s — the read this case plants was NOT bounded by the gate, which is precisely the regression this case exists to catch (rc=$hp_rc)"
+    elif [ "$hp_kind" = repo-read-blocked ] && [ "$hp_el" -lt 80 ] \
        && grep -q 'peeling HEAD' <<<"$hp_line" && grep -q 'SHARED object store' <<<"$hp_line"; then
       ok "3757-head-object-fifo: a FIFO at HEAD's OWN loose object is BOUNDED and refused by name (repo-read-blocked in ${hp_el}s), and the detail names the PEEL and the shared object store"
     else
-      bad "3757-head-object-fifo: expected KIND repo-read-blocked naming the peel, well inside the bound (got '$hp_kind' in ${hp_el}s)"
+      bad "3757-head-object-fifo: expected KIND repo-read-blocked naming the peel, well inside the bound (got '$hp_kind' in ${hp_el}s, rc=$hp_rc)"
       printf '%s\n' "$hp_out"
     fi
   fi
