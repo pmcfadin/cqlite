@@ -2964,6 +2964,199 @@ else
   bad "4b.203 the emitted STALLED guidance tells the reader to derive the bound" "not found"
 fi
 
+# --- job 323 F3 / #3769: the reservation is a SET, and every PRE-LAUNCH refusal must release it ----
+# The reservation is the summary launch-lock PLUS one marker per remaining artifact, and it was
+# released PER SITE — so three sites had drifted into three different answers about one invariant:
+# the acquisition failure rolled back all of it, the symlink refusal only `$_reserve`, and the
+# truncation failure NONE. The heartbeat and log markers outlived a launch that never happened.
+#
+# The behavioural cases below run SUBSTITUTED COPIES of the shipped launcher: the two defects are
+# point-of-use races (a symlink appearing, or a truncate failing, between an earlier check and the
+# launch) and neither is inducible from outside the process. The copy is DERIVED from the shipped
+# file and the injection anchor must match EXACTLY ONE line, so a moved or reworded site FAILs the
+# case rather than silently passing it.
+# THE ANCHOR IS PASSED THROUGH THE ENVIRONMENT, NOT `awk -v`: awk expands escape sequences in a
+# `-v` value, and one of the three anchors ENDS IN A BACKSLASH (the multi-line `systemd-run`
+# invocation). Through `-v` that anchor would never match its own source line, and the case would
+# report "the site moved" about a launcher that had not changed — a false FAIL from the test's own
+# plumbing. ENVIRON[] is verbatim.
+_inject_before() {  # <tag> <exact-anchor-line> <injected-line> -> prints copy path | rc 1 if anchor not unique
+  local tag="$1" d n
+  d="$TMP/inj-$tag/scripts/flow"                 # .../scripts/flow so the copy derives the same REPO_ROOT shape
+  mkdir -p "$d" || return 1
+  n=$(_INJ_A="$2" awk '$0==ENVIRON["_INJ_A"]{c++} END{print c+0}' "$LAUNCHER")
+  [ "$n" = 1 ] || return 1
+  _INJ_A="$2" _INJ_I="$3" awk '{ if ($0==ENVIRON["_INJ_A"]) print ENVIRON["_INJ_I"]; print }' \
+      "$LAUNCHER" > "$d/gate-detached.sh" || return 1
+  printf '%s' "$d/gate-detached.sh"
+}
+# NEGATIVE CONTROL. A bare "no locks survived" is not evidence on its own: an assertion that can
+# never fail passes for free. Neutering every CALL (never the definition) must make the same
+# observable flip, or the case is not measuring the release.
+_neuter_release() {  # <copy-path>
+  local f="$1" n
+  n=$(awk '/^[[:space:]]*_release_reservations([[:space:]]|$)/{c++} END{print c+0}' "$f")
+  [ "${n:-0}" -ge 1 ] || return 1
+  awk '{ if ($0 ~ /^[[:space:]]*_release_reservations([[:space:]]|$)/) print ":"; else print }' \
+      "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+# A LOCK IS A SYMLINK TO AN OWNER STRING, so its target does NOT exist and `-e` is FALSE for it.
+# Testing survival with `-e` alone would report every lock as already gone — a vacuous pass.
+_locks_left() {  # <summary> <log> -> prints the surviving reservation paths, one per line
+  local l
+  for l in "$1.launch-lock" "$1.heartbeat.launch-lock" "$2.launch-lock"; do
+    { [ -L "$l" ] || [ -e "$l" ]; } && printf '%s\n' "$l"
+  done
+  return 0
+}
+
+# The function itself, extracted and run: the two hazards its comment names are the two the
+# acquisition loop was fixed for (job 269 / job 319), and a second implementation of that idiom is a
+# second place for it to regress.
+if ! sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER" | grep -q '^_release_reservations()'; then
+  bad "4b.204 _release_reservations exists and could be extracted" "no such function in the launcher"
+  bad "4b.205 _release_reservations survives an empty _extra_locks under set -u" "not run: extraction failed"
+else
+  _rr_src=$(sed -n '/^_release_reservations() {/,/^}$/p' "$LAUNCHER")
+  _rr_d="$TMP/rr"; mkdir -p "$_rr_d"
+  ln -s "unit=x|pid=1" "$_rr_d/sum with space.launch-lock"
+  ln -s "unit=x|pid=1" "$_rr_d/sum with space.heartbeat.launch-lock"
+  # `$?` of the substitution would be the last `printf`'s and so always 0 — a vacuous check. The
+  # release's own status is recorded explicitly instead, and stderr is folded in INSIDE the
+  # substitution (a `2>&1` after it redirects the assignment, which writes nothing).
+  _rr_out=$( ( set -u
+               eval "$_rr_src"
+               _reserve="$_rr_d/sum with space.launch-lock"
+               _extra_locks=("$_rr_d/sum with space.heartbeat.launch-lock")
+               _release_reservations || echo FIRST-NONZERO
+               _release_reservations || echo SECOND-NONZERO   # a refusal may follow the acquisition rollback
+               echo DONE ) 2>&1 )
+  _rr_left=$(_locks_left "$_rr_d/sum with space" "$_rr_d/nolog")
+  if [ "$_rr_out" = DONE ] && [ -z "$_rr_left" ]; then
+    ok "4b.204 _release_reservations removes the WHOLE set, twice, through a space-bearing path"
+  else
+    bad "4b.204 _release_reservations removes the whole set through a space-bearing path" \
+        "out=[$_rr_out] survived: $(printf '%s' "$_rr_left" | tr '\n' ' ')"
+  fi
+  # An EMPTY array expanded as "${a[@]}" is UNBOUND under `set -u` on bash 3.2 (job 319 F3), and the
+  # acquisition-failure site can call this with nothing acquired yet.
+  _rr_empty=$( ( set -u; eval "$_rr_src"; _reserve="$_rr_d/absent.launch-lock"; _extra_locks=()
+                 _release_reservations; printf 'ok' ) 2>&1 )
+  [ "$_rr_empty" = ok ] \
+    && ok "4b.205 _release_reservations survives an EMPTY _extra_locks under set -u" \
+    || bad "4b.205 _release_reservations survives an empty _extra_locks under set -u" "got: $_rr_empty"
+fi
+
+if [ "$HAVE_SYSTEMD" != yes ]; then
+  skip=$((skip+4)); echo "SKIP 4b.206-4b.209 (no user systemd manager on this host)"
+else
+  # (a) THE LATE SYMLINK REFUSAL — released only `$_reserve`, leaving the heartbeat and log markers.
+  _f3a=$(_inject_before symlink-race 'if [ -L "$LOGFILE" ]; then' \
+                        'rm -f "$LOGFILE"; ln -s /dev/null "$LOGFILE"   # INJECTED: the job-200 race') || _f3a=""
+  if [ -z "$_f3a" ]; then
+    bad "4b.206 the late symlink refusal releases the whole reservation" \
+        "the point-of-use symlink check is no longer a unique anchor line in the launcher"
+  else
+    _f3s="$TMP/f3a-sum"; _f3l="$TMP/f3a.log"
+    _f3o=$(bash "$_f3a" --summary "$_f3s" --log "$_f3l" -- --only fmt 2>&1); _f3r=$?
+    _f3left=$(_locks_left "$_f3s" "$_f3l")
+    if [ "$_f3r" != 0 ] && printf '%s' "$_f3o" | grep -q 'became a symlink after it was checked' \
+       && [ -z "$_f3left" ]; then
+      ok "4b.206 the late symlink refusal leaves NO reservation behind (exit $_f3r)"
+    else
+      bad "4b.206 the late symlink refusal leaves no reservation behind" \
+          "exit $_f3r survived: $(printf '%s' "$_f3left" | tr '\n' ' ') out=$_f3o"
+    fi
+    # NEGATIVE CONTROL on the same injected copy: with the release calls neutered the markers MUST
+    # survive, or 4b.206 is passing on an observable it cannot actually move.
+    _f3c=$(_inject_before symlink-race-ctl 'if [ -L "$LOGFILE" ]; then' \
+                          'rm -f "$LOGFILE"; ln -s /dev/null "$LOGFILE"   # INJECTED: the job-200 race')
+    if [ -n "$_f3c" ] && _neuter_release "$_f3c"; then
+      _f3cs="$TMP/f3c-sum"; _f3cl="$TMP/f3c.log"
+      _f3co=$(bash "$_f3c" --summary "$_f3cs" --log "$_f3cl" -- --only fmt 2>&1); _f3cr=$?
+      _f3cleft=$(_locks_left "$_f3cs" "$_f3cl")
+      if [ "$_f3cr" != 0 ] && [ -n "$_f3cleft" ]; then
+        ok "4b.207 control: with the release neutered the markers DO survive ($(printf '%s' "$_f3cleft" | wc -l | tr -d ' ') left)"
+      else
+        bad "4b.207 control: with the release neutered the markers survive" \
+            "exit $_f3cr survived nothing — 4b.206 cannot detect the defect it pins"
+      fi
+      rm -f "$_f3cleft" 2>/dev/null || true
+    else
+      bad "4b.207 control: with the release neutered the markers survive" \
+          "could not build the control copy (no _release_reservations CALL to neuter)"
+    fi
+  fi
+  # (b) THE TRUNCATION REFUSAL — released nothing at all.
+  # PERMISSIONS CANNOT INDUCE THIS, and the first attempt at this case proves it: the early
+  # writability probe REMOVES the log again ("so a later refusal leaves the filesystem exactly as it
+  # was"), so the pre-launch `>` is a CREATE, and a `chmod 000` on a path that no longer exists is a
+  # silent no-op — the copy launched a real gate and the case failed for its own reason, not the
+  # launcher's. A DIRECTORY at the path is what fails a create-or-truncate, it is a shape a
+  # concurrent peer really can leave behind, and — unlike chmodding the directory — it leaves the
+  # rollback able to remove the markers it owns, which is the very thing under test.
+  _f3b=$(_inject_before truncate-fail '( : > "$LOGFILE" ) 2>/dev/null || {' \
+                        'rm -f "$LOGFILE"; mkdir -p "$LOGFILE"   # INJECTED: make the `>` fail') || _f3b=""
+  if [ -z "$_f3b" ]; then
+    bad "4b.208 the truncation refusal releases the whole reservation" \
+        "the pre-launch truncate is no longer a unique anchor line in the launcher"
+  else
+    _f3bs="$TMP/f3b-sum"; _f3bl="$TMP/f3b.log"
+    _f3bo=$(bash "$_f3b" --summary "$_f3bs" --log "$_f3bl" -- --only fmt 2>&1); _f3br=$?
+    _f3bleft=$(_locks_left "$_f3bs" "$_f3bl")
+    if [ "$_f3br" != 0 ] && printf '%s' "$_f3bo" | grep -q 'cannot truncate the log' \
+       && [ -z "$_f3bleft" ]; then
+      ok "4b.208 the truncation refusal leaves NO reservation behind (exit $_f3br)"
+    else
+      bad "4b.208 the truncation refusal leaves no reservation behind" \
+          "exit $_f3br survived: $(printf '%s' "$_f3bleft" | tr '\n' ' ') out=$_f3bo"
+    fi
+  fi
+  # (c) THE FAILED LAUNCH. Guarded differently ON PURPOSE: `systemd-run` has already spoken to the
+  # manager, so releasing — the PERMISSIVE act, since it admits a peer onto these paths — is licensed
+  # only by an AFFIRMATIVE terminal reading of the unit (`_unit_is_live` rc 1), the same polarity every
+  # other reclamation site in this file uses. A shell FUNCTION is injected rather than a PATH shim so
+  # the launcher's own earlier capability probe still runs against the real binary.
+  _f3d=$(_inject_before launch-fail 'if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \' \
+                        'systemd-run() { return 1; }   # INJECTED: the start job fails') || _f3d=""
+  if [ -z "$_f3d" ]; then
+    bad "4b.209 a FAILED systemd-run releases the reservation when the unit is affirmatively terminal" \
+        "the systemd-run invocation is no longer a unique anchor line in the launcher"
+  else
+    _f3ds="$TMP/f3d-sum"; _f3dl="$TMP/f3d.log"
+    _f3do=$(bash "$_f3d" --summary "$_f3ds" --log "$_f3dl" -- --only fmt 2>&1); _f3dr=$?
+    _f3dleft=$(_locks_left "$_f3ds" "$_f3dl")
+    if [ "$_f3dr" != 0 ] && printf '%s' "$_f3do" | grep -q 'systemd-run failed to start unit' \
+       && [ -z "$_f3dleft" ]; then
+      ok "4b.209 a FAILED systemd-run leaves NO reservation behind (exit $_f3dr)"
+    else
+      bad "4b.209 a failed systemd-run leaves no reservation behind" \
+          "exit $_f3dr survived: $(printf '%s' "$_f3dleft" | tr '\n' ' ') out=$_f3do"
+    fi
+  fi
+fi
+# DRIFT ALARM, and DECLARED AS ONE: this counts call sites, it does not prove the span is covered.
+# Deciding "every refusal between acquisition and launch calls it" needs block analysis of arbitrary
+# shell, which is the unbounded-parse shape this repo has twice descoped for rising false-PASS counts
+# (#1712's snapshot scanner, #3229's census-exclusion key). The four paths are pinned BEHAVIOURALLY
+# above; this line only tells us if a fifth appears without one.
+_rel_calls=$(grep -cE '(^|[[:space:]]|\|\| )_release_reservations([[:space:]]|$)' "$LAUNCHER" || true)
+if [ "${_rel_calls:-0}" -ge 4 ]; then
+  ok "4b.210 every known pre-launch refusal routes through the one release (call sites: $_rel_calls)"
+else
+  bad "4b.210 every known pre-launch refusal routes through the one release" \
+      "found only ${_rel_calls:-0} call sites; a site has gone back to releasing part of the set"
+fi
+# And the ONE path that deliberately does NOT release must SAY so, or its omission reads as the same
+# oversight this finding was: the post-launch heartbeat refusal stops an already-started gate, whose
+# processes may still be draining, so handing its paths to a peer is worse than the litter.
+if sed -n '/^if \[ "\$_hb_seen" -ne 1 \]; then/,/^fi$/p' "$LAUNCHER" | grep -q 'DOES \*NOT\* RELEASE'; then
+  ok "4b.211 the post-launch refusal declares why it keeps the reservation"
+else
+  bad "4b.211 the post-launch refusal declares why it keeps the reservation" \
+      "an undeclared omission is indistinguishable from the F3 defect"
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1
