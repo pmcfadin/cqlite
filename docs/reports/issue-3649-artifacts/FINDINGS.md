@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 316 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `selftest-analyze.sh` | 319 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,66 @@ session, not by this lane.
 
 ---
 
-## 9. The eighth lesson: make there be ONE path, not a guard on each path
+## 9. The ninth lesson: isolate ONE variable, and know which things may differ
+
+Round 10's headline is the only finding in this series that would have produced a
+**confounded number rather than a refusal**: each arm built and used **its own
+`flight-loadgen`**, so the client varied with the server commit. A client-side
+change between `cfa93fe99^` and `cfa93fe99` would have been attributed to server
+throughput — and nothing downstream could have revealed it, because both arms
+would have been internally consistent and the dispersion would have looked fine.
+**An instrument that produces a confounded number is worse than no instrument,
+because the number would be believed.**
+
+The root of it is a phrase carried forward without being questioned. The issue
+said *"separate `--target-dir` per commit"*, which is correct and necessary — and
+neither of us asked **which binaries legitimately differ per arm.** Only the
+server does. One load generator is now built from a pinned ref, used by both
+arms, recorded in the manifest and **per run**, and the analyzer refuses a
+manifest whose runs name more than one — because a manifest is data and this
+analyzer does not get to assume which driver produced it.
+
+**The transferable question: for any A/B, list what differs between the arms and
+require a reason for each. Anything on that list without one is a confound.**
+
+**A ruling revised, and the qualifier that hid the gap.** Partial admission
+corroboration was accepted as a disclosure rather than a refusal, on the grounds
+that the binding protection is affirmative and independent — the driver dies on
+any per-run mismatch *it can read*. That qualifier was doing more work than it
+looked: **when nothing can be read, it protects nothing**, and batch size,
+admission provenance and the merge-path pin are all unverified while the verdict
+stays decisive behind a disclosure. So `none` is now `UNMEASURED`; `partial`
+stays disclosed, because there the observed runs genuinely constrain the
+unobserved ones. The earlier reasoning was incomplete rather than wrong, and the
+lesson is about where it stopped: **when an argument for permissiveness contains
+a qualifier, check what happens at the qualifier's boundary.**
+
+**And a two-state variable that took three passes to get right.** `SRV_PID` was
+cleared first (round 2, for re-entrancy), then deliberately left set on one path
+(round 5), and then clearing-too-early bit again during the shutdown wait —
+`cleanup` saw no server, skipped the kill, and released the session lock with the
+child still running. Three passes at "when is the pid still ours" means the
+variable was the problem. There is now **one release point**, after the process
+is confirmed gone, and the reap is idempotent: `kill` on a dead pid is a no-op and
+the identity check added in round 5 makes signalling a reused pid impossible —
+which is precisely what made the clear-first trick unnecessary. **A fix that was
+load-bearing under an older design can become the thing preventing the simple
+one; when a guard is revised twice, check whether a later guard has subsumed it.**
+
+**Two stub-fidelity failures in one round, both found by an assertion I wrote
+against the real behaviour.** The stub `cargo` ignored `-p` and produced both
+binaries whatever was asked for, which made "each arm builds its own client"
+indistinguishable from "one shared client" on disk; and the misnamed cold case
+ran `--temperature warm` into a directory called `e2e-cold` and inspected the
+warm session, so cold handling and `prewarm: false` were untested behind a name
+that asserted coverage. **Fifth case in this lane that did not test what it
+claimed.** The cold case now asserts the property that is actually testable
+without privileges — that a cold session which cannot drop the page cache
+**fails closed** rather than running warm — and declares the rest.
+
+---
+
+## 10. The eighth lesson: make there be ONE path, not a guard on each path
 
 Three of round 9's four findings were the same shape, and it is the shape round 8
 only half-closed: **a value with more than one source, guarded at one source
@@ -328,7 +387,7 @@ instead of at the value.**
   globally, so any effective override failed at run time.
 
 Guarding each resolved value one at a time is the same trap as reconciling
-record fields one at a time — §10 (guard the VALUE, and enumerate the SET) — so
+record fields one at a time — §11 (guard the VALUE, and enumerate the SET) — so
 the fix is the same move that closed the
 sharing class: **make there be one path.** A single `resolve-session` step takes
 every raw input, applies every rule, and emits the complete resolved
@@ -345,7 +404,7 @@ carry a disposition — `resolver-input` or `not-server-config`, each with a
 reason. Adding an option without deciding whether it reaches the resolver reds,
 naming the option. RED-verified by adding a plausible `--new-server-knob`.
 
-Same standard as the record/workload disposition tables — §10 (guard the VALUE,
+Same standard as the record/workload disposition tables — §11 (guard the VALUE,
 and enumerate the SET) — **the list may be curated; the completeness must be
 checked against the real thing.**
 
@@ -375,7 +434,7 @@ original was), with the split stated in the case itself.
 
 ---
 
-## 10. The seventh lesson: guard the VALUE, and enumerate the SET
+## 11. The seventh lesson: guard the VALUE, and enumerate the SET
 
 Round 8's three findings are three shapes this lane keeps producing, and two of
 them were fixed by changing *where* a rule lives rather than adding another rule.
@@ -422,7 +481,7 @@ what input your harness writes by habit rather than by choice.**
 
 ---
 
-## 11. The sixth lesson: two correct rules can compose into an unusable whole
+## 12. The sixth lesson: two correct rules can compose into an unusable whole
 
 Round 6's High was that **the runbook's own sensitivity control could not be
 analyzed**. Round 2 required the analyzer to refuse cross-arm server-config
@@ -475,7 +534,7 @@ Two things worth carrying:
 - **Only execution finds this class.** Two individually-correct rules, each with
   its own passing tests, composed into an unusable whole. The case that catches
   it runs the control end to end under the shims — and it exists because
-  §12 (the driver was never executed) had already made that possible.
+  §13 (the driver was never executed) had already made that possible.
 
 **A validator that disagrees with its consumer is now FIVE instances, and the
 count is the argument.** The duration grammar, the census enumeration, the census
@@ -514,7 +573,7 @@ blind here" does not.
 
 ---
 
-## 12. The fifth lesson, and the one that closes the class: the driver was never executed
+## 13. The fifth lesson, and the one that closes the class: the driver was never executed
 
 Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
 helper had been extracted into `ab_driver_support.py` and one call site was left
@@ -531,8 +590,8 @@ that could not complete a single session.
 
 This is the FIFTH instance of one class in this lane — the dead utilization path,
 ten environment-coupled cases, the silent passer among them, the inline parity
-rule, and now the driver itself. §16 (a green suite over an unexecuted subject)
-states the class; §13 (when one mechanism keeps producing findings) says that when a
+rule, and now the driver itself. §17 (a green suite over an unexecuted subject)
+states the class; §14 (when one mechanism keeps producing findings) says that when a
 mechanism keeps producing findings you remove the reason it can. **The reason was
 that the session loop needed a rig, so nothing could run it.** So it no longer
 needs one:
@@ -570,7 +629,7 @@ which is salted per process and would have made the suite non-deterministic.
 
 ---
 
-## 13. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+## 14. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
 
 Four review rounds produced findings in the driver's session lifecycle — the
 work directory, the port, readiness, the census — roughly seven of the last
@@ -602,10 +661,10 @@ improving the sequencing and **removed the shared resource instead**:
 defect.** Not the sequencing around it, not the guard in front of it. Ask what
 resource is being shared and whether it needs to be shared at all — the fix that
 ends the series is usually a deletion. Same shape as removing the second duration
-grammar rather than widening it -- §15 (a parameter accepted without being
+grammar rather than widening it -- §16 (a parameter accepted without being
 checked) -- one level up.
 
-**And a second instance of the mirroring rule from §15 (a parameter accepted
+**And a second instance of the mirroring rule from §16 (a parameter accepted
 without being checked).** The corpus census
 scanned the whole data root recursively while the server reads **one** resolved
 directory, flat. So both size gates could pass on files that are never served —
@@ -624,7 +683,7 @@ nowhere else to decide it.
 
 ---
 
-## 14. The third lesson: the dangerous defect is the one no test would have failed on
+## 15. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -659,7 +718,7 @@ count forces.
 
 ---
 
-## 15. The second lesson: a parameter accepted without being checked against the claim
+## 16. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -693,7 +752,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 16. The first lesson: a green suite over an unexecuted subject
+## 17. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -724,7 +783,7 @@ Two rules worth carrying:
 
 ---
 
-## 17. A process finding: cadence, not partition
+## 18. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -738,7 +797,7 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §16 (a green suite over an unexecuted subject)
+which is precisely the hole §17 (a green suite over an unexecuted subject)
 describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 

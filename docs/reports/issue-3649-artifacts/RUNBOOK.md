@@ -59,7 +59,7 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
 - [ ] Claim ref held: `bash scripts/flow/claim.sh verify 3649`.
 - [ ] Worktree on `issue-3649-measure-2820-merge-fanin`; `git log --oneline -5`
       shows this artifact set.
-- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (316 cases).**
+- [ ] **`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` is green (319 cases).**
       It runs a **complete two-arm, five-pair session end to end** against stub
       `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, so a driver that cannot
       complete a session fails here rather than on the rig after both release
@@ -437,6 +437,20 @@ no probe — "something answered on 8815" was never the same claim as "my server
 owns 8815", and on a nine-lane box the difference is one session measuring
 another's binary. `--port <n>` remains available if you need a fixed one.
 
+### ONE load generator drives both arms
+
+`--loadgen-ref` (default: the HEAD arm's ref) pins the single `flight-loadgen`
+both arms are driven by. Building it per arm would make the **client** vary with
+the server commit, so a client-side change between the two refs would be
+attributed to server throughput — a confound no dispersion reporting could
+reveal, because both arms would be internally consistent. Only the server
+legitimately differs per arm. The provenance is recorded in the manifest and per
+run, and the analyzer refuses a session whose runs name more than one.
+
+If you change this, the question to answer first is the general one: **list what
+differs between the arms and give a reason for each; anything on that list
+without one is a confound.**
+
 ### The floors are floors
 
 `--min-corpus-bytes` (256 MiB) and `--min-sstables` (2) are **not lowerable for a
@@ -794,7 +808,7 @@ docs/reports/issue-3649-artifacts/
   ab_common.py            the anchored, sanitized emission every module writes through
   ab_driver_support.py    the driver's ramp/record validators and startup parser,
                           as an EXECUTABLE FILE so the self-test can drive them
-  selftest-analyze.sh     316 cases incl. full sessions under PATH shims; run it first
+  selftest-analyze.sh     319 cases incl. full sessions under PATH shims; run it first
   host/                   preflight.txt (captured on the rig)
   corpus/                 census, sha256, ticket template, generation recipe
   control-null.txt        step 4a output
