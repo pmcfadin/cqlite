@@ -24,24 +24,59 @@
 # the FEATURE CLOSURE of F (F itself, plus everything F enables, transitively,
 # following `pkg/feature` edges into other workspace members) has a DIRECT EFFECT:
 #
-#   E1  REFERENCE SITE — G's name appears as a cfg predicate spelling
-#       (`feature = "G"`, in `cfg`/`cfg_attr`/`cfg!`/`#![cfg]`, at any nesting depth
-#       inside `all()`/`any()`/`not()` — the spelling is the same either way), or as
-#       a `CARGO_FEATURE_G` build-script environment read, in the sources OF THE
-#       PACKAGE THAT DECLARES G (src/, tests/, benches/, examples/, build.rs).
+#   E1  REFERENCE SITE — G's name is named as a feature INSIDE A REAL CFG PREDICATE
+#       (a `cfg`, `cfg_attr` or `cfg!` token followed by a balanced parenthesised
+#       predicate — `#[cfg]`/`#![cfg]` differ only in what precedes the token, and
+#       `all()`/`any()`/`not()` nesting is inside the same span), or as an actual
+#       `CARGO_FEATURE_G` ENV READ in the package's BUILD SCRIPT, in the sources of
+#       the package that declares G. A bare textual `feature = "G"` is NOT a site:
+#       it occurs in ordinary string literals, in `//!` doc text (this workspace has
+#       a live instance — `arbitrary_precision` in cqlite-ffi-common/src/
+#       json_number.rs appears only in doc comments), in error messages and in
+#       `--features` argument strings, none of which gate anything. Crediting those
+#       credits a DEAD feature, which is the false-PASS direction. For
+#       `cfg_attr(pred, attrs...)` only the FIRST top-level argument is the
+#       predicate: a feature named in the tail
+#       (`#[cfg_attr(docsrs, doc(cfg(feature = "x")))]`) gates nothing by itself.
 #   E2  OPTIONAL DEPENDENCY — G's dep list enables an optional dependency (`dep:x`).
 #       The "bare optional-dep name" spelling (`wasm = ["wasm-bindgen", ...]`) is
 #       covered by the closure, because cargo SYNTHESISES an implicit feature per
-#       optional dep whose own dep list is exactly `["dep:x"]`.
+#       optional dep whose own dep list is exactly `["dep:x"]`. A non-weak
+#       `x/feature` on an optional dep also ACTIVATES it, per cargo's documented
+#       behaviour, so it counts here too.
 #   E2b DEPENDENCY FEATURE — G's dep list enables a feature of a NON-member
-#       dependency (`opentelemetry_sdk?/testing`). Enabling a feature of an external
-#       crate demonstrably changes that crate's compiled code, so it is load-bearing
-#       by definition. This guard cannot audit non-workspace sources, and does not
-#       need to: the effect is established by the edge itself.
+#       dependency. Enabling a feature of an external crate demonstrably changes that
+#       crate's compiled code, so it is load-bearing by definition. This guard cannot
+#       audit non-workspace sources, and does not need to: the effect is established
+#       by the edge itself. BUT A WEAK EDGE (`x?/feature`) IS NOT AN EFFECT ON ITS
+#       OWN — cargo does nothing with it unless the optional dependency `x` is
+#       activated by something else — so a weak edge is credited only when `x` is
+#       activated somewhere in the ORIGIN's closure (see below). `observability-
+#       testing = ["observability", "opentelemetry_sdk?/testing"]` is live because
+#       `observability` activates that dep; a standalone `["x?/f"]` is dead.
 #   E3  REQUIRED-FEATURES — G is named in the `required-features` of some target in
 #       some workspace manifest, so it SELECTS whether that target is built at all.
 #       (This is `duckdb-tests`' and `dhat-heap`'s real shape: zero cfg sites, and
 #       load-bearing all the same.)
+#
+# CARGO NAMES A DEPENDENCY BY ITS KEY, NOT BY ITS PACKAGE NAME. A renamed workspace
+# dependency (`bee = { path = "../b", package = "b" }`) is written `bee/bfeature`, so
+# resolving edges by package name misses it, classifies it as EXTERNAL and
+# auto-credits it under E2b without ever checking that the forwarded feature exists or
+# does anything — a false PASS. The key -> member map is derived from each package's
+# `dependencies` table in cargo metadata, and an edge naming a key the package does not
+# declare is a NAMED FAIL rather than a guess.
+#
+# SOURCE OWNERSHIP COMES FROM METADATA TARGETS, NEVER FROM A DIRECTORY PREFIX. This
+# workspace has the overlapping case for real: the member `cqlite-integration-tests`
+# lives at `<root>/tests`, INSIDE the root package's own `tests/` directory, and the
+# root package declares 24 test targets whose sources sit in that same directory. Under
+# a longest-directory-prefix rule every one of those root-owned files was attributed to
+# the nested member. Each target registers its exact `src_path` (which always wins) plus
+# the tree under its directory — except a BUILD SCRIPT, whose directory IS the package
+# root, so it registers as an exact file only. Ownership is a SET, deliberately: a file
+# compiled as a target of two packages genuinely references both packages' features.
+# A file inside a DEEPER member's package directory is not a shallower member's source.
 #
 # # THE ASYMMETRY IS THE WHOLE POINT
 #
@@ -300,11 +335,114 @@ def strip_comments(text):
     return "".join(out)
 
 
-FEATURE_PRED_RE = re.compile(r'feature\s*=\s*"([^"\\]+)"')
-CARGO_FEATURE_ENV_RE = re.compile(r'CARGO_FEATURE_([A-Z0-9_]+)')
+# ---------------------------------------------------------------------------
+# CFG-CONTEXT extraction. `feature = "x"` ANYWHERE in a file is NOT an effect: it
+# occurs in ordinary string literals, in `//!`/`///` doc text (this workspace has a
+# live instance — `arbitrary_precision` appears in
+# cqlite-ffi-common/src/json_number.rs only inside doc comments), in error messages
+# and in `--features` argument strings. Crediting those credits a DEAD feature, which
+# is the false-PASS direction, so the scan recognises actual cfg SYNTAX: a `cfg`,
+# `cfg_attr` or `cfg!` token followed by a balanced parenthesised predicate. Nesting
+# inside `all()`/`any()`/`not()` needs no special handling — it is inside the same
+# balanced span — and `#[cfg]`/`#![cfg]`/`cfg_attr`/`cfg!` differ only in what
+# precedes the token.
+#
+# For `cfg_attr(pred, attrs...)` ONLY the FIRST top-level argument is the predicate;
+# the tail is attributes to apply, and a feature named there
+# (`#[cfg_attr(docsrs, doc(cfg(feature = "x")))]`) gates nothing by itself. A nested
+# real `cfg(...)` in that tail is still found, because the scan walks every cfg token
+# in the file independently.
+# ---------------------------------------------------------------------------
+CFG_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_])(cfg_attr|cfg)[ \t\r\n]*(!?)[ \t\r\n]*\(')
+FEATURE_PRED_RE = re.compile(r'(?<![A-Za-z0-9_])feature[ \t\r\n]*=[ \t\r\n]*"([^"\\]+)"')
 
 
-def env_name_candidates(feature):
+def _skip_string(text, i):
+    """i points at the opening quote of a `"..."` literal; return the index after it."""
+    n = len(text)
+    i += 1
+    while i < n:
+        if text[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if text[i] == '"':
+            return i + 1
+        i += 1
+    return n
+
+
+def balanced_span(text, open_idx):
+    """open_idx points at '('. Return (start, end) of the CONTENT, or None if unbalanced.
+
+    String-aware: a `")"` inside a literal must not close the span.
+    """
+    n = len(text)
+    depth = 0
+    i = open_idx
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i = _skip_string(text, i)
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return (open_idx + 1, i)
+        i += 1
+    return None
+
+
+def first_top_level_arg(text, start, end):
+    """The first comma-separated argument of a predicate span, at depth 0."""
+    depth = 0
+    i = start
+    while i < end:
+        c = text[i]
+        if c == '"':
+            i = _skip_string(text, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            return (start, i)
+        i += 1
+    return (start, end)
+
+
+def cfg_feature_sites(text):
+    """Yield (feature_name, offset) for every feature named in a real cfg predicate."""
+    for m in CFG_TOKEN_RE.finditer(text):
+        token = m.group(1)
+        span = balanced_span(text, m.end() - 1)
+        if span is None:
+            # An unbalanced cfg( is not a site this scan can read. It is also not
+            # compilable Rust, so it is left to rustc rather than guessed at.
+            continue
+        start, end = span
+        if token == "cfg_attr":
+            start, end = first_top_level_arg(text, start, end)
+        for fm in FEATURE_PRED_RE.finditer(text, start, end):
+            yield fm.group(1), fm.start()
+
+
+# ---------------------------------------------------------------------------
+# BUILD-SCRIPT ENV READS. cargo sets CARGO_FEATURE_<NAME> in a build script's
+# environment, so reading one IS a cfg-equivalent effect — but only in a build script,
+# and only as an actual env read. A bare textual `CARGO_FEATURE_X` (a doc comment, a
+# message, a table of names) gates nothing, and crediting it is the same false-PASS
+# route as the plain `feature = "x"` match above.
+# ---------------------------------------------------------------------------
+ENV_READ_RE = re.compile(
+    r'(?:option_env!|(?:(?:std|core)::)?env::var(?:_os)?|(?<![A-Za-z0-9_:])var(?:_os)?)'
+    r'[ \t\r\n]*\([ \t\r\n]*"CARGO_FEATURE_([A-Z0-9_]+)"'
+)
+
+
+def cargo_feature_env_name(feature):
     """cargo's build-script env spelling: uppercased, non-alphanumerics -> '_'."""
     return re.sub(r"[^A-Za-z0-9]", "_", feature).upper()
 
@@ -326,8 +464,7 @@ if not isinstance(member_ids, list) or not member_ids:
     fail("`cargo metadata --no-deps` reported NO workspace_members. An empty member set is not a pass; refusing.")
 
 member_id_set = set(member_ids)
-members = {}          # name -> record
-by_dir = []           # (dir, name) for source assignment
+members = {}
 for pkg in packages:
     if pkg.get("id") not in member_id_set:
         continue
@@ -348,27 +485,114 @@ for pkg in packages:
         "dir": pkg_dir,
         "features": feats,
         "targets": pkg.get("targets") or [],
-        "refsites": {},   # feature -> "relpath:line"
+        "dependencies": pkg.get("dependencies") or [],
+        "refsites": {},
     }
-    by_dir.append((pkg_dir, name))
 
 if not members:
     fail("no workspace member could be reconstructed from cargo metadata. Refusing.")
 
-# Longest-prefix wins, so a nested member (tests/, tools/*, bindings/*) claims its own
-# sources rather than the root package claiming the whole tree.
-by_dir.sort(key=lambda t: len(t[0]), reverse=True)
 
-
-def owner_of(path):
-    for pkg_dir, name in by_dir:
-        if path == pkg_dir or path.startswith(pkg_dir + os.sep):
-            return name
-    return None
+# ---------------------------------------------------------------------------
+# 2) DEPENDENCY KEYS. Cargo's feature syntax names a dependency by its KEY — the
+#    `rename` when the manifest renames it (`bee = { package = "b" }` is written
+#    `bee/bfeat`, never `b/bfeat`) — so resolving `pkg/feature` edges by PACKAGE NAME
+#    misses a renamed workspace member and silently classifies it as EXTERNAL, which
+#    auto-credits the edge without ever checking that the forwarded feature exists or
+#    has any effect: a false PASS. The key -> member map is built here, from metadata.
+# ---------------------------------------------------------------------------
+for name, rec in members.items():
+    keys = {}
+    for dep in rec["dependencies"]:
+        dname = dep.get("name")
+        if not dname:
+            fail("member '%s' has a dependency with no name in cargo metadata. Refusing to resolve feature edges against an unreadable dependency table." % name)
+        key = dep.get("rename") or dname
+        # A local (path/workspace) dependency on a member is the only thing whose
+        # features this guard can follow; a registry crate that happens to share a
+        # member's name is external.
+        is_local = dep.get("path") is not None or dep.get("source") is None
+        entry = keys.setdefault(key, {"package": dname, "member": None, "optional": False})
+        if entry["package"] != dname:
+            fail("member '%s' uses the dependency key '%s' for two different packages ('%s' and '%s') in cargo metadata. Refusing to resolve feature edges through an ambiguous key." % (name, key, entry["package"], dname))
+        if dep.get("optional"):
+            entry["optional"] = True
+        if is_local and dname in members:
+            entry["member"] = dname
+    rec["dep_keys"] = keys
 
 
 # ---------------------------------------------------------------------------
-# 2) E1 — reference sites, per DECLARING package.
+# 3) SOURCE OWNERSHIP, derived from metadata TARGETS — never from a package-directory
+#    prefix. This workspace has the overlapping case FOR REAL: the member
+#    `cqlite-integration-tests` lives at `<root>/tests`, INSIDE the root package's own
+#    `tests/` directory, and the root package declares 24 test targets whose sources
+#    sit in that same directory. Under a longest-directory-prefix rule every one of
+#    those root-owned files was attributed to the nested member — cfg sites credited to
+#    the wrong package, in both the false-PASS and false-FAIL directions.
+#
+#    Ownership is a SET, and that is deliberate rather than a tie-break: a file
+#    compiled as a target of TWO packages (which is exactly what `<root>/tests/*.rs`
+#    is here) genuinely references BOTH packages' features, so both are credited.
+#
+#    Two registrations per target:
+#      * its EXACT src_path, which always wins; and
+#      * the TREE under `dirname(src_path)`, which is how a target reaches its module
+#        files (`tests/common/mod.rs`, `src/**`) — EXCEPT for a custom-build target,
+#        whose dirname is the PACKAGE ROOT. Registering that would hand a package the
+#        whole of its own directory again, nested members and all, so a build script
+#        is registered as an exact file only.
+#
+#    Nested-member exclusion: a file inside a DEEPER member's package directory is not
+#    the shallower member's source, unless it is literally one of the shallower
+#    member's target files.
+# ---------------------------------------------------------------------------
+TREELESS_KINDS = {"custom-build"}
+exact_owners = {}    # realpath -> set(member names)
+tree_owners = []     # (tree_dir, member name)
+buildscript_files = {}   # realpath -> set(member names)
+
+for name, rec in members.items():
+    for target in rec["targets"]:
+        sp = target.get("src_path")
+        kinds = target.get("kind") or []
+        if not sp:
+            fail("target '%s' of member '%s' has no src_path in cargo metadata. Refusing to derive source ownership from an unreadable target." % (target.get("name"), name))
+        sp = os.path.realpath(sp)
+        exact_owners.setdefault(sp, set()).add(name)
+        if set(kinds) & TREELESS_KINDS:
+            buildscript_files.setdefault(sp, set()).add(name)
+            continue
+        tree_owners.append((os.path.dirname(sp), name))
+
+tree_owners.sort(key=lambda t: len(t[0]), reverse=True)
+member_dirs = sorted(((rec["dir"], name) for name, rec in members.items()), key=lambda t: len(t[0]), reverse=True)
+
+
+def deepest_member_dir(path):
+    for pkg_dir, name in member_dirs:
+        if path == pkg_dir or path.startswith(pkg_dir + os.sep):
+            return pkg_dir, name
+    return None, None
+
+
+def owners_of(path):
+    owners = set(exact_owners.get(path, ()))
+    deep_dir, _deep_name = deepest_member_dir(path)
+    for tree_dir, name in tree_owners:
+        if name in owners:
+            continue
+        if path == tree_dir or path.startswith(tree_dir + os.sep):
+            if deep_dir is not None and len(members[name]["dir"]) < len(deep_dir):
+                # The file lives inside a DEEPER member's package directory; it is
+                # that member's source, not this one's.
+                continue
+            owners.add(name)
+    return owners
+
+
+# ---------------------------------------------------------------------------
+# 4) E1 — reference sites, per OWNING package.
 # ---------------------------------------------------------------------------
 scanned_files = 0
 for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
@@ -376,11 +600,12 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
     for fname in filenames:
         if not fname.endswith(".rs"):
             continue
-        full = os.path.join(dirpath, fname)
-        owner = owner_of(os.path.realpath(full))
-        if owner is None:
-            # Not under any workspace member: a non-member crate's source (e.g. the
-            # measurement harnesses under docs/reports/**). Nothing to certify.
+        full = os.path.realpath(os.path.join(dirpath, fname))
+        owners = owners_of(full)
+        if not owners:
+            # Not a source file of any workspace-member target: a non-member crate's
+            # source (the measurement harnesses under docs/reports/**), or a stray .rs
+            # no target reaches. Nothing to certify.
             continue
         try:
             with open(full, "r", encoding="utf-8", errors="replace") as fh:
@@ -390,26 +615,29 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         scanned_files += 1
         stripped = strip_comments(text)
         rel = os.path.relpath(full, REPO_ROOT)
-        record = members[owner]["refsites"]
-        for m in FEATURE_PRED_RE.finditer(stripped):
-            name = m.group(1)
-            if name not in record:
-                line = stripped.count("\n", 0, m.start()) + 1
-                record[name] = "%s:%d" % (rel, line)
-        for m in CARGO_FEATURE_ENV_RE.finditer(stripped):
-            env = m.group(1)
-            for feat in members[owner]["features"]:
-                if env_name_candidates(feat) == env and feat not in record:
-                    line = stripped.count("\n", 0, m.start()) + 1
-                    record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, line, env)
+        sites = list(cfg_feature_sites(stripped))
+        env_sites = []
+        if full in buildscript_files:
+            env_sites = [(m.group(1), m.start()) for m in ENV_READ_RE.finditer(stripped)]
+        for owner in owners:
+            record = members[owner]["refsites"]
+            for feat, off in sites:
+                if feat not in record:
+                    record[feat] = "%s:%d" % (rel, stripped.count("\n", 0, off) + 1)
+            if not env_sites or owner not in buildscript_files.get(full, ()):
+                continue
+            for env, off in env_sites:
+                for feat in members[owner]["features"]:
+                    if cargo_feature_env_name(feat) == env and feat not in record:
+                        record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, stripped.count("\n", 0, off) + 1, env)
 
 if scanned_files == 0:
-    fail("NOT ONE Rust source file under a workspace member could be found, so no reference site could possibly have been observed. A positive verdict requires an affirmative measurement; refusing to pass over an empty scan.")
+    fail("NOT ONE Rust source file of a workspace-member target could be found, so no reference site could possibly have been observed. A positive verdict requires an affirmative measurement; refusing to pass over an empty scan.")
 
 # ---------------------------------------------------------------------------
-# 3) E3 — required-features, across every member's targets.
+# 5) E3 — required-features, across every member's targets.
 # ---------------------------------------------------------------------------
-required_by = {}      # (pkg, feature) -> "manifest_rel target"
+required = set()
 for name, rec in members.items():
     for target in rec["targets"]:
         rf = target.get("required-features") or []
@@ -419,106 +647,137 @@ for name, rec in members.items():
             if not isinstance(entry, str) or not entry:
                 fail("target '%s' of member '%s' has an unreadable required-features entry. Refusing." % (target.get("name"), name))
             if "/" in entry:
-                dep, _, feat = entry.partition("/")
-                dep = dep.rstrip("?")
-                owner = dep if dep in members else None
+                keypart, _, feat = entry.partition("/")
+                key = keypart[:-1] if keypart.endswith("?") else keypart
+                info = rec["dep_keys"].get(key)
+                if info is None or info["member"] is None:
+                    continue
+                owner = info["member"]
             else:
                 owner, feat = name, entry
-            if owner is None:
-                # required-features naming a non-member package's feature: an external
-                # effect, nothing of ours to credit.
-                continue
             if feat not in members[owner]["features"]:
                 fail("target '%s' of member '%s' names required-features '%s', but member '%s' declares no feature '%s'. Refusing to compute a closure over a feature that does not exist." % (target.get("name"), name, entry, owner, feat))
-            required_by.setdefault((owner, feat), "%s (target `%s`)" % (members[owner]["manifest_rel"], target.get("name")))
+            required.add((owner, feat))
 
 # ---------------------------------------------------------------------------
-# 4) DIRECT EFFECTS per (package, feature), and the closure edges.
+# 6) DIRECT EFFECTS and CLOSURE EDGES.
+#
+#    A WEAK edge (`dep?/feature`) is NOT an effect on its own: cargo does nothing with
+#    it unless that optional dependency is activated by something else. Crediting it
+#    unconditionally credits a feature that changes nothing — a false PASS — so the `?`
+#    is preserved here and the edge is evaluated per ORIGIN in step 7, live only when
+#    the dependency is activated somewhere in that origin's closure.
+#
+#    A NON-weak `dep/feature` on an OPTIONAL dependency also ACTIVATES it (cargo's
+#    documented behaviour), so it is both an effect and an activation.
 # ---------------------------------------------------------------------------
-direct = {}       # (pkg, feat) -> effect description
-edges = {}        # (pkg, feat) -> [(pkg, feat), ...]
+uncond = {}      # (pkg, feat) -> True when an unconditional direct effect exists
+edges = {}       # (pkg, feat) -> [(kind, key, target_node_or_feat, weak)]
+own_deps = {}    # (pkg, feat) -> set of dependency KEYS this feature activates
+ext_edges = {}   # (pkg, feat) -> [(key, dep_feature, weak)]
 all_nodes = []
+
 for name, rec in members.items():
     for feat, deplist in sorted(rec["features"].items()):
         node = (name, feat)
         all_nodes.append(node)
         if not isinstance(deplist, list):
             fail("feature '%s' of member '%s' has a non-list dependency list in cargo metadata. Refusing to guess at its shape." % (feat, name))
-        why = None
         out = []
+        acts = set()
+        exts = []
+        effect = False
         for entry in deplist:
             if not isinstance(entry, str) or not entry:
                 fail("feature '%s' of member '%s' has an unreadable entry in its dependency list. Refusing." % (feat, name))
             if entry.startswith("dep:"):
-                if why is None:
-                    why = "E2 enables optional dependency `%s`" % entry
+                key = entry[4:]
+                if key not in rec["dep_keys"]:
+                    fail("feature '%s' of member '%s' enables the optional dependency '%s', but member '%s' declares no dependency with the key '%s'. Refusing to credit an effect it could not resolve." % (feat, name, entry, name, key))
+                acts.add(key)
+                effect = True
                 continue
             if "/" in entry:
-                dep, _, dfeat = entry.partition("/")
-                dep = dep.rstrip("?")
-                if dep in members:
-                    if dfeat not in members[dep]["features"]:
-                        fail("feature '%s' of member '%s' enables '%s', but workspace member '%s' declares no feature '%s'. Refusing to compute a closure over a feature that does not exist." % (feat, name, entry, dep, dfeat))
-                    out.append((dep, dfeat))
+                keypart, _, dfeat = entry.partition("/")
+                weak = keypart.endswith("?")
+                key = keypart[:-1] if weak else keypart
+                info = rec["dep_keys"].get(key)
+                if info is None:
+                    fail("feature '%s' of member '%s' enables '%s', but member '%s' declares no dependency with the key '%s'. Cargo's feature syntax names a dependency by its KEY (its `rename`, when renamed); refusing to credit an edge it could not resolve." % (feat, name, entry, name, key))
+                if not weak and info["optional"]:
+                    # `dep/feat` on an optional dependency activates it too.
+                    acts.add(key)
+                    effect = True
+                if info["member"] is not None:
+                    tgt = info["member"]
+                    if dfeat not in members[tgt]["features"]:
+                        fail("feature '%s' of member '%s' enables '%s', but workspace member '%s' (dependency key '%s') declares no feature '%s'. Refusing to compute a closure over a feature that does not exist." % (feat, name, entry, tgt, key, dfeat))
+                    out.append(("member", key, (tgt, dfeat), weak))
                 else:
-                    if why is None:
-                        why = "E2b enables feature `%s` of external dependency `%s`" % (dfeat, dep)
+                    exts.append((key, dfeat, weak))
+                    if not weak:
+                        effect = True
                 continue
-            # Bare name: a feature of THIS package (explicit or cargo-implicit).
             if entry not in rec["features"]:
                 fail("feature '%s' of member '%s' enables '%s', which member '%s' does not declare as a feature. Refusing to compute a closure over a feature that does not exist." % (feat, name, entry, name))
-            out.append((name, entry))
-        # E1 first when present: a reference site is the most informative effect to
-        # report. Order affects only the WORDING; the verdict is the same either way.
-        site = rec["refsites"].get(feat)
-        if site is not None:
-            why = "E1 reference site at %s" % site
-        elif why is None and node in required_by:
-            why = "E3 named in required-features of %s" % required_by[node]
+            out.append(("feature", None, (name, entry), False))
+        if feat in rec["refsites"]:
+            effect = True
+        if node in required:
+            effect = True
         edges[node] = out
-        if why is not None:
-            direct[node] = why
+        own_deps[node] = acts
+        ext_edges[node] = exts
+        if effect:
+            uncond[node] = True
 
 if not all_nodes:
     fail("no workspace member declares ANY feature, so this assert examined nothing. A positive verdict requires an affirmative measurement; refusing to pass.")
 
 # ---------------------------------------------------------------------------
-# 5) Propagate credit UP the closure: a node is load-bearing iff itself or ANY node
-#    reachable from it (what it ENABLES) has a direct effect. Never the reverse.
+# 7) Propagate credit UP the closure, PER ORIGIN: a feature is load-bearing iff itself
+#    or ANY node reachable from it (what it ENABLES) has an effect. Never the reverse —
+#    credit flows up from effects, never down from a parent, which is what makes a leaf
+#    named only by an aggregator detectable.
+#
+#    Computed per origin because weak-edge liveness depends on WHICH origin is being
+#    enabled: `a = ["x?/f"]` alone activates nothing, while `b = ["dep:x", "x?/f"]`
+#    makes the same edge live. The fixpoint grows both the reachable set and the set of
+#    activated dependency keys until neither changes.
 # ---------------------------------------------------------------------------
-verdict = {}
+def analyse(origin):
+    reach = {origin}
+    acts = set(own_deps[origin])
+    changed = True
+    while changed:
+        changed = False
+        for n in list(reach):
+            for kind, key, tgt, weak in edges[n]:
+                if weak and key not in acts:
+                    continue
+                if tgt not in reach:
+                    reach.add(tgt)
+                    changed = True
+                for k in own_deps[tgt]:
+                    if k not in acts:
+                        acts.add(k)
+                        changed = True
+    return reach, acts
 
 
-def resolve(node, stack):
-    if node in verdict:
-        return verdict[node]
-    if node in stack:
-        # A feature cycle: cargo rejects these, but do not hang on one.
-        return None
-    if node in direct:
-        verdict[node] = direct[node]
-        return verdict[node]
-    stack.add(node)
-    found = None
-    for nxt in edges.get(node, []):
-        got = resolve(nxt, stack)
-        if got is not None:
-            found = "via `%s/%s`: %s" % (nxt[0], nxt[1], got)
-            break
-    stack.discard(node)
-    if found is not None:
-        verdict[node] = found
-        return found
-    verdict[node] = None
-    return None
+def load_bearing(origin):
+    reach, acts = analyse(origin)
+    for n in reach:
+        if n in uncond:
+            return True
+        for key, _dfeat, weak in ext_edges[n]:
+            if not weak or key in acts:
+                return True
+    return False
 
-
-sys.setrecursionlimit(10000)
-for node in all_nodes:
-    resolve(node, set())
 
 # ---------------------------------------------------------------------------
-# 6) Verdict.
+# 8) Verdict.
 # ---------------------------------------------------------------------------
 def declaration_line(manifest_path, feature):
     """Line of `feature = [...]` inside [features]; None for a cargo-implicit one."""
@@ -542,11 +801,10 @@ def declaration_line(manifest_path, feature):
 dead = []
 exempt_count = 0
 for node in all_nodes:
-    pkg, feat = node
-    if feat in EXEMPT_FEATURES:
+    if node[1] in EXEMPT_FEATURES:
         exempt_count += 1
         continue
-    if verdict.get(node) is None:
+    if not load_bearing(node):
         dead.append(node)
 
 total = len(all_nodes)
@@ -563,10 +821,11 @@ if dead:
         sys.stderr.write("    %s  %s   [%s]\n" % (where, feat, pkg))
     sys.stderr.write("""
     Each has NO effect anywhere in its own closure: no cfg reference site in its
-    DECLARING package's sources, no optional dependency, no external dependency
+    DECLARING package's sources, no optional dependency, no LIVE external dependency
     feature, and no target's required-features names it. Being NAMED confers nothing:
     an aggregator that lists a leaf, a workflow `--features` argument, the gate's
     clippy enumerations and a doc table all name features without enabling anything.
+    Nor does a WEAK `dep?/feature` edge whose optional dependency nothing activates.
 
     Remedy, one of:
       * DELETE the feature from its manifest (and every enumeration that names it:
@@ -581,8 +840,8 @@ if dead:
 
 # AFFIRMATIVE success line: a count, never a bare "OK". Every element of it is
 # something the guard can only know AFTER deriving the member set from cargo, walking
-# the sources, and computing every closure. The `features-load-bearing` component of
-# scripts/agent-gate.sh matches this line WHOLE.
+# the target sources and computing every closure. The `features-load-bearing` component
+# of scripts/agent-gate.sh matches this line WHOLE.
 print(
     "features-load-bearing: %d/%d declared features load-bearing across %d workspace manifests "
     "(%d exempt: %s); %d Rust source files scanned for reference sites"
