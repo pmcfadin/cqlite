@@ -14705,13 +14705,30 @@ EOF
     _fx_base=$(basename "${_dsrc%.rs}")
     _fx_strip="$LOG_DIR/fx-nocomment-$_fx_base.rs"
     # A failed strip is UNMEASURED, never "no match": the same three-valued rule as the scan.
-    # BOTH comment forms are stripped (roborev round 5): `//` tails via sed, and `/* … */`
-    # blocks — which may SPAN LINES and so cannot be done with a line-oriented sed — via the
-    # same python3 the target derivation above already depends on. A block-commented lookup
-    # was a measured false-accept of the line-only strip.
-    if ! sed 's|//.*||' "$_dsrc" 2>/dev/null \
-         | python3 -c 'import re,sys; sys.stdout.write(re.sub(r"/\*.*?\*/", " ", sys.stdin.read(), flags=re.S))' \
-         > "$_fx_strip" 2>/dev/null; then
+    #
+    # `//` TAILS ONLY, VIA sed — DELIBERATELY NOT BLOCK COMMENTS, and both halves of that
+    # decision are roborev round-6 findings against an earlier cut of this very line.
+    #
+    # (1) PORTABILITY. The earlier cut piped through `python3`. But the target derivation
+    #     above tries **jq FIRST, then python3** on purpose (roborev round-18), so a host with
+    #     jq and no python3 DISCOVERS targets fine and would then fail every strip — making
+    #     this lane permanently red on a host the gate otherwise supports. `sed` is in the
+    #     POSIX toolset the rest of this lane already assumes, so it adds no new dependency.
+    #
+    # (2) A REGEX CANNOT DO IT ANYWAY. Rust block comments NEST (`/* /* */ */`), and nesting
+    #     is not a regular language — so `/\*.*?\*/` in python, jq or anything else is
+    #     structurally unable to strip them correctly, and the earlier cut was measured to
+    #     leave a lookup inside a nested comment intact while REPORTING the target
+    #     fixture-aware. Doing it properly needs a stateful Rust-aware scanner that also
+    #     understands string literals — which is a parser, and #3789 already owns replacing
+    #     this whole structural-inference mechanism with per-target DECLARED posture.
+    #
+    # So the claim is REDUCED rather than faked: a lookup commented out with `//` is
+    # correctly not counted, and a lookup inside a `/* … */` block is a DECLARED residual
+    # (see the census line below). That is the standing ruling in this repo — a guard with a
+    # known false-PASS presented as closed is worse than a smaller guard that says what it
+    # does — and it is why this does not grow a fifth carve of the same check.
+    if ! sed 's|//.*||' "$_dsrc" > "$_fx_strip" 2>/dev/null; then
       _fx_fatal="$_fx_fatal $_fx_base(comment-strip failed)"
       continue
     fi
@@ -14770,6 +14787,10 @@ EOF
     census+=("       CQLITE_REQUIRE_FIXTURES — the")
     census+=("       variable this lane exports, and deliberately the only one accepted here:")
     census+=("       0 RECOGNISED gaps")
+    census+=("       RESIDUAL (R6-F2): `//`-commented lookups are correctly excluded, but a")
+    census+=("       lookup inside a `/* … */` BLOCK comment is NOT — Rust block comments NEST,")
+    census+=("       nesting is not regular, so no regex can strip them; a stateful scanner is")
+    census+=("       #3789's subject. A block-commented lookup would read as fixture-aware.")
     census+=("       SCOPE OF THAT CLAIM (R3-F1): it is STRUCTURAL. It proves an executable")
     census+=("       env::var/var_os lookup of that literal EXISTS in the target root, outside")
     census+=("       any // comment and not inside a string (a quoted one needs escaped quotes,")

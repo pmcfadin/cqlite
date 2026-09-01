@@ -424,14 +424,35 @@ fn parse_deletion_info(v: &JsonValue) -> Option<JsonlDeletionInfo> {
 
 fn parse_cell(v: &JsonValue) -> Option<JsonlCell> {
     let name = v.get("name")?.as_str()?.to_string();
-    let tstamp_micros = v
-        .get("tstamp")
-        .and_then(|s| s.as_str())
-        .and_then(iso8601_to_micros);
-    let expires_at_micros = v
-        .get("expires_at")
-        .and_then(|s| s.as_str())
-        .and_then(iso8601_to_micros);
+    // ABSENT AND PRESENT-BUT-UNDECODABLE ARE DIFFERENT FACTS (roborev round 6). An
+    // `.and_then` chain collapses three states — field absent, field present but not a
+    // string, field present and a string that will not parse — onto ONE `None`. The
+    // suppression check downstream reads `None` as AUTHORITATIVE EVIDENCE that sstabledump
+    // omitted the field, which is what licenses the whole `(Some, None)` tolerance. So
+    // malformed golden data would have opened the suppression path and been ACCEPTED: a
+    // silent false accept, driven by a corrupt oracle rather than by real divergence.
+    //
+    // Absent stays `None` (the only state that may license suppression); present-but-
+    // undecodable PANICS by name. A test whose oracle it cannot read must not proceed on a
+    // guess about what the oracle said.
+    let decode_micros = |field: &str| -> Option<i64> {
+        match v.get(field) {
+            None | Some(JsonValue::Null) => None,
+            Some(raw) => {
+                let text = raw.as_str().unwrap_or_else(|| {
+                    panic!("{name}: golden field `{field}` is present but not a string: {raw}")
+                });
+                Some(iso8601_to_micros(text).unwrap_or_else(|| {
+                    panic!(
+                        "{name}: golden field `{field}` is present but not decodable as an \
+                         ISO-8601 instant: {text:?}"
+                    )
+                }))
+            }
+        }
+    };
+    let tstamp_micros = decode_micros("tstamp");
+    let expires_at_micros = decode_micros("expires_at");
     let deletion_info = v.get("deletion_info").and_then(parse_deletion_info);
 
     // Skip cells with a "path" key — these are sub-element entries for collections
@@ -943,11 +964,15 @@ fn suppression_rule_requires_equal_writetimes_or_refuses() {
         ttl_secs: ttl,
     };
     // `catch_unwind` + a marker: "it panicked" is not evidence about WHY.
+    // NO PANIC-HOOK SURGERY (roborev round 6). An earlier cut swapped the PROCESS-GLOBAL
+    // hook to silence the expected panic's backtrace. That is shared mutable state: this
+    // target runs its cases on multiple threads, so the window could swallow an UNRELATED
+    // test's panic diagnostics, or restore a stale hook if two cases overlapped — trading a
+    // little stderr noise for the loss of exactly the diagnostics a failure needs. The
+    // expected panic now prints; `catch_unwind` still captures the payload, which is the
+    // only thing asserted on.
     fn refuses(marker: &str, f: impl FnOnce() + std::panic::UnwindSafe) {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let err = std::panic::catch_unwind(f);
-        std::panic::set_hook(prev);
         let payload = err.expect_err("expected a refusal, got success");
         let msg = payload
             .downcast_ref::<String>()
