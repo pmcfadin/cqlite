@@ -474,9 +474,15 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
     missing_errors = [n for n in floor["required_error_names"] if n not in error_names]
     if missing_errors:
         failures.append(f"required strictness refusal case(s) absent: {missing_errors}")
-    names = [v["name"] for v in vectors]
-    if len(set(names)) != len(names):
-        failures.append("duplicate vector names")
+    # Uniqueness is checked in EVERY section, not just `vectors`. A count floor
+    # plus a required-name list does NOT imply coverage: a non-required case can
+    # be deleted and replaced by a duplicate of another, satisfying `min_*` and
+    # every required name while the subject set silently shrinks.
+    for _section, _items in (("vector", vectors), ("row case", rows), ("error case", errors)):
+        _names = [i["name"] for i in _items]
+        _dupes = sorted({n for n in _names if _names.count(n) > 1})
+        if _dupes:
+            failures.append(f"duplicate {_section} names: {_dupes}")
 
     seen: set = set()
     nested = False

@@ -386,8 +386,15 @@ export function checkFloor(data = loadAll()) {
   if (missingErrors.length) {
     failures.push(`required strictness refusal case(s) absent: ${JSON.stringify(missingErrors)}`);
   }
-  const names = vectors.map((v) => v.name);
-  if (new Set(names).size !== names.length) failures.push('duplicate vector names');
+  // Uniqueness is checked in EVERY section, not just `vectors`. A count floor
+  // plus a required-name list does NOT imply coverage: a non-required case can
+  // be deleted and replaced by a duplicate of another, satisfying `min_*` and
+  // every required name while the subject set silently shrinks.
+  for (const [section, items] of [['vector', vectors], ['row case', rows], ['error case', errors]]) {
+    const ns = items.map((i) => i.name);
+    const dupes = [...new Set(ns.filter((n) => ns.indexOf(n) !== ns.lastIndexOf(n)))].sort();
+    if (dupes.length) failures.push(`duplicate ${section} names: ${JSON.stringify(dupes)}`);
+  }
 
   const seen = new Set();
   let nested = false;
