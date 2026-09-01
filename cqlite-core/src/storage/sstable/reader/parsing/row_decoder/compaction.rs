@@ -574,9 +574,27 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             .parse_range_tombstone_marker_with_ldt(data, offset, schema)
         {
             Ok(v) => v,
-            // Truncated marker body at a chunk boundary (or corrupt at the
-            // final chunk): terminate exactly as the prior skip path did.
-            Err(_) => return MarkerOutcome::Stop,
+            // Issue #3721 (roborev job 16): a marker PARSE failure is NOT
+            // automatically a chunk boundary, and answering `Stop` here made it
+            // one — on the FINAL chunk the driver converted `Stop` into a
+            // SUCCESSFUL partition completion, so a corrupt or truncated marker
+            // was dropped and this policy's rows were still WRITTEN. That
+            // resurrects every row the tombstone shadowed, durably, on disk: the
+            // same harm as the unrecognised bound kind below (#3808), one arm up.
+            //
+            // The cause is PRESERVED in the outcome (never discarded and
+            // re-synthesised — the parser's own message is what makes the
+            // condition actionable) and the FINAL-vs-non-final decision is left
+            // to the driver, the only holder of the chunking state: a non-final
+            // chunk may simply have cut the marker body in half, which is the one
+            // explanation a refill can fix. Nothing here inspects bytes to guess
+            // whether more data exists (issue #28).
+            Err(cause) => {
+                let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                return MarkerOutcome::Unparseable(range_marker_error::range_marker_unparseable(
+                    cause, &partition, offset,
+                ));
+            }
         };
 
         // ClusteringPrefix.Kind ordinals:
@@ -642,8 +660,10 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 // `block_emit`), so this arm was the lone fail-open.
                 //
                 // The marker PARSED — `next_offset` is bound and the partition body
-                // continues there — so this is `Refused`, never the `Stop` a marker
-                // PARSE failure earns above.
+                // continues there — so this is `Refused`, never the `Unparseable`
+                // a marker PARSE failure earns above (which has no resume point and
+                // so is still refillable on a non-final chunk). Both are terminal on
+                // the final chunk; neither can be silently completed.
                 let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
                 return MarkerOutcome::Refused(range_marker_error::range_marker_refused(
                     Error::corruption(format!(

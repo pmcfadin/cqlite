@@ -1,5 +1,8 @@
-//! What a partition row loop does when a range-tombstone MARKER is framed but
-//! cannot be represented faithfully (issue #3721).
+//! What a partition row loop does when a range-tombstone MARKER cannot be turned
+//! into output faithfully (issue #3721) — either because it is FRAMED and
+//! unrepresentable ([`range_marker_refused`]) or because it cannot be PARSED at
+//! all on the final chunk ([`range_marker_unparseable`] +
+//! [`unparseable_marker_at_final_chunk`]).
 //!
 //! # The defect this module replaces
 //!
@@ -58,6 +61,24 @@
 //! the byte-pattern inference issue #28 forbids. So the condition is FATAL and is
 //! propagated to the caller of the read.
 //!
+//! # The second condition: a marker that cannot be PARSED (roborev job 16)
+//!
+//! The discriminator above turns on the marker being FRAMED. A marker that does
+//! not parse has no resume offset, so it is not that case — and it was handled by
+//! [`super::partition_driver::MarkerOutcome::Stop`], which the drivers convert on
+//! the FINAL chunk into a successful partition completion. For the COMPACTION
+//! policy that is the same durable harm wearing different clothes: a corrupt or
+//! truncated tombstone is dropped and the output SSTable is still written, so the
+//! rows it shadowed come back.
+//!
+//! The discriminator there is the CHUNKING STATE the driver already holds, never a
+//! byte pattern (issue #28):
+//!
+//! * a **non-final** chunk may legitimately have cut the marker body in half, so
+//!   the answer is `NeedMore` — the one explanation a refill can fix;
+//! * on the **final** chunk no further bytes can arrive, so the parse failure is
+//!   corrupt/truncated data and is PROPAGATED, carrying the parser's own cause.
+//!
 //! # Not `Error::ColumnDecode`
 //!
 //! [`crate::error::Error::ColumnDecode`] exists so the row loops can tell a
@@ -106,5 +127,55 @@ pub(super) fn range_marker_refused(
          {resume_offset}, so this is corrupt data and not the end of the partition — truncating \
          here would drop the tombstone AND every later row of the partition from a successful \
          read (issue #3721): {cause}"
+    ))
+}
+
+/// Build the error a policy PRESERVES in [`super::partition_driver::MarkerOutcome::Unparseable`]
+/// when a range-tombstone marker cannot be PARSED at all (issue #3721, roborev
+/// job 16) — the sibling of [`range_marker_refused`] for the case where no resume
+/// offset exists.
+///
+/// Deliberately does NOT log: at this point the failure may still be an ordinary
+/// window boundary (the marker body straddling a non-final chunk), which is the
+/// hot path of a chunk-stitched compaction scan. Only the driver knows whether more
+/// data is coming, so the report is emitted there — see
+/// [`unparseable_marker_at_final_chunk`]. Constructing the error eagerly is what
+/// keeps the parser's own diagnostic (`cause`) available to that decision instead of
+/// being discarded and re-synthesised.
+pub(super) fn range_marker_unparseable(
+    cause: Error,
+    partition: &dyn std::fmt::Display,
+    offset: usize,
+) -> Error {
+    Error::corruption(format!(
+        "range-tombstone marker at offset {offset} of partition {partition} could not be PARSED, \
+         so no resume point exists (issue #3721): {cause}"
+    ))
+}
+
+/// Finish the [`range_marker_unparseable`] error at the point the driver has
+/// established that the marker's bytes are ALL the bytes there are: the scan is on
+/// its FINAL chunk, so no refill can complete the marker and "unparseable" is
+/// corrupt or truncated data rather than a window boundary.
+///
+/// This is where the condition is reported (`warn!`), mirroring
+/// [`range_marker_refused`] — the non-final path builds the same error and drops
+/// it, because there it is not yet a finding.
+///
+/// The distinction is taken from the driver's own `at_final_chunk` flag — the
+/// chunking state the caller already holds — and never from inspecting bytes to
+/// guess whether more data exists (issue #28).
+pub(super) fn unparseable_marker_at_final_chunk(cause: Error) -> Error {
+    tracing::warn!(
+        "V5CompressedLegacy: range-tombstone marker is unparseable on the FINAL chunk of the \
+         scan, so it cannot be a window boundary: {}",
+        cause
+    );
+    Error::corruption(format!(
+        "the scan is at its FINAL chunk, so no further data can complete this range-tombstone \
+         marker: it is corrupt or truncated, not a chunk boundary. Completing the partition here \
+         would report success while dropping the tombstone — and this decode feeds WRITTEN \
+         compaction output, so the rows it shadows would be resurrected durably, on disk (issue \
+         #3721): {cause}"
     ))
 }

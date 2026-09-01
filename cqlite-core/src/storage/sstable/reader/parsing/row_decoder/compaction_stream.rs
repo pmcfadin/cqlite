@@ -220,10 +220,32 @@ impl V5CompressedLegacyParser {
                     }
                     return Ok(PartitionStreamStep::Consumed(next_offset));
                 }
+                // `CompactionPolicy::on_range_marker` no longer produces `Stop`
+                // (issue #3721): its marker-PARSE failures arrive as
+                // `Unparseable` below. The arm stays for the shared trait's other
+                // implementors and keeps the pre-#3721 meaning.
                 MarkerOutcome::Stop => {
                     if at_final_chunk {
                         state.reset();
                         return Ok(PartitionStreamStep::PartitionDone(0));
+                    }
+                    return Ok(PartitionStreamStep::NeedMore);
+                }
+                // Issue #3721 (roborev job 16): the marker could not be PARSED.
+                // On a NON-final chunk that may be nothing worse than a marker
+                // body straddling the window boundary, which is exactly what
+                // `NeedMore` is for. On the FINAL chunk no refill is coming, so
+                // reporting `PartitionDone` — a SUCCESSFUL partition completion —
+                // silently dropped a corrupt or truncated tombstone from output
+                // that is WRITTEN, resurrecting the rows it shadowed. Propagate
+                // the preserved parse error instead. `at_final_chunk` is the
+                // caller's own chunking state; no bytes are inspected to guess
+                // whether more data exists (issue #28).
+                MarkerOutcome::Unparseable(cause) => {
+                    if at_final_chunk {
+                        return Err(
+                            super::range_marker_error::unparseable_marker_at_final_chunk(cause),
+                        );
                     }
                     return Ok(PartitionStreamStep::NeedMore);
                 }
