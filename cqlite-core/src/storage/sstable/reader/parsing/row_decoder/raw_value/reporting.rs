@@ -46,7 +46,8 @@
 //! construction return `data.len()` EXPLICITLY, so a newly added arm cannot fall
 //! into a branch that skips the check — it has to state a number.
 
-use super::*;
+// One level deeper than `raw_value.rs`, so the `row_decoder` glob is `super::super`.
+use super::super::*;
 
 /// Assert a bounded decode consumed its entire slice (issue #3811).
 ///
@@ -489,7 +490,7 @@ impl V5CompressedLegacyParser {
     /// (`"Unexpected extraneous bytes after list value"`; the identical guard is
     /// `SetSerializer.java:127-128` and `MapSerializer.java:147`), and for tuples
     /// `TupleType.split` rule 4.
-    pub(super) fn require_frozen_extent(
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn require_frozen_extent(
         actual_end: usize,
         blob_end: usize,
         kind: &str,

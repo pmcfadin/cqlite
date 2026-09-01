@@ -1,5 +1,15 @@
 use super::*;
 
+// Issue #3811: the consumption-reporting twin of `parse_value_from_raw_bytes`,
+// plus the one assert every bounded caller of the short name now inherits. Kept
+// as a CHILD of this module (rather than a sibling registered in `mod.rs`)
+// because it is an implementation detail of this one function.
+mod reporting;
+use reporting::require_fully_consumed_raw;
+
+#[cfg(test)]
+mod issue_3811_consumption_demo_tests;
+
 impl V5CompressedLegacyParser {
     /// Map a PRIMITIVE Cassandra marshal type (e.g.
     /// `org.apache.cassandra.db.marshal.Int32Type`) to the canonical CQL short

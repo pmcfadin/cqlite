@@ -86,7 +86,7 @@
 //! `pub(super)` method on a plainly-constructed parser, so they run in every
 //! build and lane and can never pass vacuously on an empty corpus.
 
-use super::V5CompressedLegacyParser;
+use super::super::V5CompressedLegacyParser;
 use crate::schema::{CqlType, UdtRegistry};
 use crate::types::UdtTypeDef;
 use crate::{Result, Value};
