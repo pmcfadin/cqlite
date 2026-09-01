@@ -408,3 +408,48 @@ Two rules worth carrying:
   no amount of care around it substitutes for being able to call it.
 - **A case count is evidence about the subject it executes, and about nothing
   else.** 110/110 was true and it was not evidence that the driver worked.
+
+---
+
+## 12. A process finding: cadence, not partition
+
+*The sections above are about the artifact. This one is about how we sequenced
+the work that produced it, and it is recorded here because this is where the next
+person building a measurement harness will be looking.*
+
+This deliverable reached **+5890 lines across three review rounds**, at which point
+roborev began delivering the diff by snapshot path — which makes `prompt-content`
+FAIL on every round from there and puts the merge behind an owner waiver. Worth
+recording how it got that big, because the obvious conclusion is the wrong one.
+
+**The obvious split would have been actively harmful.** Splitting by layer —
+analyzer first, driver second — ships a manifest schema that nothing produces.
+That is not a missed test; it is a design that *guarantees* an unexecuted subject,
+which is precisely the hole §11 describes. Reflexively partitioning by layer
+makes the round-1 defect structural rather than accidental.
+
+**There was one real seam, and it was a requirement-sequencing error rather than
+a partitioning one.** The single-stream / utilization split is a genuine seam:
+each half is independently useful and each has a producer and a consumer. But the
+second quantity arrived as a **requirement change from the lead after the first
+build was complete and reviewed**, so it landed as a retrofit into a finished
+artifact — and that retrofit is where the dead-producer defect came from. Had
+both quantities been in the original brief, "PR 1: single-stream end to end;
+PR 2: utilization" would have been clean.
+
+**And a large share of the size is evidence the process worked.** Of the 5890
+lines, **1860 are the self-test**, and it roughly tripled across the three rounds
+— growth that is a *response* to review and could not have existed in a smaller
+first PR. Anyone auditing this by line count should know that before concluding
+the deliverable was too big.
+
+**The fix is cadence, not partition.** Get the instrument reviewed once it is
+**end-to-end runnable but thin** — one quantity, minimal tests — so review rounds
+land on a small diff. This is the repository's review-first doctrine pushed one
+step earlier: it already says review before the first full gate; this says review
+before the artifact is *complete*. Note what it would have caught here: the four
+highest-value findings (the dead utilization path, the #3058 bypass, the
+within-pair ordering bias, the ledger ordering) are all **cross-cutting** — they
+live in the interaction between driver, analyzer and runbook, so they need the
+whole thing present to be visible at all. Reviewing a thin whole finds them;
+reviewing a thick layer does not.
