@@ -56,7 +56,14 @@
 set -euo pipefail
 
 PREFIX='AB-3649: '
-DRIVER_VERSION='ab-throughput.sh/v1'
+DRIVER_VERSION='ab-throughput.sh/v2'
+
+# The Python helpers live in ab_driver_support.py, as an EXECUTABLE FILE. They
+# used to be inline heredocs, which meant nothing could run them without a rig --
+# so the record validator was covered by no test at all, which is how it came to
+# hard-code a SINGLE step record while this driver advertised --ramp. Resolved
+# before any argument is validated, because --ramp validation calls it.
+SUPPORT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ab_driver_support.py"
 
 # ---------------------------------------------------------------------------
 # Anchored, sanitized emission.
@@ -76,8 +83,15 @@ die() { # <cause> <detail>
   warn "cause $1"
   warn "cause-detail $2"
   say "session ABORTED cause $1"
-  write_manifest || true
-  say "manifest $RUN_DIR/manifest.json records the runs that did complete"
+  # An affirmatively false statement in a diagnostic is worse than silence, so
+  # the manifest is only claimed when writing it ACTUALLY SUCCEEDED and the file
+  # is on disk. An abort before the run directory exists writes nothing, and
+  # says so.
+  if write_manifest 2>/dev/null && [ -f "${RUN_DIR:-}/manifest.json" ]; then
+    say "manifest $RUN_DIR/manifest.json records the runs that did complete"
+  else
+    say "manifest NOT WRITTEN -- this abort happened before a manifest could be produced"
+  fi
   exit 2
 }
 
@@ -96,7 +110,7 @@ ab-throughput.sh [options]
   --ticket-template <file>  connector-shaped FlightTicket JSON               (required)
   --base-ref <rev>          BASE arm commit                     (default cfa93fe99^)
   --head-ref <rev>          HEAD arm commit                     (default cfa93fe99)
-  --replicates <N>          interleaved replicate pairs                  (default 5)
+  --replicates <N>          interleaved replicate pairs (floor 5)        (default 7)
   --work-dir <dir>          worktrees, target dirs, results       (default /data/ab-3649)
   --repo <dir>              repository to build from       (default this checkout)
   --max-concurrent-scans <n>  cqlite-flight admission ceiling, pinned on BOTH
@@ -147,7 +161,7 @@ CORPUS=''
 TICKET_TEMPLATE=''
 BASE_REF='cfa93fe99^'
 HEAD_REF='cfa93fe99'
-REPLICATES=5
+REPLICATES=7
 WORK_DIR='/data/ab-3649'
 REPO=''
 SHAPE='full'
@@ -206,12 +220,15 @@ done
 [ -n "$CORPUS" ]          || usage_error "--corpus is required"
 [ -n "$TICKET_TEMPLATE" ] || usage_error "--ticket-template is required"
 case "$REPLICATES" in ''|*[!0-9]*) usage_error "--replicates must be a positive integer" ;; esac
-[ "$REPLICATES" -ge 3 ] || usage_error \
-  "--replicates must be at least 3; a percentile bootstrap over fewer pairs reports an interval it cannot support (5 or more is the recommendation in RUNBOOK.md)"
+[ "$REPLICATES" -ge 5 ] || usage_error \
+  "--replicates must be at least 5. At n<=3 a 10000-draw percentile bootstrap is NOT an interval: the all-minimum resample has probability 1/n^n, which at n=3 is 3.7% and exceeds the 2.5% tail, so the reported bounds are exactly (min, max) of the observed ratios and three identical pairs yield a ZERO-WIDTH interval. 7 is the recommendation -- see RUNBOOK.md step 5"
 case "$PORT" in ''|*[!0-9]*) usage_error "--port must be an integer" ;; esac
 case "$MIN_CORPUS_BYTES" in ''|*[!0-9]*) usage_error "--min-corpus-bytes must be an integer" ;; esac
 case "$TEMPERATURE" in warm|cold) ;; *) usage_error "--temperature must be warm or cold" ;; esac
 case "$MIN_SSTABLES" in ''|*[!0-9]*) usage_error "--min-sstables must be an integer" ;; esac
+if [ -n "$ROWS_DECLARED" ]; then
+  case "$ROWS_DECLARED" in ''|*[!0-9]*) usage_error "--rows-declared must be a plain integer with no separators (3999890, not 3,999,890)" ;; esac
+fi
 case "$MERGE_PATH" in auto|merge|bypass) ;; *) usage_error "--merge-path must be auto, merge or bypass" ;; esac
 [ -n "$MAX_CONCURRENT_SCANS" ] || usage_error \
   "--max-concurrent-scans is required: unpinned, cqlite-flight DERIVES the admission ceiling from available parallelism (#3225), so it is a property of the box rather than of the experiment, and a ramp step above it measures the admission ceiling instead of merge throughput"
@@ -224,10 +241,16 @@ fi
 if [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ]; then
   case "$ADMISSION_WAIT_TIMEOUT_MS" in ''|*[!0-9]*) usage_error "--admission-wait-timeout-ms must be an integer" ;; esac
 fi
-# The ramp's top step must fit under the pinned ceiling, or the session is
-# guaranteed to shed at that step and measure admission instead of throughput.
-RAMP_TOP="$(printf '%s' "$RAMP" | tr ',' '\n' | sort -n | tail -1)"
-case "$RAMP_TOP" in ''|*[!0-9]*) usage_error "--ramp must be a comma-separated list of positive integers" ;; esac
+# EVERY element is validated, through the same parser the analyzer's helper
+# uses: `sort -n` ranks a non-numeric token as zero, so a max-only check passed
+# `--ramp 1,abc` straight into both release builds. The helper also refuses a
+# ramp that maps to no analyzer section.
+[ -f "$SUPPORT" ] || usage_error \
+  "ab_driver_support.py is not beside this script at $SUPPORT; the driver's ramp validator, record validator and startup parser all live there"
+RAMP_INFO="$(python3 "$SUPPORT" validate-ramp "$RAMP")" \
+  || usage_error "--ramp $RAMP was refused (the cause is named above)"
+RAMP_TOP="${RAMP_INFO%% *}"
+RAMP_SECTION="${RAMP_INFO##* }"
 if [ "$RAMP_TOP" -gt "$MAX_CONCURRENT_SCANS" ]; then
   usage_error "--ramp tops out at $RAMP_TOP but --max-concurrent-scans is $MAX_CONCURRENT_SCANS; every request past the ceiling waits and is then shed with gRPC UNAVAILABLE (#2420), so that step would measure the admission ceiling. Raise the pin to at least $RAMP_TOP"
 fi
@@ -237,15 +260,86 @@ if [ -n "$SERVER_CPUS" ] || [ -n "$CLIENT_CPUS" ]; then
   command -v taskset >/dev/null 2>&1 || usage_error "taskset is not on PATH but CPU pinning was requested"
 fi
 
+# Anchoring is a property of EVERY line, including the ones an ordinary operator
+# mistake produces. A bare `cd` into a missing directory prints bash's own error
+# and exits 1 with no output at all; a bare `git rev-parse` in a non-repository
+# leaks two unprefixed `fatal:` lines. Both are captured and re-emitted anchored.
 if [ -z "$REPO" ]; then
-  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel)"
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$REPO" ] || usage_error \
+    "this script is not inside a git repository and --repo was not given, so there is nothing to build the two arms from"
 fi
-REPO="$(cd "$REPO" && pwd)"
+[ -d "$REPO" ] || usage_error "--repo $REPO is not a directory"
+REPO="$(cd "$REPO" 2>/dev/null && pwd || true)"
+[ -n "$REPO" ] || usage_error "--repo could not be entered"
+REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO_TOP" ] || usage_error \
+  "--repo $REPO is not a git repository (or git cannot read it), so the two arm commits cannot be resolved"
+REPO="$REPO_TOP"
 RUN_DIR="$WORK_DIR/results"
 LOG_DIR="$WORK_DIR/logs"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 RUNS_JSONL="$RUN_DIR/runs.jsonl"
+SESSION_LOCK="$WORK_DIR/.session-lock"
+# WORK_DIR and PORT both default to fixed values, so two sessions started in one
+# work directory used to truncate each other's ledger BEFORE either noticed the
+# port was occupied -- fail-closed downstream, but the first session's record was
+# already destroyed. `mkdir` is the atomic test-and-set; the ledger is not
+# touched until the lock is held AND the port is free.
+mkdir "$SESSION_LOCK" 2>/dev/null || {
+  warn "cause work-dir-busy"
+  warn "cause-detail another session holds $SESSION_LOCK. If no session is running, remove that directory; otherwise pass a different --work-dir. Truncating this session's ledger would destroy the other's."
+  exit 2
+}
+# Truncated only once the lock is HELD -- so a concurrent session in this work
+# directory is refused above, before it can destroy this one's record. Also
+# before any `die` can fire, so an early abort never writes a manifest carrying a
+# PREVIOUS session's runs.
 : > "$RUNS_JSONL"
+
+# ---------------------------------------------------------------------------
+# Cleanup. Registered NOW, before the resources it frees can exist -- this repo
+# has three separate findings in the family "the fix that added a resource did
+# not register it with the signal path". A `die` between starting a server and
+# reaping it (a failed prewarm, a server that never bound, any `set -e` abort) or
+# a Ctrl-C used to leave a live cqlite-flight holding the port.
+# ---------------------------------------------------------------------------
+SRV_PID=''
+
+is_our_server() { # <pid> -- guard a KILL against PID reuse on a busy box
+  [ -n "${1:-}" ] || return 1
+  [ -r "/proc/$1/cmdline" ] || return 1
+  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'cqlite-flight'
+}
+
+reap_server() {
+  [ -n "$SRV_PID" ] || return 0
+  local pid="$SRV_PID"
+  # Cleared FIRST, so a signal arriving during the reap cannot re-enter it.
+  SRV_PID=''
+  kill "$pid" 2>/dev/null || true
+  local waited=0
+  while [ "$waited" -lt 30 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # Only ever KILL something still identifiable as our own server: on a box with
+  # real PID churn the id could by then belong to somebody else. No `kill` in
+  # this script ever targets a process GROUP.
+  if kill -0 "$pid" 2>/dev/null && is_our_server "$pid"; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+  reap_server
+  [ -n "${SESSION_LOCK:-}" ] && rmdir "$SESSION_LOCK" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # Manifest. Rewritten after every completed run, so an interrupted session
@@ -397,9 +491,20 @@ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$TICKET_TEMPLATE" >/
   || die ticket-template-unparseable "$TICKET_TEMPLATE is not valid JSON"
 
 [ -d "$CORPUS" ] || die corpus-absent "$CORPUS is not a directory"
-CORPUS_FILES="$(find "$CORPUS" -name '*-Data.db' -type f 2>/dev/null | wc -l | tr -d ' ')"
-CORPUS_BYTES="$(find "$CORPUS" -name '*-Data.db' -type f -printf '%s\n' 2>/dev/null \
-  | awk 'BEGIN{s=0}{s+=$1}END{print s+0}')"
+# The census GATES the size floor, so a partial census is not an acceptable
+# answer -- and under `set -e -o pipefail` a find that hits one unreadable
+# directory used to abort the whole script with exit 1, no cause and no manifest.
+# find's status is captured and turned into a NAMED refusal instead. `-printf` is
+# GNU-only; a find without it fails here rather than reporting a zero-byte corpus.
+CORPUS_LIST="$LOG_DIR/corpus-census.txt"
+census_rc=0
+find "$CORPUS" -name '*-Data.db' -type f -printf '%s\n' > "$CORPUS_LIST" 2>"$LOG_DIR/corpus-census.err" || census_rc=$?
+if [ "$census_rc" -ne 0 ]; then
+  die corpus-census-failed \
+    "find over $CORPUS exited $census_rc; the census gates the minimum-size check, so a partial answer is refused rather than used. See $LOG_DIR/corpus-census.err (note: this driver needs GNU find for -printf)"
+fi
+CORPUS_FILES="$(wc -l < "$CORPUS_LIST" | tr -d ' ')"
+CORPUS_BYTES="$(awk 'BEGIN{s=0}{s+=$1}END{print s+0}' "$CORPUS_LIST")"
 export AB_CORPUS_BYTES="$CORPUS_BYTES" AB_CORPUS_FILES="$CORPUS_FILES"
 say "corpus path $CORPUS data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES"
 [ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "$CORPUS holds no *-Data.db files"
@@ -466,6 +571,13 @@ else
   say "pinning none-unpinned -- recorded as an explicit fact, not an absence; RUNBOOK.md recommends pinning after reading the sibling map from sysfs"
 fi
 
+# The ledger is truncated only now: the lock is held, every argument is
+# validated, and the port is free, so nothing that follows can destroy a peer
+# session's record before discovering it should not have started.
+if (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; then
+  die port-occupied \
+    "port $PORT is already bound before the session started; pass a different --port or stop what is listening. The run ledger has NOT been truncated"
+fi
 write_manifest
 
 # ---------------------------------------------------------------------------
@@ -482,9 +594,16 @@ build_arm() { # <arm> <sha>
       || die worktree-failed "git worktree add for $arm failed; see $LOG_DIR/worktree-$arm.log"
   fi
   local at
-  at="$(git -C "$wt" rev-parse HEAD)"
+  at="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
   [ "$at" = "$sha" ] || die worktree-wrong-commit \
-    "$wt is at $at but arm $arm is $sha -- a pre-existing worktree was reused at the wrong commit; remove $wt and re-run"
+    "$wt is at ${at:-an unreadable HEAD} but arm $arm is $sha -- a pre-existing worktree was reused at the wrong commit; remove $wt and re-run"
+  # A sha is not a tree. A leftover worktree carrying uncommitted edits builds
+  # DIFFERENT CODE while the manifest records the clean sha -- the same fact this
+  # repository's pre-merge doctrine records as "commit: cannot see a dirty tree".
+  local dirty
+  dirty="$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null || echo UNREADABLE)"
+  [ -z "$dirty" ] || die worktree-dirty \
+    "$wt is at the right commit but is NOT CLEAN, so it would build code the manifest does not describe; remove $wt and re-run. First entries: $(printf '%s' "$dirty" | head -3 | tr '\n' ';')"
   ( cd "$wt" && CARGO_TARGET_DIR="$target" cargo build --release \
       -p cqlite-flight -p flight-loadgen ) > "$LOG_DIR/build-$arm.log" 2>&1 \
     || die build-failed "the $arm build failed; see $LOG_DIR/build-$arm.log"
@@ -503,35 +622,8 @@ build_arm head "$HEAD_SHA"
 # ---------------------------------------------------------------------------
 port_is_bound() { (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; }
 
-# Best effort, and NAMED when it fails: an unreadable startup line yields
-# NOT-OBSERVED, never a fabricated value. The caller records that distinctly and
-# the analyzer says so beside the verdict.
-parse_startup() { # <server-log> <scans|source>
-  python3 - "$1" "$2" <<'PYEOF'
-import re
-import sys
-
-path, want = sys.argv[1], sys.argv[2]
-try:
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-except OSError:
-    print("NOT-OBSERVED")
-    raise SystemExit(0)
-line = ""
-for candidate in text.splitlines():
-    if "cqlite-flight starting" in candidate:
-        line = candidate
-# No top-level `}` in this body: a `}` at column zero would terminate a naive
-# `sed -n '/^parse_startup()/,/^}/p'` extraction of this function mid-heredoc,
-# which is exactly how its own test harness reads it out.
-if want == "scans":
-    pattern = r"max_concurrent_scans[\"']?\s*[=:]\s*[\"']?(\d+)"
-else:
-    pattern = r"max_concurrent_scans_source[\"']?\s*[=:]\s*[\"']?([A-Za-z-]+)"
-match = re.search(pattern, line) if line else None
-print(match.group(1) if match else "NOT-OBSERVED")
-PYEOF
+parse_startup() { # <server-log> <scans|source>  -- returns a VALUE, not a message
+  python3 "$SUPPORT" parse-startup "$1" "$2" 2>/dev/null || echo NOT-OBSERVED
 }
 
 run_one() { # <arm> <replicate>
@@ -567,11 +659,15 @@ run_one() { # <arm> <replicate>
   [ -n "$extra" ] && server_cmd+=($extra)
   "${server_cmd[@]}" > "$server_log" 2>&1 &
   local srv=$!
+  # Registered BEFORE anything can fail, so every exit path -- die, set -e, a
+  # signal -- reaps it through `cleanup`.
+  SRV_PID=$srv
 
   local waited=0
   while [ "$waited" -lt 90 ]; do
     if port_is_bound; then break; fi
     if ! kill -0 "$srv" 2>/dev/null; then
+      SRV_PID=''
       die server-exited "the $tag server exited before binding port $PORT; see $server_log"
     fi
     sleep 1
@@ -592,12 +688,10 @@ run_one() { # <arm> <replicate>
   say "run $tag admission requested $MAX_CONCURRENT_SCANS observed $admission_observed source $admission_source"
   if [ "$admission_observed" != "NOT-OBSERVED" ] \
      && [ "$admission_observed" != "$MAX_CONCURRENT_SCANS" ]; then
-    kill -9 "$srv" 2>/dev/null || true
     die admission-mismatch \
       "$tag: the server resolved --max-concurrent-scans to $admission_observed but $MAX_CONCURRENT_SCANS was requested; the arms would not be served under the same admission ceiling"
   fi
   if [ "$admission_source" != "NOT-OBSERVED" ] && [ "$admission_source" != "flag" ]; then
-    kill -9 "$srv" 2>/dev/null || true
     die admission-provenance \
       "$tag: the server reports the admission ceiling came from '$admission_source', not 'flag', even though --max-concurrent-scans was passed; something else (CQLITE_MAX_CONCURRENT_SCANS in the environment, or a derived fallback) is deciding it"
   fi
@@ -614,28 +708,19 @@ run_one() { # <arm> <replicate>
   fi
 
   local cpu0 cpu1 hz
-  cpu0="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || echo 0)"
+  # An unreadable /proc yields NOTHING, not a fabricated 0: the recorder already
+  # has a null path for server_cpu_seconds and a silent zero would defeat it.
+  cpu0="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || true)"
   local rc=0
   "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "http://127.0.0.1:$PORT" \
     --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
     --step-duration "$STEP_DURATION" --round "$tag" --out "$jsonl" \
     > "$LOG_DIR/$tag.loadgen.log" 2>&1 || rc=$?
-  cpu1="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || echo 0)"
+  cpu1="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || true)"
   hz="$(getconf CLK_TCK)"
 
-  kill "$srv" 2>/dev/null || true
-  local dying=0
-  while [ "$dying" -lt 30 ]; do
-    kill -0 "$srv" 2>/dev/null || break
-    sleep 1
-    dying=$((dying + 1))
-  done
-  if kill -0 "$srv" 2>/dev/null; then
-    kill -9 "$srv" 2>/dev/null || true
-    sleep 2
-  fi
-  wait "$srv" 2>/dev/null || true
-  if kill -0 "$srv" 2>/dev/null; then
+  reap_server
+  if kill -0 "$srv" 2>/dev/null && is_our_server "$srv"; then
     die server-would-not-die "the $tag server (pid $srv) survived TERM and KILL; the next replicate would bind a port served by this arm's binary"
   fi
   local released=0
@@ -650,51 +735,12 @@ run_one() { # <arm> <replicate>
   [ "$rc" -eq 0 ] || die loadgen-failed \
     "the $tag load generator exited $rc; see $LOG_DIR/$tag.loadgen.log"
 
-  # Validate the produced record here, not only in the analyzer: a bad replicate
-  # must stop the session while the rig is still up, not surface hours later.
-  python3 - "$jsonl" "$tag" <<'PYEOF' || die replicate-invalid "the $tag JSONL is not a usable replicate (see the cause-detail above)"
-import json
-import sys
-
-path, tag = sys.argv[1], sys.argv[2]
-
-
-def refuse(detail):
-    sys.stderr.write("AB-3649: cause replicate-invalid\n")
-    sys.stderr.write("AB-3649: cause-detail %s\n" % detail)
-    sys.exit(1)
-
-
-try:
-    with open(path, encoding="utf-8") as handle:
-        lines = [line for line in handle if line.strip()]
-except OSError as exc:
-    refuse("%s: %s" % (path, exc))
-if len(lines) != 1:
-    refuse("%s: %d step records, expected exactly 1" % (path, len(lines)))
-try:
-    record = json.loads(lines[0])
-except ValueError as exc:
-    refuse("%s: %s" % (path, exc))
-if record.get("requests_error", 0):
-    refuse("%s: requests_error=%s" % (path, record["requests_error"]))
-if record.get("requests_unavailable", 0):
-    refuse("%s: requests_unavailable=%s" % (path, record["requests_unavailable"]))
-if not record.get("requests_ok", 0):
-    refuse("%s: requests_ok=0" % path)
-if not record.get("rows_per_s", 0) > 0:
-    refuse("%s: rows_per_s is not positive -- the scan returned no rows" % path)
-sys.stdout.write(
-    "AB-3649: run %s rows-per-s %.2f requests-ok %d duration-s %.2f p50-ms %.3f\n"
-    % (
-        tag,
-        record["rows_per_s"],
-        record["requests_ok"],
-        record["duration_s"],
-        record["latency_ms"]["p50"],
-    )
-)
-PYEOF
+  # Validate the produced records here, not only in the analyzer: a bad
+  # replicate must stop the session while the rig is still up, not surface hours
+  # later. The validator is ramp-aware -- flight-loadgen emits ONE record per
+  # ramp step -- and it is an executable file so the self-test can drive it.
+  python3 "$SUPPORT" validate-replicate "$jsonl" "$tag" "$RAMP" \
+    || die replicate-invalid "the $tag JSONL is not a usable replicate (see the cause-detail above)"
 
   python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" \
     "$admission_observed" "$admission_source" <<'PYEOF'
@@ -706,6 +752,8 @@ import sys
 try:
     server_cpu_s = (int(cpu1) - int(cpu0)) / float(hz)
 except (ValueError, ZeroDivisionError):
+    # An empty reading means /proc was unreadable. NOT a zero: a fabricated
+    # counter is indistinguishable from a server that used no CPU.
     server_cpu_s = None
 entry = {
     "arm": arm,
@@ -737,9 +785,7 @@ done
 
 write_manifest
 say "session complete: $REPLICATES paired replicates in $RUN_DIR"
-# Name the section this session's ramp belongs to, so the manifest cannot be
-# pasted into the wrong one (the analyzer refuses that, but a correct next-step
-# line is cheaper than a refusal).
-if [ "$RAMP_TOP" -eq 1 ]; then SECTION_FLAG='--single-stream'; else SECTION_FLAG='--utilization'; fi
-say "next python3 $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/analyze-ab.py $SECTION_FLAG $RUN_DIR/manifest.json"
+# The section this session's ramp belongs to, decided by the same validator that
+# accepted the ramp rather than re-derived here.
+say "next python3 $(dirname "$SUPPORT")/analyze-ab.py --$RAMP_SECTION $RUN_DIR/manifest.json"
 exit 0
