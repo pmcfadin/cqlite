@@ -108,6 +108,14 @@ const BOUND_KIND_ON_DISK: u8 = 0x01;
 /// FSM then refuses it. That refusal is the condition under test.
 const BOUND_KIND_UNREPRESENTABLE: u8 = 0x03;
 
+/// Offset of that marker's `marker_body_size` VUInt — the point
+/// [`Patch::TruncatedAtMarker`] CUTS the file at. It follows the clustering prefix:
+/// flags(1) kind(1) cluster_count(2) prefix_header(1) ck(4) = 0x22 + 9.
+const MARKER_BODY_SIZE_OFFSET: usize = 0x2b;
+/// The committed fixture's `marker_body_size` at [`MARKER_BODY_SIZE_OFFSET`]: 4
+/// bytes (`prev_size` VUInt + the deletion-time pair).
+const MARKER_BODY_SIZE_ON_DISK: u8 = 0x04;
+
 /// `CRC.db` layout (`reader::crc::CrcDb::parse`): a 4-byte big-endian chunk-size
 /// header followed by one 4-byte big-endian CRC32 per Data.db chunk.
 const CRC_HEADER_LEN: usize = 4;
@@ -126,6 +134,50 @@ CREATE TABLE IF NOT EXISTS test_compaction_tombstone_ttl.rt_cross_gen (
     PRIMARY KEY (id, ck)
 );
 ";
+
+/// Which one-byte patch a staged scratch copy carries. The committed fixture is
+/// never written to, and every case names its patch explicitly so a control can
+/// never silently become a defect case.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Patch {
+    /// No patch — the control. The marker is well formed, so it must be paired and
+    /// applied normally even on the final chunk.
+    None,
+    /// The marker's BOUND KIND byte -> a kind outside the set the readers can
+    /// represent. The marker still PARSES (framing is driven by the cluster count,
+    /// not the kind), so there IS a resume offset and the condition is a refusal
+    /// (issue #3808).
+    UnrepresentableBoundKind,
+    /// The `Data.db` CUT at [`MARKER_BODY_SIZE_OFFSET`] — the file ends INSIDE the
+    /// first marker, after its clustering prefix and before its body. The marker
+    /// therefore cannot be PARSED at all and there is NO resume offset (issue
+    /// #3721, roborev job 16), and — because the cut is at the end of the file —
+    /// nothing follows to trip a later decode: on the final chunk this used to be
+    /// converted into a SUCCESSFUL partition completion with the tombstone gone.
+    ///
+    /// This is deliberately the same shape a marker cut in half by a window
+    /// boundary has, which is exactly why the final-vs-non-final decision must come
+    /// from the chunking state and never from the bytes.
+    TruncatedAtMarker,
+}
+
+impl Patch {
+    /// Apply the patch to a scratch copy of the committed `Data.db`. Takes and
+    /// returns the buffer because one variant changes its LENGTH.
+    fn apply(self, mut data: Vec<u8>) -> Vec<u8> {
+        match self {
+            Patch::None => data,
+            Patch::UnrepresentableBoundKind => {
+                data[BOUND_KIND_OFFSET] = BOUND_KIND_UNREPRESENTABLE;
+                data
+            }
+            Patch::TruncatedAtMarker => {
+                data.truncate(MARKER_BODY_SIZE_OFFSET);
+                data
+            }
+        }
+    }
+}
 
 /// Resolve the fixture root, or FAIL — never skip (issue #3220).
 fn fixture_dir() -> PathBuf {
@@ -190,6 +242,18 @@ fn assert_marker_grammar(data: &[u8]) {
         &10_i32.to_be_bytes(),
         "expected the marker's clustering value ck = 10 (the JSONL golden's first bound)"
     );
+    assert_eq!(
+        data[MARKER_BODY_SIZE_OFFSET], MARKER_BODY_SIZE_ON_DISK,
+        "expected the committed marker_body_size VUInt at 0x{MARKER_BODY_SIZE_OFFSET:02x}"
+    );
+    // The cut must land INSIDE the marker, or `Patch::TruncatedAtMarker` would be
+    // cutting somewhere else entirely.
+    assert!(
+        MARKER_FLAGS_OFFSET < MARKER_BODY_SIZE_OFFSET && MARKER_BODY_SIZE_OFFSET < data.len(),
+        "the truncation offset 0x{MARKER_BODY_SIZE_OFFSET:02x} must lie strictly inside the \
+         first marker of the {} byte Data.db",
+        data.len()
+    );
 }
 
 /// Re-seal `CRC.db` over `data`: recompute one CRC32 per `chunk_size` chunk of the
@@ -230,10 +294,10 @@ fn reseal_crc(crc_db: &[u8], data: &[u8], verify_only: bool) -> Vec<u8> {
     out
 }
 
-/// Copy the fixture into `dir` as `<keyspace>/<table>-*/…`, optionally patching the
-/// marker's bound-kind byte and re-sealing `CRC.db` over the result. The committed
-/// fixture is never written to.
-fn stage(dir: &Path, patch_bound_kind: bool) -> PathBuf {
+/// Copy the fixture into `dir` as `<keyspace>/<table>-*/…`, applying `patch` to the
+/// first range-tombstone marker and re-sealing `CRC.db` over the result. The
+/// committed fixture is never written to.
+fn stage(dir: &Path, patch: Patch) -> PathBuf {
     let src = fixture_dir();
     let dest_root = dir.join("data");
     let dest = dest_root.join(KEYSPACE).join(
@@ -246,10 +310,7 @@ fn stage(dir: &Path, patch_bound_kind: bool) -> PathBuf {
 
     let original = std::fs::read(src.join(DATA_DB)).expect("read fixture Data.db");
     assert_marker_grammar(&original);
-    let mut patched = original.clone();
-    if patch_bound_kind {
-        patched[BOUND_KIND_OFFSET] = BOUND_KIND_UNREPRESENTABLE;
-    }
+    let patched = patch.apply(original.clone());
 
     for entry in std::fs::read_dir(&src).expect("read fixture directory") {
         let entry = entry.expect("fixture directory entry");
@@ -290,9 +351,9 @@ async fn open_db(data_root: &Path, schema: &Path) -> Database {
 
 /// Run `query` against a staged copy of the fixture (patched or not) and return the
 /// rendered rows.
-async fn run(query: &str, patch_bound_kind: bool) -> Result<Vec<Vec<(String, String)>>, Error> {
+async fn run(query: &str, patch: Patch) -> Result<Vec<Vec<(String, String)>>, Error> {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let data_root = stage(tmp.path(), patch_bound_kind);
+    let data_root = stage(tmp.path(), patch);
     let schema = tmp.path().join("schema.cql");
     std::fs::write(&schema, SCHEMA).expect("write scratch schema");
     let db = open_db(&data_root, &schema).await;
@@ -370,12 +431,12 @@ fn assert_both_live_rows(rows: &[Vec<(String, String)>], query: &str) {
 /// One case: the query must SUCCEED with both live rows over the unpatched copy and
 /// FAIL with the marker refusal over the patched copy.
 async fn case(query: &str) {
-    let clean = run(query, false)
+    let clean = run(query, Patch::None)
         .await
         .unwrap_or_else(|e| panic!("`{query}` must succeed over the UNPATCHED fixture: {e}"));
     assert_both_live_rows(&clean, query);
 
-    match run(query, true).await {
+    match run(query, Patch::UnrepresentableBoundKind).await {
         Ok(rows) => panic!(
             "`{query}` returned Ok over a fixture whose range-tombstone marker carries an \
              unrepresentable bound kind — the marker and every later row of the partition \
@@ -422,7 +483,7 @@ async fn d1_cell_metadata_scan_surfaces_the_marker_refusal() {
 #[tokio::test]
 async fn d5_streaming_scan_surfaces_the_marker_refusal() {
     let query = format!("SELECT COUNT(*) FROM {KEYSPACE}.{TABLE}");
-    let clean = run(&query, false)
+    let clean = run(&query, Patch::None)
         .await
         .unwrap_or_else(|e| panic!("`{query}` must succeed over the UNPATCHED fixture: {e}"));
     let rendered = format!("{clean:?}");
@@ -431,7 +492,7 @@ async fn d5_streaming_scan_surfaces_the_marker_refusal() {
         "the UNPATCHED streaming aggregate must count both live rows; got: {clean:#?}"
     );
 
-    match run(&query, true).await {
+    match run(&query, Patch::UnrepresentableBoundKind).await {
         Ok(rows) => panic!(
             "`{query}` returned Ok over a fixture whose range-tombstone marker carries an \
              unrepresentable bound kind — the partition was silently TRUNCATED and the \
@@ -470,7 +531,7 @@ mod d6_compaction {
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
     use cqlite_core::types::Value;
 
-    use super::{assert_marker_refusal_text, stage, KEYSPACE, LIVE_CLUSTERING, TABLE};
+    use super::{assert_marker_refusal_text, stage, Patch, KEYSPACE, LIVE_CLUSTERING, TABLE};
 
     /// Clustering keys covered by the PATCHED marker's range and by NO other
     /// marker of the fixture — which is what makes the resurrection observable.
@@ -642,14 +703,14 @@ mod d6_compaction {
     /// holding the covered rows. Returns the compaction outcome and the output
     /// directory, so a spurious `Ok` can be inspected for resurrected rows.
     fn compact_with_fixture(
-        patch_bound_kind: bool,
+        patch: Patch,
     ) -> (
         tempfile::TempDir,
         TableSchema,
         Result<PathBuf, cqlite_core::Error>,
     ) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let data_root = stage(tmp.path(), patch_bound_kind);
+        let data_root = stage(tmp.path(), patch);
         let schema = schema();
         // Run index 0 = newest: the Cassandra fixture carries the tombstone.
         let inputs = vec![
@@ -669,13 +730,15 @@ mod d6_compaction {
         (tmp, schema, outcome)
     }
 
-    /// The CONTROL, and it is load-bearing twice over: a RECOGNISED bound kind
-    /// must still be paired and applied normally (a fix that refused every marker
-    /// would fail here), and the covered rows must be SHADOWED in the output —
-    /// which is the property the patched half proves cannot be silently lost.
+    /// The CONTROL for BOTH defect cases below, and it is load-bearing three times
+    /// over: a WELL-FORMED marker must still be paired and applied normally on the
+    /// FINAL chunk (a fix that refused every marker, or every marker whose parse
+    /// fails at the end of the data, would fail here), and the covered rows must be
+    /// SHADOWED in the output — which is the property the patched halves prove
+    /// cannot be silently lost.
     #[test]
     fn d6_recognised_bound_kind_still_compacts_and_shadows_the_covered_rows() {
-        let (_tmp, schema, outcome) = compact_with_fixture(false);
+        let (_tmp, schema, outcome) = compact_with_fixture(Patch::None);
         let output = outcome.expect("compaction over the UNPATCHED fixture must succeed");
         let (live, markers) = read_back(output, &schema);
         assert_eq!(
@@ -697,7 +760,7 @@ mod d6_compaction {
     /// output durably resurrected the covered rows.
     #[test]
     fn d6_compaction_refuses_an_unrepresentable_bound_kind_and_resurrects_nothing() {
-        let (_tmp, schema, outcome) = compact_with_fixture(true);
+        let (_tmp, schema, outcome) = compact_with_fixture(Patch::UnrepresentableBoundKind);
         match outcome {
             // Text only, not the category: see `assert_marker_refusal_text`.
             Err(e) => assert_marker_refusal_text(&e.to_string(), "compact_sstables"),
@@ -713,6 +776,62 @@ mod d6_compaction {
                      an unrepresentable bound kind: the marker was SKIPPED (issue #3808), so its \
                      output holds rows {resurrected:?} that the deletion covered — resurrected \
                      durably, on disk. Output rows: {live:?}, markers: {markers}"
+                );
+            }
+        }
+    }
+
+    /// The defect (#3721, roborev job 16): a marker that cannot be PARSED on the
+    /// FINAL chunk must make COMPACTION fail. Pre-fix the policy answered
+    /// `MarkerOutcome::Stop`, which both compaction drivers convert on the final
+    /// chunk into a SUCCESSFUL partition completion — so the tombstone was dropped,
+    /// the output SSTable was still written, and the rows the tombstone covered came
+    /// back durably, on disk.
+    ///
+    /// Asserted on the compaction OUTPUT rather than on the parser, because that is
+    /// where the harm lands: an `Ok` here is only interesting for WHAT it wrote.
+    ///
+    /// The same bytes on a NON-final chunk must still be a refill request — that
+    /// half cannot be observed through `compact_sstables` (it owns its own
+    /// chunking), so it is pinned one level down against BOTH drivers in
+    /// `data_access::compaction_range_marker_resume_tests`.
+    #[test]
+    fn d7_compaction_refuses_an_unparseable_marker_at_the_final_chunk_and_resurrects_nothing() {
+        let (_tmp, schema, outcome) = compact_with_fixture(Patch::TruncatedAtMarker);
+        match outcome {
+            // Text only, not the category: see `assert_marker_refusal_text`.
+            Err(e) => {
+                let rendered = e.to_string();
+                for needle in [
+                    "range-tombstone marker",
+                    "could not be PARSED",
+                    "FINAL chunk",
+                ] {
+                    assert!(
+                        rendered.contains(needle),
+                        "the compaction refusal must name `{needle}`; got: {rendered}"
+                    );
+                }
+                assert!(
+                    rendered.contains("Failed to parse marker_body_size"),
+                    "the report must PRESERVE the parser's own cause (the marker body it could \
+                     not read past the end of the data), not a re-synthesised message; got: \
+                     {rendered}"
+                );
+            }
+            Ok(output) => {
+                let (live, markers) = read_back(output, &schema);
+                let resurrected: Vec<i32> = live
+                    .iter()
+                    .copied()
+                    .filter(|ck| COVERED_CLUSTERING.contains(ck))
+                    .collect();
+                panic!(
+                    "compaction returned Ok over a fixture whose FIRST range-tombstone marker \
+                     cannot be parsed and whose data ENDS there: the marker was silently dropped \
+                     and the partition reported complete (issue #3721), so the output holds rows \
+                     {resurrected:?} that the deletion covered — resurrected durably, on disk. \
+                     Output rows: {live:?}, markers: {markers}"
                 );
             }
         }
