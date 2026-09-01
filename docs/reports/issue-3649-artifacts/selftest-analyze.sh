@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=188
+CASE_FLOOR=229
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -127,6 +127,7 @@ def main():
         "workload": {
             "shape": "full",
             "step_duration": "60s",
+            "step_duration_seconds": 60.0,
             "ramp": ramp,
             "prewarm": True,
             "server_cpus": "0,2",
@@ -722,6 +723,73 @@ PYINNER
 run_support validate-replicate "$TMP/inf.jsonl" base-r01 1
 check_support "a non-finite rate refused by the driver too" 1 replicate-invalid
 
+# The duration grammar MIRRORS flight-loadgen's (tools/flight-loadgen/src/ramp.rs:224).
+# A stricter grammar refuses work that has already been done; a looser one makes
+# the docstring's "field for field" claim false. Both directions are pinned.
+for good_dur in "60 60.0" "60s 60.0" "500ms 0.5" "2m 120.0" "0.5 0.5" "1e18 1e+18"; do
+  set -- $good_dur
+  run_support parse-duration "$1"
+  if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "$2" ]; then
+    ok "the duration grammar accepts '$1' as flight-loadgen does"
+  else
+    bad "the duration grammar refused '$1', which flight-loadgen accepts (got '$(cat "$TMP/out.txt")')"
+  fi
+done
+for bad_dur in "0" "-5s" "nope" "nan" "inf" "1e30" "1e308m" "-1"; do
+  run_support parse-duration "$bad_dur"
+  if [ "$RC" = "1" ] && anchored; then
+    ok "the duration grammar refuses '$bad_dur' as flight-loadgen does"
+  else
+    bad "the duration grammar accepted '$bad_dur' (exit $RC)"
+  fi
+done
+
+# A ticket that narrows the scan cannot receive a full-scan verdict.
+printf '{"version":2,"keyspace":"ks","table":"t","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/tk-full.json"
+run_support validate-ticket "$TMP/tk-full.json"
+check_support "a full-ring, unprojected, unfiltered ticket" 0
+for narrowing in '"limit":100' '"predicates":[{"c":"x"}]' '"filter":"x>1"' '"aggregation":"count"' '"columns":["a"]' '"token_start":42' '"wraparound":true'; do
+  printf '{"version":2,"keyspace":"ks","table":"t",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
+  run_support validate-ticket "$TMP/tk-bad.json"
+  if [ "$RC" = "1" ] && grep -q '^AB-3649: cause ticket-not-full-ring$' "$TMP/err.txt"; then
+    ok "a ticket with $narrowing is refused as not a full-ring scan"
+  else
+    bad "a ticket with $narrowing was accepted as a full scan (exit $RC)"
+  fi
+done
+
+# Requested pinning and EFFECTIVE pinning are different facts.
+MY_CPUS="$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/$$/status 2>/dev/null || true)"
+if [ -n "$MY_CPUS" ]; then
+  run_support check-affinity "$$" "$MY_CPUS"
+  if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "VERIFIED" ]; then
+    ok "check-affinity verifies a process against its real allowed CPU set"
+  else
+    bad "check-affinity did not verify a correct pin (exit $RC, '$(cat "$TMP/out.txt")')"
+  fi
+  run_support check-affinity "$$" "999"
+  if [ "$RC" = "1" ] && grep -q '^AB-3649: cause affinity-mismatch$' "$TMP/err.txt"; then
+    ok "check-affinity refuses a pin the process does not actually have"
+  else
+    bad "check-affinity accepted a pin the process does not have (exit $RC)"
+  fi
+else
+  ok "check-affinity skipped: this platform exposes no Cpus_allowed_list (declared, not assumed)"
+fi
+
+# The startup sweep reads every echoed field, not only the resolved one.
+printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_batch_bytes=4194304 max_concurrent_scans=16 max_concurrent_scans_source=flag admission_wait_timeout_ms=30000' > "$TMP/startup-full.log"
+sweep_bad=''
+for probe in "batch-size 8192" "max-batch-bytes 4194304" "wait-timeout-ms 30000"; do
+  set -- $probe
+  [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup-full.log" "$1")" = "$2" ] || sweep_bad="$sweep_bad $1"
+done
+if [ -z "$sweep_bad" ]; then
+  ok "every echoed server field is read back from the one startup line"
+else
+  bad "the startup sweep could not read:$sweep_bad"
+fi
+
 for bad_ramp in "1,abc" "1,²" "2" "4,2" "1,1" "0"; do
   run_support validate-ramp "$bad_ramp"
   if [ "$RC" = "1" ] && anchored; then
@@ -1170,13 +1238,32 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     manifest = json.load(handle)
-del manifest["workload"]["step_duration"]
+del manifest["workload"]["step_duration_seconds"]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
 run_analyzer "$TMP/tb3"
-check_verdict "a manifest with no declared step duration" UNMEASURED 7 single-stream
-check_cause "an absent step duration" manifest-field
+check_verdict "a manifest with no canonical step duration" UNMEASURED 7 single-stream
+check_cause "an absent canonical step duration" manifest-field
+
+# THE FALSE-REFUSAL CASE. `--step-duration 60` is valid to flight-loadgen (bare
+# means seconds), so a FINISHED session must not be declined over a suffix the
+# load generator never required. The driver normalises at pre-flight, so the raw
+# string can be anything the loadgen accepts.
+mkfixture "$TMP/bareseconds" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/bareseconds/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["step_duration"] = "60"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/bareseconds"
+check_verdict "a bare-seconds step duration, which flight-loadgen accepts" MEETS-TARGET 0 single-stream
 
 echo
 echo "-- partial admission observation is not agreement --"
@@ -1242,6 +1329,100 @@ if grep -q 'ADMISSION-REMEDY' "$TMP/out.txt"; then
   bad "a fully corroborated run printed a remedy for a problem it does not have"
 else
   ok "the remedy appears only where there is something to remedy"
+fi
+
+echo
+echo "-- corroboration is a claim about PROVENANCE, not just a value --"
+
+# `agreed` says the ceiling we passed is the ceiling that took effect. Counting
+# observed VALUES alone let that word mean less than it says: a numeric ceiling
+# paired with a derived or env source counted as fully corroborated.
+mkfixture "$TMP/prov-derived" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prov-derived/manifest.json" derived <<'PYINNER'
+import json
+import sys
+
+path, source = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_source"] = source
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prov-derived"
+check_verdict "a run whose ceiling came from somewhere other than our flag" UNMEASURED 7 single-stream
+check_cause "a non-flag admission provenance" admission-provenance
+
+# A MISSING provenance is not a wrong one: it downgrades corroboration rather
+# than refusing, exactly as a missing value does.
+mkfixture "$TMP/prov-absent" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prov-absent/manifest.json" NOT-OBSERVED <<'PYINNER'
+import json
+import sys
+
+path, source = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_source"] = source
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prov-absent"
+check_verdict "a run whose provenance could not be read" MEETS-TARGET 0 single-stream
+if grep -q 'corroboration partial (6 of 12 runs)' "$TMP/out.txt"; then
+  ok "a value without a flag provenance does not count toward corroboration"
+else
+  bad "a value with no provenance was counted as corroborated"
+fi
+
+echo
+echo "-- the target band is defined for --shape full --"
+
+mkfixture "$TMP/shape-bad" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/shape-bad/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["shape"] = "limit-k"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/shape-bad"
+check_verdict "a limit-k session scored against the full-scan band" UNMEASURED 7 single-stream
+check_cause "a workload that is not a full scan" shape-not-full
+
+# A CONTROL may use any shape -- its verdict is disclaimed either way -- but the
+# shape must be named beside it.
+python3 - "$TMP/shape-bad/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["control"] = "shape-probe"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/shape-bad"
+check_verdict "a labelled control may use another shape" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: verdict-detail single-stream SHAPE the workload was --shape limit-k' "$TMP/out.txt"; then
+  ok "a non-full shape is named beside the verdict it disclaims"
+else
+  bad "a non-full shape was not disclosed"
+fi
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: verdict-detail single-stream SHAPE ' "$TMP/out.txt"; then
+  bad "a full-scan session printed a shape disclaimer it does not need"
+else
+  ok "a full-scan session carries no shape disclaimer"
 fi
 
 echo
@@ -1539,6 +1720,37 @@ else
     --max-concurrent-scans 4 --ramp 2
   check_driver "the driver refuses a ramp that maps to no analyzer section" 3
 
+  # FINDING 5: --batch-size 0 is silently clamped to one row per batch by the
+  # server, so the manifest would not record the value that was used.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --batch-size 0
+  check_driver "the driver refuses --batch-size 0" 3
+
+  # FINDING 2: the shape and the ticket must match the claim the report makes.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --shape limit-k
+  check_driver "the driver refuses a non-full shape for a measurement session" 3
+  printf '{"version":2,"keyspace":"ks","table":"t","limit":100}\n' > "$TMP/tk-narrow.json"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH"
+  check_driver "the driver refuses a ticket carrying a LIMIT" 2 ticket-not-full-ring
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow-ctl" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --control shape-probe \
+    --base-ref HEAD~1 --head-ref HEAD --shape limit-k
+  if [ "$RC" != "2" ] || grep -q 'ticket-not-full-ring' "$TMP/err.txt"; then
+    bad "a labelled control was still refused for a narrowed ticket (exit $RC)"
+  else
+    ok "a labelled control may narrow the ticket; the analyzer disclaims its verdict"
+  fi
+
+  # FINDING 3: a step duration flight-loadgen accepts must be accepted here too,
+  # and one it rejects must fail BEFORE the builds rather than after the money.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --step-duration nope
+  check_driver "the driver refuses a step duration flight-loadgen would reject" 3
+
   # P0-3: --rows-declared reached int() unvalidated.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --rows-declared 3,999,890
@@ -1588,31 +1800,41 @@ else
     --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1
   check_driver "a reused worktree at the right commit but not clean" 2 worktree-dirty
 
-  # P1-6: `die` used to claim a manifest unconditionally. The claim must be true.
+  # FINDING 4: A FAILED PRE-FLIGHT MUST NOT DESTROY AN EARLIER SESSION'S RECORD.
+  # The lock closed the concurrent case; this is the sequential one -- reusing a
+  # work directory for an attempt that then fails on a corpus, a port or a ref.
+  mkdir -p "$TMP/w-prior/results"
+  printf '{"arm":"base","replicate":1,"file":"base-r01.jsonl"}\n' \
+    > "$TMP/w-prior/results/runs.jsonl"
+  printf '{"schema":"ab-3649.manifest/v1","note":"an earlier session"}\n' \
+    > "$TMP/w-prior/results/manifest.json"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-claim" --repo "$SCRATCH"
-  if grep -q '^AB-3649: manifest .*records the runs that did complete$' "$TMP/out.txt" \
-     && [ -f "$TMP/w-claim/results/manifest.json" ]; then
-    ok "when an abort claims a manifest, the manifest is actually there"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-prior" --repo "$SCRATCH"
+  check_driver "a re-used work directory whose new attempt fails pre-flight" 2 corpus-too-small
+  if grep -q 'an earlier session' "$TMP/w-prior/results/manifest.json" \
+     && [ -s "$TMP/w-prior/results/runs.jsonl" ]; then
+    ok "the earlier session's ledger AND manifest survive a failed pre-flight"
   else
-    bad "an abort's manifest claim does not match what is on disk"
+    bad "a failed pre-flight destroyed an earlier session's record"
   fi
-  if grep -q '^AB-3649: manifest ' "$TMP/out.txt" \
-     && ! grep -q 'NOT WRITTEN' "$TMP/out.txt"; then
-    ok "the claim and the file agree on this path"
+  if grep -q 'belongs to an EARLIER session and has NOT been modified' "$TMP/out.txt"; then
+    ok "and the abort says so, rather than claiming a manifest it did not write"
   else
-    bad "the manifest claim is inconsistent with itself"
+    bad "the abort did not disclose whose manifest is in the work directory"
   fi
 
   # A refusal must still leave a manifest, so the analyzer sees the shortfall as
   # a fact rather than as an absence.
-  if [ -f "$TMP/w-badref/results/manifest.json" ]; then
-    ok "an aborted session still writes a manifest recording what completed"
+  # Nothing under the run directory is written before pre-flight passes, so a
+  # pre-flight abort in a FRESH work directory leaves no manifest at all -- and
+  # the analyzer refuses that rather than reading a stale one.
+  if [ ! -f "$TMP/w-badref/results/manifest.json" ]; then
+    ok "a pre-flight abort in a fresh work directory writes no manifest at all"
   else
-    bad "an aborted session left no manifest, so a shortfall would read as an absence"
+    bad "a pre-flight abort wrote a manifest before the session had begun"
   fi
   run_analyzer "$TMP/w-badref/results"
-  check_verdict "the analyzer refuses an aborted session's manifest" UNMEASURED 7
+  check_verdict "the analyzer refuses an absent manifest" UNMEASURED 7
 fi
 
 # ---------------------------------------------------------------------------

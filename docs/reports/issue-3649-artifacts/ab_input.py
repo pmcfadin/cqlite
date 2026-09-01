@@ -107,27 +107,37 @@ def ramp_steps(manifest):
     return steps
 
 
-_DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0}
-
-
 def step_duration_seconds(manifest):
-    """The declared per-step hold, in seconds. Fail-closed: the driver always
-    records it, so an absent or unparseable value means this manifest did not
-    come from a run this analyzer can reconcile."""
-    raw = manifest.get("workload", {})
-    raw = raw.get("step_duration") if isinstance(raw, dict) else None
-    if not isinstance(raw, str):
-        raise Unmeasured(
-            "manifest-field", "manifest.workload.step_duration is missing"
-        )
-    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m)", raw.strip())
-    if not match:
+    """The declared per-step hold, in seconds.
+
+    Read from `workload.step_duration_seconds`, which the driver NORMALISES at
+    pre-flight through the same grammar `flight-loadgen` uses. This analyzer does
+    NOT re-parse the raw `step_duration` string, and that is the point: a second
+    grammar is a second thing to drift, and when it drifted STRICTER it refused
+    completed sessions -- `--step-duration 60` is a valid bare-seconds value to
+    the load generator, so a session could build both arms, run every replicate
+    and meter a rig, and then be declined over a missing unit suffix. On a box
+    you cannot get back, a false refusal after the data exists cannot be
+    recovered from. One canonical field, produced once, before the money is
+    spent.
+    """
+    node = manifest.get("workload", {})
+    value = node.get("step_duration_seconds") if isinstance(node, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise Unmeasured(
             "manifest-field",
-            "manifest.workload.step_duration is %r, expected a duration like "
-            "60s, 500ms or 2m" % raw,
+            "manifest.workload.step_duration_seconds is missing or non-numeric; "
+            "the driver normalises the step duration at pre-flight and records it "
+            "there, so a manifest without it did not come from a session this "
+            "analyzer can reconcile",
         )
-    return float(match.group(1)) * _DURATION_UNITS[match.group(2)]
+    if not math.isfinite(float(value)) or value <= 0:
+        raise Unmeasured(
+            "manifest-field",
+            "manifest.workload.step_duration_seconds is %r, which is not a "
+            "positive finite number of seconds" % value,
+        )
+    return float(value)
 
 
 def load_manifest(path, mode):
@@ -411,12 +421,20 @@ def load_run(path, mode, declared_steps, expected_round, declared_duration_s):
     )
 
 
+#: `MaxConcurrentScansSource::as_str` (cqlite-flight/src/admission.rs:183-193).
+#: Only `flag` means the value we passed is the value that took effect.
+ADMISSION_SOURCES = ("flag", "env", "derived", "derived-fallback")
+
+
 def admission_of(entry):
-    """The admission ceiling OBSERVED at that run's server startup."""
+    """The admission ceiling OBSERVED at that run's server startup, and its
+    provenance. Either may be NOT-OBSERVED, and they are separate facts."""
     value = entry.get("admission_observed")
-    if value is None:
-        return NOT_OBSERVED
-    return str(value)
+    source = entry.get("admission_source")
+    return (
+        NOT_OBSERVED if value is None else str(value),
+        NOT_OBSERVED if source is None else str(source),
+    )
 
 
 class Admission(object):
@@ -428,10 +446,23 @@ class Admission(object):
     it with no caveat, i.e. an absence silently upgraded into corroboration. The
     docstring of this module says the ceiling must agree across EVERY run; it now
     says which runs it actually agreed across.
+
+    AND A VALUE IS NOT A PROVENANCE. A run counts as corroborated only when the
+    observed ceiling is present AND `admission_source == "flag"`. Without that,
+    a numeric ceiling paired with a `derived` or `env` source counted as full
+    corroboration, so this analyzer could print `agreed (N of N runs)` having
+    never established that the pin we passed is the pin that took effect.
+
+    The distinction matters because of what justifies disclosing rather than
+    refusing a partial observation: the argument is that the DRIVER asserts
+    `source = flag` affirmatively per run. That argument is about the driver, and
+    licenses nothing about this analyzer's own independent claim -- `agreed` is a
+    claim about provenance, and a claim has to be checked by whoever makes it.
     """
 
     def __init__(self, value, observed, total):
         self.value = value
+        #: runs with BOTH an observed ceiling and a `flag` provenance
         self.observed = observed
         self.total = total
 
@@ -482,11 +513,24 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
         seen[key] = load_run(
             path, mode, declared_steps, expected_round, declared_duration_s
         )
-        admissions[key] = admission_of(entry)
+        value, source = admission_of(entry)
+        # An explicitly NON-FLAG provenance is a refusal, not a downgrade: the
+        # server told us the ceiling came from somewhere other than the flag we
+        # passed, so the run was served under a configuration we did not choose.
+        if source != NOT_OBSERVED and source != "flag":
+            raise Unmeasured(
+                "admission-provenance",
+                "%s replicate %d reports admission_source=%r, not 'flag': the "
+                "ceiling in force came from somewhere other than the "
+                "--max-concurrent-scans this session passed, so the run was "
+                "served under a configuration this session did not choose"
+                % (arm, replicate, source),
+            )
+        admissions[key] = (value, source)
 
     # Both arms must have been served under the SAME admission ceiling, or the
     # ratio is between two differently-throttled servers.
-    values = [v for v in admissions.values() if v != NOT_OBSERVED]
+    values = [v for v, _ in admissions.values() if v != NOT_OBSERVED]
     observed = set(values)
     if len(observed) > 1:
         raise Unmeasured(
@@ -523,7 +567,14 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
             )
         pairs.append((rep, base, head))
 
+    # Corroborated == a value AND a `flag` provenance. Counting values alone is
+    # what let `agreed` mean less than it says.
+    corroborated = sum(
+        1
+        for value, source in admissions.values()
+        if value != NOT_OBSERVED and source == "flag"
+    )
     admission = Admission(
-        observed.pop() if observed else NOT_OBSERVED, len(values), len(admissions)
+        observed.pop() if observed else NOT_OBSERVED, corroborated, len(admissions)
     )
     return pairs, admission

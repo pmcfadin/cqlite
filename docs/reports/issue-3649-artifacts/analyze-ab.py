@@ -262,10 +262,11 @@ def render_common(manifest, mode, admission):
         )
     )
     out(
-        "server batch-size %s max-batch-bytes %s"
+        "server batch-size %s max-batch-bytes %s step-duration-seconds %s"
         % (
             field(manifest, "workload", "batch_size"),
             field(manifest, "workload", "max_batch_bytes"),
+            field(manifest, "workload", "step_duration_seconds"),
         )
     )
     out(
@@ -309,6 +310,26 @@ def analyze(mode, path, opts):
             "a fast path that never enters the k-way merge, so BOTH arms ran code "
             "#2820 did not touch and the ratio is 1.0 by construction"
             % (files, merge_path),
+        )
+
+    # THE TARGET BAND IS DEFINED FOR `--shape full` OVER THE WHOLE RING (the AC's
+    # first line). A point, limit-k, filtered or aggregating session scored
+    # against it is a wrong answer wearing a right-looking shape. A CONTROL may
+    # use any shape -- its verdict is already disclaimed -- but an unlabelled
+    # session may not.
+    shape = manifest.get("workload", {})
+    shape = shape.get("shape") if isinstance(shape, dict) else None
+    control = manifest.get("control")
+    control = control if isinstance(control, str) and control else None
+    if shape != "full" and not control:
+        raise Unmeasured(
+            "shape-not-full",
+            "the session ran --shape %r, but the #3649 target band and the "
+            "utilization direction are both defined for --shape full over the "
+            "whole ring; a narrowed workload scored against them would be a "
+            "verdict about a different quantity. Re-run with --shape full, or "
+            "label the session --control <label> to have its verdict disclaimed"
+            % shape,
         )
 
     pairs, admission = collect_pairs(manifest, manifest_dir, mode, declared_steps)
@@ -602,6 +623,13 @@ def report(mode, manifest, pairs, admission, opts, stats):
             "verdict-detail %s CONTROL this session is labelled %r, so its verdict "
             "describes the control and does NOT discharge the #3649 acceptance "
             "criteria" % (mode, control)
+        )
+    if field(manifest, "workload", "shape") != "full":
+        out(
+            "verdict-detail %s SHAPE the workload was --shape %s, not 'full'; the "
+            "target band and the utilization direction are defined for a full-ring "
+            "scan, so this verdict is not about the quantity #3649 asks for"
+            % (mode, field(manifest, "workload", "shape"))
         )
     if asymmetric:
         out(
