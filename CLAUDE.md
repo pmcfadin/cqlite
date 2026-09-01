@@ -1263,6 +1263,35 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   legitimate but can never be pasted as evidence of a *fresh* review. Demonstrated end to end: absence
   FAIL → waiver naming that base/head/job → recheck ⇒ `WAIVED` + `RESULT: PASS`, with zero reviewer
   invocations; and a recheck of a *different* job stays `STALE`.
+  **REQUEST A WAIVER ONLY WHEN THE HEAD IS FINAL — pushed, conflict-free, post-gate, and REVIEWED AT
+  THAT SHA (#3460).** The binding above is `base` AND `head` AND `job` compared for EXACT EQUALITY
+  against the run's own `HEAD_SHA` (`git rev-parse HEAD`, recomputed in EVERY mode INCLUDING
+  `--recheck-job`), so **any commit landing after the request makes the grant unapplicable** —
+  `waiver: STALE`, and the FAIL stands. The order is therefore: push every local commit → rebase or
+  resolve until the PR is not `CONFLICTING` → gate of record → **a roborev confirmation pass ON THAT
+  FINAL SHA** → only then request the waiver, naming THAT round's triple. **`--recheck-job` is not an
+  escape**: #3392 stabilised the BASE comparison against a moving `main`, and nothing can make a HEAD
+  binding survive a genuine content change. **The confirmation pass is the step that gets skipped, and
+  skipping it has its own failure shape**: #3367's gated sha had never been reviewed at all (round 25
+  reviewed `6f5fc2b7c` and two commits landed after it), and #2605 was the same — so the final sha needs
+  its OWN round, and THAT round's job id is the one the waiver must name. **THE TRAP CATCHES A LANE
+  DOING THE CAREFUL THING, which is why it is written down rather than left to judgement**: the absence
+  diagnostic prints `base … head … job …` and those values are CORRECT at the moment it prints them,
+  while nothing in the output says they will be invalid after the next push — so copying the verified
+  triple straight into a request is simultaneously the obvious action and the wrong one whenever
+  anything is still going to move the head. Measured cost: THREE independent lanes on ONE day
+  (2026-08-28) — #1705/PR #3382 (grant received, then a conflict with just-merged #1701 had to be
+  resolved), #1699/PR #3403 (the triple was exact and the PR was `CONFLICTING` at the same moment),
+  #3248/PR #3455 (fixes committed but unpushed, AND `CONFLICTING`) — each spending an authorization on
+  code that would not merge, and asking the authorizer to judge a review that no longer described the
+  diff. **DO NOT LOOSEN THE BINDING TO MAKE THIS EASIER**: all three instances are the binding WORKING,
+  and a waiver riding to a later review is the hole #3312 exists to close. **NOT MECHANIZED, and only
+  ONE of the three halves is**: `push-assert` catches the unpushed half (`FAIL (unpushed commits)`,
+  aborting the round before any review), while `mergeable`/`CONFLICTING` appears NOWHERE in the wrapper,
+  the waiver scanner or `premerge-assert.sh` — so a pushed-but-`CONFLICTING` head passes every check and
+  still yields a triple that dies on the rebase. Converting this rule into a refusal, and naming WHY a
+  triple is stale (`head moved` / `base moved` / `job mismatch`) instead of a generic staleness verdict,
+  is **#3827** — a change to the wrapper, which per its own doctrine cannot certify itself.
   **The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged**, so
   field order and value boundaries are enforced and `reason=TODO ` / whitespace-only reasons are refused
   like their untrimmed forms — per-field extraction had enforced neither.
