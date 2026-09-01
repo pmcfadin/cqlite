@@ -80,14 +80,24 @@ and getting it wrong produces a test that passes on unfixed code:
   `udt_hashable_shapes.stn`'s `unhashable_fields`, nested in a tuple in a set
   (golden `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`).
 * **BLIND** — every `collide`/`collide_twin` column (`c`, `fs`, `fcm`, `ftm`,
-  `stu`, `ssu`, `mtu`): the user's `_type` field TOTALLY overwrites the injected
+  `stu`, `ssu`, `mtu`, and since #3612 `cm`/`tm` too — third bullet): the user's
+  `_type` field TOTALLY overwrites the injected
   one, and because `serde_json` is built with `preserve_order` and `Map::insert`
   keeps an existing key's position while `collide` declares `"_type"` first, even
   the key ORDER matched. Assert these as preservation guards only, labelled as
   such. `id 3`'s `"_type": null` is the USER's null field and is CORRECT.
-* **NOT A SUBJECT AT ALL** — `cm`/`tm`: a non-frozen map's key lives in the cell
-  path and `parse_cell_path_key` falls back to `Value::Blob`, so the key never
-  becomes a `Value::Udt` and cannot exercise a UDT renderer.
+* **RECLASSIFIED BY #3612** — `cm`/`tm`. This bullet read **NOT A SUBJECT AT
+  ALL**, and the reasoning was sound for the code of the time: a non-frozen map's
+  key lives in the cell path, `parse_cell_path_key` fell back to `Value::Blob`,
+  so the key never became a `Value::Udt` and could not exercise a UDT renderer.
+  That is now HISTORY. The site delegates to the structural decoder (see the
+  #3612 note above), so these keys DO reach both bindings and the CLI's
+  `--format json`. They join the **BLIND** class rather than the RED-capable one,
+  for the second bullet's reason and not a new one: their key type is
+  `collide`/`collide_twin`, which DECLARES `_type`, so the user's field totally
+  overwrites any injected marker. `cqlite-core`'s `ToJson` stays a non-subject
+  for them, because its `Map` arm `Display`-stringifies every key regardless of
+  type.
 
 ## Layout
 
@@ -153,7 +163,7 @@ FIELD is `None`.
 A **non-frozen** `map<frozen<udt>,int>` is multicell, so its key lives in the
 CELL PATH; a **frozen** map is a single value cell whose key type resolves
 through the on-disk marshal element type / the `UdtRegistry`. The two spellings
-took different decode paths, and only one of them worked.
+took different decode paths, and until #3612 only one of them worked.
 
 **Historically** (and this is why both shapes are committed):
 `parse_cell_path_key` matched a closed set of **primitive** cell-path types and
@@ -174,35 +184,58 @@ in either decode path makes the two disagree.
 
 ## Table 2: `udt_hashable_shapes` — the projection totality boundary (R1-2)
 
-Python's `value_to_hashable_key` has arms for `List`, `Map`, `Frozen` and `Udt`.
-`Tuple` and `Set` have **none** and fall through to `value_to_py` (issue #3500,
-deliberately not fixed by #3504). Making a UDT a hashable `cqlite.Udt`
-nevertheless **moved** the boundary, because what made those fallthrough shapes
-unprojectable was the UDT being an unhashable `dict`. This table carries one
-column per side, each in its **own row** — the `TypeError` is raised while
-converting a row, so a row holding both would hide the projectable cell.
+**THIS SECTION HAS BEEN RE-MEASURED TWICE, AND THE HISTORY IS THE POINT.** The
+boundary moved under #3504 and again under #3500, in different ways, so anything
+here stated as a mechanism decays fast. The column below labelled `now` was
+measured against THIS tree; the two earlier columns are kept as record.
 
-Measured per row (point read; `origin/main`'s binding built into the same venv
-for the "before" column):
+When #3504 landed, `value_to_hashable_key` had arms for `List`, `Map`, `Frozen`
+and `Udt` only, while `Tuple` and `Set` had **none** and fell through to
+`value_to_py`. Making a UDT a hashable `cqlite.Udt` **moved** the boundary without
+adding an arm, because what made those fall-through shapes unprojectable was the
+UDT being an unhashable `dict`. **#3500 then made both `value_to_hashable_key` and
+`contains_udt` TOTAL** — every `Value` variant named, no wildcard arm, pinned by
+`#[deny(clippy::wildcard_enum_match_arm)]` — which moved it again. VERIFIED in
+`bindings/python/src/value_hashable.rs` on this tree: `Tuple` and `Set` now HAVE
+arms (`Value::List(items) | Value::Tuple(items)`, then `Value::Set(items)`), and
+`contains_udt` traverses `Value::List | Value::Set | Value::Tuple`. So the
+"`Tuple` and `Set` have none" premise is **no longer true** and is recorded above
+only as the state #3504 was written against.
 
-| row | column | type | before #3504 | after |
-|---|---|---|---|---|
-| 1 | `stu` | `frozen<set<frozen<tuple<frozen<collide>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 10)})` |
-| 1 | `mtu` | `frozen<map<frozen<tuple<frozen<collide>,int>>,int>>` | `TypeError: unhashable type: 'dict'` | `{(Udt, 20): 5}` |
-| 2 | `ssu` | `frozen<set<frozen<set<frozen<collide>>>>>` | `TypeError: unhashable type: 'list'` | **identical** — still raises |
-| 3 | `stn` | `frozen<set<frozen<tuple<frozen<unhashable_fields>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 30)})` |
+This table carries one column per side, each in its **own row** — a `TypeError` is
+raised while converting a row, so a row holding both would hide the projectable
+cell. That is also why the Python suite reads this table by primary key rather
+than scanning it.
 
-Two things to read off it:
+| row | column | type | before #3504 | after #3504 | now (`+#3500`, measured on this tree) |
+|---|---|---|---|---|---|
+| 1 | `stu` | `frozen<set<frozen<tuple<frozen<collide>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 10)})` | `list[tuple[Udt(collide), 10]]` |
+| 1 | `mtu` | `frozen<map<frozen<tuple<frozen<collide>,int>>,int>>` | `TypeError: unhashable type: 'dict'` | `{(Udt, 20): 5}` | `dict{tuple[Udt(collide), 20]: 5}` |
+| 2 | `ssu` | `frozen<set<frozen<set<frozen<collide>>>>>` | `TypeError: unhashable type: 'list'` | still raises | `list[list[Udt(collide)]]` — **no longer raises** |
+| 3 | `stn` | `frozen<set<frozen<tuple<frozen<unhashable_fields>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 30)})` | `list[tuple[Udt(unhashable_fields), 30]]` |
 
-- `ssu` still fails for a reason #3504 never touched: the **inner** set has a UDT
-  element, so `set_to_py` renders it as a Python `list` for CLI parity (#804),
-  and a list is unhashable in the outer set. The error text (`'list'`, not
-  `'dict'`) is what identifies the cause.
-- `stn` **succeeds**, contradicting the obvious prediction that a UDT with a
-  `map`-typed field stays unhashable. It does so only because CQLite decodes a
-  collection field inside a frozen UDT as `Value::Blob`, so the field arrives as
-  hashable `bytes` rather than a `dict`. That is a **decode gap** orthogonal to
-  #3504 (the correct value is `{"a": 1}`), pinned as characterization by
+Three things to read off it, none of which is what the pre-#3500 text said:
+
+- **NOTHING in this table raises today.** What distinguishes the columns now is the
+  CONTAINER, not projectability: `contains_udt` traverses the whole subtree, so
+  `set_to_py` sees the UDT under the tuple / under the inner set and takes its
+  #804 `list` branch for the whole column. That is why the three `set` columns are
+  `list` and only `mtu` — a map KEY, which has no #804 branch to take and must
+  project — still goes through `value_to_hashable_key`, now via its real `Tuple`
+  ARM rather than a fall-through.
+- `ssu`'s change is the one to watch, because the older text asserted the
+  opposite. It used to fail for a cause #3504 never touched (the inner set has a
+  UDT element, `set_to_py` renders it as a `list` for CLI parity (#804), and a
+  `list` is unhashable in the outer set — the error text said `'list'`, not
+  `'dict'`). #3500 made the OUTER set take the `list` branch too, so there is no
+  longer a set to hash it into.
+- `stn`'s **decode gap survives and is still the interesting fact**, though it is
+  no longer what makes the column succeed: CQLite decodes a collection field
+  inside a frozen UDT as `Value::Blob`, so `m` arrives as `bytes` rather than a
+  `dict`. MEASURED on this tree: `m` is
+  `b'\x00\x00\x00\x01\x00\x00\x00\x01a\x00\x00\x00\x04\x00\x00\x00\x01'`,
+  i.e. the serialized form of the golden's `{"a": 1}`, which is the correct value.
+  Orthogonal to both #3504 and #3500, and pinned as characterization by
   `bindings/python/tests/test_issue_3504_udt_field_namespace.py`. `Udt.__hash__`
   does still propagate `TypeError` for a genuinely unhashable field value; no
   decoder path reaches that today, so it is asserted on a hand-built value.
