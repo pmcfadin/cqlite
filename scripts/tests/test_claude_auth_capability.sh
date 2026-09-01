@@ -1157,6 +1157,113 @@ else
 fi
 
 # =====================================================================================
+# 26. SHELL TRACING MUST NOT LEAK THE CREDENTIAL.
+#     `bash -x` prints every expanded assignment and every command's ARGV *before* the
+#     command runs — which is before the redaction boundary can see anything. Measured on
+#     the shipped code: `bash -x scripts/claude-auth-capability.sh --auth` printed the
+#     token NINE times (the `[ -n "$CLAUDE_AUTH_SECRET" ]` test, the `env KEY=<token> …
+#     claude -p` argv, the `tmux setenv -g KEY <token>` argv, …).
+#     THIS IS AN ACCIDENT ROUTE, NOT A HOSTILE-INVOKER ONE — which is what makes it a
+#     defect under this repo's triage rule: an operator debugging a failing preflight
+#     reaches for `bash -x` precisely BECAUSE the credential check is what is failing, and
+#     CI harnesses set `set -x` wholesale. The owner's ruling on this issue is that the
+#     token is never printed anywhere, and "anywhere" includes a traced run.
+#     Every entry point that reads or consumes the secret now suppresses xtrace for its
+#     duration and RESTORES the caller's setting (depth-counted, so nesting is safe).
+# =====================================================================================
+d26=$(mkshim "$tmp/s26"); plant_claude_probe_env "$d26"; plant_tmux "$d26" stale
+for traced_mode in --auth --tmux-env --report --fix-tmux-env; do
+  traced_rc=0
+  traced_out=$(PATH="$d26:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 \
+        CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" \
+        bash -x "$CAPLIB" "$traced_mode" 2>&1) || traced_rc=$?
+  # NOT appended to $TRANSCRIPT verbatim: a traced run is thousands of lines and, when it
+  # leaks, the leak would be reported twice with no extra information. The census below is
+  # the verdict; a count is printed instead of the text so a failure names the scale
+  # without reprinting the secret.
+  traced_hits=$(printf '%s\n' "$traced_out" | grep -cF -- "$TOK")
+  if [ "$traced_hits" = 0 ]; then
+    ok "bash -x $traced_mode: the credential appears nowhere in a TRACED run"
+  else
+    bad "bash -x $traced_mode: the credential leaked $traced_hits time(s) under shell tracing"
+  fi
+done
+# ...and the suppression must be a LOAN, not a seizure: this file is SOURCED by bootstrap,
+# so a caller that asked for tracing must still have it afterwards. Asserted through the
+# real sourcing path rather than by reading the code.
+cat >"$tmp/xtrace-restore.sh" <<XEOF
+#!/usr/bin/env bash
+set -uo pipefail
+. "$CAPLIB"
+set -x
+claude_auth_verdict_into xr_v xr_d 2>/dev/null
+# NO \`set +x\` of our own before the probe: turning it off here would answer the
+# question the wrong way round. The trace itself goes to stderr, which the caller drops.
+case "\$-" in *x*) printf 'XTRACE-STILL-ON\n' ;; *) printf 'XTRACE-LOST\n' ;; esac
+XEOF
+xr_out=$(PATH="$d26:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" \
+         bash "$tmp/xtrace-restore.sh" 2>/dev/null)
+if printf '%s' "$xr_out" | grep -q 'XTRACE-STILL-ON'; then
+  ok "xtrace suppression is restored to the caller's setting (a sourced library must not seize it)"
+else
+  bad "xtrace suppression swallowed the caller's 'set -x': $xr_out"
+fi
+
+# =====================================================================================
+# 27. STRUCTURAL: EVERY LIBRARY FUNCTION BOOTSTRAP REACHES IS INSIDE THE TRACE BOUNDARY.
+#     Section 26 proves the suppression works on today's four entry points. It cannot see
+#     a FIFTH one added later and called from bootstrap without a wrapper — which would
+#     re-open the leak for that path only, silently, with section 26 still green. So the
+#     containment is asserted the way it is stated: the set of library functions bootstrap
+#     references must be a SUBSET of the wrapped set, and BOTH sets are DERIVED from the
+#     committed sources at run time rather than listed here (a curated list is one more
+#     thing to forget).
+# =====================================================================================
+# The wrapped set: a public name exists as a wrapper iff the file defines <name>__untraced
+# at column zero. Derived, never curated.
+xtrace_wrapped=$(grep -oE '^[a-z_]+__untraced' "$CAPLIB" | sed 's/__untraced$//' | sort -u)
+# library_refs <file>: every claude_auth_*/claude_tmux_* identifier the file names, outside
+# whole-line comments. Lowercase by construction, so the CLAUDE_AUTH_* variables are not
+# in scope; the `__untraced` implementations are skipped because naming one is naming the
+# inside of the boundary, not crossing it.
+unwrapped_refs() {
+  local f="$1" id
+  sed -e 's/^[[:space:]]*#.*$//' "$f" \
+    | grep -oE 'claude_(auth|tmux)_[a-z0-9_]+' | sort -u \
+    | while IFS= read -r id; do
+        case "$id" in *__untraced) continue ;; esac
+        printf '%s\n' "$xtrace_wrapped" | grep -qx -- "$id" || printf '%s\n' "$id"
+      done
+}
+if [ -z "$xtrace_wrapped" ]; then
+  bad "trace-boundary guard: the wrapped set could not be derived from $CAPLIB (no verdict)"
+else
+  ok "trace-boundary guard: the wrapped set was derived from the library source ($(printf '%s\n' "$xtrace_wrapped" | grep -c .) names)"
+fi
+# POSITIVE CONTROL: a caller naming a function that is NOT wrapped must be reported. The
+# needle is an internal helper that really exists and really is not a wrapper, so the
+# control cannot pass by naming something the pattern would miss anyway.
+ctl2="$tmp/fake-bootstrap.sh"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' '. "$REPO_ROOT/scripts/claude-auth-capability.sh"'
+  printf '%s\n' 'claude_auth_verdict_into V D'
+  printf '%s\n' 'claude_tmux_show_key_into A B "$text" KEY'
+} >"$ctl2"
+ctl2_hits=$(unwrapped_refs "$ctl2")
+if [ "$ctl2_hits" = 'claude_tmux_show_key_into' ]; then
+  ok "trace-boundary guard: an unwrapped library call from a caller is reported (and only it)"
+else
+  bad "trace-boundary guard: the control did not isolate the unwrapped call: [$ctl2_hits]"
+fi
+bs_unwrapped=$(unwrapped_refs "$BOOTSTRAP")
+if [ -z "$bs_unwrapped" ]; then
+  ok "trace-boundary guard: every library function bootstrap calls is inside the trace boundary"
+else
+  bad "trace-boundary guard: bootstrap calls library functions that do not suppress xtrace: $bs_unwrapped"
+fi
+
+# =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
 #     `tooling-tests` is a MANDATORY gate component, so a path that exists on ONE box —
 #     or in ONE agent session — makes the gate host-dependent, and if that directory
@@ -1262,7 +1369,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=62
+CASE_FLOOR=70
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

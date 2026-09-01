@@ -102,6 +102,11 @@
 # extra `claude_auth_redact` calls WITHIN a few detail strings (probe output, tmux stderr)
 # are BELT on top of that, not the boundary; an earlier version of this paragraph claimed a
 # single call site and there were five, while bootstrap — the primary consumer — had none.
+# AND THE REDACTION BOUNDARY IS DOWNSTREAM OF SHELL TRACING, so it cannot help there: `bash
+# -x` prints an expanded assignment and a command's ARGV BEFORE the command runs. Every
+# public entry point therefore suppresses xtrace for its duration and restores the caller's
+# setting — see "shell tracing" below. Measured on the code that shipped without it: 8
+# occurrences of the token under `bash -x … --auth`, 16 under `--report`.
 #
 # PLATFORM. /etc/environment + pam_env is Linux-specific. On a non-Linux host BOTH lines
 # are UNMEASURED and NEVER an [ok]: scoping a platform out is not the same as passing it,
@@ -163,6 +168,44 @@ claude_auth_resolve_timeout() {
   [ -n "$CLAUDE_AUTH_TIMEOUT_BIN" ]
 }
 
+# ---- shell tracing: OFF ACROSS EVERY SECRET-BEARING PATH ---------------------------
+# `bash -x` (or an inherited `set -x`) prints every expanded assignment and every
+# command's ARGV *before* the command runs — which is before the redaction boundary can
+# see anything at all. Measured on the code this replaced: `bash -x claude-auth-capability.sh
+# --auth` printed the token 8 times, `--report` 16, `--fix-tmux-env` 15 (the
+# `[ -n "$CLAUDE_AUTH_SECRET" ]` test, the `env KEY=<token> … claude -p` argv, the
+# `tmux setenv -g KEY <token>` argv).
+#
+# THIS IS AN ACCIDENT ROUTE, NOT A HOSTILE-INVOKER ONE, and that is what makes it a defect
+# rather than an out-of-model note: an operator debugging a failing preflight reaches for
+# `bash -x` precisely BECAUSE this check is what is failing, and CI harnesses set `set -x`
+# wholesale. The rule for this file is that the token is never printed ANYWHERE.
+#
+# DEPTH-COUNTED, because the wrapped entry points call each other (a verdict function calls
+# the file reader), and a save/restore pair that forgot that would restore on the INNER
+# return and trace the rest of the outer call. RESTORED, never merely turned off: this file
+# is SOURCED by bootstrap, so seizing a caller's `set -x` is the same class of rudeness as
+# replacing its trap.
+CLAUDE_AUTH_XTRACE_DEPTH=0
+CLAUDE_AUTH_XTRACE_WAS=0
+claude_auth_xtrace_off() {
+  if [ "$CLAUDE_AUTH_XTRACE_DEPTH" -eq 0 ]; then
+    case "$-" in *x*) CLAUDE_AUTH_XTRACE_WAS=1 ;; *) CLAUDE_AUTH_XTRACE_WAS=0 ;; esac
+  fi
+  CLAUDE_AUTH_XTRACE_DEPTH=$((CLAUDE_AUTH_XTRACE_DEPTH + 1))
+  set +x
+  return 0
+}
+claude_auth_xtrace_restore() {
+  if [ "$CLAUDE_AUTH_XTRACE_DEPTH" -gt 0 ]; then
+    CLAUDE_AUTH_XTRACE_DEPTH=$((CLAUDE_AUTH_XTRACE_DEPTH - 1))
+  fi
+  if [ "$CLAUDE_AUTH_XTRACE_DEPTH" -eq 0 ] && [ "$CLAUDE_AUTH_XTRACE_WAS" = 1 ]; then
+    set -x
+  fi
+  return 0
+}
+
 # ---- matching: BUILTIN ONLY, NEVER THROUGH A PIPE -----------------------------------
 # `set -o pipefail` is on and `grep -q`/`grep -m1` EXIT ON THE FIRST MATCH, so when the
 # producer still has more than a pipe buffer (64 KiB on Linux) to write it takes SIGPIPE
@@ -205,7 +248,7 @@ claude_auth_matches_ci() {
 # Over-redaction is the safe direction: the pattern is a glob, so a value containing a
 # glob metacharacter can only remove MORE text, never less.
 CLAUDE_AUTH_SECRET=''
-claude_auth_redact() {
+claude_auth_redact__untraced() {
   local t="${1:-}"
   if [ -n "$CLAUDE_AUTH_SECRET" ]; then t="${t//"$CLAUDE_AUTH_SECRET"/<redacted>}"; fi
   t=$(printf '%s' "$t" | tr -d '\000' | tr '\n\r\t' '   ' | cut -c1-500)
@@ -265,7 +308,7 @@ claude_auth_strip_pam_quotes_into() {
 # States: present | absent | absent-file | unreadable | unparseable.
 # A SYMLINK is `unreadable`, not followed: what it points at is not the file whose bytes
 # pam_env consumes, and an unknown must never resolve to the good case.
-claude_auth_read_key_into() {
+claude_auth_read_key_into__untraced() {
   local __ov="$1" __os="$2" __f="$3" __k="$4" __raw __g=0
   eval "$__ov="; eval "$__os=unreadable"
   # `-L` IS TESTED FIRST, and the order is the whole point: a DANGLING symlink fails `-e`,
@@ -312,7 +355,7 @@ claude_auth_read_key_into() {
 # THE EXIT STATUS IS NEVER READ THROUGH A PIPE. `cmd | tail; echo $?` reports the
 # PIPELINE'S LAST STAGE, and that trap inverted the reading of this very probe during
 # diagnosis. Capture into a variable, then read `$?` on the next line.
-claude_auth_verdict_into() {
+claude_auth_verdict_into__untraced() {
   local __ov="$1" __od="$2" __op="${3:-}"
   local __file='' __state='' __tok='' __cfg='' __out='' __rc=0
   eval "$__ov=UNMEASURED"; eval "$__od="
@@ -374,12 +417,12 @@ claude_auth_verdict_into() {
 
   # NOT A PIPE. `__out=$(...)` then `__rc=$?` on its own line.
   if [ "$CLAUDE_AUTH_TIMEOUT_KILL" = 1 ]; then
-    __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV \
+    __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
       "$CLAUDE_AUTH_TOKEN_KEY=$__tok" "$CLAUDE_AUTH_CONFIG_KEY=$__cfg" \
       "$CLAUDE_AUTH_TIMEOUT_BIN" --kill-after=5 "$CLAUDE_AUTH_PROBE_BOUND" \
       claude -p "$CLAUDE_AUTH_PROMPT" 2>&1)
   else
-    __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV \
+    __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
       "$CLAUDE_AUTH_TOKEN_KEY=$__tok" "$CLAUDE_AUTH_CONFIG_KEY=$__cfg" \
       "$CLAUDE_AUTH_TIMEOUT_BIN" "$CLAUDE_AUTH_PROBE_BOUND" \
       claude -p "$CLAUDE_AUTH_PROMPT" 2>&1)
@@ -421,7 +464,7 @@ claude_auth_verdict_into() {
 # neither variable however correct the disk is. A STALE server value is a distinct and
 # worse state than none — the NOT-SYSTEM-WIDE analogue from #3414 — because everything
 # looks provisioned and the credential is simply the wrong one.
-claude_tmux_env_verdict_into() {
+claude_tmux_env_verdict_into__untraced() {
   local __ov="$1" __od="$2"
   local __file='' __state='' __tok='' __out='' __err='' __rc=0
   local __stok='' __sstate='' __scfg='' __scfgstate='' __cfg='' __cfgstate=''
@@ -677,7 +720,7 @@ t="${CLAUDE_CODE_OAUTH_TOKEN-}"
 } >"$1"
 CLAUDE_AUTH_PROBE
 
-  local -a __e=(env -u BASH_ENV -u ENV -u TMUX -u TMUX_PANE
+  local -a __e=(env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u TMUX -u TMUX_PANE
                 -u "$CLAUDE_AUTH_TOKEN_KEY" -u "$CLAUDE_AUTH_CONFIG_KEY")
   [ -z "$__ptok" ] || __e+=("$CLAUDE_AUTH_TOKEN_KEY=$__ptok")
   [ -z "$__pcfg" ] || __e+=("$CLAUDE_AUTH_CONFIG_KEY=$__pcfg")
@@ -843,7 +886,7 @@ claude_tmux_show_key_into() {
 # never reads). The source is NAMED in the output, because seeding from an inherited value
 # is a different claim from seeding from a persisted one and the operator must be able to
 # tell which happened.
-claude_auth_fix_tmux_env() {
+claude_auth_fix_tmux_env__untraced() {
   local __file='' __tok='' __state='' __cfg='' __cfgstate='' __cfgsrc='' rc=0
   if ! claude_auth_env_file_into __file; then
     printf 'claude-auth: fix REFUSED (the TEST-ONLY seam is set without CQLITE_BOOTSTRAP_TEST_MODE=1)\n'
@@ -884,6 +927,52 @@ claude_auth_fix_tmux_env() {
     rc=1
   fi
   return $rc
+}
+
+# ---- the traced-run boundary: the PUBLIC names are the untraced wrappers ------------
+# Each public entry point that reads or consumes the credential is defined HERE as a thin
+# wrapper around its `__untraced` implementation, so no implementation has to remember to
+# restore the flag on each of its dozen `return` paths — a per-return restore is a list to
+# keep complete, and this repo has paid for that shape before.
+# THE WRAPPED SET IS THE SET BOOTSTRAP AND THE CLI CAN REACH; every other helper in this
+# file is called only from inside one of these, so it is already covered (and the depth
+# counter makes a redundant wrap free if one is added later). That containment is asserted
+# structurally by scripts/tests/test_claude_auth_capability.sh, against bootstrap's own
+# source, rather than left as a claim here.
+claude_auth_redact() {
+  claude_auth_xtrace_off
+  claude_auth_redact__untraced "$@"
+  local __cax_rc=$?
+  claude_auth_xtrace_restore
+  return "$__cax_rc"
+}
+claude_auth_read_key_into() {
+  claude_auth_xtrace_off
+  claude_auth_read_key_into__untraced "$@"
+  local __cax_rc=$?
+  claude_auth_xtrace_restore
+  return "$__cax_rc"
+}
+claude_auth_verdict_into() {
+  claude_auth_xtrace_off
+  claude_auth_verdict_into__untraced "$@"
+  local __cax_rc=$?
+  claude_auth_xtrace_restore
+  return "$__cax_rc"
+}
+claude_tmux_env_verdict_into() {
+  claude_auth_xtrace_off
+  claude_tmux_env_verdict_into__untraced "$@"
+  local __cax_rc=$?
+  claude_auth_xtrace_restore
+  return "$__cax_rc"
+}
+claude_auth_fix_tmux_env() {
+  claude_auth_xtrace_off
+  claude_auth_fix_tmux_env__untraced "$@"
+  local __cax_rc=$?
+  claude_auth_xtrace_restore
+  return "$__cax_rc"
 }
 
 # ---- CLI ---------------------------------------------------------------------------
