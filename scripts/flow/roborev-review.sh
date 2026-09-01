@@ -1631,7 +1631,7 @@ fi
 if [ -n "$JOB_MACHINE_ID" ]; then
   JOB_MACHINE="$JOB_MACHINE_ID (source_machine_id; job ids are per-daemon)"
 elif [ "${JOB_RECORD_READ:-0}" -eq 1 ]; then
-  JOB_MACHINE="NOT RECORDED (${JOB_MACHINE_MISS:-a job record was read but carries no source_machine_id}; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not. Identify the review by the record's git_ref, never by the id alone)"
+  JOB_MACHINE="NOT RECORDED (${JOB_MACHINE_MISS:-a job record was read, but the lookup recorded no cause for the missing daemon id — this is a defect in the lookup, not a measurement}; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not. Identify the review by the record's git_ref, never by the id alone)"
 else
   JOB_MACHINE="UNAVAILABLE (no job record could be read at all, so the issuing daemon is unknown — job-record: $JOB_RECORD)"
 fi

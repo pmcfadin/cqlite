@@ -6317,6 +6317,13 @@ run_wrapper "$jm_work"
 assert_says 'case (jm18) the miss names the depth reached and that the list ended' \
   'searched to a depth of [0-9]+ rows and to the end of what the daemon returns'
 assert_lacks 'case (jm18) it never claims a fixed 50-job window' "latest 50 jobs"
+# AND IT MUST NOT MIS-ATTRIBUTE. "We did not read far enough" and "the row carries no
+# source_machine_id" are different facts about different rows, and collapsing them into one
+# affirmative sentence is the round-2 finding repeating one layer down: the row may well exist and
+# carry the field. Separated causes are the whole value of the depth fix — closing the
+# reachability while leaving the sentence would fix the bound and keep the lie.
+assert_lacks 'case (jm18) a depth miss is never reported as field-absence' \
+  'carries no source_machine_id'
 reset_stub
 
 printf '== (jm19) #3654 r3: an abort AFTER the record poll never emits a stale job-record state ==\n'
