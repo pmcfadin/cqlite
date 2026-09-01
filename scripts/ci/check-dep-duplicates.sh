@@ -83,6 +83,14 @@
 # 114/46 on this workspace), which is the point: those rows were always in the lockfile,
 # they were merely invisible from one platform.
 #
+# THE PROBE IS RUN READ-ONLY, with `--locked --offline` (see the constant below).
+# `--locked` makes cargo REFUSE to update `Cargo.lock` rather than silently rewriting it,
+# and `--offline` removes the registry access. That is not hygiene: `Cargo.lock` is
+# TRACKED, and a component that rewrites a tracked file mid-run FAILS THE GATE OF RECORD
+# on #2926's mid-run tree-mutation check — an ADVISORY component reddening the whole gate
+# from a mutation it caused itself. A failure under either flag is UNMEASURABLE (SKIP,
+# cause named); there is deliberately no unlocked/online retry.
+#
 # An INSTANCE is one column-zero `<name> v<version>` line of that output — i.e. one
 # member of one duplicate group. A CRATE is one distinct name among them. (A crate can
 # legitimately appear twice at the SAME version, e.g. `libc v0.2.189` in both the normal
@@ -136,6 +144,39 @@ MANIFEST="$REPO_ROOT/$MANIFEST_REL"
 # The ONE spelling of the measured invocation. Named once so the script, its diagnostics
 # and the baseline header cannot drift into three descriptions of two commands.
 readonly PROBE_DESC='cargo tree -d --workspace --target all'
+# THE PROBE IS READ-ONLY, AND THAT IS NOT HYGIENE — IT IS WHAT KEEPS THIS COMPONENT FROM
+# FAILING THE GATE OF RECORD (roborev round 4, #1700).
+#
+# `cargo tree` without `--locked` will UPDATE `Cargo.lock` whenever it decides the
+# manifests need it, and without `--offline` it may reach the registry to do so. Two
+# consequences, and the second is severe:
+#
+#   1. The measured SUBJECT becomes MUTABLE — the thing being measured can be changed by
+#      the act of measuring it — which contradicts this component's own read-only,
+#      metadata-only contract (it is deliberately not in the gate's DATASET_COMPONENTS and
+#      builds nothing).
+#   2. IT CAN FAIL THE FULL GATE. `Cargo.lock` is a TRACKED file, and CLAUDE.md #2926: a
+#      run whose worktree mutates MID-RUN cannot certify — every gate mode captures a tree
+#      identity at start, re-verifies it at each component boundary, and FAILs closed with
+#      `tree-integrity: FAIL (tree-mutated-midrun; …)`. So an ADVISORY component that may
+#      never emit a FAIL could red the entire gate of record, from a mutation it caused
+#      itself.
+#
+# `--locked` is the control: cargo REFUSES to update the lockfile rather than silently
+# rewriting it. `--offline` removes the registry access. On a healthy checkout they cost
+# NOTHING — the lockfile is committed and current, so a correct tree needs no update.
+#
+# AND IF EITHER FLAG MAKES THE PROBE FAIL — a genuinely stale lockfile, a cold registry
+# cache — THAT IS `UNMEASURABLE` ⇒ SKIP NAMING THE CAUSE (cargo-tree-failed, quoting
+# cargo's own first stderr line). There is deliberately NO retry without them: a fallback
+# to an unlocked or online run would restore exactly the mutability these flags remove,
+# and would do it silently — the permissive branch a missing capability must never inherit.
+#
+# They are named SEPARATELY from PROBE_DESC on purpose. PROBE_DESC is the measured
+# SUBJECT (which graph is being censused), and the committed baseline's header quotes it;
+# these two flags change only HOW the probe is allowed to run, never WHAT it reports, so
+# folding them into the subject description would misdescribe the baseline's own subject.
+readonly PROBE_READONLY_FLAGS='--locked --offline'
 # THE BOUND ON THE PROBE, AND IT IS A REAL BOUND OR THERE IS NO PROBE.
 #
 # `timeout <n> cmd` sends SIGTERM ONLY. A cargo — or any child of it — that ignores,
@@ -156,7 +197,10 @@ The ADVISORY duplicate-dependency ratchet (issue #1700). Measures
 `cargo tree -d --workspace --target all` and compares the duplicate-instance /
 duplicate-crate counts against scripts/ci/dep-duplicates-baseline.txt. `--target all`
 is what makes the COMMITTED baseline mean the same thing on every gate host: cargo
-tree otherwise defaults to the HOST target.
+tree otherwise defaults to the HOST target. The probe is run READ-ONLY
+(`--locked --offline`): it never updates Cargo.lock and never reaches the registry,
+because rewriting a TRACKED file mid-gate fails the gate of record (#2926). A failure
+under those flags is UNMEASURABLE, never a retry without them.
 
   (no flags)      Measure and compare. Exit 0 = compared (verdict NO-INCREASE or
                   ADVISORY-INCREASE — an increase is ADVISORY and never fails).
@@ -265,8 +309,13 @@ probe_rc=0
 # The bound is STATED before it is applied, so a gate log shows what the probe was
 # actually bounded by rather than leaving a reader to trust this comment.
 say "probe bound: $TIMEOUT_BIN ${PROBE_TIMEOUT_SECS}s then SIGKILL after a further ${PROBE_KILL_GRACE_SECS}s"
+# STATED, like the bound, and for the same reason: a gate log should show that the probe
+# really was constrained to be read-only rather than leave a reader to trust a comment.
+say "probe read-only flags: $PROBE_READONLY_FLAGS (cargo REFUSES to update Cargo.lock instead of rewriting it, and makes no network access; a failure under them is UNMEASURABLE, never an unlocked retry)"
+# shellcheck disable=SC2086  # PROBE_READONLY_FLAGS is two fixed words, intentionally split.
 CARGO_TERM_COLOR=never "$TIMEOUT_BIN" -k "$PROBE_KILL_GRACE_SECS" "$PROBE_TIMEOUT_SECS" \
-  "$CARGO_BIN" tree -d --workspace --target all --manifest-path "$MANIFEST" \
+  "$CARGO_BIN" tree -d --workspace --target all $PROBE_READONLY_FLAGS \
+  --manifest-path "$MANIFEST" \
   >"$TREE_RAW" 2>"$TREE_ERR" || probe_rc=$?
 # The EXPLICIT REACH SIGNAL the gate component reads (#3453): "cargo was invoked, and
 # here is what it returned". Printed unconditionally, before any verdict, so a component

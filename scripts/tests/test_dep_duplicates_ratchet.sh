@@ -67,6 +67,12 @@
 #   P16 MIXED deltas       -> the advisory branch fires on EITHER metric rising, so the
 #                             other may have FALLEN: each delta carries its OWN sign
 #                             (never `+-2`), pinned in both directions
+#   P21 READ-ONLY probe    -> the argv the shim receives carries `--locked --offline`, so
+#                             measuring cannot rewrite the TRACKED Cargo.lock and
+#                             mid-run-mutate the gate of record (#2926); a probe that
+#                             FAILS under --locked is UNMEASURABLE naming the cause, with
+#                             NO verdict and NO retry-without-the-flags (cargo invoked
+#                             exactly once)
 #   P14 no bounded probe   -> a PATH with no timeout(1) is exit 3,
 #                             `cause=probe-unboundable`, and NO probe is claimed: a
 #                             missing capability may not inherit the permissive branch,
@@ -573,6 +579,74 @@ else
   bad "P20b: the described probe ('${p20_desc:-<none>}') claims$p20_undescribed, which cargo never received: argv was '$p20_argv'"
 fi
 
+# --- P21: THE PROBE IS READ-ONLY (--locked --offline) ---------------------
+# THE DEFECT THIS PINS (roborev round 4, #1700): the probe ran WITHOUT `--locked` and
+# WITHOUT `--offline`, so measuring the workspace could REWRITE `Cargo.lock` (cargo
+# updates the lockfile whenever the manifests need it) and could reach the registry.
+# Two consequences, and the second is the severe one:
+#   1. The measured SUBJECT became MUTABLE — the thing being measured could be changed by
+#      the act of measuring it — which contradicts this component's own read-only contract.
+#   2. IT COULD FAIL THE GATE OF RECORD. `Cargo.lock` is TRACKED, and CLAUDE.md #2926: a
+#      run whose worktree mutates MID-RUN cannot certify — every mode re-verifies the tree
+#      identity at each component boundary and FAILs closed with
+#      `tree-integrity: FAIL (tree-mutated-midrun; …)`. An ADVISORY component that may
+#      never emit a FAIL could therefore red the whole gate, from a mutation it caused
+#      itself.
+# `--locked` makes cargo REFUSE to update the lockfile instead of silently rewriting it —
+# that is what removes the mutation — and `--offline` removes the registry access. The
+# assertion is over the ARGV THE SHIM RECEIVED, never over the guard's source text: the
+# flags being PRESENT in the file is not evidence that the probe was run with them.
+d=$(new_tree p21); plant_cargo "$d" 0 tree_baseline; run_guard "$d"
+p21_argv="$(cat "$d/cargo-argv.txt" 2>/dev/null || true)"
+p21_missing=""
+for _w in --locked --offline; do
+  case " $p21_argv " in *" $_w "*) ;; *) p21_missing="$p21_missing $_w" ;; esac
+done
+if [ -z "$p21_missing" ]; then
+  ok "P21a: the probe is invoked READ-ONLY (--locked --offline), so measuring cannot rewrite the tracked Cargo.lock and mid-run-mutate the gate of record (#2926)"
+else
+  bad "P21a: the probe's argv is missing$p21_missing — measuring the workspace can rewrite Cargo.lock or reach the registry: argv was '$p21_argv'"
+fi
+
+# THE OTHER HALF, AND IT IS THE FAIL-CLOSED DIRECTION. If `--locked` makes the probe fail
+# (a genuinely stale lockfile) or `--offline` does (a cold registry cache), that is
+# UNMEASURABLE ⇒ SKIP NAMING THE CAUSE. It may NOT fall back to an unlocked or online
+# retry: a retry would restore exactly the mutability being removed here, and it would do
+# so silently, which is the permissive branch CLAUDE.md forbids. So this case plants a
+# cargo that REJECTS `--locked` the way a real stale lockfile does, and asserts BOTH that
+# the guard reports it as an unmeasured state AND that cargo was invoked exactly ONCE.
+d=$(new_tree p21b)
+plant_cargo "$d" 0 tree_baseline
+cat > "$d/bin/cargo" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$d/cargo-argv.txt"
+if [ "\${1:-}" = tree ]; then
+  case " \$* " in
+    *' --locked '*)
+      echo "error: the lock file $d/Cargo.lock needs to be updated but --locked was passed to prevent this" >&2
+      exit 101 ;;
+  esac
+  cat "$d/planted-tree.txt"
+  exit 0
+fi
+exit 97
+EOF
+chmod +x "$d/bin/cargo"
+rm -f "$d/cargo-argv.txt"
+run_guard "$d"
+assert_case "P21b: a probe that FAILS under --locked (a stale lockfile) is UNMEASURABLE (exit 3) naming the cause and quoting cargo's own reason — never a verdict" \
+  3 'SKIP-UNMEASURABLE cause=cargo-tree-failed' '--locked was passed' 'NOT a pass'
+case "$OUT" in
+  *'verdict '*) bad "P21b: a probe that could not be run read-only must print NO verdict" ;;
+  *)            ok "P21b: a probe that could not be run read-only prints NO verdict at all" ;;
+esac
+p21b_calls="$(grep -c . "$d/cargo-argv.txt" 2>/dev/null || echo 0)"
+if [ "$p21b_calls" = 1 ]; then
+  ok "P21c: cargo was invoked exactly ONCE — there is no retry-without-the-flags fallback, which would restore the mutability the flags remove"
+else
+  bad "P21c: cargo was invoked $p21b_calls time(s) — a second, unlocked/online attempt is exactly the silent permissive fallback that may not exist: argv log was '$(tr '\n' '|' < "$d/cargo-argv.txt" 2>/dev/null)'"
+fi
+
 # --- P12: --regenerate round trip ----------------------------------------
 d=$(new_tree p12 none); plant_cargo "$d" 0 tree_grew
 run_guard "$d" --regenerate
@@ -975,7 +1049,11 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # deletion of the new cases would not red. The affirmative-signal cases (G1c's two extra
 # verdicts + G1d's two) are G-class, i.e. they need git + the gate, so they raise the
 # measured totals to 67 but NOT the floor.
-CASE_FLOOR=42
+# ROUND 4. P21 (the read-only probe) adds FOUR more host-independent planted verdicts —
+# P21a's argv assertion, P21b's rc/token assertion, P21b's no-verdict check and P21c's
+# single-invocation check — all shim cargo + plant_timeout, so the floor moves with them:
+# 42 + 4 = 46. Measured 71 here.
+CASE_FLOOR=46
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2

@@ -16281,6 +16281,16 @@ run_pub_surface() {
 # would mean a different thing on a Linux lane than on a macOS one and each would report
 # a phantom advisory delta against the other's numbers.
 #
+# THE PROBE IS RUN READ-ONLY (`--locked --offline`), AND THAT PROTECTS THIS GATE. Without
+# `--locked` cargo will UPDATE `Cargo.lock` whenever it decides the manifests need it —
+# a TRACKED file — and a component that rewrites one mid-run trips this gate's own
+# mid-run tree-mutation check (#2926, `tree-integrity: FAIL (tree-mutated-midrun; …)`).
+# That would be an ADVISORY component, which may never emit a FAIL, reddening the gate of
+# record from a mutation it caused itself. `--offline` removes the registry access. A
+# failure under either flag is UNMEASURABLE ⇒ SKIP naming the cause; the guard
+# deliberately does NOT retry without them, since that would restore the mutability
+# silently.
+#
 # THIS COMPONENT NEVER EMITS FAIL, and that is a mandate rather than an oversight
 # (#1700 AC2). An increase in duplication is a signal to a human: a legitimate new
 # dependency can add a duplicate that no local decision can collapse, `[patch]` and pins
