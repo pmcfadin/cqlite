@@ -80,6 +80,9 @@
 #
 # Requires: passwordless sudo for /proc/sys/vm/drop_caches (checked, fail-closed).
 set -euo pipefail
+# GNU `time` renders %e per the locale; a decimal comma would shift every CSV column
+# after it. Pin before any measurement is taken or parsed.
+export LC_ALL=C
 
 CORPUS=""; ROUNDS=4; OUT=""
 declare -a BINARIES=()
@@ -135,6 +138,7 @@ if [ $(( ROUNDS % 2 )) -ne 0 ]; then
 fi
 [ -d "$CORPUS" ] || { echo "cold-warm-ab: corpus not a directory: $CORPUS" >&2; exit 2; }
 [ -x /usr/bin/time ] || { echo "cold-warm-ab: /usr/bin/time is required for major-fault counts" >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { echo "cold-warm-ab: python3 is required to validate each phase's JSON" >&2; exit 3; }
 
 # The label is interpolated into BOTH a filename and a CSV field, so it is
 # constrained to a charset safe for both, and required unique. Unvalidated:
@@ -290,6 +294,8 @@ echo "round,arm,where,drain_state" > "$OUT/drain.csv"
 # drained. On a device shared with other workloads it may legitimately never reach
 # zero, which is why the result is reported rather than enforced.
 DRAIN_STATE=UNKNOWN
+# First observed rows/cells/table-dirs; every later phase must match it exactly.
+EXPECTED_SHAPE=""
 drain_and_drop() {
   local round="$1" label="$2" where="$3" i=0 inflight
   DRAIN_STATE=NOT-ATTEMPTED
@@ -312,6 +318,8 @@ LAST_MAJF=""
 
 run_phase() {
   local round="$1" label="$2" path="$3" phase="$4" prefetch="$5"; shift 5
+  # `floor` is --setup-only: it deliberately performs no scan, so it has no passes
+  # to validate. Every scanning phase is validated below.
   local tm="$OUT/${label}.round${round}.${phase}.time"
   local log="$OUT/${label}.round${round}.${phase}.json"
   if ! /usr/bin/time -f "%e %M %F %R" -o "$tm" \
@@ -319,6 +327,44 @@ run_phase() {
       "$path" --corpus "$CORPUS" "$@" > "$log" 2> "$OUT/${label}.round${round}.${phase}.err"; then
     echo "cold-warm-ab: round $round arm $label phase $phase FAILED; see $OUT/${label}.round${round}.${phase}.err" >&2
     exit 4
+  fi
+  # A zero exit is not a measurement. Require the emitted JSON to be well-formed,
+  # to report a NON-ZERO row count (the "0-rows-when-present" failure this repo
+  # forbids), and to report the SAME rows/cells/table-dirs as every other scanning
+  # phase in the run — two arms scanning different work would otherwise produce a
+  # complete-looking A/B that compares nothing.
+  #
+  # `floor` is exempt BY CONSTRUCTION, not by oversight: it runs --setup-only and
+  # performs no scan, so it emits no passes to validate.
+  if [ "$phase" != floor ]; then
+    local shape
+    if ! shape=$(python3 - "$log" <<'PYEOF'
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"UNPARSEABLE {e}"); sys.exit(1)
+ps=d.get("passes") or []
+if not ps: print("NO-PASSES"); sys.exit(1)
+rows=sum(int(p.get("rows",0)) for p in ps)
+cells=sum(int(p.get("cells",0)) for p in ps)
+if rows<=0: print(f"ZERO-ROWS rows={rows}"); sys.exit(1)
+print(f"rows={rows} cells={cells} tables={','.join(sorted(d.get('table_dirs_ingested') or []))}")
+PYEOF
+    ); then
+      echo "cold-warm-ab: round $round arm $label phase $phase produced no usable measurement: $shape" >&2
+      exit 5
+    fi
+    if [ -z "$EXPECTED_SHAPE" ]; then
+      EXPECTED_SHAPE="$shape"
+      echo "work-shape: $shape" >> "$OUT/host.txt"
+    elif [ "$shape" != "$EXPECTED_SHAPE" ]; then
+      echo "cold-warm-ab: round $round arm $label phase $phase scanned DIFFERENT work than the rest of this run" >&2
+      echo "cold-warm-ab:   expected: $EXPECTED_SHAPE" >&2
+      echo "cold-warm-ab:   observed: $shape" >&2
+      echo "cold-warm-ab: an A/B over different work compares nothing." >&2
+      exit 5
+    fi
   fi
   local wall rss majf minf
   read -r wall rss majf minf < "$tm"
@@ -359,7 +405,7 @@ done
 # It records what each arm DOES; it asserts nothing about what each arm SHOULD do,
 # because the labels are the caller's and this harness does not know their meaning.
 {
-  echo "# madvise census per arm, --setup-only, CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap"
+  echo "# madvise census per arm, --setup-only, CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap\n# counts are SUCCESSFUL calls (returned 0); any failures are shown as (+N FAILED)"
   if ! command -v strace >/dev/null 2>&1; then
     echo "UNAVAILABLE: strace is not installed — the advice census was NOT taken."
     echo "UNAVAILABLE: this run carries no evidence that the arms differ in issued advice."
@@ -369,15 +415,52 @@ done
       st="$OUT/${label}.advice.strace"
       if env CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap \
            strace -f -e trace=madvise -o "$st" "$path" --corpus "$CORPUS" --setup-only >/dev/null 2>&1; then
-        _c_wn=UNMEASURED; _c_rd=UNMEASURED; _c_sq=UNMEASURED; _c_dn=UNMEASURED
+        # Count SUCCESSES, not attempts. `madvise` failure is non-fatal to the
+        # reader (it is logged and swallowed), so a run where every
+        # `MADV_WILLNEED` returned -1 would have no effective prefetch at all
+        # while a naive `grep -c MADV_WILLNEED` still reported 1. Counting the
+        # attempt would make an ineffective run indistinguishable from a working
+        # one — in the artifact whose whole job is to evidence that the arms
+        # differ. Failures are counted separately and reported, never folded in.
+        _adv=UNMEASURED
         if [ -r "$st" ]; then
-          _c_wn=$(grep -c MADV_WILLNEED   "$st" || true); [ -n "$_c_wn" ] || _c_wn=UNMEASURED
-          _c_rd=$(grep -c MADV_RANDOM     "$st" || true); [ -n "$_c_rd" ] || _c_rd=UNMEASURED
-          _c_sq=$(grep -c MADV_SEQUENTIAL "$st" || true); [ -n "$_c_sq" ] || _c_sq=UNMEASURED
-          _c_dn=$(grep -c MADV_DONTNEED   "$st" || true); [ -n "$_c_dn" ] || _c_dn=UNMEASURED
+          _adv=$(awk '
+            # strace -f splits a syscall interrupted by another thread into an
+            # "<unfinished ...>" line and a "<... madvise resumed>) = R" line, so
+            # neither half alone carries BOTH the advice name and the return value.
+            # Counting complete lines only reports every split call as a failure —
+            # measured: 2 of 4 real MADV_DONTNEED calls. Pair them by pid.
+            /<unfinished \.\.\.>/ && /MADV_/ {
+              for (i = 1; i <= NF; i++) if ($i ~ /^MADV_/) { a = $i; gsub(/[),]/, "", a) }
+              pending[$1] = a; next
+            }
+            /<\.\.\. madvise resumed>/ {
+              a = pending[$1]
+              if (a == "") { unpaired++; next }
+              delete pending[$1]
+              if ($0 ~ /=[ ]*0[ ]*$/) s[a]++; else f[a]++
+              next
+            }
+            /MADV_/ {
+              for (i = 1; i <= NF; i++) if ($i ~ /^MADV_/) { a = $i; gsub(/[),]/, "", a) }
+              if ($0 ~ /=[ ]*0[ ]*$/) s[a]++; else f[a]++
+            }
+            END {
+              split("MADV_WILLNEED MADV_RANDOM MADV_SEQUENTIAL MADV_DONTNEED", k, " ")
+              out = ""
+              for (i = 1; i <= 4; i++) {
+                n = k[i]; sub(/^MADV_/, "", n)
+                out = out sprintf("%s=%d", n, s[k[i]] + 0)
+                if (f[k[i]] + 0 > 0) out = out sprintf("(+%d FAILED)", f[k[i]])
+                out = out " "
+              }
+              d = 0; for (x in pending) d++
+              if (unpaired + 0 > 0 || d > 0) out = out sprintf("[UNRECONCILED unpaired=%d dangling=%d]", unpaired + 0, d)
+              print out
+            }' "$st")
+          [ -n "$_adv" ] || _adv=UNMEASURED
         fi
-        printf '%s: WILLNEED=%s RANDOM=%s SEQUENTIAL=%s DONTNEED=%s\n' \
-          "$label" "$_c_wn" "$_c_rd" "$_c_sq" "$_c_dn"
+        printf '%s: %s\n' "$label" "$_adv"
       else
         echo "$label: CENSUS FAILED — no evidence recorded for this arm"
       fi
