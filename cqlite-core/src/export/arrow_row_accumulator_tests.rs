@@ -375,15 +375,23 @@ fn recomputed_payload_matches_the_sum_of_the_row_widths() {
 /// `rows_to_record_batch` ends in the identical `try_new` with no explicit row
 /// count and `convert_to_arrays` returns an empty vec for zero columns. Changing
 /// it here would change Arrow output for this case inside a behaviour-preserving
-/// refactor, so it is deliberately NOT changed. **Whether a zero-column
-/// projection is reachable at all on the `do_get`/streaming path is UNRESOLVED** —
-/// this is neither a known-harmless case nor a known-live one. Issue #3742 owns
-/// both that question and the behaviour.
+/// refactor, so it is deliberately NOT changed. **Reachability is no longer
+/// open**: a zero-column projection IS publicly reachable over `do_get`, on the
+/// full-scan, point-read and aggregation routes alike — measured in
+/// `cqlite-flight/tests/issue_3742_zero_column_projection.rs`. Issue #3742 owns
+/// the resulting behaviour; no fix posture is presupposed here.
 ///
-/// The exact terminal behaviour of `try_new` on an empty array list (a zero-row
-/// batch, or an `Err`) is deliberately not hard-coded beyond the `Ok` arm, because
-/// it is arrow's, not this crate's, and both outcomes are equally consistent with
-/// the property under test.
+/// # MEASURED terminal behaviour (arrow-array 53.4.1)
+///
+/// `RecordBatch::try_new(zero_field_schema, vec![])` returns
+/// `Err(ArrowError::InvalidArgumentError("must either specify a row count or at
+/// least one column"))`, so BOTH paths refuse. That measurement is now PINNED
+/// here (issue #3742): the refusal, its message, and the fact that `len()` still
+/// reports the staged rows that no batch carries. It is pinned so that a fix —
+/// whichever posture issue #3742 settles on (reject at the boundary, carry an
+/// explicit row count, or project a count anchor) — has to flip this test
+/// deliberately and visibly, rather than sliding past an arm that asserts
+/// nothing. The `(Ok, Ok)` arm below is the arrow-upgrade tripwire.
 #[test]
 fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
     let columns: Vec<ColumnInfo> = Vec::new();
@@ -404,28 +412,51 @@ fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
     // The accumulator DOES track the rows...
     assert_eq!(acc.len(), 3, "len() reports the committed rows");
 
-    // ...and the batch does NOT, identically on both paths (issue #3742).
+    // ...and NO batch exists to carry them: under arrow-array 53.4.1 both paths
+    // REFUSE, with arrow's row-count message. This is the arm that executes.
     match (acc.to_record_batch(), rows_to_record_batch(&columns, &rows)) {
+        (Err(fused), Err(reference)) => {
+            // Arrow's refusal, verbatim from `RecordBatch::try_new`, on BOTH
+            // paths — not merely "some error each".
+            const REFUSAL: &str = "must either specify a row count or at least one column";
+            let (fused_text, reference_text) = (fused.to_string(), reference.to_string());
+            assert!(
+                fused_text.contains(REFUSAL),
+                "the fused path must refuse with arrow's row-count message, got: {fused_text}"
+            );
+            assert!(
+                reference_text.contains(REFUSAL),
+                "the pre-fold path must refuse with arrow's row-count message, \
+                 got: {reference_text}"
+            );
+            // The rows are tracked in the accumulator and carried by nothing: a
+            // refused `to_record_batch()` leaves `len()` reporting them, so the
+            // count exists on exactly one side of a boundary it cannot cross
+            // (issue #3742). Pinned, not endorsed.
+            assert_eq!(
+                acc.len(),
+                3,
+                "len() still reports the 3 staged rows after the batch was refused"
+            );
+        }
+        // TRIPWIRE, deliberately failing: arrow-array 53.4.1 — the version
+        // measured for issue #3742 — makes this arm unreachable. If an arrow
+        // upgrade starts ACCEPTING a zero-field/zero-array batch, the equality
+        // assert still enforces issue #3552's agreement property, and the panic
+        // then forces #3742 to re-measure rather than letting a silently changed
+        // terminal behaviour pass as green.
         (Ok(fused), Ok(reference)) => {
             assert_eq!(
                 fused, reference,
                 "the fused and pre-fold zero-column batches must be identical"
             );
-            assert_eq!(
+            panic!(
+                "arrow now ACCEPTS a zero-column batch (num_rows={}, tracked len={}) — \
+                 the pinned refusal in this test is stale; re-measure issue #3742",
                 fused.num_rows(),
-                0,
-                "an empty array list carries no length, so the batch reports 0 rows"
-            );
-            assert_ne!(
-                fused.num_rows(),
-                acc.len(),
-                "the tracked count is LOST at the batch boundary — this test pins \
-                 that, it does not endorse it (issue #3742)"
+                acc.len()
             );
         }
-        // Both paths REFUSING is equally consistent: the property under test is
-        // that they agree, not which way arrow decides.
-        (Err(_), Err(_)) => {}
         (fused, reference) => panic!(
             "the fused and pre-fold zero-column paths DISAGREE — fused ok={}, \
              reference ok={} (issue #3742)",
