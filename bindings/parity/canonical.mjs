@@ -464,6 +464,11 @@ const nodeAdapter = {
     if (FLOAT_KINDS.has(kind)) {
       // `create_double` (value.rs:222-223) — always a JS number.
       requireJsType(value, 'number', kind);
+      // Negative zero canonicalizes to the STRING "-0.0" — see canonical.py's
+      // `canon_float`. JSON.stringify renders -0 as `0` (measured), so the sign
+      // bit cannot survive to the comparator as a JSON number; a sign-aware
+      // comparator alone would have red on correct bindings.
+      if (Object.is(value, -0)) return '-0.0';
       return value;
     }
     if (TEXT_KINDS.has(kind)) {
@@ -497,6 +502,18 @@ const nodeAdapter = {
     if (kind === 'date') {
       if (!(value instanceof Date)) {
         throw new CanonicalError(`declared date expects a JavaScript Date, got ${containerName(value)}`);
+      }
+      // The binding builds a CQL date as `days * 86_400_000` (bindings/node/src/
+      // value.rs:238-247), i.e. ALWAYS midnight UTC. Accepting any time-of-day
+      // and discarding it would normalize away a regression that returned the
+      // right calendar day at the wrong instant.
+      if (
+        value.getUTCHours() !== 0 || value.getUTCMinutes() !== 0 ||
+        value.getUTCSeconds() !== 0 || value.getUTCMilliseconds() !== 0
+      ) {
+        throw new CanonicalError(
+          `declared date expects a Date at midnight UTC, got ${value.toISOString()}`,
+        );
       }
       const iso = value.toISOString();
       return iso.slice(0, iso.indexOf('T'));

@@ -56,8 +56,8 @@
       "each pins a defect that is silent when it is not refused, so a count alone",
       "would let one be swapped for a benign case."
     ],
-    "min_vectors": 79,
-    "min_errors": 58,
+    "min_vectors": 82,
+    "min_errors": 59,
     "required_kinds": [
       "ascii",
       "bigint",
@@ -109,6 +109,7 @@
       "node_bigint_for_smallint",
       "node_bigint_for_tinyint",
       "node_blob_not_bytes",
+      "node_date_not_midnight",
       "node_duration_extra_key",
       "node_duration_missing_key",
       "node_map_for_set",
@@ -1673,6 +1674,35 @@
       "node": "1e1000001",
       "cli": "1e1000001",
       "canonical": "1e1000001"
+    },
+    {
+      "name": "double_negative_zero",
+      "type": "double",
+      "python": -0.0,
+      "node": -0.0,
+      "cli": -0.0,
+      "canonical": "-0.0",
+      "_source": "synthetic: no corpus column carries -0.0; the canonical form is the STRING \"-0.0\" because JSON.stringify renders -0 as 0 (measured), so the sign cannot survive the node artifact as a number",
+      "_why": "a binding dropping the sign bit of a float/double is an observable fidelity regression that -0.0==0.0 hides"
+    },
+    {
+      "name": "double_positive_zero",
+      "type": "double",
+      "python": 0.0,
+      "node": 0.0,
+      "cli": 0.0,
+      "canonical": 0.0,
+      "_source": "synthetic: the CONTROL for double_negative_zero — positive zero must stay a JSON number, not the string",
+      "_why": "proves the -0.0 rule does not swallow ordinary zero"
+    },
+    {
+      "name": "float_negative_zero",
+      "type": "float",
+      "python": -0.0,
+      "node": -0.0,
+      "cli": -0.0,
+      "canonical": "-0.0",
+      "_source": "synthetic: float32 twin of double_negative_zero"
     }
   ],
   "rows": [
@@ -2513,6 +2543,18 @@
         }
       },
       "expect": "expects millisecond-aligned microseconds, got"
+    },
+    {
+      "name": "node_date_not_midnight",
+      "stage": "canonicalize",
+      "type": "date",
+      "legs": {
+        "node": {
+          "$": "datetime",
+          "ms": 1750248000000
+        }
+      },
+      "expect": "expects a Date at midnight UTC"
     }
   ]
 }

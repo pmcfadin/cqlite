@@ -406,6 +406,25 @@ def shape_tag(v: Any) -> str:
     return type(v).__name__
 
 
+# NEGATIVE ZERO IS CANONICALIZED TO A STRING, ON PURPOSE.
+# `-0.0 == 0.0` in Python and JS alike, so a binding that DROPPED the sign bit
+# of a CQL float/double would compare equal everywhere else here. Making the
+# comparator sign-aware is NOT enough and would have been a false red: the node
+# leg reaches the comparator through `JSON.stringify`, which renders -0 as `0`
+# (measured), so the sign cannot survive as a JSON number at all. Emitting the
+# STRING "-0.0" is the JSON-safe representation all three legs can carry.
+_NEGATIVE_ZERO = "-0.0"
+
+
+def canon_float(value: float) -> Any:
+    """Canonical form of a CQL float/double: the number, or "-0.0" for -0.0."""
+    import math as _math
+
+    if value == 0.0 and _math.copysign(1.0, value) < 0:
+        return _NEGATIVE_ZERO
+    return value
+
+
 def canonical_equal(a: Any, b: Any) -> bool:
     """Equality over canonical values that ALSO compares :func:`shape_tag`.
 
@@ -551,7 +570,7 @@ class PythonAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a Python float, got {_pytype(value)}"
                 )
-            return value
+            return canon_float(value)
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(
@@ -709,7 +728,7 @@ class CliAdapter(_Adapter):
                 raise CanonicalError(
                     f"declared {kind} expects a JSON number, got {_pytype(value)}"
                 )
-            return float(value)
+            return canon_float(float(value))
         if kind in _TEXT_KINDS:
             if not isinstance(value, str):
                 raise CanonicalError(

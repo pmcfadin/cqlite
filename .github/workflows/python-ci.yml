@@ -12,12 +12,19 @@ on:
     # A change to ANY of them must be able to trigger this workflow. Extending
     # the harness means extending this list in the same edit.
     #
-    # It is enumerated in full here because the SAME omission was found THREE
+    # It is enumerated in full here because the SAME omission was found FOUR
     # times in review — `bindings/node/**` + `cqlite-cli/**`, then
     # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
     # single missing path rather than as the class. Each entry below says which
     # step reads it, so the next reader can check the list against the job
     # instead of guessing.
+    #
+    # DECLARED RESIDUAL, because the FOURTH instance landed AFTER this list was
+    # called complete: this is a CURATED list and nothing mechanically checks it
+    # against what the jobs actually read. GitHub path filters cannot be derived
+    # from the steps, so completeness rests on review alone — an input added to a
+    # step but not to this list fails SILENTLY, by the job never running. Treat
+    # 'this list looks complete' as unverified.
     paths:
       # --- the workflow itself -------------------------------------------
       - '.github/workflows/python-ci.yml'
@@ -50,6 +57,12 @@ on:
       # composite action) fetch-datasets.sh; a change to either can decide
       # whether the corpus this job compares against is complete.
       - 'test-data/scripts/**'
+      # The GIT-TRACKED half of the corpus. The dataset step restores tracked
+      # fixture files and check-dataset-manifest.sh derives the committed table
+      # inventory from THIS subtree — so adding, removing or renaming a dataset
+      # table directory changes what the parity legs read and whether the
+      # completeness check passes at all.
+      - 'test-data/datasets/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -67,12 +80,19 @@ on:
     # A change to ANY of them must be able to trigger this workflow. Extending
     # the harness means extending this list in the same edit.
     #
-    # It is enumerated in full here because the SAME omission was found THREE
+    # It is enumerated in full here because the SAME omission was found FOUR
     # times in review — `bindings/node/**` + `cqlite-cli/**`, then
     # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
     # single missing path rather than as the class. Each entry below says which
     # step reads it, so the next reader can check the list against the job
     # instead of guessing.
+    #
+    # DECLARED RESIDUAL, because the FOURTH instance landed AFTER this list was
+    # called complete: this is a CURATED list and nothing mechanically checks it
+    # against what the jobs actually read. GitHub path filters cannot be derived
+    # from the steps, so completeness rests on review alone — an input added to a
+    # step but not to this list fails SILENTLY, by the job never running. Treat
+    # 'this list looks complete' as unverified.
     paths:
       # --- the workflow itself -------------------------------------------
       - '.github/workflows/python-ci.yml'
@@ -105,6 +125,12 @@ on:
       # composite action) fetch-datasets.sh; a change to either can decide
       # whether the corpus this job compares against is complete.
       - 'test-data/scripts/**'
+      # The GIT-TRACKED half of the corpus. The dataset step restores tracked
+      # fixture files and check-dataset-manifest.sh derives the committed table
+      # inventory from THIS subtree — so adding, removing or renaming a dataset
+      # table directory changes what the parity legs read and whether the
+      # completeness check passes at all.
+      - 'test-data/datasets/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
