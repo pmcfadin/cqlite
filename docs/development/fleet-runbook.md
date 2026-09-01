@@ -1036,7 +1036,11 @@ bash scripts/claude-auth-capability.sh --report
 
 # 2. If `claude-auth:` is NOT-PERSISTED — provision the credential. Its OWN LINE, no inline
 #    comment (pam_env takes a trailing `# ...` as part of the value), root:root 0644.
-sudo sh -c 'printf "CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$TOKEN" >> /etc/environment'
+#    `$TOKEN` MUST be expanded by YOUR shell, not root's: `sudo sh -c '... "$TOKEN" ...'`
+#    hands the single-quoted text to a ROOT shell that never received the variable, so it
+#    appends `CLAUDE_CODE_OAUTH_TOKEN=` — an EMPTY value, which the check then correctly
+#    reports as NOT-PERSISTED while the line looks provisioned. Pipe instead:
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOKEN" | sudo tee -a /etc/environment >/dev/null
 
 # 3. Repair the RUNNING tmux server. This is the step that fixes the field failure, and it
 #    writes NOTHING to disk.
@@ -1076,7 +1080,10 @@ it **loudly** — it emits `claude-auth: OPT-OUT` as a `[warn]`, so it withholds
 and can never buy a vacuous green.
 
 **Bootstrap writes the token to no file.** `/etc/environment` already holds it; a second 644 copy
-would buy nothing and is what `openspec/specs/worker-environment-preflight/spec.md` forbids.
+would buy nothing, and it is refused on the precedent of
+`openspec/specs/worker-environment-preflight/spec.md` — whose "SHALL NOT write the token
+itself to disk" clause is stated for `$GH_TOKEN` under the git-credential requirement, so it
+is the precedent for this rule rather than a clause that already names this credential.
 `tmux setenv -g` does pass the value in `argv` (briefly visible in `ps`) — declared rather than
 worked around, because tmux offers no stdin form and the same value is already world-readable in
 `/etc/environment` on these boxes.

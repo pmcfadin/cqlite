@@ -1304,8 +1304,9 @@ EOF
 }
 
 # mk_push_bin <dir> [setup-git-body] — PATH stubs that keep every OTHER section quiet.
-# `uname` reports Darwin so the Linux-only mold + perf sections (whose verdicts depend
-# on the HOST's kernel settings) cannot leak host state into these cases.
+# `uname` reports LINUX (see the note on the stub below; this header said Darwin for four
+# rounds after the code stopped doing it) and `perf` is stubbed, so the Linux-only mold +
+# perf sections cannot leak the HOST's kernel settings into these cases.
 mk_push_bin() {
   local dir="$1" setup="${2:-:}"
   mkdir -p "$dir"
@@ -1318,6 +1319,8 @@ mk_push_bin() {
   # perf section warns. So the sandbox becomes Linux and the one section that made Darwin
   # attractive is satisfied directly. It also makes the green-path cases MORE meaningful:
   # "this box certifies green" is now a Linux-only claim, so they must model a Linux box.
+  # (The `sudo` shim's comment below still said "the perf section is skipped here, `uname`
+  # reports Darwin" for the same four rounds — corrected with this one.)
   mk_stub "$dir" uname 'echo Linux'
   # perf stat is invoked with CSV output, so the stub emits `<count>,,cycles` on stderr as
   # the real one does — a human-formatted row parses as no-cycles-row (verified against the
@@ -1334,18 +1337,20 @@ exit 0'
   # would depend on whether the HOST running the suite happens to be pinned. That is the
   # host-dependence this file removes everywhere else (GIT_CONFIG_GLOBAL, the board env,
   # the datasets stub); 5b is simply the newest place it could leak in. Section 3b never
-  # invokes sudo and the perf section is skipped here (`uname` reports Darwin), so this
-  # shim's only subject is 5b.
+  # invokes sudo and the perf section is served by the `perf` stub above (this sandbox
+  # reports LINUX), so this shim's only subject is 5b.
   mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   # Section 5c's two probes, pinned for the same reason as the `sudo` shim above: without
   # them these sandboxes fall through to the REAL `claude` (a billed network call whose
   # result depends on the HOST's credential) and the REAL tmux server (which the --yes
-  # cases would MUTATE). The claude stub answers the sentinel prompt by echoing its LAST
-  # WORD, which IS the sentinel — so it stays correct if the sentinel is ever re-spelled,
-  # rather than duplicating the constant here.
-  mk_stub "$dir" claude 'printf "%s\n" "${*##* }"'
+  # cases would MUTATE). The claude stub UPPERCASES the prompt's last word, which is the
+  # transformation the prompt asks for — so it stays correct if the sentinel is ever
+  # re-spelled, rather than duplicating the constant here. It used to ECHO that word
+  # unchanged, which passed only because the sentinel WAS in the prompt; #3733 removed it
+  # from the prompt precisely so an argv echo can no longer satisfy the probe.
+  mk_stub "$dir" claude 'printf "%s\n" "${*##* }" | tr "[:lower:]" "[:upper:]"'
   mk_stub "$dir" tmux "case \"\${1:-}\" in
   show-environment) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\nCLAUDE_CONFIG_DIR=%s\\n' '$PUSH_CLAUDE_TOKEN' '$PUSH_CLAUDE_CONFIG_DIR' ;;
 esac

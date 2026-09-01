@@ -95,8 +95,13 @@
 # Everything reports SET/ABSENT/MATCH/DIFFERS. Comparison is by string equality on the
 # extracted VALUE of both sides (never on a reconstructed `KEY=value` line: extracting the
 # two sides differently is what produced a false finding on this issue's own thread).
-# Every emitted detail goes through ONE boundary, `claude_auth_redact`, so a probe that
-# quotes the credential back at us cannot relay it into a verdict line.
+# THE BOUNDARY, STATED AS WHAT THE CODE DOES: the FINAL rendering of every verdict detail
+# passes through `claude_auth_redact` at its RENDER site — `claude_auth_emit_auth` /
+# `claude_auth_emit_tmux` here, and the two report lines in bootstrap's section 5c — so a
+# probe that quotes the credential back at us cannot relay it into a verdict line. The
+# extra `claude_auth_redact` calls WITHIN a few detail strings (probe output, tmux stderr)
+# are BELT on top of that, not the boundary; an earlier version of this paragraph claimed a
+# single call site and there were five, while bootstrap — the primary consumer — had none.
 #
 # PLATFORM. /etc/environment + pam_env is Linux-specific. On a non-Linux host BOTH lines
 # are UNMEASURED and NEVER an [ok]: scoping a platform out is not the same as passing it,
@@ -117,8 +122,16 @@ CLAUDE_AUTH_CONFIG_KEY='CLAUDE_CONFIG_DIR'
 # The probe's success marker. Requiring it ALONGSIDE rc 0 is what makes the probe
 # affirmative: `claude -p` can exit 0 having produced nothing, and rc alone cannot tell
 # "authenticated" from "authenticated and returned nothing".
+#
+# THE SENTINEL IS DELIBERATELY ABSENT FROM THE PROMPT. It used to BE the prompt's last word
+# ("Reply with exactly this word …: <SENTINEL>"), so `grep -qF "$SENTINEL"` could not
+# distinguish an ANSWER from an ECHO OF THE INPUT — anything that prints its own argv
+# passed, and this repo shipped exactly that stub. Asking for a TRANSFORMATION the prompt
+# does not contain (the uppercase form) means the expected string exists nowhere in the
+# input, so an echo cannot satisfy it while any model that read the prompt can. Keep the two
+# constants consistent: the prompt must never contain CLAUDE_AUTH_SENTINEL verbatim.
 CLAUDE_AUTH_SENTINEL='CQLITE_CLAUDE_AUTH_OK'
-CLAUDE_AUTH_PROMPT="Reply with exactly this word and nothing else: $CLAUDE_AUTH_SENTINEL"
+CLAUDE_AUTH_PROMPT='Reply with the UPPERCASE form of the following word, and nothing else: cqlite_claude_auth_ok'
 CLAUDE_AUTH_PROBE_BOUND=90
 # The cold-start tmux probe is local-only (no network), so it gets a much tighter bound.
 CLAUDE_AUTH_TMUX_PROBE_BOUND=20
@@ -318,6 +331,12 @@ claude_auth_verdict_into() {
     eval "$__od='could not create a throwaway CLAUDE_CONFIG_DIR for the probe, so the token could not be measured in isolation'"
     return 0
   fi
+  # ARMED BETWEEN THE `mktemp -d` AND THE PROBE, for the same reason the cold probe arms
+  # its own: an interrupt during a bounded, up-to-90s network call would otherwise leave a
+  # `cqlite-claude-probe.*` directory behind on every SIGINT. The cold probe's machinery is
+  # reused as-is — it kills a server only when a socket is registered, and none is here.
+  CLAUDE_AUTH_PROBE_DIR="$__cfg"
+  claude_auth_probe_arm_traps
 
   # NOT A PIPE. `__out=$(...)` then `__rc=$?` on its own line.
   if [ "$CLAUDE_AUTH_TIMEOUT_KILL" = 1 ]; then
@@ -332,7 +351,8 @@ claude_auth_verdict_into() {
       claude -p "$CLAUDE_AUTH_PROMPT" 2>&1)
   fi
   __rc=$?
-  rm -rf "$__cfg"
+  claude_auth_probe_cleanup
+  claude_auth_probe_restore_traps
   [ -z "$__op" ] || eval "$__op=\"\$(claude_auth_redact \"\$__out\")\""
 
   if [ "$__rc" -eq 0 ] && printf '%s' "$__out" | grep -qF -- "$CLAUDE_AUTH_SENTINEL"; then
@@ -394,9 +414,32 @@ claude_tmux_env_verdict_into() {
     return 0
   fi
 
-  __err=$(tmux show-environment -g 2>&1 >/dev/null)
-  __out=$(tmux show-environment -g 2>/dev/null)
-  __rc=$?
+  # THE SECRET IS ARMED BEFORE THE FIRST THING THAT CAN BE REDACTED, not after. The
+  # `show-environment failed` path below renders tmux's stderr through `claude_auth_redact`,
+  # and that boundary is INERT while CLAUDE_AUTH_SECRET is empty — which it was, because the
+  # persisted value was not read until further down. A redaction applied before its pattern
+  # exists is a redaction in name only. Reading here also removes the duplicate read that
+  # sat further down; `__tok`/`__state` are consumed unchanged below.
+  claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
+  CLAUDE_AUTH_SECRET="$__tok"
+
+  # ONE INVOCATION, BOTH STREAMS. Running `show-environment -g` twice meant `__err` came
+  # from a DIFFERENT invocation than `__rc`/`__out`, so a server that started or died between
+  # them produced a failure message with an empty cause (or a cause for a call that
+  # succeeded). NOT A PIPE: `$?` is read on its own line.
+  local __errf=''
+  if __errf=$(mktemp "${TMPDIR:-/tmp}/cqlite-tmuxenv.XXXXXX" 2>/dev/null) && [ -f "$__errf" ]; then
+    __out=$(tmux show-environment -g 2>"$__errf")
+    __rc=$?
+    __err=$(cat "$__errf" 2>/dev/null)
+    rm -f "$__errf"
+  else
+    # No temp file: keep the ONE invocation and say the cause was not captured, rather than
+    # taking a second reading of a different moment.
+    __out=$(tmux show-environment -g 2>/dev/null)
+    __rc=$?
+    __err='(stderr not captured: no temporary file could be created)'
+  fi
   if [ "$__rc" -ne 0 ]; then
     # TWO WORDINGS MEAN "NO SERVER", and only one of them was recognised. MEASURED on tmux
     # 3.4: a box that has never started a server has no socket, and tmux says `error
@@ -428,8 +471,8 @@ claude_tmux_env_verdict_into() {
     return 0
   fi
 
-  claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
-  CLAUDE_AUTH_SECRET="$__tok"
+  # `__tok`/`__state` were read at the top of this function (see the note there); re-reading
+  # would be a second reading of a file that may have changed underneath us.
   if [ "$__state" != present ] || [ -z "$__tok" ]; then
     eval "$__od=\"the server carries a \$CLAUDE_AUTH_TOKEN_KEY (SET) but \$__file provides no persisted value to compare it against (\$__state), so whether the server is CURRENT is UNKNOWN\""
     return 0
@@ -507,7 +550,13 @@ CLAUDE_AUTH_PROBE_SOCKET=''
 CLAUDE_AUTH_PROBE_DIR=''
 CLAUDE_AUTH_PROBE_PREV_TRAPS=''
 
-claude_auth_cold_probe_cleanup() {
+# THE PROBE LIFECYCLE HELPERS ARE SHARED BY BOTH PROBES — the `--auth` one (which registers
+# only a throwaway CLAUDE_CONFIG_DIR) and the cold-start tmux one (a directory AND a server
+# socket). They were named `..._cold_probe_...` when only the second existed; a name that
+# says "cold" while the auth path also depends on it is a comment that lies in the symbol
+# table. Cleanup is keyed on what is REGISTERED, so the socket half is simply skipped when
+# no socket was armed.
+claude_auth_probe_cleanup() {
   if [ -n "$CLAUDE_AUTH_PROBE_SOCKET" ]; then
     # rc is deliberately ignored: tmux `exit-empty` means the server may already be gone,
     # which is a SUCCESSFUL cleanup, not a failure.
@@ -519,7 +568,7 @@ claude_auth_cold_probe_cleanup() {
     CLAUDE_AUTH_PROBE_DIR=''
   fi
 }
-claude_auth_cold_probe_restore_traps() {
+claude_auth_probe_restore_traps() {
   trap - EXIT INT TERM HUP
   if [ -n "$CLAUDE_AUTH_PROBE_PREV_TRAPS" ]; then eval "$CLAUDE_AUTH_PROBE_PREV_TRAPS"; fi
   CLAUDE_AUTH_PROBE_PREV_TRAPS=''
@@ -527,17 +576,17 @@ claude_auth_cold_probe_restore_traps() {
 # On a signal: clean up, put the CALLER'S traps back, then re-raise so the caller's own
 # disposition decides what happens. This file is SOURCED by bootstrap, so it must not
 # silently replace a caller's trap or force an exit code of its own.
-claude_auth_cold_probe_signal() {
-  claude_auth_cold_probe_cleanup
-  claude_auth_cold_probe_restore_traps
+claude_auth_probe_signal() {
+  claude_auth_probe_cleanup
+  claude_auth_probe_restore_traps
   kill -s "$1" $$
 }
-claude_auth_cold_probe_arm_traps() {
+claude_auth_probe_arm_traps() {
   CLAUDE_AUTH_PROBE_PREV_TRAPS=$(trap -p EXIT INT TERM HUP)
-  trap 'claude_auth_cold_probe_cleanup' EXIT
-  trap 'claude_auth_cold_probe_signal INT' INT
-  trap 'claude_auth_cold_probe_signal TERM' TERM
-  trap 'claude_auth_cold_probe_signal HUP' HUP
+  trap 'claude_auth_probe_cleanup' EXIT
+  trap 'claude_auth_probe_signal INT' INT
+  trap 'claude_auth_probe_signal TERM' TERM
+  trap 'claude_auth_probe_signal HUP' HUP
 }
 
 # claude_tmux_cold_probe_into <ov_ok> <ov_tok> <ov_toklen> <ov_cfg> <ov_why> <tok> <cfg>
@@ -579,7 +628,7 @@ claude_tmux_cold_probe_into() {
       return 0 ;;
   esac
   CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
-  claude_auth_cold_probe_arm_traps
+  claude_auth_probe_arm_traps
 
   # The pane script reports DELIVERY, never the value: set/unset, a LENGTH, and the config
   # directory (a path, not a secret). Nothing it writes carries the credential.
@@ -608,7 +657,7 @@ CLAUDE_AUTH_PROBE
   fi
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
-    claude_auth_cold_probe_cleanup; claude_auth_cold_probe_restore_traps
+    claude_auth_probe_cleanup; claude_auth_probe_restore_traps
     eval "$__owhy=\"an isolated throwaway tmux server could not be started on a private socket (rc=\$__rc)\""
     return 0
   fi
@@ -620,7 +669,7 @@ CLAUDE_AUTH_PROBE
     sh -c 'while :; do grep -q "^end$" "$1" 2>/dev/null && exit 0; sleep 0.2; done' _ "$__res" >/dev/null 2>&1
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
-    claude_auth_cold_probe_cleanup; claude_auth_cold_probe_restore_traps
+    claude_auth_probe_cleanup; claude_auth_probe_restore_traps
     eval "$__owhy=\"the isolated pane did not report within \${CLAUDE_AUTH_TMUX_PROBE_BOUND}s, so what a new server would deliver is UNKNOWN\""
     return 0
   fi
@@ -629,7 +678,7 @@ CLAUDE_AUTH_PROBE
   __rtok=$(sed -n 's/^tok=//p' "$__res" 2>/dev/null | tail -1)
   __rlen=$(sed -n 's/^toklen=//p' "$__res" 2>/dev/null | tail -1)
   __rcfg=$(sed -n 's/^cfg=//p' "$__res" 2>/dev/null | tail -1)
-  claude_auth_cold_probe_cleanup; claude_auth_cold_probe_restore_traps
+  claude_auth_probe_cleanup; claude_auth_probe_restore_traps
   case "$__rlen" in ''|*[!0-9]*) __rlen=0 ;; esac
   eval "$__otok=\${__rtok:-unset}"; eval "$__olen=\$__rlen"; eval "$__ocfg=\$__rcfg"
   eval "$__ok=1"
@@ -720,9 +769,12 @@ claude_tmux_show_key_into() {
 
 # ---- the repair: seed the RUNNING server, persist NOTHING new ----------------------
 # claude_auth_fix_tmux_env: push the PERSISTED values into the running tmux server so
-# panes spawned from now on inherit them. It writes NO file: /etc/environment already
-# holds the token and a second copy is what
-# openspec/specs/worker-environment-preflight/spec.md forbids.
+# panes spawned from now on inherit them. It writes NO file: /etc/environment already holds
+# the token, and a second copy on disk is refused on the PRECEDENT of
+# openspec/specs/worker-environment-preflight/spec.md — whose "SHALL NOT write the token
+# itself to disk" clause sits under the GIT-CREDENTIAL requirement and is about `$GH_TOKEN`,
+# so it does not already name this credential. Cited as the precedent it is; the behaviour
+# here is deliberately the stronger reading.
 #
 # RESIDUAL, stated rather than implied: `tmux setenv -g KEY value` passes the value in
 # ARGV, so it is briefly visible in `ps` to anyone on the box. The SAME exposure class,

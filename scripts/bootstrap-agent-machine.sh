@@ -103,8 +103,10 @@
 #      VERIFIED pane environment needs the CLAUDE_CONFIG_DIR to EQUAL the persisted one AND
 #      that directory to EXIST — nonempty is not correct. Only VERIFIED is an [ok] on either line (same posture as `git-push:`
 #      and `gate-pin:`); NO-SERVER is UNMEASURED-class. The TOKEN VALUE IS NEVER PRINTED,
-#      and bootstrap writes it to NO file — /etc/environment already holds it and a second
-#      copy is what openspec/specs/worker-environment-preflight/spec.md forbids.
+#      and bootstrap writes it to NO file — /etc/environment already holds it, and a second
+#      copy is refused on the PRECEDENT of openspec/specs/worker-environment-preflight/
+#      spec.md, whose "SHALL NOT write the token itself to disk" clause is stated for
+#      `$GH_TOKEN` under the git-credential requirement, not for this credential.
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -230,7 +232,11 @@ fi
 # IT PERSISTS NOTHING. The repair for the field failure is not another file: the token is
 # already in /etc/environment, and the broken thing is a long-running process whose start
 # environment predates it. `tmux setenv -g` fixes exactly that, and writing a second 644
-# copy of the credential would violate openspec/specs/worker-environment-preflight/spec.md
+# copy of the credential is refused for the same reason
+# openspec/specs/worker-environment-preflight/spec.md gives for `$GH_TOKEN` under its
+# git-credential requirement ("It SHALL NOT write the token itself to disk") — that clause
+# is about GH_TOKEN, not this credential, so it is cited as the PRECEDENT it is rather than
+# as a rule that already names this case
 # ("no file written by the bootstrap contains the token value") while buying nothing.
 FIX_CLAUDE_AUTH=0
 FIX_CREDENTIALS=0
@@ -3024,12 +3030,16 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # shellcheck source=scripts/claude-auth-capability.sh
   . "$CLAUDE_AUTH_LIB"
 
+  # EVERY DETAIL RENDERED HERE GOES THROUGH `claude_auth_redact`, the capability script's
+  # one emit boundary (sourced above). It was NOT applied at these four sites, so the
+  # library's header claim of a single boundary was false exactly where it mattered most —
+  # bootstrap is the primary consumer, and its output is what an operator pastes.
   # ---- (a) is the PERSISTED credential valid for a cold, non-interactive start? ----
   claude_auth_verdict_into CLAUDE_AUTH_V CLAUDE_AUTH_D
   if [ "$CLAUDE_AUTH_V" = VERIFIED ]; then
-    ok "claude-auth: VERIFIED ($CLAUDE_AUTH_D)"
+    ok "claude-auth: VERIFIED ($(claude_auth_redact "$CLAUDE_AUTH_D"))"
   else
-    warn "claude-auth: $CLAUDE_AUTH_V ($CLAUDE_AUTH_D)"
+    warn "claude-auth: $CLAUDE_AUTH_V ($(claude_auth_redact "$CLAUDE_AUTH_D"))"
   fi
   # THE REMEDY DIFFERS BY VERDICT, and getting that wrong sends an operator in a circle —
   # the #3414 `default` vs `invalid` lesson. NOT-PERSISTED means provision it; FAILED means
@@ -3065,9 +3075,9 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
     esac
   fi
   if [ "$CLAUDE_TMUX_V" = VERIFIED ]; then
-    ok "claude-tmux-env: VERIFIED ($CLAUDE_TMUX_D)"
+    ok "claude-tmux-env: VERIFIED ($(claude_auth_redact "$CLAUDE_TMUX_D"))"
   else
-    warn "claude-tmux-env: $CLAUDE_TMUX_V ($CLAUDE_TMUX_D)"
+    warn "claude-tmux-env: $CLAUDE_TMUX_V ($(claude_auth_redact "$CLAUDE_TMUX_D"))"
   fi
   case "$CLAUDE_TMUX_V" in
     SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)

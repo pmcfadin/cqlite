@@ -483,6 +483,35 @@ else
 fi
 
 # =====================================================================================
+# 5b. AN ARGV ECHO IS NOT AN ANSWER. `grep -qF "$SENTINEL"` over the probe's output cannot
+#     distinguish a reply from a repetition of the prompt, so while the sentinel WAS the
+#     prompt's last word any stub that printed its own argv passed — and this repo shipped
+#     exactly that stub (test_bootstrap_agent_machine.sh's `printf "%s\n" "${*##* }"`).
+#     The prompt now asks for a TRANSFORMATION it does not itself contain, so the expected
+#     string exists nowhere in the input.
+d5b=$(mkshim "$tmp/s5b")
+cat >"$d5b/claude" <<'EOF'
+#!/usr/bin/env bash
+# Echoes the LAST WORD OF ITS OWN ARGV, verbatim. This is a real stub shape, not a
+# strawman, and it is what a wedged/degraded CLI does when it parrots its input.
+printf '%s\n' "${*##* }"
+exit 0
+EOF
+chmod +x "$d5b/claude"
+run_cap "$d5b" "$ef2" -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: FAILED'; then
+  ok "claude-auth: a probe that merely ECHOES the prompt does not satisfy the sentinel"
+else
+  bad "claude-auth: an argv echo was accepted as an authenticated answer: $out"
+fi
+# ...and the prompt must not carry the sentinel, or the case above passes by accident.
+if ! grep -q "CLAUDE_AUTH_PROMPT=.*$SENTINEL" "$CAPLIB"; then
+  ok "the probe prompt does not contain the sentinel verbatim (so an echo cannot produce it)"
+else
+  bad "the probe prompt embeds the sentinel — an argv echo would satisfy it again"
+fi
+
+# =====================================================================================
 # 6. UNMEASURED — no `claude` on PATH. An unmeasured capability must never inherit the
 #    permissive branch.
 # =====================================================================================
@@ -631,9 +660,22 @@ fi
 #     NOTHING new: no second copy of the secret anywhere on disk.
 # =====================================================================================
 d15=$(mkshim "$tmp/s15"); plant_tmux "$d15" missing
-find "$tmp" -type f 2>/dev/null | sort >"$tmp/files-before"
+# THE MEASUREMENT'S OWN SUCCESS IS A PRECONDITION. `new_files=$(comm -13 …)` over a FAILED
+# find or a FAILED comm yields the empty string, the `while` body never runs, `leaked_files`
+# stays empty and the case reports `ok` — a pass derived from a measurement that did not
+# happen. `find | sort > f` cannot be rc-checked either (the rc is sort's), so find writes a
+# raw file first and each step's status is read on its own line.
+# DECLARED SCOPE, because a scan is only as wide as its root: this covers $tmp ONLY. A write
+# to /etc/environment.d/ or $HOME would be invisible here. The property that IS asserted is
+# that the repair creates no new file under the sandbox carrying the credential.
+leak_scan=ok
+find "$tmp" -type f >"$tmp/raw-before" 2>/dev/null || leak_scan=find-before-failed
+sort "$tmp/raw-before" >"$tmp/files-before" 2>/dev/null || leak_scan=sort-before-failed
+[ -s "$tmp/files-before" ] || leak_scan=empty-before
 run_cap "$d15" "$ef2" -- --fix-tmux-env
-find "$tmp" -type f 2>/dev/null | sort >"$tmp/files-after"
+find "$tmp" -type f >"$tmp/raw-after" 2>/dev/null || leak_scan=find-after-failed
+sort "$tmp/raw-after" >"$tmp/files-after" 2>/dev/null || leak_scan=sort-after-failed
+[ -s "$tmp/files-after" ] || leak_scan=empty-after
 if [ -f "$d15/tmux-calls.log" ] && grep -q '^setenv CLAUDE_CODE_OAUTH_TOKEN len=' "$d15/tmux-calls.log"; then
   ok "--fix-tmux-env: seeds CLAUDE_CODE_OAUTH_TOKEN into the running server"
 else
@@ -645,21 +687,33 @@ else
   bad "--fix-tmux-env: CLAUDE_CONFIG_DIR was not seeded"
 fi
 # NOTHING new on disk carries the secret. The pam_env file already holds it; a second copy
-# is what openspec/specs/worker-environment-preflight/spec.md forbids.
+# is refused on the PRECEDENT of openspec/specs/worker-environment-preflight/spec.md, whose
+# "SHALL NOT write the token itself to disk" clause is stated for `$GH_TOKEN` under the
+# git-credential requirement — the rule is applied here by analogy, not quoted as if it
+# already named this credential.
 # Only files the FIX ITSELF created are in scope: the suite's own shims and pam_env
 # fixture legitimately embed the planted literal. Diffing before/after is what makes this
 # a statement about the CODE rather than about the harness.
-new_files=$(comm -13 "$tmp/files-before" "$tmp/files-after")
+new_files=$(comm -13 "$tmp/files-before" "$tmp/files-after") || leak_scan=comm-failed
+# THE DIFF MUST BE NON-EMPTY. The repair provably creates at least the tmux stub's call log,
+# so an empty diff means the before/after pair did not observe the run — the same vacuity
+# one step further in.
+scanned=0
 leaked_files=''
 while IFS= read -r nf; do
   [ -n "$nf" ] || continue
-  case "$nf" in "$TRANSCRIPT"|"$tmp/files-before"|"$tmp/files-after") continue ;; esac
+  case "$nf" in "$TRANSCRIPT"|"$tmp/raw-before"|"$tmp/raw-after"|"$tmp/files-before"|"$tmp/files-after") continue ;; esac
+  scanned=$((scanned + 1))
   grep -qF -- "$TOK" "$nf" 2>/dev/null && leaked_files="$leaked_files $nf"
 done <<EOF
 $new_files
 EOF
-if [ -z "$leaked_files" ]; then
-  ok "--fix-tmux-env: wrote the token to NO new file"
+if [ "$leak_scan" != ok ]; then
+  bad "--fix-tmux-env: the new-file census could not be taken ($leak_scan) — no verdict is available"
+elif [ "$scanned" -eq 0 ]; then
+  bad "--fix-tmux-env: the census saw NO new file at all, so it observed nothing (the tmux call log alone should appear)"
+elif [ -z "$leaked_files" ]; then
+  ok "--fix-tmux-env: wrote the token to NO new file (census: $scanned new files under \$tmp)"
 else
   bad "--fix-tmux-env: the token appears in files it should not: $leaked_files"
 fi
@@ -1072,7 +1126,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=55
+CASE_FLOOR=57
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
