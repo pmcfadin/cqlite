@@ -678,12 +678,33 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
     );
 }
 
-/// Assert optional expiry times match.
+/// Assert optional expiry times match, honouring Cassandra's per-cell SUPPRESSION rule.
 ///
-/// sstabledump rounds `expires_at` to the nearest second (epoch-seconds * 1e6),
-/// while scan_delta also uses epoch-seconds * 1_000_000.  Both should agree
-/// within 1 second (1_000_000 µs) to allow for any off-by-one in the display.
-fn assert_expires_at(context: &str, actual: Option<i64>, expected: Option<i64>) {
+/// sstabledump rounds `expires_at` to the nearest second (epoch-seconds * 1e6), as does
+/// scan_delta, so the two must agree within 1s.
+///
+/// `row_liveness_expires_at` is the ENCLOSING ROW's liveness expiry, or `None` when the
+/// subject IS the row liveness. ORACLE — `JsonTransformer.serializeCell` at the pinned tag
+/// `cassandra-5.0.8`: `if (cell.isExpiring() && (liveInfo.isEmpty() || cell.ttl() !=
+/// liveInfo.ttl()))`. So sstabledump OMITS a cell's `ttl`/`expires_at` when it EQUALS the
+/// row's primary-key liveness TTL — the ordinary case for `INSERT ... USING TTL`, where
+/// every cell inherits the row's TTL and the row's `liveness_info` holds the only printed
+/// copy. It is the same rule the per-cell `tstamp` follows five lines earlier in that
+/// method, which is why the writetime comparison at the call site is already conditional on
+/// the field being present. The tolerance applies in that direction ONLY: `(None, Some(_))`
+/// stays strict, because an expiry sstabledump DID print and scan_delta did not is a real
+/// divergence, never a suppression.
+///
+/// Wrong until #3725: this is one of the 13 crate-level `delta-scan`-gated targets that
+/// executed in no merge-gating lane, so `test_delta_parity_ttl_cells` FAILED against the
+/// real corpus and PASSED against an absent one. Expectation derived from the Cassandra
+/// source above, never from CQLite's own output.
+fn assert_expires_at(
+    context: &str,
+    actual: Option<i64>,
+    expected: Option<i64>,
+    row_liveness_expires_at: Option<i64>,
+) {
     const TTL_TOLERANCE_MICROS: i64 = 1_000_000; // 1 second
     match (actual, expected) {
         (Some(a), Some(e)) => {
@@ -698,10 +719,20 @@ fn assert_expires_at(context: &str, actual: Option<i64>, expected: Option<i64>) 
             );
         }
         (None, None) => {}
-        (Some(a), None) => panic!(
-            "{}: scan_delta has expires_at={}µs but sstabledump does not",
-            context, a
-        ),
+        (Some(a), None) => match row_liveness_expires_at {
+            Some(row_e) if (a - row_e).abs() <= TTL_TOLERANCE_MICROS => {}
+            Some(row_e) => panic!(
+                "{}: scan_delta cell expires_at={}µs, sstabledump printed none, and it does NOT \
+                 match the row liveness expires_at={}µs — sstabledump omits only a cell copy \
+                 EQUAL to the row TTL (JsonTransformer.serializeCell, cassandra-5.0.8)",
+                context, a, row_e
+            ),
+            None => panic!(
+                "{}: scan_delta has expires_at={}µs but sstabledump does not, and no row liveness \
+                 expiry exists for it to have been suppressed against",
+                context, a
+            ),
+        },
         (None, Some(e)) => panic!(
             "{}: sstabledump has expires_at={}µs but scan_delta does not",
             context, e
@@ -932,6 +963,7 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                     &format!("{}.expires_at", ctx_lv),
                                     dl.expires_at,
                                     jl.expires_at_micros,
+                                    None, // the subject IS the row liveness
                                 );
                                 result.liveness_ok += 1;
                             }
@@ -1009,8 +1041,16 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                     if let Some(expected_wt) = jcell.tstamp_micros {
                                         assert_writetime(&ctx, cd.writetime, expected_wt);
                                     }
-                                    // TTL / expires_at.
-                                    assert_expires_at(&ctx, cd.expires_at, jcell.expires_at_micros);
+                                    // TTL / expires_at. The ROW's liveness expiry goes in
+                                    // because sstabledump suppresses a cell copy equal to it.
+                                    assert_expires_at(
+                                        &ctx,
+                                        cd.expires_at,
+                                        jcell.expires_at_micros,
+                                        r.liveness_info
+                                            .as_ref()
+                                            .and_then(|jl| jl.expires_at_micros),
+                                    );
                                     result.cells_ok += 1;
                                 }
                                 None => {

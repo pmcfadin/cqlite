@@ -14456,7 +14456,11 @@ run_feature_iso_delta_scan() {
   fi
 
   local -a targets=() allow_zero=() observe_ids=()
-  local names="" count=0 zero_reason="" rf_unmet="" shape_unmodelled="" derived_srcs=""
+  local names="" count=0 zero_reason="" rf_unmet="" shape_unmodelled=""
+  # derived_srcs = INVOKED target roots. declared_srcs = every root this lane NAMES
+  # (invoked, or declared as a required-features gap) — the subtrahend for the
+  # unattributed census, which must not re-report something already declared elsewhere.
+  local derived_srcs="" declared_srcs=""
   local cfg_site="feature[[:space:]]*=[[:space:]]*\"$feat\""
   local _mt_name _mt_src _mt_how _mt_rel _mt_rf _obs_id _gate_rc _coreq _off _rf1 _az_id
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
@@ -14521,6 +14525,12 @@ run_feature_iso_delta_scan() {
     fi
     if [ -n "$_off" ]; then
       rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_off)"
+      # DECLARED, so it must NOT also surface in the unattributed census below — which
+      # would describe it as "not a derived target root", a FALSE description of a target
+      # this lane names on its own line. Two headings for one fact is a census nobody
+      # trusts, and the second one is affirmatively wrong.
+      declared_srcs="$declared_srcs$_mt_src
+"
       continue
     fi
     # CONFIRMED SUBJECT — nothing may RECORD the target before the decision to INVOKE it,
@@ -14534,6 +14544,8 @@ run_feature_iso_delta_scan() {
     count=$((count + 1))
     names="$names $_mt_name"
     derived_srcs="$derived_srcs$_mt_src
+"
+    declared_srcs="$declared_srcs$_mt_src
 "
     # ALLOWED-ZERO, DERIVED (never a curated list). A crate-level gate of the form
     # `#![cfg(all(feature = "delta-scan", feature = "X"))]` with X NOT enabled here
@@ -14612,7 +14624,7 @@ EOF
   fi
   while IFS= read -r _uf; do
     [ -n "$_uf" ] || continue
-    case "$derived_srcs" in
+    case "$declared_srcs" in
       *"$_uf"$'\n'*) continue ;;
     esac
     _un_n=$((_un_n + 1)); _un_where="$_un_where ${_uf#$REPO_ROOT/}"
@@ -14641,10 +14653,13 @@ EOF
   census+=("       That mutual isolation is what makes cross-feature coupling visible (#1699);")
   census+=("       execution is ADDED to it, not substituted for it.")
   census+=("  derived targets:$names")
-  census+=("       DERIVED at run time from cargo metadata + the committed crate-root")
-  census+=("       '#![cfg(... feature = \"$feat\" ...)]' attributes, so a new gated file is")
-  census+=("       picked up with NO gate edit. A failed derivation FAILs and names the")
-  census+=("       derivation; it is never a fallback to an empty set.")
+  census+=("       DERIVED at run time: candidates from cargo metadata (so a manifest-gated or")
+  census+=("       directory-style target is not missed), membership from cargo's own gating OR a")
+  census+=("       cfg-SHAPED 'feature = \"$feat\"' reference in the target root — no attribute")
+  census+=("       GRAMMAR is consulted for membership, because an over-broad set costs a compile")
+  census+=("       while a grammar that drops a target hides a zero-test run. So a new gated file")
+  census+=("       is picked up with NO gate edit, and a failed derivation FAILs naming the")
+  census+=("       derivation rather than falling back to an empty set.")
   census+=("  fixtures: $_fx_note")
   if [ "$_fx_blind_n" -gt 0 ]; then
     census+=("       NOT COVERED BY THAT FLAG — $_fx_blind_n derived target(s) read neither")
@@ -14673,14 +14688,16 @@ EOF
   fi
   if [ "$_un_n" -gt 0 ]; then
     census+=("  UNATTRIBUTED cfg site(s): $_un_n RECOGNISED — a cfg-shaped '$feat' reference in a")
-    census+=("       cqlite-core/tests file that is NOT a derived target root (an ITEM-level gate,")
-    census+=("       or a child module). Its contribution is UNCLASSIFIED: this lane derives")
-    census+=("       CRATE-LEVEL gates only, because only those configure a whole target out.")
+    census+=("       cqlite-core/tests file this lane NAMES NOWHERE ABOVE: not an invoked target")
+    census+=("       root and not a declared required-features gap, so it is a child module or a")
+    census+=("       shared helper. Its contribution to $feat coverage is UNCLASSIFIED — whatever")
+    census+=("       it gates may execute under some other target or not at all.")
     census+=("       NON-EXHAUSTIVE (#3472): recognised sites, not necessarily all:$_un_where")
   else
     census+=("  UNATTRIBUTED cfg site(s): 0 RECOGNISED — every cfg-shaped '$feat' reference under")
-    census+=("       cqlite-core/tests is a derived target root. NON-EXHAUSTIVE (#3472): this is")
-    census+=("       evidence that none was RECOGNISED, never evidence that none is THERE.")
+    census+=("       cqlite-core/tests belongs to a target root this lane NAMES (invoked, or")
+    census+=("       declared as a required-features gap). NON-EXHAUSTIVE (#3472): this is evidence")
+    census+=("       that none was RECOGNISED, never evidence that none is THERE.")
   fi
   census+=("  NOT RUN HERE: the parity-regen-matrix.yml cql-type leg runs issue_1007 after a")
   census+=("       DOCKER REGEN of test_types; this lane runs it against the committed/fetched")
