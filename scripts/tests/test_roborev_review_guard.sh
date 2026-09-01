@@ -5897,6 +5897,19 @@ assert_lacks 'case (jd1) --help no longer claims the list filters by the shell b
 assert_says 'case (jd1) --help refuses the row-count probe as a collision check' \
   'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
 assert_says 'case (jd1) --help says why the probe cannot work' 'only ever sees the LOCAL daemon'
+# THE PRESCRIBED LOOKUP MUST REACH AN OLDER RECORD. `roborev list` returns a BOUNDED WINDOW —
+# `--limit` defaults to 50 (measured: `roborev list --help`, v0.61.2) — so a limitless documented
+# command answers NOTHING for a job outside it, an absence indistinguishable from "no such job",
+# and it is precisely the older reviews a waiver argument reaches back to. It also undercuts the
+# row-count probe next to it: a count of 1 says nothing about the window it was taken over.
+assert_says 'case (jd1) --help gives the documented list lookup an explicit --limit' \
+  'roborev list --json --limit 200 --repo <abs-repo> --branch'
+assert_says 'case (jd1) --help names the bounded window' 'BOUNDED WINDOW of the most recent rows'
+assert_says 'case (jd1) --help says to raise the limit until the job appears' \
+  'RAISE it until the job appears'
+assert_says 'case (jd1) --help gives the stopping rule for raising it' 'row count STOPS GROWING'
+assert_says 'case (jd1) --help calls a truncated empty result UNMEASURED' 'UNMEASURED, not an answer'
+assert_lacks 'case (jd1) --help no longer claims the row count is unconditionally 1' '# always 1'
 # ASK 5, FACTUAL HALF ONLY (policy is #3826): what each signal can and cannot establish.
 assert_says 'case (jd1) --help scopes the after-the-fact cost to a HUMAN reading the record' \
   'ONLY FOR A HUMAN READING'

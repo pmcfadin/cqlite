@@ -1418,7 +1418,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   binding an authorization to a REVIEW rather than to a RANGE. So **verify the record's `git_ref`,
   never the id alone** — `roborev show <id> --json | jq '.job | {id, git_ref, branch, status,
   token_usage}'`, because `show` NESTS those fields under `.job`, while for
-  `roborev list --json --repo <abs> --branch <branch>`
+  `roborev list --json --limit <n> --repo <abs> --branch <branch>`
+  **`--limit` is REQUIRED READING and must be RAISED until the job appears or the returned row
+  count STOPS GROWING** — it defaults to 50 (measured, v0.61.2), so an older job is outside the
+  window and the query yields nothing though the record exists, an absence indistinguishable from
+  "no such job" and exactly the reach a waiver argument needs; an empty result at a limit that is
+  still growing the row count is UNMEASURED, not an answer. And
   `list`'s default branch filter follows the **`--repo` PATH's CURRENT HEAD**, not the branch your
   shell is standing in — so name `--branch` whenever that checkout is not on the job's branch, which
   is exactly the `--recheck-job` case. An earlier revision of this line named the cwd's branch and
@@ -1431,7 +1436,8 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `find_job` matches `id`/`job_id`/`job` and then prefers the object carrying `git_ref` — so this is
   a trap for the human running the check by hand, not a live false `STALE`. **A LOCAL ROW COUNT IS NOT EVIDENCE OF
   UNIQUENESS**: `roborev list … | jq '[.[] | select(.id==N)] | length'` returns `1` whether or not
-  another box holds that id, because `list` only ever sees the LOCAL daemon — another probe whose
+  another box holds that id, because `list` only ever sees the LOCAL daemon — and `0` when the row
+  fell outside the `--limit` window, so the count says nothing about the window it was taken over — another probe whose
   output is IDENTICAL under the two states it claims to separate (the `RESULT: INCOMPLETE` launch
   sentinel read as a verdict; a gate run dir found by `ls -t`; `mergeable: MERGEABLE` on a
   marker-bearing merge commit) — and it gave both lanes the right answer for a reason that did not

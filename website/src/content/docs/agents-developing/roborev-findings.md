@@ -342,8 +342,10 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    # git_ref / status / token_usage are NESTED under .job on this payload:
    roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
    # `roborev list` defaults its branch filter to the --repo path's CURRENT HEAD, not to the
-   # branch your shell is on — so name --branch when that checkout is not on the job's branch:
-   roborev list --json --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
+   # branch your shell is on — so name --branch when that checkout is not on the job's branch.
+   # --limit defaults to 50 (measured, v0.61.2): RAISE it until the job appears, or until the
+   # returned row count stops growing. An empty result at a still-growing limit is UNMEASURED.
+   roborev list --json --limit 200 --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
    ```
 
    **Read `.job`, never a `show` payload's top-level `id`.** That field is the *review* row's own
@@ -357,8 +359,9 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    case — the writer emits no line at all for an empty value, so the key would read `NOT RECORDED`.)
 
    **A local row count is not evidence of uniqueness.** `roborev list … | jq '[.[] | select(.id==N)] |
-   length'` returns `1` whether or not another box holds that id, because `list` only ever sees the **local**
-   daemon — one more probe whose output is **identical under the two states it claims to separate** (the
+   length'` returns `1` whether or not another box holds that id — and `0` when the row fell outside the
+   `--limit` window, so the count says nothing about the window it was taken over — because `list` only
+   ever sees the **local** daemon — one more probe whose output is **identical under the two states it claims to separate** (the
    `RESULT: INCOMPLETE` launch sentinel read as a verdict; a gate run dir found by `ls -t`;
    `mergeable: MERGEABLE` on a marker-bearing merge commit). Run on both `job=265` lanes it gave the right
    answer for a reason that did not hold.

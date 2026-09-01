@@ -487,9 +487,9 @@ branches, different token counts, both correct. A repeated id is therefore NOT e
 of a collision; reading it as one cost a valid waiver a round. The check that settles it:
 
     roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
-    roborev list --json --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
+    roborev list --json --limit 200 --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
 
-git_ref MUST equal the marker's <base40>..<head40>. THREE TRAPS IN THOSE COMMANDS, all
+git_ref MUST equal the marker's <base40>..<head40>. FOUR TRAPS IN THOSE COMMANDS, all
 measured on roborev v0.61.2: (1) 'show <id> --json' NESTS git_ref/status/token_usage
 under '.job', so a top-level jq over that payload prints nulls for all of them — a check
 whose output cannot show what it claims;
@@ -504,14 +504,25 @@ records, asking for 9 returns id=8 with job_id=9 and job.id=9. So read '.job' (o
 right review?" doubt this section exists to remove. The wrapper is unaffected: its
 extractor matches id/job_id/job and then PREFERS the object carrying git_ref, so it lands
 on the job row either way — this is a trap for the HUMAN running the check by hand.
+(4) 'roborev list' returns a BOUNDED WINDOW of the most recent rows — '--limit' defaults
+to 50 (measured: 'roborev list --help', v0.61.2) — so an older job is simply not in a
+default read and the query yields NOTHING though the record exists —
+an absence indistinguishable from 'no such job', which breaks this whole procedure for
+exactly the reviews a waiver argument reaches back to. So pass '--limit' EXPLICITLY and
+RAISE it until the job appears, or until the returned row count STOPS GROWING (at which
+point the window covers the whole local table and the record really is absent). An empty
+result at a limit that is still growing the row count is UNMEASURED, not an answer. This
+is also what the row count below cannot survive: a count of 1 says nothing about the
+window it was taken over.
 
 AND A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS. This, which reads like a collision
 check, is not one:
 
-    roborev list --json ... | jq '[.[] | select(.id==<id>)] | length'    # always 1
+    roborev list --json ... | jq '[.[] | select(.id==<id>)] | length'    # never more than 1
 
 'roborev list' only ever sees the LOCAL daemon, so it returns 1 whether or not another
-box holds the same id. It is structurally incapable of detecting the cross-box collision
+box holds the same id — and 0 when the row fell outside the '--limit' window, which is
+not a collision answer either. It is structurally incapable of detecting the cross-box collision
 it appears to rule out — a probe whose output is IDENTICAL under the two states it claims
 to separate, the same class as reading the gate's 'RESULT: INCOMPLETE' launch sentinel as
 a verdict, or locating a gate run directory with 'ls -t'. Run on both of the 'job=265'
