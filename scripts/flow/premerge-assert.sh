@@ -797,6 +797,14 @@ c_assert_head_binds_certified() {
 # proves a stage was opened at all. Prints the issue number, or nothing.
 # Several stages is AMBIGUOUS and refuses: 1:1:1:1 puts exactly one issue in a
 # worktree, so two records mean the caller is not where it thinks it is.
+# IT REFUSES NOTHING ITSELF, BY DESIGN (#3751 round 2, S3). Its only caller is a COMMAND
+# SUBSTITUTION, and an `exit` inside one terminates the SUBSHELL — so the AMBIGUOUS refusal
+# raised here reached the top level ONLY because `set -e` propagates the status of a simple
+# assignment whose substitution failed. That made a correct diagnostic depend on a shell option
+# a later edit could disturb: with `set -e` off (or the call moved inside a condition, where it
+# is suppressed) the refusal became an advisory PRINT followed by "No 'c' stage was ever
+# OPENED" — the wrong diagnostic for two stages. So the ambiguity is REPORTED as a value and
+# a status, and the CALLER refuses explicitly.
 c_auto_locate_issue() {
   local root d n count=0 found=""
   root=$(git rev-parse --show-toplevel 2>/dev/null) || root=""
@@ -810,10 +818,8 @@ c_auto_locate_issue() {
     found="$n"
   done
   if [ "$count" -gt 1 ]; then
-    refuse_no_c_verdict \
-      "$count '$C_STAGE_KIND' stage records exist under $root/.review-stage/ — AMBIGUOUS." \
-      "1:1:1:1 puts exactly ONE issue in a worktree, so two records mean this is not the" \
-      "lane you think it is. Name the verdict explicitly: --c-verdict <path>."
+    printf 'AMBIGUOUS|%s|%s\n' "$count" "$root"
+    return 3
   fi
   printf '%s\n' "$found"
 }
@@ -821,7 +827,7 @@ c_auto_locate_issue() {
 # c_evaluate — the whole check, called once. Refuses, or leaves C_TOKEN holding a
 # token that may proceed (PASS / AUTHOR-PERFORMED / NOT-APPLICABLE).
 c_evaluate() {
-  local rs issue out rc=0
+  local rs issue out rc=0 arc=0 amb_count="" amb_root=""
   if [ "$c_verdict" != AUTO ]; then
     # AN EXPLICIT PATH. Routing is NOT consulted: a supplied path can only carry a
     # review-stage verdict token, and NOT-APPLICABLE is not in that closed
@@ -875,7 +881,27 @@ c_evaluate() {
     # tree whatever this checkout's HEAD is, and refusing earlier would relabel
     # the UNMEASURED cause an operator needs to read.
     c_assert_head_binds_certified
-    issue=$(c_auto_locate_issue)
+    # THE STATUS IS CHECKED HERE, EXPLICITLY, and the refusal is raised in THIS shell (S3).
+    # `issue=$(...) || arc=$?` is the correct idiom: `if ! issue=$(...)` would read `$?` as 0.
+    arc=0
+    issue=$(c_auto_locate_issue) || arc=$?
+    if [ "$arc" -ne 0 ]; then
+      case "$issue" in
+        AMBIGUOUS\|*)
+          amb_count=${issue#AMBIGUOUS|}; amb_count=${amb_count%%|*}
+          amb_root=${issue#AMBIGUOUS|*|}
+          refuse_no_c_verdict \
+            "$amb_count '$C_STAGE_KIND' stage records exist under $amb_root/.review-stage/ — AMBIGUOUS." \
+            "1:1:1:1 puts exactly ONE issue in a worktree, so two records mean this is not the" \
+            "lane you think it is. Name the verdict explicitly: --c-verdict <path>."
+          ;;
+        *)
+          # An unrecognised failure of the locator is a TOOL failure, never "no stage found":
+          # "cannot tell" must not take the permissive branch.
+          refuse_tool_failure "c_auto_locate_issue (exit $arc)" "the C stage verdict"
+          ;;
+      esac
+    fi
     if [ -z "$issue" ]; then
       refuse_no_c_verdict \
         "No '$C_STAGE_KIND' stage was ever OPENED in this worktree (.review-stage/issue-*/$C_STAGE_KIND.stage)," \

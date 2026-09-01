@@ -2815,10 +2815,50 @@ if [ -n "$C_STAGED" ]; then
           ok "AUTO/ambiguous: two stages refuse rather than one being picked" ;;
         *) bad "AUTO/ambiguous: must refuse naming the ambiguity (got: $OUT)" ;;
       esac
+      # AND NOT THE WRONG DIAGNOSTIC. If the ambiguity ever degrades to an advisory print, the
+      # run continues with an EMPTY issue and reports "No 'c' stage was ever OPENED" — the
+      # wrong next action for a caller standing in two lanes' worth of stage records.
+      case "$OUT" in
+        *"was ever OPENED"*)
+          bad "AUTO/ambiguous: the refusal must not ALSO print the never-opened diagnostic (got: $OUT)" ;;
+        *) ok "AUTO/ambiguous: the never-opened diagnostic is NOT printed — the ambiguity is the verdict" ;;
+      esac
     fi
   else
     bad "AUTO/ambiguous: could not open a second stage — the case is vacuous"
   fi
+fi
+
+# THE AMBIGUITY REFUSAL IS RAISED AT THE CALL SITE, NOT INSIDE A COMMAND SUBSTITUTION
+# (#3751 round 2, S3). STRUCTURAL, AND LABELLED AS SUCH: the behaviour above is correct with
+# `set -e` ON, which is the only configuration this script ships, so no behavioural case can
+# distinguish "refuses because the caller checked" from "refuses because a failed assignment
+# tripped `set -e`". What IS decidable from source is that `c_auto_locate_issue` — whose only
+# caller is a command substitution, where `exit` terminates the SUBSHELL — raises no refusal of
+# its own, and that its caller checks the status.
+C_LOC_BODY=$(LC_ALL=C awk '
+  /^c_auto_locate_issue\(\) \{/ { inf = 1 }
+  inf { print }
+  inf && /^\}/ { exit }
+' "$ASSERT")
+case "$C_LOC_BODY" in
+  "") bad "S3-structural: could not extract c_auto_locate_issue from the shipped script — the assert has no subject" ;;
+  *) ok "S3-structural: c_auto_locate_issue was located in the shipped script" ;;
+esac
+case "$C_LOC_BODY" in
+  *refuse_no_c_verdict* | *refuse_tool_failure* | *"exit "*)
+    bad "S3-structural: c_auto_locate_issue still refuses/exits INSIDE itself; its only caller is a command substitution, so that exit terminates the subshell and reaching the top level depends on set -e (body: $C_LOC_BODY)" ;;
+  *) ok "S3-structural: c_auto_locate_issue raises no refusal and no exit of its own — it REPORTS (a value plus a status)" ;;
+esac
+if printf '%s\n' "$C_LOC_BODY" | LC_ALL=C grep -q 'return 3'; then
+  ok "S3-structural: it reports the ambiguity as a STATUS (return 3) the caller can check"
+else
+  bad "S3-structural: c_auto_locate_issue does not return a distinct status for the ambiguous case (body: $C_LOC_BODY)"
+fi
+if LC_ALL=C grep -q 'issue=$(c_auto_locate_issue) || arc=$?' "$ASSERT"; then
+  ok "S3-structural: the CALL SITE captures the status with the correct idiom (\`cmd || rc=\$?\`, never \`if ! cmd; then rc=\$?\`, which reads 0)"
+else
+  bad "S3-structural: the call site does not capture c_auto_locate_issue's status, so the ambiguity cannot be refused explicitly"
 fi
 
 # --- 44e: AUTO's locally-located stage must be BOUND to the certified tree ----
