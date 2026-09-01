@@ -1055,6 +1055,31 @@ fn dataset_cases() -> Vec<DatasetCase> {
             columns: vec!["user_id", "addresses"],
             token_of_int_pk: None,
         },
+        // Issue #2339: NESTED FROZEN COLLECTIONS in element/value position, on real
+        // Cassandra bytes. `s_map_vals set<frozen<map<text,int>>>` is a composite
+        // SET ELEMENT whose element is a frozen COLLECTION (not a UDT), so it needs
+        // no `CREATE TYPE` to resolve — which means #2339's narrowing lets the
+        // predicate SELECT the fast arm for this schema. This case is what proves
+        // that is safe: both arms must return identical rows for all three of
+        // `m_list_vals map<text, frozen<list<int>>>` (scalar key, frozen-collection
+        // VALUE), `l_set_vals list<frozen<set<text>>>` (a list, position-keyed) and
+        // `s_map_vals` (the composite element), UNPROJECTED. `assert_arms_agree`
+        // FAILS unless the bypass leg shows mergers_built == 0, so "the fast arm was
+        // really taken" is asserted, not assumed.
+        DatasetCase {
+            label: "cassandra/cx_nested_frozen_collections(nested frozen collections, SELECT *)",
+            pk_only_label: "cassandra/cx_nested_frozen_collections@pk-only",
+            keyspace: "test_types",
+            table: "cx_nested_frozen_collections",
+            ddl: "CREATE TABLE cx_nested_frozen_collections (pk int, ck int, m_list_vals map<text, frozen<list<int>>>, l_set_vals list<frozen<set<text>>>, s_map_vals set<frozen<map<text,int>>>, PRIMARY KEY (pk, ck));".to_string(),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 1,
+            pk_only_projection: vec!["pk", "ck"],
+            refuses_fast_arm: false,
+            refused_error_substr: None,
+            columns: vec![],
+            token_of_int_pk: None,
+        },
         // The NON-FROZEN (multicell) UDT divergence, on real Cassandra bytes
         // (roborev): `mp person_type` is multicell, so the merge arm's
         // `assemble_complex` `_` fall-through keeps only the LAST element's scalar

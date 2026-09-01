@@ -261,11 +261,18 @@ fn dropping_the_scan_source_does_not_poison_the_callers_cancel() {
     );
 }
 
-/// Spec R1 (roborev, issue #3058): a non-frozen collection whose element/key
-/// is a frozen UDT takes the MERGE arm, so `SELECT *` cannot start working
-/// at one generation and erroring at two (#2339 fails the merge arm closed on
-/// exactly these columns). A `list<frozen<udt>>` is NOT affected — its cell
-/// path is a position TimeUUID, and the merge arm serves it.
+/// Spec R1 (roborev, issue #3058): a non-frozen collection whose element/key the
+/// two arms do NOT collapse identically takes the MERGE arm, so `SELECT *` cannot
+/// return one thing at one generation and another at two. A `list<frozen<udt>>` is
+/// NOT affected — its cell path is a position TimeUUID, and the merge arm serves
+/// it.
+///
+/// With NO `UdtScope` (this case) every composite is refused, because the merge
+/// arm resolves UDT references through the ticket registry and cannot decode a
+/// bare `Custom` — the fail-closed direction. Issue #2339's registry-aware
+/// narrowing (a RESOLVABLE composite SET element is served by both arms) is
+/// pinned separately by
+/// [`a_resolvable_composite_set_element_selects_the_fast_arm`].
 #[test]
 fn a_composite_keyed_collection_forces_the_merge_arm() {
     use crate::testutil::{simple_schema, write_row};
@@ -280,8 +287,10 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
     for refused in [
         "set<frozen<contact_info>>",
         "map<frozen<contact_info>, text>",
-        "set<frozen<tuple<int, text>>>",
         "map<frozen<tuple<int, text>>, text>",
+        // A composite SET element with NO registry scope: the merge arm cannot
+        // resolve it, so the fast arm is refused (issue #2339).
+        "set<frozen<tuple<int, text>>>",
         "set<frozen<list<int>>>",
         // Case-insensitive parse: this is refused by the `Set` arm, exactly
         // like its lowercase spelling.
@@ -325,6 +334,124 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
             BypassReason::Selected,
             "`{allowed}` is served identically by both arms and must stay on \
              the fast path"
+        );
+    }
+}
+
+/// Issue #2339: the composite-SET-element clause is REGISTRY-AWARE.
+///
+/// Both arms decode a composite set element structurally now, but they resolve
+/// the element TYPE from different places: the merge arm from the ticket DDL's
+/// `UdtScope`, the single-generation decoder from the SSTable's OWN marshal type.
+/// So the fast arm is safe only when the scope can resolve it — otherwise the
+/// merge arm fails closed while the fast arm succeeds, which is exactly the
+/// arm-dependent outcome the guard exists to prevent.
+///
+/// A composite MAP KEY stays refused whatever the scope: the divergence merely
+/// swapped sides (the merge arm decodes it; `parse_cell_path_key` in the
+/// single-generation decoder has no composite arm and falls back to an opaque
+/// `Value::Blob`).
+#[test]
+fn a_resolvable_composite_set_element_selects_the_fast_arm() {
+    use crate::testutil::{simple_schema, write_row};
+    use cqlite_core::schema::udt_registry_from_cql;
+    use cqlite_core::storage::write_engine::merge::UdtScope;
+
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+    let base = simple_schema();
+    let registry = udt_registry_from_cql(
+        "CREATE TYPE contact_info (email text, phone text);",
+        &base.keyspace,
+    );
+    let resolving = Some(UdtScope {
+        registry: &registry,
+        keyspace: &base.keyspace,
+    });
+    // A scope whose KEYSPACE does not match the one the registry was built under
+    // resolves NOTHING — the mismatch #2339's `UdtScope` exists to make explicit.
+    let wrong_keyspace = Some(UdtScope {
+        registry: &registry,
+        keyspace: "some_other_keyspace",
+    });
+
+    let with_type = |ty: &str| {
+        let mut schema = base.clone();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = ty.to_string();
+        }
+        schema
+    };
+
+    let udt_set = with_type("set<frozen<contact_info>>");
+    assert_eq!(
+        bypass_reason(&readers, &udt_set, ForcedMergePath::Auto, false, resolving),
+        BypassReason::Selected,
+        "a RESOLVABLE composite set element is decoded by both arms (issue #2339)"
+    );
+    assert_eq!(
+        bypass_reason(&readers, &udt_set, ForcedMergePath::Auto, false, None),
+        BypassReason::MulticellArmDivergence,
+        "control: without a scope the merge arm cannot resolve it, so refuse"
+    );
+    assert_eq!(
+        bypass_reason(
+            &readers,
+            &udt_set,
+            ForcedMergePath::Auto,
+            false,
+            wrong_keyspace
+        ),
+        BypassReason::MulticellArmDivergence,
+        "control: a scope keyed on the WRONG keyspace resolves nothing, so refuse"
+    );
+
+    // An UNKNOWN UDT name is unresolvable even WITH a registry.
+    assert_eq!(
+        bypass_reason(
+            &readers,
+            &with_type("set<frozen<not_registered>>"),
+            ForcedMergePath::Auto,
+            false,
+            resolving
+        ),
+        BypassReason::MulticellArmDivergence,
+        "an unresolvable composite set element must still take the merge arm"
+    );
+
+    // A nested frozen COLLECTION element needs no registry at all — it carries its
+    // own structure — so it is served by both arms even with no scope. Pinned
+    // end-to-end on Cassandra bytes by `issue_3058_forced_path_differential.rs`'s
+    // `cx_nested_frozen_collections` case.
+    for structural in ["set<frozen<list<int>>>", "set<frozen<map<text,int>>>"] {
+        assert_eq!(
+            bypass_reason(
+                &readers,
+                &with_type(structural),
+                ForcedMergePath::Auto,
+                false,
+                resolving
+            ),
+            BypassReason::Selected,
+            "`{structural}` carries its own structure and is served by both arms"
+        );
+    }
+
+    // A composite MAP KEY is refused regardless of the scope.
+    for map_key in [
+        "map<frozen<contact_info>, text>",
+        "map<frozen<tuple<int, text>>, text>",
+    ] {
+        assert_eq!(
+            bypass_reason(
+                &readers,
+                &with_type(map_key),
+                ForcedMergePath::Auto,
+                false,
+                resolving
+            ),
+            BypassReason::MulticellArmDivergence,
+            "`{map_key}`: the single-generation decoder serves a composite map key as \
+             an opaque Blob, so the arms still diverge"
         );
     }
 }
