@@ -1182,7 +1182,7 @@ fn admitting_an_empty_width_did_not_widen_the_upper_bound() {
 // frozen side. Asserted as EQUALITY of the two, per type, so neither can drift.
 
 #[test]
-fn multicell_and_frozen_sides_present_every_key_type_identically() {
+fn multicell_and_frozen_sides_present_every_composite_key_type_identically() {
     let p = parser();
     let udt = collide_key_bytes();
     let seq = encode_sequence(&[&1i32.to_be_bytes()]);
@@ -1472,9 +1472,8 @@ fn a_foreign_type_ending_in_bytes_type_is_not_treated_as_a_declared_blob() {
 /// `float` keys became reachable when #3612 widened the cell-path allowlist, and
 /// the shared arm was widening f32 to the f64 `Value::Float` — so such a key
 /// compared UNEQUAL to the same float decoded on the ordinary column path or as a
-/// UDT field, both of which produce `Value::Float32`. Pinned on both spellings and
-/// against the frozen reader, since a map key that cannot compare equal to its own
-/// value is the same collapse-class this issue exists for.
+/// UDT field, both of which produce `Value::Float32`. Pinned on BOTH SPELLINGS, since a map
+/// key that cannot compare equal to its own value is the collapse-class #3612 exists for.
 #[test]
 fn float_cell_path_key_keeps_cql_type_identity() {
     let p = parser();
@@ -1487,8 +1486,9 @@ fn float_cell_path_key_keeps_cql_type_identity() {
         );
     }
     // NO cross-spelling assertion here: for `float` the cell-path decoder DELEGATES to
-    // `parse_value_from_raw_bytes`, so comparing them cannot fail. Real parity (two
-    // readers, two type strings) belongs to `multicell_and_frozen_sides_present_every_key_type_identically`.
+    // `parse_value_from_raw_bytes`, so float parity holds BY DELEGATION and no assertion
+    // could falsify it. The composite parity test is not its home either — it hands ONE
+    // type string to both sides, and all seven of its cases are composites by construction.
     // `double` is untouched and REMAINS the f64 `Value::Float` — the fix narrows
     // `float` alone and must not have swept its neighbour up.
     assert_eq!(
