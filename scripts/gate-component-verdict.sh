@@ -79,10 +79,10 @@ SUMMARY=""; MODE=""; COMPONENT=""; WANT_RUN_ID=""; HB=""
 # every path rather than at each printf site (CLAUDE.md #3312: an invariant over OUTPUT
 # needs a check on the OUTPUT PATH). Neutralised DISPLAY-ONLY: every decision above is
 # made on the raw value.
-_safe() {  # <text> -> the same text with any pastable gate token defused
+_safe() {  # <text> -> the same text, pastable gate tokens defused and controls stripped
   printf '%s' "$1" \
     | sed -e 's/RESULT:/RESULT(defused)/g' -e 's/==== AGENT-GATE/====(defused) AGENT-GATE/g' \
-    | tr -d '\r' | tr '\n' ' '
+    | tr '\n\r\t' '   ' | tr -d '\000-\010\013\014\016-\037\177'
 }
 say()  { printf 'gate-verdict: %s\n' "$(_safe "$1")"; }
 sayerr(){ printf 'gate-verdict: %s\n' "$(_safe "$1")" >&2; }
@@ -186,6 +186,9 @@ fi
 # COULD-NOT-MEASURE whichever non-terminal state it is in, so the stall-confirmation
 # sleep would buy nothing and would block a poller.
 # ---------------------------------------------------------------------------
+if [ ! -r "$LIVENESS" ]; then
+  verdict COULD-NOT-MEASURE 4 "$COMPONENT (reader-absent; the shared completion reader is not readable at $LIVENESS, so completion cannot be established — and this script deliberately re-implements neither the terminal grammar nor the run-id binding)"
+fi
 declare -a _gl_args=("$SNAP" --heartbeat "$HB" --no-wait)
 [ -n "$WANT_RUN_ID" ] && _gl_args+=(--run-id "$WANT_RUN_ID")
 GL_OUT=$(bash "$LIVENESS" "${_gl_args[@]}" 2>&1); GL_RC=$?
@@ -193,6 +196,8 @@ if [ "$GL_RC" -ne 0 ]; then
   # Reduce the reader's answer to its own first line, and name the SUMMARY rather than
   # the snapshot path the reader was handed.
   _gl_first=$(printf '%s\n' "$GL_OUT" | head -1)
+  _gl_first="${_gl_first//"$SNAP"/"$SUMMARY"}"
+  _gl_first="${_gl_first//"$SNAPDIR"/(snapshot)}"
   verdict COULD-NOT-MEASURE 4 "$COMPONENT (run-not-complete; the run has not published a terminal verdict for this request, so no component verdict exists yet — gate-liveness.sh: ${_gl_first:-no answer} [rc=$GL_RC])"
 fi
 

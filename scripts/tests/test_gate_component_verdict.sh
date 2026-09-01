@@ -113,6 +113,9 @@ expect() {
   if printf '%s' "$out" | grep -qE 'RESULT:[[:space:]]*[A-Z]'; then
     bad "$label" "output carries a RESULT: token (pastable as a gate verdict): $(printf '%s' "$out" | head -3)"; return
   fi
+  if printf '%s' "$out" | grep -qF 'gate-component-verdict.'; then
+    bad "$label" "output names the PRIVATE SNAPSHOT path, which will not exist when anyone reads it: $(printf '%s' "$out" | head -2)"; return
+  fi
   if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
     bad "$label" "output carries an AGENT-GATE block marker: $(printf '%s' "$out" | head -3)"; return
   fi
@@ -124,7 +127,7 @@ expect() {
   if [ -n "$unanchored" ]; then
     bad "$label" "output line(s) missing the gate-verdict: anchor: $(printf '%s' "$unanchored" | head -2)"; return
   fi
-  if ! printf '%s' "$out" | grep -q "^gate-verdict: $want\b"; then
+  if ! printf '%s' "$out" | grep -q "^gate-verdict: $want "; then
     bad "$label" "expected verdict $want, got: $(printf '%s' "$out" | head -1)"; return
   fi
   if [ "$rc" != "$wantrc" ]; then
