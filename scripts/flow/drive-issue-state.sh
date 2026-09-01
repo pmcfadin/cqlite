@@ -104,7 +104,10 @@
 #       else rests on.
 #   (c) The verdict appears ONLY on a `DRIVE-STATE: verdict ` line and is a single token
 #       from the CLOSED set below; prose goes on `verdict-detail` lines. An unrecognised
-#       token is not a thing this script can print — the set is the grammar.
+#       token is not a thing this script can print — the set is the grammar. EVERY exit
+#       carries one, INCLUDING a fatal start-up failure: callers branch on the TOKEN, so a
+#       prefixed line with no token is unreadable by every one of them and its `case` falls
+#       through — (a) does not imply (c), and only (c) is what a consumer reads.
 #
 # VERDICT TOKENS (closed set)
 #   OWNED               this lane, this issue, this session — proceed
@@ -291,10 +294,14 @@ register_tmp() { TMP_FILES+=("$1"); }
 # The shared three-valued process-liveness primitives (#3822). A MISSING library is fatal
 # and NAMED — never a silent continue with the predicates undefined, which would make
 # every liveness answer an empty string and (worse) could read as "gone".
-[ -r "$SCRIPT_HOME/lib/process-liveness.sh" ] || {
-  printf '%s ERROR cannot read %s/lib/process-liveness.sh (the shared process-liveness primitives) — NOTHING was measured\n' "$P" "$SCRIPT_HOME" >&2
-  exit 1
-}
+# ANCHORED IS NOT THE SAME AS VERDICT-BEARING (roborev job 26 F1). This guard used to
+# printf its own prefixed line and exit 1: contract (a) was satisfied and contract (c) was
+# NOT, so the ONE line every caller branches on — the closed-set token on the `verdict `
+# line — was absent, and a `case` on that token (which drive-issue.md's Delta 4 mandates)
+# fell through every arm on a FATAL failure. `refuse` is defined above precisely so that
+# every exit of this script carries a token; there is no exception for a fatal one.
+[ -r "$SCRIPT_HOME/lib/process-liveness.sh" ] || \
+  refuse ERROR 1 "cannot read $(sane "$SCRIPT_HOME/lib/process-liveness.sh") (the shared process-liveness primitives) — NOTHING was measured"
 # shellcheck source=lib/process-liveness.sh
 . "$SCRIPT_HOME/lib/process-liveness.sh"
 

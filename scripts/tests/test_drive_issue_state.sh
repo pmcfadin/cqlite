@@ -1107,6 +1107,64 @@ $pr_ok"
 fi
 
 # ===========================================================================
+case_begin 29-missing-liveness-library "a MISSING shared liveness library emits the ERROR verdict TOKEN, not a bare prefixed line"
+# ===========================================================================
+# roborev job 26 F1. The guard was anchored (it carried the DRIVE-STATE: prefix) but was NOT
+# the `verdict ERROR` shape, so the ONE line every caller branches on — the closed-set token
+# on the `verdict ` line — was ABSENT. drive-issue.md's Delta 4 tells callers to `case` on
+# that token, so this failure fell through every arm: a fatal, unreadable-by-construction
+# refusal. The prefix is contract (a); the token is contract (c), and (a) does not imply (c).
+#
+# THE ARTIFACT IS SUBSTITUTED, never a path seam: the script is COPIED to a scratch directory
+# WITHOUT its lib/, exactly as cases 22/27 substitute the artifact. A settable SCRIPT_HOME (or
+# any test-only override) would be one more thing a real invoker can set.
+SCRATCH29="$T/scratch29"; mkdir -p "$SCRATCH29"
+cp "$DS" "$SCRATCH29/drive-issue-state.sh"
+L29=$(lane lane29)
+ml_out=$( cd "$L29" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+  bash "$SCRATCH29/drive-issue-state.sh" verify 3822 2>&1 ); ml_rc=$?
+ml_v="$(verdict_of "$ml_out")"
+if [ "$ml_rc" -eq 1 ] && [ "$ml_v" = ERROR ] && verdict_in_set "$ml_v" \
+   && all_lines_anchored "$ml_out" \
+   && printf '%s\n' "$ml_out" | grep -q 'process-liveness.sh'; then
+  ok "an ABSENT lib/process-liveness.sh yields exit 1 AND a closed-set 'verdict ERROR' line naming the unreadable path"
+else
+  bad "the missing-liveness-library guard emitted no usable verdict token: rc=$ml_rc verdict='$ml_v'
+$ml_out"
+fi
+# NON-VACUITY: the SAME scratch copy works once the library is beside it, so the refusal
+# above is about the missing library and not about the copy being broken.
+mkdir -p "$SCRATCH29/lib"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$SCRATCH29/lib/process-liveness.sh"
+ml_ok=$( cd "$L29" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+  bash "$SCRATCH29/drive-issue-state.sh" write 3822 2>&1 ); ml_okrc=$?
+if [ "$ml_okrc" -eq 0 ] && [ "$(verdict_of "$ml_ok")" = WRITTEN ]; then
+  ok "NON-VACUITY: the same scratch copy writes normally with the library present"
+else
+  bad "the scratch copy is broken independently of the library, so the refusal above proves nothing: rc=$ml_okrc
+$ml_ok"
+fi
+# THE UNREADABLE (as opposed to absent) ROUTE INTO THE SAME GUARD. Root bypasses file
+# permissions, so under root the probe is DECLARED unavailable rather than passing vacuously.
+if [ "$(id -u)" -eq 0 ]; then
+  ok "unreadable-library probe DECLARED unavailable under root (permissions are bypassed) — the absent-library route above is what was measured"
+else
+  chmod 000 "$SCRATCH29/lib/process-liveness.sh"
+  ml_u=$( cd "$L29" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+    bash "$SCRATCH29/drive-issue-state.sh" verify 3822 2>&1 ); ml_urc=$?
+  chmod 644 "$SCRATCH29/lib/process-liveness.sh" 2>/dev/null || true
+  if [ "$ml_urc" -eq 1 ] && [ "$(verdict_of "$ml_u")" = ERROR ] && all_lines_anchored "$ml_u"; then
+    ok "an UNREADABLE lib/process-liveness.sh takes the same guard: exit 1 with a 'verdict ERROR' line"
+  else
+    bad "an unreadable library did not emit the ERROR verdict: rc=$ml_urc verdict=$(verdict_of "$ml_u")
+$ml_u"
+  fi
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1118,8 +1176,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 20-same-process-is-owned 21-write-over-unstamped-migrates
 22-no-dead-letter-remedies 23-durable-fields-survive 24-serialization
 25-displaced-sentinel-is-not-legacy 26-unusable-start-window 27-pre-rename-validation
+29-missing-liveness-library
 28-case-floor"
-CASE_FLOOR=28
+CASE_FLOOR=29
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -1131,8 +1190,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 68 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 68)"
+if [ "$PASS" -ge 71 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 71)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
