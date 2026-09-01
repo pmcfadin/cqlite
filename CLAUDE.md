@@ -1264,9 +1264,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   FAIL → waiver naming that base/head/job → recheck ⇒ `WAIVED` + `RESULT: PASS`, with zero reviewer
   invocations; and a recheck of a *different* job stays `STALE`.
   **REQUEST A WAIVER ONLY WHEN THE HEAD IS FINAL — pushed, conflict-free, post-gate, and REVIEWED AT
-  THAT SHA (#3460).** The binding above is `base` AND `head` AND `job` compared for EXACT EQUALITY
-  against the run's own `HEAD_SHA` (`git rev-parse HEAD`, recomputed in EVERY mode INCLUDING
-  `--recheck-job`), so **any commit landing after the request makes the grant unapplicable** —
+  THAT SHA (#3460).** The binding above is `base` AND `head` AND `job`, each compared for EXACT
+  EQUALITY and each against a DIFFERENT value: `head` against the run's own `HEAD_SHA`
+  (`git rev-parse HEAD`, assigned ONCE before mode dispatch — NO path derives head from the job record,
+  `--recheck-job` included), `base` against `RANGE_BASE_SHA`, which is the **MERGE-BASE and NOT the base
+  ref's tip** (#3392 — copy it from the block's `assert-base:` line, NEVER from `base:`), and `job`
+  against this run's job id. So **any commit landing after the request makes the grant unapplicable** —
   `waiver: STALE`, and the FAIL stands. The order is therefore: push every local commit → rebase or
   resolve until the PR is not `CONFLICTING` → gate of record → **a roborev confirmation pass ON THAT
   FINAL SHA** → only then request the waiver, naming THAT round's triple. **`--recheck-job` is not an
@@ -1276,22 +1279,31 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   reviewed `6f5fc2b7c` and two commits landed after it), and #2605 was the same — so the final sha needs
   its OWN round, and THAT round's job id is the one the waiver must name. **THE TRAP CATCHES A LANE
   DOING THE CAREFUL THING, which is why it is written down rather than left to judgement**: the absence
-  diagnostic prints `base … head … job …` and those values are CORRECT at the moment it prints them,
-  while nothing in the output says they will be invalid after the next push — so copying the verified
-  triple straight into a request is simultaneously the obvious action and the wrong one whenever
-  anything is still going to move the head. Measured cost: THREE independent lanes on ONE day
-  (2026-08-28) — #1705/PR #3382 (grant received, then a conflict with just-merged #1701 had to be
-  resolved), #1699/PR #3403 (the triple was exact and the PR was `CONFLICTING` at the same moment),
-  #3248/PR #3455 (fixes committed but unpushed, AND `CONFLICTING`) — each spending an authorization on
-  code that would not merge, and asking the authorizer to judge a review that no longer described the
-  diff. **DO NOT LOOSEN THE BINDING TO MAKE THIS EASIER**: all three instances are the binding WORKING,
-  and a waiver riding to a later review is the hole #3312 exists to close. **NOT MECHANIZED, and only
-  ONE of the three halves is**: `push-assert` catches the unpushed half (`FAIL (unpushed commits)`,
-  aborting the round before any review), while `mergeable`/`CONFLICTING` appears NOWHERE in the wrapper,
-  the waiver scanner or `premerge-assert.sh` — so a pushed-but-`CONFLICTING` head passes every check and
-  still yields a triple that dies on the rebase. Converting this rule into a refusal, and naming WHY a
-  triple is stale (`head moved` / `base moved` / `job mismatch`) instead of a generic staleness verdict,
-  is **#3827** — a change to the wrapper, which per its own doctrine cannot certify itself.
+  diagnostic prints `base … head … job …`, those values are CORRECT at the moment it prints them, and
+  **the failing block itself says nothing about a push invalidating them** — only `--help` does ("a
+  push, a different base or a re-run each need a fresh one"), which is not where a lane reading a FAIL
+  is looking. So copying the verified triple straight into a request is simultaneously the obvious
+  action and the wrong one whenever anything is still going to move the head. Measured cost: THREE
+  independent lanes on ONE day (2026-08-28) — #1705/PR #3382 (grant received, then a conflict with
+  just-merged #1701 had to be resolved), #1699/PR #3403 (the triple was exact and the PR was
+  `CONFLICTING` at the same moment), #3248/PR #3455 (fixes committed but unpushed, AND `CONFLICTING`) —
+  each spending an authorization on code that would not merge, and asking the authorizer to judge a
+  review that no longer described the diff. **DO NOT LOOSEN THE BINDING TO MAKE THIS EASIER**: all three
+  instances are the binding WORKING, and a waiver riding to a later review is the hole #3312 exists to
+  close. **TWO OF THE FOUR CONDITIONS ARE MECHANIZED AND TWO ARE NOT — KNOW WHICH.** *Pushed* is:
+  `push-assert` FAILs the round before any review is enqueued (`FAIL (unpushed commits)` when the remote
+  branch exists and local is ahead; `FAIL (branch absent on remote <remote>)` when it was never pushed —
+  four spellings, one verdict). *Reviewed-at-that-sha* is: `sha-assert` FAILs when the record's range
+  head ≠ local `HEAD`, and the head binding catches it again at waiver time. But **`mergeable` /
+  `CONFLICTING` appears NOWHERE** in the wrapper, the waiver scanner or `premerge-assert.sh`, and
+  **NOTHING correlates the reviewed sha with a gate of record** — so a pushed, reviewed,
+  still-`CONFLICTING` head passes every check and yields a triple that dies on the rebase. Mechanizing
+  those two, and splitting the staleness VERDICT TOKEN (`STALE` for all three causes today, though its
+  DETAIL already names the diverged field and both values) into `head moved` / `base moved` /
+  `job mismatch`, is **#3827** — whose demonstration is **circular rather than impossible**: every
+  sanctioned invocation is the branch's own `scripts/flow/roborev-review.sh`, so the round reviewing a
+  wrapper change RUNS the changed wrapper (the same property #3544 records for `agent-gate.sh`, and
+  NOT the read-from-root self-certification bar of #3229).
   **The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged**, so
   field order and value boundaries are enforced and `reason=TODO ` / whitespace-only reasons are refused
   like their untrimmed forms — per-field extraction had enforced neither.
