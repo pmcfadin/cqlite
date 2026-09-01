@@ -958,7 +958,12 @@ fi
 NODE_TEST_JSON=$(ruby -ryaml -rjson -e '
   wf = YAML.load_file(ARGV[0], aliases: true)
   job = wf.dig("jobs", "test") || {}
-  oses = Array(job.dig("strategy", "matrix", "include")).map { |e| e["os"].to_s }
+  matrix = job.dig("strategy", "matrix") || {}
+  # Both matrix spellings, so a refactor between `os: [...]` and `include:` cannot
+  # silently empty this set (an empty set would report every platform missing —
+  # loud, but for the wrong reason).
+  oses = Array(matrix["os"]).map(&:to_s) +
+         Array(matrix["include"]).map { |e| e.is_a?(Hash) ? e["os"].to_s : "" }
   print JSON.generate("if" => job["if"].to_s.gsub(/\s+/, " ").strip,
                       "coe" => job.key?("continue-on-error"),
                       "oses" => oses,

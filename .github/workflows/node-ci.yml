@@ -208,9 +208,10 @@ jobs:
       # rather than in the label-gated `build` job, the only other producer of a
       # linux x86_64 module — is what lets the floor legs REBUILD NOTHING.
       #
-      # The name MUST stay outside the `bindings-*` namespace. `quality-gate`
-      # collects `pattern: bindings-*` with `merge-multiple: true` and
-      # republishes the result as the `cqlite-node-binaries` artifact. That
+      # The name MUST stay outside the `bindings-*` namespace. The `bundle` job
+      # (split out of `quality-gate` by #3640) collects `pattern: bindings-*` with
+      # `merge-multiple: true` and republishes the result as the
+      # `cqlite-node-binaries` artifact. That
       # merge flattens every artifact into ONE directory, and this upload's
       # `path` is the same `${APP_NAME}.*.node` basename the production
       # x86_64-unknown-linux-gnu build emits — so inside the `bindings-*`
@@ -466,16 +467,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Native test platforms only
-          # Note: x86_64-apple-darwin is build-only (cross-compiled on ARM64, can't test)
-          # Note: aarch64-unknown-linux-gnu is build-only (cross-compiled, can't test)
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+        # THE THREE GATING PLATFORMS (issue #3640). Native test platforms only:
+        # x86_64-apple-darwin and aarch64-unknown-linux-gnu are cross-compiled and
+        # cannot be tested, so they stay build-only in the `build` job. No `target:`
+        # key any more — this job builds natively for its own runner and nothing
+        # here consumes a target triple.
+        os: [ubuntu-latest, macos-14, windows-latest]
 
     steps:
       - name: Checkout

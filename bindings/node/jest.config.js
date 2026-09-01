@@ -71,6 +71,14 @@ const LEAK_TEST = '<rootDir>/__test__/leak-paths.test.js';
 // a lie about what ran — and every applied pattern is printed, because a lane
 // that omits coverage silently is indistinguishable from one that covers it.
 // Removing the workflow's use of this variable is #1979's completion criterion.
+//
+// PATTERNS USE FORWARD SLASHES, ON EVERY PLATFORM, and that is a second reason
+// they belong in the config rather than on the command line: jest-config runs
+// `replacePathSepForRegex` over `testPathIgnorePatterns`, so `/` is translated to
+// the Windows separator for us — which is why jest's own default `/node_modules/`
+// works on Windows. A pattern applied outside that normalisation would have to
+// spell `\\` itself and would silently match nothing on the one platform these
+// exclusions exist for.
 const EXTRA_IGNORE_ENV = 'CQLITE_JEST_IGNORE_SUITES';
 
 function declaredExtraIgnorePatterns() {
