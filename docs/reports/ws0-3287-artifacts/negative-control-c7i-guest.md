@@ -136,15 +136,29 @@ the issue names in advance as "has not answered the question".
 
 ## Finding 3 — TMA level-2 is absent, not degraded
 
+Quoted verbatim from the committed captures, each line naming the file it is in:
+
 ```
-perf stat -M TopdownL1  ->  Unable to find PMU or event on a PMU of 'topdown-retiring'
-perf stat -M TopdownL2  ->  Unable to find PMU or event on a PMU of 'topdown-retiring'
-perf stat -e topdown.slots -> sys_perf_event_open() failed: Invalid argument
-topdown-retiring / topdown-fe-bound / topdown-be-bound / topdown-bad-spec -> ABSENT-FROM-PMU
+tma-probe.txt        perf stat -M TopdownL1      -> Unable to find PMU or event on a PMU of 'topdown-retiring'   [rc=1]
+tma-probe.txt        perf stat -M TopdownL2      -> Unable to find PMU or event on a PMU of 'topdown-retiring'   [rc=1]
+tma-probe.txt        perf stat -e slots          -> Bad event name / Unable to find event on a PMU of 'slots'    [rc=129]
+tma-probe.txt        -e topdown-retiring         -> Bad event name / Unable to find event on a PMU of ...        [rc=129]
+tma-probe.txt        -e topdown-{fe,be}-bound,
+                        -e topdown-bad-spec      -> the same, all three                                          [rc=129]
+event-disposition.txt  topdown.slots             -> ABSENT-FROM-PMU
 ```
 
-On Ice Lake and later, TMA is served by `PERF_METRICS` through those pseudo-events plus `slots`. With
-`slots` returning `EINVAL` there is no level-1 breakdown, so level-2 is unreachable by construction.
+On Ice Lake and later, TMA is served by `PERF_METRICS` through those pseudo-events plus `slots`. Here
+`slots` does not resolve on this PMU **at all** — `perf` cannot even name the event, so no
+`perf_event_open` is attempted — and neither do the four level-1 pseudo-events. There is therefore no
+level-1 breakdown, and level-2 is unreachable by construction.
+
+*(An earlier draft of this block quoted `sys_perf_event_open() failed: Invalid argument` for
+`topdown.slots`. No committed capture, before or after the re-run, contains that string: this host
+fails these events at event-table resolution, not at the syscall. The conclusion is unchanged — if
+anything an unresolvable event is the stronger form — but a verbatim-looking quotation that no
+artefact supports is exactly the defect this file is written against, so it is corrected rather than
+carried.)*
 
 **A hand-rolled substitute is not a lesser version of this study.** Some raw components *are* present
 (`idq_uops_not_delivered.core`, `int_misc.recovery_cycles`, `exe_activity.bound_on_stores`,
@@ -386,13 +400,14 @@ The tables here say what each answer *means for #3287*, and record what this hos
 
 | probe | pass criterion |
 |---|---|
-| `perf stat -e slots -- true` and `-e topdown.slots` | resolves and counts; **`EINVAL` here** |
-| `topdown-retiring`, `topdown-fe-bound`, `topdown-be-bound`, `topdown-bad-spec` | all four present; **all four ABSENT-FROM-PMU here** |
+| `perf stat -e slots -- true` and `-e topdown.slots` | resolves and counts; **neither resolves here** — `slots` is `Bad event name` in `tma-probe.txt`, `topdown.slots` is `ABSENT-FROM-PMU` in `event-disposition.txt` |
+| `topdown-retiring`, `topdown-fe-bound`, `topdown-be-bound`, `topdown-bad-spec` | all four present; **all four unresolvable here** (`Bad event name`, rc=129, `tma-probe.txt`) |
 | `perf stat -M TopdownL1 -- true` | resolves and prints four level-1 shares summing to ~100% |
 | `perf stat -M TopdownL2 -- true` | **resolves** — this is the AC itself. Level-2 is unreachable if level-1 is |
 
-Level-2 is served by `PERF_METRICS` on Ice Lake and later. If `slots` returns `EINVAL`, stop: there
-is no level-1 breakdown to subdivide, and the raw-event substitute is barred (see Finding 3).
+Level-2 is served by `PERF_METRICS` on Ice Lake and later. If `slots` does not resolve — whether the
+event is absent from the table, as here, or `perf_event_open` refuses it — stop: there is no level-1
+breakdown to subdivide, and the raw-event substitute is barred (see Finding 3).
 
 ## Gate B — the offcore / prefetch-stall term (#3287 AC2) — the one the issue exists for
 
