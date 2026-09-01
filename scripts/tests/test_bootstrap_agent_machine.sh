@@ -252,6 +252,17 @@ pin_tree_id() {
     # shared-worktree edit. IGNORED paths stay excluded on purpose (`--exclude-standard`):
     # this lane's own scratch — the verdict file, the follow-up list — changes constantly
     # and hashing it would make every run report MOVED, which is the alarm nobody reads.
+    # ...AND THE ENUMERATION IS ROOTED AT THE WORKTREE TOP, NOT AT $SCRIPT_DIR (roborev
+    # job 332). `git ls-files` defaults to the CURRENT DIRECTORY, so `-C "$SCRIPT_DIR"`
+    # hashed untracked contents only under `scripts/tests` — an untracked file anywhere
+    # else could change content and still digest STABLE. That is the SAME silent-omission
+    # class as the `xargs -r` defect above, one axis over: portability there, SCOPE here,
+    # and in both the digest still LOOKS like it covered them. `status --porcelain` is
+    # repo-wide already, so the NAME of such a file was never the gap — only its CONTENT.
+    # Measured cost on this lane: 0 untracked non-ignored files, 0.017s.
+    local top
+    top=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null) || top="$SCRIPT_DIR"
+    [ -n "$top" ] || top="$SCRIPT_DIR"
     dig=$( { git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null
              git -C "$SCRIPT_DIR" diff 2>/dev/null
              git -C "$SCRIPT_DIR" diff --cached 2>/dev/null
@@ -262,8 +273,8 @@ pin_tree_id() {
              # omission inside an integrity digest is the worst possible failure mode:
              # the digest still LOOKS like it covered them.
              while IFS= read -r -d "" _u; do
-               git -C "$SCRIPT_DIR" hash-object -- "$_u" 2>/dev/null
-             done < <(git -C "$SCRIPT_DIR" ls-files --others --exclude-standard -z 2>/dev/null)
+               git -C "$top" hash-object -- "$_u" 2>/dev/null
+             done < <(git -C "$top" ls-files --others --exclude-standard -z 2>/dev/null)
            } | git hash-object --stdin 2>/dev/null )
     case "$dig" in
       ?*) dig=$(printf '%s' "$dig" | cut -c1-12) ;;
@@ -3021,18 +3032,46 @@ else
     printf '%s\n' "$out_o" | grep -i 'gate-pin\|pam_env\|fix:' | head -4
   fi
 
-  # 11p. ...and the ABSENT-file box (a Mac has no /etc/environment) is not handed a
-  #      remedy naming a file it does not have. A remedy that cannot work on the box it
-  #      is printed for costs a cycle before the operator learns that.
+  # 11p. ...and the ABSENT-file box is not handed a remedy naming a file it does not
+  #      have. A remedy that cannot work on the box it is printed for costs a cycle
+  #      before the operator learns that.
+  #
+  #      THIS CASE USED TO ASSERT THE WRONG HALF (roborev job 332). It ran on the
+  #      suite's own LINUX host with the env file merely MISSING, and required the
+  #      message "has nowhere to persist it" — which is a MAC's message. On Linux the
+  #      missing file is CREATED by --fix-gate-pin, so the case was PINNING A FALSE
+  #      DIAGNOSTIC in place: it simulated a Mac by removing a file, and "the file is
+  #      absent" is not "this platform has no such file". Split in two, one per state,
+  #      because a single case cannot distinguish them by construction.
+  #
+  #      11p covers the LINUX absent file: creatable, so the remedy must NAME the flag
+  #      that creates it and must NOT claim there is nowhere to persist it.
   envf_p="$tmp/pin-env-p-missing"; rm -f "$envf_p"
   out_p=$(runpin "$pinroot" "$shims_none" "$envf_p" HOME="$pin_home_plain")
   if printf '%s' "$out_p" | grep -q 'gate-pin: FAILED' \
-     && printf '%s' "$out_p" | grep -q 'has nowhere to persist it' \
-     && ! printf '%s' "$out_p" | grep -q 'fix:  bash scripts/bootstrap-agent-machine.sh --yes'; then
-    ok "gate-pin: a host with no system env file is not told to re-run --yes against it"
+     && [[ $out_p == *'--fix-gate-pin'* ]] \
+     && [[ $out_p != *'has nowhere to persist it'* ]]; then
+    ok "gate-pin: a LINUX box with no env file is pointed at --fix-gate-pin, which creates it — not told there is nowhere to persist"
   else
-    bad "gate-pin: the absent-env-file box got a remedy that cannot work there"
+    bad "gate-pin: the absent-env-file Linux box got the unmanaged-platform remedy (job 332)"
     printf '%s\n' "$out_p" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
+  fi
+
+  # 11p2. ...and the UNMANAGED-PLATFORM box keeps the original ruling: no remedy naming a
+  #      file the platform does not have. Same missing file as 11p; the ONLY difference is
+  #      `uname`, which is what makes this the state 11p is not. Without this half the fix
+  #      above could have deleted the Mac message entirely and still passed.
+  shims_mac_p="$tmp/pin-shims-mac-p"; mkpinshims "$shims_mac_p" -
+  mk_stub "$shims_mac_p" uname 'echo Darwin'
+  envf_p2="$tmp/pin-env-p2-missing"; rm -f "$envf_p2"
+  out_p2=$(runpin "$pinroot" "$shims_mac_p" "$envf_p2" HOME="$pin_home_plain")
+  if [[ $out_p2 != *'--fix-gate-pin   (this'* ]] \
+     && [[ $out_p2 != *'fix:  bash scripts/bootstrap-agent-machine.sh --yes'* ]] \
+     && ! printf '%s' "$out_p2" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: an unmanaged-platform box with no env file is never pointed at a file its platform does not read"
+  else
+    bad "gate-pin: the unmanaged-platform box was handed a create-the-file remedy"
+    printf '%s\n' "$out_p2" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
   fi
 
   # 11q. PERSIST-THEN-PROBE WITHIN ONE RUN — the property `verify.run` depends on.
@@ -4133,6 +4172,49 @@ if [ -z "$pin_decline_bad" ] && grep -qE '^  exit 1$' "$0"; then
   ok "suite hygiene: the wholesale-decline path exits NONZERO (a declined suite is not a passing suite)"
 else
   bad "suite hygiene: a wholesale decline exits 0 — the gate reads only exit status, so it would certify a suite that ran nothing"
+fi
+
+# THE DIGEST SEES UNTRACKED CONTENT ANYWHERE IN THE WORKTREE, NOT JUST UNDER scripts/tests
+# (roborev job 332). `git ls-files` defaults to the CURRENT DIRECTORY, so the enumeration
+# used to be confined to $SCRIPT_DIR and an untracked file elsewhere could change content
+# while the digest reported STABLE — the same silent-omission class as the `xargs -r`
+# defect, one axis over.
+#
+# THE CASE HAS TO CREATE ITS OWN SUBJECT: this lane has ZERO untracked non-ignored files
+# (measured), so on this tree the fixed and unfixed forms are INDISTINGUISHABLE and a case
+# that merely called pin_tree_id twice would pass either way. It therefore plants a file at
+# the WORKTREE TOP (outside $SCRIPT_DIR, which is the whole point), mutates it, and removes
+# it — then asserts the digest RETURNED to its original value, which is what proves the
+# case cannot destabilise the run's own start/end comparison below. If the case dies before
+# cleanup the leftover file flips tree-integrity to MOVED, i.e. it fails LOUDLY rather than
+# quietly poisoning the verdict.
+# THE PROBE NAME MUST NOT BE GITIGNORED, AND THE FIRST ONE WAS. `.gitignore:79` carries
+# `*.tmp`, so a `…-$$.tmp` probe was excluded by `--exclude-standard` — the case would have
+# taken the `skip` branch on EVERY run, silently, which is a vacuous case wearing a skip's
+# clothes. Caught by the guard below rather than by the suite passing, which is the only
+# reason it is not still there. `.txt` is not matched by any rule in this repository; the
+# guard stays, because a future .gitignore rule could make it so.
+pin_dig_top="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"
+pin_dig_probe="$pin_dig_top/pin-digest-probe-$$.txt"
+if [ -n "$pin_dig_top" ] && [ -d "$pin_dig_top" ] && ! git check-ignore -q "$pin_dig_probe" 2>/dev/null; then
+  pin_dig_before=$(pin_tree_id)
+  printf 'a\n' > "$pin_dig_probe" 2>/dev/null
+  pin_dig_added=$(pin_tree_id)
+  printf 'b\n' > "$pin_dig_probe" 2>/dev/null
+  pin_dig_edited=$(pin_tree_id)
+  rm -f "$pin_dig_probe"
+  pin_dig_after=$(pin_tree_id)
+  if [ "$pin_dig_added" != "$pin_dig_before" ] \
+     && [ "$pin_dig_edited" != "$pin_dig_added" ] \
+     && [ "$pin_dig_after" = "$pin_dig_before" ]; then
+    ok "suite hygiene: the tree digest sees a CONTENT change to an untracked file outside scripts/tests (and the probe restored the tree)"
+  else
+    bad "suite hygiene: an untracked file outside scripts/tests changed content and the digest did not move (job 332)"
+    printf '  before=%s added=%s edited=%s after=%s\n' \
+      "$pin_dig_before" "$pin_dig_added" "$pin_dig_edited" "$pin_dig_after"
+  fi
+else
+  skip "suite hygiene: cannot plant a NON-IGNORED untracked probe at the worktree top (digest scope unverified — an ignored probe would make this case vacuous)"
 fi
 
 PIN_TREE_END=$(pin_tree_id)

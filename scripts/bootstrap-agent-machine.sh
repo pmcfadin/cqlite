@@ -2790,8 +2790,13 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
               ;;
             *)
               warn "gate-pin: NOT-SYSTEM-WIDE (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but there is NO CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE — so it is reaching this session from a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment) and gates launched outside that source get nothing)"
-              if [ "$PIN_FILE_HAS_LINE" = absent-file ]; then
+              if [ "$PIN_FILE_HAS_LINE" = absent-file ] && [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
+                # UNMANAGED PLATFORM only — on Linux the absent file is creatable, so the
+                # remedy below is the true one (roborev job 332; see the absent-file arm
+                # of the FAILED table for the full reasoning).
                 info "this $PLATFORM host has no $PIN_ENV_FILE, so there is no system-wide file to correlate against — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image)"
+              elif [ "$PIN_FILE_HAS_LINE" = absent-file ]; then
+                info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (this $PLATFORM host has no $PIN_ENV_FILE yet — the flag CREATES it carrying '$PIN_ENV_LINE', which every PAM session reads; the per-user source stays as it is)"
               else
                 info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (persists '$PIN_ENV_LINE' to $PIN_ENV_FILE, which every PAM session reads — the per-user source stays as it is)"
               fi
@@ -2834,7 +2839,22 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           # No remedy that names a file this host does not have (the ruling on #3414's
           # residual 4): telling a Mac to re-run --yes to append to /etc/environment is
           # advice that cannot work on the box it is printed for.
-          info "this $PLATFORM host has no $PIN_ENV_FILE, so bootstrap has nowhere to persist it — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image), NOT in a shell profile"
+          #
+          # BUT THAT RULING IS ABOUT AN UNMANAGED PLATFORM, AND APPLYING IT TO EVERY
+          # ABSENT FILE MADE IT FALSE ON LINUX (roborev job 332). "The file is missing" and
+          # "this platform has no such file" are DIFFERENT STATES: on Linux the missing
+          # file is CREATED by --fix-gate-pin (the persist path above says so in its own
+          # message), so "nowhere to persist it" sent an operator on a minimal Linux
+          # image to hand-edit systemd while a working remedy sat one flag away. A false
+          # remedy costs more than a missing one, because it stops them looking.
+          #
+          # The VERDICT was already scoped on platform rather than on file presence (the
+          # test suite asserts exactly that); this scopes the REMEDY the same way.
+          if [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
+            info "this $PLATFORM host has no $PIN_ENV_FILE, so bootstrap has nowhere to persist it — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image), NOT in a shell profile"
+          else
+            info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (this $PLATFORM host has no $PIN_ENV_FILE yet — the flag CREATES it carrying '$PIN_ENV_LINE', and pam_env reads it at session creation; --yes does it too)"
+          fi
           ;;
         *)
           [ -n "$PIN_PERSIST_NOTE" ] && info "nothing was persisted this run: $PIN_PERSIST_NOTE"
