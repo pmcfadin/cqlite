@@ -513,6 +513,13 @@ assert_body_safe() {
 }
 
 # write_marker <issue> <actor> <body-file|''> [<extra key: value lines>...]
+#
+# Reports through GLOBALS (WROTE_PATH on success, WRITE_ERR + return 1 on failure) rather
+# than through stdout, and is therefore NEVER called inside a command substitution. A
+# `refuse` inside `$( )` exits only the SUBSHELL and its verdict line is CAPTURED by the
+# caller's variable — so the run would end up with no verdict on stdout and a verdict
+# string inside a path. Every emit site in this script is in the main shell for that reason.
+WROTE_PATH=''; WRITE_ERR=''
 write_marker() {
   local issue="$1" actor="$2" bodyfile="$3"; shift 3
   local wt path tmp ts session pid win lo hi
@@ -524,9 +531,9 @@ write_marker() {
   # carrying a CONTROL character cannot be recorded losslessly on one line, so it is
   # refused rather than recorded wrongly.
   case "$wt" in
-    *[[:cntrl:]]*) refuse ERROR 1 "the worktree path contains a control character, so it cannot be recorded on one line as the worktree axis — refusing to write a stamp whose identity would be lossy" ;;
+    *[[:cntrl:]]*) WRITE_ERR="the worktree path contains a control character, so it cannot be recorded on one line as the worktree axis — refusing to write a stamp whose identity would be lossy"; return 1 ;;
     /*) : ;;
-    *)  refuse ERROR 1 "the worktree path '$(sane "$wt")' is not absolute — refusing to write a stamp whose worktree axis cannot be compared" ;;
+    *)  WRITE_ERR="the worktree path '$(sane "$wt")' is not absolute — refusing to write a stamp whose worktree axis cannot be compared"; return 1 ;;
   esac
 
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -538,7 +545,8 @@ write_marker() {
     if [ -n "$win" ]; then lo="${win%% *}"; hi="${win##* }"; fi
   fi
 
-  tmp="$(mktemp "$path.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file next to $(sane "$path") — nothing was written"
+  tmp="$(mktemp "$path.XXXXXX")" || {
+    WRITE_ERR="cannot create a temporary file next to $(sane "$path") — nothing was written"; return 1; }
   {
     printf '%s\n' "$STAMP_BEGIN"
     printf 'issue: %s\n' "$issue"
@@ -555,9 +563,10 @@ write_marker() {
     printf '%s\n' "$STAMP_END"
     printf '\n'
     if [ -n "$bodyfile" ] && [ -s "$bodyfile" ]; then cat "$bodyfile"; fi
-  } >"$tmp" || { rm -f "$tmp"; refuse ERROR 1 "failed writing $(sane "$tmp") — nothing was replaced"; }
-  mv -f "$tmp" "$path" || { rm -f "$tmp"; refuse ERROR 1 "failed replacing $(sane "$path")"; }
-  printf '%s\n' "$path"
+  } >"$tmp" || { rm -f "$tmp"; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced"; return 1; }
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; WRITE_ERR="failed replacing $(sane "$path")"; return 1; }
+  WROTE_PATH="$path"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -602,16 +611,21 @@ cmd_write() {
     fi
   fi
 
-  local extras='' path
-  path="$(write_marker "$issue" "$actor" "$body_src" \
-      "$( [ -n "$stage" ]   && printf 'stage: %s' "$(sanitize_field "$stage")" )" \
-      "$( [ -n "$request" ] && printf 'request-id: %s' "$(sanitize_field "$request")" )" \
-      "$( [ -n "$pr" ]      && printf 'pr: %s' "$(sanitize_field "$pr")" )" \
-      "$( [ -n "$branch" ]  && printf 'branch: %s' "$(sanitize_field "$branch")" )")"
+  # Optional fields are built into a positional list first: an empty one contributes
+  # NOTHING (write_marker skips empty extras), so an omitted --stage leaves no `stage:`
+  # line rather than an empty-valued one the reader would refuse as MALFORMED.
+  local f_stage='' f_request='' f_pr='' f_branch=''
+  [ -z "$stage" ]   || f_stage="stage: $(sanitize_field "$stage")"
+  [ -z "$request" ] || f_request="request-id: $(sanitize_field "$request")"
+  [ -z "$pr" ]      || f_pr="pr: $(sanitize_field "$pr")"
+  [ -z "$branch" ]  || f_branch="branch: $(sanitize_field "$branch")"
+  if ! write_marker "$issue" "$actor" "$body_src" "$f_stage" "$f_request" "$f_pr" "$f_branch"; then
+    [ -z "$carried" ] || rm -f "$carried"
+    refuse ERROR 1 "$WRITE_ERR"
+  fi
   [ -z "$carried" ] || rm -f "$carried"
-  : "$extras"
   verdict WRITTEN
-  detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(pwd -P)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$path")"
+  detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(pwd -P)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$WROTE_PATH")"
 }
 
 cmd_verify() {
@@ -676,19 +690,22 @@ cmd_adopt() {
     return 0
   fi
 
-  local carried path
+  local carried f_stage=''
   carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
   marker_body >"$carried"
   assert_body_safe "$carried"
-  path="$(write_marker "$issue" "$actor" "$carried" \
-      "$( [ -n "$stage" ] && printf 'stage: %s' "$stage" )" \
+  [ -z "$stage" ] || f_stage="stage: $stage"
+  if ! write_marker "$issue" "$actor" "$carried" "$f_stage" \
       "prior-session: $prior_session" \
       "prior-session-pid: $prior_pid" \
       "prior-ts: $prior_ts" \
-      "adopt-reason: $reason_token")"
+      "adopt-reason: $reason_token"; then
+    rm -f "$carried"
+    refuse ERROR 1 "$WRITE_ERR"
+  fi
   rm -f "$carried"
   verdict ADOPTED
-  detail "issue=$(sane "$issue") prior-session=$(sane "$prior_session") prior-session-pid=$(sane "$prior_pid") new-session=$(sane "$(this_session)") reason=$(sane "$reason_token") -> $(sane "$path"); the recorded writer was provably gone: $LIVE_DETAIL"
+  detail "issue=$(sane "$issue") prior-session=$(sane "$prior_session") prior-session-pid=$(sane "$prior_pid") new-session=$(sane "$(this_session)") reason=$(sane "$reason_token") -> $(sane "$WROTE_PATH"); the recorded writer was provably gone: $LIVE_DETAIL"
 }
 
 cmd_show() {

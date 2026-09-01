@@ -484,14 +484,34 @@ else
 fi
 
 # ===========================================================================
-case_begin 17-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
+case_begin 18-write-failure-emits-a-verdict "an I/O failure emits ERROR on STDOUT — the verdict is never captured into a variable"
+# ===========================================================================
+# Regression pin for a real defect in the first cut: the writer printed its path on
+# stdout and was called inside `$( )`, so a `refuse` inside it exited only the SUBSHELL
+# and its verdict line was CAPTURED into the caller's variable — the run would emit no
+# verdict at all and put a verdict string inside a path. Every emit site must be in the
+# main shell, which this case measures rather than asserts.
+L18=$(lane lane18)
+chmod 500 "$L18"
+wf_out=$(run "$L18" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>/dev/null); wf_rc=$?
+chmod 700 "$L18"
+if [ "$wf_rc" -ne 0 ] && [ "$(verdict_of "$wf_out")" = ERROR ] && all_lines_anchored "$wf_out"; then
+  ok "an unwritable worktree yields ERROR(rc=$wf_rc) on stdout, anchored — not a swallowed verdict"
+else
+  bad "write failure did not surface a verdict: rc=$wf_rc verdict=$(verdict_of "$wf_out")
+$wf_out"
+fi
+
+# ===========================================================================
+case_begin 19-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
 5-foreign-worktree 6-session-gone-adoptable 7-session-live-peer 8-pid-unrecordable-unknown
 9-writer-refuses-sentinel-body 10-reader-refuses-duplicate-sentinel 11-machine-agrees-with-claim-sh
 12-placeholder-reason-refused 13-write-over-foreign-refuses 14-absent-is-distinct
-15-pid-reuse-recognised 16-closed-verdict-grammar 17-case-floor"
-CASE_FLOOR=17
+15-pid-reuse-recognised 16-closed-verdict-grammar 19-case-floor
+18-write-failure-emits-a-verdict"
+CASE_FLOOR=18
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -503,8 +523,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 25 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 25)"
+if [ "$PASS" -ge 30 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 30)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
