@@ -307,12 +307,24 @@ exit 0
 EOF
   chmod +x "$d/tmux"
 }
-# plant_id <dir> <me> <euid> <known-user> <known-uid>: an `id` that answers about a FIXED
-# identity, so a case can put the script in the posture `sudo` creates (running as root
-# while the INVOKING agent is someone else) without needing root or a second real account.
-# An unknown user is a FAILED lookup, exactly as the real `id` reports one.
+# plant_id <dir> <me> <euid> <known-user> <known-uid> [<alt-user> <alt-uid>]: an `id` that
+# answers about FIXED identities, so a case can put the script in the posture `sudo` creates
+# (running as root while the INVOKING agent is someone else) without needing root or a
+# second real account. An unknown user is a FAILED lookup, exactly as the real `id` reports one.
+#
+# TWO PAIRS, NOT ONE, AND THAT IS WHAT MAKES THE INCONSISTENT-METADATA GUARD REACHABLE. With
+# a single name<->uid pair every "SUDO_USER and SUDO_UID disagree" case necessarily supplied
+# a uid this stub knows NOTHING about, so the script answered on the EARLIER branch (`SUDO_UID
+# does not resolve to an account`) and the consistency guard was never entered — neutering it
+# left the suite fully green. A second, INDEPENDENT pair lets a case name a uid that DOES
+# resolve, to a DIFFERENT login than SUDO_USER, which is the only shape that reaches it. The
+# alt arms are emitted only when supplied, so the existing single-pair call sites are unchanged.
 plant_id() {
-  local d="$1" me="$2" euid="$3" ku="$4" kuid="$5"
+  local d="$1" me="$2" euid="$3" ku="$4" kuid="$5" ku2="${6:-}" kuid2="${7:-}" alt=''
+  if [ -n "$ku2" ] && [ -n "$kuid2" ]; then
+    alt=$(printf '  "-u %s")   printf %s %s ;;\n  "-un %s") printf %s %s ;;' \
+      "$ku2" "'%s\\n'" "'$kuid2'" "$kuid2" "'%s\\n'" "'$ku2'")
+  fi
   cat >"$d/id" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
@@ -320,6 +332,7 @@ case "\$*" in
   '-u')   printf '%s\n' '$euid' ;;
   "-u $ku")   printf '%s\n' '$kuid' ;;
   "-un $kuid") printf '%s\n' '$ku' ;;
+$alt
   -u*|-n*) printf 'id: no such user\n' >&2; exit 1 ;;
   *)      printf 'id: unsupported in this stub: %s\n' "\$*" >&2; exit 1 ;;
 esac
@@ -1850,6 +1863,11 @@ fi
 #     which is the permissive branch wearing a default's clothes.
 # =====================================================================================
 INVOKER='cqlite-lane-invoker'
+# A SECOND, INDEPENDENT ACCOUNT. Only the conflicting-metadata case needs it: "SUDO_USER and
+# SUDO_UID disagree" is a statement about TWO resolvable identities, so a uid that resolves to
+# nobody expresses a DIFFERENT refusal (the case below it) and cannot reach the guard.
+OTHER_LOGIN='cqlite-other-login'
+OTHER_UID=1234
 # (a) DELEGATED READ. The posture `sudo` creates: running as root, SUDO_USER naming the
 # agent. The tmux call must be delegated to that login AND must still deliver its reading —
 # a delegation that lost the answer would be a different defect with the same log line.
@@ -1888,13 +1906,23 @@ else
 fi
 # A CONFLICTING identity is ambiguous too: SUDO_UID that does not match the uid SUDO_USER
 # resolves to means the two halves of the record disagree, and one of them is wrong.
-d33c=$(mkshim "$tmp/s33c"); plant_tmux "$d33c" complete; plant_id "$d33c" root 0 "$INVOKER" 4711
+#
+# THE CAUSE TEXT IS ASSERTED, NOT JUST THE VERDICT TOKEN, and BOTH accounts resolve. Every
+# ambiguity refusal in this block emits the SAME `UNMEASURED` token, so a verdict-only grep
+# is satisfied by whichever guard happens to fire first — which is how this case previously
+# passed while measuring the `SUDO_UID does not resolve to an account` branch instead, with
+# the consistency guard unentered and unfalsifiable. The uid here therefore resolves (to
+# OTHER_LOGIN) and SUDO_USER resolves to a DIFFERENT uid, which is the only shape that
+# reaches the guard, and the detail is what proves which one answered.
+d33c=$(mkshim "$tmp/s33c"); plant_tmux "$d33c" complete
+plant_id "$d33c" root 0 "$INVOKER" 4711 "$OTHER_LOGIN" "$OTHER_UID"
 plant_delegator "$d33c" runuser
-run_cap "$d33c" "$ef2" "SUDO_USER=$INVOKER" 'SUDO_UID=1234' -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
-  ok "sudo posture: SUDO_USER and SUDO_UID disagreeing is ambiguous, not a guess"
+run_cap "$d33c" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=$OTHER_UID" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED' \
+   && printf '%s' "$out" | grep -q 'INCONSISTENT sudo metadata'; then
+  ok "sudo posture: SUDO_USER and SUDO_UID disagreeing is named INCONSISTENT, not a guess"
 else
-  bad "sudo posture: a conflicting sudo identity did not report UNMEASURED: $out"
+  bad "sudo posture: a conflicting sudo identity did not report UNMEASURED with the INCONSISTENT-metadata cause: $out"
 fi
 
 # SUDO_UID IS THE AUTHORITY AND SUDO_USER MUST AGREE — the rule bootstrap's gate-pin
@@ -1903,21 +1931,27 @@ fi
 # inherited), and incomplete metadata about WHICH SERVER TO ANSWER ABOUT is ambiguity.
 d33c2=$(mkshim "$tmp/s33c2"); plant_tmux "$d33c2" complete; plant_id "$d33c2" root 0 "$INVOKER" 4711
 plant_delegator "$d33c2" runuser
+# The cause text is asserted here for the same reason: a MISSING SUDO_UID also matches the
+# NEXT guard's `not numeric` test (the empty string is not numeric), so on the verdict token
+# alone this case passed with the incomplete-record guard neutered entirely.
 run_cap "$d33c2" "$ef2" "SUDO_USER=$INVOKER" -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
-  ok "sudo posture: a SUDO_USER with no SUDO_UID is incomplete metadata, not a hint"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED' \
+   && printf '%s' "$out" | grep -q 'the sudo record is incomplete'; then
+  ok "sudo posture: a SUDO_USER with no SUDO_UID is named incomplete metadata, not a hint"
 else
-  bad "sudo posture: incomplete sudo metadata was acted on: $out"
+  bad "sudo posture: incomplete sudo metadata was not reported as such: $out"
 fi
 # ...and a uid that resolves to nobody is its own refusal, distinct from a name that does not
-# match it: they are different operator facts.
+# match it: they are different operator facts, so each asserts its OWN wording — which is
+# also what keeps the two cases from silently collapsing onto one branch again.
 d33c3=$(mkshim "$tmp/s33c3"); plant_tmux "$d33c3" complete; plant_id "$d33c3" root 0 "$INVOKER" 4711
 plant_delegator "$d33c3" runuser
 run_cap "$d33c3" "$ef2" "SUDO_USER=$INVOKER" 'SUDO_UID=6553' -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
-  ok "sudo posture: a SUDO_UID that resolves to no account is UNMEASURED"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED' \
+   && printf '%s' "$out" | grep -q 'does not resolve to an account'; then
+  ok "sudo posture: a SUDO_UID that resolves to no account is UNMEASURED, and says so"
 else
-  bad "sudo posture: an unresolvable SUDO_UID was acted on: $out"
+  bad "sudo posture: an unresolvable SUDO_UID was not reported as unresolvable: $out"
 fi
 
 # (c) THE REPAIR OBEYS THE SAME RULE. Seeding root's server while the agent's stays broken
