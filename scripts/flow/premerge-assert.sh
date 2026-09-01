@@ -332,9 +332,13 @@ refuse_tool_failure() {
 #   * `GIT_NO_LAZY_FETCH=1` — in a PARTIAL/PROMISOR clone a plain OBJECT READ
 #     fetches over the network and WRITES packfiles, so "this is an offline
 #     check" would be an intention rather than a property. A missing object then
-#     fails its git call, which routes here to UNVERIFIABLE — the correct verdict
-#     for an unmeasurable read. Honoured only from git 2.36, so like
-#     base-staleness.sh this is a DECLARED precondition, not a detected one.
+#     fails the ANCESTRY call (`merge-base`), which routes here to UNVERIFIABLE —
+#     the correct verdict for an unmeasurable read. **NOT every git call behaves
+#     that way, and `cat-file -e` measurably does not** — see the presence-probe
+#     note in assert_anchor_on_history, which is why the probe there is a
+#     diagnostic refinement and not the soundness boundary. Honoured only from
+#     git 2.36, so like base-staleness.sh this is a DECLARED precondition, not a
+#     detected one.
 #   * `GIT_NO_REPLACE_OBJECTS=1`, plus `--no-replace-objects` on every call — one
 #     local `refs/replace/*` entry rewrites the ancestry `merge-base` walks, i.e.
 #     it can make a foreign anchor LOOK like an ancestor. Honoured by every git
@@ -402,9 +406,21 @@ assert_anchor_on_history() {
       "history the anchor must lie on is the CURRENT DIRECTORY's, and there is" \
       "deliberately no env override naming a different one (#3312)."
   fi
-  # Presence is probed per object so the diagnostic can name WHICH one is absent
-  # — the two have different remedies in practice (an anchor from a rebased-away
-  # branch vs a certified head that was never fetched).
+  # THE PRESENCE PROBE IS A DIAGNOSTIC REFINEMENT, NOT THE SOUNDNESS BOUNDARY.
+  # It exists to name WHICH object is absent, because the two have different
+  # remedies in practice (an anchor from a rebased-away branch vs a certified
+  # head that was never fetched). It is NOT what makes the check sound, and it
+  # cannot be: CLAUDE.md records, as a MEASUREMENT rather than a theory (see
+  # "cat-file -e cannot even probe presence" in the #3544 job-268 paragraph),
+  # that with `GIT_NO_LAZY_FETCH=1` set `cat-file -e` answered 0 for an object
+  # whose `show` then FAILED — it answers about PROMISED objects. So in a
+  # partial/promisor clone BOTH probes below can say "present" for an object
+  # that is not there.
+  # WHAT STILL HOLDS, and why the design fails closed anyway: `merge-base` cannot
+  # SUCCEED on an object that is not really available, so it exits >= 2 (or, at
+  # worst, 1 in a repository this check then refuses to call complete) and the
+  # verdict is UNVERIFIABLE either way. A false "present" here therefore costs a
+  # less specific diagnostic, never a pass.
   if ! git --no-replace-objects cat-file -e "$anchor^{commit}" >/dev/null 2>&1; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the ANCHOR commit is not present in this repository" \

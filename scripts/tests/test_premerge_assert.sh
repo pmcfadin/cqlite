@@ -1609,9 +1609,26 @@ if [ "$shallow_shape" -eq 1 ]; then
     esac
   fi
 else
-  # DECLARED, not silently skipped: a host whose git cannot build the fixture
-  # leaves this arm unexercised, and an unexercised arm must say so.
-  bad "ancestry shallow: could not build the shallow fixture on this host — the rc-1-is-three-valued arm did NOT run"
+  # A DECLARED SKIP — visible, named, and NON-FATAL. Two rules pull against each
+  # other here and both are the repo's:
+  #   * a bare skip that prints nothing is refused — an unexercised arm must SAY
+  #     it was not taken, or the suite's green tally silently covers less than it
+  #     did yesterday;
+  #   * a lane that REDS on correct input is the lane agents learn to waive — and
+  #     an old or unusual git that cannot build a `--depth` clone over `file://`
+  #     is a property of the HOST, not a defect in the tree under test.
+  # So it reports on the suite's own `ok` channel (the `SKIPPED (...)` idiom Case
+  # 35 already uses for the root/mode-bit case) and additionally prints an
+  # affirmative `ARM NOT TAKEN` line, so an operator reading the output can see
+  # WHICH coverage was not taken and why. The arm itself is unchanged: on every
+  # host that CAN build the fixture it runs and asserts as before.
+  printf 'ARM NOT TAKEN: ancestry shallow (rc-1-is-three-valued) — this host could not build the\n'
+  printf 'ARM NOT TAKEN: fixture: a --depth 2 --no-local clone over file:// plus a --depth 1 fetch of\n'
+  printf 'ARM NOT TAKEN: the sibling branch, yielding a SHALLOW repo holding BOTH objects. The\n'
+  printf 'ARM NOT TAKEN: shallow branch of assert_anchor_on_history is therefore UNEXERCISED on this\n'
+  printf 'ARM NOT TAKEN: run. Non-fatal by design: an old/unusual git is a host property, not a\n'
+  printf 'ARM NOT TAKEN: defect in the tree under test.\n'
+  ok "ancestry shallow: SKIPPED (fixture unbuildable on this host — see the ARM NOT TAKEN lines; arm UNEXERCISED, declared not silent)"
 fi
 
 # =============================================================================
