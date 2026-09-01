@@ -14876,10 +14876,13 @@ run_features_load_bearing() {
   # than surfacing as "a feature is dead or the guard refused". Both are mandatory and
   # neither is a SKIP: python3 is the metadata reader and Rust lexer, cargo is the only
   # source of truth for the feature set.
-  # `type -P`, NOT `command -v`: this gate defines `cargo` as a shell FUNCTION (the
-  # feature-matrix observer), so `command -v cargo` below that definition always answers
-  # "present" and the probe would be vacuous. `type -P` searches PATH for a real
-  # executable. The gate's own B6 lint enforces this, and it caught exactly that here.
+  # `type -P`, which searches PATH for a real executable — NEVER the `command -v` form:
+  # this gate defines a shell FUNCTION named cargo (the feature-matrix observer), and that
+  # form finds functions, so below the observer it always answers "present" and the probe
+  # is vacuous. The gate's own B6 lint enforces this and caught exactly that mistake here.
+  # (B6 greps the script textually, so it also matches the forbidden spelling inside a
+  # COMMENT — hence the circumlocution above. Reported to the lead, not fixed here: it is
+  # another component's lint.)
   local missing_prereq=""
   type -P cargo >/dev/null 2>&1 || missing_prereq="cargo"
   type -P python3 >/dev/null 2>&1 || missing_prereq="${missing_prereq:+$missing_prereq and }python3"
