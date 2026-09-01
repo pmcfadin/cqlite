@@ -525,6 +525,10 @@ mod tests {
                 // Blob + raw-byte-order path.
                 col("fset", "set<frozen<addr_type>>"),
                 col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
+                // set<frozen<map<text,int>>> — the frozen-collection element
+                // framing (i32-BE count + i32-BE element lengths, Cassandra
+                // `CollectionSerializer.pack`/`writeValue`), issue #2339.
+                col("smap", "set<frozen<map<text,int>>>"),
                 // inet/time element ordering (roborev 1631/1632): InetAddressType /
                 // TimeType order by raw serialized bytes, NOT the formatted-string
                 // order the scalar `compare_custom` would use.
@@ -550,6 +554,15 @@ mod tests {
             is_deleted: false,
             has_empty_value: false,
         }
+    }
+
+    /// Decode an even-length hex string to bytes (test surface for the
+    /// sstabledump-golden cell paths, issue #2339).
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+            .collect()
     }
 
     fn get<'a>(cells: &'a RowCells, name: &str) -> Option<&'a Value> {
@@ -914,4 +927,85 @@ mod tests {
             "a projected composite map-key column still fails closed, got: {msg}"
         );
     }
+
+    // ---- issue #2339: composite collection key/element decode (RED first) ----
+
+    /// A `frozen<tuple<int, text>>` MAP KEY must reconstruct as a typed
+    /// `Value::Tuple`, not fail closed (issue #2339).
+    ///
+    /// Cell-path bytes are Cassandra's tuple serialization — 4-byte i32-BE per
+    /// field, `-1` == null — per `TupleType.buildValue` (`accessor.putInt`) at
+    /// the pinned `cassandra-5.0.8` tag. `(1, "a")` and `(2, "b")`.
+    #[test]
+    fn map_with_frozen_tuple_key_decodes_structurally() {
+        let k1 = vec![
+            0, 0, 0, 4, 0, 0, 0, 1, // int 1
+            0, 0, 0, 1, b'a', // text "a"
+        ];
+        let k2 = vec![
+            0, 0, 0, 4, 0, 0, 0, 2, // int 2
+            0, 0, 0, 1, b'b', // text "b"
+        ];
+        let cells = vec![
+            elem("ftk", Value::BigInt(2), k2),
+            elem("ftk", Value::BigInt(1), k1),
+        ];
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
+        assert_eq!(
+            get(&out, "ftk"),
+            Some(&Value::Map(vec![
+                (
+                    Value::Frozen(Box::new(Value::Tuple(vec![
+                        Value::Integer(1),
+                        Value::Text("a".into())
+                    ]))),
+                    Value::BigInt(1)
+                ),
+                (
+                    Value::Frozen(Box::new(Value::Tuple(vec![
+                        Value::Integer(2),
+                        Value::Text("b".into())
+                    ]))),
+                    Value::BigInt(2)
+                ),
+            ])),
+            "a frozen<tuple> map key must decode structurally (issue #2339)"
+        );
+    }
+
+    /// A `set<frozen<map<text,int>>>` element must reconstruct as a typed
+    /// nested map, exercising the FROZEN element framing (i32-BE), not the
+    /// non-frozen VInt framing (issue #2339).
+    ///
+    /// The two cell paths are the VERBATIM hex sstabledump prints for
+    /// `test_types.cx_nested_frozen_collections.s_map_vals` — i.e. real
+    /// CASSANDRA-WRITTEN bytes, never CQLite's own output (#3042):
+    ///   `00000001 00000002 6b31 00000004 00000001`            => {"k1": 1}
+    ///   `00000002 00000002 6b32 00000004 00000002
+    ///             00000002 6b33 00000004 00000003`            => {"k2": 2, "k3": 3}
+    #[test]
+    fn set_of_frozen_map_decodes_with_i32_element_framing() {
+        let one = hex("00000001000000026b310000000400000001");
+        let two = hex("00000002000000026b320000000400000002000000026b330000000400000003");
+        let cells = vec![
+            elem("smap", Value::blob(Vec::new()), two),
+            elem("smap", Value::blob(Vec::new()), one),
+        ];
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
+        assert_eq!(
+            get(&out, "smap"),
+            Some(&Value::Set(vec![
+                Value::Frozen(Box::new(Value::Map(vec![(
+                    Value::Text("k1".into()),
+                    Value::Integer(1)
+                )]))),
+                Value::Frozen(Box::new(Value::Map(vec![
+                    (Value::Text("k2".into()), Value::Integer(2)),
+                    (Value::Text("k3".into()), Value::Integer(3)),
+                ]))),
+            ])),
+            "a frozen<map> set element must decode with i32-BE element framing (issue #2339)"
+        );
+    }
+
 }
