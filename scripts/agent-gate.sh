@@ -6108,8 +6108,8 @@ EXPLICIT_SUMMARY_FILE=0
 # precedent: a distinct, textually-separable marker key carrying a CLOSED value set.
 #
 # THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL" (#3800, roborev job 299). The
-# script has 25 `emit_summary`/`_emit_terminal_summary` call sites; 6 carry a component table
-# and all 6 append this line. The other 19 -- the three pre-flight FAIL-CLOSED blocks, the
+# script has 25 `emit_summary`/`_emit_terminal_summary` call sites; 7 carry a component table
+# and all 7 append this line. The other 18 -- the three pre-flight FAIL-CLOSED blocks, the
 # #3544 component-set FAIL, the two summary-integrity FAILs, the shared forwarder, the five
 # self-test hooks, the four --delta usage ERRORs, the two --delta refused-BEFORE-EXECUTION
 # blocks and the --only no-Data.db pre-flight -- are emitted where NO component has run (or,
@@ -6117,12 +6117,30 @@ EXPLICIT_SUMMARY_FILE=0
 # concurrent peer). They have nothing to attribute: the line could only render a misleading
 # `0 RECOGNISED ... (0/0 PASS)`, and each block already names its own cause with its own
 # dedicated marker, so adding it there would be noise that dilutes this marker's meaning. Each
-# of those 19 therefore carries a `# disk-exhaustion-exempt: <reason>` comment naming why, and
+# of those 18 therefore carries a `# disk-exhaustion-exempt: <reason>` comment naming why, and
 # `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses EVERY emit site as
 # MARKED / EXEMPT / GAP -- a new emit site with neither REDS that suite. An earlier wording of
 # this contract claimed "every terminal block", which was false and which the then-structural
 # test could not see: it derived its subject set from sites containing `_fm_summary_line`, i.e.
 # only the sites already compliant.
+#
+# THAT CIRCULARITY HAD A SECOND LEVEL, AND IT COST THE 7th SITE (#3800, final round). Narrowing
+# the contract to "carries a component table" fixed the CLAIM but left the census deriving its
+# table-bearing subset from `_fm_summary_line` alone -- so the ONE block that renders a
+# component table with its own `printf '%-18s %s (%ss)'`, the #2926 tree-integrity
+# COMPONENT-BOUNDARY FAIL (_tree_boundary_meta_lines), was invisible to the derivation and was
+# exempted on reasoning that does not hold. `tree-integrity: FAIL` has a SECOND cause that IS
+# disk exhaustion: a capture whose manifest -- written into $LOG_DIR -- cannot be written or
+# validated stamps TREE_CAPTURE_FAIL_REASON, a FIXED CONSTANT reading
+# `tree-capture-failed; the tree cannot be proven unchanged`. An ENOSPC on the logs filesystem
+# therefore produces a verdict that CAN NEVER NAME DISK and that reads as a git/worktree
+# problem -- a worse instance of this issue's own defect than the `minimal-build: FAIL` that
+# opened it. That block now carries the line, and the census recognises BOTH row renderers,
+# derived from the row FORMAT rather than from either renderer's name.
+#
+# That site is the one MID-RUN emit, and the line declares it: DISK_MIDRUN=1 relabels the
+# free-space pair `start->boundary, MID-RUN PARTIAL WINDOW` and states that the scan's subject
+# set is only the components recorded by that boundary. Partial and labelled beats omitted.
 #
 # IT IS AN ATTRIBUTION, NEVER A VERDICT. Nothing here reads, sets or influences OVERALL /
 # RESULT, in any mode. Turning a FAIL green because the cause LOOKS environmental would be
@@ -6158,6 +6176,17 @@ DISK_EXHAUSTION_SIGNATURES=(
 )
 
 # Startup free-space capture (populated immediately after LOG_DIR is created).
+#
+# DISK_MIDRUN -- THE SCAN WINDOW, declared rather than assumed. 0 (the default) means a
+# TERMINAL emit, where `start->emit` spans the whole run and the recorded verdicts are every
+# verdict there will be. 1 is set for the ONE MID-RUN emit site -- the #2926 tree-integrity
+# COMPONENT-BOUNDARY FAIL, which publishes a block from inside a run that has NOT finished.
+# There BOTH halves of the line cover a partial window: the free-space pair is a
+# start->boundary reading of a window still open, and the log scan's subject set is only the
+# components whose verdict was recorded BY that boundary. The line SAYS both, because a
+# partial measurement that does not declare its partiality is indistinguishable from a
+# complete one -- the same reason the closed signature set declares its own non-exhaustiveness.
+DISK_MIDRUN=0
 DISK_TARGET_PATH=""
 DISK_LOGS_PATH=""
 DISK_FREE_START_TARGET=""   # "<avail_kb> <mountpoint>", or "" when unmeasurable
@@ -6244,9 +6273,16 @@ _disk_free_leg() {
 # The two facts are kept INDEPENDENT of the log scan on purpose: an unmeasurable `df` renders
 # `free: UNMEASURED (...)` and does NOT by itself make the whole line UNMEASURED, because the
 # log scan is the primary oracle and reporting it as unmeasured would discard a real finding.
+#
+# AND IT NAMES ITS OWN WINDOW (#3800). At a terminal emit the pair is `start->emit` and the
+# window is the whole run. At the ONE mid-run site (DISK_MIDRUN=1) it is `start->boundary` and
+# the window is still OPEN, so it is labelled PARTIAL: read as a terminal figure it would
+# understate a collapse that had not finished happening. Labelled, never omitted -- the
+# reading is still the most useful disk fact the block can carry.
 _disk_free_field() {
   local st_t="${DISK_FREE_START_TARGET:-}" st_l="${DISK_FREE_START_LOGS:-}"
-  local now_t="" now_l=""
+  local now_t="" now_l="" lbl='free(start->emit)'
+  [ "${DISK_MIDRUN:-0}" = 1 ] && lbl='free(start->boundary, MID-RUN PARTIAL WINDOW: the run had NOT finished)'
   [ -n "${DISK_TARGET_PATH:-}" ] && now_t="$(_disk_df_probe "$DISK_TARGET_PATH" 2>/dev/null)"
   [ -n "${DISK_LOGS_PATH:-}" ] && now_l="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
   if [ -z "$st_t" ] && [ -z "$st_l" ]; then
@@ -6255,10 +6291,10 @@ _disk_free_field() {
   fi
   if [ -n "$st_t" ] && [ -n "$st_l" ] && [ "${st_t#* }" = "${st_l#* }" ]; then
     # Same filesystem -- report it ONCE.
-    printf 'free(start->emit): %s' "$(_disk_free_leg 'target+logs fs' "$st_t" "$now_t")"
+    printf '%s: %s' "$lbl" "$(_disk_free_leg 'target+logs fs' "$st_t" "$now_t")"
     return 0
   fi
-  printf 'free(start->emit): %s; %s' \
+  printf '%s: %s; %s' "$lbl" \
     "$(_disk_free_leg 'target fs' "$st_t" "$now_t")" \
     "$(_disk_free_leg 'logs fs' "$st_l" "$now_l")"
 }
@@ -6266,8 +6302,14 @@ _disk_free_field() {
 # _disk_scan_field -- the `<scan-field>`: the scan DECLARES its own non-exhaustiveness, the
 # same way the base-staleness advisory and the legacy-heuristics lane declare theirs. A scan
 # that omits coverage silently is indistinguishable from one that covers it.
+#
+# At the ONE mid-run site (DISK_MIDRUN=1) the subject set is partial as well -- only the
+# components whose verdict was RECORDED BY that boundary exist to be scanned -- and that is
+# stated in the same field rather than left for the reader to infer from `components-completed:`.
 _disk_scan_field() {
-  printf 'scan: CLOSED signature set {no-space-left-on-device, os-error-28, disk-quota-exceeded} over non-PASS component logs only; NON-EXHAUSTIVE by construction -- a disk-full failure worded any other way is a DECLARED false negative'
+  local partial=''
+  [ "${DISK_MIDRUN:-0}" = 1 ] && partial='; SUBJECT SET ALSO PARTIAL -- only the components whose verdict was RECORDED BY THIS BOUNDARY are scanned; the components that had not run are not subjects and their absence is NOT a clean reading'
+  printf 'scan: CLOSED signature set {no-space-left-on-device, os-error-28, disk-quota-exceeded} over non-PASS component logs only; NON-EXHAUSTIVE by construction -- a disk-full failure worded any other way is a DECLARED false negative%s' "$partial"
 }
 
 # _disk_exhaustion_line <name> <status> [<name> <status> ...]
@@ -8943,7 +8985,8 @@ _tree_mode_components() {
 }
 
 _tree_boundary_meta_lines() {
-  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" "
+  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" " _de_prev
+  local -a _de_pairs=()
   _tree_commit_meta_render
   printf '%s\n' "$TREE_COMMIT_LINE"
   if [ -n "${DATA_COUNT:-}" ]; then
@@ -8969,15 +9012,6 @@ _tree_boundary_meta_lines() {
   printf '%s\n' "$(accelerators_line)"
   printf '%s\n' "$(cpu_budget_line)"
   [ -n "${SUMMARY_INTEGRITY_LINE:-}" ] && printf '%s\n' "$SUMMARY_INTEGRITY_LINE"
-  # #3800 DECLARED OMISSION, so it is a stated boundary and not a silent gap: this BOUNDARY
-  # block carries NO `disk-exhaustion:` line. Its cause is already named and is a DIFFERENT
-  # one -- a mid-run tree mutation (#2926) -- and the block is emitted from a component
-  # boundary that may be mid-run, where a start->emit free-space delta would be measuring a
-  # window the run has not finished. Every emit site that carries a COMPONENT TABLE does carry
-  # the line -- the full gate's terminal, --lite's, --delta's, --delta's python-tier REFUSED
-  # block and the --emit-summary-selftest hook; every OTHER site is exempt with a stated reason
-  # at the site. That whole set is derived from source and censused in
-  # scripts/tests/test_agent_gate_disk_exhaustion.sh.
   _tree_meta_render_lines
   # The per-component verdict table, as far as the run got. Canonical order for the mode
   # ACTUALLY RUNNING (#2926 review J2 — this iterated the full gate's COMPONENTS, which does
@@ -8997,6 +9031,7 @@ _tree_boundary_meta_lines() {
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _de_pairs+=("$_c" "$_st")
     _seen="$_seen $_c "
     _done=$(( _done + 1 ))
   done
@@ -9007,8 +9042,30 @@ _tree_boundary_meta_lines() {
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _de_pairs+=("$_c" "$_st")
     _done=$(( _done + 1 ))
   done
+  # #3800: this BOUNDARY block DOES carry the `disk-exhaustion:` attribution, and the
+  # reasoning that once exempted it was WRONG. The exemption said the cause was already named
+  # -- a mid-run tree mutation (#2926). But `tree-integrity: FAIL` has a SECOND cause that IS
+  # disk exhaustion: when _tree_identity cannot write or validate its manifest, the block is
+  # stamped with TREE_CAPTURE_FAIL_REASON, a FIXED CONSTANT reading
+  # `tree-capture-failed; the tree cannot be proven unchanged`, and that manifest is written
+  # into $LOG_DIR -- so an ENOSPC on the logs filesystem produces exactly that verdict. The
+  # constant CAN NEVER NAME DISK, and it reads as a git/worktree problem, which makes this
+  # block a WORSE instance of #3800's defect than the `minimal-build: FAIL` that opened it.
+  # This is also the one block that carries a component table WITHOUT going through
+  # _fm_summary_line, which is why the census could not see it (its subject set was derived
+  # from that one renderer -- the same circularity, one level down).
+  #
+  # The pairs come from the SAME traversal that printed the table above -- one loop, two
+  # outputs -- so the attribution and the table can never disagree about which components are
+  # non-PASS. DISK_MIDRUN=1 makes BOTH halves of the line declare their partial window; it is
+  # saved and restored because this renderer must leave no state behind for the terminal emit.
+  _de_prev="${DISK_MIDRUN:-0}"
+  DISK_MIDRUN=1
+  _disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"}
+  DISK_MIDRUN="$_de_prev"
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
   # (a bare "${ARR[@]}" on an empty array aborts under `set -u` on bash < 4.4).
   for _s in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do
@@ -9059,7 +9116,10 @@ _tree_boundary_fail() {
   local -a _meta=()
   while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)
   _meta+=("detected-after-component: $comp")
-  # disk-exhaustion-exempt: #2926 tree-integrity BOUNDARY FAIL. Its component table comes from _tree_boundary_meta_lines, which carries this line DECLARED OMISSION in its own body (see the #3800 note there): the cause is a mid-run tree mutation, and a start->emit free-space delta at a boundary would measure a window the run has not finished
+  # #3800: MARKED, not exempt. The block's component table AND its `disk-exhaustion:` line are
+  # both rendered by _tree_boundary_meta_lines above, from one traversal of the recorded
+  # verdicts. See the note at that call for why a tree-integrity FAIL is itself an ENOSPC
+  # symptom (TREE_CAPTURE_FAIL_REASON is a fixed constant that cannot name disk).
   _emit_terminal_summary FAIL "${_meta[@]}" || true
   exit 1
 }

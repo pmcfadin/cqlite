@@ -960,10 +960,43 @@ if grep -q 'detected-after-component: fmt' "$sum"; then
 else
   bad "A(real): the failure is not attributed to a real component boundary"
 fi
-if grep -q 'PARTIAL' "$sum"; then
+# The property is that the PARTIAL VERDICT is not published: the gate emits that token in
+# exactly two anchored shapes (`RESULT: PARTIAL` from the terminal renderer, and
+# `mode: PARTIAL (--only ...)` from the --only assembly), and a mutated run must publish
+# neither. Matched at those two anchors rather than as a bare substring anywhere in the
+# block: an unanchored grep also fires on any DIAGNOSTIC that uses the word -- the #3800
+# `disk-exhaustion:` line declares a MID-RUN PARTIAL WINDOW at this very site -- which would
+# make a prose word in an attribution read as a verdict. Narrower, and strictly closer to
+# the property.
+if grep -qE '^(RESULT|OVERALL): PARTIAL|^mode: PARTIAL' "$sum"; then
   bad "--only: a mutated PARTIAL run must NOT report PARTIAL"
+  grep -nE '^(RESULT|OVERALL): PARTIAL|^mode: PARTIAL' "$sum"
 else
-  ok "--only: a mutated run reports FAIL, never PARTIAL"
+  ok "--only: a mutated run reports FAIL, never PARTIAL (neither RESULT:/OVERALL: nor mode:)"
+fi
+# #3800: this is the ONE MID-RUN emit site and the ONE component table not rendered through
+# _fm_summary_line. It carries the attribution line, and BOTH halves declare their partial
+# window -- because `tree-integrity: FAIL` is itself reachable from ENOSPC (the capture
+# manifest is written into $LOG_DIR and TREE_CAPTURE_FAIL_REASON is a fixed constant that
+# cannot name disk), so this block must not be the one that hides the host cause.
+de_line=$(grep -c '^disk-exhaustion:' "$sum" 2>/dev/null | tr -d ' ')
+if [ "$de_line" = 1 ]; then
+  ok "#3800: the boundary-FAIL block carries exactly one disk-exhaustion: attribution line"
+else
+  bad "#3800: expected exactly one disk-exhaustion: line in the boundary-FAIL block, found $de_line"
+fi
+if grep -qE '^disk-exhaustion: .*MID-RUN PARTIAL WINDOW' "$sum" \
+   && grep -qE '^disk-exhaustion: .*SUBJECT SET ALSO PARTIAL' "$sum"; then
+  ok "#3800: the mid-run attribution declares BOTH partial windows (free-space start->boundary, and the recorded-so-far subject set)"
+else
+  bad "#3800: the boundary block's attribution does not declare its partial window:"
+  grep -E '^disk-exhaustion:' "$sum" 2>/dev/null
+fi
+# ...and it stays an ATTRIBUTION: the verdict is the tree-integrity FAIL, unchanged.
+if grep -q '^RESULT: FAIL$' "$sum"; then
+  ok "#3800: the attribution does not change the boundary block's RESULT: FAIL"
+else
+  bad "#3800: the boundary block's RESULT is not FAIL"
 fi
 # G3: the MAIN-lane boundary FAIL block is a FULL block, not a stub. It used to carry only
 # the four tree lines + detected-after-component, making the one block a reader reaches
