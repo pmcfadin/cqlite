@@ -650,7 +650,7 @@ fn bounded_uuid_over_width_is_refused() {
 /// is a bare UDT name the registry resolves — the route to
 /// `parse_nested_udt_from_registry`. `6f75746572` = "outer",
 /// `6c6162656c` = "label", `61646472` = "addr".
-const MARSHAL_OUTER: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,6f75746572,\
+pub(super) const MARSHAL_OUTER: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,6f75746572,\
 6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,\
 61646472:org.apache.cassandra.db.marshal.UserType(issue_3811_ks,61646472,\
 737472656574:org.apache.cassandra.db.marshal.UTF8Type,\
@@ -659,7 +659,7 @@ const MARSHAL_OUTER: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811
 /// Wrap an `addr` encoding as the second field of a well-formed `outer` value.
 /// The outer prefix counts `addr_bytes` EXACTLY, so the outer value is never the
 /// thing at fault — only what is inside the field can be.
-fn outer_with_nested(addr_bytes: &[u8]) -> Vec<u8> {
+pub(super) fn outer_with_nested(addr_bytes: &[u8]) -> Vec<u8> {
     let mut v = component(b"tag");
     v.extend(component(addr_bytes));
     v

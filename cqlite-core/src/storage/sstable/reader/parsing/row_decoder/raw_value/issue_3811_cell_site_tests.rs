@@ -449,3 +449,99 @@ async fn cell_site_registry_arm_trailing_garbage_is_refused_from_the_cell_entry_
         "cell-entry/registry/trailing (rule 4)",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The guard the AC6 sweep found UNCOVERED: `parse_udt_field_value`'s
+// `CqlType::Udt` arm (`udt.rs:669`)
+//
+// Re-measuring every consumption guard site INDEPENDENTLY — rather than the four
+// `parse_udt_value` callers jointly, as an earlier revision of the sibling
+// suite's table did — gave this one a red set of ZERO. It was reachable from
+// nowhere in the suite, which is roborev's round-4 finding at a third site: the
+// joint disable could not see it, because the reds it produced came from the
+// header-type caller and would have read identically with this arm untested.
+//
+// It is reached only through `parse_udt_value`'s FIELD LOOP (`udt.rs:525`) with
+// a field whose `CqlType` is `Udt` — which `parse_cassandra_type_with_depth`
+// produces for a NESTED marshal `UserType(...)` (`udt.rs:337-345`). The bounded
+// entry point cannot get there: BOTH of `parse_value_from_raw_bytes`'s UDT arms
+// delegate to `parse_raw_type_value`, whose nested-UDT handling calls
+// `parse_inline_udt_value` instead. The route that does reach it is a frozen
+// cell whose declared UDT nests another UDT — i.e. this file's subject.
+// ---------------------------------------------------------------------------
+
+/// `frozen<UserType(outer, label text, addr UserType(addr, street, city))>`.
+fn marshal_outer_column() -> Column {
+    column(format!("frozen<{}>", vectors::MARSHAL_OUTER))
+}
+
+/// The refusal must be the NESTED-field guard's, not the enclosing frozen-UDT
+/// one: the outer component prefix counts the nested bytes exactly, so the outer
+/// `frozen UDT` check is satisfied and only `udt.rs:669` can refuse.
+fn assert_refused_by_the_nested_udt_guard(
+    result: Result<Value>,
+    expected_consumed: usize,
+    expected_len: usize,
+    ctx: &str,
+) {
+    if let Err(e) = &result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("type 'nested UDT'"),
+            "{ctx}: the refusal must come from the NESTED-field consumption check, got: {msg}"
+        );
+    }
+    vectors::assert_refused_short(result, expected_consumed, expected_len, ctx);
+}
+
+/// **CONTROL / NON-DISCRIMINATING.** The outer framing is sound.
+#[tokio::test]
+async fn cell_site_nested_udt_field_exact_decodes_ok() {
+    let ctx = reader_context().await;
+    let bytes = vectors::outer_with_nested(&vectors::case1_exact());
+    let (value, _) = decode_at_call_site(&ctx, &marshal_outer_column(), &bytes)
+        .expect("a well-formed nested-UDT frozen cell");
+    match unwrap_frozen(&value, "cell-site/nested/case1") {
+        Value::Udt(udt) => assert_eq!(udt.fields.len(), 2, "outer field count"),
+        other => panic!("expected Value::Udt, got {other:?}"),
+    }
+}
+
+/// **CONTROL / NON-DISCRIMINATING.** `TupleType.split` rule 1 is legal at depth,
+/// so the guard must not reject an omitted trailing field of the NESTED value.
+#[tokio::test]
+async fn cell_site_nested_udt_field_legally_short_decodes_ok() {
+    let ctx = reader_context().await;
+    let bytes = vectors::outer_with_nested(&vectors::case4_legally_short());
+    decode_at_call_site(&ctx, &marshal_outer_column(), &bytes)
+        .expect("a legally short NESTED encoding is accepted (rule 1)");
+}
+
+/// **DISCRIMINATING — attributes to `udt.rs:669` alone.** Rule 4 inside the
+/// nested field: the outer prefix says 19 bytes and 19 follow, so the enclosing
+/// frozen-UDT check passes; the nested decode reads 18 of them.
+#[tokio::test]
+async fn cell_site_nested_udt_field_trailing_garbage_is_refused() {
+    let ctx = reader_context().await;
+    let bytes = vectors::outer_with_nested(&vectors::case2_trailing_garbage());
+    assert_refused_by_the_nested_udt_guard(
+        decode_at_call_site(&ctx, &marshal_outer_column(), &bytes).map(|(v, _)| v),
+        18,
+        19,
+        "cell-site/nested/trailing (rule 4)",
+    );
+}
+
+/// **DISCRIMINATING — `udt.rs:669`.** Rule 2 inside the nested field, one byte
+/// from the legal omission above.
+#[tokio::test]
+async fn cell_site_nested_udt_field_partial_prefix_is_refused() {
+    let ctx = reader_context().await;
+    let bytes = vectors::outer_with_nested(&vectors::case3_partial_prefix());
+    assert_refused_by_the_nested_udt_guard(
+        decode_at_call_site(&ctx, &marshal_outer_column(), &bytes).map(|(v, _)| v),
+        11,
+        12,
+        "cell-site/nested/partial (rule 2)",
+    );
+}
