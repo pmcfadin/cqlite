@@ -796,6 +796,47 @@ else
   bad "tempfile control: the custom report was not written"
 fi
 
+# --- 11c. THE report= FIELD GOES THROUGH THE SAME EMIT BOUNDARY (round 2, S1) -------------
+# The cause is neutralised at the emit boundary because a report-supplied `agent=peer` would put
+# a second, earlier `agent=` pair on a line consumers scan. `report=` is interpolated into that
+# SAME line, is CALLER-INFLUENCED (`--report`), and was the one emitted value left raw — so the
+# comment stating "ONE emit boundary" was not what the code did. Same treatment, one function.
+R11C="$(newrepo)"
+INJ_REPORT="$R11C/.review-stage/issue-810/a=b elapsed=999.md"
+mkdir -p "$R11C/.review-stage/issue-810"
+rs "$R11C" open t2 --issue 810 --agent spec-auditor --report "$INJ_REPORT"
+rc_is 0 "report-field: open accepts a path carrying '=' (it is a legal filename, so refusing would red correct input)"
+# The OPEN-OK LINE only. `open` also prints the path RAW on a line of its own (a caller consumes
+# it) and inside the paste-ready clause — deliberate, and stated in the code: those are whole
+# lines with no `key=value` fields for a pair to be injected into, so there is nothing to anchor.
+OPEN_OK_LINE="$(printf '%s\n' "$OUT" | LC_ALL=C grep 'OPEN-OK' || true)"
+case "$OPEN_OK_LINE" in
+  *"elapsed=999"*) bad "report-field: the OPEN-OK line carries the path's injected 'elapsed=' pair (got: $OPEN_OK_LINE)" ;;
+  *"a~b elapsed~999.md"*) ok "report-field: the OPEN-OK line neutralises the injected pair and keeps the path readable" ;;
+  *) bad "report-field: could not read an OPEN-OK line to check (got: $OUT)" ;;
+esac
+
+rs "$R11C" verdict t2 --issue 810
+rc_is 5 "report-field: the verdict of the sentinel-only stage is NOT-RUN"
+hasnt "elapsed=999" "report-field: the VERDICT line does not carry the path's injected 'elapsed=' pair"
+N_ELAPSED=$(printf '%s\n' "$OUT" | LC_ALL=C tr ' ' '\n' | LC_ALL=C grep -c '^elapsed=' || true)
+if [ "$N_ELAPSED" = "1" ]; then
+  ok "report-field: EXACTLY ONE 'elapsed=' field on the verdict line, so a first-match consumer reads the MEASURED value"
+else
+  bad "report-field: $N_ELAPSED 'elapsed=' fields on the verdict line (out: $OUT)"
+fi
+has "a~b elapsed~999.md" "report-field: the path is still READABLE, with '=' neutralised rather than dropped (display-only, like the cause)"
+
+rs "$R11C" status t2 --issue 810
+rc_is 0 "report-field: status is advisory (exit 0)"
+hasnt "elapsed=999" "report-field: the STATUS line does not carry the injected pair either"
+
+rs "$R11C" record-author-performed t2 --issue 810 \
+  --reason 'no peer agent available on this box; hand audit against the spec deltas' \
+  --evidence 'docs/round-artifacts/issue-810-hand.md' --performed-by author
+rc_is 0 "report-field: record-author-performed accepts the stage"
+hasnt "elapsed=999" "report-field: the RECORD-OK line does not carry the injected pair either"
+
 # --- 11b. AN UNREADABLE REPORT IS ITS OWN CAUSE, NOT "report empty" (round 2, B7) ---------
 # The cause list's entire justification is that THE OPERATOR ACTION DIFFERS PER CAUSE: "the file
 # is empty" sends the operator to the agent, "I cannot read the file" sends them to `chmod`. An

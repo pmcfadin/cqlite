@@ -218,6 +218,25 @@ one_line() {
   printf '%s' "${1:-}" | LC_ALL=C tr -d '\000' | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
 }
 
+# field_value <text> — THE ONE EMIT BOUNDARY for a DATA value interpolated into one of this
+# tool's `key=value` control lines (#3312's rule; #3751 round 2, S1). Flattens to one line and
+# maps the ONE reserved character '=' to '~'.
+#
+# WHY IT IS ONE FUNCTION AND NOT A RULE PER SITE: the `cause` and the `report=` path are both
+# DATA on a line whose other fields a consumer scans, and both are influenced by a party this
+# tool is judging — the cause partly by the report's own text, the path by `--report`. A path
+# like `a=b elapsed=999.md` is a LEGAL filename, so it cannot be refused (refusing would red
+# correct input); left raw it put a SECOND `elapsed=` pair on the line, and the comment above
+# the cause claimed "ONE emit boundary" while the neighbouring field had none. Neutralised
+# rather than refused, because both values are diagnostics an operator has to read.
+#
+# DISPLAY-ONLY, WHICH IS THE WHOLE SAFETY ARGUMENT: every decision (the token, the exit code,
+# the paths actually written) is made on the RAW value before any line is built, so this can
+# never change a verdict — the same reasoning the roborev wrapper's `roborev_safe_line` states.
+field_value() {
+  one_line "${1:-}" | LC_ALL=C tr '=' '~'
+}
+
 # placeholder_defect <raw-value> — THE ONE JUDGEMENT, shared by every caller that has to
 # decide whether a free-text value RECORDS SOMETHING. It prints `<kind>|<token>` for the first
 # defect it finds and NOTHING when the value is usable; it never exits, so a caller that must
@@ -602,7 +621,7 @@ cmd_open() {
   if [ -f "$sfile" ]; then
     prior_iso="$(read_field "$sfile" spawned-at)"
     if [ "$force" -ne 1 ]; then
-      emit "OPEN-REFUSED reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(read_field "$sfile" report)"
+      emit "OPEN-REFUSED reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$(read_field "$sfile" report)")"
       emit "OPEN-REFUSED detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
       exit 2
     fi
@@ -685,7 +704,12 @@ cmd_open() {
   } >"$WRITE_TMP"
   commit_write "$rpath" report-of-record
 
-  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso reopen-count=$reopen_count report=$rpath"
+  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso reopen-count=$reopen_count report=$(field_value "$rpath")"
+  # THE RAW PATH, ON A LINE OF ITS OWN — deliberately NOT through `field_value`. A caller
+  # consumes this line to open the file, so a neutralised '=' would hand back a path that does
+  # not exist. Safe for the reason the fields are not: this is a WHOLE LINE with no `key=value`
+  # pairs, so there is no control token for a payload to pose as (the same reason the
+  # paste-ready clause below quotes the path verbatim).
   printf '%s\n' "$rpath"
   # THE PASTE-READY CLAUSE. Printed so the contract reaches the agent VERBATIM instead of
   # being paraphrased per lane — the paraphrase is what varied across the NINE measured
@@ -875,10 +899,11 @@ cmd_verdict() {
   # wrong — the cause is a diagnostic the operator has to read, and an unreadable NOT-RUN is
   # worse than a slightly-spelled one. The TOKEN needs no such treatment: it comes from a
   # closed set matched by string equality.
-  [ -z "$cause" ] || rendered="$token ($(one_line "$cause" | LC_ALL=C tr '=' '~'))"
+  [ -z "$cause" ] || rendered="$token ($(field_value "$cause"))"
   # EXACTLY ONE LINE on stdout. Nothing else is printed here, ever: this line is what a
-  # consumer greps, and a second line is a second opinion.
-  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE agent=$STAGE_AGENT report=$STAGE_REPORT"
+  # consumer greps, and a second line is a second opinion. BOTH data values on it — the cause
+  # and the caller-influenced report path — go through `field_value`, the one emit boundary.
+  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE agent=$STAGE_AGENT report=$(field_value "$STAGE_REPORT")"
   case "$token" in
     PASS) exit 0 ;;
     FINDINGS) exit 4 ;;
@@ -917,7 +942,7 @@ cmd_status() {
     *) if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi ;;
   esac
 
-  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE past-deadline=$past agent=$STAGE_AGENT spawned-at=$STAGE_SPAWNED_ISO report=$STAGE_REPORT"
+  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE past-deadline=$past agent=$STAGE_AGENT spawned-at=$STAGE_SPAWNED_ISO report=$(field_value "$STAGE_REPORT")"
   if [ "$state" = sentinel-only ] && [ "$past" = yes ]; then
     # A STAGE THAT IS WAITING MUST NOT LOOK LIKE ONE THAT IS HUNG (the gate's
     # `waiting for gate slot` idiom): name the elapsed time AND the fact that nothing was
@@ -1019,7 +1044,7 @@ cmd_record_author_performed() {
   case "$prior_token" in
     PASS | FINDINGS)
       if [ "$force" -ne 1 ]; then
-        emit "AUTHOR-REFUSED reason=verdict-already-recorded kind=$kind issue=$issue recorded-verdict=$prior_token report=$STAGE_REPORT"
+        emit "AUTHOR-REFUSED reason=verdict-already-recorded kind=$kind issue=$issue recorded-verdict=$prior_token report=$(field_value "$STAGE_REPORT")"
         emit "AUTHOR-REFUSED detail=this stage already RECORDS a verdict, and replacing it here would destroy it with no trace — a recorded FINDINGS would become a merge-proceeding AUTHOR-PERFORMED. Read it first ($prog verdict $kind --issue $issue). If the substitute really does supersede it, pass --force: the replaced token is then RECORDED in the new report."
         exit 2
       fi
@@ -1062,7 +1087,7 @@ cmd_record_author_performed() {
   } >"$WRITE_TMP"
   commit_write "$STAGE_REPORT" report-of-record
 
-  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok${replaced:+ replaced-verdict=$replaced} report=$STAGE_REPORT"
+  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok${replaced:+ replaced-verdict=$replaced} report=$(field_value "$STAGE_REPORT")"
   emit "RECORD-NOTE kind=$kind issue=$issue $AUTHOR_DISCLOSURE"
   exit 0
 }
