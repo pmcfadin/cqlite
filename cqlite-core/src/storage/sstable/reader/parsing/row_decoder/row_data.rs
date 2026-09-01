@@ -610,12 +610,7 @@ impl V5CompressedLegacyParser {
                     }
                     Err(e) => {
                         // Issue #3721: PROPAGATE (rule: `column_decode_error`); the
-                        // two arms above share it, so compaction sees it too. The
-                        // reported type is the DISPATCH type — for a complex column
-                        // the container decodes on the header marshal type while the
-                        // cell-path key / element decode on the SUPPLIED schema type,
-                        // and it is the latter that carries the key/element
-                        // parameters a failure here is usually about.
+                        // two arms above share it, so compaction sees it too.
                         let n = &column.name;
                         let ty = dispatch_type(&column.data_type, Some(complex_type));
                         return Err(column_decode_failure(n, &ty, offset, e));
@@ -626,35 +621,10 @@ impl V5CompressedLegacyParser {
                 // to detect USE_ROW_TTL (0x10), which makes a cell with no explicit
                 // expiry inherit the ROW's expiry rather than being live-forever.
                 let cell_flags = data.get(offset).copied().unwrap_or(0);
-                // Issue #3721: there is NO end-of-cells sentinel to detect here, so
-                // this position is a cell UNCONDITIONALLY and a flags byte that is
-                // not a cell's is a DECODE FAILURE, not a loop exit.
-                //
-                // Authority (cassandra-5.0.8, quoted rather than inferred from
-                // bytes — issue #28):
-                // `db/rows/UnfilteredSerializer.deserializeRowBody` establishes the
-                // column set BEFORE reading any cell —
-                //   `Columns columns = hasAllColumns ? headerColumns
-                //        : Columns.serializer.deserializeSubset(headerColumns, in);`
-                // — then iterates EXACTLY that set (`columns.apply(column -> …
-                // readSimpleColumn / readComplexColumn …)`). Cell reading is bounded
-                // by the columns bitmap / subset encoding; no flags value terminates
-                // it. `db/rows/Cell.Serializer` defines only five flag bits
-                // (IS_DELETED 0x01, IS_EXPIRING 0x02, HAS_EMPTY_VALUE 0x04,
-                // USE_ROW_TIMESTAMP 0x08, USE_ROW_TTL 0x10 — union 0x1F).
-                //
-                // A `> 0x1F` byte therefore means this cursor is not at the cell
-                // Cassandra wrote, and `parse_cell_value_schema_order` rejects it as
-                // corruption (issue #191) one call below — which the `Err` arm turns
-                // into `Error::ColumnDecode`. The pre-#3721 `break` on the same
-                // condition (and the `not_a_cell` helper that briefly replaced it)
-                // reported that as a SUCCESSFUL short row, which is the defect this
-                // issue exists to remove; masking to 0x1F and proceeding — the other
-                // defensible reading of Cassandra's own tolerance of unknown bits —
-                // was rejected because Cassandra's tolerance is forward compatibility
-                // for cells IT wrote, whereas reaching this byte means OUR cursor
-                // disagrees with the framing, so decoding on would emit a value
-                // fabricated from non-cell bytes. Fail closed.
+                // Issue #3721: there is NO end-of-cells sentinel, so a flags byte
+                // that is not a cell's is a DECODE FAILURE, not a loop exit — see
+                // `column_decode_error`, "The cell-flags byte: NOT a terminator"
+                // (authority, and the rejected mask-to-`0x1F` alternative).
                 match self.parse_cell_value_schema_order(
                     data,
                     offset,
@@ -807,12 +777,7 @@ impl V5CompressedLegacyParser {
                     Err(e) => {
                         // Issue #3721: PROPAGATE (see `column_decode_error`); the
                         // `break` this replaces described only its mechanism, and a
-                        // clean loop exit IS a truncated row. The reported type is
-                        // the one the cell was DISPATCHED on (`ColumnToParse.kind`,
-                        // resolved from `column.data_type` for both a matched and a
-                        // dropped column), not the on-disk header type it used to
-                        // name — which misidentified the cause whenever the supplied
-                        // schema was the thing that was wrong.
+                        // clean loop exit IS a truncated row.
                         let ty = dispatch_type(&column.data_type, header_type);
                         return Err(column_decode_failure(&column.name, &ty, offset, e));
                     }

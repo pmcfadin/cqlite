@@ -96,6 +96,30 @@
 //! walk over-running a real row boundary) is handled where it belongs, at the
 //! callers that chose the optimization: see [`end_of_partition_or_bail`].
 
+//! # Where an INDEX-POSITIONED walk must stop, and why (issue #3721)
+//!
+//! `block_emit_windowed`'s `row_body_window` is a byte extent inside the FIRST
+//! partition's row body, resolved from that partition's authoritative row index,
+//! and it is applied to `partition_index == 0` alone. A windowed walk therefore
+//! covers that partition and STOPS.
+//!
+//! Continuing costs CORRECTNESS, not just work. Stopping the row loop at
+//! `body_end` leaves the cursor in the MIDDLE of a row — a row-index block extent
+//! is a byte bound, not a row bound — and the try-parse partition detector (issue
+//! #166, deliberately no byte-pattern heuristics) then reads a "partition header"
+//! out of a cell value and decodes a phantom partition from it. MEASURED on the
+//! #1184 fixture: the promoted-index reverse block walk stopped at `body_end`
+//! 461014, peeked a partition header there, and decoded a row whose `payload` cell
+//! flags byte was `0x70` — the ASCII `p` of the text value it was standing in
+//! (`partition_index = 1`, `row_count = 0`).
+//!
+//! That phantom parse was harmless only while its failure was swallowed. Once a
+//! per-column decode failure is reported, as it must be, an over-run reads as a
+//! corrupt SSTable. Not entering the phantom partition is the fix;
+//! [`indexed_walk_falls_back`] remains as defence in depth for any over-run this
+//! does not prevent. Every windowed caller keeps only the target partition's rows,
+//! so nothing is lost.
+
 use crate::error::{Error, Result};
 
 /// Build the [`Error::ColumnDecode`] a row-assembly column handler propagates,
@@ -181,6 +205,21 @@ pub(super) fn dispatch_type(declared: &str, header: Option<&str>) -> String {
 /// Callers must DISCARD any rows the failed windowed attempt buffered before
 /// retrying; every one of them collects into a local `Vec` rather than emitting
 /// incrementally, so there is nothing already handed to a consumer.
+///
+/// # Where each windowed caller retracts, and why not lower down
+///
+/// * `data_access::clustering_seek_decode` — the forward clustering-slice seek. It
+///   holds BOTH index narrowings (the decompressed `decode_end_bound` AND
+///   `row_body_window`) and so is the only level that can drop both. Retrying
+///   further down, inside `big_decode_clustering_window` or
+///   `bti_collect_partition_rows`, drops only the row-body window and still reads
+///   the NARROWED extent, which ends mid-partition — MEASURED to fail a clean read
+///   of the committed `test_big.wide_partition` fixture on the retry as well.
+/// * `big_promoted::big_reverse_partition_rows_via_promoted_index` — the reverse
+///   block walk. It has no unwindowed form to retry, so it abandons the
+///   optimization through `Ok(None)`, the documented channel every other "cannot
+///   use the fast path" branch of that function already takes; the caller then
+///   re-reads via the in-memory-sort full scan.
 ///
 /// Gated `not(tombstones)` like its ONLY caller, `data_access::clustering_seek_decode`
 /// (whose seek path is itself `not(tombstones)`): under `tombstones` no windowed

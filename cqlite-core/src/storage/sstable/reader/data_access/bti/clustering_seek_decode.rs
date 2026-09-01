@@ -38,6 +38,7 @@
 //! engaged for the retry, so the caller's `AccessPath` stays honest.
 
 use super::super::SSTableReader;
+use crate::schema::TableSchema;
 use crate::storage::sstable::reader::parsing::row_decoder::column_decode_error;
 use crate::types::{ScanRow, TableId};
 use crate::{Result, RowKey};
@@ -112,6 +113,59 @@ impl SSTableReader {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Decode the rows of a single BIG (`nb`) wide partition bounded to a
+    /// clustering-slice block window (Issue #1184). Resolves the partition's
+    /// decompressed window, then runs the windowed parser over only the selected
+    /// block extent (`row_body_window`), collecting the target partition's rows.
+    ///
+    /// The target partition is identified by a partition-key-bytes equality check
+    /// only — the reader is already scoped to a single table by the manager, so
+    /// (exactly as the full-scan `scan().retain(matches_key)` fallback does) no
+    /// table-id match is applied. This decodes SSTables whose serialization-header
+    /// keyspace/table differ from a fully-qualified query id. Returns `Ok(None)`
+    /// when the partition window cannot be resolved (caller falls back to the full
+    /// scan).
+    async fn big_decode_clustering_window(
+        &self,
+        partition_key: &[u8],
+        offset: u64,
+        end_bound: Option<usize>,
+        row_body_window: Option<(usize, usize)>,
+        schema: Option<&TableSchema>,
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
+        let Some((window, within)) = self
+            .decompress_partition_window(offset as usize, end_bound)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let parser = self.build_v5_parser(true);
+        let key = RowKey::from(partition_key.to_vec());
+        let avail = window.len().saturating_sub(within);
+        let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
+        let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
+        // Issue #3721: a per-column decode failure propagates; the retry cannot live
+        // here (`end_bound` is already narrowed) — `clustering_seek_decode`.
+        parser.parse_block_emit_windowed(
+            &window[within..],
+            schema,
+            self,
+            clamped,
+            |(_tid, entry_key, entry_value)| {
+                if entry_key.as_bytes() == partition_key {
+                    if self.filter_tombstone(&entry_value) {
+                        rows.push((key.clone(), entry_value));
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                } else {
+                    // First row of the next partition — stop.
+                    Ok(std::ops::ControlFlow::Break(()))
+                }
+            },
+        )?;
+        Ok(Some(rows))
     }
 
     /// ONE decode attempt at the supplied bounds. The BIG arm with an engaged

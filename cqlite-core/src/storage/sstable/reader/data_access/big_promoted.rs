@@ -409,15 +409,8 @@ impl SSTableReader {
                 },
             );
             if let Err(e) = walk {
-                // Issue #3721 (roborev blocker 2): a per-column decode failure inside
-                // this INDEX-POSITIONED block walk is ambiguous between a misaligned
-                // cursor and genuinely undecodable data, so it may not be answered
-                // with the rows collected so far. Abandon the promoted-index
-                // optimization entirely (`Ok(None)`) — the documented channel every
-                // other "cannot use the fast path" branch of this function already
-                // takes — and let the caller re-read through the in-memory-sort full
-                // scan, which parses forward from the partition header and surfaces a
-                // real failure from a cursor known to be at a row boundary.
+                // Issue #3721: this INDEX-POSITIONED walk may not answer with the
+                // rows collected so far — see `indexed_walk_falls_back`.
                 if column_decode_error::indexed_walk_falls_back(&e) {
                     return Ok(None);
                 }
@@ -438,64 +431,6 @@ impl SSTableReader {
         Ok(Some(out))
     }
 
-    /// Decode the rows of a single BIG (`nb`) wide partition bounded to a
-    /// clustering-slice block window (Issue #1184). Resolves the partition's
-    /// decompressed window, then runs the windowed parser over only the selected
-    /// block extent (`row_body_window`), collecting the target partition's rows.
-    ///
-    /// The target partition is identified by a partition-key-bytes equality check
-    /// only — the reader is already scoped to a single table by the manager, so
-    /// (exactly as the full-scan `scan().retain(matches_key)` fallback does) no
-    /// table-id match is applied. This decodes SSTables whose serialization-header
-    /// keyspace/table differ from a fully-qualified query id. Returns `Ok(None)`
-    /// when the partition window cannot be resolved (caller falls back to the full
-    /// scan).
-    pub(super) async fn big_decode_clustering_window(
-        &self,
-        partition_key: &[u8],
-        offset: u64,
-        end_bound: Option<usize>,
-        row_body_window: Option<(usize, usize)>,
-        schema: Option<&TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
-        let Some((window, within)) = self
-            .decompress_partition_window(offset as usize, end_bound)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let parser = self.build_v5_parser(true);
-        let key = RowKey::from(partition_key.to_vec());
-        let avail = window.len().saturating_sub(within);
-        let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
-        let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
-        // Issue #3721 (roborev blocker 2): a per-column decode failure propagates out
-        // of this INDEX-POSITIONED walk instead of being answered with the rows
-        // buffered so far. The retry that resolves the ambiguity cannot live here —
-        // `end_bound` is the NARROWED decode extent the clustering resolver chose, so
-        // re-reading it without `row_body_window` would still stop mid-partition. The
-        // caller that chose BOTH narrowings retracts BOTH: see
-        // `data_access::clustering_seek_decode`.
-        parser.parse_block_emit_windowed(
-            &window[within..],
-            schema,
-            self,
-            clamped,
-            |(_tid, entry_key, entry_value)| {
-                if entry_key.as_bytes() == partition_key {
-                    if self.filter_tombstone(&entry_value) {
-                        rows.push((key.clone(), entry_value));
-                    }
-                    Ok(std::ops::ControlFlow::Continue(()))
-                } else {
-                    // First row of the next partition — stop.
-                    Ok(std::ops::ControlFlow::Break(()))
-                }
-            },
-        )?;
-        Ok(Some(rows))
-    }
-
     /// Decompress exactly the chunk window covering the partition `[offset,
     /// end_bound)` (UNCOMPRESSED domain) and return `(window, within)` where
     /// `within = offset - window_base` is the partition start inside `window`
@@ -513,7 +448,7 @@ impl SSTableReader {
     /// preserved: `read_compressed_chunk_at` verifies each compressed chunk's inline
     /// CRC32 before it is decompressed, and the uncompressed arm verifies the covering
     /// `CRC.db` chunk(s) before returning bytes.
-    async fn decompress_partition_window(
+    pub(super) async fn decompress_partition_window(
         &self,
         offset: usize,
         end_bound: Option<usize>,

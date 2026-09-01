@@ -27,6 +27,11 @@ use crate::Error;
 #[cfg(not(feature = "tombstones"))]
 use tracing::debug;
 
+// Issue #3721: the seek's decode step + its ONE fallback. Declared HERE, and gated
+// exactly like `scan_single_partition_clustering` below, which is its only caller.
+#[cfg(not(feature = "tombstones"))]
+mod clustering_seek_decode;
+
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
     ///
