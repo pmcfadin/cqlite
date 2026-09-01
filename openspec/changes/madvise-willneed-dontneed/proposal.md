@@ -16,7 +16,7 @@ as filed is not implementable**:
 > on built machinery**, not new IO code."
 
 Both halves — `WILLNEED` at open and `MADV_DONTNEED` post-scan-once — depend on scan-lifetime plumbing
-that does not exist. Filed separately, targeted at the i4i rig.
+that does not exist. Filed as **issue #3853**, targeted at the i4i rig.
 
 ## Why the flip cannot ship: advising at open is advising the whole data directory
 
@@ -95,7 +95,7 @@ unexamined.
 ## What does not ship, and where it went
 
 The scan-lifetime advice plumbing — one seam serving `WILLNEED` at scan start *and* `DONTNEED` at scan
-end — is filed as its own issue, unmilestoned, cross-referencing roborev job 340 and the #2824 thread.
+end — is filed as **issue #3853**, unmilestoned, cross-referencing roborev job 340 and the #2824 thread.
 It should be measured on the i4i rig, where the benefit is demonstrable, and it must re-run
 `benches/concurrent_scan.rs`'s `scaling_floors` gate because concurrent scans over one reader are a
 supported, tested property (#815).

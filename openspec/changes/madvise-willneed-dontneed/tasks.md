@@ -28,7 +28,9 @@ Outcome: **priced re-scope**, lead ruling on REQ-2824-03. The lever does not shi
 - [x] 4.1 Revert all `*.rs` and the two guide chapters to `origin/main`, byte for byte.
 - [x] 4.2 Rewrite proposal + spec delta to the outcome; keep the durable requirements.
 - [x] 4.3 Correct the two documents whose addenda assumed the flip shipped.
-- [ ] 4.4 File the scan-lifetime advice plumbing issue, unmilestoned, cross-referencing job 340.
-- [ ] 4.5 `scripts/ci/classify-docs-only.sh` decides whether roborev applies — do not judge by path shape.
+- [x] 4.4 Filed as **#3853** (unmilestoned), cross-referencing job 340 and the #2824 thread.
+- [x] 4.5 `classify-docs-only.sh` -> **FULL PATH** (the harness `.sh` is a code input), so this diff
+      is NOT code-free and roborev **does** apply. The lead's 'primary-source verification, not
+      roborev' branch was conditional on the classifier; it did not fire.
 - [ ] 4.6 flow-closer: full gate of record -> premerge-assert -> merge on green.
 - [ ] 4.7 Finalize, telemetry, closing comment.

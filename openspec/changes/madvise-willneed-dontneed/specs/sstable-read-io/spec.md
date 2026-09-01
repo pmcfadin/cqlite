@@ -27,7 +27,7 @@ advice is issued for every table of every keyspace before a single query is seen
 workload pays it in full. Reader-open is not evidence of intent to scan.
 
 The constraint is scoped and has an exit: it holds **until** a scan-lifetime seam exists that can issue
-advice when a scan actually begins. That plumbing is filed separately. An explicit
+advice when a scan actually begins. That plumbing is filed as **issue #3853**. An explicit
 `PrefetchMode::WillNeed` or `Sequential` remains a caller opt-in and is unaffected — the requirement is
 about the default.
 
