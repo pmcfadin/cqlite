@@ -1815,6 +1815,22 @@ verify-owned:OWNED:0
 show-fields:SHOWN:0
 adopt-succeeds:ADOPTED:0
 lock-file-unusable:ERROR:1"
+# THE BOUND, and the two rows that need it (roborev job 51). Both plant a FIFO, whose defect is
+# an indefinite block rather than a wrong answer — so they are only safe to run under a bound,
+# and the bound is DECLARED rather than assumed present.
+INV_TIMEOUT=""
+if command -v timeout >/dev/null 2>&1; then
+  INV_TIMEOUT="timeout 120"
+else
+  ok "DECLARED: \`timeout\` is unavailable on this host, so the invariant table runs UNBOUNDED and the two FIFO rows are omitted — a row whose defect is a hang may not be run without a bound"
+fi
+if [ -n "$INV_TIMEOUT" ] && command -v mkfifo >/dev/null 2>&1; then
+  INV_ROWS="$INV_ROWS
+lock-not-regular-fifo:ERROR:1
+body-file-not-regular:USAGE:64"
+else
+  ok "DECLARED: the two FIFO rows (lock-not-regular-fifo, body-file-not-regular) need both \`timeout\` and \`mkfifo\` — they are omitted rather than asserted vacuously"
+fi
 # An unwritable worktree is only measurable when permissions apply to us: root bypasses them,
 # so the row is DECLARED unavailable rather than passing vacuously.
 if [ "$(id -u)" -ne 0 ]; then
@@ -1831,8 +1847,16 @@ inv_bin() {  # inv_bin <cmd> <body-line> — a PATH dir holding one shim
   printf '%s\n' "$d"
 }
 inv_exec() {  # inv_exec <dir> <script> <shimdir|''> <session> <pid> <args...>
+  # BOUNDED (roborev job 51). Two rows below plant a FIFO, and the defect they pin is an
+  # INDEFINITE BLOCK — so an unbounded runner would not fail the suite, it would HANG it, and
+  # the thing that notices would be the gate's stall watchdog minutes later. A hanging test is
+  # worse than a failing one. The bound is generous (nothing here takes seconds) and applies to
+  # EVERY row, so a future row that learns to block reds too. `timeout` propagates the child's
+  # own status, so the rc every row asserts is unchanged; rc 124 is the bound firing and no row
+  # expects it. If `timeout` is unavailable the whole table is DECLARED unavailable above rather
+  # than run unbounded.
   local d="$1" sc="$2" sd="$3" ss="$4" sp="$5"; shift 5
-  ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+  ( cd "$d" && ${INV_TIMEOUT} env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
       ${ss:+"CLAUDE_CODE_SESSION_ID=$ss"} ${sp:+"CLAUDE_PID=$sp"} ${sd:+"PATH=$sd:$PATH"} \
       bash "$sc" "$@" 2>&1 )
 }
@@ -1855,6 +1879,16 @@ inv_run() {  # inv_run <row-name> — set the state up, run it, print output, re
       sd=$(inv_bin cat 'case "$*" in *body-unreadable.md*) exit 1;; esac
 exec '"$(command -v cat)"' "$@"')
       inv_exec "$d" "$DS" "$sd" "$SESS_A" $$ write 3822 --body-file "$INV_DIR/body-unreadable.md" ;;
+    lock-not-regular-fifo)
+      # roborev job 51: a FIFO at the SCRIPT-OWNED lock path. `: >>"$lock"` on one blocks
+      # forever; the type refusal must reach it before the open.
+      mkfifo "$d/$MARKER.lock"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 ;;
+    body-file-not-regular)
+      # The same class at the one path a CALLER names: `-r` is true for a FIFO and `cat` then
+      # blocks forever. USAGE, because the path came from the invocation.
+      rm -f "$INV_DIR/body-fifo"; mkfifo "$INV_DIR/body-fifo"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 --body-file "$INV_DIR/body-fifo" ;;
     absent-marker)         inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
     marker-not-regular)    mkdir -p "$d/$MARKER"; inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
     unstamped-marker)      printf 'legacy plan\n' >"$d/$MARKER"; inv_exec "$d" "$DS" '' "$SESS_A" $$ verify 3822 ;;
@@ -1994,8 +2028,8 @@ else
 fi
 # ROW FLOOR, the same idea as the case floor: a span-replacing edit that silently drops rows
 # otherwise leaves a green tally over a shrunken table.
-if [ "$inv_count" -ge 33 ]; then
-  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 33) — including all four success verdicts, both signal phases and every refusal token"
+if [ "$inv_count" -ge 35 ]; then
+  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 35) — including all four success verdicts, both signal phases and every refusal token"
 else
   bad "table floor breached: only $inv_count rows ran"
 fi
@@ -3010,7 +3044,7 @@ ln -s "$K46C_TARGET" "$L46c/$MARKER.lock"
 c46_w=$(run "$L46c" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); c46_wrc=$?
 c46_link_after=$(readlink "$L46c/$MARKER.lock" 2>/dev/null || true)
 if [ "$c46_wrc" -ne 0 ] && [ "$(verdict_of "$c46_w")" = ERROR ] \
-   && printf '%s\n' "$c46_w" | grep -q 'lock path .* is a SYMLINK' \
+   && printf '%s\n' "$c46_w" | grep -q 'lock path .* is NOT a regular file (it is a symlink)' \
    && [ -L "$L46c/$MARKER.lock" ] && [ "$c46_link_after" = "$K46C_TARGET" ] \
    && [ ! -e "$K46C_TARGET" ] && [ ! -e "$L46c/$MARKER" ]; then
   ok "a SYMLINK at the lock path is refused by name; the link survives, its target was NOT created, and no marker was written"
@@ -3046,6 +3080,179 @@ else
 fi
 
 # ===========================================================================
+case_begin 47-non-regular-paths-never-block "roborev job 51: NO path this script opens may be a FIFO/socket/device/directory — a FIFO BLOCKS FOREVER and emits NO verdict at all"
+# ===========================================================================
+# THE DEFECT, MEASURED BEFORE IT WAS FIXED: with a FIFO at `.drive-issue-state.md.lock`, `write`
+# ran until killed — `timeout 10` returned rc 124 having emitted no `verdict ` line. That is the
+# worst possible breach of contract (c): not a WRONG verdict, NO verdict, forever, in a lane
+# nobody is watching. Round 10 (job 43 K1) taught this same path to refuse a SYMLINK and stopped
+# there, which is the THIRD round running in which a fix reached one member of its class — so
+# this case is a TABLE over the TYPES, not a point fix for the FIFO.
+#
+# EVERY RUN HERE IS BOUNDED. A regression in the code under test is an indefinite hang, and an
+# unbounded case would not fail the suite, it would HANG it — the gate's stall watchdog noticing
+# minutes later. Each row therefore asserts rc != 124 explicitly, so "it did not time out" is a
+# measured property and not an inference from the suite finishing.
+if ! command -v timeout >/dev/null 2>&1; then
+  ok "DECLARED: \`timeout\` is unavailable on this host, so the non-regular-path table is OMITTED — a case whose defect is a hang may not be run unbounded"
+else
+
+# run47 <dir> <secs> -- <args...> — `run`, bounded, stderr merged.
+run47() {
+  local dir="$1" secs="$2"; shift 2
+  [ "${1:-}" = "--" ] && shift
+  ( cd "$dir" && timeout "$secs" env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$DS" "$@" 2>&1 )
+}
+mksock47() { python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$1" 2>/dev/null; }
+
+# --- THE LOCK SIDECAR. Script-owned, so the ENTRY ITSELF must be regular: a symlink is refused
+#     whatever it resolves to, which is why both symlink shapes are rows here.
+L47_ROWS="fifo directory symlink-dangling symlink-to-regular"
+command -v mkfifo >/dev/null 2>&1 || { L47_ROWS="directory symlink-dangling symlink-to-regular"; ok "DECLARED: \`mkfifo\` is unavailable, so the FIFO row of the lock table is omitted rather than asserted vacuously"; }
+if mksock47 "$T/probe47.sock"; then L47_ROWS="$L47_ROWS socket"; rm -f "$T/probe47.sock"
+else ok "DECLARED: a unix socket could not be created on this host (no python3, or the path is too long), so the socket row of the lock table is omitted rather than asserted vacuously"; fi
+ok "DECLARED: the block-device and char-device rows are NOT asserted — creating one needs root, and this suite does not run as root. They take the same code path as the rows above (the closed \`case\` admits only absent|regular), and the char-device shape IS measured below through --body-file /dev/zero."
+
+l47_fail=0; l47_rows=0
+for kind in $L47_ROWS; do
+  l47_rows=$((l47_rows + 1))
+  d=$(lane "lane47-lock-$kind"); lk="$d/$MARKER.lock"; tgt="$T/lock47-target-$kind"
+  case "$kind" in
+    fifo)               mkfifo "$lk" ;;
+    directory)          mkdir -p "$lk" ;;
+    socket)             mksock47 "$lk" ;;
+    symlink-dangling)   rm -f "$tgt"; ln -s "$tgt" "$lk" ;;
+    symlink-to-regular) printf 'peer\n' >"$tgt"; ln -s "$tgt" "$lk" ;;
+  esac
+  out=$(run47 "$d" 20 -- write 3822 --stage implement); rc=$?
+  why=''
+  [ "$rc" -ne 124 ] || why="$why TIMED-OUT(the hang is back)"
+  [ "$rc" -ne 0 ]   || why="$why rc=0"
+  [ "$(verdict_count "$out")" = 1 ] || why="$why verdicts=$(verdict_count "$out")"
+  [ "$(verdict_of "$out")" = ERROR ] || why="$why token=$(verdict_of "$out")"
+  all_lines_anchored "$out" || why="$why unanchored-line"
+  # The refusal NAMES what the path actually is — "not a regular file" alone would send an
+  # operator looking at the wrong thing.
+  case "$kind" in
+    symlink-*) printf '%s\n' "$out" | grep -q 'it is a symlink' || why="$why kind-unnamed" ;;
+    *)         printf '%s\n' "$out" | grep -q "it is a $kind"   || why="$why kind-unnamed" ;;
+  esac
+  # NOTHING was written, and the planted entry was neither opened nor replaced.
+  [ ! -e "$d/$MARKER" ] || why="$why marker-written"
+  case "$kind" in
+    symlink-dangling)   { [ -L "$lk" ] && [ ! -e "$tgt" ]; } || why="$why link-or-target-touched" ;;
+    symlink-to-regular) { [ -L "$lk" ] && [ "$(cat "$tgt" 2>/dev/null)" = peer ]; } || why="$why link-or-target-touched" ;;
+    fifo)               [ -p "$lk" ] || why="$why plant-replaced" ;;
+    socket)             [ -S "$lk" ] || why="$why plant-replaced" ;;
+    directory)          [ -d "$lk" ] || why="$why plant-replaced" ;;
+  esac
+  if [ -n "$why" ]; then
+    l47_fail=$((l47_fail + 1)); printf 'note   lock/%s ->%s\n%s\n' "$kind" "$why" "$out"
+  fi
+done
+if [ "$l47_fail" -eq 0 ]; then
+  ok "all $l47_rows non-regular lock-path types are refused with ONE anchored ERROR naming the type, WITHOUT blocking, and the planted entry survives untouched"
+else
+  bad "$l47_fail of $l47_rows lock-path types hung, were opened, or reported the wrong verdict"
+fi
+
+# NON-VACUITY: an ORDINARY leftover lock file from a previous run must still be used.
+L47ok=$(lane lane47-lock-regular); : >"$L47ok/$MARKER.lock"
+o47=$(run47 "$L47ok" 20 -- write 3822 --stage implement); rc47=$?
+if [ "$rc47" -eq 0 ] && [ "$(verdict_of "$o47")" = WRITTEN ]; then
+  ok "NON-VACUITY: a leftover REGULAR lock file from a previous run is still used (verdict WRITTEN) — the type rule refuses foreign artifacts, not our own sidecar"
+else
+  bad "the type rule broke the ordinary path: rc=$rc47 verdict=$(verdict_of "$o47")
+$o47"
+fi
+
+# --- THE CALLER'S --body-file. Here the question is what the path RESOLVES to: a symlink to a
+#     real notes file is an ordinary thing to pass and must keep working.
+B47_ROWS="directory char-device"
+command -v mkfifo >/dev/null 2>&1 && B47_ROWS="$B47_ROWS fifo symlink-to-fifo"
+[ -c /dev/zero ] || { B47_ROWS="directory"; ok "DECLARED: /dev/zero is not a character device on this host, so the char-device --body-file row is omitted"; }
+b47_fail=0; b47_rows=0
+for kind in $B47_ROWS; do
+  b47_rows=$((b47_rows + 1))
+  d=$(lane "lane47-body-$kind"); src=''
+  case "$kind" in
+    directory)       src="$T/body47-dir"; mkdir -p "$src" ;;
+    char-device)     src=/dev/zero ;;
+    fifo)            src="$T/body47.fifo"; rm -f "$src"; mkfifo "$src" ;;
+    symlink-to-fifo) src="$T/body47-link.fifo"; rm -f "$src" "$T/body47b.fifo"; mkfifo "$T/body47b.fifo"; ln -s "$T/body47b.fifo" "$src" ;;
+  esac
+  out=$(run47 "$d" 20 -- write 3822 --body-file "$src"); rc=$?
+  why=''
+  [ "$rc" -ne 124 ] || why="$why TIMED-OUT(the hang is back)"
+  [ "$rc" -eq 64 ]  || why="$why rc=$rc"
+  [ "$(verdict_count "$out")" = 1 ] || why="$why verdicts=$(verdict_count "$out")"
+  [ "$(verdict_of "$out")" = USAGE ] || why="$why token=$(verdict_of "$out")"
+  all_lines_anchored "$out" || why="$why unanchored-line"
+  printf '%s\n' "$out" | grep -q 'is not a REGULAR file' || why="$why reason-unnamed"
+  [ ! -e "$d/$MARKER" ] || why="$why marker-written"
+  if [ -n "$why" ]; then
+    b47_fail=$((b47_fail + 1)); printf 'note   body/%s ->%s\n%s\n' "$kind" "$why" "$out"
+  fi
+done
+if [ "$b47_fail" -eq 0 ]; then
+  ok "all $b47_rows non-regular --body-file types are refused with ONE anchored USAGE, WITHOUT blocking and WITHOUT streaming a device into the snapshot, and nothing is written"
+else
+  bad "$b47_fail of $b47_rows --body-file types hung, streamed, or reported the wrong verdict"
+fi
+
+# NON-VACUITY, and the property the FOLLOWED probe exists for: a SYMLINK to a real file is
+# still accepted, and its bytes still land in the marker.
+L47b=$(lane lane47-body-symlink); printf 'linked plan\n' >"$T/body47-real.md"
+rm -f "$T/body47-real-link.md"; ln -s "$T/body47-real.md" "$T/body47-real-link.md"
+o47b=$(run47 "$L47b" 20 -- write 3822 --body-file "$T/body47-real-link.md"); rc47b=$?
+if [ "$rc47b" -eq 0 ] && [ "$(verdict_of "$o47b")" = WRITTEN ] \
+   && grep -qFx 'linked plan' "$L47b/$MARKER"; then
+  ok "NON-VACUITY: a --body-file that is a SYMLINK to a real file is still accepted and its bytes still land in the marker (the body probe asks what the path RESOLVES to, not what the entry is)"
+else
+  bad "the body-file type rule rejected a legitimate symlink: rc=$rc47b verdict=$(verdict_of "$o47b")
+$o47b"
+fi
+
+# --- POSITIVE CONTROL, by ARTIFACT SUBSTITUTION. Both round-11 guards are removed in a scratch
+#     copy; the SAME FIFO plants must then HANG (rc 124) with no verdict. Without this the rows
+#     above prove only that a refusal exists, not that they reach the defect it prevents.
+if command -v mkfifo >/dev/null 2>&1; then
+  mkdir -p "$T/j51-scratch/lib"
+  cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$T/j51-scratch/lib/"
+  j51_pre="$T/j51-scratch/drive-issue-state.sh"
+  LC_ALL=C awk '
+    index($0, "local lkind; lkind=") { lskip = 1; next }
+    lskip && $0 == "  esac" { lskip = 0; next }
+    lskip { next }
+    index($0, "local bkind; bkind=") { bskip = 1; next }
+    bskip { bskip = 0; next }
+    { print }
+  ' "$DS" >"$j51_pre"
+  j51_pin=0
+  [ "$(grep -c 'lkind' "$j51_pre" || true)" = 0 ] || j51_pin=$((j51_pin + 1))
+  [ "$(grep -c 'bkind' "$j51_pre" || true)" = 0 ] || j51_pin=$((j51_pin + 1))
+  grep -q ': 2>/dev/null >>"\$lock"' "$j51_pre" || j51_pin=$((j51_pin + 1))
+  bash -n "$j51_pre" 2>/dev/null || j51_pin=$((j51_pin + 1))
+  L47p=$(lane lane47-pre-lock); mkfifo "$L47p/$MARKER.lock"
+  p47=$( cd "$L47p" && timeout 5 env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$j51_pre" write 3822 2>&1 ); p47rc=$?
+  L47q=$(lane lane47-pre-body); rm -f "$T/body47-pre.fifo"; mkfifo "$T/body47-pre.fifo"
+  q47=$( cd "$L47q" && timeout 5 env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$j51_pre" write 3822 --body-file "$T/body47-pre.fifo" 2>&1 ); q47rc=$?
+  if [ "$j51_pin" -eq 0 ] && [ "$p47rc" -eq 124 ] && [ "$q47rc" -eq 124 ]; then
+    ok "POSITIVE CONTROL: with both type guards reverted, the SAME FIFO plants HANG until killed (rc 124 at the lock path AND at --body-file) — the indefinite block is real and the plants reach it"
+  else
+    bad "the positive control did not reproduce the hang: pin-failures=$j51_pin lock-rc=$p47rc body-rc=$q47rc (124 expected for both)
+$p47
+$q47"
+  fi
+else
+  ok "DECLARED: \`mkfifo\` is unavailable, so the hang POSITIVE CONTROL is omitted — the rows above then prove a refusal exists but not that it prevents a measured hang"
+fi
+
+fi  # timeout available
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -3068,8 +3275,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 40-worktree-axis-must-be-measurable 41-body-without-trailing-newline
 42-verdict-emission-is-a-critical-section
 43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated
-45-unknown-prologue-keys-survive 46-symlink-marker-is-never-clobbered 28-case-floor"
-CASE_FLOOR=46
+45-unknown-prologue-keys-survive 46-symlink-marker-is-never-clobbered
+47-non-regular-paths-never-block 28-case-floor"
+CASE_FLOOR=47
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -3081,10 +3289,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 172 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 172)"
+if [ "$PASS" -ge 178 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 178)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 172)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 178)"
 fi
 
 # ===========================================================================

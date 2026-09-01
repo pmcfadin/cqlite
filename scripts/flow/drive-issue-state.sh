@@ -558,8 +558,13 @@ register_tmp() { TMP_FILES+=("$1"); }
 # line — was absent, and a `case` on that token (which drive-issue.md's Delta 4 mandates)
 # fell through every arm on a FATAL failure. `refuse` is defined above precisely so that
 # every exit of this script carries a token; there is no exception for a fatal one.
-[ -r "$SCRIPT_HOME/lib/process-liveness.sh" ] || \
-  refuse ERROR 1 "cannot read $(sane "$SCRIPT_HOME/lib/process-liveness.sh") (the shared process-liveness primitives) — NOTHING was measured"
+# `-f` AS WELL AS `-r` (roborev job 51's sweep). `.` on a FIFO would BLOCK FOREVER waiting for a
+# writer, and `-r` is true for one. The path is repo-owned, so reaching that state means the
+# checkout was tampered with — invoker-class, out of the threat model — but the guard is one
+# token and a hang here has no verdict and no timeout. Both predicates FOLLOW a symlink, which
+# is deliberate: a symlinked checkout is a legitimate layout.
+{ [ -f "$SCRIPT_HOME/lib/process-liveness.sh" ] && [ -r "$SCRIPT_HOME/lib/process-liveness.sh" ]; } || \
+  refuse ERROR 1 "cannot read $(sane "$SCRIPT_HOME/lib/process-liveness.sh") as a regular file (the shared process-liveness primitives) — NOTHING was measured"
 # shellcheck source=lib/process-liveness.sh
 . "$SCRIPT_HOME/lib/process-liveness.sh"
 
@@ -771,6 +776,60 @@ require_numeric_issue() {
 }
 
 # ---------------------------------------------------------------------------
+# FILESYSTEM ENTRY TYPES (roborev job 51, and the sweep of its class).
+#
+# WHY A TYPE PROBE EXISTS AT ALL: a `test -e`/`test -r` answers whether a path is THERE, and
+# every path this script opens then assumes it is a REGULAR FILE. It is not the same question,
+# and the gap is not cosmetic — the three failure modes differ by type:
+#
+#   FIFO      opening one for write BLOCKS INDEFINITELY until a reader appears. MEASURED: with
+#             a FIFO at the lock path, `write` ran until killed (`timeout 10` -> rc 124). In an
+#             unattended lane that is a PERMANENT STALL, and it is the worst possible breach of
+#             contract (c): not a wrong verdict, NO verdict, forever.
+#   device    a char/block device accepts the open and the write, so the run would appear to
+#             succeed while the bytes went to the device and the `flock` serialized nothing.
+#   socket    opening one fails with ENXIO — a refusal, but under a message naming the wrong
+#             cause ("it may be a directory").
+#   directory an open-for-write fails cleanly.
+#   symlink   FOLLOWED by every predicate except `-L`, so it redirects the open OUTSIDE the lane
+#             (roborev job 43 K1, whose fix reached only the symlink half of this same class).
+#
+# Both helpers are pure `test` builtins: they STAT, they never OPEN, so probing is itself
+# incapable of blocking. The fall-through is `unknown`, never `regular` — a type nothing here
+# recognises is not licensed to be opened, which is this file's standing rule that a positive
+# verdict requires an affirmative measurement.
+#
+# TWO functions, because the two call sites want different questions and answering the wrong
+# one is a defect either way. The LOCK sidecar is script-owned: the entry ITSELF must be
+# regular, so a symlink is refused whatever it points at. A caller's `--body-file` is the
+# caller's own artifact: a symlink to a real file is ordinary and must keep working, so THERE
+# the question is what the path RESOLVES to.
+# ---------------------------------------------------------------------------
+
+# path_kind_followed <path> — the type the path RESOLVES to (symlinks followed).
+path_kind_followed() {
+  local p="$1"
+  [ -e "$p" ]  || { printf 'absent\n'; return 0; }
+  [ ! -f "$p" ] || { printf 'regular\n'; return 0; }
+  [ ! -d "$p" ] || { printf 'directory\n'; return 0; }
+  [ ! -p "$p" ] || { printf 'fifo\n'; return 0; }
+  [ ! -S "$p" ] || { printf 'socket\n'; return 0; }
+  [ ! -b "$p" ] || { printf 'block-device\n'; return 0; }
+  [ ! -c "$p" ] || { printf 'char-device\n'; return 0; }
+  printf 'unknown\n'
+}
+
+# path_kind <path> — the type of the ENTRY, never its target's. The `-L` test comes FIRST
+# because every other predicate follows a link, and a DANGLING symlink is `-L` true / `-e`
+# false — the shape that made an earlier `-e` probe answer `absent` for an entry that plainly
+# exists (roborev job 43 K1).
+path_kind() {
+  local p="$1"
+  [ ! -L "$p" ] || { printf 'symlink\n'; return 0; }
+  path_kind_followed "$p"
+}
+
+# ---------------------------------------------------------------------------
 # Serialization. A verify-then-replace sequence that is not atomic is a guard with a hole:
 # two sessions in ONE lane — the exact scenario this file exists for — can BOTH pass
 # ownership verification and the second can clobber the first's stamp. The ownership check
@@ -796,20 +855,32 @@ lock_marker() {
   # non-interactive shell with bash's own unprefixed diagnostic — which would break the
   # output anchor every consumer rests on, and emit no verdict at all.
   [ -w "$wt" ] || refuse ERROR 1 "the worktree directory $(sane "$wt") is not writable, so the marker lock cannot be taken — nothing was decided and nothing was written"
-  # THE LOCK PATH IS SCRIPT-OWNED, SO A SYMLINK THERE IS REFUSED TOO (roborev job 43 K1's class,
-  # swept rather than waited for). The `: >>"$lock"` below FOLLOWS a link, so a link planted at
-  # this path — by a peer lane, not only by the invoker — would make this script create a file
-  # OUTSIDE the lane, and a DANGLING one is invisible to `-e` exactly as the marker's was. Same
-  # ruling as the marker's: a link is a deliberate artifact, and this script neither follows one
-  # nor replaces one.
-  [ ! -L "$lock" ] || refuse ERROR 1 "the marker lock path $(sane "$lock") is a SYMLINK (dangling or not) — this script owns that path and neither follows nor replaces a link there, so the ownership-verify -> replace sequence cannot be serialized on it; nothing was decided and nothing was written"
+  # THE LOCK PATH IS SCRIPT-OWNED, SO ANY NON-REGULAR ENTRY THERE IS REFUSED (roborev job 51,
+  # and the third round running in which a fix reached one member of its class: job 43 K1 taught
+  # this path to refuse a SYMLINK and left every other non-regular type accepted). The FIFO is
+  # the one that must never reach the open below — `: >>"$lock"` on a FIFO BLOCKS FOREVER — but
+  # the rule is stated over the TYPE rather than over the list of types that hang today: this
+  # script owns this path, it did not create what is there, and it neither follows, opens nor
+  # replaces someone else's artifact. `absent` is the ordinary case (we create it); `regular` is
+  # our own sidecar from a previous run. Everything else, INCLUDING a type this probe cannot
+  # name, is a refusal. The symlink half is folded in here rather than kept as a second check,
+  # so there is ONE rule and one message to keep true.
+  local lkind; lkind="$(path_kind "$lock")"
+  case "$lkind" in
+    absent | regular) : ;;
+    *) refuse ERROR 1 "the marker lock path $(sane "$lock") exists and is NOT a regular file (it is a $lkind) — this script owns that path, so it neither follows, opens nor replaces what someone else put there. Opening a FIFO there would BLOCK FOREVER waiting for a reader (an unattended lane would stall with no verdict at all); a device or socket would serialize NOTHING while appearing to succeed. Inspect the path and remove it deliberately. Nothing was decided and nothing was written." ;;
+  esac
   command -v flock >/dev/null 2>&1 || refuse ERROR 1 "flock is not available on this host, so the ownership-verify -> replace sequence cannot be SERIALIZED. Refusing rather than mutating unserialized: two sessions in one lane could both pass verification and one clobber the other's stamp, which is the defect this marker exists to prevent. An unmeasurable guarantee is never read as satisfied."
   # THE `2>/dev/null` COMES FIRST, AND THAT ORDER IS THE WHOLE POINT (roborev job 30, found by
   # sweeping G3's class rather than by the finding). Bash applies redirections LEFT TO RIGHT, so
   # `: >>"$lock" 2>/dev/null` attempts the failing redirection BEFORE stderr is diverted and
   # prints its own UNPREFIXED `bash: <path>: Permission denied` (measured, both orders). A
   # redirection is an external-command diagnostic in every way that matters to contract (a).
-  : 2>/dev/null >>"$lock" || refuse ERROR 1 "cannot create the marker lock file $(sane "$lock") — it may be a directory, or the lane may not permit creating it; nothing was decided"
+  # The type check above has already refused every non-regular entry BY NAME, so what remains
+  # here is a permission/quota failure, or an entry that changed type between the probe and this
+  # open. It is deliberately NOT removed as redundant: the probe is a stat and this is the act,
+  # and a check before an act can only describe a file that no longer has to be the one acted on.
+  : 2>/dev/null >>"$lock" || refuse ERROR 1 "cannot create or append to the marker lock file $(sane "$lock") — the lane may not permit creating it, or it was replaced after its type was probed; nothing was decided"
   eval "exec ${MARKER_LOCK_FD}>>\"\$lock\""
   # flock's own stderr is SUPPRESSED rather than captured: capturing it would mean running
   # flock inside a command substitution, i.e. in a subshell, which is not a place to be
@@ -1479,14 +1550,24 @@ write_marker() {
   # DISCARDED — the trap never runs at all — while the same signal during a plain command is
   # delivered normally. The one window whose interruption changes durable state must be
   # signal-OBSERVABLE, or the phase machinery below can never see it.
-  local mverrf="$tmp.err" mverr=''
-  register_tmp "$mverrf"
-  # PRE-CREATED, WITH `2>/dev/null` FIRST: the commit below redirects into this path, and a
-  # redirection bash cannot satisfy prints an UNPREFIXED diagnostic (see lock_marker). Proving
-  # the path creatable here keeps that diagnostic out of the one command that must not emit one.
-  : 2>/dev/null >"$mverrf" || {
+  # CREATED BY `mktemp`, NOT BY A REDIRECTION INTO A DERIVED NAME (roborev job 51's sweep). The
+  # commit below redirects into this path, and a redirection bash cannot satisfy prints an
+  # UNPREFIXED diagnostic (see lock_marker) — so the path must be proven creatable BEFORE that
+  # one command. This used to be `mverrf="$tmp.err"` plus `: >"$mverrf"`, which proves
+  # creatability but opens whatever is already at that name: a FIFO there BLOCKS FOREVER, the
+  # lock path's defect at a second site. A type probe cannot close it (the probe is a stat, the
+  # redirect is the act), but `mktemp` can: it creates with O_EXCL, so it can never open an
+  # existing entry of ANY type. That the name is unpredictable makes the race narrow; it does
+  # not make it absent, and the fix costs one call.
+  local mverrf mverrout mverr=''
+  mverrout="$(mktemp "$path.err.XXXXXX" 2>&1)" || {
     rm -f "$tmp" 2>/dev/null || true
-    WRITE_ERR="cannot create the commit's diagnostic file next to $(sane "$path") — nothing was written"; return 1; }
+    WRITE_ERR="cannot create the commit's diagnostic file next to $(sane "$path") — nothing was written (mktemp: $(sane "$mverrout"))"; return 1; }
+  mverrf="$mverrout"
+  register_tmp "$mverrf"
+  { [ -n "$mverrf" ] && [ -f "$mverrf" ]; } || {
+    rm -f "$tmp" 2>/dev/null || true
+    WRITE_ERR="mktemp exited 0 for the commit's diagnostic file next to $(sane "$path") but named no usable temporary file (it emitted: $(sane "$mverrout")) — nothing was written"; return 1; }
   COMMIT_PHASE=committing
   if mv -f "$tmp" "$path" >"$mverrf" 2>&1; then
     COMMIT_PHASE=committed
@@ -1560,6 +1641,18 @@ cmd_write() {
   local body_src='' body_snap=''
   if [ -n "$bodyfile" ]; then
     [ -r "$bodyfile" ] || die_usage "--body-file '$(sane "$bodyfile")' is not readable — nothing was written"
+    # AND IT MUST BE A REGULAR FILE — the same class as the lock sidecar's, at the one path a
+    # CALLER names (roborev job 51's sweep). `-r` is TRUE for a FIFO, and the `cat` below then
+    # BLOCKS FOREVER waiting for a writer: MEASURED, `--body-file <a fifo>` ran until killed
+    # (`timeout 8` -> rc 124), the same permanent unattended stall as the lock path's. A
+    # CHARACTER DEVICE is worse than a stall and was also measured: `--body-file /dev/zero`
+    # streams without end into the snapshot, so the failure is a filled disk rather than a hang.
+    # The question here is what the path RESOLVES to, not what the entry is: a symlink to a real
+    # notes file is an ordinary thing for a caller to pass and keeps working. USAGE rather than
+    # ERROR because the path came from the invocation — the same verdict as the `-r` line above,
+    # and the documented contract is `--body-file <notes.md>`, a file.
+    local bkind; bkind="$(path_kind_followed "$bodyfile")"
+    [ "$bkind" = regular ] || die_usage "--body-file '$(sane "$bodyfile")' is not a REGULAR file (it resolves to a $bkind) — reading a FIFO would BLOCK FOREVER waiting for a writer and a device would stream without end, so it is refused rather than opened. Pass a file. NOTHING was written."
     body_snap="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the --body-file snapshot under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$body_snap"))"
     { [ -n "$body_snap" ] && [ -f "$body_snap" ]; } || refuse ERROR 1 "mktemp exited 0 for the --body-file snapshot but named no usable temporary file (it emitted: $(sane "$body_snap")) — nothing was written"
     register_tmp "$body_snap"
