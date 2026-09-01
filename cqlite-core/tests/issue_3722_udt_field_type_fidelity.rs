@@ -221,14 +221,14 @@ fn variant(v: &Value) -> &'static str {
 /// `Value::as_bytes()` deliberately covers only `Blob` and `Text`, so it returns
 /// `None` for `Varint` and `Inet` — using it for those two silently compares
 /// `None` against the expectation and would fail on CORRECT output.
-fn raw_bytes<'a>(v: &'a Value) -> Option<&'a [u8]> {
+fn raw_bytes(v: &Value) -> Option<&[u8]> {
     match peel(v) {
         Value::Varint(b) | Value::Inet(b) | Value::Blob(b) | Value::Text(b) => Some(b.as_ref()),
         _ => None,
     }
 }
 
-fn peel<'a>(v: &'a Value) -> &'a Value {
+fn peel(v: &Value) -> &Value {
     match v {
         Value::Frozen(inner) => peel(inner),
         other => other,
