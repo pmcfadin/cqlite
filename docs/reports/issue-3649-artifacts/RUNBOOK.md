@@ -151,6 +151,10 @@ a `1,2,4,8` ramp is comfortable). Any shedding at all means the pin was too low;
 the analyzer's exclusion machinery is a backstop for JSONL produced some other
 way, not the plan.
 
+After each pass, confirm the pin was not merely *requested* but *observed*: the
+analyzer's `admission … corroboration` line is the read-back, and a `partial` or
+`none` there is fixable only while the rig is alive. Step 5 says what to do.
+
 Also pinned and recorded on both arms: **`--batch-size` (default 8192)**, because
 it is the Arrow record-batch row cap and therefore interacts directly with the
 egress batching #2820 changed. `--max-batch-bytes` and
@@ -378,6 +382,34 @@ the analyzer requires the two arms of each pair to have the **same** surviving
 ladder. Each pass costs `2 × replicates × (steps × step-duration + prewarm +
 server start/stop)`, so budget 5b at roughly four times 5a for a four-step ramp.
 
+### ⏱ Check the corroboration line after EACH pass, not at the end
+
+Run the analyzer once against each pass as soon as that pass finishes — before
+you start the next one — and read this line:
+
+```
+AB-3649: admission max-concurrent-scans requested 16 observed 16 corroboration agreed (14 of 14 runs) ...
+```
+
+**Anything other than `corroboration agreed (N of N runs)` is actionable RIGHT
+NOW AND ONLY RIGHT NOW.** `partial` or `none` means the driver could not read the
+resolved ceiling back out of some or all of the servers' `cqlite-flight starting`
+lines. Diagnosing that takes minutes while the box is up — look at
+`<work-dir>/logs/<arm>-r<NN>.server.log`, confirm the line is there and that
+`ab_driver_support.py parse-startup` can read it — and it becomes **impossible
+the moment the instance is terminated**, because the logs go with it. A session
+finished and torn down with `partial` corroboration cannot be repaired; it can
+only be re-run, and there is no rig to re-run it on.
+
+**Be clear about what it does and does not mean.** It means **less
+corroboration**, not evidence that the two arms disagreed. The requested ceiling
+is one manifest-level value passed identically to both arms, and the driver
+already **dies** on any per-run `observed ≠ requested` it *can* read, refuses a
+ramp topping out above the requested pin, and dies on any shed at single-stream
+concurrency. So the thing corroboration guards against is separately caught; what
+a `NOT-OBSERVED` run costs you is the independent confirmation, and the report
+says so rather than quietly reducing to the one value it did see.
+
 **On `--replicates` — the floor is 5, and the reason is arithmetic, not taste.**
 
 A percentile bootstrap resamples the observed pairs with replacement, so its
@@ -451,6 +483,26 @@ Handing a manifest to the wrong section is a named refusal
 (`mode-manifest-mismatch`), not a silently wrong answer: a `--ramp 1` manifest is
 rejected by `--utilization` and a ramp manifest by `--single-stream`.
 
+### Read the `admission … corroboration` line before you read any verdict
+
+Deliberately repeated from step 5, because this is the other moment you will be
+looking at it and the window to act on it is still open only if the rig is still
+up:
+
+| corroboration | what it says | what to do |
+|---|---|---|
+| `agreed (N of N runs)` | every server's startup line was read and every one reported the ceiling you requested | nothing; proceed |
+| `partial (M of N runs)` | the ceiling was read back for some runs and not others; the ones read agree | **fix the startup-log parse and re-run the affected pass, while the box is up.** Do not terminate first |
+| `none (0 of N runs)` | no startup line was readable at all — usually the whole parse is broken, not one run | as above, and suspect the server log format or `--merge-path`/flag plumbing before anything else |
+
+The analyzer says the same thing on a `verdict-detail … ADMISSION` line, and it
+does **not** withhold a verdict for it: partial corroboration is a reduction in
+independent confirmation, not evidence that the arms were served differently — a
+genuine disagreement is caught affirmatively by the driver, which dies on any
+per-run `observed ≠ requested` it can read. Treat it as a defect in **the
+measurement record**, which you can still repair, rather than a defect in the
+measurement.
+
 ### The single-stream section — verdicted against the band
 
 | token | exit | what it means | what to do |
@@ -506,8 +558,12 @@ Then, before any regression language reaches #3649, confirm all four:
 - [ ] `merge-path merge` appears in the analyzer output (the k-way merge actually
       ran — `FINDINGS.md` §6);
 - [ ] `corpus data-db-files` is ≥ 2 and the corpus is compressed;
-- [ ] `admission ... observed <n>` equals the requested value and no
-      `excluded-step` line appears (nothing was admission-shed — `FINDINGS.md` §7);
+- [ ] the admission line reads **`corroboration agreed (N of N runs)`** with the
+      observed value equal to the requested one, and no `excluded-step` line
+      appears (nothing was admission-shed — `FINDINGS.md` §7). A `partial` or
+      `none` corroboration does **not** block the verdict, but it does block
+      *this* gate: say so in the write-up rather than filing a regression on a
+      record you could not fully corroborate;
 - [ ] both controls in step 4 behaved.
 
 If all four hold and the verdict is `BELOW-TARGET`, the finding is *"the
