@@ -631,8 +631,9 @@ cmd_open() {
   emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso reopen-count=$reopen_count report=$rpath"
   printf '%s\n' "$rpath"
   # THE PASTE-READY CLAUSE. Printed so the contract reaches the agent VERBATIM instead of
-  # being paraphrased per lane — the paraphrase is what varied across the seven measured
-  # sessions.
+  # being paraphrased per lane — the paraphrase is what varied across the NINE measured
+  # sessions (the census is docs/development/review-stage-reporting.md §2: nine spawns,
+  # five lanes, four agent types).
   cat <<CLAUSE
 
 --- paste this into the spawn prompt (verbatim) ---
