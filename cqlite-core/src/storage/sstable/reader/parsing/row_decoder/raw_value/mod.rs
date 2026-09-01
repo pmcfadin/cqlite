@@ -19,6 +19,10 @@ mod marshal_short;
 mod set_member;
 #[cfg(test)]
 mod set_member_tests;
+// Issue #3723 (round 3): a member DROPPED by the #1741 shadow/TTL filter is
+// still width-validated — and the filtering itself is unchanged.
+#[cfg(test)]
+mod set_member_dropped_tests;
 
 #[cfg(test)]
 mod tests;
