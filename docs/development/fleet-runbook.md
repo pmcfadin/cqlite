@@ -1028,6 +1028,32 @@ The probe reads the token from `/etc/environment`, **scrubs the inherited one** 
 `ENV` with it), and requires **both** rc 0 **and** a sentinel back from a bounded `claude -p`. The
 token value is never printed by any of these — they report `SET`/`ABSENT`/`MATCH`/`DIFFERS`.
 
+**Which half of the scrub is the mechanism** — measured by deleting each flag and re-running
+`scripts/tests/test_claude_auth_capability.sh`, because a scrub nothing can falsify is a scrub
+nothing asserts. `-u BASH_ENV` on the `--auth` probe *is* the mechanism: a non-interactive bash
+sources `$BASH_ENV` **after** `env KEY=<persisted>` has run, so a file re-exporting the credential
+overrides the value the probe was deliberately handed and yields a `VERIFIED` about the inherited
+one. `-u CLAUDE_CODE_OAUTH_TOKEN` is the mechanism in the **cold-start** probe, where the
+re-supplying assignment is conditional. In the `--auth` probe that same flag is **belt**, redundant
+by construction (the assignment always follows and always wins) — kept, and *declared*, rather than
+covered by a case asserting something already true. `-u ENV` is belt everywhere: `$ENV` is read only
+by an interactive POSIX shell.
+
+**The sentinel is a transformation, not an echo.** The prompt asks for the UPPERCASE form of a
+lowercase word and never contains `CQLITE_CLAUDE_AUTH_OK` itself, so `grep -qF "$SENTINEL"` cannot
+be satisfied by anything that merely repeats its own argv — which the repo's own test stub did.
+
+**The `/etc/environment` grammar is measured, not assumed.** `/etc/pam.d/sudo` carries
+`pam_env.so readenv=1`, so appending a probe line and reading `sudo env` shows exactly what pam_env
+delivers. It skips leading whitespace, then drops an **exact 7-byte `export `** prefix (`export K=v`
+and `  export K=v` are delivered; `export  K=v`, `export<TAB>K=v`, `exportK=v` and `setenv K=v` are
+not), and the key runs to the first `=` with **no** whitespace before it. The parser matches that
+exactly — an over-permissive anchor would report `PERSISTED` for a line no session receives.
+Three further refusals, each the non-permissive answer to an unknown: a **symlink** at the env-file
+path is `unreadable` (what it points at is not the file pam_env consumes) **including a dangling
+one**; a `grep` that **errors** (rc >= 2) is `unreadable`, never the affirmative "no token line
+here"; and an unparseable line is an absence of evidence, never a mismatch.
+
 ### Recovery: a box whose new sessions hit the login chooser
 
 ```bash
@@ -1035,7 +1061,9 @@ token value is never printed by any of these — they report `SET`/`ABSENT`/`MAT
 bash scripts/claude-auth-capability.sh --report
 
 # 2. If `claude-auth:` is NOT-PERSISTED — provision the credential. Its OWN LINE, no inline
-#    comment (pam_env takes a trailing `# ...` as part of the value), root:root 0644.
+#    comment (pam_env takes a trailing `# ...` as part of the value), root:root 0644. A
+#    leading `export ` (exactly one space) is fine — pam_env strips it — but `setenv `,
+#    `export  ` with two spaces and `K = v` are all silently NOT delivered.
 #    `$TOKEN` MUST be expanded by YOUR shell, not root's: `sudo sh -c '... "$TOKEN" ...'`
 #    hands the single-quoted text to a ROOT shell that never received the variable, so it
 #    appends `CLAUDE_CODE_OAUTH_TOKEN=` — an EMPTY value, which the check then correctly
