@@ -106,6 +106,24 @@ carry).
   `delta-anchor:` naming exactly that anchor — an `(UNRESOLVED)` anchor refuses — and its own
   `commit:`/`tree-start:` at the certified sha. The chain is closed end to end; a delta block ALONE
   is still the #3408 escape and still refused.
+  **And since #3653 the anchor must be ON THE CERTIFIED SHA'S HISTORY.** Everything above proves the
+  two blocks AGREE about a sha, never that the sha belongs to THIS PR: Case B's anchor identity rested
+  on the delta run's SELF-DECLARED `delta-anchor:` line, so any full-gate PASS plus a delta naming it
+  satisfied the chain — the #3616 cross-lane class surviving in the one path Case A's sha binding does
+  not cover. `git merge-base --is-ancestor <anchor> <certified>` closes it offline, and the verdict is
+  **three-valued** because `--is-ancestor`'s rc 1 is itself three-valued (#3544: in a shallow clone it
+  also means "the connecting history is absent"). **BOUND** (rc 0) proceeds and is recorded
+  affirmatively as `anchor-ancestry: BOUND` on the `PREMERGE: DELTA-RECERT` line — a silent pass is
+  indistinguishable from a check that never ran. **NOT-ANCESTOR** (rc 1, both objects present, the
+  repository proven complete via `git rev-parse --is-shallow-repository` = `false`) is exit 2, naming
+  both shas. Everything **UNMEASURABLE** — no git, not inside a work tree, either object absent,
+  shallow or shallowness unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under its own
+  `PREMERGE: ANCHOR-UNVERIFIABLE` marker with a per-cause remedy, because an unmeasurable result is
+  UNKNOWN and "fix the box" is a different operator action from "your chain is wrong". The reads run
+  against the CURRENT DIRECTORY's repository with no env override (#3312), under
+  `GIT_NO_LAZY_FETCH=1` + `GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`. Residual, stated: it
+  proves ancestry **in the local repository only** — not that the anchor is on the PR as GitHub sees
+  it, and a manipulated local object store is invoker-class and out of model.
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
   It does not prove the change was certified against the `main` it will join: a squash-merge composes

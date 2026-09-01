@@ -169,6 +169,26 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   naming exactly that anchor (an `(UNRESOLVED)` anchor refuses), and its OWN `commit:`/`tree-start:`
   at the certified sha. A block carrying `nested-under:` (#2874) is refused in either shape: a nested
   sub-gate runs at the SAME tree, so the sha binding provably cannot distinguish it.
+  **In Case B the anchor must ALSO be on the certified sha's history (#3653).** Everything above only
+  proves the two blocks AGREE about a sha — never that the sha is on THIS PR. The anchor's identity
+  rested on the delta run's SELF-DECLARED `delta-anchor:` line, so any full-gate PASS plus a delta
+  naming it satisfied the chain: the #3616 cross-lane class surviving in the one path Case A's sha
+  binding does not cover. (The accident route was narrowed by `agent-gate.sh --delta`'s own
+  fail-closed diff classification — i.e. by ANOTHER script, which is not a constraint stated where
+  this guard is read.) So the script runs `git merge-base --is-ancestor <anchor> <certified>`, and the
+  verdict is **three-valued**, because `--is-ancestor`'s rc 1 is itself three-valued (#3544: in a
+  shallow clone it also means "the connecting history is absent", so rc 1 is a verdict only in a
+  repository proven complete). **BOUND** (rc 0) proceeds and is RECORDED as `anchor-ancestry: BOUND`
+  on the `PREMERGE: DELTA-RECERT` line — a silent pass is indistinguishable from a check that never
+  ran. **NOT-ANCESTOR** (rc 1, both objects present, `git rev-parse --is-shallow-repository` =
+  `false`) is exit 2, naming both shas. Everything **UNMEASURABLE** — no git, not inside a work tree,
+  either object absent, shallow or shallowness unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under
+  its own `PREMERGE: ANCHOR-UNVERIFIABLE` marker, each cause carrying its own remedy, because an
+  unmeasurable result is UNKNOWN and "fix the box" is a different operator action from "your chain is
+  wrong". The reads run against the CURRENT DIRECTORY's repository with no env override (#3312), under
+  `GIT_NO_LAZY_FETCH=1` + `GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`. Residual: it proves
+  ancestry **in the local repository only** — not that the anchor is on the PR as GitHub sees it — and
+  a manipulated local object store is invoker-class and out of model.
   **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
   `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
   PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A
