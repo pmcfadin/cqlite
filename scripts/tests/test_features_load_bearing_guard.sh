@@ -168,10 +168,15 @@
 #  43.  GREEN  — SOUNDNESS: `src/target/` and `src/fuzz/` are legitimate module
 #                directories; pruning by BASENAME never scanned them, so a gate there was
 #                reported dead. Pruning is now anchored.
-#  44.  RED    — the control for 43: a `target/` BESIDE a Cargo.toml is cargo build
-#                output and stays pruned, so a generated file cannot credit a feature.
+#  44.  GREEN+RED — the BUILD dir is the ONE cargo REPORTS (`target_directory`), never a
+#                name: a member's own `target/` holds real source and credits, while
+#                cargo's target_directory stays pruned. Name-based pruning was an
+#                inference where a derivation exists.
 #  45.  GREEN  — SOUNDNESS: a `cfg_attr` chain 40 levels deep — past the recursion bound
 #                — CREDITS at the bound rather than dropping the gate.
+#  47.  GREEN  — SOUNDNESS: `cfg!` takes all three macro delimiters — `cfg!(...)`,
+#                `cfg![...]`, `cfg! { ... }` — and the contract line advertises `cfg!`,
+#                so recognising only parentheses made that advertisement false.
 #  46.  STRUCT  — the gate must invoke THIS SUITE behind a `command -v python3` guard with
 #                a loud SKIP branch: it needs python3, it lives in the SKIP-aware
 #                tooling-tests component, and invoking it unguarded turned a supported
@@ -214,6 +219,53 @@ trap cleanup EXIT INT TERM HUP
 
 CASES=0
 fail_case() { echo "FAIL: $*"; exit 1; }
+
+# --- PORTABLE in-place fixture edits (roborev job 64) -------------------------
+# `sed -i` without an argument is GNU-only (BSD/macOS sed requires one), and `\n` in a
+# replacement is a GNU extension too — so 22 fixture mutations made this MANDATORY suite
+# fail on macOS, a host this repo treats as first-class. python3 is already a declared
+# prerequisite of the guard under test, so it does the editing: ONE dialect, no second
+# sed to keep in step.
+#
+# Both helpers FAIL CLOSED when the anchor is absent. A fixture edit that silently
+# no-ops is the worst kind: the case still runs, still passes or fails for another
+# reason, and has quietly stopped reproducing its own subject.
+replace_line() { # <file> <exact-line> <replacement (may contain newlines)>
+  python3 - "$1" "$2" "$3" <<'PYEOF' || fail_case "fixture edit: anchor line not found in $1: $2"
+import sys
+path, anchor, replacement = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as fh:
+    lines = fh.read().split("\n")
+for i, line in enumerate(lines):
+    if line == anchor:
+        lines[i:i + 1] = replacement.split("\n")
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+delete_line() { # <file> <exact-line>
+  python3 - "$1" "$2" <<'PYEOF' || fail_case "fixture edit: anchor line not found in $1: $2"
+import sys
+path, anchor = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    lines = fh.read().split("\n")
+for i, line in enumerate(lines):
+    if line == anchor:
+        del lines[i]
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+append_after_line() { # <file> <exact-line> <text to add after it>
+  replace_line "$1" "$2" "$2
+$3"
+}
 ok() { CASES=$((CASES + 1)); echo "  ok $CASES — $1"; }
 
 # --- Fixture builder ----------------------------------------------------------
@@ -404,7 +456,8 @@ ok "base fixture certifies, reporting $BASE_COUNT asserted features"
 
 # --- 2. RED: a dead leaf named ONLY by an aggregator ---------------------------
 D="$(fixture deadleaf)"
-sed -i 's/^aggmid = \["leafx", "leafy"\]$/aggmid = ["leafx", "leafy", "deadleaf"]\ndeadleaf = []/' "$D/a/Cargo.toml"
+replace_line "$D/a/Cargo.toml" 'aggmid = ["leafx", "leafy"]' 'aggmid = ["leafx", "leafy", "deadleaf"]
+deadleaf = []'
 grep -q '^deadleaf = \[\]$' "$D/a/Cargo.toml" || fail_case "case 2: fixture edit did not plant deadleaf"
 expect_red_naming "$D" "deadleaf" "case 2"
 ok "a dead leaf named only by an aggregator is reported dead (credit does not flow down)"
@@ -422,21 +475,21 @@ expect_green "$D" "case 4"
 ok "a feature whose only effect is a target required-features certifies"
 
 D="$(fixture rf-red)"
-sed -i '/^required-features = \["rfonly"\]$/d' "$D/a/Cargo.toml"
+delete_line "$D/a/Cargo.toml" 'required-features = ["rfonly"]'
 grep -q 'required-features' "$D/a/Cargo.toml" && fail_case "case 5: fixture edit did not remove required-features"
 expect_red_naming "$D" "rfonly" "case 5"
 ok "removing that required-features kills the same feature (E3 is what passed case 4)"
 
 # --- 6. RED: an optional dependency is an effect -------------------------------
 D="$(fixture dep-red)"
-sed -i 's/^leafy = \["dep:optdep"\]$/leafy = []/' "$D/a/Cargo.toml"
+replace_line "$D/a/Cargo.toml" 'leafy = ["dep:optdep"]' 'leafy = []'
 expect_red_naming "$D" "leafy" "case 6"
 ok "a feature whose only effect was an optional dependency dies when that dep is dropped"
 
 # --- 7. RED: the `default` exemption is by NAME only --------------------------
 D="$(fixture default-red)"
 # Rename the exempt, effect-free `default` to a non-exempt name. Nothing else changes.
-sed -i 's/^default = \[\]$/notdefault = []/' "$D/b/Cargo.toml"
+replace_line "$D/b/Cargo.toml" 'default = []' 'notdefault = []'
 expect_red_naming "$D" "notdefault" "case 7"
 ok "an effect-free feature named anything other than \`default\` is reported dead"
 
@@ -473,7 +526,7 @@ D="$(fixture implicit)"
 # `optional = true` with no `dep:` reference anywhere: cargo synthesises an implicit
 # feature `implicitdep` that no [features] block contains. It must be COUNTED (a
 # textual manifest sweep cannot see it) and credited (it enables an optional dep).
-sed -i 's|^bee = { path = "../b", package = "b" }$|bee = { path = "../b", package = "b" }\nimplicitdep = { path = "../optdep", package = "optdep", optional = true }|' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'bee = { path = "../b", package = "b" }' 'implicitdep = { path = "../optdep", package = "optdep", optional = true }'
 expect_green "$D" "case 11"
 IMPL_COUNT="$(asserted_count)"
 [ "$IMPL_COUNT" -eq "$((BASE_COUNT + 1))" ] \
@@ -602,7 +655,7 @@ ok "SOUNDNESS: all six CARGO_FEATURE_* spellings credit (aliased import, constan
 # Environment ITERATION names no individual feature, so there is nothing to match and
 # the only reading that cannot report a live feature dead is to credit them all.
 D="$(fixture bare-prefix)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nprefixonly = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'prefixonly = []'
 grep -q '^prefixonly = \[\]$' "$D/a/Cargo.toml" || fail_case "case 15: fixture edit did not plant prefixonly"
 cat >"$D/a/tests/t.rs" <<'EOF'
 #[test]
@@ -623,7 +676,7 @@ ok "a BARE CARGO_FEATURE_ prefix credits EVERY feature of the package (nothing n
 
 # --- 16. RED: a package with NO build script gets no env credit --------------
 D="$(fixture no-build-script)"
-sed -i '/^build = "build.rs"$/d' "$D/a/Cargo.toml"
+delete_line "$D/a/Cargo.toml" 'build = "build.rs"'
 rm -f "$D/a/build.rs"
 cat >"$D/a/src/lib.rs" <<'EOF'
 #[cfg(feature = "leafx")]
@@ -642,7 +695,7 @@ ok "a package with NO build script gets no env credit at all, even for a real en
 
 # --- 15. RED / 16. GREEN: weak dependency edges ------------------------------
 D="$(fixture weak-red)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nwkdead = ["optdep?\/odfeat"]/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'wkdead = ["optdep?/odfeat"]'
 grep -q '^wkdead = ' "$D/a/Cargo.toml" || fail_case "case 15: fixture edit did not plant wkdead"
 expect_red_naming "$D" "wkdead" "case 15"
 ok "a STANDALONE weak edge (\`optdep?/odfeat\`) is not an effect — nothing activates the optional dependency"
@@ -671,7 +724,7 @@ D="$(fixture overlap-both)"
 # file lies under a directory `a`'s own test target can reach (`#[path]`, `include!`, a
 # shared helper), and this scan cannot trace that. Dropping the outer owner reported a
 # feature used only there as DEAD, so a file two packages can reach now credits BOTH.
-sed -i 's/^tfeat = \[\]$/tfeat = []\nnfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'nfeat = []'
 grep -q '^nfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 18: fixture edit did not plant a's nfeat"
 expect_green "$D" "case 18"
 ok "a file under a NESTED member's directory credits the OUTER member too (ownership never subtracts)"
@@ -793,7 +846,7 @@ ok "a non-weak edge to an OPTIONAL dependency stays load-bearing even when the f
 # makes that statement testable. If module-graph resolution is ever implemented this
 # case must red, and the residual text must be updated in the same change.
 D="$(fixture orphan-file)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\norphanfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'orphanfeat = []'
 grep -q '^orphanfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 28: fixture edit did not plant orphanfeat"
 # Reachable from NO `mod` chain: a/src/lib.rs does not declare `mod obsolete`.
 cat >"$D/a/src/obsolete.rs" <<'EOF'
@@ -870,7 +923,7 @@ ok "SOUNDNESS: a NON-MEMBER path dependency sharing a member's package name reso
 
 # --- 32. GREEN (DECLARED): cfg inside an UNEXPANDED macro body --------------
 D="$(fixture macro-body-cfg)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nmacrofeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'macrofeat = []'
 grep -q '^macrofeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 32: fixture edit did not plant macrofeat"
 cat >>"$D/a/src/lib.rs" <<'EOF'
 
@@ -891,7 +944,7 @@ ok "DECLARED: a cfg inside an UNEXPANDED macro_rules! body credits its feature, 
 # NO owner and the feature it gates was reported DEAD. Ownership now falls back to every
 # member whose package DIRECTORY contains the file.
 D="$(fixture out-of-tree-path-module)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\npathfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'pathfeat = []'
 grep -q '^pathfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 33: fixture edit did not plant pathfeat"
 cat >"$D/a/gated.rs" <<'EOF'
 #[cfg(feature = "pathfeat")]
@@ -911,7 +964,7 @@ ok "SOUNDNESS: a module included from OUTSIDE any target root (#[path]) still cr
 # existing overlap case only covered an EXACT target file, which is why this survived
 # three rounds.
 D="$(fixture nested-helper-module)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nhelperfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'helperfeat = []'
 grep -q '^helperfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 34: fixture edit did not plant helperfeat"
 mkdir -p "$D/a/tests/helpers"
 cat >"$D/a/tests/helpers/util.rs" <<'EOF'
@@ -969,7 +1022,7 @@ ok "THE ASYMMETRY: three differently-ambiguous files each credit their feature (
 # `#[cfg_attr(unix, cfg(feature = "x"))]` applies the tail attribute when the condition
 # holds, so it gates x. Scanning only the CONDITION reported such a feature dead.
 D="$(fixture cfg-attr-tail)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\ntailfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'tailfeat = []'
 grep -q '^tailfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 36: fixture edit did not plant tailfeat"
 cat >>"$D/a/src/lib.rs" <<'EOF'
 
@@ -983,7 +1036,8 @@ ok "SOUNDNESS: a cfg inside a cfg_attr TAIL is a real gate and credits its featu
 # `# [cfg(...)]` and `# ! [cfg(...)]` are legal Rust; requiring `#[` contiguous meant a
 # legal gate was NOT SEEN.
 D="$(fixture whitespace-attr-head)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nwsouter = []\nwsinner = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'wsouter = []
+wsinner = []'
 for f in wsouter wsinner; do
   grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 37: fixture edit did not plant $f"
 done
@@ -1003,7 +1057,8 @@ ok "SOUNDNESS: \`# [cfg(...)]\` and \`# ! [cfg(...)]\` (whitespace in the head) 
 # --- 38. GREEN (SOUNDNESS): Rust string escapes are decoded ------------------
 # `"\x66oo"` IS the feature `foo`; recording `x66oo` reported `foo` dead.
 D="$(fixture escape-decoding)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nfoo = []\nbar = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'foo = []
+bar = []'
 for f in foo bar; do
   grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 38: fixture edit did not plant $f"
 done
@@ -1020,7 +1075,7 @@ ok "SOUNDNESS: \\xHH and \\u{...} escapes are decoded, so the gated feature is t
 
 # --- 39. GREEN (DECLARED): an UNDECODABLE escape credits every feature -------
 D="$(fixture undecodable-escape)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nnowhere = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'nowhere = []'
 grep -q '^nowhere = \[\]$' "$D/a/Cargo.toml" || fail_case "case 39: fixture edit did not plant nowhere"
 cat >>"$D/a/src/lib.rs" <<'EOF'
 
@@ -1036,7 +1091,7 @@ ok "DECLARED: an escape the scanner cannot decode credits EVERY feature of the p
 # is a NOT-SEEN spelling, and the contract line says so — that is why the claim is
 # scoped rather than absolute.
 D="$(fixture macro-expanded-name)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nexpandedname = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'expandedname = []'
 grep -q '^expandedname = \[\]$' "$D/a/Cargo.toml" || fail_case "case 40: fixture edit did not plant expandedname"
 cat >>"$D/a/src/lib.rs" <<'EOF'
 
@@ -1054,7 +1109,7 @@ ok "DECLARED LIMIT: a feature NAME produced by macro expansion is NOT SEEN (repo
 
 # --- 41. RED (DECLARED LIMIT): a build-script env key built at runtime -------
 D="$(fixture runtime-env-key)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\nruntimekey = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'runtimekey = []'
 grep -q '^runtimekey = \[\]$' "$D/a/Cargo.toml" || fail_case "case 41: fixture edit did not plant runtimekey"
 cat >"$D/a/build.rs" <<'EOF'
 fn main() {
@@ -1095,7 +1150,8 @@ ok "THE CLAIM: the success output states the SCOPED no-false-FAIL claim, enumera
 # a RECOGNISED spelling, was reported dead, contradicting the printed claim. Pruning is
 # now by anchored path: `target` only beside a Cargo.toml, `fuzz` only the workspace root.
 D="$(fixture src-target-module)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\ntargetfeat = []\nfuzzfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'targetfeat = []
+fuzzfeat = []'
 for f in targetfeat fuzzfeat; do
   grep -q "^$f = \[\]$" "$D/a/Cargo.toml" || fail_case "case 43: fixture edit did not plant $f"
 done
@@ -1116,19 +1172,32 @@ EOF
 expect_green "$D" "case 43"
 ok "SOUNDNESS: modules named \`target\` and \`fuzz\` under src/ are real source and are scanned (pruning is by anchored path, not basename)"
 
-# --- 44. GREEN (SOUNDNESS): build output IS still pruned ---------------------
-# The control for 43: a `target/` BESIDE a Cargo.toml is cargo build output and must not
-# be scanned. A generated file there naming an otherwise-dead feature must not credit it.
+# --- 44. GREEN + RED: the build dir is the one cargo REPORTS, nothing else ---
+# Two halves of one property. (a) A member's OWN `target/` directory is NOT cargo's build
+# directory — members share the workspace-level one — so a real module there is real
+# source and must credit its feature. Pruning "any directory named target beside a
+# Cargo.toml" reported it dead: an INFERENCE where a derivation exists (roborev job 64).
+# (b) The control: cargo's canonical `target_directory` IS pruned, so a generated file
+# there cannot credit anything.
+D="$(fixture member-target-module)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'membertargetfeat = []'
+mkdir -p "$D/a/target/keep"
+cat >"$D/a/target/keep/mod.rs" <<'EOF'
+#[cfg(feature = "membertargetfeat")]
+pub fn real_source_under_a_dir_named_target() {}
+EOF
+expect_green "$D" "case 44a"
+
 D="$(fixture build-output-pruned)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\ngeneratedfeat = []/' "$D/a/Cargo.toml"
-grep -q '^generatedfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 44: fixture edit did not plant generatedfeat"
-mkdir -p "$D/a/target/debug/build"
-cat >"$D/a/target/debug/build/generated.rs" <<'EOF'
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'generatedfeat = []'
+# cargo reports `<workspace>/target` as target_directory for this fixture.
+mkdir -p "$D/target/debug/build"
+cat >"$D/target/debug/build/generated.rs" <<'EOF'
 #[cfg(feature = "generatedfeat")]
 pub fn generated() {}
 EOF
-expect_red_naming "$D" "generatedfeat" "case 44"
-ok "the control for 43: a target/ dir BESIDE a Cargo.toml is build output and stays pruned"
+expect_red_naming "$D" "generatedfeat" "case 44b"
+ok "the BUILD dir is the one cargo REPORTS: a member's own target/ is real source and credits, while cargo's target_directory stays pruned"
 
 # --- 45. GREEN (SOUNDNESS): a cfg_attr chain DEEPER than the recursion bound --
 # The recursion is bounded so a pathological token stream cannot hang a mandatory gate
@@ -1136,7 +1205,7 @@ ok "the control for 43: a target/ dir BESIDE a Cargo.toml is build output and st
 # valid chain is inside the advertised recognised spelling and dropping it would report a
 # live feature dead.
 D="$(fixture deep-cfg-attr-chain)"
-sed -i 's/^tfeat = \[\]$/tfeat = []\ndeepfeat = []/' "$D/a/Cargo.toml"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'deepfeat = []'
 grep -q '^deepfeat = \[\]$' "$D/a/Cargo.toml" || fail_case "case 45: fixture edit did not plant deepfeat"
 python3 - "$D/a/src/lib.rs" <<'PYEOF'
 import sys
@@ -1169,13 +1238,35 @@ sed -n "${inv_line},$((inv_line + 25))p" "$GATE" | grep -q 'SKIP scripts/tests/t
   || fail_case "case 46: the python3 guard around scripts/agent-gate.sh:$inv_line has no LOUD SKIP branch. A silently skipped self-test is indistinguishable from one that ran."
 ok "STRUCTURAL: the gate invokes this suite inside a \`command -v python3\` guard with a LOUD SKIP branch, so tooling-tests' documented no-python3 SKIP still governs"
 
+# --- 47. GREEN (SOUNDNESS): cfg! takes ALL THREE macro delimiters ------------
+# `cfg!(...)`, `cfg![...]` and `cfg! { ... }` are all valid Rust, and the contract line
+# advertises `cfg!` coverage — recognising only the parenthesised form made that
+# advertisement false and reported the other two dead (roborev job 64). Each form gates a
+# distinct feature here, so a missed delimiter names itself in the failure.
+D="$(fixture cfg-bang-delimiters)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'parenfeat = []
+bracketfeat = []
+bracefeat = []'
+cat >>"$D/a/src/lib.rs" <<'EOF'
+
+pub fn which_delimiters() -> u8 {
+    let mut n = 0;
+    if cfg!(feature = "parenfeat") { n += 1; }
+    if cfg![feature = "bracketfeat"] { n += 2; }
+    if cfg! { feature = "bracefeat" } { n += 4; }
+    n
+}
+EOF
+expect_green "$D" "case 47"
+ok "SOUNDNESS: cfg!(...), cfg![...] and cfg! { ... } are all recognised, as the contract line advertises"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=45
+CASE_COUNT_EXPECTED=46
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

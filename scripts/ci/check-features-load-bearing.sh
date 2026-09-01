@@ -377,25 +377,29 @@ EXEMPT_FEATURES = {
 #   `.git`, `node_modules`  — pruned by name at any depth: neither is ever a Rust
 #                             module directory, at any level, so the name IS the
 #                             property.
-#   `target`                — pruned ONLY beside a `Cargo.toml`, which is where cargo
-#                             puts build output. `src/target/` has no sibling manifest
-#                             and is scanned.
+#   the BUILD DIRECTORY     — pruned as the ONE canonical path cargo REPORTS
+#                             (`target_directory` in the metadata), never by name.
+#                             "A directory called `target` beside a Cargo.toml" was an
+#                             INFERENCE where a derivation exists (roborev job 64): it
+#                             over-prunes a member that legitimately has sources under
+#                             such a path — a false FAIL, contradicting the printed
+#                             claim — and under-prunes a build dir configured elsewhere
+#                             (CARGO_TARGET_DIR, `build.target-dir`). And it is never
+#                             pruned if a registered target source path lives under it,
+#                             because a file cargo names as a target's source is source
+#                             whatever directory it sits in.
 #   `<root>/fuzz`           — pruned as EXACTLY that one path: it is the excluded
 #                             cargo-fuzz workspace (see the header). `src/fuzz/`, or a
 #                             `fuzz` module anywhere else, is scanned.
 PRUNE_BY_NAME = {".git", "node_modules"}
-FUZZ_WORKSPACE = os.path.join(REPO_ROOT, "fuzz")
+FUZZ_WORKSPACE = os.path.realpath(os.path.join(REPO_ROOT, "fuzz"))
+PRUNE_EXACT = set()   # filled once the metadata and the target set are known
 
 
 def prune_dir(dirpath, name):
-    full = os.path.join(dirpath, name)
     if name in PRUNE_BY_NAME:
         return True
-    if name == "target" and os.path.isfile(os.path.join(dirpath, "Cargo.toml")):
-        return True
-    if os.path.realpath(full) == os.path.realpath(FUZZ_WORKSPACE):
-        return True
-    return False
+    return os.path.realpath(os.path.join(dirpath, name)) in PRUNE_EXACT
 
 # THE CONTRACT, printed on every success — SCOPED, because the unqualified version could
 # not be made true (roborev job 60). It read "SOUND-BY-DESIGN: a live feature is not
@@ -641,9 +645,16 @@ WS = "[ \t\r\n]*"
 # `# ! [cfg(...)]` are both valid), so the head is whitespace-tolerant at every joint
 # (roborev job 60): requiring `#[` contiguous meant a legal gate was NOT SEEN and its
 # feature reported dead.
+# `cfg!` takes ANY of Rust's three macro delimiters — `cfg!(...)`, `cfg![...]`,
+# `cfg! { ... }` are all valid gates (roborev job 64) — so all three are recognised, and
+# the span reader matches whichever bracket opened. The ATTRIBUTE forms are deliberately
+# parenthesis-only: `cfg`/`cfg_attr` are built-in attributes and rustc requires
+# `#[cfg(...)]` there, so accepting `#[cfg{...}]` would be recognising something that
+# does not compile.
+CLOSING = {"(": ")", "[": "]", "{": "}"}
 HEAD_RE = re.compile(
     r'(?P<attr>\#' + WS + r'!?' + WS + r'\[' + WS + r'(?P<kind>cfg_attr|cfg)' + WS + r'\()'
-    r'|(?P<bang>(?<![A-Za-z0-9_])cfg' + WS + r'!' + WS + r'\()'
+    r'|(?P<bang>(?<![A-Za-z0-9_])cfg' + WS + r'!' + WS + r'[(\[{])'
 )
 # NO `^` ANCHOR: this pattern is used with `re.match(code, pos, endpos)`, which already
 # anchors at `pos`, while `^` would anchor at the real start of the STRING (a documented
@@ -653,18 +664,25 @@ FEATURE_EQ_RE = re.compile(r'(?<![A-Za-z0-9_])feature' + WS + r'=' + WS)
 
 
 def balanced_span(code, open_idx):
-    """open_idx points at '('. Return (start, end) of the CONTENT, or None if unbalanced.
+    """open_idx points at an opening bracket. Return (start, end) of the CONTENT.
 
-    No string handling needed: string literals are sentinel-filled in `code`.
+    Returns None if unbalanced. Works for `(`, `[` and `{` — `cfg!` accepts all three —
+    counting only the bracket KIND that opened the span, which is enough here because a
+    cfg predicate's own nesting uses parentheses. No string handling needed: string
+    literals are sentinel-filled in `code`.
     """
+    opener = code[open_idx]
+    closer = CLOSING.get(opener)
+    if closer is None:
+        return None
     depth = 0
     i = open_idx
     n = len(code)
     while i < n:
         c = code[i]
-        if c == "(":
+        if c == opener:
             depth += 1
-        elif c == ")":
+        elif c == closer:
             depth -= 1
             if depth == 0:
                 return (open_idx + 1, i)
@@ -962,6 +980,18 @@ for name, rec in members.items():
         tree_owners.append((os.path.dirname(sp), name))
 
 tree_owners.sort(key=lambda t: len(t[0]), reverse=True)
+
+# The pruned set, DERIVED: cargo's own `target_directory` plus the excluded fuzz
+# workspace. A build directory that CONTAINS a registered target source path is NOT
+# pruned — cargo naming a file as a target's source makes it source, wherever it sits.
+PRUNE_EXACT.add(FUZZ_WORKSPACE)
+_target_dir = meta.get("target_directory")
+if _target_dir:
+    _target_dir = os.path.realpath(_target_dir)
+    _holds_source = any(sp == _target_dir or sp.startswith(_target_dir + os.sep)
+                        for sp in exact_owners)
+    if not _holds_source:
+        PRUNE_EXACT.add(_target_dir)
 
 
 def buildscript_owners_of(path):
