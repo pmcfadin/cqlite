@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets, openDatabase, withDatabase } = require('./helpers.js');
+const { assertDatasetsAvailable, openDatabase, withDatabase } = require('./helpers.js');
 
 // Query over the largest basic-types table available (simple_table, ~1000 rows).
 // Large enough that per-row AsyncTask dispatch overhead is measurable.
@@ -58,7 +58,7 @@ async function fsReadLatency(file) {
 
 describe('Streaming Iterator Tests (Issue #305)', () => {
   beforeAll(() => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
   });
 
   describe('Basic Streaming', () => {
