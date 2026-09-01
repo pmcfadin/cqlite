@@ -560,6 +560,21 @@ def report(mode, manifest, pairs, admission, opts, stats):
                 "corroborate nothing"
                 % (mode, admission.observed, admission.total)
             )
+        # THE REMEDY TRAVELS WITH THE DIAGNOSTIC. This block gets pasted into an
+        # issue and read weeks later by somebody who never had RUNBOOK.md open,
+        # possibly after the rig is gone -- and "was this fixable at the time?" is
+        # the first question a reviewer of a marginal result asks. Naming the
+        # state without naming the fix is the shape `missing-fixtures`,
+        # `missing-schemas` and the component-set verdict all exist to correct.
+        # ONE line, deliberately: the fuller guidance is RUNBOOK.md step 6.
+        out(
+            "verdict-detail %s ADMISSION-REMEDY fixable ONLY while the rig is "
+            "live -- read <work-dir>/logs/<arm>-r<NN>.server.log, check "
+            "`ab_driver_support.py parse-startup` against it, and re-run the "
+            "affected pass; the server logs are lost with the instance. This is "
+            "LESS CORROBORATION, not evidence the arms disagreed: the driver dies "
+            "affirmatively on any per-run observed != requested it can read" % mode
+        )
     if control:
         out(
             "verdict-detail %s CONTROL this session is labelled %r, so its verdict "

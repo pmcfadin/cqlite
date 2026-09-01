@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=178
+CASE_FLOOR=183
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -934,6 +934,11 @@ if grep -q '^AB-3649: verdict-detail single-stream ADMISSION ' "$TMP/out.txt"; t
 else
   bad "an unobserved admission ceiling was passed off as corroborated"
 fi
+if grep -q '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt"; then
+  ok "a wholly unobserved ceiling names its remedy too, not only the partial case"
+else
+  bad "the none-corroboration case named a state with no remedy"
+fi
 if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed NOT-OBSERVED ' "$TMP/out.txt"; then
   ok "requested and observed admission values are printed side by side"
 else
@@ -1176,12 +1181,43 @@ if grep -q 'PARTIAL OBSERVATION IS NOT AGREEMENT' "$TMP/out.txt"; then
 else
   bad "partial observation was silently upgraded to agreement"
 fi
+# THE REMEDY MUST TRAVEL WITH THE DIAGNOSTIC, and it is pinned so a wording pass
+# cannot delete it silently -- which is the failure mode this whole round was
+# about. Pinned by CONTENT, not just by the key: a line that keeps the key and
+# loses the fix, the time window or the honest scope is not the line that was
+# reviewed.
+if grep -q '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt"; then
+  ok "a partial corroboration names its remedy in the OUTPUT, not only in the runbook"
+else
+  bad "a partial corroboration named a state with no remedy -- the shape this repo's fail-closed diagnostics exist to correct"
+fi
+remedy_line="$(grep '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt" || true)"
+missing_bits=''
+case "$remedy_line" in *"ONLY while the rig is live"*) ;; *) missing_bits="$missing_bits time-window" ;; esac
+case "$remedy_line" in *"server.log"*)               ;; *) missing_bits="$missing_bits log-path" ;; esac
+case "$remedy_line" in *"parse-startup"*)            ;; *) missing_bits="$missing_bits parse-tool" ;; esac
+case "$remedy_line" in *"not evidence the arms disagreed"*) ;; *) missing_bits="$missing_bits honest-scope" ;; esac
+if [ -z "$missing_bits" ]; then
+  ok "the remedy line carries the time window, the log path, the tool and the honest scope"
+else
+  bad "the remedy line has lost:$missing_bits"
+fi
+if [ "$(grep -c '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt")" = "1" ]; then
+  ok "the remedy is ONE line, not a paragraph in the output"
+else
+  bad "the remedy grew past one line in the output"
+fi
 run_analyzer "$TMP/five"
 if grep -q 'corroboration agreed (10 of 10 runs)' "$TMP/out.txt" \
    && ! grep -q '^AB-3649: verdict-detail single-stream ADMISSION ' "$TMP/out.txt"; then
   ok "full corroboration is stated as such and carries no caveat"
 else
   bad "a fully corroborated ceiling was not reported as agreed"
+fi
+if grep -q 'ADMISSION-REMEDY' "$TMP/out.txt"; then
+  bad "a fully corroborated run printed a remedy for a problem it does not have"
+else
+  ok "the remedy appears only where there is something to remedy"
 fi
 
 echo
