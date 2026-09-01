@@ -796,6 +796,51 @@ else
   bad "tempfile control: the custom report was not written"
 fi
 
+# --- 12. OUTSIDE A GIT WORKTREE: the documented exit fires, and no path is fabricated ------
+# `repo_root` used to `die_usage` itself, and its only caller was `$(repo_root)` inside a
+# COMMAND SUBSTITUTION — so `exit 64` terminated the SUBSHELL, the diagnostic printed once per
+# substitution, and the script carried on with an EMPTY root: `verdict` emitted
+# `report=/.review-stage/issue-1/c.md`, a FABRICATED absolute path, on the line that is
+# otherwise the authority, while exiting 5 instead of the 64 the header documents. A `die` that
+# cannot reach the top level is not a die.
+NOGIT="$T/nogit"
+mkdir -p "$NOGIT"
+if git -C "$NOGIT" rev-parse --show-toplevel >/dev/null 2>&1; then
+  # The scratch dir is inside a repository (an unusual TMPDIR), so this section cannot measure
+  # what it claims. SAY SO rather than pass: a case that silently cannot run is the vacuous
+  # green this suite exists to refuse.
+  bad "outside-a-worktree: $NOGIT is inside a git repository, so this section could not measure anything — set TMPDIR to a non-repository path"
+else
+  ok "outside-a-worktree: the scratch dir is outside any git worktree (the precondition is MEASURED, not assumed)"
+
+  rs "$NOGIT" verdict c --issue 1
+  rc_is 64 "outside-a-worktree: verdict exits 64, the DOCUMENTED usage-error code"
+  has "not inside a git worktree" "outside-a-worktree: the refusal names the cause"
+  hasnt "=/.review-stage" "outside-a-worktree: NO '/'-rooted report path is emitted (the old code published a fabricated one)"
+  hasnt "RESULT:" "outside-a-worktree: no verdict line at all — a refusal is not a verdict"
+  N_DIAG=$(printf '%s\n' "$OUT" | LC_ALL=C grep -c 'not inside a git worktree' || true)
+  if [ "$N_DIAG" = "1" ]; then
+    ok "outside-a-worktree: the diagnostic prints ONCE (it printed once per command substitution while the die was trapped in a subshell)"
+  else
+    bad "outside-a-worktree: the diagnostic printed $N_DIAG times, so it is still being raised inside a substitution (out: $OUT)"
+  fi
+
+  rs "$NOGIT" open c --issue 1 --agent spec-auditor
+  rc_is 64 "outside-a-worktree: open exits 64 too, instead of failing later inside mkdir"
+  has "not inside a git worktree" "outside-a-worktree: open names the same cause"
+  hasnt "mkdir" "outside-a-worktree: the failure is a named refusal, not a raw mkdir error"
+
+  rs "$NOGIT" status c --issue 1
+  rc_is 64 "outside-a-worktree: status exits 64 as well (all three readers agree)"
+
+  # CONTROL: --help must NOT require a worktree. Resolving the root at the head of every
+  # subcommand would be wrong if it also gated the usage text — a guard that reds on correct
+  # input is the guard agents learn to waive.
+  rs "$NOGIT" --help
+  rc_is 0 "outside-a-worktree CONTROL: --help still works with no worktree"
+  has "EXIT CODES" "outside-a-worktree CONTROL: --help prints the usage text"
+fi
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,

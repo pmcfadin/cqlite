@@ -351,8 +351,31 @@ validate_secs() {
 }
 
 # --- paths -------------------------------------------------------------------
+# THE ROOT IS RESOLVED ONCE, AT TOP LEVEL, BEFORE ANY PATH IS BUILT FROM IT (#3751 round 2,
+# B6). `repo_root` used to `die_usage` itself, and its ONLY caller was `$(repo_root)` inside
+# `stage_dir` — a COMMAND SUBSTITUTION — so `exit 64` terminated the SUBSHELL and the script
+# carried on with an EMPTY root. Measured outside any repository: the diagnostic printed TWICE
+# (once per substitution) and `verdict` then emitted `report=/.review-stage/issue-1/c.md`, a
+# FABRICATED path, on the line that is otherwise the authority — while exiting 5, not the 64
+# the header documents. A `die` that cannot reach the top level is not a die.
+#
+# So `require_repo_root` runs in the PARENT shell at the head of every subcommand, sets the
+# global, and dies there. `repo_root` is then a pure reader of that global, safe to call from
+# any substitution. `--help` never calls it: reading the usage text must not require a
+# worktree.
+REPO_ROOT=""
+require_repo_root() {
+  local root=""
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || root=""
+  [ -n "$root" ] || die_usage "not inside a git worktree (this tool writes into the lane's worktree on purpose — see the header)"
+  REPO_ROOT="$root"
+}
+
 repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null || die_usage "not inside a git worktree (this tool writes into the lane's worktree on purpose — see the header)"
+  # NEVER a fallback to $PWD or to empty: an unresolved root would build a `/`-rooted path and
+  # publish it as the report of record. `require_repo_root` has already died if it is unset.
+  [ -n "$REPO_ROOT" ] || die_usage "internal: the repository root was not resolved before a path was built from it"
+  printf '%s\n' "$REPO_ROOT"
 }
 
 # abs_path <path> — absolutise WITHOUT requiring the file to exist (the report is often the
@@ -525,6 +548,7 @@ now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # --- open --------------------------------------------------------------------
 cmd_open() {
+  require_repo_root
   local kind="" issue="" agent="" deadline="$DEFAULT_DEADLINE_SECS" report="" force=0
   kind="$(validate_kind "${1:-}")"; shift || true
   while [ $# -gt 0 ]; do
@@ -811,6 +835,7 @@ parse_kind_issue() {
 
 # --- verdict -----------------------------------------------------------------
 cmd_verdict() {
+  require_repo_root
   parse_kind_issue "$@"
   load_stage "$KI_ISSUE" "$KI_KIND"
   local cls token cause rendered
@@ -849,6 +874,7 @@ cmd_verdict() {
 # not be able to decide anything, and a caller that could branch on its exit status would
 # have built a second, clock-shaped verdict path beside the content-shaped one.
 cmd_status() {
+  require_repo_root
   parse_kind_issue "$@"
   load_stage "$KI_ISSUE" "$KI_KIND"
   local cls token cause state past=unknown
@@ -888,6 +914,7 @@ cmd_status() {
 
 # --- record-author-performed -------------------------------------------------
 cmd_record_author_performed() {
+  require_repo_root
   local kind="" issue="" reason="" evidence="" performed_by="" force=0
   kind="$(validate_kind "${1:-}")"; shift || true
   while [ $# -gt 0 ]; do
