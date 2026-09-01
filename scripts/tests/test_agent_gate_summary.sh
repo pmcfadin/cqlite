@@ -5095,6 +5095,7 @@ fi
 # OPTIONAL detail rather than on end-of-line. `--emit-summary-selftest` emits no OPT-OUT
 # row itself; the behavioural coverage is scripts/tests/test_agent_gate_file_size_log.sh,
 # which drives the REAL `--only file-size` path (also in tooling-tests).
+#
 # ONE definition of the row grammar, shared by the census below and by 54f, which is what
 # makes 54f a test OF THIS CENSUS rather than of a second copy that can drift from it.
 # FIVE tokens, from two issues that landed together and reached the same conclusion
