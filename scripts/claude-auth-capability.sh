@@ -241,6 +241,75 @@ claude_auth_resolve_timeout() {
   return 1
 }
 
+# ---- BOUNDING IS A PROPERTY OF EVERY EXTERNAL CALL HERE, NOT OF ONE CALL SITE ------
+# The SECOND bounding defect in this file (the first was the `claude -p` probe's
+# SIGTERM-only bound), so it is closed as a class. A tmux server that ACCEPTS a connection
+# and never answers hangs `show-environment -g` and `setenv -g` forever, and this file's
+# primary caller is a provisioning entry point `.agent-ami/profile.yaml` runs UNATTENDED:
+# there, an unbounded read is an indefinite hang, not a slow check.
+#
+# THE CENSUS, so the next call site inherits the decision instead of re-deriving it. Every
+# external invocation in this file is either BOUNDED or declared here as unable to block:
+#   BOUNDED — `claude -p` (90s, the network probe); every `tmux` invocation, live or
+#     throwaway (`show-environment -g`, `setenv -g`, `new-session`, `kill-server`); the
+#     pane-report wait loop; the digest tool; and (below) the identity lookups `id` uses.
+#   DECLARED UNBOUNDABLE-BY-NEED, each because it cannot block indefinitely:
+#     * `uname -s` — a syscall wrapper;
+#     * `mktemp`, `rm`, `cat` of a file this process just wrote, `chmod` — local filesystem
+#       calls on paths we created;
+#     * `grep`/`sed` over the pam_env file — only reached AFTER `[ -f ]` has established it
+#       is a REGULAR file, so there is no fifo or device to block on, and bounding them
+#       would make the NOT-PERSISTED verdict itself depend on a `timeout` binary that a
+#       correct box need not have (the read must still work when the probe cannot run);
+#     * `tr`/`cut` inside the redaction boundary, over a string already in memory — a bound
+#       that fired there would DESTROY the verdict text it is rendering.
+#   NOT AN EXTERNAL CALL AT ALL — `command -v` is a shell builtin, so a missing-binary check
+#     spawns nothing.
+# A `timeout` that cannot ENFORCE the bound (no SIGKILL escalation) is not a bound at all;
+# `claude_auth_resolve_timeout` refuses such a candidate, and every caller of a bounded
+# operation treats that refusal as UNMEASURED rather than running the call unbounded.
+CLAUDE_AUTH_TMUX_OP_BOUND=10
+CLAUDE_AUTH_DIGEST_BOUND=10
+CLAUDE_AUTH_IDENTITY_BOUND=10
+
+# claude_auth_bounded <secs> <cmd> [args...]: run <cmd> under a HARD bound.
+# rc is the command's own, or 124/137 when the bound fired, or 125 when NO bound could be
+# established (which also happens to be `timeout`'s own "could not run it" code — the two
+# are the same operational fact here: the call was not made under a bound, so nothing was
+# measured). CALLERS THAT NEED TO TELL A REFUSAL FROM A FAILURE MUST CALL
+# `claude_auth_resolve_timeout` THEMSELVES FIRST, because a command substitution runs this
+# in a SUBSHELL and any global it sets there is discarded.
+claude_auth_bounded() {
+  local __secs="$1"; shift
+  if [ -n "$CLAUDE_AUTH_TIMEOUT_BIN" ] || claude_auth_resolve_timeout; then
+    "$CLAUDE_AUTH_TIMEOUT_BIN" \
+      ${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]+"${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]}"} \
+      "$__secs" "$@"
+    return $?
+  fi
+  return 125
+}
+
+# claude_auth_bound_fired <rc>: rc 0 iff <rc> says the bound killed the child. 124 is
+# `timeout`'s own code; 137 is 128+SIGKILL, i.e. the escalation did the killing.
+claude_auth_bound_fired() { [ "${1:-}" = 124 ] || [ "${1:-}" = 137 ]; }
+
+# THE ARGV PREFIX EVERY TMUX CALL CARRIES. Empty when tmux is to be run as this process
+# (the ordinary case); an identity delegation when the invoking agent is someone else (see
+# the identity block below). It is a GLOBAL because the probe's CLEANUP has to reach the
+# same server the probe created, and cleanup runs from a trap with no arguments.
+CLAUDE_AUTH_TMUX_PREFIX=()
+
+# claude_auth_tmux_run <secs> <tmux-args...>: one bounded tmux call, as the invoking
+# identity. The two LIVE server operations (`show-environment -g`, `setenv -g`) go through
+# here; the throwaway-probe calls compose the same two pieces by hand because they also
+# interpose the credential-scrubbing `env`.
+claude_auth_tmux_run() {
+  local __secs="$1"; shift
+  claude_auth_bounded "$__secs" \
+    ${CLAUDE_AUTH_TMUX_PREFIX[@]+"${CLAUDE_AUTH_TMUX_PREFIX[@]}"} tmux "$@"
+}
+
 # ---- identity of a delivered credential: A DIGEST, NEVER A LENGTH ------------------
 # The cold-start probe reports what a would-be tmux server DELIVERS to a pane, and the
 # delivered token used to be checked against `${#persisted}` alone. LENGTH EQUALITY IS NOT
@@ -267,7 +336,7 @@ claude_auth_resolve_digest() {
     # PROBED BY RUNNING IT, never taken from its name: the same rule as the timeout
     # resolver. A candidate that does not produce 64 hex characters is not a sha256.
     # NOT A PIPE WHOSE rc WE READ: the value is captured, then the SHAPE is tested.
-    out=$(printf '%s' cqlite | $cand 2>/dev/null)
+    out=$(printf '%s' cqlite | claude_auth_bounded "$CLAUDE_AUTH_DIGEST_BOUND" $cand 2>/dev/null)
     out=${out%% *}
     case "$out" in
       *[!0-9a-f]*|'') continue ;;
@@ -288,7 +357,7 @@ claude_auth_digest_into() {
   [ -n "$CLAUDE_AUTH_DIGEST_CMD" ] || return 1
   # The pipe is safe here for the reason the matcher block gives: the SIGPIPE hazard is an
   # early-exiting consumer, and a digest tool reads to EOF by construction.
-  __d=$(printf '%s' "$__salt$__val" | $CLAUDE_AUTH_DIGEST_CMD 2>/dev/null)
+  __d=$(printf '%s' "$__salt$__val" | claude_auth_bounded "$CLAUDE_AUTH_DIGEST_BOUND" $CLAUDE_AUTH_DIGEST_CMD 2>/dev/null)
   __d=${__d%% *}
   case "$__d" in
     *[!0-9a-f]*|'') return 1 ;;
@@ -636,6 +705,14 @@ claude_tmux_env_verdict_into__untraced() {
     eval "$__od='no tmux binary on PATH — there is no server environment to inspect'"
     return 0
   fi
+  # A LIVE SERVER CAN WEDGE, so the read needs the same HARD bound the network probe needs,
+  # and for the same reason: where the call cannot be bounded it is not made at all. Checked
+  # HERE rather than read from the bounded runner's rc, because the read below runs in a
+  # command substitution — a subshell — where any global the runner set is discarded.
+  if ! claude_auth_resolve_timeout; then
+    eval "$__od='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to run an UNBOUNDED tmux read, because a server that accepts a connection and never answers would hang this provisioning entry point indefinitely'"
+    return 0
+  fi
 
   # THE SECRET IS ARMED BEFORE THE FIRST THING THAT CAN BE REDACTED, not after. The
   # `show-environment failed` path below renders tmux's stderr through `claude_auth_redact`,
@@ -652,16 +729,24 @@ claude_tmux_env_verdict_into__untraced() {
   # succeeded). NOT A PIPE: `$?` is read on its own line.
   local __errf=''
   if __errf=$(mktemp "${TMPDIR:-/tmp}/cqlite-tmuxenv.XXXXXX" 2>/dev/null) && [ -f "$__errf" ]; then
-    __out=$(tmux show-environment -g 2>"$__errf")
+    __out=$(claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" show-environment -g 2>"$__errf")
     __rc=$?
     __err=$(cat "$__errf" 2>/dev/null)
     rm -f "$__errf"
   else
     # No temp file: keep the ONE invocation and say the cause was not captured, rather than
     # taking a second reading of a different moment.
-    __out=$(tmux show-environment -g 2>/dev/null)
+    __out=$(claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" show-environment -g 2>/dev/null)
     __rc=$?
     __err='(stderr not captured: no temporary file could be created)'
+  fi
+  # THE BOUND FIRING IS ITS OWN OUTCOME, and it must be read BEFORE the error text is
+  # classified: a server that accepts the connection and never answers produces no stderr at
+  # all, so the wordings below would fall through to "failed for a reason that is not a
+  # missing server" and name no cause. What was learned is nothing, and the verdict says so.
+  if claude_auth_bound_fired "$__rc"; then
+    eval "$__od=\"the running tmux server did not answer 'show-environment -g' within \${CLAUDE_AUTH_TMUX_OP_BOUND}s and the read was killed (a server that accepts a connection but never responds) — what its panes receive is UNKNOWN\""
+    return 0
   fi
   if [ "$__rc" -ne 0 ]; then
     # TWO WORDINGS MEAN "NO SERVER", and only one of them was recognised. MEASURED on tmux
@@ -783,7 +868,15 @@ claude_auth_probe_cleanup() {
   if [ -n "$CLAUDE_AUTH_PROBE_SOCKET" ]; then
     # rc is deliberately ignored: tmux `exit-empty` means the server may already be gone,
     # which is a SUCCESSFUL cleanup, not a failure.
-    tmux -S "$CLAUDE_AUTH_PROBE_SOCKET" kill-server >/dev/null 2>&1
+    # BOUNDED LIKE EVERY OTHER TMUX CALL, and this one runs from an EXIT/signal trap, where
+    # an unbounded call against a wedged server would hang the caller at exit — the worst
+    # place for it. When no bound can be established the call is SKIPPED rather than run
+    # unbounded (a hung exit trap is worse than a throwaway server that `exit-empty` will
+    # end); that branch is unreachable by construction, because a socket is registered only
+    # after `claude_auth_resolve_timeout` has already succeeded.
+    claude_auth_bounded "$CLAUDE_AUTH_TMUX_OP_BOUND" \
+      ${CLAUDE_AUTH_TMUX_PREFIX[@]+"${CLAUDE_AUTH_TMUX_PREFIX[@]}"} \
+      tmux -S "$CLAUDE_AUTH_PROBE_SOCKET" kill-server >/dev/null 2>&1
     CLAUDE_AUTH_PROBE_SOCKET=''
   fi
   if [ -n "$CLAUDE_AUTH_PROBE_DIR" ]; then
@@ -894,8 +987,11 @@ CLAUDE_AUTH_PROBE
                 "CQLITE_AUTH_PROBE_SALT=$__salt" "CQLITE_AUTH_PROBE_DIGEST=$CLAUDE_AUTH_DIGEST_CMD")
   [ -z "$__ptok" ] || __e+=("$CLAUDE_AUTH_TOKEN_KEY=$__ptok")
   [ -z "$__pcfg" ] || __e+=("$CLAUDE_AUTH_CONFIG_KEY=$__pcfg")
-  # NOT A PIPE: the command runs on its own line and $? is read on the next.
-  "${__e[@]}" "$CLAUDE_AUTH_TIMEOUT_BIN" "${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]}" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+  # NOT A PIPE: the command runs on its own line and $? is read on the next. The scrub
+  # `env` sits INSIDE the bound (it is the thing being run), and any delegation prefix sits
+  # in front of it, so the whole chain is what the bound kills.
+  claude_auth_bounded "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+    ${CLAUDE_AUTH_TMUX_PREFIX[@]+"${CLAUDE_AUTH_TMUX_PREFIX[@]}"} "${__e[@]}" \
     tmux -S "$__sock" new-session -d -s cqlite-authprobe "sh '$__dir/probe.sh' '$__res'" >/dev/null 2>&1
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
@@ -907,7 +1003,7 @@ CLAUDE_AUTH_PROBE
   # `new-session -d` returns as soon as the session exists, so the pane may not have
   # written yet. The wait is bounded by the SAME timeout binary rather than by a counted
   # `sleep` loop, so a host whose sleep has no sub-second form cannot stretch it.
-  "$CLAUDE_AUTH_TIMEOUT_BIN" "${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]}" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+  claude_auth_bounded "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
     sh -c 'while :; do grep -q "^end$" "$1" 2>/dev/null && exit 0; sleep 0.2; done' _ "$__res" >/dev/null 2>&1
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
@@ -1082,6 +1178,12 @@ claude_auth_fix_tmux_env__untraced() {
     printf 'claude-auth: fix SKIPPED (no `tmux` on PATH — nothing to seed)\n'
     return 1
   fi
+  # Same rule as the read: a `setenv -g` against a wedged server hangs forever, so where the
+  # call cannot be bounded it is not made.
+  if ! claude_auth_resolve_timeout; then
+    printf 'claude-auth: fix REFUSED (no timeout/gtimeout on PATH can enforce a HARD bound, and an UNBOUNDED `tmux setenv -g` against a server that never answers would hang this entry point)\n'
+    return 1
+  fi
   claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
   CLAUDE_AUTH_SECRET="$__tok"
   if [ "$__state" != present ] || [ -z "$__tok" ]; then
@@ -1089,10 +1191,18 @@ claude_auth_fix_tmux_env__untraced() {
       "$__file" "$CLAUDE_AUTH_TOKEN_KEY" "$__state"
     return 1
   fi
-  if ! tmux setenv -g "$CLAUDE_AUTH_TOKEN_KEY" "$__tok" 2>/dev/null; then
-    printf 'claude-auth: fix FAILED (tmux would not accept `setenv -g %s` — is a server running?)\n' "$CLAUDE_AUTH_TOKEN_KEY"
+  claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" setenv -g "$CLAUDE_AUTH_TOKEN_KEY" "$__tok" 2>/dev/null
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if claude_auth_bound_fired "$rc"; then
+      printf 'claude-auth: fix FAILED (the tmux server did not accept `setenv -g %s` within %ss and the call was killed — the server is not answering; nothing was seeded)\n' \
+        "$CLAUDE_AUTH_TOKEN_KEY" "$CLAUDE_AUTH_TMUX_OP_BOUND"
+    else
+      printf 'claude-auth: fix FAILED (tmux would not accept `setenv -g %s` — is a server running?)\n' "$CLAUDE_AUTH_TOKEN_KEY"
+    fi
     return 1
   fi
+  rc=0
   printf 'claude-auth: seeded %s into the running tmux server (value NOT printed; source %s)\n' \
     "$CLAUDE_AUTH_TOKEN_KEY" "$__file"
   claude_auth_read_key_into __cfg __cfgstate "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
@@ -1105,7 +1215,7 @@ claude_auth_fix_tmux_env__untraced() {
       "$CLAUDE_AUTH_CONFIG_KEY" "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
     return 0
   fi
-  if tmux setenv -g "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" 2>/dev/null; then
+  if claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" setenv -g "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" 2>/dev/null; then
     printf 'claude-auth: seeded %s=%s into the running tmux server (source: %s)\n' \
       "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" "$__cfgsrc"
   else

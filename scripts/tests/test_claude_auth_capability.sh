@@ -225,6 +225,8 @@ EOF
 #   complete    — matching token AND CLAUDE_CONFIG_DIR
 #   broken      — an error that is NOT "no server running"
 #   probefail   — no server AND the isolated cold-start probe cannot be started
+#   wedged      — the server accepts the call and NEVER ANSWERS (show-environment sleeps
+#                 far past any bound). The shape a half-dead tmux server has in the field.
 #   substitute  — no server, and a would-be server SUBSTITUTES a DIFFERENT token of the
 #                 SAME LENGTH into the pane (a `set-environment` in a tmux config does
 #                 exactly this). The delivered value is wrong; every length-derived
@@ -280,12 +282,14 @@ case "\$1" in
     case '$mode' in
       no-server|probefail|substitute) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
+      wedged)     sleep 120; exit 0 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
       stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
       incomplete) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n-CLAUDE_CONFIG_DIR\n' '$TOK'; exit 0 ;;
       complete)   printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK' '$cfg'; exit 0 ;;
     esac ;;
   set-environment|setenv)
+    case '$mode' in wedged) sleep 120; exit 0 ;; esac
     shift
     key=''; val=''
     while [ "\$#" -gt 0 ]; do
@@ -1404,14 +1408,23 @@ if printf '%s' "$out" | grep -qi 'kill\|hard'; then
 else
   bad "claude-auth: the refusal does not say which capability was missing: $out"
 fi
-# The tmux cold-start probe shares the resolver, so it refuses on the same ground.
+# The tmux path shares the resolver, so it refuses on the same ground — and since the LIVE
+# read is bounded too (section 32) the refusal now happens one step EARLIER, before that
+# read. That is the more honest verdict, not merely a different one: with no enforceable
+# bound we cannot take the live read at all, so we do not know whether a server is running,
+# and `NO-SERVER` would assert something unmeasured. UNMEASURED, non-passing, cause named.
 d28c=$(mkshim "$tmp/s28c"); plant_tmux "$d28c" no-server
 for tname in timeout gtimeout; do cp "$d28b/$tname" "$d28c/$tname"; done
 run_cap "$d28c" "$ef2" -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER'; then
-  ok "claude-tmux-env: the cold-start probe refuses on the same unenforceable bound (NO-SERVER, UNMEASURED-class)"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "claude-tmux-env: an unenforceable bound refuses the tmux path outright (UNMEASURED)"
 else
-  bad "claude-tmux-env: the cold-start probe ran without an enforceable bound: $out"
+  bad "claude-tmux-env: the tmux path ran without an enforceable bound: $out"
+fi
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'kill\|hard\|UNBOUNDED'; then
+  ok "claude-tmux-env: ...non-passing, and it names the missing hard bound"
+else
+  bad "claude-tmux-env: the tmux-path refusal is not non-passing or does not name the bound: rc=$rc $out"
 fi
 
 # =====================================================================================
@@ -1635,6 +1648,99 @@ else
   bad "cold-start probe: a missing digest tool did not refuse: $out"
 fi
 
+
+# =====================================================================================
+# 32. BOUNDING IS A PROPERTY OF EVERY EXTERNAL CALL IN THIS FILE, NOT OF ONE CALL SITE.
+#     This is the SECOND bounding finding here — round 2's was the `claude -p` probe's
+#     SIGTERM-only bound — so it is closed as a class rather than carved a third time. A
+#     tmux server that ACCEPTS a connection and never answers hangs `show-environment -g`
+#     (and `setenv -g`) forever, and bootstrap is a provisioning entry point that
+#     `.agent-ami/profile.yaml` runs unattended: an unbounded read there is an indefinite
+#     hang, not a slow check. A timeout is classified UNMEASURED on a READ and a failed
+#     repair on a WRITE — never a pass, and never an accusation about the credential.
+#
+#     THREE ASSERTS, because none of them alone closes the class:
+#      (a) the helper really escalates on a real child (a unit-level bound);
+#      (b) a wedged LIVE server yields UNMEASURED, in bounded wall-clock, end to end;
+#      (c) STRUCTURAL: no `tmux` invocation in the library is unbounded — which is what
+#          stops the next call site being added without one, and it carries its own
+#          positive control because a scanner that matches nothing reports every file clean.
+# =====================================================================================
+# (a) the helper itself. Sourced rather than driven through the CLI, because the property
+# is about the helper and a CLI path would also measure everything around it.
+bnd_t0=$SECONDS
+bnd_rc=0
+( set -uo pipefail; . "$CAPLIB"; claude_auth_bounded 1 sleep 30 ) >/dev/null 2>&1 || bnd_rc=$?
+bnd_dt=$((SECONDS - bnd_t0))
+if [ "$bnd_rc" = 124 ] || [ "$bnd_rc" = 137 ]; then
+  ok "bounded runner: a long child is killed and reports a timeout rc ($bnd_rc)"
+else
+  bad "bounded runner: a 30s child under a 1s bound returned rc $bnd_rc"
+fi
+if [ "$bnd_dt" -le 10 ]; then
+  ok "bounded runner: ...and it returned in ${bnd_dt}s, not the child's own lifetime"
+else
+  bad "bounded runner: the bound took ${bnd_dt}s to fire — it did not bound anything"
+fi
+
+# (b) a WEDGED live server, end to end. The verdict must be UNMEASURED (a read that could
+# not be taken is not a verdict about the box) and it must arrive without waiting for the
+# stub's own 120s sleep.
+d32=$(mkshim "$tmp/s32"); plant_tmux "$d32" wedged
+w_t0=$SECONDS
+run_cap "$d32" "$ef2" -- --tmux-env
+w_dt=$((SECONDS - w_t0))
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "claude-tmux-env: a tmux server that never answers is UNMEASURED, not a verdict"
+else
+  bad "claude-tmux-env: a wedged server did not report UNMEASURED: $out"
+fi
+if [ "$w_dt" -le 60 ]; then
+  ok "claude-tmux-env: ...and the bound fired in ${w_dt}s instead of hanging the entry point"
+else
+  bad "claude-tmux-env: the wedged-server read took ${w_dt}s — it is not bounded"
+fi
+if printf '%s' "$out" | grep -qi 'did not answer\|bound'; then
+  ok "claude-tmux-env: the detail names the bound rather than inventing a cause"
+else
+  bad "claude-tmux-env: the wedged-server detail does not name the bound: $out"
+fi
+
+# (c) STRUCTURAL. Logical lines (backslash continuations joined) so a wrapped invocation is
+# judged whole; whole-line comments blanked; `command -v tmux` is a resolution, not a call;
+# and a line whose `tmux` sits inside a MESSAGE (`printf`) is not an invocation. DECLARED
+# NON-EXHAUSTIVE: it is a textual scan, so a tmux call assembled at run time from a
+# variable is not covered, and neither is one sharing a line with `printf`/`eval` — which is
+# how this library RENDERS messages, several of which name tmux, and a guard that reds on
+# the sentence describing its own subject is the guard agents learn to delete. The positive
+# control below pins what it DOES catch.
+scan_unbounded_tmux() {
+  sed -e ':a' -e '/\\$/{N;s/\\\n//;ta' -e '}' -e 's/^[[:space:]]*#.*$//' "$1" \
+    | grep -vE 'command -v tmux' \
+    | grep -vE '(^|[[:space:]])(printf|eval) ' \
+    | grep -nE '(^|[^[:alnum:]_.-])tmux[[:space:]]' \
+    | grep -vE 'claude_auth_bounded|claude_auth_tmux_run|# bounded-exempt:'
+}
+ctl3="$tmp/unbounded-tmux-control.sh"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' '# a comment naming tmux kill-server must not red'
+  printf '%s\n' 'claude_auth_bounded 10 tmux show-environment -g'
+  printf '%s\n' 'tmux kill-server >/dev/null 2>&1'
+} >"$ctl3"
+ctl3_hits=$(scan_unbounded_tmux "$ctl3")
+if printf '%s' "$ctl3_hits" | grep -q 'kill-server' \
+   && [ "$(printf '%s\n' "$ctl3_hits" | grep -c .)" -eq 1 ]; then
+  ok "unbounded-tmux guard: the scanner finds a planted unbounded invocation (and only it)"
+else
+  bad "unbounded-tmux guard: the scanner did not isolate the planted call: [$ctl3_hits]"
+fi
+unb_hits=$(scan_unbounded_tmux "$CAPLIB")
+if [ -z "$unb_hits" ]; then
+  ok "unbounded-tmux guard: every tmux invocation in the library runs under a hard bound"
+else
+  bad "unbounded-tmux guard: an unbounded tmux invocation survives: $unb_hits"
+fi
 
 # =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
