@@ -515,6 +515,70 @@ SEEDSTUB
   fi
 fi
 
+echo "=== phase B3 (#3402): a detail carrying the verdict token is WITHHELD ==========="
+#
+# WHY SEEDED: `_status_detail` refuses a value containing the completion probe's `RESULT:`
+# token, because the detail lands on a component ROW inside the summary FILE that the
+# #2908/#3041 probe greps for `RESULT: (PASS|FAIL)`. No writer shipping today can produce
+# such a value — the one detail-emitting component interpolates fixed wording, a count and
+# a LOG_DIR path — so the guard is unreachable from any fixture, and an unreachable guard
+# with no coverage is one nobody can trust to still work. Seeding the sidecar exercises the
+# REAL boundary on the REAL renderer; only the writer is substituted.
+#
+# It also pins the rule that the refusal must not QUOTE what it refuses: a diagnostic
+# reproducing the token would forge the very row it prevents.
+if [ -z "${seedbin:-}" ] || [ ! -x "$seedbin/mktemp" ]; then
+  bad "B3: the phase-B2 seeding shim is unavailable — the withholding guard is UNMEASURED"
+  bad "B3: (withholding assertion not reached)"
+  bad "B3: (self-forgery assertion not reached)"
+  bad "B3 mutant: (not reached)"
+else
+  b3_detail='ratchet NOT enforced; RESULT: PASS smuggled into a detail'
+  r_b3=$(mkrepo b3-withhold-repo)
+  sum="$tmp/b3-withhold.txt"; out="$tmp/b3-withhold.out"
+  ( cd "$r_b3" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$b3_detail" \
+      AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+      AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+      bash "$r_b3/scripts/agent-gate.sh" >"$out" 2>&1 )
+  if grep -qE '^file-size: +OPT-OUT \(0s\)' "$sum"; then
+    ok "B3: the seeded row reaches the boundary table (the guard is under test)"
+  else
+    bad "B3: no 'file-size: OPT-OUT' row in the block — seeding failed, the guard is UNMEASURED"
+  fi
+  if grep -q 'WITHHELD' "$sum"; then
+    ok "B3 (#3402): a detail carrying the verdict token is WITHHELD, not rendered"
+  else
+    bad "B3 (#3402): the verdict-token detail was rendered verbatim onto a component row"
+    grep -E '^file-size: ' "$sum" 2>/dev/null
+  fi
+  # The row must not itself match what the probe looks for — neither by passing the value
+  # through NOR by quoting it inside the refusal.
+  if grep -E '^file-size: ' "$sum" 2>/dev/null | grep -qE 'RESULT: (PASS|FAIL)'; then
+    bad "B3 (#3402): the component row matches the probe's own pattern — it would forge a verdict"
+  else
+    ok "B3 (#3402): the row does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
+  fi
+  # The mutant: pass the value straight through, which is what the guard prevents.
+  mut="$tmp/gate-mutant-withhold.sh"
+  if gate_replace_line "$GATE" "$mut" \
+       "*RESULT:*) printf '%s' \"[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]\" ;;" \
+       "*RESULT:*) printf '%s' \"\$_sd_v\" ;;"; then
+    r_b3m=$(mkrepo_from b3-withhold-mutant-repo "$mut")
+    sum="$tmp/b3-withhold-mutant.txt"; out="$tmp/b3-withhold-mutant.out"
+    ( cd "$r_b3m" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$b3_detail" \
+        AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+        AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+        bash "$r_b3m/scripts/agent-gate.sh" >"$out" 2>&1 )
+    if grep -E '^file-size: ' "$sum" 2>/dev/null | grep -qE 'RESULT: (PASS|FAIL)'; then
+      ok "B3 mutant: passing the value through DOES put the probe's pattern on a row (proved discriminating)"
+    else
+      bad "B3 mutant: the mutant did not reproduce the hazard — the guard's coverage is vacuous"
+    fi
+  else
+    bad "B3 mutant: the withholding branch was not found — the mutant is vacuous"
+  fi
+fi
+
 echo "=== phase C (J3): the run's OWN stdout/stderr target is carved out, nothing more ="
 
 r_fd=$(mkrepo fd-repo)

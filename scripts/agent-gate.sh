@@ -6778,18 +6778,16 @@ _fm_annotate() {
 # backgrounded subshell of the bounded pool (#1737) and cannot write the parent's state.
 _status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
 
-# _record_status_detail <component> <trusted> [<untrusted>] (#3402): publish that detail as
-# TWO FIELDS, one per line — because they have different provenance and the reader of the
-# other end has to be able to tell them apart (roborev job 21).
-#   <trusted>    gate-authored text plus numbers this component computed. No repository
-#                content reaches it.
-#   <untrusted>  optional; repository-derived text (today: the grown-FILE PATHS).
-# Withholding used to replace the WHOLE suffix, so a path carrying the completion probe's
-# verdict token also destroyed the COUNT — gate-authored data, provably safe, and the single
-# most useful thing on the row — while a comment two lines up claimed the count was kept.
-# Splitting the fields is #3312's own prescription applied here: when one string carries both
-# your text and someone else's payload, SEPARATE THE CHANNEL rather than escape harder. The
-# boundary can then withhold exactly the untrusted half.
+# _record_status_detail <component> <text> (#3402): publish that detail. The text must be
+# GATE-AUTHORED — fixed wording plus values the component computed. No repository-derived
+# content (paths, branch names, commit subjects) may be interpolated into it.
+#
+# That is a CONTRACT, not an observation, and it is what makes the reader's job small. A
+# two-field trusted/untrusted sidecar was built here when the row still rendered grown-file
+# PATHS, and was removed with them: the untrusted half had no writer left, and unused
+# generality is a liability that the next reader has to reason about. A future writer that
+# genuinely needs repository content should re-introduce the split deliberately (#3312:
+# separate the channel; do not escape harder) rather than smuggle it through this field.
 # Best-effort by
 # design — the detail EXPLAINS a status token, it does not carry the verdict, so a
 # LOG_DIR that cannot take it must not change what the component reports. (The token
@@ -6797,10 +6795,7 @@ _status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
 # guard.)
 _record_status_detail() {
   [ -n "${LOG_DIR:-}" ] || return 0
-  # ALWAYS two lines, even when the untrusted field is empty, so the reader's line 2 means
-  # "the untrusted field" and never "whatever happened to be next".
-  { printf '%s\n' "$2"; printf '%s\n' "${3:-}"; } 2>/dev/null \
-    >"$(_status_detail_file "$1")" || return 0
+  printf '%s\n' "$2" 2>/dev/null >"$(_status_detail_file "$1")" || return 0
 }
 
 # _status_detail <component> (#3402): read it back, reduced to ONE line with no control
@@ -6840,8 +6835,8 @@ _record_status_detail() {
 # claim is narrowed rather than the implementation grown, because no reachable input
 # carries even a C0 (see the defence-in-depth note above).
 # LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
-# the defect this issue removes — bounding the value is the WRITER's job (see
-# _fs_abbrev_grown, which elides by a NAMED remainder).
+# the defect this issue removes. Bounding the value is the WRITER's job, and today's writers
+# need no bound — every detail is a fixed sentence plus a count and a log path.
 _status_detail() {
   local f
   f=$(_status_detail_file "$1")
@@ -6850,22 +6845,16 @@ _status_detail() {
   # (roborev job 19, L1). The #2908/#3041 probe greps the summary FILE for
   # `RESULT: (PASS|FAIL)` and this detail lands on a component ROW inside that file, so the
   # token must not appear here. The first attempt SUBSTITUTED it — and a blanket
-  # substitution edits the token wherever it occurs, INCLUDING inside a legitimate
-  # grown-file path such as `cqlite-core/src/RESULT: PASS.rs`, which the row would then name
-  # in a spelling that exists nowhere on disk. That is the SAME false-reporting defect this
-  # change exists to remove, reintroduced by its own guard, and strictly worse than the
-  # disclosure it was protecting: a reader cannot tell a rewritten name from a real one.
+  # substitution edits the token wherever it occurs, INCLUDING inside repository-derived
+  # text — at the time, a legitimate grown-file path such as `cqlite-core/src/RESULT: PASS.rs`,
+  # which the row then named in a spelling that exists nowhere on disk. That was the SAME
+  # false-reporting defect this change exists to remove, reintroduced by its own guard.
+  # No shipping writer can reach that case any more (the row carries no repository content),
+  # but REFUSE-DON'T-REWRITE is kept as the boundary's rule, because the next writer to need
+  # such content must not inherit a silent rewriter.
   #
   # So the offending value is WITHHELD, loudly, and the reader is sent to the component log
   # — a truthful degradation instead of a false statement.
-  #
-  # WITHHELD AT FIELD GRANULARITY, which is the whole point of the two-field sidecar
-  # (roborev job 21). The first version replaced the ENTIRE suffix, which also destroyed the
-  # COUNT — gate-authored, provably safe, and the most useful thing on the row — while the
-  # comment here claimed the count was kept. That claim was simply false, and the fix is to
-  # make it true rather than to narrow it: a pathological filename now costs the FILE LIST
-  # and nothing else, so the row still discloses that the ratchet was not enforced and over
-  # how many files.
   #
   # The refusal names NO part of the token it refuses (the reason is described, not quoted),
   # because a diagnostic reproducing the token it exists to keep off this row would forge the
@@ -6877,20 +6866,16 @@ _status_detail() {
   # here (pollers outside this repo read these blocks). The cost of the broad trigger is a
   # withheld detail on a pathological filename; the cost of a narrow one is a forged verdict
   # for a consumer nobody surveyed. Only one of those is recoverable by reading the log.
-  local _sd_t _sd_u
-  _sd_t=$(sed -n '1p' "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
-  _sd_u=$(sed -n '2p' "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
-  # The TRUSTED field is still checked, not assumed: "gate-authored" is a property of
-  # today's four call sites, and a fifth could interpolate something. Its refusal withholds
-  # the whole row detail, because if the trusted half is compromised nothing after it can be
-  # relied on either.
-  case "$_sd_t" in
-    *RESULT:*) printf '%s' "[detail WITHHELD: its gate-authored half carries the completion probe's reserved verdict token (#2908) — see the component log]"; return 0 ;;
-  esac
-  case "$_sd_u" in
-    "")        printf '%s' "$_sd_t" ;;
-    *RESULT:*) printf '%s%s' "$_sd_t" "[WITHHELD: a listed path carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
-    *)         printf '%s%s' "$_sd_t" "$_sd_u" ;;
+  local _sd_v
+  _sd_v=$(head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
+  # CHECKED, not assumed. The gate-authored contract above is a property of today's four
+  # call sites; a fifth could interpolate something, and this boundary is the one place that
+  # notices. It cannot fire on any writer shipping today, which is why its coverage is a
+  # SEEDED case in scripts/tests/test_agent_gate_tree_provenance.sh (phase B3) rather than a
+  # filename fixture — an untestable guard is one nobody can trust.
+  case "$_sd_v" in
+    *RESULT:*) printf '%s' "[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
+    *)         printf '%s' "$_sd_v" ;;
   esac
 }
 
@@ -17890,28 +17875,6 @@ _fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per ar
   printf '%s\n' "$@" 2>/dev/null >>"$_fs_log" ||
     _FS_WRITE_FAILURES=$((_FS_WRITE_FAILURES + 1))
 }
-# _fs_abbrev_grown <path…> (#3402): the grown-file list as it appears on the SUMMARY line.
-# Each argument is a RAW PATH. It used to take the formatted `path: before -> after
-# (limit N)` entries and recover the path with `${e%%: *}` — which TRUNCATES any filename
-# containing `: ` and then names a file that does not exist (roborev round 1, L3). The
-# caller has the path in hand at construction time, so re-deriving it from a DISPLAY STRING
-# was a lossy round-trip with nothing to gain; the fix is to carry it, not to pick a rarer
-# delimiter. Up to 3 paths print in full; beyond that the remainder is
-# NAMED as elided (`a,b,c,+N more`) — the same rule and the same reason as
-# _fm_abbrev_features: an abbreviation must not imply a completeness it does not have,
-# and a silent truncation in a SUMMARY block is exactly the invisible-opt-out shape this
-# issue exists to remove. The exact count is carried separately by the caller, so this
-# renders identity, never arithmetic.
-_fs_abbrev_grown() {
-  local shown=0 out="" p
-  for p in ${1+"$@"}; do
-    [ "$shown" -lt 3 ] || break
-    out="${out:+$out,}$p"
-    shown=$((shown + 1))
-  done
-  [ "$#" -gt "$shown" ] && out="$out,+$(( $# - shown )) more"
-  printf '%s' "$out"
-}
 run_file_size() {
   local name=file-size
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -17957,10 +17920,7 @@ run_file_size() {
     files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null)
   fi
 
-  # `grew` is the DISPLAY list; `grew_paths` is the same set as raw paths, carried rather
-  # than recovered from the display string later (roborev round 1, L3). The two are
-  # appended together, on adjacent lines, so they cannot fall out of step.
-  local -a over=() grew=() grew_paths=()
+  local -a over=() grew=()
   local f cur lim base_n
   while IFS= read -r f; do
     [ -n "$f" ] && [ -f "$f" ] || continue
@@ -17976,7 +17936,6 @@ run_file_size() {
     base_n=${base_n:-0}
     if [ "$cur" -gt "$base_n" ]; then
       grew+=("$(printf '%s: %s -> %s (limit %s)' "$f" "$base_n" "$cur" "$lim")")
-      grew_paths+=("$f")
     fi
   done <<<"$files"
 
@@ -18018,12 +17977,28 @@ run_file_size() {
       # (full gate, aggregate_lite_components, run_delta) set OVERALL=FAIL only on an
       # EXACT `FAIL`, so OPT-OUT rides to a PASS RESULT without a special case.
       status=OPT-OUT
-      # The COUNT is gate-authored and goes in the trusted field; only the PATHS are
-      # repository-derived. So a pathological filename costs the file list and nothing else
-      # — the row still discloses that the ratchet was not enforced and over how many files.
+      # NO REPOSITORY CONTENT ON THIS ROW — env var + COUNT + a pointer to the log, which is
+      # exactly what the issue asks for (#3402: "OPT-OUT (CQLITE_ALLOW_FILE_GROWTH=1; N
+      # file(s) grown)", with naming the files marked "ideally" and explicitly deferred to
+      # the sibling log issue, #3401, now merged).
+      #
+      # An earlier revision rendered the grown PATHS inline. It was dropped after that one
+      # embellishment produced THREE of this PR's seven review findings, each a different
+      # way of mangling a filename: splitting on `: ` when recovering a path from a display
+      # string, substituting inside a path that contained the completion probe's token, and
+      # joining with `,` so `src/a.rs,b.rs` was indistinguishable from two files. Each fix
+      # was correct and the next round found another — the signature the repo already ruled
+      # on for #3229's census predicate: REMOVE the mechanism rather than carve it again.
+      # Escaping would only move the argument to the escape grammar (#3312: a rarer
+      # delimiter is still forgeable).
+      #
+      # Nothing is actually lost. `file-size.log` carries every path with its before -> after
+      # arithmetic (that is #3401's whole subject, and this issue points at it), and a PR
+      # reviewer has a second copy in the DIFF ITSELF — the grown files are the files the PR
+      # changed. What the row must carry is what a pasted SUMMARY cannot get anywhere else:
+      # that the ratchet was NOT enforced, and over how many files.
       _record_status_detail "$name" \
-        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown: " \
-        "$(_fs_abbrev_grown ${grew_paths[@]+"${grew_paths[@]}"})"
+        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown — see $log"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"

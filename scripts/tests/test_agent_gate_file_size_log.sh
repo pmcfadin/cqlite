@@ -464,7 +464,12 @@ has "case4 (#3402): the SUMMARY row NAMES the env var that was engaged" \
     "$sumrow4" "CQLITE_ALLOW_FILE_GROWTH=1"
 has "case4 (#3402): the SUMMARY row gives the COUNT of grown files" \
     "$sumrow4" "1 over-threshold file(s) grown"
-has "case4 (#3402): the SUMMARY row NAMES the grown file" \
+# The row deliberately carries NO repository content (see the REMOVED-cases note below).
+# What it must carry instead is a pointer to where the names DO live, plus — asserted from
+# the other side — proof that no path leaked onto it.
+has "case4 (#3402): the SUMMARY row POINTS AT the component log for the file list" \
+    "$sumrow4" "file-size.log"
+lacks "case4 (#3402): the row renders NO repository path — the whole mangling family is unreachable" \
     "$sumrow4" "cqlite-core/src/big.rs"
 has "case4 (#3402): the row keeps its feature-matrix annotation ahead of the detail" \
     "$sumrow4" "[no-cargo]"
@@ -483,23 +488,25 @@ has "case4 (#3402): the block's RESULT is the passing PARTIAL, not FAIL" \
     "$r4/.sum" "RESULT: PARTIAL"
 
 # ---------------------------------------------------------------------------
-# Case 4b (#3402) — the grown-file list is ELIDED, never silently truncated. Four grown
-# files against a three-entry render: the row must name three and say how many it dropped.
-# A one-file fixture can never exercise this, and an abbreviation that implies a
-# completeness it does not have is the same class of defect as the invisible opt-out.
+# REMOVED, deliberately: cases 4b (elision past three files), 4e (a path containing `: `)
+# and 4g (a path containing the completion probe's verdict token). All three exercised the
+# INLINE GROWN-PATH LIST, which is gone.
+#
+# Why the list went, recorded here because a future reader will otherwise re-add it: it was
+# the OPTIONAL half of #3402 ("ideally naming the files", with the issue itself deferring
+# that data to the sibling log issue #3401, now merged), and it produced THREE of this PR's
+# seven review findings — one per round, each a different way of mangling a filename: a
+# `: ` split when recovering a path from a display string; substitution inside a path
+# carrying `RESULT:`; and `,` joining, which made `src/a.rs,b.rs` indistinguishable from two
+# files. Every fix was correct and the next round found another. That is the shape #3229
+# already ruled on — remove the mechanism rather than carve it a fourth time — and escaping
+# would only move the argument to the escape grammar (#3312: a rarer delimiter is still
+# forgeable).
+#
+# The row now carries env var + COUNT + a pointer to file-size.log, which is what the issue
+# actually specified. The names live in the log (#3401's whole subject) and, for a PR
+# reviewer, in the diff itself — the grown files are the files the PR changed.
 # ---------------------------------------------------------------------------
-mkrepo_multi optout4 4 900 950; r4b="$REPO"
-out4b="$tmp/optout4.out"
-run_only_file_size "$r4b" "$out4b" CQLITE_ALLOW_FILE_GROWTH=1
-d4b=$(logdir_of "$out4b") || bad "case4b: the run published no usable 'logs:' dir"
-assert_verdict "case4b: four grown files under the engaged override still report OPT-OUT" "$d4b" OPT-OUT
-sumrow4b="$tmp/optout4.sumrow"
-fs_summary_row "$r4b/.sum" "$sumrow4b" ||
-  bad "case4b (#3402): the run emitted no usable file-size row — the elision assert is UNMEASURED"
-has "case4b (#3402): the SUMMARY row reports the FULL count, not the rendered count" \
-    "$sumrow4b" "4 over-threshold file(s) grown"
-has "case4b (#3402): the SUMMARY row NAMES the elided remainder rather than truncating silently" \
-    "$sumrow4b" ",+1 more"
 
 # ---------------------------------------------------------------------------
 # Case 4c (#3402), run for BOTH malformed spellings — THE FALSE-PASS ROUTE, and the reason the emit is keyed on the
@@ -534,85 +541,6 @@ for bad_val in 0 true; do
     bad "case4c/$bad_val (#3402): expected exit 1, got $rcbv — a malformed override did not fail the run"
   fi
 done
-
-# ---------------------------------------------------------------------------
-# Case 4e (#3402, roborev round 1 L3) — a grown path CONTAINING THE `: ` that the abbreviator
-# used to split on. `_fs_abbrev_grown` took the formatted `path: before -> after (limit N)`
-# entries and recovered the path with `${e%%: *}`, so `we: ird.rs` was truncated to `we` and
-# the SUMMARY NAMED A FILE THAT DOES NOT EXIST — worse than eliding it, because the reader
-# has no way to tell a real name from a mangled one. Fixed by CARRYING the path instead of
-# re-deriving it from a display string.
-#
-# The second needle is END-ANCHORED, and that is the whole of its value. A `lacks` on the
-# truncated stem CANNOT FAIL here: with one grown file the buggy render ends at
-# `…/src/we`, which is a PREFIX of the correct `…/src/we: ird.rs`, so any needle matching
-# the bug also matches the fix (or, with a trailing comma appended to dodge that, matches
-# neither). Anchoring on `$` states the property that actually distinguishes them — the
-# full name is the LAST thing on the line, so nothing was silently dropped after the split
-# point.
-# ---------------------------------------------------------------------------
-mkrepo colonpath 'cqlite-core/src/we: ird.rs' 900 950 main; r4e="$REPO"
-out4e="$tmp/colonpath.out"
-run_only_file_size "$r4e" "$out4e" CQLITE_ALLOW_FILE_GROWTH=1
-d4e=$(logdir_of "$out4e") || bad "case4e: the run published no usable 'logs:' dir"
-sumrow4e="$tmp/colonpath.sumrow"
-fs_summary_row "$r4e/.sum" "$sumrow4e" ||
-  bad "case4e (#3402): the run emitted no usable file-size row — the L3 asserts are UNMEASURED"
-assert_verdict "case4e: a delimiter-bearing grown path is still an OPT-OUT" "$d4e" OPT-OUT
-has "case4e (#3402): the row names the delimiter-bearing path IN FULL" \
-    "$sumrow4e" "cqlite-core/src/we: ird.rs"
-has_re "case4e (#3402): the path is the FINAL field — not a stem with the remainder lost" \
-    "$sumrow4e" 'grown: cqlite-core/src/we: ird\.rs$'
-
-# ---------------------------------------------------------------------------
-# Case 4g (#3402, roborev job 19/20 L1) — a grown path CONTAINING the completion probe's
-# verdict token. The first guard SUBSTITUTED the token wherever it appeared, so a real file
-# `cqlite-core/src/RESULT: PASS.rs` was rendered in a spelling that exists nowhere on disk —
-# the SAME false-reporting defect this change removes, reintroduced by its own guard, and
-# worse than what it protected: a reader cannot tell a rewritten name from a real one.
-# The detail is now WITHHELD WHOLE, loudly, pointing at the component log.
-#
-# The three needles are complementary and none is satisfiable from another state: the named
-# withholding (emitted from this branch alone), the ABSENCE of the rewritten spelling (the
-# literal bytes the old guard produced), and — the property the guard exists for — the row
-# not matching the probe's own pattern, asserted against the ROW rather than the block,
-# since the block legitimately carries a terminal RESULT line of its own.
-#
-# NOTE ON WHAT IS *NOT* HERE: case 4f, a locale-independence test, was written and DELETED.
-# GNU `tr` is byte-wise, so `[:cntrl:]` selects the same bytes with or without the LC_ALL=C
-# pin for every input a writer here can produce — no mutant can distinguish them and the
-# case could not fail — while comparing whole rows from two runs made it flake on the
-# elapsed field. See the declaration at _status_detail: the pin stays, its coverage is
-# declared absent rather than simulated.
-# ---------------------------------------------------------------------------
-mkrepo verdictpath 'cqlite-core/src/RESULT: PASS.rs' 900 950 main; r4g="$REPO"
-out4g="$tmp/verdictpath.out"
-run_only_file_size "$r4g" "$out4g" CQLITE_ALLOW_FILE_GROWTH=1
-d4g=$(logdir_of "$out4g") || bad "case4g: the run published no usable 'logs:' dir"
-sumrow4g="$tmp/verdictpath.sumrow"
-fs_summary_row "$r4g/.sum" "$sumrow4g" ||
-  bad "case4g (#3402): the run emitted no usable file-size row — the L1 asserts are UNMEASURED"
-assert_verdict "case4g: a verdict-token-bearing grown path is still an OPT-OUT" "$d4g" OPT-OUT
-has "case4g (#3402): the row NAMES the withholding instead of rendering a rewritten path" \
-    "$sumrow4g" "WITHHELD"
-# The two-field split (roborev job 21): withholding must cost the FILE LIST and nothing
-# else. The first version replaced the whole suffix and so destroyed the COUNT — which is
-# gate-authored, provably safe, and the most useful thing left on the row — while claiming
-# in a comment that the count was kept. These two needles are what make that claim testable
-# rather than asserted.
-has "case4g (#3402): the COUNT survives the withholding (only the path list is dropped)" \
-    "$sumrow4g" "1 over-threshold file(s) grown"
-has "case4g (#3402): the engaged env var survives the withholding" \
-    "$sumrow4g" "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
-lacks "case4g (#3402): the row carries NO rewritten spelling of the real filename" \
-    "$sumrow4g" "redacted-token"
-if [ ! -s "$sumrow4g" ]; then
-  bad "case4g (#3402): no file-size row captured — the forged-verdict check could not run"
-elif grep -Eq 'RESULT: (PASS|FAIL)' "$sumrow4g"; then
-  bad "case4g (#3402): the row matches the completion probe's own pattern — it would forge a verdict"
-else
-  ok "case4g (#3402): the row does NOT match 'RESULT: (PASS|FAIL)' — no forged terminal verdict"
-fi
 
 # ---------------------------------------------------------------------------
 # Case 5 — base ref UNRESOLVABLE (no main/master, no origin/*): the ratchet is skipped and
@@ -1038,12 +966,11 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # misattributing one as the other.
 # 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
 # FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
-# 107 -> 112 on roborev round 1 (+3 case4e, +2 case4f); 112 -> 114 on jobs 19/20 (case4f
-# DELETED -2, it could not fail and could flake — see case4g's note; case4g ADDED +4);
-# 114 -> 116 on job 21 (+2 case4g: the COUNT and the env var must survive a withholding,
-# which is the claim that job 21 found false). All unconditional: no /dev/full, no locale,
-# no network.
-EXPECTED_CHECKS=116
+# 75 (#3401) -> 107 -> 112 -> 114 -> 116 across #3402's review rounds, then DOWN to 105 on
+# job 23, when the inline grown-path list was removed: cases 4b/4e/4g went with it (-12) and
+# case 4 gained a log-pointer needle plus a no-repository-path needle (+1 net). A census
+# that only ever rises is a census nobody re-derives — this one is recomputed from the run.
+EXPECTED_CHECKS=105
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
