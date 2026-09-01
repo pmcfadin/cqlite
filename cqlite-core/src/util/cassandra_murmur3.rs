@@ -183,8 +183,18 @@ pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
 ///
 /// Exposed so a caller that already holds `(h1, h2)` from a single
 /// [`cassandra_murmur3_x64_128`] pass can derive the token without re-hashing
-/// the key (issue #1681). `cassandra_murmur3_token(data)` is exactly
-/// `cassandra_murmur3_normalize_token(cassandra_murmur3_x64_128(data).0)`.
+/// the key (issue #1681).
+///
+/// **This is NOT the whole token function.** For a NON-EMPTY key,
+/// `cassandra_murmur3_token(data)` equals
+/// `cassandra_murmur3_normalize_token(cassandra_murmur3_x64_128(data).0)`. For an
+/// EMPTY key it does NOT: the token is [`CASSANDRA_MINIMUM_TOKEN`], because
+/// `Murmur3Partitioner.getToken(ByteBuffer, long[])` short-circuits a zero-length
+/// key to `MINIMUM` before consulting the hash, while `normalize(0) == 0`
+/// (issue #3633). A caller taking this single-pass route MUST carry its own
+/// `is_empty()` guard: reading this equivalence as unconditional is exactly how
+/// the BTI partitions writer came to place an empty key at token 0 while the
+/// reader probed at `i64::MIN`.
 pub fn cassandra_murmur3_normalize_token(h1: i64) -> i64 {
     normalize(h1)
 }
