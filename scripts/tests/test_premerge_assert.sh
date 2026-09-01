@@ -2228,9 +2228,9 @@ fi
 # Case 44 — THE C (INTENT AUDIT) VERDICT AT THE MERGE POINT (#3751)
 # =============================================================================
 # The consumer half of `scripts/flow/review-stage.sh`. A delegated review stage
-# used to write NOTHING, so its reader had only ABSENCE to reason from; six lanes
-# read that absence as "not run" correctly and nothing required them to, and the
-# seventh read an idle notice as a clean review and merged. These cases pin that
+# used to write NOTHING, so its reader had only ABSENCE to reason from. Every
+# measured instance was recorded as not-run by its own lane and nothing REQUIRED
+# it; no false certification has occurred yet. These cases pin that
 # an absent C cannot reach a merge, that routing is MEASURED rather than asserted
 # by the caller, and that the disclosed substitute keeps its own token.
 #

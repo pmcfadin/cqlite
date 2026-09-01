@@ -20,9 +20,10 @@ report?" but "what does the report say?".
   token is matched by STRING EQUALITY on its first word against a closed set, so an invented
   value (`PASS-BUT-UNMEASURED`, `NOT-APPLICABLE`) is read as `NOT-RUN`, never as a pass.
 - **An absent file is recorded as `NOT-RUN` — never as clean** — and `NOT-RUN` BLOCKS the merge
-  at `scripts/flow/premerge-assert.sh --c-verdict`. Six lanes read a silent stage as "not run"
-  correctly and nothing required them to; the seventh read an idle notice as a clean review and
-  merged. That is the defect this contract closes.
+  at `scripts/flow/premerge-assert.sh --c-verdict`. Every measured instance so far was recorded
+  as not-run BY ITS OWN LANE — the discipline held every time and NO false certification has
+  occurred — and nothing REQUIRED it. That gap is the defect this contract closes: a property
+  that holds only because each lane chose it is not a property of the pipeline.
 - **No returned message, idle notice or verbal summary substitutes for the file.** Derived from
   the definitions themselves: of the 8 files in `.claude/agents/`, the 7 carrying an explicit
   `tools:` list all OMIT `SendMessage` (`flow-lead.md` declares no `tools:` key at all), and

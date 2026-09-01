@@ -6,9 +6,9 @@
 # ---------------
 # A delegated review stage (C / rust-reviewer / coverage-reviewer / a closer, …) used to
 # write NOTHING at any point in its life. Its reader therefore had only ABSENCE to reason
-# from, and every consumer of an absence has to CHOOSE how to read it: six lanes chose
-# "not run" correctly and nothing required them to; the seventh read an idle notice as a
-# clean review and merged.
+# from, and every consumer of an absence has to CHOOSE how to read it. Every measured
+# instance so far was recorded as not-run by its own lane — the discipline held every time,
+# and NO false certification has occurred — but nothing REQUIRED it, which is the gap.
 #
 # This is #3041's mechanism transplanted. The agent gate writes
 # `RESULT: INCOMPLETE (gate did not finish)` into its summary file AT LAUNCH — before the

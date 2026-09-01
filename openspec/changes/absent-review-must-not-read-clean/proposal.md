@@ -9,8 +9,11 @@ shared channel), #3465/#3616 (a check must sit at the merge point), #2926 (tree 
 
 ## Why
 
-Five lanes on 2026-08-31 and a sixth on 2026-09-01 spawned a review subagent that **produced no report at
-all**. Nine spawns across four agent types. Every one was recorded by its lane as *not-run*, and in three
+**Five** lanes across 2026-08-31 and 2026-09-01 spawned a review subagent that **produced no report at
+all** — nine spawns across four agent types (`lane-3629`, `lane-3515`, `lane-3544`, `lane-3634`,
+`lane-3725`; the census is `docs/development/review-stage-reporting.md` §2). `lane-3414`'s two long-running
+subagents are **deliberately NOT counted**: both reported substantively, and the lead ruled explicitly that
+adding them would widen this issue to two unrelated causes. Every one was recorded by its lane as *not-run*, and in three
 cases the hand-performed substitute **found a real defect the idle agent would have been credited for**.
 
 The defect is not the agents' silence. It is that **silence has no representation**:
@@ -24,7 +27,7 @@ The defect is not the agents' silence. It is that **silence has no representatio
 A spawned `spec-auditor` that idles leaves **no artifact**, and "no artifact" is indistinguishable — to
 any automated consumer — from "not yet finished". `flow-closer` treats **C** as merge-gating; if a closer
 ever reads "no findings reported" as PASS, the stage certifies nothing while appearing to certify. The only
-thing that has prevented that is six lanes independently choosing to record the stage as not-run. **That is
+thing that has prevented that is five lanes independently choosing to record the stage as not-run. **That is
 a discipline outcome, not a mechanism outcome**, which is precisely the shape the affirmative-measurement
 rule exists to remove.
 

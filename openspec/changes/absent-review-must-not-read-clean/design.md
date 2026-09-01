@@ -7,7 +7,7 @@
 This is #3041's mechanism, transplanted. The gate writes `RESULT: INCOMPLETE (gate did not finish)` into
 its summary file *at launch*, so a reader can never mistake a just-launched run for a certified one. A
 review stage today writes nothing at any point, so its reader has only absence to reason from — and every
-consumer of an absence has to *choose* how to read it. Six lanes chose correctly; nothing required them to.
+consumer of an absence has to *choose* how to read it. Five lanes chose correctly; nothing required them to.
 
 Pre-stamping converts the question from *"is there a report?"* (two-valued, and the permissive answer is
 the dangerous one) to *"what does the report say?"* (three-valued, with the unmeasured state named).
@@ -144,7 +144,7 @@ component, so `agent-gate.components` is unchanged):
 | Instruct agents harder to report back | Tried, in writing, by two lanes. The tool to comply does not exist. |
 | Read the agent's transcript via `TaskOutput` | Deprecated for agents; the output is the full JSONL and floods the caller. |
 | Infer "clean" from an idle notice | The exact false certification this issue exists to prevent. An idle notice is *weaker* than `INCOMPLETE`: at least the sentinel names itself a non-verdict. |
-| Enforce in `flow-closer`'s prose only | Prose is what already failed; six lanes complied and nothing required them to. And a check must sit at the merge point (#3465/#3616). |
+| Enforce in `flow-closer`'s prose only | Prose is what already failed; five lanes complied and nothing required them to. And a check must sit at the merge point (#3465/#3616). |
 | Let the deadline decide the verdict | Adds a clock to a question answerable from content, and would fail a slow-but-real review. |
 | Let the caller declare C not-applicable | A caller-supplied exemption is the escape hatch; routing is measurable from the branch. |
 

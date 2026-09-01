@@ -140,8 +140,8 @@
 # -------------------------------------------------------------------
 # A delegated review stage used to write NOTHING at any point in its life, so its
 # reader had only ABSENCE to reason from — and every consumer of an absence has to
-# CHOOSE how to read it. Six lanes chose "not run" correctly and nothing required
-# them to; the seventh read an idle notice as a clean review and merged.
+# CHOOSE how to read it. Every measured instance so far was recorded as not-run by
+# its own lane and nothing REQUIRED it; no false certification has occurred yet.
 # `scripts/flow/review-stage.sh` makes a stage's verdict an ARTIFACT with a CLOSED
 # grammar; this script is the point that CONSUMES it, so an absent C can no longer
 # reach a merge.
@@ -452,9 +452,9 @@ refuse_no_c_verdict() {
     printf '  %s\n' "$1" >&2
     shift
   done
-  printf '  An ABSENT review is not a clean one (#3751). Six lanes read a silent\n' >&2
-  printf '  stage as "not run" correctly and nothing required them to; the seventh\n' >&2
-  printf '  read an idle notice as a clean review and merged. The remedy is to RUN\n' >&2
+  printf '  An ABSENT review is not a clean one (#3751). Every measured instance so\n' >&2
+  printf '  far was recorded as not-run by its own lane, and nothing REQUIRED it.\n' >&2
+  printf '  This check is that requirement. The remedy is to RUN\n' >&2
   printf '  the stage and let it record a verdict:\n' >&2
   printf '    bash scripts/flow/review-stage.sh open %s --issue <N> --agent spec-auditor\n' \
     "$C_STAGE_KIND" >&2
