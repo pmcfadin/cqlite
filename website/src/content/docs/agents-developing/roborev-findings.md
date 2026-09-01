@@ -304,8 +304,8 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    cached; vacuous baseline ~18.7k / 0). That trade was chosen deliberately over a machine guessing from
    injectable text.
 
-   **That cost is true at review time and false after the fact, which is where the best absence evidence
-   lives (#3654).** The prompt roborev *sent* is **retained in the job record** and retrievable later —
+   **That cost is true at review time, and false after the fact only for a *human* reading the stored
+   record — it stays true of the *machine*, and must (#3654).** The prompt roborev *sent* is **retained in the job record** and retrievable later —
    `roborev show <id> --prompt` — even though the snapshot file it names is transient and already deleted,
    and a delivery-by-path prompt says so in its own words under `### Combined Diff`. That is **direct**
    **direct artifact** — roborev's *actual prompt* rather than a statistic about it — and an absence-waiver
@@ -349,8 +349,9 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    review?" doubt the check exists to remove. The wrapper is unaffected (`find_job` matches
    `id`/`job_id`/`job` and then **prefers the object carrying `git_ref`**, so it lands on the job row
    either way): this is a trap for the human running the check by hand, not a live false `STALE`. For the
-   same reason, do not reach for the top-level `uuid` as a machine proxy — `job.uuid` does not exist, the
-   nested row is what is selected, and the fact would render blank.
+   same reason, do not reach for the top-level `uuid` as a machine proxy: it identifies the **review row**,
+   not the daemon, so it answers a different question however it renders. (It would not render blank in any
+   case — the writer emits no line at all for an empty value, so the key would read `NOT RECORDED`.)
 
    **A local row count is not evidence of uniqueness.** `roborev list … | jq '[.[] | select(.id==N)] |
    length'` returns `1` whether or not another box holds that id, because `list` only ever sees the **local**
@@ -377,7 +378,9 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    against box B's different review**: `sha-assert` passes, the id matches, and the authorization crosses
    reviews. "A repeated id cannot reach another box's recheck" is true of the *record* and irrelevant to the
    *marker*, which is what actually travels — and on this fleet it is not exotic: ids have already collided
-   at 265, and two lanes reviewing one branch has happened. **It is not closed here** because closing it
+   at 265, and two lanes reviewing one branch has happened (2026-09-01, a peer session and this lane both
+   landing on #3654 within seconds; cause tracked as [#3810](https://github.com/pmcfadin/cqlite/issues/3810)
+   — `CLAIM_ACTOR` defaults to the literal `flow`, so `claim.sh` answers `VERIFY-OK` to both lanes on one box). **It is not closed here** because closing it
    means adding a field to a hand-typed control line, which this issue's disposition forbids: a **design
    call, escalated to the owner and pending on #3654**. The mitigation that exists today is **operational,
    not mechanical** — the block names the issuing daemon, so an authorizer comparing `job-machine:` between

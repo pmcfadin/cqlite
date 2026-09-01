@@ -422,7 +422,8 @@ census paths in the prompt, so both FAIL. What distinguishes them is a HUMAN plu
 review's token accounting (genuine reviews measured 398k-649k input / 314k-554k cached;
 the vacuous baseline is ~18.7k input / 0 cached).
 
-THAT SENTENCE IS TRUE AT REVIEW TIME AND FALSE AFTER THE FACT, WHICH IS WHERE THE BEST
+THAT SENTENCE IS TRUE AT REVIEW TIME, AND FALSE AFTER THE FACT ONLY FOR A HUMAN READING
+THE STORED RECORD — IT STAYS TRUE OF THE MACHINE, AND MUST. THAT IS WHERE THE BEST
 EVIDENCE IS (#3654). The prompt roborev SENT is retained in the job record and can be
 retrieved later, even though the snapshot file it names is transient and long deleted:
 

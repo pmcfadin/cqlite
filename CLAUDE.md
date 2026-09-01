@@ -1384,8 +1384,8 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   What distinguishes them is a **human plus the review's token accounting** (genuine: 398k–649k input /
   314k–554k cached; vacuous baseline ~18.7k / 0). That trade was chosen over a machine guessing from
   injectable text.
-  **THAT COST IS TRUE AT REVIEW TIME AND FALSE AFTER THE FACT, WHICH IS WHERE THE BEST ABSENCE
-  EVIDENCE LIVES (#3654).** The prompt roborev SENT is RETAINED in the job record and retrievable
+  **THAT COST IS TRUE AT REVIEW TIME, AND FALSE AFTER THE FACT ONLY FOR A HUMAN READING THE STORED
+  RECORD — IT STAYS TRUE OF THE MACHINE, AND MUST (#3654).** The prompt roborev SENT is RETAINED in the job record and retrievable
   later — `roborev show <id> --prompt` — even though the snapshot file it names is transient and
   already deleted, and a delivery-by-path prompt says so in its own words under `### Combined
   Diff`. That is the **DIRECT ARTIFACT** — roborev's ACTUAL prompt rather than a statistic about it —
@@ -1414,9 +1414,10 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   NOWHERE, while `roborev list --json --repo <abs> --branch <branch>` rows carry the daemon id and
   `list`'s default branch filter follows the **`--repo` PATH's CURRENT HEAD**, not the branch your
   shell is standing in — so name `--branch` whenever that checkout is not on the job's branch, which
-  is exactly the `--recheck-job` case. (The earlier claim here, "filters by the CURRENT BRANCH",
-  meant the cwd's and was FALSE: its evidence was a `null` from a `--repo` sitting on `main`, which
-  both readings explain identically — a probe whose output cannot distinguish what it asserts.) **Read `.job`, never a `show` payload's TOP-LEVEL
+  is exactly the `--recheck-job` case. An earlier revision of this line named the cwd's branch and
+  was FALSE; the evidence offered for it — a `null` from a `--repo` sitting on `main` — is explained
+  identically by both readings, so it could never have separated them. The measurement that does:
+  from cwd `/tmp`, which is not a git repository at all, `--repo <lane>` returns that lane's rows. **Read `.job`, never a `show` payload's TOP-LEVEL
   `id`**: that is the REVIEW row's own sequence and need not be the job you asked for (measured over
   ten records — asking for 9 returns `id=8`, `job_id=9`, `job.id=9`), so a top-level jq manufactures
   the very "is this the right review?" doubt the check exists to remove. The wrapper is unaffected —
@@ -1444,7 +1445,9 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   box B against box B's DIFFERENT review: `sha-assert` passes, the id matches, the authorization
   crosses reviews. "A repeated id cannot reach another box's recheck" is true of the RECORD and
   IRRELEVANT to the MARKER, which is what actually travels; on this fleet ids have already collided
-  at 265 and two lanes have reviewed one branch. **It is NOT closed here** because closing it means
+  at 265 and two lanes have reviewed one branch (2026-09-01, a peer session and this lane both landing
+  on #3654 within seconds; cause tracked as **#3810** — `CLAIM_ACTOR` defaults to the literal `flow`, so
+  `claim.sh` answers `VERIFY-OK` to both lanes on one box). **It is NOT closed here** because closing it means
   adding a field to a hand-typed control line, which this issue's disposition forbids — a DESIGN
   CALL, escalated to the owner and PENDING on #3654. The mitigation that exists today is
   OPERATIONAL, not mechanical: the block NAMES the daemon, so an authorizer comparing `job-machine:`
