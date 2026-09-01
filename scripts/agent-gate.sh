@@ -14753,7 +14753,18 @@ EOF
     # MEASURED before adopting it: 0 of the 12 derived targets carry a lookup on a line that
     # also holds a raw-string opener, and all 12 are still accepted after the exclusion.
     _fx_lookup_src="$LOG_DIR/fx-noraw-$_fx_base.rs"
-    grep -vE 'r#*"' "$_fx_strip" > "$_fx_lookup_src" 2>/dev/null || true
+    # TRI-STATE, NOT `|| true` (roborev round 8). `|| true` was there to tolerate grep's rc 1
+    # ("no line survived the filter", which is legitimate), but it ALSO swallowed rc >= 2 —
+    # a real read/write failure — leaving a PARTIAL file that the lookup scan would then read
+    # as authoritative. That is the third time this one mechanism has taken the permissive
+    # branch on an unmeasured state (round 6: an unconsumed `_fx_fatal`; round 7: an explicit
+    # JSON null read as absence; now this), so it is spelled out rather than shortened.
+    _fx_raw_rc=0
+    grep -vE 'r#*"' "$_fx_strip" > "$_fx_lookup_src" 2>/dev/null || _fx_raw_rc=$?
+    if [ "$_fx_raw_rc" -ge 2 ]; then
+      _fx_fatal="$_fx_fatal $_fx_base(raw-string filter exit $_fx_raw_rc)"
+      continue
+    fi
     _fx_reads=0
     grep -qE 'CQLITE_DATASETS_ROOT' "$_fx_strip" 2>/dev/null && _fx_reads=1 || _fx_rrc=$?
     if [ "${_fx_rrc:-1}" -ge 2 ]; then

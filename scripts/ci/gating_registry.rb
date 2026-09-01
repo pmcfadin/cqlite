@@ -287,9 +287,35 @@ module GatingRegistry
       frontier.concat(Array(job["needs"]).map(&:to_s))
     end
 
+    # A STEP WHOSE FAILURE CANNOT FAIL THE CONTEXT IS NOT A GATING STEP (roborev round 8).
+    # `continue-on-error: true`, at step OR job level, makes a failure non-fatal, so such a
+    # step cannot carry a `required-gate-step` claim and is EXCLUDED here rather than
+    # accepted. Measured when added: ZERO steps in the aggregator's closure carry either
+    # flag, so this changes no current verdict and closes the route for the next one.
+    #
+    # DELIBERATELY NOT EXCLUDED: a step bearing an `if:`. Both claims in the registry today
+    # (`Validate workflow policy`, `cqlite-core fast representative tests`) are conditional
+    # on the docs-only short-circuit, BY DESIGN — a docs-only PR is meant to skip the core
+    # gate. Rejecting conditional steps would therefore red the registry on correct input,
+    # which is the guard agents learn to waive. So the residual is DECLARED instead: on a PR
+    # where the condition is false the named step does not run, and the exemption's gating
+    # claim is correspondingly weaker for that PR. Deciding whether a conditional step may
+    # carry the claim at all is a policy question for the registry's owner, not something to
+    # settle by tightening a parser.
     names = closure.flat_map do |job|
-      steps = jobs.dig(job, "steps")
-      steps.is_a?(Array) ? steps.filter_map { |step| step["name"].to_s if step.is_a?(Hash) && step["name"] } : []
+      job_hash = jobs[job]
+      next [] unless job_hash.is_a?(Hash)
+      next [] if job_hash["continue-on-error"] == true
+
+      steps = job_hash["steps"]
+      next [] unless steps.is_a?(Array)
+
+      steps.filter_map do |step|
+        next unless step.is_a?(Hash) && step["name"]
+        next if step["continue-on-error"] == true
+
+        step["name"].to_s
+      end
     end.reject(&:empty?)
     return [[], "the aggregating job `#{job_name}` depends on no job with a NAMED step, so no " \
                 "`required-gate-step` claim can be verified"] if names.empty?
