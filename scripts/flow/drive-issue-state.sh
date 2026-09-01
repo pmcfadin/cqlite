@@ -137,7 +137,8 @@
 #   ADOPTABLE           session differs and the recorded writer is provably GONE
 #   LIVE-PEER           session differs and the recorded writer is provably ALIVE
 #   LIVENESS-UNKNOWN    session differs and liveness could NOT be measured
-#   ERROR               an I/O or internal failure — nothing was decided
+#   ERROR               an I/O or internal failure, or an identity axis that could not be
+#                       MEASURED (axis=machine) — nothing was decided
 #   USAGE               the invocation itself was wrong — nothing was read and nothing written
 #
 # SUBCOMMANDS
@@ -195,6 +196,15 @@
 #             mirrored here and the AGREEMENT is pinned BEHAVIOURALLY by
 #             scripts/tests/test_drive_issue_state.sh, which extracts claim.sh's own
 #             definition and compares the two in one environment.
+#             IT MUST BE MEASURABLE OR THE RUN REFUSES (`verdict ERROR`, exit 1, detail naming
+#             `axis=machine`), on `write`, on `adopt` and on `verify` — the sanitizer maps an
+#             empty or unrecordable value onto the `unspecified` PLACEHOLDER, and COMMITTING
+#             that placeholder as an identity would (transiently) lock the lane out of its own
+#             marker once hostname resolution recovers and (persistently) ALIAS EVERY
+#             UNMEASURABLE BOX ONTO ONE OWNER, so lane A's marker would verify as OWNED on
+#             machine B. The refusal is at the USE SITE, never in the sanitizer: the shared
+#             placeholder is claim.sh's behaviour and stays pinned. Where no marker exists
+#             nothing is compared, so `verify`/`adopt` still report ABSENT.
 #   worktree  `pwd -P` — the physical directory holding the marker.
 #   session   CLAUDE_CODE_SESSION_ID, sanitized. `unrecorded` when unset, which makes the
 #             session axis UNMEASURED and routes to the liveness resolution.
@@ -212,7 +222,7 @@
 #
 # EXIT CODES
 #   0   OWNED / WRITTEN / ADOPTED / SHOWN
-#   1   ERROR — I/O or internal failure; nothing was decided
+#   1   ERROR — I/O or internal failure, or an unmeasurable machine axis; nothing was decided
 #   3   ABSENT — no marker; a legitimate fresh start (textually AND numerically distinct
 #       from every refusal, so a caller can tell "nothing to resume" from "refused")
 #   4   FOREIGN-ISSUE / FOREIGN-MACHINE / FOREIGN-WORKTREE
@@ -458,9 +468,71 @@ sanitize_field() {
   printf '%s\n' "$s"
 }
 
-# `hostname`'s stderr is suppressed (roborev job 26 F2): its failure is already visible as a
-# degraded machine value, and an unprefixed 'hostname: not found' would break the anchor.
-this_machine() { sanitize_field "${CLAIM_MACHINE:-$(hostname -s 2>/dev/null)}"; }
+# THE MACHINE AXIS, RESOLVED ONCE, WITH ITS MEASURABILITY CARRIED ALONGSIDE (roborev job 34 H1).
+#
+# `sanitize_field` maps an EMPTY value onto the `unspecified` PLACEHOLDER — deliberately, and
+# that behaviour is claim.sh's, mirrored here and pinned by case 11, so it is NOT changed. What
+# was wrong was COMMITTING the placeholder as an identity: with `hostname -s` failing (or
+# printing nothing) and CLAIM_MACHINE unset, the writer stamped `machine: unspecified`. A
+# TRANSIENT failure then writes a marker that turns FOREIGN-MACHINE the moment resolution
+# recovers (the lane locks itself out), and a PERSISTENT one ALIASES EVERY BOX ONTO ONE OWNER,
+# so lane A's marker verifies as OWNED on machine B — the peer-adoption defect this file exists
+# to close, arriving through the identity it was supposed to enforce.
+#
+# So the REFUSAL lives at the USE SITE (`require_machine_axis`), not in the sanitizer: the
+# claim.sh agreement is a property of the recorded VALUE, and this is a property of whether the
+# value was MEASURED at all. Resolved ONCE and cached, because two calls to `hostname` can give
+# two answers and an identity that changes mid-run is no identity.
+#
+# `hostname`'s stderr is suppressed (roborev job 26 F2): its failure is reported through the
+# anchored refusal below, and an unprefixed 'hostname: not found' would break contract (a).
+MACHINE_AXIS_VALUE=''
+MACHINE_AXIS_STATE=''   # ok | unmeasured | unrecordable
+resolve_machine_axis() {
+  [ -z "$MACHINE_AXIS_STATE" ] || return 0
+  local raw
+  # THE MIRRORED EXPRESSION — same env var, same default, same sanitizer as claim.sh's
+  # `this_machine` (see IDENTITY in the header; case 11 pins the agreement behaviourally).
+  # `|| true` INSIDE the substitution is load-bearing, and it is what the mirrored expression
+  # needs HERE that claim.sh's does not need THERE: claim.sh calls it as an ARGUMENT (a failing
+  # substitution in a word leaves the command's own status 0), while this is a plain ASSIGNMENT,
+  # whose status IS the substitution's — so under `set -e` a failing `hostname` killed the shell
+  # before the anchored refusal below could name the axis (measured: the EXIT-trap backstop's
+  # generic ERROR, with no axis=machine detail). The value is unchanged either way: empty.
+  raw="${CLAIM_MACHINE:-$(hostname -s 2>/dev/null || true)}"
+  MACHINE_AXIS_VALUE="$(sanitize_field "$raw")"
+  if [ -z "$raw" ]; then
+    MACHINE_AXIS_STATE=unmeasured
+  elif [ "$MACHINE_AXIS_VALUE" = unspecified ]; then
+    # The source said SOMETHING and none of it survives as a token (an all-punctuation
+    # CLAIM_MACHINE, or a host whose `tr` is broken, which is the fail-open case 30 used to
+    # declare as a residual). Recorded, it is the same alias, so it is refused the same way.
+    MACHINE_AXIS_STATE=unrecordable
+  else
+    MACHINE_AXIS_STATE=ok
+  fi
+}
+
+this_machine() { resolve_machine_axis; printf '%s\n' "$MACHINE_AXIS_VALUE"; }
+
+# require_machine_axis — refuse unless this box's own machine identity was MEASURED.
+# Called from the main shell ONLY (never inside `$( )`, where the refusal would exit the
+# subshell and its verdict line would be captured into a variable — the defect case 17 pins),
+# wherever the axis is about to be RECORDED or COMPARED: `write` before any mutation, and
+# `check_ownership`, which is verify's and adopt's one door. Where there is no marker at all
+# nothing is compared and ABSENT is unaffected.
+require_machine_axis() {
+  resolve_machine_axis
+  case "$MACHINE_AXIS_STATE" in
+    ok) return 0 ;;
+    unmeasured)
+      refuse ERROR 1 "axis=machine could NOT BE MEASURED: CLAIM_MACHINE is unset or empty and \`hostname -s\` produced nothing. The machine axis is fail-closed identity, and recording the 'unspecified' placeholder would ALIAS every unmeasurable box onto ONE owner (this lane's marker would then verify as OWNED on any other box) — so nothing is written, nothing is compared and nothing was decided. Set CLAIM_MACHINE to this box's unique identity, or repair hostname resolution." ;;
+    unrecordable)
+      refuse ERROR 1 "axis=machine is NOT RECORDABLE: the machine identity resolved to a value that records as the 'unspecified' placeholder (it carries no recordable characters [A-Za-z0-9._:/#-], or the sanitizer itself could not run) and would ALIAS every such box onto ONE owner. Nothing was written, nothing was compared and nothing was decided. Set CLAIM_MACHINE to this box's unique identity." ;;
+    *)
+      refuse ERROR 1 "internal: machine-axis state '$(sane "$MACHINE_AXIS_STATE")' is not one of ok|unmeasured|unrecordable — nothing was decided" ;;
+  esac
+}
 
 # this_session — the current session id, or the `unrecorded` sentinel. An unrecorded
 # session makes the session axis UNMEASURED (never "equal"), which routes to the liveness
@@ -827,6 +899,10 @@ writer_liveness() {
 check_ownership() {
   local issue="$1" mode="$2"
   local machine session
+  # An identity that could not be MEASURED is never read as MATCHING (roborev job 34 H1): with
+  # the placeholder on both sides the axis comparison SUCCEEDS, so an unmeasurable box would own
+  # every marker recorded by another unmeasurable box. Refused before any comparison.
+  require_machine_axis
   machine="$(this_machine)"; session="$(this_session)"
 
   read_marker
@@ -987,6 +1063,13 @@ write_marker() {
   # and its failure is reported through WRITE_ERR: `set -e` cannot be relied on here because
   # every caller invokes this function as `if ! write_marker ...`, which suppresses it for the
   # whole subtree (roborev job 26 F2).
+  # THE MACHINE AXIS IS RE-ASSERTED OVER THE BYTES ABOUT TO BE COMMITTED (roborev job 34 H1).
+  # The callers refuse an unmeasurable axis before they mutate anything; this is the backstop at
+  # the site that ASSEMBLES the stamp, in the same posture as the `ts` completeness check below,
+  # because a stamp with a placeholder identity is not a weaker stamp — it is an alias.
+  resolve_machine_axis
+  [ "$MACHINE_AXIS_STATE" = ok ] || {
+    WRITE_ERR="the machine axis is not recordable (state=$(sane "$MACHINE_AXIS_STATE")), so the stamp's \`machine\` field would record the 'unspecified' placeholder and alias this box onto every other unmeasurable one — nothing was written"; return 1; }
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || {
     WRITE_ERR="cannot read the current time (\`date\` failed), so the stamp's \`ts\` field cannot be recorded — refusing rather than committing a stamp with an empty required field; nothing was written"; return 1; }
   [ -n "$ts" ] || {
@@ -1013,7 +1096,7 @@ write_marker() {
   {
     printf '%s\n' "$STAMP_BEGIN"
     printf 'issue: %s\n' "$issue"
-    printf 'machine: %s\n' "$(this_machine)"
+    printf 'machine: %s\n' "$MACHINE_AXIS_VALUE"
     printf 'worktree: %s\n' "$wt"
     printf 'session: %s\n' "$session"
     printf 'session-pid: %s\n' "$pid"
@@ -1103,6 +1186,11 @@ cmd_write() {
   done
   cleared() { case " $clears " in *" $1 "*) return 0 ;; esac; return 1; }
   local actor; actor="$(resolve_actor "$actor_raw")"
+
+  # BEFORE ANY MUTATION, and before the lock: the fresh-start (ABSENT) path never reaches
+  # check_ownership, so this is the site that stops an unmeasurable machine axis being
+  # COMMITTED as the 'unspecified' placeholder (roborev job 34 H1).
+  require_machine_axis
 
   local body_src=''
   if [ -n "$bodyfile" ]; then

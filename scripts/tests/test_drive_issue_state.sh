@@ -1302,22 +1302,22 @@ else
   bad "a failing date committed a self-bricking marker or emitted no verdict: rc=$d30_rc verdict=$(verdict_of "$d30_out")
 $(printf '%s' "$d30_out" | cat -v)"
 fi
-# DECLARED RESIDUAL, MEASURED rather than implied: with `tr` shimmed the identity sanitizer
-# cannot run, and because it is called from inside `$( )` it CANNOT refuse (a `refuse` there is
-# captured, the defect case 17 pins) — so every sanitized field degrades to sanitize_field's
-# `unspecified` sentinel and the write SUCCEEDS. That is a fail-open on the machine/session
-# axes, reachable only on a host whose `tr` is broken, and it is NOT what job 26 F2 is about:
-# the sentinel is mirrored from claim.sh (case 11 pins that agreement), so changing it is a
-# separate decision. What THIS case owns is the anchor, which must hold either way.
+# THE RESIDUAL THIS CASE ONCE DECLARED IS NOW CLOSED (roborev job 34 H1). With `tr` shimmed the
+# identity sanitizer cannot run, so every sanitized field degraded to sanitize_field's
+# `unspecified` sentinel and the write SUCCEEDED — a fail-open on the machine axis, reachable on
+# any host whose `tr` is broken. The sentinel is still claim.sh's (case 11 pins that agreement)
+# and is unchanged; what changed is that COMMITTING it as an identity is refused at the USE
+# SITE, so the same shim now produces an anchored ERROR naming axis=machine and NO marker at
+# all. What this case still owns is the anchor, which must hold either way.
 tr_dir="$(shim_dir_for tr)"; L30T=$(lane leak-tr2)
 tr_out=$( cd "$L30T" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
   "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$tr_dir:$PATH" \
   bash "$DS" write 3822 2>&1 ) || true
-if all_lines_anchored "$tr_out" \
-   && grep -q '^machine: unspecified$' "$L30T/$MARKER" 2>/dev/null; then
-  ok "DECLARED RESIDUAL: a failing 'tr' leaks nothing, and the identity fields degrade to the 'unspecified' sentinel rather than to an empty (self-bricking) value"
+if all_lines_anchored "$tr_out" && [ ! -e "$L30T/$MARKER" ] \
+   && [ "$(verdict_of "$tr_out")" = ERROR ] && printf '%s\n' "$tr_out" | grep -q 'axis=machine'; then
+  ok "a failing 'tr' leaks nothing AND no longer fails open: the machine axis is refused (ERROR, axis=machine) and NO marker with a placeholder identity is committed"
 else
-  bad "a failing tr leaked a line, or the degraded marker is not the shape this residual declares:
+  bad "a failing tr leaked a line, or committed a placeholder identity instead of refusing:
 $(printf '%s' "$tr_out" | cat -v)
 $(cat "$L30T/$MARKER" 2>/dev/null | cat -v)"
 fi
@@ -1745,6 +1745,7 @@ malformed-marker:MALFORMED:8
 duplicate-sentinel:DUPLICATE-SENTINEL:8
 foreign-issue:FOREIGN-ISSUE:4
 foreign-machine:FOREIGN-MACHINE:4
+unmeasurable-machine:ERROR:1
 foreign-worktree:FOREIGN-WORKTREE:4
 adoptable:ADOPTABLE:5
 live-peer:LIVE-PEER:6
@@ -1816,6 +1817,14 @@ inv_run() {  # inv_run <row-name> — set the state up, run it, print output, re
       inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
       ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxB \
           "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$DS" verify 3822 2>&1 ) ;;
+    unmeasurable-machine)
+      # roborev job 34 H1, added to the TABLE rather than only to its own case: the class
+      # lesson on this lane is that a fix reaches one site and the next round finds the same
+      # defect one exit path over, so every new failure mode joins the one-verdict/anchor sweep.
+      sd=$(inv_bin hostname 'exit 1')
+      ( cd "$d" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u CLAIM_MACHINE \
+          "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd:$PATH" \
+          bash "$DS" write 3822 2>&1 ) ;;
     foreign-worktree)
       other=$(lane "inv-$n-other")
       inv_exec "$other" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
@@ -1966,6 +1975,92 @@ else
 fi
 
 # ===========================================================================
+case_begin 37-machine-axis-must-be-measurable "an UNMEASURABLE machine axis is refused, never committed as the 'unspecified' placeholder (roborev job 34 H1)"
+# ===========================================================================
+# THE DEFECT: `hostname -s` failing (or printing nothing) with CLAIM_MACHINE unset made the
+# machine axis sanitize to the `unspecified` PLACEHOLDER, and the writer COMMITTED it. Two
+# consequences in a file whose whole subject is ownership: a transient failure writes a stamp
+# that becomes FOREIGN-MACHINE the moment hostname resolution recovers (the lane locks ITSELF
+# out), and a PERSISTENT failure ALIASES EVERY BOX ONTO ONE OWNER — lane A's marker then
+# verifies as OWNED on machine B, which is the peer-adoption defect this issue exists to close.
+# THE ARTIFACT IS SUBSTITUTED (a PATH shim), never a settable seam.
+mkm_fail=0
+hostname_shim() {  # hostname_shim <kind> -> a PATH dir whose `hostname` fails|prints nothing|works
+  local kind="$1" d="$T/hnbin-$1"
+  mkdir -p "$d"
+  case "$kind" in
+    fail)  { printf '#!/bin/sh\n'; printf 'exit 1\n'; } >"$d/hostname" ;;
+    empty) { printf '#!/bin/sh\n'; printf 'printf ""\n'; printf 'exit 0\n'; } >"$d/hostname" ;;
+    real)  { printf '#!/bin/sh\n'; printf 'printf "realbox\\n"\n'; } >"$d/hostname" ;;
+  esac
+  chmod +x "$d/hostname"
+  printf '%s\n' "$d"
+}
+run_nomachine() {  # run_nomachine <dir> <shim-dir> <args...> — CLAIM_MACHINE UNSET
+  local dir="$1" sd="$2"; shift 2
+  ( cd "$dir" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u CLAIM_MACHINE \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$sd:$PATH" \
+      bash "$DS" "$@" 2>&1 )
+}
+for hk in fail empty; do
+  hsd="$(hostname_shim "$hk")"
+  L37=$(lane "lane37-$hk")
+  m37_out=$(run_nomachine "$L37" "$hsd" write 3822); m37_rc=$?
+  if [ "$m37_rc" -ne 0 ] && [ "$(verdict_of "$m37_out")" = ERROR ] \
+     && [ ! -e "$L37/$MARKER" ] && all_lines_anchored "$m37_out"; then
+    ok "hostname '$hk' + no CLAIM_MACHINE: write refuses ERROR and commits NO marker"
+  else
+    mkm_fail=1
+    bad "hostname '$hk': write did not refuse, or committed a marker: rc=$m37_rc verdict=$(verdict_of "$m37_out") marker=$([ -e "$L37/$MARKER" ] && echo present || echo absent)
+$m37_out"
+  fi
+  if printf '%s\n' "$m37_out" | grep -q 'axis=machine'; then
+    ok "hostname '$hk': the refusal NAMES the axis (axis=machine)"
+  else
+    bad "hostname '$hk': the refusal does not name the axis:
+$m37_out"
+  fi
+done
+# NON-VACUITY: the SAME lane, the same everything, with a WORKING hostname shim, writes.
+hsd_ok="$(hostname_shim real)"
+L37OK=$(lane lane37-real)
+m37ok_out=$(run_nomachine "$L37OK" "$hsd_ok" write 3822); m37ok_rc=$?
+if [ "$m37ok_rc" -eq 0 ] && [ "$(verdict_of "$m37ok_out")" = WRITTEN ] \
+   && grep -q '^machine: realbox$' "$L37OK/$MARKER" 2>/dev/null; then
+  ok "NON-VACUITY: a WORKING hostname writes normally (machine: realbox) — the refusals above are about the unmeasurable value, not the shim"
+else
+  bad "the working-hostname control did not write: rc=$m37ok_rc verdict=$(verdict_of "$m37ok_out")
+$m37ok_out"
+fi
+# THE ALIAS, DEMONSTRATED: a marker RECORDING the placeholder must NOT verify as OWNED just
+# because this box cannot measure its own name either. Without the use-site refusal both sides
+# read `unspecified` and the axis comparison SUCCEEDS — every box owning every marker.
+L37A=$(lane lane37-alias)
+run "$L37A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+LC_ALL=C sed -i.bak 's/^machine: boxA$/machine: unspecified/' "$L37A/$MARKER" && rm -f "$L37A/$MARKER.bak"
+cp "$L37A/$MARKER" "$T/alias-before.md"
+hsd_f="$(hostname_shim fail)"
+a37_out=$(run_nomachine "$L37A" "$hsd_f" verify 3822); a37_rc=$?
+if [ "$a37_rc" -ne 0 ] && [ "$(verdict_of "$a37_out")" = ERROR ]; then
+  ok "a recorded 'unspecified' machine does NOT alias onto an unmeasurable current machine: verify refuses ERROR (not OWNED)"
+else
+  bad "the placeholder ALIASED: verify rc=$a37_rc verdict=$(verdict_of "$a37_out") (OWNED here means every box owns every marker)
+$a37_out"
+fi
+# NOTHING IS MUTATED BY A REFUSAL — byte-for-byte, not a line count.
+w37_out=$(run_nomachine "$L37A" "$hsd_f" write 3822 --stage implement); w37_rc=$?
+d37_out=$(run_nomachine "$L37A" "$hsd_f" adopt 3822 --reason cron-reinvoke:machine-unmeasurable); d37_rc=$?
+if [ "$w37_rc" -ne 0 ] && [ "$(verdict_of "$w37_out")" = ERROR ] \
+   && [ "$d37_rc" -ne 0 ] && [ "$(verdict_of "$d37_out")" = ERROR ] \
+   && cmp -s "$T/alias-before.md" "$L37A/$MARKER"; then
+  ok "write AND adopt both refuse ERROR and the marker is BYTE-IDENTICAL afterwards (nothing was committed)"
+else
+  bad "a refused write/adopt mutated the marker or produced a non-ERROR verdict: w_rc=$w37_rc w=$(verdict_of "$w37_out") a_rc=$d37_rc a=$(verdict_of "$d37_out")
+$w37_out
+$d37_out"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1981,8 +2076,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 31-adoption-provenance-survives
 32-failed-scan-is-not-no-match 33-signals-emit-one-verdict
 34-shift-never-leaks-bash-diagnostics 35-one-verdict-per-failure-mode
-36-anchor-holds-on-every-stream 28-case-floor"
-CASE_FLOOR=36
+36-anchor-holds-on-every-stream
+37-machine-axis-must-be-measurable 28-case-floor"
+CASE_FLOOR=37
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
