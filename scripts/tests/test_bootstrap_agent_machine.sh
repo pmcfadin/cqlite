@@ -36,6 +36,25 @@ $1"; }
 # instead, by the base_warns assertion in block 7p.
 skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
+# out_has <text> <grep-args...>: a SIGPIPE-SAFE text predicate, and the reason it exists is
+# MEASURED (issue #3727): under `set -o pipefail`, `out_has "$big" PAT` returns
+# **141** once the payload exceeds the 64 KiB pipe buffer, because grep -q exits at the first match
+# and printf's next write dies — 64 KiB rc=0, 128 KiB rc=141, with the match present in both. A
+# full bootstrap run's output crossed that line when section 5b2 was added, which turned PASSING
+# cases into failures whose own debug output showed the matching text. A here-string is not a
+# pipeline, so grep's own status is the answer and pipefail has nothing to override.
+#
+# THE WHOLE FILE IS CONVERTED, and it was done because leaving it declared did not hold: three
+# separate cases fired this way across four runs as the output grew (7p-b2 — RED on pristine
+# origin/main, 7p-k, 12b-k, then the section-presence loop's CQLITE_DATASETS_ROOT), each reporting
+# the opposite of what it measured. 286 `printf … | grep -q` predicates and 2 `push_plain … |
+# grep -q` ones now route through here. What remains on purpose: pipelines whose leftmost stage is
+# NOT a whole-output printf (`git config … | grep -qF`, and two `push_plain … | grep -E … | grep -q`
+# chains whose final stage receives only a handful of lines) — those payloads cannot approach the
+# pipe buffer. If a new predicate is added, use out_has: the pipeline form is a latent false verdict,
+# not a style preference.
+out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
+
 # --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
 # OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
 # Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
@@ -297,7 +316,7 @@ fi
 
 # --- 2. --help exits 0 and prints usage ---
 help_out=$(env HOME="$tmp/help-home" CARGO_HOME="$tmp/help-home/.cargo" "$PIN_BS" "$BOOTSTRAP" --help 2>&1); help_rc=$?
-if [ "$help_rc" -eq 0 ] && printf '%s' "$help_out" | grep -q "bootstrap"; then
+if [ "$help_rc" -eq 0 ] && out_has "$help_out" "bootstrap"; then
   ok "--help exits 0 and prints usage"
 else
   bad "--help did not exit 0 / print usage (rc=$help_rc)"
@@ -431,7 +450,7 @@ fi
 
 # --- 4. The run must actually emit its section headers (it ran the checks). ---
 for section in "Rust toolchain" "Gate accelerators" "project scope" "roborev" "CQLITE_DATASETS_ROOT" "Notification channel" "Bootstrap summary"; do
-  if printf '%s' "$run_out" | grep -q "$section"; then
+  if out_has "$run_out" "$section"; then
     ok "check section present: $section"
   else
     bad "check section MISSING: $section"
@@ -601,7 +620,7 @@ mk_stub "$stubA" cc 'exit 0'
 outA=$(PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 cfgA="$sbA/.cargo/config.toml"
-if printf '%s' "$outA" | grep -q "Link accelerator: mold"; then
+if out_has "$outA" "Link accelerator: mold"; then
   ok "mold: Linux run emits the mold section"
 else
   bad "mold: Linux run did not emit the mold section"
@@ -668,7 +687,7 @@ mk_stub "$stubD" cc 'exit 1'
 mk_stub "$stubD" clang 'exit 1'
 outD=$(PATH="$stubD:$PATH" HOME="$sbD" CARGO_HOME="$sbD/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$outD" | grep -q "link probe FAILED" \
+if out_has "$outD" "link probe FAILED" \
    && [ ! -f "$sbD/.cargo/config.toml" ]; then
   ok "mold: failed link probe warns and writes no linker config"
 else
@@ -701,7 +720,7 @@ mk_stub "$stubF" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubF" cc 'exit 0'
 outF=$(PATH="$stubF:$PATH" HOME="$sbF" CARGO_HOME="$sbF/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if ! printf '%s' "$outF" | grep -q "Link accelerator: mold" \
+if ! out_has "$outF" "Link accelerator: mold" \
    && [ ! -f "$sbF/.cargo/config.toml" ]; then
   ok "mold: Darwin performs no mold detection/config (no-op)"
 else
@@ -718,8 +737,8 @@ tripG="$stubG/tripwire.log"; : >"$tripG"
 mk_stub "$stubG" apt-get "echo \"apt-get \$*\" >>\"$tripG\"; exit 0"
 outG=$(PATH="$stubG" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$outG" | grep -q "mold MISSING" \
-   && printf '%s' "$outG" | grep -q "install mold:.*apt-get install -y mold" \
+if out_has "$outG" "mold MISSING" \
+   && out_has "$outG" "install mold:.*apt-get install -y mold" \
    && [ ! -s "$tripG" ] \
    && [ ! -f "$sbG/.cargo/config.toml" ]; then
   ok "mold: missing + apt prints install command, installs nothing, writes no config"
@@ -734,7 +753,7 @@ sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"
 mk_hermetic_bin "$stubH"
 outH=$(PATH="$stubH" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$outH" | grep -q "no supported package manager" \
+if out_has "$outH" "no supported package manager" \
    && [ ! -f "$sbH/.cargo/config.toml" ]; then
   ok "mold: missing + no package manager warns and writes no config"
 else
@@ -768,7 +787,7 @@ printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native
 beforeK=$(cat "$cfgK")
 outK=$(PATH="$stubA:$PATH" HOME="$sbK" CARGO_HOME="$sbK/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$outK" | grep -q "existing \[target" \
+if out_has "$outK" "existing \[target" \
    && [ "$beforeK" = "$(cat "$cfgK")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgK"; then
   ok "mold: pre-existing [target.<triple>] section -> warn, file byte-identical, no block"
@@ -802,7 +821,7 @@ printf '[build]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgM"
 beforeM=$(cat "$cfgM")
 outM=$(PATH="$stubA:$PATH" HOME="$sbM" CARGO_HOME="$sbM/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$outM" | grep -q "existing \[build\] rustflags" \
+if out_has "$outM" "existing \[build\] rustflags" \
    && [ "$beforeM" = "$(cat "$cfgM")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgM"; then
   ok "mold: pre-existing [build] rustflags -> warn, file byte-identical, no block"
@@ -896,14 +915,14 @@ repo7a="$tmp/repo7a"; mk_fake_repo "$repo7a" "https://github.com/pmcfadin/cqlite
 gc7a="$sb7a/gitconfig"   # deliberately absent
 out7a=$(PATH="$stub7a" HOME="$sb7a" CARGO_HOME="$sb7a/.cargo" GIT_CONFIG_GLOBAL="$gc7a" \
   GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7a/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$out7a" | grep -q "git push credentials"; then
+if out_has "$out7a" "git push credentials"; then
   ok "cred: bootstrap emits the git-credential section"
 else
   bad "cred: git-credential section MISSING from bootstrap output"
 fi
-if printf '%s' "$out7a" | grep -q "\[warn\].*git push" \
-   && printf '%s' "$out7a" | grep -q "could not read Username" \
-   && printf '%s' "$out7a" | grep -q "gh auth setup-git"; then
+if out_has "$out7a" "\[warn\].*git push" \
+   && out_has "$out7a" "could not read Username" \
+   && out_has "$out7a" "gh auth setup-git"; then
   ok "cred: no helper -> warn naming the 'could not read Username' symptom + remediation"
 else
   bad "cred: no-helper case did not warn with the symptom/remediation"
@@ -983,7 +1002,7 @@ gc7c="$sb7c/gitconfig"
 out7c=$(PATH="$stub7c" HOME="$sb7c" CARGO_HOME="$sb7c/.cargo" GIT_CONFIG_GLOBAL="$gc7c" \
   GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7c/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if [ -f "$gc7c" ] && grep -q 'gh-stub' "$gc7c" && ! grep -q 'x-access-token' "$gc7c" \
-   && printf '%s' "$out7c" | grep -q "gh auth setup-git"; then
+   && out_has "$out7c" "gh auth setup-git"; then
   ok "cred: a working 'gh auth setup-git' is preferred; no \$GH_TOKEN fallback added"
 else
   bad "cred: working setup-git path did not win (fallback added or not reported)"
@@ -998,7 +1017,7 @@ repo7d="$tmp/repo7d"; mk_fake_repo "$repo7d" "git@github.com:pmcfadin/cqlite.git
 gc7d="$sb7d/gitconfig"
 out7d=$(PATH="$stub7d" HOME="$sb7d" CARGO_HOME="$sb7d/.cargo" GIT_CONFIG_GLOBAL="$gc7d" \
   GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7d/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
-if printf '%s' "$out7d" | grep -qi "SSH" \
+if out_has "$out7d" -i "SSH" \
    && ! { [ -f "$gc7d" ] && grep -q 'x-access-token' "$gc7d"; }; then
   ok "cred: SSH origin reported as its own credential path; no helper written"
 else
@@ -1041,7 +1060,7 @@ if ! grep -q 'x-access-token' "$gc7g" 2>/dev/null; then
 fi
 out7g=$(PATH="$stub7g" HOME="$sb7g" CARGO_HOME="$sb7g/.cargo" GIT_CONFIG_GLOBAL="$gc7g" \
   GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$out7g" | grep -q "\[warn\].*git push has NO credentials" \
+if out_has "$out7g" "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7g" | grep -Eq '\[ok\].*git push credentials resolve'; then
   ok "cred: helper present but GH_TOKEN unset -> WARN (a declining helper is not a credential)"
 else
@@ -1071,7 +1090,7 @@ else
 fi
 out7ge=$(PATH="$stub7ge" HOME="$sb7ge" CARGO_HOME="$sb7ge/.cargo" GIT_CONFIG_GLOBAL="$gc7ge" \
   GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$out7ge" | grep -q "\[warn\].*git push has NO credentials" \
+if out_has "$out7ge" "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7ge" | grep -Eq '\[ok\].*git push credentials resolve'; then
   ok "cred: a helper answering with an EMPTY password is not accepted as a credential"
 else
@@ -1193,7 +1212,7 @@ fi
 # advisories must see the HOST-SCOPED key this script itself writes. A bare
 # `credential.helper` lookup would go silent on exactly the config it just created,
 # muting the caveat that matters most to a systemd/cron worker.
-if printf '%s' "$out7e" | grep -q 'reads \$GH_TOKEN from the ENVIRONMENT'; then
+if out_has "$out7e" 'reads \$GH_TOKEN from the ENVIRONMENT'; then
   ok "cred: env-dependency caveat fires for the HOST-SCOPED helper the script writes"
 else
   bad "cred: env-dependency caveat missed a host-scoped helper"
@@ -1209,7 +1228,7 @@ git -C "$repo7i" config --local --add 'credential.https://github.com.helper' \
   '!f(){ test "$1" = get || exit 0; echo username=x; echo password=local-only-secret; };f'
 out7i=$(PATH="$stub7i" HOME="$sb7i" CARGO_HOME="$sb7i/.cargo" GIT_CONFIG_GLOBAL="$sb7i/gitconfig" \
   GH_TOKEN="" "$PIN_BS" "$repo7i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$out7i" | grep -q 'REPO-LOCAL scope only'; then
+if out_has "$out7i" 'REPO-LOCAL scope only'; then
   ok "cred: repo-local-scope note fires for a HOST-SCOPED local helper"
 else
   bad "cred: repo-local-scope note missed a host-scoped local helper"
@@ -1400,20 +1419,7 @@ push_plain()  { printf '%s' "$1" | sed "s/${PUSH_ESC}\[[0-9;]*m//g"; }
 # "Address the [warn] lines above", making every count one too high — and the counts
 # below are the whole basis of the delta assertion.
 push_warns()  { push_plain "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
-push_green()  { printf '%s' "$1" | grep -qF 'All checks green.'; }
-# out_has <text> <grep-args...>: a SIGPIPE-SAFE text predicate, and the reason it exists is
-# MEASURED (issue #3727): under `set -o pipefail`, `printf '%s' "$big" | grep -q PAT` returns
-# **141** once the payload exceeds the 64 KiB pipe buffer, because grep -q exits at the first match
-# and printf's next write dies — 64 KiB rc=0, 128 KiB rc=141, with the match present in both. A
-# full bootstrap run's output crossed that line when section 5b2 was added, which turned PASSING
-# cases into failures whose own debug output showed the matching text. A here-string is not a
-# pipeline, so grep's own status is the answer and pipefail has nothing to override.
-#
-# DECLARED, because it is not fixed everywhere: ~300 predicates in this file still use the
-# `printf … | grep -q` shape. Every one of them is at risk the next time bootstrap's output grows,
-# and the failure mode is a case that reports the OPPOSITE of what it measured. The four sites that
-# actually crossed the threshold are converted; the rest are a known latent class, not a clean bill.
-out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
+push_green()  { out_has "$1" -F 'All checks green.'; }
 push_verdict(){ push_plain "$1" | grep -F 'git-push:'; }
 
 # 7p-a/d. THE POSITIVE CONTROL and the OPT-OUT, measured as a pair against ONE sandbox
@@ -1427,8 +1433,8 @@ run_push "$repo7pa" "$bin7pa" "$gc7pa" --skip-push-probe --strict; out7pd=$push_
 run_push "$repo7pa" "$bin7pa" "$gc7pa" --strict; out7pa=$push_out; rc7pa=$push_rc
 base_warns=$(push_warns "$out7pd"); probe_warns=$(push_warns "$out7pa")
 
-if printf '%s' "$out7pa" | grep -q '\[ok\].*git-push: VERIFIED' \
-   && printf '%s' "$out7pa" | grep -q 'refs/claims/\*'; then
+if out_has "$out7pa" '\[ok\].*git-push: VERIFIED' \
+   && out_has "$out7pa" 'refs/claims/\*'; then
   ok "push: a REAL push (create+ls-remote+delete on a local bare repo) is reported VERIFIED as [ok]"
 else
   bad "push: the probe could not report VERIFIED even against a bare repo that accepts pushes"
@@ -1440,7 +1446,7 @@ if [ "$probe_warns" -eq $((base_warns - 1)) ]; then
 else
   bad "push: warning delta wrong (opt-out=$base_warns verified=$probe_warns)"
 fi
-if printf '%s' "$out7pd" | grep -q '\[warn\].*git-push: OPT-OUT (--skip-push-probe)'; then
+if out_has "$out7pd" '\[warn\].*git-push: OPT-OUT (--skip-push-probe)'; then
   ok "push: --skip-push-probe emits a LOUD [warn] OPT-OUT line (it cannot buy a silent pass)"
 else
   bad "push: --skip-push-probe was silent or reported ok"
@@ -1487,7 +1493,7 @@ repo7pb="$tmp/repo7pb"; mk_push_repo "$repo7pb" "file://$bare7pb"
 bin7pb="$tmp/bin7pb"; mk_push_bin "$bin7pb"
 gc7pb="$tmp/gc7pb"; : >"$gc7pb"
 run_push "$repo7pb" "$bin7pb" "$gc7pb" --strict; out7pb=$push_out; rc7pb=$push_rc
-if printf '%s' "$out7pb" | grep -q '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
+if out_has "$out7pb" '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
    && ! push_green "$out7pb" && [ "$rc7pb" -ne 0 ]; then
   ok "push: a rejected push is a [warn] FAILED naming authentication, green withheld, --strict exits $rc7pb"
 else
@@ -1499,8 +1505,8 @@ fi
 # passed only because the advice branched on `!= ssh` and swept `other` into the https
 # arm, i.e. the test asserted a property it never exercised (#3369 review). The genuine
 # https path is 7p-q below.
-if printf '%s' "$out7pb" | grep -q "remote 'origin' is a 'other' remote" \
-   && printf '%s' "$out7pb" | grep -q 'credential helper may not apply' \
+if out_has "$out7pb" "remote 'origin' is a 'other' remote" \
+   && out_has "$out7pb" 'credential helper may not apply' \
    && ! push_plain "$out7pb" | grep -E '^ *fix:' | grep -q 'gh auth setup-git'; then
   ok "push: a file:// remote's auth-shaped failure gets protocol-neutral advice, NOT https credential advice"
 else
@@ -1547,14 +1553,14 @@ repo7pc="$tmp/repo7pc"; mk_push_repo "$repo7pc" "file://$tmp/no-such-bare.git"
 bin7pc="$tmp/bin7pc"; mk_push_bin "$bin7pc"
 gc7pc="$tmp/gc7pc"; : >"$gc7pc"
 run_push "$repo7pc" "$bin7pc" "$gc7pc"; out7pc=$push_out; rc7pc=$push_rc
-if printf '%s' "$out7pc" | grep -q '\[warn\].*git-push: UNMEASURED' \
-   && printf '%s' "$out7pc" | grep -q 'git-push: UNMEASURED.*UNKNOWN, not ok'; then
+if out_has "$out7pc" '\[warn\].*git-push: UNMEASURED' \
+   && out_has "$out7pc" 'git-push: UNMEASURED.*UNKNOWN, not ok'; then
   ok "push: an unreachable remote is UNMEASURED, and the text names it as UNKNOWN"
 else
   bad "push: unreachable remote did not produce the UNMEASURED verdict"
   push_verdict "$out7pc"
 fi
-if ! printf '%s' "$out7pc" | grep -q '\[ok\].*git-push' && ! push_green "$out7pc"; then
+if ! out_has "$out7pc" '\[ok\].*git-push' && ! push_green "$out7pc"; then
   ok "push: an UNMEASURED probe is NEVER [ok] and NEVER green (affirmative-measurement rule)"
 else
   bad "push: an unmeasured push capability took the permissive branch"
@@ -1566,8 +1572,8 @@ repo7pc2="$tmp/repo7pc2"; mk_push_repo "$repo7pc2" ""
 bin7pc2="$tmp/bin7pc2"; mk_push_bin "$bin7pc2"
 gc7pc2="$tmp/gc7pc2"; : >"$gc7pc2"
 run_push "$repo7pc2" "$bin7pc2" "$gc7pc2"; out7pc2=$push_out
-if printf '%s' "$out7pc2" | grep -q "\[warn\].*git-push: UNMEASURED.*no 'origin' remote" \
-   && ! printf '%s' "$out7pc2" | grep -q '\[ok\].*git-push'; then
+if out_has "$out7pc2" "\[warn\].*git-push: UNMEASURED.*no 'origin' remote" \
+   && ! out_has "$out7pc2" '\[ok\].*git-push'; then
   ok "push: no origin remote -> UNMEASURED [warn], never [ok]"
 else
   bad "push: missing origin was not reported as UNMEASURED"
@@ -1589,8 +1595,8 @@ chmod +x "$repo7pc3/scripts/flow/claim.sh"
 bin7pc3="$tmp/bin7pc3"; mk_push_bin "$bin7pc3"
 gc7pc3="$tmp/gc7pc3"; : >"$gc7pc3"
 run_push "$repo7pc3" "$bin7pc3" "$gc7pc3"; out7pc3=$push_out
-if printf '%s' "$out7pc3" | grep -q '\[warn\].*git-push: UNMEASURED.*no SMOKE-OK/SMOKE-FAIL verdict' \
-   && ! printf '%s' "$out7pc3" | grep -q '\[ok\].*git-push'; then
+if out_has "$out7pc3" '\[warn\].*git-push: UNMEASURED.*no SMOKE-OK/SMOKE-FAIL verdict' \
+   && ! out_has "$out7pc3" '\[ok\].*git-push'; then
   ok "push: a probe that returns NO verdict is UNMEASURED — success is keyed on SMOKE-OK, not on the absence of failure"
 else
   bad "push: a verdict-less probe was not reported UNMEASURED (the permissive branch is keyed on '!= failed')"
@@ -1617,7 +1623,7 @@ mk_push_bin "$bin7pe" "echo SETUP-GIT >>\"$order7pe\"
 gc7pe1="$tmp/gc7pe1"; : >"$gc7pe1"
 run_push "$repo7pe" "$bin7pe" "$gc7pe1"; out7pe1=$push_out
 twin_log=$(tr '\n' ' ' <"$order7pe")
-if ! printf '%s' "$out7pe1" | grep -q 'git-push: VERIFIED' && [ -z "${twin_log// /}" ]; then
+if ! out_has "$out7pe1" 'git-push: VERIFIED' && [ -z "${twin_log// /}" ]; then
   ok "push: (negative twin) with no credential fix the probe never reaches the remote and never VERIFIES"
 else
   bad "push: the unwired machine reported VERIFIED (log=[$twin_log])"
@@ -1626,8 +1632,8 @@ fi
 : >"$order7pe"; gc7pe2="$tmp/gc7pe2"; : >"$gc7pe2"
 run_push "$repo7pe" "$bin7pe" "$gc7pe2" --fix-credentials; out7pe2=$push_out
 order_seq=$(sed 's/[^A-Z-]//g' "$order7pe" | tr '\n' ' ' | tr -s ' ')
-if printf '%s' "$out7pe2" | grep -q '\[ok\].*git-push: VERIFIED' \
-   && printf '%s\n' "$order_seq" | grep -q '^SETUP-GIT PUSH'; then
+if out_has "$out7pe2" '\[ok\].*git-push: VERIFIED' \
+   && out_has "$order_seq" '^SETUP-GIT PUSH'; then
   ok "push: the probe runs AFTER the credential fix — observed order [$order_seq], verdict VERIFIED"
 else
   bad "push: fix/probe ordering not established (order=[$order_seq])"
@@ -1666,9 +1672,9 @@ mk_push_bin "$bin7pj" "git config --global --add 'credential.https://push-probe.
       git config --global \"url.file://$bare7pj/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
 gc7pj="$tmp/gc7pj"; : >"$gc7pj"   # UNWIRED: no helper, no rewrite, as the image ships
 run_push "$repo7pj" "$bin7pj" "$gc7pj" --fix-credentials --strict; out7pj=$push_out; rc7pj=$push_rc
-if printf '%s' "$out7pj" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN' \
-   && ! printf '%s' "$out7pj" | grep -q '\[warn\].*git push has NO credentials' \
-   && printf '%s' "$out7pj" | grep -q '\[ok\].*git-push: VERIFIED'; then
+if out_has "$out7pj" '\[ok\].*git credentials WIRED BY THIS RUN' \
+   && ! out_has "$out7pj" '\[warn\].*git push has NO credentials' \
+   && out_has "$out7pj" '\[ok\].*git-push: VERIFIED'; then
   ok "push: an unwired box repaired by --fix-credentials reports ONE [ok] verdict — no pre-repair warning survives the repair"
 else
   bad "push: the repaired box still carries a credential WARNING (verify.run would fail on a box it just fixed)"
@@ -1700,16 +1706,16 @@ repo7pk="$tmp/repo7pk"; mk_push_repo "$repo7pk" "file://$bare7pk"
 bin7pk="$tmp/bin7pk"; mk_push_bin "$bin7pk"
 gc7pk="$tmp/gc7pk"; : >"$gc7pk"
 run_push "$repo7pk" "$bin7pk" "$gc7pk" --strict; out7pk=$push_out; rc7pk=$push_rc
-if printf '%s' "$out7pk" | grep -q '\[warn\].*git-push: FAILED' \
-   && push_plain "$out7pk" | grep -q 'reason=cleanup-unverified' \
-   && ! printf '%s' "$out7pk" | grep -q 'git-push: VERIFIED' \
+if out_has "$out7pk" '\[warn\].*git-push: FAILED' \
+   && out_has "$(push_plain "$out7pk")" 'reason=cleanup-unverified' \
+   && ! out_has "$out7pk" 'git-push: VERIFIED' \
    && ! push_green "$out7pk" && [ "$rc7pk" -ne 0 ]; then
   ok "push: an unsuccessful cleanup delete is FAILED, never VERIFIED (green withheld, --strict exits $rc7pk)"
 else
   bad "push: delete failure was reported as success (rc=$rc7pk)"
   push_verdict "$out7pk"
 fi
-if push_plain "$out7pk" | grep -q "git ls-remote .* refs/claims/smoke-"; then
+if out_has "$(push_plain "$out7pk")" "git ls-remote .* refs/claims/smoke-"; then
   ok "push: the quoted verdict reaches the operator with the ls-remote check for the possibly-stranded ref"
 else
   bad "push: cleanup-unverified verdict lost its stray-ref guidance in transit"
@@ -1737,8 +1743,8 @@ printf '#!/usr/bin/env bash\necho "hint: a healthy run prints CLAIM: SMOKE-OK he
   >"$repo7pk/scripts/flow/claim.sh"
 chmod +x "$repo7pk/scripts/flow/claim.sh"
 run_push "$repo7pk" "$bin7pk" "$gc7pk"; out7pk2=$push_out
-if printf '%s' "$out7pk2" | grep -q '\[warn\].*git-push: UNMEASURED' \
-   && ! printf '%s' "$out7pk2" | grep -q '\[ok\].*git-push'; then
+if out_has "$out7pk2" '\[warn\].*git-push: UNMEASURED' \
+   && ! out_has "$out7pk2" '\[ok\].*git-push'; then
   ok "push: the SMOKE-OK token in unanchored prose (plus a nonzero exit) does NOT satisfy the probe"
 else
   bad "push: a prose mention of SMOKE-OK was accepted as the verdict"
@@ -1765,9 +1771,9 @@ gc7pl="$tmp/gc7pl"; : >"$gc7pl"
 export CLAIM_REMOTE=upstream      # unset immediately after: it must not leak into later cases
 run_push "$repo7pl" "$bin7pl" "$gc7pl" --fix-credentials --strict; out7pl=$push_out; rc7pl=$push_rc
 unset CLAIM_REMOTE
-if printf '%s' "$out7pl" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
-   && printf '%s' "$out7pl" | grep -q "\[ok\].*git-push: VERIFIED.*'upstream'" \
-   && ! printf '%s' "$out7pl" | grep -q "no credential helper applies"; then
+if out_has "$out7pl" '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
+   && out_has "$out7pl" "\[ok\].*git-push: VERIFIED.*'upstream'" \
+   && ! out_has "$out7pl" "no credential helper applies"; then
   ok "push: with CLAIM_REMOTE set, the credential half and the push probe address the SAME remote"
 else
   bad "push: credential half and push probe addressed different remotes (rc=$rc7pl)"
@@ -1782,8 +1788,8 @@ git -C "$repo7pl2" remote set-url --push origin "https://push-probe.invalid/cqli
 bin7pl2="$tmp/bin7pl2"; mk_push_bin "$bin7pl2"
 gc7pl2="$tmp/gc7pl2"; : >"$gc7pl2"
 run_push "$repo7pl2" "$bin7pl2" "$gc7pl2"; out7pl2=$push_out
-if printf '%s' "$out7pl2" | grep -q '\[warn\].*git push has NO credentials for push-probe.invalid' \
-   && ! printf '%s' "$out7pl2" | grep -q "no credential helper applies"; then
+if out_has "$out7pl2" '\[warn\].*git push has NO credentials for push-probe.invalid' \
+   && ! out_has "$out7pl2" "no credential helper applies"; then
   ok "push: an origin with a differing pushurl is judged on its PUSH host, not its fetch host"
 else
   bad "push: pushurl was ignored — the credential verdict is about the wrong host"
@@ -1820,7 +1826,7 @@ if [ -n "$TIMEOUT_KILL_TEST" ]; then
   hang_elapsed=$(( $(date +%s) - hang_start ))
   # rc 124 OR 137 both mean the OUTER ceiling fired (137 = the watchdog had to SIGKILL
   # bootstrap itself), i.e. the inner bound failed to bound. Either is a failure here.
-  if [ "$hang_rc" -ne 124 ] && [ "$hang_rc" -ne 137 ] && printf '%s' "$hang_out" | grep -q '\[warn\].*git-push: UNMEASURED.*exceeded its 60s bound and was killed' \
+  if [ "$hang_rc" -ne 124 ] && [ "$hang_rc" -ne 137 ] && out_has "$hang_out" '\[warn\].*git-push: UNMEASURED.*exceeded its 60s bound and was killed' \
      && [ "$hang_elapsed" -lt 120 ]; then
     ok "push: a SIGTERM-ignoring probe child is KILLED at the bound + grace — bootstrap still completes (${hang_elapsed}s) and reports UNMEASURED"
   else
@@ -1847,9 +1853,9 @@ bin7pn="$tmp/bin7pn"; mk_push_bin "$bin7pn"
 mk_stub "$bin7pn" ssh 'echo "git@push-probe.invalid: Permission denied (publickey)." >&2; exit 255'
 gc7pn="$tmp/gc7pn"; : >"$gc7pn"
 run_push "$repo7pn" "$bin7pn" "$gc7pn"; out7pn=$push_out
-if printf '%s' "$out7pn" | grep -q '\[warn\].*git-push: FAILED' \
-   && printf '%s' "$out7pn" | grep -q 'authenticates with your SSH KEY' \
-   && printf '%s' "$out7pn" | grep -q 'ssh-add -l' \
+if out_has "$out7pn" '\[warn\].*git-push: FAILED' \
+   && out_has "$out7pn" 'authenticates with your SSH KEY' \
+   && out_has "$out7pn" 'ssh-add -l' \
    && ! push_plain "$out7pn" | grep -E '^ *fix:|^ *  *then re-run' | grep -q 'gh auth setup-git'; then
   ok "push: an SSH remote's push failure advises SSH keys, NOT 'gh auth setup-git' (which cannot affect key auth)"
 else
@@ -1874,16 +1880,16 @@ gc7ps="$tmp/gc7ps"; : >"$gc7ps"
 run_push "$repo7ps" "$bin7ps" "$gc7ps"; out7ps=$push_out
 # Guard the guard: without the FAILED verdict + SSH advice the run never reached the lines
 # under test, and "the secret is absent" would be true for the wrong reason.
-if printf '%s' "$out7ps" | grep -q '\[warn\].*git-push: FAILED' \
-   && printf '%s' "$out7ps" | grep -q 'authenticates with your SSH KEY'; then
+if out_has "$out7ps" '\[warn\].*git-push: FAILED' \
+   && out_has "$out7ps" 'authenticates with your SSH KEY'; then
   ok "push: (precondition) 7p-s(i) reaches the FAILED verdict and the SSH advice branch"
 else
   bad "push: 7p-s(i) precondition FAILED — the advice branch was not reached, the secret assert would be vacuous"
   push_plain "$out7ps" | grep -E 'git-push|fix:' | head -4
 fi
-if ! printf '%s' "$out7ps" | grep -qF "$URL_SECRET" \
-   && printf '%s' "$out7ps" | grep -q "remote 'origin' is an SSH remote" \
-   && printf '%s' "$out7ps" | grep -q 'remote get-url --push origin'; then
+if ! out_has "$out7ps" -F "$URL_SECRET" \
+   && out_has "$out7ps" "remote 'origin' is an SSH remote" \
+   && out_has "$out7ps" 'remote get-url --push origin'; then
   ok "push: a credential embedded in an SSH remote URL is NEVER printed — the advice names the remote and where to read the URL locally"
 else
   bad "push: the remote URL (and its embedded secret) reached the output"
@@ -1897,9 +1903,9 @@ repo7ps2="$tmp/repo7ps2"; mk_push_repo "$repo7ps2" "https://cq:p@${URL_SECRET}@p
 bin7ps2="$tmp/bin7ps2"; mk_push_bin "$bin7ps2"
 gc7ps2="$tmp/gc7ps2"; : >"$gc7ps2"
 run_push "$repo7ps2" "$bin7ps2" "$gc7ps2"; out7ps2=$push_out
-if printf '%s' "$out7ps2" | grep -q 'git push has NO credentials for push-probe.invalid' \
-   && ! printf '%s' "$out7ps2" | grep -qF "$URL_SECRET" \
-   && ! printf '%s' "$out7ps2" | grep -q '@push-probe.invalid'; then
+if out_has "$out7ps2" 'git push has NO credentials for push-probe.invalid' \
+   && ! out_has "$out7ps2" -F "$URL_SECRET" \
+   && ! out_has "$out7ps2" '@push-probe.invalid'; then
   ok "push: a password containing '@' does not leak into the printed host (userinfo is split at the LAST '@')"
 else
   bad "push: the parsed host carried a credential fragment"
@@ -1930,9 +1936,9 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   # bound provably does not bound a child that ignores SIGTERM and hanging the launcher is
   # worse than a red verdict. Nothing is pushed, green is withheld, --strict exits nonzero.
   refs7po=$(git ls-remote "$bare7po" 'refs/claims/*' 2>/dev/null | wc -l | tr -d ' ')
-  if printf '%s' "$out7po" | grep -q 'does not accept --kill-after' \
-     && printf '%s' "$out7po" | grep -q '\[warn\].*git-push: UNMEASURED.*cannot hard-kill' \
-     && ! printf '%s' "$out7po" | grep -q '\[ok\].*git-push' \
+  if out_has "$out7po" 'does not accept --kill-after' \
+     && out_has "$out7po" '\[warn\].*git-push: UNMEASURED.*cannot hard-kill' \
+     && ! out_has "$out7po" '\[ok\].*git-push' \
      && [ "${refs7po:-0}" -eq 0 ] && ! push_green "$out7po" && [ "$rc7po" -ne 0 ]; then
     ok "push: a timeout that cannot hard-kill is still used for other probes, but the MUTATING push is REFUSED — nothing pushed, green withheld, --strict exits $rc7po"
   else
@@ -1956,8 +1962,8 @@ bin7pp="$tmp/bin7pp"; mk_push_bin "$bin7pp"
 gc7pp="$tmp/gc7pp"; : >"$gc7pp"
 run_push "$repo7pp" "$bin7pp" "$gc7pp" --strict; out7pp=$push_out; rc7pp=$push_rc
 refs7pp=$(( $(git ls-remote "$bare7pp1" 'refs/claims/*' 2>/dev/null | wc -l) + $(git ls-remote "$bare7pp2" 'refs/claims/*' 2>/dev/null | wc -l) ))
-if printf '%s' "$out7pp" | grep -q '\[warn\].*git-push: UNMEASURED.*2 push URLs' \
-   && ! printf '%s' "$out7pp" | grep -q '\[ok\].*git-push' \
+if out_has "$out7pp" '\[warn\].*git-push: UNMEASURED.*2 push URLs' \
+   && ! out_has "$out7pp" '\[ok\].*git-push' \
    && [ "$refs7pp" -eq 0 ] && ! push_green "$out7pp" && [ "$rc7pp" -ne 0 ]; then
   ok "push: a multi-push-URL remote is UNMEASURED and NOTHING is pushed to either destination (green withheld)"
 else
@@ -1980,16 +1986,16 @@ gc7pq="$tmp/gc7pq"; : >"$gc7pq"
 run_push "$repo7pq" "$bin7pq" "$gc7pq" --fix-credentials --strict; out7pq=$push_out; rc7pq=$push_rc
 # Guard the guard: if the classification were not https, this case would be testing the
 # same `other` path as 7p-b and its assertion would be vacuous again.
-if printf '%s' "$out7pq" | grep -q 'push-probe.invalid' \
-   && ! printf '%s' "$out7pq" | grep -q "is a 'other' remote"; then
+if out_has "$out7pq" 'push-probe.invalid' \
+   && ! out_has "$out7pq" "is a 'other' remote"; then
   ok "push: (precondition) 7p-q's remote really is classified https"
 else
   bad "push: 7p-q precondition FAILED — not an https classification, the advice assertion below is vacuous"
 fi
-if printf '%s' "$out7pq" | grep -q '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
-   && printf '%s' "$out7pq" | grep -q 'gh auth setup-git' \
-   && printf '%s' "$out7pq" | grep -q -- '--fix-credentials' \
-   && printf '%s' "$out7pq" | grep -q 'contents:write' \
+if out_has "$out7pq" '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
+   && out_has "$out7pq" 'gh auth setup-git' \
+   && out_has "$out7pq" -- '--fix-credentials' \
+   && out_has "$out7pq" 'contents:write' \
    && [ "$rc7pq" -ne 0 ]; then
   ok "push: a real HTTPS auth failure prints the credential remediation AND the write-scope possibility"
 else
@@ -2102,7 +2108,7 @@ run_push "$repo7pr" "$bin7pr" "$gc7pr" --fix-credentials --strict; out7pr=$push_
 helper7pr=$(git config --file "$gc7pr" --get-all 'credential.https://push-probe.invalid.helper' 2>/dev/null | wc -l | tr -d ' ')
 tokleak7pr=$(grep -cF "$FAKE_TOKEN" "$gc7pr" 2>/dev/null || true)
 if [ "${helper7pr:-0}" -eq 0 ] && [ "${tokleak7pr:-0}" -eq 0 ] \
-   && printf '%s' "$out7pr" | grep -q '\[warn\].*push-probe.invalid.*REFUSED to configure any' \
+   && out_has "$out7pr" '\[warn\].*push-probe.invalid.*REFUSED to configure any' \
    && ! push_green "$out7pr" && [ "$rc7pr" -ne 0 ]; then
   ok "push: a token that is NOT authoritative for the push host is NOT configured for it — the refusal warns, green is withheld, --strict exits $rc7pr"
 else
@@ -2111,7 +2117,7 @@ else
 fi
 # Neither token may appear anywhere in the output: the comparison is in-process, and the
 # diagnosis names the HOST, never a secret.
-if ! printf '%s' "$out7pr" | grep -qF "$FAKE_TOKEN" && ! printf '%s' "$out7pr" | grep -qF "$ENTERPRISE_TOKEN"; then
+if ! out_has "$out7pr" -F "$FAKE_TOKEN" && ! out_has "$out7pr" -F "$ENTERPRISE_TOKEN"; then
   ok "push: the authority check prints NEITHER token — the refusal names only the host"
 else
   bad "push: a token value leaked into the bootstrap output"
@@ -2120,7 +2126,7 @@ fi
 # "could not configure any" warning, or a single fault would be counted twice.
 if [ "$base_warns" -eq 1 ]; then
   if [ "$(push_warns "$out7pr")" -eq 1 ] \
-     && ! printf '%s' "$out7pr" | grep -q 'could NOT configure any'; then
+     && ! out_has "$out7pr" 'could NOT configure any'; then
     ok "push: the refusal is exactly ONE warning and names the host, not a generic second verdict"
   else
     bad "push: refusal emitted $(push_warns "$out7pr") warnings (expected 1)"
@@ -2141,9 +2147,9 @@ gc7pr2="$tmp/gc7pr2"; : >"$gc7pr2"
 run_push "$repo7pr2" "$bin7pr2" "$gc7pr2" --fix-credentials --strict; out7pr2=$push_out; rc7pr2=$push_rc
 helper7pr2=$(git config --file "$gc7pr2" --get-all 'credential.https://push-probe.invalid.helper' 2>/dev/null | grep -cF 'x-access-token' || true)
 if [ "${helper7pr2:-0}" -ge 1 ] \
-   && printf '%s' "$out7pr2" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
-   && printf '%s' "$out7pr2" | grep -q '\[ok\].*git-push: VERIFIED' \
-   && ! printf '%s' "$out7pr2" | grep -q 'REFUSED to configure any'; then
+   && out_has "$out7pr2" '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
+   && out_has "$out7pr2" '\[ok\].*git-push: VERIFIED' \
+   && ! out_has "$out7pr2" 'REFUSED to configure any'; then
   ok "push: (positive control) the AUTHORITATIVE token is repaired exactly as before — helper written, credentials WIRED, push VERIFIED"
 else
   bad "push: the authority gate broke the repair on its own host (helpers=${helper7pr2:-0} rc=$rc7pr2)"
@@ -2168,8 +2174,8 @@ rm -f "$repo7pg/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"   # one ADV
 bin7pg="$tmp/bin7pg"; mk_push_bin "$bin7pg"
 gc7pg="$tmp/gc7pg"; : >"$gc7pg"
 run_push "$repo7pg" "$bin7pg" "$gc7pg" --strict; out7pg=$push_out; rc7pg=$push_rc
-if printf '%s' "$out7pg" | grep -q '\[ok\].*git-push: VERIFIED' \
-   && printf '%s' "$out7pg" | grep -q 'no \*-Data.db files found' \
+if out_has "$out7pg" '\[ok\].*git-push: VERIFIED' \
+   && out_has "$out7pg" 'no \*-Data.db files found' \
    && ! push_green "$out7pg" && [ "$rc7pg" -ne 0 ]; then
   ok "push: an ADVISORY warning withholds green AND fails --strict, even with push VERIFIED (--strict is not blocking-only)"
 else
@@ -2204,18 +2210,18 @@ fi
 #   both must be documented and each must skip only its own thing. 7p-a ran with
 #   --skip-smoke ALONE and still probed; 7p-d ran with BOTH and skipped only the probe.
 push_help=$(env HOME="$tmp/help-home" CARGO_HOME="$tmp/help-home/.cargo" "$PIN_BS" "$BOOTSTRAP" --help 2>&1)
-if printf '%s' "$push_help" | grep -q -- '--skip-push-probe' \
-   && printf '%s' "$push_help" | grep -q -- '--skip-smoke' \
-   && printf '%s' "$push_help" | grep -q -- '--fix-credentials' \
-   && printf '%s' "$push_help" | grep -q -- '--strict'; then
+if out_has "$push_help" -- '--skip-push-probe' \
+   && out_has "$push_help" -- '--skip-smoke' \
+   && out_has "$push_help" -- '--fix-credentials' \
+   && out_has "$push_help" -- '--strict'; then
   ok "push: --help documents --skip-push-probe, --skip-smoke, --fix-credentials and --strict"
 else
   bad "push: --help does not document the new flags"
 fi
-if printf '%s' "$out7pa" | grep -q 'git-push: VERIFIED' \
-   && printf '%s' "$out7pa" | grep -q 'skipped (--skip-smoke)' \
-   && printf '%s' "$out7pd" | grep -q 'git-push: OPT-OUT' \
-   && printf '%s' "$out7pd" | grep -q 'skipped (--skip-smoke)'; then
+if out_has "$out7pa" 'git-push: VERIFIED' \
+   && out_has "$out7pa" 'skipped (--skip-smoke)' \
+   && out_has "$out7pd" 'git-push: OPT-OUT' \
+   && out_has "$out7pd" 'skipped (--skip-smoke)'; then
   ok "push: --skip-smoke skips only the gate run; --skip-push-probe skips only the push probe"
 else
   bad "push: the two skip flags are not independent"
@@ -2357,18 +2363,18 @@ EOF
 #     unusable, GraphQL fine. Today's scope-string check prints an unqualified
 #     "board dispatch works" here — that verdict must be impossible.
 run_board_case falseok "'project', 'repo', 'workflow'" "'read:org'" 1 0
-if printf '%s' "$BOARD_OUT" | grep -q "board dispatch works"; then
+if out_has "$BOARD_OUT" "board dispatch works"; then
   bad "board: scope-present-but-gh-project-unusable STILL prints 'board dispatch works'"
 else
   ok "board: scope present + gh project unusable -> no unqualified 'board dispatch works'"
 fi
-if printf '%s' "$BOARD_OUT" | grep -q "updateProjectV2ItemFieldValue"; then
+if out_has "$BOARD_OUT" "updateProjectV2ItemFieldValue"; then
   ok "board: names the updateProjectV2ItemFieldValue GraphQL write fallback"
 else
   bad "board: never named the updateProjectV2ItemFieldValue fallback"
   printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
 fi
-if printf '%s' "$BOARD_OUT" | grep -qi "read:org"; then
+if out_has "$BOARD_OUT" -i "read:org"; then
   ok "board: surfaces the read:org scope gap gh itself reports"
 else
   bad "board: did not surface the read:org gap"
@@ -2377,8 +2383,8 @@ fi
 # 8b. `gh project` READ works but gh still reports missing required scopes — the
 #     write (`item-edit`) can fail. Still not an unqualified success.
 run_board_case partial "'project', 'repo', 'workflow'" "'read:org'" 0 0
-if ! printf '%s' "$BOARD_OUT" | grep -q "board dispatch works" \
-   && printf '%s' "$BOARD_OUT" | grep -q "updateProjectV2ItemFieldValue"; then
+if ! out_has "$BOARD_OUT" "board dispatch works" \
+   && out_has "$BOARD_OUT" "updateProjectV2ItemFieldValue"; then
   ok "board: read-OK + missing required scopes -> qualified verdict naming the fallback"
 else
   bad "board: read-OK + missing scopes reported as unqualified success"
@@ -2402,7 +2408,7 @@ fi
 # 8d. Unreachable board (both probes fail) -> a loud warn, never a scope-based pass.
 run_board_case unreachable "'project', 'repo', 'workflow'" "" 1 1
 if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*board' \
-   && ! printf '%s' "$BOARD_OUT" | grep -q "board dispatch works"; then
+   && ! out_has "$BOARD_OUT" "board dispatch works"; then
   ok "board: both probes failing -> warn (scope match never rescues the verdict)"
 else
   bad "board: unreachable board did not warn"
@@ -2469,7 +2475,7 @@ run_board_auth_case active-noproject 'github.com
   - Active account: true
   - Token scopes: '"'"'read:project'"'"', '"'"'repo'"'"''
 if ! printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #1.*reachable' \
-   && printf '%s' "$BOARD_OUT" | grep -q "'project' scope MISSING on gh account 'pmcfadin'"; then
+   && out_has "$BOARD_OUT" "'project' scope MISSING on gh account 'pmcfadin'"; then
   ok "board: scopes are read from the ACTIVE stanza, not the first one printed"
 else
   bad "board: scopes were read from a non-active (first-listed) account"
@@ -2477,7 +2483,7 @@ else
 fi
 
 # 8h-iii. The operator must be able to see WHICH account the verdict is about.
-if printf '%s' "$BOARD_OUT" | grep -q "measuring gh account 'pmcfadin'"; then
+if out_has "$BOARD_OUT" "measuring gh account 'pmcfadin'"; then
   ok "board: names the account the verdict is about"
 else
   bad "board: verdict does not name the account it measured"
@@ -2565,7 +2571,7 @@ if ! grep -q -- 'auth switch' "$log8j" && [ "$(cat "$state8j")" = other-emu ]; t
 else
   bad "board: attempted an account switch while GH_TOKEN was in force"
 fi
-if printf '%s' "$out8j" | grep -q "from GH_TOKEN in the environment"; then
+if out_has "$out8j" "from GH_TOKEN in the environment"; then
   ok "board: names the env token as the identity source"
 else
   bad "board: did not disclose that the identity came from GH_TOKEN"
@@ -2599,14 +2605,14 @@ out8k=$(PATH="$stub8k" HOME="$sb8k" CARGO_HOME="$sb8k/.cargo" GIT_CONFIG_GLOBAL=
   CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" "$PIN_BS" "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out8k" | grep -Eq '\[ok\].*board #.*reachable'; then
   bad "board: unexported CQLITE_PROJECT_NUMBER still produced a green 'reachable' verdict"
-elif printf '%s' "$out8k" | grep -q 'CQLITE_PROJECT_NUMBER is NOT exported'; then
+elif out_has "$out8k" 'CQLITE_PROJECT_NUMBER is NOT exported'; then
   ok "board: unexported CQLITE_PROJECT_NUMBER is reported as a dispatch blocker"
 else
   bad "board: unexported CQLITE_PROJECT_NUMBER neither warned nor blocked the green verdict"
   printf '%s\n' "$out8k" | grep -i -A2 "board"
 fi
 if [ -n "$jqp" ]; then
-  if printf '%s' "$out8k" | grep -q 'export CQLITE_PROJECT_NUMBER=7'; then
+  if out_has "$out8k" 'export CQLITE_PROJECT_NUMBER=7'; then
     ok "board: discovers the number by title and prints the exact export line"
   else
     bad "board: did not resolve the board by title / print the export line"
@@ -2622,7 +2628,7 @@ run_board_auth_case nonumber 'github.com
   - Active account: true
   - Token scopes: '"'"'project'"'"', '"'"'read:org'"'"', '"'"'repo'"'"'' CQLITE_PROJECT_NUMBER=
 if ! printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #.*reachable' \
-   && printf '%s' "$BOARD_OUT" | grep -q 'setup-project-board.sh'; then
+   && out_has "$BOARD_OUT" 'setup-project-board.sh'; then
   ok "board: unresolvable board number -> no green, points at setup-project-board.sh"
 else
   bad "board: unresolvable board number did not block the green verdict"
@@ -2670,7 +2676,7 @@ if grep -q 'NOTIFY_LIB=.*scripts/lib/gate-notify.sh' "$BOOTSTRAP" \
 else
   bad "notify: bootstrap does not run the wrapper's self-test (existence check only?)"
 fi
-if printf '%s' "$run_out" | grep -q 'notify contract v'; then
+if out_has "$run_out" 'notify contract v'; then
   ok "notify: bootstrap RECORDS the pinned contract version"
 else
   bad "notify: bootstrap did not record a pinned notify contract version"
@@ -2681,7 +2687,7 @@ else
   bad "notify: bootstrap prescribes the swallowed --category shape"
 fi
 # The section is informational: a machine with no notify target must still finish.
-if printf '%s' "$run_out" | grep -q 'Notification channel' && [ "$run_rc" -eq 0 ]; then
+if out_has "$run_out" 'Notification channel' && [ "$run_rc" -eq 0 ]; then
   ok "notify: the section is informational — the run still exits 0"
 else
   bad "notify: the section is not informational (rc=$run_rc)"
@@ -2692,8 +2698,8 @@ fi
 redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
   CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if printf '%s' "$redact_out" | grep -q 'notify target configured' \
-   && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
+if out_has "$redact_out" 'notify target configured' \
+   && ! out_has "$redact_out" -E 's3cr3t-token|alice:'; then
   ok "notify: URL userinfo is redacted from the reported target"
 else
   bad "notify: the reported target leaked URL userinfo"
@@ -2749,8 +2755,8 @@ runnotifyroot() { # runnotifyroot <dir> [env assignments...]
 goodroot="$tmp/notify-good"
 if mknotifyroot "$goodroot" good; then
   good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
-  if printf '%s' "$good_out" | grep -q 'notify capability verified' \
-     && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
+  if out_has "$good_out" 'notify capability verified' \
+     && ! out_has "$good_out" 'notify self-test FAILED'; then
     ok "notify capability: a HEALTHY wrapper is reported verified"
   else
     bad "notify capability: healthy wrapper was not reported verified"
@@ -2765,8 +2771,8 @@ fi
 badroot="$tmp/notify-broken"
 if mknotifyroot "$badroot" broken; then
   bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
-  if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
-     && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
+  if out_has "$bad_out" 'notify self-test FAILED' \
+     && ! out_has "$bad_out" 'notify capability verified'; then
     ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
   else
     bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
@@ -2784,9 +2790,9 @@ if mknotifyroot "$tmp/notify-notarget" good; then
     CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
   notarget_rc=$?
   if [ "$notarget_rc" -eq 0 ] \
-     && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
-     && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
-     && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
+     && out_has "$notarget_out" 'no notify target configured' \
+     && out_has "$notarget_out" 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
+     && out_has "$notarget_out" 'silent no-ops on this machine'; then
     ok "notify no-target: warns, prints the exact export line, and still exits 0"
   else
     bad "notify no-target case (rc=$notarget_rc)"
@@ -2906,8 +2912,8 @@ else
   envf_a="$tmp/pin-env-a"; : >"$envf_a"
   out_a=$(runpin "$pinroot" "$shims_none" "$envf_a" HOME="$pin_home_plain" \
     CQLITE_GATE_MAX_CONCURRENCY=7)
-  if printf '%s' "$out_a" | grep -q 'gate-pin: FAILED' \
-     && ! printf '%s' "$out_a" | grep -q 'gate-pin: VERIFIED'; then
+  if out_has "$out_a" 'gate-pin: FAILED' \
+     && ! out_has "$out_a" 'gate-pin: VERIFIED'; then
     ok "gate-pin: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
   else
     bad "gate-pin: an inherited value was accepted as evidence the box is pinned"
@@ -2920,8 +2926,8 @@ else
   shims_one="$tmp/pin-shims-one"; mkpinshims "$shims_one" 1
   envf_b="$tmp/pin-env-b"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_b"
   out_b=$(runpin "$pinroot" "$shims_one" "$envf_b" HOME="$pin_home_plain")
-  if printf '%s' "$out_b" | grep -q 'gate-pin: VERIFIED' \
-     && ! printf '%s' "$out_b" | grep -q 'gate-pin: FAILED'; then
+  if out_has "$out_b" 'gate-pin: VERIFIED' \
+     && ! out_has "$out_b" 'gate-pin: FAILED'; then
     ok "gate-pin: a pin a fresh profile-free session CAN see is reported VERIFIED"
   else
     bad "gate-pin: a genuinely visible pin was not reported VERIFIED"
@@ -2934,9 +2940,9 @@ else
   envf_c="$tmp/pin-env-c"; : >"$envf_c"
   out_c=$(runpin "$pinroot" "$shims_nosudo" "$envf_c" HOME="$pin_home_plain" \
     CQLITE_GATE_MAX_CONCURRENCY=7)
-  if printf '%s' "$out_c" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-     && printf '%s' "$out_c" | grep -q "no 'sudo' on this box" \
-     && ! printf '%s' "$out_c" | grep -qE '\[ok\].*gate-pin'; then
+  if out_has "$out_c" -E '\[warn\].*gate-pin: UNMEASURED' \
+     && out_has "$out_c" "no 'sudo' on this box" \
+     && ! out_has "$out_c" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: no sudo binary => UNMEASURED as a [warn], never an [ok]"
   else
     bad "gate-pin: a box with no sudo did not report UNMEASURED-as-a-warn"
@@ -2950,9 +2956,9 @@ else
   envf_d="$tmp/pin-env-d"; : >"$envf_d"
   out_d=$(runpin "$pinroot" "$shims_pw" "$envf_d" HOME="$pin_home_plain" \
     CQLITE_GATE_MAX_CONCURRENCY=7)
-  if printf '%s' "$out_d" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-     && printf '%s' "$out_d" | grep -q 'will not open a session as' \
-     && ! printf '%s' "$out_d" | grep -qE '\[ok\].*gate-pin'; then
+  if out_has "$out_d" -E '\[warn\].*gate-pin: UNMEASURED' \
+     && out_has "$out_d" 'will not open a session as' \
+     && ! out_has "$out_d" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: a sudo that cannot open a self-session => UNMEASURED as a [warn], with its own cause"
   else
     bad "gate-pin: a password-requiring sudo did not report UNMEASURED-as-a-warn"
@@ -2980,13 +2986,26 @@ else
   #      The run must also SAY it left the value alone: asserting only that the file is
   #      unchanged is satisfied by a bootstrap that never writes at all, so the case
   #      would pass against the very code this replaces.
+  #
+  #      SCOPED TO THE PIN LINE, NOT TO THE WHOLE FILE (issue #3727). This used to be
+  #      `[ "$(cat "$envf_f")" = "CQLITE_GATE_MAX_CONCURRENCY=4" ]`, which asserts something this
+  #      case does not own: that NOTHING ELSE ever writes to the shared sandbox env file. Section
+  #      5b2 legitimately appends SCCACHE_CACHE_SIZE under `--yes`, so the equality broke the
+  #      moment that feature stopped being inert — and it had been GREEN only because the fleet
+  #      cap literal was still an unsubstituted placeholder that bootstrap refused to persist.
+  #      Same family as the `base_warns` drift: a case coupled to a NEIGHBOUR section's output,
+  #      passing for a reason that had nothing to do with its subject. The property is: exactly
+  #      ONE pin assignment, still carrying the operator's 4 — which a rewrite to 1, a duplicate
+  #      append, and a deletion all still fail.
   envf_f="$tmp/pin-env-f"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_f"
   out_f=$(runpin "$pinroot" "$shims_none" "$envf_f" HOME="$pin_home_plain" --yes)
-  if [ "$(cat "$envf_f")" = "CQLITE_GATE_MAX_CONCURRENCY=4" ] \
-     && printf '%s' "$out_f" | grep -q 'already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is'; then
+  pin_f_n=$(grep -cE '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$envf_f" 2>/dev/null)
+  pin_f_val=$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=//p' "$envf_f" 2>/dev/null | tail -1)
+  if [ "${pin_f_n:-0}" = 1 ] && [ "$pin_f_val" = 4 ] \
+     && out_has "$out_f" 'already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is'; then
     ok "gate-pin: an existing CQLITE_GATE_MAX_CONCURRENCY value is left EXACTLY as it is, and the run says so"
   else
-    bad "gate-pin: --yes rewrote a deliberate override (or never looked at the file)"
+    bad "gate-pin: --yes rewrote a deliberate override (or never looked at the file) — ${pin_f_n:-0} pin assignment(s), value '$pin_f_val'"
     cat "$envf_f"
     printf '%s\n' "$out_f" | grep -i 'gate-pin\|already carries' | head -2
   fi
@@ -3011,8 +3030,8 @@ else
   envf_h="$tmp/pin-env-h"; : >"$envf_h"
   out_h=$(runpin "$pinroot" "$shims_none" "$envf_h" HOME="$pin_home_prof" \
     SHELL=/bin/bash CQLITE_GATE_MAX_CONCURRENCY=7)
-  if printf '%s' "$out_h" | grep -q 'gate-pin: FAILED' \
-     && ! printf '%s' "$out_h" | grep -qE '\[ok\].*(gate-pin|CQLITE_GATE_MAX_CONCURRENCY)'; then
+  if out_has "$out_h" 'gate-pin: FAILED' \
+     && ! out_has "$out_h" -E '\[ok\].*(gate-pin|CQLITE_GATE_MAX_CONCURRENCY)'; then
     ok "gate-pin: a profile that carries the export produces NO success verdict"
   else
     bad "gate-pin: a profile grep (or the inherited value) still bought a success verdict"
@@ -3050,8 +3069,8 @@ else
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_j" \
     "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
       --skip-smoke --skip-gate-pin 2>&1)
-  if printf '%s' "$out_j" | grep -qE '\[warn\].*gate-pin: OPT-OUT' \
-     && ! printf '%s' "$out_j" | grep -qE '\[ok\].*gate-pin'; then
+  if out_has "$out_j" -E '\[warn\].*gate-pin: OPT-OUT' \
+     && ! out_has "$out_j" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: --skip-gate-pin is a [warn] OPT-OUT that can never buy a green"
   else
     bad "gate-pin: the opt-out did not report as a non-passing OPT-OUT"
@@ -3069,9 +3088,9 @@ else
     shims_nh="$tmp/pin-shims-nh-$pin_val"; mkpinshims "$shims_nh" "$pin_val"
     envf_nh="$tmp/pin-env-nh-$pin_val"; printf 'CQLITE_GATE_MAX_CONCURRENCY=%s\n' "$pin_val" >"$envf_nh"
     out_nh=$(runpin "$pinroot" "$shims_nh" "$envf_nh" HOME="$pin_home_plain")
-    if printf '%s' "$out_nh" | grep -q 'gate-pin: NOT-HONOURED' \
-       && printf '%s' "$out_nh" | grep -q "$pin_expect" \
-       && ! printf '%s' "$out_nh" | grep -qE '\[ok\].*gate-pin'; then
+    if out_has "$out_nh" 'gate-pin: NOT-HONOURED' \
+       && out_has "$out_nh" "$pin_expect" \
+       && ! out_has "$out_nh" -E '\[ok\].*gate-pin'; then
       ok "gate-pin: a visible '$pin_val' the gate does not honour is NOT-HONOURED, never VERIFIED"
     else
       bad "gate-pin: a visible-but-not-honoured '$pin_val' was not surfaced"
@@ -3086,8 +3105,8 @@ else
   shims_four="$tmp/pin-shims-four"; mkpinshims "$shims_four" 4
   envf_m="$tmp/pin-env-m"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_m"
   out_m=$(runpin "$pinroot" "$shims_four" "$envf_m" HOME="$pin_home_plain")
-  if printf '%s' "$out_m" | grep -q 'gate-pin: VERIFIED' \
-     && printf '%s' "$out_m" | grep -q 'max-concurrency=4(pinned)'; then
+  if out_has "$out_m" 'gate-pin: VERIFIED' \
+     && out_has "$out_m" 'max-concurrency=4(pinned)'; then
     ok "gate-pin: a deliberate override >1 is VERIFIED and reported as the cap the gate will apply"
   else
     bad "gate-pin: a legitimate >1 override was not VERIFIED"
@@ -3101,9 +3120,9 @@ else
   if mknotifyroot "$nogate" good; then
     envf_n="$tmp/pin-env-n"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_n"
     out_n=$(runpin "$nogate" "$shims_one" "$envf_n" HOME="$pin_home_plain")
-    if printf '%s' "$out_n" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_n" | grep -q 'could not be consulted to confirm' \
-       && ! printf '%s' "$out_n" | grep -qE '\[ok\].*gate-pin'; then
+    if out_has "$out_n" -E '\[warn\].*gate-pin: UNMEASURED' \
+       && out_has "$out_n" 'could not be consulted to confirm' \
+       && ! out_has "$out_n" -E '\[ok\].*gate-pin'; then
       ok "gate-pin: a visible pin whose honouring could NOT be checked is UNMEASURED, not VERIFIED"
     else
       bad "gate-pin: an unconsultable gate still produced a verdict about honouring"
@@ -3119,10 +3138,10 @@ else
   #      The two boxes that reach FAILED must be told apart.
   envf_o="$tmp/pin-env-o"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_o"
   out_o=$(runpin "$pinroot" "$shims_none" "$envf_o" HOME="$pin_home_plain")
-  if printf '%s' "$out_o" | grep -q 'gate-pin: FAILED' \
-     && printf '%s' "$out_o" | grep -q 'this is a PAM condition, NOT a missing pin' \
-     && printf '%s' "$out_o" | grep -q 'pam_env' \
-     && ! printf '%s' "$out_o" | grep -q 'fix:  bash scripts/bootstrap-agent-machine.sh --yes'; then
+  if out_has "$out_o" 'gate-pin: FAILED' \
+     && out_has "$out_o" 'this is a PAM condition, NOT a missing pin' \
+     && out_has "$out_o" 'pam_env' \
+     && ! out_has "$out_o" 'fix:  bash scripts/bootstrap-agent-machine.sh --yes'; then
     ok "gate-pin: a present-but-invisible pin is diagnosed as a PAM condition, not handed the persist remedy"
   else
     bad "gate-pin: the two FAILED boxes were not told apart"
@@ -3145,7 +3164,7 @@ else
   #      that creates it and must NOT claim there is nowhere to persist it.
   envf_p="$tmp/pin-env-p-missing"; rm -f "$envf_p"
   out_p=$(runpin "$pinroot" "$shims_none" "$envf_p" HOME="$pin_home_plain")
-  if printf '%s' "$out_p" | grep -q 'gate-pin: FAILED' \
+  if out_has "$out_p" 'gate-pin: FAILED' \
      && [[ $out_p == *'--fix-gate-pin'* ]] \
      && [[ $out_p != *'has nowhere to persist it'* ]]; then
     ok "gate-pin: a LINUX box with no env file is pointed at --fix-gate-pin, which creates it — not told there is nowhere to persist"
@@ -3164,7 +3183,7 @@ else
   out_p2=$(runpin "$pinroot" "$shims_mac_p" "$envf_p2" HOME="$pin_home_plain")
   if [[ $out_p2 != *'--fix-gate-pin   (this'* ]] \
      && [[ $out_p2 != *'fix:  bash scripts/bootstrap-agent-machine.sh --yes'* ]] \
-     && ! printf '%s' "$out_p2" | grep -qE '\[ok\].*gate-pin'; then
+     && ! out_has "$out_p2" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: an unmanaged-platform box with no env file is never pointed at a file its platform does not read"
   else
     bad "gate-pin: the unmanaged-platform box was handed a create-the-file remedy"
@@ -3181,7 +3200,7 @@ else
   envf_q="$tmp/pin-env-q"; : >"$envf_q"
   shims_pam_q="$tmp/pin-shims-pam-q"; mkpinshims "$shims_pam_q" "file:$envf_q"
   out_q=$(runpin "$pinroot" "$shims_pam_q" "$envf_q" HOME="$pin_home_plain" --fix-gate-pin)
-  if printf '%s' "$out_q" | grep -q 'gate-pin: VERIFIED' \
+  if out_has "$out_q" 'gate-pin: VERIFIED' \
      && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_q"; then
     ok "gate-pin: --fix-gate-pin persists AND the same run's probe then sees it (no --yes, no re-login)"
   else
@@ -3200,7 +3219,7 @@ else
   envf_q4="$tmp/pin-env-q4"; printf 'CQLITE_GATE_MAX_CONCURRENCY=99999999999999999999\n' >"$envf_q4"
   shims_pam_q4="$tmp/pin-shims-pam-q4"; mkpinshims "$shims_pam_q4" "file:$envf_q4"
   out_q4=$(runpin "$pinroot" "$shims_pam_q4" "$envf_q4" HOME="$pin_home_plain")
-  if printf '%s' "$out_q4" | grep -q 'gate-pin: NOT-HONOURED' \
+  if out_has "$out_q4" 'gate-pin: NOT-HONOURED' \
      && [[ $out_q4 == *'too large to use as a slot cap'* ]] \
      && [[ $out_q4 != *'it is not a plain decimal integer'* ]] \
      && [[ $out_q4 == *'at most 18 digits'* ]]; then
@@ -3223,8 +3242,8 @@ else
   envf_q2="$tmp/pin-env-q2"; printf 'CQLITE_GATE_MAX_CONCURRENCY=08\n' >"$envf_q2"
   shims_pam_q2="$tmp/pin-shims-pam-q2"; mkpinshims "$shims_pam_q2" "file:$envf_q2"
   out_q2=$(runpin "$pinroot" "$shims_pam_q2" "$envf_q2" HOME="$pin_home_plain")
-  if printf '%s' "$out_q2" | grep -q 'gate-pin: VERIFIED' \
-     && ! printf '%s' "$out_q2" | grep -q 'gate-pin: UNMEASURED'; then
+  if out_has "$out_q2" 'gate-pin: VERIFIED' \
+     && ! out_has "$out_q2" 'gate-pin: UNMEASURED'; then
     ok "gate-pin: a valid leading-zero pin (08) reaches VERIFIED — the gate's normalisation is not read as oracle drift"
   else
     bad "gate-pin: a correctly persisted 08 was not VERIFIED (job 333 — raw-vs-normalised compare)"
@@ -3250,7 +3269,7 @@ FAKEGATE
   cp "$pinroot/scripts/bootstrap-agent-machine.sh" "$pinroot_q3/scripts/" 2>/dev/null
   cp "$shims_pam_q3/../pin-fake-gate.sh" "$pinroot_q3/scripts/agent-gate.sh" 2>/dev/null
   out_q3=$(runpin "$pinroot_q3" "$shims_pam_q3" "$envf_q3" HOME="$pin_home_plain")
-  if ! printf '%s' "$out_q3" | grep -q 'gate-pin: VERIFIED'; then
+  if ! out_has "$out_q3" 'gate-pin: VERIFIED'; then
     ok "gate-pin: an oracle answering about a DIFFERENT value is still refused — canonicalising did not delete the drift check"
   else
     bad "gate-pin: the drift check was lost — a gate answering 9(pinned) for a session showing 08 read VERIFIED"
@@ -3263,8 +3282,13 @@ FAKEGATE
   envf_r="$tmp/pin-env-r"; : >"$envf_r"
   shims_pam_r="$tmp/pin-shims-pam-r"; mkpinshims "$shims_pam_r" "file:$envf_r"
   out_r=$(runpin "$pinroot" "$shims_pam_r" "$envf_r" HOME="$pin_home_plain")
-  if printf '%s' "$out_r" | grep -q 'gate-pin: FAILED' \
-     && ! printf '%s' "$out_r" | grep -qE '\[ok\].*gate-pin' \
+  # `[ ! -s ]` IS a whole-file assertion, and the #3727 sweep checked it deliberately: it survives
+  # section 5b2 because BOTH sections refuse to write without an explicit authorisation, and this
+  # run passes none. So it now covers 5b2's no-unasked-write rule too — a bonus, but note that
+  # adding `--yes`/`--fix-sccache-cap` to THIS case would make it fail for a reason unrelated to
+  # the pin.
+  if out_has "$out_r" 'gate-pin: FAILED' \
+     && ! out_has "$out_r" -E '\[ok\].*gate-pin' \
      && [ ! -s "$envf_r" ]; then
     ok "gate-pin: without a repair flag the same unpinned box stays FAILED and nothing is written"
   else
@@ -3284,8 +3308,8 @@ FAKEGATE
   #      The refuse-to-persist path is covered behaviourally by 11s2 below instead.
   envf_s="$tmp/pin-env-s"; : >"$envf_s"
   out_s=$(runpin "$pinroot" "$shims_pw" "$envf_s" HOME="$pin_home_plain" --fix-gate-pin)
-  if ! printf '%s' "$out_s" | grep -qE '\[ok\].*gate-pin' \
-     && printf '%s' "$out_s" | grep -qE '\[warn\].*gate-pin:'; then
+  if ! out_has "$out_s" -E '\[ok\].*gate-pin' \
+     && out_has "$out_s" -E '\[warn\].*gate-pin:'; then
     ok "gate-pin: --fix-gate-pin on a box it cannot certify stays non-passing (so --strict exits 1)"
   else
     bad "gate-pin: --fix-gate-pin reported ok on a box without passwordless sudo"
@@ -3311,10 +3335,12 @@ FAKEGATE
     # that has nothing to do with it.
     out_s2=$(runpin "$pinroot" "$shims_none" "$envf_s2" HOME="$pin_home_plain" --fix-gate-pin)
     chmod 0644 "$envf_s2"
-    if printf '%s' "$out_s2" | grep -q 'cannot read' \
-       && printf '%s' "$out_s2" | grep -q 'gate-pin: FAILED' \
-       && ! printf '%s' "$out_s2" | grep -qE '\[ok\].*gate-pin' \
-       && [ "$(cat "$envf_s2")" = "FOO=bar" ]; then
+    if out_has "$out_s2" 'cannot read' \
+       && out_has "$out_s2" 'gate-pin: FAILED' \
+       && ! out_has "$out_s2" -E '\[ok\].*gate-pin' \
+       && [ "$(cat "$envf_s2")" = "FOO=bar" ]; then   # whole-file, and safe: the unreadable-file
+       # branch precedes every write in BOTH sections, and --fix-gate-pin does not authorise 5b2's
+       # (checked in the #3727 sweep — see 11f for the sibling that was NOT safe)
       ok "gate-pin: an unreadable env file refuses the append, says why, and does not pass"
     else
       bad "gate-pin: an unreadable env file was appended to blind (or still passed)"
@@ -3335,7 +3361,7 @@ FAKEGATE
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke $pin_order 2>&1)
     pin_t_rc=$?
-    if [ "$pin_t_rc" -eq 2 ] && printf '%s' "$pin_t_out" | grep -q 'contradictory'; then
+    if [ "$pin_t_rc" -eq 2 ] && out_has "$pin_t_out" 'contradictory'; then
       ok "gate-pin: '$pin_order' is a usage error naming the contradiction, whatever the order"
     else
       bad "gate-pin: '$pin_order' did not exit 2 naming the contradiction (rc=$pin_t_rc)"
@@ -3349,8 +3375,8 @@ FAKEGATE
   shims_pam_u="$tmp/pin-shims-pam-u"; mkpinshims "$shims_pam_u" "file:$envf_u"
   out_u=$(runpin "$pinroot" "$shims_pam_u" "$envf_u" HOME="$pin_home_plain" \
     CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 --fix-gate-pin)
-  if printf '%s' "$out_u" | grep -q 'gate-pin: VERIFIED' \
-     && ! printf '%s' "$out_u" | grep -q 'gate-pin: OPT-OUT'; then
+  if out_has "$out_u" 'gate-pin: VERIFIED' \
+     && ! out_has "$out_u" 'gate-pin: OPT-OUT'; then
     ok "gate-pin: an explicit --fix-gate-pin overrides the weaker env opt-out"
   else
     bad "gate-pin: the env opt-out neutered an explicit --fix-gate-pin"
@@ -3371,9 +3397,9 @@ FAKEGATE
   envf_w="$tmp/pin-env-w"; : >"$envf_w"
   out_w=$(runpin "$pinroot" "$shims_none" "$envf_w" HOME="$pin_home_plain" \
     BASH_ENV="$pin_bashenv")
-  if printf '%s' "$out_w" | grep -q 'gate-pin: FAILED' \
-     && ! printf '%s' "$out_w" | grep -qE '\[ok\].*gate-pin' \
-     && ! printf '%s' "$out_w" | grep -q 'CQLITE_GATE_MAX_CONCURRENCY=9'; then
+  if out_has "$out_w" 'gate-pin: FAILED' \
+     && ! out_has "$out_w" -E '\[ok\].*gate-pin' \
+     && ! out_has "$out_w" 'CQLITE_GATE_MAX_CONCURRENCY=9'; then
     ok "gate-pin: a BASH_ENV file exporting the pin cannot forge VERIFIED (BASH_ENV is scrubbed)"
   else
     bad "gate-pin: BASH_ENV injected a pin the box does not have"
@@ -3388,8 +3414,8 @@ FAKEGATE
   shims_pam_x="$tmp/pin-shims-pam-x"; mkpinshims "$shims_pam_x" "file:$envf_x"
   out_x=$(runpin "$pinroot" "$shims_pam_x" "$envf_x" HOME="$pin_home_plain" \
     BASH_ENV="$pin_bashenv")
-  if printf '%s' "$out_x" | grep -q 'gate-pin: VERIFIED' \
-     && printf '%s' "$out_x" | grep -q 'max-concurrency=1(pinned)'; then
+  if out_has "$out_x" 'gate-pin: VERIFIED' \
+     && out_has "$out_x" 'max-concurrency=1(pinned)'; then
     ok "gate-pin: scrubbing BASH_ENV does not break a genuinely pinned box"
   else
     bad "gate-pin: the BASH_ENV scrub broke the positive path"
@@ -3408,8 +3434,8 @@ FAKEGATE
   # probe cannot establish — that the value "came from the system env file" — since
   # ~/.pam_environment or a sudoers env_file satisfies the observation identically. (What
   # licenses the system-wide claim now is the FILE correlation, not the probe.)
-  if ! printf '%s' "$out_x" | grep -q 'came from the system env file' \
-     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
+  if ! out_has "$out_x" 'came from the system env file' \
+     && out_has "$out_x" 'max-concurrency=N(pinned)'; then
     ok "gate-pin: VERIFIED does not re-assert the unestablishable attribution, and names cpu-budget as authoritative"
   else
     bad "gate-pin: VERIFIED claims an attribution the probe cannot make (or dropped the cpu-budget pointer)"
@@ -3425,9 +3451,9 @@ FAKEGATE
   #      passed on such a box.
   envf_z="$tmp/pin-env-z"; : >"$envf_z"          # file has NO pin line ...
   out_z=$(runpin "$pinroot" "$shims_one" "$envf_z" HOME="$pin_home_plain")   # ... session DOES see one
-  if printf '%s' "$out_z" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
-     && ! printf '%s' "$out_z" | grep -qE '\[ok\].*gate-pin' \
-     && printf '%s' "$out_z" | grep -q 'sudo- or user-specific source'; then
+  if out_has "$out_z" 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! out_has "$out_z" -E '\[ok\].*gate-pin' \
+     && out_has "$out_z" 'sudo- or user-specific source'; then
     ok "gate-pin: a session-visible value with NO line in the system env file is NOT-SYSTEM-WIDE, never VERIFIED"
   else
     bad "gate-pin: a sudo-only value was certified as a system-wide pin"
@@ -3440,8 +3466,8 @@ FAKEGATE
   #      (11b/11q already cover the both-halves-present positive.)
   envf_z2="$tmp/pin-env-z2"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_z2"
   out_z2=$(runpin "$pinroot" "$shims_none" "$envf_z2" HOME="$pin_home_plain")
-  if printf '%s' "$out_z2" | grep -q 'gate-pin: FAILED' \
-     && ! printf '%s' "$out_z2" | grep -qE '\[ok\].*gate-pin'; then
+  if out_has "$out_z2" 'gate-pin: FAILED' \
+     && ! out_has "$out_z2" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: the file half ALONE is not VERIFIED either (the original #3414 defect)"
   else
     bad "gate-pin: a file line with no session visibility was treated as a pin"
@@ -3457,9 +3483,9 @@ FAKEGATE
     envf_z3="$tmp/pin-env-z3"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_z3"; chmod 0000 "$envf_z3"
     out_z3=$(runpin "$pinroot" "$shims_one" "$envf_z3" HOME="$pin_home_plain")
     chmod 0644 "$envf_z3"
-    if printf '%s' "$out_z3" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_z3" | grep -q 'could not be READ' \
-       && ! printf '%s' "$out_z3" | grep -qE '\[ok\].*gate-pin'; then
+    if out_has "$out_z3" -E '\[warn\].*gate-pin: UNMEASURED' \
+       && out_has "$out_z3" 'could not be READ' \
+       && ! out_has "$out_z3" -E '\[ok\].*gate-pin'; then
       ok "gate-pin: an unreadable system env file cannot be correlated => UNMEASURED, not VERIFIED"
     else
       bad "gate-pin: an uncorrelatable file still produced a verdict about system-wide scope"
@@ -3485,11 +3511,11 @@ FAKEGATE
   # #3728 and NOWHERE IN THE EMITTED LINE, which is the only place an operator reads. A
   # caveat that lives where only a caveat-hunter looks is not a disclosure; asserted here
   # so a later edit cannot drop it silently.
-  if printf '%s' "$out_x" | grep -q 'is NOT checked here' \
-     && printf '%s' "$out_x" | grep -q 'created WITHOUT PAM' \
-     && printf '%s' "$out_x" | grep -q 'SESSION CREATION' \
-     && printf '%s' "$out_x" | grep -q 'already descended from it' \
-     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
+  if out_has "$out_x" 'is NOT checked here' \
+     && out_has "$out_x" 'created WITHOUT PAM' \
+     && out_has "$out_x" 'SESSION CREATION' \
+     && out_has "$out_x" 'already descended from it' \
+     && out_has "$out_x" 'max-concurrency=N(pinned)'; then
     ok "gate-pin: the scope note states what it did NOT check, that the verdict covers FUTURE sessions only, and names the gate's token as authority"
   else
     bad "gate-pin: the scope note does not match the correlated verdict"
@@ -3521,8 +3547,8 @@ FAKEGATE
     fi
     out_r5=$(runpin "$pinroot" "$shims_none" "$envf_r5" HOME="$pin_home_plain")
     chmod 0644 "$envf_r5" 2>/dev/null || true
-    if printf '%s' "$out_r5" | grep -q 'gate-pin: FAILED' \
-       && ! printf '%s' "$out_r5" | grep -qE 'gate-pin: (UNMEASURED|NOT-SYSTEM-WIDE|VERIFIED)'; then
+    if out_has "$out_r5" 'gate-pin: FAILED' \
+       && ! out_has "$out_r5" -E 'gate-pin: (UNMEASURED|NOT-SYSTEM-WIDE|VERIFIED)'; then
       ok "gate-pin: session-cannot-see-it => FAILED with the env file $pin_row (file state cannot soften a negative)"
     else
       bad "gate-pin: file state '$pin_row' changed a NEGATIVE probe's verdict"
@@ -3538,9 +3564,9 @@ FAKEGATE
   #      `abc`, which the gate discards for its default formula and stamps N(invalid).
   envf_aa="$tmp/pin-env-aa"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_aa"
   out_aa=$(runpin "$pinroot" "$shims_one" "$envf_aa" HOME="$pin_home_plain")   # session sees 1
-  if printf '%s' "$out_aa" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
-     && ! printf '%s' "$out_aa" | grep -qE '\[ok\].*gate-pin' \
-     && printf '%s' "$out_aa" | grep -q "OVERRIDING the system-wide file"; then
+  if out_has "$out_aa" 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! out_has "$out_aa" -E '\[ok\].*gate-pin' \
+     && out_has "$out_aa" "OVERRIDING the system-wide file"; then
     ok "gate-pin: a file value the session does NOT match is not VERIFIED (presence is not the predicate)"
   else
     bad "gate-pin: a file/session VALUE mismatch was certified"
@@ -3554,7 +3580,7 @@ FAKEGATE
   #      pin_gate_source_for exists to avoid.
   envf_ab="$tmp/pin-env-ab"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1 \n' >"$envf_ab"
   out_ab=$(runpin "$pinroot" "$shims_one" "$envf_ab" HOME="$pin_home_plain")
-  if ! printf '%s' "$out_ab" | grep -qE '\[ok\].*gate-pin'; then
+  if ! out_has "$out_ab" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: '1 ' in the file is not equal to '1' in the session (string equality, as the gate resolves it)"
   else
     bad "gate-pin: a value the gate would DISCARD was normalised into a match"
@@ -3574,9 +3600,9 @@ FAKEGATE
   mk_stub "$shims_mac" uname 'echo Darwin'
   envf_ac="$tmp/pin-env-ac"; : >"$envf_ac"
   out_ac=$(runpin "$pinroot" "$shims_mac" "$envf_ac" HOME="$pin_home_plain")
-  if printf '%s' "$out_ac" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-     && printf '%s' "$out_ac" | grep -q 'no PAM-read system-wide file to compare it against' \
-     && ! printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin'; then
+  if out_has "$out_ac" -E '\[warn\].*gate-pin: UNMEASURED' \
+     && out_has "$out_ac" 'no PAM-read system-wide file to compare it against' \
+     && ! out_has "$out_ac" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: a non-Linux host with a session-visible pin is UNMEASURED, never certified"
   else
     bad "gate-pin: a non-Linux host was given a verdict its platform cannot support"
@@ -3590,8 +3616,8 @@ FAKEGATE
   mk_stub "$shims_mac_none" uname 'echo Darwin'
   envf_ac2="$tmp/pin-env-ac2"; : >"$envf_ac2"
   out_ac2=$(runpin "$pinroot" "$shims_mac_none" "$envf_ac2" HOME="$pin_home_plain")
-  if ! printf '%s' "$out_ac2" | grep -qE '\[ok\].*gate-pin' \
-     && printf '%s' "$out_ac2" | grep -qE '\[warn\].*gate-pin'; then
+  if ! out_has "$out_ac2" -E '\[ok\].*gate-pin' \
+     && out_has "$out_ac2" -E '\[warn\].*gate-pin'; then
     ok "gate-pin: an UNPINNED non-Linux host is also NON-PASSING — no platform exemption certifies it"
   else
     bad "gate-pin: an unpinned non-Linux host was certified (the finding-BB defect)"
@@ -3604,8 +3630,8 @@ FAKEGATE
   #      11ac (no env file) with the only difference being the platform.
   envf_ad="$tmp/pin-env-ad-missing"; rm -f "$envf_ad"
   out_ad=$(runpin "$pinroot" "$shims_one" "$envf_ad" HOME="$pin_home_plain")
-  if ! printf '%s' "$out_ad" | grep -qE '\[ok\].*gate-pin' \
-     && ! printf '%s' "$out_ad" | grep -qE 'NOT-APPLICABLE|VERIFIED-NO-SYSTEM-FILE'; then
+  if ! out_has "$out_ad" -E '\[ok\].*gate-pin' \
+     && ! out_has "$out_ad" -E 'NOT-APPLICABLE|VERIFIED-NO-SYSTEM-FILE'; then
     ok "gate-pin: a LINUX box with no system env file stays non-passing (scoped by platform, not by file absence)"
   else
     bad "gate-pin: a Linux anomaly was excused as a platform inapplicability"
@@ -3622,7 +3648,7 @@ FAKEGATE
   for pin_q in '"1"' "'1'" '"1' '1'; do
     envf_ae="$tmp/pin-env-ae"; printf 'CQLITE_GATE_MAX_CONCURRENCY=%s\n' "$pin_q" >"$envf_ae"
     out_ae=$(runpin "$pinroot" "$shims_one" "$envf_ae" HOME="$pin_home_plain")
-    if printf '%s' "$out_ae" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+    if out_has "$out_ae" -E '\[ok\].*gate-pin: VERIFIED'; then
       ok "gate-pin: a file value written as $pin_q still VERIFIES (pam_env's quoting is read, not reinterpreted)"
     else
       bad "gate-pin: a correctly-pinned box written as $pin_q was reported non-passing"
@@ -3637,7 +3663,7 @@ FAKEGATE
   #      its content, and it is the half a future "just trim it" refactor would erase.
   envf_af="$tmp/pin-env-af"; printf 'CQLITE_GATE_MAX_CONCURRENCY=" 1 "\n' >"$envf_af"
   out_af=$(runpin "$pinroot" "$shims_one" "$envf_af" HOME="$pin_home_plain")
-  if ! printf '%s' "$out_af" | grep -qE '\[ok\].*gate-pin'; then
+  if ! out_has "$out_af" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: de-quoting leaves the interior alone — a quoted ' 1 ' still mismatches '1'"
   else
     bad "gate-pin: de-quoting slid into normalisation and certified a value the gate discards"
@@ -3658,8 +3684,8 @@ FAKEGATE
   shims_ag="$tmp/pin-shims-ag"; mkpinshims "$shims_ag" abc     # session genuinely sees abc
   out_ag=$(runpin "$pinroot" "$shims_ag" "$envf_ag" HOME="$pin_home_plain" \
     BASH_ENV="$pin_bashenv_v")
-  if ! printf '%s' "$out_ag" | grep -qE '\[ok\].*gate-pin' \
-     && printf '%s' "$out_ag" | grep -q 'gate-pin: NOT-HONOURED'; then
+  if ! out_has "$out_ag" -E '\[ok\].*gate-pin' \
+     && out_has "$out_ag" 'gate-pin: NOT-HONOURED'; then
     ok "gate-pin: a BASH_ENV-injected valid value cannot make the ORACLE certify an invalid pin"
   else
     bad "gate-pin: the gate oracle was polluted into certifying a value it never saw"
@@ -3699,8 +3725,8 @@ FAKEGATE
   shims_ai="$tmp/pin-shims-ai"; mkpinshims "$shims_ai" 4
   out_ai=$(runpin "$pinroot" "$shims_ai" "$envf_ai" HOME="$pin_home_ai" SHELL=/bin/bash --yes)
   if ! grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$pin_home_ai/.bashrc" \
-     && printf '%s' "$out_ai" | grep -q 'not touching' \
-     && printf '%s' "$out_ai" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+     && out_has "$out_ai" 'not touching' \
+     && out_has "$out_ai" -E '\[ok\].*gate-pin: VERIFIED'; then
     ok "gate-pin: --yes on a box pinned to 4 leaves the profile alone (no manufactured 1-vs-4 divergence)"
   else
     bad "gate-pin: the profile append manufactured a divergence with the system-wide value"
@@ -3760,8 +3786,8 @@ FAKEGATE
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
-    if printf '%s' "$out_ak" | grep -q 'gate-pin: SKIPPED' \
-       && printf '%s' "$out_ak" | grep -q 'PRIVILEGED write' \
+    if out_has "$out_ak" 'gate-pin: SKIPPED' \
+       && out_has "$out_ak" 'PRIVILEGED write' \
        && [ ! -e "$pin_seam_probe" ]; then
       ok "gate-pin: a ROOT run with the seam set refuses and writes nothing to the env-chosen path"
     else
@@ -3794,9 +3820,9 @@ FAKEGATE
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
-    if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_am" | grep -qE 'does not resolve to an account|INCONSISTENT sudo metadata' \
-       && ! printf '%s' "$out_am" | grep -qE '\[ok\].*gate-pin'; then
+    if out_has "$out_am" -E '\[warn\].*gate-pin: UNMEASURED' \
+       && out_has "$out_am" -E 'does not resolve to an account|INCONSISTENT sudo metadata' \
+       && ! out_has "$out_am" -E '\[ok\].*gate-pin'; then
       ok "gate-pin: an unresolvable sudo invoker is UNMEASURED, never answered about root instead"
     else
       bad "gate-pin: an unresolvable invoker fell back to probing the wrong user"
@@ -3806,7 +3832,7 @@ FAKEGATE
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
-    if printf '%s' "$out_an" | grep -q "the account that invoked sudo"; then
+    if out_has "$out_an" "the account that invoked sudo"; then
       ok "gate-pin: a resolvable sudo invoker becomes the probe subject, and the run says so"
     else
       bad "gate-pin: the sudo invoker was not adopted as the probe subject"
@@ -3834,7 +3860,7 @@ FAKEGATE
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
-    if printf '%s' "$out_at" | grep -q 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
+    if out_has "$out_at" 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
     else
       bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
@@ -3851,9 +3877,9 @@ FAKEGATE
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
-    if printf '%s' "$out_au" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_au" | grep -q 'INCONSISTENT sudo metadata' \
-       && ! printf '%s' "$out_au" | grep -qE '\[ok\].*gate-pin'; then
+    if out_has "$out_au" -E '\[warn\].*gate-pin: UNMEASURED' \
+       && out_has "$out_au" 'INCONSISTENT sudo metadata' \
+       && ! out_has "$out_au" -E '\[ok\].*gate-pin'; then
       ok "gate-pin: SUDO_USER disagreeing with SUDO_UID is UNMEASURED, not a probe of the wrong account"
     else
       bad "gate-pin: inconsistent sudo metadata was trusted"
@@ -3865,8 +3891,8 @@ FAKEGATE
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
-    if printf '%s' "$out_av" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-       && printf '%s' "$out_av" | grep -q 'sudo was invoked BY root'; then
+    if out_has "$out_av" -E '\[warn\].*gate-pin: UNMEASURED' \
+       && out_has "$out_av" 'sudo was invoked BY root'; then
       ok "gate-pin: SUDO_UID=0 is UNMEASURED — root invoking sudo says nothing about a gate's account"
     else
       bad "gate-pin: SUDO_UID=0 was treated as a usable probe subject"
@@ -3890,7 +3916,7 @@ FAKEGATE
     out_aw=$(runpin "$pinroot" "$shims_none" "$envf_aw" HOME="$pin_home_aw" SHELL=/bin/bash --yes)
     chmod 0644 "$envf_aw"
     if ! grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$pin_home_aw/.bashrc" \
-       && printf '%s' "$out_aw" | grep -q 'could not determine what'; then
+       && out_has "$out_aw" 'could not determine what'; then
       ok "gate-pin: an UNREADABLE env file does not get the hardcoded profile export (unreadable is not absent)"
     else
       bad "gate-pin: an unreadable env file fell through to the append, recreating the divergence Q removed"
@@ -3923,8 +3949,8 @@ FAKEGATE
   # has none — which is the condition under test.
   pin_ax_timeout=$(command -v timeout 2>/dev/null || true)
   out_ax=$(env PATH="$pin_nt" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo"     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_ax"     ${pin_ax_timeout:+"$pin_ax_timeout" -s KILL 120}     "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --skip-push-probe 2>&1)
-  if printf '%s' "$out_ax" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-     && printf '%s' "$out_ax" | grep -q 'NOTHING was probed' \
+  if out_has "$out_ax" -E '\[warn\].*gate-pin: UNMEASURED' \
+     && out_has "$out_ax" 'NOTHING was probed' \
      && [ ! -s "$pin_nt_trip" ]; then
     ok "gate-pin: with no timeout utility the section refuses AND invokes sudo zero times"
   else
@@ -3949,8 +3975,8 @@ if [ "${1:-}" = "-u" ]; then shift 2; fi
 exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   envf_ay="$tmp/pin-env-ay"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ay"
   out_ay=$(runpin "$pinroot" "$pin_ab" "$envf_ay" HOME="$pin_home_plain")
-  if printf '%s' "$out_ay" | grep -qE '\[ok\].*gate-pin: VERIFIED' \
-     && ! printf '%s' "$out_ay" | grep -q 'needs a password'; then
+  if out_has "$out_ay" -E '\[ok\].*gate-pin: VERIFIED' \
+     && ! out_has "$out_ay" 'needs a password'; then
     ok "gate-pin: root execution denied but the self-session permitted still MEASURES (no false red)"
   else
     bad "gate-pin: a box permitting the self-session was failed for lacking unrestricted root"
@@ -3978,9 +4004,9 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_bb" \
     "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
   if [ "$ba_created" = 1 ] \
-     && printf '%s' "$out_ba" | grep -q 'CREATED' \
+     && out_has "$out_ba" 'CREATED' \
      && [ ! -e "$envf_bb" ] \
-     && printf '%s' "$out_bb" | grep -q 'will be CREATED'; then
+     && out_has "$out_bb" 'will be CREATED'; then
     ok "gate-pin: a MISSING env file is created under --fix-gate-pin (with the pin in it), and is NOT created without authorisation — which SAYS it would be"
   else
     bad "gate-pin: the create path is wrong (created=$ba_created, unauthorised-file-exists=$([ -e "$envf_bb" ] && echo yes || echo no))"
@@ -4019,8 +4045,8 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   envf_bc="$tmp/pin-env-bc"; rm -f "$envf_bc"
   out_bc=$(runpin "$pinroot" "$shims_badstat" "$envf_bc" HOME="$pin_home_plain" --fix-gate-pin)
   if [ ! -e "$envf_bc" ] \
-     && printf '%s' "$out_bc" | grep -q 'the pin was NOT persisted' \
-     && printf '%s' "$out_bc" | grep -q 'never created'; then
+     && out_has "$out_bc" 'the pin was NOT persisted' \
+     && out_has "$out_bc" 'never created'; then
     ok "gate-pin: a create whose mode cannot be established on the STAGED file never links it, so the destination is untouched (nothing to roll back, hence no rollback race)"
   else
     bad "gate-pin: the failed create left a residue, or did not report rolling it back"
@@ -4050,8 +4076,8 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   chmod 0555 "$pin_ro_dir"
   out_bi=$(runpin "$pinroot" "$shims_one" "$envf_bi" HOME="$pin_home_plain" --fix-gate-pin)
   chmod 0755 "$pin_ro_dir" 2>/dev/null || true
-  if printf '%s' "$out_bi" | grep -q 'the pin was NOT persisted' \
-     && printf '%s' "$out_bi" | grep -q 'before .* was linked' \
+  if out_has "$out_bi" 'the pin was NOT persisted' \
+     && out_has "$out_bi" 'before .* was linked' \
      && [ ! -e "$envf_bi" ]; then
     ok "gate-pin: a staging-write failure reports itself and writes NOTHING at the destination (no destructive cleanup of a path that was never ours)"
   else
@@ -4121,9 +4147,9 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   envf_bd="$tmp/pin-env-bd"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_bd"
   shims_bd="$tmp/pin-shims-bd"; mkpinshims "$shims_bd" abc
   out_bd=$(runpin "$pinroot" "$shims_bd" "$envf_bd" HOME="$pin_home_plain")
-  if printf '%s' "$out_bd" | grep -q 'gate-pin: NOT-HONOURED' \
-     && printf '%s' "$out_bd" | grep -q 'is OVERRIDING it' \
-     && ! printf '%s' "$out_bd" | grep -q 'fix the VALUE (not the presence)'; then
+  if out_has "$out_bd" 'gate-pin: NOT-HONOURED' \
+     && out_has "$out_bd" 'is OVERRIDING it' \
+     && ! out_has "$out_bd" 'fix the VALUE (not the presence)'; then
     ok "gate-pin: a bad SESSION value over a CORRECT system file is diagnosed as an override, not as a bad file"
   else
     bad "gate-pin: the override case was handed the edit-the-system-file remedy"
@@ -4135,9 +4161,9 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   #      correct advice and must survive.
   envf_be="$tmp/pin-env-be"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_be"
   out_be=$(runpin "$pinroot" "$shims_bd" "$envf_be" HOME="$pin_home_plain")
-  if printf '%s' "$out_be" | grep -q 'gate-pin: NOT-HONOURED' \
-     && printf '%s' "$out_be" | grep -q 'fix the VALUE (not the presence)' \
-     && ! printf '%s' "$out_be" | grep -q 'is OVERRIDING it'; then
+  if out_has "$out_be" 'gate-pin: NOT-HONOURED' \
+     && out_has "$out_be" 'fix the VALUE (not the presence)' \
+     && ! out_has "$out_be" 'is OVERRIDING it'; then
     ok "gate-pin: where the system file really holds the bad value, the edit-the-file remedy survives"
   else
     bad "gate-pin: the genuine bad-file case lost its remedy to the override branch"
@@ -4155,8 +4181,8 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   envf_bf="$tmp/pin-env-bf"; : >"$envf_bf"
   shims_bf="$tmp/pin-shims-bf"; mkpinshims "$shims_bf" "file:$envf_bf"
   out_bf=$(runpin "$pinroot" "$shims_bf" "$envf_bf" HOME="$pin_home_plain" --fix-gate-pin)
-  if printf '%s' "$out_bf" | grep -q 'gate-pin: VERIFIED' \
-     && printf '%s' "$out_bf" | grep -q 'Agreement is measured; provenance is not'; then
+  if out_has "$out_bf" 'gate-pin: VERIFIED' \
+     && out_has "$out_bf" 'Agreement is measured; provenance is not'; then
     ok "gate-pin: VERIFIED states that it measured agreement and NOT provenance (the alternate-source residual is disclosed with the verdict)"
   else
     bad "gate-pin: VERIFIED did not disclose the agreement-vs-provenance limit"
@@ -4173,9 +4199,9 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   out_k2=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="relative/env" \
     "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-  if printf '%s' "$out_k" | grep -q 'gate-pin: SKIPPED' \
-     && printf '%s' "$out_k2" | grep -q 'gate-pin: SKIPPED' \
-     && ! printf '%s' "$out_k" | grep -qE '\[ok\].*gate-pin'; then
+  if out_has "$out_k" 'gate-pin: SKIPPED' \
+     && out_has "$out_k2" 'gate-pin: SKIPPED' \
+     && ! out_has "$out_k" -E '\[ok\].*gate-pin'; then
     ok "gate-pin: the test seam is fail-closed (no marker / relative path => SKIPPED, no fallback)"
   else
     bad "gate-pin: the test seam was honoured without its marker, or accepted a relative path"
@@ -4344,7 +4370,7 @@ else
   mksccshims "$scc_shims_v" "file:$scc_env_v"
   scc_out_v=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_v=$(scc_slice "$scc_out_v")
-  if printf '%s\n' "$scc_sl_v" | grep -qE '\[ok\].*sccache-cap: VERIFIED' \
+  if out_has "$scc_sl_v" -E '\[ok\].*sccache-cap: VERIFIED' \
      && [ "$(scc_warns "$scc_sl_v")" = 0 ] && [ "$(scc_oks "$scc_sl_v")" = 1 ]; then
     ok "sccache-cap: file + session + RUNNING server agree -> exactly one [ok] VERIFIED and zero [warn]"
   else
@@ -4353,10 +4379,10 @@ else
   fi
   # The scope note must state what VERIFIED does NOT cover — an unqualified VERIFIED reads as
   # "every gate on this box gets this cap", and the server-startup caveat is the new one.
-  if printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*NON-LOGIN PAM session.*LOGIN shell' \
-     && printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*SERVER at STARTUP' \
-     && printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*provenance is not' \
-     && printf '%s\n' "$scc_sl_v" | grep -q 'sccache-cap=<bytes>(pinned)'; then
+  if out_has "$scc_sl_v" 'scope:.*NON-LOGIN PAM session.*LOGIN shell' \
+     && out_has "$scc_sl_v" 'scope:.*SERVER at STARTUP' \
+     && out_has "$scc_sl_v" 'scope:.*provenance is not' \
+     && out_has "$scc_sl_v" 'sccache-cap=<bytes>(pinned)'; then
     ok "sccache-cap: VERIFIED prints its scope — BOTH session types measured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
   else
     bad "sccache-cap: the scope note is missing one of its three statements"
@@ -4370,10 +4396,10 @@ else
   #        than none, because it stops them looking).
   scc_out_nh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
   scc_sl_nh=$(scc_slice "$scc_out_nh")
-  if printf '%s\n' "$scc_sl_nh" | grep -qE '\[warn\].*sccache-cap: NOT-HONOURED' \
-     && printf '%s\n' "$scc_sl_nh" | grep -q 'sccache --stop-server' \
-     && ! printf '%s\n' "$scc_sl_nh" | grep -qE '\[ok\].*sccache-cap' \
-     && ! printf '%s\n' "$scc_sl_nh" | grep -q 'fix the VALUE'; then
+  if out_has "$scc_sl_nh" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
+     && out_has "$scc_sl_nh" 'sccache --stop-server' \
+     && ! out_has "$scc_sl_nh" -E '\[ok\].*sccache-cap' \
+     && ! out_has "$scc_sl_nh" 'fix the VALUE'; then
     ok "sccache-cap: a stale server is NOT-HONOURED whose remedy is 'sccache --stop-server', never editing the value"
   else
     bad "sccache-cap: the stale-server state did not report NOT-HONOURED with the stop-server remedy"
@@ -4386,9 +4412,9 @@ else
   scc_env_empty="$tmp/scc-env-empty"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_empty"
   scc_out_nsw=$(runscc "$scc_bs" "$scc_shims_lit" "$scc_env_empty" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_nsw=$(scc_slice "$scc_out_nsw")
-  if printf '%s\n' "$scc_sl_nsw" | grep -qE '\[warn\].*sccache-cap: NOT-SYSTEM-WIDE' \
-     && printf '%s\n' "$scc_sl_nsw" | grep -q -- '--fix-sccache-cap' \
-     && ! printf '%s\n' "$scc_sl_nsw" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_nsw" -E '\[warn\].*sccache-cap: NOT-SYSTEM-WIDE' \
+     && out_has "$scc_sl_nsw" -- '--fix-sccache-cap' \
+     && ! out_has "$scc_sl_nsw" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: a value reaching only this session is NOT-SYSTEM-WIDE, remedied by --fix-sccache-cap"
   else
     bad "sccache-cap: a session-only value was not reported as NOT-SYSTEM-WIDE"
@@ -4403,9 +4429,9 @@ else
   scc_out_f=$(runscc "$scc_bs" "$scc_shims_none" "$scc_env_empty" SCC_STUB_MAX=32212254720 \
     SCCACHE_CACHE_SIZE=30G SCC_STUB_LOG="$scc_log")
   scc_sl_f=$(scc_slice "$scc_out_f")
-  if printf '%s\n' "$scc_sl_f" | grep -qE '\[warn\].*sccache-cap: FAILED' \
-     && ! printf '%s\n' "$scc_sl_f" | grep -qE '\[ok\].*sccache-cap' \
-     && printf '%s\n' "$scc_sl_f" | grep -q -- '--fix-sccache-cap'; then
+  if out_has "$scc_sl_f" -E '\[warn\].*sccache-cap: FAILED' \
+     && ! out_has "$scc_sl_f" -E '\[ok\].*sccache-cap' \
+     && out_has "$scc_sl_f" -- '--fix-sccache-cap'; then
     ok "sccache-cap: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
   else
     bad "sccache-cap: an inherited value was accepted as evidence the box is capped"
@@ -4421,10 +4447,10 @@ else
     printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=%s\n' "$scc_amb" >"$scc_env_amb"
     scc_out_amb=$(runscc "$scc_bs" "$scc_shims_amb" "$scc_env_amb" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
     scc_sl_amb=$(scc_slice "$scc_out_amb")
-    if printf '%s\n' "$scc_sl_amb" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-       && printf '%s\n' "$scc_sl_amb" | grep -q "sccache's OWN default cap" \
-       && printf '%s\n' "$scc_sl_amb" | grep -q '<digits>\[KkMmGgTt\]' \
-       && ! printf '%s\n' "$scc_sl_amb" | grep -qE '\[ok\].*sccache-cap'; then
+    if out_has "$scc_sl_amb" -E '\[warn\].*sccache-cap: UNMEASURED' \
+       && out_has "$scc_sl_amb" "sccache's OWN default cap" \
+       && out_has "$scc_sl_amb" '<digits>\[KkMmGgTt\]' \
+       && ! out_has "$scc_sl_amb" -E '\[ok\].*sccache-cap'; then
       ok "sccache-cap: '$scc_amb' resolving to sccache's own default is UNMEASURED with the ambiguity + grammar named"
     else
       bad "sccache-cap: '$scc_amb' did not produce the declared-ambiguity UNMEASURED"
@@ -4438,9 +4464,9 @@ else
   scc_shims_nb="$tmp/scc-shims-nb"; mksccshims "$scc_shims_nb" 30G no-sccache
   scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCC_STUB_MAX=32212254720)
   scc_sl_nb=$(scc_slice "$scc_out_nb")
-  if printf '%s\n' "$scc_sl_nb" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_nb" | grep -q "no 'sccache' on PATH" \
-     && ! printf '%s\n' "$scc_sl_nb" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_nb" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && out_has "$scc_sl_nb" "no 'sccache' on PATH" \
+     && ! out_has "$scc_sl_nb" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing oracle, never an [ok]"
   else
     bad "sccache-cap: an absent oracle did not produce UNMEASURED"
@@ -4453,9 +4479,9 @@ else
   #        against itself and call the box VERIFIED.
   scc_out_ns=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none SCC_STUB_LOG="$scc_log")
   scc_sl_ns=$(scc_slice "$scc_out_ns")
-  if printf '%s\n' "$scc_sl_ns" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_ns" | grep -q 'no sccache server is answering' \
-     && ! printf '%s\n' "$scc_sl_ns" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_ns" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && out_has "$scc_sl_ns" 'no sccache server is answering' \
+     && ! out_has "$scc_sl_ns" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: a null cache_size is UNMEASURED — the client's own echo can never certify a cap"
   else
     bad "sccache-cap: a client-side echo with no server running was not refused"
@@ -4475,15 +4501,15 @@ else
   scc_out_fresh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none \
     SCC_STUB_STATE="$scc_state_w" SCC_STUB_LOG="$scc_log_fresh" --fix-sccache-cap)
   scc_sl_fresh=$(scc_slice "$scc_out_fresh")
-  if printf '%s\n' "$scc_sl_fresh" | grep -qE '\[ok\].*sccache-cap: VERIFIED' \
+  if out_has "$scc_sl_fresh" -E '\[ok\].*sccache-cap: VERIFIED' \
      && [ "$(scc_warns "$scc_sl_fresh")" = 0 ]; then
     ok "sccache-cap: a fresh box with NO server reaches VERIFIED — the section starts the server under the persisted value instead of failing --strict"
   else
     bad "sccache-cap: a fresh box with no running server did not reach VERIFIED (roborev finding 2)"
     printf '%s\n' "$scc_sl_fresh" | head -8
   fi
-  if printf '%s\n' "$scc_sl_fresh" | grep -q 'THIS RUN STARTED' \
-     && printf '%s\n' "$scc_sl_fresh" | grep -q 'scope:.*THIS RUN started it'; then
+  if out_has "$scc_sl_fresh" 'THIS RUN STARTED' \
+     && out_has "$scc_sl_fresh" 'scope:.*THIS RUN started it'; then
     ok "sccache-cap: the VERIFIED verdict DECLARES that this run started the server (not an independent observation)"
   else
     bad "sccache-cap: a run that started the server claimed VERIFIED without saying so"
@@ -4516,9 +4542,9 @@ else
   scc_out_empty=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
     SCC_STUB_USED=null SCC_STUB_LOG="$scc_log_empty" --fix-sccache-cap)
   scc_sl_empty=$(scc_slice "$scc_out_empty")
-  if printf '%s\n' "$scc_sl_empty" | grep -qE '\[ok\].*sccache-cap: VERIFIED' \
+  if out_has "$scc_sl_empty" -E '\[ok\].*sccache-cap: VERIFIED' \
      && [ "$(scc_warns "$scc_sl_empty")" = 0 ] \
-     && ! printf '%s\n' "$scc_sl_empty" | grep -q 'THIS RUN STARTED' \
+     && ! out_has "$scc_sl_empty" 'THIS RUN STARTED' \
      && ! grep -q -- '--start-server' "$scc_log_empty"; then
     ok "sccache-cap: a RUNNING server with an empty cache (cache_size null) VERIFIES as an ALREADY-RUNNING server — no start, no UNMEASURED"
   else
@@ -4534,9 +4560,9 @@ else
   scc_out_def=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none \
     SCC_STUB_STATE="$scc_state_d" SCC_STUB_LOG="$scc_log_def")
   scc_sl_def=$(scc_slice "$scc_out_def")
-  if printf '%s\n' "$scc_sl_def" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_def" | grep -q 'no sccache server is answering' \
-     && printf '%s\n' "$scc_sl_def" | grep -q -- '--fix-sccache-cap' \
+  if out_has "$scc_sl_def" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && out_has "$scc_sl_def" 'no sccache server is answering' \
+     && out_has "$scc_sl_def" -- '--fix-sccache-cap' \
      && ! grep -q -- '--start-server' "$scc_log_def" \
      && [ ! -s "$scc_state_d" ]; then
     ok "sccache-cap: a DEFAULT run starts no server — UNMEASURED naming the flag, and zero host mutation"
@@ -4574,10 +4600,10 @@ else
   scc_out_conf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
     SCC_SHIM_LOGIN_VALUE=40G SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
   scc_sl_conf=$(scc_slice "$scc_out_conf")
-  if printf '%s\n' "$scc_sl_conf" | grep -qE '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && printf '%s\n' "$scc_sl_conf" | grep -q "'30G'" \
-     && printf '%s\n' "$scc_sl_conf" | grep -q "'40G'" \
-     && ! printf '%s\n' "$scc_sl_conf" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_conf" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
+     && out_has "$scc_sl_conf" "'30G'" \
+     && out_has "$scc_sl_conf" "'40G'" \
+     && ! out_has "$scc_sl_conf" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: a login shell disagreeing with a non-login session is CONFLICTING-SOURCES naming BOTH values — even when every other fact would VERIFY"
   else
     bad "sccache-cap: two session types disagreed and the section still certified (or did not name both values)"
@@ -4586,9 +4612,9 @@ else
   # It must also point at the mechanism and at a source hunt that DECLARES its own
   # non-exhaustiveness: the reason this went unnoticed is that /etc/profile.d/20-agent-ami.sh
   # contains no `SCCACHE_CACHE_SIZE` string at all — it only SOURCES the file that does.
-  if printf '%s\n' "$scc_sl_conf" | grep -q 'profile.d' \
-     && printf '%s\n' "$scc_sl_conf" | grep -q 'NOT exhaustive' \
-     && printf '%s\n' "$scc_sl_conf" | grep -q 'grep -rn SCCACHE_CACHE_SIZE'; then
+  if out_has "$scc_sl_conf" 'profile.d' \
+     && out_has "$scc_sl_conf" 'NOT exhaustive' \
+     && out_has "$scc_sl_conf" 'grep -rn SCCACHE_CACHE_SIZE'; then
     ok "sccache-cap: the conflict names the profile.d mechanism and prints a source hunt declared NON-exhaustive"
   else
     bad "sccache-cap: the conflict verdict does not tell the operator where to look"
@@ -4610,10 +4636,10 @@ else
   scc_out_rconf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
     SCC_SHIM_LOGIN_DIR=/some/other/cache SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
   scc_sl_rconf=$(scc_slice "$scc_out_rconf")
-  if printf '%s\n' "$scc_sl_rconf" | grep -qE '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && printf '%s\n' "$scc_sl_rconf" | grep -q 'ROUTING' \
-     && printf '%s\n' "$scc_sl_rconf" | grep -q '/some/other/cache' \
-     && ! printf '%s\n' "$scc_sl_rconf" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_rconf" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
+     && out_has "$scc_sl_rconf" 'ROUTING' \
+     && out_has "$scc_sl_rconf" '/some/other/cache' \
+     && ! out_has "$scc_sl_rconf" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: agreeing caps with disagreeing ROUTING is also CONFLICTING-SOURCES, naming the other cache"
   else
     bad "sccache-cap: a routing disagreement did not block certification"
@@ -4626,9 +4652,9 @@ else
   scc_out_lfail=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
     SCC_SHIM_LOGIN_FAIL=1 --fix-sccache-cap)
   scc_sl_lfail=$(scc_slice "$scc_out_lfail")
-  if printf '%s\n' "$scc_sl_lfail" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_lfail" | grep -q 'LOGIN-shell session could not be measured' \
-     && ! printf '%s\n' "$scc_sl_lfail" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_lfail" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && out_has "$scc_sl_lfail" 'LOGIN-shell session could not be measured' \
+     && ! out_has "$scc_sl_lfail" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: an unmeasurable LOGIN session is UNMEASURED, never a fall back to the non-login answer"
   else
     bad "sccache-cap: an unmeasurable login session was silently ignored"
@@ -4641,9 +4667,9 @@ else
   scc_out_iso=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
     SCC_STUB_ISO_LOC=/some/other/servers/cache SCC_STUB_LOG="$scc_log")
   scc_sl_iso=$(scc_slice "$scc_out_iso")
-  if printf '%s\n' "$scc_sl_iso" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_iso" | grep -q 'answered by a DIFFERENT sccache' \
-     && ! printf '%s\n' "$scc_sl_iso" | grep -qE '\[ok\].*sccache-cap'; then
+  if out_has "$scc_sl_iso" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && out_has "$scc_sl_iso" 'answered by a DIFFERENT sccache' \
+     && ! out_has "$scc_sl_iso" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: a foreign sccache answering the isolated probe is DISCARDED, not trusted"
   else
     bad "sccache-cap: the isolation assert did not fire on a foreign cache location"
@@ -4671,8 +4697,8 @@ else
   mk_stub "$scc_shims_mac" uname 'echo Darwin; exit 0'
   scc_out_mac=$(runscc "$scc_bs" "$scc_shims_mac" "$scc_env_v" SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_mac=$(scc_slice "$scc_out_mac")
-  if printf '%s\n' "$scc_sl_mac" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && ! printf '%s\n' "$scc_sl_mac" | grep -qE '\[ok\]'; then
+  if out_has "$scc_sl_mac" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && ! out_has "$scc_sl_mac" -E '\[ok\]'; then
     ok "sccache-cap: a non-Linux host with a session-visible, enforced cap is UNMEASURED, never certified"
   else
     bad "sccache-cap: a non-Linux host produced a success verdict"
@@ -4728,27 +4754,43 @@ else
     grep -n 'SCCACHE_CACHE_SIZE' "$scc_env_w"
   fi
 
-  # 12b-m. THE PLACEHOLDER REFUSAL. Until the measured cap is substituted, the shipped literal is
-  #        not a value sccache accepts — and persisting it would be SILENT (no diagnostic
-  #        anywhere) and PERMANENT (this section never rewrites an existing value). So the write
-  #        is refused, loudly, and nothing is written. This case is a no-op once the literal is a
-  #        real cap, so it is keyed on what the shipped script actually says rather than assuming.
-  scc_shipped_val=$(sed -n "s/^SCC_ENV_VALUE='\\(.*\\)'\$/\\1/p" "$scc_bs" | head -1)
-  case "$scc_shipped_val" in
-    *[!0-9KkMmGgTt]*|''|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*|*[0-9])
-      scc_env_ph="$tmp/scc-env-ph"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_ph"
-      scc_out_ph=$(runscc "$scc_bs" "$scc_shims_w" "$scc_env_ph" SCC_STUB_MAX=32212254720 \
-        SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
-      if ! grep -q 'SCCACHE_CACHE_SIZE' "$scc_env_ph" \
-         && printf '%s\n' "$(scc_slice "$scc_out_ph")" | grep -q 'SILENTLY DISCARD'; then
-        ok "sccache-cap: an unusable cap literal ('$scc_shipped_val') is REFUSED, not persisted (a discarded line would be permanent and invisible)"
-      else
-        bad "sccache-cap: an unusable cap literal was persisted, or the refusal was silent"
-        echo "--- env file ---"; cat "$scc_env_ph"; scc_slice "$scc_out_ph" | head -4
-      fi ;;
-    *)
-      ok "sccache-cap: the shipped cap literal '$scc_shipped_val' is an accepted <digits>[KkMmGgTt] value (the placeholder has been substituted; the refusal path is now unreachable by design)" ;;
-  esac
+  # 12b-m. THE UNUSABLE-LITERAL REFUSAL, ON ITS OWN FIXTURE (issue #3727). Persisting a value
+  #        sccache silently discards is worse than persisting nothing: there is no diagnostic
+  #        anywhere, and because this section never rewrites an existing value it would be
+  #        PERMANENT. This used to be keyed on the SHIPPED literal, which covered the refusal only
+  #        INCIDENTALLY — by that literal being an unsubstituted placeholder. Now that the fleet
+  #        cap is a real value (`50G`), that coverage would have evaporated, so the case
+  #        substitutes the artifact in its own scratch copy and is independent of whatever the
+  #        fleet cap becomes.
+  #
+  #        `50GiB` is chosen deliberately over an obviously-silly string: it is the REAL-WORLD
+  #        TRAP — the spelling anyone would reach for — and it is MEASURED to yield sccache's
+  #        10 GiB default rather than 50 GiB. A fixture that used `zzz` would prove the guard
+  #        rejects garbage while saying nothing about the value that actually gets shipped by
+  #        mistake.
+  scc_bs_bad="$tmp/scc-bs-unusable.sh"
+  cp "$scc_bs" "$scc_bs_bad"
+  sed -i.bak "s/^SCC_ENV_VALUE='[^']*'\$/SCC_ENV_VALUE='50GiB'/" "$scc_bs_bad" 2>/dev/null \
+    || sed -i '' "s/^SCC_ENV_VALUE='[^']*'\$/SCC_ENV_VALUE='50GiB'/" "$scc_bs_bad" 2>/dev/null
+  rm -f "$scc_bs_bad.bak"
+  if grep -q "^SCC_ENV_VALUE='50GiB'\$" "$scc_bs_bad"; then
+    ok "sccache-cap: the unusable-literal fixture carries 50GiB (the harness's own precondition)"
+  else
+    bad "sccache-cap: could not plant the unusable literal — the refusal case below would test nothing"
+  fi
+  scc_env_ph="$tmp/scc-env-ph"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_ph"
+  scc_out_ph=$(runscc "$scc_bs_bad" "$scc_shims_w" "$scc_env_ph" SCC_STUB_MAX=32212254720 \
+    SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
+  scc_sl_ph=$(scc_slice "$scc_out_ph")
+  if ! grep -q 'SCCACHE_CACHE_SIZE' "$scc_env_ph" \
+     && out_has "$scc_sl_ph" 'SILENTLY DISCARD' \
+     && out_has "$scc_sl_ph" '50GiB' \
+     && ! out_has "$scc_sl_ph" -E '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: an unusable cap literal ('50GiB', the real-world trap) is REFUSED and NAMED, never persisted — a discarded line would be permanent and invisible"
+  else
+    bad "sccache-cap: an unusable cap literal was persisted, or the refusal was silent"
+    echo "--- env file ---"; cat "$scc_env_ph"; printf '%s\n' "$scc_sl_ph" | head -4
+  fi
 
   # 12b-n. THE OPT-OUT is loud and NON-PASSING — a switch that returned `ok` would be a way to
   #        buy a vacuous green, which is the failure mode this section removes.
@@ -4759,8 +4801,8 @@ else
       scc_out_oo=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 "$scc_optout")
     fi
     scc_sl_oo=$(scc_slice "$scc_out_oo")
-    if printf '%s\n' "$scc_sl_oo" | grep -qE '\[warn\].*sccache-cap: OPT-OUT' \
-       && ! printf '%s\n' "$scc_sl_oo" | grep -qE '\[ok\].*sccache-cap'; then
+    if out_has "$scc_sl_oo" -E '\[warn\].*sccache-cap: OPT-OUT' \
+       && ! out_has "$scc_sl_oo" -E '\[ok\].*sccache-cap'; then
       ok "sccache-cap: $scc_optout is a [warn] OPT-OUT that can never buy a green"
     else
       bad "sccache-cap: $scc_optout did not report as a non-passing OPT-OUT"
@@ -4961,7 +5003,7 @@ for pin_mustrun in \
   "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)" \
   "push: AC1+AC3 end to end" \
   "push: the refusal is exactly ONE warning and names the host"; do
-  printf '%s\n' "$PIN_RAN_CASES" | grep -qF -- "$pin_mustrun" \
+  out_has "$PIN_RAN_CASES" -F -- "$pin_mustrun" \
     || pin_mustrun_missing="${pin_mustrun_missing:+$pin_mustrun_missing; }$pin_mustrun"
 done
 if [ -z "$pin_mustrun_missing" ]; then
