@@ -184,6 +184,31 @@ PROMPT_SIGNATURE_RE="${PROMPT_SIGNATURE_RE:-AskUserQuestion|Do you want to|waiti
 LEFTOVER_HOLD_MAX="${LEFTOVER_HOLD_MAX:-3}"
 BUILD_HOLD_MAX="${BUILD_HOLD_MAX:-12}"
 UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
+# issue #3749: the SHARED git object store on this box (every lane here is a worktree of
+# ONE `.git`) is rehashed with `git fsck` on a THROTTLED cadence from the per-iteration
+# preflight path. This is the recurring half of #3749's control; the one-shot half is
+# scripts/bootstrap-agent-machine.sh section 5b-obj. Both go through the SAME script,
+# scripts/check-object-store-integrity.sh — a second implementation would be a second
+# place for the verdict to drift.
+#
+# OBJ_SWEEP_INTERVAL_HOURS — minimum hours between sweeps, throttled by a stamp file.
+#   Measured cost: 19.83s per sweep on this fleet's 331M store, and a box runs up to 4
+#   lanes, so an UNTHROTTLED sweep would burn ~80s of every iteration cycle across the
+#   box for a property that changes on the timescale of disk faults, not minutes.
+#   A value of 0 DISABLES the sweep (same `<=0 disables` semantics as BUILD_HOLD_MAX),
+#   which is ANNOUNCED ONCE in the journal rather than left silent: a disabled hygiene
+#   probe must be visible in the log, not inferred from the absence of its lines. It buys
+#   no green anywhere — this sweep certifies nothing, it only refuses to run workers over
+#   a store known to be damaged.
+# OBJ_SWEEP_TIMEOUT_SECS — passed through as the sweep's own `--timeout`. STRICTLY
+#   POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe into a
+#   permanent UNMEASURED — a silently self-disabling bound, the shape validate_numeric_knobs
+#   exists for.
+OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
+OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-300}"
+# Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
+# object store share one throttle.
+OBJ_SWEEP_STAMP="${OBJ_SWEEP_STAMP:-}"
 # issue #2670 (roborev 1813): before escalating a non-merged PR state to a
 # mismatch, re-read gh a few times to absorb read-after-merge lag. Env-tunable so
 # the tooling tests set the wait to 0 (nothing sleeps in the suite).
@@ -3177,6 +3202,135 @@ acquire_lock() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared-object-store integrity sweep (issue #3749) — THROTTLED, and deliberately
+# NOT a hold reason.
+#
+# WHY IT IS HERE. Every lane on this box reads ONE shared `.git`, and git does not
+# rehash an object against the id it was asked for on an ordinary read. A corrupt
+# shared store can therefore change ANY gate's verdict on this box, so no worker
+# should be allowed to certify against it. #3749's owner ruling scopes this to
+# ACCIDENTAL corruption (bit rot, a torn pack write, a SIGKILLed gc); DELIBERATE
+# peer forgery is invoker-class and out of model per the #3312 triage rule.
+#
+# WHY `CORRUPT` STOPS THE LOOP RATHER THAN HOLDING IT. Corruption is
+# NON-SELF-CLEARING: a HOLD-and-repoll loop would spin until the wall-clock budget
+# taking no useful action, which is precisely the latch #2670 bounded the leftover
+# families to avoid. So it uses the established "stop loudly" idiom — notify high,
+# journal, finalize_exit with its own reason — the same shape as leftover-worker
+# exceeding LEFTOVER_HOLD_MAX.
+# ---------------------------------------------------------------------------
+OBJ_SWEEP_ANNOUNCED=0
+OBJ_SWEEP_UNMEASURED_NOTIFIED=0
+
+# obj_sweep_stamp_path — the throttle stamp. Keyed on the SHARED OBJECT STORE, not on
+# the lane, so four lanes of one box share one 6-hour cadence instead of sweeping four
+# times. An unresolvable store falls back to a fixed name: the stamp is a THROTTLE, and
+# every failure mode of it costs at most an extra sweep, never a missed one.
+obj_sweep_stamp_path() {
+  local common key
+  if [[ -n "$OBJ_SWEEP_STAMP" ]]; then
+    printf '%s' "$OBJ_SWEEP_STAMP"
+    return 0
+  fi
+  common="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)" || common=""
+  if [[ -n "$common" ]]; then
+    common="$(cd "$REPO_ROOT" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P)" || common=""
+  fi
+  key="${common:-unresolved-store}"
+  # Flatten to one path component; keep only characters that cannot surprise a shell or
+  # a filesystem.
+  key="${key//\//_}"
+  key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
+  printf '%s' "${TMPDIR:-/tmp}/cqlite-object-store-sweep.${key}.stamp"
+}
+
+object_store_sweep() {
+  local script stamp now last rc out verdict
+  if [[ "$OBJ_SWEEP_INTERVAL_HOURS" -le 0 ]]; then
+    # ANNOUNCED, never silent (the CLAIM_CMD-disabled precedent in main()): a hygiene
+    # probe that is off must be visible in the journal rather than inferred from missing
+    # lines.
+    if [[ "$OBJ_SWEEP_ANNOUNCED" -eq 0 ]]; then
+      log "object-store sweep DISABLED (OBJ_SWEEP_INTERVAL_HOURS=0) — this box's SHARED git object store is NOT being rehashed this run (#3749)"
+      OBJ_SWEEP_ANNOUNCED=1
+    fi
+    return 0
+  fi
+  script="$REPO_ROOT/scripts/check-object-store-integrity.sh"
+  if [[ ! -r "$script" ]]; then
+    # PERMISSIVE, AND HERE IS THE REASON, IN CODE (CLAUDE.md #3229: where a signal
+    # genuinely SHOULD be permissive, record the why at the branch). The sweep is absent
+    # from this checkout — an older branch, or a partial tree. Refusing to run any worker
+    # because a hygiene probe is missing is a self-DoS on the whole fleet, and the probe
+    # certifies nothing on the passing side either. Journalled once so it is visible.
+    if [[ "$OBJ_SWEEP_ANNOUNCED" -eq 0 ]]; then
+      log "object-store sweep UNAVAILABLE: no $script in this checkout — the shared store is NOT being rehashed (#3749). NOT treated as clean and NOT a stop reason."
+      OBJ_SWEEP_ANNOUNCED=1
+    fi
+    return 0
+  fi
+  stamp="$(obj_sweep_stamp_path)"
+  now="$(date +%s)"
+  last=0
+  if [[ -r "$stamp" ]]; then
+    read -r last <"$stamp" 2>/dev/null || last=0
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  # A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not
+  # park the sweep forever: treat it as never-swept.
+  [[ "$last" -gt "$now" ]] && last=0
+  if [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]; then
+    return 0
+  fi
+  rc=0
+  out="$(bash "$script" --repo "$REPO_ROOT" --timeout "$OBJ_SWEEP_TIMEOUT_SECS" 2>&1)" || rc=$?
+  # The stamp is written for EVERY outcome, including UNMEASURED: the throttle bounds how
+  # often this box SPENDS the sweep, and a box that cannot measure (no timeout binary, say)
+  # must not re-attempt it every iteration. The verdict is journalled either way, so
+  # nothing is hidden by the stamp.
+  printf '%s\n' "$(date +%s)" >"$stamp" 2>/dev/null ||
+    log "object-store sweep: could not write the throttle stamp $stamp — the sweep will re-run next iteration"
+  # Read the verdict from the sweep's OWN anchored control line, never from loose text:
+  # its output prints repository-controlled paths verbatim, so an unanchored match could
+  # land on one. Both the line AND the exit status are required to agree for the two
+  # actionable verdicts.
+  verdict="$(printf '%s\n' "$out" | grep '^OBJECT-STORE: verdict ' | head -1)"
+  verdict="${verdict#OBJECT-STORE: verdict }"
+  verdict="${verdict%% *}"
+  if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
+    log "object-store: VERIFIED — $(printf '%s\n' "$out" | grep '^OBJECT-STORE: measured ' | head -1)"
+    return 0
+  fi
+  if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
+    local findings
+    findings="$(printf '%s\n' "$out" | grep -E '^OBJECT-STORE: (finding|object) ' | head -6 | tr '\n' ';' | cut -c1-600)"
+    notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
+      "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
+    log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
+    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it."
+    finalize_exit "object-store-corrupt" 1
+  fi
+  # UNMEASURED (or no recognised verdict at all): REPORTED, and DELIBERATELY PERMISSIVE.
+  # THE WHY, IN CODE (CLAUDE.md #3229). An UNMEASURED sweep is not clean — nothing here
+  # reads it as clean, and it stops no worker from being spawned either, because refusing
+  # to run any worker on this box because a HYGIENE PROBE could not run is a self-DoS: the
+  # probe's failure modes are its own (no timeout binary, an unresolvable git dir, an
+  # expired bound on a loaded box), none of which is evidence about the store. So it is
+  # journalled every time and paged ONCE per run — loud enough to fix, never a silent
+  # swallow and never a latch.
+  log "object-store: UNMEASURED (rc=$rc verdict='${verdict:-<none>}') — the shared store was NOT rehashed, so its integrity is UNKNOWN, not clean. Continuing: a hygiene probe that cannot run must not stop the fleet (#3749)."
+  printf '%s\n' "$out" | grep '^OBJECT-STORE: unmeasured-cause ' | head -4 | while IFS= read -r obj_line; do
+    log "object-store: $obj_line"
+  done
+  if [[ "$OBJ_SWEEP_UNMEASURED_NOTIFIED" -eq 0 ]]; then
+    notify "high" "worker-supervisor: object-store sweep UNMEASURED" \
+      "the shared git object store could not be rehashed on this box (rc=$rc) — integrity is UNKNOWN, not clean. The loop continues; fix the cause so the sweep can run."
+    OBJ_SWEEP_UNMEASURED_NOTIFIED=1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Preflight: fail-closed, wait-don't-spin. Returns a hold reason on stdout, or
 # empty when clear. stop-file / budgets are handled by the caller (clean exit,
 # not a hold).
@@ -3219,6 +3373,11 @@ LAST_HOLD_REASON=""
 # allowed the LOOSE BUILD_HOLD_MAX so a legitimate concurrent full gate is waited out.
 preflight_wait() {
   local worker_holds=0 build_holds=0
+  # The throttled shared-object-store sweep (#3749) runs ONCE per iteration, HERE, before
+  # the hold loop: it is per-iteration box hygiene, not a hold reason, and it must not be
+  # re-run on every hold repoll. `CORRUPT` never returns — it stops the loop loudly from
+  # inside (see object_store_sweep).
+  object_store_sweep
   while true; do
     [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
     [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
@@ -3884,10 +4043,15 @@ validate_numeric_knobs() {
   # silently break the bound (e.g. MAX_ISSUES=-1 ⇒ instant budget-issues rc=0, roborev
   # 1843). MAX_HOURS is here because its `$((MAX_HOURS * 3600))` derivation is integer
   # arithmetic (a bare-word MAX_HOURS would coerce to 0 → a broken wall-clock budget).
+  # OBJ_SWEEP_INTERVAL_HOURS is here, not in the signed group: 0 is its documented
+  # `disables` value and a NEGATIVE would be an operator typo whose meaning is undefined
+  # (the `-le 0` guard would treat it as disabled, which is not what a `-1` was trying to
+  # say). #3749.
   for name in MAX_HOURS MAX_ISSUES BREAKER_N BACKOFF_NOWORK_SECS HOLD_POLL_SECS \
               MAX_ITER_SECS STUCK_POLL_SECS STUCK_TAIL_LINES LEFTOVER_HOLD_MAX \
               UNVERIFIED_MAX MISMATCH_RETRIES MISMATCH_RETRY_WAIT_SECS \
-              PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS; do
+              PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS \
+              OBJ_SWEEP_INTERVAL_HOURS; do
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a non-negative integer"
   done
@@ -3902,6 +4066,15 @@ validate_numeric_knobs() {
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
     [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (0 would silently skip the migration entirely)"
+  done
+  # OBJ_SWEEP_TIMEOUT_SECS is the same class (#3749): it is passed straight through as the
+  # sweep's `--timeout`, which REJECTS 0 as a usage error — so a 0 would make every sweep
+  # UNMEASURED forever, i.e. a bound that silently disables the probe rather than loosening
+  # it. Its own group because the message has to say that.
+  for name in OBJ_SWEEP_TIMEOUT_SECS; do
+    val="${!name}"
+    [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
+    [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (the sweep rejects 0, which would make every run UNMEASURED)"
   done
   # SIGNED integer knobs — the two with a documented `<=0 disables` contract.
   for name in BUILD_HOLD_MAX MISMATCH_GRACE_CAP_SECS; do
