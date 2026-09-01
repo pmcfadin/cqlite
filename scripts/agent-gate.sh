@@ -6151,7 +6151,9 @@ DISK_FREE_START_LOGS=""
 # of them would break the block frame and could forge a `RESULT: PASS` or a second
 # `==== AGENT-GATE SUMMARY ====` marker inside the block. Neutralised at the ONE emit boundary
 # (the final printf), never per interpolation site: a per-site escape is a list to keep complete.
-_disk_safe() { printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\037\177'; }
+_disk_safe() {
+  printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\037\177'
+}
 
 # _disk_abbrev <csv> <max-items> -- bound a name list so one line stays one readable line.
 _disk_abbrev() {
@@ -15123,6 +15125,22 @@ run_pub_surface() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_agent_gate_disk_exhaustion.sh (#3800), the pin for the
+# `disk-exhaustion:` SUMMARY marker. A full gate died of ENOSPC and the ONE artifact agents
+# retain said `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
+# the reader debugged a minimal-features build that was never broken. 39 cases EXTRACT the
+# shipped `_disk_exhaustion_line` + helpers out of this file and run them: each signature of
+# the CLOSED set; an ANSI-COLOURED log (the payload carries no escapes, #3400) plus the proof
+# that the scan materialises NO sibling file — a diagnostic needing free disk is useless under
+# ENOSPC, which is why it does NOT use `_ansi_stripped_log`; the literal `0 RECOGNISED` rather
+# than a bare `0`; a PASSing component's log never scanned, with a status-flip positive control;
+# grep's THREE-valued rc, so an unreadable subject is UNMEASURED and never "no signature"; the
+# mixed cases in both directions; a hostile log carrying a forged `RESULT: PASS` and SUMMARY
+# marker proving no log text is interpolated; per-component sub-logs in and cross-boundary logs
+# out; and a STRUCTURAL check that derives the emit-site set from this file rather than
+# hard-coding a count. Hermetic: temp dirs plus the two hidden selftest hooks — no cargo, no
+# python3, no datasets, no network — so it is registered ABOVE the python3 SKIP branch and
+# never SKIPs.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -16752,6 +16770,29 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_file_size_log.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (file-size component-log guard #3401); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # disk-exhaustion attribution guard (#3800): hermetic (temp dirs + the two hidden
+  # selftest hooks; no cargo/python3/datasets/network, ~1s). A full gate killed by ENOSPC
+  # reported only `minimal-build: FAIL (611s)` in the ONE artifact doctrine retains, so the
+  # reader debugged a build that was never broken. This pins the `disk-exhaustion:` marker's
+  # CLOSED value set, its three-valued grep handling, the no-log-text-in-the-block rule and
+  # the derived emit-site set.
+  #
+  # Registered HERE, as its own guard ABOVE the python3 branch, and NOT inside the
+  # `&&`-chain below: that chain is behind `command -v python3`, and folding a suite that
+  # needs nothing beyond bash into a SKIP-aware lane would be a coverage hole wearing a
+  # SKIP's clothes (#3522's rule). It never SKIPs. Same shape as the file-size log guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_disk_exhaustion.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_exhaustion.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (disk-exhaustion attribution guard #3800); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
