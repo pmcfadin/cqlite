@@ -761,6 +761,36 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   must not be clobbered), so re-running it is a **silent no-op**: fix the VALUE in
   `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
   `gate-pin: NOT-HONOURED`.
+- **Every component line states WHAT IT VERIFIED, not just how long it took — and a component
+  that verified NOTHING cannot report PASS (#3625).** `PASS (0s)` was indistinguishable, in a
+  pasted block, from a component that did nothing. A duration is a PROXY for work; a COUNT is
+  the work. So `_fm_summary_line` now appends a census suffix — `{verified: 3562 tests passed}`,
+  `{verified: 2 test binaries built/verified}`, `{no census — <declared reason>}`,
+  `{census NOT-MEASURED: <reason>}` — plus ONE aggregate `census:` line per block. **The
+  measured oracle behind it, and the answer to the issue's two-run comparison: cargo caches
+  COMPILATION, never test EXECUTION** — a WARM `cargo test` re-prints `test result: ok. N
+  passed` and a WARM `cargo test --no-run` still prints one `Executable ` line per binary — so
+  those `0s` lanes DID re-verify their subjects and the count was in the log all along; nothing
+  put it in the SUMMARY. A `libtest`/`compile`/`both` lane whose measured subject count is ZERO
+  is recorded as **`VACUOUS`**, a fourth component-status token beside PASS/FAIL/SKIP, and it
+  fails the run. **That required making every aggregation AFFIRMATIVE**: `[ "$st" = FAIL ] &&
+  OVERALL=FAIL` failed only the ONE named bad token, so every other value — an unrecognised
+  token, an empty result file, VACUOUS itself — took the permissive branch; `_status_is_nonfailing`
+  is now a closed set (PASS, SKIP) and everything else fails. Two states are DECLARED and
+  deliberately NON-FATAL, because a lane that reds on correct input is the lane agents learn to
+  waive: `NOT-MEASURED` (an unreadable log, a failed ANSI strip, an unrecognised driver report)
+  and `gap:<reason>` (13 components today — fmt, clippy, all-features-check, the shell/python
+  guards, smoke, tooling-tests — each PRINTING its reason every run). Neither is ever read as
+  verified: the aggregate line counts them separately and always as `N RECOGNISED`, never a bare
+  `N`, and it DECLARES its own non-exhaustiveness, because the gap set is curated. One asymmetry
+  worth knowing: for a cargo lane the subject markers are cargo's OWN guaranteed output, so their
+  absence really does mean nothing ran — but for `indirect:<driver>` (python-bindings/pytest,
+  node-bindings/jest) an ABSENT tally is `NOT-MEASURED`, since a third-party report format is not
+  ours and its absence is a measurement failure, not proof of vacuity. Declaration site:
+  `_census_kind` (a CLOSED set; an undeclared component is a named FAIL, so a new component
+  cannot join with a blank census). Guard: `scripts/tests/test_agent_gate_census.sh`
+  (`tooling-tests`), which plants a no-op in a real component under `--only`, requires the block
+  to NAME it, and carries a positive control on the same lane differing in ONE property.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
