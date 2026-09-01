@@ -11,6 +11,26 @@
 # alone: a bare exit-code assertion passes on an unrelated silent abort, and for this
 # script it would pass on the vacuous states the whole design exists to keep visible.
 #
+# PLANTED CASES ARE HOST-INDEPENDENT BY CONSTRUCTION; ONLY P14/P15 LOOK AT THE HOST.
+# The guard REQUIRES a `timeout(1)` accepting `-k` and refuses to run an unbounded probe
+# without one, so a planted case that borrowed the AMBIENT tool would turn every expected
+# verdict into `cause=probe-unboundable` on a host that has none — a suite that reds on
+# correct input, which (via tooling-tests) reds the FULL GATE. That is the very class of
+# defect the split below exists to end, and it has now been introduced twice, so it is
+# stated once here rather than fixed case by case:
+#
+#   PLANTED (P1-P13, P16)  get a HERMETIC forwarding `timeout` shim on the scratch PATH
+#                          (plant_timeout, below) alongside the shim `cargo`. They depend
+#                          on NOTHING the host does or does not have.
+#   AMBIENT (P14, P15)     are the two cases whose SUBJECT IS THE AMBIENT TOOL — P14 that
+#                          its ABSENCE is refused, P15 that its `-k` really hard-kills — so
+#                          they alone consult the host, resolve the bounding command ONCE
+#                          (timeout OR gtimeout — macOS coreutils installs only the second)
+#                          and invoke the RESOLVED PATH, never a bare `timeout` literal.
+#
+# Do not reintroduce an ambient dependency into a planted case: planting is what makes the
+# case's input ours, and a planted case that needs a host binary is planted in name only.
+#
 # THE SUBJECT IS SUBSTITUTED, NEVER SEAMED. The guard derives its workspace and its
 # baseline path from its own location and takes no flag or environment variable for
 # either (a guard whose invoker picks its subject can be pointed at a trivial subject and
@@ -154,13 +174,65 @@ tree_unparseable() { printf '├── foo v1.0.0\n│   └── x v0.1.0\n   
 
 baseline_matching() { printf 'instances 4\ncrates 2\ncrate foo 2\ncrate bar 2\n'; }
 
-# new_tree <name> [baseline-writer]: a scratch tree holding a COPY of the real guard.
+# plant_timeout <dir>: a HERMETIC forwarding `timeout` on the scratch PATH — the thing
+# that makes every PLANTED case independent of what this host has installed (see the
+# planted/ambient split at the top of this file). It is written in bash and implements the
+# only two behaviours the guard depends on: it accepts `-k <grace>` (the guard PROBES that
+# affirmatively with `-k 1 1 true` and refuses to run at all if it is rejected), and it
+# runs the command, returning its status. It also really bounds the command — a planted
+# `cargo` that hung would otherwise hang this suite — reporting coreutils' own 124/137 so
+# the shim cannot teach the guard a status the real tool never emits.
+plant_timeout() {
+  cat > "$1/bin/timeout" <<'SHIM'
+#!/usr/bin/env bash
+# HERMETIC timeout(1) shim for the dep-duplicates ratchet self-test. Not a general
+# implementation: it covers `timeout [-k GRACE] SECS CMD...`, which is the one form
+# scripts/ci/check-dep-duplicates.sh ever invokes.
+grace=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -k)  grace="${2:-0}"; shift 2 ;;
+    -k*) grace="${1#-k}"; shift ;;
+    --)  shift; break ;;
+    -*)  shift ;;
+    *)   break ;;
+  esac
+done
+[ "$#" -ge 2 ] || exit 125
+secs="$1"; shift
+fired="$(mktemp "${TMPDIR:-/tmp}/dep-dup-timeout.XXXXXX")"
+rm -f "$fired"
+"$@" &
+cmd_pid=$!
+( sleep "$secs" 2>/dev/null || :
+  : >"$fired"
+  kill -TERM "$cmd_pid" 2>/dev/null || :
+  sleep "$grace" 2>/dev/null || :
+  kill -KILL "$cmd_pid" 2>/dev/null || : ) &
+wd_pid=$!
+wait "$cmd_pid"; rc=$?
+kill -TERM "$wd_pid" 2>/dev/null || :
+wait "$wd_pid" 2>/dev/null || :
+if [ -e "$fired" ]; then
+  rm -f "$fired"
+  # coreutils: 124 when the command died at the bound, 137 when the hard kill was needed.
+  case "$rc" in 137) exit 137 ;; *) exit 124 ;; esac
+fi
+rm -f "$fired"
+exit "$rc"
+SHIM
+  chmod +x "$1/bin/timeout"
+}
+
+# new_tree <name> [baseline-writer]: a scratch tree holding a COPY of the real guard, a
+# hermetic `timeout` shim, and (via plant_cargo) a shim `cargo`.
 new_tree() {
   local d="$TMPROOT/$1"
   mkdir -p "$d/scripts/ci" "$d/bin"
   cp "$GUARD" "$d/$GUARD_REL"
   printf '[workspace]\nmembers = []\n' > "$d/Cargo.toml"
   if [ "${2:-}" = none ]; then :; else baseline_matching > "$d/$BASELINE_REL"; fi
+  plant_timeout "$d"
   printf '%s' "$d"
 }
 
@@ -227,6 +299,15 @@ case "$OUT" in
   *'probe bound: '*'then SIGKILL after a further '*)
     ok "P1: the run STATES the bound it applied to the probe (tool, bound, hard-kill grace)" ;;
   *) bad "P1: no 'probe bound:' line — the applied bound is invisible in the gate log" ;;
+esac
+# …and the bound came from the SCRATCH TREE, not the host. This is the mechanical pin on
+# the planted/ambient split: if a future edit drops plant_timeout, every planted case
+# silently starts depending on an ambient binary again and reds on any host without one.
+case "$OUT" in
+  *"probe bound: $d/bin/timeout "*)
+    ok "P1: the probe was bound by the scratch tree's HERMETIC timeout shim, not by a host binary (planted cases are host-independent by construction)" ;;
+  *)
+    bad "P1: the bound was NOT the planted shim ($d/bin/timeout) — a planted case has picked up an ambient dependency: $(printf '%s' "$OUT" | grep -F 'probe bound:' | head -1)" ;;
 esac
 
 # --- P2: a crate grew ------------------------------------------------------
@@ -402,7 +483,9 @@ esac
 # here is an ADVISORY component that can hang the whole gate with no verdict at all.
 # PATH is rebuilt from scratch with the handful of binaries the guard genuinely needs and
 # NO timeout/gtimeout — the same substitution discipline as everywhere else in this file
-# (no seam, no env var: the guard has none).
+# (no seam, no env var: the guard has none). This is one of the TWO cases whose subject is
+# the ambient tool, so the scratch tree's hermetic `timeout` shim is deliberately NOT on
+# this PATH: planting it here would plant away the very absence being tested.
 d=$(new_tree p14); plant_cargo "$d" 0 tree_baseline
 mkdir -p "$d/minbin"
 p14_missing=""
@@ -435,7 +518,20 @@ fi
 # so this case SUBSTITUTES THE ARTIFACT: it rewrites them in its OWN scratch copy of the
 # guard and VERIFIES the rewrite took, because a silently-unapplied edit would make the
 # case time out under its own outer bound and read as an unrelated failure.
+#
+# THE OTHER AMBIENT CASE. Its subject is the REAL tool's `-k`, so the scratch tree's
+# hermetic shim is removed here — a shim proving its own `-k` would prove nothing about the
+# binary the guard uses in production. The bounding command is therefore resolved ONCE, from
+# the host, as `timeout` OR `gtimeout` (a macOS coreutils install exposes only the second, so
+# a bare `timeout` literal would exit 127 there), its `-k` capability is PROBED rather than
+# assumed, and every invocation below uses the resolved path.
 d=$(new_tree p15)
+rm -f "$d/bin/timeout"
+p15_timeout="$(type -P timeout || true)"
+[ -n "$p15_timeout" ] || p15_timeout="$(type -P gtimeout || true)"
+if [ -n "$p15_timeout" ] && ! "$p15_timeout" -k 1 1 true >/dev/null 2>&1; then
+  p15_timeout=""
+fi
 sed -i.bak -e 's/^readonly PROBE_TIMEOUT_SECS=600$/readonly PROBE_TIMEOUT_SECS=1/' \
            -e 's/^readonly PROBE_KILL_GRACE_SECS=30$/readonly PROBE_KILL_GRACE_SECS=1/' \
            "$d/$GUARD_REL"
@@ -451,15 +547,15 @@ fi
 exit 97
 SHIM
 chmod +x "$d/bin/cargo"
-if [ -z "$(type -P timeout || true)" ] && [ -z "$(type -P gtimeout || true)" ]; then
-  skipped "P15: this host has no timeout(1) at all, so neither the guard's bound nor this case's own outer bound can be applied here (P14 is the case for such a host)"
+if [ -z "$p15_timeout" ]; then
+  skipped "P15: this host has no timeout(1)/gtimeout(1) accepting -k, so neither the guard's bound nor this case's own outer bound can be applied here (P14 is the case for such a host)"
 elif grep -qx 'readonly PROBE_TIMEOUT_SECS=1' "$d/$GUARD_REL" \
    && grep -qx 'readonly PROBE_KILL_GRACE_SECS=1' "$d/$GUARD_REL"; then
   ok "P15: the scratch copy's bound was really shortened (the substitution took, so P15 cannot pass or fail for the wrong reason)"
   # An OUTER bound, not a wall-clock threshold assert: if the guard's own bound does NOT
   # work the outer timeout kills it and rc is 124, which fails the assertion below with
   # the guard's own claim visible. Nothing here depends on how long anything took.
-  OUT="$(PATH="$d/bin:$PATH" timeout 60 bash "$d/$GUARD_REL" 2>&1)"; RC=$?
+  OUT="$(PATH="$d/bin:$PATH" "$p15_timeout" 60 bash "$d/$GUARD_REL" 2>&1)"; RC=$?
   assert_case "P15: a SIGTERM-IGNORING cargo is HARD-KILLED at the bound and reported UNMEASURABLE (exit 3), not waited on forever" \
     3 'probe bound:' 'INVOKED (rc 137)' 'SKIP-UNMEASURABLE cause=cargo-tree-failed' 'SIGKILL'
   case "$OUT" in
