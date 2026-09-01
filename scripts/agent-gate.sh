@@ -2790,7 +2790,8 @@ _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT H
 # in this file than the assignment (lexical position is not execution order for a function body,
 # so no source scan can decide that ordering — the sentinel makes it moot).
 _CS_READ_DIR_UNSET='/nonexistent/agent-gate-component-set-read-dir-not-established'
-_CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
+_CS_READ_DIR="$_CS_READ_DIR_UNSET"
+                   # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
                    # ALWAYS the isolated scratch — "else this checkout" was written here while
                    # the pre-flight still read objects live, and since #3757 it reads NONE
                    # there, so that clause licensed exactly what the enumeration above forbids.
@@ -4532,18 +4533,31 @@ _cs_live_refuse() {
 # a refusal (the caller must return), 1 otherwise — the same contract as `_cs_live_refuse`, so the
 # two read alike at a call site.
 #
-# WHY A REFUSAL AND NOT AN ASSERTION-BY-COMMENT (#3757): the two states this rejects are the two
-# that would silently redirect an OBJECT read into the live repository, which is the one thing the
-# execution-route enumeration at the head of this region forbids — empty (because `git -C ""`
-# leaves the working directory unchanged, so it MEANS this checkout) and `$REPO_ROOT` itself. A
-# fall-through would be a lazy-fetch route re-opened by a future edit, reported as nothing.
+# WHY A REFUSAL AND NOT AN ASSERTION-BY-COMMENT (#3757): a wrong value here silently redirects an
+# OBJECT read into the live repository, which is the one thing the execution-route enumeration at
+# the head of this region forbids.
+#
+# AND WHY IT IS AFFIRMATIVE, NOT A LIST OF BAD STATES (roborev job 339, item 5). The first version
+# enumerated three: empty (because `git -C ""` leaves the working directory unchanged, so it MEANS
+# this checkout), the UNSET sentinel, and `$REPO_ROOT`. That was sound for the three assignment
+# sites that exist and NOTHING PINNED THE NUMBER OF SITES, so a future fourth
+# `_CS_READ_DIR=<some live-ish path>` would pass the `*)` arm silently — the permissive-default
+# shape this pre-flight keeps ruling against. The question is now asked the other way round: the
+# value must BE the scratch this run created. `_CS_SCRATCH_DIR` is set from `$csdir` at the top of
+# the scratch block, before `_CS_READ_DIR="$csdir/repo"` in the same function, so the two are
+# derived from one value and comparing them cannot go stale; a probe that never got that far
+# leaves them unequal and is refused. The three named states survive only as DIAGNOSTIC TEXT, so
+# an operator still reads a cause rather than a bare mismatch.
 _cs_read_dir_isolated_or_refuse() {
   local why
+  if [ -n "$_CS_SCRATCH_DIR" ] && [ "$_CS_READ_DIR" = "$_CS_SCRATCH_DIR/repo" ]; then
+    return 1
+  fi
   case "$_CS_READ_DIR" in
     "")                        why="EMPTY, and git reads \`-C \"\"\` as 'leave the working directory unchanged' — i.e. the LIVE checkout" ;;
     "$_CS_READ_DIR_UNSET")     why="still the 'not established' sentinel ($_CS_READ_DIR), so the isolated scratch was never created" ;;
     "$REPO_ROOT")              why="the LIVE checkout ($_CS_READ_DIR)" ;;
-    *) return 1 ;;
+    *)                         why="'$_CS_READ_DIR', which is not the scratch this run created (\$_CS_SCRATCH_DIR is ${_CS_SCRATCH_DIR:-EMPTY})" ;;
   esac
   _CS_KIND=read-dir-unisolated
   _CS_DETAIL="refusing to $1: the isolated read repository was never established (\$_CS_READ_DIR is $why), and an object read in the live repository can be answered from the NETWORK by a promisor remote under that repository's own config. This is a code-path defect in the pre-flight, not a state of your checkout: the scratch assignment was skipped or removed"
@@ -5262,7 +5276,8 @@ _component_set_probe_inner() {
   # objects — so any of them here re-opens the lazy-fetch route this replaced, whatever the
   # `--verify --quiet` spelling suggests. A caller needing a peeled or walked rev must ask the
   # SCRATCH, exactly as the block below does. `scripts/tests/test_agent_gate_component_set.sh::
-  # 3757-no-live-peel` fails the suite if any live call grows a peel operator.
+  # 3757-live-call-allowlist` fails the suite if any live call grows a peel operator (or any other
+  # undeclared argument shape).
   _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD
   if _cs_live_refuse "HEAD's sha (the ref only, unpeeled)"; then return 0; fi
   local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0

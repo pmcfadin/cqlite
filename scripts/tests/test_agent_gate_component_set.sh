@@ -915,10 +915,21 @@ fi
 #
 # So the question is asked affirmatively, which is also what makes a PASS mean something: the SET
 # of live invocations must EQUAL `CS_DECLARED_LIVE_CALLS`, in BOTH directions. An unrecognised
-# shape is a FINDING whatever it contains, so (a)–(d) are all rejected by the same rule and so is
-# the next spelling nobody has thought of; and a declared entry that no longer appears is a
-# FINDING too, because a stale entry PRE-AUTHORISES its own re-introduction (section 9b's rule for
-# git operations, applied to argv).
+# shape is a FINDING whatever it contains, so (a)–(d) are all rejected by one rule; and a declared
+# entry that no longer appears is a FINDING too, because a stale entry PRE-AUTHORISES its own
+# re-introduction (section 9b's rule for git operations, applied to argv).
+#
+# WHAT IT COVERS, AND WHAT IT DOES NOT — stated because the first version of this comment claimed
+# the rule also rejected "the next spelling nobody has thought of", AND THAT WAS FALSE (roborev
+# job 339): the shape test recognised only a command word literally spelled `git` or exactly
+# `_cs_live_git `, so a call through a variable, an `eval`, a `\git` or A SECOND WRAPPER FUNCTION
+# was classified as NOTHING — demonstrated, `_cs_live_git_quiet` routing a peel produced zero
+# findings from this guard AND from 9b. A false rationale in a guard is worse than none, because it
+# is what stops the next person looking. Rule R2 in `cs_live_call_findings` closes those spellings
+# by keying on the live repository's NAME (`$REPO_ROOT`) rather than on the command word, and its
+# own residual is stated at that rule: a live call that names the live checkout neither by that
+# token nor on that line (a CWD-relative call through an unrecognised command word) is still not
+# seen here.
 #
 # GRANULARITY, and why it differs from 9b deliberately: 9b keys on the SUBCOMMAND because a
 # flag-level key would red on a reordering of correct code. Here the ARGV IS the property — `HEAD`
@@ -954,8 +965,50 @@ CS_DECLARED_DIRECT_GIT=(
   'git init -q "$csdir/repo"|creates the ISOLATED scratch at a named target path; reads no repository'
 )
 CS_ISOLATED_SELECTORS=('-C "$_CS_READ_DIR"' '-C "$csdir/repo"')
+# CS_DECLARED_REPO_ROOT_HARMLESS: the command words a `$REPO_ROOT`-MENTIONING line may begin with
+# and still not be an invocation of anything that can read a repository. Everything else on such a
+# line is a FINDING (see rule R2 in `cs_live_call_findings`), which is what makes the rule
+# affirmative: a live call spelled through a VARIABLE (`$GIT`), an `eval`, a `\git`, or A SECOND
+# WRAPPER FUNCTION lands here rather than being invisible.
+CS_DECLARED_REPO_ROOT_HARMLESS=(
+  'local'   # `local f="$REPO_ROOT/…"` — declares a path for SHELL reads of committed source
+  'return'  # `_CS_KIND=…; _CS_DETAIL="… $REPO_ROOT …"; return 0`
+  ':'       # an explicit no-op
+)
+# cs_first_word <text>: the COMMAND WORD of a shell fragment, or empty when the fragment invokes
+# nothing (a bare assignment, a case-arm pattern, a keyword). Quoted spans must already be
+# removed by the caller. The stripping mirrors 9b's audit — leading keywords, `!`, `VAR=value`
+# assignments — plus a leading case-arm PATTERN, because `*) git …` is an invocation and `?*)
+# lane_objects="…"` is not, and only stripping the pattern tells them apart.
+cs_first_word() {
+  local t="$1" w
+  t="${t#"${t%%[![:space:]]*}"}"
+  while :; do
+    case "$t" in
+      '!'*)            t="${t#!}"; t="${t#"${t%%[![:space:]]*}"}"; continue ;;
+      if\ *|while\ *|until\ *|then\ *|else\ *|elif\ *|do\ *|not\ *)
+                       t="${t#* }"; t="${t#"${t%%[![:space:]]*}"}"; continue ;;
+      *')'*)
+        # A case-arm pattern only when the `)` precedes any whitespace, i.e. the fragment STARTS
+        # with `<pattern>)`. `$(…)` cannot appear here: the caller removed quoted spans and a
+        # substitution at command position is itself reported by the word test below.
+        case "${t%%')'*}" in
+          *[[:space:]]*) break ;;
+          *) t="${t#*')'}"; t="${t#"${t%%[![:space:]]*}"}"; continue ;;
+        esac ;;
+      [A-Za-z_]*=*)
+        case "${t%%=*}" in
+          *[!A-Za-z0-9_]*) break ;;
+          *) t="${t#*=}"; t="${t#"${t%%[[:space:]]*}"}"; t="${t#"${t%%[![:space:]]*}"}"; continue ;;
+        esac ;;
+    esac
+    break
+  done
+  w="${t%%[[:space:]]*}"
+  printf '%s' "$w"
+}
 cs_live_call_findings() {
-  local gate="$1" line num raw argv dq entry i hit prev_cont=0
+  local gate="$1" line num raw argv dq entry i hit frag w rest
   local -a seen=()
   for i in "${!CS_DECLARED_LIVE_CALLS[@]}"; do seen[$i]=0; done
   while IFS= read -r line; do
@@ -966,24 +1019,16 @@ cs_live_call_findings() {
     # from a per-line scan. SCOPED TO `_cs_live_git` LINES, because an `&&`-chained ISOLATED read
     # legitimately continues (the fast path's presence probe does, and an unscoped rule RED on it
     # — measured, first run: a guard that reds on correct input is the guard agents learn to
-    # waive).
+    # waive). The TAIL of such a call needs no rule of its own: a tail that names the live
+    # repository mentions `$REPO_ROOT` and is caught by R2 below, which is also why the separate
+    # tail rule this replaces is GONE — it fired for EVERY line ending in `\`, so wrapping a long
+    # `_CS_DETAIL="… from $REPO_ROOT …"` over two lines emitted a spurious finding (roborev job
+    # 339, item 4).
     case "$raw" in
       *_cs_live_git*'\')
         printf 'FINDING: %s: a LIVE git call is split over a line CONTINUATION, so its argument list cannot be judged as one line — write it on one line: %s\n' "$num" "$raw"
-        prev_cont=1; continue ;;
+        continue ;;
     esac
-    # THE TAIL OF A CONTINUED CALL IS ALSO A PLACE A LIVE REPOSITORY CAN BE NAMED. `git` takes the
-    # LAST `-C`, so an isolated first line followed by a tail naming `$REPO_ROOT` (or a
-    # `--git-dir=`/`GIT_DIR=`) would run live while the first line classified as isolated. Nothing
-    # in the region does this today; the rule is what keeps it that way, and the set it forbids is
-    # EMPTY rather than declared, so there is nothing to keep in step.
-    if [ "$prev_cont" = 1 ]; then
-      case "$raw" in
-        *'$REPO_ROOT'*|*--git-dir*|*GIT_DIR=*)
-          printf 'FINDING: %s: the CONTINUATION TAIL of a git call names the live repository (git honours the LAST -C, so this can redirect an isolated call): %s\n' "$num" "$raw" ;;
-      esac
-    fi
-    case "$raw" in *'\') prev_cont=1 ;; *) prev_cont=0 ;; esac
     case "$raw" in
       *_cs_live_git\ *)
         argv="${raw#*_cs_live_git }"
@@ -997,16 +1042,73 @@ cs_live_call_findings() {
         if [ -z "$hit" ]; then
           printf 'FINDING: %s: UNDECLARED live-repository git call: %s\n' "$num" "$argv"
         fi
-        prev_cont=0; continue ;;
+        continue ;;
     esac
-    # A DIRECT `git` at command position. Quoted spans are removed FIRST so a diagnostic string
-    # (`_CS_DETAIL="git fetch … exited $rc"`, `hint="… git rebase …"`) is not read as an
-    # invocation — 9b's measured lesson. The word class excludes `--git-path`/`_cs_live_git`,
-    # where `git` is part of a longer word.
     dq=$(printf '%s' "$raw" | sed 's/"[^"]*"//g')
+    # ---- R2: A LINE THAT NAMES THE LIVE REPOSITORY MUST NOT INVOKE ANYTHING (roborev job 339).
+    # `$REPO_ROOT` is the ONLY in-region name for the live checkout, so any line that reaches a
+    # command while mentioning it is either a declared live call (handled above, by exact argv) or
+    # a finding. This one rule closes TWO holes the previous per-selector classifier had:
+    #   * THE SAME-LINE OVERRIDE. `git -C "$_CS_READ_DIR" -C "$REPO_ROOT" rev-parse "$sha^{commit}"`
+    #     was EXCUSED, because `CS_ISOLATED_SELECTORS` matched as a bare substring and the line was
+    #     never asked whether it ALSO named the live repository — and git honours the LAST `-C`. A
+    #     PASS over a live object read, with all six declared entries still observed.
+    #   * THE UNRECOGNISED COMMAND WORD. The direct-`git` test below only recognises the literal
+    #     word `git`, so `$GIT`, `eval`, `\git` or A SECOND WRAPPER (`_cs_live_git_quiet …`) was
+    #     classified as nothing at all, and 9b cannot backstop it (its EXT census excuses every
+    #     function defined in the gate, and its GAP half looks only through
+    #     `env`/`_component_set_bounded`/`_cs_live_git`).
+    # RESIDUAL, stated because the previous comment overclaimed ("the next spelling nobody has
+    # thought of") and a false rationale in a guard is worse than none: this rule sees a live call
+    # only if the live repository is named ON THAT LINE by the token `$REPO_ROOT`. A call that
+    # reaches the live repository by CWD with an unrecognised command word (`$GIT rev-parse …`, no
+    # `-C`), or through a variable copied from `$REPO_ROOT` in a way that hides the token, is NOT
+    # caught here — the copy's ASSIGNMENT line is caught (it mentions `$REPO_ROOT`), which is why
+    # the residual is narrow rather than absent.
+    case "$raw" in
+      *'$REPO_ROOT'*)
+        hit=""
+        rest="$dq"
+        while [ -n "$rest" ]; do
+          case "$rest" in
+            *'&&'*) frag="${rest%%&&*}"; rest="${rest#*&&}" ;;
+            *'||'*) frag="${rest%%\|\|*}"; rest="${rest#*\|\|}" ;;
+            *';'*)  frag="${rest%%;*}";  rest="${rest#*;}" ;;
+            *)      frag="$rest"; rest="" ;;
+          esac
+          w=$(cs_first_word "$frag")
+          [ -n "$w" ] || continue
+          for entry in "${CS_DECLARED_REPO_ROOT_HARMLESS[@]}"; do
+            [ "$w" = "$entry" ] && { w=""; break; }
+          done
+          [ -n "$w" ] || continue
+          hit="$w"
+          break
+        done
+        if [ -n "$hit" ]; then
+          printf 'FINDING: %s: a line naming the LIVE repository ($REPO_ROOT) invokes `%s`, and it is not one of the %s declared live calls — git honours the LAST -C, so an isolated selector on the same line excuses nothing: %s\n' \
+            "$num" "$hit" "${#CS_DECLARED_LIVE_CALLS[@]}" "$raw"
+          continue
+        fi
+        # No invocation on this line: the mention is a diagnostic, a path for a shell read, or a
+        # case-arm pattern. Nothing to check.
+        continue ;;
+    esac
+    # A DIRECT `git` at command position, on a line that does NOT name the live repository. Quoted
+    # spans were removed above so a diagnostic string (`_CS_DETAIL="git fetch … exited $rc"`,
+    # `hint="… git rebase …"`) is not read as an invocation — 9b's measured lesson. The word class
+    # excludes `--git-path`/`_cs_live_git`, where `git` is part of a longer word.
     case "$dq" in
       git\ *|*[[:space:]\;\&\|\(]git\ *) : ;;
       *) continue ;;
+    esac
+    # THE LIVE-REPO TEST RUNS BEFORE THE ISOLATED EXCUSAL (roborev job 339). R2 above already
+    # rejects `$REPO_ROOT`; these two spellings name a repository without that token, so they are
+    # refused here rather than being excused by an isolated `-C` earlier on the same line.
+    case "$raw" in
+      *--git-dir*|*GIT_DIR=*)
+        printf 'FINDING: %s: a git invocation selects its repository with --git-dir/GIT_DIR, which no declared call uses and which OVERRIDES an isolated -C on the same line: %s\n' "$num" "$raw"
+        continue ;;
     esac
     hit=""
     for entry in "${CS_ISOLATED_SELECTORS[@]}"; do
@@ -1040,26 +1142,44 @@ fi
 # gate) and each must be REPORTED, NAMED, and shown to have been substituted at all — a sed that
 # matched nothing would "pass" this by proving nothing.
 lc_dir="$tmp/3757-live-call-controls"; mkdir -p "$lc_dir"
-lc_ids=(a b c d)
+lc_ids=(a b c d e f g h)
 lc_whats=(
   'a dereferencing rev that contains no ^{ (HEAD~1)'
   'the rev held in a VARIABLE, so no rev token appears on the call line'
   'the call split over a \ line CONTINUATION'
   'a live call spelled --git-dir= instead of -C "$REPO_ROOT"'
+  'a SAME-LINE -C OVERRIDE on an isolated read (git honours the LAST -C)'
+  'a --git-dir="$REPO_ROOT/.git" appended to an isolated read'
+  'a live call routed through a SECOND WRAPPER function'
+  'a live call whose command word is a VARIABLE, not the literal git'
 )
 lc_progs=(
   's|^\(  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1HEAD~1|'
   's|^\(  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1"$_cs_planted_rev"|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_live_git --no-replace-objects -C "$REPO_ROOT" \\\n    rev-parse --verify --quiet "HEAD^{commit}"|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$REPO_ROOT/.git" rev-parse --verify --quiet "HEAD^{commit}"|'
+  's|-C "\$_CS_READ_DIR" rev-parse --verify --quiet "\${head_unpeeled}|-C "$_CS_READ_DIR" -C "$REPO_ROOT" rev-parse --verify --quiet "${head_unpeeled}|'
+  's|-C "\$_CS_READ_DIR" merge-base --is-ancestor|-C "$_CS_READ_DIR" --git-dir="$REPO_ROOT/.git" merge-base --is-ancestor|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_live_git_quiet --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  $CS_PLANTED_GIT_BIN --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"|'
 )
 lc_tooks=(
   'rev-parse --verify --quiet HEAD~1$'
   'rev-parse --verify --quiet "\$_cs_planted_rev"$'
   '_cs_live_git .*\\$'
   'git --git-dir="\$REPO_ROOT/\.git"'
+  '\-C "\$_CS_READ_DIR" -C "\$REPO_ROOT"'
+  '\-C "\$_CS_READ_DIR" --git-dir="\$REPO_ROOT/\.git"'
+  '_cs_live_git_quiet --no-replace-objects'
+  '\$CS_PLANTED_GIT_BIN --no-replace-objects'
 )
-lc_needles=('HEAD~1' '_cs_planted_rev' 'line CONTINUATION' '--git-dir=')
+lc_needles=(
+  'HEAD~1' '_cs_planted_rev' 'line CONTINUATION' '--git-dir='
+  '-C "$_CS_READ_DIR" -C "$REPO_ROOT"'
+  '--git-dir="$REPO_ROOT/.git"'
+  '_cs_live_git_quiet'
+  '$CS_PLANTED_GIT_BIN'
+)
 for lc_i in "${!lc_ids[@]}"; do
   lc_id="${lc_ids[$lc_i]}"
   lc_copy="$lc_dir/route-$lc_id.sh"
@@ -1147,7 +1267,7 @@ fi
 #       (iii) the peel calls the runtime refusal before handing the value to git.
 # ---------------------------------------------------------------------------
 cs_read_dir_findings() {
-  local g="$1" init sentinel_decl assign assign_ln body_lo body_hi consumers ln peel_ln guard_ln
+  local g="$1" init sentinel_decl assign assign_ln body_lo body_hi consumers ln peel_ln guard_ln refuse_body glob_init
   init=$(cs_region_code "$g" | grep -F '_CS_READ_DIR=' | grep -F '_CS_READ_ENV=(); _CS_HEAD_SHA=' | head -1)
   if [ -z "$init" ]; then
     printf 'FINDING: could not locate the probe initialiser line that sets _CS_READ_DIR — the shape changed or the scan broke (fail-closed)\n'
@@ -1161,6 +1281,16 @@ cs_read_dir_findings() {
       *) printf 'FINDING: %s: the initialiser sets _CS_READ_DIR to an unrecognised value; only the declared UNSET sentinel is allowed: %s\n' "${init%%:*}" "${init#*:}" ;;
     esac
   fi
+  # THE GLOBAL INITIALISER IS PINNED TOO (roborev job 339, item 1). It sat at `""` — the value this
+  # file's own control and finding text call unsafe — one line below the sentinel introduced to
+  # replace it, because the check covered only the PROBE initialiser. Two initialisers, one
+  # property; pin both.
+  glob_init=$(cs_region_code "$g" | grep '^[0-9][0-9]*:_CS_READ_DIR=' | head -1)
+  case "$glob_init" in
+    *'_CS_READ_DIR="$_CS_READ_DIR_UNSET"'*) : ;;
+    '') printf 'FINDING: could not locate the GLOBAL _CS_READ_DIR initialiser (fail-closed)\n' ;;
+    *)  printf 'FINDING: %s: the GLOBAL initialiser does not use the UNSET sentinel: %s\n' "${glob_init%%:*}" "${glob_init#*:}" ;;
+  esac
   # THE SENTINEL MUST BE A PATH THAT CANNOT EXIST — that is what makes an unguarded consumer fail
   # CLOSED rather than read live, and it is the half no source scan could otherwise supply.
   # CAPTURED, NOT PIPED INTO `grep -q`. This suite runs under `pipefail`, and a successful
@@ -1209,6 +1339,16 @@ cs_read_dir_findings() {
       printf 'FINDING: %s: a -C "$_CS_READ_DIR" consumer runs BEFORE the scratch assignment at line %s, in the probe body where lexical order IS execution order: %s\n' "${ln%%:*}" "$assign_ln" "${ln#*:}"
     fi
   done <<<"$consumers"
+  # THE REFUSAL MUST ASK AN AFFIRMATIVE QUESTION (roborev job 339, item 5). A list of bad states is
+  # sound only for the assignment sites that exist today, and nothing pins that number: a future
+  # fourth `_CS_READ_DIR=<live-ish path>` would pass a `*)` arm silently. The value must BE the
+  # scratch this run created.
+  refuse_body=$(awk '/^_cs_read_dir_isolated_or_refuse\(\) \{$/,/^\}$/' "$g")
+  if [ -z "$refuse_body" ]; then
+    printf 'FINDING: could not locate _cs_read_dir_isolated_or_refuse (fail-closed)\n'
+  elif ! grep -qF '[ "$_CS_READ_DIR" = "$_CS_SCRATCH_DIR/repo" ]' <<<"$refuse_body"; then
+    printf 'FINDING: the refusal is not AFFIRMATIVE — it does not require _CS_READ_DIR to BE the scratch this run created ($_CS_SCRATCH_DIR/repo), so an unlisted bad value passes silently\n'
+  fi
   peel_ln=$(cs_region_code "$g" | grep -F 'rev-parse --verify --quiet "${head_unpeeled}^{commit}"' | head -1)
   guard_ln=$(cs_region_code "$g" | grep -F '_cs_read_dir_isolated_or_refuse "peel HEAD' | head -1)
   if [ -z "$peel_ln" ]; then
@@ -1228,29 +1368,40 @@ else
   printf '%s\n' "$rd_findings"
 fi
 
-# THREE PLANTED CONTROLS, one per property. Each mutates a COPY and must be REPORTED and NAMED.
+# FIVE PLANTED CONTROLS over the three properties (roborev job 339, item 3: this said "THREE
+# PLANTED CONTROLS, one per property" over four entries, and neither half was true — i and ii both
+# target the INITIALISER). Each mutates a COPY and must be REPORTED and NAMED.
 rd_dir="$tmp/3757-read-dir-controls"; mkdir -p "$rd_dir"
-rd_ids=(i ii iii iv)
+rd_ids=(i ii iii iv v)
 rd_whats=(
   'the initialiser set back to the LIVE checkout'
   'the initialiser left EMPTY, which git reads as the CURRENT directory'
   'a -C "$_CS_READ_DIR" consumer planted BEFORE the scratch assignment, in the probe body'
   'the runtime refusal call removed from the peel'
+  'the refusal reverted to a DENY-LIST of bad states instead of an affirmative test'
 )
 rd_progs=(
   's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
   's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
   's|^  _CS_READ_DIR="\$csdir/repo"$|  : "$(git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e planted-by-the-selftest 2>/dev/null)"\n  _CS_READ_DIR="$csdir/repo"|'
   '/_cs_read_dir_isolated_or_refuse "peel HEAD/d'
+  's|if \[ -n "\$_CS_SCRATCH_DIR" \] && \[ "\$_CS_READ_DIR" = "\$_CS_SCRATCH_DIR/repo" \]; then|if [ "$_CS_READ_DIR" != "$REPO_ROOT" ]; then|'
 )
 rd_tooks=(
   '^  _CS_READ_DIR="\$REPO_ROOT"; _CS_READ_ENV'
   '^  _CS_READ_DIR=""; _CS_READ_ENV'
   'cat-file -e planted-by-the-selftest'
   '_cs_read_dir_isolated_or_refuse "peel HEAD'
+  'if \[ "\$_CS_READ_DIR" != "\$REPO_ROOT" \]; then'
 )
-rd_expect_n=(1 1 1 0)
-rd_needles=('THE LIVE CHECKOUT' 'reads -C "" as the CURRENT directory' 'BEFORE the scratch assignment' 'does not call _cs_read_dir_isolated_or_refuse')
+rd_expect_n=(1 1 1 0 1)
+rd_needles=(
+  'THE LIVE CHECKOUT'
+  'reads -C "" as the CURRENT directory'
+  'BEFORE the scratch assignment'
+  'does not call _cs_read_dir_isolated_or_refuse'
+  'not AFFIRMATIVE'
+)
 for rd_i in "${!rd_ids[@]}"; do
   rd_id="${rd_ids[$rd_i]}"
   rd_copy="$rd_dir/prop-$rd_id.sh"
@@ -5297,7 +5448,10 @@ fi
 # allowlist replaces), so the net is TEN and the floor is raised by exactly ten. All eleven are
 # unconditional; the one skippable case in this family remains `3757-head-object-fifo`, which the
 # floor does not count.
-CASE_FLOOR=123
+# 123 -> 128 with roborev job 339's five: evasion routes e-h (the same-line -C override, the
+# --git-dir override, a second wrapper, a variable command word) and read-dir control v (the
+# refusal reverted to a deny-list). All five unconditional.
+CASE_FLOOR=128
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
