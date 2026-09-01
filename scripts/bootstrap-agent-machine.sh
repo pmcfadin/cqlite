@@ -81,6 +81,20 @@
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
 #      what the write just persisted — no reboot and no re-login.
+#   5b2. sccache cache-size cap (issue #3727). The SAME defect as 5b, one variable over:
+#      `.agent-ami/profile.yaml` DECLARES SCCACHE_CACHE_SIZE but nothing ever persisted it, so
+#      the value existed only inside launcher-created processes and the fleet-effective cap was
+#      sccache's own 10 GiB default. Persists SCCACHE_CACHE_SIZE into /etc/environment (never
+#      rewriting an existing value) and takes its VERDICT from a fresh profile-free session
+#      PLUS the RUNNING SERVER — because the cap is read by the sccache SERVER at startup and
+#      is therefore fixed by whichever process started it: a visible env var proves nothing
+#      once a server is already up. One greppable `sccache-cap:` line: VERIFIED /
+#      NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED / UNMEASURED, and only VERIFIED is an [ok].
+#      NOT-HONOURED's remedy is `sccache --stop-server`, NOT editing the value. The value->bytes
+#      map is asked of an ISOLATED throwaway sccache server, never reimplemented here: measured,
+#      `30G` is 30 GiB but `30GiB` and `30GB` are SILENTLY DISCARDED to the 10 GiB default and a
+#      bare integer means BYTES, so a bash reimplementation is exactly where this goes wrong.
+#      Non-Linux hosts get UNMEASURED and never a success (same posture as 5b).
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -122,6 +136,21 @@
 #                                                      #   CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 is the
 #                                                      #   env spelling, for harnesses that drive
 #                                                      #   bootstrap on a fixed command line.
+#   bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap  # persist the sccache cache-size
+#                                                      #   cap (section 5b2's /etc/environment
+#                                                      #   write) WITHOUT --yes, and nothing
+#                                                      #   else — the sibling of
+#                                                      #   --fix-credentials / --fix-gate-pin,
+#                                                      #   and what .agent-ami/profile.yaml's
+#                                                      #   verify.run uses. One flag per
+#                                                      #   subject: a cache-size cap is not a
+#                                                      #   gate-slot cap (issue #3727).
+#   bash scripts/bootstrap-agent-machine.sh --skip-sccache-cap # skip ONLY section 5b2. Same
+#                                                      #   posture as --skip-gate-pin: it emits
+#                                                      #   `sccache-cap: OPT-OUT` as a [warn],
+#                                                      #   so it can never buy a vacuous green.
+#                                                      #   CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1
+#                                                      #   is the env spelling.
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
 #                                                      #   DISTINCT from --skip-push-probe: this
 #                                                      #   one is about the gate fmt smoke, that
@@ -166,6 +195,17 @@ fi
 # stays a verification step rather than becoming an installer — the same reasoning that
 # justified --fix-credentials.
 FIX_GATE_PIN=0
+# --fix-sccache-cap / --skip-sccache-cap (issue #3727): section 5b2's own switches. ONE FLAG PER
+# SUBJECT, the rule --skip-push-probe / --skip-smoke / --skip-gate-pin already follow — a cache-size
+# cap and a gate-slot cap are different variables with different consumers and different remedies
+# (`sccache --stop-server` vs editing a value), so folding this into --fix-gate-pin would make that
+# flag's own "and NOTHING else" documentation false, which is the drift this file pays for later.
+FIX_SCCACHE_CAP=0
+SKIP_SCCACHE_CAP=0
+SKIP_SCCACHE_CAP_HOW=""
+if [ "${CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP:-0}" = 1 ]; then
+  SKIP_SCCACHE_CAP=1; SKIP_SCCACHE_CAP_HOW="CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1"
+fi
 FIX_CREDENTIALS=0
 STRICT=0
 for arg in "$@"; do
@@ -175,6 +215,8 @@ for arg in "$@"; do
     --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
     --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
     --fix-gate-pin) FIX_GATE_PIN=1 ;;
+    --skip-sccache-cap) SKIP_SCCACHE_CAP=1; SKIP_SCCACHE_CAP_HOW="--skip-sccache-cap" ;;
+    --fix-sccache-cap) FIX_SCCACHE_CAP=1 ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
     --strict) STRICT=1 ;;
     -h|--help)
@@ -199,6 +241,17 @@ if [ "$FIX_GATE_PIN" = 1 ] && [ "$SKIP_GATE_PIN" = 1 ]; then
     exit 2
   fi
   SKIP_GATE_PIN=0; SKIP_GATE_PIN_HOW=""
+fi
+
+# Same rule, same shape, for 5b2's pair (issue #3727). Resolved after the loop so flag ORDER cannot
+# change the outcome, and an EXPLICIT skip beside an explicit fix is a usage error while the weaker
+# ENV opt-out loses to an explicit --fix-sccache-cap.
+if [ "$FIX_SCCACHE_CAP" = 1 ] && [ "$SKIP_SCCACHE_CAP" = 1 ]; then
+  if [ "$SKIP_SCCACHE_CAP_HOW" = "--skip-sccache-cap" ]; then
+    echo "bootstrap: --skip-sccache-cap and --fix-sccache-cap are contradictory (try --help)" >&2
+    exit 2
+  fi
+  SKIP_SCCACHE_CAP=0; SKIP_SCCACHE_CAP_HOW=""
 fi
 
 # ---- OS + package-manager detection ----
