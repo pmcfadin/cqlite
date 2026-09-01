@@ -262,9 +262,20 @@ catch a “merge of an old green head” — the SHA assertion is the real guard
 path (e.g. <code dir="auto">$(mktemp /tmp/gate-&#x3C;issue>-XXXXXX.txt)</code>) — shared <code dir="auto">/tmp</code> names get contended under
 multi-lane load, so one lane’s summary can clobber or be misread as another’s.</li>
 <li><strong>Single full gate per machine — enforced mechanically (#2640).</strong> The default posture is one full
-gate at a time on a box: <code dir="auto">bootstrap-agent-machine.sh</code> pins <code dir="auto">CQLITE_GATE_MAX_CONCURRENCY=1</code>, so the
-#1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core budget hands that
-sole gate the full core count. The gate also derives <code dir="auto">CARGO_BUILD_JOBS</code> + nextest <code dir="auto">--test-threads</code>
+gate at a time on a box: <code dir="auto">bootstrap-agent-machine.sh</code> persists <code dir="auto">CQLITE_GATE_MAX_CONCURRENCY=1</code>
+into <code dir="auto">/etc/environment</code> — which PAM reads at session creation, so non-interactive shells see it —
+and then <strong>verifies from a fresh, profile-free session that the value is visible and that the gate
+honours it</strong> (<code dir="auto">gate-pin: VERIFIED</code>, #3414), rather than trusting that the write happened. That
+verdict is scoped to a PAM-created session, so a gate launched from a systemd unit or container
+entrypoint is not covered by it; it also measures that the file and the session AGREE, not that the
+file is where the session got the value, so a box setting the same value from a sudoers <code dir="auto">env_file</code>
+would read VERIFIED with an <code dir="auto">/etc/environment</code> no PAM stack loads. The per-run authority stays the
+gate’s own <code dir="auto">cpu-budget:</code> token.
+A visible value the gate discards or clamps reports <code dir="auto">gate-pin: NOT-HONOURED</code> — its remedy is to
+fix the VALUE, since bootstrap never rewrites an existing one. With the
+pin in effect the #1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core
+budget hands that sole gate the full core count; a gate that resolved its cap from the default
+formula instead says so on its own <code dir="auto">cpu-budget:</code> line as <code dir="auto">max-concurrency=N(default)</code>. The gate also derives <code dir="auto">CARGO_BUILD_JOBS</code> + nextest <code dir="auto">--test-threads</code>
 from the slot count and wraps itself in <code dir="auto">taskpolicy -c utility</code> (macOS) / <code dir="auto">nice</code> (Linux), so even
 if two gates do overlap neither oversubscribes the CPU. No manual <code dir="auto">pgrep</code>-serialization is needed.</li>
 </ul>

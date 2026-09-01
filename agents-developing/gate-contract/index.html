@@ -926,7 +926,9 @@ block (full <strong>and</strong> <code dir="auto">--lite</code>) carries a machi
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on"><div></div></button></div></figure></div>
 <p>On <strong>Linux</strong> the line additionally carries a <code dir="auto">mold=</code> token and a <code dir="auto">perf=</code> token
 (byte-identical / no tokens on macOS — both are Linux-only):</p>
-<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok"><div></div></button></div></figure></div>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">cpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=okcpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16"><div></div></button></div></figure></div>
+<p>(The <code dir="auto">cpu-budget:</code> line is a sibling of <code dir="auto">accelerators:</code> and carries the resolved
+slot cap <strong>and where it came from</strong> — see the concurrency-cap section below.)</p>
 <ul>
 <li><strong><code dir="auto">sccache</code></strong> — cross-worktree compile cache (~25.6% faster fresh builds).</li>
 <li><strong><code dir="auto">nextest</code></strong> — parallel <code dir="auto">core-tests</code> (the gate’s long pole).</li>
@@ -973,22 +975,48 @@ now takes a <strong>cross-process bounded semaphore</strong>: at most <strong>N<
 proceed when a slot frees. <strong>They never fail from the cap</strong>, and a non-interactive
 caller blocks cleanly rather than spin-failing.</p>
 <ul>
-<li><strong><code dir="auto">--lite</code>, <code dir="auto">--delta</code>, and <code dir="auto">--only</code> runs are EXEMPT</strong> — never queued. <code dir="auto">--lite</code>
+<li>
+<p><strong><code dir="auto">--lite</code>, <code dir="auto">--delta</code>, and <code dir="auto">--only</code> runs are EXEMPT</strong> — never queued. <code dir="auto">--lite</code>
 and <code dir="auto">--delta</code> are cheap by design; <code dir="auto">--only</code> is a PARTIAL run (and is used by
-nested tooling self-tests, so capping it could self-deadlock the queue).</li>
-<li><strong>N</strong> defaults to <code dir="auto">max(2, floor((ncpu-2)/4))</code> — a conservative fraction of cores
+nested tooling self-tests, so capping it could self-deadlock the queue).</p>
+</li>
+<li>
+<p><strong>N</strong> defaults to <code dir="auto">max(2, floor((ncpu-2)/4))</code> — a conservative fraction of cores
 that still lets a couple of gates run on a small box. Override with
-<code dir="auto">CQLITE_GATE_MAX_CONCURRENCY</code>.</li>
-<li><strong>SIGKILL-safe stale-slot reaping:</strong> each slot is an <code dir="auto">fcntl.flock</code> held by a
+<code dir="auto">CQLITE_GATE_MAX_CONCURRENCY</code>.</p>
+</li>
+<li>
+<p><strong>Every SUMMARY says where N came from (issue #3414).</strong> The <code dir="auto">cpu-budget:</code> line
+stamps <code dir="auto">max-concurrency=N(pinned|default|invalid|clamped)</code>, the same idiom as
+<code dir="auto">build-jobs=N(derived|caller)</code> beside it: <code dir="auto">pinned</code> = the env var held a valid
+integer ≥ 1 and was used verbatim, <code dir="auto">default</code> = it was unset so N is the formula
+above, <code dir="auto">invalid</code> = it was empty or non-numeric and was silently discarded for the
+formula, <code dir="auto">clamped</code> = it was a valid integer &#x3C; 1 and was silently raised to 1.
+<code dir="auto">3</code> and <code dir="auto">3 because nothing set it</code> are different operational facts — read
+<code dir="auto">N(default)</code> on a fleet box as <em>the pin is not provisioned</em>.</p>
+<p><strong>The remedy DIFFERS BY TOKEN, and getting that wrong sends you in a circle.</strong> A
+<code dir="auto">default</code> box has no pin line at all, so
+<code dir="auto">bash scripts/bootstrap-agent-machine.sh --fix-gate-pin</code> (or <code dir="auto">--yes</code>) persists one.
+An <code dir="auto">invalid</code> or <code dir="auto">clamped</code> box ALREADY HAS the line, holding a bad value — and
+bootstrap deliberately never rewrites an existing value, because a box running >1
+gate on purpose must not be clobbered — so re-running it there is a <strong>silent
+no-op</strong>. Fix the VALUE by hand in <code dir="auto">/etc/environment</code>. Bootstrap says the same thing
+at the same fork, as <code dir="auto">gate-pin: NOT-HONOURED</code>.</p>
+</li>
+<li>
+<p><strong>SIGKILL-safe stale-slot reaping:</strong> each slot is an <code dir="auto">fcntl.flock</code> held by a
 small background daemon (<code dir="auto">scripts/lib/gate_slot_daemon.py</code>) that the gate starts
 and monitors. Because the daemon opens the lock fd <em>after</em> it is forked, the
 gate’s heavy children (<code dir="auto">cargo</code>/<code dir="auto">nextest</code>) never inherit the lock — a SIGKILLed
 gate frees its slot within one poll interval even while orphaned children run on.
-A crashed gate can never permanently leak a slot.</li>
-<li>Works <strong>across worktrees</strong> (shared slot dir, not per-checkout) and composes with
+A crashed gate can never permanently leak a slot.</p>
+</li>
+<li>
+<p>Works <strong>across worktrees</strong> (shared slot dir, not per-checkout) and composes with
 the per-gate component parallelism (<code dir="auto">AGENT_GATE_JOBS</code>) and <code dir="auto">sccache</code>: the cap
 bounds the <em>worst case</em> (several sessions hitting their one full gate at once),
-the others cut average load and per-compile time.</li>
+the others cut average load and per-compile time.</p>
+</li>
 </ul>
 <p><strong>Environment knobs</strong> (all optional):</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">CQLITE_GATE_MAX_CONCURRENCY</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">4</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/agent-gate.sh</span><span style="--0:#D6DEEB;--1:#403F53">   </span><span style="--0:#919F9F;--1:#5F636F"># raise N on a big box</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">CQLITE_GATE_SLOTS_DIR</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">/path</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/agent-gate.sh</span><span style="--0:#D6DEEB;--1:#403F53">     </span><span style="--0:#919F9F;--1:#5F636F"># slot dir (default $TMPDIR/cqlite-gate-slots)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">CQLITE_GATE_POLL_SECS</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">1</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/agent-gate.sh</span><span style="--0:#D6DEEB;--1:#403F53">         </span><span style="--0:#919F9F;--1:#5F636F"># queue/liveness poll (default 2s)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">CQLITE_GATE_DISABLE_CAP</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">1</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/agent-gate.sh</span><span style="--0:#D6DEEB;--1:#403F53">       </span><span style="--0:#919F9F;--1:#5F636F"># force-disable the cap</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="CQLITE_GATE_MAX_CONCURRENCY=4 bash scripts/agent-gate.sh   # raise N on a big boxCQLITE_GATE_SLOTS_DIR=/path bash scripts/agent-gate.sh     # slot dir (default $TMPDIR/cqlite-gate-slots)CQLITE_GATE_POLL_SECS=1 bash scripts/agent-gate.sh         # queue/liveness poll (default 2s)CQLITE_GATE_DISABLE_CAP=1 bash scripts/agent-gate.sh       # force-disable the cap"><div></div></button></div></figure></div>
