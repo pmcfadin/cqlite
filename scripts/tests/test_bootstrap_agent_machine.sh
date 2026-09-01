@@ -987,6 +987,48 @@ else
   printf '%s\n' "$outU" | grep -i 'mold\|symlink' | head -5
 fi
 
+# 6v. A DANGLING LEGACY `config` SYMLINK MUST NOT SHADOW A REAL `config.toml` (#3756 roborev
+#     round 5 — a regression introduced by 6r's own fix, which is why the two are tested
+#     together). Selecting the legacy name would MATERIALISE its target holding the mold block
+#     ALONE, and cargo reads exactly one of the two files and prefers the extension-less one —
+#     so from that moment every user setting in config.toml is silently ignored. 6r bought a
+#     LATENT preference flip and would have paid for it with an IMMEDIATE one. Ambiguous state,
+#     so: warn, write nothing, leave the tree byte-identical — the posture the other two
+#     fail-safes in this function already take.
+sbV=$(mktemp -d "$tmp/moldV.XXXXXX"); mkdir -p "$sbV/.cargo" "$sbV/dotfiles"
+printf '[net]\nretry = 11\n' >"$sbV/.cargo/config.toml"
+ln -s "$sbV/dotfiles/legacy-config" "$sbV/.cargo/config"
+beforeV=$(cat "$sbV/.cargo/config.toml")
+outV=$(PATH="$stubO:$PATH" HOME="$sbV" CARGO_HOME="$sbV/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ ! -e "$sbV/dotfiles/legacy-config" ] \
+   && [ "$beforeV" = "$(cat "$sbV/.cargo/config.toml")" ] \
+   && printf '%s' "$outV" | grep -q "broken symlink and .* also exists"; then
+  ok "mold/symlink: a DANGLING legacy config symlink beside a real config.toml is refused with a named warning — the legacy target is NOT materialised, so cargo's preference does not flip and the user's config.toml is left byte-identical"
+else
+  bad "mold/symlink: the shadowing case was not refused (legacy-materialised=$([ -e "$sbV/dotfiles/legacy-config" ] && echo yes || echo no) config.toml-changed=$([ "$beforeV" = "$(cat "$sbV/.cargo/config.toml")" ] && echo no || echo yes))"
+  printf '%s\n' "$outV" | grep -i 'mold\|symlink' | head -5
+  echo "--- config.toml ---"; cat "$sbV/.cargo/config.toml"
+fi
+
+# 6w. ...and the same refusal when the coexisting config.toml is ITSELF a symlink. `-e` follows
+#     the link, so a config.toml that is a symlink to a real file is caught by it — but a
+#     DANGLING config.toml symlink is not, and it is still a declared config the user owns. The
+#     selection therefore tests `-e` OR `-L` on config.toml, and this case drives the `-L` half:
+#     without it, two broken declarations would silently resolve in favour of one of them.
+sbW=$(mktemp -d "$tmp/moldW.XXXXXX"); mkdir -p "$sbW/.cargo" "$sbW/dotfiles"
+ln -s "$sbW/dotfiles/legacy-config" "$sbW/.cargo/config"
+ln -s "$sbW/dotfiles/modern-config" "$sbW/.cargo/config.toml"
+outW=$(PATH="$stubO:$PATH" HOME="$sbW" CARGO_HOME="$sbW/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ ! -e "$sbW/dotfiles/legacy-config" ] && [ ! -e "$sbW/dotfiles/modern-config" ] \
+   && printf '%s' "$outW" | grep -q "broken symlink and .* also exists"; then
+  ok "mold/symlink: a dangling legacy config symlink beside a DANGLING config.toml symlink is refused too — neither target is materialised, so the run does not pick a winner between two broken declarations"
+else
+  bad "mold/symlink: the two-dangling-symlinks case was not refused (legacy=$([ -e "$sbW/dotfiles/legacy-config" ] && echo materialised || echo no) modern=$([ -e "$sbW/dotfiles/modern-config" ] && echo materialised || echo no))"
+  printf '%s\n' "$outW" | grep -i 'mold\|symlink' | head -5
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +

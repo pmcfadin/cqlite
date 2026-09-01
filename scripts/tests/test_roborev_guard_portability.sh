@@ -383,7 +383,13 @@ add_construct '\-printf[[:space:]]' \
 # portable (every getopt honours `--`), so the rule red on correct code. `--[a-zA-Z]` keeps
 # `--no-run-if-empty` flagged and lets the delimiter through; both pinned by controls.
 _XARGS_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+)*'
-RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-[a-zA-Z0-9]*r|--[a-zA-Z])'
+# AND THE SHORT-OPTION MATCH ENDS AT A TOKEN BOUNDARY (#3756 roborev round 5). Without one,
+# `-[a-zA-Z0-9]*r` matched the `-Ir` PREFIX of `xargs -Ireplace echo` — a portable ATTACHED
+# option argument — so the lint red on correct code. The boundary keeps `-r`, `-0r` and `-0 -r`
+# and drops the prefix match; measured, false positives 2 -> 1 with positives unchanged at 5/5.
+# The one that remains is an attached argument that itself ENDS in `r` (`-Eerror`), which needs
+# option arity to tell from a real `-r` — the same ambiguity residual 4a records.
+RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-[a-zA-Z0-9]*r([[:space:]]|$)|--[a-zA-Z])'
 add_construct "$RE_XARGS_R" \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
   '  printf "" | xargs -0 -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -480,6 +486,11 @@ fi
 #      Telling them apart needs xargs's option-arity table, i.e. a second implementation of an
 #      option grammar — the route this file already refuses two paragraphs above, for the reason
 #      recorded there. So: KNOWN NOT COVERED, by choice, like 1-4.
+#      THE SAME AMBIGUITY, ONE SPELLING OVER: an ATTACHED option argument that itself ENDS in `r`
+#      (`xargs -Eerror echo`, where `error` is `-E`'s eof-string) is FLAGGED — a false positive
+#      that only option arity could remove. The commoner attached forms (`-Ireplace`, `-I{}`) are
+#      not flagged, because the short-option match must end at a token boundary; this residue is
+#      the tail of that fix, and its escape is the per-line marker like any other.
 #
 #   5. THE BACKSTOP DOES NOT COVER THE WHOLE SCANNED SET, AND 1-4 ARE UNCOVERED OUTSIDE IT
 #      (#3296 round-9 finding 2 — this bullet CORRECTS an earlier claim made right here, that the
@@ -1202,10 +1213,12 @@ printf '%s\n' \
   '  find . -print0 | xargs -0 rm -rf' \
   '  printf "" | xargs -n1 rm -r' \
   '  git ls-files -z | xargs -0 sh -c '"'"'grep -r foo "$@"'"'"' _' \
-  '  printf "" | xargs -- rm' >"$tmp/xargs-ok.sh"
+  '  printf "" | xargs -- rm' \
+  '  git ls-files -z | xargs -Ireplace echo replace' \
+  '  git ls-files -z | xargs -I{} echo {}' >"$tmp/xargs-ok.sh"
 scan_found "$RE_XARGS_R" "$tmp/xargs-ok.sh"
 case $? in
-  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`) and the BARE end-of-options `xargs -- rm` are NOT flagged — the option run stops at the command name, and a long option must have a name' ;;
+  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`), the BARE end-of-options `xargs -- rm`, and an ATTACHED option argument (`-Ireplace`, `-I{}`) are NOT flagged — the option run stops at the command name, a long option must have a name, and a short option must END at a token boundary' ;;
   0) bad "structural control: the widened xargs rule flags an xargs whose COMMAND carries -r — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
   *) : ;; # already counted by scan_found
 esac

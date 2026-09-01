@@ -347,8 +347,23 @@ mold_write_block() {
   # then either writes through to the declared target or REFUSES, so a broken link is never
   # silently replaced. The `config.toml` arm needs no equivalent: its `else` branch already
   # selects the same path, so a dangling `config.toml` link reaches the resolver either way.
-  if [ -f "$cfg_dir/config" ] || [ -L "$cfg_dir/config" ]; then
+  #
+  # ...BUT ONLY WHEN IT IS NOT SHADOWING A REAL config.toml (#3756 roborev round 3). Selecting a
+  # DANGLING `config` while a populated `config.toml` exists would materialise the legacy target
+  # containing the mold block ALONE — and cargo, which reads exactly one of the two and prefers
+  # the extension-less name, would from that moment ignore every setting the user has in
+  # `config.toml`. The round-2 fix bought a latent flip and would have paid with an immediate one.
+  # A broken symlink beside a real config is an AMBIGUOUS state, not a state to guess at, so it
+  # gets the same posture as the other two fail-safes in this function: warn, write nothing, leave
+  # the tree byte-identical. A dangling legacy link with NO config.toml is unambiguous — the user
+  # declared where the config goes — and is still written through.
+  if [ -f "$cfg_dir/config" ]; then
     cfg_file="$cfg_dir/config"
+  elif [ -L "$cfg_dir/config" ] && [ ! -e "$cfg_dir/config.toml" ] && [ ! -L "$cfg_dir/config.toml" ]; then
+    cfg_file="$cfg_dir/config"
+  elif [ -L "$cfg_dir/config" ]; then
+    warn "$cfg_dir/config is a broken symlink and $cfg_dir/config.toml also exists — writing NO mold block (materialising the legacy name would make cargo prefer it and silently ignore config.toml); fix or remove the symlink and re-run bootstrap"
+    return 0
   elif [ -f "$cfg_dir/config.toml" ]; then
     cfg_file="$cfg_dir/config.toml"
   else
