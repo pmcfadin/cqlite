@@ -263,9 +263,19 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 
   ```bash
   bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
-  # exit 0 = PASS | 1 = NOT-PASS | 5 = NOT-COMPLETE (the ONLY retryable code — poll on 5,
-  #                 never on 4) | 4 = COULD-NOT-MEASURE (permanent) | 64 = USAGE
+  # exit 0 = PASS | 1 = NOT-PASS | 4 = COULD-NOT-MEASURE (no verdict available, whatever the
+  #                 reason) | 64 = USAGE
   ```
+
+  **THIS IS NOT A COMPLETION PROBE AND IT HAS NO OPINION ABOUT LIVENESS — NEVER CALL IT IN A LOOP.**
+  Establish completion FIRST (rule 1: the exit status, else `gate-liveness.sh`, which is the
+  three-valued liveness authority and the only one of the two that may be polled), then ask this once.
+  A retryability taxonomy was tried here and **DESCOPED** (#3750 round 2): a second exit code for
+  "still running" produced three findings in one review round, and the harmful one could not be
+  patched — `--no-wait` makes the reader's `STALLED` unreachable, so a live gate whose beat is merely
+  STALE arrives as its `UNKNOWN` code and was reported as permanent. A lane obeying that **relaunches a
+  live gate: two gates on one summary path.** So the tool makes only the binary distinction it can
+  support and quotes the reader's cause verbatim. Subtraction cannot introduce a false PASS.
 
   A completed run whose component **SKIPped or is ABSENT is NOT a pass**: a SKIP means the check never
   ran, which is the vacuous pass itself — and note a SKIPping component still leaves `RESULT: PARTIAL`

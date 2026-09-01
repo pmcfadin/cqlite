@@ -418,10 +418,16 @@ grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE
 # component's OWN line, as a separate assertion. A completed run whose component SKIPped is NOT a pass.
 bash scripts/gate-component-verdict.sh "$AGENT_GATE_SUMMARY_FILE" \
      --mode only --component tooling-tests --run-id <id>
-# 0 PASS / 1 NOT-PASS / 5 NOT-COMPLETE (the ONLY retryable code — poll on 5, never on 4) /
-# 4 COULD-NOT-MEASURE (permanent) / 64 USAGE. It REFUSES a LITE/DELTA block and any block whose
-# `tree-integrity:` token is not PASS, rather than answering about a run the gate called
-# non-certifying.
+# 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) / 64 USAGE.
+# It REFUSES a LITE/DELTA block and any block whose `tree-integrity:` token is not PASS, rather than
+# answering about a run the gate called non-certifying.
+#
+# NOT A COMPLETION PROBE, AND NO OPINION ABOUT LIVENESS — NEVER IN A LOOP. Establish completion with
+# one of the two probes above (or the exit status); `gate-liveness.sh` is the three-valued liveness
+# authority and the only one that may be polled. A retryability taxonomy here was DESCOPED (#3750):
+# `--no-wait` makes the reader's STALLED unreachable, so a LIVE gate whose beat is merely stale
+# arrives as UNKNOWN and was reported permanent — and a lane obeying that relaunches a live gate,
+# putting two gates on one summary path.
 ```
 
 Corollaries:
@@ -452,7 +458,11 @@ in this order:
   machine you may not be on. Act on it like this: the gate relaunches its beater at every
   component boundary, so a live gate whose beater alone died recovers to `RUNNING` within one
   component; re-read before acting, and if it is still `STALLED` after a component's worth of
-  time (the longest is ~850s) treat the gate as gone and relaunch it. Pass `--run-id` whenever
+  time treat the gate as gone and relaunch it — and read that duration OFF THE COMPONENT TABLE IN
+  YOUR OWN SUMMARY (`<name>: PASS (<n>s)`), never off a figure in prose. The figure that used to sit
+  here, "~850s", was understated by 2.4x (`tooling-tests` measured **2073s**, #3473), and acting on
+  an understated bound is exactly what makes a closer declare a LIVE gate gone and relaunch it —
+  putting two gates on one summary path. Pass `--run-id` whenever
   you know it; a concurrent peer's beat on a shared default path otherwise answers about the
   peer's gate (#2874). A **missing** beat is `UNKNOWN`, never `STALLED` — an older gate simply
   has no beat.

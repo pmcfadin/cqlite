@@ -1060,9 +1060,14 @@ read it:
 >
 > # COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:
 > bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
-> # exit 0 PASS / 1 NOT-PASS / 5 NOT-COMPLETE (the ONLY retryable code) / 4 COULD-NOT-MEASURE
-> # (permanent) / 64 USAGE. A completed run whose component SKIPped is NOT a pass, and a LITE or
-> # DELTA block, or one whose tree-integrity token is not PASS, is REFUSED rather than answered.
+> # exit 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) /
+> # 64 USAGE. A completed run whose component SKIPped is NOT a pass, and a LITE or DELTA block, or
+> # one whose tree-integrity token is not PASS, is REFUSED rather than answered.
+> #
+> # NOT a completion probe, and no opinion about liveness — NEVER in a loop. Establish completion
+> # first (exit status, or gate-liveness.sh, the three-valued liveness authority and the only one of
+> # the two that may be polled). A retryability taxonomy here was DESCOPED (#3750): it told a lane a
+> # LIVE gate was permanently unmeasurable, and an obedient lane relaunches it — two gates, one path.
 > ```
 >
 > A terminal `RESULT: INCOMPLETE` means "still running, or died" — never a certification.

@@ -35,7 +35,11 @@ that grammar spins on green there. Poll `--only` by **EXIT STATUS** (`3` = compl
 observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`; then read the
 component's verdict SEPARATELY, from its own line:
 `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name> --run-id <id>` (exit 0 PASS /
-1 NOT-PASS / 5 NOT-COMPLETE, the only retryable code / 4 COULD-NOT-MEASURE, permanent / 64 USAGE). A
+1 NOT-PASS / 4 COULD-NOT-MEASURE, no verdict available whatever the reason / 64 USAGE). It is **NOT a
+completion probe and has no opinion about liveness — never call it in a loop**: establish completion
+first with the grammars above or `gate-liveness.sh`, which is the three-valued liveness authority and
+the only one of the two that may be polled (#3750 descoped a retryability taxonomy here, because it
+told a lane a LIVE gate was permanently unmeasurable and an obedient lane relaunches it). A
 completed run whose component **SKIPped or is absent is NOT a pass** —
 and a SKIPping component still exits 3, so exit 3 is completion and never a green.
 
