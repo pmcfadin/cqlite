@@ -108,13 +108,38 @@ impl V5CompressedLegacyParser {
                 depth + 1,
             )?))),
 
-            // An UNRESOLVED type string is the one arm that cannot say what an
-            // empty value of it IS without resolving it, so it keeps the SAME
-            // single route a non-empty payload takes (module header of
-            // `udt_field`): a `blob` fallback there is the documented carve-out
-            // for an unknown type, not a decoded non-`blob` type turning into a
-            // blob.
+            // `Custom` is an UNRESOLVED type string, and it is NOT rare: on a
+            // schema-less read the field types come from the marshal header, and
+            // `parse_cassandra_type_with_depth` (udt.rs) has no arm for
+            // `ShortType`, `ByteType`, `DurationType`, `CounterColumnType`,
+            // `VarcharType` or `LexicalUUIDType` — they all land here.
+            //
+            // So this arm has to NORMALIZE before dispatching, or the two
+            // SPELLINGS DISAGREE about the same value, which is the defect class
+            // #3722 exists to remove. Measured (roborev round 3): an empty
+            // `smallint` field is `CqlType::SmallInt` under the CQL-short
+            // spelling and answers `Value::Null`, but under the marshal spelling
+            // it is `Custom("…ShortType")`, and handing an EMPTY slice to
+            // `parse_value_from_raw_bytes` reaches its `"smallint"` arm, whose
+            // `data.len() < 2` check ERRORS — failing the row rather than
+            // decoding it.
+            //
+            // Normalization reuses the existing marshal->CQL-short mapping and
+            // `CqlType::parse`, so no third type mapping is introduced. A string
+            // it does not recognise keeps the previous behaviour: the same single
+            // route a non-empty payload takes, where a `blob` fallback is the
+            // documented carve-out for a genuinely unknown type.
             CqlType::Custom(type_str) => {
+                if let Some(short) = Self::primitive_marshal_to_cql_short(type_str) {
+                    if let Ok(resolved) = CqlType::parse(short) {
+                        // Guard against a mapping that resolved back to `Custom`
+                        // (it cannot today, but a future arm must not recurse
+                        // forever here).
+                        if !matches!(resolved, CqlType::Custom(_)) {
+                            return self.empty_udt_field_value(&resolved, depth);
+                        }
+                    }
+                }
                 self.parse_value_from_raw_bytes(&[], type_str, "udt field", depth + 1)
             }
         }
@@ -251,5 +276,96 @@ mod tests {
             }
             other => panic!("expected a Udt, got {other:?}"),
         }
+    }
+
+    /// roborev round 3: an empty field must decode IDENTICALLY under both
+    /// spellings. On a schema-less read the field type comes from the marshal
+    /// header, and `ShortType`/`ByteType`/`DurationType`/`CounterColumnType`/
+    /// `VarcharType`/`LexicalUUIDType` have no arm in
+    /// `parse_cassandra_type_with_depth`, so they arrive as `CqlType::Custom`.
+    ///
+    /// Before the fix, the CQL-short spelling answered `Value::Null` while the
+    /// marshal spelling ERRORED (an empty slice reaching
+    /// `parse_value_from_raw_bytes`'s `"smallint"` arm fails its `len < 2`
+    /// check) — the two spellings disagreeing about one value, which is the
+    /// defect class this whole issue exists to remove.
+    #[test]
+    fn an_empty_field_decodes_the_same_under_both_spellings() {
+        let p = parser();
+        const M: &str = "org.apache.cassandra.db.marshal.";
+        // (marshal form that lands in `Custom`, the concrete CQL-short type)
+        let pairs = [
+            (format!("{M}ShortType"), CqlType::SmallInt),
+            (format!("{M}ByteType"), CqlType::TinyInt),
+            (format!("{M}DurationType"), CqlType::Duration),
+            (format!("{M}CounterColumnType"), CqlType::Counter),
+            (format!("{M}VarcharType"), CqlType::Text),
+            // NOT LexicalUUIDType: it ends with `UUIDType`, so
+            // `parse_cassandra_type` resolves it to `CqlType::Uuid` and it never
+            // reaches the `Custom` arm. The precondition assert below caught that
+            // when it was listed here, which is why the assert exists.
+        ];
+        for (marshal, concrete) in pairs {
+            // Precondition: this marshal form really does land in `Custom`,
+            // otherwise the case proves nothing about the arm under test.
+            let via_header = Self_parse_cassandra(&marshal);
+            assert!(
+                matches!(via_header, CqlType::Custom(_)),
+                "{marshal} no longer resolves to CqlType::Custom, so this case \
+                 no longer exercises the Custom arm — re-point it"
+            );
+
+            let short = p
+                .parse_udt_field_value(&[], &concrete, 0)
+                .unwrap_or_else(|e| panic!("empty {concrete:?} (CQL-short) must decode: {e}"));
+            let marsh = p
+                .parse_udt_field_value(&[], &via_header, 0)
+                .unwrap_or_else(|e| panic!("empty {marshal} (marshal) must decode: {e}"));
+            assert_eq!(
+                short, marsh,
+                "empty field decoded DIFFERENTLY per spelling: {concrete:?} -> {short:?} \
+                 but {marshal} -> {marsh:?}"
+            );
+            assert!(
+                !matches!(short, Value::Blob(_)),
+                "empty {concrete:?} decoded to Value::Blob"
+            );
+        }
+    }
+
+    /// Helper: resolve a marshal string the way a schema-less read does.
+    #[allow(non_snake_case)]
+    fn Self_parse_cassandra(type_str: &str) -> CqlType {
+        V5CompressedLegacyParser::parse_cassandra_type(type_str)
+            .unwrap_or_else(|e| panic!("marshal type must parse: {e}"))
+    }
+
+    /// roborev round 3: a field length below `-1` in the inline-UDT route used to
+    /// reach `field_len as usize` (~1.8e19 for `-5`), after which the bounds
+    /// check `current_offset + field_len > data.len()` OVERFLOWS — a panic in a
+    /// debug build. Reachable from hostile bytes via the structural nested-UDT
+    /// route, so it must be a corruption ERROR and never a panic.
+    #[test]
+    fn a_negative_inline_udt_field_length_errors_rather_than_panicking() {
+        let p = parser();
+        let fields = vec![("a".to_string(), CqlType::Int)];
+        for bad_len in [-5i32, -2, i32::MIN] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&bad_len.to_be_bytes());
+            let got = p.parse_inline_udt_value(&data, "inner_u", &fields, 0);
+            assert!(
+                got.is_err(),
+                "field length {bad_len} must be a corruption error, got {got:?}"
+            );
+        }
+        // Control: -1 is the LEGAL negative length (null), and must still work —
+        // otherwise the guard above would be rejecting valid input.
+        let mut null_data = Vec::new();
+        null_data.extend_from_slice(&(-1i32).to_be_bytes());
+        assert!(
+            p.parse_inline_udt_value(&null_data, "inner_u", &fields, 0)
+                .is_ok(),
+            "-1 is a NULL field and must still decode"
+        );
     }
 }

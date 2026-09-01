@@ -302,7 +302,7 @@ impl V5CompressedLegacyParser {
     /// Parse a Cassandra type string into a CqlType.
     /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
     #[allow(dead_code)]
-    fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
+    pub(super) fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
         Self::parse_cassandra_type_with_depth(type_str, 0)
     }
 
@@ -878,6 +878,18 @@ impl V5CompressedLegacyParser {
                 // Empty value
                 let value = self.parse_udt_field_value(&[], field_type, depth)?;
                 Some(value)
+            } else if field_len < 0 {
+                // Only -1 is a legal negative length (null). Anything else is
+                // corruption and MUST be rejected before the `as usize` below:
+                // `-5 as usize` is ~1.8e19, and the bounds check that follows is
+                // `current_offset + field_len > data.len()`, whose addition
+                // OVERFLOWS — a panic in a debug build, and a wrapped comparison
+                // in release. This path is reachable from hostile bytes through
+                // the structural nested-UDT route (roborev round 3, #3722).
+                return Err(Error::corruption(format!(
+                    "Inline UDT field '{}': invalid negative field length {}",
+                    field_name, field_len
+                )));
             } else {
                 let field_len =
                     Self::checked_component_len(field_len, field_name, current_offset, data.len())?;

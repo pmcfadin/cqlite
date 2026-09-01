@@ -107,9 +107,25 @@ impl V5CompressedLegacyParser {
             CqlType::Blob => Ok(Value::Blob(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
             )),
-            CqlType::Inet => Ok(Value::Inet(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
+            // `inet` is 4 bytes (IPv4) or 16 (IPv6) and nothing else:
+            // `InetAddressSerializer.validate` rejects every other length
+            // ("Expected 4 or 16 byte inetaddress"). The pre-#3722 arms accepted
+            // ANY non-empty payload, so a malformed address reached
+            // `Value::Inet` (roborev round 3, #3722). Checked here rather than
+            // left to a consumer, for the same reason the fixed-width arms are
+            // strict `!= N`: the field's own length prefix bounds it exactly, so
+            // a wrong length is corruption and not something to pass along.
+            CqlType::Inet => {
+                if data.len() != 4 && data.len() != 16 {
+                    return Err(Error::corruption(format!(
+                        "Inet field requires 4 bytes (IPv4) or 16 (IPv6), got {}",
+                        data.len()
+                    )));
+                }
+                Ok(Value::Inet(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
+            }
             CqlType::Varint => Ok(Value::Varint(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
             )),
@@ -773,5 +789,35 @@ mod tests {
             .parse_udt_field_value(&[0u8; 4], &CqlType::Int, MAX_TYPE_NESTING_DEPTH + 1)
             .expect_err("past the depth bound must error");
         assert!(err.to_string().contains("depth"), "got: {err}");
+    }
+
+    /// roborev round 3: `inet` is 4 bytes (IPv4) or 16 (IPv6) and nothing else.
+    /// The pre-fix arms accepted ANY non-empty payload, so a malformed address
+    /// reached `Value::Inet`. Both directions asserted — a guard that rejects
+    /// VALID lengths would be worse than the leniency it replaced.
+    #[test]
+    fn inet_accepts_only_4_or_16_bytes() {
+        let p = parser();
+        assert!(
+            matches!(
+                p.parse_udt_field_value(&[192, 168, 1, 42], &CqlType::Inet, 0),
+                Ok(Value::Inet(_))
+            ),
+            "a 4-byte IPv4 address must decode"
+        );
+        assert!(
+            matches!(
+                p.parse_udt_field_value(&[0u8; 16], &CqlType::Inet, 0),
+                Ok(Value::Inet(_))
+            ),
+            "a 16-byte IPv6 address must decode"
+        );
+        for bad in [1usize, 3, 5, 8, 15, 17] {
+            let data = vec![0u8; bad];
+            assert!(
+                p.parse_udt_field_value(&data, &CqlType::Inet, 0).is_err(),
+                "a {bad}-byte inet payload must be rejected"
+            );
+        }
     }
 }
