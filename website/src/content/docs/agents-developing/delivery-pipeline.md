@@ -450,6 +450,30 @@ It claims nothing about lanes that never stamped (a lane run with `CLAIM_CMD=""`
 nothing about other machines — a PID is only checkable where it runs, so **run it ON the suspect
 box**.
 
+**AND ON A SUPERVISOR-LESS FLEET IT ANSWERS ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
+by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
+`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and **the only writer of either in the
+tree is `worker-supervisor.sh`**. The fleet runs `/drive-issue` lanes, not supervisors — measured on
+all three boxes: `lane-claims=0 machine-claims=0`, production supervisors **zero**, while
+`claims=6 heartbeats=20`. So the command reports nothing and exits 1, which is exactly why the
+no-exit-0 rule above matters rather than being softened: **1 means "nothing was reported", never a
+clean bill of health.**
+
+The two *populated* namespaces were **measured** and rejected as substitutes, so a read-side "just
+point it at those" fix is refused with evidence: `refs/claims/issue-<N>` records the pid of the
+**transient claiming shell** and never refreshes it (measured dead while its lane was running, so
+reading it would report a dead lane for a healthy one), and `refs/heartbeats/<machine>` is
+**single-slot per machine** and force-updated, so N lanes on one box overwrite each other and at most
+one is ever reportable — structurally the same masking defect the retired per-machine claim ref had.
+**AC4 survives the descope**: a stale pid must never yield a `DEAD-*` verdict, it must abstain.
+
+What lane liveness rests on here is the **coordination lead's sweep** plus the **#3436
+board-signature read** (Ready + pushed branch + no claim ref) — and both are **operating mechanisms,
+not committed tooling**: there is no sweep command and no board-signature script in this repository,
+and #3436's reading of that signature *conflicts* with the runbook's "parked-by-design" reading of
+the same shape, unresolved. Full record, including the primitives that do exist:
+`docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*.
+
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH
 banner from inside the VPC, **check `dmesg` for an OOM kill before concluding the instance is broken**.
