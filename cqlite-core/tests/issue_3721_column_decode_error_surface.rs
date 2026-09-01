@@ -278,6 +278,26 @@ async fn simple_column_decode_failure_fails_the_select_naming_the_column() {
     assert_column_decode(&err, "name");
 }
 
+/// The POINT read path must answer identically to the full scan (issue #1918's
+/// differential contract): both reach the same `parse_block_emit*` decode, so a
+/// column decode failure that fails one must fail the other. A point read that
+/// still swallowed would be worse than the original defect — the same query would
+/// succeed or fail depending on which path was chosen.
+#[tokio::test]
+async fn a_targeted_point_read_fails_the_same_way_as_the_full_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = fixture_root(COMPLEX_KEYSPACE, COMPLEX_TABLE);
+    let schema = write_schema(dir.path(), &complex_schema(COMPLEX_TABLE_WRONG_KEY));
+    let db = open_db(&root, &schema, COMPLEX_KEYSPACE).await;
+    let err = db
+        .execute(&format!(
+            "SELECT * FROM {COMPLEX_KEYSPACE}.{COMPLEX_TABLE} WHERE id = 1"
+        ))
+        .await
+        .expect_err("a partition-targeted read must surface the same failure");
+    assert_column_decode(&err, "m");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AC4 — the fix must not become "abort the row" for columns that decode fine.
 //

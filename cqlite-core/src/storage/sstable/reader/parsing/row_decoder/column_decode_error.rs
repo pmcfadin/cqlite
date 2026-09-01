@@ -103,6 +103,47 @@ pub(super) fn column_decode_failure(
     Error::column_decode(column_name, column_type, offset, cause)
 }
 
+/// Is the byte at a simple column's cell position NOT a cell flags byte — i.e. is
+/// there no cell to decode here at all?
+///
+/// **This is the one class that is FRAMING rather than a decode failure, and it is
+/// therefore the one class that keeps the historical `break`.** Cassandra's cell
+/// flags occupy the low 5 bits (`Cell.Serializer` in `UnfilteredSerializer`, read
+/// at the pinned `cassandra-5.0.8` tag); `0x20`/`0x40`/`0x80` are ROW flags, so a
+/// byte carrying any of them cannot be a cell — the statement is "there is no cell
+/// here", not "this column's value is undecodable". It is the row walk's END-OF-
+/// CELLS terminator, and CQLite's SPECULATIVE reads depend on it: the promoted-
+/// index reverse read and the clustering-window read
+/// (`data_access::big_promoted`) hand `parse_block_emit_windowed` a block extent
+/// and let it parse rows from it, and a walk that runs past real row data lands in
+/// cell values and is rejected exactly here. Measured: making this class fatal
+/// turned a CLEAN read of the committed `test_comp.uncompressed_table` fixture
+/// into a hard error (`invalid cell flags 0x61` — an ASCII byte from a `text`
+/// value, inside a row body the header claimed was 97 bytes long).
+///
+/// That speculative walk over-running into a value IS a latent defect of those
+/// read paths, but it is NOT this issue's, and converting it into a user-visible
+/// read failure would be a large availability regression for wide-partition reads.
+/// It stays the terminator; it is reported at `debug!` because it fires on healthy
+/// reads of those paths, so a higher level would be pure noise.
+///
+/// Everything AFTER a valid flags byte — a wrong fixed width, a non-4/16-byte
+/// `inet`, invalid UTF-8, a short value, an undecodable cell-path key — is a
+/// genuine per-column decode failure and propagates as [`Error::ColumnDecode`].
+pub(super) fn not_a_cell(column_name: &str, offset: usize, flags: u8) -> bool {
+    let not_a_cell = flags > 0x1F;
+    if not_a_cell {
+        tracing::debug!(
+            "V5CompressedLegacy: no cell at offset {} for column '{}': byte 0x{:02x} \
+             carries a ROW flag bit (0x20/0x40/0x80), so the row body's cells end here",
+            offset,
+            column_name,
+            flags
+        );
+    }
+    not_a_cell
+}
+
 /// Is `e` the per-column decode failure that must never be mistaken for the end of
 /// a partition body? A MATCH on the variant, never a message-text test (issue #28).
 pub(crate) fn is_column_decode(e: &Error) -> bool {

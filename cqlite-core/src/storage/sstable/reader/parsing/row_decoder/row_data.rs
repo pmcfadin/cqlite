@@ -1,7 +1,6 @@
 use super::*;
 
-// Issue #3721: the per-column decode-failure policy — the ONE statement of why a
-// failure here is fatal rather than skippable — lives in `column_decode_error`.
+// Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
 use super::column_decode_error::column_decode_failure;
 
 impl V5CompressedLegacyParser {
@@ -610,9 +609,8 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        // Issue #3721: PROPAGATE (rule + fatal-vs-skippable
-                        // analysis: `column_decode_error`). Shared by BOTH arms
-                        // above, so compaction surfaces it identically.
+                        // Issue #3721: PROPAGATE (rule: `column_decode_error`); the
+                        // two arms above share it, so compaction sees it too.
                         let n = &column.name;
                         return Err(column_decode_failure(n, complex_type, offset, e));
                     }
@@ -622,6 +620,11 @@ impl V5CompressedLegacyParser {
                 // to detect USE_ROW_TTL (0x10), which makes a cell with no explicit
                 // expiry inherit the ROW's expiry rather than being live-forever.
                 let cell_flags = data.get(offset).copied().unwrap_or(0);
+                // Issue #3721: FRAMING, not a decode failure — `column_decode_error`
+                // states why this ONE class keeps the historical `break`.
+                if column_decode_error::not_a_cell(&column.name, offset, cell_flags) {
+                    break;
+                }
                 match self.parse_cell_value_schema_order(
                     data,
                     offset,
@@ -772,10 +775,9 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        // Issue #3721: PROPAGATE (see `column_decode_error`).
-                        // Replaces a `break` whose comment described the mechanism
-                        // and not its consequence: a clean loop exit IS a truncated
-                        // row, returned as `Ok`.
+                        // Issue #3721: PROPAGATE (see `column_decode_error`); the
+                        // `break` this replaces described only its mechanism, and a
+                        // clean loop exit IS a truncated row.
                         let ty = header_type.unwrap_or(&column.data_type);
                         return Err(column_decode_failure(&column.name, ty, offset, e));
                     }

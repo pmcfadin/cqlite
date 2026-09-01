@@ -162,9 +162,9 @@ pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
         // Issue #3721: a per-column decode failure IS damaged/undecodable data at
         // the cell level — the same operator signal as `Corruption`, and never the
         // `Other` bucket, so a dashboard shows a read that failed on bad bytes.
-        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) | Error::ColumnDecode { .. } => {
-            ObsErrorCategory::Corruption
-        }
+        Error::Corruption(_)
+        | Error::CorruptCommitLogFrame(_)
+        | Error::ColumnDecode { .. } => ObsErrorCategory::Corruption,
 
         Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 
