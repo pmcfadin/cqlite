@@ -1,4 +1,14 @@
-# Issue #2824 slice 1 — cold/warm A/B result
+# Issue #2824 — cold/warm A/B result (lever reverted)
+
+> **OUTCOME: THE LEVER WAS REVERTED AND DOES NOT SHIP (issue #2824, lead ruling on REQ-2824-03,
+> 2026-09-01).** `PrefetchMode::Auto` still issues no `madvise`. This document records a measurement
+> of a change that was built and then backed out — read every "patched" figure below as *what the
+> flip would have done*, never as current behaviour. Why it was rejected:
+> `SSTableManager::new` opens **every** SSTable under the data directory at `Database::open`
+> (`storage/sstable/manager_open.rs:61` -> `:300`), so advising at open fires whole-file read-ahead
+> for every table of every keyspace before any query is seen. See `../../..`-relative
+> `openspec/changes/madvise-willneed-dontneed/proposal.md`.
+
 
 **Verdict: NO detectable effect, and NO regression, on this host — and this host is
 structurally incapable of exhibiting the effect AC1 asks about.** The lever is neither
@@ -71,7 +81,9 @@ carries no information about the i4i case.
 
 ## What this DOES establish
 
-1. The flip is correct at the syscall boundary: `MADV_WILLNEED` is issued once, on the scan
+These hold about the change **as built and measured**, before it was reverted:
+
+1. The flip was correct at the syscall boundary: `MADV_WILLNEED` is issued once, on the scan
    mapping, over the whole file; the #2210 point mapping is untouched; `MADV_SEQUENTIAL` is
    never issued by either arm (`ab/construction.md`).
 2. **No regression** on an EBS-backed deployment, warm or cold, on either signal.

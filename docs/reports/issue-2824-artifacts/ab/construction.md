@@ -1,5 +1,15 @@
 # A/B construction assertion (issue #2824)
 
+> **OUTCOME: THE LEVER WAS REVERTED AND DOES NOT SHIP (issue #2824, lead ruling on REQ-2824-03,
+> 2026-09-01).** `PrefetchMode::Auto` still issues no `madvise`. This document records a measurement
+> of a change that was built and then backed out — read every "patched" figure below as *what the
+> flip would have done*, never as current behaviour. Why it was rejected:
+> `SSTableManager::new` opens **every** SSTable under the data directory at `Database::open`
+> (`storage/sstable/manager_open.rs:61` -> `:300`), so advising at open fires whole-file read-ahead
+> for every table of every keyspace before any query is seen. See `../../..`-relative
+> `openspec/changes/madvise-willneed-dontneed/proposal.md`.
+
+
 An A/B whose two arms differ in more than the property under test proves nothing while
 looking exactly like proof. This file records that the two arms differ in **one** property,
 asserted twice — once in the source, once at the syscall boundary.
