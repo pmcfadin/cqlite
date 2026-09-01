@@ -2030,6 +2030,17 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   compatibility" while the rewrite path dropped it made an OLDER script silently DELETE a field
   a NEWER one introduced — preserve beats refuse, which would brick every touched lane on a
   fleet mid-rollout.
+  (10) **An `-e` existence probe is not an existence probe: it FOLLOWS the link, so a DANGLING
+  symlink at the marker path classified `absent` — the ONE class licensed to replace a file — and
+  `write` silently destroyed a link someone placed.** Existence is now `-e` **or** `-L`, the `-L`
+  test runs BEFORE `-f` (which also follows), and EVERY symlink, dangling or not, takes the
+  existing `not-regular` refusal; the class was swept to the script-owned lock sidecar, where
+  `: >>"$lock"` would have created a file OUTSIDE the lane. **And an axis guard must run before
+  anything that DERIVES A PATH OR TAKES A LOCK**: `adopt` locked first, so an unmeasurable
+  worktree yielded a generic "not writable" instead of the published `axis=worktree` refusal —
+  the same input answered differently by subcommand. Both were UNTESTED because the axis matrix
+  named `write verify show` by hand, so it is now DERIVED from the dispatch table and a
+  subcommand with no declared arguments REDS rather than joining uncovered.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

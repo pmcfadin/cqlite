@@ -91,12 +91,16 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
     the turn. Do not "fix" it by rewriting the marker.
   - `LIVENESS-UNKNOWN` (7) → liveness could not be measured. STOP the same way and say so in your
     report; never adopt on unproven information.
-  - `ERROR` (1) → an I/O or internal failure: an unreadable marker, no `flock` on this host, the
+  - `ERROR` (1) → an I/O or internal failure: an unreadable marker, a SYMLINK at the marker or
+    lock path (dangling or not — a link is a deliberate artifact, so it is refused rather than
+    followed or replaced), no `flock` on this host, the
     shared liveness library missing, a helper the writer depends on failing, or an IDENTITY AXIS
     THAT COULD NOT BE MEASURED — the detail names it (`axis=machine`: `hostname -s` failed and
     `CLAIM_MACHINE` is unset, so the stamp would record the `unspecified` placeholder and alias
     every such box onto one owner; `axis=worktree`: `pwd -P` named no absolute directory, so the
-    marker path would be derived at the filesystem root). NOTHING was
+    marker path would be derived at the filesystem root — every subcommand, `adopt` included,
+    refuses on this axis BEFORE it derives a path or takes a lock, so the diagnostic does not
+    depend on which one you ran). NOTHING was
     decided and NOTHING was written. Do not proceed from the marker and do not write over it —
     report the `verdict-detail` line to the lead. **Every** exit of that script carries a verdict
     token, a fatal start-up failure included, so an EMPTY token means you are not reading its
