@@ -131,6 +131,14 @@
 #              may not overwrite a live peer's plan either — so a foreign marker refuses
 #              with that marker's own verdict. The route past it is `adopt`, never a flag
 #              on `write`. Without --body-file an OWNED marker's body is PRESERVED.
+#              ONE EXCEPTION — the MIGRATION case: an UNSTAMPED marker (the pre-#3822
+#              shape) asserts NO ownership, so `write` REPLACES it, DISCARDS its body (an
+#              unstamped plan may belong to any session and is never carried forward) and
+#              ANNOUNCES the discard on a verdict-detail line. `verify` still REFUSES an
+#              unstamped marker; `write` is the one door, and it is the door the UNSTAMPED
+#              refusal names. MALFORMED / DUPLICATE-SENTINEL get no exception: they CLAIM
+#              an identity that cannot be READ, which may be a live peer's, so a human
+#              moves the file aside deliberately and `write` then takes the ABSENT path.
 #   verify <N> [--actor <id>]      the rehydrate gate (see the axes above)
 #   adopt  <N> --reason <why> [--actor <id>]
 #              The explicit adopt gesture. Resolves the SESSION axis ONLY: a fail-closed
@@ -348,16 +356,16 @@ read_marker() {
   local first
   first="$(head -1 "$path" 2>/dev/null || true)"
   if [ "$first" != "$STAMP_BEGIN" ]; then
-    refuse UNSTAMPED 8 "$(sane "$path") carries NO ownership stamp (its first line is not the stamp sentinel) — this is the pre-#3822 marker shape, whose plan could belong to ANY session on ANY machine, so it is refused rather than adopted. Re-stamp it with '$prog write <issue>' only if this lane's work IS the issue it describes."
+    refuse UNSTAMPED 8 "$(sane "$path") carries NO ownership stamp (its first line is not the stamp sentinel) — this is the pre-#3822 marker shape, whose plan could belong to ANY session on ANY machine, so nothing is READ from it. The route forward is '$prog write <issue>', which SUCCEEDS over an unstamped marker and REPLACES it — DISCARDING its body, because an unstamped plan may belong to any session and is never carried forward. Save anything you need out of the file first."
   fi
 
   local nb ne
   nb="$(count_sentinel "$path" "$STAMP_BEGIN")"
   ne="$(count_sentinel "$path" "$STAMP_END")"
   if [ "$nb" -ne 1 ] || [ "$ne" -gt 1 ]; then
-    refuse DUPLICATE-SENTINEL 8 "$(sane "$path") carries $nb stamp-begin and $ne stamp-end sentinels at column zero (exactly one of each is legal) — a second stamp cannot be told apart from the first, so no identity is read from this file"
+    refuse DUPLICATE-SENTINEL 8 "$(sane "$path") carries $nb stamp-begin and $ne stamp-end sentinels at column zero (exactly one of each is legal) — a second stamp cannot be told apart from the first, so no identity is read from this file. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
   fi
-  [ "$ne" -eq 1 ] || refuse MALFORMED 8 "$(sane "$path") has no stamp-end sentinel at column zero — the prologue is unterminated, so its extent (and therefore which lines are identity) is undecidable"
+  [ "$ne" -eq 1 ] || refuse MALFORMED 8 "$(sane "$path") has no stamp-end sentinel at column zero — the prologue is unterminated, so its extent (and therefore which lines are identity) is undecidable. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
 
   # Parse the CONTIGUOUS run of `key: value` lines between the two sentinels, and NOTHING
   # else in the file. `IFS=` + `-r` keeps each line byte-exact.
@@ -368,14 +376,14 @@ read_marker() {
     [ "$line" = "$STAMP_END" ] && break
     case "$line" in
       [a-z]*': '*) : ;;
-      *) refuse MALFORMED 8 "$(sane "$path") line $ln is inside the stamp prologue but is not a 'key: value' line at column zero — the prologue grammar is closed, so a line it cannot parse is a refusal rather than a guess" ;;
+      *) refuse MALFORMED 8 "$(sane "$path") line $ln is inside the stamp prologue but is not a 'key: value' line at column zero — the prologue grammar is closed, so a line it cannot parse is a refusal rather than a guess. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)" ;;
     esac
     key="${line%%: *}"
     val="${line#*: }"
     case "$key" in
-      *[!a-z0-9-]*) refuse MALFORMED 8 "$(sane "$path") line $ln has a stamp key outside [a-z0-9-] ('$(sane "$key")')" ;;
+      *[!a-z0-9-]*) refuse MALFORMED 8 "$(sane "$path") line $ln has a stamp key outside [a-z0-9-] ('$(sane "$key")'). The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)" ;;
     esac
-    [ -n "$val" ] || refuse MALFORMED 8 "$(sane "$path") line $ln records an EMPTY value for '$(sane "$key")'"
+    [ -n "$val" ] || refuse MALFORMED 8 "$(sane "$path") line $ln records an EMPTY value for '$(sane "$key")'. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
     case "$key" in
       issue)                      dup="$S_issue";          S_issue="$val" ;;
       machine)                    dup="$S_machine";        S_machine="$val" ;;
@@ -393,7 +401,7 @@ read_marker() {
     esac
     # A DUPLICATE identity key would let the PARSER's choice decide identity, which is the
     # forgery shape this whole prologue exists to remove. Refused, not first-wins.
-    [ -z "$dup" ] || refuse MALFORMED 8 "$(sane "$path") records '$(sane "$key")' TWICE in the stamp prologue — which occurrence is the identity is undecidable"
+    [ -z "$dup" ] || refuse MALFORMED 8 "$(sane "$path") records '$(sane "$key")' TWICE in the stamp prologue — which occurrence is the identity is undecidable. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
   done <"$path"
 
   local missing=''
@@ -406,7 +414,7 @@ read_marker() {
   [ -n "$S_start_hi" ] || missing="$missing session-pid-start-latest"
   [ -n "$S_actor" ]    || missing="$missing actor"
   [ -n "$S_ts" ]       || missing="$missing ts"
-  [ -z "$missing" ] || refuse MALFORMED 8 "$(sane "$path") stamp prologue is missing required field(s):$(sane "$missing") — an incomplete stamp is not a weaker stamp, it is no stamp"
+  [ -z "$missing" ] || refuse MALFORMED 8 "$(sane "$path") stamp prologue is missing required field(s):$(sane "$missing") — an incomplete stamp is not a weaker stamp, it is no stamp. The route forward is to move the file aside DELIBERATELY (e.g. 'mv $MARKER_NAME $MARKER_NAME.unreadable'): with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally. It is NOT overwritten for you — unlike an unstamped marker this file CLAIMS an identity, and an identity that cannot be READ may be a live peer's. (This text deliberately names no subcommand: naming one that refuses in THIS state is the dead-letter shape scripts/tests/test_drive_issue_state.sh case 22 forbids.)"
   return 0
 }
 
@@ -638,17 +646,40 @@ cmd_write() {
 
   # Writing OVER an existing marker passes the SAME ownership verification: you may not
   # overwrite a live peer's plan either. ABSENT is the legitimate fresh-start path.
-  local carried=''
+  #
+  # ONE EXCEPTION, AND IT IS THE MIGRATION CASE: an UNSTAMPED marker. It asserts NO
+  # ownership at all — that is what makes it the pre-#3822 shape — so refusing to replace it
+  # protects no identifiable party while BRICKING the only route forward. On rollout EVERY
+  # existing lane holds an unstamped marker, so the refusal made the whole marker path a
+  # dead letter fleet-wide, with the refusal text naming the very command that refused (the
+  # #3312-job-24 shape: a break-glass no sequence of actions can reach). So `write` REPLACES
+  # it and DISCARDS its body — silently carrying a foreign plan forward is the defect this
+  # issue exists to close — and ANNOUNCES the discard, because a quiet overwrite of someone's
+  # notes is unacceptable even where refusing is worse. A MALFORMED or DUPLICATE-SENTINEL
+  # marker gets NO such exception: it CLAIMS an identity that merely cannot be read, and an
+  # unreadable identity may be a live peer's, so it is moved aside by a human deliberately.
+  local carried='' discarded=''
   if [ -e "$(marker_path)" ]; then
-    check_ownership "$issue" strict
-    if [ -z "$body_src" ]; then
+    local mpath; mpath="$(marker_path)"
+    [ -f "$mpath" ] && [ -r "$mpath" ] || refuse ERROR 1 "$(sane "$mpath") exists but is not a readable regular file — nothing was decided"
+    if [ "$(head -1 "$mpath" 2>/dev/null || true)" != "$STAMP_BEGIN" ]; then
+      local dl dbytes
+      dl="$(LC_ALL=C wc -l <"$mpath" 2>/dev/null | tr -d ' ')"
+      dbytes="$(LC_ALL=C wc -c <"$mpath" 2>/dev/null | tr -d ' ')"
+      discarded="replaced an UNSTAMPED marker of unknown provenance and DISCARDED its body (${dl:-?} lines, ${dbytes:-?} bytes): an unstamped plan may belong to ANY session, so it is never carried forward"
+      # body_src stays as the caller supplied it (empty unless --body-file): the preserve
+      # branch below is UNREACHABLE from here, which is the point.
+    else
+      check_ownership "$issue" strict
+      if [ -z "$body_src" ]; then
       # Preserve an OWNED marker's body: `write` updates the stamp and the recorded stage,
       # not the author's notes.
-      carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
-      register_tmp "$carried"
-      marker_body >"$carried"
-      assert_body_safe "$carried"
-      body_src="$carried"
+        carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX")" || refuse ERROR 1 "cannot create a temporary file for the carried body"
+        register_tmp "$carried"
+        marker_body >"$carried"
+        assert_body_safe "$carried"
+        body_src="$carried"
+      fi
     fi
   fi
 
@@ -666,6 +697,7 @@ cmd_write() {
   fi
   [ -z "$carried" ] || rm -f "$carried"
   verdict WRITTEN
+  [ -z "$discarded" ] || detail "$discarded"
   detail "issue=$(sane "$issue") machine=$(sane "$(this_machine)") worktree=$(sane "$(pwd -P)") session=$(sane "$(this_session)") session-pid=$(sane "$(this_session_pid)") actor=$(sane "$actor") -> $(sane "$WROTE_PATH")"
 }
 

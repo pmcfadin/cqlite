@@ -288,6 +288,7 @@ case_begin 9-writer-refuses-sentinel-body "the writer REFUSES a body carrying a 
 L9=$(lane lane9)
 body="$T/body9.md"
 sentinel=$(sed -n 's/^STAMP_BEGIN=.\(.*\).$/\1/p' "$DS" | head -1)
+sentinel_end=$(sed -n 's/^STAMP_END=.\(.*\).$/\1/p' "$DS" | head -1)
 {
   printf 'plan notes\n'
   printf '%s\n' "$sentinel"
@@ -593,7 +594,186 @@ $sp_p"
 fi
 
 # ===========================================================================
-case_begin 21-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
+case_begin 21-write-over-unstamped-migrates "MIGRATION: write SUCCEEDS over an UNSTAMPED marker, discards its body, and announces it"
+# ===========================================================================
+# The dead letter this case exists for: `verify` refused an UNSTAMPED marker (correctly)
+# and so did `write` and `adopt`, while the refusal text named `write` as the remedy — so on
+# rollout EVERY existing lane, all of which hold an unstamped marker by definition, had NO
+# route forward. An unstamped marker asserts no ownership, so refusing to replace it
+# protects no identifiable party.
+L21=$(lane lane21)
+cat >"$L21/$MARKER" <<'LEGACY'
+# drive-issue state for #3822 (hand-written, pre-stamp)
+- stage: implement
+- note: DISTINCTIVE_LEGACY_BODY_MARKER must not survive the restamp
+LEGACY
+mig_v=$(run "$L21" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); mig_vrc=$?
+mig_w=$(run "$L21" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage implement); mig_wrc=$?
+mig_v2=$(run "$L21" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); mig_v2rc=$?
+if [ "$mig_vrc" -eq 8 ] && [ "$(verdict_of "$mig_v")" = UNSTAMPED ] \
+   && [ "$mig_wrc" -eq 0 ] && [ "$(verdict_of "$mig_w")" = WRITTEN ] \
+   && [ "$mig_v2rc" -eq 0 ] && [ "$(verdict_of "$mig_v2")" = OWNED ]; then
+  ok "the end-to-end migration path works: verify UNSTAMPED(8) -> write WRITTEN(0) -> verify OWNED(0)"
+else
+  bad "migration path broken: verify=$mig_vrc/$(verdict_of "$mig_v") write=$mig_wrc/$(verdict_of "$mig_w") reverify=$mig_v2rc/$(verdict_of "$mig_v2")
+$mig_w"
+fi
+# The old body must be provably GONE — asserted on a DISTINCTIVE STRING, not on a length,
+# because a length can coincide while the foreign plan survives.
+if ! grep -q 'DISTINCTIVE_LEGACY_BODY_MARKER' "$L21/$MARKER"; then
+  ok "the unstamped body is provably ABSENT from the restamped marker (a foreign plan is never carried forward)"
+else
+  bad "the unstamped body SURVIVED the restamp:
+$(cat "$L21/$MARKER")"
+fi
+if printf '%s\n' "$mig_w" | grep -q 'DISCARDED its body' && all_lines_anchored "$mig_w"; then
+  ok "the discard is ANNOUNCED on an anchored verdict-detail line (a quiet overwrite of someone's notes is not acceptable)"
+else
+  bad "the discard was not announced:
+$mig_w"
+fi
+# NON-VACUITY: the exception is for UNSTAMPED ONLY. A marker that CLAIMS an identity which
+# merely cannot be READ may be a live peer's, so write must still refuse it.
+L21B=$(lane lane21b)
+run "$L21B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+grep -vFx -- "$sentinel_end" "$L21B/$MARKER" >"$T/m21b" && mv "$T/m21b" "$L21B/$MARKER"
+mal_w=$(run "$L21B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822); mal_wrc=$?
+if [ "$mal_wrc" -ne 0 ] && [ "$(verdict_of "$mal_w")" = MALFORMED ]; then
+  ok "NON-VACUITY: write still REFUSES a MALFORMED marker — the exception is scoped to UNSTAMPED"
+else
+  bad "write overwrote a marker whose stamp merely could not be READ: rc=$mal_wrc verdict=$(verdict_of "$mal_w")
+$mal_w"
+fi
+
+# ===========================================================================
+case_begin 22-no-dead-letter-remedies "DERIVED: no refusal may name a subcommand of this script that returns the same refusal"
+# ===========================================================================
+# Generalized from the UNSTAMPED dead letter. Derived from the verdict set rather than
+# hand-copied per verdict, so a NEW refusal verdict cannot join without being covered: the
+# table below must account for every non-success token in VERDICT_SET, and each state's
+# refusal text is SCANNED for `drive-issue-state.sh <sub>` mentions which are then INVOKED
+# on that same state. A verdict that names no mechanical remedy is fine (FOREIGN-* say
+# "escalate"); naming a command that refuses identically is the defect.
+#
+# THE RULE IS DELIBERATELY STRICT ABOUT TWO-STEP REMEDIES: a text may not name a
+# subcommand that only works AFTER the reader does something else first (e.g. "move the
+# file aside, then `write`"), because the reader of these texts runs printed commands
+# LITERALLY. Such a remedy must describe the STATE CHANGE and let the normal path follow —
+# which is how MALFORMED/DUPLICATE-SENTINEL are worded. This case caught two such texts
+# the moment it was written, in the same round as the UNSTAMPED dead letter itself.
+DL_STATES="absent unstamped malformed duplicate-sentinel foreign-issue foreign-machine foreign-worktree adoptable live-peer liveness-unknown error"
+expected_for() {
+  case "$1" in
+    absent)             printf 'ABSENT\n' ;;
+    unstamped)          printf 'UNSTAMPED\n' ;;
+    malformed)          printf 'MALFORMED\n' ;;
+    duplicate-sentinel) printf 'DUPLICATE-SENTINEL\n' ;;
+    foreign-issue)      printf 'FOREIGN-ISSUE\n' ;;
+    foreign-machine)    printf 'FOREIGN-MACHINE\n' ;;
+    foreign-worktree)   printf 'FOREIGN-WORKTREE\n' ;;
+    adoptable)          printf 'ADOPTABLE\n' ;;
+    live-peer)          printf 'LIVE-PEER\n' ;;
+    liveness-unknown)   printf 'LIVENESS-UNKNOWN\n' ;;
+    error)              printf 'ERROR\n' ;;
+    *)                  printf '\n' ;;
+  esac
+}
+# setup_state <state> <dir> — build the state and set PROBE_* (+ SLEEPER when a live process
+# is part of the state).
+setup_state() {
+  PROBE_MACHINE=boxA; PROBE_SESSION="$SESS_A"; PROBE_PID=$$; SLEEPER=''
+  local st="$1" d="$2" other
+  case "$st" in
+    absent) : ;;
+    unstamped) printf 'legacy hand-written plan\n' >"$d/$MARKER" ;;
+    malformed)
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+      grep -vFx -- "$sentinel_end" "$d/$MARKER" >"$T/dl-mal" && mv "$T/dl-mal" "$d/$MARKER" ;;
+    duplicate-sentinel)
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+      { printf '%s\n' "$sentinel"; printf 'issue: 3822\n'; } >>"$d/$MARKER" ;;
+    foreign-issue)
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 9999 >/dev/null 2>&1 ;;
+    foreign-machine)
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+      PROBE_MACHINE=boxB ;;
+    foreign-worktree)
+      other=$(lane "dl-other-$$")
+      run "$other" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+      cp "$other/$MARKER" "$d/$MARKER" ;;
+    adoptable)
+      sleep 30 & local dead=$!
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$dead" -- write 3822 >/dev/null 2>&1
+      kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null
+      PROBE_SESSION="$SESS_B" ;;
+    live-peer)
+      sleep 300 & SLEEPER=$!
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$SLEEPER" -- write 3822 >/dev/null 2>&1
+      PROBE_SESSION="$SESS_B" ;;
+    liveness-unknown)
+      run "$d" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" -- write 3822 >/dev/null 2>&1
+      PROBE_SESSION="$SESS_B" ;;
+    error) mkdir -p "$d/$MARKER" ;;
+  esac
+}
+dl_probe() {  # dl_probe <dir> <subcommand-or-verify>
+  local d="$1" sub="$2"
+  case "$sub" in
+    adopt) run "$d" "CLAIM_MACHINE=$PROBE_MACHINE" "CLAUDE_CODE_SESSION_ID=$PROBE_SESSION" "CLAUDE_PID=$PROBE_PID" -- adopt 3822 --reason no-dead-letter-probe:derived 2>&1 ;;
+    write) run "$d" "CLAIM_MACHINE=$PROBE_MACHINE" "CLAUDE_CODE_SESSION_ID=$PROBE_SESSION" "CLAUDE_PID=$PROBE_PID" -- write 3822 2>&1 ;;
+    *)     run "$d" "CLAIM_MACHINE=$PROBE_MACHINE" "CLAUDE_CODE_SESSION_ID=$PROBE_SESSION" "CLAUDE_PID=$PROBE_PID" -- "$sub" 3822 2>&1 ;;
+  esac
+}
+dl_fail=0; dl_covered=''; dl_named=0
+for st in $DL_STATES; do
+  d=$(lane "dl-$st")
+  setup_state "$st" "$d"
+  exp="$(expected_for "$st")"
+  out="$(dl_probe "$d" verify)"; got="$(verdict_of "$out")"
+  if [ "$got" != "$exp" ]; then
+    dl_fail=$((dl_fail + 1))
+    printf 'note   state %s: expected verdict %s, got %s\n' "$st" "$exp" "$got"
+  fi
+  dl_covered="$dl_covered $exp"
+  # Every subcommand of THIS script named in the refusal text must not return the same
+  # refusal when invoked on the same state.
+  subs="$(printf '%s\n' "$out" | grep -oE 'drive-issue-state\.sh [a-z]+' | awk '{print $2}' | sort -u)"
+  for sub in $subs; do
+    case "$sub" in write | verify | adopt | show) : ;; *) continue ;; esac
+    dl_named=$((dl_named + 1))
+    rout="$(dl_probe "$d" "$sub")"; rgot="$(verdict_of "$rout")"
+    if [ "$rgot" = "$exp" ]; then
+      dl_fail=$((dl_fail + 1))
+      printf 'note   DEAD LETTER: %s names "%s", which returns %s again\n' "$exp" "$sub" "$rgot"
+    fi
+  done
+  [ -z "$SLEEPER" ] || { kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null; }
+done
+if [ "$dl_fail" -eq 0 ]; then
+  ok "11 refusal states reproduce their expected verdict, and every remedy they NAME ($dl_named invocation(s)) escapes that refusal"
+else
+  bad "$dl_fail dead-letter/verdict failures across the refusal states"
+fi
+if [ "$dl_named" -ge 2 ]; then
+  ok "NON-VACUITY: the scan actually FOUND named remedies ($dl_named) — it is not passing on an empty subject set"
+else
+  bad "the remedy scan found $dl_named named subcommands: it cannot have measured the dead-letter property"
+fi
+# COMPLETENESS: every non-success verdict token must appear in the state table, so a new
+# refusal verdict cannot be added without a state that reaches it.
+dl_missing=''
+for t in $VERDICT_SET; do
+  case "$t" in OWNED | WRITTEN | ADOPTED | SHOWN) continue ;; esac
+  case " $dl_covered " in *" $t "*) : ;; *) dl_missing="$dl_missing $t" ;; esac
+done
+if [ -z "$dl_missing" ]; then
+  ok "every non-success verdict in the closed set is reached by a state in this table"
+else
+  bad "verdict tokens reached by NO state here (a new refusal joined uncovered):$dl_missing"
+fi
+
+# ===========================================================================
+case_begin 23-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
 5-foreign-worktree 6-session-gone-adoptable 7-session-live-peer 8-pid-unrecordable-unknown
@@ -601,8 +781,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 12-placeholder-reason-refused 13-write-over-foreign-refuses 14-absent-is-distinct
 15-pid-reuse-recognised 16-closed-verdict-grammar 17-write-failure-emits-a-verdict
 18-control-chars-stay-anchored 19-control-char-worktree-refused
-20-same-process-is-owned 21-case-floor"
-CASE_FLOOR=21
+20-same-process-is-owned 21-write-over-unstamped-migrates
+22-no-dead-letter-remedies 23-case-floor"
+CASE_FLOOR=23
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -614,8 +795,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 30 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 30)"
+if [ "$PASS" -ge 40 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 40)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
