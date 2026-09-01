@@ -75,6 +75,26 @@
 //! match on the dedicated [`Error::ColumnDecode`] variant — inspecting message
 //! text would be exactly the byte/string-pattern inference issue #28 forbids.
 //! [`end_of_partition_or_bail`] is that single decision, written once.
+//!
+//! # The cell-flags byte: NOT a terminator (issue #3721, roborev blocker 1)
+//!
+//! An earlier revision of this module kept a `not_a_cell` predicate that treated a
+//! simple column's flags byte `> 0x1F` as an END-OF-CELLS marker and `break`ed the
+//! column loop — i.e. reported a short row as a SUCCESSFUL read, the very defect
+//! this module exists to remove. **No such marker exists in the format.** At
+//! `cassandra-5.0.8`, `db/rows/UnfilteredSerializer.deserializeRowBody` fixes the
+//! column set BEFORE any cell is read (`hasAllColumns ? headerColumns :
+//! Columns.serializer.deserializeSubset(headerColumns, in)`) and then iterates
+//! exactly that set; cell reading is bounded by the columns bitmap / subset
+//! encoding, never by a sentinel flags value. `db/rows/Cell.Serializer` defines
+//! five bits only (`0x01|0x02|0x04|0x08|0x10` = `0x1F`).
+//!
+//! So a `> 0x1F` byte at a cell position is evidence the CURSOR is wrong, and the
+//! cell decoder rejects it as corruption (`cell_value.rs`, issue #191) — which
+//! becomes an [`Error::ColumnDecode`] like every other per-column failure. The
+//! class that used to hide behind the terminator (a SPECULATIVE, index-positioned
+//! walk over-running a real row boundary) is handled where it belongs, at the
+//! callers that chose the optimization: see [`end_of_partition_or_bail`].
 
 use crate::error::{Error, Result};
 
@@ -103,51 +123,40 @@ pub(super) fn column_decode_failure(
     Error::column_decode(column_name, column_type, offset, cause)
 }
 
-/// Is the byte at a simple column's cell position NOT a cell flags byte — i.e. is
-/// there no cell to decode here at all?
-///
-/// **This is the one class that is FRAMING rather than a decode failure, and it is
-/// therefore the one class that keeps the historical `break`.** Cassandra's cell
-/// flags occupy the low 5 bits (`Cell.Serializer` in `UnfilteredSerializer`, read
-/// at the pinned `cassandra-5.0.8` tag); `0x20`/`0x40`/`0x80` are ROW flags, so a
-/// byte carrying any of them cannot be a cell — the statement is "there is no cell
-/// here", not "this column's value is undecodable". It is the row walk's END-OF-
-/// CELLS terminator, and CQLite's SPECULATIVE reads depend on it: the promoted-
-/// index reverse read and the clustering-window read
-/// (`data_access::big_promoted`) hand `parse_block_emit_windowed` a block extent
-/// and let it parse rows from it, and a walk that runs past real row data lands in
-/// cell values and is rejected exactly here. Measured: making this class fatal
-/// turned a CLEAN read of the committed `test_comp.uncompressed_table` fixture
-/// into a hard error (`invalid cell flags 0x61` — an ASCII byte from a `text`
-/// value, inside a row body the header claimed was 97 bytes long).
-///
-/// That speculative walk over-running into a value IS a latent defect of those
-/// read paths, but it is NOT this issue's, and converting it into a user-visible
-/// read failure would be a large availability regression for wide-partition reads.
-/// It stays the terminator; it is reported at `debug!` because it fires on healthy
-/// reads of those paths, so a higher level would be pure noise.
-///
-/// Everything AFTER a valid flags byte — a wrong fixed width, a non-4/16-byte
-/// `inet`, invalid UTF-8, a short value, an undecodable cell-path key — is a
-/// genuine per-column decode failure and propagates as [`Error::ColumnDecode`].
-pub(super) fn not_a_cell(column_name: &str, offset: usize, flags: u8) -> bool {
-    let not_a_cell = flags > 0x1F;
-    if not_a_cell {
-        tracing::debug!(
-            "V5CompressedLegacy: no cell at offset {} for column '{}': byte 0x{:02x} \
-             carries a ROW flag bit (0x20/0x40/0x80), so the row body's cells end here",
-            offset,
-            column_name,
-            flags
-        );
-    }
-    not_a_cell
-}
-
 /// Is `e` the per-column decode failure that must never be mistaken for the end of
 /// a partition body? A MATCH on the variant, never a message-text test (issue #28).
 pub(crate) fn is_column_decode(e: &Error) -> bool {
     matches!(e, Error::ColumnDecode { .. })
+}
+
+/// The ONE response an INDEX-POSITIONED read may make to [`Error::ColumnDecode`]:
+/// **abandon the optimization and re-read without the window** (issue #3721,
+/// roborev blocker 2). Never "return what we have" — that is the partial-results
+/// defect this issue exists to remove.
+///
+/// A windowed walk (`parse_block_emit_windowed` with a `row_body_window`, driven by
+/// `data_access::big_promoted` / `bti_point`) positions its cursor from the
+/// promoted/BTI row index, so a failure there is ambiguous between a misaligned
+/// cursor and a genuinely undecodable column, and NOTHING at the failure site can
+/// tell them apart. Re-reading through the full-partition path — which parses
+/// forward from the partition header and is not resynchronising — resolves the
+/// ambiguity by measurement: a misalignment artifact disappears, a real decode
+/// failure surfaces from a cursor known to be at a row boundary and propagates to
+/// the caller of the read. Only the fast path is lost.
+///
+/// Callers must DISCARD any rows the failed windowed attempt buffered before
+/// retrying; every one of them collects into a local `Vec` rather than emitting
+/// incrementally, so there is nothing already handed to a consumer.
+pub(in crate::storage::sstable::reader) fn indexed_walk_falls_back(e: &Error) -> bool {
+    let fall_back = is_column_decode(e);
+    if fall_back {
+        tracing::warn!(
+            "index-positioned read hit a per-column decode failure ({}); abandoning the \
+             windowed optimization and re-reading the full partition (issue #3721)",
+            e
+        );
+    }
+    fall_back
 }
 
 /// The ONE place a block/partition row loop decides what a row-parse `Err` means.
@@ -159,39 +168,48 @@ pub(crate) fn is_column_decode(e: &Error) -> bool {
 ///   the end of the partition body. Logged exactly as before and reported as
 ///   `Ok(())`, so the caller continues to `break` out of its row loop.
 ///
-/// # `resynchronising_walk`: the ONE caller class that keeps the old behaviour
+/// # No caller is exempt (issue #3721, roborev blocker 2)
 ///
-/// A walk that positions its cursor from an INDEX rather than by parsing forward
-/// from a partition header may start, or run past, a byte that is not a row
-/// boundary — and then "decode" a row out of the middle of a cell value. The
-/// promoted-index reverse read and the clustering-slice window read
-/// (`data_access::big_promoted`, issue #954/#1184) are exactly that: they hand
-/// `parse_block_emit_windowed` a row-index block extent and let it resynchronise,
-/// and the reader's own code says so (`bti_point`: "the parser resynced onto
-/// garbage"). A decode failure there is evidence about the CURSOR, not about a
-/// real row, so it stays the stop signal it has always been.
+/// An earlier revision took a `resynchronising_walk` flag and, when it was set,
+/// folded [`Error::ColumnDecode`] back into the `Ok(())` end-of-partition signal —
+/// so every index-positioned read (the promoted-index reverse walk and the
+/// clustering-slice window read, `data_access::big_promoted` / `bti_point`, issues
+/// #954/#1184) returned PARTIAL RESULTS SILENTLY. That is the original defect
+/// surviving on exactly the public read paths a wide-partition `SELECT … ORDER BY
+/// … DESC` or a clustering slice takes.
 ///
-/// MEASURED, which is why this parameter exists rather than a blanket propagate:
-/// making that class fatal turned CLEAN reads of the committed
-/// `test_comp.uncompressed_table` / `test_big.wide_partition` fixtures into hard
-/// errors — `text length 210241672 exceeds maximum` and `invalid UTF-8`, both read
-/// out of the middle of a `text` value — i.e. a large availability regression on
-/// every wide-partition reverse/slice read.
+/// The two facts it conflated are real and stay distinguished — but NOT here:
 ///
-/// The COST is stated rather than implied: a genuine per-column decode failure
-/// inside an index-positioned walk is still swallowed there, exactly as before.
-/// Closing that needs the resynchronising walk to stop over-running a real row
-/// boundary — a defect of those read paths, not of row assembly — and is left to a
-/// follow-up. Every non-resynchronising read (the ordinary full scan, the
-/// point/partition read, and both compaction drivers) propagates.
+/// * **cursor misalignment.** A walk positioned from an index can start, or run
+///   past, a byte that is not a row boundary and then "decode" a row out of the
+///   middle of a cell value. That is evidence about the CURSOR, not about the data.
+/// * **decode failure.** The row was framed and one column's value is genuinely
+///   undecodable.
+///
+/// Nothing at THIS call site can tell them apart, and a two-valued predicate that
+/// cannot tell would have to pick one — which is how the permissive answer (accept
+/// partial output) got chosen. The decision belongs to the caller that CHOSE the
+/// index optimization, because only it can retract that choice: on
+/// [`Error::ColumnDecode`] it abandons the windowed/indexed walk and re-reads
+/// through the FULL-PARTITION path, which is not resynchronising. A misalignment
+/// artifact then disappears (the full walk parses forward from the partition
+/// header) and a genuine failure surfaces from a cursor known to be at a real row
+/// boundary. Either way NO path returns partial output. This mirrors the fallback
+/// `prime_shadow_before_window` already uses in `block_emit_windowed` when it
+/// cannot faithfully reconstruct shadow state: lose the fast path, never the rows.
+///
+/// So this function propagates [`Error::ColumnDecode`] unconditionally, and the
+/// fallback lives at the three windowed callers
+/// (`big_promoted::big_decode_clustering_window`,
+/// `big_promoted::big_reverse_partition_rows_via_promoted_index`,
+/// `bti_point::bti_collect_partition_rows`).
 pub(super) fn end_of_partition_or_bail(
     e: Error,
     partition_index: usize,
     row_count: usize,
     offset: usize,
-    resynchronising_walk: bool,
 ) -> Result<()> {
-    if is_column_decode(&e) && !resynchronising_walk {
+    if is_column_decode(&e) {
         return Err(e);
     }
     tracing::debug!(

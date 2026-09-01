@@ -594,13 +594,16 @@ impl V5CompressedLegacyParser {
                                 // Issue #3721: `Err` here is normally the
                                 // end-of-partition signal; a per-column decode
                                 // failure is NOT, and only `column_decode_error`
-                                // decides which is which.
+                                // decides which is which. It propagates even under a
+                                // `row_body_window`: the caller that chose the index
+                                // optimization retracts it and re-reads through the
+                                // full-partition path, rather than this walk
+                                // accepting PARTIAL output (roborev blocker 2).
                                 column_decode_error::end_of_partition_or_bail(
                                     e,
                                     partition_index,
                                     row_count,
                                     offset,
-                                    row_body_window.is_some(),
                                 )?;
                                 break; // End of valid data in partition
                             }

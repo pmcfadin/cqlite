@@ -784,32 +784,55 @@ impl SSTableReader {
             let avail = window.len().saturating_sub(within);
             (start.min(avail), end.min(avail))
         });
-        parser.parse_block_emit_windowed(
-            &window[within..],
-            schema_opt,
-            self,
-            clamped_window,
-            |(tid, entry_key, entry_value)| {
-                if entry_key.as_bytes() == key.as_bytes() {
-                    // Header-authoritative table consistency: wrong-table rejected
-                    // (#831); a keyspace-divergent same-table query is served ONLY
-                    // when resolution was an exact fully-qualified match — a
-                    // fallback-resolved query keeps strict keyspace matching so it
-                    // never returns another keyspace's same-named rows (#1284).
-                    if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match) {
-                        rows.push(entry_value);
+        // Issue #3721 (roborev blocker 2): run the windowed walk, and on a per-column
+        // decode failure re-run it with the window DROPPED rather than answering with
+        // the rows buffered so far. A cursor positioned from the BTI row index can
+        // land mid-structure, so a failure under the window is not attributable to
+        // the data; the unwindowed walk parses forward from the partition header, so
+        // a failure there is, and it propagates to the caller of the read. `rows` is
+        // local and is discarded before the retry, so nothing is double-collected.
+        let attempt = |rows: &mut Vec<ScanRow>,
+                       saw_next_partition: &mut bool,
+                       window_arg: Option<(usize, usize)>|
+         -> Result<()> {
+            parser.parse_block_emit_windowed(
+                &window[within..],
+                schema_opt,
+                self,
+                window_arg,
+                |(tid, entry_key, entry_value)| {
+                    if entry_key.as_bytes() == key.as_bytes() {
+                        // Header-authoritative table consistency: wrong-table rejected
+                        // (#831); a keyspace-divergent same-table query is served ONLY
+                        // when resolution was an exact fully-qualified match — a
+                        // fallback-resolved query keeps strict keyspace matching so it
+                        // never returns another keyspace's same-named rows (#1284).
+                        if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match) {
+                            rows.push(entry_value);
+                        }
+                        Ok(std::ops::ControlFlow::Continue(()))
+                    } else {
+                        // First row of the NEXT partition (the authoritative extent
+                        // can overrun into it by up to one chunk). Stop here so no
+                        // next-partition row is collected; the target partition's rows
+                        // are already complete because its whole extent was buffered.
+                        *saw_next_partition = true;
+                        Ok(std::ops::ControlFlow::Break(()))
                     }
-                    Ok(std::ops::ControlFlow::Continue(()))
-                } else {
-                    // First row of the NEXT partition (the authoritative extent
-                    // can overrun into it by up to one chunk). Stop here so no
-                    // next-partition row is collected; the target partition's rows
-                    // are already complete because its whole extent was buffered.
-                    saw_next_partition = true;
-                    Ok(std::ops::ControlFlow::Break(()))
-                }
-            },
-        )?;
+                },
+            )
+        };
+        if let Err(e) = attempt(&mut rows, &mut saw_next_partition, clamped_window) {
+            if clamped_window.is_none()
+                || !crate::storage::sstable::reader::parsing::row_decoder::column_decode_error::
+                    indexed_walk_falls_back(&e)
+            {
+                return Err(e);
+            }
+            rows.clear();
+            saw_next_partition = false;
+            attempt(&mut rows, &mut saw_next_partition, None)?;
+        }
         Ok((rows, saw_next_partition))
     }
 

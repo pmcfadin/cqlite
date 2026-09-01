@@ -620,11 +620,35 @@ impl V5CompressedLegacyParser {
                 // to detect USE_ROW_TTL (0x10), which makes a cell with no explicit
                 // expiry inherit the ROW's expiry rather than being live-forever.
                 let cell_flags = data.get(offset).copied().unwrap_or(0);
-                // Issue #3721: FRAMING, not a decode failure — `column_decode_error`
-                // states why this ONE class keeps the historical `break`.
-                if column_decode_error::not_a_cell(&column.name, offset, cell_flags) {
-                    break;
-                }
+                // Issue #3721: there is NO end-of-cells sentinel to detect here, so
+                // this position is a cell UNCONDITIONALLY and a flags byte that is
+                // not a cell's is a DECODE FAILURE, not a loop exit.
+                //
+                // Authority (cassandra-5.0.8, quoted rather than inferred from
+                // bytes — issue #28):
+                // `db/rows/UnfilteredSerializer.deserializeRowBody` establishes the
+                // column set BEFORE reading any cell —
+                //   `Columns columns = hasAllColumns ? headerColumns
+                //        : Columns.serializer.deserializeSubset(headerColumns, in);`
+                // — then iterates EXACTLY that set (`columns.apply(column -> …
+                // readSimpleColumn / readComplexColumn …)`). Cell reading is bounded
+                // by the columns bitmap / subset encoding; no flags value terminates
+                // it. `db/rows/Cell.Serializer` defines only five flag bits
+                // (IS_DELETED 0x01, IS_EXPIRING 0x02, HAS_EMPTY_VALUE 0x04,
+                // USE_ROW_TIMESTAMP 0x08, USE_ROW_TTL 0x10 — union 0x1F).
+                //
+                // A `> 0x1F` byte therefore means this cursor is not at the cell
+                // Cassandra wrote, and `parse_cell_value_schema_order` rejects it as
+                // corruption (issue #191) one call below — which the `Err` arm turns
+                // into `Error::ColumnDecode`. The pre-#3721 `break` on the same
+                // condition (and the `not_a_cell` helper that briefly replaced it)
+                // reported that as a SUCCESSFUL short row, which is the defect this
+                // issue exists to remove; masking to 0x1F and proceeding — the other
+                // defensible reading of Cassandra's own tolerance of unknown bits —
+                // was rejected because Cassandra's tolerance is forward compatibility
+                // for cells IT wrote, whereas reaching this byte means OUR cursor
+                // disagrees with the framing, so decoding on would emit a value
+                // fabricated from non-cell bytes. Fail closed.
                 match self.parse_cell_value_schema_order(
                     data,
                     offset,

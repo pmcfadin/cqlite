@@ -33,6 +33,7 @@ use crate::parser::types::{parse_cql_value, CqlTypeId};
 use crate::parser::vint::parse_vuint;
 use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
+use crate::storage::sstable::reader::parsing::row_decoder::column_decode_error;
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
@@ -395,7 +396,7 @@ impl SSTableReader {
                 .saturating_add(block.width as usize)
                 .min(avail);
             let mut block_rows: Vec<ScanRow> = Vec::new();
-            parser.parse_block_emit_windowed(
+            let walk = parser.parse_block_emit_windowed(
                 &window[within..],
                 Some(schema),
                 self,
@@ -406,7 +407,22 @@ impl SSTableReader {
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
                 },
-            )?;
+            );
+            if let Err(e) = walk {
+                // Issue #3721 (roborev blocker 2): a per-column decode failure inside
+                // this INDEX-POSITIONED block walk is ambiguous between a misaligned
+                // cursor and genuinely undecodable data, so it may not be answered
+                // with the rows collected so far. Abandon the promoted-index
+                // optimization entirely (`Ok(None)`) — the documented channel every
+                // other "cannot use the fast path" branch of this function already
+                // takes — and let the caller re-read through the in-memory-sort full
+                // scan, which parses forward from the partition header and surfaces a
+                // real failure from a cursor known to be at a row boundary.
+                if column_decode_error::indexed_walk_falls_back(&e) {
+                    return Ok(None);
+                }
+                return Err(e);
+            }
             // Per-iteration memory high-water mark + block-walk evidence (#1184).
             crate::storage::sstable::work_counters::observe_reverse_block_rows(
                 block_rows.len() as u64
@@ -452,24 +468,44 @@ impl SSTableReader {
         let key = RowKey::from(partition_key.to_vec());
         let avail = window.len().saturating_sub(within);
         let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
+        // Issue #3721 (roborev blocker 2): the windowed attempt first, then — ONLY on
+        // a per-column decode failure, and only when a window was actually applied —
+        // the SAME read with the window dropped. An index-positioned cursor can land
+        // mid-structure, so a failure under the window is not attributable to the
+        // data; the unwindowed walk parses forward from the partition header, so its
+        // verdict is. Returning the rows the windowed attempt had buffered (the
+        // pre-fix behaviour) would be silent partial output. The buffer is local and
+        // is discarded before the retry, so no row can be double-counted, and the
+        // over-read is a SUPERSET of the slice, which this function's caller already
+        // trims with the post-scan clustering backstop.
         let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
-        parser.parse_block_emit_windowed(
-            &window[within..],
-            schema,
-            self,
-            clamped,
-            |(_tid, entry_key, entry_value)| {
-                if entry_key.as_bytes() == partition_key {
-                    if self.filter_tombstone(&entry_value) {
-                        rows.push((key.clone(), entry_value));
-                    }
-                    Ok(std::ops::ControlFlow::Continue(()))
-                } else {
-                    // First row of the next partition — stop.
-                    Ok(std::ops::ControlFlow::Break(()))
-                }
-            },
-        )?;
+        let collect =
+            |rows: &mut Vec<(RowKey, ScanRow)>, window_arg: Option<(usize, usize)>| -> Result<()> {
+                parser.parse_block_emit_windowed(
+                    &window[within..],
+                    schema,
+                    self,
+                    window_arg,
+                    |(_tid, entry_key, entry_value)| {
+                        if entry_key.as_bytes() == partition_key {
+                            if self.filter_tombstone(&entry_value) {
+                                rows.push((key.clone(), entry_value));
+                            }
+                            Ok(std::ops::ControlFlow::Continue(()))
+                        } else {
+                            // First row of the next partition — stop.
+                            Ok(std::ops::ControlFlow::Break(()))
+                        }
+                    },
+                )
+            };
+        if let Err(e) = collect(&mut rows, clamped) {
+            if clamped.is_none() || !column_decode_error::indexed_walk_falls_back(&e) {
+                return Err(e);
+            }
+            rows.clear();
+            collect(&mut rows, None)?;
+        }
         Ok(Some(rows))
     }
 
