@@ -238,16 +238,23 @@ removes a finished issue's worktree; additionally prune stale worktrees' `target
 dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
 10-core machine).
 
-**A single `--lite` round can be the thing that exhausts the disk (issues
-#3763/#3764).** Measured: one `--lite` on a `cqlite-core/src/` diff grew
-`target/debug/deps` by **~18 GB in roughly ten minutes**, taking a box from 34 GB to
-16 GB free — because that diff shape triggers the issue #2658 dependent-crate leg,
-which runs `cargo test -p <pkg> --all-targets --no-run` for every workspace member
-depending on `cqlite-core`. So do not budget `--lite` as a cheap, disk-neutral round
-on a shared box. Worse, **`--lite` is EXEMPT from the issue #1825 gate-slot cap**, so
-nothing serialises that build against a peer's concurrent gate of record — the two
-compete for the same disk with no arbitration. There is no admission check for
-`--lite` today; issue #3763 owns that gap.
+**A single `--lite` round can be the thing that exhausts the disk.** Measured by
+another lane and reported in issue #3764: one `--lite` on a `cqlite-core/src/` diff
+grew `target/debug/deps` by **~18 GB in roughly ten minutes**, taking that box from
+34 GB to 16 GB free — because that diff shape triggers the issue #2658
+dependent-crate leg, which runs `cargo test -p <pkg> --all-targets --no-run` for
+every workspace member that directly declares a dependency on `cqlite-core`. So do
+not budget `--lite` as a cheap, disk-neutral round on a shared box. Worse, **`--lite`
+is EXEMPT from the issue #1825 gate-slot cap**, so nothing serialises that build
+against a peer's concurrent gate of record — the two compete for the same disk with
+no arbitration. There is no admission check for `--lite` today; issue #3763 owns that
+gap.
+
+**And the cost lands on the NEXT lane, not the one that spent the disk.**
+`scripts/local/worker-supervisor.sh` sets `DISK_FLOOR_GB="${DISK_FLOOR_GB:-40}"`
+(`:155`) and enforces it in `preflight_reason()` (`:3204-3208`), so the incident's end
+state — 16 GB free — is **below** that floor: nothing stopped the `--lite` that spent
+the disk, but the very next worker iteration on that box would have held on `disk`.
 
 **macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
 reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed
