@@ -80,9 +80,12 @@
 #   P15 the bound is HARD  -> a SIGTERM-IGNORING cargo is SIGKILLed at the bound (the
 #                             `-k` half; `timeout <n>` alone would wait forever), reported
 #                             exit 3 `cause=cargo-tree-failed` naming the SIGKILL
-#   L1  the real tree      -> the committed guard + committed baseline agree; BOTH
-#                             affirmative verdicts pass and a documented UNMEASURABLE is
-#                             reported SKIPPED (see G3 for why)
+#   L1  CONSOLIDATED       -> the live-tree case is now G3's, so the suite takes ONE live
+#                             `cargo tree` probe instead of two (a full gate took THREE,
+#                             at a 600s bound each, in the gate's longest component). L1's
+#                             distinct property — a corrupt COMMITTED baseline in this
+#                             checkout is a repository defect and stays a FAILURE, not a
+#                             skip — is preserved in G3 in both directions
 #   G1  gate component     -> PLANTED, in a scratch worktree with the guard substituted:
 #                             a clean measurement records PASS with the driver-named
 #                             annotation and the affirmative line echoed (G1a); an
@@ -96,7 +99,8 @@
 #                             rc — never PASS. This is the vacuous-pass guard, and it is
 #                             the reason the component may never fail: SKIP is the only
 #                             way it can say "nothing was measured".
-#   G3  the live component -> the committed component over the REAL workspace. The
+#   G3  the live component -> the committed component over the REAL workspace, and the
+#                             suite's ONLY live probe (it carries L1's property too). The
 #                             DETERMINISTIC assertions live in G1/G2 against planted
 #                             input, deliberately: asserting them here made the suite —
 #                             and therefore the FULL GATE, via tooling-tests — red on
@@ -786,27 +790,23 @@ else
   bad "P15: could not shorten the bound in the scratch copy — the constants were renamed or reformatted"
 fi
 
-# --- L1: the live tree ---------------------------------------------------
-if [ -z "$(type -P cargo || true)" ]; then
-  skipped "L1: no cargo on PATH — the live tree cannot be measured here"
-elif [ ! -f "$REPO_ROOT/$BASELINE_REL" ]; then
-  bad "L1: the committed baseline $BASELINE_REL is absent from this checkout"
-else
-  OUT="$(cd "$REPO_ROOT" && bash "$GUARD" 2>&1)"; RC=$?
-  case "$RC:$OUT" in
-    0:*'verdict NO-INCREASE'*)   ok "L1: the committed guard and the committed baseline agree on the real workspace (verdict NO-INCREASE)" ;;
-    0:*'verdict ADVISORY-INCREASE'*) ok "L1: the committed guard measured the real workspace and reports ADVISORY-INCREASE (non-failing; the baseline wants regenerating)" ;;
-    3:*)                         skipped "L1: the real workspace could not be measured here ($(printf '%s' "$OUT" | grep -o 'cause=[a-z-]*' | head -1))" ;;
-    # DELIBERATELY NOT SKIPPED, and the asymmetry with G3 is the point: exit 4 means the
-    # COMMITTED baseline in THIS checkout does not parse. That is a repository defect (a
-    # truncation, a hand-edit, a bad merge), not a property of this host, and it is the one
-    # thing L1 exists to catch — a suite that skipped here would let a corrupt baseline ride.
-    # G3 accepts the same state as a SKIP because it asserts the COMPONENT'S MAPPING from
-    # guard output to SUMMARY status, which is correct for every non-measuring cause.
-    4:*)                         bad "L1: the COMMITTED baseline $BASELINE_REL does not parse: $(printf '%s' "$OUT" | grep -o 'cause=[a-z-]* detail=.*' | head -1)" ;;
-    *)                           bad "L1: rc=$RC with no verdict line: $(printf '%s' "$OUT" | tr '\n' '|')" ;;
-  esac
-fi
+# --- L1: CONSOLIDATED INTO G3 --------------------------------------------
+# L1 used to run the COMMITTED guard directly against the REAL workspace, immediately
+# before G3 ran the COMMITTED COMPONENT against the same workspace. That is TWO live
+# `cargo tree -d --workspace --target all` probes in one suite — and since this suite runs
+# under `tooling-tests`, a FULL GATE performed THREE (L1, G3, and the `dep-duplicates`
+# component itself). The probe is bounded at 600s, so in the worst case that is 20+ minutes
+# added to the longest component in the gate, paid by every lane on every full gate, for a
+# second measurement of the same tree by the same code.
+#
+# So there is ONE live invocation now, in G3, and it carries BOTH properties. L1's
+# distinct property is NOT dropped: it existed to catch a corrupt or stale COMMITTED
+# baseline in THIS checkout, which is a REPOSITORY defect and must remain a test FAILURE
+# rather than a skip. That asymmetry with G3 — which accepts every non-measuring cause as
+# a SKIP because its subject is the component's MAPPING from guard output to SUMMARY
+# status — is preserved explicitly in G3's SKIP branch below: a baseline-unusable cause is
+# a FAILURE, every other named cause is SKIPPED. The affirmative direction is asserted
+# too: on PASS the log must show the committed baseline having been READ and COMPARED.
 
 # --- G/G2/G3: the gate component -----------------------------------------
 # TWO KINDS OF CASE, AND THE SPLIT IS THE POINT (roborev finding on #1700).
@@ -992,14 +992,22 @@ exit 55')
     skipped "G1/G2: could not create a detached scratch worktree ($(tail -1 "$TMPROOT/wt.log" 2>/dev/null))"
   fi
 
-  # G3 — THE LIVE COMPONENT. It still has to prove the COMMITTED component, the COMMITTED
-  # guard and the COMMITTED baseline agree on a REAL tree — so the assertion is
-  # affirmative — but every outcome the component is DESIGNED to produce here is accepted:
+  # G3 — THE LIVE COMPONENT, AND THE SUITE'S ONE LIVE PROBE (round 4 consolidation; see
+  # the L1 note above). It has to prove the COMMITTED component, the COMMITTED guard and
+  # the COMMITTED baseline agree on a REAL tree — so the assertion is affirmative — but
+  # every outcome the component is DESIGNED to produce here is accepted:
   #   PASS + NO-INCREASE       the ratchet holds
   #   PASS + ADVISORY-INCREASE the ratchet grew; ADVISORY, non-failing BY MANDATE
   #   SKIP + a named cause     nothing could be measured on this host (reported SKIPPED)
   # A FAIL, a missing component line, or a PASS with no echoed measurement remain
   # failures: those are states the component must never reach.
+  #
+  # ONE EXCEPTION TO "EVERY NAMED CAUSE IS A SKIP", inherited from L1: a
+  # SKIP-BASELINE-UNUSABLE cause (baseline-missing / baseline-garbage) is NOT a property of
+  # this host — it means the COMMITTED baseline in THIS checkout is absent, truncated,
+  # hand-edited or badly merged. That is a repository defect and the one thing L1 existed to
+  # catch, so it stays a test FAILURE. Every other named cause (no cargo, no bounded probe,
+  # cargo tree failed, unparseable output) is genuinely host-dependent and is SKIPPED.
   if [ -z "$(type -P cargo || true)" ]; then
     skipped "G3: no cargo on PATH — the live component would SKIP for an unrelated reason"
   else
@@ -1014,12 +1022,26 @@ exit 55')
       *FAIL*)
         bad "G3: the component recorded FAIL, which it may never do (#1700 AC2): $g3_line" ;;
       *SKIP*)
-        skipped "G3: the live workspace could not be measured here ($(grep -o 'cause=[a-z-]*' "$g3_log" | head -1)) — a SKIP is a documented, correct outcome and not a failure" ;;
+        # L1's ASYMMETRY, folded in: a broken COMMITTED baseline is a repository defect,
+        # never a host property, so it FAILS here where every other named cause SKIPS.
+        if grep -q 'SKIP-BASELINE-UNUSABLE' "$g3_log" 2>/dev/null; then
+          bad "G3/L1: the COMMITTED baseline $BASELINE_REL does not parse in this checkout: $(grep -o 'cause=[a-z-]* detail=.*' "$g3_log" | head -1)"
+        else
+          skipped "G3: the live workspace could not be measured here ($(grep -o 'cause=[a-z-]*' "$g3_log" | head -1)) — a SKIP is a documented, correct outcome and not a failure"
+        fi ;;
       *PASS*)
         if grep -qE 'dep-duplicates: (0 INCREASE RECOGNISED|ADVISORY-INCREASE)' "$g3_log"; then
           ok "G3: the live component records PASS and echoes an AFFIRMATIVE reading ($(grep -oE 'verdict (NO-INCREASE|ADVISORY-INCREASE)' "$g3_log" | head -1))"
         else
           bad "G3: PASS with NEITHER an affirmative '0 INCREASE RECOGNISED' nor an ADVISORY-INCREASE in the log — that is the vacuous pass this component must never emit"
+        fi
+        # L1's property in the AFFIRMATIVE direction: the committed baseline was really
+        # READ and COMPARED against, not merely present. The guard prints its comparison
+        # as `… vs baseline <instances>/<crates>`, so that line is the evidence.
+        if grep -qE 'dep-duplicates: .*vs baseline [0-9]+/[0-9]+' "$g3_log"; then
+          ok "G3/L1: the COMMITTED baseline was READ and COMPARED on the real workspace ($(grep -oE 'vs baseline [0-9]+/[0-9]+' "$g3_log" | head -1)) — the property L1 used to buy with a second live probe"
+        else
+          bad "G3/L1: PASS with no '… vs baseline <n>/<m>' comparison in the log — the committed baseline was not evidenced as read"
         fi
         case "$g3_line" in
           *UNDECLARED*|*UNCLASSIFIED*)
@@ -1042,17 +1064,20 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # below the leanest host so it reds on a structural loss and never on a lean box. Since
 # the PLANTED cases became host-independent (plant_timeout, above) that floor can be much
 # tighter than it was: P1-P8, P10-P13 and P16-P20 produce 37 verdicts on ANY host, and
-# only P9/P14/P15/L1/G* depend on what is installed. Measured: 57 here, 51 on a simulated
+# only P9/P14/P15/G* depend on what is installed. Measured: 57 here, 51 on a simulated
 # host with no timeout(1) and no cargo. Round 3's grammar-closure cases add six more
 # host-independent verdicts BY CONSTRUCTION (P19b, P19c, P19d x2, P19e x2 — shim cargo +
 # plant_timeout, no ambient tool), so 43 / 63 / 57; the floor moves with them, or a
 # deletion of the new cases would not red. The affirmative-signal cases (G1c's two extra
 # verdicts + G1d's two) are G-class, i.e. they need git + the gate, so they raise the
 # measured totals to 67 but NOT the floor.
-# ROUND 4. P21 (the read-only probe) adds FOUR more host-independent planted verdicts —
-# P21a's argv assertion, P21b's rc/token assertion, P21b's no-verdict check and P21c's
-# single-invocation check — all shim cargo + plant_timeout, so the floor moves with them:
-# 42 + 4 = 46. Measured 71 here.
+# ROUND 4, TWO CHANGES AND THE FLOOR MOVES FOR ONLY ONE. P21 (the read-only probe) adds
+# FOUR host-independent planted verdicts — P21a's argv assertion, P21b's rc/token
+# assertion, P21b's no-verdict check and P21c's single-invocation check — all shim cargo +
+# plant_timeout, so the floor moves with them: 42 + 4 = 46. The L1/G3 consolidation moves
+# it not at all: L1 was host-dependent (it needed cargo) and never counted toward this
+# floor, and its verdict is replaced one-for-one by G3's `G3/L1` assertion, which is
+# G-class for the same reason. Measured 71 here, unchanged by the consolidation.
 CASE_FLOOR=46
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
