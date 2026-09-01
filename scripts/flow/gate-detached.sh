@@ -1309,6 +1309,30 @@ fi
 # space-bearing paths, so neither shape is hypothetical.
 _extra_locks=()
 _extra_ok=1
+# ONE ROLLBACK FOR THE WHOLE SET, CALLED ON EVERY PATH THAT REFUSES AFTER ACQUIRING IT
+# (#3769, roborev job 323 F3, Low). The reservation is a SET — the summary lock plus one marker per
+# remaining artifact — and it was released PER SITE, so each site got a different subset right: the
+# acquisition failure below rolled back all of it, the symlink refusal removed only `$_reserve`, and
+# the truncation failure removed NONE. The heartbeat and log markers therefore outlived a launch that
+# never happened. Litter rather than a deadlock, because `_foreign_reservation` + `_unit_runs_a_gate`
+# reclaim a marker whose owner is gone — but litter in a caller-supplied in-repo path is a
+# `tree-integrity` (#2926) FAIL on someone else's gate, which reads as an unrelated failure.
+#
+# So the set is released in ONE place and every refusal calls it. A per-site release is a list to keep
+# complete, and three sites had already drifted into three different answers about one invariant.
+#
+# `_extra_locks` is emptied after the loop so a second call cannot re-remove a path a later launcher
+# may by then legitimately own — this function must be idempotent, since a refusal path may run after
+# the acquisition rollback already ran.
+# ${ARRAY[@]+"${ARRAY[@]}"} and `rm -f --`, both for the reasons the acquisition loop states above:
+# an empty array is UNBOUND under `set -u` on bash 3.2, and an unquoted expansion would word-split and
+# glob a space-bearing path onto a live peer's reservation.
+_release_reservations() {
+  local _l
+  for _l in ${_extra_locks[@]+"${_extra_locks[@]}"}; do rm -f -- "$_l" 2>/dev/null || true; done
+  _extra_locks=()
+  rm -f -- "$_reserve" 2>/dev/null || true
+}
 for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   [ "$_art" = "$SUMMARY" ] && continue
   if ln -s "$_res_target" "$_art.launch-lock" 2>/dev/null; then
@@ -1337,8 +1361,7 @@ for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   fi
 done
 if [ "$_extra_ok" != 1 ]; then
-  for _l in ${_extra_locks[@]+"${_extra_locks[@]}"}; do rm -f -- "$_l" 2>/dev/null || true; done
-  rm -f "$_reserve" 2>/dev/null || true
+  _release_reservations
   echo "gate-detached: could not reserve every write destination for this launch." >&2
   echo "               One of '$SUMMARY.heartbeat' or '$LOGFILE' is claimed by another run, so a gate" >&2
   echo "               here would overwrite its files. Refusing (#3473); use paths of your own." >&2
@@ -1361,11 +1384,12 @@ if [ -L "$LOGFILE" ]; then
   echo "gate-detached: the log path '$LOGFILE' became a symlink after it was checked." >&2
   echo "               Refusing: '>' would follow it and write the gate's log somewhere the" >&2
   echo "               caller never named (#3473). Give --log a path of its own." >&2
-  rm -f "$_reserve" 2>/dev/null || true   # we own it and are not launching; do not leak it
+  _release_reservations   # we own the whole set and are not launching; do not leak any of it
   exit 1
 fi
 ( : > "$LOGFILE" ) 2>/dev/null || {
   echo "gate-detached: cannot truncate the log at '$LOGFILE' just before launch." >&2
+  _release_reservations
   exit 1
 }
 # `env -i` IS LOAD-BEARING, AND THE DENY-LIST ALONE DID NOT COVER THIS (roborev job 211, High).
@@ -1398,6 +1422,16 @@ if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
      --property="StandardError=append:$LOGFILE" \
      "$_env_abs" -i "$_bash_abs" "$ENV_SCRIPT" ${GATE_ARGS[@]+"${GATE_ARGS[@]}"}; then
   echo "gate-detached: systemd-run failed to start unit $UNIT (see $LOGFILE)" >&2
+  # THIS SITE IS GUARDED WHERE THE THREE ABOVE ARE NOT, AND THE ASYMMETRY IS THE POINT (#3769).
+  # Those three run before anything was ever started, so releasing is unconditionally safe. Here
+  # `systemd-run` has already spoken to the manager, and a non-zero exit does not prove nothing runs
+  # under $UNIT — releasing is the PERMISSIVE act (it admits a peer onto these paths), so only an
+  # AFFIRMATIVE terminal reading may license it. `_unit_is_live` returns 1 for exactly that reading
+  # and 0 for live-or-unmeasurable, which is the same polarity every other reclamation site in this
+  # file uses (jobs 205/241). An unmeasurable unit therefore keeps its reservation and self-heals by
+  # the ordinary `_foreign_reservation` rules, which is the conservative direction: leftover litter,
+  # never two writers on one summary.
+  _unit_is_live "$UNIT" || _release_reservations
   exit 1
 fi
 CG=$(systemctl --user show "$UNIT" -p ControlGroup --value 2>/dev/null)
@@ -1592,6 +1626,12 @@ if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
   esac
 fi
 if [ "$_hb_seen" -ne 1 ]; then
+  # AND THIS SITE DELIBERATELY DOES *NOT* RELEASE THE RESERVATION (#3769). It is the one refusal path
+  # AFTER a successful launch: a gate really started, may have written into these artifacts, and
+  # `systemctl stop` is asynchronous — its processes can still be draining when this returns. Handing
+  # the paths to a peer in that window is exactly the two-writers-on-one-summary failure the whole
+  # reservation exists to prevent, and it is a worse outcome than the litter. The set self-heals by
+  # the ordinary `_foreign_reservation` + `_unit_runs_a_gate` reclamation once the owner is gone.
   systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
   echo "gate-detached: the gate started but published no readable liveness to '$_hbdest' within 20s," >&2
   echo "               plus one confirmation of up to 65s where the clock domain is unproven," >&2
