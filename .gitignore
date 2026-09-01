@@ -350,3 +350,6 @@ trino-connector/docker/field-repro-artifacts/
 
 # Cross-binding parity harness artifacts (issue #1455)
 bindings/parity/out/
+
+# /drive-issue subagent terminal reports (session scratch, never deliverable)
+.impl-*-report.md
