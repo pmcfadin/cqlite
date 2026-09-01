@@ -12,14 +12,16 @@ patches.
 | `ac0/host-identity.json` | this is not #3248's host; the cross-instance move is stated rather than left undecidable |
 | `raw/counter-capability-census.md` | what this box can and CANNOT measure. **Read before trusting any number here**: no PEBS and no Topdown slots, and both bound the claims |
 | `ac1/codegen-fingerprint.md` | the disassembly identification of the inlined decoder — `decode_unsigned` has NO symbol (nm: 0), and the four fingerprint elements are annotated against `vint.rs:40-77` |
-| `ac1/vint-share-*.json`, `ac1/ab-*.json` | per-rep shares with the PIE rebase self-check verdict and the skid band |
+| `ac1/vint-share-*.json`, `ac1/ab-*.json` | per-rep shares on **both denominators** (`narrow_pct` = total on-CPU, the pre-registered basis; `narrow_pct_in_binary`), plus `pct_outside_binary`, `no_chain_cycles`, the PIE rebase self-check verdict and the skid band. Each carries a `denominator_note`: **the two bases are different quantities and must never be divided by each other** |
 | `ac1/SUMMARY-STATS.txt` | the pooled statistics, the two-route disagreement, and the AC3 verdict line |
 | `ac1/vint-regions-perfprof-1.json` | fingerprint-vs-DWARF agreement (133/138) plus the per-opcode and per-caller composition |
 | `ac1/vint-width-distribution.md` | the measured 55.6% single-byte / 44.4% multi-byte split that explains the `bswap` concentration |
 | `ac1/codegen-fidelity-profiles.json` | `debug=1` vs codegen-faithful function profiles — max delta 0.17 pp |
 | `ac2/counters-rep*.csv` | the counting reps, `pct_running` **100.00** in field 5 on all six events |
 | `ac2/stall-share-rep*.json`, `ac2/stall-regions-rep1.json` | vint's share of `cycle_activity.stalls_total`, attributed through the same inline chain as cycles |
-| `raw/validity-and-refusals.md` | every rep's validity checks, the REFUSED observations, and the co-tenancy discussion |
+| `raw/validity-and-refusals.md` | every rep's validity checks, the REFUSED observations, the co-tenancy discussion, and the **DECLARED GAP**: the quiescence check is prospective and no load data was captured *during* any published rep |
+| `raw/load-sensitivity.txt` | whether contention can move either verdict, fitted on both bases |
+| `raw/refusal-demo/` | evidence that a refused rep actually refuses — exit 3 at `peak_load=59.21` |
 
 ## Harness (`harness/`) — reviewed code, not scratch
 
@@ -44,6 +46,19 @@ cross-checks are reproducible without shipping a measurement-only feature flag i
   AC1's Route 2 symbol-visible cross-check. **Changes codegen; cross-check only.**
 * `ac1/vint-width-probe.patch` — relaxed-atomic width counters, for the width distribution.
   **Perturbs the hot loop; its TIMING is discarded and only its distribution is used.**
+
+## Two corrections made after review, recorded because the corrections matter
+
+**AC2's sign was reversed in the first version of this report.** The published 0.806x
+"anti-concentrated" divided two shares whose denominators differ (out-of-binary cycles are
+42.83% in the cycles reps, 56.47% in the stall reps). Like-for-like it is **1.061x — parity**,
+so AC2 reads NOT CONFIRMED. Report §4 records the error and its mechanism rather than quietly
+restating the conclusion.
+
+**The denominator was disclosed nowhere.** 42.8% of the pre-registered denominator is outside
+the measured binary and unreachable by the attribution, so the same numerator is 1.70% (total
+basis, pre-registered, primary) or 2.98% (in-binary). Report §2.4 states both, bounds the
+libc-`memcpy` undercount at a loose 8.89% ceiling, and marks the exact split unmeasured.
 
 ## Why the number here is not just "0.74% was wrong"
 
