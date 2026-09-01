@@ -1388,10 +1388,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   EVIDENCE LIVES (#3654).** The prompt roborev SENT is RETAINED in the job record and retrievable
   later — `roborev show <id> --prompt` — even though the snapshot file it names is transient and
   already deleted, and a delivery-by-path prompt says so in its own words under `### Combined
-  Diff`. That is DIRECT evidence a diff was delivered, where token accounting is INFERENCE (a large
-  number is merely CONSISTENT with a real review), so **the stored prompt is the PREFERRED evidence
-  in an absence-waiver request and a request LEADS with it**; token accounting is the FALLBACK, for
-  when the prompt cannot be retrieved. **It resurrects nothing of the deleted delivery classifier,
+  Diff`. That is the **DIRECT ARTIFACT** — roborev's ACTUAL prompt rather than a statistic about it —
+  and an absence-waiver request should **LEAD with it**. **IT IS NOT SELF-AUTHENTICATING, AND THE
+  TRUST PROPERTIES RUN THE OPPOSITE WAY FROM THE OBVIOUS READING:** roborev's prompt EMBEDS
+  repository-controlled content at positions indistinguishable from roborev's own text, so a
+  reviewed branch can carry text MIMICKING that delivery wording — a human in the loop is not a
+  channel separation, it is the same shared channel with a slower parser — so the prompt is read for
+  the STRUCTURAL fact it reports, never as proof of its own provenance. The **token accounting has
+  the opposite property**: recorded BY THE DAEMON, unwritable by the reviewed branch, so it
+  CORROBORATES where the prompt cannot and is **not a mere fallback**. The two are COMPLEMENTARY,
+  not ranked — where both exist an authorizer should want both. **It resurrects nothing of the deleted delivery classifier,
   and that distinction is load-bearing rather than a caveat:** the classifier read injectable prompt
   text AT DECISION TIME to produce an AUTOMATED verdict, while this is a HUMAN reading a STORED
   record as evidence for a HAND-GRANTED waiver — there is no automated verdict to spoof. Nothing in
@@ -1426,6 +1432,20 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   inherits. **The marker grammar is UNCHANGED**: no machine field was added to either kind — the
   authorizer would have to know it, it is derivable from the record, and every field in a hand-typed
   control line is one more way for a legitimate authorization to read `MALFORMED`.
+  **DECLARED BOUNDARY — WHAT THE `job=` BINDING DOES NOT CLOSE (#3654).** CLAIMED: within ONE daemon,
+  base+head+job names one review and `--recheck-job` re-decides THAT record. **NOT CLAIMED: that a
+  marker cannot cross boxes.** The marker travels through GITHUB, not through the daemon, while
+  `--recheck-job <id>` reads the LOCAL daemon's record — so if two boxes hold the SAME id for the
+  SAME `git_ref` range, a waiver granted after an authorizer inspected box A's review is ACCEPTED on
+  box B against box B's DIFFERENT review: `sha-assert` passes, the id matches, the authorization
+  crosses reviews. "A repeated id cannot reach another box's recheck" is true of the RECORD and
+  IRRELEVANT to the MARKER, which is what actually travels; on this fleet ids have already collided
+  at 265 and two lanes have reviewed one branch. **It is NOT closed here** because closing it means
+  adding a field to a hand-typed control line, which this issue's disposition forbids — a DESIGN
+  CALL, escalated to the owner and PENDING on #3654. The mitigation that exists today is
+  OPERATIONAL, not mechanical: the block NAMES the daemon, so an authorizer comparing `job-machine:`
+  between the request and the recheck SEES a cross-box mismatch. That is why the key exists — and it
+  is informational, so a reader who does not compare it is stopped by nothing.
   **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
   credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
   **dedicated, column-zero line** of a PR comment:

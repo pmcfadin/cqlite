@@ -6101,10 +6101,42 @@ assert_says 'case (jm10) --help states that a local row count proves nothing' \
   'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
 assert_says 'case (jm10) --help names the failure class the row count belongs to' \
   'IDENTICAL under the two states it claims'
-assert_says 'case (jm10) --help makes the stored prompt the PREFERRED absence evidence' \
-  "stored prompt is the PREFERRED"
+assert_says 'case (jm10) --help names the prompt as the DIRECT ARTIFACT to lead with' \
+  'That is the DIRECT ARTIFACT'
 assert_says 'case (jm10) --help names the retrieval command' 'roborev show <id> --prompt'
-assert_says 'case (jm10) --help keeps token accounting as the FALLBACK' 'the FALLBACK, for when the prompt cannot be retrieved'
+# THE CORRECTED EVIDENCE AXIS (roborev job 39, finding 2). The first version called the prompt
+# DIRECT EVIDENCE and token accounting a mere FALLBACK, which inverts the trust properties: the
+# prompt is PARTLY BRANCH-INFLUENCED (roborev embeds repository-controlled content at positions
+# indistinguishable from its own text, so a branch can mimic the delivery wording), while the token
+# counts are recorded BY THE DAEMON and unwritable by the reviewed branch. Both halves are asserted
+# — the qualification AND the corroboration property — because dropping either one restores a claim
+# an authorizer would act on.
+assert_says 'case (jm10) --help says the prompt is NOT self-authenticating' \
+  'IT IS NOT SELF-AUTHENTICATING'
+assert_says 'case (jm10) --help names the repository-controlled content that makes it so' \
+  'EMBEDS repository-controlled content'
+assert_says 'case (jm10) --help refuses "a human reads it" as a channel separation' \
+  'not a channel separation'
+assert_says 'case (jm10) --help gives token accounting its daemon-recorded corroboration property' \
+  'recorded BY THE DAEMON and nothing'
+assert_says 'case (jm10) --help ranks neither: they are complementary' \
+  'COMPLEMENTARY rather than ranked'
+assert_lacks 'case (jm10) --help no longer demotes token accounting to a fallback' \
+  'the FALLBACK, for when the prompt cannot be retrieved'
+# THE DECLARED CROSS-BOX BOUNDARY (roborev job 39, finding 1). The marker travels through GitHub
+# while --recheck-job reads the LOCAL daemon, so a same-id/same-range collision across two boxes
+# lets an authorization cross reviews. It is NOT closed here (that needs a marker field, which ask 4
+# forbids) — so what must never regress is that the text DECLARES it rather than implying safety.
+assert_says 'case (jm10) --help declares the cross-box boundary' 'DECLARED BOUNDARY'
+assert_says 'case (jm10) --help says what is NOT claimed' 'NOT CLAIMED: that a marker cannot cross boxes'
+assert_says 'case (jm10) --help names the channel the marker actually travels' \
+  'travels\s*through GITHUB, not through the daemon'
+assert_says 'case (jm10) --help refuses the issue-body argument as irrelevant to the marker' \
+  'true of the RECORD and'
+assert_says 'case (jm10) --help records the escalation rather than deciding it' \
+  'escalated to\s*the owner and PENDING on #3654'
+assert_says 'case (jm10) --help states the mitigation is operational, not mechanical' \
+  'OPERATIONAL, NOT MECHANICAL|is informational and CANNOT enforce'
 assert_says 'case (jm10) --help says why this is not the deleted classifier' \
   'RESURRECTS NOTHING OF THE DELETED DELIVERY CLASSIFIER'
 assert_says 'case (jm10) --help records that the marker grammar is unchanged' \

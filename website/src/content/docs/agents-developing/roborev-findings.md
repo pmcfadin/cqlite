@@ -308,10 +308,19 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    lives (#3654).** The prompt roborev *sent* is **retained in the job record** and retrievable later —
    `roborev show <id> --prompt` — even though the snapshot file it names is transient and already deleted,
    and a delivery-by-path prompt says so in its own words under `### Combined Diff`. That is **direct**
-   evidence a diff was delivered, where token accounting is **inference** (a large number is merely
-   *consistent* with a real review). So the **stored prompt is the PREFERRED evidence in an absence-waiver
-   request and a request leads with it**; token accounting is the **fallback**, for when the prompt cannot
-   be retrieved. **It resurrects nothing of the deleted delivery classifier, and that distinction is
+   **direct artifact** — roborev's *actual prompt* rather than a statistic about it — and an absence-waiver
+   request should **lead with it**.
+
+   **It is not self-authenticating, and the trust properties run the opposite way from the obvious
+   reading.** roborev's prompt **embeds repository-controlled content** at positions indistinguishable from
+   roborev's own text, so a reviewed branch can carry text *mimicking* that delivery wording and an
+   authorizer would read it as roborev's — a human in the loop is not a channel separation, it is the same
+   shared channel with a slower parser. So the prompt is read for the **structural fact** it reports, never
+   as proof of its own provenance. The **token accounting has the opposite property**: it is recorded **by
+   the daemon** and nothing the reviewed branch can write changes it, so it **corroborates** where the
+   prompt cannot — it is *not* a mere fallback for a missing prompt. The two are **complementary, not
+   ranked**: where both exist an authorizer should want both, and a request offering only one should say
+   which is missing and why. **It resurrects nothing of the deleted delivery classifier, and that distinction is
    load-bearing rather than a caveat:** the classifier read injectable prompt text *at decision time* to
    produce an **automated verdict**, while this is a **human** reading a **stored record** as evidence for a
    **hand-granted** waiver — there is no automated verdict to spoof. Nothing in the wrapper parses the
@@ -358,6 +367,21 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    marker grammar is unchanged**: no machine field was added to either kind — the authorizer would have to
    know it, it is derivable from the record, and every field in a hand-typed control line is one more way
    for a legitimate authorization to read `MALFORMED`.
+
+   **Declared boundary — what the `job=` binding does not close (#3654).** *Claimed:* within **one** daemon,
+   base+head+job names one review and `--recheck-job` re-decides that record. *Not claimed:* that a marker
+   cannot cross boxes. **The marker travels through GitHub, not through the daemon**, while
+   `--recheck-job <id>` reads the **local** daemon's record — so if two boxes hold the same id for the same
+   `git_ref` range, a waiver granted after an authorizer inspected box A's review is **accepted on box B
+   against box B's different review**: `sha-assert` passes, the id matches, and the authorization crosses
+   reviews. "A repeated id cannot reach another box's recheck" is true of the *record* and irrelevant to the
+   *marker*, which is what actually travels — and on this fleet it is not exotic: ids have already collided
+   at 265, and two lanes reviewing one branch has happened. **It is not closed here** because closing it
+   means adding a field to a hand-typed control line, which this issue's disposition forbids: a **design
+   call, escalated to the owner and pending on #3654**. The mitigation that exists today is **operational,
+   not mechanical** — the block names the issuing daemon, so an authorizer comparing `job-machine:` between
+   the request and the recheck **sees** a cross-box mismatch. That is why the key exists; being
+   informational, it stops nobody who does not look.
 
    **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
    credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a

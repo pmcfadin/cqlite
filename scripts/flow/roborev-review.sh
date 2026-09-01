@@ -428,12 +428,23 @@ retrieved later, even though the snapshot file it names is transient and long de
 
     roborev show <id> --prompt
 
-A delivery-by-path prompt says so in its own words, under '### Combined Diff' — 'Diff
-too large to include inline ... Read the diff from: <path>' — which is DIRECT evidence
-that a diff was delivered. Token accounting is INFERENCE: a large number is CONSISTENT
-with a real review, nothing more. So the record's stored prompt is the PREFERRED
-evidence in an absence-waiver request and a request should LEAD with it; the token
-accounting is the FALLBACK, for when the prompt cannot be retrieved.
+Under '### Combined Diff' a delivery-by-path prompt carries roborev's own wording — 'Diff
+too large to include inline ... Read the diff from: <path>'. That is the DIRECT ARTIFACT:
+roborev's ACTUAL prompt rather than a statistic about it, and it is what an absence-waiver
+request should LEAD with.
+
+IT IS NOT SELF-AUTHENTICATING, AND THE TRUST PROPERTIES RUN THE OPPOSITE WAY FROM THE
+OBVIOUS READING. roborev's prompt EMBEDS repository-controlled content — project
+guidelines, AGENTS.md, additional context, previous-review bodies — at positions
+indistinguishable from roborev's own text, so a reviewed branch can carry text MIMICKING
+that delivery wording and an authorizer would read it as roborev's. A human in the loop is
+not a channel separation; it is the same shared channel with a slower parser. So the
+prompt is read for the STRUCTURAL fact it reports, never as proof of its own provenance.
+The TOKEN ACCOUNTING has the opposite property: it is recorded BY THE DAEMON and nothing
+the reviewed branch can write changes it, so it CORROBORATES where the prompt cannot — it
+is NOT a mere fallback for a missing prompt. The two are COMPLEMENTARY rather than ranked:
+where both exist an authorizer should want both, and a request offering only one should
+say which is missing and why.
 
 THIS RESURRECTS NOTHING OF THE DELETED DELIVERY CLASSIFIER, and the distinction is
 load-bearing rather than a caveat. The classifier failed because it inferred delivery
@@ -529,6 +540,25 @@ fail a run. THE MARKER GRAMMAR IS DELIBERATELY UNCHANGED: no machine field was a
 it, in either marker kind. The authorizer would have to know the value, it is derivable
 from the record, and every field in a hand-typed control line is one more way for a
 legitimate authorization to read MALFORMED.
+
+DECLARED BOUNDARY — WHAT THE 'job=' BINDING DOES NOT CLOSE, AND WHY IT IS NOT CLOSED HERE
+(#3654). CLAIMED: within ONE daemon, base+head+job names one review, and '--recheck-job'
+re-decides THAT record. NOT CLAIMED: that a marker cannot cross boxes. The marker travels
+through GITHUB, not through the daemon, while '--recheck-job <id>' reads the LOCAL
+daemon's record for that id — so if two boxes hold the SAME id for the SAME git_ref range,
+a waiver granted after an authorizer inspected box A's review is ACCEPTED on box B against
+box B's DIFFERENT review: sha-assert passes, the id matches, and the authorization crosses
+reviews. 'A repeated id cannot reach another box's recheck' is true of the RECORD and
+IRRELEVANT to the MARKER, which is the thing that actually travels. Not exotic on this
+fleet: ids have already collided at 265, and two lanes reviewing one branch has happened.
+
+IT IS NOT CLOSED HERE because closing it means adding a field to a HAND-TYPED CONTROL
+LINE, which this issue's own disposition forbids — so it is a DESIGN CALL, escalated to
+the owner and PENDING on #3654, not something this change may decide. THE MITIGATION THAT
+EXISTS TODAY IS OPERATIONAL, NOT MECHANICAL: the block NAMES the issuing daemon, so an
+authorizer comparing 'job-machine:' between the request and the recheck SEES a cross-box
+mismatch — which is why the key exists at all. It is informational and CANNOT enforce: a
+reader who does not compare it is stopped by nothing.
 
 THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL. (1) The marker must BE the
 line: an indented, '>'-quoted, bulleted or mid-sentence copy does not match, so pasting
