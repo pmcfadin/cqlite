@@ -65,68 +65,94 @@
 //!   issue's assert. `rule3_overrun_*` is the only one of these.
 //!
 //! The labels were PROVED, not asserted — and proved per guard, with each guard
-//! disabled **ALONE**. There are now four, and an earlier revision of this table
-//! disabled two of them TOGETHER, which was a real methodological error and is
-//! recorded rather than quietly corrected: the joint disable produced 2 reds, all
-//! from the REGISTRY path, and would have read identically if the inline guard had
-//! had no test at all — which is exactly what was true (roborev round 2 / F2).
-//! **A guard with no test is indistinguishable from a guard whose test passes**,
-//! so a joint disable cannot attribute either. Independently:
+//! disabled **ALONE**. An earlier revision of this table disabled two of them
+//! TOGETHER, which was a real methodological error and is recorded rather than
+//! quietly corrected: the joint disable produced 2 reds, all from the REGISTRY
+//! path, and would have read identically if the inline guard had had no test at
+//! all — which is exactly what was true (roborev round 2 / F2). **A guard with no
+//! test is indistinguishable from a guard whose test passes**, so a joint disable
+//! cannot attribute either.
 //!
-//! | disabled ALONE | red set |
-//! |---|---|
-//! | the outer wrapper assert in `raw_value.rs` | **15** |
-//! | `parse_nested_udt_from_registry`'s guard | **2** — exactly `nested_udt_*_is_refused` |
-//! | `parse_inline_udt_value`'s guard (`udt/inline.rs`) | **2** — exactly `inline_udt_*_is_refused` |
-//! | the four `parse_udt_value` caller checks | **2** — exactly `frozen_udt_header_path_*_is_refused` |
-//! | `require_frozen_extent` at `parse_frozen_sequence_value` | **2** — exactly `cell_frozen_{list,set}_*_is_refused` |
-//! | `require_frozen_extent` at `parse_frozen_map_value` | **1** — exactly `cell_frozen_map_*_is_refused` |
-//! | `require_frozen_extent` at `parse_tuple_value` | **1** — exactly `cell_tuple_*_is_refused` |
+//! **That error was still present in this table one revision ago, and it hid two
+//! real holes.** A row reading "the four `parse_udt_value` caller checks | **2**"
+//! covered FOUR distinct call sites with ONE joint disable. Splitting it — and
+//! re-measuring EVERY site independently, which is what the table below is — gave
+//! `cell_value_complex.rs:128`/`:180` a red set of **0** (roborev round 4's
+//! finding, now closed by `issue_3811_cell_site_tests`) and `udt.rs:669` a red set
+//! of **0** as well, a guard no row of the old table even named. The lesson is the
+//! one already stated above, applied to a *set* of call sites rather than a pair:
+//! **a joint disable attributes nothing, and the arithmetic of "N reds" hides how
+//! many of the disabled sites contributed zero.**
 //!
-//! 25 DISCRIMINATING, each attributed to the ONE guard it pins and to no other.
-//! The 18 CONTROL cases, the 2 DISCRIMINATING-ELSEWHERE cases and the
-//! `require_frozen_extent` helper case stayed green in ALL SEVEN runs.
+//! Every guard site in the contract, each disabled ALONE against the full
+//! `cqlite-core --lib` suite:
 //!
-//! That separation is what the `inline_udt_*` cases exist for. They red under the
-//! inline disable and NOT under the registry one, which is the only evidence that
-//! they take the inline arm at all — the arm is reached only when
-//! `self.udt_registry` is `None`, so the registry-carrying `parser()` used by the
-//! `nested_udt_*` cases can never reach it, however deeply nested the value.
+//! | # | guard site (enclosing fn) | disabled ALONE ⇒ red set |
+//! |---|---|---|
+//! | A | `parse_value_from_raw_bytes` outer wrapper (`raw_value/reporting.rs`) | **15** |
+//! | B | `decode_frozen_udt_from_header_type` (`udt.rs:86`) | **2** — exactly `frozen_udt_header_path_*_is_refused` |
+//! | C | `parse_udt_field_value`'s `CqlType::Udt` arm (`udt.rs:669`) | **2** — exactly `cell_site_nested_udt_field_*_is_refused` |
+//! | D | `parse_nested_udt_from_registry` (`udt.rs:1090`) | **2** — exactly `nested_udt_*_is_refused` |
+//! | E | `parse_inline_udt_value` (`udt/inline.rs:136`) | **4** — exactly `inline_udt_*_is_refused` + `structural_nested_udt_*_is_refused` |
+//! | F | `decode_complex_cell_value` MARSHAL arm (`cell_value_complex.rs:128`) | **3** — exactly `cell_site_marshal_arm_*_is_refused` |
+//! | G | `decode_complex_cell_value` REGISTRY arm (`cell_value_complex.rs:180`) | **3** — exactly `cell_site_registry_arm_*_is_refused` |
+//! | H | `require_frozen_extent` at `parse_frozen_sequence_value` (`frozen.rs:162`) | **2** — exactly `cell_frozen_{list,set}_*_is_refused` |
+//! | I | `require_frozen_extent` at `parse_frozen_map_value` (`frozen.rs:231`) | **1** — exactly `cell_frozen_map_*_is_refused` |
+//! | J | `require_frozen_extent` at `parse_tuple_value` (`frozen.rs:493`) | **1** — exactly `cell_tuple_*_is_refused` |
 //!
-//! **What that experiment does NOT cover — now TWO sites, down from five, and the
-//! reduction is the point.** An earlier draft of this paragraph declared census
-//! finding F's whole cell-level trio unreachable "because it needs an
-//! `SSTableReader`". That was true of the SIGNATURE and false of the
-//! REQUIREMENT: all four `frozen.rs` entry points took a `_reader` they never
-//! used, and deleting that dead parameter made the three guards directly
-//! drivable with a hand-built VUInt-framed buffer (see the cell-level cases
-//! below, and rows 5-7 of the table above, which pin their WIRING and not merely
-//! the rule). **"Needs a reader" was a claim about a type signature; it should
-//! have been checked against what the body does.**
+//! **35 DISCRIMINATING cases across the two files, in TEN pairwise-disjoint sets:
+//! every case is attributed to exactly ONE guard, and every guard has at least
+//! one case.** The remaining 30 of the 65 cases — 27 CONTROL, the 2
+//! DISCRIMINATING-ELSEWHERE `rule3_overrun_*` cases and the `require_frozen_extent`
+//! helper case — stayed green in ALL TEN runs.
 //!
-//! What genuinely remains, with the blocker named rather than gestured at:
-//! census finding C's **two** `parse_udt_value` callers inside
-//! `decode_complex_cell_value` (`cell_value_complex.rs`). That function's
-//! `reader` parameter is NOT dead — `cell_value_complex.rs:257` forwards it to
-//! `parse_cell_value_schema_order` for frozen-inner recursion — so the same
-//! deletion does not apply, and `SSTableReader` cannot be built in a unit test:
-//! it holds `Arc<Mutex<BlockSource>>` / `ScanSource` / `Arc<dyn ReadAt>` over an
-//! open file, and its only constructors are the four `async`
-//! `SSTableReader::open*` functions (`reader/open.rs:38+`), each needing a tokio
-//! runtime and a real parseable SSTable on disk. Covering those two means a
-//! fixture-backed integration test: **issue #3861**.
+//! Two attributions in that table were WRONG when first written and were fixed by
+//! the measurement, not by re-reading source; both are recorded because the
+//! reasoning that produced them is the reasoning a reader will repeat. The
+//! `structural_nested_udt_*` cases were built to reach C and land in E (the
+//! bounded entry point delegates BOTH UDT arms to `parse_raw_type_value`, whose
+//! nested handling calls `parse_inline_udt_value`, so C is unreachable from it at
+//! all); and E is therefore NOT "reached only when `self.udt_registry` is `None`"
+//! — those cases carry a registry. The route is selected by the FIELD's `CqlType`.
+//! What still separates E from D is that `inline_udt_*` red under E and not under
+//! D, which remains the only evidence they take the inline arm.
 //!
-//! **The CONSEQUENCE of the remaining gap, which is why it is filed rather than
-//! shrugged at:** an `Err` from a column decode makes `row_data.rs` `break` its
-//! column loop, so the failing column **and every later column** silently become
-//! null rather than surfacing an error. A mis-wired argument at either site would
-//! present as a quietly truncated row, not a failure — which is why the 144-file
-//! corpus census (row counts AND a hash of the full rendered output) is part of
-//! this change's evidence and not an optional extra.
+//! **What the experiment does NOT cover: nothing, at guard granularity — every
+//! one of the ten has a non-empty, exclusively-attributed red set.** Getting
+//! there took retiring two "infeasible to test" claims in a row, and both failed
+//! the same way. First: census finding F's cell-level trio was declared
+//! unreachable "because it needs an `SSTableReader`" — true of the SIGNATURE and
+//! false of the REQUIREMENT, since all four `frozen.rs` entry points took a
+//! `_reader` they never used (rows H-J). Then F and G were declared to need a
+//! fixture-backed integration test (issue #3861) because `decode_complex_cell_value`
+//! really does use its `reader` (it forwards it to `parse_cell_value_schema_order`
+//! for frozen-inner recursion) and `SSTableReader` has no `Default` and no
+//! builder — only four `async` `open*` constructors. That was true and still not a
+//! blocker: `regression_1741h_tests.rs`, in this same directory, already writes a
+//! one-row SSTable with `SSTableWriter` into a `TempDir` inside a `#[tokio::test]`
+//! and opens it. `issue_3811_cell_site_tests` does the same, and #3861 is closed.
+//! **The generalisable rule: "this cannot be tested" is a claim to EARN — check it
+//! against what the body does and against what the neighbouring test files already
+//! do, not against the type signature.**
 //!
-//! These carry NO dataset, reader or feature-flag dependency: the subject is a
-//! `pub(super)` method on a plainly-constructed parser, so they run in every
-//! build and lane and can never pass vacuously on an empty corpus.
+//! **Why any of this mattered enough to keep digging:** an `Err` from a column
+//! decode makes `row_data.rs` `break` its column loop, so a failing column **and
+//! every later column** silently become null rather than surfacing an error. A
+//! mis-wired argument at any of these sites would present as a quietly truncated
+//! row, not a failure — which is why the 144-file corpus census (row counts AND a
+//! hash of the full rendered output) is part of this change's evidence and not an
+//! optional extra.
+//!
+//! THIS FILE's cases carry NO dataset, reader or feature-flag dependency: the
+//! subject is a `pub(super)` method on a plainly-constructed parser, so they run
+//! in every build and lane and can never pass vacuously on an empty corpus. The
+//! sibling `issue_3811_cell_site_tests` is stated separately rather than folded
+//! in, because its posture DIFFERS: it is gated on `feature = "write-support"`
+//! (default-on, so it runs in every ordinary lane, but a `--no-default-features`
+//! build compiles it out) and it opens a real `SSTableReader`. It still carries
+//! no dataset dependency — the SSTable it reads is one it writes into a
+//! `TempDir` — and that fixture is reader PLUMBING, never an oracle (#3042); see
+//! that file's header.
 
 use super::super::V5CompressedLegacyParser;
 use crate::schema::{CqlType, UdtRegistry};
@@ -138,7 +164,8 @@ pub(super) const KEYSPACE: &str = "issue_3811_ks";
 /// Marshal-form type string for `addr(street text, city text)` — reaches the
 /// `raw_value.rs:458-459` arm via `Self::is_udt_type`. Field names are hex:
 /// `61646472` = "addr", `737472656574` = "street", `63697479` = "city".
-pub(super) const MARSHAL_UDT: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,61646472,\
+pub(super) const MARSHAL_UDT: &str =
+    "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,61646472,\
 737472656574:org.apache.cassandra.db.marshal.UTF8Type,\
 63697479:org.apache.cassandra.db.marshal.UTF8Type)";
 
@@ -650,7 +677,8 @@ fn bounded_uuid_over_width_is_refused() {
 /// is a bare UDT name the registry resolves — the route to
 /// `parse_nested_udt_from_registry`. `6f75746572` = "outer",
 /// `6c6162656c` = "label", `61646472` = "addr".
-pub(super) const MARSHAL_OUTER: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,6f75746572,\
+pub(super) const MARSHAL_OUTER: &str =
+    "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,6f75746572,\
 6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,\
 61646472:org.apache.cassandra.db.marshal.UserType(issue_3811_ks,61646472,\
 737472656574:org.apache.cassandra.db.marshal.UTF8Type,\
@@ -718,26 +746,32 @@ fn nested_udt_partial_prefix_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
-// Census finding C — the STRUCTURAL nested-UDT field arm
-// (`parse_udt_field_value`'s `CqlType::Udt` branch, `udt.rs:669`)
+// The INLINE arm reached WITH a registry wired — `parse_inline_udt_value`
+// (`udt/inline.rs:136`), via `parse_raw_type_value`
 //
-// Found by the AC6 experiment, not by reading source: re-measuring EVERY guard
-// site independently (rather than the four `parse_udt_value` callers jointly, as
-// an earlier revision of the table did) showed this one with a red set of ZERO.
-// The `nested_udt_*` cases above do NOT reach it — a marshal-form nested field
-// resolves through `parse_nested_udt_from_registry` (`udt.rs:1090`) — so it was
-// covered by nothing, in exactly the way roborev's round-4 finding describes.
+// These cases were written expecting `parse_udt_field_value`'s `CqlType::Udt`
+// arm (`udt.rs:669`) and MEASURED into `parse_inline_udt_value`'s instead. The
+// mistaken expectation is recorded rather than quietly corrected, because the
+// measurement is the point: BOTH of `parse_value_from_raw_bytes`'s UDT arms
+// delegate to `parse_raw_type_value` (`raw_value/reporting.rs:446`/`:478`), and
+// `parse_raw_type_value`'s nested-UDT handling calls `parse_inline_udt_value` —
+// so `udt.rs:669` is not on the bounded entry point's path at all. It is covered
+// from the CELL site instead (`issue_3811_cell_site_tests`,
+// `cell_site_nested_udt_field_*`).
 //
-// It is reached when the outer `UdtTypeDef` carries a field whose type is a
-// STRUCTURAL `CqlType::Udt(name, fields)`: `parse_udt_value`'s field loop hands
-// that to `parse_udt_field_value`, whose `CqlType::Udt` arm recurses and now
-// checks the count it gets back.
+// What these cases DO establish, and it corrects a claim made further up this
+// header: the inline arm is **NOT** reachable only when `self.udt_registry` is
+// `None`. The parser below carries a registry and still lands there, because the
+// route is selected by the FIELD's `CqlType`, not by whether a registry exists.
+// The `inline_udt_*` cases (no registry) and these (registry) red together under
+// the same single disable, which is the evidence for that.
 // ---------------------------------------------------------------------------
 
 /// A registry holding `outer_struct { label text, addr <STRUCTURAL nested UDT> }`.
 /// The nested field type is built as `CqlType::Udt` rather than spelled as a
-/// marshal string, which is the whole point: it is what selects `udt.rs:669`
-/// over `udt.rs:1090`.
+/// marshal string: that is what selects the INLINE arm over
+/// `parse_nested_udt_from_registry` (`udt.rs:1090`), which the marshal-spelled
+/// `nested_udt_*` cases take.
 fn parser_structural_nested() -> V5CompressedLegacyParser {
     let mut reg = UdtRegistry::new();
     reg.register_udt(
@@ -790,8 +824,8 @@ fn structural_nested_udt_legally_short_decodes_ok() {
         .expect("a legally short structural nested encoding is accepted (rule 1)");
 }
 
-/// **DISCRIMINATING — attributes to `udt.rs:669` alone.** Rule 4 inside the
-/// nested field: the outer prefix says 19 bytes and 19 follow, so the outer
+/// **DISCRIMINATING — attributes to `udt/inline.rs:136` alone.** Rule 4 inside
+/// the nested field: the outer prefix says 19 bytes and 19 follow, so the outer
 /// check passes; the nested decode reads 18 of them.
 #[test]
 fn structural_nested_udt_trailing_garbage_is_refused() {
@@ -803,8 +837,8 @@ fn structural_nested_udt_trailing_garbage_is_refused() {
     );
 }
 
-/// **DISCRIMINATING — `udt.rs:669`.** Rule 2 inside the nested field, one byte
-/// away from the legal omission above.
+/// **DISCRIMINATING — `udt/inline.rs:136`.** Rule 2 inside the nested field, one
+/// byte away from the legal omission above.
 #[test]
 fn structural_nested_udt_partial_prefix_is_refused() {
     assert_refused_short(

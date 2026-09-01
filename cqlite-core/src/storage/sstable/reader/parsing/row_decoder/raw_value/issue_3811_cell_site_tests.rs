@@ -94,9 +94,7 @@ struct ReaderContext {
 async fn reader_context() -> ReaderContext {
     use crate::schema::{KeyColumn, TableSchema};
     use crate::storage::sstable::writer::{SSTableFormat, SSTableWriter};
-    use crate::storage::write_engine::mutation::{
-        CellOperation, Mutation, PartitionKey, TableId,
-    };
+    use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
 
     let schema = TableSchema {
         keyspace: "ks".to_string(),
@@ -306,7 +304,10 @@ async fn cell_site_marshal_arm_exact_decodes_ok() {
     let ctx = reader_context().await;
     let (value, off) = decode_at_call_site(&ctx, &marshal_column(), &vectors::case1_exact())
         .expect("a well-formed marshal-form frozen UDT cell");
-    vectors::assert_both_fields(unwrap_frozen(&value, "cell-site/marshal/case1"), "marshal/case1");
+    vectors::assert_both_fields(
+        unwrap_frozen(&value, "cell-site/marshal/case1"),
+        "marshal/case1",
+    );
     assert_eq!(off, 19, "the offset must advance past the whole cell");
 }
 
@@ -319,7 +320,10 @@ async fn cell_site_marshal_arm_legally_short_decodes_ok() {
     let (value, off) =
         decode_at_call_site(&ctx, &marshal_column(), &vectors::case4_legally_short())
             .expect("a legally short marshal-form frozen UDT cell");
-    vectors::assert_city_absent(unwrap_frozen(&value, "cell-site/marshal/case4"), "marshal/case4");
+    vectors::assert_city_absent(
+        unwrap_frozen(&value, "cell-site/marshal/case4"),
+        "marshal/case4",
+    );
     assert_eq!(off, 12, "the offset must advance past the whole cell");
 }
 
