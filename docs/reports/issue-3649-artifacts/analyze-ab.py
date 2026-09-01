@@ -227,7 +227,7 @@ def non_exhaustive_lines(mode, n_pairs):
     return lines
 
 
-def render_common(manifest, mode, admission):
+def render_common(manifest, mode, admission, session):
     out("mode %s" % mode)
     out("manifest-generated-utc %s" % field(manifest, "generated_utc"))
     out("driver-version %s" % field(manifest, "driver_version"))
@@ -289,6 +289,14 @@ def render_common(manifest, mode, admission):
         )
     )
     out("thermal-state %s" % field(manifest, "workload", "temperature"))
+    out(
+        "server-observed batch-size %s max-batch-bytes %s wait-timeout-ms %s"
+        % (
+            session["server_config"].get("batch_size_observed", "NOT-OBSERVED"),
+            session["server_config"].get("max_batch_bytes_observed", "NOT-OBSERVED"),
+            session["server_config"].get("wait_timeout_ms_observed", "NOT-OBSERVED"),
+        )
+    )
     out("merge-path %s" % field(manifest, "workload", "merge_path"))
 
 
@@ -332,7 +340,9 @@ def analyze(mode, path, opts):
             % shape,
         )
 
-    pairs, admission = collect_pairs(manifest, manifest_dir, mode, declared_steps)
+    pairs, admission, session = collect_pairs(
+        manifest, manifest_dir, mode, declared_steps
+    )
     if len(pairs) < manifest["replicates_requested"]:
         raise Unmeasured(
             "replicate-shortfall",
@@ -350,8 +360,8 @@ def analyze(mode, path, opts):
         )
 
     stats = compute(mode, pairs, opts)
-    render_common(manifest, mode, admission)
-    return report(mode, manifest, pairs, admission, opts, stats)
+    render_common(manifest, mode, admission, session)
+    return report(mode, manifest, pairs, admission, opts, stats, session)
 
 
 def compute(mode, pairs, opts):
@@ -418,7 +428,7 @@ def compute(mode, pairs, opts):
     }
 
 
-def report(mode, manifest, pairs, admission, opts, stats):
+def report(mode, manifest, pairs, admission, opts, stats, session):
     level_text = "%.0f%%" % (opts["ci_level"] * 100.0)
     control = manifest.get("control")
     control = control if isinstance(control, str) and control else None
@@ -431,8 +441,26 @@ def report(mode, manifest, pairs, admission, opts, stats):
     out("arm base server-extra [%s]" % ("" if extra_base == "NOT-RECORDED" else extra_base))
     out("arm head server-extra [%s]" % ("" if extra_head == "NOT-RECORDED" else extra_head))
     out(
-        "replicates requested %d paired %d order interleaved-base-head"
+        "replicates requested %d paired %d order counterbalanced-by-replicate-parity"
         % (manifest["replicates_requested"], len(pairs))
+    )
+    # THE EXECUTED ORDER, COUNTED FROM THE RECORD. Interleaving across replicates
+    # controls drift between pairs; only alternating the order WITHIN a pair stops
+    # a monotonic gradient landing on the same arm every time.
+    out(
+        "counterbalance base-first %d head-first %d residual %d pair(s)"
+        % (
+            session["base_first"],
+            session["head_first"],
+            abs(session["base_first"] - session["head_first"]),
+        )
+    )
+    out(
+        "counterbalance order-by-replicate %s"
+        % ",".join(
+            "%d:%s" % (rep, arm)
+            for rep, arm in sorted(session["order_by_replicate"].items())
+        )
     )
 
     base_rates = stats["base_rates"]
@@ -636,6 +664,15 @@ def report(mode, manifest, pairs, admission, opts, stats):
             "verdict-detail %s CONTROL the two arms were served under DIFFERENT "
             "server flags, so the difference measured is the injected one and not "
             "the commit pair's" % mode
+        )
+    if session["base_first"] != session["head_first"]:
+        out(
+            "verdict-detail %s COUNTERBALANCE %d pair(s) ran base-first and %d "
+            "head-first: an odd replicate count cannot balance exactly, so one "
+            "within-pair ordering is represented once more than the other. Any "
+            "drift inside a pair is therefore cancelled to within one pair, not "
+            "exactly -- run an EVEN replicate count to remove this residual"
+            % (mode, session["base_first"], session["head_first"])
         )
     for line in non_exhaustive_lines(mode, len(pairs)):
         out("verdict-detail %s NON-EXHAUSTIVE %s" % (mode, line))

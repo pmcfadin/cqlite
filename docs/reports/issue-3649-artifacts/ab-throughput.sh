@@ -89,10 +89,11 @@ die() { # <cause> <detail>
   # is on disk. An abort before the run directory exists writes nothing, and
   # says so.
   if [ "${LEDGER_ARMED:-0}" = "1" ] && write_manifest 2>/dev/null \
+     && [ "${PROMOTED:-0}" = "1" ] && promote_ledger \
      && [ -f "${RUN_DIR:-}/manifest.json" ]; then
     say "manifest $RUN_DIR/manifest.json records the runs that did complete"
   elif [ -f "${RUN_DIR:-}/manifest.json" ]; then
-    say "manifest NOT WRITTEN -- this abort happened before any measurement began; the manifest present in $RUN_DIR belongs to an EARLIER session and has NOT been modified"
+    say "manifest NOT WRITTEN -- this abort happened before any replicate completed; the manifest present in $RUN_DIR belongs to an EARLIER session and has NOT been modified"
   else
     say "manifest NOT WRITTEN -- this abort happened before a manifest could be produced"
   fi
@@ -188,7 +189,24 @@ CONTROL=''
 BASE_SERVER_EXTRA=''
 HEAD_SERVER_EXTRA=''
 
+# EVERY value-taking option, in one list. A `shift 2` with one argument left
+# consumes past the end and exits 1 with an unanchored bash error instead of the
+# documented usage error -- so the presence of a value is checked ONCE here
+# rather than in each arm below, where the next option added would be the next
+# one to miss it. `scripts`-side drift is caught by a structural case in
+# selftest-analyze.sh that requires every `shift 2` arm to appear in this list.
+VALUE_OPTS="--corpus --ticket-template --base-ref --head-ref --replicates \
+--work-dir --repo --shape --ramp --step-duration --port --server-cpus \
+--client-cpus --min-corpus-bytes --min-sstables --merge-path \
+--max-concurrent-scans --batch-size --max-batch-bytes \
+--admission-wait-timeout-ms --rows-declared --temperature --control \
+--base-server-extra --head-server-extra"
+
 while [ "$#" -gt 0 ]; do
+  case " $VALUE_OPTS " in
+    *" $1 "*)
+      [ "$#" -ge 2 ] || usage_error "$1 requires a value" ;;
+  esac
   case "$1" in
     --corpus)            CORPUS="${2:-}";           shift 2 ;;
     --ticket-template)   TICKET_TEMPLATE="${2:-}";  shift 2 ;;
@@ -316,13 +334,42 @@ mkdir "$SESSION_LOCK" 2>/dev/null || {
 # any manifest present belongs to an earlier session and was not touched. There
 # is deliberately no per-site guard -- a second finding in one lifecycle path is
 # what says the ordering, not the site, is what needs fixing.
+# THE INVARIANT, STATED ONCE: this session writes NOTHING into $RUN_DIR until it
+# has a SERVING SERVER and a completed replicate. Not "until pre-flight passed"
+# -- that was the previous boundary, and the port can be taken during the two
+# release builds that follow it, so the truncation still happened and `run_one`
+# then aborted over an already-destroyed ledger.
+#
+# THIS IS THE THIRD FINDING IN THIS ONE PATH, so the fix is structural rather
+# than another recheck: the session's ledger and manifest live in a PRIVATE
+# STAGING DIRECTORY for their whole life, and are PROMOTED into $RUN_DIR by
+# atomic rename only after a run has actually completed. A fourth instance is
+# then not expressible -- there is no code path on which an incomplete session
+# can overwrite a previous one's record, because until the promotion the previous
+# one's files are the only ones there.
 LEDGER_ARMED=0
+STAGE_DIR=""
 
-arm_ledger() {
+stage_ledger() {
+  STAGE_DIR="$RUN_DIR/.staging-$$"
+  mkdir -p "$STAGE_DIR"
+  RUNS_JSONL="$STAGE_DIR/runs.jsonl"
   : > "$RUNS_JSONL"
   LEDGER_ARMED=1
   write_manifest
 }
+
+# Atomic per file, and only ever called after a completed run.
+promote_ledger() {
+  [ "${LEDGER_ARMED:-0}" = "1" ] || return 0
+  [ -n "${STAGE_DIR:-}" ] || return 0
+  cp "$STAGE_DIR/runs.jsonl" "$RUN_DIR/.runs.tmp.$$" \
+    && mv "$RUN_DIR/.runs.tmp.$$" "$RUN_DIR/runs.jsonl"
+  cp "$STAGE_DIR/manifest.json" "$RUN_DIR/.manifest.tmp.$$" \
+    && mv "$RUN_DIR/.manifest.tmp.$$" "$RUN_DIR/manifest.json"
+  PROMOTED=1
+}
+PROMOTED=0
 
 # ---------------------------------------------------------------------------
 # Cleanup. Registered NOW, before the resources it frees can exist -- this repo
@@ -362,6 +409,8 @@ reap_server() {
 
 cleanup() {
   reap_server
+  [ -n "${STAGE_DIR:-}" ] && rm -rf "$STAGE_DIR" 2>/dev/null || true
+  [ -n "${SESSION_LOCK:-}" ] && rm -f "$RUN_DIR/.runs.tmp.$$" "$RUN_DIR/.manifest.tmp.$$" 2>/dev/null || true
   [ -n "${SESSION_LOCK:-}" ] && rmdir "$SESSION_LOCK" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -378,10 +427,11 @@ CORPUS_BYTES=0
 CORPUS_FILES=0
 
 write_manifest() {
-  # A no-op until the ledger is armed: before that, a manifest in this directory
-  # is a PREVIOUS session's and overwriting it is the data loss this guards.
+  # A no-op until the ledger is staged, and it writes into the STAGING directory
+  # -- never into $RUN_DIR, which still holds a previous session's record until
+  # `promote_ledger` runs.
   [ "${LEDGER_ARMED:-0}" = "1" ] || return 1
-  python3 - "$RUN_DIR/manifest.json" "$RUNS_JSONL" <<'PYEOF'
+  python3 - "$STAGE_DIR/manifest.json" "$RUNS_JSONL" <<'PYEOF'
 import json
 import os
 import sys
@@ -678,8 +728,8 @@ build_arm head "$HEAD_SHA"
 
 # Pre-flight passed and both arms exist: only now may this session claim the work
 # directory's ledger and manifest.
-arm_ledger
-say "ledger armed -- $RUN_DIR now describes THIS session"
+stage_ledger
+say "ledger staged in $STAGE_DIR -- $RUN_DIR still describes any EARLIER session until the first replicate completes"
 
 # ---------------------------------------------------------------------------
 # One replicate of one arm.
@@ -690,8 +740,8 @@ parse_startup() { # <server-log> <scans|source>  -- returns a VALUE, not a messa
   python3 "$SUPPORT" parse-startup "$1" "$2" 2>/dev/null || echo NOT-OBSERVED
 }
 
-run_one() { # <arm> <replicate>
-  local arm="$1" rep="$2"
+run_one() { # <arm> <replicate> <position-in-pair: 1|2>
+  local arm="$1" rep="$2" position="$3"
   local tag; tag="$(printf '%s-r%02d' "$arm" "$rep")"
   local bin="${ARM_BIN_DIR[$arm]}"
   local jsonl="$RUN_DIR/$tag.jsonl"
@@ -774,6 +824,11 @@ run_one() { # <arm> <replicate>
     die max-batch-bytes-mismatch \
       "$tag: the server reports max_batch_bytes=$observed_maxbytes but $MAX_BATCH_BYTES was requested"
   fi
+  if [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ] && [ "$observed_wait" != "NOT-OBSERVED" ] \
+     && [ "$observed_wait" != "$ADMISSION_WAIT_TIMEOUT_MS" ]; then
+    die wait-timeout-mismatch \
+      "$tag: the server reports admission_wait_timeout_ms=$observed_wait but $ADMISSION_WAIT_TIMEOUT_MS was requested; the shed threshold decides which steps the analyzer must exclude"
+  fi
 
   # Requested pinning and EFFECTIVE pinning are different facts too: a server
   # that is not on the cores the manifest names is measuring something else, and
@@ -837,12 +892,14 @@ run_one() { # <arm> <replicate>
     || die replicate-invalid "the $tag JSONL is not a usable replicate (see the cause-detail above)"
 
   python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" \
-    "$admission_observed" "$admission_source" "$observed_batch" <<'PYEOF'
+    "$admission_observed" "$admission_source" "$observed_batch" \
+    "$observed_maxbytes" "$observed_wait" "$position" <<'PYEOF'
 import json
 import sys
 
 (runs_path, arm, rep, filename, temperature, cpu0, cpu1, hz,
- admission_observed, admission_source, batch_size_observed) = sys.argv[1:12]
+ admission_observed, admission_source, batch_size_observed,
+ max_batch_bytes_observed, wait_timeout_ms_observed, position) = sys.argv[1:15]
 try:
     server_cpu_s = (int(cpu1) - int(cpu0)) / float(hz)
 except (ValueError, ZeroDivisionError):
@@ -860,25 +917,64 @@ entry = {
     "admission_observed": admission_observed,
     "admission_source": admission_source,
     "batch_size_observed": batch_size_observed,
+    # Observed and PERSISTED, so the analyzer can compare them across arms. A
+    # value that is read and then dropped is the same defect as a value that is
+    # read and then not compared -- the observation has to reach whoever makes
+    # the claim.
+    "max_batch_bytes_observed": max_batch_bytes_observed,
+    "wait_timeout_ms_observed": wait_timeout_ms_observed,
+    # The ACTUAL executed order, not the parity rule that chose it.
+    "position_in_pair": int(position),
 }
 with open(runs_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(entry, sort_keys=True) + "\n")
 PYEOF
   write_manifest
+  # The first promotion is the moment $RUN_DIR stops describing an earlier
+  # session -- and it happens only once a server has served and a replicate has
+  # been validated, which is the invariant stated at the top of this file.
+  if [ "${PROMOTED:-0}" = "0" ]; then
+    promote_ledger
+    say "ledger promoted -- $RUN_DIR now describes THIS session"
+  else
+    promote_ledger
+  fi
 }
 
 # ---------------------------------------------------------------------------
 # The interleaved session.
 # ---------------------------------------------------------------------------
-say "session replicates $REPLICATES order interleaved-base-head shape $SHAPE ramp $RAMP step-duration $STEP_DURATION temperature $TEMPERATURE prewarm $PREWARM"
+# COUNTERBALANCED, NOT MERELY INTERLEAVED. Interleaving across replicates
+# controls drift BETWEEN pairs; it does nothing about a gradient WITHIN one. If
+# base always ran first, a monotonic drift over the ~2 minutes of a pair -- a
+# thermal ramp, a clock adjustment, a neighbour's job starting -- lands on the
+# head arm in EVERY pair and biases every ratio the same way. That is precisely
+# the systematic error the paired design exists to remove, and it would arrive
+# with a tight interval, which is worse than a noisy one because it looks
+# trustworthy.
+#
+# So the order alternates by replicate parity, and the ACTUAL executed order is
+# recorded per run (`position_in_pair`) rather than assumed from the parity rule:
+# the analyzer counts it and refuses a session where counterbalancing did not
+# happen. An odd replicate count cannot balance exactly -- one ordering runs once
+# more than the other -- and that residual is disclosed, not hidden. An EVEN
+# count cancels exactly; see RUNBOOK.md step 5.
+say "session replicates $REPLICATES order counterbalanced-by-replicate-parity shape $SHAPE ramp $RAMP step-duration $STEP_DURATION temperature $TEMPERATURE prewarm $PREWARM"
 rep=1
 while [ "$rep" -le "$REPLICATES" ]; do
-  run_one base "$rep"
-  run_one head "$rep"
+  if [ "$((rep % 2))" -eq 1 ]; then
+    pair_first=base; pair_second=head
+  else
+    pair_first=head; pair_second=base
+  fi
+  say "pair $rep order $pair_first-then-$pair_second"
+  run_one "$pair_first" "$rep" 1
+  run_one "$pair_second" "$rep" 2
   rep=$((rep + 1))
 done
 
 write_manifest
+promote_ledger
 say "session complete: $REPLICATES paired replicates in $RUN_DIR"
 # The section this session's ramp belongs to, decided by the same validator that
 # accepted the ramp rather than re-derived here.

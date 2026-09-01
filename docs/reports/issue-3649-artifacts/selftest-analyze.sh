@@ -107,6 +107,12 @@ def main():
                     record["target_concurrency"] = concurrency
                     handle.write(json.dumps(record))
                     handle.write("\n")
+            # Counterbalanced by replicate parity, exactly as the driver does:
+            # base first on odd replicates, head first on even ones.
+            if index % 2 == 1:
+                position = 1 if arm == "base" else 2
+            else:
+                position = 2 if arm == "base" else 1
             runs.append({
                 "arm": arm,
                 "replicate": index,
@@ -114,6 +120,10 @@ def main():
                 "temperature": "warm",
                 "admission_observed": "16",
                 "admission_source": "flag",
+                "batch_size_observed": "8192",
+                "max_batch_bytes_observed": "4194304",
+                "wait_timeout_ms_observed": "30000",
+                "position_in_pair": position,
             })
     manifest = {
         "schema": "ab-3649.manifest/v1",

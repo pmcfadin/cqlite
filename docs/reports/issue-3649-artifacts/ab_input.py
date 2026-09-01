@@ -484,6 +484,8 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     declared_duration_s = step_duration_seconds(manifest)
     seen = {}
     admissions = {}
+    positions = {}
+    server_config = {}
     for entry in manifest["runs"]:
         if not isinstance(entry, dict):
             raise Unmeasured("manifest-field", "manifest.runs: entry is not an object")
@@ -528,6 +530,33 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
             )
         admissions[key] = (value, source)
 
+        # The ACTUAL executed order, read from the record rather than inferred
+        # from the parity rule that was supposed to produce it.
+        position = entry.get("position_in_pair")
+        if position not in (1, 2):
+            raise Unmeasured(
+                "position-not-recorded",
+                "%s replicate %d does not record which half of its pair it ran in "
+                "(position_in_pair=%r). Counterbalancing that is not recorded is "
+                "counterbalancing that cannot be checked"
+                % (arm, replicate, position),
+            )
+        positions[key] = position
+
+        # Every server-config field the driver read back must agree across every
+        # run: two arms served under different effective configurations are not
+        # comparable, and an observation that is taken and then not compared is
+        # the same defect as one that is never taken.
+        for name in (
+            "batch_size_observed",
+            "max_batch_bytes_observed",
+            "wait_timeout_ms_observed",
+        ):
+            observed = entry.get(name)
+            if observed is None or str(observed) == NOT_OBSERVED:
+                continue
+            server_config.setdefault(name, {})[key] = str(observed)
+
     # Both arms must have been served under the SAME admission ceiling, or the
     # ratio is between two differently-throttled servers.
     values = [v for v, _ in admissions.values() if v != NOT_OBSERVED]
@@ -554,6 +583,16 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     if not base_reps:
         raise Unmeasured("unpaired-replicates", "manifest declares no runs at all")
 
+    for name, by_run in server_config.items():
+        distinct = sorted(set(by_run.values()))
+        if len(distinct) > 1:
+            raise Unmeasured(
+                "server-config-mismatch",
+                "the runs report more than one observed %s (%s); the arms were not "
+                "served under the same configuration, so their throughputs are not "
+                "comparable" % (name.replace("_observed", ""), ", ".join(distinct)),
+            )
+
     pairs = []
     for rep in base_reps:
         base, head = seen[("base", rep)], seen[("head", rep)]
@@ -577,4 +616,41 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     admission = Admission(
         observed.pop() if observed else NOT_OBSERVED, corroborated, len(admissions)
     )
-    return pairs, admission
+
+    # WHICH ARM RAN FIRST, per pair, and whether the counterbalancing happened.
+    first_by_rep = {}
+    for rep in base_reps:
+        base_pos, head_pos = positions[("base", rep)], positions[("head", rep)]
+        if base_pos == head_pos:
+            raise Unmeasured(
+                "position-not-recorded",
+                "replicate %d records both arms in position %d of the pair; one of "
+                "them ran first and the record does not say which"
+                % (rep, base_pos),
+            )
+        first_by_rep[rep] = "base" if base_pos == 1 else "head"
+    base_first = sum(1 for arm in first_by_rep.values() if arm == "base")
+    head_first = len(first_by_rep) - base_first
+    # Parity counterbalancing yields |base_first - head_first| == n mod 2, so a
+    # difference greater than 1 means it did not happen. An odd replicate count
+    # legitimately leaves one pair unbalanced; that residual is DISCLOSED in the
+    # report rather than refused, because refusing it would red correct input.
+    if abs(base_first - head_first) > 1:
+        raise Unmeasured(
+            "counterbalance-broken",
+            "%d pairs ran base-first and %d ran head-first: the within-pair order "
+            "was not counterbalanced, so a monotonic drift inside a pair lands on "
+            "the same arm every time and biases every ratio in one direction -- "
+            "with a tight interval, which is worse than a noisy one"
+            % (base_first, head_first),
+        )
+
+    session = {
+        "order_by_replicate": first_by_rep,
+        "base_first": base_first,
+        "head_first": head_first,
+        "server_config": {
+            name: sorted(set(by_run.values()))[0] for name, by_run in server_config.items()
+        },
+    }
+    return pairs, admission, session
