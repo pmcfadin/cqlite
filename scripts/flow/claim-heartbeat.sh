@@ -260,12 +260,19 @@
 #   exits 1. That reinforces the rule above rather than softening it: EXIT 1 MEANS
 #   "NOTHING WAS REPORTED", NEVER a clean bill of health (#3467). On such a fleet lane liveness
 #   rests on the coordination sweep plus TWO BOARD SIGNATURES THAT MEAN DIFFERENT THINGS AND MUST
-#   NOT BE MERGED (roborev job 40; same wording as docs/development/fleet-runbook.md so the two
-#   cannot drift): (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL
-#   — a vanished `/drive-issue` lane RETAINS its claim ref, because the ref outlives the process,
-#   so this is where dead-lane investigation goes on such a fleet. (b) `Ready` + pushed branch +
-#   NO claim ref is the #3436 UNCLAIMED-WORK signature — work performed without claiming, NOT
-#   evidence that a lane died. All of these are operating mechanisms, NOT committed commands. See
+#   NOT BE MERGED — and only the FIRST is definite. Three rounds of review each replaced one definite
+#   label for (b) with another (jobs 38, 40, 41); the shape is genuinely ambiguous, so it is no longer
+#   classified at all. Wording below is shared verbatim with docs/development/fleet-runbook.md so the
+#   two cannot drift.
+#   (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL — a vanished
+#   `/drive-issue` lane RETAINS its claim ref, because the ref outlives the process, so this is where
+#   dead-lane investigation goes on such a fleet. That one is NOT ambiguous.
+#   (b) `Ready` + pushed branch + NO claim ref is AMBIGUOUS and is deliberately NOT classified here: the
+#   same shape fits parked-by-design work, the #3436 unclaimed-work case, and a lane that died before
+#   claiming. Nothing distinguishes them mechanically today, so check the branch's last commit time and
+#   whether a session is driving it; it is not by itself evidence of a lane death, and the rule is to
+#   treat the signature as a prompt to look, never as a verdict.
+#   All of these are operating mechanisms, NOT committed commands. See
 #   docs/development/fleet-runbook.md.
 #
 #   THE TWO POPULATED NAMESPACES ARE DELIBERATELY NOT READ, measured rather than priced

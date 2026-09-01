@@ -3046,6 +3046,15 @@ require_help_phrase() {  # <the guarantee this phrase carries> <the COMPLETE phr
     bad "--help is MISSING the $1 statement (#3548) — this exact phrase is gone: \"$2\""
   fi
 }
+# The mirror: a phrase that must NOT come back. Used for the definite labels that review rejected —
+# an assertion that something is PRESENT cannot stop a contradictory sentence being added beside it.
+refute_help_phrase() {  # <the overstatement this refuses> <the COMPLETE phrase, matched literally>
+  if grep -Fqi -- "$2" <<<"$help81_flat"; then
+    bad "--help has RE-ASSERTED $1 (#3548, roborev job 41) — this phrase must not come back: \"$2\""
+  else
+    ok "--help does not re-assert $1"
+  fi
+}
 require_help_phrase "supervisor-fleets-only scope" \
   'lane-granular dead-lane detection APPLIES TO SUPERVISOR FLEETS ONLY'
 require_help_phrase "descope attribution (owner ruling + issue numbers)" \
@@ -3094,8 +3103,21 @@ require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)
 # merging them back into one signature — reds this case, and the two files carry one wording.
 require_help_phrase "held-claim signature, presented as THE dead-lane signal" \
   'A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL'
-require_help_phrase "#3436 unclaimed-work signature, explicitly NOT a lane death" \
-  '`Ready` + pushed branch + NO claim ref is the #3436 UNCLAIMED-WORK signature — work performed without claiming, NOT evidence that a lane died'
+# SIGNATURE (b) IS PINNED AS AN AMBIGUITY, NOT AS A LABEL (roborev job 41). Three rounds each replaced
+# one definite classification of this shape with another — job 38 called a HELD claim ref the #3436
+# signature, job 40 called the NO-claim-ref shape the dead-lane signal, job 41 called it unclaimed work
+# — and each was wrong or overstated, because the shape genuinely fits parked-by-design work, #3436's
+# unclaimed work, AND a lane that died before claiming. A fourth label would be a fourth defect, and a
+# phrase test on a label FREEZES it (the job-17 lesson). So the assertion is the ambiguity itself plus
+# the operator rule, and a REFUTATION stops the rejected label returning beside them.
+require_help_phrase "signature (b) stated as an AMBIGUITY, not classified" \
+  'NO claim ref is AMBIGUOUS and is deliberately NOT classified here'
+require_help_phrase "signature (b) operator rule (verbatim from fleet-runbook.md)" \
+  'treat the signature as a prompt to look, never as a verdict'
+refute_help_phrase "a definite unclaimed-work label for signature (b)" \
+  'NO claim ref is the #3436 UNCLAIMED-WORK signature'
+refute_help_phrase "a definite dead-lane label for signature (b)" \
+  'NO claim ref is the DEAD-LANE SIGNAL'
 require_help_phrase "exclusion-IS-the-abstention mechanism (what TEST 82 proves)" \
   'are NOT ENUMERATED by this command, so they produce no row and no verdict at all — not `DEAD-*`, not `UNKNOWN-*`, nothing'
 require_help_phrase "AC4 as a COUNTERFACTUAL about a non-refreshing carrier" \
@@ -3135,8 +3157,10 @@ g clone -q "$ns_origin" "$ns_work" 2>/dev/null
     git commit-tree "$et" -m "claim issue=8801 machine=nsBox pid=${ABSENT_PID} actor=flow ts=${now_ts}")
   g push -q origin "${cs}:refs/claims/issue-8801"
 )
-# ...plus a machine heartbeat, the other populated namespace.
-(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox bash "$HB" beat 8801 >/dev/null 2>&1)
+# ...plus a machine heartbeat, the other populated namespace. A DISTINCT issue number (8803, not the
+# lock's 8801) so each staged namespace is proven absent INDEPENDENTLY — with one shared number, a row
+# from either could satisfy the other's absence check (roborev job 41, finding 2).
+(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox bash "$HB" beat 8803 >/dev/null 2>&1)
 ns_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 ns_rc=$?
@@ -3145,17 +3169,25 @@ ns_rc=$?
 ns_lock=$(g -C "$ns_work" ls-remote origin 'refs/claims/issue-8801' | awk '{print $1}')
 ns_beat=$(g -C "$ns_work" ls-remote origin 'refs/heartbeats/nsBox' | awk '{print $1}')
 if [ -n "$ns_lock" ] && [ -n "$ns_beat" ]; then
-  ok "NON-VACUITY: both populated namespaces are staged (refs/claims/issue-8801, refs/heartbeats/nsBox) with pid $ABSENT_PID"
+  ok "NON-VACUITY: both populated namespaces are staged (refs/claims/issue-8801, refs/heartbeats/nsBox issue 8803) with pid $ABSENT_PID"
 else
   bad "NON-VACUITY broken: fixture refs missing (lock='$ns_lock' beat='$ns_beat')"
 fi
-# here-strings throughout (roborev job 15, finding 1 — see TEST 81).
+# THE ASSERTION HAS TO COVER WHAT IT CLAIMS (roborev job 41, finding 2). It used to reject only the
+# token `DEAD-` and the number 8801, so a heartbeat-derived row such as `nsBox <no issue> …
+# UNKNOWN-NO-PID` — which carries neither — would have passed while the case claimed "no row at all".
+# Four independent conditions now: no ROW for the staged machine, NO verdict token of ANY kind, and
+# each staged namespace's OWN identifier absent. here-strings throughout (job 15, finding 1).
+ns_row=$(grep -cE '^nsBox ' <<<"$ns_out")
+ns_verdict=$(grep -coE 'DEAD-[A-Z-]+|UNKNOWN-[A-Z-]+|ALIVE' <<<"$ns_out")
 if [ "$ns_rc" -eq 1 ] \
-  && ! grep -q 'DEAD-' <<<"$ns_out" \
-  && ! grep -q '8801' <<<"$ns_out"; then
-  ok "a dead pid in refs/claims/issue-<N> (and a heartbeat beside it) produces NO DEAD-* verdict and no row at all (rc=$ns_rc)"
+  && [ "$ns_row" -eq 0 ] \
+  && [ "$ns_verdict" -eq 0 ] \
+  && ! grep -q '8801' <<<"$ns_out" \
+  && ! grep -q '8803' <<<"$ns_out"; then
+  ok "neither populated namespace yields anything: 0 rows for nsBox, 0 verdict tokens of any kind, and neither 8801 (lock) nor 8803 (heartbeat) named (rc=$ns_rc)"
 else
-  bad "the populated namespaces must be OUT of the subject set — no DEAD-* and no row: rc=$ns_rc out:
+  bad "the populated namespaces must be OUT of the subject set — rows=$ns_row verdict-tokens=$ns_verdict rc=$ns_rc out:
 $ns_out"
 fi
 # ...and the run must say it measured NOTHING, so an operator is not left reading silence as

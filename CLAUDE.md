@@ -1974,8 +1974,10 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   had). Lane liveness here rests on the coordination sweep plus **TWO board signatures that mean
   DIFFERENT things**: a **HELD `refs/claims/issue-<N>` with no live session** is the DEAD-LANE signal
   (a vanished `/drive-issue` lane keeps its claim ref — the ref outlives the process), while **Ready +
-  pushed branch + NO claim ref** is #3436's **UNCLAIMED-WORK** signature and is NOT evidence a lane
-  died. Both are **operating mechanisms, NOT committed tooling: no such script or command exists in
+  pushed branch + NO claim ref** is **AMBIGUOUS and deliberately NOT classified** — parked-by-design
+  work, #3436's unclaimed-work case and a lane that died before claiming all look identical, nothing
+  separates them mechanically, so it is **a prompt to look, never a verdict** and never by itself
+  evidence of a lane death. All of these are **operating mechanisms, NOT committed tooling: no such script or command exists in
   this repo**, and #3436's reading of the second CONFLICTS with the runbook's "parked-by-design"
   reading of the same shape, unresolved. AC4 survives the descope, and
   **EXCLUSION IS THE ABSTENTION**: the two populated carriers are NOT ENUMERATED, so they produce no

@@ -937,18 +937,23 @@ yield `DEAD-*`") — both are false about the code.
 
 1. **The coordination lead's sweep** — a human-driven loop over the board and the open PRs. It is what
    has been catching stalls in practice, including a lane parked 56 minutes on a missed request.
-2. **Two board signatures, which mean different things** (the distinction the recovery row above
-   spells out): a **held `refs/claims/issue-<N>` with no live session** is the **dead-lane** signal —
-   a vanished `/drive-issue` lane retains its claim ref, because the ref outlives the process — while
-   ***Ready* + pushed branch + no claim ref** is the **#3436 unclaimed-work** signature: work
-   performed without claiming, **not** evidence that a lane died.
+2. **Two board signatures that mean different things — and only the first is definite** (the
+   distinction the recovery row above spells out).
+   (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL — a vanished
+   `/drive-issue` lane RETAINS its claim ref, because the ref outlives the process, so this is where
+   dead-lane investigation goes on such a fleet. That one is NOT ambiguous.
+   (b) `Ready` + pushed branch + NO claim ref is AMBIGUOUS and is deliberately NOT classified here: the
+   same shape fits parked-by-design work, the #3436 unclaimed-work case, and a lane that died before
+   claiming. Nothing distinguishes them mechanically today, so check the branch's last commit time and
+   whether a session is driving it; it is not by itself evidence of a lane death, and the rule is to
+   treat the signature as a prompt to look, never as a verdict.
 
 **Both are OPERATING MECHANISMS, tracked by #3436 (open, `status:in-review`) — NOT committed tooling.**
 There is no `board-signature` script, no sweep command, and no flag in this repository; a `grep` for
 either term finds nothing. Do not go looking for one, and do not add its name to this page until
 something in `scripts/` actually implements it.
 
-**And the unclaimed-work signature is ambiguous today.** The *Reading the board* section above reads
+**Where the two readings of signature (b) collide.** The *Reading the board* section above reads
 *Ready + branch already on origin* as **parked-by-design**, while #3436 reads the same shape as **work
 being performed without a claim**. That conflict is real and unresolved: nothing mechanical
 distinguishes them, so an operator has to check the branch's last commit time and whether a session is
