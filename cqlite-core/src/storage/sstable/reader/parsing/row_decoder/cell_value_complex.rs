@@ -121,7 +121,8 @@ impl V5CompressedLegacyParser {
 
                 // Parse UDT value from the blob
                 let udt_data = &data[off..off + blob_len];
-                let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+                let (udt_value, _consumed) =
+                    self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
                 off += blob_len;
 
                 (udt_value, off)
@@ -169,7 +170,8 @@ impl V5CompressedLegacyParser {
                 }
 
                 let udt_data = &data[off..off + blob_len];
-                let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+                let (udt_value, _consumed) =
+                    self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
                 off += blob_len;
 
                 (udt_value, off)

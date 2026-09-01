@@ -801,7 +801,7 @@ fn a_collection_field_of_a_top_level_frozen_udt_column_also_decodes_structurally
     data.extend_from_slice(&udt_field(MAP_A_1_GOLDEN_BYTES));
 
     let (value, consumed) = parser()
-        .parse_udt_value(&data, 0, &udt_def, &column)
+        .parse_udt_value(&data, 0, &udt_def, &column, 0)
         .expect("the top-level frozen-UDT column path must decode");
     assert_eq!(consumed, data.len(), "every byte must be accounted for");
 
@@ -926,4 +926,235 @@ fn a_legitimately_nested_frozen_spelling_is_not_refused_by_the_depth_limit() {
         ),
         other => panic!("expected the inner UDT, got {other:?}"),
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE COLUMN-LEVEL ENTRY POINT (roborev round 4, findings A and B).
+//
+// `parse_udt_value` is the decoder a TOP-LEVEL frozen-UDT column takes. It reported a
+// consumed offset that every production caller DISCARDED (`let (v, _) = …`), and its
+// `Frozen`/`Udt` arms recursed through it again at depth ZERO — so on this path the
+// byte accounting and the shared nesting limit were both unchecked, while the nested
+// path had both. The enumeration that produced the five-dispatch collapse covered the
+// PER-FIELD entries and missed these; the closure was larger than that table.
+// ════════════════════════════════════════════════════════════════════════════
+
+fn column(name: &str, data_type: &str) -> crate::schema::Column {
+    crate::schema::Column {
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    }
+}
+
+/// A one-field `inner(a int)` def for the column-level decoder.
+fn inner_def() -> UdtTypeDef {
+    UdtTypeDef {
+        keyspace: "test_udt_collision".to_string(),
+        name: "inner".to_string(),
+        fields: vec![UdtFieldDef {
+            name: "a".to_string(),
+            field_type: CqlType::Int,
+            nullable: true,
+        }],
+    }
+}
+
+#[test]
+fn a_top_level_frozen_udt_column_consuming_every_byte_decodes() {
+    let (value, consumed) = parser()
+        .parse_udt_value(
+            &inner_a_1(),
+            0,
+            &inner_def(),
+            &column("u", "frozen<inner>"),
+            0,
+        )
+        .expect("the exact serialization must decode");
+    assert_eq!(consumed, inner_a_1().len());
+    assert!(matches!(unfrozen(&value), Value::Udt(_)), "got {value:?}");
+}
+
+#[test]
+fn trailing_bytes_in_a_top_level_frozen_udt_column_are_refused() {
+    let mut bytes = inner_a_1();
+    bytes.extend_from_slice(&0i32.to_be_bytes());
+    let err = parser()
+        .parse_udt_value(&bytes, 0, &inner_def(), &column("u", "frozen<inner>"), 0)
+        .expect_err("trailing bytes after the last declared field are corruption");
+    assert!(err.to_string().contains("trailing byte"), "got: {}", err);
+}
+
+#[test]
+fn a_partial_trailing_field_length_prefix_in_a_top_level_udt_column_is_refused() {
+    // Two declared fields so the loop reaches the second and finds fewer than four
+    // bytes left — Cassandra's `if (position + 4 > length) throw`.
+    let mut def = inner_def();
+    def.fields.push(UdtFieldDef {
+        name: "b".to_string(),
+        field_type: CqlType::Text,
+        nullable: true,
+    });
+    let mut bytes = inner_a_1();
+    bytes.extend_from_slice(&[0x00, 0x00]);
+    let err = parser()
+        .parse_udt_value(&bytes, 0, &def, &column("u", "frozen<inner>"), 0)
+        .expect_err("an incomplete field-length prefix is corruption");
+    assert!(err.to_string().contains("trailing byte"), "got: {}", err);
+
+    // POSITIVE CONTROL: the same two-field def with NO stray bytes is legal.
+    parser()
+        .parse_udt_value(&inner_a_1(), 0, &def, &column("u", "frozen<inner>"), 0)
+        .expect("omitted trailing fields at exact EOF are legal");
+}
+
+#[test]
+fn a_nested_inline_udt_in_a_top_level_column_is_byte_checked_and_depth_bounded() {
+    // Finding B's shape: the field's declared type is an INLINE nested UDT, which used
+    // to recurse through `parse_udt_value` at depth 0 with its offset discarded.
+    let def = UdtTypeDef {
+        keyspace: "test_udt_collision".to_string(),
+        name: "outer".to_string(),
+        fields: vec![UdtFieldDef {
+            name: "n".to_string(),
+            field_type: CqlType::Udt("inline".to_string(), vec![("a".to_string(), CqlType::Int)]),
+            nullable: true,
+        }],
+    };
+    // Well-formed: `[i32 len][inner UDT bytes]`.
+    let good = udt_field(&inner_a_1());
+    parser()
+        .parse_udt_value(&good, 0, &def, &column("u", "frozen<outer>"), 0)
+        .expect("a well-formed inline nested UDT must decode");
+
+    // The nested UDT's own slice carries a trailing byte: invisible before finding B's
+    // fix, because the nested decoder's consumed count was dropped.
+    let mut inner = inner_a_1();
+    inner.push(0x7F);
+    let bad = udt_field(&inner);
+    let err = parser()
+        .parse_udt_value(&bad, 0, &def, &column("u", "frozen<outer>"), 0)
+        .expect_err("a trailing byte INSIDE the nested UDT must be refused");
+    assert!(err.to_string().contains("trailing byte"), "got: {}", err);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NULL COLLECTION ENTRIES (roborev round 4, finding C).
+//
+// Authority, read first-hand at the pinned tag:
+// `cassandra-5.0.8:.../serializers/MapSerializer.java` `deserialize` reads BOTH halves
+// of every entry with `readNonNullValue` (lines 136 and 140), and
+// `CollectionSerializer.readNonNullValue` throws
+// `MarshalException("Null value read when not allowed")` for the null that `readValue`
+// returns on any `size < 0`. So a negative length is corruption on EITHER side, and
+// surfacing the value side as `Value::Null` invented a value no writer can produce.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a_negative_map_value_length_is_refused_like_a_negative_key_length() {
+    let ty = CqlType::Frozen(Box::new(CqlType::Map(
+        Box::new(CqlType::Text),
+        Box::new(CqlType::Int),
+    )));
+    // one entry: key "a" (well-formed), value length -1
+    let mut bytes = 1i32.to_be_bytes().to_vec();
+    bytes.extend_from_slice(&1i32.to_be_bytes());
+    bytes.push(b'a');
+    bytes.extend_from_slice(&(-1i32).to_be_bytes());
+    let err = parser()
+        .parse_simple_udt_field_value_at(&bytes, &ty, 0)
+        .expect_err("a null map VALUE is not a legal entry");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("null map value"),
+        "the error must name the illegal entry half; got: {msg}"
+    );
+
+    // The KEY side was already refused; asserted here so the two stay symmetric.
+    let mut key_bad = 1i32.to_be_bytes().to_vec();
+    key_bad.extend_from_slice(&(-1i32).to_be_bytes());
+    key_bad.extend_from_slice(&4i32.to_be_bytes());
+    key_bad.extend_from_slice(&1i32.to_be_bytes());
+    assert!(
+        parser()
+            .parse_simple_udt_field_value_at(&key_bad, &ty, 0)
+            .is_err(),
+        "a null map KEY must stay refused"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// EMPTY FIXED-WIDTH VALUES (roborev round 4, finding D).
+//
+// The width gate ALLOWED an empty buffer while every delegate rejected empty input, so
+// the allowance was dead code and the real behaviour was a worse error. Worse, the test
+// that claimed to cover the rule exercised an empty MAP — a variable-width type — so it
+// could not have caught it. Authority (pinned tag):
+// `Int32Serializer.validate` = `if (accessor.size(value) != 4 && !accessor.isEmpty(value))
+// throw ... "Expected 4 or 0 byte int"`, and `deserialize` =
+// `accessor.isEmpty(value) ? null : accessor.toInt(value)`. So empty is LEGAL and means
+// NULL — which is also what the sibling column-level path already did for `[i32 0]`.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn an_empty_fixed_width_field_is_null_not_an_error() {
+    let p = parser();
+    for ty in [
+        CqlType::Int,
+        CqlType::BigInt,
+        CqlType::Boolean,
+        CqlType::Float,
+        CqlType::Double,
+        CqlType::Uuid,
+        CqlType::Timestamp,
+        CqlType::SmallInt,
+        CqlType::TinyInt,
+        CqlType::Date,
+        CqlType::Time,
+    ] {
+        let value = p
+            .parse_simple_udt_field_value_at(&[], &ty, 0)
+            .unwrap_or_else(|e| {
+                panic!("empty {ty:?} must be legal (Cassandra: \"4 or 0 byte int\"), got {e}")
+            });
+        assert_eq!(
+            value,
+            Value::Null,
+            "an empty fixed-width {ty:?} deserializes to NULL, per Int32Serializer.deserialize"
+        );
+    }
+}
+
+#[test]
+fn an_empty_variable_width_field_keeps_its_own_empty_semantics() {
+    let p = parser();
+    assert_eq!(
+        p.parse_simple_udt_field_value_at(&[], &CqlType::Text, 0)
+            .expect("empty text is the empty string, not null"),
+        Value::text("")
+    );
+    match p
+        .parse_simple_udt_field_value_at(&[], &CqlType::Blob, 0)
+        .expect("empty blob is the empty blob")
+    {
+        Value::Blob(b) => assert!(b.is_empty()),
+        other => panic!("expected an empty blob, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_oversized_fixed_width_field_is_still_refused() {
+    // The other side of the same gate, on an actual FIXED-WIDTH type — which is the
+    // coverage finding D says was missing, the previous case having used a map.
+    let err = parser()
+        .parse_simple_udt_field_value_at(&[0, 0, 0, 1, 0xFF], &CqlType::Int, 0)
+        .expect_err("5 bytes is neither 4 nor 0");
+    assert!(
+        err.to_string().contains("Int field requires 4 bytes")
+            || err.to_string().contains("4 bytes"),
+        "got: {}",
+        err
+    );
 }

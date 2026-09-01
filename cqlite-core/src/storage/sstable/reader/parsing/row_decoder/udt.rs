@@ -77,7 +77,13 @@ impl V5CompressedLegacyParser {
         }
 
         let udt_data = &data[offset..offset + blob_len];
-        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+        let (udt_value, _consumed) =
+            // depth 0, written here because this IS a column-level entry point: a
+            // top-level frozen-UDT cell starts a fresh nesting budget. The `0` is at the
+            // call site by design — a zero-depth WRAPPER is what a caller inside a decode
+            // picks by accident (issue #3631). `parse_udt_value` itself now requires the
+            // decode to consume the whole cell, so the discarded offset is safe here.
+            self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
         offset += blob_len;
 
         Ok((udt_value, offset))
@@ -429,13 +435,36 @@ impl V5CompressedLegacyParser {
     // field layout using only the [`UdtTypeDef`] field types. It does NOT need an
     // [`SSTableReader`] (the previous `reader` param was threaded through but never
     // dereferenced), so it is reader-free and unit-testable in isolation (issue #1080).
+    ///
+    /// # Byte accounting (issue #3631, roborev round 4 finding A)
+    /// `data` is exactly one serialized UDT, so the decode must reach its end. Every
+    /// production caller passed `offset = 0` and DISCARDED the returned offset
+    /// (`let (v, _) = …`), which meant a top-level frozen UDT with trailing bytes — or
+    /// with an incomplete 1-3 byte field-length prefix, which the field loop reads as
+    /// "trailing fields omitted" — was accepted. Requiring it HERE is the one place no
+    /// caller can forget, which is the same reason the per-field entry owns its own
+    /// assert; four call sites could each have grown the check and three of them would
+    /// eventually not have.
+    ///
+    /// The rule is `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/TupleType.java`
+    /// `split`, which `UserType extends TupleType` inherits: `if (position == length)
+    /// return copyOfRange(...)` (omitted trailing fields are legal ONLY at exact
+    /// end-of-buffer) and, after the loop, `if (position < length) throw ... "but got
+    /// more"`.
     pub(super) fn parse_udt_value(
         &self,
         data: &[u8],
         offset: usize,
         udt_def: &UdtTypeDef,
         _column: &crate::schema::Column,
+        depth: usize,
     ) -> Result<(Value, usize)> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::corruption(format!(
+                "UDT '{}': type nesting depth {} exceeds maximum {}",
+                udt_def.name, depth, MAX_TYPE_NESTING_DEPTH
+            )));
+        }
         // Validate field count to prevent memory exhaustion
         if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
             return Err(Error::schema(format!(
@@ -516,7 +545,7 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Parse field value based on its type
-                let value = self.parse_udt_field_value(field_data, &field_def.field_type)?;
+                let value = self.parse_udt_field_value(field_data, &field_def.field_type, depth)?;
                 Some(value)
             };
 
@@ -532,11 +561,39 @@ impl V5CompressedLegacyParser {
             fields,
         };
 
+        // See the doc comment: the whole slice IS the UDT.
+        if current_offset != data.len() {
+            return Err(Error::corruption(format!(
+                "UDT '{}': decoded {} of {} bytes — {} trailing byte(s) unaccounted for \
+                 (trailing bytes, or a partial trailing field-length prefix, are \
+                 corruption per TupleType.split; issue #3631)",
+                udt_def.name,
+                current_offset,
+                data.len(),
+                data.len().saturating_sub(current_offset)
+            )));
+        }
+
         Ok((Value::Udt(Box::new(udt_value)), current_offset))
     }
 
-    /// Parse a UDT field value based on its CqlType.
-    fn parse_udt_field_value(&self, data: &[u8], field_type: &CqlType) -> Result<Value> {
+    /// Parse a UDT field value based on its CqlType, carrying the nesting `depth`.
+    ///
+    /// The scalar arms are this path's own (a `date` is `Value::Date`, an `inet` is
+    /// `Value::Inet`, `float` surfaces `Value::Float32`) and are kept byte-for-byte:
+    /// changing which `Value` variant a top-level frozen-UDT column produces is not this
+    /// issue's subject. Everything STRUCTURED — `frozen<…>`, a nested UDT, a collection,
+    /// a tuple — is delegated to the one per-field entry, which threads `depth` and
+    /// asserts exhaustion (issue #3631, roborev round 4 finding B). It previously had its
+    /// own `Frozen` and `Udt` arms that recursed through `parse_udt_value` at depth ZERO
+    /// and dropped its consumed offset, so the shared nesting limit and the byte
+    /// accounting were both unchecked on exactly this path.
+    fn parse_udt_field_value(
+        &self,
+        data: &[u8],
+        field_type: &CqlType,
+        depth: usize,
+    ) -> Result<Value> {
         match field_type {
             CqlType::Text | CqlType::Ascii => {
                 std::str::from_utf8(data)
@@ -638,40 +695,14 @@ impl V5CompressedLegacyParser {
             CqlType::Inet => Ok(Value::Inet(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
             )),
-            CqlType::Frozen(inner) => {
-                // Parse the inner type and wrap in Frozen
-                let inner_value = self.parse_udt_field_value(data, inner)?;
-                Ok(Value::Frozen(Box::new(inner_value)))
-            }
-            CqlType::Udt(name, field_defs) => {
-                // Nested UDT - recursively parse
-                let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
-                for (field_name, field_type) in field_defs {
-                    nested_def =
-                        nested_def.with_field(field_name.clone(), field_type.clone(), true);
-                }
-                let dummy_column = crate::schema::Column {
-                    name: name.clone(),
-                    data_type: "udt".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                };
-                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
-                Ok(value)
-            }
-            // Issue #3631 instance B, THIRD site: this arm used to hand back
-            // `Value::Blob` for every remaining declared type, exactly as
-            // `parse_simple_udt_field_value` did. It is the field decoder for
-            // `parse_udt_value`, i.e. the one a TOP-LEVEL frozen-UDT column takes, so
-            // leaving it would have fixed the nested spelling
-            // (`set<tuple<frozen<udt>,int>>`, which the fixture happens to carry) and
-            // left the direct one degrading — the "patch a site, the family
-            // regenerates" failure #3504 and this issue were both filed about. The
-            // depth starts at 0 because each entry here peels one `CqlType` layer of a
-            // FINITE declared type; the delegate then threads and enforces the limit
-            // across every layer it adds.
-            other => self.parse_typed_value(data, other, "UDT field", 0),
+
+            // EVERY structured type — `frozen<…>`, a nested UDT, a collection, a tuple —
+            // and every scalar this path does not spell itself goes to the one per-field
+            // entry, carrying `depth` (issue #3631; the `Value::Blob` fallback this arm
+            // used to be was the THIRD of five, and the `Frozen`/`Udt` arms that used to
+            // sit above it were round 4's finding B: they recursed through
+            // `parse_udt_value` at depth ZERO and discarded its consumed offset).
+            other => self.parse_simple_udt_field_value_at(data, other, depth),
         }
     }
 

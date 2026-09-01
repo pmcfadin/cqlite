@@ -105,6 +105,16 @@ impl V5CompressedLegacyParser {
                 "UDT field: type nesting depth {depth} exceeds maximum {MAX_TYPE_NESTING_DEPTH}"
             )));
         }
+        // An EMPTY field (`[i32 0]`, i.e. `ByteBufferUtil.EMPTY_BYTE_BUFFER`) is decided by
+        // ONE rule, in the typed decoder — see its fixed-width gate, which cites
+        // `Int32Serializer.validate`/`deserialize` at the pinned tag. The arms below each
+        // require their exact width, so without this redirect an empty `int` field
+        // ERRORED here while Cassandra reads it as null (roborev round 4, finding D). Text,
+        // blob and the collections keep their own empty semantics, which the typed decoder
+        // spells identically (`Text("")`, empty blob, empty collection).
+        if data.is_empty() {
+            return self.parse_typed_value(data, field_type, "UDT field", depth);
+        }
         match field_type {
             CqlType::Text | CqlType::Ascii => {
                 std::str::from_utf8(data)
@@ -438,7 +448,25 @@ impl V5CompressedLegacyParser {
                     let value_ctx = format!("{ctx}: map entry {i} value");
                     let value =
                         match Self::read_sized_element(data, &mut pos, &value_ctx, "map value")? {
-                            None => Value::Null,
+                            // A negative length is REPRESENTABLE and is corruption, not a
+                            // `Null` — the same rule as the key above, and it used to
+                            // differ (roborev round 4, finding C). Verified first-hand at
+                            // the pinned tag rather than taken from the finding:
+                            // `cassandra-5.0.8:src/java/org/apache/cassandra/serializers/MapSerializer.java`
+                            // `deserialize` reads BOTH halves of every entry with
+                            // `readNonNullValue` (lines 136 and 140), and
+                            // `CollectionSerializer.readNonNullValue` throws
+                            // `MarshalException("Null value read when not allowed")` when
+                            // `readValue` returned null, which it does for any `size < 0`.
+                            // So Cassandra itself refuses this byte pattern; surfacing it
+                            // as `Value::Null` invented a value no writer can produce.
+                            None => {
+                                return Err(Error::corruption(format!(
+                                    "{value_ctx}: null map value (negative length) is not a \
+                                     legal map entry — Cassandra's MapSerializer reads \
+                                     entry values with readNonNullValue"
+                                )))
+                            }
                             Some(bytes) => {
                                 self.parse_typed_value(bytes, value_type, &value_ctx, depth + 1)?
                             }
@@ -509,14 +537,29 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
                 if let Some(width) = Self::fixed_scalar_width(short) {
-                    // Cassandra accepts the exact width or an EMPTY buffer; the
-                    // delegate below checks `<`, so it would silently drop the tail
-                    // of an oversized frame.
-                    if !data.is_empty() && data.len() != width {
+                    // An EMPTY buffer is legal for a fixed-width type, and it means NULL.
+                    // Both halves are read first-hand at the pinned tag (roborev round 4,
+                    // finding D — the old code ALLOWED empty here and then handed it to a
+                    // delegate that rejects every empty input, so the allowance was dead
+                    // and the real behaviour was a worse error message):
+                    // `cassandra-5.0.8:src/java/org/apache/cassandra/serializers/Int32Serializer.java`
+                    // `validate` is `if (accessor.size(value) != 4 && !accessor.isEmpty(value))
+                    // throw new MarshalException("Expected 4 or 0 byte int (%d)")` — 4 OR 0 —
+                    // and `deserialize` is `accessor.isEmpty(value) ? null : accessor.toInt(value)`.
+                    // A UDT field written `[i32 0]` carries `ByteBufferUtil.EMPTY_BYTE_BUFFER`,
+                    // which is exactly this case.
+                    if data.is_empty() {
+                        return Ok((Value::Null, 0));
+                    }
+                    // Any OTHER length is refused rather than truncated: the delegate
+                    // bounds-checks with `<`, so it would read `width` bytes out of a
+                    // longer frame and drop the tail.
+                    if data.len() != width {
                         return Err(Error::corruption(format!(
-                            "{ctx}: declared type '{short}' is {width} bytes wide but \
-                             the framed value is {} bytes; accepting it would \
-                             silently discard {} trailing byte(s) (issue #3631)",
+                            "{ctx}: declared type '{short}' is {width} bytes wide (or \
+                             empty, meaning null) but the framed value is {} bytes; \
+                             accepting it would silently discard {} trailing byte(s) \
+                             (issue #3631)",
                             data.len(),
                             data.len().saturating_sub(width)
                         )));
