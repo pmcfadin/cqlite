@@ -2115,5 +2115,42 @@ fi
 kill_sleeper "$S45"
 rm -rf "$D45"
 
+# ===========================================================================
+echo "TEST 46: --pid '' is a USAGE ERROR in EVERY subcommand, never a silent fallback (roborev round 31)"
+# ===========================================================================
+# `--pid "$PID"` with an UNSET variable used to fall through to ancestor-based resolution, so
+# the caller believed it had named a holder while the lock recorded a DIFFERENT identity.
+# `--expect ''` was already refused for exactly this reasoning; --pid was the sibling option
+# that lacked it. ASSERTED ACROSS ALL FIVE SUBCOMMANDS BY ENUMERATION, because the first
+# attempt at this fix patched three of the five parse sites and a spot-check would have passed:
+# a per-site guard is a list to keep complete, so the test iterates the list.
+D46="$(mktemp -d)"; mkdir -p "$D46/lane-900"
+for sub46 in acquire verify probe release reclaim; do
+  case "$sub46" in
+    reclaim) extra46="--expect none --reason test-empty-pid-guard" ;;
+    *)       extra46="" ;;
+  esac
+  # shellcheck disable=SC2086
+  o46="$(LANE_ROOT="$D46" bash "$LL" "$sub46" 900 --pid '' --lane-dir "$D46/lane-900" $extra46 2>&1)"; rc46=$?
+  if [ "$rc46" -eq 64 ] && printf '%s' "$o46" | grep -q "rejected on purpose"; then
+    ok "($sub46) --pid '' is a usage error (rc=64), not a silent fallback to ancestor resolution"
+  else
+    bad "($sub46) --pid '' was accepted: rc=$rc46
+$o46"
+  fi
+done
+# CONTROL: the guard must not refuse a REAL pid, or every arm above passes for the wrong reason.
+sleep46_started=0
+sleeper; S46="$REPLY_SLEEPER"
+o46c="$(LANE_ROOT="$D46" bash "$LL" acquire 900 --pid "$S46" --lane-dir "$D46/lane-900" 2>&1)"; rc46c=$?
+if [ "$rc46c" -eq 0 ] && printf '%s' "$o46c" | grep -q 'ACQUIRED issue=900'; then
+  ok "(control) a REAL --pid still acquires, so the refusals above are about EMPTINESS"
+else
+  bad "(control) a real --pid was refused too — the guard is over-broad: rc=$rc46c
+$o46c"
+fi
+kill_sleeper "$S46"
+rm -rf "$D46"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

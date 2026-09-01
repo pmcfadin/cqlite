@@ -387,8 +387,14 @@ scan_board() {
         BOARD_UNPARSEABLE_ROW="$line"
         return 1 ;;
     esac
+    # `null|''` — THE EMPTY CASE MATCHES NEITHER SIBLING ARM (#3436, roborev round 31). An
+    # empty number is not the literal `null`, and it contains no non-digit character either, so
+    # `*[!0-9]*` does not catch it: `Issue|pmcfadin/cqlite|` fell through BOTH arms and was
+    # ACCEPTED, letting schema drift report measured=yes off a row carrying no issue at all.
+    # The adjacent `row_repo` arm above already spelled this `null|''`; this one did not, which
+    # is the same rule written correctly for one field and incompletely for the field beside it.
     case "$row_num" in
-      null)
+      null|'')
         BOARD_UNPARSEABLE_ROW="$line"
         return 1 ;;
       *[!0-9]*)

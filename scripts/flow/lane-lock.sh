@@ -1511,7 +1511,17 @@ cmd_acquire() {
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
-      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2";  shift 2 ;;
+      # AN EMPTY --pid IS A USAGE ERROR, NOT "no --pid" (#3436, roborev round 31). The classic
+      # `--pid "$PID"` with an UNSET variable silently fell back to ancestor-based resolution, so
+      # the caller believes it named a holder while the lock records a DIFFERENT identity --- and
+      # acquire/verify/probe/release/reclaim then all operate under it. `--expect ''` is already
+      # refused for exactly this reasoning ("an unset lease variable would silently disable the
+      # incarnation check"); this is that rule applied to the sibling option that lacked it.
+      # Applied at ALL FIVE parse sites, checked by count -- a per-site fix is a list to keep
+      # complete, and the first attempt at this very change missed two of the five.
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"
+                  [ -n "$2" ] || die_usage "--pid '' is rejected on purpose — an unset pid variable would silently fall back to ancestor resolution and record an identity you did not name. Pass a pid, or omit --pid and run from inside the lane."
+                  pid_opt="$2"; shift 2 ;;
       -*) die_usage "acquire: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "acquire: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -1553,7 +1563,11 @@ cmd_verify() {
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
-      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2";  shift 2 ;;
+      # An empty --pid is a usage error, not "no --pid" (#3436, roborev round 31) --- full
+      # rationale at the acquire arm above.
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"
+                  [ -n "$2" ] || die_usage "--pid '' is rejected on purpose — an unset pid variable would silently fall back to ancestor resolution and record an identity you did not name. Pass a pid, or omit --pid and run from inside the lane."
+                  pid_opt="$2"; shift 2 ;;
       -*) die_usage "verify: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "verify: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -1611,7 +1625,11 @@ cmd_probe() {
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";   shift 2 ;;
-      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2"; shift 2 ;;
+      # An empty --pid is a usage error, not "no --pid" (#3436, roborev round 31) --- full
+      # rationale at the acquire arm above.
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"
+                  [ -n "$2" ] || die_usage "--pid '' is rejected on purpose — an unset pid variable would silently fall back to ancestor resolution and record an identity you did not name. Pass a pid, or omit --pid and run from inside the lane."
+                  pid_opt="$2"; shift 2 ;;
       -*) die_usage "probe: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "probe: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -1751,7 +1769,11 @@ cmd_release() {
       # SUBJECT but cannot fix the IDENTITY. Three sanctioned ways to release, in order of
       # preference: from inside the lane; with --pid naming the durable holder; or --force
       # (the reaper path, which needs no identity at all).
-      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"; pid_opt="$2"; shift 2 ;;
+      # An empty --pid is a usage error, not "no --pid" (#3436, roborev round 31) --- full
+      # rationale at the acquire arm above.
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"
+                  [ -n "$2" ] || die_usage "--pid '' is rejected on purpose — an unset pid variable would silently fall back to ancestor resolution and record an identity you did not name. Pass a pid, or omit --pid and run from inside the lane."
+                  pid_opt="$2"; shift 2 ;;
       -*) die_usage "release: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "release: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -1936,7 +1958,11 @@ cmd_reclaim() {
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
-      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2";  shift 2 ;;
+      # An empty --pid is a usage error, not "no --pid" (#3436, roborev round 31) --- full
+      # rationale at the acquire arm above.
+      --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value"
+                  [ -n "$2" ] || die_usage "--pid '' is rejected on purpose — an unset pid variable would silently fall back to ancestor resolution and record an identity you did not name. Pass a pid, or omit --pid and run from inside the lane."
+                  pid_opt="$2"; shift 2 ;;
       --expect)   [ "$#" -ge 2 ] || die_usage "--expect requires a value"; expect="$2"; expect_given=1; shift 2 ;;
       --reason)   [ "$#" -ge 2 ] || die_usage "--reason requires a value"; reason="$2"; reason_given=1; shift 2 ;;
       -*) die_usage "reclaim: unknown flag $1" ;;

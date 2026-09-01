@@ -571,6 +571,24 @@ else
 $out13b"
 fi
 
+# AN EMPTY ISSUE NUMBER IS THE SAME CLASS AND MATCHED NEITHER ARM (#3436, roborev round 31).
+# `Issue|pmcfadin/cqlite|` is not the literal `null`, and an empty string contains no non-digit
+# character, so `*[!0-9]*` did not catch it either: the row fell through BOTH arms and was
+# ACCEPTED, producing measured=yes off a row carrying no issue at all. The sibling `row_repo`
+# arm had spelled this `null|''` since round 21; the number arm had not — the same rule written
+# correctly for one field and incompletely for the field beside it.
+mk_gh "$T/bin13c" "Issue|pmcfadin/cqlite|"
+rc13c=0; out13c="$( run_scan "$T/bin13c" 2>&1 )" || rc13c=$?
+if [ "$rc13c" -eq 1 ] \
+   && printf '%s' "$out13c" | grep -q 'UNMEASURABLE what=board-status' \
+   && printf '%s' "$out13c" | grep -qE '^SCAN: advertised-collision .*measured=no' \
+   && ! printf '%s' "$out13c" | grep -qE '^SCAN: advertised-collision .*measured=yes'; then
+  ok "an EMPTY issue number is UNMEASURABLE too, not accepted as a candidate (round 31)"
+else
+  bad "expected an empty issue number to read UNMEASURABLE; got rc=$rc13c
+$out13c"
+fi
+
 # ===========================================================================
 echo "TEST 16: a credential-bearing remote is REDACTED in every output path"
 # ===========================================================================
