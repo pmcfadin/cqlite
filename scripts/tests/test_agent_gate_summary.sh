@@ -1165,6 +1165,35 @@ else
   cat "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null | head -3
 fi
 
+# 9c-v-d. NO HARDCODED DEFAULT, SO AN UNKNOWABLE ONE IS UNATTRIBUTED (issue #3727 roborev round 6,
+#         f2 — and this issue's own declared residual from round 1, found independently). Every
+#         provenance label except pinned/stale is a statement RELATIVE TO sccache's own default cap,
+#         and that default used to be a constant measured on 0.17.0 while the fleet installs sccache
+#         UNVERSIONED — so a build with a different default would have mislabelled `default` as
+#         `inherited` and `invalid` as `invalid-stale`, restart guidance included. It is measured
+#         per emit now; where it cannot be established the cap renders `(unattributed)` and the
+#         WARNs that would quote the default stay silent.
+scc_nodflt="$tmp/scc-cap-nodefault.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_nodflt" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=unknown SCCACHE_CACHE_SIZE=30G \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-nodefault.stderr"
+if accel_token_is "$scc_nodflt" sccache-cap '32212254720(unattributed)' \
+   && ! accel_token_is "$scc_nodflt" sccache-cap '32212254720(pinned)'; then
+  ok "sccache-cap: an unmeasurable sccache default renders (unattributed) — no constant stands in for it, and a would-be (pinned) box is not labelled"
+else
+  bad "sccache-cap: an unknown default still produced a provenance label"
+  grep '^accelerators:' "$scc_nodflt" 2>/dev/null || cat "$scc_nodflt"
+fi
+if [ ! -s "$tmp/scc-cap-nodefault.stderr" ] || ! grep -q 'WARN: sccache-cap' "$tmp/scc-cap-nodefault.stderr"; then
+  ok "sccache-cap: with the default unknown, no WARN quotes a default it does not have"
+else
+  bad "sccache-cap: a WARN fired while sccache's default was unknown"
+  cat "$tmp/scc-cap-nodefault.stderr" | head -3
+fi
+assert_accelerators "sccache-cap-nodefault" "$scc_nodflt"
+
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured
 #        value — this repo's standing rule that a positive verdict requires an affirmative
@@ -5448,7 +5477,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 443: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 33 host-independent
+# 410 -> 446: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 36 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
@@ -5457,11 +5486,11 @@ fi
 # A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +33 above is a measured difference (the last four: the below-default invalid-stale row's
-# token + grammar, and the two direction asserts) and the deliberate ~10 margin is preserved rather than
+# the +36 above is a measured difference (the last three: 9c-v-d's unknown-default token, its
+# no-WARN assert and its grammar check) and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=443
+ASSERT_FLOOR=446
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

@@ -123,7 +123,11 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
   the invoking shell itself, whose environment `gate-detached.sh` forwards — comparing every
   exported `SCCACHE_*` variable, not just the cap, before it will say `sccache-cap: VERIFIED`. Any
   disagreement is `CONFLICTING-SOURCES`; a difference in an `SCCACHE_*` name it does not classify as
-  routing is `UNMEASURED` naming that name, never a pass on a partial match. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
+  routing is `UNMEASURED` naming that name, never a pass on a partial match. The same rule covers
+  the **binary**: each context is asked which `sccache` it would run, all three must agree, and a
+  disagreement is `CONFLICTING-SOURCES` (two installs can differ in the grammar, the default cap and
+  the server itself) — never a fall back to the one on bootstrap's own PATH, which under
+  `sudo bash …` is root's rather than the account gates run as. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
   running a different cap keeps it. Before writing, it also resolves **its own** fleet literal
   through the isolated oracle and refuses to persist anything that resolves to sccache's default —
   a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
@@ -167,9 +171,13 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
   running cap is above the default and *raises* it when below; the WARN computes which. (Env-value
   validity and running-server provenance are independent axes; one label for both would invent a
   causal link and invert the remedy — #3727.)
-- `…(unattributed)` — the attribution differential did not establish that a *running* server
-  answered (the reading moved with the client's env, or the second read failed), so this is the cap
-  that *will* apply rather than one proven to be in force. Most commonly: no server is up yet.
+- `…(unattributed)` — the provenance could not be established, so this is the cap that *will* apply
+  rather than one proven to be in force. Two causes: the attribution differential did not show that
+  a *running* server answered (the reading moved with the client's env, or the second read failed) —
+  most commonly no server is up yet — or **sccache's own default cap could not be measured**, which
+  every other label is stated relative to. There is deliberately no hardcoded default: this fleet
+  installs sccache unversioned, and a constant would mislabel `default` as `inherited` on a build
+  whose default differs (#3727).
 - `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires
   an affirmative measurement, so these never render as `0` or blank.
 - `sccache-used=<bytes>(<N>%)` — occupancy and fill against the enforced cap; `>= 95%` also emits a

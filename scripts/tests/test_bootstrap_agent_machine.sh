@@ -4291,6 +4291,10 @@ scc_extra=()
 [ -n "${SCC_STUB_SESSION_DIR:-}" ] && scc_extra+=("SCCACHE_DIR=$SCC_STUB_SESSION_DIR")
 if [ "$scc_login" = 1 ]; then
   [ -n "${SCC_SHIM_LOGIN_DIR+set}" ] && scc_extra+=("SCCACHE_DIR=$SCC_SHIM_LOGIN_DIR")
+  # SCC_SHIM_LOGIN_BIN prepends a directory to the LOGIN form PATH, so `command -v sccache` inside
+  # that context resolves a DIFFERENT binary — the shape of #3727 round 6 f1, where two launch
+  # contexts would run different sccache installs.
+  [ -n "${SCC_SHIM_LOGIN_BIN:-}" ] && scc_extra+=("PATH=$SCC_SHIM_LOGIN_BIN:$PATH")
 fi'
   if [ "${val#file:}" != "$val" ]; then
     mk_stub "$dir" sudo "$scc_pre
@@ -4515,7 +4519,7 @@ else
   scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720)
   scc_sl_nb=$(scc_slice "$scc_out_nb")
   if out_has "$scc_sl_nb" -E '\[warn\].*sccache-cap: UNMEASURED' \
-     && out_has "$scc_sl_nb" "no 'sccache' on PATH" \
+     && out_has "$scc_sl_nb" 'no sccache on PATH' \
      && ! out_has "$scc_sl_nb" -E '\[ok\].*sccache-cap'; then
     ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing oracle, never an [ok]"
   else
@@ -4536,6 +4540,27 @@ else
   else
     bad "sccache-cap: a client-side echo with no server running was not refused"
     printf '%s\n' "$scc_sl_ns" | head -6
+  fi
+
+  # 12b-f2. THE BINARY IS PART OF THE OBJECT (issue #3727 roborev round 6, f1). Round 3 moved the
+  #         ROUTING into the measured session and kept the binary ours; "ours" is bootstrap's ambient
+  #         PATH, which under `sudo bash bootstrap` is ROOT's — so the section could ask one sccache
+  #         about a cap and start or verify a server with it while gates run another. Two contexts
+  #         running different binaries can differ in the grammar, the default cap AND the server, so
+  #         a disagreement is the same class as a value disagreement and gets the same verdict.
+  scc_altbin="$tmp/scc-altbin"; mkdir -p "$scc_altbin"
+  mk_stub "$scc_altbin" sccache "$scc_stub_body"
+  scc_out_bin=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 SCC_SHIM_LOGIN_BIN="$scc_altbin" SCC_STUB_LOG="$scc_log")
+  scc_sl_bin=$(scc_slice "$scc_out_bin")
+  if out_has "$scc_sl_bin" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
+     && out_has "$scc_sl_bin" 'DIFFERENT sccache binaries' \
+     && out_has "$scc_sl_bin" "$scc_altbin/sccache" \
+     && ! out_has "$scc_sl_bin" -E '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: contexts that would run DIFFERENT sccache binaries are CONFLICTING-SOURCES, naming both paths"
+  else
+    bad "sccache-cap: a binary disagreement was resolved by picking one, or not reported"
+    printf '%s\n' "$scc_sl_bin" | head -6
   fi
 
   # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER

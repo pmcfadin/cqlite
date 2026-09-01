@@ -1155,7 +1155,9 @@ _sccache_health() {
 # the three measured inputs, so every state asserts deterministically with no
 # sccache installed. Each accepts digits, or the literal `unmeasured`; ANYTHING ELSE
 # IS TREATED AS `unmeasured`, NEVER AS 0 — a mis-set hook must not manufacture a
-# measured-looking value. The USED hook also accepts `null` (a server reporting no
+# measured-looking value. The DEFAULT hook additionally accepts the literal `unknown`,
+# which forces the "sccache's own default could not be measured" branch on a box where
+# the probe would succeed. The USED hook also accepts `null` (a server reporting no
 # cache size), and AGENT_GATE_TEST_SCCACHE_ATTRIBUTED=yes|no|unknown forces the
 # attribution differential's outcome — a separate axis from the size, since the
 # measurement above showed a null size says nothing about whether a server answered.
@@ -1166,12 +1168,40 @@ _sccache_health() {
 # would therefore mean two sccache execs per emit; instead _sccache_cap_probe
 # assigns into the variables both renderers read. Cost measured: 12 ms.
 
-# sccache's compiled-in default cap, MEASURED on sccache 0.17.0 (start a server with
-# SCCACHE_CACHE_SIZE unset -> `"max_cache_size":10737418240`). It is needed ONLY to
-# tell `(default)` from `(inherited)` when the variable is UNSET. If a future sccache
-# changes the constant, a genuinely-default box reads `(inherited)` — a visible
-# mislabelling of PROVENANCE, never a fabricated number.
-_SCCACHE_DEFAULT_BYTES_MEASURED=10737418240
+# THERE IS NO HARDCODED DEFAULT (issue #3727 roborev round 6, f2 — and it was this issue's
+# own declared residual from round 1, found independently, which is the system working: a
+# declared residual is still a defect if it can MISLABEL). A constant `10737418240` was
+# right for sccache 0.17.0 and this fleet installs sccache UNVERSIONED, so a build with a
+# different default would have reported `(inherited)` for a genuinely-default box and
+# `(invalid-stale)` — with its restart-direction guidance — for a plain `(invalid)` one.
+#
+# It is MEASURED instead, per emit, and it is cheap for the reason this file records above:
+# `--show-stats` does NOT start a server, so asking sccache what it would use with no
+# SCCACHE_CACHE_SIZE set costs ONE client call (~10 ms) against a private, empty
+# SCCACHE_DIR and a private port. Where that cannot be established the provenance labels
+# that DEPEND on it are not produced at all — the cap renders `(unattributed)`, which is
+# exactly what it says: this gate could not attribute the number. Never a constant standing
+# in for a measurement.
+_sccache_default_probe() {   # -> prints the byte count, or nothing
+  local __d __port __json __hits
+  command -v sccache >/dev/null 2>&1 || return 1
+  __d=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-sccache-dflt.XXXXXX" 2>/dev/null) || return 1
+  __port=$(( 40000 + (($$ + 5077) % 20000) ))
+  __json=$(env -u SCCACHE_CACHE_SIZE SCCACHE_DIR="$__d" SCCACHE_SERVER_PORT="$__port" \
+    sccache --show-stats --stats-format json 2>/dev/null)
+  # The SAME isolation assert the bootstrap oracle uses: a reading answered by somebody
+  # else's server says nothing about sccache's own default. Matched against the RAW JSON
+  # (its inner quotes are escaped).
+  case "$__json" in
+    *"$__d"*) ;;
+    *) rm -rf -- "$__d" 2>/dev/null; return 1 ;;
+  esac
+  __hits=$(printf '%s\n' "$__json" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
+  rm -rf -- "$__d" 2>/dev/null
+  [ -n "$__hits" ] || return 1
+  [ "$(printf '%s\n' "$__hits" | grep -c '^' 2>/dev/null)" = 1 ] || return 1
+  printf '%s' "${__hits##*:}"
+}
 
 # _sccache_hook_uint <raw> <outvar>: read one test hook. Digits -> the value (rc 0).
 # The literal `unmeasured` -> empty (rc 1: simulate an unreadable probe). ANYTHING
@@ -1264,10 +1294,17 @@ _sccache_cap_probe() {
     return 0
   fi
 
-  # The DEFAULT has no `unmeasured` state: it is a constant of the sccache build, so
-  # a hook value that is not digits falls back to the measured constant.
+  # The hook wins (so the self-test never depends on this build's constant); otherwise the
+  # default is MEASURED, and a failure leaves it EMPTY — which the classification below reads
+  # as "provenance not establishable" rather than substituting a guess.
   if ! _sccache_hook_uint "${AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES:-}" _SCC_DEFAULT_BYTES; then
-    _SCC_DEFAULT_BYTES="$_SCCACHE_DEFAULT_BYTES_MEASURED"
+    # The literal `unknown` forces the unmeasurable branch, so the self-test can drive it on a box
+    # where the probe WOULD succeed — the state has to be assertable, not merely reachable.
+    if [ "${AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES:-}" = unknown ]; then
+      _SCC_DEFAULT_BYTES=""
+    else
+      _SCC_DEFAULT_BYTES=$(_sccache_default_probe) || _SCC_DEFAULT_BYTES=""
+    fi
   fi
 
   local cap="" used="" why_cap="" why_used=""
@@ -1330,7 +1367,15 @@ _sccache_cap_probe() {
   if [ -n "$cap" ]; then
     _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"; _SCC_CAP_WHY=""
     local implied=""
-    if [ "$_SCC_ATTRIBUTED" != yes ]; then
+    if [ -z "$_SCC_DEFAULT_BYTES" ]; then
+      # Every remaining label except pinned/stale is a statement RELATIVE TO sccache's own
+      # default, so without it the provenance is unknown — and `unattributed` is precisely
+      # "this gate could not attribute the number". pinned/stale would still be decidable,
+      # but splitting the arm to salvage them would mean two code paths for one unknown, so
+      # the whole classification degrades together and the WARNs (which quote the default)
+      # stay silent.
+      _SCC_CAP_SOURCE=unattributed
+    elif [ "$_SCC_ATTRIBUTED" != yes ]; then
       # Nothing running is PROVEN to enforce this number — either the reading moved with
       # the client's env (no server is answering) or the differential could not be taken —
       # so no claim about the variable being IN FORCE may be made from it. Fail-closed:
