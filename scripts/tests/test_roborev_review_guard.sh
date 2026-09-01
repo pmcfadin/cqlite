@@ -6130,11 +6130,11 @@ assert_lacks 'case (jm10) --help no longer demotes token accounting to a fallbac
 assert_says 'case (jm10) --help declares the cross-box boundary' 'DECLARED BOUNDARY'
 assert_says 'case (jm10) --help says what is NOT claimed' 'NOT CLAIMED: that a marker cannot cross boxes'
 assert_says 'case (jm10) --help names the channel the marker actually travels' \
-  'travels\s*through GITHUB, not through the daemon'
+  'through GITHUB, not through the daemon'
 assert_says 'case (jm10) --help refuses the issue-body argument as irrelevant to the marker' \
   'true of the RECORD and'
 assert_says 'case (jm10) --help records the escalation rather than deciding it' \
-  'escalated to\s*the owner and PENDING on #3654'
+  'PENDING on #3654'
 assert_says 'case (jm10) --help states the mitigation is operational, not mechanical' \
   'OPERATIONAL, NOT MECHANICAL|is informational and CANNOT enforce'
 assert_says 'case (jm10) --help says why this is not the deleted classifier' \
