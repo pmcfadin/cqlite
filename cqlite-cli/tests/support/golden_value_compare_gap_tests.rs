@@ -651,6 +651,7 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
             Egress::Json,
             Depth::TopLevel,
             Kinding::Natural,
+            super::super::super::container::MapKeySpelling::ToJsonString,
         )
     };
 
@@ -819,25 +820,28 @@ fn the_multicell_map_key_gap_covers_nothing_else() {
     assert_eq!(undeclared.len(), 6, "the case floor for this bounding");
 }
 
-/// The golden half is stated against the ORACLE, not against the golden's
-/// appearance: a golden whose keys ARE the declared key type's `toJSONString`
-/// documents is the FROZEN shape this lane now compares in full, so declaring this
-/// gap there suppresses nothing and the gap is reported STALE.
+/// THE RETIREMENT AXIS IS THE EGRESS, and it is the only one that can move.
+///
+/// The gap's DDL half (a multicell column with a container key type) is fixed by the
+/// committed schema and the golden's `getString` spelling follows from it, so neither
+/// can change while the fixture does not. What CAN change is CQLite: when it decodes
+/// a multicell map's cell path instead of handing back the raw key bytes, the CLI
+/// half stops matching, the gap suppresses nothing and `Report::stale_skips` FAILS
+/// the lane until the declaration is removed or re-scoped.
+///
+/// Worth stating because it is NOT obvious and it bounds the follow-up: fixing the
+/// egress alone does not make this column AGREE. The golden leaves the key undecoded
+/// too, so the pair becomes an ordinary reported divergence — a golden-side rule for
+/// `getString`-spelled container keys is a separate piece of work.
 #[test]
-fn the_multicell_map_key_gap_does_not_match_a_golden_that_decoded() {
+fn the_multicell_map_key_gap_retires_when_the_egress_decodes_the_key() {
     let schema = schema_of(MULTICELL_MAP_DDL, "t");
-    let decoded_golden = vec![row(&[
-        ("id", json!(1)),
-        (
-            "m",
-            json!({"[{\"label\": \"charlie\", \"rank\": 3}, 8]": 80}),
-        ),
-    ])];
     let cli = multicell_map_cli(json!([
-        {"key": [{"label": "charlie", "rank": 3}, 8], "value": 80}
+        {"key": [{"label": "charlie", "rank": 3}, 8], "value": 80},
+        {"key": [{"label": "delta", "rank": 4}, 9], "value": 90}
     ]));
     let report = compare_rows(
-        &decoded_golden,
+        &multicell_map_golden(),
         &cli,
         &schema,
         &["id"],
@@ -845,17 +849,51 @@ fn the_multicell_map_key_gap_does_not_match_a_golden_that_decoded() {
         &MULTICELL_MAP_GAP,
         Egress::Json,
     );
-    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
     assert_eq!(
         report.stale_skips.len(),
         1,
-        "the gap must retire itself: {:?}",
+        "a decoded egress must retire the gap: {:?}",
         report.stale_skips
     );
-    assert!(
-        report.stale_skips[0].contains("AGREE"),
-        "{:?}",
+}
+
+/// THE REGRESSION TEST FOR THE PERMISSIVE DIRECTION.
+///
+/// An earlier revision of this matcher decided the multicell case by asking whether
+/// the golden's keys FAILED to parse as JSON. That is unsound the permissive way:
+/// "the keys did not parse" is not "this column is multicell". A FROZEN map whose
+/// golden key is malformed is an ORACLE fault the comparison must REPORT, and under
+/// that revision this gap SUPPRESSED it instead.
+///
+/// The matcher now reads the multicellness from the committed DDL
+/// (`schema::Column::is_multicell()`, carried as `container::MapKeySpelling`), so the
+/// same golden and the same egress under a FROZEN declaration are NOT this gap.
+#[test]
+fn a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap() {
+    let frozen_ddl = "CREATE TYPE key_part (label text, rank int); \
+         CREATE TABLE t (id int PRIMARY KEY, \
+         m frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>);";
+    let schema = schema_of(frozen_ddl, "t");
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &multicell_map_cli(measured_cli_map()),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a FROZEN column is not the multicell gap, so the declaration must go stale: {:?}",
         report.stale_skips
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "and the oracle fault must be REPORTED, not suppressed: {:?}",
+        report.diffs
     );
 }
 

@@ -99,14 +99,61 @@ pub fn is_container_type(ty: &CqlType) -> bool {
     }
 }
 
-/// The [`Kinding`] the GOLDEN's map key is read under, from the declared key type.
+/// WHICH CASSANDRA WRITER spelled a map's keys in the golden.
+///
+/// This is a STRUCTURAL fact about the COLUMN, decided by the committed DDL, and it
+/// is deliberately an INPUT here rather than something inferred from the key text.
+/// `sstabledump` has two writers and they meet at this one position:
+///
+///   * [`MapKeySpelling::ToJsonString`] — a FROZEN map is one value cell, written
+///     `writeRawValue(type.toJSONString(...))`, and `cassandra-5.0.8`
+///     `MapType.toJSONString` renders each key with
+///     `keys.toJSONString(kv, protocolVersion)`, quoting it only when it does not
+///     already start with `"`. So the golden's JSON object key is exactly the key
+///     value's own toJSONString document.
+///   * [`MapKeySpelling::GetString`] — a MULTICELL map is one cell PER ENTRY, whose
+///     key is the cell PATH, written
+///     `writeString(ct.nameComparator().getString(...))` (`JsonTransformer`). For a
+///     container key that is `getString`'s flat colon-joined, escaped text —
+///     `charlie\:3:8` on the committed `test_nested_udt_keys` fixture — which is not
+///     a JSON document at all.
+///
+/// # Why this is a parameter and NOT derived from the key text
+///
+/// Deciding it by "does the key parse as JSON?" would decide a STRUCTURAL fact by
+/// INSPECTING A VALUE, which is the move this lane forbids most explicitly — the
+/// gap module states the rule in as many words ("DDL ONLY. No value is read —
+/// deliberately") and gives the reason: a shape assertion there invites the next
+/// depth, and the list of depths is `compare_map`'s own feature list, which does not
+/// close (issue #3500, roborev jobs 302/305/306). It is also unsound in the
+/// PERMISSIVE direction: "the key did not parse" is not "this column is multicell",
+/// so a FROZEN map whose golden key is genuinely malformed — an ORACLE fault, which
+/// [`golden_map_key_value`] must REPORT — would be silently reclassified as the
+/// multicell case. And its soundness would rest on an unproven negative, that no
+/// `getString` rendering of any container key type ever parses as JSON of the
+/// declared kind. The DDL answers the question outright and cannot be wrong.
+///
+/// Source: `schema::Column::is_multicell()` (`!frozen && ty.is_complex()`) at the
+/// COLUMN ROOT, and [`MapKeySpelling::ToJsonString`] for any map reached by
+/// RECURSION — CQL requires a map key, and every collection nested inside another,
+/// to be frozen, so a nested map always lives in one value cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapKeySpelling {
+    /// A frozen map: the key is `keys.toJSONString(...)` text.
+    ToJsonString,
+    /// A multicell map: the key is the cell path, `nameComparator().getString(...)`.
+    GetString,
+}
+
+/// The [`Kinding`] the GOLDEN's map key is read under.
 ///
 /// The single statement of that rule, called by both [`canon_map`] and
 /// `compare::compare_map` — two spellings of it would be two notions of what the
 /// golden's key text is, which is the drift this lane's review history is made of.
 ///
-///   * a CONTAINER key is `keys.toJSONString(...)` text (the module doc's oracle),
-///     whose scalars keep their natural JSON kind — [`Kinding::Natural`];
+///   * a CONTAINER key under [`MapKeySpelling::ToJsonString`] is
+///     `keys.toJSONString(...)` text (the module doc's oracle), whose scalars keep
+///     their natural JSON kind — [`Kinding::Natural`];
 ///   * a SCALAR key is stringified BY THE FORMAT (a JSON object key can only be a
 ///     string), which is exactly the rule `compare_map` has always applied. Note
 ///     `MapType.toJSONString` spells a scalar key through `keys.toJSONString` too,
@@ -115,8 +162,13 @@ pub fn is_container_type(ty: &CqlType) -> bool {
 ///     and `boolean`, and guarded relaxations for `blob` (`0x`-prefixed text is not
 ///     a spelling `BytesSerializer.toString` can produce, so it is left exact) and
 ///     `timestamp` (both spellings are accepted) — so one rule is kept rather than
-///     two.
-pub fn golden_map_key_kinding(key_ty: &CqlType) -> Kinding {
+///     two. That is why the scalar answer does not depend on the spelling.
+///
+/// A CONTAINER key under [`MapKeySpelling::GetString`] never reaches a kinding:
+/// [`golden_map_key_value`] refuses it first, so this answers [`Kinding::Natural`]
+/// for the shape of the rule rather than as a licence.
+pub fn golden_map_key_kinding(key_ty: &CqlType, spelling: MapKeySpelling) -> Kinding {
+    let _ = spelling;
     if is_container_type(key_ty) {
         Kinding::Natural
     } else {
@@ -125,35 +177,56 @@ pub fn golden_map_key_kinding(key_ty: &CqlType) -> Kinding {
 }
 
 /// The VALUE a golden map key denotes: the parsed `toJSONString` document for a
-/// CONTAINER key type, the key text itself for a scalar one.
+/// CONTAINER key of a FROZEN map, the key text itself for a scalar one.
 ///
 /// THE one function that answers that question — `compare::compare_map`,
 /// [`canon_map`] and `csv_container` all call it, so the comparison, the
 /// canonicalization and the CSV rendering cannot drift apart on what the golden's
 /// key is.
 ///
-/// Fail-closed in both directions, and NEITHER failure is a shape ladder: the parse
-/// must succeed, and the parsed document must be the ONE JSON shape the declared
-/// kind has (`toJSONString` spells a list/set/tuple as an array and a map/UDT as an
-/// object). Anything else means the golden's key is not the spelling the oracle
-/// says it is — which is a fact about the ORACLE, not about the egress, so it is
-/// reported and never guessed at. The MULTICELL map's cell path is exactly that
-/// case: `JsonTransformer.serializeCell` writes it with
-/// `writeString(ct.nameComparator().getString(...))`, so `getString`'s colon-joined
-/// text (`"charlie\:3:8"`) arrives here and does not parse.
+/// # The two refusals, and what each one claims
+///
+/// A container key under [`MapKeySpelling::GetString`] is refused IMMEDIATELY, with
+/// no parse attempted: the dump wrote that position with
+/// `nameComparator().getString(...)`, so there is no toJSONString document there to
+/// read, and the refusal says so. That sentence is the one
+/// `compare::gap::Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex`
+/// mirrors — the CAUSE, not the symptom of a failed parse.
+///
+/// The PARSE failure that remains is therefore scoped to what it can honestly
+/// claim: a FROZEN map whose key text is not the spelling the oracle says it is.
+/// That is a fact about the ORACLE, not about the egress, so it is reported and
+/// never guessed at. Neither refusal is a shape ladder: the parse must succeed, and
+/// the parsed document must be the ONE JSON shape the declared kind has
+/// (`toJSONString` spells a list/set/tuple as an array and a map/UDT as an object).
 ///
 /// Parsed through [`strict_json`] — the same strict parse the golden LINE and the
 /// CLI's own egress get (issue #1491 review finding K2): a duplicate object key
 /// inside a key document would silently discard part of the oracle.
-pub fn golden_map_key_value(key: &str, key_ty: &CqlType) -> Result<Value, String> {
+pub fn golden_map_key_value(
+    key: &str,
+    key_ty: &CqlType,
+    spelling: MapKeySpelling,
+) -> Result<Value, String> {
     if !is_container_type(key_ty) {
         return Ok(Value::String(key.to_string()));
     }
+    if spelling == MapKeySpelling::GetString {
+        return Err(format!(
+            "the schema declares the map key type `{}`, a container, on a MULTICELL map \
+             — so sstabledump wrote this key as the cell PATH, \
+             `writeString(ct.nameComparator().getString(...))`, which is getString's \
+             flat colon-joined text and not a toJSONString document; there is no \
+             container here to pair (cassandra-5.0.8)",
+            key_ty.describe()
+        ));
+    }
     let parsed = strict_json::parse(key, "golden map key").map_err(|why| {
         format!(
-            "the schema declares the map key type `{}`, a container, so \
-             cassandra-5.0.8 MapType.toJSONString spells this golden object key as the \
-             key value's own toJSONString text — and {} does not parse as JSON: {why}",
+            "the schema declares the map key type `{}`, a container, on a FROZEN map \
+             — so cassandra-5.0.8 MapType.toJSONString spells this golden object key \
+             as the key value's own toJSONString text — and {} does not parse as \
+             JSON: {why}",
             key_ty.describe(),
             brief(key)
         )
@@ -169,8 +242,8 @@ pub fn golden_map_key_value(key: &str, key_ty: &CqlType) -> Result<Value, String
     );
     if !shaped {
         return Err(format!(
-            "the golden's map key {} parses as {}, but the schema declares the key type \
-             `{}`, whose toJSONString spelling is {} (cassandra-5.0.8)",
+            "the golden's map key {} parses as {}, but the schema declares the key \
+             type `{}`, whose toJSONString spelling is {} (cassandra-5.0.8)",
             brief(key),
             shape_of(&parsed),
             key_ty.describe(),
@@ -293,13 +366,21 @@ fn canon_map(
         Value::Object(entries) => {
             let mut out = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                let key_value = golden_map_key_value(key, key_ty)?;
+                // [`MapKeySpelling::ToJsonString`] UNCONDITIONALLY, and this is an
+                // INVARIANT rather than a default: a map reaches `canon_typed` only as
+                // a map KEY's own nested map or as a member of a frozen container, and
+                // CQL requires both to be frozen — so it lives in one value cell and
+                // its keys come from `MapType.toJSONString`. A top-level MULTICELL map
+                // column never arrives here: `compare::compare_value_body` routes its
+                // `(Object, Array)` pair to `compare::compare_map`, which takes the
+                // spelling from the DDL (`compare::map_key_spelling`).
+                let key_value = golden_map_key_value(key, key_ty, MapKeySpelling::ToJsonString)?;
                 let canon_key = canon_typed(
                     &key_value,
                     egress,
                     key_ty,
                     Depth::Inside,
-                    golden_map_key_kinding(key_ty),
+                    golden_map_key_kinding(key_ty, MapKeySpelling::ToJsonString),
                 )?;
                 out.push((canon_key, canon_member(value, egress, value_ty)?));
             }

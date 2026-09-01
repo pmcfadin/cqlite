@@ -38,7 +38,7 @@
 //! now produce an ordinary diff naming the column, the declared gap and what was
 //! actually seen (see `super::compare_value_at`).
 
-use super::super::container::{golden_map_key_value, is_container_type};
+use super::super::container::{is_container_type, MapKeySpelling};
 use super::super::schema::CqlType;
 use super::{canon_typed, csv_container, Depth, Egress, Kinding};
 use serde_json::Value;
@@ -272,6 +272,7 @@ impl Divergence {
         egress: Egress,
         depth: Depth,
         kinding: Kinding,
+        map_key_spelling: MapKeySpelling,
     ) -> bool {
         match self {
             Divergence::AbsentMulticellRendersEmpty => {
@@ -365,29 +366,37 @@ impl Divergence {
                 // grammar, so `csv_container::decode_object` leaves it as the raw
                 // `0x…` text), so both formats present the identical shape here.
                 let _ = (depth, kinding);
-                // DDL: a map whose declared KEY type is a container.
+                // DDL ONLY for the two STRUCTURAL facts, which is the whole rule this
+                // matcher's predecessor stated and this one keeps: a map, whose
+                // declared KEY type is a container, on a MULTICELL column.
+                //
+                // The multicellness comes from `schema::Column::is_multicell()`,
+                // carried here as [`MapKeySpelling`]. It is NOT inferred from whether
+                // the golden's keys parse as JSON. That inference was tried and is
+                // wrong three ways: it decides a STRUCTURAL fact by inspecting a
+                // VALUE, which is the ladder roborev jobs 302/305/306 walked up and
+                // #3500 abandoned; it is PERMISSIVE in the wrong direction, because
+                // "the keys did not parse" is not "this column is multicell", so a
+                // FROZEN map whose golden key is genuinely malformed — an ORACLE fault
+                // the comparison must REPORT — would be suppressed by this gap
+                // instead; and its soundness would rest on an unproven negative, that
+                // no `getString` rendering of any container key type ever parses as
+                // JSON of the declared kind.
                 let CqlType::Map(key_ty, _) = ty else {
                     return false;
                 };
                 if !is_container_type(key_ty) {
                     return false;
                 }
-                // GOLDEN: an object, and EVERY key of it is something other than the
-                // declared key type's `toJSONString` document — asked through the
-                // function the comparison pairs with, so the gap and the pairing
-                // cannot disagree about what the golden's key is. An EMPTY object is
-                // NOT this gap: it exhibits no key spelling at all, so there would be
-                // nothing measured to suppress.
+                if map_key_spelling != MapKeySpelling::GetString {
+                    return false;
+                }
+                // GOLDEN: an object. An EMPTY one is NOT this gap — it exhibits no key
+                // spelling at all, so there would be nothing measured to suppress.
                 let Value::Object(entries) = golden else {
                     return false;
                 };
                 if entries.is_empty() {
-                    return false;
-                }
-                if entries
-                    .keys()
-                    .any(|key| golden_map_key_value(key, key_ty).is_ok())
-                {
                     return false;
                 }
                 // EGRESS: the `{key,value}` array, of the SAME length, every entry of

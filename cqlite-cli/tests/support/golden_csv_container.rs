@@ -681,7 +681,18 @@ fn member_kinding(seq: &CqlType, kinding: Kinding) -> Kinding {
 fn entry_key_rendering(object: &CqlType, key: &str) -> Option<String> {
     match object {
         CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => {
-            let value = container::golden_map_key_value(key, key_ty).ok()?;
+            // [`container::MapKeySpelling::ToJsonString`] because that is the
+            // question THIS site asks: is the golden's key text the toJSONString
+            // document this module can re-render through its own grammar? A
+            // MULTICELL map's `getString` key answers no, the `None` propagates, and
+            // the node is refused — which is the correct CSV behaviour for it, and
+            // the same answer the DDL-driven spelling would give.
+            let value = container::golden_map_key_value(
+                key,
+                key_ty,
+                container::MapKeySpelling::ToJsonString,
+            )
+            .ok()?;
             golden_rendering(&value, Some(key_ty), Kinding::Natural)
         }
         CqlType::Map(key_ty, _) => Some(stringified_csv_text(key.to_string(), key_ty)),
@@ -1240,7 +1251,18 @@ fn decode_object<'t>(
                     // one; a key the golden does not have is decoded from the
                     // declared type alone and the comparison reports the difference.
                     let guide = golden_key
-                        .and_then(|k| container::golden_map_key_value(k, key_ty).ok())
+                        .and_then(|k| {
+                            // Asking the same question as `entry_key_rendering`: is
+                            // there a toJSONString document here to guide the decode?
+                            // A `getString` key answers no and the decode falls back
+                            // to the declared type alone.
+                            container::golden_map_key_value(
+                                k,
+                                key_ty,
+                                container::MapKeySpelling::ToJsonString,
+                            )
+                            .ok()
+                        })
                         .unwrap_or(Value::Null);
                     // A key whose text does not invert the grammar is left as RAW
                     // TEXT rather than failing the whole cell — the same rule this

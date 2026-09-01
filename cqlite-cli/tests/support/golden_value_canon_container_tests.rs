@@ -13,7 +13,7 @@
 use super::super::compare::compare_rows;
 use super::super::schema::{from_ddl, CqlType, TableSchema};
 use super::super::{canon_typed, Canon, Depth, Egress, Kinding, Row};
-use super::{golden_map_key_value, is_container_type};
+use super::{golden_map_key_value, is_container_type, MapKeySpelling};
 use serde_json::{json, Value};
 
 // =======================================================================
@@ -437,7 +437,7 @@ fn an_entry_separator_inside_a_key_cannot_forge_another_rendering() {
 fn a_scalar_map_key_denotes_its_own_text() {
     let ty = CqlType::Text("text".to_string());
     assert_eq!(
-        golden_map_key_value("[1, 2]", &ty),
+        golden_map_key_value("[1, 2]", &ty, MapKeySpelling::ToJsonString),
         Ok(Value::String("[1, 2]".to_string())),
         "a `text` key is its text, brackets and all — nothing is parsed"
     );
@@ -446,7 +446,10 @@ fn a_scalar_map_key_denotes_its_own_text() {
 #[test]
 fn a_container_map_key_denotes_its_parsed_tojsonstring_document() {
     let ty = column_ty("frozen<list<int>>");
-    assert_eq!(golden_map_key_value("[1, 2]", &ty), Ok(json!([1, 2])));
+    assert_eq!(
+        golden_map_key_value("[1, 2]", &ty, MapKeySpelling::ToJsonString),
+        Ok(json!([1, 2]))
+    );
 }
 
 /// A duplicate object key inside a key document would silently discard part of the
@@ -455,7 +458,11 @@ fn a_container_map_key_denotes_its_parsed_tojsonstring_document() {
 #[test]
 fn a_duplicate_key_inside_a_golden_map_key_document_is_refused() {
     let ty = column_ty("frozen<key_part>");
-    let why = match golden_map_key_value("{\"label\": \"x\", \"label\": \"y\", \"rank\": 1}", &ty) {
+    let why = match golden_map_key_value(
+        "{\"label\": \"x\", \"label\": \"y\", \"rank\": 1}",
+        &ty,
+        MapKeySpelling::ToJsonString,
+    ) {
         Ok(value) => panic!("expected a refusal, got {value}"),
         Err(why) => why,
     };

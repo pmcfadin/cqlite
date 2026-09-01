@@ -155,6 +155,17 @@ struct At<'s, 'p> {
     suppressions: &'s Suppressions,
     /// The declared gap this position is INSIDE, if any (see [`ActiveGap`]).
     gap: Option<ActiveGap>,
+    /// WHICH CASSANDRA WRITER spelled this position's map keys, if it is a map
+    /// (see [`container::MapKeySpelling`]).
+    ///
+    /// A COLUMN-level, DDL-derived fact — `schema::Column::is_multicell()` — carried
+    /// here rather than inferred from a key's text, because it decides which of
+    /// `sstabledump`'s two writers produced the golden's object keys and a value
+    /// cannot be asked that. Forced to [`container::MapKeySpelling::ToJsonString`]
+    /// one level in ([`At::field`], [`At::index`]): CQL requires a map key, and every
+    /// collection nested inside another, to be frozen, so a map reached by recursion
+    /// always lives in one value cell.
+    map_key_spelling: container::MapKeySpelling,
 }
 
 /// The declared gap whose subtree the walk is currently inside.
@@ -179,6 +190,7 @@ impl<'s, 'p> At<'s, 'p> {
     fn column(
         name: &str,
         kinding: Kinding,
+        map_key_spelling: container::MapKeySpelling,
         skips: &'s SkipPaths<'p>,
         refusals: &'s Refusals,
         suppressions: &'s Suppressions,
@@ -191,6 +203,7 @@ impl<'s, 'p> At<'s, 'p> {
             refusals,
             suppressions,
             gap: None,
+            map_key_spelling,
         }
     }
 
@@ -209,6 +222,7 @@ impl<'s, 'p> At<'s, 'p> {
             refusals: self.refusals,
             suppressions: self.suppressions,
             gap: self.gap.clone(),
+            map_key_spelling: container::MapKeySpelling::ToJsonString,
         }
     }
 
@@ -223,6 +237,7 @@ impl<'s, 'p> At<'s, 'p> {
             refusals: self.refusals,
             suppressions: self.suppressions,
             gap: self.gap.clone(),
+            map_key_spelling: container::MapKeySpelling::ToJsonString,
         }
     }
 
@@ -443,6 +458,7 @@ pub fn compare_rows(
             let at = At::column(
                 name,
                 column_kinding(column),
+                map_key_spelling(column),
                 &skips,
                 &refusals,
                 &suppressions,
@@ -709,6 +725,30 @@ fn undeclared_columns(
 /// from the DDL (`Column::is_multicell`), so a `frozen<set<int>>` (one value cell,
 /// golden `[-2,-1]`) is correctly held to kind equality while the non-frozen
 /// `set<int>` beside it is not.
+/// WHICH CASSANDRA WRITER spelled this column's map keys, from the committed DDL.
+///
+/// A MULTICELL map is one cell per entry and its key is the cell PATH, written
+/// `writeString(ct.nameComparator().getString(...))`; a FROZEN map is one value cell
+/// whose keys come from `MapType.toJSONString`. `sstabledump` picks between those two
+/// writers on exactly this property, so the lane reads it from the same place
+/// Cassandra does — the schema — and never from the key text (see
+/// [`container::MapKeySpelling`] for why inferring it from a value is unsound in the
+/// permissive direction).
+///
+/// Answered for EVERY column, not just maps: it is a property of the cell layout, and
+/// a non-map column simply never asks. Deliberately separate from [`column_kinding`]
+/// rather than folded into it — [`Kinding`] states a value's JSON KIND, this states
+/// which writer produced a key, and the two coincide only for scalars; folding them
+/// would also change `csv_container`'s root kinding, a wider blast radius than the
+/// fact being recorded.
+fn map_key_spelling(column: &Column) -> container::MapKeySpelling {
+    if column.is_multicell() {
+        container::MapKeySpelling::GetString
+    } else {
+        container::MapKeySpelling::ToJsonString
+    }
+}
+
 fn column_kinding(column: &Column) -> Kinding {
     let is_partition_key = column.kind == ColumnKind::Partition;
     let is_multicell_set = column.is_multicell() && matches!(column.ty, CqlType::Set(_));
@@ -896,9 +936,15 @@ fn compare_value_at(
     // subtree, because that is where the divergence lives: the `set<double>` gap
     // is declared on the column and diverges at three of its seven members.
     if !refused_here
-        && gap
-            .divergence
-            .matched(golden, cli, ty, egress, at.depth, at.kinding)
+        && gap.divergence.matched(
+            golden,
+            cli,
+            ty,
+            egress,
+            at.depth,
+            at.kinding,
+            at.map_key_spelling,
+        )
     {
         at.skips.observe(&gap.root, Observed::Suppressed);
         at.suppressions.record(&gap.root);
@@ -1258,13 +1304,13 @@ fn compare_map(
         // not already start with `"` — so a container key's object key is exactly the
         // key value's own toJSONString document (issue #3726). Two spellings of that
         // rule would be two notions of what the golden key is.
-        let value = container::golden_map_key_value(key, key_ty)?;
+        let value = container::golden_map_key_value(key, key_ty, at.map_key_spelling)?;
         canon_typed(
             &value,
             egress,
             key_ty,
             Depth::Inside,
-            container::golden_map_key_kinding(key_ty),
+            container::golden_map_key_kinding(key_ty, at.map_key_spelling),
         )
     };
     let canon_cli_key = |v: &Value| -> Result<Canon, String> {
