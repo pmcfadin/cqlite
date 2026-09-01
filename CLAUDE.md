@@ -1746,11 +1746,19 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   everything UNMEASURABLE — no git, not a work tree, either object absent, shallow or shallowness
   unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under its own `PREMERGE: ANCHOR-UNVERIFIABLE`
   marker, each cause carrying its own remedy, because an unmeasurable result is UNKNOWN and "fix the
-  box" is a different operator action from "your chain is wrong". The reads run against the CURRENT
-  DIRECTORY's repository with **no env override** (#3312) under `GIT_NO_LAZY_FETCH=1` +
-  `GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`. It proves ancestry **in the local repository
-  only** — not that the anchor is on the PR as GitHub sees it, and a manipulated local object store is
-  invoker-class and out of model.
+  box" is a different operator action from "your chain is wrong". **The walk does NOT run in the lane**
+  (roborev job 355): `$GIT_DIR/info/grafts` rewrites parentage and SURVIVES `--no-replace-objects` (the
+  job-285 measurement above, re-measured for this check: `no` → `YES` → `YES`), so a graft alone turns a
+  FOREIGN anchor into `BOUND` — and grafts live in the COMMON git dir that every lane on this fleet
+  shares, making the planter a PEER LANE as well as an accident. The ruling there was to MOVE the walk,
+  and it is applied here: the object reads and `merge-base` run in a throwaway `git init` scratch whose
+  only view of the lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` — pure object storage, no config, hence no
+  grafts, no replace refs, no promisor; a failure to build it is UNVERIFIABLE, **never** a fall-back to
+  the live repository. Two reads stay in the lane on purpose: resolving its object directory
+  (`rev-parse --git-path objects`, no object read, no network) and `--is-shallow-repository`, because a
+  fresh scratch is NEVER shallow and probing it there would answer `false` unconditionally, making the
+  shallow guard a vacuous pass. No env override anywhere (#3312); the pins stay as belt. It proves
+  ancestry **in the local object store only** — not that the anchor is on the PR as GitHub sees it.
   **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
   It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
   tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge

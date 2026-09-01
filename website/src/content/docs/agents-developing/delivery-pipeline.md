@@ -185,10 +185,18 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   either object absent, shallow or shallowness unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under
   its own `PREMERGE: ANCHOR-UNVERIFIABLE` marker, each cause carrying its own remedy, because an
   unmeasurable result is UNKNOWN and "fix the box" is a different operator action from "your chain is
-  wrong". The reads run against the CURRENT DIRECTORY's repository with no env override (#3312), under
-  `GIT_NO_LAZY_FETCH=1` + `GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`. Residual: it proves
-  ancestry **in the local repository only** — not that the anchor is on the PR as GitHub sees it — and
-  a manipulated local object store is invoker-class and out of model.
+  wrong". **The walk does not run in the lane** (roborev job 355): `$GIT_DIR/info/grafts` rewrites
+  parentage and SURVIVES `--no-replace-objects` (#3544 job 285's measurement, re-measured for this
+  check), so a graft alone manufactures `BOUND` — and grafts live in the COMMON git dir every lane on
+  this fleet shares, so the planter is a PEER LANE as well as an accident. As in `agent-gate.sh`'s
+  component-set pre-flight, the ruling is to MOVE the walk: the object reads and `merge-base` run in a
+  throwaway `git init` scratch whose only view of the lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` — pure
+  object storage, no config, hence no grafts, no replace refs, no promisor — and a scratch that cannot
+  be built is UNVERIFIABLE, never a fall-back to the live repository. `--is-shallow-repository` still
+  reads the LANE on purpose (a fresh scratch is never shallow, so probing it there would turn the
+  shallow guard into a vacuous pass). No env override (#3312); the pins stay as belt. Residual: it
+  proves ancestry **in the local object store only** — not that the anchor is on the PR as GitHub sees
+  it.
   **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
   `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
   PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A

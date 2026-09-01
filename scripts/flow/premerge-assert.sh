@@ -159,12 +159,17 @@
 #     local branch could hold commits that were never pushed, and no `gh` call
 #     here reads the PR's commit list. The `commit:`/`tree-start:` binding plus
 #     the head compare are what tie the whole chain to the sha GitHub will merge.
-#     (b) A MANIPULATED LOCAL OBJECT STORE or a `refs/replace/*` entry could make
-#     a foreign anchor look like an ancestor — INVOKER-CLASS and out of model by
-#     residual 2, and narrowed anyway by the two git pins at the check
-#     (`GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`), which close the
-#     replacement-ref route because it also fires BY ACCIDENT (a `git replace`
-#     left behind by an unrelated debugging session).
+#     (b) REPOSITORY STATE THAT REWRITES ANCESTRY is closed by CONSTRUCTION, not
+#     by the threat model: the walk runs in an isolated scratch repository whose
+#     only view of this lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` (roborev job
+#     355), so `$GIT_DIR/info/grafts` and `refs/replace/*` — both of which are
+#     PEER-WRITABLE here, since every lane is a worktree of one shared `.git`,
+#     and both of which also fire BY ACCIDENT as leftovers of an unrelated
+#     debugging session — cannot reach it. The two git pins stay as belt. What
+#     remains INVOKER-CLASS and out of model by residual 2 is planting forged
+#     OBJECTS in the shared store: objects are content-addressed, so that means
+#     defeating sha collision resistance or replacing the store wholesale, and
+#     the shared-store trust boundary is #3746's subject, not this check's.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -343,17 +348,51 @@ refuse_tool_failure() {
 #     local `refs/replace/*` entry rewrites the ancestry `merge-base` walks, i.e.
 #     it can make a foreign anchor LOOK like an ancestor. Honoured by every git
 #     that has replacement refs at all, so it needs no version measurement.
-# Neither is settable by the caller, and the repository read is the CURRENT
-# WORKING DIRECTORY's, with no env override (#3312: the constrained party must
-# not choose its own enforcer, and "which repository decides whether my anchor is
-# on this PR" is exactly what a lane wanting to skip a re-cert would redirect).
+# Neither is settable by the caller (#3312: the constrained party must not choose
+# its own enforcer, and "which repository decides whether my anchor is on this
+# PR" is exactly what a lane wanting to skip a re-cert would redirect).
 #
-# THESE READS ARE DELIBERATELY **NOT** WRAPPED IN `env -i` + an allowlist, unlike
-# scripts/agent-gate.sh's component-set pre-flight. That wrapper exists where a
-# git call can REACH A REMOTE and the answer's provenance is a fetch. Here every
-# read is lane-local and addressed BY A SHA, and everything addressed by a sha is
-# CONTENT-ADDRESSED — so there is nothing an environment can bend that the two
-# pins above do not already cover. Do not "fix" this by adding one.
+# BUT THE PINS ARE NOT ENOUGH, AND THE WALK DOES NOT RUN IN THE LANE AT ALL
+# (roborev job 355, High — the fix mirrors scripts/agent-gate.sh's component-set
+# pre-flight rather than inventing anything). `$GIT_DIR/info/grafts` rewrites
+# parentage and **`--no-replace-objects` does NOT disable it**: CLAUDE.md records
+# the measurement under "A SYMLINK IS A BLOB, AND A GRAFT OUTLIVES
+# `--no-replace-objects`" (roborev job 285, on #3544) — `no -> YES -> YES` across
+# before-graft / plain / `--no-replace-objects`, i.e. the graft wins in all three.
+# Re-measured for THIS check on git 2.43.0 with the same result. So a graft alone
+# turns a FOREIGN anchor into `BOUND`, recreating the exact false acceptance this
+# binding exists to refuse. It is IN MODEL on BOTH halves of the triage rule:
+# every lane on this fleet is a worktree of ONE shared `.git` and grafts live in
+# the COMMON git dir, so the planter is a PEER LANE (a non-invoker route) — and a
+# leftover debugging graft is the accident route.
+#
+# When agent-gate.sh hit this in the same place — an ancestry walk reading the
+# live repository — the ruling was to MOVE THE WALK, not to flag the graft. Same
+# here: the object reads AND the `merge-base --is-ancestor` walk run inside a
+# throwaway scratch repository (`git init` under TMPDIR), with the LANE's object
+# directory exposed only through `GIT_ALTERNATE_OBJECT_DIRECTORIES`. An alternate
+# is PURE OBJECT STORAGE: it carries no config and no `$GIT_DIR`, hence no
+# grafts, no replace refs, no promisor, no `insteadOf`, and nothing a remote
+# helper could be invoked from. Objects are CONTENT-ADDRESSED, so a read BY SHA
+# there is exactly as trustworthy as one in the lane. Failing to build the
+# scratch is UNVERIFIABLE — never a fall-back to the live repository, which would
+# silently restore the hole.
+#   Measured, this fixture, git 2.43.0: with a graft making the foreign anchor a
+#   parent of the certified head, `merge-base --is-ancestor` in the lane answers
+#   0 (attack works) and the same walk in the scratch answers 1 (refused).
+#
+# ONE PROBE STILL READS THE LANE ON PURPOSE: `--is-shallow-repository`.
+# Shallowness is a property of the repository that HOLDS the history, and a fresh
+# scratch is NEVER shallow — probing it there would answer `false`
+# unconditionally and turn the shallow guard into a vacuous pass, which is the
+# very shape this check is about. It is a state probe, not an object read, and it
+# cannot be redirected by a graft.
+#
+# THE READS ARE DELIBERATELY **NOT** WRAPPED IN `env -i` + an allowlist, unlike
+# agent-gate.sh's pre-flight. That wrapper exists where a git call can REACH A
+# REMOTE and the answer's provenance is a fetch. Here nothing is fetched and
+# every read is BY A SHA against a config-less object source, so there is no
+# transport an environment could bend. Do not "fix" this by adding one.
 export GIT_NO_LAZY_FETCH=1
 export GIT_NO_REPLACE_OBJECTS=1
 
@@ -389,6 +428,146 @@ refuse_anchor_unverifiable() {
   exit 3
 }
 
+# --- THE ISOLATED SCRATCH REPOSITORY (roborev job 355) ----------------------
+# CLEANUP IS REGISTERED BEFORE THE RESOURCE EXISTS. CLAUDE.md's recurring lesson
+# in this family (roborev job 282) is exactly that ordering, plus: a fix that
+# ADDS a resource inherits that resource's lifetime bugs. So the variable is
+# declared and the traps installed HERE, above any `mktemp`, and the handler is
+# empty-safe (`rm -rf ""` would delete nothing but is still a bug worth not
+# writing). Signals get handlers because bash runs NO EXIT trap for a signal left
+# at its default disposition; each re-raises after cleaning up, so the process
+# still dies of the signal it was sent. This script installs no other traps (it
+# had none before this change), so there is no caller disposition to save.
+ANCHOR_SCRATCH=""
+_anchor_cleanup() {
+  [ -n "$ANCHOR_SCRATCH" ] || return 0
+  rm -rf "$ANCHOR_SCRATCH" 2>/dev/null || true
+  ANCHOR_SCRATCH=""
+}
+trap '_anchor_cleanup' EXIT
+trap '_anchor_cleanup; trap - INT;  kill -INT  $$' INT
+trap '_anchor_cleanup; trap - TERM; kill -TERM $$' TERM
+trap '_anchor_cleanup; trap - HUP;  kill -HUP  $$' HUP
+
+# _anchor_canon <dir> — canonicalize with `cd`+`pwd -P`, EMPTY on failure. The
+# convention scripts/flow/base-staleness.sh uses (no `realpath` dependency), and
+# every caller treats empty as "could not measure", never as "outside".
+_anchor_canon() { (cd "$1" 2>/dev/null && pwd -P) || true; }
+
+# _anchor_build_scratch — on success sets ANCHOR_SCRATCH (the mktemp dir),
+# ANCHOR_SCRATCH_REPO (the git dir to run in) and ANCHOR_ALT (the value for
+# GIT_ALTERNATE_OBJECT_DIRECTORIES). On failure returns 1 with ANCHOR_SCRATCH_ERR
+# set to a cause sentence. NEVER falls back to the live repository.
+ANCHOR_SCRATCH_REPO=""
+ANCHOR_ALT=""
+ANCHOR_SCRATCH_ERR=""
+_anchor_build_scratch() {
+  local lane_objects repo_canon common_canon tmp_req tmp_canon created_canon alt_q
+
+  # THE SCRATCH MUST BE PROVABLY OUTSIDE THE REPOSITORY, and "the repository" is
+  # BOTH roots: the work tree AND the git COMMON dir (these are worktrees of one
+  # shared `.git`, so the common dir is elsewhere entirely). Reasoning and the
+  # two-phase check are base-staleness.sh's, reused rather than reinvented: the
+  # pre-check answers about the path as it resolved a moment ago, so what was
+  # ACTUALLY CREATED is re-validated, because a symlink swapped in between lands
+  # the real directory somewhere else.
+  repo_canon=$(_anchor_canon "$(git rev-parse --show-toplevel 2>/dev/null || true)")
+  common_canon=$(_anchor_canon "$(git rev-parse --git-common-dir 2>/dev/null || true)")
+  if [ -z "$repo_canon" ] || [ -z "$common_canon" ]; then
+    ANCHOR_SCRATCH_ERR="the work-tree root and/or git common directory could not be resolved, so a scratch location cannot be proven outside them"
+    return 1
+  fi
+  tmp_req="${TMPDIR:-/tmp}"
+  tmp_canon=$(_anchor_canon "$tmp_req")
+  if [ -z "$tmp_canon" ]; then
+    ANCHOR_SCRATCH_ERR="the scratch root TMPDIR=$tmp_req could not be resolved (absent, unreadable, or not a directory)"
+    return 1
+  fi
+  case "$tmp_canon/" in
+    "$repo_canon"/* | "$common_canon"/*)
+      ANCHOR_SCRATCH_ERR="the scratch root $tmp_canon resolves INSIDE the repository (work tree $repo_canon / git dir $common_canon); NOTHING was created"
+      return 1 ;;
+  esac
+  if ! ANCHOR_SCRATCH=$(mktemp -d "$tmp_canon/premerge-anchor.XXXXXX" 2>/dev/null) ||
+     [ -z "$ANCHOR_SCRATCH" ] || [ ! -d "$ANCHOR_SCRATCH" ]; then
+    ANCHOR_SCRATCH=""
+    ANCHOR_SCRATCH_ERR="could not create a scratch directory under $tmp_canon"
+    return 1
+  fi
+  created_canon=$(_anchor_canon "$ANCHOR_SCRATCH")
+  if [ -z "$created_canon" ]; then
+    ANCHOR_SCRATCH_ERR="the created scratch directory could not be canonicalized"
+    return 1
+  fi
+  case "$created_canon/" in
+    "$repo_canon"/* | "$common_canon"/*)
+      ANCHOR_SCRATCH_ERR="the CREATED scratch directory $created_canon resolves INSIDE the repository — the root resolved into the checkout between the pre-check and the create"
+      return 1 ;;
+  esac
+
+  # THE LANE'S OBJECT DIRECTORY, resolved rather than assumed — and this is the
+  # ONE read that still happens in the live repository, mirroring the reference
+  # implementation (agent-gate.sh: `rev-parse --git-path objects`). In a
+  # `git worktree` it answers the SHARED store of the parent checkout, i.e. the
+  # objects dir under `--git-common-dir`, which is where HEAD's objects live
+  # (measured here: `--git-path objects` = /…/repo/.git/objects while
+  # `--git-dir` = /…/repo/.git/worktrees/<lane>). It reads no object and reaches
+  # no network; a graft cannot redirect a path.
+  lane_objects=$(git rev-parse --git-path objects 2>/dev/null) || lane_objects=""
+  # MADE ABSOLUTE: `--git-path` answers RELATIVE TO THE WORK-TREE ROOT for a
+  # plain clone (`.git/objects`) and absolute only for a worktree. A relative
+  # value would be resolved against the SCRATCH, a different directory, and the
+  # alternate would point at nothing. (`--path-format=absolute` is git >= 2.31,
+  # so the prefix is applied here rather than relied upon.)
+  case "$lane_objects" in
+    '')
+      ANCHOR_SCRATCH_ERR="this repository's object directory resolved to an EMPTY path, so its objects cannot be made readable to the isolated repository"
+      return 1 ;;
+    /*) : ;;
+    *)  lane_objects="$repo_canon/$lane_objects" ;;
+  esac
+  if [ ! -d "$lane_objects" ]; then
+    ANCHOR_SCRATCH_ERR="this repository's object directory ($lane_objects) is not a directory"
+    return 1
+  fi
+
+  ANCHOR_SCRATCH_REPO="$ANCHOR_SCRATCH/repo"
+  if ! git init -q "$ANCHOR_SCRATCH_REPO" >/dev/null 2>&1 ||
+     [ ! -d "$ANCHOR_SCRATCH_REPO/.git" ]; then
+    ANCHOR_SCRATCH_ERR="could not initialise an isolated scratch repository at $ANCHOR_SCRATCH_REPO"
+    return 1
+  fi
+
+  # C-QUOTED, ALWAYS. `GIT_ALTERNATE_OBJECT_DIRECTORIES` is a COLON-separated
+  # list, so a colon in the path cannot be expressed raw — but git accepts a
+  # C-quoted entry, and agent-gate.sh measured all five shapes (plain, colon,
+  # space, embedded `"`, embedded `\`) resolving correctly through it. Quoting
+  # unconditionally avoids a second code path for the common case. ORDER IS
+  # LOAD-BEARING: escape backslashes FIRST, then quotes, or the backslash pass
+  # escapes the backslashes the quote pass just added.
+  alt_q="${lane_objects//\\/\\\\}"
+  alt_q="${alt_q//\"/\\\"}"
+  ANCHOR_ALT="\"$alt_q\""
+
+  # NESTED ALTERNATES NEED NO CARRY-OVER, AND THAT IS MEASURED, NOT ASSUMED. If
+  # the lane's object store itself has `objects/info/alternates`, git FOLLOWS it
+  # transitively from an entry named in GIT_ALTERNATE_OBJECT_DIRECTORIES —
+  # measured on git 2.43.0: an object present ONLY in repo A was resolved from a
+  # scratch repository whose alternate named repo B, where B reached A solely
+  # through its own `info/alternates`. So an object reachable in the lane only
+  # through its alternates is reachable here too, and copying the list would be
+  # a second, drift-prone source for the same fact.
+  return 0
+}
+
+# _anchor_git <git-args...> — a git call INSIDE the isolated scratch repository,
+# with the lane's objects supplied as an alternate. This is the only place the
+# ancestry reads happen; nothing here consults the lane's config.
+_anchor_git() {
+  GIT_ALTERNATE_OBJECT_DIRECTORIES="$ANCHOR_ALT" \
+    git --no-replace-objects -C "$ANCHOR_SCRATCH_REPO" "$@"
+}
+
 # assert_anchor_on_history <anchor-40-hex> <certified-40-hex> — the #3653
 # binding. Sets ANCHOR_ANCESTRY=BOUND on the one passing verdict; every other
 # outcome refuses. Exit codes are captured WITHOUT tripping `set -e`.
@@ -406,22 +585,38 @@ assert_anchor_on_history() {
       "history the anchor must lie on is the CURRENT DIRECTORY's, and there is" \
       "deliberately no env override naming a different one (#3312)."
   fi
+  # THE ISOLATED REPOSITORY IS BUILT BEFORE ANY OBJECT IS READ, and a failure to
+  # build it is UNVERIFIABLE — never a fall-back to the live repository, which is
+  # the whole hole job 355 closes.
+  if ! _anchor_build_scratch; then
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "the isolated scratch repository could not be built: $ANCHOR_SCRATCH_ERR" \
+      "The ancestry walk deliberately does NOT run in this checkout: a graft in" \
+      "\$GIT_DIR/info/grafts rewrites parentage and survives --no-replace-objects" \
+      "(#3544 job 285), so a walk here could report a FOREIGN anchor as BOUND." \
+      "Falling back to the live repository would restore exactly that hole, so an" \
+      "unbuildable scratch is UNMEASURED instead." \
+      "REMEDY: give this process a usable TMPDIR outside the work tree and outside" \
+      "the git common directory, then re-run this assert."
+  fi
+
   # THE PRESENCE PROBE IS A DIAGNOSTIC REFINEMENT, NOT THE SOUNDNESS BOUNDARY.
   # It exists to name WHICH object is absent, because the two have different
   # remedies in practice (an anchor from a rebased-away branch vs a certified
-  # head that was never fetched). It is NOT what makes the check sound, and it
-  # cannot be: CLAUDE.md records, as a MEASUREMENT rather than a theory (see
-  # "cat-file -e cannot even probe presence" in the #3544 job-268 paragraph),
-  # that with `GIT_NO_LAZY_FETCH=1` set `cat-file -e` answered 0 for an object
-  # whose `show` then FAILED — it answers about PROMISED objects. So in a
-  # partial/promisor clone BOTH probes below can say "present" for an object
-  # that is not there.
-  # WHAT STILL HOLDS, and why the design fails closed anyway: `merge-base` cannot
-  # SUCCEED on an object that is not really available, so it exits >= 2 (or, at
-  # worst, 1 in a repository this check then refuses to call complete) and the
-  # verdict is UNVERIFIABLE either way. A false "present" here therefore costs a
-  # less specific diagnostic, never a pass.
-  if ! git --no-replace-objects cat-file -e "$anchor^{commit}" >/dev/null 2>&1; then
+  # head that was never fetched). Since job 355 it runs in the SCRATCH, which
+  # has no config and therefore no promisor remote — so the #3544 job-268
+  # measurement that made this probe unsound in the LANE ("cat-file -e cannot
+  # even probe presence": with `GIT_NO_LAZY_FETCH=1` set it answered 0 for an
+  # object whose `show` then FAILED, because it answers about PROMISED objects)
+  # no longer has a mechanism to fire through here: an object promised but absent
+  # in the lane is simply ABSENT to a config-less alternate.
+  # That last sentence is REASONING, not a measurement, which is why the probe
+  # is still not load-bearing. What is load-bearing, in every case: `merge-base`
+  # cannot SUCCEED on an object that is not really available, so it exits >= 2
+  # (or 1 in a repository this check then refuses to call complete) and the
+  # verdict is UNVERIFIABLE either way. A false "present" costs a less specific
+  # diagnostic, never a pass.
+  if ! _anchor_git cat-file -e "$anchor^{commit}" >/dev/null 2>&1; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the ANCHOR commit is not present in this repository" \
       "An absent object cannot be shown to lie on any history, and its absence is" \
@@ -429,7 +624,7 @@ assert_anchor_on_history() {
       "REMEDY: fetch the branch that carries it (git fetch origin <branch>) and" \
       "re-run this assert."
   fi
-  if ! git --no-replace-objects cat-file -e "$head^{commit}" >/dev/null 2>&1; then
+  if ! _anchor_git cat-file -e "$head^{commit}" >/dev/null 2>&1; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the CERTIFIED commit is not present in this repository" \
       "REMEDY: fetch the PR branch (git fetch origin <branch>) and re-run this" \
@@ -437,9 +632,10 @@ assert_anchor_on_history() {
   fi
 
   rc=0
-  git --no-replace-objects merge-base --is-ancestor "$anchor" "$head" >/dev/null 2>&1 || rc=$?
+  _anchor_git merge-base --is-ancestor "$anchor" "$head" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     ANCHOR_ANCESTRY=BOUND
+    _anchor_cleanup
     return 0
   fi
   if [ "$rc" -ne 1 ]; then
@@ -456,6 +652,13 @@ assert_anchor_on_history() {
   # An empty answer (a git too old to know the option, or a failed call) is
   # UNMEASURED and takes the same refusing branch as `true` — the permissive
   # branch is never the default for an unestablished state.
+  #
+  # PROBED IN THE **LANE**, NOT THE SCRATCH, AND THAT IS NOT AN OVERSIGHT.
+  # Shallowness is a property of the repository that HOLDS the history; a freshly
+  # `git init`-ed scratch is never shallow, so asking it would answer `false`
+  # unconditionally and turn this guard into a vacuous pass — the exact shape
+  # this whole check exists to refuse. It is a STATE probe, not an object read,
+  # so the graft route job 355 closed does not apply to it.
   shallow=$(git --no-replace-objects rev-parse --is-shallow-repository 2>/dev/null) || shallow=""
   if [ "$shallow" != false ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \

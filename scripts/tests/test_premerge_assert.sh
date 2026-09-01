@@ -1631,6 +1631,102 @@ else
   ok "ancestry shallow: SKIPPED (fixture unbuildable on this host — see the ARM NOT TAKEN lines; arm UNEXERCISED, declared not silent)"
 fi
 
+# --- 44(f): A GRAFT MUST NOT BE ABLE TO MANUFACTURE `BOUND` (roborev job 355) -
+#
+# `$GIT_DIR/info/grafts` rewrites parentage and **survives
+# `--no-replace-objects`** (CLAUDE.md, #3544 job 285: measured `no -> YES -> YES`
+# across before-graft / plain / `--no-replace-objects`). Every lane here is a
+# worktree of ONE shared `.git` and grafts live in the COMMON git dir, so the
+# planter is a PEER LANE — a non-invoker route — and a leftover debugging graft
+# is the accident route. Either alone makes it a defect, which is why the walk
+# was MOVED into an isolated scratch repository rather than the graft flagged.
+#
+# TWO ARMS OVER ONE FIXTURE, AND ARM 1 IS A POSITIVE CONTROL (CLAUDE.md's job-264
+# rule: assert UNREACHABILITY with a control proving the attack executes in a
+# plain repository, or the green means nothing).
+#   1. plain `git merge-base --is-ancestor` in the grafted repository answers 0
+#      — the attack works here, on this host's git;
+#   2. premerge-assert.sh on that SAME repository, with that SAME graft, still
+#      refuses (exit 2, NOT-ANCESTOR).
+# If arm 1 does not reproduce, arm 2 proves nothing and the case says so as a
+# declared not-taken arm rather than passing quietly.
+GRAFT_REPO="$T/ancestry-graft-repo"
+graft_shape=0
+if [ "$anc_shape" -eq 1 ] && cp -a "$ANC_REPO" "$GRAFT_REPO" 2>/dev/null; then
+  # The graft makes the FOREIGN commit a parent of the CERTIFIED head, which is
+  # precisely "make a foreign anchor look ancestral".
+  if printf '%s %s\n' "$R_CERT" "$R_FOREIGN" >"$GRAFT_REPO/.git/info/grafts" 2>/dev/null; then
+    graft_shape=1
+  fi
+fi
+graft_attack=0
+if [ "$graft_shape" -eq 1 ]; then
+  # NON-VACUITY, both directions: the UNGRAFTED copy must still answer "no", or
+  # a fixture that was ancestral all along would make arm 1 meaningless.
+  if git -C "$ANC_REPO" merge-base --is-ancestor "$R_FOREIGN" "$R_CERT" >/dev/null 2>&1; then
+    bad "graft control: the UNGRAFTED fixture already reports the foreign anchor as ancestral — the arm would be meaningless"
+    graft_shape=0
+  elif git -C "$GRAFT_REPO" merge-base --is-ancestor "$R_FOREIGN" "$R_CERT" >/dev/null 2>&1; then
+    graft_attack=1
+  fi
+fi
+if [ "$graft_shape" -eq 1 ] && [ "$graft_attack" -eq 1 ]; then
+  ok "graft POSITIVE CONTROL: plain merge-base --is-ancestor in the grafted repo answers 0 — the attack really executes on this host"
+  # And it survives --no-replace-objects, which is the half that makes the pins
+  # insufficient and the move necessary.
+  if git --no-replace-objects -C "$GRAFT_REPO" merge-base --is-ancestor "$R_FOREIGN" "$R_CERT" >/dev/null 2>&1; then
+    ok "graft POSITIVE CONTROL: the graft SURVIVES --no-replace-objects (so the pins alone cannot close it)"
+  else
+    bad "graft POSITIVE CONTROL: --no-replace-objects defeated the graft on this host — CLAUDE.md's #3544 job-285 measurement does not reproduce, so the stated rationale needs re-checking"
+  fi
+  OUT=$(cd "$GRAFT_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 2 ]; then
+    bad "graft: a planted graft manufactured a non-refusal (exit $RC, wanted 2) — the ancestry walk is reading the live repository again (job 355) (got: $OUT)"
+  else
+    ok "graft: the planted graft does NOT manufacture BOUND — the walk is isolated from it (exit 2)"
+    case "$OUT" in
+      *"is NOT on the certified sha's history"*)
+        ok "graft: the refusal is the NOT-ANCESTOR verdict, not some other refusal firing first" ;;
+      *) bad "graft: expected the NOT-ANCESTOR cause (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"anchor-ancestry: BOUND"*)
+        bad "graft: the output claims BOUND — the graft was honoured (got: $OUT)" ;;
+      *) ok "graft: no BOUND token appears anywhere in the grafted run's output" ;;
+    esac
+  fi
+  # The ACCEPT direction must still work in the same grafted repository: the
+  # isolation must not have broken ordinary ancestry, or arm 2 would "pass" for
+  # the trivial reason that nothing is ever BOUND any more.
+  #
+  # IT IS ALSO A SECOND, INDEPENDENT DETECTOR OF THE REGRESSION, which is worth
+  # knowing before reading its failure message. This graft REPLACES the certified
+  # head's parent list, so under it the foreign commit becomes ancestral AND the
+  # REAL anchor stops being so. A walk that reads the live repository therefore
+  # fails BOTH arms — verified by reverting the walk: the refusal arm reported
+  # exit 0 and this one reported the genuine anchor refused at exit 2.
+  OUT=$(cd "$GRAFT_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ] && [ "${OUT#*anchor-ancestry: BOUND}" != "$OUT" ]; then
+    ok "graft: NON-VACUITY — a genuine ancestor is still BOUND in the same grafted repository"
+  else
+    bad "graft: the genuine ancestor is no longer BOUND (exit $RC) — either the isolation broke ordinary ancestry, or the walk is reading the live repository and the graft masked the real parent (job 355). Arm 2 proves nothing either way (got: $OUT)"
+  fi
+else
+  # DECLARED, not silent, and non-fatal — the same treatment the shallow arm gets.
+  printf 'ARM NOT TAKEN: graft isolation (roborev job 355) — this host could not build the fixture\n'
+  printf 'ARM NOT TAKEN: (a copy of the ancestry repo with $GIT_DIR/info/grafts making the foreign\n'
+  printf 'ARM NOT TAKEN: commit a parent of the certified head) or the graft did not take effect, so\n'
+  printf 'ARM NOT TAKEN: the POSITIVE CONTROL did not fire. Without it a passing refusal would prove\n'
+  printf 'ARM NOT TAKEN: nothing, so BOTH arms are skipped and the graft-isolation property is\n'
+  printf 'ARM NOT TAKEN: UNEXERCISED on this run. Non-fatal by design: git support for grafts is\n'
+  printf 'ARM NOT TAKEN: deprecated and may be removed, which is a host property, not a defect here.\n'
+  ok "graft: SKIPPED (positive control did not fire — see the ARM NOT TAKEN lines; arm UNEXERCISED, declared not silent)"
+fi
+
 # =============================================================================
 # #3465 review — the remaining refusal branches
 # =============================================================================

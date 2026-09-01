@@ -119,11 +119,17 @@ carry).
   both shas. Everything **UNMEASURABLE** — no git, not inside a work tree, either object absent,
   shallow or shallowness unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under its own
   `PREMERGE: ANCHOR-UNVERIFIABLE` marker with a per-cause remedy, because an unmeasurable result is
-  UNKNOWN and "fix the box" is a different operator action from "your chain is wrong". The reads run
-  against the CURRENT DIRECTORY's repository with no env override (#3312), under
-  `GIT_NO_LAZY_FETCH=1` + `GIT_NO_REPLACE_OBJECTS=1` + `--no-replace-objects`. Residual, stated: it
-  proves ancestry **in the local repository only** — not that the anchor is on the PR as GitHub sees
-  it, and a manipulated local object store is invoker-class and out of model.
+  UNKNOWN and "fix the box" is a different operator action from "your chain is wrong". **The walk does
+  not run in the lane** (roborev job 355): `$GIT_DIR/info/grafts` rewrites parentage and SURVIVES
+  `--no-replace-objects` (#3544 job 285's measurement, re-measured here), so a graft alone manufactures
+  `BOUND` — and on this fleet grafts live in the COMMON git dir every lane shares, so the planter is a
+  peer lane as well as an accident. The reads and the walk therefore run in a throwaway `git init`
+  scratch whose only view of the lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` (pure object storage: no
+  config, hence no grafts, no replace refs, no promisor), and failing to build it is UNVERIFIABLE,
+  never a fall-back to the live repository. `--is-shallow-repository` deliberately still reads the
+  LANE: a fresh scratch is never shallow, so probing it there would make the shallow guard a vacuous
+  pass. No env override (#3312); the pins remain as belt. Residual, stated: it proves ancestry **in the
+  local object store only** — not that the anchor is on the PR as GitHub sees it.
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
   It does not prove the change was certified against the `main` it will join: a squash-merge composes
