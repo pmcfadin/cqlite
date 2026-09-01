@@ -180,7 +180,9 @@ It does not depend on any judgement call in the method:
 
 * widest single annotate rep: 1.7960% — KILL
 * wide boundary (decoder + nom adapters), worst rep: 1.8352% — KILL
-* skid band, worst edge across all reps: ~1.89% — KILL
+* skid band, worst *narrow* edge over all annotate reps: 1.8369% — KILL
+* skid band on the *wide* boundary, worst edge (the most permissive figure this method can
+  produce at all): 1.8880% — KILL
 * even the cross-check probe, which is *known* to inflate: 2.2624% mean, 2.4583% worst — KILL
 
 For a VInt lever to be worth funding it would have to remove more than the entire measured
