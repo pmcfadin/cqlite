@@ -1362,8 +1362,13 @@ exit 0'
   # SCCACHE_CACHE_SIZE is injected alongside the pin (issue #3727) so section 5b2's verdict —
   # and therefore the warning count every case here measures — does not depend on whether the
   # HOST running the suite happens to be capped.
+  # `-i` is stripped here for the reason mkpinshims records: 5b2 probes the login form too, and an
+  # unhandled `-i` would add a warn to every sandbox built on this helper — the base_warns drift.
+  # The SAME value is injected for both session types, so 5b2's two-session comparison agrees and
+  # this helper stays a one-warning sandbox.
   mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
+if [ "${1:-}" = "-i" ]; then shift; fi
 exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=30G "$@"'
   mk_push_gh "$dir" "$setup"
 }
@@ -1396,6 +1401,19 @@ push_plain()  { printf '%s' "$1" | sed "s/${PUSH_ESC}\[[0-9;]*m//g"; }
 # below are the whole basis of the delta assertion.
 push_warns()  { push_plain "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
 push_green()  { printf '%s' "$1" | grep -qF 'All checks green.'; }
+# out_has <text> <grep-args...>: a SIGPIPE-SAFE text predicate, and the reason it exists is
+# MEASURED (issue #3727): under `set -o pipefail`, `printf '%s' "$big" | grep -q PAT` returns
+# **141** once the payload exceeds the 64 KiB pipe buffer, because grep -q exits at the first match
+# and printf's next write dies — 64 KiB rc=0, 128 KiB rc=141, with the match present in both. A
+# full bootstrap run's output crossed that line when section 5b2 was added, which turned PASSING
+# cases into failures whose own debug output showed the matching text. A here-string is not a
+# pipeline, so grep's own status is the answer and pipefail has nothing to override.
+#
+# DECLARED, because it is not fixed everywhere: ~300 predicates in this file still use the
+# `printf … | grep -q` shape. Every one of them is at risk the next time bootstrap's output grows,
+# and the failure mode is a case that reports the OPPOSITE of what it measured. The four sites that
+# actually crossed the threshold are converted; the rest are a known latent class, not a clean bill.
+out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
 push_verdict(){ push_plain "$1" | grep -F 'git-push:'; }
 
 # 7p-a/d. THE POSITIVE CONTROL and the OPT-OUT, measured as a pair against ONE sandbox
@@ -1695,10 +1713,12 @@ fi
 # policy from a network drop from a post-readback auth failure, so neither claim.sh nor
 # bootstrap may name one — and in particular bootstrap must not fall back to credential
 # advice, which was the wrong-remedy defect one round earlier.
-if ! printf '%s' "$out7pk" | grep -q 'gh auth setup-git' \
-   && ! printf '%s' "$out7pk" | grep -q -- '--fix-credentials' \
-   && ! printf '%s' "$out7pk" | grep -qi 'ref-deletion policy' \
-   && push_plain "$out7pk" | grep -q 'no cause is attributed'; then
+# Predicates via out_has, NOT `printf | grep -q`: this output is over 64 KiB, where the pipeline
+# form returns 141 and the case reports the opposite of what it measured (see out_has).
+if ! out_has "$out7pk" 'gh auth setup-git' \
+   && ! out_has "$out7pk" -- '--fix-credentials' \
+   && ! out_has "$out7pk" -i 'ref-deletion policy' \
+   && out_has "$(push_plain "$out7pk")" 'no cause is attributed'; then
   ok "push: a failed cleanup attributes NO cause and gives no credential advice — it reports the observation"
 else
   bad "push: an unsupportable cause (or credential advice) was attached to a failed cleanup"
@@ -2807,6 +2827,7 @@ mkpinshims() {
     # gate's (invalid) classification turns on.
     mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
 if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+if [ \"\${1:-}\" = \"-i\" ]; then shift; fi
 pam_file='${val#file:}'
 if [ -f \"\$pam_file\" ] && grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' \"\$pam_file\"; then
   pam_val=\$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=//p' \"\$pam_file\" | head -1)
@@ -2816,10 +2837,12 @@ exec \"\$@\""
   elif [ "$val" = "-" ]; then
     mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
+if [ "${1:-}" = "-i" ]; then shift; fi
 exec "$@"'
   else
     mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
 if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+if [ \"\${1:-}\" = \"-i\" ]; then shift; fi
 exec env CQLITE_GATE_MAX_CONCURRENCY=$val \"\$@\""
   fi
 }
@@ -4203,24 +4226,49 @@ mksccshims() {
     [ -n "$bin" ] && ln -sf "$bin" "$dir/$t" 2>/dev/null || true
   done
   [ "$mode" = no-sccache ] || mk_stub "$dir" sccache "$scc_stub_body"
+  # ONE stub for both session types. It recognises `-i` (the LOGIN form section 5b2 added in round
+  # 3) and, by default, answers identically for both — an agreeing box. Three env knobs, read at
+  # call time so no call site has to change, drive the disagreeing cases:
+  #   SCC_SHIM_LOGIN_VALUE  the value the LOGIN form reports (the profile's value, which on this
+  #                         fleet OVERRIDES /etc/environment for a login shell)
+  #   SCC_SHIM_LOGIN_DIR    the SCCACHE_DIR the LOGIN form reports (a routing conflict)
+  #   SCC_SHIM_LOGIN_FAIL   non-empty: the login form fails, so it cannot be measured
+  # Leaving `-i` unhandled would make the stub run `env VAR=x -i bash …`, where GNU env stops
+  # option parsing at the first assignment and takes `-i` as the COMMAND (rc 127) — a failure that
+  # reads as an unmeasurable login session rather than as a broken stub.
+  local scc_pre='scc_login=0
+while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+if [ "${1:-}" = "-i" ]; then scc_login=1; shift; fi
+if [ "$scc_login" = 1 ] && [ -n "${SCC_SHIM_LOGIN_FAIL:-}" ]; then exit 1; fi
+scc_extra=()
+if [ "$scc_login" = 1 ]; then
+  [ -n "${SCC_SHIM_LOGIN_DIR+set}" ] && scc_extra+=("SCCACHE_DIR=$SCC_SHIM_LOGIN_DIR")
+fi'
   if [ "${val#file:}" != "$val" ]; then
-    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
-if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+    mk_stub "$dir" sudo "$scc_pre
 pam_file='${val#file:}'
 scc_val=\"\"
 if [ -f \"\$pam_file\" ] && grep -Eq '^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=' \"\$pam_file\"; then
   scc_val=\$(sed -n 's/^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=//p' \"\$pam_file\" | tail -1)
-  exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$scc_val\" \"\$@\"
+  if [ \"\$scc_login\" = 1 ] && [ -n \"\${SCC_SHIM_LOGIN_VALUE+set}\" ]; then scc_val=\"\$SCC_SHIM_LOGIN_VALUE\"; fi
+  exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$scc_val\" \${scc_extra[@]+\"\${scc_extra[@]}\"} \"\$@\"
 fi
-exec env CQLITE_GATE_MAX_CONCURRENCY=1 \"\$@\""
+if [ \"\$scc_login\" = 1 ] && [ -n \"\${SCC_SHIM_LOGIN_VALUE+set}\" ]; then
+  exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$SCC_SHIM_LOGIN_VALUE\" \${scc_extra[@]+\"\${scc_extra[@]}\"} \"\$@\"
+fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 \${scc_extra[@]+\"\${scc_extra[@]}\"} \"\$@\""
   elif [ "$val" = "-" ]; then
-    mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
-if [ "${1:-}" = "-u" ]; then shift 2; fi
-exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+    mk_stub "$dir" sudo "$scc_pre
+if [ \"\$scc_login\" = 1 ] && [ -n \"\${SCC_SHIM_LOGIN_VALUE+set}\" ]; then
+  exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$SCC_SHIM_LOGIN_VALUE\" \${scc_extra[@]+\"\${scc_extra[@]}\"} \"\$@\"
+fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 \${scc_extra[@]+\"\${scc_extra[@]}\"} \"\$@\""
   else
-    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
-if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
-exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=$val \"\$@\""
+    mk_stub "$dir" sudo "$scc_pre
+scc_val=$val
+if [ \"\$scc_login\" = 1 ] && [ -n \"\${SCC_SHIM_LOGIN_VALUE+set}\" ]; then scc_val=\"\$SCC_SHIM_LOGIN_VALUE\"; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 SCCACHE_CACHE_SIZE=\"\$scc_val\" \${scc_extra[@]+\"\${scc_extra[@]}\"} \"\$@\""
   fi
 }
 
@@ -4296,10 +4344,11 @@ else
   fi
   # The scope note must state what VERIFIED does NOT cover — an unqualified VERIFIED reads as
   # "every gate on this box gets this cap", and the server-startup caveat is the new one.
-  if printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*SERVER at STARTUP' \
+  if printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*NON-LOGIN PAM session.*LOGIN shell' \
+     && printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*SERVER at STARTUP' \
      && printf '%s\n' "$scc_sl_v" | grep -q 'scope:.*provenance is not' \
      && printf '%s\n' "$scc_sl_v" | grep -q 'sccache-cap=<bytes>(pinned)'; then
-    ok "sccache-cap: VERIFIED prints its scope — server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
+    ok "sccache-cap: VERIFIED prints its scope — BOTH session types measured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
   else
     bad "sccache-cap: the scope note is missing one of its three statements"
     printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
@@ -4504,6 +4553,79 @@ else
     printf '%s\n' "$(scc_slice "$scc_out_live")" | head -6; cat "$scc_log_live" | head -3
   fi
 
+  # 12b-q. CONFLICTING-SOURCES OUTRANKS VERIFIED (issue #3727 round 3, and the ROOT CAUSE of the
+  #        whole issue). MEASURED on box3: a login shell saw 30G (from ~/.agent-ami/worker-env.sh,
+  #        sourced by /etc/profile.d/20-agent-ami.sh) while a non-login PAM session saw 50G (from
+  #        /etc/environment) — profile.d runs AFTER pam_env, so the profile WINS for a login shell,
+  #        which is the dominant launch path on this fleet. This case is deliberately set up so
+  #        EVERY OTHER FACT WOULD VERIFY (the file, the non-login session and the running server all
+  #        agree on 30G): only the login shell disagrees, so a section that certified on one session
+  #        would print [ok] here. That is the false certification, and it must be a warn instead.
+  scc_log_conf="$tmp/scc-stub-argv-conflict.log"; : >"$scc_log_conf"
+  scc_out_conf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+    SCC_SHIM_LOGIN_VALUE=40G SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
+  scc_sl_conf=$(scc_slice "$scc_out_conf")
+  if printf '%s\n' "$scc_sl_conf" | grep -qE '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
+     && printf '%s\n' "$scc_sl_conf" | grep -q "'30G'" \
+     && printf '%s\n' "$scc_sl_conf" | grep -q "'40G'" \
+     && ! printf '%s\n' "$scc_sl_conf" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: a login shell disagreeing with a non-login session is CONFLICTING-SOURCES naming BOTH values — even when every other fact would VERIFY"
+  else
+    bad "sccache-cap: two session types disagreed and the section still certified (or did not name both values)"
+    printf '%s\n' "$scc_sl_conf" | head -6
+  fi
+  # It must also point at the mechanism and at a source hunt that DECLARES its own
+  # non-exhaustiveness: the reason this went unnoticed is that /etc/profile.d/20-agent-ami.sh
+  # contains no `SCCACHE_CACHE_SIZE` string at all — it only SOURCES the file that does.
+  if printf '%s\n' "$scc_sl_conf" | grep -q 'profile.d' \
+     && printf '%s\n' "$scc_sl_conf" | grep -q 'NOT exhaustive' \
+     && printf '%s\n' "$scc_sl_conf" | grep -q 'grep -rn SCCACHE_CACHE_SIZE'; then
+    ok "sccache-cap: the conflict names the profile.d mechanism and prints a source hunt declared NON-exhaustive"
+  else
+    bad "sccache-cap: the conflict verdict does not tell the operator where to look"
+    printf '%s\n' "$scc_sl_conf" | head -8
+  fi
+  # And it must not start a server while the answer is ambiguous: which cap would it use?
+  if ! grep -qE -- '--start-server|--stop-server' "$scc_log_conf"; then
+    ok "sccache-cap: no server is started or stopped while the sources conflict (there is no single value to start it with)"
+  else
+    bad "sccache-cap: a server was started/stopped under conflicting sources"
+    cat "$scc_log_conf" | head -3
+  fi
+
+  # 12b-r. THE SAME DISEASE ONE VARIABLE OVER: agreeing caps, DISAGREEING ROUTING. If the two
+  #        session types resolve SCCACHE_DIR differently they contact different servers, so a cap
+  #        verified against one says nothing about the other — the round-2 finding (verify one
+  #        object, certify another) reappearing through the round-3 door. On box3 SCCACHE_DIR
+  #        escaped the conflict only because both files happen to carry the same value.
+  scc_out_rconf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+    SCC_SHIM_LOGIN_DIR=/some/other/cache SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
+  scc_sl_rconf=$(scc_slice "$scc_out_rconf")
+  if printf '%s\n' "$scc_sl_rconf" | grep -qE '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
+     && printf '%s\n' "$scc_sl_rconf" | grep -q 'ROUTING' \
+     && printf '%s\n' "$scc_sl_rconf" | grep -q '/some/other/cache' \
+     && ! printf '%s\n' "$scc_sl_rconf" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: agreeing caps with disagreeing ROUTING is also CONFLICTING-SOURCES, naming the other cache"
+  else
+    bad "sccache-cap: a routing disagreement did not block certification"
+    printf '%s\n' "$scc_sl_rconf" | head -6
+  fi
+
+  # 12b-s. AN UNMEASURABLE LOGIN SESSION MAY ONLY WEAKEN A POSITIVE CLAIM. The login shell is the
+  #        launch path that matters on this fleet, so failing to measure it cannot fall back to the
+  #        non-login answer — that is the single-session certification this round removed.
+  scc_out_lfail=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+    SCC_SHIM_LOGIN_FAIL=1 --fix-sccache-cap)
+  scc_sl_lfail=$(scc_slice "$scc_out_lfail")
+  if printf '%s\n' "$scc_sl_lfail" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
+     && printf '%s\n' "$scc_sl_lfail" | grep -q 'LOGIN-shell session could not be measured' \
+     && ! printf '%s\n' "$scc_sl_lfail" | grep -qE '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: an unmeasurable LOGIN session is UNMEASURED, never a fall back to the non-login answer"
+  else
+    bad "sccache-cap: an unmeasurable login session was silently ignored"
+    printf '%s\n' "$scc_sl_lfail" | head -6
+  fi
+
   # 12b-h. THE ISOLATION ASSERT, which is the single most important line in the section: if the
   #        isolated probe is answered by a DIFFERENT sccache, its cap says nothing about our
   #        value and the reading must be discarded rather than trusted.
@@ -4564,11 +4686,12 @@ else
   fi
   # ... and that box is VERIFIED at ITS OWN cap, which is what makes the no-rewrite rule safe
   # rather than merely polite.
-  if printf '%s\n' "$(scc_slice "$scc_out_7g")" | grep -qE '\[ok\].*sccache-cap: VERIFIED.*7G'; then
+  scc_sl_7g=$(scc_slice "$scc_out_7g")
+  if out_has "$scc_sl_7g" -E '\[ok\].*sccache-cap: VERIFIED.*7G'; then
     ok "sccache-cap: a box on its own 7G cap VERIFIES at that value (the fleet literal is not imposed)"
   else
-    bad "sccache-cap: a box with its own cap did not verify at its own value"
-    scc_slice "$scc_out_7g" | head -6
+    bad "sccache-cap: a box with its own cap did not verify at its own value (slice $(printf '%s' "$scc_sl_7g" | wc -c) bytes, whole output $(printf '%s' "$scc_out_7g" | wc -c) bytes)"
+    printf '%s\n' "$scc_sl_7g" | head -6
   fi
 
   # 12b-l. THE WRITE. With a substituted literal and no line in the file, --fix-sccache-cap
