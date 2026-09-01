@@ -168,10 +168,17 @@ Row `id = 2` is the same property in two elements: on disk `9.0.0.1` then
 | # | golden `path` | nanoseconds since midnight | 8-byte big-endian (hex) |
 |---|---|---|---|
 | 1 | `00:00:00.000000000` | `0`              | `0000000000000000` |
-| 2 | `00:00:09.000000000` | `9000000000`     | `000000021ca9c380` |
+| 2 | `00:00:09.000000000` | `9000000000`     | `0000000218711a00` |
 | 3 | `00:00:10.000000000` | `10000000000`    | `00000002540be400` |
-| 4 | `12:00:00.000000000` | `43200000000000` | `0000273fcbce7000` |
-| 5 | `23:59:59.999999999` | `86399999999999` | `00004e94914eff7f` |
+| 4 | `12:00:00.000000000` | `43200000000000` | `0000274a48a78000` |
+| 5 | `23:59:59.999999999` | `86399999999999` | `00004e94914effff` |
+
+Those five hex values are not hand-derived: they are the 8-byte components
+CQLite read back out of this fixture's own `pair_set` tuple elements (see the
+read-back section below), cross-checked against `"%016x" % nanos`. An earlier
+draft of this table carried three hand-computed values that were WRONG; an
+oracle with wrong bytes in it is worse than no oracle, so derive them from the
+fixture, never by hand.
 
 `time_map` values follow the same order: `t-midnight`, `t-nine-sec`, `t-ten-sec`,
 `t-noon`, `t-max`. Row `id = 2`: `00:00:09` then `00:00:10` (`pair-nine-sec` then
@@ -259,5 +266,29 @@ cargo run -p cqlite-cli --bin cqlite -- read-sstable \
   --format json
 ```
 
-See "Read-back verification" below for the observed row count and what CQLite
-returned for the collections.
+Result, on the committed fixture at CQLite `d23403d1e` + this branch (before the
+`ComparatorType::compare` fix lands):
+
+- exit `0`, **2 entries** (`Displayed 2 entries (total: 2, skipped: 0)`) — a
+  non-zero row count with the collection contents intact, so this is not the
+  silent 0-rows-when-present failure.
+- `inet_set` came back as
+  `{::1, 9.0.0.1, 10.0.0.2, 2001:db8::1, 192.168.0.1, fe80::1}` and `inet_map` as
+  `{::1: v6-loopback, 9.0.0.1: v4-nine, 10.0.0.2: v4-ten, 2001:db8::1: v6-doc,
+  192.168.0.1: v4-private, fe80::1: v6-linklocal}` — i.e. **the on-disk byte
+  order above, preserved**. `time_set`/`time_map` likewise.
+- `pair_set` elements came back as **undecoded tuple blobs**
+  (`0x00000004090000010000000800004e94914effff`, …) on this path — a
+  4-byte-length-prefixed inet component followed by an 8-byte-length-prefixed
+  time component, which is where the verified `time` hex above comes from.
+
+**TWO THINGS A TEST AUTHOR MUST NOT MISREAD.** (1) `read-sstable` returning the
+correct order here does **not** mean the defect is absent: this path emits cells
+in the order it read them off disk and never consults
+`ComparatorType::compare`. The comparator is reached where collections from
+multiple sources are merged/re-ordered (the scalar multicell path, and
+`compare_composite`'s scalar-leaf delegation for `pair_set`), so the ordering
+assertion must be driven through that entrypoint — not through a plain
+single-SSTable dump, which would pass with or without the fix. (2) A
+`read-sstable` dump is therefore a **liveness check on the fixture**, which is
+all it is used for here.
