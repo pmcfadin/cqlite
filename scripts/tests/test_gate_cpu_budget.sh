@@ -245,6 +245,30 @@ else
   bad "source: N looks resolved in more than one place (a second resolver can drift from the slot cap)"
 fi
 
+# LEADING-ZERO VALUES MUST NOT REACH THE ARITHMETIC AS OCTAL (roborev job 331, Medium).
+# The digit-only guard admits `08`, and bash reads a leading zero as OCTAL — where `08` and
+# `09` are not valid octal — so the value flowed into `cores=$(( _ncpu / n ))` and the GATE
+# ERRORED OUT instead of resolving a cap. Measured before the fix:
+#   CQLITE_GATE_MAX_CONCURRENCY=08 -> "line 1301: 08: value too great for base"
+# Erroring is worse than either honouring or refusing the value, because a gate that dies
+# inside its own budget line produces no verdict at all. `10#` forces base 10 and the value is
+# normalised, so the SUMMARY reports the cap actually honoured.
+zz_ok=1
+for _zz in "08 8 pinned" "09 9 pinned" "01 1 pinned" "0 1 clamped"; do
+  set -- $_zz
+  _zline=$(cpu_budget AGENT_GATE_TEST_NCPU=16 CQLITE_GATE_MAX_CONCURRENCY="$1" 2>&1)
+  _zgot="$(budget_n "$_zline")($(budget_source "$_zline"))"
+  [ "$_zgot" = "$2($3)" ] || { zz_ok=0; echo "  '$1' should give $2($3), got '$_zgot'"; }
+  case "$_zline" in
+    *"value too great for base"*) zz_ok=0; echo "  '$1' produced an octal arithmetic error in the budget line" ;;
+  esac
+done
+if [ "$zz_ok" = 1 ]; then
+  ok "source: leading-zero values are read base-10 (08->8, 09->9, 01->1, 0->1 clamped) and never reach the arithmetic as octal"
+else
+  bad "source: a leading-zero value was misread or errored in the cpu-budget line"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
 [ "$FAIL" -eq 0 ]

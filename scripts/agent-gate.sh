@@ -1281,7 +1281,16 @@ _gate_resolve_max_concurrency() {
     v="${CQLITE_GATE_MAX_CONCURRENCY}"
     case "$v" in
       ''|*[!0-9]*) v=$dflt; src=invalid ;;
-      *)           if [ "$v" -lt 1 ]; then v=1; src=clamped; else src=pinned; fi ;;
+      # BASE-10 EXPLICITLY (roborev job 331, Medium). The case above admits any digit-only
+      # string, so `08` reached the arithmetic below — where bash reads a leading zero as
+      # OCTAL and `08`/`09` are not valid octal. Measured before the fix:
+      #   CQLITE_GATE_MAX_CONCURRENCY=08 -> "line 1301: 08: value too great for base"
+      # i.e. the gate ERRORED OUT rather than resolving a cap, which is worse than either
+      # mis-classifying it or refusing it. `10#` forces base 10, and `v` is normalised so
+      # every downstream consumer (cores-per-gate, build-jobs, test-threads) gets a clean
+      # decimal — the SUMMARY then reports the value actually honoured, e.g. `8(pinned)`.
+      *)           v=$(( 10#$v ))
+                   if [ "$v" -lt 1 ]; then v=1; src=clamped; else src=pinned; fi ;;
     esac
   fi
   GATE_MAX_CONCURRENCY="$v"
