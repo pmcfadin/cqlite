@@ -613,10 +613,6 @@ async fn null_udt_fields_stay_null_and_populated_siblings_still_decode() {
     assert_eq!(field(udt, "i"), &Value::Integer(7), "row 2: populated int");
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// CHARACTERIZATION — NOT this issue's subject. Do not "fix" these.
-// ════════════════════════════════════════════════════════════════════════════
-
 /// AC3 route 4: a MULTICELL set's UDT ELEMENT (`set<frozen<wide>>`, non-frozen).
 ///
 /// MEASURED, and it corrects an assumption worth recording: a multicell set's
@@ -641,47 +637,84 @@ async fn multicell_set_udt_element_decodes_every_field_both_spellings() {
     }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// CHARACTERIZATION — NOT this issue's subject. Do not "fix" this.
-// ════════════════════════════════════════════════════════════════════════════
-
-/// The one AC3 route #3722 cannot deliver: a MULTICELL MAP's UDT KEY (`mw`).
+/// AC3 route 5 — a MULTICELL MAP's UDT KEY (`mw`), the last of AC3's four named
+/// routes, and the one that needed #3612 as well as this change.
 ///
-/// That key arrives as a CELL PATH, and `parse_cell_path_key`
-/// (`row_decoder/complex_column.rs`) matches a CLOSED allowlist of PRIMITIVE
-/// types (`text|ascii`, `uuid|timeuuid`, `int`, `bigint|counter`, `date`,
-/// `timestamp`) and falls back to `Value::Blob` for a frozen UDT. So on this one
-/// route the UDT never becomes a `Value::Udt` at all and NO field decoder ever
-/// runs — unifying the field decoders cannot reach it.
+/// # This test was a CHARACTERIZATION PIN until #3612 landed, and it fired
 ///
-/// That is **issue #3612**'s subject, deliberately left alone: #3722's own body
-/// records the lead rejecting a widening between these two.
+/// It used to assert the OPPOSITE: that `mw`'s key stayed an opaque
+/// `Value::Blob`, because `parse_cell_path_key` matched a closed scalar-only
+/// allowlist and fell back to `Value::Blob` for a frozen UDT — so on this route
+/// the UDT never became a `Value::Udt` and no field decoder ever ran. That was
+/// issue #3612's subject, deliberately out of scope here, and the pin carried the
+/// instruction "when #3612 lands this will go RED; assert the decoded fields
+/// instead". #3612 merged (`8c503f7cf`, decoding composite cell-path keys
+/// structurally) while this branch was in review, the pin went red on the rebase
+/// exactly as written, and this is the promised replacement.
 ///
-/// Note the contrast with `sw` above, which is also a multicell cell-path column
-/// and DOES decode. The blocked set is the map-KEY route specifically, not
-/// "everything multicell" — measured, not inferred.
+/// # Why it takes BOTH changes
 ///
-/// This test is the PIN. When #3612 lands it will go RED here, with this comment
-/// attached, and whoever fixes it inherits a ready-made Cassandra-written
-/// subject: this fixture's `mw` column, whose UDT carries all 16 field types.
-/// Same device the #3504/#3629 pins used on this very defect.
+/// #3612 makes the cell-path key a `Value::Udt` at all; #3722 makes that UDT's
+/// FIELDS decode instead of arriving as opaque bytes. Neither alone gets this
+/// column right, which is why the assertion lives here rather than in #3612 — and
+/// why this fixture's 16-field UDT is the subject: #3612's own coverage cannot
+/// distinguish "the key is a Udt" from "the key's fields are correct".
 #[tokio::test]
-async fn multicell_map_udt_key_remains_opaque_pending_3612() {
+async fn multicell_map_udt_key_decodes_every_field() {
     let rows = rows(Spelling::CqlShort).await;
-    let v = column(&rows, 1, "mw");
-    let inner = peel(v);
-    let saw_blob = match inner {
-        Value::Map(pairs) => pairs.iter().any(|(k, _)| matches!(peel(k), Value::Blob(_))),
-        Value::Blob(_) => true,
-        _ => false,
-    };
-    assert!(
-        saw_blob,
-        "column mw: expected the RECORDED #3612 gap — a multicell MAP's cell-path UDT key \
-         still decodes to Value::Blob because parse_cell_path_key's allowlist is scalar-only. \
-         Got {} with no Blob key inside. If #3612 has landed, this pin has done its job: \
-         assert the decoded fields here instead (this fixture's UDT carries all 16 types) \
-         and update the docstring.",
-        variant(inner)
+    let ctx = "column mw (MULTICELL map cell-path KEY)";
+    match peel(any_column(&rows, "mw", ctx)) {
+        Value::Map(pairs) => {
+            assert!(!pairs.is_empty(), "{ctx}: decoded ZERO pairs");
+            assert!(
+                !pairs.iter().any(|(k, _)| matches!(peel(k), Value::Blob(_))),
+                "{ctx}: a cell-path UDT key is still an opaque Blob — #3612 has landed, \
+                 so this is a regression, not the recorded gap"
+            );
+            assert_wide_fully_decoded(full_udt(&rows, "mw", ctx), ctx);
+        }
+        other => panic!("{ctx}: expected Value::Map, got {}", variant(other)),
+    }
+}
+
+/// CASE FLOOR (issue #3544's idiom, and this file has already needed it).
+///
+/// While flipping the `mw` pin, a span-replacing edit silently DELETED
+/// `multicell_set_udt_element_decodes_every_field_both_spellings` and the suite
+/// reported a cheerful `5 passed` — a green tally over a shrunken suite. Assert
+/// the roster so a future edit that drops a case FAILS instead of passing quietly.
+#[test]
+fn every_case_in_this_file_is_still_present() {
+    const EXPECTED: &[&str] = &[
+        "top_level_frozen_udt_column_decodes_every_field_both_spellings",
+        "frozen_map_udt_key_decodes_every_field_cql_short_spelling",
+        "frozen_set_udt_element_decodes_every_field_cql_short_spelling",
+        "null_udt_fields_stay_null_and_populated_siblings_still_decode",
+        "multicell_set_udt_element_decodes_every_field_both_spellings",
+        "multicell_map_udt_key_decodes_every_field",
+    ];
+    let src = include_str!("issue_3722_udt_field_type_fidelity.rs");
+    for name in EXPECTED {
+        assert!(
+            src.contains(&format!("async fn {name}(")),
+            "case `{name}` is GONE from this file — a green tally over a shrunken \
+             suite proves nothing. Restore it, or remove it from EXPECTED with a \
+             stated reason."
+        );
+    }
+    // The needle is SPLIT so this guard cannot match its own source line — it
+    // counted itself and reported 7-of-6 on the first attempt.
+    // The needle is SPLIT so this guard cannot match its own source line, and it
+    // is matched against WHOLE TRIMMED LINES rather than as a substring: a
+    // substring count also picked up the mention inside this test's own assert
+    // message, and reported 7-of-6 twice before this was anchored.
+    let needle = concat!("#[tokio", "::test]");
+    let declared = src.lines().filter(|l| l.trim() == needle).count();
+    assert_eq!(
+        declared,
+        EXPECTED.len(),
+        "this file declares {declared} async test attributes but EXPECTED lists {} — \
+         add the new case to EXPECTED so the floor rises with the suite",
+        EXPECTED.len()
     );
 }

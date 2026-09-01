@@ -714,9 +714,8 @@ const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
 const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 
-// Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers
-// (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`,
-// `extract_clustering_values`) live in `display_row`.
+// Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers live in `display_row`
+// (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`, `extract_clustering_values`).
 mod display_row;
 use display_row::{
     build_display_row, build_display_row_read_path, extract_clustering_values, merge_static_cells,
@@ -808,7 +807,8 @@ mod row_framing;
 mod udt;
 mod udt_field; // issue #3722: THE single UDT-field value decoder (campsite split of `udt`, #1116)
 mod udt_field_collection; // issue #3722: the collection/tuple arms of `udt_field` (campsite split, #1116)
-mod udt_field_empty; // issue #3722: the zero-length arm of `udt_field` (campsite split, #1116)
+mod udt_field_empty;
+mod udt_field_tests; // issue #3722: `udt_field`'s unit cases (campsite split, #1135) // issue #3722: the zero-length arm of `udt_field` (campsite split, #1116)
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
 // Per-column decode dispatch tag (Epic J / issue #1635). Imported into this module's
