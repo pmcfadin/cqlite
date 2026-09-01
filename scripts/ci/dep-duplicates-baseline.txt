@@ -26,10 +26,11 @@
 #   `crate <name> <n>`   once per duplicated crate, n >= 2
 #   blank lines and lines whose FIRST character is `#` are skipped
 #   the `crate` lines must COHERE with the totals (count == crates, sum == instances)
-instances 71
-crates 31
+instances 73
+crates 32
 crate anstream 2
 crate anstyle-parse 2
+crate base64 2
 crate bitflags 2
 crate console 2
 crate float-cmp 2

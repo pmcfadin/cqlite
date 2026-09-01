@@ -52,7 +52,7 @@ crc32fast = { workspace = true }
 # Additional missing dependencies for test compilation
 colored = { workspace = true }
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.21"
 futures = { workspace = true }
 parking_lot = { workspace = true }
 insta = "1.34"
