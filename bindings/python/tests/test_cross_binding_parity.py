@@ -558,6 +558,70 @@ def test_set_of_udt_projection_is_allowed():
         canon_python([[1]], parse_type("set<frozen<list<int>>>"))
 
 
+def test_two_decimal_renderers_converge():
+    """F7: the CLI and the bindings render a negative scale DIFFERENTLY.
+
+    MEASURED by executing both renderers (see the README table):
+    ``(scale=-5000, unscaled=1)`` is ``1`` followed by 5000 zeros from
+    ``ValueFormatter`` and ``1e5000`` from ``decimal_to_string``. Before the
+    integer fold the canonicalizer kept the CLI's expanded string verbatim once
+    it crossed ``DECIMAL_PLAIN_MAX_CHARS``, so the harness RED on a perfectly
+    valid value.
+    """
+    from canonical import normalize_decimal_string as norm
+
+    cli_expanded = "1" + "0" * 5000
+    assert norm(cli_expanded) == norm("1E+5000") == "1e5000"
+    assert norm("-7" + "0" * 5000) == norm("-7E+5000") == "-7e5000"
+    assert norm("10") == norm("1E+1") == "1e1"
+    # Above each renderer's own 1e6 scale cap both already emit exponent form.
+    assert norm("1e1000001") == "1e1000001"
+    # A large POSITIVE scale is positional on both legs — the control that the
+    # fold must not disturb.
+    assert norm("0." + "0" * 4999 + "1") == "1e-5000"
+
+
+def test_the_fold_leaves_already_agreeing_values_alone():
+    """The non-regression half: a fractional value keeps its scale.
+
+    Cassandra's decimal carries a scale and both renderers preserve it, so
+    folding there would discard a distinction the legs agree on — and would be
+    a NEW false red rather than a fix for one.
+    """
+    from canonical import normalize_decimal_string as norm
+
+    for text in ("31595.67", "0.10", "-1.50", "1.500", "0.0015", "-0.00", "12345", "0"):
+        assert norm(text) == text, text
+
+
+def test_the_fold_cannot_expand_a_pathological_exponent():
+    """R2 and F7 must not fight: the integer path allocates only the mantissa."""
+    from canonical import normalize_decimal_string as norm
+
+    assert norm("1E+1000000000") == "1e1000000000"
+    assert norm("-7E-2000000000") == "-7e-2000000000"
+
+
+def test_renderer_formatted_vectors_declare_their_provenance():
+    """A vector may not MODEL what a leg prints (issue #1455, F7).
+
+    The defect F7 exposed was not only the divergence but the vectors asserting
+    an assumed CLI rendering. Every renderer-formatted vector must say whether
+    its leg strings were OBSERVED or are a synthetic parser probe.
+    """
+    from vectors import RENDERER_FORMATTED_KINDS
+
+    data = load_vector_file()
+    unlabelled = []
+    for vec in data["vectors"]:
+        kinds = set(re.findall(r"[a-z_]+", vec["type"])) & RENDERER_FORMATTED_KINDS
+        if kinds and not str(vec.get("_source", "")).startswith(("measured", "synthetic")):
+            unlabelled.append(vec["name"])
+    assert not unlabelled, f"renderer-formatted vector(s) with no `_source`: {unlabelled}"
+    measured = [v for v in data["vectors"] if str(v.get("_source", "")).startswith("measured")]
+    assert len(measured) >= 30, f"only {len(measured)} vectors claim measured provenance"
+
+
 def test_canonical_vector_case_floor():
     """The vector table cannot shrink to nothing and stay green (B2).
 

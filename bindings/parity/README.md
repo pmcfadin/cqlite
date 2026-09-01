@@ -244,6 +244,89 @@ bare `Uint8Array` would have canonicalized identically. R4 removed a second
 defect on the way — the old `getattr(value, "months", None)` form read a
 legitimate `months=None` as a missing attribute.
 
+### Decimals: TWO renderers, reconciled in the harness (F7)
+
+The three legs do not share a decimal renderer, and the difference is real:
+
+* the CLI goes through `cqlite_core::util::value_fmt::ValueFormatter`
+  (`cqlite-cli/src/output/json.rs:181`);
+* both bindings go through `cqlite_ffi_common::decimal::decimal_to_string`
+  (`bindings/{node,python}/src/value.rs`).
+
+**Measured by executing both**, not reasoned about:
+
+| (scale, unscaled) | CLI | bindings |
+|---|---|---|
+| (2, 3159567) | `31595.67` | `31595.67` |
+| (0, 12345) | `12345` | `12345` |
+| (2, -150) | `-1.50` | `-1.50` |
+| (3, 1500) | `1.500` | `1.500` |
+| (-1, 1) | `10` | `1e1` |
+| (-5000, 1) | `1` + 5000 zeros (len 5001) | `1e5000` |
+| (-5000, -7) | `-7` + 5000 zeros (len 5002) | `-7e5000` |
+| (-4095, 1) | positional (len 4096) | `1e4095` |
+| (-4097, 1) | positional (len 4098) | `1e4097` |
+| (-1000001, 1) | `1e1000001` | `1e1000001` |
+| (-2000000, 1) | `1e2000000` | `1e2000000` |
+| (5000, 1) | `0.000…1` (len 5002) | `0.000…1` (len 5002) |
+| (2000000, 1) | `1e-2000000` | `1e-2000000` |
+
+A **negative** scale below each renderer's own 1e6 cap is where they part; above
+the cap, and for a large **positive** scale, they already agree. Before the fix
+the canonicalizer preserved the CLI's expanded string verbatim once it crossed
+`DECIMAL_PLAIN_MAX_CHARS`, so the harness **red on a perfectly valid value** —
+a false red on correct input, the lane agents learn to waive.
+
+The fix folds an **integer's** trailing zeros into an exponent, so both forms
+reduce to one canonical string. It is deliberately **not** applied to a value
+with a fractional part: `0.10` must stay `0.10`, because both renderers preserve
+that scale and folding would discard a distinction the legs agree on. Verified
+against the pre-fix algorithm: every previously-agreeing value (`31595.67`,
+`0.10`, `-1.50`, `1.500`, `0.0015`, `-0.00`, `12345`) is **unchanged**.
+
+**The CLI's renderer is NOT touched.** Reconciling in the harness is what a
+test-only change may do; unifying the two renderers would change shipped CLI
+output and belongs to its own issue.
+
+It also **strengthens** the bound R2 exists for rather than fighting it: the
+integer path allocates at most the mantissa, so `1E+1000000000` canonicalizes to
+`1e1000000000` in 1342 bytes instead of attempting a gigabyte of zeros.
+
+### Vector provenance: `measured` vs `synthetic`
+
+F7's second half was worse than the first. The vectors **modelled** the CLI as
+emitting exponent notation, and the model was wrong — the failure CLAUDE.md
+names: *a port is a second implementation, and its correctness is only knowable
+by differential testing against the original*. A vector asserting what we
+*assume* a leg prints is worth less than no vector, because it manufactures
+confidence.
+
+Every vector carrying a **renderer-formatted** kind (`decimal`, `uuid`,
+`timeuuid`, `inet`, `blob`, `timestamp`, `date`, `time`, `duration`, `varint`)
+must therefore declare `_source`:
+
+* **`measured:`** — the leg strings were OBSERVED by executing the real
+  renderer, and `_parts` records the `(scale, unscaled)` they came from.
+* **`synthetic:`** — an input shape **no renderer emits**, present only to pin
+  the canonicalizer's own string parser. It makes no claim about any leg.
+  (`-0`, `-0.00`, leading zeros, uppercase hex.)
+
+Both `check_schema` / `checkSchema` REQUIRE it, so a modelled leg claim cannot
+be added silently again. **All 21 non-decimal renderer-formatted claims were
+measured in this round and are correct** — including the risky ones (pre-epoch
+timestamp and date, negative duration parts, last-nano-of-day, empty blob, both
+varints, which no corpus fixture covers). One mislabelling was caught:
+`blob_uppercase_hex_from_cli` asserted a CLI provenance it never had (the CLI
+emits lowercase), and is now `blob_uppercase_hex_is_lowercased`, marked
+synthetic.
+
+**Declared residual:** the leg values are still hand-written *in the file*, not
+generated from the renderers at run time. `_source` records that a human ran the
+renderer and copied the output; it does not prove the copy is faithful, and it
+cannot notice a renderer changing later. Deriving them at run time would need
+the harness to link both Rust renderers, which is a bigger change than this
+issue.
+
 ### R7 is DECLINED, deliberately — not an omission
 
 The CLI leg's `float`/`double` branch still accepts a Python `int` as well as a
