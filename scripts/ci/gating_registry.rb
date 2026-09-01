@@ -243,6 +243,27 @@ module GatingRegistry
   # Also three-valued: [step_names, error]. Derived from the registry's declared
   # aggregator (workflow + job), never from a hard-coded job name, so renaming
   # `pr-gate-core` moves this with it.
+  # ONLY ABSENT OR PROVABLY-FALSE `continue-on-error` LEAVES A FAILURE FATAL (roborev round 9).
+  # Round 8 excluded the literal `true` and stopped there, which is the two-valued reading of a
+  # three-valued field: GitHub Actions also permits an EXPRESSION
+  # (`continue-on-error: ${{ … }}`), whose value is not knowable here — and an unknowable value
+  # was being treated as "fatal on failure", i.e. the permissive answer. There are 2
+  # expression-valued instances in this repository's workflows today, so this is a live shape
+  # rather than a hypothetical.
+  #
+  # Absent or literal `false` => a failure of this step/job CAN fail the context, so it may
+  # carry a `required-gate-step` claim. Anything else — literal `true`, an expression, a string,
+  # a number — is NOT provably fatal and is excluded. A claim naming an excluded step then fails
+  # closed with the caller's "no such gating step" diagnostic, which is the conservative
+  # direction: the cost is a refused claim (loud, fixable by naming a different step), never an
+  # accepted claim whose failure would be ignored.
+  def gating_failure_possible?(node)
+    return true unless node.is_a?(Hash)
+    return true unless node.key?("continue-on-error")
+
+    node["continue-on-error"] == false
+  end
+
   def required_gate_step_names(registry, workflows)
     # THE SCHEMA VALIDATOR MUST NOT CRASH ON THE SCHEMA IT VALIDATES (roborev round
     # 2). `Hash#dig` raises TypeError the moment an intermediate value is not
@@ -305,14 +326,14 @@ module GatingRegistry
     names = closure.flat_map do |job|
       job_hash = jobs[job]
       next [] unless job_hash.is_a?(Hash)
-      next [] if job_hash["continue-on-error"] == true
+      next [] unless gating_failure_possible?(job_hash)
 
       steps = job_hash["steps"]
       next [] unless steps.is_a?(Array)
 
       steps.filter_map do |step|
         next unless step.is_a?(Hash) && step["name"]
-        next if step["continue-on-error"] == true
+        next unless gating_failure_possible?(step)
 
         step["name"].to_s
       end
