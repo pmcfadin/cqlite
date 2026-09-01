@@ -805,6 +805,9 @@ mod partition_driver;
 pub(crate) mod partition_shadow;
 mod raw_type_value;
 mod raw_value;
+// Issue #3811: the consumption-reporting twin of `parse_value_from_raw_bytes`
+// plus the one assert every bounded caller of that name now inherits.
+mod raw_value_reporting;
 mod row_data;
 mod row_framing;
 mod udt;
@@ -815,6 +818,9 @@ use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolic
 // `row_data`) can name it via `super::*`.
 use cell_kind::CellKind;
 use partition_shadow::{clustering_reversed_flags, PartitionShadow};
+// Issue #3811: named here so the `use super::*` sibling modules (`raw_value`)
+// can reach the bounded-decode consumption assert.
+use raw_value_reporting::require_fully_consumed_raw;
 // #1741: shared partition-header need-more classifier used by both sliding
 // parsers (`block_emit_windowed` + `compaction`) via their `use super::*` glob.
 use row_framing::PartitionHeaderReadiness;
