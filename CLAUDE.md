@@ -529,10 +529,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   filesystem than the last and each checked by observing the filesystem rather than an exit
   status: marker append (carries the reason) → **truncate** our own verdict → **unlink** it
   (needs no space and frees some; sound HERE because absence means "not selected" only to the
-  `--lite`/`--delta` loops and the SIDE lane exists only in the full gate) → **SIGTERM the gate**,
+  `--lite`/`--delta` loops and the SIDE lane exists only in the full gate) → **signal the gate**,
   the last disk-free channel, after which the run publishes NO verdict and keeps the
   `RESULT: INCOMPLETE` launch sentinel, which is never a certification. Bounded by a state where
-  the gate cannot produce a trustworthy verdict anyway. Same round, same family, one
+  the gate cannot produce a trustworthy verdict anyway. **That last rung is TERM *then* KILL,
+  because `kill` SUCCEEDING IS NOT THE TARGET DYING (job 319 round 4)** — the ladder's own rule
+  applied to its own bottom rung: `kill -TERM` returns 0 on mere DELIVERY, and an ignored TERM
+  disposition inherited by the gate's shell survives into bash and cannot be un-ignored, so a
+  TERM-only rung resumes with the original well-formed `PASS` intact. TERM first so cleanup can
+  run; SIGKILL after, because it cannot be ignored — which **ENDS the ladder instead of adding a
+  rung with another hole in it**. Signalling `$$` is safe in the way `kill -- -$pgid` is not: it
+  is this subshell's own ancestor, alive by construction, so there is no reaped-leader pid-reuse
+  hazard and no way to hit a peer lane's gate. Same round, same family, one
   file down: **the missing NEWLINE is part of the verdict.** An ENOSPC short write can truncate
   `printf '%s %s\n'` ON A FIELD BOUNDARY — `PASS 12` losing its newline, or `PASS 1` being all
   that reached disk of `PASS 12` — and both parse as well-formed two-field verdicts, the second

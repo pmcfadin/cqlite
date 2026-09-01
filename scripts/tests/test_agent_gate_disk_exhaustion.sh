@@ -1863,9 +1863,34 @@ if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && !
     bad "21c-ladder: the lower rungs did not fire (exit='${ex21c:-<none>}'; expected 143 with both diagnostics and no ALIVE):
 $o21c"
   fi
+  # (21d) RUNG 4 WITH SIGTERM IGNORED -- roborev job 319 round 4. `kill -TERM` returns 0 when the
+  # signal is merely DELIVERED, and an ignored disposition inherited by the gate's shell SURVIVES
+  # into bash and cannot be un-ignored, so a TERM-only rung would resume execution here with the
+  # original well-formed PASS intact: a false certification at the bottom of a fail-closed ladder.
+  # SIGKILL cannot be ignored, which is what ENDS the ladder instead of adding another rung.
+  # Asserted as death by SIGKILL (128+9) with the shell never reaching its next statement.
+  chmod 444 "$d/logs/legacy-heuristics.result" 2>/dev/null || true
+  chmod 555 "$d/logs" 2>/dev/null || true
+  o21d=$(
+    bash -c '
+      trap "" TERM
+      . "$1"; LOG_DIR="$2"; _disk_env
+      ( _tree_boundary_fail legacy-heuristics "tree-capture-failed" capture-failed ) >/dev/null 2>&1
+      printf "SURVIVED\n"
+    ' _ "$EX" "$d/logs" 2>&1
+    printf 'EXIT %s\n' "$?"
+  )
+  chmod 755 "$d/logs" 2>/dev/null || true
+  ex21d=$(printf '%s\n' "$o21d" | sed -n 's/^EXIT //p')
+  if [ "${ex21d:-0}" = 137 ] && case "$o21d" in *SURVIVED*) false ;; *) true ;; esac; then
+    ok "21d-unignorable: with SIGTERM IGNORED the gate is still terminated -- rung 4 escalates to SIGKILL (exit 137) and the shell never reaches its next statement, so a 'kill' that returns 0 can no longer be mistaken for the target having died"
+  else
+    bad "21d-unignorable: a gate ignoring SIGTERM SURVIVED rung 4 (exit='${ex21d:-<none>}'), so the original well-formed PASS would stand:
+$o21d"
+  fi
 else
   chmod 755 "$d/logs" 2>/dev/null || true
-  printf 'SKIP - 21c-ladder: this host could not be made to refuse BOTH a truncate and an unlink (running as root, or a permissive filesystem), so rungs 3-4 cannot be induced. DECLARED, not silently omitted.\n'
+  printf 'SKIP - 21c-ladder + 21d-unignorable: this host could not be made to refuse BOTH a truncate and an unlink (running as root, or a permissive filesystem), so rungs 3-4 cannot be induced. DECLARED, not silently omitted.\n'
 fi
 
 # +4 (roborev job 319: the two false-PASS routes that survived round 5. 21a the terminator and

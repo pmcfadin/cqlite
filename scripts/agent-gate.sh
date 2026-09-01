@@ -9537,7 +9537,7 @@ _tree_boundary_fail() {
       #                                   HERE and not in `record_result`: absence means "not
       #                                   selected" only to the `--lite`/`--delta` loops, and the
       #                                   SIDE lane exists only in the full gate.)
-      #   4. SIGTERM the gate itself    — the last disk-free channel there is. The run then
+      #   4. SIGNAL the gate itself     — the last disk-free channel there is. The run then
       #                                   publishes NO verdict: its summary keeps the launch
       #                                   sentinel `RESULT: INCOMPLETE`, which doctrine defines
       #                                   as "still running, died, or queued" and NEVER as
@@ -9549,6 +9549,21 @@ _tree_boundary_fail() {
       #                                   our own verdict file. `$$` is the top-level gate even
       #                                   in this subshell (bash keeps `$$`; `BASHPID` is what
       #                                   differs, which is the lane discriminator above).
+      #
+      # RUNG 4 IS TERM **THEN** KILL, because `kill` SUCCEEDING IS NOT THE TARGET DYING (roborev
+      # job 319 round 4) -- the same "a specified control must be required to have WORKED" rule
+      # this ladder exists to apply, at its own last rung. `kill -TERM` returns 0 when the signal
+      # is merely DELIVERED, and TERM can be IGNORED: an ignored disposition inherited by the
+      # gate's own shell SURVIVES into bash and cannot be un-ignored, so execution would resume
+      # here with the original well-formed `PASS` intact -- a false certification at the bottom of
+      # a fail-closed ladder. TERM goes first so the gate can still run its cleanup; SIGKILL
+      # follows because it cannot be ignored or handled, which ENDS the ladder rather than adding
+      # a rung someone can find another hole in. It also guarantees the EXIT trap does not run, so
+      # the summary keeps its INCOMPLETE sentinel rather than emitting anything at all.
+      #
+      # Signalling `$$` is safe in the way `kill -- -$pgid` is not: `$$` is this subshell's own
+      # ancestor, alive by construction while it waits on this lane, so there is no reaped-leader
+      # pid-reuse hazard and no possibility of hitting a peer lane's gate.
       : > "$_tbf_v" 2>/dev/null || true
       if [ -s "$_tbf_v" ]; then
         echo "⚠️ agent-gate: [$comp] verdict TRUNCATION also failed — attempting to REMOVE the verdict instead (#3800)" >&2
@@ -9557,6 +9572,8 @@ _tree_boundary_fail() {
       if [ -e "$_tbf_v" ] && [ -s "$_tbf_v" ]; then
         echo "⚠️ agent-gate: [$comp] verdict could be neither emptied nor removed, and the marker channel is unavailable — there is no disk-free way left to fail this run from a SIDE-lane subshell, so the GATE is being terminated: it will publish no verdict at all (RESULT stays the INCOMPLETE launch sentinel, which is never a certification) (#3800)" >&2
         kill -TERM "$$" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$$" 2>/dev/null || true
       fi
       return 1
     fi
