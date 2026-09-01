@@ -158,11 +158,15 @@ pub fn golden_map_key_value(key: &str, key_ty: &CqlType) -> Result<Value, String
             brief(key)
         )
     })?;
-    let shaped = match (&parsed, key_ty) {
-        (Value::Array(_), CqlType::List(_) | CqlType::Set(_) | CqlType::Tuple(_)) => true,
-        (Value::Object(_), CqlType::Map(..) | CqlType::Udt(_)) => true,
-        _ => false,
-    };
+    // The ONE JSON shape the declared kind's `toJSONString` has: `[…]` for a
+    // list/set/tuple, `{…}` for a map/UDT (cassandra-5.0.8).
+    let shaped = matches!(
+        (&parsed, key_ty),
+        (
+            Value::Array(_),
+            CqlType::List(_) | CqlType::Set(_) | CqlType::Tuple(_)
+        ) | (Value::Object(_), CqlType::Map(..) | CqlType::Udt(_))
+    );
     if !shaped {
         return Err(format!(
             "the golden's map key {} parses as {}, but the schema declares the key type \
@@ -469,7 +473,7 @@ fn array<'v>(v: &'v Value, ty: &CqlType) -> Result<&'v Vec<Value>, String> {
 
 /// The rendering of a [`Canon::Seq`]. Recursive, and INJECTIVE — see [`escape`].
 pub fn describe_seq(items: &[Canon]) -> String {
-    format!("seq[{}]", join(items.iter().map(|item| escape(item))))
+    format!("seq[{}]", join(items.iter().map(escape)))
 }
 
 /// The rendering of a [`Canon::Entries`], in emitted order.

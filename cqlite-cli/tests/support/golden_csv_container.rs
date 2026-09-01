@@ -501,7 +501,7 @@ fn decode_does_not_recover(
                              the golden's key {}",
                         brief(got),
                         brief(part),
-                        brief(&key)
+                        brief(key)
                     )),
                     Ok(_) => None,
                 }
