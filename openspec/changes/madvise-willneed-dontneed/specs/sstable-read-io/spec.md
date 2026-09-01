@@ -18,10 +18,18 @@ post-scan-once counterpart.
 
 **Acceptance-criterion → requirement map** (issue #2824):
 
-| AC | Requirement(s) |
-|---|---|
-| AC1 — cold-p99 improves, no warm regression, no #1143 reintroduction | ADDED *`PrefetchMode::Auto` issues `MADV_WILLNEED` on the scan mapping*, ADDED *`Auto` never yields `MADV_SEQUENTIAL`*, ADDED *The policy flip is recorded against a cold-vs-warm measurement*; the **i4i magnitude** is an explicit residual, see the proposal |
-| AC2 — `MADV_DONTNEED` post-scan-once, B4 peak hygiene | ADDED *A completed scan-once releases the scan mapping's resident pages*, ADDED *The post-scan release claims RSS hygiene and never page-cache eviction* |
+| AC | Requirement(s) | Slice |
+|---|---|---|
+| AC1 — cold-p99 improves, no warm regression, no #1143 reintroduction | ADDED *`PrefetchMode::Auto` issues `MADV_WILLNEED` on the scan mapping*, ADDED *`Auto` never yields `MADV_SEQUENTIAL`*, ADDED *The policy flip is recorded against a cold-vs-warm measurement*; the **i4i magnitude** is an explicit residual, see the proposal | 1 |
+| AC2 — `MADV_DONTNEED` post-scan-once, B4 peak hygiene | — see ADDED *Slice 1 ships no `MADV_DONTNEED` and says so*; the claim boundary that governs it is ADDED *The post-scan release claims RSS hygiene and never page-cache eviction* | **2** |
+
+**This delta is SLICE 1 of 2.** It ships AC1 — the `WILLNEED` policy flip — and deliberately ships no
+`MADV_DONTNEED`. The reason is recorded in the proposal and raised on the issue thread as REQ-2824-02:
+AC2 has no single post-scan seam (nine independent scan entry points in three shapes), requires new
+reader-scoped in-flight state because concurrent scans on one reader are a supported and tested property
+(#815), requires `unsafe` because memmap2 puts `DontNeed` in `UncheckedAdvice`, and — implemented
+unconditionally — is a plausible source of exactly the warm regression AC1 forbids. Slice 2 is filed
+separately.
 
 ## ADDED Requirements
 
@@ -75,11 +83,26 @@ latency comparison is observational only, by its own header, so the unit assert 
 - **GIVEN** `PrefetchMode::Sequential`, which is an explicit caller opt-in and not a default
 - **THEN** `mmap_advice_for` returns `MADV_SEQUENTIAL`
 
+### Requirement: Slice 1 ships no `MADV_DONTNEED` and says so
+
+This change SHALL NOT issue `MADV_DONTNEED` on any mapping, and SHALL NOT claim to satisfy AC2.
+
+The reader SHALL be left with no partial or dormant scan-lifetime accounting introduced for it: a
+half-built refcount that no seam decrements is worse than none, because it reads as coverage. Slice 2
+adds the accounting and the release together, with `benches/concurrent_scan.rs`'s `scaling_floors` perf
+gate re-run as part of it.
+
+#### Scenario: No `MADV_DONTNEED` is issued on any plane
+- **GIVEN** a reader opened under any `PrefetchMode`
+- **WHEN** any scan over it completes
+- **THEN** no `MADV_DONTNEED` is issued
+
 ### Requirement: The post-scan release claims RSS hygiene and never page-cache eviction
 
-No requirement, source comment, log line, artifact, or PR text produced by this change SHALL claim that
-`MADV_DONTNEED` evicts page cache, drops the page cache, or prevents a scan from "leaving the page cache
-warm".
+No requirement, source comment, log line, artifact, or PR text produced by this change — **or by slice
+2** — SHALL claim that `MADV_DONTNEED` evicts page cache, drops the page cache, or prevents a scan from
+"leaving the page cache warm". The requirement is stated here, in slice 1, because slice 1 is where the
+finding was made and where the issue's AC2 wording would otherwise be inherited unexamined.
 
 Per `madvise(2)`, after `MADV_DONTNEED` on a **file-backed** mapping subsequent accesses repopulate "from
 the up-to-date contents of the underlying mapped file"; the call frees the process's resident PTEs and

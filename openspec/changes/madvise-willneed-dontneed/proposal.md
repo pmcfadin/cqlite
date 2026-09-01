@@ -100,3 +100,32 @@ lane. Raised on the issue thread as REQ-2824-01 item (1), with this as the state
 The fixture is **CQLite-written and CQLite-read** and is a **performance fixture only, never a
 correctness oracle** (#3042) — it holds the bytes constant across two measurement arms in one session
 and nothing more. It is also **uncompressed** (#1406), which is noted where the result is reported.
+
+## This change is SLICE 1 of 2 — AC1 only
+
+The design investigation found AC2 (`MADV_DONTNEED` post-scan-once) to be a materially larger and
+riskier change than "a policy flip on built machinery":
+
+1. **No single post-scan seam.** Nine scan entry points in three shapes — materializing async fns
+   (`scan_inner`, `iterate_all_partitions[_cancellable]`, `iterate_all_partitions_for_compaction`,
+   `iterate_all_partitions_via_full_index`, `bti_scan_with_metadata[_cancellable]`), callback-driven
+   walks (`summary_scan/mod.rs:424/:468/:535`, `full_index_stream.rs:145/:420`), and spawned-task +
+   channel streams (`per_row_scan_stream.rs:145`, `batched_scan_stream.rs:181`) — share no wrapper.
+2. **No reader-scoped scan state exists.** `SSTableReader` (`reader/types.rs:243-380`) has no scan
+   counter, id, or guard, so AC2 requires adding one and threading it through all nine.
+3. **It cannot be unconditional.** Concurrent scans on one reader are a deliberate, tested property
+   (#815 removed the scan mutex; `reader/tests.rs:903`, `compaction_cancel_tests.rs:435`,
+   `benches/concurrent_scan.rs` + its `scaling_floors` perf gate). Firing `MADV_DONTNEED` when one scan
+   ends would zap a mapping another is mid-read on — and below the 8 MiB threshold `point_source` *is*
+   the scan mapping (`reader/mod.rs:970`), so it would degrade the point plane too.
+4. **It needs `unsafe`.** memmap2 0.9.11 puts `DontNeed` in `UncheckedAdvice`, not the safe `Advice`
+   enum, so `mmap_advice_for`'s `Option<Advice>` return cannot carry it.
+
+And it is in **tension with AC1**: implemented unconditionally, any workload that scans an SSTable more
+than once — a full-ring scan iterating, compaction re-reading — re-faults everything on every scan after
+the first, which is the warm regression AC1 forbids. Nothing in the reader knows whether a scan is
+one-shot, and inventing that predicate would be a heuristic (#28).
+
+Raised on the issue thread as REQ-2824-02 with this split as the stated default. Slice 2 is filed
+separately and carries findings 1-4. The issue stays **open** and this slice is stamped with
+`delivery-telemetry --slice`.
