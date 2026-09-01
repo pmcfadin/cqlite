@@ -147,25 +147,50 @@ claude_auth_seam_set()  { [ -n "${CQLITE_CLAUDE_AUTH_ENV_FILE:-}" ]; }
 # claude_auth_platform_linux: rc 0 iff this host has the pam_env mechanism at all.
 claude_auth_platform_linux() { [ "$(uname -s 2>/dev/null)" = Linux ]; }
 
-# ---- bounded execution -------------------------------------------------------------
+# ---- bounded execution: THE BOUND MUST ESCALATE, OR THERE IS NO PROBE ---------------
 # Resolved by PROBING the candidate, not by trusting its name: GNU coreutils installs its
-# timeout as `gtimeout` on macOS, and a BusyBox `timeout` REJECTS --kill-after. Same
-# resolution bootstrap uses, duplicated here only because this file must also run
-# standalone. A candidate that supports --kill-after wins even if it is second.
+# timeout as `gtimeout` on macOS, and an older BusyBox `timeout` REJECTS --kill-after.
+#
+# A SIGTERM-ONLY BOUND IS NOT A BOUND, and keeping one was a shipped defect: the resolver
+# used to fall back to a `timeout` that had FAILED the --kill-after probe, so a `claude`
+# that ignores SIGTERM ran to its own completion and hung the provisioning entry point.
+# MEASURED here with a TERM-ignoring child:
+#     timeout 2 <child>                -> rc 124 after THIRTY seconds (the child's own
+#                                         lifetime — the "bound" bounded nothing)
+#     timeout --kill-after=2 2 <child> -> rc 137 after 4 seconds
+# The rc even LOOKS like a timeout in the first case, so nothing downstream could tell.
+# CLAUDE.md's gate doctrine takes the opposite line for exactly this shape: where the probe
+# cannot be BOUNDED, the probe is not run at all — a missing capability must not inherit
+# the permissive branch. So an unsupported escalation flag is now a REFUSAL, whose callers
+# report UNMEASURED with the cause named.
+#
+# TWO SPELLINGS, because they are the same capability under different names: `--kill-after=`
+# (GNU long) and `-k` (GNU short AND BusyBox). Each is probed by RUNNING it, so a candidate
+# that merely prints the flag in its --help is not taken at its word.
+#
+# WHAT IS MEASURED AND WHAT IS NOT, declared rather than implied: the resolver measures that
+# the escalation flag is ACCEPTED. That the implementation then really escalates to SIGKILL
+# is pinned behaviourally, against the real binary and a SIGTERM-ignoring child, by
+# scripts/tests/test_claude_auth_capability.sh section 28 — not re-measured on every run,
+# because a behavioural probe needs a child that outlives its own bound, i.e. seconds of
+# wall clock on a provisioning entry point.
 CLAUDE_AUTH_TIMEOUT_BIN=""
-CLAUDE_AUTH_TIMEOUT_KILL=0
+CLAUDE_AUTH_TIMEOUT_KILL_ARGS=()
 claude_auth_resolve_timeout() {
   local name path
-  CLAUDE_AUTH_TIMEOUT_BIN=""; CLAUDE_AUTH_TIMEOUT_KILL=0
+  CLAUDE_AUTH_TIMEOUT_BIN=""; CLAUDE_AUTH_TIMEOUT_KILL_ARGS=()
   for name in timeout gtimeout; do
     path="$(command -v "$name" 2>/dev/null || true)"
     [ -n "$path" ] || continue
     if "$path" --kill-after=1 1 true >/dev/null 2>&1; then
-      CLAUDE_AUTH_TIMEOUT_BIN="$path"; CLAUDE_AUTH_TIMEOUT_KILL=1; return 0
+      CLAUDE_AUTH_TIMEOUT_BIN="$path"; CLAUDE_AUTH_TIMEOUT_KILL_ARGS=(--kill-after=5); return 0
     fi
-    [ -n "$CLAUDE_AUTH_TIMEOUT_BIN" ] || CLAUDE_AUTH_TIMEOUT_BIN="$path"
+    if "$path" -k 1 1 true >/dev/null 2>&1; then
+      CLAUDE_AUTH_TIMEOUT_BIN="$path"; CLAUDE_AUTH_TIMEOUT_KILL_ARGS=(-k 5); return 0
+    fi
   done
-  [ -n "$CLAUDE_AUTH_TIMEOUT_BIN" ]
+  CLAUDE_AUTH_TIMEOUT_BIN=""
+  return 1
 }
 
 # ---- shell tracing: OFF ACROSS EVERY SECRET-BEARING PATH ---------------------------
@@ -401,7 +426,7 @@ claude_auth_verdict_into__untraced() {
     return 0
   fi
   if ! claude_auth_resolve_timeout; then
-    eval "$__od='no timeout/gtimeout on PATH — refusing to run an UNBOUNDED network probe (a wedged child would hang the provisioning entry point)'"
+    eval "$__od='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — a SIGTERM-only bound does not bound a child that ignores SIGTERM, so this refuses to run the network probe rather than hang the provisioning entry point'"
     return 0
   fi
   if ! __cfg=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-claude-probe.XXXXXX") || [ ! -d "$__cfg" ]; then
@@ -415,18 +440,13 @@ claude_auth_verdict_into__untraced() {
   CLAUDE_AUTH_PROBE_DIR="$__cfg"
   claude_auth_probe_arm_traps
 
-  # NOT A PIPE. `__out=$(...)` then `__rc=$?` on its own line.
-  if [ "$CLAUDE_AUTH_TIMEOUT_KILL" = 1 ]; then
-    __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
-      "$CLAUDE_AUTH_TOKEN_KEY=$__tok" "$CLAUDE_AUTH_CONFIG_KEY=$__cfg" \
-      "$CLAUDE_AUTH_TIMEOUT_BIN" --kill-after=5 "$CLAUDE_AUTH_PROBE_BOUND" \
-      claude -p "$CLAUDE_AUTH_PROMPT" 2>&1)
-  else
-    __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
-      "$CLAUDE_AUTH_TOKEN_KEY=$__tok" "$CLAUDE_AUTH_CONFIG_KEY=$__cfg" \
-      "$CLAUDE_AUTH_TIMEOUT_BIN" "$CLAUDE_AUTH_PROBE_BOUND" \
-      claude -p "$CLAUDE_AUTH_PROMPT" 2>&1)
-  fi
+  # NOT A PIPE. `__out=$(...)` then `__rc=$?` on its own line. ONE invocation, because
+  # there is no longer a bound-without-escalation form to branch on: the resolver refuses
+  # rather than hand back a SIGTERM-only `timeout`.
+  __out=$(env -u "$CLAUDE_AUTH_TOKEN_KEY" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
+    "$CLAUDE_AUTH_TOKEN_KEY=$__tok" "$CLAUDE_AUTH_CONFIG_KEY=$__cfg" \
+    "$CLAUDE_AUTH_TIMEOUT_BIN" "${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]}" "$CLAUDE_AUTH_PROBE_BOUND" \
+    claude -p "$CLAUDE_AUTH_PROMPT" 2>&1)
   __rc=$?
   claude_auth_probe_cleanup
   claude_auth_probe_restore_traps
@@ -676,7 +696,7 @@ claude_tmux_cold_probe_into() {
   eval "$__ok=0"; eval "$__otok=unset"; eval "$__olen=0"; eval "$__ocfg="; eval "$__owhy="
 
   if ! claude_auth_resolve_timeout; then
-    eval "$__owhy='no timeout/gtimeout on PATH — refusing to start an UNBOUNDED tmux probe'"
+    eval "$__owhy='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to start a tmux probe whose bound could not kill a wedged child'"
     return 0
   fi
   if ! __dir=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-tmux-probe.XXXXXX") || [ ! -d "$__dir" ]; then
@@ -725,13 +745,8 @@ CLAUDE_AUTH_PROBE
   [ -z "$__ptok" ] || __e+=("$CLAUDE_AUTH_TOKEN_KEY=$__ptok")
   [ -z "$__pcfg" ] || __e+=("$CLAUDE_AUTH_CONFIG_KEY=$__pcfg")
   # NOT A PIPE: the command runs on its own line and $? is read on the next.
-  if [ "$CLAUDE_AUTH_TIMEOUT_KILL" = 1 ]; then
-    "${__e[@]}" "$CLAUDE_AUTH_TIMEOUT_BIN" --kill-after=5 "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
-      tmux -S "$__sock" new-session -d -s cqlite-authprobe "sh '$__dir/probe.sh' '$__res'" >/dev/null 2>&1
-  else
-    "${__e[@]}" "$CLAUDE_AUTH_TIMEOUT_BIN" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
-      tmux -S "$__sock" new-session -d -s cqlite-authprobe "sh '$__dir/probe.sh' '$__res'" >/dev/null 2>&1
-  fi
+  "${__e[@]}" "$CLAUDE_AUTH_TIMEOUT_BIN" "${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]}" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+    tmux -S "$__sock" new-session -d -s cqlite-authprobe "sh '$__dir/probe.sh' '$__res'" >/dev/null 2>&1
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
     claude_auth_probe_cleanup; claude_auth_probe_restore_traps
@@ -742,7 +757,7 @@ CLAUDE_AUTH_PROBE
   # `new-session -d` returns as soon as the session exists, so the pane may not have
   # written yet. The wait is bounded by the SAME timeout binary rather than by a counted
   # `sleep` loop, so a host whose sleep has no sub-second form cannot stretch it.
-  "$CLAUDE_AUTH_TIMEOUT_BIN" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+  "$CLAUDE_AUTH_TIMEOUT_BIN" "${CLAUDE_AUTH_TIMEOUT_KILL_ARGS[@]}" "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
     sh -c 'while :; do grep -q "^end$" "$1" 2>/dev/null && exit 0; sleep 0.2; done' _ "$__res" >/dev/null 2>&1
   __rc=$?
   if [ "$__rc" -ne 0 ]; then

@@ -1264,6 +1264,107 @@ else
 fi
 
 # =====================================================================================
+# 28. THE BOUND MUST BE HARD, OR THERE MUST BE NO PROBE.
+#     The resolver used to KEEP a `timeout` that failed the `--kill-after` probe and run
+#     with a SIGTERM-ONLY bound, so a `claude` that ignores SIGTERM ran unbounded and hung
+#     the provisioning entry point. Measured on this box with a TERM-ignoring child:
+#       timeout 2 <child>                 -> rc 124 after THIRTY seconds (the child's own
+#                                            lifetime; the "bound" bounded nothing)
+#       timeout --kill-after=2 2 <child>  -> rc 137 after 4 seconds
+#     CLAUDE.md's gate doctrine takes the opposite line for exactly this case: where the
+#     probe cannot be BOUNDED the probe is not run at all, because a missing capability
+#     must not inherit the permissive branch. So the resolver now requires an escalating
+#     bound in one of its two spellings (`--kill-after=` GNU, `-k` BusyBox/GNU-short) and
+#     otherwise REFUSES, leaving the verdict UNMEASURED with the cause named.
+# =====================================================================================
+# (a) THE BOUND ACTUALLY TERMINATES A TERM-IGNORING CHILD. Driven through the real probe
+#     path — the library is sourced and CLAUDE_AUTH_PROBE_BOUND lowered — so this measures
+#     the shipped invocation, not a re-derived one. `exec` is used deliberately: a signal
+#     set to SIG_IGN stays ignored across execve, so the process the bound must kill really
+#     is one that discards SIGTERM, and it holds no pipe to this suite (a child that did
+#     would keep the capture open long after its parent was killed, and the case would time
+#     out for the wrong reason).
+d28=$(mkshim "$tmp/s28")
+cat >"$d28/claude" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+exec sleep 45 >/dev/null 2>&1
+EOF
+chmod +x "$d28/claude"
+cat >"$tmp/hardbound.sh" <<HBEOF
+#!/usr/bin/env bash
+set -uo pipefail
+. "$CAPLIB"
+CLAUDE_AUTH_PROBE_BOUND=1
+claude_auth_verdict_into hb_v hb_d
+printf 'verdict=%s\n' "\$hb_v"
+HBEOF
+hb_start=$(date +%s)
+hb_out=$(PATH="$d28:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" \
+         bash "$tmp/hardbound.sh" 2>&1) || true
+hb_elapsed=$(( $(date +%s) - hb_start ))
+printf '%s\n' "$hb_out" >>"$TRANSCRIPT"
+# 20s is the ceiling for a 1s bound + a 5s kill-after on a loaded box; the UNBOUNDED
+# failure this pins takes the child's full 45s, so the two are not close.
+if [ "$hb_elapsed" -lt 20 ] && printf '%s' "$hb_out" | grep -q '^verdict=UNMEASURED'; then
+  ok "the probe bound KILLS a SIGTERM-ignoring child (${hb_elapsed}s, verdict UNMEASURED)"
+else
+  bad "the probe bound did not terminate a SIGTERM-ignoring child in time (${hb_elapsed}s): $hb_out"
+fi
+# (b) A `timeout` WITH NO ESCALATION IS NOT A BOUND, so the probe must not run at all.
+#     Both spellings are refused by the shim, and `gtimeout` is planted too — the resolver
+#     tries it second, and a host that happened to have one would otherwise rescue the case
+#     and hide the defect.
+d28b=$(mkshim "$tmp/s28b")
+CLAUDE_RAN_MARKER="$tmp/s28b-claude-ran"
+rm -f "$CLAUDE_RAN_MARKER"
+for tname in timeout gtimeout; do
+  cat >"$d28b/$tname" <<EOF
+#!/usr/bin/env bash
+# A \`timeout\` that knows no escalation flag: it REJECTS both spellings and otherwise
+# behaves (BusyBox's older form). Rejecting is what the resolver must notice.
+case "\${1:-}" in
+  --kill-after*|-k) printf '%s: unrecognized option\n' "\$0" >&2; exit 125 ;;
+esac
+shift   # the duration; this stub never enforces one
+exec "\$@"
+EOF
+  chmod +x "$d28b/$tname"
+done
+cat >"$d28b/claude" <<EOF
+#!/usr/bin/env bash
+: >'$CLAUDE_RAN_MARKER'
+printf '%s\n' '$SENTINEL'
+exit 0
+EOF
+chmod +x "$d28b/claude"
+run_cap "$d28b" "$ef2" -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+  ok "claude-auth: UNMEASURED when no timeout on PATH can enforce a HARD bound"
+else
+  bad "claude-auth: a SIGTERM-only timeout was accepted as a bound: $out"
+fi
+if [ ! -e "$CLAUDE_RAN_MARKER" ]; then
+  ok "claude-auth: the probe is NOT RUN when the bound cannot be enforced (a would-be VERIFIED stub was never invoked)"
+else
+  bad "claude-auth: the unbounded probe RAN anyway — a missing capability inherited the permissive branch"
+fi
+if printf '%s' "$out" | grep -qi 'kill\|hard'; then
+  ok "claude-auth: the refusal NAMES the missing hard bound rather than reporting a generic absence"
+else
+  bad "claude-auth: the refusal does not say which capability was missing: $out"
+fi
+# The tmux cold-start probe shares the resolver, so it refuses on the same ground.
+d28c=$(mkshim "$tmp/s28c"); plant_tmux "$d28c" no-server
+for tname in timeout gtimeout; do cp "$d28b/$tname" "$d28c/$tname"; done
+run_cap "$d28c" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER'; then
+  ok "claude-tmux-env: the cold-start probe refuses on the same unenforceable bound (NO-SERVER, UNMEASURED-class)"
+else
+  bad "claude-tmux-env: the cold-start probe ran without an enforceable bound: $out"
+fi
+
+# =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
 #     `tooling-tests` is a MANDATORY gate component, so a path that exists on ONE box —
 #     or in ONE agent session — makes the gate host-dependent, and if that directory
@@ -1369,7 +1470,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=70
+CASE_FLOOR=75
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

@@ -984,7 +984,7 @@ They are two verdicts because they fail independently and the operator actions d
 | `claude-tmux-env: COLD-START-MISSING` | No server is running, and a throwaway one started from the persisted environment handed its pane **no token**. The next real server will not either. | Provision the token (below). |
 | `claude-tmux-env: COLD-START-INCOMPLETE` | A new server would deliver the token but **no `CLAUDE_CONFIG_DIR`** — `/etc/profile.d` never reaches a spawned pane (fact 5). | Add a `CLAUDE_CONFIG_DIR=` line to `/etc/environment`. |
 | `claude-tmux-env: COLD-START-NODIR` | A new server would deliver both, but that config directory does not exist. | Create it, or correct the `/etc/environment` line. |
-| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`, no private working directory, tmux would not start). **UNMEASURED-class.** | Resolve the named cause and re-run. |
+| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`/`gtimeout` able to enforce a **hard** bound — one that escalates to SIGKILL via `--kill-after=` or `-k` — no private working directory, tmux would not start). **UNMEASURED-class.** | Resolve the named cause and re-run. |
 
 **A box with no tmux server is measured, not excused.** That is the normal state of a freshly
 provisioned machine at the moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a
