@@ -54,7 +54,6 @@ impl SSTableReader {
     /// caller reports as `AccessPath::ClusteringSlice`, and is `false` whenever the
     /// narrowing was retracted — a retried read decoded the whole partition, so
     /// claiming a slice would be untrue.
-    #[cfg(not(feature = "tombstones"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn decode_clustering_seek_target(
         &self,
@@ -120,7 +119,6 @@ impl SSTableReader {
     /// not the BTI strict table-id match that rejects writer-header SSTables,
     /// issue #1184); everything else uses the chunk-targeted BTI decoder, which is
     /// also the full-partition path (issue #953).
-    #[cfg(not(feature = "tombstones"))]
     #[allow(clippy::too_many_arguments)]
     async fn decode_clustering_seek_attempt(
         &self,

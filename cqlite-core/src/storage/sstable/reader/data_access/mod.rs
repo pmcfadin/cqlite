@@ -17,9 +17,13 @@
 //! delta-scan bridge), plus the public-surface re-exports.
 
 mod bti;
-mod clustering_seek_decode; // issue #3721: the clustering-seek decode + its fallback
-                            // BTI point-read path split out of `bti.rs` (issue #1599 / G3, campsite #1116):
-                            // `bti_point_lookup` + the chunk-targeted single-partition decode machinery.
+// Issue #3721: the clustering-seek decode + its fallback. Gated exactly like the
+// seek path it serves — `scan_single_partition_clustering` is `not(tombstones)`,
+// so under `tombstones` this whole module would be dead code.
+#[cfg(not(feature = "tombstones"))]
+mod clustering_seek_decode;
+// BTI point-read path split out of `bti.rs` (issue #1599 / G3, campsite #1116):
+// `bti_point_lookup` + the chunk-targeted single-partition decode machinery.
 mod bti_point;
 // BIG ("nb") promoted-index forward seek + reverse iterator (Issue #1184). The
 // seek/reverse paths exist only on the default build, so the whole module is

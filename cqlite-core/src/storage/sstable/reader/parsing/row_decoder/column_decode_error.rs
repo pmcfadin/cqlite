@@ -181,6 +181,11 @@ pub(super) fn dispatch_type(declared: &str, header: Option<&str>) -> String {
 /// Callers must DISCARD any rows the failed windowed attempt buffered before
 /// retrying; every one of them collects into a local `Vec` rather than emitting
 /// incrementally, so there is nothing already handed to a consumer.
+///
+/// Gated `not(tombstones)` like its ONLY caller, `data_access::clustering_seek_decode`
+/// (whose seek path is itself `not(tombstones)`): under `tombstones` no windowed
+/// read path is compiled, so there is no walk to fall back.
+#[cfg(not(feature = "tombstones"))]
 pub(in crate::storage::sstable::reader) fn indexed_walk_falls_back(e: &Error) -> bool {
     let fall_back = is_column_decode(e);
     if fall_back {
