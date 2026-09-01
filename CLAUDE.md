@@ -1126,7 +1126,7 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `sstable-developer`, which had queued work it never did, are in it beside the four reviewers).
   Writes go under `.review-stage/`, whose ignore status is **verified with `git check-ignore`,
   fail-closed**, so a stage opened mid-run cannot dirty a running gate (#2926) or make
-  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **THE CLAIM IS ABOUT THE CONSUMER AND NOT
+  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **And a SYMLINK at the report path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the writes themselves go through a same-directory temporary file plus an atomic `mv -f`, which replaces a link instead of following it and never lets a concurrent reader see a half-written `result:` line. **THE CLAIM IS ABOUT THE CONSUMER AND NOT
   ABOUT THE AGENTS, and stating it narrowly is the point**: naming a report path was effective for
   `spec-auditor` and `flow-closer` and did NOTHING for `rust-reviewer` (0 of 3, one of them told IN
   WRITING that an absent file would be recorded as a non-review) — and the mechanical reason

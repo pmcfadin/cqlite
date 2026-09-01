@@ -75,6 +75,11 @@ usage failure (exit 3), and SHALL determine whether C is required by MEASURING t
 - **WHEN** `--c-verdict` is omitted entirely
 - **THEN** the script exits 3 (usage) rather than defaulting to "not required"
 
+#### Scenario: a symlinked write path is refused, not followed
+- **WHEN** the report path, the stage-record path, or any component under `.review-stage/` is a SYMLINK
+- **THEN** `open` (and `record-author-performed`) REFUSE naming the symlink and the component, the link
+  target is left UNTOUCHED, and the ordinary non-symlinked path still succeeds (the positive control)
+
 #### Scenario: archiving a completed change is not design-routed
 - **WHEN** the branch's only change under `openspec/changes/` is a real move of a live change
   directory into `openspec/changes/archive/`

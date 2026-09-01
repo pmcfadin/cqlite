@@ -209,6 +209,8 @@ Everything is written under `.review-stage/`, whose ignore status is **verified 
 `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate of
 record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).
 
+**And a SYMLINK at the report path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the writes themselves go through a same-directory temporary file plus an atomic `mv -f`, which replaces a link instead of following it and never lets a concurrent reader see a half-written `result:` line.
+
 If no independent audit can be obtained, the **sanctioned fallback** is to record the substitute
 *with its working* — never a hand-asserted pass:
 

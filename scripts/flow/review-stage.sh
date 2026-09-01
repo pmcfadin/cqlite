@@ -86,6 +86,17 @@
 # git does not confirm. A path outside the repository is also a refusal, not an exemption:
 # `check-ignore` cannot confirm it, and "cannot tell" must never take the permissive branch.
 #
+# AND A SYMLINK IS REFUSED, NEVER FOLLOWED (#3751 round 1, F5)
+# -----------------------------------------------------------
+# `check-ignore` answers about a LEXICAL path; a WRITE follows symlinks. So the check above was
+# satisfiable while the write landed somewhere else entirely — measured: an ignored but SYMLINKED
+# report path clobbered a TRACKED file and `open` reported `OPEN-OK`. The report path, the
+# `.stage` path and EVERY path component at or below the repo root are therefore checked, and a
+# link is a NAMED refusal rather than something to resolve. Both writes then go through a
+# same-directory temporary file plus an atomic `mv -f`: `mv` replaces the destination NAME instead
+# of opening it, and no concurrent reader (`premerge-assert.sh` at the merge point) can observe a
+# half-written `result:` line.
+#
 # THE DEADLINE IS ADVISORY BY DESIGN
 # ----------------------------------
 # It changes what `status` REPORTS, never the verdict. A report that arrives late is still
@@ -362,6 +373,114 @@ assert_ignored() {
   fi
 }
 
+# assert_no_symlink <path> <what> — REFUSE rather than FOLLOW (#3751 round 1, F5).
+#
+# `git check-ignore` answers about a LEXICAL path; a WRITE follows symlinks. So an ignored
+# `.review-stage/issue-<N>/c.md` that is a SYMLINK puts the write wherever the link points — a
+# TRACKED file, or outside the repository altogether — which falsifies the claim the ignore
+# verification above exists to make: that a stage opened mid-run cannot dirty a running gate of
+# record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). Measured before
+# this check existed: a symlinked report path CLOBBERED a tracked file and `open` reported
+# OPEN-OK.
+#
+# REFUSING BEATS RESOLVING. Resolving the link would need a SECOND ignore verification of the
+# resolved path plus a decision about intent, and nothing legitimate creates such a link here —
+# so "cannot tell what this is for" takes the refusing branch, as everywhere else in this file.
+#
+# EVERY COMPONENT AT OR BELOW THE REPO ROOT IS CHECKED, not just the leaf: a symlinked
+# `.review-stage/` or `.review-stage/issue-<N>` redirects the write just as effectively as a
+# symlinked file. The ROOT ITSELF and anything above it are deliberately NOT checked — a fleet
+# checkout legitimately sits under symlinked parents, and refusing there would red correct input,
+# which is the guard agents learn to waive. A path not under the root returns without a verdict:
+# `assert_ignored` already refuses it, because `check-ignore` cannot confirm it.
+#
+# It runs BEFORE the `mkdir -p` that prepares the write, because a component that is a DANGLING
+# symlink makes `mkdir -p` fail with "File exists" — an unnamed exit 1 under `set -e` instead of
+# a named refusal.
+assert_no_symlink() {
+  local path="$1" what="$2" root rel comp cur parent oldifs
+  root="$(repo_root)"
+  case "$path" in
+    "$root"/*) rel="${path#"$root"/}" ;;
+    *) return 0 ;;
+  esac
+  cur="$root"
+  parent="$root"
+  oldifs="$IFS"
+  # NOGLOB while splitting: `set -- $rel` is an UNQUOTED expansion, so a component containing a
+  # glob character would be pathname-expanded and the walk would inspect other files entirely.
+  set -f
+  IFS='/'
+  # shellcheck disable=SC2086
+  set -- $rel
+  IFS="$oldifs"
+  set +f
+  for comp in "$@"; do
+    [ -n "$comp" ] || continue
+    # "CANNOT TELL" IS A REFUSAL: if the parent exists but is not searchable, `-L`/`-e` on the
+    # child answer FALSE for a component that may well be a symlink — a two-valued predicate
+    # collapsing the unknown onto the permissive answer, which is the shape this repo pins.
+    if [ -e "$parent" ] && [ ! -x "$parent" ]; then
+      emit "OPEN-REFUSED reason=path-unverifiable what=$what path=$path component=$parent"
+      emit "OPEN-REFUSED detail=this directory is not searchable, so whether the next component is a SYMLINK cannot be determined — and a write that follows a link lands outside the verified-gitignored path (#2926/#3648). Refusing rather than guessing: cannot-tell must not take the permissive branch."
+      exit 2
+    fi
+    parent="$cur"
+    cur="$cur/$comp"
+    if [ -L "$cur" ]; then
+      emit "OPEN-REFUSED reason=path-is-symlink what=$what path=$path component=$cur"
+      emit "OPEN-REFUSED detail=git check-ignore verifies a LEXICAL path but a WRITE follows symlinks, so this write would land wherever the link points — possibly a TRACKED file or a path outside the repository — dirtying a running gate of record (tree-integrity FAIL, #2926) and making premerge-assert refuse on dirty: yes (#3648). Remove the link and let this tool create a regular file, or pass a --report path that is one."
+      exit 2
+    fi
+    if [ -e "$cur" ] && [ ! -d "$cur" ] && [ "$cur" != "$path" ]; then
+      emit "OPEN-REFUSED reason=path-component-not-a-directory what=$what path=$path component=$cur"
+      emit "OPEN-REFUSED detail=an intermediate path component exists and is not a directory, so nothing can be written under it."
+      exit 2
+    fi
+  done
+  if [ -e "$cur" ] && [ ! -f "$cur" ]; then
+    emit "OPEN-REFUSED reason=path-not-a-regular-file what=$what path=$path"
+    emit "OPEN-REFUSED detail=this path exists and is not a regular file (a directory, a fifo, a device). This tool writes a text record; it will not write through anything else."
+    exit 2
+  fi
+}
+
+# WRITE_TMP / prepare_write / commit_write — WRITE VIA A SAME-DIRECTORY TEMPORARY FILE PLUS AN
+# ATOMIC `mv -f` (#3751 round 1, F5). Two reasons, and both matter:
+#   1. `mv -f` REPLACES the destination NAME rather than opening it, so a link that appeared
+#      between the check above and the write is replaced, not followed. The check is the control;
+#      this is the belt, and it costs nothing.
+#   2. no reader can observe a HALF-WRITTEN report. The report of record is read CONCURRENTLY (by
+#      `premerge-assert.sh` at the merge point, and by `status` from another session), and a
+#      truncated `result:` line is a verdict nobody wrote.
+# The TEMPORARY path is verified the same way the destination is — not a symlink, and gitignored
+# — because for the duration of the write it is a real file in the tree, so a temp beside a
+# `--report` in a directory ignored only by EXTENSION would dirty a running gate exactly as the
+# report would.
+#
+# WRITE_TMP IS A GLOBAL, NOT A PRINTED VALUE. `assert_ignored` and `assert_no_symlink` refuse by
+# EMITTING and exiting 2; inside a command substitution that exit would end only the SUBSHELL
+# while the refusal text was captured into a variable — a refusal nobody sees, and a script that
+# carries on writing.
+WRITE_TMP=""
+prepare_write() {
+  local dest="$1" what="$2"
+  assert_no_symlink "$dest" "$what"
+  WRITE_TMP="$(dirname "$dest")/.$(basename "$dest").tmp.$$"
+  assert_no_symlink "$WRITE_TMP" "$what-tempfile"
+  assert_ignored "$WRITE_TMP" "$what-tempfile"
+}
+commit_write() {
+  local dest="$1" what="$2"
+  if ! mv -f "$WRITE_TMP" "$dest" 2>/dev/null; then
+    rm -f "$WRITE_TMP" 2>/dev/null || true
+    emit "OPEN-REFUSED reason=write-failed what=$what path=$dest"
+    emit "OPEN-REFUSED detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
+    exit 2
+  fi
+  WRITE_TMP=""
+}
+
 # read_field <file> <key> — the FIRST `<key>: <value>` line's value, flattened to one line.
 # Empty output means "absent or empty", which every caller treats as unmeasured.
 read_field() {
@@ -403,11 +522,18 @@ cmd_open() {
   # BOTH files are verified ignored BEFORE anything is created — including the stage record,
   # which lives under .review-stage/ whatever --report says. Checking only the report would
   # leave the other write dirtying a running gate.
+  #
+  # THE SYMLINK WALK RUNS FIRST, BEFORE THE `mkdir -p`: a component that is a dangling symlink
+  # makes `mkdir -p` fail with "File exists", i.e. an unnamed exit 1 under `set -e` instead of a
+  # named refusal — and a component that is a LIVE symlink would have the directory created
+  # somewhere else entirely.
+  assert_no_symlink "$sfile" stage-record
   dir="$(dirname "$sfile")"; mkdir -p "$dir"
   assert_ignored "$sfile" stage-record
   # The report's PARENT must exist for check-ignore to answer about a path, and for the
   # write to land; creating it is safe because the directory itself is under a verified
   # path or under the caller's chosen tree.
+  assert_no_symlink "$rpath" report-of-record
   mkdir -p "$(dirname "$rpath")"
   assert_ignored "$rpath" report-of-record
 
@@ -443,6 +569,7 @@ cmd_open() {
     esac
   fi
 
+  prepare_write "$sfile" stage-record
   {
     printf 'kind: %s\n' "$kind"
     printf 'issue: %s\n' "$issue"
@@ -453,10 +580,12 @@ cmd_open() {
     printf 'report: %s\n' "$rpath"
     printf 'reopen-count: %s\n' "$reopen_count"
     [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
-  } >"$sfile"
+  } >"$WRITE_TMP"
+  commit_write "$sfile" stage-record
 
   # THE SENTINEL. `result:` is the FIRST recordable line on purpose: it is what `verdict`
   # reads, and a reader opening the file sees the non-verdict before anything else.
+  prepare_write "$rpath" report-of-record
   {
     printf '# review stage: %s — issue #%s\n' "$kind" "$issue"
     printf '\n'
@@ -487,7 +616,8 @@ cmd_open() {
     printf '## Findings\n'
     printf '\n'
     printf '(nothing written yet)\n'
-  } >"$rpath"
+  } >"$WRITE_TMP"
+  commit_write "$rpath" report-of-record
 
   emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso reopen-count=$reopen_count report=$rpath"
   printf '%s\n' "$rpath"
@@ -769,8 +899,10 @@ cmd_record_author_performed() {
     emit "AUTHOR-REFUSED detail=open the stage first, so the recording attaches to a stage with a known agent and clock: $prog open $kind --issue $issue --agent <type>"
     exit 2
   fi
+  assert_no_symlink "$STAGE_REPORT" report-of-record
   assert_ignored "$STAGE_REPORT" report-of-record
 
+  prepare_write "$STAGE_REPORT" report-of-record
   {
     printf '# review stage: %s — issue #%s (AUTHOR-PERFORMED substitute)\n' "$kind" "$issue"
     printf '\n'
@@ -795,7 +927,8 @@ cmd_record_author_performed() {
     printf 'Peer review is preferred; a hand audit is the sanctioned fallback only, and it\n'
     printf 'is sanctioned at all because an audit whose working is shown is auditable,\n'
     printf 'whereas an absent one is not.\n'
-  } >"$STAGE_REPORT"
+  } >"$WRITE_TMP"
+  commit_write "$STAGE_REPORT" report-of-record
 
   emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok report=$STAGE_REPORT"
   emit "RECORD-NOTE kind=$kind issue=$issue $AUTHOR_DISCLOSURE"

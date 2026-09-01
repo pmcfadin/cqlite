@@ -513,6 +513,125 @@ rs "$R9" --help
 rc_is 0 "usage: --help exits 0"
 has "REVIEW-STAGE:" "usage: --help renders the header contract"
 
+# --- 11. a symlink is REFUSED, never followed -----------------------------------
+# `git check-ignore` answers about a LEXICAL path; a WRITE follows symlinks. So an ignored
+# `.review-stage/issue-<N>/c.md` that is a SYMLINK puts the write wherever the link points —
+# a TRACKED file, or outside the repository — which falsifies the whole claim the gitignore
+# verification exists to make: that a stage opened mid-run cannot dirty a running gate
+# (#2926) or make premerge-assert refuse on `dirty: yes` (#3648).
+#
+# EVERY CASE ASSERTS THE VICTIM IS UNTOUCHED, not merely that the exit code was 2: a refusal
+# that had already written through the link would satisfy an exit-code-only test.
+
+# (a) the REPORT path is a symlink to a tracked, non-ignored file in the same repo.
+R10="$(newrepo)"
+printf 'the original tracked content\n' >"$R10/victim.md"
+git -C "$R10" add victim.md >/dev/null 2>&1
+mkdir -p "$R10/.review-stage/issue-800"
+ln -s "$R10/victim.md" "$R10/.review-stage/issue-800/c.md"
+rs "$R10" open c --issue 800 --agent spec-auditor
+rc_is 2 "symlink: a REPORT path that is a symlink is REFUSED (exit 2)"
+has "reason=path-is-symlink" "symlink: the refusal names the symlink reason"
+has "what=report-of-record" "symlink: the refusal names which half was refused"
+if [ "$(cat "$R10/victim.md")" = "the original tracked content" ]; then
+  ok "symlink: the tracked file the link pointed at is UNTOUCHED"
+else
+  bad "symlink: the write FOLLOWED the link and clobbered a tracked file"
+fi
+
+# (b) the STAGE RECORD path is a symlink — checked too, for the same reason both paths are
+#     checked for ignore status: refusing only the report leaves the other write following a link.
+R11="$(newrepo)"
+printf 'stage victim\n' >"$R11/victim.stage"
+mkdir -p "$R11/.review-stage/issue-801"
+ln -s "$R11/victim.stage" "$R11/.review-stage/issue-801/c.stage"
+rs "$R11" open c --issue 801 --agent spec-auditor
+rc_is 2 "symlink: a STAGE RECORD path that is a symlink is REFUSED"
+has "what=stage-record" "symlink: the refusal names the stage-record half"
+if [ "$(cat "$R11/victim.stage")" = "stage victim" ]; then
+  ok "symlink: the stage-record link target is UNTOUCHED"
+else
+  bad "symlink: the stage-record write followed the link"
+fi
+
+# (c) an intermediate COMPONENT under .review-stage/ is a symlink — a symlinked
+#     `.review-stage/issue-<N>` redirects BOTH writes just as effectively as a symlinked leaf,
+#     and here it points OUTSIDE the repository entirely.
+R12="$(newrepo)"
+OUTSIDE="$T/outside-tree-$$"
+mkdir -p "$OUTSIDE"
+mkdir -p "$R12/.review-stage"
+ln -s "$OUTSIDE" "$R12/.review-stage/issue-802"
+rs "$R12" open c --issue 802 --agent spec-auditor
+rc_is 2 "symlink: a symlinked PATH COMPONENT is REFUSED (not just the leaf)"
+has "reason=path-is-symlink" "symlink: the component refusal names the symlink reason"
+has "component=" "symlink: the refusal NAMES the offending component"
+if [ -z "$(ls -A "$OUTSIDE" 2>/dev/null)" ]; then
+  ok "symlink: nothing was written outside the repository through the component link"
+else
+  bad "symlink: the write escaped the repository through a symlinked component"
+fi
+
+# (d) a symlinked .review-stage/ ITSELF.
+R13="$(newrepo)"
+OUTSIDE2="$T/outside-review-stage-$$"
+mkdir -p "$OUTSIDE2"
+ln -s "$OUTSIDE2" "$R13/.review-stage"
+rs "$R13" open c --issue 803 --agent spec-auditor
+rc_is 2 "symlink: a symlinked .review-stage/ is REFUSED"
+has "reason=path-is-symlink" "symlink: the .review-stage/ refusal names the symlink reason"
+
+# (e) record-author-performed writes the report too, so it is held to the same rule.
+R14="$(newrepo)"
+rs "$R14" open c --issue 804 --agent spec-auditor
+rc_is 0 "symlink: a normal stage opens (the control for the case below)"
+printf 'author victim\n' >"$R14/victim-author.md"
+rm -f "$(REPORT_OF "$R14" 804 c)"
+ln -s "$R14/victim-author.md" "$(REPORT_OF "$R14" 804 c)"
+rs "$R14" record-author-performed c --issue 804 \
+  --reason 'no peer agent available; hand C against the spec deltas' \
+  --evidence 'docs/round-artifacts/issue-804-hand-c.md' --performed-by author
+rc_is 2 "symlink: record-author-performed REFUSES a symlinked report path"
+has "path-is-symlink" "symlink: the author-performed refusal names the symlink reason"
+if [ "$(cat "$R14/victim-author.md")" = "author victim" ]; then
+  ok "symlink: the author-performed write did not follow the link"
+else
+  bad "symlink: record-author-performed followed the link"
+fi
+
+# (f) POSITIVE CONTROL: the ordinary path is unaffected, the report is a REGULAR file, and the
+#     write is atomic-by-rename rather than in-place. Without this, a check that refused every
+#     write would satisfy every case above.
+R15="$(newrepo)"
+rs "$R15" open c --issue 805 --agent spec-auditor
+rc_is 0 "symlink control: an ordinary open still succeeds"
+AP15="$(REPORT_OF "$R15" 805 c)"
+if [ -f "$AP15" ] && [ ! -L "$AP15" ]; then
+  ok "symlink control: the report is a REGULAR file, not a link"
+else
+  bad "symlink control: the report is missing or is a link"
+fi
+if [ -f "$R15/.review-stage/issue-805/c.stage" ] && [ ! -L "$R15/.review-stage/issue-805/c.stage" ]; then
+  ok "symlink control: the stage record is a REGULAR file"
+else
+  bad "symlink control: the stage record is missing or is a link"
+fi
+# NO TEMPORARY FILE SURVIVES a successful write: a leftover `.c.md.tmp.<pid>` is an untracked
+# file in the tree, which is the very thing the ignore verification exists to prevent — and it
+# would be indistinguishable from a crashed write.
+LEFTOVER="$(ls -A "$R15/.review-stage/issue-805" | grep -c 'tmp' || true)"
+if [ "$LEFTOVER" = "0" ]; then
+  ok "symlink control: no temporary file is left behind by a successful write"
+else
+  bad "symlink control: $LEFTOVER temporary file(s) survived the write"
+fi
+rs "$R15" verdict c --issue 805
+rc_is 5 "symlink control: the atomically-written sentinel reads NOT-RUN as usual"
+has "RESULT: NOT-RUN (no report written)" "symlink control: the sentinel content survived the atomic write"
+printf 'result: PASS\n\nreviewed.\n' >"$AP15"
+rs "$R15" verdict c --issue 805
+rc_is 0 "symlink control: a real report over an atomically-written sentinel still reads PASS"
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -528,7 +647,7 @@ has "REVIEW-STAGE:" "usage: --help renders the header contract"
 # that stops noticing a silently-dying section. Adding cases never reds it (it is a lower
 # bound); REMOVING one does, which is the point. Move it consciously, in the same diff as the
 # shrink it accounts for.
-ASSERT_FLOOR=135
+ASSERT_FLOOR=178
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

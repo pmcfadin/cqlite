@@ -2919,10 +2919,10 @@ fi
 # `--kill-after` exists (it DELEGATES to a real runner rather than reimplementing
 # the escalation it tests) and carries at most 6 assertions — measured by counting
 # the `ok`/`bad` calls inside it, not guessed. Every other case runs on every host.
-# 245 executed here minus that 6 is the floor. Adding cases never reds it (it is a
+# 268 executed here minus that 6 is the floor. Adding cases never reds it (it is a
 # lower bound); deleting a section does, which is the point. Move it consciously,
 # in the same diff as the shrink it accounts for.
-ASSERT_FLOOR=239
+ASSERT_FLOOR=262
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
