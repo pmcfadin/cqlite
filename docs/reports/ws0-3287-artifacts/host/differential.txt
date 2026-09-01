@@ -2,8 +2,8 @@
 host L3: 105 MiB (1 instance)
 cpuset:  0,8 (derived from cpu0/topology/thread_siblings_list)
 window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED
-gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10x, ideal ~100x)
-  absolute, REPORTED not asserted: 6297 instructions for 1e3 accesses
+gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10x, ideal ~100x)
+  absolute, REPORTED not asserted: 6296 instructions for 1e3 accesses
   (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)
 
 -- GATE A: TMA --
@@ -16,13 +16,15 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10
   offcore_requests_outstanding.cycles_with_data_rd:u : STUCK (0 in both arms)
   offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
   offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
+  l1d_pend_miss.fb_full:u : MOVING (3114 -> 421700)
+  l1d_pend_miss.pending:u : MOVING (140096539 -> 9969422234)
 
 -- GATE C: reproduce #3224's own baseline counters --
   cycle_activity.stalls_l3_miss:u : STUCK (0 in both arms)
-  cycle_activity.stalls_l2_miss:u : MOVING (7420 -> 10526624796)
-  cycle_activity.stalls_total:u : MOVING (280771661 -> 11825588086)
-  LLC-loads:u : ABSENT/UNMEASURED
-  LLC-load-misses:u : ABSENT/UNMEASURED
+  cycle_activity.stalls_l2_miss:u : MOVING (25651 -> 9580988073)
+  cycle_activity.stalls_total:u : MOVING (280902272 -> 10888290974)
+  LLC-loads:u : ABSENT (ABSENT-FROM-PMU)
+  LLC-load-misses:u : ABSENT (ABSENT-FROM-PMU)
   cache-references:u : STUCK (0 in both arms)
   cache-misses:u : STUCK (0 in both arms)
   NESTING (stalls_l3_miss <= stalls_l2_miss <= stalls_total), per arm:
@@ -31,9 +33,9 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 7420 <= 280771661)
-    hostile-512m: HOLDS (0 <= 10526624796 <= 11825588086)
-    hostile-2g: HOLDS (0 <= 5838924652 <= 6387885131)
+    friendly-L2resident: HOLDS (0 <= 25651 <= 280902272)
+    hostile-512m: HOLDS (0 <= 9580988073 <= 10888290974)
+    hostile-2g: HOLDS (0 <= 5913220369 <= 6468498965)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt

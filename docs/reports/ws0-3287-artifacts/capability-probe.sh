@@ -95,7 +95,17 @@ rm -f "$D"/arm-*.csv "$D"/arm-*.txt "$D"/gate-probe-*.csv "$D"/gate-probe-*.txt 
       "$D"/cache-hostile-build.txt
 
 FAILED=0
-note_fail() { FAILED=1; echo "PROBE-STEP-FAILED: $*" >&2; }
+# The operator-facing diagnostic must reach the OPERATOR. Several blocks below
+# produce an artefact with `{ ...; } > file 2>&1`, and that `2>&1` swallowed every
+# note_fail raised inside them INTO the artefact -- so a `<not counted>` triage
+# failure landed in event-disposition.txt and a nesting violation landed in
+# differential.txt, while the verdict text told the reader to "see
+# PROBE-STEP-FAILED on stderr", where it was not. Not fail-OPEN (FAILED was still
+# set and the run still exited non-zero), but a verdict that points at a place the
+# cause is not is worse than one that says nothing. fd 9 is the real stderr,
+# saved before any block redirection, so note_fail is immune to them.
+exec 9>&2
+note_fail() { FAILED=1; echo "PROBE-STEP-FAILED: $*" >&9; }
 
 # ---------------------------------------------------------------- host inventory
 # Each command's status is recorded INDIVIDUALLY: a single `{ a; b; } > f || fail`

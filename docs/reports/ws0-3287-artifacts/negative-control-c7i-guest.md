@@ -277,6 +277,27 @@ capability answer); and the counter-semantics size check was **vacuous**, since 
 per event whether or not any definition was found (now each event is explicitly `FOUND` or
 `NOT-LISTED`). (#3287 roborev job 308, findings 1 and 2.)
 
+**AND THE GUARDS HAVE A SELFTEST, because four review rounds found 14 defects in this one script and
+TWO OF THE HIGHS WERE INTRODUCED BY THE ROUND THAT FIXED THE PREVIOUS ONES.** That is the signature of
+code whose only entry point is a run on a host with a working PMU, read by eye.
+[`selftest-guards.sh`](selftest-guards.sh) — modelled on #3224's file of the same name — drives every
+fail-closed guard with the bad input it exists to catch, using a shim `perf` on `PATH`, so it needs no
+PMU, no root and no metal and runs in seconds. Eleven cases, and per #3224's standard **two in tension
+for each guard**: the bad input it must REJECT and the good input it must still ACCEPT. Each case
+asserts the VERDICT *and the named cause*, because a bare non-zero exit is not evidence — the probe can
+fail for a dozen reasons, so a case checking only the exit code would pass on an unrelated breakage. It
+carries a case FLOOR (#3544's lesson: a green tally over a silently shrunken suite is not a green
+suite).
+
+**It earned its keep on its first run, on a defect no review round had found.** Two cases failed, and
+the cause was in the probe rather than the tests: the artefact-producing blocks use
+`{ …; } > file 2>&1`, and that `2>&1` swallowed every `note_fail` raised inside them **into the
+artefact** — a `<not counted>` triage failure landed in `event-disposition.txt`, a nesting violation in
+`differential.txt` — while the verdict text told the reader to "see PROBE-STEP-FAILED on stderr", where
+it was not. Not fail-*open* (the run still failed and exited non-zero), but **a verdict that points at a
+place the cause is not is worse than one that says nothing**, because it is what stops the next person
+looking. `note_fail` now writes to fd 9, the real stderr saved before any block redirection.
+
 **One place where a non-zero exit is an ANSWER, not a failure**, and the distinction is deliberate:
 `perf stat` exits non-zero when an event is absent from the PMU, and in the TMA probe and the
 event-disposition sweep *that is precisely what is being measured*. Treating it as a step failure
