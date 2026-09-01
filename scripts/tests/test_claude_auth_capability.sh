@@ -791,6 +791,25 @@ else
 fi
 
 # =====================================================================================
+# 23b. STRUCTURAL: NO LIVE COMMAND SUBSTITUTION INSIDE A DOUBLE-QUOTED `eval` STRING.
+#      Backticks and `$(...)` are LIVE inside "..." — including inside a single-quoted
+#      run nested in it, because the OUTER quotes are the double ones. The shipped defect:
+#      `eval "$__od='no \`claude\` on PATH ...'"` executed `claude`, printing
+#      `claude: command not found` into the bootstrap transcript at exactly the moment an
+#      operator is debugging why the box cannot start claude — and deleting the subject
+#      from the message ("no  on PATH"). It was harmless only because the branch is guarded
+#      on the binary being ABSENT; that is luck, not design.
+#      Asserted STRUCTURALLY rather than per message, because it is a CLASS: a behavioural
+#      case only covers the two instances someone already found.
+evalbt=$(grep -n 'eval "' "$CAPLIB" | grep -v '\\`' | grep '`' || true)
+evalcs=$(grep -n 'eval "' "$CAPLIB" | grep -E '(^|[^\\])\$\(' || true)
+if [ -z "$evalbt" ] && [ -z "$evalcs" ]; then
+  ok "no unescaped backtick or \$( ) survives inside a double-quoted eval string"
+else
+  bad "a live command substitution sits inside a double-quoted eval: $evalbt $evalcs"
+fi
+
+# =====================================================================================
 # 23. NO RUN PRINTS A TOKEN-SHAPED VALUE. Asserted over the WHOLE suite transcript, not
 #     per case: the property is about every emit path, and a per-case check only covers
 #     the paths someone remembered.

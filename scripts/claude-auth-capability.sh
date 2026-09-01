@@ -256,7 +256,13 @@ claude_auth_verdict_into() {
   fi
 
   if ! command -v claude >/dev/null 2>&1; then
-    eval "$__od='no `claude` on PATH — the persisted credential exists but nothing here can exercise it'"
+    # NO BACKTICKS HERE, and none may come back: the OUTER quotes are double, so a backtick
+    # (or an unescaped $(...)) anywhere inside — including inside this nested single-quoted
+    # run — is LIVE and executes when the eval runs. The shipped form said `claude` and so
+    # ran `claude`, emitting "claude: command not found" into the operator's transcript and
+    # deleting the subject from the message. Pinned structurally by
+    # scripts/tests/test_claude_auth_capability.sh.
+    eval "$__od='no claude binary on PATH — the persisted credential exists but nothing here can exercise it'"
     return 0
   fi
   if ! claude_auth_resolve_timeout; then
@@ -337,7 +343,9 @@ claude_tmux_env_verdict_into() {
     return 0
   fi
   if ! command -v tmux >/dev/null 2>&1; then
-    eval "$__od='no `tmux` on PATH — there is no server environment to inspect'"
+    # No backticks: see the identical note in claude_auth_verdict_into. This one really did
+    # run `tmux` and print "tmux: command not found" on a box with no tmux.
+    eval "$__od='no tmux binary on PATH — there is no server environment to inspect'"
     return 0
   fi
 
