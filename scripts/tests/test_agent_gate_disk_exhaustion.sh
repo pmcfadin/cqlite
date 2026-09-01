@@ -146,10 +146,30 @@ if [ "${out#disk-exhaustion: RECOGNISED (#3800)}" != "$out" ] \
 else
   bad "1-no-space: expected RECOGNISED naming signature+component+line; got: $out"
 fi
-if case "$out" in *"ENVIRONMENTAL"*"NOT a defect in the diff"*) true ;; *) false ;; esac; then
-  ok "1-no-space: the line states the FAIL is ENVIRONMENTAL and not a defect in the diff"
+# The RECOGNISED line reports EVIDENCE, never a CONCLUSION (roborev job 299). It must name the
+# HOST as what the signature is consistent with, give the remedy, and DECLINE to clear the diff.
+if case "$out" in *"CONSISTENT WITH disk exhaustion on this HOST"*"free space and re-run before treating this FAIL as a defect in the diff"*) true ;; *) false ;; esac; then
+  ok "1-no-space: the line attributes the signature to the HOST and gives the remedy before any diff conclusion"
 else
-  bad "1-no-space: the RECOGNISED line does not carry the environmental-attribution remedy text; got: $out"
+  bad "1-no-space: the RECOGNISED line does not carry the host-attribution + remedy text; got: $out"
+fi
+if case "$out" in *"EVIDENCE, NOT PROOF"*"the diff is NOT thereby cleared"*) true ;; *) false ;; esac; then
+  ok "1-no-space: the line states plainly that it is evidence, not proof, and does NOT clear the diff"
+else
+  bad "1-no-space: the RECOGNISED line omits the evidence-not-proof qualifier; got: $out"
+fi
+# NEGATIVE: the retired wording asserted innocence the scan cannot support, and contradicted this
+# marker's own doctrine. A test can PRINT a signature into its own log, and a diff CAN itself drive
+# disk usage -- so this exact claim must never come back.
+if case "$out" in *"NOT a defect in the diff"*) true ;; *) false ;; esac; then
+  bad "1-no-space: the RECOGNISED line asserts 'NOT a defect in the diff' -- an unsupportable conclusion (roborev job 299); report evidence, not innocence"
+else
+  ok "1-no-space: the line never asserts the diff is NOT at fault (an unsupportable conclusion)"
+fi
+if case "$out" in *"This is an ATTRIBUTION and does NOT change RESULT."*) true ;; *) false ;; esac; then
+  ok "1-no-space: the ATTRIBUTION-not-a-verdict clause is retained"
+else
+  bad "1-no-space: the RECOGNISED line dropped the 'ATTRIBUTION and does NOT change RESULT' clause; got: $out"
 fi
 
 d="$tmp/c2"; mkdir -p "$d"
@@ -499,7 +519,10 @@ fi
 # green it -- `failed: 0` over a shrunken subject set is the vacuous pass these suites are
 # for (#3544's own lesson, one directory over). Raise it deliberately when adding cases.
 # ─────────────────────────────────────────────────────────────────────────────────
-CASE_FLOOR=30
+# 30 at introduction; +3 (roborev job 299: the RECOGNISED wording split into host-attribution,
+# evidence-not-proof, the negative on the retired 'NOT a defect in the diff' claim, and the
+# retained ATTRIBUTION clause -- 4 cases replacing 1).
+CASE_FLOOR=33
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

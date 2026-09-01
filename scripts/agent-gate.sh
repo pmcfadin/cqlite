@@ -6353,10 +6353,18 @@ _disk_exhaustion_line() {
     # log), the log BASENAME (component name + a fixed suffix) and an integer line number. The
     # matched TEXT is never echoed -- a component log is compiler- and test-controlled, and a
     # newline in it would break the block frame and could forge a RESULT line (#3312).
+    #
+    # IT REPORTS EVIDENCE, NEVER A CONCLUSION (#3800, roborev job 299). An earlier wording said
+    # "NOT a defect in the diff", which is an assertion this scan cannot support and which
+    # contradicts this marker's own doctrine ("a matched signature is evidence about the HOST,
+    # not proof the diff is innocent"). Two ways it is false: a failing test may legitimately
+    # PRINT one of the signatures into its own log, and a diff CAN itself drive disk usage (a
+    # new feature-matrix lane, a large fixture, a runaway build). So the line says what was
+    # OBSERVED and what to DO about it, and explicitly declines to clear the diff.
     extra=""
     [ "$matched" -gt 1 ] && extra="$extra ($matched non-PASS component logs matched; first reported)."
     [ "$unread" -gt 0 ] && extra="$extra ($unread further subject log(s) could NOT be read: $(_disk_abbrev "$unread_names" 4))."
-    out="disk-exhaustion: RECOGNISED (#3800) -- signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln; treat this $m_status as ENVIRONMENTAL -- disk exhaustion, NOT a defect in the diff: free space and re-run. This is an ATTRIBUTION and does NOT change RESULT.$extra $(_disk_free_field). $(_disk_scan_field)"
+    out="disk-exhaustion: RECOGNISED (#3800) -- signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln; CONSISTENT WITH disk exhaustion on this HOST: free space and re-run before treating this $m_status as a defect in the diff. EVIDENCE, NOT PROOF -- the diff is NOT thereby cleared (a test can print the phrase, and a diff can itself drive disk usage). This is an ATTRIBUTION and does NOT change RESULT.$extra $(_disk_free_field). $(_disk_scan_field)"
   elif [ "$nonpass" -eq 0 ]; then
     out="disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan ($total/$total PASS). $(_disk_free_field). $(_disk_scan_field)"
   elif [ "$unread" -gt 0 ]; then

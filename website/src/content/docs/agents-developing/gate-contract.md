@@ -750,8 +750,14 @@ Every terminal block — full, `--lite`, `--delta` (including its REFUSED path) 
 selftest hooks — now carries exactly one `disk-exhaustion:` line, on the `missing-fixtures:` /
 `missing-schemas:` marker precedent. Its value set is **closed**:
 
-- `RECOGNISED (#3800)` — names the signature, the component, `<log>:<line>`, and states the
-  FAIL is **environmental**: free space and re-run.
+- `RECOGNISED (#3800)` — names the signature, the component and `<log>:<line>`, says the
+  observation is **consistent with disk exhaustion on this host**, and gives the remedy: free
+  space and re-run *before* treating the non-PASS as a defect in the diff. It says in the same
+  breath that this is **evidence, not proof** — the diff is not thereby cleared. An earlier
+  wording asserted the failure was "NOT a defect in the diff", which this scan cannot support
+  and which contradicted the attribution rule below: a failing test may legitimately *print* a
+  signature into its own log, and a diff can itself drive disk usage (a new feature-matrix lane,
+  a large fixture, a runaway build).
 - `0 RECOGNISED (#3800)` — either every subject log was **read** and nothing matched, or there
   was no non-PASS component to scan. Never a bare `0`: a bare zero reads as a verified
   all-clear from a scan that documents itself as incomplete.
