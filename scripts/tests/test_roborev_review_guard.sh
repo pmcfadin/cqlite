@@ -6080,19 +6080,39 @@ printf '== (jm9) #3654: the facts tool extracts source_machine_id from `list`, a
 # the unmeasured-value-as-a-value defect this repository fails runs for.
 _jm_tool="$SCRIPT_DIR/../flow/roborev-job-facts.py"
 _jm_facts="$tmp/jm-facts.txt"
+# ===== SUB-CASES SHARE ONE FACTS FILE, SO EACH RUN MUST START FROM AN EMPTY ONE (#3654 r3) =====
+# Every sub-case below ran the tool `|| true` against the SAME `$_jm_facts`. A tool failure
+# therefore left the PREVIOUS sub-case's output in place and the next assert read it — jm11's
+# `git_ref == aaa..bbb` could pass on jm9's stale file, a green that measured nothing. The tally
+# cannot see that, which is the point. Truncating is necessary and NOT sufficient: the sub-cases
+# asserting an ABSENCE (no `source_machine_id`) are satisfied trivially by an empty file, so the
+# tool is also required to have SUCCEEDED and to have produced output.
+_jm_run() { # _jm_run <job> — payload on stdin; truncates first, then requires the tool to work
+  : >"$_jm_facts"
+  : >"$_jm_prompt"
+  if ! python3 "$_jm_tool" "$1" "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1; then
+    bad "case (jm9/jm11) the facts tool exited non-zero for job $1 — the assert that follows would read an empty or stale facts file"
+    return 1
+  fi
+  if [ ! -s "$_jm_facts" ]; then
+    bad "case (jm9/jm11) the facts tool produced NO facts for job $1 — an absence assert would pass vacuously"
+    return 1
+  fi
+  return 0
+}
 _jm_prompt="$tmp/jm-facts-prompt.txt"
 if [ ! -f "$_jm_tool" ] || ! command -v python3 >/dev/null 2>&1; then
   printf 'SKIP - roborev-job-facts.py or python3 unavailable; the fact-extraction cases did not run\n'
 else
   printf '[{"id":4656,"git_ref":"aaa..bbb","status":"done","source_machine_id":"%s"}]' "$JM_UUID" \
-    | python3 "$_jm_tool" 4656 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+    | _jm_run 4656 || true
   if [ "$(sed -n 's/^source_machine_id=//p' "$_jm_facts" | head -1)" = "$JM_UUID" ]; then
     ok 'case (jm9) a list-shaped row yields source_machine_id as a string fact'
   else
     bad "case (jm9) the list-shaped row did not yield source_machine_id (facts: $(tr '\n' ' ' <"$_jm_facts"))"
   fi
   printf '{"id":4656,"job_id":4656,"agent":"codex","prompt":"p","job":{"id":4656,"git_ref":"aaa..bbb","status":"done"}}' \
-    | python3 "$_jm_tool" 4656 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+    | _jm_run 4656 || true
   if grep -q '^source_machine_id=' "$_jm_facts"; then
     bad "case (jm9) a show-shaped payload emitted a source_machine_id fact — an empty one renders as a blank uuid (facts: $(tr '\n' ' ' <"$_jm_facts"))"
   else
@@ -6102,7 +6122,7 @@ else
   # onto a different row. The review row here answers to the same id and carries no git_ref, so a
   # regression that let the new fact influence selection would surface as the wrong git_ref.
   printf '{"id":4656,"job_id":4656,"source_machine_id":"decoy","job":{"id":4656,"git_ref":"aaa..bbb","status":"done","model":"m"}}' \
-    | python3 "$_jm_tool" 4656 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+    | _jm_run 4656 || true
   if [ "$(sed -n 's/^git_ref=//p' "$_jm_facts" | head -1)" = 'aaa..bbb' ]; then
     ok 'case (jm9) the git_ref-bearing row is still the one selected (the new fact cannot move find_job)'
   else
@@ -6264,7 +6284,7 @@ if [ ! -f "$_jm_tool" ] || ! command -v python3 >/dev/null 2>&1; then
   printf 'SKIP - roborev-job-facts.py or python3 unavailable; the id-divergence case did not run\n'
 else
   printf '{"id":8,"job_id":9,"uuid":"outer-uuid","source_machine_id":"DECOY","prompt":"p","job":{"id":9,"git_ref":"aaa..bbb","status":"done","model":"m"}}' \
-    | python3 "$_jm_tool" 9 "$_jm_facts" "$_jm_prompt" >/dev/null 2>&1 || true
+    | _jm_run 9 || true
   if [ "$(sed -n 's/^git_ref=//p' "$_jm_facts" | head -1)" = 'aaa..bbb' ]; then
     ok 'case (jm11) the nested job row is still selected when the top-level id names another review'
   else

@@ -828,10 +828,6 @@ JOB="-"
 MODEL_LINE="-"
 CENSUS="-"
 TOKENS="UNAVAILABLE"
-# WHICH DAEMON ISSUED THE JOB ID (#3654). Initialised to the state a run that never reached a job
-# record is actually in — never blank, and never a bare `-`, which would read as "no daemon" rather
-# than "nothing was read". Recomputed once, below, from the facts the record read produced.
-JOB_MACHINE="UNAVAILABLE (no job record was read — job-record: SKIP)"
 # Was a job record READ at all (any payload, complete or not)? Distinct from `record_required_present`,
 # which answers about COMPLETENESS — see the `job-machine:` state selection below (#3654 round 2).
 JOB_RECORD_READ=0
@@ -852,6 +848,18 @@ PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"
 JOB_RECORD="SKIP"
+# WHICH DAEMON ISSUED THE JOB ID (#3654). Initialised to the state a run that never reached a job
+# record is actually in — never blank, and never a bare `-`, which would read as "no daemon" rather
+# than "nothing was read". Recomputed once, below, from the facts the record read produced.
+#
+# IT INTERPOLATES `$JOB_RECORD` RATHER THAN HARD-CODING `SKIP`, and it is declared HERE, directly
+# after that variable, for two reasons that are one reason: a hard-coded `SKIP` made an abort
+# between the record poll and the recompute emit `job-record: PASS` beside
+# `job-machine: UNAVAILABLE (... job-record: SKIP)` — two keys contradicting each other about the
+# same fact — while interpolating it at the ORIGINAL site read `$JOB_RECORD` twenty lines before it
+# exists, which under `set -u` aborts the wrapper outright. Keeping the two adjacent is what stops
+# either failure returning.
+JOB_MACHINE="UNAVAILABLE (no job record was read — job-record: $JOB_RECORD)"
 SHA_ASSERT="SKIP"
 # The POSITIVE "a review actually happened" assert. Absence of a vacuous phrase is
 # NOT evidence a review occurred: a transcript that only says "Waiting for job N to
@@ -1437,7 +1445,7 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
 # transient-read modelling above it. A failure here is not an error — it yields no id, and the key
 # says so affirmatively.
 #
-# IT IS SCOPED TO THE RECORD'S OWN BRANCH, NOT TO THE AMBIENT ONE (#3654 round 2). `roborev list`
+# IT IS SCOPED TO THE RECORD'S OWN BRANCH, NOT TO THE CHECKOUT'S (#3654 round 2). `roborev list`
 # is BRANCH-FILTERED and its default follows the CURRENT HEAD OF THE `--repo` PATH; `$BRANCH` is
 # read from that same HEAD, so both name the branch the CHECKOUT is on and neither names the JOB's
 # — so scoping by it answers about a DIFFERENT branch whenever the job was enqueued elsewhere, and
