@@ -78,6 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # A NAMED step in the job `required` needs: the subject of
+      # `merge_gating_half: {kind: required-gate-step}` (issue #3725).
+      - name: Validate workflow policy
+        run: 'true'
       - run: 'true'
   required:
     name: required
@@ -179,7 +183,23 @@ exempt:
   - workflow: advisory.yml
     reason: Advisory docs lane that must never block a merge.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          Nothing merge-gating renders the docs site; a broken docs build is fixed
+          forward and must never block a merge.
 YAML
+
+# THE GATE-COMPONENT MANIFEST (issue #3725). `merge_gating_half: {kind: gate-component}`
+# is validated to NAME A COMPONENT THAT EXISTS, so every case carries its own copy of
+# the manifest (the real one lives at scripts/agent-gate.components) and `run_policy`
+# points the rule at it. A case that wants a renamed/deleted component edits its own
+# copy — never the repository's.
+cat >"$BASE/agent-gate.components" <<'COMPONENTS'
+# one component name per line, in the gate's own dispatch order
+alpha-component
+beta-component
+COMPONENTS
 
 new_case() {
   # NOTE: `local a=1 b=$a` cannot be collapsed — `local`'s arguments are all
@@ -225,7 +245,8 @@ RULE="$REGISTRY_RB"
 
 run_policy() {
   local dir="$1"
-  OUT=$(ruby "$RULE" policy --workflows-dir "$dir/workflows" --registry "$dir/registry.yml" 2>&1)
+  OUT=$(ruby "$RULE" policy --workflows-dir "$dir/workflows" --registry "$dir/registry.yml" \
+    --gate-components "$dir/agent-gate.components" 2>&1)
   RC=$?
 }
 
@@ -337,7 +358,7 @@ tiers:
   - { id: alpha, workflow: alpha.yml, context: Alpha gate }
   - { id: selfgate, workflow: pr-gate.yml, context: required }
 exempt:
-  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
 YAML
 run_policy "$DIR"
 expect_fail_named "registering pr-gate.yml is rejected" "never wait on itself"
@@ -622,7 +643,7 @@ defaults: { wait_minutes: 10 }
 tiers:
   - { id: alpha, workflow: alpha.yml, context: Alpha gate, wait_minutes: 90 }
 exempt:
-  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
 YAML
 run_policy "$DIR"
 expect_fail_named "the effective deadline is the MAX over tiers, not the default" "90m"
@@ -635,8 +656,8 @@ aggregator: { workflow: pr-gate.yml, job: required }
 defaults: { wait_minutes: 60 }
 tiers: []
 exempt:
-  - { workflow: alpha.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
-  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: alpha.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
 YAML
 run_policy "$DIR"
 expect_fail_named "an empty tiers list is rejected" "at least one gating tier"
@@ -668,8 +689,8 @@ defaults: { wait_minutes: 60 }
 tiers:
   - { id: alpha, workflow: alpha.yml, context: Alpha gate }
 exempt:
-  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
-  - { workflow: impostor.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
+  - { workflow: impostor.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
 YAML
 run_policy "$DIR"
 expect_fail_named "a context emitted by a job in another workflow is rejected" "impostor.yml"
@@ -683,11 +704,166 @@ defaults: { wait_minutes: 60 }
 tiers:
   - { id: alpha, workflow: alpha.yml, context: Alpha gate }
 exempt:
-  - { workflow: alpha.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
-  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: alpha.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910", merge_gating_half: [ { kind: none, ground: "Nothing merge-gating covers this advisory lane; that is deliberate." } ] }
 YAML
 run_policy "$DIR"
 expect_fail_named "a workflow listed twice is rejected" "both a gating tier and an exemption"
+
+# ------------------------------- the DECLARED MERGE-GATING HALF (issue #3725) --
+# #3493's class, mechanized. An exemption says "this workflow does not gate the
+# merge", and the registry's own prose then names what does — but nothing ever
+# checked that claim, so `node-ci.yml`'s exemption named a component that had been
+# narrowed to 1 of 27 test files and stayed "true" on paper for ~2 days of a
+# deterministic main-red. The prose stays UNCHECKED BY DESIGN (see the declared
+# residual in gating_policy_rules.rb); the machine-checked control is a STRUCTURED
+# `merge_gating_half:` under a CLOSED grammar.
+#
+# Every case below is discriminating: non-zero exit AND the offending entry named.
+
+exempt_registry() {
+  # exempt_registry <dir> <yaml-fragment-for-the-single-exempt-entry>
+  local dir="$1" body="$2"
+  {
+    printf '%s\n' 'version: 1'
+    printf '%s\n' 'aggregator: { workflow: pr-gate.yml, job: required }'
+    printf '%s\n' 'defaults: { wait_minutes: 60 }'
+    printf '%s\n' 'tiers:'
+    printf '%s\n' '  - { id: alpha, workflow: alpha.yml, context: Alpha gate }'
+    printf '%s\n' 'exempt:'
+    printf '%s\n' '  - workflow: advisory.yml'
+    printf '%s\n' '    reason: Advisory docs lane that must never block a merge.'
+    printf '%s\n' '    issue: "#2910"'
+    printf '%s\n' "$body"
+  } >"$dir/registry.yml"
+}
+
+echo "== an exemption must DECLARE what merge-gating thing covers it =="
+DIR=$(new_case exempt-no-half)
+# Every OTHER exempt requirement satisfied (workflow, reason, issue), so the missing
+# declaration is the ONLY thing that can red it.
+exempt_registry "$DIR" ''
+run_policy "$DIR"
+expect_fail_named "an exemption without merge_gating_half is rejected" "merge_gating_half"
+
+echo "== the merge_gating_half grammar is CLOSED =="
+DIR=$(new_case exempt-half-unknown-kind)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: vibes
+        component: alpha-component'
+run_policy "$DIR"
+expect_fail_named "an unrecognised merge_gating_half kind is a NAMED refusal" "vibes"
+
+DIR=$(new_case exempt-half-empty)
+exempt_registry "$DIR" '    merge_gating_half: []'
+run_policy "$DIR"
+expect_fail_named "an empty merge_gating_half declares nothing and is rejected" "merge_gating_half"
+
+DIR=$(new_case exempt-half-unknown-field)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: gate-component
+        component: alpha-component
+        scope: everything'
+run_policy "$DIR"
+expect_fail_named "an unknown field inside merge_gating_half is rejected" "scope"
+
+echo "== a named gate component must EXIST in the gate manifest =="
+DIR=$(new_case exempt-half-ghost-component)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: gate-component
+        component: renamed-away'
+run_policy "$DIR"
+expect_fail_named "an exemption deferring to a component that does not exist is rejected" "renamed-away"
+
+DIR=$(new_case exempt-half-good-component)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: gate-component
+        component: beta-component'
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "an exemption naming a component that DOES exist passes"
+else
+  bad "a truthful gate-component declaration was rejected: $OUT"
+fi
+
+echo "== the gate manifest must be READABLE, or the claim is unmeasured =="
+DIR=$(new_case exempt-half-no-manifest)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: gate-component
+        component: beta-component'
+rm -f "$DIR/agent-gate.components"
+run_policy "$DIR"
+expect_fail_named "an unreadable gate manifest is a refusal, not a silent pass" "agent-gate.components"
+
+DIR=$(new_case exempt-half-garbage-manifest)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: gate-component
+        component: beta-component'
+printf 'beta-component\n  leading-space-name\n' >"$DIR/agent-gate.components"
+run_policy "$DIR"
+expect_fail_named "an ungrammatical gate manifest line is a NAMED refusal" "agent-gate.components"
+
+echo "== a named required-gate step must exist in the aggregator's needs closure =="
+DIR=$(new_case exempt-half-ghost-step)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: required-gate-step
+        step: No such step'
+run_policy "$DIR"
+expect_fail_named "an exemption deferring to a step that does not exist is rejected" "No such step"
+
+DIR=$(new_case exempt-half-good-step)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: required-gate-step
+        step: Validate workflow policy'
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "an exemption naming a real step of the job \`required\` needs passes"
+else
+  bad "a truthful required-gate-step declaration was rejected: $OUT"
+fi
+
+echo "== \`none\` is an HONEST declaration, not a wildcard =="
+DIR=$(new_case exempt-half-none-no-ground)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: none'
+run_policy "$DIR"
+expect_fail_named "\`kind: none\` without a stated ground is rejected" "ground"
+
+DIR=$(new_case exempt-half-none-not-sole)
+exempt_registry "$DIR" '    merge_gating_half:
+      - kind: none
+        ground: Nothing merge-gating covers this lane at all, by decision.
+      - kind: gate-component
+        component: beta-component'
+run_policy "$DIR"
+expect_fail_named "\`kind: none\` beside a positive claim is incoherent and rejected" "none"
+
+echo "== an UNPARSEABLE workflow must not escape the enrolment rule (#3725) =="
+# THE FAIL-OPEN THIS FIXES. `load_workflows` used to map an unparseable workflow to
+# `{}`; `workflow_triggers({})` is empty; so `pull_request_workflow?` answered FALSE
+# and the file skipped the enrolment rule entirely — a two-valued predicate taking
+# the permissive branch on "cannot tell". Verified RED against the pre-fix rule: the
+# tree below exited 0.
+DIR=$(new_case unparseable-workflow)
+cat >"$DIR/workflows/broken-lane.yml" <<'YAML'
+name: Broken lane
+on:
+  pull_request:
+jobs:
+  run:
+    steps:
+      - run: echo x
+   bad_indent: [unclosed
+YAML
+run_policy "$DIR"
+expect_fail_named "an unparseable workflow is a NAMED error, never a silent exclusion" "broken-lane.yml"
+
+DIR=$(new_case non-mapping-workflow)
+# Parses cleanly, but to a LIST — so `workflow["on"]` is not askable either. Same
+# class, different cause: the answer is UNKNOWN, and unknown must not be permissive.
+printf -- '- not\n- a\n- workflow\n' >"$DIR/workflows/listy-lane.yml"
+run_policy "$DIR"
+expect_fail_named "a workflow that is not a mapping is a NAMED error" "listy-lane.yml"
 
 echo "== the real repository tree is enrolled =="
 OUT=$(ruby "$REGISTRY_RB" policy --workflows-dir "$REPO_ROOT/.github/workflows" \
@@ -1219,7 +1395,13 @@ count_rule_rejections() {
              "$WORK"/case-two-scopes "$WORK"/case-mandate-drift \
              "$WORK"/case-label-churn "$WORK"/case-head-evaluated \
              "$WORK"/case-no-event-tree-checkout "$WORK"/case-no-event-dir-input \
-             "$WORK"/case-tier-cancel-literal "$WORK"/case-tier-cancel-event-name; do
+             "$WORK"/case-tier-cancel-literal "$WORK"/case-tier-cancel-event-name \
+             "$WORK"/case-exempt-no-half "$WORK"/case-exempt-half-unknown-kind \
+             "$WORK"/case-exempt-half-empty "$WORK"/case-exempt-half-unknown-field \
+             "$WORK"/case-exempt-half-ghost-component "$WORK"/case-exempt-half-no-manifest \
+             "$WORK"/case-exempt-half-garbage-manifest "$WORK"/case-exempt-half-ghost-step \
+             "$WORK"/case-exempt-half-none-no-ground "$WORK"/case-exempt-half-none-not-sole \
+             "$WORK"/case-unparseable-workflow "$WORK"/case-non-mapping-workflow; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -1232,10 +1414,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 19 ]; then
-  ok "the real rule rejects all 19 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 31 ]; then
+  ok "the real rule rejects all 31 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/19"
+  bad "the real rule rejected only $REAL_REJECTIONS/31"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"
@@ -1248,6 +1430,21 @@ if [ "$RC" -eq 0 ]; then
   ok "validate-workflows.rb with the stub rule stops rejecting; the wiring assertion is real"
 else
   bad "the stub-wired validator still failed, so the wiring assertion is not discriminating: $OUT"
+fi
+
+# ------------------------------------------------- THE CASE FLOOR (#3725) ---
+# A GREEN TALLY OVER A SHRUNKEN SUITE IS ITS OWN DEFECT (#3544): a span-replacing
+# edit silently deleted four cases from a sibling suite and it reported `failed: 0`
+# at the reduced count for a whole round. `PASS` is the only number that moves when
+# a case is deleted, so it carries the floor. RAISE this when you add cases; it is
+# deliberately a FLOOR and not an equality, so adding one does not red the suite
+# before its author gets to the bottom of the file. The number counts the cases
+# decided BEFORE this assertion — this one is not in its own subject set.
+CASE_FLOOR=88
+if [ "$((PASS + FAIL))" -ge "$CASE_FLOOR" ]; then
+  ok "the suite ran at least its declared floor of $CASE_FLOOR cases"
+else
+  bad "the suite ran only $((PASS + FAIL)) cases, below the declared floor of $CASE_FLOOR — cases were LOST, not fixed"
 fi
 
 echo

@@ -66,7 +66,7 @@ module GatingRegistry
 
   # ----------------------------------------------------------- schema rules --
 
-  def schema_errors(registry, path)
+  def schema_errors(registry, path, workflows: {}, gate_components_path: DEFAULT_GATE_COMPONENTS)
     errors = []
     unknown = registry.keys.map(&:to_s) - TOP_LEVEL_KEYS
     unknown.each { |key| errors << "#{path}: unknown top-level key `#{key}`" }
@@ -75,7 +75,8 @@ module GatingRegistry
     errors.concat(aggregator_schema_errors(registry, path))
     errors.concat(defaults_schema_errors(registry, path))
     errors.concat(tier_schema_errors(registry, path))
-    errors.concat(exempt_schema_errors(registry, path))
+    errors.concat(exempt_schema_errors(registry, path, workflows: workflows,
+                                                      gate_components_path: gate_components_path))
     errors
   end
 
@@ -159,10 +160,17 @@ module GatingRegistry
     errors
   end
 
-  def exempt_schema_errors(registry, path)
+  def exempt_schema_errors(registry, path, workflows: {}, gate_components_path: DEFAULT_GATE_COMPONENTS)
     raw = registry["exempt"]
     return ["#{path}: `exempt` must be a list"] unless raw.nil? || raw.is_a?(Array)
 
+    # The two subject sets `merge_gating_half` is checked against, each loaded
+    # LAZILY and ONCE. Lazily because a registry whose every exemption declares
+    # `kind: none` needs neither, and eagerly refusing on an absent manifest
+    # would red a tree that makes no claim about it — a rule that reds on correct
+    # input is the rule people learn to waive. Once because both loaders are
+    # three-valued and their error text must appear at most one time.
+    subjects = { components: nil, steps: nil }
     errors = []
     Array(raw).each_with_index do |entry, index|
       label = "#{path}: exempt[#{index}]"
@@ -184,8 +192,143 @@ module GatingRegistry
       unless issue.is_a?(String) && issue.strip.match?(ISSUE_PATTERN)
         errors << "#{label} (#{name}) needs an `issue` reference like `#2910`"
       end
+
+      errors.concat(merge_gating_half_errors(entry, "#{label} (#{name})", registry, workflows,
+                                             gate_components_path, subjects))
     end
     errors
+  end
+
+  # ------------------------------------- the declared merge-gating half (#3725)
+
+  # #3493's class, mechanized. An exemption asserts that this workflow's PR result
+  # need not block a merge; `merge_gating_half:` is the structured, machine-checked
+  # answer to "then what does?".
+  #
+  # WHAT THIS CHECKS, EXACTLY: that a named gate component EXISTS in
+  # scripts/agent-gate.components, and that a named required-gate step EXISTS in the
+  # aggregator's `needs` closure. It does NOT — and cannot — check SCOPE, which is
+  # what #3493 showed to be the actual hazard: `node-ci.yml`'s exemption named a
+  # component that existed the whole time and had been narrowed to 1 of 27 test
+  # files. Existence catches the renamed/deleted/never-existed component; scope
+  # needs a human reading both sides. This check does not overclaim, and no reader
+  # should read a green run as "the deferral is adequate".
+  #
+  # DECLARED RESIDUAL — THE PROSE IS UNCHECKED BY DESIGN. There is deliberately no
+  # recogniser over the `reason:` field, so an entry whose prose CONTRADICTS its
+  # structured field is not caught: `reason: "not run by pull requests"` beside a
+  # correct `merge_gating_half:` passes. That is #3312's standing ruling — a
+  # recogniser over author-controlled prose never closes, and each narrowing only
+  # postpones the next instance — so the control is the structured field and the
+  # prose is documentation. It is a deliberate trade, not an oversight.
+  #
+  # AND ONE CLAUSE OF THE ISSUE'S AC5 IS VACUOUS FOR THE CURRENT POPULATION, said
+  # plainly rather than implied: "a NEW pull_request trigger added to an exempt
+  # workflow" cannot be a regression signal here, because ALL 23 exempt entries
+  # already carry one (measured with `pull_request_workflow?` over the real tree).
+  # A stored `pr_triggered:` boolean would be constant across every entry, carry no
+  # information, and become a second source of truth that can drift from the
+  # workflow — so the trigger fact is DERIVED where it is needed
+  # (`enrolment_errors`) and never stored.
+  def merge_gating_half_errors(entry, label, registry, workflows, gate_components_path, subjects)
+    raw = entry["merge_gating_half"]
+    if raw.nil?
+      return ["#{label} needs a `merge_gating_half:` declaring what DOES gate the merge in this " \
+              "workflow's place — a list of {kind: gate-component, component: <name>} / " \
+              "{kind: required-gate-step, step: <name>} / {kind: none, ground: <why that is " \
+              "acceptable>} (issue #3725)"]
+    end
+    return ["#{label} `merge_gating_half` must be a list"] unless raw.is_a?(Array)
+    if raw.empty?
+      return ["#{label} `merge_gating_half` is empty; declaring nothing is not a declaration — use " \
+              "`kind: none` with a ground if genuinely nothing merge-gating covers this workflow"]
+    end
+
+    errors = []
+    kinds = []
+    raw.each_with_index do |element, index|
+      element_label = "#{label} merge_gating_half[#{index}]"
+      unless element.is_a?(Hash)
+        errors << "#{element_label} must be a mapping"
+        next
+      end
+
+      kind = element["kind"]
+      unless kind.is_a?(String) && MERGE_GATING_HALF_KINDS.key?(kind)
+        errors << "#{element_label} has an unrecognised `kind` #{kind.inspect}; the grammar is CLOSED " \
+                  "— one of #{MERGE_GATING_HALF_KINDS.keys.sort.join(', ')}"
+        next
+      end
+      kinds << kind
+
+      subject_key = MERGE_GATING_HALF_KINDS.fetch(kind)
+      (element.keys.map(&:to_s) - ["kind", subject_key]).each do |key|
+        errors << "#{element_label} (kind `#{kind}`) has unknown field `#{key}`; the only field this " \
+                  "kind takes is `#{subject_key}`"
+      end
+      subject = element[subject_key]
+      unless subject.is_a?(String) && !subject.strip.empty?
+        errors << "#{element_label} (kind `#{kind}`) needs a non-empty `#{subject_key}`"
+        next
+      end
+
+      errors.concat(merge_gating_half_subject_errors(kind, subject.strip, element_label, registry,
+                                                     workflows, gate_components_path, subjects))
+    end
+
+    # `none` means "nothing merge-gating covers this workflow". Beside a positive
+    # claim that is incoherent — one of the two statements is false — and letting
+    # the pair through would make `none` a wildcard that neutralises the check.
+    if kinds.include?("none") && kinds.length > 1
+      errors << "#{label} declares `kind: none` (nothing merge-gating covers this) beside " \
+                "#{kinds.reject { |k| k == 'none' }.uniq.join(', ')}; those cannot both be true — " \
+                "`none` must be the sole element"
+    end
+    errors
+  end
+
+  def merge_gating_half_subject_errors(kind, subject, label, registry, workflows,
+                                       gate_components_path, subjects)
+    case kind
+    when "none"
+      # `ground` is prose, and prose is exactly what this field is NOT trying to
+      # verify. What the length floor buys is that `none` cannot be reached by
+      # typing `ground: x` — the author has to state a ground someone can later
+      # disagree with. `none` is the ANTI-claim (a declared hole), so prose here
+      # cannot manufacture coverage that does not exist; that asymmetry is why a
+      # prose field is acceptable for this kind and for no other.
+      return [] if subject.length >= 30
+
+      ["#{label} `kind: none` needs a substantive `ground` stating why having NO merge-gating " \
+       "counterpart is acceptable for this workflow (got #{subject.inspect})"]
+    when "gate-component"
+      names, error = (subjects[:components] ||= load_gate_components(gate_components_path))
+      return ["#{label} names gate component `#{subject}`, but that claim could not be MEASURED: " \
+              "#{error}"] if error
+      return [] if names.include?(subject)
+
+      ["#{label} names gate component `#{subject}`, which does not exist in " \
+       "#{gate_components_path} (the full gate runs #{names.length} components). An exemption that " \
+       "defers to a component that was renamed, deleted or never existed is a hole (#3493). NOTE: " \
+       "this checks EXISTENCE, not SCOPE — a component that exists may still not cover this " \
+       "workflow, which no rule here can decide."]
+    when "required-gate-step"
+      names, error = (subjects[:steps] ||= required_gate_step_names(registry, workflows))
+      return ["#{label} names required-gate step `#{subject}`, but that claim could not be MEASURED: " \
+              "#{error}"] if error
+      return [] if names.include?(subject)
+
+      ["#{label} names required-gate step `#{subject}`, which is not a step of any job the " \
+       "aggregating job depends on (#{names.length} named steps are). Same EXISTENCE-not-SCOPE " \
+       "caveat as `gate-component`."]
+    else
+      # Unreachable: `kind` was matched against MERGE_GATING_HALF_KINDS before we
+      # got here. Present so that adding a kind WITHOUT its validator is a loud
+      # refusal rather than a silent accept — the permissive branch is the one
+      # this whole rule exists to remove.
+      ["#{label} kind `#{kind}` is declared in MERGE_GATING_HALF_KINDS but has no validator; " \
+       "a kind is added only with the check that verifies its subject"]
+    end
   end
 
   # ------------------------------------------------------- enrolment policy --
@@ -193,17 +336,24 @@ module GatingRegistry
   # The forcing function. Returns [] when the repo's workflow set and the
   # registry agree; otherwise a list of named, actionable errors. Any non-empty
   # result reds `pr-gate-core`, and therefore `required`.
-  def policy_errors(workflows_dir: DEFAULT_WORKFLOWS_DIR, registry_path: DEFAULT_REGISTRY)
+  def policy_errors(workflows_dir: DEFAULT_WORKFLOWS_DIR, registry_path: DEFAULT_REGISTRY,
+                    gate_components_path: DEFAULT_GATE_COMPONENTS)
     registry = begin
       load_registry(registry_path)
     rescue Error => e
       return [e.message]
     end
 
-    errors = schema_errors(registry, registry_path)
-    return errors unless errors.empty?
+    # The workflow set is loaded BEFORE the schema check now, because
+    # `merge_gating_half`'s `required-gate-step` kind is validated against the
+    # aggregator workflow's own steps (issue #3725). Parse failures are reported
+    # by `workflow_parse_errors` below, never swallowed.
+    workflows, parse_errors = load_workflows_with_parse_errors(workflows_dir)
 
-    workflows = load_workflows(workflows_dir)
+    errors = schema_errors(registry, registry_path,
+                           workflows: workflows, gate_components_path: gate_components_path)
+    return parse_errors + errors unless errors.empty? && parse_errors.empty?
+
     errors.concat(enrolment_errors(registry, registry_path, workflows, workflows_dir))
     errors.concat(aggregator_trigger_errors(registry, registry_path, workflows))
     # Round 4: the label-churn rule now covers the AGGREGATOR AND every
@@ -218,14 +368,51 @@ module GatingRegistry
   end
 
   def load_workflows(workflows_dir)
-    Dir[File.join(workflows_dir, "*.{yml,yaml}")].sort.each_with_object({}) do |file, acc|
+    workflows, = load_workflows_with_parse_errors(workflows_dir)
+    workflows
+  end
+
+  # AN UNREADABLE WORKFLOW IS A NAMED ERROR, NEVER A SILENT EXCLUSION (issue
+  # #3725). This used to map an unparseable file to `{}` and carry on. That is a
+  # two-valued predicate collapsing "cannot tell" onto the PERMISSIVE answer, and
+  # it was a live fail-open: `workflow_triggers({})` is empty, so
+  # `pull_request_workflow?` answered FALSE and a PR-triggered workflow that
+  # happened not to parse escaped the enrolment rule ENTIRELY — no tier, no
+  # exemption, no error, exit 0. Verified against the pre-fix rule before the fix
+  # (`scripts/tests/test_gating_registry_policy.sh`, case `unparseable-workflow`).
+  #
+  # Three-valued now: parseable-and-a-mapping (the workflow), or a NAMED error.
+  # The placeholder `{}` is STILL inserted for a failed file so every downstream
+  # rule keeps a Hash to ask questions of — but the error travels beside it and
+  # `policy_errors` returns non-empty, so nothing can pass on the placeholder.
+  #
+  # A file that parses to a NON-MAPPING (a list, a scalar, an empty document) is
+  # the same class with a different cause: `workflow["on"]` is unaskable, so the
+  # trigger answer is UNKNOWN, and unknown must not be permissive.
+  def load_workflows_with_parse_errors(workflows_dir)
+    errors = []
+    workflows = Dir[File.join(workflows_dir, "*.{yml,yaml}")].sort.each_with_object({}) do |file, acc|
+      name = File.basename(file)
       parsed = begin
         load_yaml(file)
-      rescue Psych::SyntaxError
+      rescue Psych::SyntaxError => e
+        errors << "#{workflows_dir}/#{name}: could not be parsed as YAML, so whether it carries a " \
+                  "`pull_request` trigger CANNOT be determined; an unreadable workflow is NOT treated " \
+                  "as non-PR-triggered (YAML parse failed: #{e.message.lines.first&.strip})"
+        nil
+      rescue SystemCallError, IOError => e
+        errors << "#{workflows_dir}/#{name}: could not be read, so whether it carries a " \
+                  "`pull_request` trigger CANNOT be determined (#{e.class}: #{e.message})"
         nil
       end
-      acc[File.basename(file)] = parsed.is_a?(Hash) ? parsed : {}
+      unless parsed.nil? || parsed.is_a?(Hash)
+        errors << "#{workflows_dir}/#{name}: parses to #{parsed.class}, not a workflow mapping, so " \
+                  "whether it carries a `pull_request` trigger CANNOT be determined; an unreadable " \
+                  "workflow is NOT treated as non-PR-triggered"
+      end
+      acc[name] = parsed.is_a?(Hash) ? parsed : {}
     end
+    [workflows, errors]
   end
 
   def enrolment_errors(registry, path, workflows, workflows_dir)
