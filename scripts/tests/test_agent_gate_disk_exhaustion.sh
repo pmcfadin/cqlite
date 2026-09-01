@@ -932,6 +932,26 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────
+# (17f) A LARGE capture text, under `set -o pipefail` -- the case that made an earlier draft
+# report a MATCH as "could not read". With `grep -m1` on the in-memory branch grep exits at the
+# first match, `printf` then dies of SIGPIPE writing the rest, and pipefail hands the pipeline
+# printf's 141: rc>=2, i.e. UNMEASURED, on a payload that plainly matched. MEASURED at 400 KB
+# (rc 141 with `-m1`, rc 0 without), and the payload only gets large on a DIRTY tree -- exactly
+# when a capture is most likely to run out of space. The suite runs under `set -uo pipefail`
+# too, so this case reproduces the shipped conditions.
+big=$(head -c 400000 /dev/zero 2>/dev/null | tr '\0' 'x')
+if [ "${#big}" -ge 400000 ]; then
+  out=$(run_mem record "$(printf 'write error: %s\n%s\n' "$NOSPACE" "$big")" fmt PASS)
+  if case "$out" in "disk-exhaustion: RECOGNISED (#3800)"*"'no-space-left-on-device'"*) true ;; *) false ;; esac; then
+    ok "17f-mem-large: a 400 KB capture text whose FIRST line matches is RECOGNISED -- the in-memory branch does not turn a match into UNMEASURED via pipefail+SIGPIPE"
+  else
+    bad "17f-mem-large: a large matching capture text did not read RECOGNISED (pipefail is handing the pipeline printf's SIGPIPE status); got: ${out:0:200}"
+  fi
+else
+  bad "17f-mem-large: could not build the 400 KB payload (${#big} bytes) -- the case would prove nothing"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────
 # (18) A REAL ENOSPC, THROUGH THE SHIPPED CAPTURE. "The line exists" is not a test: the
 # question is whether a GENUINE out-of-space condition produces text this scan can see.
 #
@@ -1025,9 +1045,11 @@ fi
 # case 18 drives a GENUINE ENOSPC through the shipped _tree_identity at /dev/full: fixture
 # provenance, the attributed verdict, and the mutation control that removes the subject from
 # the scan: 3. Case 18 declares a 2-case SKIP where /dev/full is unavailable, so the floor
-# holds on macOS too: 7 + 3 = 10 on a /dev/full host, 7 + 2 = 9 without it, and a floor must
-# take the LOWER.)
-CASE_FLOOR=52
+# holds on macOS too: 8 + 3 = 11 on a /dev/full host, 8 + 2 = 10 without it, and a floor must
+# take the LOWER. The 8th case-17 entry is 17f, the 400 KB payload that pins the in-memory
+# branch against pipefail+SIGPIPE turning a MATCH into UNMEASURED -- found by measurement while
+# writing this round, not predicted.)
+CASE_FLOOR=53
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

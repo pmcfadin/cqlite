@@ -6412,7 +6412,18 @@ _disk_scan_subject() {
     if [ "$kind" = file ]; then
       hit="$(LC_ALL=C grep -n -a -m1 -F -e "$phrase" < "$payload" 2>/dev/null)"; rc=$?
     else
-      hit="$(printf '%s\n' "$payload" | LC_ALL=C grep -n -a -m1 -F -e "$phrase" 2>/dev/null)"; rc=$?
+      # `-m1` IS DELIBERATELY ABSENT ON THIS BRANCH, and it is not a style choice. This gate
+      # runs under `set -o pipefail`, and with `-m1` grep exits as soon as it matches, so a
+      # LARGE payload leaves `printf` writing into a closed pipe: printf dies of SIGPIPE, and
+      # pipefail hands the PIPELINE printf's 141 even though grep matched. MEASURED, on a
+      # 400 KB payload whose FIRST line matches: `rc=141` with `-m1`, `rc=0` without. That
+      # turns a genuine RECOGNISED into "could not read" -- a wrong verdict, and one that only
+      # appears once the captured text is big, i.e. on a dirty tree, i.e. exactly when a
+      # capture is most likely to run out of space. Without `-m1` grep consumes all of stdin,
+      # printf always completes, and the pipeline status is grep's own. The first matching
+      # line is taken in-shell below, so the reported line number is unchanged.
+      hit="$(printf '%s\n' "$payload" | LC_ALL=C grep -n -a -F -e "$phrase" 2>/dev/null)"; rc=$?
+      hit="${hit%%$'\n'*}"
     fi
     if [ "$rc" -eq 0 ]; then
       DISK_SCAN_SIG="$sig"
