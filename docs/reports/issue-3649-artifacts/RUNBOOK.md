@@ -800,7 +800,8 @@ built this, and no number was produced here — deliberately. See `FINDINGS.md` 
 ```
 docs/reports/issue-3649-artifacts/
   RUNBOOK.md              this file
-  FINDINGS.md             what is established in-lane, with citations
+  FINDINGS.md             what is established in-lane, with citations; §9 is the
+                          acceptance-criteria disposition the PR body quotes
   ab-throughput.sh        the interleaved paired A/B driver
   analyze-ab.py           the CLI and the two-section report
   ab_stats.py             the statistics and BOTH verdict rules, with their citations
