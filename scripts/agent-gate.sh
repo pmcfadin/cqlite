@@ -1182,12 +1182,33 @@ _sccache_health() {
 # that DEPEND on it are not produced at all — the cap renders `(unattributed)`, which is
 # exactly what it says: this gate could not attribute the number. Never a constant standing
 # in for a measurement.
+# THE PROBE IS ISOLATED THE WAY BOOTSTRAP'S ORACLE IS — BLANKET-UNSET, NOT ONE VARIABLE (issue
+# #3727 roborev round 10, f1). This unset only SCCACHE_CACHE_SIZE, so any other inherited
+# SCCACHE_* could shape the answer and a configured cap could then read as `(default)`. The
+# bootstrap oracle has blanket-unset since round 1 and records the reason — a backend variable in
+# a future sccache would be missed by any list written today — and the gate's probe never got the
+# same treatment. It does now: every exported SCCACHE_* is cleared (derived from `compgen -e`,
+# never a list), plus BASH_ENV/ENV, plus HOME and XDG_CONFIG_HOME pointed at the empty probe
+# directory so per-user config cannot reach it either.
+#
+# MEASURED, and recorded because it qualifies the finding rather than the fix: the specific
+# `SCCACHE_CONF` route roborev names did NOT reproduce on sccache 0.17.0 — a config file with
+# `[cache.disk] size = 7516192768` left `max_cache_size` at the 10 GiB default. So this is
+# defence against a class, not a repair of a demonstrated leak. It costs one array and nothing at
+# runtime; a system-wide config is deliberately NOT isolated, because a value every context would
+# see IS the default this token means.
 _sccache_default_probe() {   # -> prints the byte count, or nothing
-  local __d __port __json __hits
+  local __d __port __json __hits __n
+  local -a __unset=()
   command -v sccache >/dev/null 2>&1 || return 1
   __d=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-sccache-dflt.XXXXXX" 2>/dev/null) || return 1
+  for __n in $(compgen -e 2>/dev/null || true); do
+    case "$__n" in SCCACHE_*) __unset+=(-u "$__n") ;; esac
+  done
   __port=$(( 40000 + (($$ + 5077) % 20000) ))
-  __json=$(env -u SCCACHE_CACHE_SIZE SCCACHE_DIR="$__d" SCCACHE_SERVER_PORT="$__port" \
+  __json=$(env ${__unset[@]+"${__unset[@]}"} -u BASH_ENV -u ENV \
+    HOME="$__d" XDG_CONFIG_HOME="$__d" \
+    SCCACHE_DIR="$__d" SCCACHE_SERVER_PORT="$__port" \
     sccache --show-stats --stats-format json 2>/dev/null)
   # The SAME isolation assert the bootstrap oracle uses: a reading answered by somebody
   # else's server says nothing about sccache's own default. Matched against the RAW JSON
@@ -1454,7 +1475,18 @@ _sccache_cap_probe() {
       # percentage is UNDEFINED rather than 0 — name it instead of dividing.
       _SCC_USED_PCT=cap-zero
     else
-      _SCC_USED_PCT="$(( used * 100 / _SCC_CAP_BYTES ))%"
+      # NO OVERFLOW IN THE PERCENTAGE (issue #3727 roborev round 10, f3), and the coupling is worth
+      # stating: this hazard exists BECAUSE round 8 stopped rejecting large caps, so the two
+      # decisions are linked. bash arithmetic is signed 64-bit and wraps silently, so `used * 100`
+      # overflows once used exceeds ~9.2e16 — and the failure direction is the SILENT one: a wrapped
+      # negative percentage compares below 95 and SUPPRESSES the near-capacity warning. The common
+      # path keeps the exact form; only the absurd-size path divides first, where losing sub-percent
+      # precision cannot matter.
+      if [ "$used" -le 92233720368547758 ]; then
+        _SCC_USED_PCT="$(( used * 100 / _SCC_CAP_BYTES ))%"
+      else
+        _SCC_USED_PCT="$(( used / (_SCC_CAP_BYTES / 100 > 0 ? _SCC_CAP_BYTES / 100 : 1) ))%"
+      fi
     fi
   elif [ -n "$used" ]; then
     # This token reports a FILL RATIO, and a ratio needs a denominator: an

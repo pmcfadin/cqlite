@@ -1280,6 +1280,71 @@ else
 fi
 assert_accelerators "sccache-cap-unclassifiable" "$scc_wrap"
 
+# 9c-v-g. THE DEFAULT PROBE IS ISOLATED FROM THE INHERITED ENVIRONMENT (issue #3727 roborev round
+#         10, f1), and THE FILL PERCENTAGE CANNOT OVERFLOW (f3). Two independent asserts, both
+#         behavioural.
+#
+#         ISOLATION: the probe used to unset only SCCACHE_CACHE_SIZE, so any other inherited
+#         SCCACHE_* could shape sccache's reported default and a CONFIGURED cap could then read as
+#         `(default)`. The bootstrap oracle has blanket-unset since round 1; the gate's probe had
+#         not. Driven with a PATH-shim sccache that answers 7516192768 whenever it sees ANY
+#         SCCACHE_* beyond the three the probe itself sets, and 10737418240 otherwise — so a leak
+#         makes the default 7516192768, the hooked cap 10737418240 then differs from it, and an
+#         UNSET variable classifies as `(inherited)` instead of `(default)`. The shim is the only
+#         way to test this: on real sccache 0.17.0 no SCCACHE_* other than the cap itself was
+#         measured to move that number, so the fix is defence against a class rather than a repair
+#         of a demonstrated leak, and a behavioural test needs a tool that DOES leak.
+scc_shimdir="$tmp/scc-dflt-shim"; mkdir -p "$scc_shimdir"
+cat > "$scc_shimdir/sccache" <<'SCCSHIM'
+#!/usr/bin/env bash
+leak=0
+for n in $(compgen -e 2>/dev/null || true); do
+  case "$n" in
+    SCCACHE_DIR|SCCACHE_SERVER_PORT|SCCACHE_CACHE_SIZE) ;;
+    SCCACHE_*) leak=1 ;;
+  esac
+done
+mx=10737418240; [ "$leak" = 1 ] && mx=7516192768
+printf '{"stats":{},"cache_location":"Local disk: \"%s\"","cache_size":null,"max_cache_size":%s,"version":"0.17.0"}
+'   "${SCCACHE_DIR:-/none}" "$mx"
+SCCSHIM
+chmod +x "$scc_shimdir/sccache"
+scc_iso="$tmp/scc-cap-probe-isolated.txt"
+env -u SCCACHE_CACHE_SIZE \
+  AGENT_GATE_SUMMARY_FILE="$scc_iso" PATH="$scc_shimdir:$PATH" \
+  SCCACHE_GHA_ENABLED=true SCCACHE_CONF="$tmp/nonexistent-sccache.toml" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_iso" sccache-cap '10737418240(default)' \
+   && ! accel_token_is "$scc_iso" sccache-cap '10737418240(inherited)'; then
+  ok "sccache-cap: the default probe is isolated from inherited SCCACHE_* — a leaking environment does not turn (default) into (inherited)"
+else
+  bad "sccache-cap: an inherited SCCACHE_* reached the default probe and mislabelled the provenance"
+  grep '^accelerators:' "$scc_iso" 2>/dev/null || cat "$scc_iso"
+fi
+
+# f3: `used * 100` overflows bash's signed 64-bit arithmetic for the large caps round 8 stopped
+#     rejecting — and the failure direction is the SILENT one, a wrapped percentage below 95 that
+#     SUPPRESSES the near-capacity warning. The two decisions are coupled, so the case pins both the
+#     percentage and the warning.
+scc_big="$tmp/scc-used-hugecap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_big" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=4611686018427387904 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=4T \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-used-hugecap.stderr"
+if accel_token_is "$scc_big" sccache-used '4611686018427387904(100%)' \
+   && grep -q 'AT/NEAR CAPACITY' "$tmp/scc-used-hugecap.stderr" 2>/dev/null; then
+  ok "sccache-used: a 4 EiB cache at its 4 EiB cap renders 100% and still WARNS (used*100 no longer overflows into a suppressed warning)"
+else
+  bad "sccache-used: a huge cap produced a wrong percentage or silently lost its near-capacity WARN"
+  grep '^accelerators:' "$scc_big" 2>/dev/null || cat "$scc_big"
+  head -2 "$tmp/scc-used-hugecap.stderr" 2>/dev/null
+fi
+assert_accelerators "sccache-used-hugecap" "$scc_big"
+
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured
 #        value — this repo's standing rule that a positive verdict requires an affirmative
@@ -5563,7 +5628,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 452: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 42 host-independent
+# 410 -> 455: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 45 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
@@ -5572,11 +5637,12 @@ fi
 # A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +42 above is a measured difference (the last three: 9c-v-f's unclassifiable-value token, its
-# no-WARN assert and its grammar check) and the deliberate ~10 margin is preserved rather than
+# the +45 above is a measured difference (the last three: 9c-v-g's probe-isolation assert, its
+# huge-cap percentage+WARN assert and that case's grammar check) and the deliberate ~10 margin is
+# preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=452
+ASSERT_FLOOR=455
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
