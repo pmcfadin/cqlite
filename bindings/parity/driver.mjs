@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { canonRowNode, parseType } from './canonical.mjs';
+import { canonRowNode, typesFromColumns } from './canonical.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -65,10 +65,16 @@ export function checkFixtureFloor(data = loadFixtureFile()) {
   return failures;
 }
 
+/**
+ * Column name -> parsed CQL type.
+ *
+ * Delegates to `typesFromColumns` so there is ONE builder: it returns a
+ * null-prototype object because `__proto__` is a legal CQL column name
+ * (issue #1455, F1), and the `rows` section of `canonical-vectors.json` pins
+ * that builder in BOTH languages.
+ */
 export function fixtureTypes(fixture) {
-  const types = {};
-  for (const [name, text] of Object.entries(fixture.columns)) types[name] = parseType(text);
-  return types;
+  return typesFromColumns(fixture.columns);
 }
 
 export async function runFixture(fixture, datasets) {

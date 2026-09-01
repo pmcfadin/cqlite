@@ -32,9 +32,12 @@ from canonical import (  # noqa: E402
     CanonicalError,
     canon_cli,
     canon_python,
+    canon_row_cli,
+    canon_row_python,
     canonical_equal,
     parse_type,
     shape_tag,
+    types_from_columns,
 )
 
 VECTORS_PATH = _HERE / "canonical-vectors.json"
@@ -138,6 +141,68 @@ def check_vectors(vectors: Optional[List[dict]] = None) -> Tuple[List[str], Dict
 
 
 # ---------------------------------------------------------------------------
+# Row cases -- the ROW-BUILDING path (issue #1455, F1)
+# ---------------------------------------------------------------------------
+
+
+def materialize_python_row(spec: dict) -> dict:
+    """A row dict, keys VERBATIM. Python dicts have no prototype to pollute."""
+    return {name: materialize_python(value) for name, value in spec.items()}
+
+
+def check_rows(rows: Optional[List[dict]] = None) -> Tuple[List[str], Dict[str, int]]:
+    """Drive ``types_from_columns`` + ``canon_row_*`` for whole rows.
+
+    The value vectors above never build a COLUMN-NAME-KEYED object, so they
+    cannot reach the hazard this section exists for: ``__proto__`` is a legal
+    quoted CQL identifier, and on an ordinary JS object assigning it replaces
+    the prototype instead of creating an own property -- silently dropping the
+    column from both the type map and the canonical row. Python is immune
+    (dicts have no prototype); the case is driven here too so both halves are
+    pinned against the SAME expected row rather than each against itself.
+    """
+    if rows is None:
+        rows = load_all().get("rows", [])
+    failures: List[str] = []
+    counts = {"rows": 0, "checks": 0, "ok": 0, "failed": 0, "skipped": 0}
+    for case in rows:
+        counts["rows"] += 1
+        expected = case["canonical"]
+        for leg in LEGS:
+            if leg not in case:
+                counts["skipped"] += 1
+                continue
+            counts["checks"] += 1
+            try:
+                types = types_from_columns(case["columns"])
+                if leg == "python":
+                    actual = canon_row_python(materialize_python_row(case[leg]), types)
+                else:
+                    actual = canon_row_cli(case[leg], types)
+            except Exception as exc:  # noqa: BLE001 - report, do not abort the sweep
+                failures.append(f"{case['name']}/{leg}: raised {type(exc).__name__}: {exc}")
+                counts["failed"] += 1
+                continue
+            missing = [c for c in case["columns"] if c not in actual]
+            if missing:
+                failures.append(
+                    f"{case['name']}/{leg}: canonical row LOST column(s) {missing} "
+                    f"(got keys {sorted(actual)})"
+                )
+                counts["failed"] += 1
+                continue
+            if canonical_equal(actual, expected):
+                counts["ok"] += 1
+                continue
+            failures.append(
+                f"{case['name']}/{leg}: expected {expected!r} ({shape_tag(expected)}), "
+                f"got {actual!r} ({shape_tag(actual)})"
+            )
+            counts["failed"] += 1
+    return failures, counts
+
+
+# ---------------------------------------------------------------------------
 # Refusal cases (issue #1455, N3)
 # ---------------------------------------------------------------------------
 
@@ -233,6 +298,15 @@ def check_floor(data: Optional[dict] = None) -> List[str]:
         failures.append(
             f"error-case floor: {len(errors)} < {floor['min_errors']} — cases were REMOVED"
         )
+    rows = data.get("rows", [])
+    if len(rows) < floor.get("min_rows", 0):
+        failures.append(
+            f"row-case floor: {len(rows)} < {floor['min_rows']} — row cases were REMOVED"
+        )
+    row_names = [r["name"] for r in rows]
+    missing_rows = [n for n in floor.get("required_row_names", []) if n not in row_names]
+    if missing_rows:
+        failures.append(f"required row case(s) absent: {missing_rows}")
     names = [v["name"] for v in vectors]
     if len(set(names)) != len(names):
         failures.append("duplicate vector names")
@@ -268,8 +342,9 @@ def main() -> int:
     data = load_all()
     floor_failures = check_floor(data)
     vec_failures, vec_counts = check_vectors(data["vectors"])
+    row_failures, row_counts = check_rows(data.get("rows", []))
     err_failures, err_counts = check_errors(data.get("errors", []))
-    for line in floor_failures + vec_failures + err_failures:
+    for line in floor_failures + vec_failures + row_failures + err_failures:
         print(f"FAIL {line}", file=sys.stderr)
     print(
         f"vectors: {vec_counts['ok']}/{vec_counts['checks']} leg-checks OK over "
@@ -281,8 +356,12 @@ def main() -> int:
         f"refusals: {err_counts['ok']}/{err_counts['checks']} leg-checks OK over "
         f"{err_counts['cases']} cases"
     )
+    print(
+        f"rows: {row_counts['ok']}/{row_counts['checks']} leg-checks OK over "
+        f"{row_counts['rows']} row cases ({row_counts['skipped']} leg-checks skipped)"
+    )
     print(f"floor: {'OK' if not floor_failures else 'FAILED'}")
-    return 1 if (floor_failures or vec_failures or err_failures) else 0
+    return 1 if (floor_failures or vec_failures or row_failures or err_failures) else 0
 
 
 if __name__ == "__main__":

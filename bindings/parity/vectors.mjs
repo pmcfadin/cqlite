@@ -24,7 +24,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  CanonicalError, canonNode, canonicalEqual, parseType, shapeTag,
+  CanonicalError, canonNode, canonRowNode, canonicalEqual, parseType, shapeTag,
+  typesFromColumns,
 } from './canonical.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -111,6 +112,70 @@ export function checkVectors(vectors = loadVectors()) {
 }
 
 // ---------------------------------------------------------------------------
+// Row cases -- the ROW-BUILDING path (issue #1455, F1)
+// ---------------------------------------------------------------------------
+
+/**
+ * A row object with the spec's keys VERBATIM.
+ *
+ * NULL-PROTOTYPE, like every column-name-keyed object in this harness: with an
+ * ordinary `{}` the case's own `__proto__` key would set the prototype instead
+ * of becoming an own property, and the case would then be testing nothing --
+ * a fixture that quietly stops exercising its own hazard.
+ */
+export function materializeNodeRow(spec) {
+  const row = Object.create(null);
+  for (const [name, value] of Object.entries(spec)) row[name] = materializeNode(value);
+  return row;
+}
+
+/**
+ * Drive `typesFromColumns` + `canonRowNode` for whole ROWS.
+ *
+ * The value vectors never build a column-name-keyed object, so they cannot
+ * reach this hazard: `__proto__` is a legal quoted CQL identifier and, on an
+ * ordinary object, assigning it runs `Object.prototype`'s inherited setter --
+ * no own property, no error, the column simply gone from the canonical row.
+ */
+export function checkRows(rows = loadAll().rows || []) {
+  const failures = [];
+  const counts = {
+    rows: 0, checks: 0, ok: 0, failed: 0, skipped: 0,
+  };
+  for (const c of rows) {
+    counts.rows += 1;
+    if (!('node' in c)) { counts.skipped += 1; continue; }
+    counts.checks += 1;
+    const expected = c.canonical;
+    let actual;
+    try {
+      actual = canonRowNode(materializeNodeRow(c.node), typesFromColumns(c.columns));
+    } catch (e) {
+      failures.push(`${c.name}/node: raised ${e && e.message ? e.message : e}`);
+      counts.failed += 1;
+      continue;
+    }
+    const present = new Set(Object.keys(actual));
+    const missing = Object.keys(c.columns).filter((col) => !present.has(col));
+    if (missing.length) {
+      failures.push(
+        `${c.name}/node: canonical row LOST column(s) ${JSON.stringify(missing)} `
+        + `(got keys ${JSON.stringify(Object.keys(actual).sort())})`,
+      );
+      counts.failed += 1;
+      continue;
+    }
+    if (canonicalEqual(actual, expected)) { counts.ok += 1; continue; }
+    failures.push(
+      `${c.name}/node: expected ${JSON.stringify(expected)} (${shapeTag(expected)}), `
+      + `got ${JSON.stringify(actual)} (${shapeTag(actual)})`,
+    );
+    counts.failed += 1;
+  }
+  return { failures, counts };
+}
+
+// ---------------------------------------------------------------------------
 // Refusal cases (issue #1455, N3)
 // ---------------------------------------------------------------------------
 
@@ -182,6 +247,13 @@ export function checkFloor(data = loadAll()) {
   if (errors.length < floor.min_errors) {
     failures.push(`error-case floor: ${errors.length} < ${floor.min_errors} — cases were REMOVED`);
   }
+  const rows = data.rows || [];
+  if (rows.length < (floor.min_rows || 0)) {
+    failures.push(`row-case floor: ${rows.length} < ${floor.min_rows} — row cases were REMOVED`);
+  }
+  const rowNames = rows.map((r) => r.name);
+  const missingRows = (floor.required_row_names || []).filter((n) => !rowNames.includes(n));
+  if (missingRows.length) failures.push(`required row case(s) absent: ${JSON.stringify(missingRows)}`);
   const names = vectors.map((v) => v.name);
   if (new Set(names).size !== names.length) failures.push('duplicate vector names');
 
@@ -223,13 +295,24 @@ export function checkFloor(data = loadAll()) {
  * therefore hands Python an `int` where the python and cli legs hold a
  * `float`. The Python side re-reads this file and compares.
  */
-export function emitCanonical(target, vectors = loadVectors()) {
-  const out = vectors.map((vec) => ({
-    name: vec.name,
-    canonical: canonNode(materializeNode(vec.node), parseType(vec.type)),
-  }));
+export function emitCanonical(target, data = loadAll()) {
+  const out = {
+    vectors: data.vectors.map((vec) => ({
+      name: vec.name,
+      canonical: canonNode(materializeNode(vec.node), parseType(vec.type)),
+    })),
+    // Rows are emitted too, so the `__proto__` cases cross the SERIALIZATION
+    // boundary as well as the in-memory one: a null-prototype object with an
+    // own `__proto__` key serializes to `{"__proto__": ...}`, which json.loads
+    // reads back as an own key. If either half of that ever stops holding, the
+    // Python round-trip check is what says so.
+    rows: (data.rows || []).filter((c) => 'node' in c).map((c) => ({
+      name: c.name,
+      canonical: canonRowNode(materializeNodeRow(c.node), typesFromColumns(c.columns)),
+    })),
+  };
   fs.writeFileSync(target, `${JSON.stringify(out, null, 1)}\n`, 'utf8');
-  return out.length;
+  return out.vectors.length + out.rows.length;
 }
 
 function main() {
@@ -247,8 +330,9 @@ function main() {
   const data = loadAll();
   const floorFailures = checkFloor(data);
   const vec = checkVectors(data.vectors);
+  const rows = checkRows(data.rows || []);
   const err = checkErrors(data.errors || []);
-  for (const line of [...floorFailures, ...vec.failures, ...err.failures]) {
+  for (const line of [...floorFailures, ...vec.failures, ...rows.failures, ...err.failures]) {
     process.stderr.write(`FAIL ${line}\n`);
   }
   process.stdout.write(
@@ -259,8 +343,13 @@ function main() {
   process.stdout.write(
     `refusals: ${err.counts.ok}/${err.counts.checks} leg-checks OK over ${err.counts.cases} cases\n`,
   );
+  process.stdout.write(
+    `rows: ${rows.counts.ok}/${rows.counts.checks} leg-checks OK over `
+    + `${rows.counts.rows} row cases (${rows.counts.skipped} leg-checks skipped)\n`,
+  );
   process.stdout.write(`floor: ${floorFailures.length ? 'FAILED' : 'OK'}\n`);
-  return (floorFailures.length || vec.failures.length || err.failures.length) ? 1 : 0;
+  return (floorFailures.length || vec.failures.length || rows.failures.length
+    || err.failures.length) ? 1 : 0;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {

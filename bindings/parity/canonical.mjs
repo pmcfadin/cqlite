@@ -113,6 +113,25 @@ export function parseType(text) {
   return node;
 }
 
+/**
+ * Column name -> parsed CQL type. NULL-PROTOTYPE by necessity (issue #1455, F1).
+ *
+ * ONE builder for the row path, shared by `driver.mjs`'s `fixtureTypes` and by
+ * the `rows` section of `canonical-vectors.json`, so the twin of
+ * `types_from_columns` in canonical.py is pinned rather than assumed.
+ *
+ * `__proto__` is a legal CQL column name (quoted identifier; see
+ * `test-data/schemas/issue-3630-row-collision.cql`). On an ordinary object
+ * `types['__proto__'] = <CqlType>` runs `Object.prototype`'s inherited SETTER
+ * and REPLACES the prototype -- no own property, no error -- so the column
+ * would vanish from `Object.entries(types)` and never be canonicalized.
+ */
+export function typesFromColumns(columns) {
+  const types = Object.create(null);
+  for (const [name, text] of Object.entries(columns)) types[name] = parseType(text);
+  return types;
+}
+
 export function renderType(t) {
   if (!t.args.length) return t.kind;
   return `${t.kind}<${t.args.map(renderType).join(', ')}>`;
@@ -404,9 +423,27 @@ export function canonNode(value, t) {
   return canon(value, t, nodeAdapter);
 }
 
-/** Canonicalize one Node row object against `types` (name -> CqlType). */
+/**
+ * Canonicalize one Node row object against `types` (name -> CqlType).
+ *
+ * The result is a NULL-PROTOTYPE object, and that is load-bearing, not style
+ * (issue #1455, F1). `__proto__` is a legal CQL column name -- expressible as
+ * the quoted identifier `"__proto__"`, and this repository already has a
+ * fixture schema for it (`test-data/schemas/issue-3630-row-collision.cql`) --
+ * and on an ORDINARY object `out['__proto__'] = v` runs the inherited SETTER
+ * on `Object.prototype` instead of creating an own property. It throws
+ * nothing: the column simply VANISHES from `Object.keys(out)` and from the
+ * emitted JSON, so this harness would report agreement about a column it had
+ * silently dropped. The Node binding itself already defends the same way
+ * (`bindings/node/src/value.rs` uses `Object.create(null)` for UDT fields and
+ * JSON objects); the harness now follows suit.
+ *
+ * The READ side was already safe -- `hasOwnProperty.call` plus a `row[name]`
+ * that resolves an OWN `__proto__` data property ahead of the prototype
+ * accessor -- but it is only safe as long as it stays written that way.
+ */
 export function canonRowNode(row, types) {
-  const out = {};
+  const out = Object.create(null);
   for (const [name, t] of Object.entries(types)) {
     const raw = Object.prototype.hasOwnProperty.call(row, name) ? row[name] : null;
     try {

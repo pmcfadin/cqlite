@@ -25,7 +25,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from canonical import canon_row_python, parse_type  # noqa: E402
+from canonical import canon_row_python, types_from_columns  # noqa: E402
 
 REPO_ROOT = _HERE.parents[1]
 FIXTURES_PATH = _HERE / "fixtures.json"
@@ -81,7 +81,7 @@ def check_fixture_floor(data: Optional[dict] = None) -> List[str]:
 
 
 def fixture_types(fixture: dict) -> Dict[str, Any]:
-    return {name: parse_type(text) for name, text in fixture["columns"].items()}
+    return types_from_columns(fixture["columns"])
 
 
 def run_fixture(fixture: dict, datasets: Path) -> Dict[str, Any]:

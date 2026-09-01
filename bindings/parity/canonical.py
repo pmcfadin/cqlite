@@ -34,6 +34,7 @@ __all__ = [
     "CanonicalError",
     "CqlType",
     "parse_type",
+    "types_from_columns",
     "canonical_compare",
     "canonical_sort_key",
     "canon_python",
@@ -585,6 +586,19 @@ def _canon(value: Any, t: CqlType, ad: _Adapter) -> Any:
             )
         return [_canon(x, t.args[i], ad) for i, x in enumerate(items)]
     return ad.scalar(value, kind)
+
+
+def types_from_columns(columns: dict) -> dict:
+    """Column name -> parsed :class:`CqlType`. ONE builder, every caller.
+
+    Trivial in Python -- a ``dict`` has no prototype -- and it exists so the
+    Python and JS halves have the SAME entry point for the row-building path,
+    which the ``rows`` section of ``canonical-vectors.json`` pins in both. The
+    JS twin (``typesFromColumns``) must build a NULL-PROTOTYPE object, because
+    ``__proto__`` is a legal CQL column name and an ordinary object would
+    silently swallow it (issue #1455, F1).
+    """
+    return {name: parse_type(text) for name, text in columns.items()}
 
 
 def canon_python(value: Any, t: CqlType) -> Any:

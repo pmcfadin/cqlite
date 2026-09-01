@@ -20,7 +20,15 @@
     "",
     "A `cli` value of null means 'this shape is unreachable from the CLI'; the",
     "vector then pins only the python and node legs. That is used ONLY for a",
-    "value the CLI cannot emit, never to excuse a divergence."
+    "value the CLI cannot emit, never to excuse a divergence.",
+    "",
+    "`rows` (issue #1455, F1) drives the ROW path rather than a single value:",
+    "each case declares `columns` (name -> CQL type) plus a per-leg ROW object,",
+    "and every leg must canonicalize to the same `canonical` ROW. It exists",
+    "because a column NAME can be hostile -- `__proto__` is a legal quoted CQL",
+    "identifier -- and the value vectors never touch a column-name-keyed object.",
+    "Expressible as data precisely because JSON.parse and json.loads create an",
+    "OWN `__proto__` property where a JS object literal would not."
   ],
   "floor": {
     "_comment": [
@@ -29,7 +37,10 @@
       "reporting, so `0/0 vectors OK` is unreachable.",
       "`required_kinds` is checked against the CQL type KINDS appearing anywhere",
       "in a vector's parsed type tree, so deleting every blob vector reds the",
-      "runners rather than shrinking the suite silently."
+      "runners rather than shrinking the suite silently.",
+      "`rows` pins the ROW-BUILDING path (types_from_columns/typesFromColumns +",
+      "canon_row_*), which the value vectors cannot reach; min_rows and",
+      "required_row_names keep it from being emptied."
     ],
     "min_vectors": 68,
     "min_errors": 23,
@@ -61,7 +72,14 @@
       "tuple"
     ],
     "require_nested_container": true,
-    "require_null_canonical": true
+    "require_null_canonical": true,
+    "min_rows": 4,
+    "required_row_names": [
+      "plain_row_control",
+      "proto_polluting_column_names",
+      "proto_column_absent_from_the_row",
+      "proto_column_explicit_null"
+    ]
   },
   "vectors": [
     {"name": "null_int", "type": "int", "python": null, "node": null, "cli": null, "canonical": null},
@@ -132,6 +150,164 @@
     {"name": "decimal_pathological_exponent", "type": "decimal", "python": {"$": "decimal", "v": "1E+1000000000"}, "node": "1e1000000000", "cli": "1e1000000000", "canonical": "1e1000000000"},
     {"name": "decimal_pathological_negative_exponent", "type": "decimal", "python": {"$": "decimal", "v": "-7E-2000000000"}, "node": "-7e-2000000000", "cli": "-7e-2000000000", "canonical": "-7e-2000000000"},
     {"name": "double_integral_value", "type": "double", "python": 2.0, "node": 2.0, "cli": 2.0, "canonical": 2.0}
+  ],
+  "rows": [
+    {
+      "name": "plain_row_control",
+      "_why": "The control: an ordinary row must round-trip through the row-building path unchanged.",
+      "columns": {
+        "id": "uuid",
+        "n": "int",
+        "tags": "set<text>"
+      },
+      "python": {
+        "id": {
+          "$": "uuid",
+          "v": "15291a77-d739-4e73-8397-b787442f3a1f"
+        },
+        "n": 7,
+        "tags": {
+          "$": "set",
+          "items": [
+            "b",
+            "a"
+          ]
+        }
+      },
+      "node": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "n": 7,
+        "tags": {
+          "$": "set",
+          "items": [
+            "b",
+            "a"
+          ]
+        }
+      },
+      "cli": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "n": 7,
+        "tags": [
+          "b",
+          "a"
+        ]
+      },
+      "canonical": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "n": 7,
+        "tags": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    {
+      "name": "proto_polluting_column_names",
+      "_why": "issue #1455 F1: `__proto__` is a legal quoted CQL identifier (test-data/schemas/issue-3630-row-collision.cql). On an ORDINARY JS object both the type map and the canonical row silently LOSE it, because assignment runs Object.prototype's inherited setter instead of creating an own property. `constructor`/`toString`/`valueOf` are inherited DATA properties, which shadow correctly, and are here so a fix that only special-cases `__proto__` is still exercised against the rest of the family.",
+      "columns": {
+        "id": "uuid",
+        "__proto__": "text",
+        "constructor": "int",
+        "toString": "boolean",
+        "valueOf": "decimal",
+        "prototype": "blob"
+      },
+      "python": {
+        "id": {
+          "$": "uuid",
+          "v": "15291a77-d739-4e73-8397-b787442f3a1f"
+        },
+        "__proto__": "survived",
+        "constructor": 5,
+        "toString": true,
+        "valueOf": {
+          "$": "decimal",
+          "v": "1.50"
+        },
+        "prototype": {
+          "$": "bytes",
+          "hex": "00ff"
+        }
+      },
+      "node": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": "survived",
+        "constructor": 5,
+        "toString": true,
+        "valueOf": "1.50",
+        "prototype": {
+          "$": "bytes",
+          "hex": "00ff"
+        }
+      },
+      "cli": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": "survived",
+        "constructor": 5,
+        "toString": true,
+        "valueOf": "1.50",
+        "prototype": "0x00ff"
+      },
+      "canonical": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": "survived",
+        "constructor": 5,
+        "toString": true,
+        "valueOf": "1.50",
+        "prototype": "0x00ff"
+      }
+    },
+    {
+      "name": "proto_column_absent_from_the_row",
+      "_why": "The null half of the same hazard: `out['__proto__'] = null` on an ordinary object sets the PROTOTYPE to null (the setter accepts null), so the column vanishes just as it does for a string value. Absence must canonicalize to an OWN null key.",
+      "columns": {
+        "id": "uuid",
+        "__proto__": "text"
+      },
+      "python": {
+        "id": {
+          "$": "uuid",
+          "v": "15291a77-d739-4e73-8397-b787442f3a1f"
+        }
+      },
+      "node": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f"
+      },
+      "cli": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f"
+      },
+      "canonical": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": null
+      }
+    },
+    {
+      "name": "proto_column_explicit_null",
+      "columns": {
+        "id": "uuid",
+        "__proto__": "map<text, int>"
+      },
+      "python": {
+        "id": {
+          "$": "uuid",
+          "v": "15291a77-d739-4e73-8397-b787442f3a1f"
+        },
+        "__proto__": null
+      },
+      "node": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": null
+      },
+      "cli": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": null
+      },
+      "canonical": {
+        "id": "15291a77-d739-4e73-8397-b787442f3a1f",
+        "__proto__": null
+      }
+    }
   ],
   "errors": [
     {"name": "udt_refused", "stage": "parse_type", "type": "address_type", "expect": "unsupported CQL type"},

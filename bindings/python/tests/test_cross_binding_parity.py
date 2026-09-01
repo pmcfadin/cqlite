@@ -55,6 +55,7 @@ from driver import (  # noqa: E402
 from vectors import (  # noqa: E402
     check_errors,
     check_floor,
+    check_rows,
     check_vectors,
     load_all as load_vector_file,
 )
@@ -391,6 +392,27 @@ def test_canonicalizer_refusals_python_leg():
     assert counts["checks"] > 0, "no refusal leg-checks ran"
 
 
+def test_canonicalizer_row_cases_python_leg():
+    """The ROW-BUILDING path, including hostile column NAMES (issue #1455, F1).
+
+    ``__proto__`` is a legal quoted CQL identifier (this repo already ships
+    ``test-data/schemas/issue-3630-row-collision.cql`` for it) and on an
+    ordinary JS object assigning it replaces the prototype instead of creating
+    an own property -- silently, so the Node leg would emit a row missing that
+    column and this harness would report agreement about data it had dropped.
+    Python dicts are immune; both legs are driven against the SAME expected row
+    so the immune half pins the vulnerable one.
+
+    NOTE: no ``test_row_collision`` SSTable exists in either corpus root, so
+    there is no live 3-way FIXTURE for this — these row cases plus the Node
+    runner's own ``checkRows`` are the coverage, and the README says so.
+    """
+    failures, counts = check_rows()
+    assert not failures, "row-case failures (python/cli legs):\n" + "\n".join(failures)
+    assert counts["checks"] > 0, "no row leg-checks ran"
+    assert counts["ok"] == counts["checks"]
+
+
 def test_canonical_vector_case_floor():
     """The vector table cannot shrink to nothing and stay green (B2).
 
@@ -401,6 +423,12 @@ def test_canonical_vector_case_floor():
     assert not check_floor(data), "\n".join(check_floor(data))
     assert len(data["vectors"]) >= data["floor"]["min_vectors"] >= 59
     assert len(data["errors"]) >= data["floor"]["min_errors"] >= 20
+    assert len(data["rows"]) >= data["floor"]["min_rows"] >= 4
+    # The hostile-column-name cases are the reason `rows` exists; a floor on the
+    # COUNT alone would let them be swapped for four benign rows.
+    assert {"proto_polluting_column_names", "proto_column_absent_from_the_row"} <= {
+        r["name"] for r in data["rows"]
+    }
 
 
 def test_fixture_case_floor():
@@ -530,17 +558,30 @@ def test_node_canonical_survives_the_json_round_trip(parity_out_dir):
         timeout=120,
     )
     assert proc.returncode == 0, f"emit failed:\n{proc.stdout}\n{proc.stderr}"
-    emitted = {e["name"]: e["canonical"] for e in json.loads(target.read_text(encoding="utf-8"))}
-    vectors = load_vector_file()["vectors"]
-    assert len(emitted) == len(vectors), (
-        f"emitted {len(emitted)} canonical values for {len(vectors)} vectors"
-    )
-    mismatches = [
-        f"{v['name']}: expected {v['canonical']!r} ({shape_tag(v['canonical'])}), "
-        f"round-tripped {emitted[v['name']]!r} ({shape_tag(emitted[v['name']])})"
-        for v in vectors
-        if not canonical_equal(emitted[v["name"]], v["canonical"])
-    ]
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    data = load_vector_file()
+    mismatches: List[str] = []
+    for section in ("vectors", "rows"):
+        emitted = {e["name"]: e["canonical"] for e in payload[section]}
+        # `rows` cases without a `node` leg are not emitted; everything else is.
+        expected_cases = [c for c in data[section] if section == "vectors" or "node" in c]
+        assert len(emitted) == len(expected_cases), (
+            f"emitted {len(emitted)} {section} for {len(expected_cases)} cases"
+        )
+        for case in expected_cases:
+            got = emitted[case["name"]]
+            if not canonical_equal(got, case["canonical"]):
+                mismatches.append(
+                    f"{section}/{case['name']}: expected {case['canonical']!r} "
+                    f"({shape_tag(case['canonical'])}), round-tripped {got!r} ({shape_tag(got)})"
+                )
+            # A hostile column NAME must survive serialization as an OWN key.
+            missing = [c for c in case.get("columns", {}) if c not in got]
+            if missing:
+                mismatches.append(
+                    f"{section}/{case['name']}: column(s) {missing} absent after the JSON "
+                    f"round trip (got {sorted(got)})"
+                )
     assert not mismatches, (
         "JS canonical values changed across the JSON boundary:\n" + "\n".join(mismatches)
     )
