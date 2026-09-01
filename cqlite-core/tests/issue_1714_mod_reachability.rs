@@ -21,10 +21,17 @@
 //! `Path::is_absolute` answers only for the HOST. Those three non-native arms
 //! are PORTABILITY arms and cannot be mutation-killed on Linux, where the
 //! host-native check overlaps them; they are pinned by direct unit assertions on
-//! the helper instead. It DOES model out-of-line
-//! modules nested in inline `mod` blocks, `#[path]` on those, and attributes
-//! broken across lines. There is deliberately **no exception list**: an orphan
-//! is a failure to fix, never an entry to add.
+//! the helper instead. It DOES model out-of-line modules nested in inline `mod`
+//! blocks, `#[path]` on those, and attributes broken across lines. There is
+//! deliberately **no exception list**: an orphan is a failure to fix, never an
+//! entry to add.
+//!
+//! Every fixture filename these tests materialize is portable: audited (round 4)
+//! for Windows reserved device names, reserved characters, trailing dots/spaces
+//! and case-insensitive collisions. The ONE non-portable case — a `:` in a
+//! filename, needed to prove a drive-RELATIVE `#[path]` still resolves — is
+//! `#[cfg(not(windows))]`-gated, with its classification covered
+//! platform-neutrally by a filesystem-free unit assertion.
 //!
 //! The vacuity floor (>= 400 enumerated files) is checked BEFORE the orphan
 //! assertion, so on a tree far smaller than today's it reds on the floor rather
@@ -1035,9 +1042,24 @@ fn a_windows_drive_rooted_path_attr_is_refused_loudly() {
 }
 
 #[test]
-fn a_colon_bearing_or_single_letter_path_attr_still_resolves() {
-    // Green twins for the two shapes arm 4 must NOT eat, end to end.
-    assert!(orphans(&[("lib.rs", "#[path = \"a/b.rs\"]\nmod x;\n"), ("a/b.rs", ""),]).is_empty());
+fn a_single_letter_directory_path_attr_still_resolves() {
+    // Green twin for the shape arm 4 must not eat: `a/` is a legitimate
+    // single-letter module directory, not a drive letter.
+    assert!(orphans(&[("lib.rs", "#[path = \"a/b.rs\"]\nmod x;\n"), ("a/b.rs", "")]).is_empty());
+}
+
+// Gated because `:` is a RESERVED CHARACTER in a Windows filename, so `fs::write`
+// cannot materialize this fixture there at all. Contrast the absolute-#[path]
+// refusal, which is deliberately NOT cfg-gated: there, gating would hide a real
+// behavioural gap, since `Path::is_absolute` genuinely decides differently per
+// platform. Here the CLASSIFICATION is already covered platform-neutrally by the
+// `c:notdrive.rs` row of `absoluteness_is_decided_for_every_platform_not_just_this_host`,
+// which touches no filesystem; only the MATERIALIZATION half is impossible on
+// Windows. So this gate drops a test that cannot run there at all, not a check.
+#[cfg(not(windows))]
+#[test]
+fn a_colon_bearing_path_attr_still_resolves() {
+    // `c:notdrive.rs` is drive-RELATIVE, not a drive root, so it must resolve.
     assert!(orphans(&[
         ("lib.rs", "#[path = \"c:notdrive.rs\"]\nmod x;\n"),
         ("c:notdrive.rs", ""),
