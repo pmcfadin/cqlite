@@ -287,29 +287,40 @@ cargo run -p cqlite-cli --bin cqlite -- read-sstable \
   --format json
 ```
 
-Result, on the committed fixture at CQLite `d23403d1e` + this branch (before the
-`ComparatorType::compare` fix lands):
+Result, on the committed fixture with this branch's working tree (the
+`ComparatorType::compare` fix `ec6335bcd` already applied — see the caveat
+below, which is why that does not make this a *proof* of the fix):
 
 - exit `0`, **2 entries** (`Displayed 2 entries (total: 2, skipped: 0)`) — a
   non-zero row count with the collection contents intact, so this is not the
-  silent 0-rows-when-present failure.
+  silent 0-rows-when-present failure. Re-verified from a fresh
+  `git worktree add --detach HEAD`, not from the dirty tree that produced it.
 - `inet_set` came back as
   `{::1, 9.0.0.1, 10.0.0.2, 2001:db8::1, 192.168.0.1, fe80::1}` and `inet_map` as
   `{::1: v6-loopback, 9.0.0.1: v4-nine, 10.0.0.2: v4-ten, 2001:db8::1: v6-doc,
   192.168.0.1: v4-private, fe80::1: v6-linklocal}` — i.e. **the on-disk byte
-  order above, preserved**. `time_set`/`time_map` likewise.
+  order above**. `time_set`/`time_map` likewise.
 - `pair_set` elements came back as **undecoded tuple blobs**
   (`0x00000004090000010000000800004e94914effff`, …) on this path — a
   4-byte-length-prefixed inet component followed by an 8-byte-length-prefixed
   time component, which is where the verified `time` hex above comes from.
 
-**TWO THINGS A TEST AUTHOR MUST NOT MISREAD.** (1) `read-sstable` returning the
-correct order here does **not** mean the defect is absent: this path emits cells
-in the order it read them off disk and never consults
-`ComparatorType::compare`. The comparator is reached where collections from
-multiple sources are merged/re-ordered (the scalar multicell path, and
-`compare_composite`'s scalar-leaf delegation for `pair_set`), so the ordering
-assertion must be driven through that entrypoint — not through a plain
-single-SSTable dump, which would pass with or without the fix. (2) A
-`read-sstable` dump is therefore a **liveness check on the fixture**, which is
-all it is used for here.
+**WHAT THIS READ-BACK DOES AND DOES NOT ESTABLISH.** It establishes that the
+committed bytes PARSE and yield both rows with all five collections populated —
+a liveness check on the fixture, which is the only claim made for it here. It
+does **not** establish that the ordering fix works, for two independent reasons,
+and a test author should treat both as things to determine rather than assume:
+
+1. the observation was taken with the fix already applied, so a correct result is
+   consistent with both a fixed comparator and a path that never calls one; and
+2. a single-SSTable dump emits cells in the order it read them off disk, so if
+   this path does not re-order, it would print the correct sequence with or
+   without the fix.
+
+Which entrypoint actually consults `ComparatorType::compare` for a multicell
+collection (and `compare_composite`'s scalar-leaf delegation for `pair_set`) is
+a question about CQLite's read path, not about this fixture; establish it before
+choosing where to assert, or the assertion may pass vacuously. The ordering
+ORACLE — the tables above — is independent of that choice: it comes from
+Cassandra-written bytes and from `cassandra-5.0.8` source, never from CQLite's
+own output.
