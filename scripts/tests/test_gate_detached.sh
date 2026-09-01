@@ -2903,6 +2903,73 @@ else
   rm -rf "$_lcd"
 fi
 
+# --- job 323 F1: acceptance needs TWO affirmative legs, and the orphan case is why ------------------
+# `_unit_is_affirmatively_live` reads only ActiveState, and an ORPHANED NON-GATE process keeps a unit
+# `active` forever (the very fact `_unit_runs_a_gate` was written for, measured in 4b.165). So a gate
+# that published one beat, died and left a child was ACCEPTED as monitorable, and no terminal verdict
+# would ever arrive. The veto is keyed on the AFFIRMATIVE absence (rc 1), not on "not rc 0", because
+# rc 2 is unmeasurable and a cgroup-v1 host answers 2 ALWAYS (job 322's declared precondition) — so
+# demanding rc 0 would red every launch on such a host, which is the guard agents learn to waive.
+_acc_src=$( sed -n '/^_unit_state() {/,/^}$/p'                    "$LAUNCHER"
+            sed -n '/^_unit_is_affirmatively_live() {/,/^}$/p'    "$LAUNCHER"
+            sed -n '/^_unit_accepts_as_monitorable() {/,/^}$/p'   "$LAUNCHER" )
+if ! printf '%s' "$_acc_src" | grep -q '^_unit_accepts_as_monitorable()'; then
+  bad "4b.198 _unit_accepts_as_monitorable could be extracted" "extraction produced nothing usable"
+else
+  _acc() {  # <ActiveState> <_unit_runs_a_gate rc> -> rc
+    ( eval "$_acc_src"
+      eval "systemctl() { printf '%s\n' $1; }"
+      eval "_unit_runs_a_gate() { return $2; }"
+      _unit_accepts_as_monitorable u.service ) >/dev/null 2>&1; printf '%s' "$?"
+  }
+  _acc_orphan=$(_acc active 1)     # active unit, affirmatively NO gate => an orphan holds it
+  _acc_gate=$(_acc active 0)       # active unit with a gate in the cgroup
+  if [ "$_acc_orphan" != 0 ] && [ "$_acc_gate" = 0 ]; then
+    ok "4b.198 an ORPHAN-held active unit is NOT accepted, while a real gate still is"
+  else
+    bad "4b.198 an orphan-held active unit is not accepted" \
+        "orphan=$_acc_orphan (nonzero expected) gate=$_acc_gate (0 expected)"
+  fi
+  # rc 2 must NOT veto, or every cgroup-v1 launch fails after startup.
+  _acc_unmeas=$(_acc active 2)
+  [ "$_acc_unmeas" = 0 ] \
+    && ok "4b.199 an UNMEASURABLE cgroup does not veto acceptance (cgroup-v1 hosts still launch)" \
+    || bad "4b.199 an unmeasurable cgroup does not veto acceptance" "rc=$_acc_unmeas (0 expected)"
+  # And the ActiveState leg still governs: a terminal or stopping unit refuses even WITH a gate present.
+  _acc_bad=""
+  for _st in inactive failed deactivating; do
+    [ "$(_acc "$_st" 0)" = 0 ] && _acc_bad="$_acc_bad $_st"
+  done
+  [ -z "$_acc_bad" ] \
+    && ok "4b.200 a terminal/stopping unit refuses even with a gate in the cgroup" \
+    || bad "4b.200 a terminal/stopping unit refuses even with a gate present" "accepted:$_acc_bad"
+  # Both acceptance sites must go through the two-leg helper, not the single-leg predicate.
+  _acc_sites=$(grep -cE '_unit_accepts_as_monitorable "\$UNIT"' "$LAUNCHER" || true)
+  _acc_single=$(grep -cE '^\s+2\).*_unit_is_affirmatively_live "\$UNIT"' "$LAUNCHER" || true)
+  if [ "${_acc_sites:-0}" -ge 2 ] && [ "${_acc_single:-0}" -eq 0 ]; then
+    ok "4b.201 BOTH RUNNING acceptance sites use the two-leg helper (found $_acc_sites)"
+  else
+    bad "4b.201 both RUNNING acceptance sites use the two-leg helper" \
+        "two-leg=$_acc_sites single-leg-remaining=$_acc_single"
+  fi
+fi
+
+# --- job 323 F2: the READER's EMITTED text must not carry a fixed wait figure ----------------------
+# This change corrected the "~850s" bound in four DOCUMENTATION sites and left the one an operator
+# actually reads — the reader's own STALLED output — untouched. Correcting a claim at the sites you
+# happen to notice is not correcting it; the disclosure path needs its own census.
+if grep -n 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -qE '~?8[0-9][0-9] ?s'; then
+  bad "4b.202 the emitted STALLED guidance carries no fixed wait figure" \
+      "a fixed duration is still printed to operators"
+else
+  ok "4b.202 the emitted STALLED guidance carries no fixed wait figure"
+fi
+if grep -E 'verdict STALLED' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -q 'LONGEST COMPONENT OF THIS RUN'; then
+  ok "4b.203 the emitted STALLED guidance tells the reader to DERIVE the bound"
+else
+  bad "4b.203 the emitted STALLED guidance tells the reader to derive the bound" "not found"
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1

@@ -781,6 +781,32 @@ _unit_is_affirmatively_live() {  # <unit>
   [ "$(_unit_state "$1")" = running ]
 }
 
+# ACCEPTANCE NEEDS TWO AFFIRMATIVE LEGS, NOT ONE (roborev job 323, Medium). `_unit_is_affirmatively_live`
+# reads only `ActiveState` — and this file documents, at length, that an ORPHANED NON-GATE PROCESS keeps
+# a unit `active` forever. That is the whole reason `_unit_runs_a_gate` exists. So a gate that published
+# one beat, died, and left a child was ACCEPTED as monitorable: the unit reads active, and no terminal
+# verdict will ever arrive. I used the weaker predicate at the two acceptance sites while the stronger
+# one sat in the same file for exactly this distinction.
+#
+# WHY IT IS SAFE HERE, when it is deliberately NOT used at the post-launch monitorability probe below:
+# that probe can run before the gate has exec'd, where "no agent-gate.sh in the cgroup" is the NORMAL
+# startup state. These sites are only reached when the reader answered RUNNING, which means it saw a
+# FRESH BEAT for this run-id — so the gate provably started, and an absent gate process now means it
+# is gone rather than not yet arrived.
+#
+# THE VETO IS KEYED ON THE AFFIRMATIVE ABSENCE (rc 1), NOT ON "not rc 0". `_unit_runs_a_gate` answers 2
+# = unmeasurable, and on a cgroup-v1 host it answers 2 ALWAYS (job 322's declared precondition), so
+# demanding rc 0 here would make every launch on such a host fail after startup — a guard that reds on
+# correct input. Acceptance therefore requires an affirmative LIVE reading from ActiveState AND the
+# absence of an affirmative "no gate in this cgroup"; both legs are affirmative in the direction that
+# can only weaken acceptance, and an unmeasurable cgroup falls back to the ActiveState leg alone.
+_unit_accepts_as_monitorable() {  # <unit> -> 0 = may accept
+  _unit_is_affirmatively_live "$1" || return 1
+  _unit_runs_a_gate "$1"
+  [ "$?" = 1 ] && return 1        # affirmatively NO gate in the cgroup => an orphan is holding it
+  return 0
+}
+
 _unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmatively not running
   # RETAINED, with this polarity, for the sites where 0 means REFUSE (reservation reclamation, and
   # the "has the unit already died" branch below): there, lumping `stopping` and `unknown` in with
@@ -1482,7 +1508,7 @@ while [ "$_i" -lt 40 ]; do
     # the path that can still find a terminal summary written in the gap.
     case "$?" in
       0) _hb_seen=1; break ;;                                  # COMPLETE — a verdict exists
-      2) if _unit_is_affirmatively_live "$UNIT"; then _hb_seen=1; break; fi ;; # RUNNING — only if live
+      2) if _unit_accepts_as_monitorable "$UNIT"; then _hb_seen=1; break; fi ;; # RUNNING — live AND a gate is in the cgroup
     esac
   fi
   # If the unit already died, stop waiting — but take ONE SETTLED SNAPSHOT first (roborev job 213).
@@ -1562,7 +1588,7 @@ if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
   # is the correct outcome: no verdict is coming.
   case "$?" in
     0) _hb_seen=1 ;;                              # COMPLETE — a verdict exists
-    2) _unit_is_affirmatively_live "$UNIT" && _hb_seen=1 ;;   # RUNNING — only if AFFIRMATIVELY live
+    2) _unit_accepts_as_monitorable "$UNIT" && _hb_seen=1 ;;   # RUNNING — live AND a gate in the cgroup
   esac
 fi
 if [ "$_hb_seen" -ne 1 ]; then

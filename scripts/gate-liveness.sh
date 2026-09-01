@@ -1055,7 +1055,15 @@ fi
 #
 # The lane's real question is "should I keep waiting?", and STALLED answers it. What is lost
 # is "definitely dead, re-run now"; what replaces it needs no process inspection at all — the
-# gate relaunches its beater at every component boundary, so a live gate whose beater alone
-# died RECOVERS to RUNNING within one component. Re-read before acting; if it is still
-# STALLED after a component's worth of time, treat the gate as gone.
-verdict STALLED 3 "no liveness (staleness window ${STALE_AFTER}s): beat-seq did NOT advance over a ${_confirm_wait}s window timed on this host (and the beat reads ${AGE}s old against this clock). This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after a component's worth of time (the longest component is ~850s), treat the gate as gone and relaunch it. $_where"
+# gate relaunches its beater at every component boundary AND while queued for the #1825 slot
+# (job 322), so a live gate whose beater alone died RECOVERS to RUNNING within one component.
+# Re-read before acting; if it is still STALLED after longer than the LONGEST COMPONENT OF THAT
+# RUN, treat the gate as gone.
+#
+# THE EMITTED TEXT MUST NOT CARRY A FIXED DURATION (roborev job 323). It used to say "the longest
+# component is ~850s", and this change corrected that figure in four DOCUMENTATION sites while
+# leaving the one an operator actually reads -- the reader's own output -- untouched. Correcting a
+# claim at the sites you happen to notice is not correcting it; the disclosure path needs its own
+# census. The number was understated 2.4x (measured: tooling-tests at 2073s), and under-waiting
+# relaunches a LIVE gate, which is the two-gates-on-one-summary outcome this issue exists to stop.
+verdict STALLED 3 "no liveness (staleness window ${STALE_AFTER}s): beat-seq did NOT advance over a ${_confirm_wait}s window timed on this host (and the beat reads ${AGE}s old against this clock). This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after LONGER THAN THE LONGEST COMPONENT OF THIS RUN, treat the gate as gone and relaunch it -- read that duration off the component table in the summary block (\`<name>: PASS (<n>s)\`) rather than from any fixed figure, because it grows as components are added (a \`~850s\` figure once printed here was understated 2.4x against a measured 2073s). $_where"
