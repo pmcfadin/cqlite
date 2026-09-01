@@ -311,7 +311,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    (exit 3), the #3465 precedent, because a silent "C is not required" would reproduce the defect
    inside the enforcer. `AUTO` is the form to use: it MEASURES whether C is required from the
    CERTIFIED tree (what this branch does to `openspec/changes/`, against its merge-base with
-   `origin/main`, `archive/**` excluded) and then reads the stage you opened in step 2. A branch
+   `origin/main`, `archive/**` and pure DELETIONS excluded — so archiving a completed change, which
+   is a delete-plus-add with rename detection off, is not a routing signal) and then reads the stage you opened in step 2. A branch
    with no OpenSpec change reports `c-verdict: NOT-APPLICABLE (no openspec change on branch)`
    affirmatively; an absent or `NOT-RUN` C on a design-routed branch REFUSES the merge, naming
    the stage and the cause; and a routing it cannot MEASURE is treated as REQUIRED. There is no

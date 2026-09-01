@@ -163,8 +163,11 @@
 # A caller-supplied "C does not apply here" is exactly the escape hatch #3751
 # exists to remove, so `AUTO` asks git what THIS BRANCH does to
 # `openspec/changes/`: the diff between merge-base(origin/main, <certified>) and
-# <certified>, with `openspec/changes/archive/**` excluded (archiving is
-# flow-finalize's work, never a routing signal). Non-empty ⇒ DESIGN-ROUTED ⇒ C
+# <certified>, with `openspec/changes/archive/**` AND pure DELETIONS excluded
+# (archiving is flow-finalize's work, never a routing signal — and because rename
+# detection is pinned off, a real archive MOVE is a deletion plus an addition under
+# `archive/`, so counting the deletion refused every finalize PR: #3751 round 1 F4).
+# Non-empty ⇒ DESIGN-ROUTED ⇒ C
 # REQUIRED; empty ⇒ affirmatively `NOT-APPLICABLE (no openspec change on branch)`.
 #   * A plain LISTING of `openspec/changes/` cannot answer this. Measured
 #     2026-09-01: `origin/main` carries `archive` PLUS two sibling lanes' in-flight
@@ -694,8 +697,21 @@ c_measure_routing() {
   # translated: a path containing a newline would split into two entries, and both
   # halves then fail the `archive/` prefix test, which counts as DESIGN-ROUTED —
   # the fail-closed direction.
+  #
+  # DELETIONS ARE NOT A ROUTING SIGNAL (`--diff-filter=d`, lowercase = EXCLUDE
+  # deletions; #3751 round 1, F4). Because rename detection is pinned off — and it
+  # must stay off, for the reasons above — a real `openspec archive` move shows up
+  # as a DELETION from `openspec/changes/<slug>/` plus an ADDITION under
+  # `archive/`. The addition is excluded below, so counting the deletion made every
+  # archive-only finalize PR read design-routed and REFUSE for want of a C verdict:
+  # a false refusal on correct, doctrine-mandated input, which is the guard agents
+  # learn to waive. A path that is ONLY deleted also contributes nothing to audit —
+  # there is no spec delta at the certified tree for C to anchor to. Every ADDED or
+  # MODIFIED path under a live `openspec/changes/<slug>/` still routes to C, which
+  # is the fail-closed half and is pinned by its own case in the suite.
   out=$(git -c diff.renames=false -c diff.relative=false \
-    diff --name-only -z "$base" "$certified" -- openspec/changes/ 2>/dev/null | tr '\0' '\n') ||
+    diff --diff-filter=d --name-only -z "$base" "$certified" -- openspec/changes/ 2>/dev/null |
+    tr '\0' '\n') ||
     rc=$?
   if [ "$rc" -ne 0 ]; then
     C_ROUTING=UNMEASURED

@@ -110,8 +110,9 @@ carry).
   **`--c-verdict <path|AUTO>` is REQUIRED too, and omitting it is exit 3 (#3751).** It is the C intent
   audit's half of the same idea: a gate summary certifies that the code BUILDS AND PASSES, and nothing in
   the merge path used to ask whether the audit of *intent* had reported at all. `AUTO` measures the routing
-  from the CERTIFIED TREE (does this branch touch `openspec/changes/`, excluding `archive/**`, between the
-  merge-base with `origin/main` and the certified sha) rather than trusting the caller, an `UNMEASURED`
+  from the CERTIFIED TREE (does this branch touch `openspec/changes/`, excluding `archive/**` and pure deletions — a real
+  archive MOVE is a deletion plus an addition under `archive/`, and counting the deletion refused every
+  finalize PR — between the merge-base with `origin/main` and the certified sha) rather than trusting the caller, an `UNMEASURED`
   measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
   own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Two bindings tie the verdict to the
   merge (#3751 round 1): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a

@@ -2617,6 +2617,86 @@ if [ -n "$C_ARCHIVE" ] &&
   esac
 fi
 
+# A REAL `openspec archive` MOVE IS NOT DESIGN-ROUTED EITHER (F4). Rename detection is
+# pinned OFF deliberately, so a live -> archive move appears as a DELETION from
+# `openspec/changes/<slug>/` plus an ADDITION under `archive/`: the addition is
+# excluded and the deletion used to be COUNTED, so an archive-only finalize PR was
+# design-routed and REFUSED for want of a C verdict. That is a false refusal on
+# correct, doctrine-mandated input — the guard agents learn to waive. The fixture
+# performs the ACTUAL move (`git mv`) rather than simulating its shape.
+c_repo_archive_move() {
+  local d="$T/c-repo-archive-move"
+  mkdir -p "$d"
+  git init -q -b mainline "$d" >/dev/null 2>&1 || return 1
+  git -C "$d" config user.email t@t
+  git -C "$d" config user.name t
+  printf '.review-stage/\n' >"$d/.gitignore"
+  printf 'seed\n' >"$d/README.md"
+  # The LIVE change exists on the merge-base, which is what makes the move a DELETION
+  # there — the whole shape of the finding.
+  mkdir -p "$d/openspec/changes/a-finished-slug"
+  printf 'the proposal\n' >"$d/openspec/changes/a-finished-slug/proposal.md"
+  mkdir -p "$d/openspec/changes/a-finished-slug/specs/thing"
+  printf 'the spec delta\n' >"$d/openspec/changes/a-finished-slug/specs/thing/spec.md"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m seed >/dev/null 2>&1 || return 1
+  git -C "$d" update-ref refs/remotes/origin/main mainline || return 1
+  git -C "$d" checkout -q -b finalize || return 1
+  mkdir -p "$d/openspec/changes/archive"
+  git -C "$d" mv openspec/changes/a-finished-slug \
+    openspec/changes/archive/a-finished-slug >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m "archive the completed change" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$d"
+}
+C_ARCHIVE_MOVE=$(c_repo_archive_move) || C_ARCHIVE_MOVE=""
+if [ -n "$C_ARCHIVE_MOVE" ]; then
+  ok "archive-move fixture: a live openspec change was really git mv'd into archive/"
+else
+  bad "archive-move fixture: could not build it — the case would be vacuous"
+fi
+if [ -n "$C_ARCHIVE_MOVE" ] &&
+  run_in_repo "$C_ARCHIVE_MOVE" 0 \
+    "AUTO on a real live->archive MOVE -> NOT-APPLICABLE (deletions are not a routing signal)" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT NOT-APPLICABLE"*"no openspec change on branch"*)
+      ok "archive-move: reported NOT-APPLICABLE, so a finalize PR is not falsely design-routed" ;;
+    *) bad "archive-move: must report NOT-APPLICABLE (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "archive-move: the merge proceeds without a C verdict" ;;
+    *) bad "archive-move: an archiving PR must not need C (got: $OUT)" ;;
+  esac
+fi
+# THE OTHER DIRECTION STAYS FAIL-CLOSED: an ADDITION or a MODIFICATION under a live
+# `openspec/changes/<slug>/` still routes to C. Without this, `--diff-filter=d` could
+# have been widened to exclude everything and every case above would still pass.
+C_MODIFY=""
+if [ -n "$C_ARCHIVE_MOVE" ]; then
+  C_MODIFY="$T/c-repo-modify"
+  if cp -R "$C_ARCHIVE_MOVE" "$C_MODIFY" >/dev/null 2>&1 &&
+    git -C "$C_MODIFY" checkout -q -b modify mainline &&
+    printf 'an EDITED spec delta\n' \
+      >"$C_MODIFY/openspec/changes/a-finished-slug/specs/thing/spec.md" &&
+    git -C "$C_MODIFY" add -A >/dev/null 2>&1 &&
+    git -C "$C_MODIFY" commit -q -m "edit the live spec delta" >/dev/null 2>&1; then
+    ok "modify fixture: a branch that MODIFIES a live spec delta was built"
+  else
+    bad "modify fixture: could not build it — the fail-closed direction would be untested"
+    C_MODIFY=""
+  fi
+fi
+if [ -n "$C_MODIFY" ] &&
+  run_in_repo "$C_MODIFY" 2 \
+    "AUTO on a MODIFIED live spec delta -> still C REQUIRED (the fail-closed direction)" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"routing: REQUIRED"*"openspec/changes/a-finished-slug"*)
+      ok "modify: a modification still routes to C, naming the change it found" ;;
+    *) bad "modify: a modified spec delta must route to C (got: $OUT)" ;;
+  esac
+fi
+
 # A DESIGN-ROUTED BRANCH WITH NO STAGE EVER OPENED. This is the state
 # review-stage.sh names `NOT-RUN (stage never opened)`, and it must REFUSE.
 if [ -n "$C_DESIGN" ] &&

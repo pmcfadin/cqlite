@@ -75,6 +75,14 @@ usage failure (exit 3), and SHALL determine whether C is required by MEASURING t
 - **WHEN** `--c-verdict` is omitted entirely
 - **THEN** the script exits 3 (usage) rather than defaulting to "not required"
 
+#### Scenario: archiving a completed change is not design-routed
+- **WHEN** the branch's only change under `openspec/changes/` is a real move of a live change
+  directory into `openspec/changes/archive/`
+- **THEN** the routing measure reports `NOT-APPLICABLE (no openspec change on branch)` and the merge
+  proceeds — a deletion is not a routing signal, and refusing here would be a false refusal on
+  doctrine-mandated input
+- **AND** an ADDED or MODIFIED path under a live `openspec/changes/<slug>/` still routes to C
+
 #### Scenario: an AUTO-located stage is bound to the certified tree
 - **WHEN** `--c-verdict AUTO` locates a stage in a worktree whose `HEAD` is not the certified commit
 - **THEN** `premerge-assert.sh` REFUSES, naming the divergence — every lane is a worktree of one shared

@@ -181,7 +181,7 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   merge-base(`origin/main`, `<certified>`) and `<certified>`, with `openspec/changes/archive/**` excluded
   (archiving is flow-finalize's work, not a routing signal). Non-empty ⇒ design-routed ⇒ **C REQUIRED**,
   and an absent or `NOT-RUN` verdict REFUSES the merge naming the stage and the cause; empty ⇒
-  affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. A plain LISTING of
+  affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. **PURE DELETIONS ARE EXCLUDED TOO (`--diff-filter=d`, #3751 round 1).** Rename detection is pinned OFF deliberately, so a real `openspec archive` MOVE appears as a DELETION from `openspec/changes/<slug>/` plus an ADDITION under `archive/` — the addition is excluded, so counting the deletion made every archive-only finalize PR read design-routed and REFUSE for want of a C verdict: a false refusal on correct, doctrine-mandated input. A path that is ONLY deleted also contributes nothing to audit, since there is no spec delta at the certified tree for C to anchor to; every ADDED or MODIFIED path under a live change still routes to C. A plain LISTING of
   `openspec/changes/` cannot answer it — measured 2026-09-01, `origin/main` carries `archive` plus two
   sibling lanes' in-flight change directories, so every branch would read design-routed and the
   "measurement" would be vacuous — and the base is the **MERGE-BASE, never `origin/main`'s TIP** (#3392: a
