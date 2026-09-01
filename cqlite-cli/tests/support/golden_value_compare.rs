@@ -1431,3 +1431,10 @@ pub use staging::{golden_path, stage_single_table};
 #[cfg(test)]
 #[path = "golden_value_compare_tests.rs"]
 mod tests;
+
+/// `compare_map` with a CONTAINER-typed key, and the three properties that had to
+/// survive that (issue #3726). Its own file because
+/// `golden_value_compare_tests.rs` is at the campsite-rule size target.
+#[cfg(test)]
+#[path = "golden_value_compare_map_tests.rs"]
+mod map_tests;

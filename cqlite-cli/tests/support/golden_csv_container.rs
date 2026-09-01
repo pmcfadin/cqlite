@@ -277,7 +277,7 @@
 //! defect under test.
 
 use super::schema::CqlType;
-use super::{stringified_blob_spelling, Kinding};
+use super::{container, stringified_blob_spelling, Kinding};
 use serde_json::{Map, Value};
 
 /// The ONE bracket pair a container of this declared type may be rendered with
@@ -435,14 +435,25 @@ fn decode_does_not_recover(
             split_mismatch(&rendering, "member", &parts, &want)
         }
         Value::Object(fields) => {
+            // The keys are rendered ONCE and reused below, so the split check and
+            // the key-cut check cannot ask two different questions about the same
+            // key — and so the "a key that does not render" case is decided in one
+            // place (here, by returning `None`: no refusal, because the golden's
+            // key is not a spelling of this declared type at all, which is a
+            // divergence for the comparison to report and not a format limit).
+            let keys = fields
+                .keys()
+                .map(|key| entry_key_rendering(ty, key))
+                .collect::<Option<Vec<String>>>()?;
             let want = fields
                 .iter()
-                .map(|(key, value)| {
+                .zip(keys.iter())
+                .map(|((key, value), rendered_key)| {
                     // The VALUE of a map entry / UDT field is a cell value, so it
                     // keeps its natural kind — `compare::compare_map` and
                     // `compare::udt::compare_udt` say the same thing.
                     golden_rendering(value, field_type(Some(ty), key), Kinding::Natural)
-                        .map(|value| format!("{}: {value}", entry_key_rendering(ty, key)))
+                        .map(|value| format!("{rendered_key}: {value}"))
                 })
                 .collect::<Option<Vec<String>>>()?;
             if let Some(why) = split_mismatch(&rendering, "entry", &parts, &want) {
@@ -458,26 +469,22 @@ fn decode_does_not_recover(
             // as the split's above — a key whose brackets balance leaves the `: `
             // that follows it at depth zero — and is reported rather than dropped
             // on the same grounds.
-            fields
-                .iter()
-                .zip(parts.iter())
-                .find_map(|((key, _), part)| {
-                    // Compared against the key AS RENDERED, which for a map key is
-                    // the CSV spelling of the golden's stringified text — the same
-                    // text `compare::compare_map` canonicalizes the golden key to.
-                    let key = entry_key_rendering(ty, key);
-                    match entry_cut(part) {
-                        Err(why) => Some(format!("the golden's own rendering: {why}")),
-                        Ok((got, _)) if got != key => Some(format!(
-                            "the decoder recovers key {} from the golden's own entry {}, not \
+            keys.iter().zip(parts.iter()).find_map(|(key, part)| {
+                // Compared against the key AS RENDERED — for a map key the CSV
+                // spelling of the value the golden's object key DENOTES, which
+                // is the same value `compare::compare_map` canonicalizes it to.
+                match entry_cut(part) {
+                    Err(why) => Some(format!("the golden's own rendering: {why}")),
+                    Ok((got, _)) if got != key => Some(format!(
+                        "the decoder recovers key {} from the golden's own entry {}, not \
                              the golden's key {}",
-                            brief(got),
-                            brief(part),
-                            brief(&key)
-                        )),
-                        Ok(_) => None,
-                    }
-                })
+                        brief(got),
+                        brief(part),
+                        brief(&key)
+                    )),
+                    Ok(_) => None,
+                }
+            })
         }
         // Unreachable: the scalar case returned above and every other shape is a
         // container the two arms cover.
@@ -585,9 +592,11 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>, kinding: Kinding) -> O
             let body = fields
                 .iter()
                 .map(|(key, value)| {
+                    let rendered_key = entry_key_rendering(object, key)?;
                     // A map VALUE / UDT field is a cell value: natural kind.
-                    golden_rendering(value, field_type(ty, key), Kinding::Natural)
-                        .map(|value| format!("{}: {value}", entry_key_rendering(object, key)))
+                    let rendered_value =
+                        golden_rendering(value, field_type(ty, key), Kinding::Natural)?;
+                    Some(format!("{rendered_key}: {rendered_value}"))
                 })
                 .collect::<Option<Vec<String>>>()?
                 .join(", ");
@@ -625,18 +634,37 @@ fn member_kinding(seq: &CqlType, kinding: Kinding) -> Kinding {
     }
 }
 
-/// The text the CSV rendering carries for one object entry's KEY.
+/// The text the CSV rendering carries for one object entry's KEY, or `None` when
+/// the golden's key is not a spelling the declared key type has (see
+/// [`golden_rendering`], whose `None` this propagates).
 ///
-/// A UDT entry's key is a FIELD NAME — not a value — and the grammar writes it
-/// verbatim. A MAP entry's key IS a value, and the golden always spells it under
-/// [`Kinding::Stringified`], because a JSON object key can only be a string; that
-/// is the same reading `compare::compare_map` applies to the golden key (and the
-/// reason it holds the CLI's own key to [`Kinding::Natural`]), so the same
-/// translation applies here.
-fn entry_key_rendering(object: &CqlType, key: &str) -> String {
+/// Three cases, and each one's authority:
+///
+///   * a UDT entry's key is a FIELD NAME — not a value — so the grammar writes it
+///     verbatim;
+///   * a MAP entry's key whose declared type is a CONTAINER is the key value's own
+///     `toJSONString` document (`cassandra-5.0.8 MapType.toJSONString` writes
+///     `keys.toJSONString(kv, protocolVersion)` and quotes it only when it does not
+///     already start with `"`), so it is PARSED — through the lane's one
+///     `container::golden_map_key_value` — and then rendered by this module's own
+///     grammar, at [`Kinding::Natural`] because a frozen container's members are
+///     cell values (issue #3726). Left as the raw JSON text it would carry `, ` and
+///     `: ` of its own, so [`decode_does_not_recover`] would judge every such node
+///     unrecoverable and REFUSE it — which is how the CSV half of this issue stayed
+///     open;
+///   * a MAP entry's key whose declared type is a SCALAR is spelled by the golden
+///     under [`Kinding::Stringified`], because a JSON object key can only be a
+///     string. That is the same reading `compare::compare_map` applies (and the
+///     reason it holds the CLI's own key to [`Kinding::Natural`]), so the same
+///     translation applies here.
+fn entry_key_rendering(object: &CqlType, key: &str) -> Option<String> {
     match object {
-        CqlType::Map(key_ty, _) => stringified_csv_text(key.to_string(), key_ty),
-        _ => key.to_string(),
+        CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => {
+            let value = container::golden_map_key_value(key, key_ty).ok()?;
+            golden_rendering(&value, Some(key_ty), Kinding::Natural)
+        }
+        CqlType::Map(key_ty, _) => Some(stringified_csv_text(key.to_string(), key_ty)),
+        _ => Some(key.to_string()),
     }
 }
 
@@ -1121,6 +1149,25 @@ fn decode_sequence<'t>(
 /// with the declared type of the value under a given key — `None` for a UDT field
 /// the `CREATE TYPE` does not declare, whose value is therefore left as raw text
 /// for the comparator to reject by name.
+///
+/// # A MAP's key is a VALUE and is decoded under its declared type (issue #3726)
+///
+/// A UDT entry's key is a FIELD NAME and stays verbatim. A map entry's key is a
+/// value, so when the DDL declares a CONTAINER key type the key text is decoded
+/// recursively like any other position — without that, CSV handed
+/// `compare::compare_map` a flat string where the declared type says a container,
+/// and the CSV half of a container-keyed map could not be compared at all.
+///
+/// # WHICH golden entry is this one, and why the answer is a RENDERING
+///
+/// The golden's own key is looked up by the text [`entry_key_rendering`] renders it
+/// as — the same text [`decode_does_not_recover`] requires the decoder to recover
+/// from the golden's own rendering — so the decoder and the refusal agree about
+/// which entry is which. Matching the CLI's raw key text against the golden's
+/// object key directly (the previous rule) held only while the two spellings
+/// coincided, which is exactly what a container key does not do (nor, latently, a
+/// `blob` key, whose golden `getString` text is the BARE hex while the CSV egress
+/// renders `0x…`).
 fn decode_object<'t>(
     golden: &Value,
     text: &str,
@@ -1131,11 +1178,13 @@ fn decode_object<'t>(
 ) -> Result<Value, String> {
     let parts = members(text, ty)?;
     let fields = golden.as_object();
+    let container_key_ty = match ty {
+        CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => Some(&**key_ty),
+        _ => None,
+    };
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         let (key, value) = entry_cut(part)?;
-        let mut entry = Map::new();
-        entry.insert("key".to_string(), Value::String(key.to_string()));
         // A UDT field step, spelled `parent.field` as the comparator spells it. A
         // MAP key reaches the same branch (CSV cannot tell the two apart), but a
         // dotted skip path through a map is rejected when the case is validated
@@ -1145,7 +1194,37 @@ fn decode_object<'t>(
         } else {
             format!("{path}.{key}")
         };
-        let child_golden = fields.and_then(|g| g.get(key)).unwrap_or(&Value::Null);
+        let golden_key = fields.and_then(|g| {
+            g.keys()
+                .find(|k| entry_key_rendering(ty, k).as_deref() == Some(key))
+        });
+        let mut entry = Map::new();
+        entry.insert(
+            "key".to_string(),
+            match container_key_ty {
+                Some(key_ty) => {
+                    // The golden's own parsed key guides the decode where there is
+                    // one; a key the golden does not have is decoded from the
+                    // declared type alone and the comparison reports the difference.
+                    let guide = golden_key
+                        .and_then(|k| container::golden_map_key_value(k, key_ty).ok())
+                        .unwrap_or(Value::Null);
+                    // A key whose text does not invert the grammar is left as RAW
+                    // TEXT rather than failing the whole cell — the same rule this
+                    // module already applies to a member beyond a tuple's declared
+                    // arity and to an undeclared UDT field. Nothing is swallowed:
+                    // `compare::compare_map` canonicalizes that text under the
+                    // declared container key type, which REFUSES a flat scalar and
+                    // names the position.
+                    decode_at(&guide, key, key_ty, &child, excluded, Kinding::Natural)
+                        .unwrap_or_else(|_| Value::String(key.to_string()))
+                }
+                None => Value::String(key.to_string()),
+            },
+        );
+        let child_golden = golden_key
+            .and_then(|k| fields.and_then(|g| g.get(k)))
+            .unwrap_or(&Value::Null);
         let decoded = match value_ty(key) {
             // A map VALUE / UDT field is a cell value: natural kind, as in
             // `golden_rendering`'s object arm and in the comparator.

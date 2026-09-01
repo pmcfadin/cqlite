@@ -41,6 +41,7 @@ fn ty_of(decl: &str) -> CqlType {
     let ddl = format!(
         "CREATE TYPE address (street text, city text, zip text); \
          CREATE TYPE person (first_name text, last_name text, age int); \
+         CREATE TYPE key_part (label text, rank int); \
          CREATE TABLE t (id int PRIMARY KEY, c {decl});"
     );
     let schema = match super::super::schema::from_ddl(&ddl, "t") {
@@ -944,4 +945,121 @@ fn a_surplus_member_is_kept_so_the_length_mismatch_is_reported() {
 fn a_member_beyond_a_tuples_arity_is_kept_as_text() {
     let decoded = decode(&json!([1]), "(1, 2)", &ty_of("tuple<int>")).unwrap();
     assert_eq!(decoded, json!(["1", "2"]));
+}
+
+// --- a MAP whose declared KEY type is a container (issue #3726) ---------
+//
+// The key type used throughout is quoted from the committed
+// `test-data/schemas/nested-udt-keys.cql`; `key_part` is added to [`ty_of`]'s DDL
+// preamble so these cases parse against the real schema reader.
+
+/// A container key is DECODED under its declared type, not kept as raw text. Left
+/// as text, `compare::compare_map` was handed a flat scalar where the DDL declares
+/// a container, so the CSV half of a container-keyed map could not be compared.
+///
+/// The rendering is the one the CSV egress MEASURABLY emits for
+/// `test_nested_udt_keys.nested_udt_keys`'s `f_map_tuple_udt` (row `id=1`); the
+/// golden is that row's own golden cell.
+#[test]
+fn a_container_map_key_is_decoded_under_its_declared_type() {
+    let ty = ty_of("frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>");
+    let golden = json!({"[{\"label\": \"mkey-a\", \"rank\": 21}, 1]": 210});
+    let decoded = decode(&golden, "{({label: mkey-a, rank: 21}, 1): 210}", &ty)
+        .expect("the rendering inverts the grammar");
+    assert_eq!(
+        decoded,
+        json!([{
+            // The tuple's two slots, the first of them a UDT in this module's
+            // `{key,value}` spelling (CSV cannot tell a UDT from a map, so every
+            // brace-delimited body decodes that way).
+            "key": [
+                [{"key": "label", "value": "mkey-a"}, {"key": "rank", "value": "21"}],
+                "1"
+            ],
+            "value": "210"
+        }]),
+        "decoded: {decoded}"
+    );
+}
+
+/// The `, ` and `: ` INSIDE a container key are not top-level cuts, because
+/// [`scan`] tracks `[ { (` depth — which is what lets the entry split and the
+/// key/value cut of a container-keyed map work at all. Asserted on [`scan`]
+/// directly, so the property is pinned where it lives rather than inferred from a
+/// decode that happens to succeed.
+#[test]
+fn the_separators_inside_a_container_key_are_not_top_level_cuts() {
+    let body = "({label: mkey-a, rank: 21}, 1): 210, ({label: mkey-b, rank: 22}, 2): 220";
+    assert_eq!(
+        scan(body, ", ").expect("balanced"),
+        vec![body.find(", (").expect("the entry separator")],
+        "only the `, ` BETWEEN the two entries is at depth zero"
+    );
+    let entry = "({label: mkey-a, rank: 21}, 1): 210";
+    assert_eq!(
+        scan(entry, ": ").expect("balanced"),
+        vec![entry.rfind(": ").expect("the entry cut")],
+        "only the `: ` after the key's closing bracket is at depth zero"
+    );
+    // And the cut the decoder actually makes agrees with that.
+    assert_eq!(
+        entry_cut(entry).expect("cuts"),
+        ("({label: mkey-a, rank: 21}, 1)", "210")
+    );
+}
+
+/// The golden's own rendering of a container key is what the refusal machinery
+/// requires the decoder to recover, so [`entry_key_rendering`] must render the
+/// PARSED key rather than the golden's JSON text. Left as that text, the `, ` and
+/// `: ` inside it would make the golden's own rendering unsplittable and the node
+/// would be REFUSED — which is how the CSV half of this stayed open.
+#[test]
+fn the_goldens_container_key_renders_in_the_csv_grammar() {
+    let ty = ty_of("frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>");
+    let golden = json!({"[{\"label\": \"mkey-a\", \"rank\": 21}, 1]": 210});
+    assert_eq!(
+        golden_rendering(&golden, Some(&ty), Kinding::Natural),
+        Some("{({label: mkey-a, rank: 21}, 1): 210}".to_string())
+    );
+    assert_eq!(
+        node_refusal(&golden, Some(&ty)),
+        None,
+        "the golden's own rendering must round-trip, or the node is refused"
+    );
+}
+
+/// A golden key that is NOT the declared type's `toJSONString` spelling renders as
+/// nothing, and that is deliberately NOT a refusal: the golden's key contradicting
+/// the DDL is a divergence for the comparison to report, not a limit of the flat
+/// format. This is the MEASURED multicell `m_tuple_udt` shape — `getString`'s
+/// colon-joined cell path.
+#[test]
+fn a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused() {
+    let ty = ty_of("frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>");
+    let golden = json!({"charlie\\:3:8": 80});
+    assert_eq!(entry_key_rendering(&ty, "charlie\\:3:8"), None);
+    assert_eq!(golden_rendering(&golden, Some(&ty), Kinding::Natural), None);
+    assert_eq!(node_refusal(&golden, Some(&ty)), None);
+}
+
+/// A UDT entry's key is a FIELD NAME, not a value, and stays verbatim — the one
+/// thing that must NOT change with the map rule above.
+#[test]
+fn a_udt_entry_key_is_still_a_verbatim_field_name() {
+    let ty = ty_of("frozen<person>");
+    assert_eq!(
+        entry_key_rendering(&ty, "first_name"),
+        Some("first_name".to_string())
+    );
+    let golden = json!({"first_name": "ada", "last_name": "l", "age": 36});
+    let decoded = decode(&golden, "{first_name: ada, last_name: l, age: 36}", &ty)
+        .expect("inverts the grammar");
+    assert_eq!(
+        decoded,
+        json!([
+            {"key": "first_name", "value": "ada"},
+            {"key": "last_name", "value": "l"},
+            {"key": "age", "value": "36"}
+        ])
+    );
 }
