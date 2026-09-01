@@ -411,7 +411,7 @@ mk_bin() {
   local dir="$1" t p
   shift
   mkdir -p "$dir"
-  for t in bash printf mktemp rm cat sed awk grep tr sort head wc date nice chmod mkdir cmp "$@"; do
+  for t in bash env printf mktemp rm cat sed awk grep tr sort head wc date nice chmod mkdir cmp "$@"; do
     p=$(type -P "$t" 2>/dev/null) || continue
     [ -n "$p" ] && ln -sf "$p" "$dir/$t" 2>/dev/null
   done

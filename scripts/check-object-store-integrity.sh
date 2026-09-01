@@ -68,10 +68,19 @@
 # EXIT CODES, AND THE CONSUMER CONTRACT
 # -------------------------------------
 #   0   VERIFIED   — the sweep RAN TO COMPLETION and reported no corruption.
-#   4   CORRUPT    — fsck reported corruption. The affected object ids are named.
+#   4   CORRUPT    — fsck reported OBJECT/PACK damage (its exit bits 1/4) on TWO
+#                    independent walks. The affected object ids are named.
 #   5   UNMEASURED — the answer was not obtained: no git, no resolvable object
-#                    store, no usable timeout binary, the bound expired, or an fsck
-#                    failure this script cannot classify.
+#                    store, no usable timeout binary, the bound expired, an fsck
+#                    failure this script cannot classify, a damage class that did
+#                    NOT reproduce, or reachability/ref complaints that did.
+#
+# REACHABILITY IS ITS OWN NON-PASSING STATE, NEITHER CLEAN NOR CORRUPT. fsck's exit
+# bit 2 (ERROR_REACHABLE) fires for a stale reflog entry on a store peer lanes are
+# writing — routine on this fleet, and NOT this script's subject — but also for a
+# genuinely MISSING object, so it can be demoted to neither. It lands on UNMEASURED
+# with a cause that names the class. And NO verdict is fatal on ONE observation:
+# see the discriminator at the sweep below.
 #   2   usage error — and `--help` exits 2 as well, deliberately: exit 0 MEANS
 #                    VERIFIED here, so a run that measured nothing must never
 #                    produce it.
@@ -104,16 +113,69 @@
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -uo pipefail
 
-# Ambient git state that would otherwise bend this measurement, pinned in one
-# place (the idiom and the rationale are base-staleness.sh's):
-#   GIT_NO_LAZY_FETCH=1     — in a partial/promisor clone an object read fetches
-#                             over the network and WRITES a packfile into the store
-#                             this script is auditing. Honoured from git 2.36.
-#   GIT_NO_REPLACE_OBJECTS=1 — `refs/replace/*` substitutes objects, so a single
-#                             local replacement ref could change which objects the
-#                             sweep visits.
-export GIT_NO_LAZY_FETCH=1
-export GIT_NO_REPLACE_OBJECTS=1
+# THE GIT ENVIRONMENT IS AN ALLOWLIST, NOT A PIN-TWO-AND-HOPE (#3749 review, and
+# CLAUDE.md's recorded ruling for exactly this family, roborev job 276: `env -i`
+# plus ONE allowlist for every git call in a verdict-bearing probe, "precisely
+# because per-site fixes kept missing new sites").
+#
+# THE FIRST VERSION EXPORTED TWO VARIABLES AND LET THE REST OF THE CALLER'S
+# ENVIRONMENT THROUGH, AND THAT PRODUCED A FALSE `VERIFIED` NAMING THE CORRUPT
+# STORE. Reproduced: `GIT_OBJECT_DIRECTORY=<good>/objects` with `--repo <bad>`
+# printed `store <bad>/.git/objects` and `verdict VERIFIED`, exit 0 - every emitted
+# line affirmatively false, with no signal to either consumer. `GIT_DIR` and
+# `GIT_ALTERNATE_OBJECT_DIRECTORIES` reproduce variants of it. It is ACCIDENT-CLASS
+# (an exported `GIT_DIR` in the shell that launched the supervisor), which the
+# #3312 triage rule says to fix; and the inherited house pattern it copied
+# (`base-staleness.sh`) emits a NON-FATAL ADVISORY COUNT, while this one stops a
+# supervisor and gates `--strict` onboarding.
+#
+# So every git call in this script runs under `env -i` with the list below, which
+# makes a git environment variable nobody has thought of CLEARED BY DEFAULT rather
+# than needing to be discovered. ADMIT only what git needs to REACH the store;
+# SET, rather than inherit, anything that decides WHICH objects it reads, WHAT it
+# runs, or how it SPEAKS.
+#
+#   PATH                     ADMITTED. `git`, `nice` and the timeout binary are
+#                            invoked by name, and the test suite's hermetic-PATH
+#                            cases depend on the caller's PATH being the one in
+#                            effect. It cannot redirect the sweep to another
+#                            STORE - only to another git, which is the same trust
+#                            as `command -v git` above.
+#   LC_ALL=C                 SET. Localised diagnostics would change the text the
+#                            operator is shown; the class comes from the exit
+#                            status, but the evidence lines should not vary by
+#                            locale.
+#   GIT_NO_LAZY_FETCH=1      SET. In a partial/promisor clone an object read
+#                            fetches over the network and WRITES a packfile into
+#                            the store this script is auditing. Honoured from
+#                            git 2.36.
+#   GIT_NO_REPLACE_OBJECTS=1 SET. `refs/replace/*` substitutes objects, so a single
+#                            local replacement ref could change which objects the
+#                            sweep visits.
+#   GIT_CONFIG_GLOBAL,       SET to /dev/null. `~/.gitconfig` and the system config
+#   GIT_CONFIG_SYSTEM        can carry `fsck.*` severities, alternates and
+#                            `url.*.insteadOf`; HOME is shared on this fleet, so a
+#                            peer lane's edit there is not the invoker's.
+#   everything else          CLEARED - notably GIT_DIR, GIT_COMMON_DIR,
+#                            GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+#                            GIT_INDEX_FILE, GIT_CEILING_DIRECTORIES,
+#                            GIT_CONFIG_COUNT/_KEY_*/_VALUE_*, GIT_CONFIG_PARAMETERS,
+#                            GIT_TEMPLATE_DIR, GIT_ALLOW_PROTOCOL, HOME.
+#
+# git_isolated <cmd...> - run <cmd> with exactly that environment. Used for EVERY
+# git call here (the `--git-common-dir` resolution and both fsck passes), because
+# an allowlist that reaches only some call sites is the hole it was written to
+# close.
+git_isolated() {
+  "$ENV_BIN" -i \
+    PATH="${PATH:-/usr/bin:/bin}" \
+    LC_ALL=C \
+    GIT_NO_LAZY_FETCH=1 \
+    GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    "$@"
+}
 
 P='OBJECT-STORE:'
 
@@ -177,7 +239,7 @@ unmeasured() {
 
 # --- argument parsing: every unrecognised argument is refused ----------------
 REPO="."
-BOUND_SECS=300
+BOUND_SECS=600
 repo_set=0
 bound_set=0
 while [ "$#" -gt 0 ]; do
@@ -246,6 +308,17 @@ BOUND_KILL_GRACE=5
 command -v git >/dev/null 2>&1 ||
   unmeasured "git is not on PATH, so the object store cannot be rehashed at all"
 
+# `env` IS A HARD DEPENDENCY BECAUSE THE ISOLATION IS (see git_isolated above), so a
+# host without it is UNMEASURED rather than silently downgraded to running git in the
+# caller's environment. That downgrade is exactly the defect the allowlist closes: a
+# measurement taken under an inherited GIT_OBJECT_DIRECTORY can name one store and
+# read another.
+ENV_BIN="$(command -v env 2>/dev/null || true)"
+[ -n "$ENV_BIN" ] ||
+  unmeasured "env is not on PATH, so this run cannot ISOLATE git's environment - and an" \
+    "fsck run under an inherited GIT_DIR/GIT_OBJECT_DIRECTORY can report about a" \
+    "DIFFERENT store than the one it names. Refusing rather than measuring the wrong thing."
+
 if [ -z "$TIMEOUT_BIN" ]; then
   unmeasured "no timeout/gtimeout on PATH - refusing to run an UNBOUNDED fsck: both" \
     "callers are hang-sensitive (machine onboarding, and the supervisor's" \
@@ -260,7 +333,7 @@ fi
 # dir (measured on this fleet: toplevel /data/lanes/lane-NNNN, common dir
 # /data/lanes/repo/.git). Sweeping the per-worktree dir would audit the wrong
 # thing and report VERIFIED about a store it never read.
-if ! GIT_COMMON_DIR_RAW=$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null) ||
+if ! GIT_COMMON_DIR_RAW=$(git_isolated git -C "$REPO" rev-parse --git-common-dir 2>/dev/null) ||
   [ -z "$GIT_COMMON_DIR_RAW" ]; then
   unmeasured "git -C $(sane "$REPO") rev-parse --git-common-dir failed: not a git" \
     "repository, or the repository is unreadable"
@@ -305,109 +378,263 @@ fi
 # store that has held reset branches, not corruption. `--no-progress` because
 # progress output is not a finding and would pollute the anchored stream.
 #
-# `nice`d: this is a hygiene sweep on a box that runs up to 4 gates. Measured on
-# this fleet's 331M shared store (one 219M pack): 19.83s elapsed, 64% cpu, 426MB
-# maxrss. The 300s default bound is ~15x that headroom — generous on purpose,
-# because the bound exists to stop a HANG, not to police duration: a cold cache
-# under four concurrent gates can legitimately be several times slower, and a
-# bound that expires on a healthy-but-busy box produces UNMEASURED noise nobody
-# acts on.
-START_TS=$(date +%s 2>/dev/null || echo 0)
-fsck_rc=0
-if [ "$TIMEOUT_KILL_AFTER" -eq 1 ]; then
-  nice -n 19 "$TIMEOUT_BIN" --kill-after="$BOUND_KILL_GRACE" "$BOUND_SECS" \
-    git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling \
-    >"$TMPD/fsck.out" 2>"$TMPD/fsck.err" || fsck_rc=$?
-else
-  nice -n 19 "$TIMEOUT_BIN" "$BOUND_SECS" \
-    git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling \
-    >"$TMPD/fsck.out" 2>"$TMPD/fsck.err" || fsck_rc=$?
-fi
-END_TS=$(date +%s 2>/dev/null || echo 0)
-ELAPSED=$((END_TS - START_TS))
-[ "$ELAPSED" -ge 0 ] || ELAPSED=0
-
-cat "$TMPD/fsck.out" "$TMPD/fsck.err" >"$TMPD/fsck.all" 2>/dev/null || : >"$TMPD/fsck.all"
-
-# --- CLASSIFY ---------------------------------------------------------------
+# `nice`d: this is a hygiene sweep on a box that runs up to 4 gates.
 #
-# CORRUPTION IS RECOGNISED FROM fsck's OWN DIAGNOSTIC SHAPES, not from "the exit
-# status was non-zero" — because a non-zero fsck also covers `fatal: not a git
-# repository` and every other way the invocation can fail, and calling that CORRUPT
-# would send an operator hunting for damage that is not there. The recognised
-# shapes (verified against git 2.43.0 on planted fixtures, both of which the test
-# suite plants):
-#   error: inflate: data stream error ...                 (a torn/rotted object)
-#   error: <sha>: object corrupt or missing: <path>
-#   error: <sha>: hash-path mismatch, found at: <path>    (content != its own name)
-#   missing blob|tree|commit|tag <sha>
-#   broken link from ... to ...
-# Anything containing `corrupt` is included too, wherever git puts it.
+# COST IS A RANGE WITH CONDITIONS, NOT A NUMBER (#3749 review). This file used to
+# quote "19.83s" from a single warm run and derive "~15x headroom" from it; both
+# were wrong. Two independent measurement sets on this fleet's shared store
+# (366M, one ~220M pack, git 2.43.0) give:
+#   * warm page cache, quiet box:      13-24s  (5 runs)
+#   * cold-ish cache / concurrent gates: 47-80s (3 runs)
+# The sweep is I/O-bound (user time is only 17-19s of an 80s wall), so it is CACHE
+# STATE and box load that dominate, and any single number is a measurement of the
+# machine's mood rather than of the sweep.
 #
-# WARNINGS ARE NOT CORRUPTION and are deliberately not matched: `warning in commit
-# <sha>: missingSpaceBeforeEmail` is legitimate historical sloppiness, git exits 0
-# on it, and matching it would report CORRUPT on a healthy store.
-: >"$TMPD/findings"
-sed -n -e '/^error/p' -e '/^missing /p' -e '/^broken link/p' -e '/corrupt/p' \
-  "$TMPD/fsck.all" >"$TMPD/findings" 2>/dev/null || : >"$TMPD/findings"
-n_findings=$(grep -c . "$TMPD/findings" 2>/dev/null | tr -d ' ')
-case "$n_findings" in '' | *[!0-9]*) n_findings=0 ;; esac
-
-# The affected object ids: every 40-hex token in the findings, deduped. Extracted
-# from the findings themselves so an id can never be reported without the
-# diagnostic that named it; the diagnostics are printed verbatim as well, because
-# a shape this extractor does not recognise must still reach the operator.
-: >"$TMPD/ids"
-tr -c '0-9a-f' '\n' <"$TMPD/findings" 2>/dev/null |
-  awk 'length($0) == 40 { print }' | sort -u >"$TMPD/ids" 2>/dev/null || : >"$TMPD/ids"
-
+# THE 600s DEFAULT BOUND IS SIZED FROM THE TOP OF THAT RANGE: ~7.5x the observed
+# cold worst case, not the ~4x that 300s would give. The bound exists to stop a
+# HANG, not to police duration - an expired bound is UNMEASURED, which is a page
+# nobody can act on, and a bound that fires on a healthy-but-busy box is the guard
+# operators learn to waive. WORST-CASE WALL TIME IS 2x THE BOUND, because a
+# non-clean first pass is re-run once (see the discriminator below); only the rare
+# non-clean path pays it.
 FINDING_LIST_LIMIT=40
 
-if [ "$n_findings" -gt 0 ]; then
-  n=0
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    n=$((n + 1))
-    [ "$n" -le "$FINDING_LIST_LIMIT" ] && printf '%s finding %s\n' "$P" "$(sane "$line")"
-  done <"$TMPD/findings"
-  [ "$n" -gt "$FINDING_LIST_LIMIT" ] &&
-    printf '%s finding (+%s further fsck diagnostics, not listed)\n' "$P" "$((n - FINDING_LIST_LIMIT))"
-  while IFS= read -r oid; do
-    [ -n "$oid" ] || continue
-    printf '%s object %s\n' "$P" "$(sane "$oid")"
-  done <"$TMPD/ids"
-  printf '%s measured fsck rc=%s in %ss over %s\n' "$P" "$fsck_rc" "$ELAPSED" "$(sane "$OBJ_DIR")"
-  printf '%s verdict CORRUPT\n' "$P"
-  printf '%s verdict-detail %s fsck diagnostic(s) name damaged or unhashable objects in the\n' "$P" "$n_findings"
-  printf '%s verdict-detail SHARED store. Every lane on this box reads it, so it can change ANY\n' "$P"
-  printf '%s verdict-detail gate verdict here: do NOT certify anything against this checkout.\n' "$P"
-  printf '%s verdict-detail REMEDY: stop the lanes on this box, then re-obtain the objects from the\n' "$P"
-  printf '%s verdict-detail canonical remote (a fresh clone of pmcfadin/cqlite, or\n' "$P"
-  printf '%s verdict-detail `git fetch --force origin` if the damage is confined to fetched packs).\n' "$P"
-  printf '%s verdict-detail A LOCAL `git gc`/`git repack` CANNOT REPAIR THIS - it rewrites the same\n' "$P"
-  printf '%s verdict-detail damaged content, or refuses. Escalate rather than improvising (#3749).\n' "$P"
-  exit 4
-fi
+# fsck_pass <tag> - ONE bounded fsck over the shared store. Sets WALK_RC,
+# WALK_ELAPSED, WALK_CLASS, WALK_NFIND and writes $TMPD/<tag>.findings (the
+# recognised diagnostic lines, verbatim) and $TMPD/<tag>.ids (the 40-hex tokens in
+# them).
+#
+# THE CLASS COMES FROM fsck's EXIT BITMASK, NOT FROM THE TEXT SHAPE OF ITS
+# DIAGNOSTICS, AND THAT IS THE #3749 REVIEW'S CORRECTION. `git fsck` returns a
+# bitmask: 1 ERROR_OBJECT, 2 ERROR_REACHABLE, 4 ERROR_PACK, 8 ERROR_REFS,
+# 16 ERROR_COMMIT_GRAPH. The first version of this script recognised damage from
+# `/^error/p` and short-circuited to the fatal branch on any hit - and `error:` is
+# ALSO what fsck prints for a reflog entry naming a pruned object, which on a store
+# eight lanes are concurrently writing (branch create/delete, fetch, gc) happens
+# routinely on a PERFECTLY HEALTHY store. Measured on this fleet: 2 of 4 raw fsck
+# runs in one sitting exited 2 with `invalid reflog entry` diagnostics naming a
+# DIFFERENT branch each time. Under the old classifier every one of those was a
+# `CORRUPT` that pages high, stops the supervisor and fails `--strict` bootstrap.
+#
+# Only bits 1 and 4 are the subject of this script (an object that failed to
+# rehash, a damaged pack). Bits 2/8/16 are NOT demoted to clean - a genuinely
+# missing object also reports ERROR_REACHABLE, so treating reachability as clean
+# would convert a real corruption symptom into a pass - they land in their own
+# NON-PASSING state (UNMEASURED, with a cause that names the class).
+#
+# A status OUTSIDE 1..31 is not a bitmask at all (128 is git's `die()`, 127 is a
+# missing binary), so it is `unclassified`, never bit-tested: `127 & 1` is 1 and
+# would read as object damage.
+fsck_pass() {
+  local tag="$1" rc=0 t0 t1 el
+  local out="$TMPD/$tag.out" err="$TMPD/$tag.err" all="$TMPD/$tag.all"
+  t0=$(date +%s 2>/dev/null || echo 0)
+  if [ "$TIMEOUT_KILL_AFTER" -eq 1 ]; then
+    git_isolated nice -n 19 "$TIMEOUT_BIN" --kill-after="$BOUND_KILL_GRACE" "$BOUND_SECS" \
+      git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling \
+      >"$out" 2>"$err" || rc=$?
+  else
+    git_isolated nice -n 19 "$TIMEOUT_BIN" "$BOUND_SECS" \
+      git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling \
+      >"$out" 2>"$err" || rc=$?
+  fi
+  t1=$(date +%s 2>/dev/null || echo 0)
+  el=$((t1 - t0))
+  [ "$el" -ge 0 ] || el=0
+  WALK_RC="$rc"
+  WALK_ELAPSED="$el"
+  cat "$out" "$err" >"$all" 2>/dev/null || : >"$all"
 
-# 124 = SIGTERM'd at the bound; 137 = it ignored SIGTERM and --kill-after
-# escalated to SIGKILL. A KILLED SWEEP IS UNMEASURED, NEVER VERIFIED: it exited
-# without having rehashed the rest of the store, and its silence up to that point
-# is the absence of a bad signal, not a clean answer.
-if [ "$fsck_rc" -eq 124 ] || [ "$fsck_rc" -eq 137 ]; then
-  unmeasured "the fsck exceeded its ${BOUND_SECS}s bound and was killed (rc=$fsck_rc) after" \
-    "${ELAPSED}s - it never finished rehashing the store, so its silence is NOT a" \
+  # The recognised diagnostic shapes, kept for the OPERATOR (the class above is
+  # decided by the status). Verified against git 2.43.0 on the planted fixtures the
+  # test suite builds:
+  #   error: inflate: data stream error ...                 (a torn/rotted object)
+  #   error: <sha>: object corrupt or missing: <path>
+  #   error: <sha>: hash-path mismatch, found at: <path>    (content != its own name)
+  #   missing blob|tree|commit|tag <sha>
+  #   broken link from ... to ...
+  # Anything containing `corrupt` is included too, wherever git puts it. WARNINGS
+  # ARE NOT MATCHED: `warning in commit <sha>: missingSpaceBeforeEmail` is
+  # legitimate historical sloppiness and fsck exits 0 on it.
+  #
+  # A DIAGNOSTIC IS READ WHOLE, NOT LINE BY LINE. git permits newlines in paths and
+  # quotes them verbatim, so `sed` would split such a diagnostic in two and the
+  # CONTINUATION - which carries the rest of the path the operator has to act on -
+  # matches no pattern and would be dropped silently (#3749 review NIT 1). So a
+  # line that matches nothing is APPENDED to the previous finding when there is
+  # one, and the whole thing is escaped by sane() at print time.
+  : >"$TMPD/$tag.findings"
+  awk '
+    /^error/ || /^missing / || /^broken link/ || /corrupt/ {
+      if (have) printf "%s%c", buf, 0
+      buf = $0; have = 1; next
+    }
+    have { buf = buf "\n" $0 }
+    END { if (have) printf "%s%c", buf, 0 }
+  ' "$all" >"$TMPD/$tag.findings" 2>/dev/null || : >"$TMPD/$tag.findings"
+  WALK_NFIND=$(tr -cd '\000' <"$TMPD/$tag.findings" 2>/dev/null | wc -c | tr -d ' ')
+  case "$WALK_NFIND" in '' | *[!0-9]*) WALK_NFIND=0 ;; esac
+
+  # The affected object ids: every 40-hex token in the findings, deduped. Extracted
+  # FROM the findings so an id can never be reported without the diagnostic that
+  # named it.
+  : >"$TMPD/$tag.ids"
+  tr -c '0-9a-f' '\n' <"$TMPD/$tag.findings" 2>/dev/null |
+    awk 'length($0) == 40 { print }' | sort -u >"$TMPD/$tag.ids" 2>/dev/null || : >"$TMPD/$tag.ids"
+
+  if [ "$rc" -eq 0 ]; then
+    WALK_CLASS=clean
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    WALK_CLASS=killed
+  elif [ "$rc" -ge 1 ] && [ "$rc" -le 31 ]; then
+    if [ $((rc & 5)) -ne 0 ]; then
+      WALK_CLASS=damage
+    else
+      WALK_CLASS=reachability
+    fi
+  else
+    WALK_CLASS=unclassified
+  fi
+}
+
+# emit_findings <tag> <label> - print the pass's diagnostics (NUL-separated records,
+# so a newline inside one is not a record boundary) and, for the fatal branch only,
+# the object ids. Bounded, and the overflow is COUNTED rather than dropped.
+emit_findings() {
+  local tag="$1" label="$2" n=0 rec
+  while IFS= read -r -d '' rec; do
+    [ -n "$rec" ] || continue
+    n=$((n + 1))
+    [ "$n" -le "$FINDING_LIST_LIMIT" ] && printf '%s %s %s\n' "$P" "$label" "$(sane "$rec")"
+  done <"$TMPD/$tag.findings"
+  [ "$n" -gt "$FINDING_LIST_LIMIT" ] &&
+    printf '%s %s (+%s further fsck diagnostics, not listed)\n' "$P" "$label" "$((n - FINDING_LIST_LIMIT))"
+  return 0
+}
+
+# --- PASS 1 ------------------------------------------------------------------
+fsck_pass p1
+C1="$WALK_CLASS"
+RC1="$WALK_RC"
+EL1="$WALK_ELAPSED"
+N1="$WALK_NFIND"
+
+# 124 = SIGTERM'd at the bound; 137 = it ignored SIGTERM and --kill-after escalated
+# to SIGKILL. A KILLED SWEEP IS UNMEASURED, NEVER VERIFIED: it exited without having
+# rehashed the rest of the store, and its silence up to that point is the absence of
+# a bad signal, not a clean answer. No second pass: a killed pass says nothing to
+# reproduce, and re-running would double the wall time of the one case that is
+# already too slow.
+if [ "$C1" = killed ]; then
+  unmeasured "the fsck exceeded its ${BOUND_SECS}s bound and was killed (rc=$RC1) after" \
+    "${EL1}s - it never finished rehashing the store, so its silence is NOT a" \
     "clean result. Re-run with a larger --timeout on an idle box."
 fi
 
-# ANY OTHER NON-ZERO STATUS IS UNMEASURED, NOT CLEAN AND NOT CORRUPT. fsck failed
-# in a way this script does not recognise (an unreadable pack directory, a git too
-# old for a flag, a `fatal:` about the repository itself). Guessing CORRUPT would
-# send an operator after damage that may not exist; guessing VERIFIED would be the
-# permissive-unknown branch this whole file refuses.
-if [ "$fsck_rc" -ne 0 ]; then
-  unmeasured "git fsck exited $fsck_rc after ${ELAPSED}s with no recognised corruption" \
-    "diagnostic, so this run can classify it as neither clean nor corrupt." \
-    "fsck said: $(head -c 400 "$TMPD/fsck.all" 2>/dev/null)"
+if [ "$C1" = clean ]; then
+  FIRST_WALK_CLEAN=1
+else
+  FIRST_WALK_CLEAN=0
+fi
+
+# --- PASS 2: THE DISCRIMINATOR ----------------------------------------------
+#
+# WHY A SECOND WALK, AND WHAT IT IS FOR. This control CANNOT DISTINGUISH A
+# CONCURRENCY-INDUCED TRANSIENT FROM REAL DAMAGE IN A SINGLE OBSERVATION: the store
+# is being written by up to 8 peer lanes while fsck walks it, so a ref that vanishes
+# mid-walk, a pack being replaced by gc, or a reflog entry naming a just-pruned
+# object all produce diagnostics on a healthy store. What separates the two is
+# REPRODUCTION: a transient does not survive a second independent walk, and real
+# damage does. So the fatal verdict is affirmative - it rests on the SAME class
+# being observed twice - rather than on one observation plus an argument.
+#
+# IT IS DELIBERATELY NOT A RETRY-UNTIL-CLEAN LOOP. Exactly one re-run, and its
+# result can only make the verdict weaker or confirm it, never sweep it away: a
+# damage class seen once and not the second time is NOT clean either, it is
+# UNMEASURED (a flickering corruption signal is not something to certify).
+#
+# It is nearly free: only the non-clean path pays a second bound, and on this fleet
+# that path is the exception.
+if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
+  printf '%s measured pass 1: fsck rc=%s in %ss over %s (full rehash: not --connectivity-only)\n' \
+    "$P" "$RC1" "$EL1" "$(sane "$OBJ_DIR")"
+  printf '%s note pass 1 was not clean (class=%s, rc=%s, %s diagnostic(s)); re-running once\n' \
+    "$P" "$C1" "$RC1" "$N1"
+  printf '%s note the second walk is a DISCRIMINATOR, not a retry: a concurrent writer on\n' "$P"
+  printf '%s note this shared store produces diagnostics that do not survive a second walk,\n' "$P"
+  printf '%s note while real damage does. It is never re-run until it comes back clean.\n' "$P"
+  emit_findings p1 note
+  fsck_pass p2
+  printf '%s measured pass 2: fsck rc=%s in %ss over %s (full rehash: not --connectivity-only)\n' \
+    "$P" "$WALK_RC" "$WALK_ELAPSED" "$(sane "$OBJ_DIR")"
+  C2="$WALK_CLASS"
+  RC2="$WALK_RC"
+  EL2="$WALK_ELAPSED"
+  N2="$WALK_NFIND"
+
+  if [ "$C2" = killed ]; then
+    unmeasured "pass 1 was not clean (class=$C1, rc=$RC1) and the confirming pass exceeded" \
+      "its ${BOUND_SECS}s bound (rc=$RC2) after ${EL2}s, so the first observation could" \
+      "not be confirmed or dismissed. Re-run with a larger --timeout on an idle box."
+  fi
+
+  # BOTH PASSES SAW OBJECT/PACK DAMAGE: the fatal branch, and the only path to it.
+  if [ "$C1" = damage ] && [ "$C2" = damage ]; then
+    emit_findings p2 finding
+    while IFS= read -r oid; do
+      [ -n "$oid" ] || continue
+      printf '%s object %s\n' "$P" "$(sane "$oid")"
+    done <"$TMPD/p2.ids"
+    printf '%s measured fsck rc=%s then rc=%s (%ss + %ss) over %s\n' \
+      "$P" "$RC1" "$RC2" "$EL1" "$EL2" "$(sane "$OBJ_DIR")"
+    printf '%s verdict CORRUPT\n' "$P"
+    printf '%s verdict-detail %s fsck diagnostic(s) name damaged or unhashable objects in the\n' "$P" "$N2"
+    printf '%s verdict-detail SHARED store, on TWO independent walks (fsck exit bits 1/4 both\n' "$P"
+    printf '%s verdict-detail times), so this is damage and not a concurrent writer. Every lane on\n' "$P"
+    printf '%s verdict-detail this box reads it, so it can change ANY gate verdict here: do NOT\n' "$P"
+    printf '%s verdict-detail certify anything against this checkout.\n' "$P"
+    printf '%s verdict-detail REMEDY: stop the lanes on this box, then re-obtain the objects from the\n' "$P"
+    printf '%s verdict-detail canonical remote (a fresh clone of pmcfadin/cqlite, or\n' "$P"
+    printf '%s verdict-detail `git fetch --force origin` if the damage is confined to fetched packs).\n' "$P"
+    printf '%s verdict-detail A LOCAL `git gc`/`git repack` CANNOT REPAIR THIS - it rewrites the same\n' "$P"
+    printf '%s verdict-detail damaged content, or refuses. Escalate rather than improvising (#3749).\n' "$P"
+    exit 4
+  fi
+
+  # A DAMAGE CLASS IN EXACTLY ONE PASS: non-passing, and NOT the fatal branch. It is
+  # neither established damage (it did not reproduce) nor a clean store (something
+  # named an object as unhashable once).
+  if [ "$C1" = damage ] || [ "$C2" = damage ]; then
+    emit_findings p2 unmeasured-cause
+    unmeasured "an object/pack damage class (fsck exit bit 1 or 4) was observed in ONE of two" \
+      "walks and did not reproduce (pass 1 class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2)." \
+      "That is neither established damage nor a clean store: re-run on an IDLE box," \
+      "and if it recurs treat the store as suspect and escalate (#3749)."
+  fi
+
+  # BOTH PASSES NON-CLEAN, NEITHER OBJECT/PACK DAMAGE: reachability, refs or
+  # commit-graph complaints that survived a second walk. Its OWN non-passing state
+  # with its OWN cause text - never the fatal branch (this is not the class this
+  # script exists for) and never VERIFIED (a genuinely MISSING object reports
+  # exactly this, so reading it as clean would hide real damage). No `object` lines:
+  # the 40-hex tokens in a reflog diagnostic name INTACT objects.
+  if [ "$C2" != clean ]; then
+    emit_findings p2 unmeasured-cause
+    unmeasured "git fsck reported reachability/ref/commit-graph problems on BOTH walks" \
+      "(pass 1 class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2) and NO object or pack" \
+      "damage. This script's subject is object content, and that question is therefore" \
+      "not answered: a missing object reports the same class. Inspect the diagnostics" \
+      "above; a stale reflog clears with 'git reflog expire --expire-unreachable=now" \
+      "--all', a genuinely absent object does not."
+  fi
+
+  # PASS 2 CLEAN, and pass 1 carried no damage class: the first observation did not
+  # reproduce. The store gets the affirmative verdict below on the strength of the
+  # SECOND walk (a complete rehash that found nothing), and the non-reproducing
+  # observation is RECORDED rather than swallowed.
+  printf '%s note the pass-1 diagnostics did NOT reproduce on the second walk (pass 2 rc=0),\n' "$P"
+  printf '%s note which is the signature of a concurrent writer on this shared store rather\n' "$P"
+  printf '%s note than damage. The verdict below rests on the second walk, which completed.\n' "$P"
 fi
 
 # --- THE ONE AFFIRMATIVE BRANCH --------------------------------------------
@@ -418,11 +645,11 @@ fi
 # statuses (124/137) are distinguishable and are routed to UNMEASURED above, and an
 # fsck that could not start, could not read the store or died on a signal cannot
 # produce 0. `git fsck` exits 0 only after walking and REHASHING every object it
-# was asked to check. So `rc == 0` here means "it finished, and it found nothing" —
-# two facts, not one — while every state in which the first fact is unknown has
+# was asked to check. So `rc == 0` here means "it finished, and it found nothing" -
+# two facts, not one - while every state in which the first fact is unknown has
 # already been routed to UNMEASURED.
 printf '%s measured fsck rc=0 in %ss over %s (full rehash: not --connectivity-only)\n' \
-  "$P" "$ELAPSED" "$(sane "$OBJ_DIR")"
+  "$P" "$WALK_ELAPSED" "$(sane "$OBJ_DIR")"
 printf '%s verdict VERIFIED\n' "$P"
 printf '%s verdict-detail git fsck ran to completion and reported no damaged objects.\n' "$P"
 printf '%s verdict-detail SCOPE: this is a POINT-IN-TIME sweep of ACCIDENTAL corruption, not a\n' "$P"
