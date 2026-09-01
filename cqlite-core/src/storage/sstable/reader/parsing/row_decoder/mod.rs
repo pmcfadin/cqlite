@@ -791,7 +791,7 @@ mod cell_kind;
 mod cell_value;
 mod cell_value_complex; // campsite split of `cell_value` (#1795): complex ladder
 mod cell_value_scalar; // campsite split of `cell_value` (#1795): scalar arms
-pub(in crate::storage::sstable::reader) mod column_decode_error; // issue #3721 policy
+pub(in crate::storage::sstable::reader) mod column_decode_error; // issue #3721 policy (COLUMN level)
 mod compaction;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
 pub(in crate::storage::sstable::reader) use compaction_stream::{
@@ -805,7 +805,9 @@ pub(crate) mod now_clock;
 mod parser_construction;
 mod partition_driver;
 pub(crate) mod partition_shadow;
-mod range_marker_error; // issue #3721 policy (marker level)
+// Issue #3721 sibling policy modules — COLUMN level above, MARKER level here. Each
+// `mod` line grows this over-threshold glue file; acknowledged under epic #1116.
+mod range_marker_error; // issue #3721 policy (MARKER level)
 mod raw_type_value;
 mod raw_value;
 mod row_data;

@@ -847,18 +847,50 @@ async fn the_reported_type_names_the_complex_columns_declared_key_type() {
 // `streaming_compaction_read_surfaces_the_column_decode_failure` above.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// SIMPLE-arm subject: `id int PRIMARY KEY, fs frozen<set<int>>,
-/// fm frozen<map<int,text>>` — FROZEN collections are single-cell, so both regular
-/// columns are decoded by the SIMPLE arm. Uncompressed, single partition, committed.
-const TRUNC_SIMPLE_TABLE: &str = "frozen_int_collections";
-const TRUNC_SIMPLE_DIR: &str = "frozen_int_collections-c9820c30748d11f1a94ae34493d77740";
+/// # The SIMPLE-arm truncation case moved, and why (issue #3721)
+///
+/// This fixture (`id int PRIMARY KEY, fs frozen<set<int>>, fm frozen<map<int,text>>`
+/// — frozen collections are single-cell, so both regular columns take the SIMPLE
+/// arm) used to carry the SIMPLE-arm `row body exhausted` case at `keep = 108`. It
+/// no longer can, and the reason is worth stating because it is not a fixture
+/// regression:
+///
+/// The truncation makes the REAL partition's row fail on row-size framing (#2481,
+/// `row_size=124 … exceeds available data (88 bytes remain)`), which is correctly
+/// read as end-of-partition, so the scan RESYNCHRONISES and decodes phantom
+/// partitions out of the middle of the real row's cell values (measured: phantom
+/// headers at 19, 58, 85). The `row body exhausted` this case asserted came from the
+/// LAST of those phantoms. Byte `0x4f` of that same row is the `z` of the text value
+/// `"zero"` — `0x7a`, which has `IS_MARKER` (`0x02`) set — and byte `0x50` is its
+/// `e`, `0x65` = 101, read as the bound kind. So the resync walk reaches an
+/// unrepresentable range-tombstone marker at offset 79 BEFORE any phantom row can
+/// run out of bytes, and the marker-level propagation added for the same issue fires
+/// first.
+///
+/// The bogus bound kind is therefore NOT a second, removable defect: it is the
+/// truncation's own artifact at a fixed offset inside the fixture's real payload.
+/// MEASURED exhaustively over every `keep` in `20..=145`:
+///
+/// ```text
+///  20..= 86  Ok(0 rows)   the separate row-framing swallow this file's header
+///                         already records as out of scope
+///  87..=143  Err          range-tombstone marker refusal at offset 79
+/// 144..=145  Ok(1 row)    the untruncated fixture reads cleanly
+/// ```
+///
+/// There is no `keep` that isolates the column-level condition, so per the split
+/// this case now pins the MARKER-level refusal on the same bytes, and the
+/// column-level `row body exhausted` pin is the COMPLEX case below — whose fixture
+/// is measured marker-clean at every `keep` in `20..=109`.
+const RESYNC_MARKER_TABLE: &str = "frozen_int_collections";
+const RESYNC_MARKER_DIR: &str = "frozen_int_collections-c9820c30748d11f1a94ae34493d77740";
 /// The fixture's untruncated size, asserted so a corpus change cannot silently move
 /// the truncation onto some other condition.
-const TRUNC_SIMPLE_FULL_LEN: usize = 145;
-/// Truncated length at which the outstanding column is `fm`, on-disk column 0 of 2.
-const TRUNC_SIMPLE_KEEP: usize = 108;
+const RESYNC_MARKER_FULL_LEN: usize = 145;
+/// Truncated length whose resync walk reaches the payload byte read as a marker.
+const RESYNC_MARKER_KEEP: usize = 108;
 
-const TRUNC_SIMPLE_SCHEMA: &str = "\
+const RESYNC_MARKER_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS test_signed_coll.frozen_int_collections (
     id INT PRIMARY KEY,
     fs FROZEN<SET<INT>>,
@@ -866,9 +898,14 @@ CREATE TABLE IF NOT EXISTS test_signed_coll.frozen_int_collections (
 );
 ";
 
-/// COMPLEX-arm subject: the same fixture the complex cases above use, so the two
-/// differ only in whether the outstanding column is frozen (single-cell, SIMPLE) or
-/// non-frozen (multicell, COMPLEX).
+/// COMPLEX-arm subject: the same fixture the complex cases above use. Since the
+/// SIMPLE-arm truncation case moved to the marker level (see
+/// [`RESYNC_MARKER_TABLE`]), this is the ONE remaining pin on `row_body_exhausted`,
+/// and it holds because this fixture's resync walk is marker-clean: MEASURED over
+/// every `keep` in `20..=109`, no read of it produces a range-tombstone marker
+/// refusal — `79` is the `row body exhausted` under test, `80..=107` are
+/// `Complex cell m.0: invalid flags 0xff`, and `108..=109` read cleanly. Changing
+/// the keep below without re-measuring can silently reintroduce the collision.
 const TRUNC_COMPLEX_FULL_LEN: usize = 109;
 const TRUNC_COMPLEX_KEEP: usize = 79;
 
@@ -958,27 +995,58 @@ fn assert_row_body_exhausted(err: &Error, column: &str, at: usize, on_disk_colum
     );
 }
 
-/// SIMPLE arm. Pre-fix: `Ok` with ZERO rows.
+/// A truncation whose RESYNC walk reads real payload as a range-tombstone marker
+/// must FAIL the read, not truncate the partition (issue #3721, marker level).
+///
+/// Named for what it pins. See [`RESYNC_MARKER_TABLE`] for the measurement showing
+/// this fixture can no longer reach the column-level condition, and why the bogus
+/// bound kind is the truncation's own artifact rather than a second defect that
+/// could be removed from the fixture.
+///
+/// Pre-#3721 the marker handlers answered an unrepresentable bound kind with a bare
+/// `break`, so this read returned `Ok` — dropping the marker and every later row of
+/// the partition from a SUCCESSFUL query, the same shape as the column-level swallow
+/// this file's other cases pin.
 #[tokio::test]
-async fn a_simple_column_left_without_bytes_fails_the_select() {
+async fn a_truncation_whose_resync_walk_reads_payload_as_a_marker_fails_the_select() {
     let err = select_all_truncated(
         COMPLEX_KEYSPACE,
-        TRUNC_SIMPLE_TABLE,
-        TRUNC_SIMPLE_DIR,
-        TRUNC_SIMPLE_FULL_LEN,
-        Some(TRUNC_SIMPLE_KEEP),
-        TRUNC_SIMPLE_SCHEMA,
+        RESYNC_MARKER_TABLE,
+        RESYNC_MARKER_DIR,
+        RESYNC_MARKER_FULL_LEN,
+        Some(RESYNC_MARKER_KEEP),
+        RESYNC_MARKER_SCHEMA,
     )
     .await
     .expect_err(
-        "a row body that ends while the column set still names a PRESENT column is \
+        "a framed range-tombstone marker the read-side shadow FSM cannot represent is \
          damaged data and must FAIL the read — pre-#3721 this `break`ed and reported a \
-         SUCCESSFUL query with zero rows (roborev job 10)",
+         SUCCESSFUL query, dropping the marker and every later row of the partition",
     );
-    assert_row_body_exhausted(&err, "fm", TRUNC_SIMPLE_KEEP, 2);
-    // The frozen collection is decoded by the SIMPLE arm, and the report names the
-    // dispatch type — so this case cannot be confused with its complex sibling.
-    assert_dispatch_type(&err, "frozen<map<INT, TEXT>>", "frozen<map<int, text>>");
+    // The refusal must say WHAT it measured: that the marker was framed (so a resume
+    // point exists and this is not the end of the partition body), where the body
+    // continues, and the shadow FSM's own cause. A bare "corrupt SSTable" would leave
+    // an operator no better off than the `tracing::debug!` this replaces.
+    let rendered = err.to_string();
+    for needle in [
+        "range-tombstone marker",
+        "could not be represented faithfully",
+        "partition body continues at offset",
+        "bound kind",
+    ] {
+        assert!(
+            rendered.contains(needle),
+            "the marker refusal must name `{needle}`; got: {rendered}"
+        );
+    }
+    assert_eq!(err.category(), ErrorCategory::Data);
+    assert!(!err.is_recoverable());
+    // NOT the column-level variant: this is a marker, and conflating the two is what
+    // the dedicated `Error::ColumnDecode` variant exists to prevent.
+    assert!(
+        !matches!(err, Error::ColumnDecode { .. }),
+        "a marker refusal must not be reported as a per-COLUMN decode failure; got: {err:?}"
+    );
 }
 
 /// COMPLEX arm. Same condition with a non-frozen (multicell) collection outstanding.
@@ -1005,14 +1073,14 @@ async fn a_complex_column_left_without_bytes_fails_the_select() {
 /// to copying the fixture. Without this, a fix that failed every read of a
 /// checksum-less SSTable would satisfy them.
 #[tokio::test]
-async fn the_simple_subject_still_reads_cleanly_without_its_checksum_components() {
+async fn the_resync_marker_subject_still_reads_cleanly_without_its_checksum_components() {
     let rows = select_all_truncated(
         COMPLEX_KEYSPACE,
-        TRUNC_SIMPLE_TABLE,
-        TRUNC_SIMPLE_DIR,
-        TRUNC_SIMPLE_FULL_LEN,
+        RESYNC_MARKER_TABLE,
+        RESYNC_MARKER_DIR,
+        RESYNC_MARKER_FULL_LEN,
         None,
-        TRUNC_SIMPLE_SCHEMA,
+        RESYNC_MARKER_SCHEMA,
     )
     .await
     .expect("the untruncated scratch copy must read cleanly");
