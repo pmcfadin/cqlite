@@ -48,6 +48,20 @@
 //! CHARACTERISATION (it fails if the disposition changes in EITHER direction),
 //! never a statement that the behaviour is desirable.
 //!
+//! ### Two further USES of the predicate that are NOT census sites
+//!
+//! `complex_column/element_decode.rs` calls the predicate twice more (issue
+//! #3723, review round 5), for the MAP-key and UDT-FIELD decodes of an element
+//! the #1741 shadow/TTL filter is DROPPING. They are deliberately not rows of
+//! the census above, which names sites whose tolerance can SURFACE a partial
+//! result: a dropped element is never surfaced, so what is tolerated there
+//! loses no data — the predicate is used to decide whether the WIDTH REFUSAL
+//! still escapes (it must, whatever happens to shadow the element), not whether
+//! a value survives. The LIVE halves of both decodes propagate EVERY decode
+//! error, exactly as they always did. Multicell sets reach the same property
+//! through census site 2, whose single arm serves live and dropped members
+//! alike (`raw_value/set_member.rs`).
+//!
 //! Issue #3723 added ONE error class that must NOT be tolerated: a
 //! [`Error::FixedWidthLengthMismatch`] reporting a WRONG WIDTH — a fixed-width
 //! element whose declared on-disk length is a non-zero length the type's

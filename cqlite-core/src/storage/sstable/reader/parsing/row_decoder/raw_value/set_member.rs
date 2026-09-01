@@ -66,6 +66,12 @@
 //! with a TOLERATED class (a zero length included) still yields `Ok(None)` and
 //! is filtered silently, and the drop accounting
 //! (`shadow_filtered_element_count`) is untouched.
+//!
+//! The MAP and multicell-UDT branches of `complex_column` acquired the same
+//! property in review round 5, through their own shared decoders in
+//! `complex_column/element_decode.rs` — a separate function per branch because
+//! their live paths propagate EVERY decode error where this one tolerates all
+//! but the fatal class.
 
 use super::*;
 
