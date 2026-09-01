@@ -42,7 +42,9 @@ HELPER_TIMEOUT_EXEMPTIONS = {
   "ci-minimal-features.yml" => %w[feature-gate-validation],
   "flight-image.yml" => %w[merge],
   "flight-trino-e2e.yml" => %w[tier-summary],
-  "node-ci.yml" => %w[quality-gate],
+  # node-ci.yml's quality-gate is NOT here: it emits a registered tier's context
+  # (#3640) and declares its own timeout-minutes, so the exemption was removed
+  # rather than left stale — this table's own instruction.
   "python-ci.yml" => %w[quality-gate],
   "quality-gates.yml" => %w[quality-gates-coordinator]
 }.freeze

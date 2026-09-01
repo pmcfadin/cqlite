@@ -458,7 +458,10 @@ jobs:
     needs: classify
     if: needs.classify.outputs.run_tier == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 45, not the old 20: this job now BUILDS the native module as well as running
+    # the suite (see the note above), and a cold release-profile napi build on the
+    # windows/macOS runners is the dominant cost.
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
