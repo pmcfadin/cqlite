@@ -1,0 +1,47 @@
+issue #1698 — PRE-EXISTING main-red in `cqlite-integration-tests --lib`, with its
+falsifying control
+
+WHAT HAPPENED. #1698 deletes two dead features from `tests/Cargo.toml`
+(`ci_zero_tolerance`, `sstable-writer`) and stops `unit-tests-only` forwarding to
+cqlite-core's deleted twin. That puts `cqlite-integration-tests` in `--lite`'s
+BLAST RADIUS, so `--lite` ran `cargo test -p cqlite-integration-tests --lib` — and
+per the #3522 census that suite's 206 lib tests execute in NO gate component and no
+CI job, i.e. this is the FIRST execution of them in this repository's gate history.
+Six of them fail. This is exactly the #1716 precedent recorded in CLAUDE.md:
+"expect latent failures the first time you touch a long-unwired crate".
+
+THE CONTROL — measured, not argued. A clean `git worktree add --detach origin/main`
+(9da235a6c, the branch point) with its own CARGO_TARGET_DIR, same command, same
+datasets root:
+
+  origin/main 9da235a6c : test result: FAILED. 123 passed; 6 failed; 16 ignored
+  issue-1698  cd2e60622 : test result: FAILED. 123 passed; 6 failed; 16 ignored
+
+IDENTICAL counts and IDENTICAL failure set:
+
+  cli_integration_tests::tests::test_cli_error_handling
+  cli_integration_tests::tests::test_cli_integration_basic
+  integration::cli_tests::tests::test_cli_help
+  integration::cli_tests::tests::test_cli_version
+  issue_28a_heuristics_removal_tests::test_row_cell_state_machine_no_blob_fallback_modern
+  parser_validation::vint_validation_tests::test_vint_length_parsing
+
+WHY NONE OF THEM CAN BE CAUSED BY THIS DIFF.
+  * The four CLI ones panic in assert_cmd with "`CARGO_BIN_EXE_cqlite` is unset —
+    if this is running within a unit test, move it to an integration test". That
+    env var is set by cargo only for INTEGRATION-test targets, so these four can
+    NEVER pass in a `--lib` run, under any feature set. Structural, not featural.
+  * `issue_28a…no_blob_fallback_modern` asserts "BIG v5 format should fail instead
+    of falling back to blob" — a no-heuristics expectation, evaluated with the
+    `legacy-heuristics` feature OFF on both sides.
+  * `parser_validation…test_vint_length_parsing` is a bare `assert_eq!(2, 1)`-shaped
+    length assertion with no cfg in its path.
+  None of the deleted features had a single cfg site anywhere (that is the whole
+  criterion of #1698's guard), so no deletion here can change any code path.
+
+DISPOSITION. Not fixed in #1698, deliberately: the four CLI ones need moving from
+the crate's LIB into integration-test targets, and the other two are substantive
+expectations (a no-heuristics assertion and a VInt length) each worth its own
+investigation. Doing any of that inside a dead-feature-flag cleanup would be a
+different change wearing this one's number. Filed separately; #1698's own
+`--lite` FAIL is cited against it rather than papered over.
