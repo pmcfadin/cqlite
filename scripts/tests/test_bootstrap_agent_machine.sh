@@ -3784,6 +3784,14 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   #      the mode — one run's reported failure becoming the next run's silent success at a
   #      permission nothing chose.
   #
+  #      RE-ANCHORED AGAIN (roborev job 329): the post-`ln` read-back-and-rollback this case
+  #      used to drive HAS BEEN DELETED, because removing the destination by pathname was a
+  #      destructive race (`ln` proves the inode is ours at LINK time, not at REMOVE time). The
+  #      mode is now established and verified on the TEMP *before* linking, so the observable
+  #      changed: on a mode failure the destination is NEVER CREATED rather than created-then-
+  #      removed. The assertion is the same shape — destination absent + failure reported — for
+  #      a materially better reason.
+  #
   #      DRIVEN THROUGH ITS ORACLE, and the reason is the third instance of premise-staleness
   #      in this block. The first version stubbed `chmod` to fail and forced `umask 077` so
   #      `tee` created 0600. The job-314 fix then made the create atomic — one privileged
@@ -3800,8 +3808,8 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   out_bc=$(runpin "$pinroot" "$shims_badstat" "$envf_bc" HOME="$pin_home_plain" --fix-gate-pin)
   if [ ! -e "$envf_bc" ] \
      && printf '%s' "$out_bc" | grep -q 'the pin was NOT persisted' \
-     && printf '%s' "$out_bc" | grep -q 'was REMOVED'; then
-    ok "gate-pin: a create whose mode cannot be established rolls the partial file back and says so (nothing populated for the next run to inherit)"
+     && printf '%s' "$out_bc" | grep -q 'never created'; then
+    ok "gate-pin: a create whose mode cannot be established on the STAGED file never links it, so the destination is untouched (nothing to roll back, hence no rollback race)"
   else
     bad "gate-pin: the failed create left a residue, or did not report rolling it back"
     printf '%s\n' "$out_bc" | grep -iE 'gate-pin|CREATED|REMOVED|persisted' | head -4

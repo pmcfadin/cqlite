@@ -2254,8 +2254,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # nothing — the same reason the claim protocol pushes a ref instead of checking for one.
   # `umask 022` establishes the mode AT CREATION instead of chmod-ing afterwards, which also
   # closes the window where the file briefly exists at a mode nobody chose. The readback in
-  # pin_create_mode_ok stays as verification: setting a umask is an instruction, and this
-  # section's whole rule is that an instruction is not a measurement.
+  # The mode is VERIFIED, not merely instructed: setting a umask/chmod is an instruction, and
+  # this section's whole rule is that an instruction is not a measurement. The verification now
+  # happens on the STAGED file before `ln` (job 329) rather than on the destination after it.
   pin_create_env_file() {
     # THE CREATE AND THE WRITE ARE SEPARATE STEPS SO THEIR FAILURES ARE DISTINGUISHABLE
     # (roborev job 321, Medium). Collapsing them and then asking `[ -e "$FILE" ]` cannot tell
@@ -2280,11 +2281,26 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       t="$f.cqlite-pin.$$"
       rm -f "$t" 2>/dev/null
       printf "%s\n%s\n" "$1" "$2" > "$t" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 5; }
+      # ESTABLISH AND VERIFY THE MODE ON THE *TEMP*, BEFORE LINKING (roborev job 329, Medium).
+      # This used to be a post-`ln` read-back with a rollback that removed the DESTINATION BY
+      # PATHNAME, which is a destructive race: `ln` succeeding proves the inode is ours AT
+      # LINK TIME, not at REMOVE time, so a provisioner that unlinked and replaced the file in
+      # between had ITS replacement deleted by our rollback. Verifying here makes the
+      # destination correct BY CONSTRUCTION — `ln` links the inode, so it carries this mode
+      # from the instant it appears — and removes the need for any rollback at all.
+      chmod 0644 "$t" 2>/dev/null || true
+      [ "$(stat -c %a "$t" 2>/dev/null)" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
       ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
       rm -f "$t" 2>/dev/null
     ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null
     pin_child_rc=$?
     if [ "$pin_child_rc" = 4 ]; then pin_create_rc=3; return 3; fi
+    if [ "$pin_child_rc" = 6 ]; then
+      # Mode could not be established ON THE STAGED FILE, so nothing was ever linked. The
+      # destination is untouched by construction — there is no rollback to get wrong.
+      PIN_CREATE_RESIDUE="0644 could not be established on the staged file, so $PIN_ENV_FILE was never created; the temporary was removed by the child"
+      pin_create_rc=1; return 1
+    fi
     if [ "$pin_child_rc" != 0 ]; then
       # NEVER TOUCH THE DESTINATION ON A PRE-LINK FAILURE (roborev job 328, Medium). This
       # branch used to `rm -f "$PIN_ENV_FILE"` unconditionally, which was DESTRUCTIVE and
@@ -2298,47 +2314,22 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # rc=0). Therefore the parent never needs to remove the destination here, and the
       # correct disposition is: report, and touch NOTHING.
       #
-      # pin_create_mode_ok's rollback is a DIFFERENT case and stays: it runs only after `ln`
-      # succeeded, and `ln` is atomic and fails if the destination exists, so the inode it
-      # removes is provably the one THIS invocation created.
+      # AND THERE IS NO OTHER ROLLBACK LEFT TO GET WRONG. An earlier revision kept a post-`ln`
+      # mode rollback here on the argument that `ln` proves the inode is ours — true at LINK
+      # time, FALSE at REMOVE time, which is the destructive race job 329 found. The mode is
+      # now verified on the staged file before linking, so no rollback exists at all.
       PIN_CREATE_RESIDUE="the staging write failed (rc $pin_child_rc) before $PIN_ENV_FILE was linked; nothing was written there and the temporary was removed by the child"
       pin_create_rc=1; return 1
     fi
-    pin_create_mode_ok "$PIN_ENV_FILE"; pin_create_rc=$?; return "$pin_create_rc"
+    pin_create_rc=0; return 0
   }
 
-  # pin_create_mode_ok: establish 0644 on a JUST-CREATED env file and CONFIRM it by reading
-  # the mode BACK. chmod's exit status answers a different question than "is the mode
-  # right": a chmod that fails on a file already at 0644 is harmless, and one that reports
-  # success is still worth confirming — the same affirmative-measurement rule this whole
-  # section is built on, applied to its own write.
-  #
-  # Where the mode cannot be established (or cannot be READ, which is indistinguishable
-  # from wrong for our purposes) the partial file is REMOVED. That is the fail-closed
-  # direction and it costs nothing: the file did not exist a moment ago, so deleting it
-  # restores the state the run started in, whereas LEAVING it makes the next run read a
-  # present CQLITE_GATE_MAX_CONCURRENCY line and treat the pin as persisted at a permission
-  # nothing chose. Linux-only path — the caller is behind PIN_PLATFORM_UNMANAGED — so
-  # `stat -c` is the right spelling here and needs no BSD fallback.
-  pin_create_mode_ok() {
-    local f="$1" mode
-    ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} chmod 0644 "$f" 2>/dev/null || true
-    mode=$(${PIN_ROOT[@]+"${PIN_ROOT[@]}"} stat -c %a "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null)
-    if [ "$mode" = 644 ]; then PIN_CREATE_RESIDUE=""; return 0; fi
-    if ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} rm -f "$f" 2>/dev/null && [ ! -e "$f" ]; then
-      PIN_CREATE_RESIDUE="mode came out ${mode:-unreadable}, not 0644 — the partial file was REMOVED so the next run creates it cleanly instead of inheriting it"
-    else
-      PIN_CREATE_RESIDUE="mode came out ${mode:-unreadable}, not 0644, AND the partial file could not be removed — it still carries the pin line; chmod 0644 or delete $f by hand"
-    fi
-    return 1
-  }
-
-  # ---- (1) persist. Reported with info/warn ONLY — a write is never the verdict ----
-  # AND ONLY ON LINUX (#3414 final roborev). The verdict half already treats a non-Linux
-  # host as unmanaged, but this block still APPENDED to /etc/environment whenever that file
-  # happened to exist and --yes/--fix-gate-pin was passed — mutating a system file that the
-  # platform's own session mechanism does not consume. Writing to a file nobody reads is not
-  # a harmless no-op; it is an unrequested change to host state that will outlive the run.
+  # pin_create_mode_ok WAS HERE AND IS DELETED (roborev job 329, Medium). It read the mode
+  # back AFTER `ln` and, on a mismatch, removed the DESTINATION BY PATHNAME — a destructive
+  # race, because `ln` proves the inode is ours at LINK time and not at REMOVE time. The mode
+  # is now established and verified on the TEMP before linking, so the destination is correct
+  # from the instant it exists and there is nothing to roll back. Removing the rollback
+  # removes the race; narrowing it would only have made the window smaller.
   if [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
     PIN_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
     info "not touching $PIN_ENV_FILE on this $PLATFORM host — pam_env is a Linux mechanism and this platform does not consume that file, so writing it would change host state for nothing"
