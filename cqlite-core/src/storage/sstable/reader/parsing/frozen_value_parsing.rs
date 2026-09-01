@@ -32,6 +32,11 @@
 
 use crate::{types::ComparatorType, Error, Result, Value};
 
+/// A caller's depth-tracking value decoder, handed to
+/// [`parse_frozen_inner_with`] so the recursion (and its `#1632` depth budget)
+/// stays owned by ONE place instead of being duplicated per frozen kind.
+type DepthAwareDecoder<'a> = &'a dyn Fn(&[u8], &ComparatorType, usize) -> Result<Value>;
+
 /// Upper bound on capacity pre-allocated from a declared element/entry count — a
 /// corrupt huge count must not pre-allocate gigabytes (issue #1632). Mirrors
 /// `value_parsing::REASONABLE_COLLECTION_CAPACITY`.
@@ -229,7 +234,7 @@ pub(crate) fn parse_frozen_inner_with(
     inner: &ComparatorType,
     depth: usize,
     max_depth: usize,
-    parse: &dyn Fn(&[u8], &ComparatorType, usize) -> Result<Value>,
+    parse: DepthAwareDecoder<'_>,
 ) -> Result<Value> {
     if depth > max_depth {
         return Err(Error::corruption(format!(
