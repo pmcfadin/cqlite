@@ -106,6 +106,11 @@ mod read_assembly;
 #[cfg(feature = "write-support")]
 pub use read_assembly::assemble_read_cells;
 
+/// Composite (frozen tuple / UDT / nested frozen collection) collection
+/// key/element decode + Cassandra-faithful ordering for [`read_assembly`]
+/// (issue #2339).
+mod read_assembly_composite;
+
 /// Single-partition point-read merge builder (issue #2207): assembles a
 /// [`KWayMerger`] from per-candidate single-partition runs (seeked or key-filtered)
 /// for the Flight `do_get` point-read path. Byte-identical reconciliation to the

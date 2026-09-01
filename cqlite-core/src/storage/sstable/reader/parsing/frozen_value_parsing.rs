@@ -48,7 +48,12 @@ fn read_i32_be(data: &[u8], offset: &mut usize, what: &str) -> Result<i32> {
             data.len()
         )));
     }
-    let v = i32::from_be_bytes([data[*offset], data[*offset + 1], data[*offset + 2], data[end - 1]]);
+    let v = i32::from_be_bytes([
+        data[*offset],
+        data[*offset + 1],
+        data[*offset + 2],
+        data[end - 1],
+    ]);
     *offset = end;
     Ok(v)
 }
@@ -140,13 +145,15 @@ where
     let count = read_count(data, &mut offset, "map")?;
     let mut entries = Vec::with_capacity(count.min(REASONABLE_COLLECTION_CAPACITY));
     for i in 0..count {
-        let key_body = read_element(data, &mut offset, &format!("map key {i}"))?.ok_or_else(
-            || Error::corruption(format!("Frozen map key {i}: null key is not permitted")),
-        )?;
+        let key_body =
+            read_element(data, &mut offset, &format!("map key {i}"))?.ok_or_else(|| {
+                Error::corruption(format!("Frozen map key {i}: null key is not permitted"))
+            })?;
         let key = parse_element(key_body, key_comparator)?;
-        let val_body = read_element(data, &mut offset, &format!("map value {i}"))?.ok_or_else(
-            || Error::corruption(format!("Frozen map value {i}: null value is not permitted")),
-        )?;
+        let val_body =
+            read_element(data, &mut offset, &format!("map value {i}"))?.ok_or_else(|| {
+                Error::corruption(format!("Frozen map value {i}: null value is not permitted"))
+            })?;
         let val = parse_element(val_body, value_comparator)?;
         entries.push((key, val));
     }

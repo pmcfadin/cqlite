@@ -487,7 +487,27 @@ impl CqliteFlightService {
         // registry on its shared readers in `do_get_resolve`, so both flip together.
         // An empty registry (a DDL with no `CREATE TYPE`) is a no-op.
         let registry = cqlite_core::schema::udt_registry_from_cql(&ticket.ddl, &ticket.keyspace);
-        let producer = MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?
+        // Issue #2339: the registry is keyed by `ticket.keyspace`, but EVERY
+        // consumer looks a UDT reference up under the SCHEMA's keyspace
+        // (`resolve_columns_udts`, the bypass divergence predicate, and the
+        // merged-read reassembler). `parse_cql_schema` yields the literal
+        // placeholder `"default"` for an UNQUALIFIED `CREATE TABLE`
+        // (`cql_parser.rs`'s `keyspace.unwrap_or_else(|| "default")`) — which every
+        // Trino/connector ticket sends — so those lookups MISSED and a
+        // `frozen<UDT>` element stayed an unresolved `Custom("udt:X")`. The
+        // TICKET's keyspace is the authoritative one (the caller names the
+        // keyspace it is reading), so it replaces the placeholder here. A DDL that
+        // DOES qualify its table keeps its own keyspace — a ticket contradicting an
+        // explicit DDL keyspace is a caller error, not something to paper over.
+        //
+        // Done on the producer's OWN clone, never on the cached `Arc<TableSchema>`:
+        // `cached_schema` is keyed by DDL alone, so mutating the cached value would
+        // leak one ticket's keyspace into another ticket that shares its DDL.
+        let mut producer_schema = (*schema).clone();
+        if producer_schema.keyspace == "default" {
+            producer_schema.keyspace = ticket.keyspace.clone();
+        }
+        let producer = MergeProducer::with_spec(producer_schema, self.batch_size, spec)?
             // Issue #2825: the configured byte-cap reaches every producer this
             // service builds, on every route.
             .with_max_batch_bytes(self.max_batch_bytes)

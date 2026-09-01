@@ -267,9 +267,11 @@ pub fn bypass_reason(
     // `static_with_tombstones/select-star` case is now an ordinary both-arms
     // differential (and asserts the bypass leg built ZERO mergers, so it cannot pass by
     // silently routing back to the merge arm).
-    if schema.columns.iter().any(|c| {
-        declares_composite_keyed_collection(&c.data_type, registry, &schema.keyspace)
-    }) {
+    if schema
+        .columns
+        .iter()
+        .any(|c| declares_composite_keyed_collection(&c.data_type, registry, &schema.keyspace))
+    {
         return BypassReason::MulticellArmDivergence;
     }
     if !only.supports_streaming_query_scan() {
@@ -398,7 +400,9 @@ fn merge_arm_resolves_composite(
 /// comparator (see [`merge_arm_resolves_composite`]).
 fn fully_resolved(ty: &CqlType) -> bool {
     match ty {
-        CqlType::Frozen(inner) | CqlType::List(inner) | CqlType::Set(inner) => fully_resolved(inner),
+        CqlType::Frozen(inner) | CqlType::List(inner) | CqlType::Set(inner) => {
+            fully_resolved(inner)
+        }
         CqlType::Map(k, v) => fully_resolved(k) && fully_resolved(v),
         CqlType::Tuple(fields) => fields.iter().all(fully_resolved),
         CqlType::Udt(_, fields) => {

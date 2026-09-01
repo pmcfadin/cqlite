@@ -137,7 +137,13 @@ fn one_source_with_a_clean_schema_selects_the_fast_path() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     assert_eq!(readers.len(), 1, "the fixture is exactly one generation");
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false, None),
+        bypass_reason(
+            &readers,
+            &simple_schema(),
+            ForcedMergePath::Auto,
+            false,
+            None
+        ),
         BypassReason::Selected
     );
 }
@@ -152,7 +158,13 @@ fn two_sources_take_the_merge_arm() {
     ]);
     assert_eq!(readers.len(), 2, "the fixture is two generations");
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false, None),
+        bypass_reason(
+            &readers,
+            &simple_schema(),
+            ForcedMergePath::Auto,
+            false,
+            None
+        ),
         BypassReason::MultipleSources
     );
 }
@@ -183,7 +195,13 @@ fn forced_bypass_never_overrides_a_correctness_precondition() {
         vec![write_row(2, "b", 20, 200)],
     ]);
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false, None),
+        bypass_reason(
+            &readers,
+            &simple_schema(),
+            ForcedMergePath::Bypass,
+            false,
+            None
+        ),
         BypassReason::MultipleSources
     );
 }

@@ -990,17 +990,22 @@ fn dataset_cases() -> Vec<DatasetCase> {
         // an arm differential rather than a fail-closed fallback. (Its
         // Cassandra-parity assertion — 1 row, static value present, no `ck = null`
         // row — lives in `issue_3095_flight_static_columns.rs`.)
-        // Spec R1/R6 (roborev): this table declares `set<frozen<contact_info>>`
-        // and `map<text, frozen<contact_info>>` — a composite-keyed collection the
-        // MERGE arm's reassembler fails closed on (#2339) while the
-        // single-generation decoder serves it. Left unguarded, `SELECT *` here
-        // would ERROR at two generations and SUCCEED at one. The predicate now
-        // REFUSES the fast path for such a schema, so this case runs UNPROJECTED
-        // (`SELECT *`) and pins the fallback: both forced values take the merge
-        // arm and behave exactly as they do today (i.e. both fail the same way,
-        // which is why it is asserted as a fallback rather than a row differential).
+        // Spec R1/R6 + issue #2339 AC2: this table declares
+        // `contacts set<frozen<contact_info>>` (a composite SET ELEMENT, whose
+        // element type is a NESTED UDT) and
+        // `emergency_contacts map<text, frozen<contact_info>>` (a scalar-keyed map
+        // with a composite VALUE). The merge arm's reassembler used to FAIL CLOSED
+        // on `contacts`, so `SELECT *` here ERRORED at two generations and
+        // SUCCEEDED at one, and this case could only be asserted as a fail-closed
+        // FALLBACK. #2339 decodes the composite element structurally on the merge
+        // arm, so the case is now an ordinary UNPROJECTED (`SELECT *`) ARM
+        // DIFFERENTIAL over real Cassandra bytes: the ticket DDL carries the two
+        // `CREATE TYPE`s, so the element type resolves, the predicate selects the
+        // fast arm, and `assert_arms_agree` compares every column of every row
+        // (and FAILS unless the bypass leg shows mergers_built == 0, so "the fast
+        // arm was really taken" is asserted, not assumed).
         DatasetCase {
-            label: "cassandra/collections_with_udts(fail-closed composite-keyed collection)",
+            label: "cassandra/collections_with_udts(composite set element, SELECT *)",
             pk_only_label: "cassandra/collections_with_udts@pk-only",
             keyspace: "test_collections",
             table: "collections_with_udts",
@@ -1012,11 +1017,9 @@ fn dataset_cases() -> Vec<DatasetCase> {
             .join(" "),
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
-            pk_only_projection: vec![],
-            refuses_fast_arm: true,
-            // The #2339 condition the merge arm fails closed on — asserted so an
-            // unrelated identical error on both arms cannot pass this case.
-            refused_error_substr: Some("composite-keyed collection decode unsupported"),
+            pk_only_projection: vec!["user_id"],
+            refuses_fast_arm: false,
+            refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,
         },
