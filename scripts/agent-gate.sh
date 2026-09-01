@@ -9885,9 +9885,10 @@ export -f check_unittest_targets_ran
 #
 # The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test` exit
 # is not evidence that anything ran: a suite whose every TEST is `test.skip`ped is
-# reported as a PASSED suite, so `Test Suites: 27 passed, 27 total` is reachable over
-# zero real assertions — the vacuous green this whole issue exists to remove, arriving
-# through the widened lane's own plumbing. (Jest's suite-level `skipped` count is a
+# reported as a PASSED suite, so a `Test Suites: N passed, N total` line covering EVERY
+# suite is reachable over zero real assertions — the vacuous green this whole issue
+# exists to remove, arriving through the widened lane's own plumbing. (The illustration
+# named a literal count until #3772; it was stale, and an EXAMPLE does not need one.) (Jest's suite-level `skipped` count is a
 # DIFFERENT and weaker signal: it catches a whole FILE being skipped, not a file whose
 # every test was. That is why the two are separate directions below rather than one.)
 #
@@ -10856,9 +10857,11 @@ run_node_bindings() {
   census+=("       below as \"suite set RECONCILED: N\"; and that the leak file executed EXACTLY")
   census+=("       ONCE — zero or twice would fail check_jest_suites_ran (jest reported total vs")
   census+=("       the DEDUPLICATED disk inventory) and the affirmation itself (suites.length")
-  census+=("       !== 1 at the leak path). Jest PROJECT identities are NOT checked by either")
-  census+=("       guard; both projects running is inferred from the leak file having executed,")
-  census+=("       which is weaker and is stated as such. This line used to carry a hard-coded")
+  census+=("       !== 1 at the leak path). No guard reads a jest PROJECT identity; that both")
+  census+=("       projects ran follows from the config plus the COMPLETE per-suite results —")
+  census+=("       the leak file evidences the leaks project, and the OTHER reconciled suites")
+  census+=("       evidence the default one. Neither half evidences the other. This line used")
+  census+=("       to carry a hard-coded")
   census+=("       file count asserted as duplicate-free; it had gone stale as the suite grew,")
   census+=("       and its cited oracle could not see a duplicate anyway (jest --listTests")
   census+=("       DEDUPES across projects — measured, #3772). No count is printed here now, in")
