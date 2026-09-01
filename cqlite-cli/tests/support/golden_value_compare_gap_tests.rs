@@ -7,6 +7,8 @@
 //! of that module, so the shared `row`/`schema_of` helpers and its imports are
 //! reached through `use super::*` and are stated once.
 
+use super::super::super::container::MapKeySpelling;
+use super::super::gap::Position;
 use super::*;
 
 // =======================================================================
@@ -647,11 +649,13 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
         gap.matched(
             &golden_hex,
             cli,
-            ty,
-            Egress::Json,
-            Depth::TopLevel,
-            Kinding::Natural,
-            super::super::super::container::MapKeySpelling::ToJsonString,
+            Position {
+                ty,
+                egress: Egress::Json,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
         )
     };
 

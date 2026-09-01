@@ -13,9 +13,9 @@
 //! the golden's, and the measured CLI spellings appear only as the input under
 //! test.
 
-use super::super::schema::TableSchema;
-use super::super::{Egress, Row};
-use super::compare_rows;
+use super::super::super::schema::TableSchema;
+use super::super::super::{Egress, Row};
+use super::super::compare_rows;
 use serde_json::{json, Value};
 
 /// The committed `CREATE TYPE`, and the two map types quoted verbatim from
@@ -26,7 +26,7 @@ const MAP_SET_UDT: &str = "frozen<map<frozen<set<frozen<key_part>>>, int>>";
 
 fn schema_for(cql_type: &str) -> TableSchema {
     let ddl = format!("{UDT_DDL} CREATE TABLE t (id int PRIMARY KEY, c {cql_type});");
-    match super::super::schema::from_ddl(&ddl, "t") {
+    match super::super::super::schema::from_ddl(&ddl, "t") {
         Ok(schema) => schema,
         Err(why) => panic!("`{cql_type}` must parse: {why}"),
     }

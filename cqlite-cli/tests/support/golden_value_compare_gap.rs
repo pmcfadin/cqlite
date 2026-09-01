@@ -218,6 +218,28 @@ pub enum Divergence {
     MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
 }
 
+/// EVERYTHING A DIVERGENCE RULE MAY ASK ABOUT A POSITION, and nothing else.
+///
+/// One parameter rather than five, because every rule below states itself against
+/// the same handful of facts and passing them singly had reached clippy's arity
+/// limit — but the grouping is not merely cosmetic: it names the closed set a
+/// divergence is allowed to reason from. Each field is either the committed DDL or a
+/// property of the format, never a property of a VALUE, which is what keeps a
+/// matcher from drifting into the shape ladder #3500 abandoned (roborev jobs
+/// 302/305/306).
+#[derive(Clone, Copy)]
+pub struct Position<'t> {
+    /// The declared CQL type at this position.
+    pub ty: &'t CqlType,
+    pub egress: Egress,
+    /// What CSV's empty-field rule keys on.
+    pub depth: Depth,
+    /// How the GOLDEN spells this value's JSON kind.
+    pub kinding: Kinding,
+    /// WHICH CASSANDRA WRITER spelled this position's map keys, from the DDL.
+    pub map_key_spelling: MapKeySpelling,
+}
+
 impl Divergence {
     /// A one-line statement of the declared divergence, for the census and for the
     /// diff that reports a mismatch which is NOT this one.
@@ -264,16 +286,14 @@ impl Divergence {
     /// CSV's empty-field depth and how the GOLDEN spells its JSON kind here — so
     /// every rule below is stated against the committed DDL rather than against a
     /// value's appearance.
-    pub fn matched(
-        self,
-        golden: &Value,
-        cli: &Value,
-        ty: &CqlType,
-        egress: Egress,
-        depth: Depth,
-        kinding: Kinding,
-        map_key_spelling: MapKeySpelling,
-    ) -> bool {
+    pub fn matched(self, golden: &Value, cli: &Value, at: Position<'_>) -> bool {
+        let Position {
+            ty,
+            egress,
+            depth,
+            kinding,
+            map_key_spelling,
+        } = at;
         match self {
             Divergence::AbsentMulticellRendersEmpty => {
                 // The golden side: NO value at all. A multi-cell collection is
