@@ -943,6 +943,34 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   prior behavior. Rule: for any on-disk framing/encoding property, the oracle must be
   **Cassandra-written bytes** (or Cassandra source), never CQLite's own output. Long form:
   [validation playbook](https://pmcfadin.github.io/cqlite/agents-developing/validation-playbook/).
+- **Fourth blind spot: EVERY oracle above is PER-SURFACE, so three surfaces can each be green against
+  their own oracle while DISAGREEING WITH EACH OTHER (issue #1455).** Python, Node and the CLI are three
+  independent windows onto one SSTable, and each was checked only against its own reference — Python
+  against the CLI (`test_cli_parity.py`), Node against the sstabledump JSONL goldens
+  (`parity-utils.js`), the CLI against nothing else. Those two normalizers **do not share an oracle, a
+  canonical form, or even a comparison direction** (blob canonicalizes to a `"0x…"` STRING on the Python
+  side and to a `Buffer` on the Node side; timestamp to a millisecond-truncated string vs a `Date` with a
+  ±1 ms tolerance; Node has **no duration rule at all**), so both can pass while a user querying one table
+  three ways gets three answers. The cross-surface differential is
+  `bindings/parity/` + `bindings/python/tests/test_cross_binding_parity.py`: ONE `SELECT`, all three
+  surfaces, canonical JSON, deep-equal per row. **The canonical form is implemented TWICE by construction
+  (`canonical.py` / `canonical.mjs`) and the two are DIFFERENTIALLY PINNED** against a shared
+  `canonical-vectors.json` — a second implementation's agreement is only knowable by testing it, never by
+  care. **Three DECLARED gaps, stated because a lane that omits coverage silently is
+  indistinguishable from one that covers it**: (1) `tuple` cannot be distinguished from `list` on two of
+  the three legs (Node and the CLI both emit a plain array; only Python has a distinct type), so a
+  tuple/list confusion is UNDETECTABLE here by construction — it is canonicalized as a plain array and the
+  harness says so at run time; (2) **no `varint` column exists anywhere in `test-data/schemas/*.cql`**, so
+  varint is uncovered rather than quietly dropped; (3) non-finite floats are 3-way asymmetric (Python
+  `nan` / Node `NaN` / CLI JSON `null`, `cqlite-cli/src/output/json.rs:156-161`) and such fixtures are
+  avoided. **AND THE COVERAGE SPLIT IS ITSELF A DECLARED GAP: this harness is NOT merge-gating.** No local
+  gate component can run it — the gate runs pytest with `RUN_SLOW_TESTS=0` and builds neither the Node
+  native module nor a release `cqlite-cli` — so it lives in `python-ci.yml`'s `cross-binding-parity` job,
+  which is `required`-exempt AND in the heavy `ci:bindings-full` tier. A cross-binding divergence can
+  therefore still merge; the `.github/ci-gating-tiers.yml` exemption NAMES that residual rather than
+  implying coverage it does not have (#3493). Marking the test `@pytest.mark.slow` is deliberate and not
+  an oversight: unmarked, the gate's `python-bindings` component would instantiate the `cli_binary`
+  fixture and add a full release `cqlite-cli` build to EVERY lane's full gate.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
