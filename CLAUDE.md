@@ -2009,6 +2009,27 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   site that prints a verdict line and ONE that sets the flag, and the race is pinned by a
   structural order assert plus a signal PLANTED at the window in a scratch copy — with the
   pre-fix ordering kept as the positive control, because a race cannot be pinned by a timed test.
+  (9) **An identity is recorded and compared LOSSLESSLY or the run REFUSES, naming its axis** —
+  the third instance of H1's family (unmeasurable axis committed as a placeholder; then the
+  worktree axis; now a MEASURABLE identity committed LOSSILY). The shared `sanitize_field`
+  maps space to `-`, collapses runs and TRUNCATES at 120, so `CLAIM_MACHINE='build box'`
+  recorded `build-box` and a genuinely different `build-box` verified as OWNED — and two names
+  sharing a 120-char prefix were one owner. Enforced at the USE SITE by requiring
+  `sanitize_field(v) == v` (one comparison covering charset AND length, needing no second copy
+  of the sanitizer's rules), never in the sanitizer, which stays pinned against claim.sh's own
+  definition — that agreement case now compares the two EXTRACTED functions over a TABLE, since
+  a lossy value no longer reaches a marker to be read back out of. It covers `machine` and
+  `session` (an EQUAL session id is OWNED outright, so a lossy one aliases two sessions);
+  `worktree` was already verbatim; `actor`, the durable fields and the `prior-*` provenance are
+  DECLARED lossy and deliberately not refused, because nothing COMPARES them so a collision
+  cannot grant ownership. Same round, two more: a supplied body is **READ, never stat-gated** —
+  an `[ -s ]` before the copy let a source deleted or truncated in between commit an EMPTY body
+  under `WRITTEN`, so the caller's file is snapshotted ONCE and every later step reads those
+  bytes (a check before the act can only describe a file that no longer has to be the one acted
+  on); and an **unrecognised prologue key is PRESERVED**, because accepting it "for forward
+  compatibility" while the rewrite path dropped it made an OLDER script silently DELETE a field
+  a NEWER one introduced — preserve beats refuse, which would brick every touched lane on a
+  fleet mid-rollout.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
