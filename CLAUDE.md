@@ -1949,6 +1949,24 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   readers of these texts run printed commands literally. Naming no mechanical remedy is fine
   (`FOREIGN-*` say "escalate"); naming one that refuses is the defect, and that case caught two
   further instances in the same round it was written.
+  **Three later corrections, one shape: a guarantee that stops short of what a consumer
+  actually reads.** (1) A fatal start-up failure printed an ANCHORED line and no
+  `verdict <TOKEN>`, so every caller the doctrine tells to `case` on the token fell through
+  every arm — the prefix is contract (a), the token is contract (c), and **(a) does not imply
+  (c)**; every exit now carries a token. (2) The anchor covers the EXTERNAL commands too: a
+  native `mktemp:`/`mv:` line has no prefix at all, so each call site either CAPTURES that text
+  into the anchored message or suppresses it, and a cleanup command carries `|| true` because a
+  failing command in a bash EXIT trap under `set -e` aborts the trap **and replaces the exit
+  status** (measured: a broken `rm` turned a legitimate `WRITTEN`(0) into an unexplained
+  non-zero). Same sweep, worse defect: a failing `date` committed a stamp with an EMPTY
+  required field — `set -e` cannot catch it, since the writer is called as `if ! write_marker`,
+  which suppresses `set -e` for its whole subtree — so the assembled bytes are now checked for
+  FIELD COMPLETENESS, not just sentinels, or the lane bricks itself. (3) The ADOPTION
+  PROVENANCE (`prior-session`, `prior-session-pid`, `prior-ts`, `adopt-reason`) is DURABLE
+  STATE: an ordinary `write` preserves it exactly as it preserves stage/request-id/pr/branch,
+  because a mandatory, validated `--reason` that the next stage update erases is no audit
+  record — and carrying a field forward requires READING it, so all four are parsed under the
+  same duplicate-key refusal as the identity keys.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

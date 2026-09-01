@@ -156,10 +156,19 @@
 #              `--clear stage|request-id|pr|branch` (repeatable). Omitting a flag never
 #              erases durable state — dropping the open request id would make the next
 #              session re-ask, breaking "one marker, one wait".
+#              THE ADOPTION PROVENANCE IS DURABLE STATE TOO and is preserved the same way:
+#              `prior-session`, `prior-session-pid`, `prior-ts`, `adopt-reason`. There is no
+#              flag and no `--clear` for those four — only a LATER `adopt` replaces them (the
+#              newest hand-over is the record), and a fresh write over an ABSENT marker, or
+#              the UNSTAMPED migration, INVENTS none. A mandatory, validated `--reason` that
+#              the next stage update erases is no audit record at all.
 #   verify <N> [--actor <id>]      the rehydrate gate (see the axes above)
 #   adopt  <N> --reason <why> [--actor <id>]
 #              The explicit adopt gesture. Resolves the SESSION axis ONLY: a fail-closed
 #              axis mismatch still refuses, and so does a live or unmeasurable writer.
+#              It RECORDS the provenance of the hand-over — `prior-session`,
+#              `prior-session-pid`, `prior-ts`, `adopt-reason` — which then survives later
+#              `write`s and is REPLACED (never accumulated) by a later adopt.
 #              The body and the durable fields (stage/request-id/pr/branch) SURVIVE: this is
 #              THE normal cron-resume path, so dropping them would destroy the open
 #              coordination request on every legitimate resume.
@@ -167,7 +176,9 @@
 #              nothing recordable in it, a bare PLACEHOLDER (`why`, `todo`, `tbd`, …) or one
 #              still carrying an UNSUBSTITUTED `<…>` is a USAGE error (64), never a silent
 #              `reason=unspecified` — same gate, and same reasons, as claim.sh's.
-#   show   <N> print the recorded stamp fields. No ownership verdict.
+#   show   <N> print the recorded stamp fields, INCLUDING the adoption provenance when the
+#              marker carries it (`show` is the contract's window onto the marker, so it
+#              prints every field the reader parses). No ownership verdict.
 #   --help     this contract (authoritative)
 #
 # IDENTITY
@@ -419,7 +430,11 @@ lock_marker() {
 # ---------------------------------------------------------------------------
 S_issue=''; S_machine=''; S_worktree=''; S_session=''; S_pid=''
 S_start_lo=''; S_start_hi=''; S_actor=''; S_ts=''; S_stage=''
-S_request=''; S_pr=''; S_branch=''; S_prior_session=''
+S_request=''; S_pr=''; S_branch=''
+# ADOPTION PROVENANCE (roborev job 26 F3). All FOUR are PARSED, not merely written: they are
+# durable state — the audit record of how this lane changed hands — so an ordinary `write` has
+# to be able to carry them forward, and carrying forward what is never read is impossible.
+S_prior_session=''; S_prior_pid=''; S_prior_ts=''; S_adopt_reason=''
 
 marker_path() { printf '%s/%s\n' "$(pwd -P)" "$MARKER_NAME"; }
 
@@ -514,6 +529,9 @@ read_marker() {
       pr)                         dup="$S_pr";             S_pr="$val" ;;
       branch)                     dup="$S_branch";         S_branch="$val" ;;
       prior-session)              dup="$S_prior_session";  S_prior_session="$val" ;;
+      prior-session-pid)          dup="$S_prior_pid";      S_prior_pid="$val" ;;
+      prior-ts)                   dup="$S_prior_ts";       S_prior_ts="$val" ;;
+      adopt-reason)               dup="$S_adopt_reason";   S_adopt_reason="$val" ;;
       *) dup='' ;;   # forward compatibility: an unrecognised KEY is ignored, but its
                      # SHAPE was still enforced above, so it can never smuggle in a line.
     esac
@@ -873,6 +891,7 @@ cmd_write() {
   local issue="${1:-}"; shift || true
   require_numeric_issue "$issue" write
   local stage='' request='' pr='' branch='' bodyfile='' actor_raw='' clears=''
+  local prior_session='' prior_pid='' prior_ts='' adopt_reason=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --stage)      stage="${2:-}";      shift 2 || die_usage "--stage needs a value" ;;
@@ -948,6 +967,15 @@ cmd_write() {
       [ -n "$request" ] || cleared request-id || request="$S_request"
       [ -n "$pr" ]      || cleared pr         || pr="$S_pr"
       [ -n "$branch" ]  || cleared branch     || branch="$S_branch"
+      # ADOPTION PROVENANCE IS DURABLE STATE TOO (roborev job 26 F3, the same class as job
+      # 18's dropped durable fields, reappearing at the adopt fields). `adopt` records WHO
+      # held this lane, WHEN, and WHY it was taken; rebuilding the prologue from the write
+      # path's field list alone erased all of it on the very next stage update, which makes
+      # the mandatory, validated `--reason` worthless. There is no flag and no `--clear` for
+      # these: only a LATER `adopt` replaces them (the newest hand-over is the record), and
+      # nothing invents them where no adoption happened.
+      prior_session="$S_prior_session"; prior_pid="$S_prior_pid"
+      prior_ts="$S_prior_ts";           adopt_reason="$S_adopt_reason"
       if [ -z "$body_src" ]; then
       # Preserve an OWNED marker's body: `write` updates the stamp and the recorded stage,
       # not the author's notes.
@@ -969,7 +997,13 @@ cmd_write() {
   [ -z "$request" ] || f_request="request-id: $(sanitize_field "$request")"
   [ -z "$pr" ]      || f_pr="pr: $(sanitize_field "$pr")"
   [ -z "$branch" ]  || f_branch="branch: $(sanitize_field "$branch")"
-  if ! write_marker "$issue" "$actor" "$body_src" "$f_stage" "$f_request" "$f_pr" "$f_branch"; then
+  local f_ps='' f_pp='' f_pt='' f_ar=''
+  [ -z "$prior_session" ] || f_ps="prior-session: $(sanitize_field "$prior_session")"
+  [ -z "$prior_pid" ]     || f_pp="prior-session-pid: $(sanitize_field "$prior_pid")"
+  [ -z "$prior_ts" ]      || f_pt="prior-ts: $(sanitize_field "$prior_ts")"
+  [ -z "$adopt_reason" ]  || f_ar="adopt-reason: $(sanitize_field "$adopt_reason")"
+  if ! write_marker "$issue" "$actor" "$body_src" "$f_stage" "$f_request" "$f_pr" "$f_branch" \
+      "$f_ps" "$f_pp" "$f_pt" "$f_ar"; then
     [ -z "$carried" ] || rm -f "$carried" 2>/dev/null || true
     refuse ERROR 1 "$WRITE_ERR"
   fi
@@ -1088,7 +1122,14 @@ cmd_show() {
   emit "field request-id=$(sane "${S_request:-none}")"
   emit "field pr=$(sane "${S_pr:-none}")"
   emit "field branch=$(sane "${S_branch:-none}")"
+  # `show` is the contract's WINDOW onto the marker, so it prints every provenance field it
+  # parses — printing one of the four and hiding three would make the audit record readable
+  # only by opening the file, which is the state this script exists to replace. Each is
+  # conditional: a lane that was never adopted has no provenance to show.
   [ -z "$S_prior_session" ] || emit "field prior-session=$(sane "$S_prior_session")"
+  [ -z "$S_prior_pid" ]     || emit "field prior-session-pid=$(sane "$S_prior_pid")"
+  [ -z "$S_prior_ts" ]      || emit "field prior-ts=$(sane "$S_prior_ts")"
+  [ -z "$S_adopt_reason" ]  || emit "field adopt-reason=$(sane "$S_adopt_reason")"
   verdict SHOWN
   detail "fields as recorded for issue $(sane "$issue"); SHOWN asserts NOTHING about ownership — use 'verify' for that"
 }

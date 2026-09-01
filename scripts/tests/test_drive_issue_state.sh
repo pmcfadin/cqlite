@@ -1308,6 +1308,114 @@ $(cat "$L30T/$MARKER" 2>/dev/null | cat -v)"
 fi
 
 # ===========================================================================
+case_begin 31-adoption-provenance-survives "adoption provenance (prior-session/-pid/-ts, adopt-reason) survives a later write"
+# ===========================================================================
+# roborev job 26 F3, and the SAME CLASS as job 18 finding 2 (dropped durable fields)
+# reappearing at the adopt fields: `adopt` records HOW this lane changed hands, and the very
+# next `write --stage x` rebuilt the prologue from the write path's field list — which carried
+# only stage/request-id/pr/branch — so the provenance VANISHED on the first stage update. A
+# `--reason` that is mandatory, validated and then erased by the next command is worthless.
+L31=$(lane lane31)
+sleep 30 & ap_d1=$!
+run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$ap_d1" -- \
+  write 3822 --stage implement --request-id coord-3822-31 --pr 4031 --branch issue-3822-ap >/dev/null 2>&1
+kill "$ap_d1" 2>/dev/null; wait "$ap_d1" 2>/dev/null
+# The adopting session records a pid that is ALSO gone, so a THIRD session can adopt later
+# (the overwrite half below). Its own `write` is OWNED by session equality, which needs no
+# liveness at all.
+# It stays ALIVE across its own adopt and write (so both stamps record a MEASURABLE start
+# window) and is killed only afterwards, which is what makes the third session's adopt reach
+# the `gone` branch rather than LIVENESS-UNKNOWN.
+sleep 300 & ap_d2=$!
+ap_ad=$(run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$ap_d2" -- \
+  adopt 3822 --reason cron-reinvoke:writer-pid-gone-31); ap_adrc=$?
+ap_ts1="$(sed -n 's/^prior-ts: //p' "$L31/$MARKER" | head -1)"
+if [ "$ap_adrc" -eq 0 ] && [ "$(verdict_of "$ap_ad")" = ADOPTED ] \
+   && grep -q "^prior-session: $SESS_A\$" "$L31/$MARKER" \
+   && grep -q "^prior-session-pid: $ap_d1\$" "$L31/$MARKER" \
+   && [ -n "$ap_ts1" ] \
+   && grep -q '^adopt-reason: cron-reinvoke:writer-pid-gone-31$' "$L31/$MARKER"; then
+  ok "the adopt recorded all four provenance fields (prior-session/-pid/-ts, adopt-reason)"
+else
+  bad "the adopt did not record the provenance this case is about: rc=$ap_adrc
+$(cat "$L31/$MARKER")"
+fi
+# THE SUBJECT: an ordinary stage update by the now-owning session.
+ap_w=$(run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$ap_d2" -- \
+  write 3822 --stage review); ap_wrc=$?
+ap_show=$(run "$L31" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$ap_d2" -- show 3822 2>&1)
+if [ "$ap_wrc" -eq 0 ] && [ "$(verdict_of "$ap_w")" = WRITTEN ] \
+   && printf '%s\n' "$ap_show" | grep -q "prior-session=$SESS_A" \
+   && printf '%s\n' "$ap_show" | grep -q "prior-session-pid=$ap_d1" \
+   && printf '%s\n' "$ap_show" | grep -q "prior-ts=$ap_ts1" \
+   && printf '%s\n' "$ap_show" | grep -q 'adopt-reason=cron-reinvoke:writer-pid-gone-31' \
+   && printf '%s\n' "$ap_show" | grep -q 'stage=review' \
+   && printf '%s\n' "$ap_show" | grep -q 'request-id=coord-3822-31'; then
+  ok "a later 'write --stage' PRESERVES all four adoption-provenance fields AND still updates the stage"
+else
+  bad "the stage update erased the adoption provenance: rc=$ap_wrc
+$ap_show"
+fi
+# A LATER ADOPT OVERWRITES them — the NEWEST hand-over is the one recorded, not the first.
+kill "$ap_d2" 2>/dev/null; wait "$ap_d2" 2>/dev/null
+ap_ad2=$(run "$L31" CLAIM_MACHINE=boxA CLAUDE_CODE_SESSION_ID=sess-cccccccc "CLAUDE_PID=$$" -- \
+  adopt 3822 --reason second-handover:31); ap_ad2rc=$?
+ap_show2=$(run "$L31" CLAIM_MACHINE=boxA CLAUDE_CODE_SESSION_ID=sess-cccccccc "CLAUDE_PID=$$" -- show 3822 2>&1)
+if [ "$ap_ad2rc" -eq 0 ] && [ "$(verdict_of "$ap_ad2")" = ADOPTED ] \
+   && printf '%s\n' "$ap_show2" | grep -q "prior-session=$SESS_B" \
+   && printf '%s\n' "$ap_show2" | grep -q "prior-session-pid=$ap_d2" \
+   && printf '%s\n' "$ap_show2" | grep -q 'adopt-reason=second-handover:31' \
+   && ! printf '%s\n' "$ap_show2" | grep -q 'cron-reinvoke:writer-pid-gone-31'; then
+  ok "a LATER adopt OVERWRITES the provenance with the newest hand-over (it is not accumulated)"
+else
+  bad "a second adopt did not replace the provenance: rc=$ap_ad2rc
+$ap_show2"
+fi
+# NEGATIVE HALF: a fresh write over an ABSENT marker must INVENT none of them, and neither
+# must the UNSTAMPED migration branch (which asserts no ownership and carries nothing forward).
+L31B=$(lane lane31b)
+run "$L31B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage implement >/dev/null 2>&1
+L31C=$(lane lane31c); printf 'legacy hand-written plan\n' >"$L31C/$MARKER"
+run "$L31C" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
+ap_negshow=$(run "$L31B" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822 2>&1)
+if ! grep -qE '^(prior-session|prior-session-pid|prior-ts|adopt-reason): ' "$L31B/$MARKER" \
+   && ! grep -qE '^(prior-session|prior-session-pid|prior-ts|adopt-reason): ' "$L31C/$MARKER" \
+   && ! printf '%s\n' "$ap_negshow" | grep -q 'prior-' \
+   && ! printf '%s\n' "$ap_negshow" | grep -q 'adopt-reason'; then
+  ok "a fresh write (ABSENT marker) and the UNSTAMPED migration invent NO provenance fields, and show prints none"
+else
+  bad "provenance fields were invented where there was no adoption:
+$(cat "$L31B/$MARKER")
+--
+$(cat "$L31C/$MARKER")
+--
+$ap_negshow"
+fi
+# A DUPLICATE provenance key is a MALFORMED refusal like every other stamp key: which
+# occurrence is the record must not be the parser's choice.
+L31D=$(lane lane31d)
+sleep 30 & ap_d3=$!
+run "$L31D" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$ap_d3" -- write 3822 >/dev/null 2>&1
+kill "$ap_d3" 2>/dev/null; wait "$ap_d3" 2>/dev/null
+run "$L31D" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason dup-probe:31 >/dev/null 2>&1
+ap_dupfail=0
+for dk in prior-session-pid prior-ts adopt-reason; do
+  cp "$L31D/$MARKER" "$T/m31d.bak"
+  awk -v k="$dk" '{print} $0 ~ "^"k": " && !d {print; d=1}' "$T/m31d.bak" >"$L31D/$MARKER"
+  ap_du=$(run "$L31D" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- show 3822 2>&1); ap_durc=$?
+  if [ "$ap_durc" -ne 0 ] && [ "$(verdict_of "$ap_du")" = MALFORMED ]; then :; else
+    ap_dupfail=$((ap_dupfail + 1))
+    printf 'note   duplicate %s was not refused: rc=%s verdict=%s\n' "$dk" "$ap_durc" "$(verdict_of "$ap_du")"
+  fi
+  cp "$T/m31d.bak" "$L31D/$MARKER"
+done
+if [ "$ap_dupfail" -eq 0 ]; then
+  ok "a DUPLICATE prior-session-pid / prior-ts / adopt-reason is refused MALFORMED — these keys are PARSED, not merely written"
+else
+  bad "$ap_dupfail provenance keys accept a duplicate (they are written but not parsed)"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -1320,8 +1428,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 22-no-dead-letter-remedies 23-durable-fields-survive 24-serialization
 25-displaced-sentinel-is-not-legacy 26-unusable-start-window 27-pre-rename-validation
 29-missing-liveness-library 30-native-diagnostics-stay-anchored
+31-adoption-provenance-survives
 28-case-floor"
-CASE_FLOOR=30
+CASE_FLOOR=31
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -1333,8 +1442,8 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 78 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 78)"
+if [ "$PASS" -ge 83 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 83)"
 else
   bad "assertion floor breached: only $PASS assertions passed"
 fi
