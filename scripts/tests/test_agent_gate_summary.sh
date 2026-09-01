@@ -1235,29 +1235,55 @@ else
   bad "sccache-health: a cap raise silenced the error-counter token (#3727 conflation)"
 fi
 
-# 9c-x. A CAP NOBODY IS ENFORCING MAY NOT READ AS `pinned` (issue #3727). MEASURED: with no
-#       sccache server running, `--show-stats` does not start one and answers `max_cache_size`
-#       from the CLIENT's own resolution of SCCACHE_CACHE_SIZE, reporting `"cache_size":null`.
-#       So the value is echoed straight back, and classifying that as `pinned` would assert
-#       enforcement by a server that does not exist — this issue's own defect one layer in.
-#       Driven through the USED hook's `null` spelling, which is that measured state.
-scc_unattr="$tmp/scc-cap-unattributed.txt"
-AGENT_GATE_SUMMARY_FILE="$scc_unattr" \
+# 9c-x. A CAP NOBODY IS PROVEN TO ENFORCE MAY NOT READ AS `pinned` (issue #3727). MEASURED: with
+#       no sccache server running, `--show-stats` does not start one and answers `max_cache_size`
+#       from the CLIENT's own resolution of SCCACHE_CACHE_SIZE — so the value is echoed straight
+#       back, and calling that `pinned` asserts enforcement by a server that does not exist.
+#       Attribution is decided by a DIFFERENTIAL (a second read with a sentinel value: a running
+#       server's answer does not move, a client's does), forced here by the third hook.
+#       `unknown` must land in the same place as `no`: only an affirmative yes may license the
+#       other labels.
+for scc_attr in no unknown; do
+  scc_unattr="$tmp/scc-cap-unattributed-$scc_attr.txt"
+  AGENT_GATE_SUMMARY_FILE="$scc_unattr" \
+    AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+    AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+    AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_ATTRIBUTED="$scc_attr" \
+    SCCACHE_CACHE_SIZE=30G \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  if accel_token_is "$scc_unattr" sccache-cap '32212254720(unattributed)'; then
+    ok "sccache-cap: attribution '$scc_attr' renders (unattributed), never (pinned)"
+  else
+    bad "sccache-cap: attribution '$scc_attr' did not render (unattributed)"
+    grep '^accelerators:' "$scc_unattr" 2>/dev/null || cat "$scc_unattr"
+  fi
+  if accel_token_is "$scc_unattr" sccache-cap '32212254720(pinned)'; then
+    bad "sccache-cap: an unattributed cap read as (pinned) — enforcement asserted with no server proven"
+  fi
+  assert_accelerators "sccache-cap-unattributed-$scc_attr" "$scc_unattr"
+done
+
+# 9c-xi. AND A NULL `cache_size` IS *NOT* AN ATTRIBUTION SIGNAL — the correction that cost a round
+#        (issue #3727). A RUNNING server with an EMPTY cache reports `"cache_size":null` exactly as
+#        a client with no server does; measured by starting a real server at 40G on a private port
+#        and reading it back (cap 42949672960, size null), the two payloads differing only in their
+#        values. So a null size must leave the cap's classification ALONE and show up only in the
+#        occupancy token. A test keyed the other way was green against a stub that shared the
+#        code's premise — which is why this one asserts the two axes move independently.
+scc_nullsize="$tmp/scc-cap-nullsize.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_nullsize" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=null \
   AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=30G \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
-if accel_token_is "$scc_unattr" sccache-cap '32212254720(unattributed)' \
-   && accel_token_is "$scc_unattr" sccache-used 'unmeasured(no-size)'; then
-  ok "sccache-cap: a null cache_size renders (unattributed) + used unmeasured(no-size), never (pinned)"
+if accel_token_is "$scc_nullsize" sccache-cap '32212254720(pinned)' \
+   && accel_token_is "$scc_nullsize" sccache-used 'unmeasured(no-size)'; then
+  ok "sccache-cap: a null cache_size on an ATTRIBUTED cap stays (pinned) and only the occupancy is unmeasured(no-size)"
 else
-  bad "sccache-cap: a null cache_size did not render (unattributed)/(no-size)"
-  grep '^accelerators:' "$scc_unattr" 2>/dev/null || cat "$scc_unattr"
+  bad "sccache-cap: a null cache_size leaked into the cap's classification (the two axes are collapsed again)"
+  grep '^accelerators:' "$scc_nullsize" 2>/dev/null || cat "$scc_nullsize"
 fi
-if accel_token_is "$scc_unattr" sccache-cap '32212254720(pinned)'; then
-  bad "sccache-cap: an unenforced cap read as (pinned) — enforcement asserted with no server running"
-fi
-assert_accelerators "sccache-cap-unattributed" "$scc_unattr"
+assert_accelerators "sccache-cap-nullsize" "$scc_nullsize"
 
 # 9c-iv. Regression guard for the NEXT appended accelerators token (issue #2914).
 #        #2859 appended a Linux-only ` mold=` token and silently reddened three
@@ -5397,18 +5423,19 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 435: the #3727 capacity-token cases (9c-v..9c-x) add exactly 25 host-independent
+# 410 -> 439: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 29 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
-# grammar) = 2, and the invalid-stale row + its two axes-kept-apart asserts = 4. COUNTED FROM A
-# REAL RUN, not from
+# grammar) = 2, the invalid-stale row + its two axes-kept-apart asserts = 4, and the attribution
+# pair (9c-x's two forced outcomes x2 + 9c-xi's null-size-is-not-attribution pair) = 4. COUNTED FROM
+# A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +25 above is a measured difference and the deliberate ~10 margin is preserved rather than
+# the +29 above is a measured difference and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=435
+ASSERT_FLOOR=439
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

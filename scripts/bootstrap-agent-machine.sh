@@ -3219,15 +3219,25 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   SCC_RUN_STATE=""        # ok | no-server | unreadable
   SCC_SERVER_STARTED=0
   # scc_running_cap: the cap the RUNNING production server is enforcing, in bytes. Deliberately
-  # run with the AMBIENT environment — that is the server a gate on this box would talk to, and
-  # measured, a running server's reported cap does not move with the client's env.
+  # run with the AMBIENT environment — that is the server a gate on this box would talk to.
   #
-  # IT REQUIRES A NON-NULL `cache_size`, and that requirement is the whole soundness of the
-  # verdict: with NO server running, `--show-stats` answers max_cache_size from the CLIENT's own
-  # env (measured: SCCACHE_CACHE_SIZE=7G reads 7516192768 with nothing running) and reports
-  # `"cache_size":null`. Comparing our value against that number would be comparing the value
-  # with itself and calling it VERIFIED — a certification of nothing. So a null size is
-  # UNMEASURED, cause named.
+  # THE SOUNDNESS OF THE WHOLE VERDICT IS IN TELLING A SERVER'S ANSWER FROM THE CLIENT'S OWN, AND
+  # A NULL `cache_size` DOES NOT DO IT. Measured, in this order, and the second measurement
+  # falsified the first design:
+  #   * with NO server running, `--show-stats` answers max_cache_size from the CLIENT's env
+  #     (SCCACHE_CACHE_SIZE=7G reads 7516192768 with nothing up) and reports `"cache_size":null`;
+  #   * BUT A RUNNING SERVER WITH AN EMPTY CACHE ALSO REPORTS `"cache_size":null` — verified by
+  #     starting a real server at 40G on a private port and reading it back: cap 42949672960,
+  #     size null. The two payloads are otherwise IDENTICAL (a field-by-field diff differs only
+  #     in the values themselves), so "null size" cannot mean "no server", and a check keyed on
+  #     it reported UNMEASURED on a box whose server it had just correctly started.
+  # So attribution is decided by a DIFFERENTIAL, which is affirmative rather than inferred: read
+  # the cap twice, once with the ambient env and once with SCCACHE_CACHE_SIZE forced to a SENTINEL
+  # whose bytes differ from the first reading. A RUNNING server ignores the client's env (measured:
+  # a server started at 40G reports 42949672960 to a client with the variable unset), so the two
+  # readings AGREE ⇒ the number is the server's. With no server, the client resolves our env, so
+  # the second reading moves ⇒ the number is ours, not a cap in force. Two client calls, ~10 ms
+  # each, no mutation, and it needs no knowledge of ports or process tables.
   scc_running_cap() {
     SCC_RUN_CAP=""; SCC_RUN_WHY=""; SCC_RUN_STATE=unreadable
     have sccache || { SCC_RUN_WHY="no 'sccache' on PATH, so no running server can be read"; return 1; }
@@ -3241,14 +3251,6 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       SCC_RUN_WHY="'sccache --show-stats --stats-format json' produced no output (rc $rc)"
       return 1
     fi
-    hits=$(printf '%s\n' "$json" | grep -o '"cache_size":[0-9][0-9]*' 2>/dev/null)
-    if [ -z "$hits" ]; then
-      SCC_RUN_WHY="no sccache server is running (the reported cache_size is null), so there is no cap IN FORCE to compare against — the number --show-stats prints in that state is the CLIENT's own resolution of SCCACHE_CACHE_SIZE, not an enforced cap"
-      # AFFIRMATIVE, not a catch-all: this is the one branch that KNOWS nothing is running, which
-      # is what licenses the starter below. Every other failure stays `unreadable`.
-      SCC_RUN_STATE=no-server
-      return 1
-    fi
     hits=$(printf '%s\n' "$json" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
     n=$(printf '%s\n' "$hits" | grep -c '^' 2>/dev/null)
     if [ -z "$hits" ]; then
@@ -3259,6 +3261,36 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       return 1
     fi
     SCC_RUN_CAP=${hits##*:}
+    # ---- THE ATTRIBUTION DIFFERENTIAL (see the note above) ----
+    # The sentinel is chosen so its bytes CANNOT equal the first reading: 7K = 7168 bytes, and
+    # where the first reading is itself 7168 the sentinel moves to 9K. Without that guard, a box
+    # whose SCCACHE_CACHE_SIZE happens to be 7K with NO server would produce two equal readings
+    # and be reported as server-attributed — the one input that could invert this test.
+    local sentinel=7K sentinel_bytes=7168 json2 rc2=0 cap2=""
+    if [ "$SCC_RUN_CAP" = "$sentinel_bytes" ]; then sentinel=9K; sentinel_bytes=9216; fi
+    json2=$(bounded 20 env -u BASH_ENV -u ENV SCCACHE_CACHE_SIZE="$sentinel" \
+      sccache --show-stats --stats-format json 2>/dev/null) || rc2=$?
+    if [ "$rc2" != 0 ] || [ -z "$json2" ]; then
+      SCC_RUN_CAP=""
+      SCC_RUN_WHY="the attribution differential could not be taken (the second 'sccache --show-stats' produced no output, rc $rc2), so it cannot be established whether $hits is a RUNNING server's cap or this client's own resolution of SCCACHE_CACHE_SIZE"
+      return 1
+    fi
+    cap2=$(printf '%s\n' "$json2" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null | head -1)
+    cap2=${cap2##*:}
+    if [ -z "$cap2" ]; then
+      SCC_RUN_CAP=""
+      SCC_RUN_WHY="the attribution differential could not be taken (the second reading carries no max_cache_size), so it cannot be established whether the cap is a RUNNING server's or this client's own"
+      return 1
+    fi
+    if [ "$cap2" != "$SCC_RUN_CAP" ]; then
+      # The reading MOVED with the client's env, so the client is answering: nothing is running.
+      # AFFIRMATIVE, not a catch-all — this is the one branch that KNOWS there is no server, which
+      # is what licenses the starter below. Every other failure stays `unreadable`.
+      SCC_RUN_WHY="no sccache server is answering: the reported cap MOVED when the client's SCCACHE_CACHE_SIZE was changed to $sentinel ($SCC_RUN_CAP -> $cap2), which is what a client resolving its OWN env does — a running server's answer does not move. So there is no cap IN FORCE to compare against"
+      SCC_RUN_CAP=""
+      SCC_RUN_STATE=no-server
+      return 1
+    fi
     SCC_RUN_STATE=ok
     return 0
   }

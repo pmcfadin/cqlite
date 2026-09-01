@@ -1126,26 +1126,39 @@ _sccache_health() {
 # this token as a certification of the cap should read `sccache-cap:` from
 # bootstrap instead, which is the check that asks sccache.
 #
-# AND `max_cache_size` IS ONLY THE *SERVER'S* CAP WHILE A SERVER IS RUNNING —
+# AND `max_cache_size` IS ONLY THE *SERVER'S* CAP WHILE A SERVER IS ANSWERING —
 # MEASURED, and it is why the sixth source token exists. With no server up,
 # `--show-stats` does NOT start one (measured: nothing listening afterwards, an
 # empty SCCACHE_DIR, and a following `--stop-server` reports "couldn't connect");
 # it answers from the CLIENT's own resolution of SCCACHE_CACHE_SIZE, so
 # `SCCACHE_CACHE_SIZE=7G` reads `"max_cache_size":7516192768` with no server
 # anywhere. Reporting that as `(pinned)` would assert enforcement by a server that
-# does not exist — this issue's own defect, one layer in. The tell is
-# `"cache_size":null` (measured: null with no server, an integer with one), so a
-# null size renders `<bytes>(unattributed)`: the number is a cap that WILL apply,
-# not one proven to be in force. Deliberately named for what is ESTABLISHED rather
-# than `no-server`, because a non-disk backend (the GHA cache in CI) can also
-# report no size while a server runs, and `no-server` would then be false.
+# does not exist — this issue's own defect, one layer in.
+#
+# `"cache_size":null` IS NOT THE TELL, AND BELIEVING IT WAS COST A ROUND. Measured
+# afterwards: a RUNNING server with an EMPTY cache reports a null size too, and
+# the two payloads are otherwise IDENTICAL (a field-by-field diff of a no-server
+# read against a freshly-started-at-40G read differs only in the values). So
+# attribution is decided by a DIFFERENTIAL, affirmatively: read the cap twice, the
+# second time with SCCACHE_CACHE_SIZE forced to a sentinel whose bytes differ from
+# the first reading. A running server IGNORES the client's env (measured: a server
+# started at 40G answers 42949672960 to a client with the variable unset), so two
+# EQUAL readings mean the number is the server's, and a reading that MOVES means
+# the client is resolving our own env. Unequal, or unmeasurable, renders
+# `<bytes>(unattributed)`: the number is a cap that WILL apply, not one proven to
+# be in force. Named for what is ESTABLISHED rather than `no-server`, because a
+# non-disk backend (the GHA cache in CI) could also defeat the differential and
+# `no-server` would then be a claim we did not measure.
 #
 # Test hooks (self-test, issue #3727): AGENT_GATE_TEST_SCCACHE_MAX_BYTES /
 # AGENT_GATE_TEST_SCCACHE_USED_BYTES / AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES force
 # the three measured inputs, so every state asserts deterministically with no
 # sccache installed. Each accepts digits, or the literal `unmeasured`; ANYTHING ELSE
 # IS TREATED AS `unmeasured`, NEVER AS 0 — a mis-set hook must not manufacture a
-# measured-looking value.
+# measured-looking value. The USED hook also accepts `null` (a server reporting no
+# cache size), and AGENT_GATE_TEST_SCCACHE_ATTRIBUTED=yes|no|unknown forces the
+# attribution differential's outcome — a separate axis from the size, since the
+# measurement above showed a null size says nothing about whether a server answered.
 #
 # ONE PROBE PER EMIT, AND IT LIVES IN accelerators_line'S OWN BODY. Every call site
 # invokes `$(accelerators_line)`, so a script-scope memo lands in a subshell and is
@@ -1232,14 +1245,15 @@ _SCC_USED_BYTES=""
 _SCC_USED_PCT=""     # <N>% | cap-zero
 _SCC_USED_WHY=""
 _SCC_DEFAULT_BYTES=""
-_SCC_SIZE_NULL=0     # `"cache_size":null` was observed -> the cap is UNATTRIBUTED
+_SCC_SIZE_NULL=0     # `"cache_size":null` was observed (a size, NOT an attribution, signal)
+_SCC_ATTRIBUTED=""   # yes | no | unknown — did the cap come from a RUNNING server?
 
 # _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, assigned
 # into the variables above (never printed — see the one-probe-per-emit note).
 _sccache_cap_probe() {
   _SCC_CAP_KIND=unmeasured; _SCC_CAP_BYTES=""; _SCC_CAP_SOURCE=""; _SCC_CAP_WHY=no-stats
   _SCC_USED_KIND=unmeasured; _SCC_USED_BYTES=""; _SCC_USED_PCT=""; _SCC_USED_WHY=no-stats
-  _SCC_DEFAULT_BYTES=""; _SCC_SIZE_NULL=0
+  _SCC_DEFAULT_BYTES=""; _SCC_SIZE_NULL=0; _SCC_ATTRIBUTED=unknown
 
   local state="${AGENT_GATE_TEST_SCCACHE_STATE:-${ACCEL_SCCACHE:-absent}}"
   if [ "$state" != on ]; then
@@ -1260,6 +1274,11 @@ _sccache_cap_probe() {
   local hook_max="${AGENT_GATE_TEST_SCCACHE_MAX_BYTES:-}"
   local hook_used="${AGENT_GATE_TEST_SCCACHE_USED_BYTES:-}"
   if [ -n "$hook_max" ] || [ -n "$hook_used" ]; then
+    # With the cap forced, NO server is contacted, so the differential cannot run: attribution
+    # defaults to `yes` (the hook is standing in for a real server's answer) and the dedicated
+    # hook overrides it. An unrecognised value is `unknown`, never `yes`.
+    _SCC_ATTRIBUTED="${AGENT_GATE_TEST_SCCACHE_ATTRIBUTED:-yes}"
+    case "$_SCC_ATTRIBUTED" in yes|no|unknown) ;; *) _SCC_ATTRIBUTED=unknown ;; esac
     _sccache_hook_uint "$hook_max"  cap  || why_cap=no-stats
     if [ "$hook_used" = null ]; then
       why_used=no-size; _SCC_SIZE_NULL=1
@@ -1290,15 +1309,32 @@ _sccache_cap_probe() {
       if [ -z "$used" ]; then
         case "$json" in *'"cache_size":null'*) why_used=no-size; _SCC_SIZE_NULL=1 ;; esac
       fi
+      # THE ATTRIBUTION DIFFERENTIAL. The sentinel's bytes cannot equal the first
+      # reading: 7K = 7168, and where the first reading IS 7168 the sentinel moves to
+      # 9K — without that guard a box whose own value is 7K with no server would
+      # produce two equal readings and be reported as server-attributed, the one input
+      # that inverts this test.
+      if [ -n "$cap" ]; then
+        local sent=7K sent_bytes=7168 json2="" rc2=0 cap2=""
+        [ "$cap" = "$sent_bytes" ] && { sent=9K; sent_bytes=9216; }
+        json2=$(env SCCACHE_CACHE_SIZE="$sent" sccache --show-stats --stats-format json 2>/dev/null) || rc2=$?
+        if [ "$rc2" = 0 ] && [ -n "$json2" ] && _sccache_json_uint "$json2" max_cache_size cap2; then
+          if [ "$cap2" = "$cap" ]; then _SCC_ATTRIBUTED=yes; else _SCC_ATTRIBUTED=no; fi
+        else
+          _SCC_ATTRIBUTED=unknown
+        fi
+      fi
     fi
   fi
 
   if [ -n "$cap" ]; then
     _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"; _SCC_CAP_WHY=""
     local implied=""
-    if [ "$_SCC_SIZE_NULL" = 1 ]; then
-      # Nothing running is proven to enforce this number, so no claim about the
-      # variable being IN FORCE may be made from it (see the block comment).
+    if [ "$_SCC_ATTRIBUTED" != yes ]; then
+      # Nothing running is PROVEN to enforce this number — either the reading moved with
+      # the client's env (no server is answering) or the differential could not be taken —
+      # so no claim about the variable being IN FORCE may be made from it. Fail-closed:
+      # only an affirmative `yes` licenses the other five labels (see the block comment).
       _SCC_CAP_SOURCE=unattributed
     elif [ -z "${SCCACHE_CACHE_SIZE+set}" ]; then
       # The variable is UNSET: nothing this fleet provisions is in play, so the only

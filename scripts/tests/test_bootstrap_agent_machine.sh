@@ -571,7 +571,11 @@ case "$*" in
 esac
 if [ -n "${SCCACHE_SERVER_PORT:-}" ]; then
   # ISOLATED client, no server: the cap comes from this process s own SCCACHE_CACHE_SIZE and the
-  # size is null (measured on sccache 0.17.0).
+  # size is null (measured on sccache 0.17.0). The two RUNNING-server branches below deliberately
+  # IGNORE the client env, because that is what a real server does — and it is exactly what the
+  # attribution differential measures. A null cache_size is NOT a no-server signal: a running
+  # server with an empty cache reports null too (measured), which is why SCC_STUB_USED=null is a
+  # legal setting for a RUNNING server.
   printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
     "${SCC_STUB_ISO_LOC:-${SCCACHE_DIR:-/none}}" "$(scc_resolve)"
 elif [ -n "${SCC_STUB_STATE:-}" ] && [ -s "${SCC_STUB_STATE:-}" ]; then
@@ -4392,7 +4396,7 @@ else
   scc_out_ns=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=none SCC_STUB_LOG="$scc_log")
   scc_sl_ns=$(scc_slice "$scc_out_ns")
   if printf '%s\n' "$scc_sl_ns" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_ns" | grep -q 'no sccache server is running' \
+     && printf '%s\n' "$scc_sl_ns" | grep -q 'no sccache server is answering' \
      && ! printf '%s\n' "$scc_sl_ns" | grep -qE '\[ok\].*sccache-cap'; then
     ok "sccache-cap: a null cache_size is UNMEASURED — the client's own echo can never certify a cap"
   else
@@ -4441,6 +4445,29 @@ else
     bad "sccache-cap: the started server got '$(cat "$scc_state_w" 2>/dev/null)' rather than the persisted value's bytes"
   fi
 
+  # 12b-g2b. A RUNNING SERVER WITH AN EMPTY CACHE STILL VERIFIES — the falsifier for the premise
+  #          this section shipped for one commit (issue #3727). `"cache_size":null` was read as
+  #          "no server is running", and measured against real sccache a server freshly started at
+  #          40G on a private port reports cap 42949672960 with size NULL; the two payloads differ
+  #          only in their values. Keyed on a null size, the section reported UNMEASURED about a
+  #          server whose cap it had just correctly established — and the first version of this
+  #          suite was GREEN because the stub encoded the same premise as the code. Attribution is
+  #          now a differential (a running server's answer does not move when the client's
+  #          SCCACHE_CACHE_SIZE changes; a client's does), and this case pins it.
+  scc_log_empty="$tmp/scc-stub-argv-empty.log"; : >"$scc_log_empty"
+  scc_out_empty=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCC_STUB_MAX=32212254720 \
+    SCC_STUB_USED=null SCC_STUB_LOG="$scc_log_empty" --fix-sccache-cap)
+  scc_sl_empty=$(scc_slice "$scc_out_empty")
+  if printf '%s\n' "$scc_sl_empty" | grep -qE '\[ok\].*sccache-cap: VERIFIED' \
+     && [ "$(scc_warns "$scc_sl_empty")" = 0 ] \
+     && ! printf '%s\n' "$scc_sl_empty" | grep -q 'THIS RUN STARTED' \
+     && ! grep -q -- '--start-server' "$scc_log_empty"; then
+    ok "sccache-cap: a RUNNING server with an empty cache (cache_size null) VERIFIES as an ALREADY-RUNNING server — no start, no UNMEASURED"
+  else
+    bad "sccache-cap: a running server with an empty cache was mistaken for no server (the null-size premise is back)"
+    printf '%s\n' "$scc_sl_empty" | head -6; cat "$scc_log_empty" | head -3
+  fi
+
   # 12b-g3. A DEFAULT RUN STARTS NOTHING. Starting a daemon is a host mutation, and this file's
   #         standing contract is that a run without --yes / a --fix flag mutates nothing — so the
   #         same fresh box stays UNMEASURED, names what is missing, and points at the flag.
@@ -4450,7 +4477,7 @@ else
     SCC_STUB_STATE="$scc_state_d" SCC_STUB_LOG="$scc_log_def")
   scc_sl_def=$(scc_slice "$scc_out_def")
   if printf '%s\n' "$scc_sl_def" | grep -qE '\[warn\].*sccache-cap: UNMEASURED' \
-     && printf '%s\n' "$scc_sl_def" | grep -q 'no sccache server is running' \
+     && printf '%s\n' "$scc_sl_def" | grep -q 'no sccache server is answering' \
      && printf '%s\n' "$scc_sl_def" | grep -q -- '--fix-sccache-cap' \
      && ! grep -q -- '--start-server' "$scc_log_def" \
      && [ ! -s "$scc_state_d" ]; then

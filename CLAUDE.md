@@ -777,10 +777,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `SCCACHE_CACHE_SIZE` once, at server startup); `…(default)` on a fleet box means the cap is not
   provisioned, the #3414 reading one variable over; `…(invalid-stale)` means BOTH that the value
   is discarded AND that the running cap is not its fallback, where the remedy INVERTS (fix the
-  value first — a bare `--stop-server` there LOWERS the cap); `…(unattributed)` means `cache_size` came back
-  null, so no RUNNING server is proven to enforce the number — measured, a client with no server
-  answers `max_cache_size` from its OWN env, so a cap read out of `--show-stats` is an ENFORCED cap
-  only while `cache_size` is an integer. Measured trap: `30G` is 30 GiB but **`30GiB`
+  value first — a bare `--stop-server` there LOWERS the cap); `…(unattributed)` means no RUNNING server was
+  proven to enforce the number — measured, a client with no server answers `max_cache_size` from its
+  OWN env, and **a null `cache_size` does NOT distinguish the two** (a running server with an empty
+  cache reports null as well), so attribution is a DIFFERENTIAL: a running server's answer does not
+  move when the client's `SCCACHE_CACHE_SIZE` changes, a client's does. Measured trap: `30G` is 30 GiB but **`30GiB`
   and `30GB` are SILENTLY DISCARDED** to the 10 GiB default and a bare integer means BYTES, with
   no diagnostic anywhere — `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` persists
   and VERIFIES the value against a fresh profile-free session AND the running server (only

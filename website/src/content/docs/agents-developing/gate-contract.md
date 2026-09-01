@@ -946,8 +946,10 @@ Two further tokens carry the sccache **capacity** facts (issue #3727):
 `sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|invalid-stale|unattributed)` and
 `sccache-used=<bytes>(<N>%)`, each with an explicit `unmeasured(<why>)` /
 `na(sccache-not-in-use)` rendering so a positive reading is always an affirmative
-measurement. Both are read from the **running server's** JSON, because sccache reads
-`SCCACHE_CACHE_SIZE` once, at server startup: `…(stale)` means the running server predates the
+measurement. Both are read from the **running server's** JSON — attributed to a server by a differential (a
+running server's answer does not move when the client's `SCCACHE_CACHE_SIZE` changes; a client with
+no server resolves your own variable, and a null `cache_size` does not tell the two apart) — because
+sccache reads `SCCACHE_CACHE_SIZE` once, at server startup: `…(stale)` means the running server predates the
 value and the remedy is `sccache --stop-server`, never editing the value; `…(default)` on a fleet
 box means the cap is not provisioned. Measured trap: `30G` is 30 GiB but **`30GiB` and `30GB` are
 SILENTLY DISCARDED** to sccache's 10 GiB default, and a bare integer means BYTES — with no

@@ -126,8 +126,16 @@ A third fact, measured while building that check and worth knowing before you re
 `--show-stats` output: **with NO server running, `--show-stats` does not start one** (nothing listens
 afterwards, the `SCCACHE_DIR` stays empty, a following `--stop-server` reports "couldn't connect")
 **and it answers `max_cache_size` from the CLIENT's own env** — `SCCACHE_CACHE_SIZE=7G` reads
-`7516192768` with no server anywhere. The tell is `"cache_size":null`. So a cap read out of
-`--show-stats` is only an *enforced* cap while `cache_size` is an integer.
+`7516192768` with no server anywhere. So a cap read out of `--show-stats` is not necessarily a cap in
+force.
+
+**`"cache_size":null` is NOT how you tell.** Measured: a *running* server with an *empty* cache
+reports a null size too — a field-by-field diff of a no-server read against a freshly-started-at-40G
+read differs only in the values themselves. What distinguishes them is that **a running server
+ignores the client's environment**: read the cap twice, the second time with `SCCACHE_CACHE_SIZE` set
+to a sentinel whose bytes differ from the first reading. Two equal readings ⇒ a server answered;
+a reading that moves ⇒ the client resolved your own variable and nothing is enforcing it. Both the
+gate token and `--fix-sccache-cap` decide attribution that way.
 
 ### `sccache-cap=` / `sccache-used=` on the accelerators line (issue #3727)
 
@@ -151,8 +159,9 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
   the server on its own would *lower* the cap to sccache's default, because the restart discards
   the value too. (Env-value validity and running-server provenance are independent axes; one
   label for both would invent a causal link and invert the remedy — #3727.)
-- `…(unattributed)` — `cache_size` came back null, so no *running* server is proven to enforce this
-  number; it is the cap that will apply, most commonly because no server is up.
+- `…(unattributed)` — the attribution differential did not establish that a *running* server
+  answered (the reading moved with the client's env, or the second read failed), so this is the cap
+  that *will* apply rather than one proven to be in force. Most commonly: no server is up yet.
 - `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires
   an affirmative measurement, so these never render as `0` or blank.
 - `sccache-used=<bytes>(<N>%)` — occupancy and fill against the enforced cap; `>= 95%` also emits a
