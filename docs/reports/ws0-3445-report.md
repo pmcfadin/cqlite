@@ -330,7 +330,10 @@ touch the expensive path.
 Not a recommendation — the verdict above forbids one. Recorded because a KILL that explains
 *where the cost would have been* is worth more than a bare number.
 
-* One `bswap` (`u64::from_be_bytes`) carries **72.7%** of all vint decode cycles.
+* Cycle weight inside the region is concentrated around the `bswap` (`u64::from_be_bytes`) —
+  **~72.7%** by the unshifted table. **Indicative, not precise**: with no PEBS the skid at
+  instruction granularity is the same order as the figure (§4), so read this as "the cost is in
+  the multi-byte bit-assembly", not as an exact per-instruction attribution.
 * That instruction is only on the multi-byte path, and the measured width distribution is
   **55.6% single-byte / 44.4% multi-byte** (5 bytes and wider: effectively absent). So the
   concentration is where the work is, not an artifact of sample skid.

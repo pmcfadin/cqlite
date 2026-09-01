@@ -37,7 +37,9 @@ Snapshot taken at the dump instant (counts are point-in-time; the RATIO is the r
 ## Why this matters to the numbers above it
 
 It explains the single most striking figure in the cycle attribution: **one `bswap`
-instruction carries 72.7% of all VInt decode cycles**. That instruction exists only on the
+instruction carries ~72.7% of all VInt decode cycles by the UNSHIFTED table** (indicative
+only -- no PEBS on this host, so instruction-granularity skid is the same order as the figure;
+see the report's AC2 section). That instruction exists only on the
 multi-byte path, and the multi-byte path is taken by 44% of decodes — so the
 concentration is not an artifact of sample skid landing on a convenient instruction, it is
 where the work actually is. The `bswap` is also the consumer of a store-to-load forward from
