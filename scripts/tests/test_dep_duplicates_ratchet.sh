@@ -172,6 +172,27 @@ tree_coloured() {
 # Content, but no COLUMN-ZERO `<name> v<version>` line: every line is an indented branch.
 tree_unparseable() { printf '├── foo v1.0.0\n│   └── x v0.1.0\n    (nothing at column zero)\n'; }
 
+# IMPOSSIBLE CENSUS: `cargo tree -d` reports DUPLICATE groups, so every crate it prints
+# has at least two members. A crate appearing ONCE means the output is not the document
+# this parser thinks it is reading (a truncation, an interleaved write, a different
+# subcommand), and counting it would publish a census assembled from a document nobody
+# validated.
+tree_singleton() { printf 'foo v1.0.0\n└── x v0.1.0\n\nbar v0.1.0\nbar v0.2.0\n'; }
+# PARTIALLY PARSEABLE: two good groups and then a TRUNCATED column-zero line — the shape
+# a `cargo tree` killed mid-write leaves behind. Every recognised line is fine; the census
+# is short by however much never arrived.
+tree_truncated() { printf 'foo v1.0.0\nfoo v2.0.0\n\nbar v0.1.0\nbar v0.2.0\n\nhashbrow'; }
+# A column-zero line that is neither a record nor a tree branch — a cargo diagnostic
+# interleaved onto stdout, or another subcommand's output entirely.
+tree_foreign_line() { tree_baseline; printf 'error: failed to select a version\n'; }
+# THE FALSE-POSITIVE CONTROL for all three of the above: `[dev-dependencies]` /
+# `[build-dependencies]` section headers ARE column-zero lines cargo really prints (this
+# workspace's own output carries one), and rejecting them would red the guard on correct
+# input — the failure mode a strictness fix most easily introduces.
+tree_with_section_header() {
+  printf 'foo v1.0.0\n└── x v0.1.0\n\nfoo v2.0.0\n\n[dev-dependencies]\nbar v0.1.0\nbar v0.2.0\n'
+}
+
 baseline_matching() { printf 'instances 4\ncrates 2\ncrate foo 2\ncrate bar 2\n'; }
 
 # plant_timeout <dir>: a HERMETIC forwarding `timeout` on the scratch PATH — the thing
@@ -426,6 +447,39 @@ crates 2
 crate foo 1
 crate bar 3
 ' 'a DUPLICATE needs at least 2'
+
+# --- P17/P18/P19: THE MEASUREMENT PARSER IS AS STRICT AS THE BASELINE PARSER ------
+# THE ASYMMETRY THIS CLOSES (roborev, #1700): the BASELINE reader already refuses a
+# `crate x 1` ("a DUPLICATE needs at least 2") and refuses any line outside its closed
+# grammar — but the MEASUREMENT parser accepted anything with one recognisable record in
+# it, counting what it recognised and ignoring the rest. So partial or malformed
+# `cargo tree` output produced a NO-INCREASE verdict from an UNDER-COUNT: a VACUOUS PASS,
+# in the one component whose entire reason for existing is never to emit one. A parser
+# strict about the file it reads and permissive about the command it runs is guessing on
+# the half that matters.
+d=$(new_tree p17); plant_cargo "$d" 0 tree_singleton; run_guard "$d"
+assert_case "P17: a crate appearing ONCE is an impossible duplicate census — UNMEASURABLE (exit 3), naming the crate" \
+  3 'SKIP-UNMEASURABLE cause=implausible-census' "'foo' appears 1 time" 'at least 2' 'NOT a pass'
+case "$OUT" in
+  *'verdict '*) bad "P17: an unvalidated census must not print a verdict — that is the vacuous pass" ;;
+  *)            ok "P17: an unvalidated census prints NO verdict at all" ;;
+esac
+d=$(new_tree p18); plant_cargo "$d" 0 tree_truncated; run_guard "$d"
+assert_case "P18: TRUNCATED output (good groups then a partial column-zero line) is UNMEASURABLE (exit 3), quoting the offending line" \
+  3 'SKIP-UNMEASURABLE cause=malformed-record' 'hashbrow' 'NOT a pass'
+case "$OUT" in
+  *'verdict '*) bad "P18: a truncated read must not print a verdict — the census is short by whatever never arrived" ;;
+  *)            ok "P18: a truncated read prints NO verdict (a partial document may not become a comparison)" ;;
+esac
+d=$(new_tree p18b); plant_cargo "$d" 0 tree_foreign_line; run_guard "$d"
+assert_case "P18b: a FOREIGN column-zero line (a diagnostic on stdout) is UNMEASURABLE (exit 3), not silently skipped" \
+  3 'SKIP-UNMEASURABLE cause=malformed-record' 'error: failed to select a version'
+# THE FALSE-POSITIVE CONTROL. A strictness fix that reds on correct input is the lane
+# agents learn to waive, and `[dev-dependencies]` is a column-zero line cargo REALLY
+# prints (it is in this workspace's own `cargo tree -d` output today).
+d=$(new_tree p19); plant_cargo "$d" 0 tree_with_section_header; run_guard "$d"
+assert_case "P19: a real [dev-dependencies] section header is RECOGNISED, not called malformed (strictness must not red on correct cargo output)" \
+  0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE (4/2 vs baseline 4/2)'
 
 # --- P12: --regenerate round trip ----------------------------------------
 d=$(new_tree p12 none); plant_cargo "$d" 0 tree_grew

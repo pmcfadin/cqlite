@@ -38,7 +38,13 @@
 #                           all-clear from a scan that may not have happened.
 #   UNMEASURABLE            exit 3 — no cargo on PATH, NO WAY TO BOUND THE PROBE (see
 #                           below), `cargo tree` non-zero (an offline registry, a broken
-#                           lockfile), a timeout, or output the parser does not recognise.
+#                           lockfile), a timeout, or output the parser does not recognise:
+#                           nothing recognisable at all (`unparseable-output`), a
+#                           column-zero line that is not a duplicate-group head
+#                           (`malformed-record` — truncation, a diagnostic on stdout), or a
+#                           crate counted ONCE (`implausible-census` — a duplicate group
+#                           has at least two members, the same rule the baseline reader
+#                           enforces).
 #                           The gate component maps this to SKIP NAMING THE CAUSE. It is
 #                           NOT a pass.
 #   BASELINE UNUSABLE       exit 4 — the committed baseline is missing or does not parse
@@ -138,7 +144,8 @@ counts against scripts/ci/dep-duplicates-baseline.txt.
                   ADVISORY-INCREASE — an increase is ADVISORY and never fails).
                   Exit 3 = UNMEASURABLE, cause named (no cargo, no timeout(1) to
                   bound the probe with, cargo tree failed, timed out, unparseable
-                  output). Exit 4 = the committed baseline is
+                  output, a malformed column-zero record, or an impossible census
+                  in which some crate appears once). Exit 4 = the committed baseline is
                   missing or does not parse. Exit 2 = usage error.
   --regenerate    Re-measure and rewrite the baseline from the current graph. THE one
                   documented regeneration command; run it after a change that
@@ -309,6 +316,23 @@ census_bump() {
   fi
 }
 
+# THE MEASUREMENT PARSER IS AS STRICT AS THE BASELINE PARSER BELOW, and that symmetry is
+# the point (roborev, #1700). The baseline reader refuses a `crate x 1` and refuses any
+# line outside its closed grammar; this parser used to count what it RECOGNISED and
+# silently ignore everything else, so partial or malformed output — a `cargo tree` killed
+# mid-write, a diagnostic interleaved onto stdout, another subcommand's output — produced
+# a NO-INCREASE verdict from an UNDER-COUNT. That is a VACUOUS PASS in the one component
+# whose whole reason for existing is never to emit one. A parser strict about the file it
+# reads and permissive about the command it runs is guessing on the half that matters.
+#
+# The classification is CLOSED, three ways, and every line lands in exactly one:
+#   CONTINUATION  a line whose first character is not a crate-name character: a tree
+#                 branch (`├`, `│`, `└`), an indented entry, or a `[dev-dependencies]` /
+#                 `[build-dependencies]` section header. All of these cargo really prints
+#                 (this workspace's own output carries a `[dev-dependencies]` line), and
+#                 rejecting them would red the guard on CORRECT input.
+#   RECORD        a column-zero `<name> v<version>` duplicate-group head. Counted.
+#   MALFORMED     anything else at column zero. NOT skipped — UNMEASURABLE, named.
 now_instances=0
 now_names=""
 nonblank=0
@@ -317,16 +341,34 @@ while IFS= read -r line || [ -n "$line" ]; do
     '') continue ;;
   esac
   nonblank=$((nonblank + 1))
-  # Column zero, `name vX...`. The name grammar is cargo's own (alphanumerics, `-`, `_`).
+  # CONTINUATION? Decided on the FIRST character only, so the rule is unambiguous.
   case "$line" in
-    [A-Za-z0-9_-]*' v'[0-9]*)
-      nm="${line%% *}"
-      case "$nm" in *[!A-Za-z0-9_-]*) continue ;; esac
-      now_instances=$((now_instances + 1))
-      census_get "$NOW_CENSUS" "$nm" >/dev/null || now_names="$now_names $nm"
-      census_bump "$NOW_CENSUS" "$nm"
-      ;;
+    [A-Za-z0-9_-]*) ;;
+    *) continue ;;
   esac
+  # A top-level line, so it MUST be a record. Split with parameter expansion, never
+  # `set -- $line`: word splitting also GLOBS, and cargo prints `(*)` on a de-duplicated
+  # entry, which would expand against the working directory.
+  case "$line" in
+    *' '*) ;;
+    *) unmeasurable malformed-record \
+      "$PROBE_DESC printed a column-zero line that is not a '<name> v<version>' duplicate-group head: '$line'" ;;
+  esac
+  nm="${line%% *}"
+  rest="${line#* }"
+  ver="${rest%% *}"
+  case "$nm" in
+    *[!A-Za-z0-9_-]*) unmeasurable malformed-record \
+      "$PROBE_DESC printed a column-zero line whose first field '$nm' is not a crate name: '$line'" ;;
+  esac
+  case "$ver" in
+    v[0-9]*) ;;
+    *) unmeasurable malformed-record \
+      "$PROBE_DESC printed a column-zero line whose second field '$ver' is not a v<version>: '$line'" ;;
+  esac
+  now_instances=$((now_instances + 1))
+  census_get "$NOW_CENSUS" "$nm" >/dev/null || now_names="$now_names $nm"
+  census_bump "$NOW_CENSUS" "$nm"
 done <"$TREE_TXT"
 
 now_crates=0
@@ -340,6 +382,17 @@ if [ "$now_instances" -eq 0 ] && [ "$nonblank" -gt 0 ]; then
   unmeasurable unparseable-output \
     "$PROBE_DESC printed $nonblank non-blank line(s) but NO column-zero '<name> v<version>' duplicate-group line was recognised"
 fi
+
+# THE CENSUS MUST BE POSSIBLE, not merely parseable. `cargo tree -d` reports DUPLICATE
+# groups, so every crate it prints has at least TWO members — the identical rule the
+# baseline reader already enforces on `crate <name> <n>`. A crate counted ONCE means the
+# document is not the one this parser thinks it is reading, and a census assembled from an
+# unvalidated document may not become a verdict.
+for _n in $now_names; do
+  _c="$(census_get "$NOW_CENSUS" "$_n")"
+  [ "$_c" -ge 2 ] || unmeasurable implausible-census \
+    "in the $PROBE_DESC census '$_n' appears $_c time(s) — a DUPLICATE group has at least 2 members, so this output is not a complete duplicate census"
+done
 say "MEASURED $now_instances duplicate instance(s) / $now_crates duplicated crate(s) from $PROBE_DESC"
 
 # ---------------------------------------------------------------------------
