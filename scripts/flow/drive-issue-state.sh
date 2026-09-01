@@ -404,16 +404,44 @@ count_sentinel() {
   printf '%s\n' "$n"
 }
 
+# marker_class <path> — echo absent | not-regular | stamped | displaced | legacy.
+#
+# ONE CLASSIFIER FOR EVERY CALLER, AND "LEGACY" REQUIRES THE WHOLE FILE TO BE SENTINEL-FREE.
+# The first cut inferred "carries no ownership stamp" from the FIRST LINE ALONE, and the
+# migration path then discarded and replaced such a file. So a stamped marker with a single
+# prepended blank line or comment — a ONE-BYTE mutation — was classified legacy, and A LIVE
+# PEER'S STATE WAS OVERWRITTEN: precisely the defect this file exists to close, wearing the
+# migration path's clothes. The inference "no stamp at line 1 => no identity asserted" is
+# valid ONLY if no sentinel exists ANYWHERE, so `legacy` is now the answer of last resort:
+#
+#   stamped   line 1 IS the begin sentinel — parse it (dup/grammar checks follow)
+#   displaced a sentinel exists at column zero but NOT as a valid prologue opener. The file
+#             DOES assert an identity, which merely cannot be READ, and an unreadable
+#             identity may be a live peer's => MALFORMED, never migratable.
+#   legacy    no sentinel anywhere => genuinely the pre-#3822 shape => UNSTAMPED
+marker_class() {
+  local path="$1" nb ne
+  [ -e "$path" ] || { printf 'absent\n'; return 0; }
+  { [ -f "$path" ] && [ -r "$path" ]; } || { printf 'not-regular\n'; return 0; }
+  if [ "$(head -1 "$path" 2>/dev/null || true)" = "$STAMP_BEGIN" ]; then
+    printf 'stamped\n'; return 0
+  fi
+  nb="$(count_sentinel "$path" "$STAMP_BEGIN")"
+  ne="$(count_sentinel "$path" "$STAMP_END")"
+  if [ "$nb" -gt 0 ] || [ "$ne" -gt 0 ]; then printf 'displaced\n'; else printf 'legacy\n'; fi
+}
+
 # read_marker — parse the stamp prologue of the marker in the current worktree.
 # Exits with a named refusal on every structural fault; returns 0 with S_* set otherwise.
 read_marker() {
-  local path; path="$(marker_path)"
-  [ -e "$path" ] || refuse ABSENT 3 "no $MARKER_NAME in $(sane "$(pwd -P)") — nothing to resume; this is a legitimate FRESH START, not a refusal"
-  [ -f "$path" ] && [ -r "$path" ] || refuse ERROR 1 "$(sane "$path") exists but is not a readable regular file — nothing was decided"
-
-  local first
-  first="$(head -1 "$path" 2>/dev/null || true)"
-  if [ "$first" != "$STAMP_BEGIN" ]; then
+  local path cls; path="$(marker_path)"
+  cls="$(marker_class "$path")"
+  [ "$cls" != absent ] || refuse ABSENT 3 "no $MARKER_NAME in $(sane "$(pwd -P)") — nothing to resume; this is a legitimate FRESH START, not a refusal"
+  [ "$cls" != not-regular ] || refuse ERROR 1 "$(sane "$path") exists but is not a readable regular file — nothing was decided"
+  if [ "$cls" = displaced ]; then
+    refuse MALFORMED 8 "$(sane "$path") contains a stamp sentinel at column zero but NOT as its first line, so it DOES assert an ownership identity and that identity cannot be READ — it is NOT treated as an unstamped legacy marker and is never replaced for you, because an unreadable identity may be a LIVE PEER's (a single prepended blank line or comment produces this shape). INSPECT it, and if it is genuinely corrupt remove it or move it aside (e.g. 'mv $MARKER_NAME $MARKER_NAME.corrupt'); with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally."
+  fi
+  if [ "$cls" = legacy ]; then
     refuse UNSTAMPED 8 "$(sane "$path") carries NO ownership stamp (its first line is not the stamp sentinel) — this is the pre-#3822 marker shape, whose plan could belong to ANY session on ANY machine, so nothing is READ from it. The route forward is '$prog write <issue>', which SUCCEEDS over an unstamped marker and REPLACES it — DISCARDING its body, because an unstamped plan may belong to any session and is never carried forward. Save anything you need out of the file first."
   fi
 
@@ -488,6 +516,41 @@ marker_body() {
 # ---------------------------------------------------------------------------
 # Liveness of the RECORDED writer. Sets LIVE_STATE (gone|alive|unknown) + LIVE_DETAIL.
 # ---------------------------------------------------------------------------
+
+# epoch_is_canonical <value> — 0 iff <value> is a bounded canonical decimal usable as an
+# epoch second in `[ -le ]` and `$(( ))`: digits only, no sign, no leading zeros (so no
+# accidental octal in an arithmetic context), 1..12 digits (year 2286 needs 10; 12 leaves
+# headroom while staying far inside intmax_t, which is what stops `[` erroring out).
+epoch_is_canonical() {
+  case "${1:-}" in
+    '' | *[!0-9]*) return 1 ;;
+    0) return 0 ;;
+    0*) return 1 ;;
+  esac
+  [ "${#1}" -le 12 ] || return 1
+  return 0
+}
+
+# interval_is_usable <earliest> <latest> — 0 iff both endpoints are canonical AND ordered.
+# Sets INTERVAL_WHY to the reason on failure, so the refusal says WHICH property failed
+# rather than leaving the reader to guess.
+INTERVAL_WHY=''
+interval_is_usable() {
+  INTERVAL_WHY=''
+  if ! epoch_is_canonical "${1:-}"; then
+    INTERVAL_WHY="'earliest' is not a bounded canonical epoch second"
+    return 1
+  fi
+  if ! epoch_is_canonical "${2:-}"; then
+    INTERVAL_WHY="'latest' is not a bounded canonical epoch second"
+    return 1
+  fi
+  if [ "$1" -gt "$2" ]; then
+    INTERVAL_WHY="the interval is INVERTED (earliest > latest), so it describes no instant"
+    return 1
+  fi
+  return 0
+}
 LIVE_STATE=''; LIVE_DETAIL=''
 
 writer_liveness() {
@@ -499,11 +562,20 @@ writer_liveness() {
       LIVE_DETAIL="the stamp records session-pid=$(sane "$pid"), which is not a pid — the writing session's liveness is UNMEASURABLE. It is reported UNKNOWN and NOT 'gone': recording this script's own \$\$ instead would make a LIVE peer read as dead."
       return 0 ;;
   esac
-  case "$lo$hi" in
-    '' | *[!0-9]*)
-      LIVE_DETAIL="the stamp records no measured start window for pid $(sane "$pid") (earliest=$(sane "$lo") latest=$(sane "$hi")), so a pid that is alive NOW cannot be shown to be the process that stamped this marker — PID REUSE is indistinguishable, hence UNKNOWN"
-      return 0 ;;
-  esac
+  # THE RECORDED INTERVAL IS VALIDATED BEFORE ANYTHING IS PROBED, AND AN UNUSABLE ONE IS
+  # `unknown` — NEVER `gone`. A digit-only test on the two endpoints CONCATENATED was not
+  # enough, and the failure mode was the worst available: an INVERTED interval (earliest >
+  # latest) or one whose magnitude `[` cannot parse makes the intersection test below ERROR,
+  # an errored `[` inside `if A && B` reads as FALSE, and the false branch was `gone` — so a
+  # LIVE PEER became adoptable. Unmeasurable must never read as gone; that is the whole
+  # liveness axis. Each endpoint is checked SEPARATELY (concatenation let an empty endpoint
+  # hide behind a digit-bearing one), as a bounded canonical decimal (no sign, no leading
+  # zeros, <= 12 digits so `[ -le ]` and `$(( ))` cannot be handed an out-of-range value),
+  # and the interval must be ORDERED.
+  if ! interval_is_usable "$lo" "$hi"; then
+    LIVE_DETAIL="the stamp's start window for pid $(sane "$pid") is UNUSABLE (earliest=$(sane "$lo") latest=$(sane "$hi"): $INTERVAL_WHY), so a pid that is alive NOW cannot be shown to be the process that stamped this marker — PID REUSE is indistinguishable, hence UNKNOWN and never 'gone'"
+    return 0
+  fi
   if ! ps_usable; then
     LIVE_DETAIL="\`ps\` cannot answer an existence question on this host (it failed even for our own pid), so nothing about pid $(sane "$pid") was measured"
     return 0
@@ -538,6 +610,14 @@ writer_liveness() {
     return 0
   fi
   ce="${cur%% *}"; cl="${cur##* }"
+  # The MEASURED window gets the same treatment as the recorded one: it is derived as
+  # `now - elapsed`, so a nonsense `elapsed` yields a nonsense (even negative) endpoint, and
+  # an unparseable operand in the comparison below would ERROR — which reads as FALSE, whose
+  # branch is `gone`. Same false-permissive, other operand.
+  if ! interval_is_usable "$ce" "$cl"; then
+    LIVE_DETAIL="pid $(sane "$pid") is running but its MEASURED start window is unusable (earliest=$(sane "$ce") latest=$(sane "$cl"): $INTERVAL_WHY), so it cannot be compared with the recorded one — UNKNOWN, never 'gone'"
+    return 0
+  fi
   # Same process <=> the recorded interval and the live one INTERSECT (both are
   # `now - elapsed` brackets from this host's clock; the slack absorbs per-side rounding).
   if [ "$((ce - START_SLACK_SECS))" -le "$hi" ] && [ "$((cl + START_SLACK_SECS))" -ge "$lo" ]; then
@@ -620,6 +700,38 @@ assert_body_safe() {
   done
 }
 
+# assert_assembled_marker <tmp> — validate the FULLY ASSEMBLED file immediately before the
+# atomic rename. Sets WRITE_ERR and returns 1 on any fault.
+#
+# THE CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES. `assert_body_safe` validates the body
+# FILE, and the body is READ AGAIN later when the marker is assembled — two different reads
+# of a file that can change in between, so the first cannot certify the second. The threat
+# model matters here: a hostile INVOKER is out of scope (they can edit the marker directly),
+# but this is reachable BY ACCIDENT — an agent's own notes file being rewritten while it
+# writes the marker — and "reachable by accident" is a defect. The consequence is the
+# dead-letter family again: a marker carrying a stray sentinel is refused by every later
+# read, i.e. it BRICKS ITSELF.
+#
+# Validating the assembled temporary subsumes the race instead of narrowing it: these are
+# EXACTLY the bytes that get committed, whatever route the body took to get there. It is a
+# second, independent layer — `assert_body_safe` stays, because it gives the common case a
+# clear usage error before any work is done.
+assert_assembled_marker() {
+  local tmp="$1" nb ne first
+  first="$(head -1 "$tmp" 2>/dev/null || true)"
+  if [ "$first" != "$STAMP_BEGIN" ]; then
+    WRITE_ERR="internal: the assembled marker's first line is not the stamp sentinel — refusing to commit a file that every later read would refuse"
+    return 1
+  fi
+  nb="$(count_sentinel "$tmp" "$STAMP_BEGIN")"
+  ne="$(count_sentinel "$tmp" "$STAMP_END")"
+  if [ "$nb" -ne 1 ] || [ "$ne" -ne 1 ]; then
+    WRITE_ERR="the assembled marker carries $nb stamp-begin and $ne stamp-end sentinels at column zero (exactly one of each is legal) — the body supplied at COMMIT time contains a line that can pose as a stamp boundary. Nothing was written. If a --body-file was named, it changed between validation and assembly, or it carries a sentinel at column zero: remove that line."
+    return 1
+  fi
+  return 0
+}
+
 # write_marker <issue> <actor> <body-file|''> [<extra key: value lines>...]
 #
 # Reports through GLOBALS (WROTE_PATH on success, WRITE_ERR + return 1 on failure) rather
@@ -673,6 +785,8 @@ write_marker() {
     printf '\n'
     if [ -n "$bodyfile" ] && [ -s "$bodyfile" ]; then cat "$bodyfile"; fi
   } >"$tmp" || { rm -f "$tmp"; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced"; return 1; }
+  # The last thing before the atomic commit, over the committed bytes themselves.
+  assert_assembled_marker "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path" || { rm -f "$tmp"; WRITE_ERR="failed replacing $(sane "$path")"; return 1; }
   WROTE_PATH="$path"
   return 0
@@ -730,10 +844,15 @@ cmd_write() {
   lock_marker
 
   local carried='' discarded=''
-  if [ -e "$(marker_path)" ]; then
-    local mpath; mpath="$(marker_path)"
-    [ -f "$mpath" ] && [ -r "$mpath" ] || refuse ERROR 1 "$(sane "$mpath") exists but is not a readable regular file — nothing was decided"
-    if [ "$(head -1 "$mpath" 2>/dev/null || true)" != "$STAMP_BEGIN" ]; then
+  local mpath mcls
+  mpath="$(marker_path)"
+  mcls="$(marker_class "$mpath")"
+  if [ "$mcls" != absent ]; then
+    [ "$mcls" != not-regular ] || refuse ERROR 1 "$(sane "$mpath") exists but is not a readable regular file — nothing was decided"
+    # ONLY the `legacy` class migrates. A `displaced` sentinel means the file DOES assert an
+    # identity (see marker_class), so it goes down the ownership path, where read_marker
+    # refuses it MALFORMED — never discarded as though it asserted nothing.
+    if [ "$mcls" = legacy ]; then
       local dl dbytes
       dl="$(LC_ALL=C wc -l <"$mpath" 2>/dev/null | tr -d ' ')"
       dbytes="$(LC_ALL=C wc -c <"$mpath" 2>/dev/null | tr -d ' ')"
