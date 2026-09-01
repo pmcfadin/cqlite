@@ -536,7 +536,7 @@ else
 fi
 
 # =====================================================================================
-# 20a-c. `NONEMPTY` IS NOT `CORRECT` — the CLAUDE_CONFIG_DIR half of the tmux verdict.
+# 19. `NONEMPTY` IS NOT `CORRECT` — the CLAUDE_CONFIG_DIR half of the tmux verdict.
 #     The check used to be "the server names SOMETHING" else VERIFIED, so a stale, wrong
 #     or nonexistent directory read as an [ok]. That is the two-valued-predicate shape
 #     CLAUDE.md warns about — only the bad state is tested, so every unknown state inherits
@@ -741,7 +741,7 @@ else
 fi
 
 # =====================================================================================
-# 19. NO RUN PRINTS A TOKEN-SHAPED VALUE. Asserted over the WHOLE suite transcript, not
+# 23. NO RUN PRINTS A TOKEN-SHAPED VALUE. Asserted over the WHOLE suite transcript, not
 #     per case: the property is about every emit path, and a per-case check only covers
 #     the paths someone remembered.
 # =====================================================================================
