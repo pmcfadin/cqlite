@@ -621,9 +621,8 @@ impl SSTableReader {
     ///
     /// The read is a SYNCHRONOUS positional read on `reader.scan_positional_source`
     /// (issue #1940 restructure; repointed off the MADV_RANDOM point plane onto the
-    /// never-`MADV_RANDOM` scan plane by #2876): a `pread`-style call carrying its offset as a
-    /// parameter,
-    /// which touches NO tokio reactor/timer and completes fully on THIS blocking
+    /// never-`MADV_RANDOM` scan plane by #2876): a `pread`-style call carrying its
+    /// offset as a parameter, which touches NO tokio reactor/timer and completes fully on THIS blocking
     /// thread for every backend (mmap = resident slice; `O_DIRECT` = aligned pread;
     /// buffered = `pread` on a dedicated `std::fs::File`). This deliberately
     /// eliminates the former `futures::executor::block_on(read_next_block_parts(..))`,

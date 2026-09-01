@@ -585,9 +585,8 @@ impl SSTableReader {
             // point read keeps the dedicated `MADV_RANDOM` mapping (issue #2210), a
             // scan takes the never-`MADV_RANDOM` one, for which that readahead
             // suppression is a deliberate loss. The covering CRC.db chunks were
-            // already verified on
-            // the SAME plane by `verify_uncompressed_range` (issue #1396), so these
-            // bytes are integrity-checked too.
+            // already verified on the SAME plane by `verify_uncompressed_range`
+            // (issue #1396), so these bytes are integrity-checked too.
             model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             let mut buffer = vec![0u8; size as usize];
             source.read_exact_at(block_offset, &mut buffer)?;
