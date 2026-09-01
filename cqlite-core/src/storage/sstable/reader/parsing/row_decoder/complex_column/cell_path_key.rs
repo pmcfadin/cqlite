@@ -171,16 +171,16 @@
 //! the one this module's own headline example used. The rest are OPEN, tracked as
 //! issue **#3778**, and are why this section survives.
 //!
-//! * **fixed-width scalars — CLOSED by #3723.** The guards were `data.len() < N`,
-//!   so a 5-byte `int` element decoded from its first 4 bytes. They are now
-//!   `!= N`, returning [`Error::FixedWidthLengthMismatch`], which
-//!   `raw_value::is_fatal_decode_error` makes FATAL for a WRONG width (a zero
-//!   length is refused but stays TOLERATED). Relevant here because this file
-//!   routes scalar cell-path keys through that arm, so on the MULTICELL path the
+//! * **fixed-width scalars — CLOSED by #3723 WHERE THE GUARD IS REACHED.** The
+//!   guards were `data.len() < N`, so a 5-byte `int` decoded from its first 4
+//!   bytes; they are now `!= N`, returning [`Error::FixedWidthLengthMismatch`],
+//!   which `raw_value::is_fatal_decode_error` makes FATAL for a WRONG width (a
+//!   zero length is refused but stays TOLERATED). On the MULTICELL path that
 //!   refusal escapes the tolerant `break`/`None` handlers above and reaches the
-//!   public read path. NOT so for a frozen column — a SIMPLE cell, whose tolerant
-//!   `break` is the census's unguarded FIFTH site (declared in
-//!   `raw_value/fatal_decode_error.rs`; open under #3778).
+//!   public read path — but ONLY for a NESTED scalar. A DIRECT scalar key is
+//!   refused earlier by this file's own allowed-widths table as the TOLERATED
+//!   `Error::Corruption` (census site SIX), as is a frozen column's SIMPLE-cell
+//!   `break` (site FIVE); both declared in `fatal_decode_error.rs`, open #3778.
 //! * **nested tuples and UDTs — OPEN.** The decoders iterate the DECLARED
 //!   components and stop, leaving extra components unread.
 //! * **nested collections — OPEN.** The element loop runs the DECLARED count and

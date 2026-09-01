@@ -32,16 +32,35 @@
 //! every other failure keeps the pre-#3723 outcome (the element is filtered, the
 //! read succeeds). That asymmetry is the point rather than an oversight: this
 //! round's subject is the WIDTH GUARD escaping observability behind an unrelated
-//! shadow, and promoting the other classes for dropped elements would make
-//! today's successful reads fail on data the read path never returns — a new
-//! refusal surface with no oracle behind it, outside the one-variant fatal set
-//! (`raw_value/fatal_decode_error.rs`). No new fatal class is introduced and no
-//! tolerated error becomes fatal.
+//! shadow — for the key/field types whose refusal is the named variant at all
+//! (see the section below) — and promoting the other classes for dropped
+//! elements would make today's successful reads fail on data the read path never
+//! returns — a new refusal surface with no oracle behind it, outside the
+//! one-variant fatal set (`raw_value/fatal_decode_error.rs`). No new fatal class
+//! is introduced and no tolerated error becomes fatal.
 //!
 //! For the same reason a DROPPED UDT field whose declared field INDEX is out of
 //! range is left alone: that refusal is `Error::Corruption`, not the fatal
 //! variant, so validation is skipped rather than promoted (the live path's
 //! refusal is untouched).
+//!
+//! ## What this dropped-path validation does NOT cover (census site 6, #3778)
+//!
+//! Read the previous paragraph as the general rule rather than an exception,
+//! because it has a second instance that matters more: the map-key half below is
+//! only as strong as the VARIANT its decoder reports. A key whose declared type
+//! is fixed-width DIRECTLY (`map<int, …>`) is refused by `cell_path_key.rs`'s
+//! own allowed-widths table as `Error::Corruption` — the general pre-existing
+//! TOLERATED class — and so is filtered SILENTLY here, the outcome this round
+//! exists to remove. The width guard escapes only for a NESTED fixed-width
+//! element (`map<frozen<list<int>>, …>`), which is what the round-5 cases in
+//! `dropped_element_tests.rs` exercise.
+//!
+//! That is the census's SIXTH tolerant site
+//! (`raw_value/fatal_decode_error.rs`), DECLARED and not fixed: the cause is the
+//! error VARIANT, not a missing guard here, and closing it means promoting a
+//! `Corruption` — which would turn a live `map<int, …>` read that today returns
+//! a partial row into a hard read failure. The class closes in **#3778**.
 //!
 //! Decoding a value that is then discarded is deliberate wasted work; the
 //! cheaper shapes were rejected for the reasons recorded in

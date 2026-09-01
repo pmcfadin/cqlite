@@ -11,11 +11,13 @@
 //! failure would change behaviour for every one of those paths, far beyond this
 //! issue. Hence a predicate naming ONE class instead of a blanket `?`.
 //!
-//! ## The census: FIVE tolerant sites, FOUR of them guarded
+//! ## The census: SIX tolerant sites, FOUR of them guarded
 //!
 //! Complete as of this commit, `file:line` verified by reading each site. The
 //! first four take an `is_fatal_decode_error` arm placed ABOVE their pre-existing
-//! tolerant arm; the fifth deliberately does not (see below).
+//! tolerant arm; the fifth and sixth deliberately do not (see below). Sites 5
+//! and 6 are DECLARED, NOT FIXED — each is a route on which the refusal stays
+//! unobservable today, and both close as one class in issue **#3778**.
 //!
 //! | # | Site | Tolerant disposition | #3723 arm |
 //! |---|------|----------------------|-----------|
@@ -24,6 +26,7 @@
 //! | 3 | `block_emit.rs:271` — the per-partition row loop | `break`, returning a partition with FEWER rows | yes |
 //! | 4 | `block_emit_windowed.rs:592` — the stitched SCAN path's row loop | `break`, same shape as 3 | yes |
 //! | 5 | `row_data.rs:777` — the SIMPLE (non-multicell) cell arm | `break`, dropping this column and every LATER on-disk column | **NO — declared, not fixed** |
+//! | 6 | `complex_column/cell_path_key.rs:385` — a DIRECT (top-level) fixed-width MAP-KEY width failure | refused as `Error::Corruption`, which sites 1 and the dropped-key use below both tolerate | **NO — declared, not fixed** |
 //!
 //! ### Site 5: declared, NOT fixed, and why (issue #3778)
 //!
@@ -48,6 +51,44 @@
 //! CHARACTERISATION (it fails if the disposition changes in EITHER direction),
 //! never a statement that the behaviour is desirable.
 //!
+//! ### Site 6: declared, NOT fixed, and why (issue #3778)
+//!
+//! `parse_cell_path_key_reporting` applies its OWN allowed-widths table before
+//! the shared decoder runs, and reports a width failure as
+//! [`Error::Corruption`]. So a map key whose declared type is fixed-width
+//! DIRECTLY — `map<int, …>`, as opposed to `map<frozen<list<int>>, …>` where the
+//! `int` is NESTED — never reaches the fixed-width arm and never produces the
+//! named variant the fatal set is built on.
+//!
+//! OBSERVABLE CONSEQUENCE, on the DROPPED path (the round-5 use below): a map
+//! entry the #1741 shadow/TTL filter is dropping, whose direct fixed-width key
+//! has a width Cassandra refuses (a 3-byte `int`), is SILENTLY ACCEPTED — the
+//! entry is filtered, the read succeeds, and nothing surfaces. On the LIVE path
+//! the same bytes reach census site 1, whose tolerant `break` yields a partial
+//! row. Neither is observable at the read path.
+//!
+//! THE CAUSE IS THE ERROR VARIANT, NOT A MISSING GUARD. The width check exists
+//! and fires; it simply reports the general pre-existing TOLERATED class. So
+//! closing this site means classifying a top-level cell-path width failure as
+//! fatal, i.e. PROMOTING an `Error::Corruption` — and that would break the
+//! zero-regression property this branch rests on: a live `map<int, …>` read that
+//! today returns a partial row would become a hard read failure. It is the exact
+//! defect already fixed once on this branch (the zero-length case,
+//! `4b4e4c72a`), where a pre-existing tolerated error was made fatal and had to
+//! be reverted. Reintroducing that shape one file over would be a regression
+//! dressed as a fix, so the site is declared and left alone; the class closes in
+//! **#3778**.
+//!
+//! Said plainly, because the round that found this shape did not: issue #3723's
+//! round-5 map cases use a NESTED `frozen<list<int>>` key precisely BECAUSE a
+//! direct fixed-width key yields `Corruption`. That was recorded as a
+//! calibration fact and routed around; it is a gap those tests were steered
+//! past (roborev round 6, job 33). Today's disposition is pinned by
+//! `complex_column/dropped_element_tests.rs`
+//! `wrong_width_direct_map_key_is_tolerated_today_known_gap_3778`, which is
+//! CHARACTERISATION — it fails if the disposition changes in EITHER direction —
+//! never a statement that the behaviour is desirable.
+//!
 //! ### Two further USES of the predicate that are NOT census sites
 //!
 //! `complex_column/element_decode.rs` calls the predicate twice more (issue
@@ -61,6 +102,15 @@
 //! error, exactly as they always did. Multicell sets reach the same property
 //! through census site 2, whose single arm serves live and dropped members
 //! alike (`raw_value/set_member.rs`).
+//!
+//! The MAP-key one of those two is reached only for a key type that produces the
+//! named variant at all — i.e. a NESTED fixed-width element. A DIRECT
+//! fixed-width key type refuses earlier, as `Error::Corruption`, and is site 6
+//! above.
+//!
+//! So the predicate has SIX call sites in the decoder: the four guarded census
+//! sites (1-4) plus these two. Sites 5 and 6 have none, which is what "declared,
+//! not fixed" means.
 //!
 //! Issue #3723 added ONE error class that must NOT be tolerated: a
 //! [`Error::FixedWidthLengthMismatch`] reporting a WRONG WIDTH — a fixed-width

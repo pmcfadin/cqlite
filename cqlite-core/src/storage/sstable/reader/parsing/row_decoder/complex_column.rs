@@ -767,9 +767,9 @@ impl V5CompressedLegacyParser {
                     );
                     if dropped {
                         // Issue #3723 (round 5): width-validate the KEY BEFORE
-                        // filtering — being shadowed is not a licence to skip
-                        // the guard (see `element_decode`'s header). The decoded
-                        // key is DISCARDED; the drop accounting is unchanged.
+                        // filtering — shadowed is no licence to skip the guard
+                        // (only a NESTED scalar's refusal escapes: site 6, #3778).
+                        // Key DISCARDED; the drop accounting is unchanged.
                         self.validate_dropped_map_key(&cell.path_bytes, &key_type, &column.name)?;
                         shadow_filtered_element_count += 1;
                         continue;
