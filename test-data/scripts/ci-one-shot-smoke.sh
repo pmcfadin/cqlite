@@ -47,16 +47,22 @@ SNAPSHOTS_DIR="${GOLDEN_DIR:-${SCRIPT_DIR}/smoke-test-snapshots}"
 # ran at all. That is how #3689's stale CSV golden hid a second, identical
 # staleness in select_simple_table.golden.
 #
-# Not reentrant: ERREXIT_PREV is a single global, so these must not be nested.
-# No call site nests them today.
-errexit_save() {
-    ERREXIT_PREV=off
-    case $- in *e*) ERREXIT_PREV=on ;; esac
-    set +e
-}
-
+# The saved state is passed EXPLICITLY rather than parked in a global, because
+# these calls DO nest: main() wraps run_test_suite, which wraps each run_test.
+# With a single global the inner restores would overwrite main's saved value and
+# main would restore the inner state instead of the script's initial `set -e`.
+# Each caller keeps its own `local`, so nesting is safe at any depth.
+#
+# Save with the two lines below (a helper cannot do it: setting the caller's
+# local would need a nameref or a command substitution, and a command
+# substitution subshell is the wrong place to read $- from):
+#
+#     local errexit_prev=off
+#     case $- in *e*) errexit_prev=on ;; esac
+#     set +e
+#
 errexit_restore() {
-    if [[ "${ERREXIT_PREV:-off}" == "on" ]]; then
+    if [[ "${1:-off}" == "on" ]]; then
         set -e
     else
         set +e
@@ -231,7 +237,9 @@ run_test() {
 
     # Run the CLI command with appropriate flags
     # Suppress stderr to match golden snapshots (Issue #129: logs go to stderr)
-    errexit_save
+    local errexit_prev=off
+    case $- in *e*) errexit_prev=on ;; esac
+    set +e
     if [[ -n "${CQLITE_DATASET:-}" ]]; then
         # Dataset mode
         "${CQLITE_CLI}" \
@@ -250,7 +258,7 @@ run_test() {
             > "${output_file}" 2>/dev/null
     fi
     exit_code=$?
-    errexit_restore
+    errexit_restore "${errexit_prev}"
 
     # Validate exit code
     if [[ ${exit_code} -ne ${expected_exit_code} ]]; then
@@ -307,10 +315,12 @@ run_error_test() {
     local exit_code=0
 
     # Run the CLI command (expecting failure)
-    errexit_save
+    local errexit_prev=off
+    case $- in *e*) errexit_prev=on ;; esac
+    set +e
     "${CQLITE_CLI}" "${args[@]}" > "${output_file}" 2>&1
     exit_code=$?
-    errexit_restore
+    errexit_restore "${errexit_prev}"
 
     # Should have non-zero exit code
     if [[ ${exit_code} -eq 0 ]]; then
@@ -473,7 +483,9 @@ run_test_suite() {
     # This test just validates that the query executes without crashing
     log_info "Running test: test_query_nonexistent_table"
     local output_file="${OUTPUT_DIR}/test_query_nonexistent_table.actual"
-    errexit_save
+    local errexit_prev=off
+    case $- in *e*) errexit_prev=on ;; esac
+    set +e
     if [[ -n "${CQLITE_DATASET:-}" ]]; then
         "${CQLITE_CLI}" \
             --schema "${CQLITE_SCHEMA}" \
@@ -490,7 +502,7 @@ run_test_suite() {
             > "${output_file}" 2>&1
     fi
     local exit_code=$?
-    errexit_restore
+    errexit_restore "${errexit_prev}"
 
     TESTS_RUN=$((TESTS_RUN + 1))
     # Accept any exit code (0 or non-zero) - just verify it doesn't crash
@@ -565,9 +577,11 @@ main() {
     echo ""
 
     # Run test suite (continue on error to collect all results)
-    errexit_save
+    local errexit_prev=off
+    case $- in *e*) errexit_prev=on ;; esac
+    set +e
     run_test_suite
-    errexit_restore
+    errexit_restore "${errexit_prev}"
 
     # Print summary and exit with appropriate code
     if print_summary; then

@@ -188,6 +188,57 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# Case 3 -- the save/restore pair must be NESTABLE.
+#
+# main() wraps run_test_suite, which wraps each run_test, so these calls nest
+# three deep. A first cut parked the saved state in one global: each inner save
+# overwrote it, so main's restore reinstated the INNER state (off) instead of
+# the script's initial `set -e`. Caught in review (roborev job 2 on PR #3773).
+# The state is therefore passed explicitly and held in a `local` per caller.
+# ---------------------------------------------------------------------------
+
+# Unit: errexit_restore must honour its ARGUMENT, in both directions.
+# Extracted from the shipped script so unrouting it here reds the suite.
+(
+    eval "$(sed -n '/^errexit_restore() {/,/^}/p' "${SUBJECT}")"
+    if ! declare -F errexit_restore >/dev/null; then
+        echo "EXTRACT-FAILED"
+        exit 1
+    fi
+    set +e; errexit_restore on
+    case $- in *e*) echo "on->on ok" ;; *) echo "on->on BAD" ;; esac
+    set -e; errexit_restore off
+    case $- in *e*) echo "off->off BAD" ;; *) echo "off->off ok" ;; esac
+    set -e; errexit_restore
+    case $- in *e*) echo "noarg BAD" ;; *) echo "noarg ok" ;; esac
+) > "${WORK}/restore-unit.txt" 2>&1
+unit="$(cat "${WORK}/restore-unit.txt")"
+if grep -q 'EXTRACT-FAILED' <<<"${unit}"; then
+    fail "could not extract errexit_restore from the shipped script -- its contract is untested"
+elif grep -q 'BAD' <<<"${unit}"; then
+    fail "errexit_restore does not honour its argument: ${unit}"
+else
+    pass "errexit_restore honours its argument (on/off/absent)"
+fi
+
+# Structural: the saved state must be per-caller, never one shared global --
+# that is what makes the nesting safe.
+if grep -qE '^\s*(ERREXIT_PREV=|errexit_save\b)' "${SUBJECT}"; then
+    fail "the shipped script still uses a shared ERREXIT_PREV/errexit_save -- nested save/restore would clobber it (#3689)"
+else
+    pass "no shared errexit global in the shipped script"
+fi
+
+save_sites="$(grep -cE '^\s*case \$- in \*e\*\) errexit_prev=on ;; esac' "${SUBJECT}")"
+local_decls="$(grep -cE '^\s*local errexit_prev=off' "${SUBJECT}")"
+restore_calls="$(grep -cE '^\s*errexit_restore "\$\{errexit_prev\}"' "${SUBJECT}")"
+if [[ "${save_sites}" -gt 0 && "${save_sites}" -eq "${local_decls}" && "${save_sites}" -eq "${restore_calls}" ]]; then
+    pass "all ${save_sites} save sites declare a local and pass it back to errexit_restore"
+else
+    fail "save/restore sites are not balanced: ${save_sites} saves, ${local_decls} locals, ${restore_calls} explicit restores"
+fi
+
 echo
 if [[ "${FAILURES}" -eq 0 ]]; then
     echo "PASS: ci-one-shot-smoke.sh runs its whole suite through a failing test (#3689)"
