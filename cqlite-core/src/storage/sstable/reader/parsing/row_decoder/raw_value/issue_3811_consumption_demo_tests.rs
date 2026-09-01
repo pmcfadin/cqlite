@@ -133,22 +133,22 @@ use crate::schema::{CqlType, UdtRegistry};
 use crate::types::UdtTypeDef;
 use crate::{Result, Value};
 
-const KEYSPACE: &str = "issue_3811_ks";
+pub(super) const KEYSPACE: &str = "issue_3811_ks";
 
 /// Marshal-form type string for `addr(street text, city text)` — reaches the
 /// `raw_value.rs:458-459` arm via `Self::is_udt_type`. Field names are hex:
 /// `61646472` = "addr", `737472656574` = "street", `63697479` = "city".
-const MARSHAL_UDT: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,61646472,\
+pub(super) const MARSHAL_UDT: &str = "org.apache.cassandra.db.marshal.UserType(issue_3811_ks,61646472,\
 737472656574:org.apache.cassandra.db.marshal.UTF8Type,\
 63697479:org.apache.cassandra.db.marshal.UTF8Type)";
 
 /// Bare UDT name — reaches the `raw_value.rs:479-480` registry-resolved arm.
-const REGISTRY_UDT: &str = "addr";
+pub(super) const REGISTRY_UDT: &str = "addr";
 
 /// A parser holding a bare-keyed `addr` UDT, so BOTH arms are reachable from one
 /// instance (the marshal arm does not consult the registry; the bare-name arm
 /// requires it).
-fn parser() -> V5CompressedLegacyParser {
+pub(super) fn parser() -> V5CompressedLegacyParser {
     let mut reg = UdtRegistry::new();
     reg.register_udt(
         UdtTypeDef::new(KEYSPACE.to_string(), "addr".to_string())
@@ -169,7 +169,7 @@ fn component(bytes: &[u8]) -> Vec<u8> {
 
 /// Case 1 — every declared field present, buffer ends exactly. 18 bytes:
 /// `00000007 "main st" 00000003 "nyc"`.
-fn case1_exact() -> Vec<u8> {
+pub(super) fn case1_exact() -> Vec<u8> {
     let mut v = component(b"main st");
     v.extend(component(b"nyc"));
     v
@@ -177,7 +177,7 @@ fn case1_exact() -> Vec<u8> {
 
 /// Case 2 — case 1 plus one trailing byte the encoding does not account for.
 /// 19 bytes. `TupleType.split` rule 3: `position(18) < length(19)` ⇒ throw.
-fn case2_trailing_garbage() -> Vec<u8> {
+pub(super) fn case2_trailing_garbage() -> Vec<u8> {
     let mut v = case1_exact();
     v.push(0xAA);
     v
@@ -187,7 +187,7 @@ fn case2_trailing_garbage() -> Vec<u8> {
 /// prefix. 12 bytes. `TupleType.split` at `i = 1`: `position(11) != length(12)`
 /// so rule 1 does not fire, then `position + 4 (15) > length (12)` ⇒ rule 2
 /// throw, `"Not enough bytes to read 1th component"`. NOT a legal omission.
-fn case3_partial_prefix() -> Vec<u8> {
+pub(super) fn case3_partial_prefix() -> Vec<u8> {
     let mut v = case4_legally_short();
     v.push(0x00);
     v
@@ -196,7 +196,7 @@ fn case3_partial_prefix() -> Vec<u8> {
 /// Case 4 — the trailing declared field is simply absent and the buffer ends
 /// exactly. 11 bytes. `TupleType.split` rule 1 at `i = 1`:
 /// `position(11) == length(11)` ⇒ legal short return, `city` is null.
-fn case4_legally_short() -> Vec<u8> {
+pub(super) fn case4_legally_short() -> Vec<u8> {
     component(b"main st")
 }
 
@@ -233,7 +233,7 @@ fn decode(type_str: &str, data: &[u8]) -> Result<Value> {
 }
 
 /// Both fields materialized as text.
-fn assert_both_fields(value: &Value, ctx: &str) {
+pub(super) fn assert_both_fields(value: &Value, ctx: &str) {
     match value {
         Value::Udt(udt) => {
             assert_eq!(udt.type_name, "addr", "{ctx}: UDT type name");
@@ -256,7 +256,7 @@ fn assert_both_fields(value: &Value, ctx: &str) {
 }
 
 /// `street` present, `city` absent (implicit null).
-fn assert_city_absent(value: &Value, ctx: &str) {
+pub(super) fn assert_city_absent(value: &Value, ctx: &str) {
     match value {
         Value::Udt(udt) => {
             assert_eq!(udt.fields.len(), 2, "{ctx}: field count");
@@ -275,7 +275,7 @@ fn assert_city_absent(value: &Value, ctx: &str) {
 /// Assert a bounded decode was REFUSED, and that the refusal is the consumption
 /// contract's and not some unrelated error. `expected_consumed`/`expected_len`
 /// pin WHICH boundary fired, so a test cannot pass on a coincidental corruption.
-fn assert_refused_short(
+pub(super) fn assert_refused_short(
     result: Result<Value>,
     expected_consumed: usize,
     expected_len: usize,
@@ -724,7 +724,7 @@ fn nested_udt_partial_prefix_is_refused() {
 
 /// Cell framing for the header-type frozen-UDT path: `[VUInt blob_len][blob]`.
 /// Lengths here are all < 128, so the VUInt is one byte.
-fn frozen_udt_cell(blob: &[u8]) -> Vec<u8> {
+pub(super) fn frozen_udt_cell(blob: &[u8]) -> Vec<u8> {
     assert!(blob.len() < 128, "test vectors keep the VUInt single-byte");
     let mut v = vec![blob.len() as u8];
     v.extend_from_slice(blob);

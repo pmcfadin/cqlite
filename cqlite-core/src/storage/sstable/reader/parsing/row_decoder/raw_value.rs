@@ -9,6 +9,14 @@ mod reporting;
 #[cfg(test)]
 mod issue_3811_consumption_demo_tests;
 
+// Issue #3811 / roborev round 4 (closes #3861): the two frozen-UDT consumption
+// checks in `cell_value_complex.rs` driven at their PRODUCTION call site, which
+// needs a live `SSTableReader` and therefore `write-support` (a default feature).
+// Registered here rather than in `mod.rs` because `mod.rs` is at the campsite
+// file-size ratchet ceiling; it shares this module's oracle-derived vectors.
+#[cfg(all(test, feature = "write-support"))]
+mod issue_3811_cell_site_tests;
+
 impl V5CompressedLegacyParser {
     /// Map a PRIMITIVE Cassandra marshal type (e.g.
     /// `org.apache.cassandra.db.marshal.Int32Type`) to the canonical CQL short
