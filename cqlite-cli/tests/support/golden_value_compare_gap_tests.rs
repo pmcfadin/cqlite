@@ -824,6 +824,47 @@ fn the_multicell_map_key_gap_covers_nothing_else() {
     assert_eq!(undeclared.len(), 6, "the case floor for this bounding");
 }
 
+/// THE OTHER RETIREMENT AXIS: a golden whose keys ARE decoded.
+///
+/// The gap's golden half requires every key to be UNDECODED — not a document the
+/// declared key type's `toJSONString` could have produced. That conjunct sits AFTER
+/// the DDL check and can only NARROW the gap, so it cannot reproduce the defect
+/// `a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap` pins, where a
+/// parse result stood in for the multicell fact and widened the gap onto frozen
+/// columns.
+///
+/// What it covers is the case the egress axis cannot: were `sstabledump` to start
+/// decoding a multicell map's cell path, the gap would otherwise go on suppressing a
+/// column whose golden side had improved.
+#[test]
+fn the_multicell_map_key_gap_does_not_match_a_decoded_golden() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let decoded_golden = vec![row(&[
+        ("id", json!(1)),
+        (
+            "m",
+            json!({"[{\"label\": \"charlie\", \"rank\": 3}, 8]": 80}),
+        ),
+    ])];
+    let report = compare_rows(
+        &decoded_golden,
+        &multicell_map_cli(json!([
+            {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80}
+        ])),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a decoded golden must retire the gap: {:?}",
+        report.stale_skips
+    );
+}
+
 /// THE RETIREMENT AXIS IS THE EGRESS, and it is the only one that can move.
 ///
 /// The gap's DDL half (a multicell column with a container key type) is fixed by the

@@ -38,7 +38,7 @@
 //! now produce an ordinary diff naming the column, the declared gap and what was
 //! actually seen (see `super::compare_value_at`).
 
-use super::super::container::{is_container_type, MapKeySpelling};
+use super::super::container::{golden_map_key_value, is_container_type, MapKeySpelling};
 use super::super::schema::CqlType;
 use super::{canon_typed, csv_container, Depth, Egress, Kinding, Side};
 use serde_json::Value;
@@ -417,6 +417,28 @@ impl Divergence {
                     return false;
                 };
                 if entries.is_empty() {
+                    return false;
+                }
+                // …and every key is UNDECODED, i.e. not a document the declared key
+                // type's `toJSONString` could have produced.
+                //
+                // READ THE ORDER, BECAUSE IT IS THE WHOLE SAFETY ARGUMENT. This asks
+                // about a VALUE, which the two checks above deliberately do not — and
+                // it is sound here for one reason: it is a CONJUNCT AFTER the DDL, not
+                // a SUBSTITUTE FOR IT. It can only make the gap NARROWER, so it can
+                // only ever move a case from suppressed to REPORTED, which is the
+                // fail-closed direction. The defect it must not become is the earlier
+                // revision where a parse result STOOD IN FOR the multicell fact: that
+                // widened the gap onto frozen columns and swallowed an oracle fault
+                // (see `a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap`).
+                //
+                // What it buys: `sstabledump` writing a DECODED key here would
+                // otherwise leave the gap suppressing a column whose golden side had
+                // improved. The egress is the axis expected to move first, and the CLI
+                // half below covers that one; this covers the other.
+                if entries.keys().any(|key| {
+                    golden_map_key_value(key, key_ty, MapKeySpelling::ToJsonString).is_ok()
+                }) {
                     return false;
                 }
                 // EGRESS: the `{key,value}` array, of the SAME length, every entry of
