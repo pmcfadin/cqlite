@@ -1118,8 +1118,10 @@ fn body_emptiness_bound(members: usize, body: &str, rendering: &str) -> Result<(
 #[path = "golden_csv_decode.rs"]
 mod decode_half;
 pub use decode_half::{decode, decode_at, Excluded};
-// The grammar helpers the REFUSAL half asks its question with — the same `members`,
-// `entry_cut` and `scan` the decode runs, so the refusal set cannot drift from the decode.
+// `members` and `entry_cut` are the grammar helpers the REFUSAL half asks its question
+// WITH — the same two the decode runs, which is what stops the refusal set drifting from
+// the decode. `scan` is imported for this module's own test cases, which exercise the
+// depth rule directly; it is not used by the refusal path.
 use decode_half::{entry_cut, members, scan};
 
 /// Truncate a rendering for a diagnostic (the corpus carries 4 KiB blobs).
