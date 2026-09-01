@@ -364,10 +364,24 @@ add_construct '\-printf[[:space:]]' \
   "  find . -printf '%p\\\\n'" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 # NAMED because the #3756 bootstrap-scope controls below assert about this rule SPECIFICALLY —
 # an index reference would silently retarget when a row is inserted above it.
-RE_XARGS_R='(^|[^[:alnum:]_-])xargs[[:space:]]+(-[a-zA-Z]*r|--)'
+#
+# `-r` DOES NOT HAVE TO SIT NEXT TO `xargs`, AND THE INCIDENT'S OWN SPELLING DID NOT (#3756
+# roborev round 1). This rule required the flag to be the FIRST token, so it matched
+# `xargs -r` and MISSED `xargs -0 -r` and `xargs -0r` — and `xargs -0 -r` is exactly what PR
+# #3708 shipped, i.e. the rule never detected the construct this whole issue is about. A plant
+# control using the spelling the rule already caught would have reported coverage that did not
+# exist, which is why the plants below use the INCIDENT spelling.
+#
+# THE OPTION RUN HERE IS NARROWER THAN THE SED ONE, DELIBERATELY. `_OPT_RUN` skips ARBITRARY
+# tokens, which is right for sed (its expression is an operand that can look like anything) and
+# WRONG for xargs, whose operand is A COMMAND WITH ITS OWN FLAGS: `find . | xargs rm -rf` would
+# be read as an xargs `-r` and red the gate on the single most common xargs idiom there is. So
+# the run admits OPTION TOKENS ONLY (each must start with `-`), which stops at the command name.
+_XARGS_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+)*'
+RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-[a-zA-Z0-9]*r|--)'
 add_construct "$RE_XARGS_R" \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
-  '  printf "" | xargs -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
+  '  printf "" | xargs -0 -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
   'base64 -w is GNU-only (BSD/macOS base64 has no wrap flag; use -b or fold)' \
   '  base64 -w0 <f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -377,7 +391,11 @@ add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
 # recommends is the lint agents learn to waive, and it fired on three real call sites. So the
 # duration is now `[0-9]+` plus an optional GNU suffix, and it must END the token: a digit
 # followed by `>` or `<` is a REDIRECTION's file descriptor, never a duration.
-RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9]+[smhd]?([[:space:]]|$)'
+# A DURATION MAY BE FRACTIONAL (#3756 roborev round 1). coreutils parses the duration with
+# strtod, so `timeout 0.5 cmd` and `timeout .5 cmd` are real invocations — and the ORIGINAL
+# `[0-9]` form caught `0.5`, so requiring an integer would have NARROWED the rule while fixing
+# its false positive. A false-positive fix that loses a true positive is not a fix.
+RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+([0-9]+(\.[0-9]+)?|\.[0-9]+)[smhd]?([[:space:]]|$)'
 add_construct "$RE_TIMEOUT_UNGUARDED" \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -1013,13 +1031,15 @@ for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
   # onto its last physical line, where an enclosing quote or comment could hide it — the plant
   # would go undetected and this control would report a hole that does not exist.
   printf '\n' >>"$_bs_copy"
-  printf '%s\n' '  printf "" | xargs -r rm' >>"$_bs_copy" # portability-lint-allow: plants the #3756 incident construct into a THROWAWAY COPY on purpose
+  # THE INCIDENT'S OWN SPELLING, not a simpler one the rule already caught: PR #3708 shipped
+  # `xargs -0 -r`, and planting bare `xargs -r` would have certified a rule that MISSED it.
+  printf '%s\n' '  printf "" | xargs -0 -r rm' >>"$_bs_copy" # portability-lint-allow: plants the #3756 incident construct into a THROWAWAY COPY on purpose
   scan_found "$RE_XARGS_R" "$_bs_copy"
   case $? in
     0)
       _bs_hit=$(scan_first_hit)
       case "$_bs_hit" in
-        *"xargs -r"*) # portability-lint-allow: the planted construct as a MATCH PATTERN, not an invocation
+        *"xargs -0 -r"*) # portability-lint-allow: the planted construct as a MATCH PATTERN, not an invocation
           ok "bootstrap-scope: the \`xargs -r\` rule FIRES on a copy of $_bs_name and NAMES the planted line ($_bs_hit) — the #3756 incident construct would now red the gate instead of a reviewer" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
         *)
           bad "bootstrap-scope: a hit was reported on the planted copy of $_bs_name but it does not name the planted construct ($_bs_hit) — a bare red is not evidence, an unrelated match produces the same verdict" ;;
@@ -1096,6 +1116,46 @@ case "$_scope_nm" in
   *) bad "scope control: a census taken outside any repository still produced a numeric scope line ($_scope_nm) — that is a fabricated measurement" ;;
 esac
 
+# CONTROLS FOR THE WIDENED xargs RULE (#3756 roborev round 1). Both directions, because the
+# option run is what makes the true positives reachable AND is the only thing that could make
+# `xargs rm -rf` a false positive.
+printf '%s\n' \
+  '  printf "" | xargs -0 -r rm' \
+  '  printf "" | xargs -0r rm' \
+  '  printf "" | xargs -r rm' \
+  '  find . -print0 | xargs -0 --no-run-if-empty rm' \
+  '  git ls-files -z | xargs -0 -I{} -r echo {}' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+_xargs_missed=''
+_xargs_broke=0
+while IFS= read -r _xl; do
+  [ -n "$_xl" ] || continue
+  printf '%s\n' "$_xl" >"$tmp/xargs-one.sh"
+  scan_found "$RE_XARGS_R" "$tmp/xargs-one.sh"
+  case $? in
+    0) ;;
+    1) _xargs_missed="$_xargs_missed [$_xl]" ;;
+    *) _xargs_broke=1 ;;
+  esac
+done <"$tmp/xargs-bad.sh"
+if [ "$_xargs_broke" -eq 1 ]; then
+  : # already counted by scan_found; a MISS/no-MISS verdict here would be unmeasured
+elif [ -z "$_xargs_missed" ]; then
+  ok 'structural control: every GNU-only xargs spelling is detected — INCLUDING the `-0 -r` and `-0r` forms PR #3708 actually shipped, which the first-token-only rule missed entirely'
+else
+  bad "structural control: the xargs rule MISSES:$_xargs_missed — a rule that does not detect the incident's own spelling reports coverage it does not have"
+fi
+printf '%s\n' \
+  '  find . -name x | xargs rm -rf' \
+  '  find . -print0 | xargs -0 rm -rf' \
+  '  printf "" | xargs -n1 rm -r' \
+  '  git ls-files -z | xargs -0 sh -c '"'"'grep -r foo "$@"'"'"' _' >"$tmp/xargs-ok.sh"
+scan_found "$RE_XARGS_R" "$tmp/xargs-ok.sh"
+case $? in
+  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`) is NOT flagged — the option run stops at the command name, so the widening did not red the most common xargs idiom there is' ;;
+  0) bad "structural control: the widened xargs rule flags an xargs whose COMMAND carries -r — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
+  *) : ;; # already counted by scan_found
+esac
+
 # NEGATIVE CONTROL for the timeout rule (#3756): `command -v timeout` is the REMEDY this rule's
 # own message recommends, and the old `[0-9]` form matched the `2` of its `2>/dev/null`. Both
 # directions are pinned — the guard must be clean, the real invocation must still be flagged —
@@ -1113,13 +1173,29 @@ esac
 printf '%s\n' \
   '  timeout 30 some-command' \
   '  timeout 5m other-command' \
-  '  timeout 180 bash "$GATE"' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
-scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-bad.sh"
-case $? in
-  0) ok 'structural control: real `timeout <duration> cmd` invocations (bare seconds, a GNU suffix, a longer duration) are still FLAGGED — the false-positive fix did not lose the true positive' ;;
-  1) bad 'structural control: the timeout rule no longer detects a real timeout(1) invocation — the false-positive fix narrowed it past its subject' ;;
-  *) : ;; # already counted by scan_found
-esac
+  '  timeout 180 bash "$GATE"' \
+  '  timeout 0.5 flaky-command' \
+  '  timeout .5 flaky-command' \
+  '  timeout 1.5s flaky-command' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+_timeout_missed=''
+_timeout_broke=0
+while IFS= read -r _tl; do
+  [ -n "$_tl" ] || continue
+  printf '%s\n' "$_tl" >"$tmp/timeout-one.sh"
+  scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-one.sh"
+  case $? in
+    0) ;;
+    1) _timeout_missed="$_timeout_missed [$_tl]" ;;
+    *) _timeout_broke=1 ;;
+  esac
+done <"$tmp/timeout-bad.sh"
+if [ "$_timeout_broke" -eq 1 ]; then
+  : # already counted by scan_found
+elif [ -z "$_timeout_missed" ]; then
+  ok 'structural control: every real `timeout <duration> cmd` spelling is still FLAGGED — integer, GNU suffix, and the FRACTIONAL forms (0.5, .5, 1.5s) that the original [0-9] rule caught. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
+else
+  bad "structural control: the timeout rule no longer detects:$_timeout_missed — the false-positive fix narrowed it past its subject, which is a coverage loss dressed as a fix"
+fi
 
 # ===========================================================================
 # (2) THE BSD SHIMS, and the controls that prove they reproduce the reported defects.
