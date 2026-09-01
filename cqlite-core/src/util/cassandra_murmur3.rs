@@ -162,7 +162,17 @@ pub const CASSANDRA_MINIMUM_TOKEN: i64 = i64::MIN;
 ///
 /// Takes h1 from the 128-bit hash and applies `normalize`:
 /// maps `i64::MIN` to `i64::MAX` (Cassandra excludes the minimum token value).
+///
+/// An **empty** key short-circuits to [`CASSANDRA_MINIMUM_TOKEN`] without hashing,
+/// exactly as Cassandra does (`Murmur3Partitioner.getToken(ByteBuffer, long[])`,
+/// cassandra-5.0.8 lines 261-267: `if (key.remaining() == 0) return MINIMUM;`).
+/// The hash of the empty input is `h1 == 0` and `normalize(0) == 0`, so without
+/// this branch an empty key would be placed on the ring at token 0 (issue #3633).
 pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
+    // `key.remaining() == 0` in Cassandra's terms.
+    if data.is_empty() {
+        return CASSANDRA_MINIMUM_TOKEN;
+    }
     let (h1, _) = cassandra_murmur3_x64_128(data);
     cassandra_murmur3_normalize_token(h1)
 }
@@ -543,6 +553,15 @@ mod tests {
     }
 
     /// Verify the raw hash function returns (h1, h2) — not swapped
+    ///
+    /// NOTE (issue #3633): `h1 == 0` for `b""` is the CORRECT raw murmur3_x64_128
+    /// value at seed 0 and must stay asserted as-is. It does NOT contradict
+    /// `cassandra_murmur3_token(b"") == CASSANDRA_MINIMUM_TOKEN`: Cassandra's
+    /// `Murmur3Partitioner.getToken(ByteBuffer, long[])` (cassandra-5.0.8, lines
+    /// 261-267) returns `MINIMUM` for a zero-length key BEFORE consulting the hash,
+    /// so the raw hash and the token legitimately differ at empty input. Do not
+    /// "reconcile" the two — changing this assertion would break the port of
+    /// `MurmurHash.hash3_x64_128`.
     #[test]
     fn test_hash_returns_h1_h2_order() {
         // For the empty input with seed 0, both h1 and h2 should be 0
@@ -647,7 +666,10 @@ mod tests {
             (&[0x80], -5284281814142962636),
             (&[0xFF], -4442228696663692417),
             (&[0, 0, 0, 0, 0, 0, 0, 0], 2945182322382062539),
-            (&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 9204767954415360687u64 as i64),
+            (
+                &[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                9204767954415360687u64 as i64,
+            ),
             (&[0x11; 16], 4360155383588533346),
         ];
         for (key, expected) in vectors {
