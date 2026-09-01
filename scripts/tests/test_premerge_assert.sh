@@ -2122,7 +2122,40 @@ fi
 # arm asserts NO stray process survives, matched on an EXACT argv sentinel that
 # no other process on the box can produce — never a `pkill -f` pattern.
 TOFLOW="$T/flow-timeout"
-TOSENTINEL="sleep 987654321"
+# THE SENTINEL MUST BE UNIQUE PER RUN, AND A FIXED STRING WAS A REAL BLOCKER.
+# It used to be a FIXED `sleep <constant>` argv, while `to_leaks` and the cleanup
+# census the WHOLE BOX (`ps -eo …`). Measured, both directions: a suite run
+# CONCURRENTLY with another run of itself reported `293 passed, 1 FAILED —
+# 1 stray process(es) matching the sentinel survived`, and the same suite run
+# alone immediately after reported `294 passed, 0 failed` with no strays on the
+# box. Two consequences, the second far worse:
+#   1. FALSE RED ACROSS LANES. This suite runs in `tooling-tests`, i.e. in EVERY
+#      full gate, and this fleet reports `max-concurrency=3` — so two concurrent
+#      gates red each other. A flaky merge gate, fleet-wide.
+#   2. THE CLEANUP KILLED THE PEER'S PROCESS. The kill site iterated every
+#      process on the box and SIGKILLed any whose argv equalled the sentinel.
+#      Its comment claimed exactness made that safe "because it cannot be a peer
+#      lane's gate" — true, and worthless: it is exactly a peer lane's copy of
+#      THIS SUITE, because the argv was not unique per run. Exact-but-SHARED is
+#      job 279's incident wearing a safer-looking comment.
+# `$T` is already run-unique (`mktemp -d …premerge-assert-test.XXXXXX`), so the
+# sentinel is derived from it: the census can then only ever match this run's own
+# processes, and the cleanup can only ever kill its own.
+#
+# WHY A DURATION AND NOT A SUFFIX: `sleep` takes numeric operands only, so a
+# textual tag cannot be appended to its argv. The uniqueness therefore lives in
+# the NUMBER. `printf '9%09d'` keeps it a fixed 10 digits with a floor of ~285
+# years, so a short checksum can never yield a sleep that exits during the run
+# and makes the leak check pass for the wrong reason.
+to_derive_sentinel() {
+  local tok
+  tok=$(printf '%s' "$1" | cksum 2>/dev/null | awk '{print ($1 % 1000000000)}') || tok=""
+  case "$tok" in
+    ''|*[!0-9]*) tok=$(( $$ % 1000000000 )) ;;   # a live pid is unique among live processes
+  esac
+  printf 'sleep %s\n' "$(printf '9%09d' "$tok")"
+}
+TOSENTINEL=$(to_derive_sentinel "$T")
 to_shape=0
 # A REAL bounding runner is REQUIRED for these arms. Without one the $BIN shim
 # discards the bound (see its own comment) and a hung read would hang FOREVER —
@@ -2290,8 +2323,14 @@ to_run_arm() {
     ok "hung-read ($label): the sentinel census also finds no stray sleep (secondary check)"
   else
     bad "hung-read ($label): $leaks stray process(es) matching the sentinel survived — the runner did not reap its child (job 279)"
-    # Clean up ONLY pids whose full argv EQUALS the sentinel: an exact whole-argv
-    # match cannot be a peer lane's gate, which is what a pattern kill would risk.
+    # Clean up ONLY pids whose full argv EQUALS the sentinel. WHAT MAKES THIS
+    # SAFE IS THAT THE SENTINEL IS UNIQUE TO THIS RUN (derived from `$T`), NOT
+    # that the match is exact. The previous comment claimed exactness was the
+    # safety property — "an exact whole-argv match cannot be a peer lane's gate"
+    # — which is true and buys nothing: with a shared constant the match is
+    # exactly a PEER LANE'S COPY OF THIS SUITE, and this loop SIGKILLed it. Do
+    # not weaken the derivation back to a constant; the reasoning error is easy
+    # to reproduce, which is why it is written down here.
     ps -eo pid=,args= 2>/dev/null | while read -r _p _a; do
       [ "$_a" = "$TOSENTINEL" ] && kill -KILL "$_p" 2>/dev/null
     done
@@ -2362,7 +2401,7 @@ fi
 
 # --- 44(l): THE LEAK CHECK MUST BE ABLE TO SAY "LEAK" (roborev job 367) ------
 #
-# Round 4's leak assertion searched for the sentinel argv `sleep 987654321`. Only
+# Round 4's leak assertion searched for the sentinel sleep argv. Only
 # the TERM shim ever wears it (it `exec`s into that sleep); the KILL shim stays a
 # BASH process blocked on the FIFO — measured argv
 # `bash <shimdir>/git merge-base --is-ancestor <sha> <sha>` — so a surviving
@@ -2385,7 +2424,7 @@ DECOY_PID="$T/leak-decoy.pid"
 DECOY_FIFO="$T/leak-decoy.fifo"
 decoy_shape=0
 # THE DECOY MUST NOT SPAWN A CHILD, and getting that wrong ONCE is why this
-# comment exists. The first version ran `sleep 987654322`, so the decoy was TWO
+# comment exists. The first version ran a bare `sleep`, so the decoy was TWO
 # processes: the bash wrapper (which carries the argv the needle matches, and is
 # the pid recorded) and its sleep CHILD. SIGKILLing the wrapper ORPHANED the
 # child, and five runs of this suite left five stray sleeps on the box —
@@ -2410,6 +2449,19 @@ DECOY
   sleep 1
   if [ -n "$(ps -p "$decoy_pid" -o args= 2>/dev/null | grep -F "$DECOY_DIR/git")" ]; then
     decoy_shape=1
+  fi
+  # THE NO-CHILD PROPERTY, ASSERTED WHILE THE DECOY IS ALIVE — this is the check
+  # that would have caught round 7's orphaning decoy, and it can only be made
+  # here, because after the parent dies its children are reparented and the link
+  # is gone. A decoy with a child means SIGKILLing the recorded pid ORPHANS that
+  # child, which is the "a leak guard that leaks" hazard.
+  if [ "$decoy_shape" -eq 1 ]; then
+    decoy_kids=$(ps -eo ppid= 2>/dev/null | awk -v p="$decoy_pid" '$1 == p { n++ } END { print n + 0 }')
+    if [ "$decoy_kids" = 0 ]; then
+      ok "leak self-test fixture: the decoy has NO child process, so killing it cannot orphan anything"
+    else
+      bad "leak self-test fixture: the decoy has $decoy_kids child process(es) — killing the recorded pid would ORPHAN them (this is the round-7 defect)"
+    fi
   fi
 fi
 if [ "$decoy_shape" -ne 1 ]; then
@@ -2452,14 +2504,12 @@ else
   else
     bad "leak self-test: a dead decoy was reported '$v' — the check would red on a clean run"
   fi
-  # THE ARM CLEANS UP AFTER ITSELF, and says so. The decoy needs no child (see
-  # the fixture note), so nothing can be orphaned — asserted rather than assumed,
-  # because the first version of this arm DID orphan a sleep on every run.
-  if [ "$(ps -eo args= 2>/dev/null | grep -c -x -F 'sleep 987654322')" = 0 ]; then
-    ok "leak self-test: the arm left NO orphan process of its own behind"
-  else
-    bad "leak self-test: the arm orphaned a process of its own — a leak guard that leaks is its own hazard"
-  fi
+  # (the no-child property is asserted at the fixture, while the decoy is still
+  # alive — see `decoy_kids` above. A post-hoc census for a `sleep` argv, which
+  # is what stood here, became VACUOUS the moment the decoy stopped spawning one:
+  # nothing could ever wear that argv again, so the assertion could not fail.
+  # That is the same "worse than missing" class this whole round is about, one
+  # arm over.)
   # And the absent/garbage subjects, so a silent NO-SUBJECT can never read as clean.
   if [ "$(to_pid_verdict "$T/no-such-pidfile" "$DECOY_DIR/git")" = NO-SUBJECT ]; then
     ok "leak self-test: a MISSING pidfile is NO-SUBJECT (the arm proves nothing), never 'no leak'"
@@ -2472,6 +2522,65 @@ else
   else
     bad "leak self-test: a non-numeric pidfile must be BAD-PID"
   fi
+fi
+
+# --- 44(m): THE SENTINEL IS UNIQUE PER RUN (cross-lane blocker) --------------
+#
+# A single run cannot demonstrate cross-run isolation, so the property is pinned
+# two ways. Both matter: the derivation assert is what stops a future edit
+# quietly restoring a shared constant, and the shape assert is what stops the
+# derivation degrading into something a peer could also produce.
+#
+# (1) DERIVATION — two different scratch roots must yield two different
+#     sentinels. This is the actual property: `$T` is run-unique, so a peer
+#     lane's suite derives a different argv and neither census can see the other.
+sent_a=$(to_derive_sentinel "/tmp/premerge-assert-test.AAAAAA")
+sent_b=$(to_derive_sentinel "/tmp/premerge-assert-test.BBBBBB")
+if [ -n "$sent_a" ] && [ "$sent_a" != "$sent_b" ]; then
+  ok "sentinel: two different scratch roots derive DIFFERENT sentinels — a peer lane cannot collide with this run"
+else
+  bad "sentinel: two scratch roots derived the SAME sentinel ('$sent_a') — the census would count a peer lane's process as this run's leak, and the cleanup would SIGKILL it"
+fi
+# (2) THIS RUN's sentinel really is the derived one, not a constant someone
+#     reintroduced beside it.
+if [ "$TOSENTINEL" = "$(to_derive_sentinel "$T")" ]; then
+  ok "sentinel: the live TOSENTINEL is the value derived from this run's scratch root"
+else
+  bad "sentinel: TOSENTINEL ('$TOSENTINEL') is not the value derived from \$T — something is overriding the derivation"
+fi
+# (3) SHAPE — `sleep ` plus a fixed 10 digits. The width floor is not cosmetic:
+#     a short duration could EXPIRE mid-run and make the leak check pass because
+#     the sleep ended, not because the runner reaped it.
+case "$TOSENTINEL" in
+  "sleep "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+    ok "sentinel: the derived value has the expected shape (sleep + 10 digits, so it cannot expire mid-run)" ;;
+  *)
+    bad "sentinel: unexpected shape '$TOSENTINEL' — a short or non-numeric duration breaks either sleep or the leak check" ;;
+esac
+# (4) The historical SHARED constants must not be hard-coded anywhere in this
+#     file any more — not in a shim, not in a census, not in a comment (a comment
+#     carrying them would make this guard pass for the wrong reason if someone
+#     later grepped for them).
+# The needle is ASSEMBLED FROM TWO HALVES so this guard cannot match its own line
+# (the idiom Case 41d already uses), and it is the `sleep `-prefixed form so the
+# 40-hex FAKE_CERT fixture — which happens to contain the same digits — is not a
+# false positive.
+_sent_lit_a='sleep 9876'
+_sent_lit_b='5432'
+# `grep -c` PRINTS 0 AND EXITS 1 on no-match, so `$(grep -c … || printf 0)`
+# captures BOTH and yields "0\n0" — which is not `0` and reds a clean tree. (That
+# is exactly what the first version of this guard did.) The rc is read
+# THREE-VALUED: 0/1 mean the count is trustworthy, >=2 means grep FAILED and the
+# scan could not be made — which is `bad`, never a pass derived from an
+# unmeasurable read.
+shared_lits=$(grep -c -F -- "$_sent_lit_a$_sent_lit_b" "${BASH_SOURCE[0]}" 2>/dev/null)
+_sent_rc=$?
+if [ "$_sent_rc" -ge 2 ]; then
+  bad "sentinel: the shared-literal scan could not be made (grep exit $_sent_rc) — UNMEASURED, not clean"
+elif [ "$shared_lits" = 0 ]; then
+  ok "sentinel: no hard-coded shared sentinel literal survives anywhere in this suite"
+else
+  bad "sentinel: $shared_lits occurrence(s) of a hard-coded shared sentinel literal remain — a fixed argv is exactly the cross-lane blocker"
 fi
 
 # =============================================================================
