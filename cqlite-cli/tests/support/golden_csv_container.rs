@@ -769,10 +769,19 @@ fn entry_key_rendering(object: &CqlType, key: &str) -> Option<String> {
         CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => {
             // [`container::MapKeySpelling::ToJsonString`] because that is the
             // question THIS site asks: is the golden's key text the toJSONString
-            // document this module can re-render through its own grammar? A
-            // MULTICELL map's `getString` key answers no, the `None` propagates, and
-            // the node is refused — which is the correct CSV behaviour for it, and
-            // the same answer the DDL-driven spelling would give.
+            // document this module can re-render through its own grammar? A MULTICELL
+            // map's `getString` key answers no and the `None` propagates.
+            //
+            // WHAT THAT `None` DOES, stated exactly, because the obvious reading is
+            // wrong: it does NOT refuse the node. `decode_does_not_recover` returns
+            // `None` for "no refusal", so a key that does not render leaves the node
+            // UNREFUSED and the divergence is reported by the comparison instead —
+            // which is deliberate and is stated on `node_refusal`: a golden key
+            // contradicting the DDL is a divergence to report, not a limit of the flat
+            // format. For the multicell shape that report is then suppressed by the
+            // declared `MulticellMapKeyUndecodedByGoldenRendersAsBlobHex` gap.
+            // `a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused`
+            // asserts exactly this.
             let value = container::golden_map_key_value(
                 key,
                 key_ty,

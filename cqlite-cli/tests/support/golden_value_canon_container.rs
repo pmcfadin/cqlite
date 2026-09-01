@@ -347,14 +347,14 @@ pub fn canon_container(
     }
 }
 
-/// A MAP, in EITHER of its two spellings, identified BY SHAPE — which is what makes
-/// this arm correct without a "which side is this" parameter:
+/// A MAP, with EACH SIDE HELD TO ITS OWN SPELLING — the shape is required to match
+/// the [`Side`] the caller states, never used to infer it:
 ///
-///   * `Value::Object` — the GOLDEN's spelling. A JSON object key can only be a
+///   * [`Side::Golden`] requires `Value::Object`. A JSON object key can only be a
 ///     string, so each key is read through [`golden_map_key_value`] at
 ///     [`golden_map_key_kinding`]'s kinding (the module doc's oracle);
-///   * `Value::Array` — the CLI's spelling, `{"key":…,"value":…}` entries (and what
-///     `csv_container` decodes a CSV map into). BOTH halves keep their natural JSON
+///   * [`Side::Cli`] requires `Value::Array`, the `{"key":…,"value":…}` entries (and
+///     what `csv_container` decodes a CSV map into). BOTH halves keep their natural JSON
 ///     kind: the egress is under no stringification constraint, which is issue #1491
 ///     review findings M1/N1 and is why the golden-side relaxation above can never
 ///     license a CLI spelling.
