@@ -1251,6 +1251,35 @@ else
   grep 'WARN' "$tmp/scc-fill-pinned.stderr" 2>/dev/null | head -2
 fi
 
+# 9c-v-f. "THE SHELL CANNOT CLASSIFY THIS" IS NOT "SCCACHE DISCARDS THIS" (issue #3727 roborev
+#         round 8, f2 — retiring a residual this suite declared twice instead of fixing). The
+#         classifier bounded the digits it would multiply and returned INVALID for anything longer,
+#         but sccache does NOT uniformly discard those: measured, a 21-digit value falls back to the
+#         default while a 19-digit one WRAPS and is ACCEPTED (9999999999999999999G ->
+#         2484298143374508032). So an accepted cap was being labelled `invalid`/`invalid-stale`, with
+#         the wrong remediation attached. Such values now report unclassified provenance and no WARN.
+scc_wrap="$tmp/scc-cap-unclassifiable.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_wrap" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=2484298143374508032 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1 \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=9999999999999999999G \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-unclassifiable.stderr"
+if accel_token_is "$scc_wrap" sccache-cap '2484298143374508032(unattributed)' \
+   && ! accel_token_is "$scc_wrap" sccache-cap '2484298143374508032(invalid)' \
+   && ! accel_token_is "$scc_wrap" sccache-cap '2484298143374508032(invalid-stale)'; then
+  ok "sccache-cap: a value bash cannot classify (19 digits, which sccache WRAPS and accepts) reports unclassified provenance, never (invalid)"
+else
+  bad "sccache-cap: an sccache-ACCEPTED cap was labelled invalid because bash could not multiply it"
+  grep '^accelerators:' "$scc_wrap" 2>/dev/null || cat "$scc_wrap"
+fi
+if [ ! -s "$tmp/scc-cap-unclassifiable.stderr" ] || ! grep -q 'WARN: sccache-cap' "$tmp/scc-cap-unclassifiable.stderr"; then
+  ok "sccache-cap: no WARN prescribes a remedy for a value whose effect this gate could not establish"
+else
+  bad "sccache-cap: a WARN gave remediation for an unclassifiable value"
+  cat "$tmp/scc-cap-unclassifiable.stderr" | head -3
+fi
+assert_accelerators "sccache-cap-unclassifiable" "$scc_wrap"
+
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured
 #        value — this repo's standing rule that a positive verdict requires an affirmative
@@ -5534,7 +5563,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 449: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 39 host-independent
+# 410 -> 452: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 42 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
 # used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
@@ -5543,12 +5572,11 @@ fi
 # A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +39 above is a measured difference (the last six: 9c-v-d's unknown-default token, its no-WARN
-# assert, its grammar check and its still-classified-when-valid twin, plus 9c-v-e's two
-# source-aware-remedy asserts) and the deliberate ~10 margin is preserved rather than
+# the +42 above is a measured difference (the last three: 9c-v-f's unclassifiable-value token, its
+# no-WARN assert and its grammar check) and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=449
+ASSERT_FLOOR=452
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

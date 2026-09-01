@@ -1240,15 +1240,28 @@ _sccache_json_uint() {
 # DISCARDS it and falls back to its own default. Classification only — see the
 # block comment above for why this map is allowed to exist here and what it may
 # never be used for.
+# THREE-VALUED, because "sccache would discard this" and "this shell cannot work out what
+# sccache does with it" are different facts (issue #3727 roborev round 8, f2 — and the
+# retirement of a residual this file declared twice rather than fixed):
+#   rc 0 = sccache ACCEPTS it, <outvar> = bytes
+#   rc 1 = SYNTACTICALLY invalid, so sccache discards it (measured: `30GiB`, `30GB`, `30 G`,
+#          `abc`, empty, `-5G` all fall back to the default)
+#   rc 2 = the shape is valid but UNCLASSIFIABLE HERE — the digits exceed what bash can
+#          multiply reliably. Measured, sccache does NOT simply discard those: a 21-digit
+#          value falls back to the default (10737418240) while a 19-digit one WRAPS and is
+#          accepted (`9999999999999999999G` -> 2484298143374508032). So a caller must not
+#          call this `invalid`; it has to report an unclassified provenance, which is the
+#          same rule the rest of this token follows — never assert a state you have not
+#          established. Returning 1 here mislabelled an ACCEPTED cap as `invalid`/
+#          `invalid-stale` and handed the operator the wrong remediation.
 _sccache_value_bytes() {
   local __v="$1" __out="$2" __num __suf __shift __bytes
   eval "$__out="
   [[ $__v =~ ^([0-9]+)([KkMmGgTt]?)$ ]] || return 1
   __num="${BASH_REMATCH[1]}"; __suf="${BASH_REMATCH[2]}"
-  # An unrepresentable value is discarded (measured: a 21-digit value falls back to
-  # the default), and bash arithmetic wraps silently rather than erroring — so bound
-  # the literal first and verify the shift afterwards instead of trusting it.
-  [ "${#__num}" -le 18 ] || return 1
+  # Bash arithmetic wraps silently rather than erroring, so the literal is bounded first and
+  # the shift verified afterwards — but BOTH are `unclassifiable`, not `invalid`.
+  [ "${#__num}" -le 18 ] || return 2
   case "$__suf" in
     K|k) __shift=10 ;; M|m) __shift=20 ;; G|g) __shift=30 ;; T|t) __shift=40 ;; *) __shift=0 ;;
   esac
@@ -1256,7 +1269,7 @@ _sccache_value_bytes() {
   # `030G` would silently become 24 GiB.
   __bytes=$(( (10#$__num) << __shift ))
   if [ "$__bytes" -lt 0 ] || [ "$(( __bytes >> __shift ))" != "$(( 10#$__num ))" ]; then
-    return 1
+    return 2
   fi
   eval "$__out=\$__bytes"
   return 0
@@ -1278,6 +1291,7 @@ _SCC_DEFAULT_BYTES=""
 _SCC_SIZE_NULL=0     # `"cache_size":null` was observed (a size, NOT an attribution, signal)
 _SCC_ATTRIBUTED=""   # yes | no | unknown — did the cap come from a RUNNING server?
 _SCC_CFG_BYTES=""    # what the CONFIGURED value means in bytes, when sccache would accept it
+_scc_vb_rc=0         # last _sccache_value_bytes outcome: 0 accepted, 1 invalid, 2 unclassifiable
 
 # _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, assigned
 # into the variables above (never printed — see the one-probe-per-emit note).
@@ -1382,7 +1396,7 @@ _sccache_cap_probe() {
       # only an affirmative `yes` licenses the other labels (see the block comment).
       _SCC_CAP_SOURCE=unattributed
     elif [ -n "${SCCACHE_CACHE_SIZE+set}" ] \
-         && _sccache_value_bytes "${SCCACHE_CACHE_SIZE}" implied; then
+         && { _sccache_value_bytes "${SCCACHE_CACHE_SIZE}" implied; _scc_vb_rc=$?; [ "$_scc_vb_rc" = 0 ]; }; then
       # The variable is set AND sccache would accept it, so the question is answerable without
       # knowing sccache's default: does the server enforce what the value means?
       _SCC_CFG_BYTES="$implied"
@@ -1391,6 +1405,13 @@ _sccache_cap_probe() {
       else
         _SCC_CAP_SOURCE=stale
       fi
+    elif [ "${_scc_vb_rc:-0}" = 2 ]; then
+      # The value is SHAPED like a cap but this shell cannot say what sccache makes of it
+      # (roborev round 8, f2). Measured, such values are NOT uniformly discarded — a 19-digit
+      # one wraps and is ACCEPTED — so calling it `invalid` would assert a state we have not
+      # established and hand the operator the wrong remediation. Unclassified provenance
+      # instead, and no WARN.
+      _SCC_CAP_SOURCE=unattributed
     elif [ -z "$_SCC_DEFAULT_BYTES" ]; then
       # Only the labels below need the default, and it could not be measured — so the
       # provenance is unknown and the WARNs that would quote a default stay silent.

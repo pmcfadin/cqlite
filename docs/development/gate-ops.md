@@ -166,8 +166,11 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212
   chose that value.
 - `…(stale)` — the var is set and valid but the server enforces something else. **Remedy
   `sccache --stop-server`**, not editing the value.
-- `…(invalid)` — sccache discards the value (see the grammar table above) **and** the running
-  server enforces exactly that fallback, so the value is having no effect. Fix the value, then
+- `…(invalid)` — sccache discards the value **syntactically** (see the grammar table above) **and**
+  the running server enforces exactly that fallback, so the value is having no effect. A value that
+  is *shaped* like a cap but too large for the shell to work out is **not** called invalid — sccache
+  does not uniformly discard those (measured: 21 digits falls back to the default, 19 digits WRAPS
+  and is accepted), so it reports `(unattributed)` instead of a state nobody established (#3727). Fix the value, then
   `sccache --stop-server`.
 - `…(invalid-stale)` — TWO faults: sccache discards the value **and** the running server enforces
   something that is neither the fallback nor derived from it. **Fix the value FIRST** — stopping the
