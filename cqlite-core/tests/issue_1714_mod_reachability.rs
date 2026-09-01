@@ -59,7 +59,9 @@ impl Stripped {
 /// caller can still scan line-anchored declarations.
 fn strip(src: &str) -> Stripped {
     let b = src.as_bytes();
-    let mut text = String::with_capacity(src.len());
+    // Bytes, not chars: cutting only at ASCII boundaries means a byte-wise copy
+    // is safe, and nothing here can slice a multi-byte char in half.
+    let mut text: Vec<u8> = Vec::with_capacity(src.len());
     let mut literals: Vec<String> = Vec::new();
     let mut i = 0usize;
     while i < b.len() {
@@ -79,7 +81,7 @@ fn strip(src: &str) -> Stripped {
                     i += 2;
                 } else {
                     if b[i] == b'\n' {
-                        text.push('\n');
+                        text.push(b'\n');
                     }
                     i += 1;
                 }
@@ -117,16 +119,17 @@ fn strip(src: &str) -> Stripped {
                 end
             };
             let body = String::from_utf8_lossy(&b[start.min(b.len())..end]).into_owned();
-            text.push_str(&format!("\"@@S{}@@\"", literals.len()));
+            text.extend_from_slice(format!("\"@@S{}@@\"", literals.len()).as_bytes());
             literals.push(body);
         } else {
-            // Copy one char (not byte) so multi-byte UTF-8 stays intact.
-            let ch = src[i..].chars().next().expect("index is a char boundary");
-            text.push(ch);
-            i += ch.len_utf8();
+            text.push(b[i]);
+            i += 1;
         }
     }
-    Stripped { text, literals }
+    Stripped {
+        text: String::from_utf8_lossy(&text).into_owned(),
+        literals,
+    }
 }
 
 // ---------------------------------------------------------------------------
