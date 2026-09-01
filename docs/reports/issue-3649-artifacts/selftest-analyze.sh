@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=25
+CASE_FLOOR=59
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -512,6 +512,92 @@ if [ -f "$DRIVER" ] && bash -n "$DRIVER"; then
   ok "ab-throughput.sh parses"
 else
   bad "ab-throughput.sh is absent or does not parse"
+fi
+
+echo
+echo "-- the driver's fail-closed guards, exercised without a rig --"
+
+# The driver refuses long before it builds anything, so its pre-flight guards are
+# testable on any box. These are the guards RUNBOOK.md's procedure depends on.
+run_driver() { # <args...>
+  set +e
+  bash "$DRIVER" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+check_driver() { # <description> <expected-exit> [expected-cause]
+  local desc="$1" want_rc="$2" want_cause="${3:-}"
+  if [ "$RC" != "$want_rc" ]; then
+    bad "$desc (exit $RC, expected $want_rc)"
+    return
+  fi
+  if ! anchored; then
+    bad "$desc (an output line does not carry the AB-3649 anchor)"
+    return
+  fi
+  if [ -n "$want_cause" ] && ! grep -q "^AB-3649: cause $want_cause$" "$TMP/err.txt"; then
+    bad "$desc (cause '$want_cause' absent; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+    return
+  fi
+  ok "$desc -> exit $RC${want_cause:+ cause $want_cause}"
+}
+
+if [ ! -f "$DRIVER" ]; then
+  bad "the driver is absent, so none of its guards could be exercised"
+else
+  mkdir -p "$TMP/tinycorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-Data.db"
+  mkdir -p "$TMP/emptycorpus"
+  printf '{"version": 2, "keyspace": "ks", "table": "tbl"}\n' > "$TMP/ticket.json"
+
+  run_driver --help
+  check_driver "the driver --help exits 3, never 0" 3
+
+  run_driver --no-such-flag
+  check_driver "an unrecognised driver flag exits 3" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --replicates 2
+  check_driver "the driver refuses fewer than 3 replicates" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --server-cpus 0,2
+  check_driver "the driver refuses a server CPU set with no client CPU set" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1
+  check_driver "the driver refuses overlapping server and client CPU sets" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" \
+    --work-dir "$TMP/w-tpl"
+  check_driver "an absent ticket template" 2 ticket-template-absent
+
+  run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" \
+    --work-dir "$TMP/w-empty" --min-corpus-bytes 1
+  check_driver "a corpus holding no Data.db files" 2 corpus-empty
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --work-dir "$TMP/w-small"
+  check_driver "a corpus below the stated minimum size" 2 corpus-too-small
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --work-dir "$TMP/w-same" --min-corpus-bytes 1 --repo "$HERE" \
+    --base-ref HEAD --head-ref HEAD
+  check_driver "two arm refs resolving to the same commit" 2 arm-refs-identical
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --repo "$HERE" \
+    --base-ref no-such-rev-3649 --head-ref HEAD
+  check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable
+
+  # A refusal must still leave a manifest, so the analyzer sees the shortfall as
+  # a fact rather than as an absence.
+  if [ -f "$TMP/w-badref/results/manifest.json" ]; then
+    ok "an aborted session still writes a manifest recording what completed"
+  else
+    bad "an aborted session left no manifest, so a shortfall would read as an absence"
+  fi
+  run_analyzer "$TMP/w-badref/results"
+  check_verdict "the analyzer refuses an aborted session's manifest" UNMEASURED 7
 fi
 
 # ---------------------------------------------------------------------------
