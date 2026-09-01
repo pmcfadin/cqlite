@@ -1042,6 +1042,53 @@ fn a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused() {
     assert_eq!(node_refusal(&golden, Some(&ty)), None);
 }
 
+/// EVIDENCE, NOT A GUARD: a key the two sides spell DIFFERENTLY decodes correctly
+/// even though it finds no guide — so the roborev finding's stated failure mode does
+/// not reproduce (issue #3726).
+///
+/// The premise is real. `entry_key_rendering` translates only the spellings this lane
+/// knows (`blob`, via `stringified_csv_text`) and deliberately leaves `timestamp`
+/// alone, so the golden carries `2024-01-01T00:00:00Z` where the CSV cell carries
+/// `2024-01-01 00:00:00+0000`; the guide lookup matches on text and therefore finds
+/// NOTHING. `canon_timestamp` accepts both separators, which is this lane stating in
+/// its own source that the two denote one value.
+///
+/// The predicted consequence — "decoded against `Null` and falsely diverges" — does
+/// NOT follow, and the reason is one line of `decode_shape`: the null-token arm is
+/// `Value::Null if text == "null" => Ok(Value::Null)`. Decoding against `Null` is
+/// exactly what RESOLVES a `null` token, so the guide's absence costs nothing here.
+/// A scalar member decodes to its own text either way, and both sides then
+/// canonicalize equal.
+///
+/// A canonical-value fallback for the guide lookup was written for this finding and
+/// REVERTED: with this case decoding correctly without it, its benefit could not be
+/// demonstrated by any test, and an undemonstrable guard in a function that has
+/// absorbed three review rounds is not worth its risk. This case is kept as the
+/// evidence for that decision — if a future change makes the missing guide matter, it
+/// reds here first.
+#[test]
+fn a_key_spelled_differently_by_the_two_sides_still_decodes_correctly() {
+    let ty = ty_of("frozen<map<frozen<tuple<timestamp, text>>, int>>");
+    let golden = json!({"[\"2024-01-01T00:00:00Z\", null]": 7});
+    let csv = "{(2024-01-01 00:00:00+0000, null): 7}";
+    // The premise: the golden's rendering and the CSV text really do differ, so the
+    // text lookup finds no guide.
+    assert_eq!(
+        entry_key_rendering(&ty, "[\"2024-01-01T00:00:00Z\", null]").as_deref(),
+        Some("(2024-01-01T00:00:00Z, null)"),
+        "premise: the golden renders with the T separator"
+    );
+    let decoded = match decode(&golden, csv, &ty) {
+        Ok(decoded) => decoded,
+        Err(why) => panic!("the CSV cell must decode: {why}"),
+    };
+    assert_eq!(
+        decoded[0]["key"],
+        json!(["2024-01-01 00:00:00+0000", null]),
+        "the null slot decodes as Null with no guide at all — `Value::Null if text == \"null\"`"
+    );
+}
+
 /// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
 /// is REFUSED rather than decoded against the wrong guide (roborev finding, #3726).
 ///
