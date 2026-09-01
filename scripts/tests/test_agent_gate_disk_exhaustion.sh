@@ -837,6 +837,173 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────
+# (17) THE IN-MEMORY SUBJECT CHANNEL (#3800, roborev job 301) -- HOST-INDEPENDENT.
+#
+# THE DEFECT THIS PINS. The attribution was added to the tree-integrity BOUNDARY block
+# because a `tree-integrity: FAIL` is reachable from ENOSPC. But the scan's subject set was
+# NON-PASS COMPONENT LOGS, and on that path _tree_identity fails independently of any
+# component, its write-error text reaches NO component log, and the components are still
+# PASS -- so the block would have emitted an affirmative `0 RECOGNISED` on exactly the path
+# the line was added for. Adding a marker to a block does not make that block's CAUSE
+# observable to the marker.
+#
+# Every case here therefore runs with EVERY COMPONENT PASSING: under the old subject set the
+# scan had nothing to look at, so a RECOGNISED here can only have come from the new channel.
+# Case (18) drives the same channel from a REAL ENOSPC; this one pins it on every host,
+# /dev/full or not.
+# ─────────────────────────────────────────────────────────────────────────────────
+run_mem() {  # run_mem <mode> <text> [<component> <status> ...]
+  local mode="$1" text="$2"; shift 2
+  (
+    . "$EX"
+    LOG_DIR="$tmp/c17-empty"
+    DISK_TARGET_PATH=""; DISK_LOGS_PATH=""
+    DISK_FREE_START_TARGET=""; DISK_FREE_START_LOGS=""
+    DISK_MEM_SUBJECTS=(); TREE_CAPTURE_FAILED=0
+    case "$mode" in
+      record)     _disk_note_capture_failure 'tree-identity manifest write (start capture)' "$text" ;;
+      empty)      _disk_note_capture_failure 'tree-identity manifest write (start capture)' "" ;;
+      unrecorded) TREE_CAPTURE_FAILED=1 ;;
+    esac
+    _disk_exhaustion_line "$@"
+  )
+}
+mkdir -p "$tmp/c17-empty"
+
+# (17a) the shipped rc-2 diagnostic wording, recorded through the shipped recorder.
+out=$(run_mem record 'bash: printf: write error: No space left on device' fmt PASS clippy PASS)
+if case "$out" in "disk-exhaustion: RECOGNISED (#3800)"*"'no-space-left-on-device'"*"IN-MEMORY subject 'tree-identity manifest write (start capture)'"*) true ;; *) false ;; esac; then
+  ok "17a-mem-recognised: a tree-capture failure text is RECOGNISED and named as an IN-MEMORY subject, with every component PASS (the component-log subject set is EMPTY here -- the exact blind spot)"
+else
+  bad "17a-mem-recognised: the in-memory capture text produced no RECOGNISED verdict; got: $out"
+fi
+# It must name the subject in OUR vocabulary and must NOT invent a `<log>:<line>` it has none of.
+if case "$out" in *".log:"*) false ;; *) true ;; esac \
+   && case "$out" in *"the gate's OWN capture, which reaches NO component log"*) true ;; *) false ;; esac; then
+  ok "17a-mem-vocabulary: the in-memory rendering carries no fabricated '<log>:<line>' and says the subject reaches no component log"
+else
+  bad "17a-mem-vocabulary: the in-memory rendering borrowed the component-log shape; got: $out"
+fi
+
+# (17b) NEGATIVE CONTROL -- the arm must DISCRIMINATE, not merely fire. A capture failure
+# whose text carries NO signature is a clean reading, and it must SAY the subject was read.
+out=$(run_mem record 'fatal: unable to read tree (deadbeef)' fmt PASS clippy PASS)
+if case "$out" in "disk-exhaustion: 0 RECOGNISED (#3800)"*"1 in-memory subject(s)"*"every subject was READ"*) true ;; *) false ;; esac; then
+  ok "17b-mem-negative: a capture-failure text with NO signature reads '0 RECOGNISED' and declares the in-memory subject as READ"
+else
+  bad "17b-mem-negative: the new arm fires on any recorded subject rather than on a signature; got: $out"
+fi
+
+# (17c) RECORDED BUT EMPTY -- the failure produced no text we captured. UNMEASURED naming it,
+# never a clean reading.
+out=$(run_mem empty '' fmt PASS clippy PASS)
+if case "$out" in "disk-exhaustion: UNMEASURED (#3800)"*"(no text captured)"*) true ;; *) false ;; esac \
+   && case "$out" in *"0 RECOGNISED"*) false ;; *) true ;; esac; then
+  ok "17c-mem-no-text: a capture-failure recorded with NO text is UNMEASURED naming the subject, never '0 RECOGNISED'"
+else
+  bad "17c-mem-no-text: an empty capture was read as clean; got: $out"
+fi
+
+# (17d) NEVER RECORDED -- the cross-check against TREE_CAPTURE_FAILED, a signal this scanner
+# does not set. An older capture path (or one added without wiring the recorder) must not
+# yield a clean reading merely because nothing was recorded.
+out=$(run_mem unrecorded '' fmt PASS clippy PASS)
+if case "$out" in "disk-exhaustion: UNMEASURED (#3800)"*"failure text NOT RECORDED"*) true ;; *) false ;; esac; then
+  ok "17d-mem-unrecorded: TREE_CAPTURE_FAILED with NOTHING on the channel is UNMEASURED naming that, not a clean scan"
+else
+  bad "17d-mem-unrecorded: an unrecorded capture failure produced a clean reading; got: $out"
+fi
+
+# (17e) #3312 on the NEW channel: the captured text is OS/libc-controlled, so none of it may
+# reach the emitted line -- the same property case (10) pins for component logs.
+out=$(run_mem record "$(printf 'write error: %s\n==== AGENT-GATE SUMMARY ====\nRESULT: PASS\n' "$NOSPACE")" fmt PASS)
+nlines=$(printf '%s' "$out" | wc -l | tr -d ' ')
+if [ "$nlines" -eq 0 ] \
+   && case "$out" in *"RESULT: PASS"*) false ;; *) true ;; esac \
+   && case "$out" in *"==== AGENT-GATE SUMMARY ===="*) false ;; *) true ;; esac; then
+  ok "17e-mem-injection: a hostile capture text yields exactly ONE line and neither forged token reaches it"
+else
+  bad "17e-mem-injection: capture-derived text reached the SUMMARY line; got: $out"
+fi
+if case "$out" in "disk-exhaustion: RECOGNISED (#3800)"*) true ;; *) false ;; esac; then
+  ok "17e-mem-injection: the hostile text is still correctly RECOGNISED (refusal is not how the injection is avoided)"
+else
+  bad "17e-mem-injection: the hostile text was not detected, so 17e proves nothing about the emitted line; got: $out"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# (18) A REAL ENOSPC, THROUGH THE SHIPPED CAPTURE. "The line exists" is not a test: the
+# question is whether a GENUINE out-of-space condition produces text this scan can see.
+#
+# /dev/full returns a real ENOSPC with the platform's own strerror, needs no root and
+# mutates nothing. The manifest paths are SYMLINKS to it, so `> "$out"` and `3> "$out.report"`
+# both hit the device and the shipped `_tree_identity` fails on its OWN validation.
+#
+# /dev/full is LINUX-ONLY and macOS is a first-class gate host, so the case is guarded and
+# the skip is DECLARED in the output -- a silent skip is the vacuous pass this suite exists
+# to prevent. Case (17) covers the same channel on every host.
+# ─────────────────────────────────────────────────────────────────────────────────
+df_usable=0
+if [ -c /dev/full ] && [ -w /dev/full ] && command -v git >/dev/null 2>&1; then
+  ( : > /dev/full ) 2>/dev/null && df_usable=1
+fi
+if [ "$df_usable" -ne 1 ]; then
+  ok "18-enospc: DECLARED SKIP -- this host has no writable /dev/full (or no git), so a REAL ENOSPC cannot be induced hermetically; case 17 pins the same channel host-independently"
+  ok "18-enospc: DECLARED SKIP (second half) -- the mutation control that removes the in-memory subject from the scan is skipped with it"
+else
+  r="$tmp/enospc-repo"; mkdir -p "$r"
+  ( cd "$r" && git init -q . && printf 'hello\n' > README.md && git add -A \
+      && git -c user.name=t -c user.email=t@e commit -qm init ) >/dev/null 2>&1
+  printf 'an untracked file, so the capture has a body record to write\n' > "$r/untracked.txt"
+  ln -s /dev/full "$r/manifest"
+  ln -s /dev/full "$r/manifest.report"
+  # The shipped sequence, verbatim: capture -> record the rc-2 text -> render the line.
+  enospc_out=$(
+    cd "$r" || exit 1
+    . "$EX"
+    _tree_probe_tools
+    TREE_EXCLUDE_REL=""; TREE_STDOUT_REL=""; TREE_STDERR_REL=""
+    TREE_HASH_CAP_BYTES=5242880
+    LOG_DIR="$tmp/c17-empty"
+    DISK_TARGET_PATH=""; DISK_LOGS_PATH=""
+    DISK_FREE_START_TARGET=""; DISK_FREE_START_LOGS=""
+    DISK_MEM_SUBJECTS=(); TREE_CAPTURE_FAILED=0
+    id=$(_tree_identity "$r/manifest"); rc=$?
+    printf 'RC %s\n' "$rc"
+    printf 'DIAGSIG %s\n' "$(printf '%s' "$id" | grep -c 'No space left on device')"
+    _tree_note_capture_failure "tree-identity manifest write (start capture)" "$rc" "$id"
+    printf 'LINE %s\n' "$(_disk_exhaustion_line fmt PASS clippy PASS smoke PASS)"
+    # MUTATION CONTROL, in the same shell and on the same captured text: drop the in-memory
+    # subject from the scan and the verdict must collapse. Without this, 18b could pass for
+    # any reason at all.
+    DISK_MEM_SUBJECTS=()
+    printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS clippy PASS smoke PASS)"
+  )
+  e_rc=$(printf '%s\n' "$enospc_out" | sed -n 's/^RC //p')
+  e_sig=$(printf '%s\n' "$enospc_out" | sed -n 's/^DIAGSIG //p')
+  e_line=$(printf '%s\n' "$enospc_out" | sed -n 's/^LINE //p')
+  e_mut=$(printf '%s\n' "$enospc_out" | sed -n 's/^MUTANT //p')
+  # FIXTURE PROVENANCE FIRST: without a real rc 2 carrying real strerror text, everything
+  # below would be measuring nothing.
+  if [ "${e_rc:-}" = 2 ] && [ "${e_sig:-0}" -ge 1 ]; then
+    ok "18a-enospc-real: the shipped _tree_identity returned rc 2 against /dev/full and its rc-2 channel carried the platform's REAL 'No space left on device' text"
+  else
+    bad "18a-enospc-real: expected rc 2 with real ENOSPC text on the rc-2 channel; rc='${e_rc:-<none>}' signature-lines='${e_sig:-<none>}'"
+  fi
+  if case "$e_line" in "disk-exhaustion: RECOGNISED (#3800)"*"'no-space-left-on-device'"*"IN-MEMORY subject 'tree-identity manifest write (start capture)'"*) true ;; *) false ;; esac; then
+    ok "18b-enospc-attributed: a REAL ENOSPC in the tree-identity capture is RECOGNISED and named, with all three components PASS (nothing in the component-log subject set could ever have shown it)"
+  else
+    bad "18b-enospc-attributed: a real ENOSPC capture failure was not attributed; got: $e_line"
+  fi
+  if case "$e_mut" in "disk-exhaustion: RECOGNISED (#3800)"*) false ;; *) true ;; esac \
+     && case "$e_mut" in "disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan"*) true ;; *) false ;; esac; then
+    ok "18c-enospc-mutation: removing the in-memory subject from the scan collapses the SAME real-ENOSPC run to the affirmative '0 RECOGNISED -- no non-PASS component to scan' -- which IS the false clean reading this round exists to remove, and proves the new arm is what makes 18b pass"
+  else
+    bad "18c-enospc-mutation: the verdict did not collapse as expected when the in-memory subject was removed, so 18b is not measuring the new arm; got: $e_mut"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────
 # CASE FLOOR. A span-replacing edit that silently deletes cases must RED this suite, not
 # green it -- `failed: 0` over a shrunken subject set is the vacuous pass these suites are
 # for (#3544's own lesson, one directory over). Raise it deliberately when adding cases.
@@ -851,8 +1018,16 @@ fi
 # pin against the blind spot that let the tree-integrity boundary site ship exempt); +1 (control
 # (d): the EXEMPT arm now refuses an unsubstituted `<...>` placeholder reason, as
 # scripts/flow/claim.sh:795 already does for --reason, and a refusal nobody has seen fire is not
-# evidence -- this contract's own doctrine comment contains that placeholder).
-CASE_FLOOR=43
+# evidence -- this contract's own doctrine comment contains that placeholder); +9 (roborev job
+# 301: the SECOND KIND OF SUBJECT. Case 17 pins the in-memory channel host-independently --
+# RECOGNISED, our-vocabulary naming, the negative control that makes the arm discriminate, an
+# empty capture, the never-recorded cross-check and the two #3312 injection halves: 7 -- and
+# case 18 drives a GENUINE ENOSPC through the shipped _tree_identity at /dev/full: fixture
+# provenance, the attributed verdict, and the mutation control that removes the subject from
+# the scan: 3. Case 18 declares a 2-case SKIP where /dev/full is unavailable, so the floor
+# holds on macOS too: 7 + 3 = 10 on a /dev/full host, 7 + 2 = 9 without it, and a floor must
+# take the LOWER.)
+CASE_FLOOR=52
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

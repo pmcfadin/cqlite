@@ -6534,7 +6534,7 @@ _disk_exhaustion_line() {
     # new feature-matrix lane, a large fixture, a runaway build). So the line says what was
     # OBSERVED and what to DO about it, and explicitly declines to clear the diff.
     if [ "$m_kind" = mem ]; then
-      subj="signature '$m_sig' in IN-MEMORY subject '$m_label' (the gate own capture, which reaches NO component log)"
+      subj="signature '$m_sig' in IN-MEMORY subject '$m_label' (the gate's OWN capture, which reaches NO component log)"
       what="this tree-capture failure"
     else
       subj="signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln"
@@ -7916,8 +7916,11 @@ _tree_identity() {
   # hash-object batch above). Same fd ordering rule: `2>&1` FIRST, so the error text goes to
   # the command substitution's pipe and never into the manifest it is complaining about.
   # The subshell is harmless -- this block writes files and sets no variable used afterwards.
-  _capdiag="${_capdiag:+$_capdiag
-}$(
+  # The separator is `$nl`, never a literal newline inside the expansion: a line starting
+  # with `}` at column zero would truncate every structural scan of this function's body
+  # (`fn_body` in scripts/tests/test_agent_gate_tree_integrity.sh stops at `^\}`), silently
+  # hiding the validation calls below from the checks that assert they exist.
+  _capdiag="${_capdiag:+$_capdiag$nl}$(
   {
     printf 'H\t%s\0' "$head"
     printf 'H\t%s\n' "$head" >&3
@@ -7932,7 +7935,7 @@ _tree_identity() {
     printf 'N\t%s\0' "${#paths[@]}"
     printf 'N\t%s\n' "${#paths[@]}" >&3
   } 2>&1 > "$out" 3> "$out.report"
-)"
+  )"
 
   [ "${#paths[@]}" -gt 0 ] && dirty=yes
 
