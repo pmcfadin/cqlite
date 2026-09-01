@@ -2046,5 +2046,74 @@ $o43e"
 fi
 rm -rf "$D43"
 
+# ===========================================================================
+echo "TEST 44: a DANGLING SYMLINK in the lock root is COUNTED, not silently skipped (roborev round 29)"
+# ===========================================================================
+# `[ -e "$f" ]` FOLLOWS the link, so a broken one answered FALSE and took the
+# glob-didn't-match branch -- skipped WITHOUT incrementing SAME_DIR_UNREADABLE. The lead's
+# ruling on this guard (#3761) was to KEEP THE DISCLOSURE and defer the mechanism, so an
+# entry that escapes the counter escapes the disclosure too and ACQUIRED then claims an
+# exhaustive directory scan it did not perform. Two arms differing in exactly ONE property
+# (the dangling link), because a single arm proves nothing: without the baseline this would
+# also pass if the guard disclosed on EVERY acquire.
+D44="$(mktemp -d)"; mkdir -p "$D44/.lane-locks" "$D44/lane-800"
+sleeper; S44="$REPLY_SLEEPER"   # NEVER $(sleeper): the append runs in a subshell and the EXIT trap loses it
+o44a="$(LANE_ROOT="$D44" LANE_LOCK_PID=$S44 bash "$LL" acquire 800 --lane-dir "$D44/lane-800" 2>&1)"
+LANE_ROOT="$D44" LANE_LOCK_PID=$S44 bash "$LL" release 800 >/dev/null 2>&1
+ln -s /nonexistent/target "$D44/.lane-locks/lane-999.lock"
+o44b="$(LANE_ROOT="$D44" LANE_LOCK_PID=$S44 bash "$LL" acquire 800 --lane-dir "$D44/lane-800" 2>&1)"
+if printf '%s' "$o44a" | grep -q 'dir-guard='; then
+  bad "(a) CONTROL: a clean lock root disclosed a partial dir guard, so the disclosure says nothing:
+$o44a"
+else
+  ok "(a) CONTROL: a clean lock root discloses NO dir-guard narrowing"
+fi
+if printf '%s' "$o44b" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
+  ok "(b) a DANGLING symlink is counted unreadable and DISCLOSED on the ACQUIRED line"
+else
+  bad "(b) a dangling symlink escaped the counter — ACQUIRED claimed an exhaustive scan it did not do:
+$o44b"
+fi
+kill_sleeper "$S44"
+rm -rf "$D44"
+
+# ===========================================================================
+echo "TEST 45: ACQUIRE PUBLISHES THE LEASE, so the acquirer can use release --expect (roborev round 29)"
+# ===========================================================================
+# The release residual note says a caller "that can hold a lease across the gap -- finalize
+# can, it acquired -- SHOULD pass it", but acquire never printed one, so the acquirer could
+# not follow its own recommendation without a second `probe`. Asserted END TO END rather than
+# on the presence of the field: a lease that is printed but not ACCEPTED by --expect would
+# satisfy a grep and still leave the documented path unusable.
+D45="$(mktemp -d)"; mkdir -p "$D45/lane-810"
+sleeper; S45="$REPLY_SLEEPER"   # NEVER $(sleeper): same subshell trap
+o45="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" acquire 810 --lane-dir "$D45/lane-810" 2>&1)"
+l45="$(printf '%s' "$o45" | tr ' ' '\n' | sed -n 's/^lease=//p')"
+p45="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" probe 810 2>&1 | tr ' ' '\n' | sed -n 's/^lease=//p')"
+if [ -n "$l45" ] && [ "$l45" = "$p45" ]; then
+  ok "(a) acquire publishes lease= and it is byte-identical to probe's"
+else
+  bad "(a) acquire lease '$l45' != probe lease '$p45' (empty means acquire published none)"
+fi
+o45r="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" release 810 --expect "$l45" 2>&1)"; rc45r=$?
+if [ "$rc45r" -eq 0 ] && printf '%s' "$o45r" | grep -q 'RELEASED issue=810'; then
+  ok "(b) the lease acquire printed is ACCEPTED by release --expect (the path is usable end to end)"
+else
+  bad "(b) release --expect rejected the lease acquire itself published: rc=$rc45r
+$o45r"
+fi
+# RED arm: the check must still REFUSE a lease that is not the record's incarnation, or (b)
+# would pass simply because --expect validates nothing.
+LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" acquire 811 --lane-dir "$D45/lane-811" >/dev/null 2>&1
+o45x="$(LANE_ROOT="$D45" LANE_LOCK_PID=$S45 bash "$LL" release 811 --expect "not-the-lease#1" 2>&1)"; rc45x=$?
+if [ "$rc45x" -ne 0 ] && printf '%s' "$o45x" | grep -q 'RELEASE-LOST.*lease-mismatch'; then
+  ok "(c) RED: a lease that is not the record's incarnation is REFUSED, so (b) is a real acceptance"
+else
+  bad "(c) a bogus lease was accepted by release --expect: rc=$rc45x
+$o45x"
+fi
+kill_sleeper "$S45"
+rm -rf "$D45"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

@@ -1054,8 +1054,21 @@ same_dir_other_issue() {
   SAME_DIR_UNREADABLE=0
   REPLY_SAME_DIR=""
   for f in "$(lock_root)"/lane-*.lock; do
-    [ -e "$f" ] || continue                 # the glob's literal self when nothing matches
+    # `-e` FOLLOWS A SYMLINK, so a BROKEN one answers FALSE and used to take the
+    # glob-didn't-match branch — skipped WITHOUT counting (#3436, roborev round 29). That is
+    # this file's own `1699-find-tristate` shape one more time: THREE states (no such entry /
+    # an entry we cannot read / a readable record) collapsed onto a two-valued predicate,
+    # which then picks the permissive answer. It matters more than an ordinary miss because
+    # the lead's ruling on this guard was to KEEP THE DISCLOSURE and defer the mechanism
+    # (#3761): an entry that escapes the COUNTER escapes the disclosure too, so ACQUIRED would
+    # claim an exhaustive directory scan it did not perform. `-L` is what separates the two —
+    # it is true for a dangling link and false for the unmatched glob's literal self.
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      continue                              # the glob's literal self when nothing matches
+    fi
     if [ ! -f "$f" ]; then
+      # A dangling symlink, a directory, a socket: an entry that EXISTS and is not a record
+      # we can read. Counted, never silently skipped.
       SAME_DIR_UNREADABLE=$((SAME_DIR_UNREADABLE + 1)); continue
     fi
     base="${f##*/}"; other="${base#lane-}"; other="${other%.lock}"
@@ -1425,7 +1438,17 @@ _acquire_locked() {
           emit "OCCUPIED issue=$G_ISSUE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. The record protects the recorded directory only, so returning re-entrant here would advertise protection this lock does not provide. Release it under this issue first, or take the other directory under its own issue number.) lane-dir=$G_LANE"
           return 2
         fi
-        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
+        # PUBLISH THE LEASE (#3436, roborev round 29). The release/reclaim rationale says a
+        # caller "that can hold a lease across the gap -- finalize can, it acquired -- SHOULD
+        # pass it" to get compare-and-swap, but ACQUIRE NEVER PRINTED ONE, so the acquirer
+        # could not do the thing its own residual note recommends without a second `probe`.
+        # Re-parsed FROM DISK so the value published is the record that exists, not one
+        # rebuilt from in-memory fields that could differ from what was written.
+        # parse_record is called HERE, NOT inside the `$(...)` below: it assigns REC_* globals,
+        # and a substitution would set them in a subshell and discard them -- the boundary this
+        # file has already lost a value across three times (rounds 19, 22, 23).
+        parse_record "$G_RECORD" >/dev/null 2>&1 || true
+        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) lease=$(record_lease) record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
         return 0
         ;;
       DEAD-*)
@@ -1439,7 +1462,8 @@ _acquire_locked() {
           return 1
         fi
         append_audit "$G_LOG" "verdict=ACQUIRED-RECLAIMED issue=$G_ISSUE token=$G_TOKEN prev-token=$prev_token prev-liveness=$liveness reason=auto-reclaim-dead-holder"
-        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
+        parse_record "$G_RECORD" >/dev/null 2>&1 || true
+        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) lease=$(record_lease) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
         return 0
         ;;
       *)
@@ -1454,7 +1478,8 @@ _acquire_locked() {
     return 1
   fi
   append_audit "$G_LOG" "verdict=ACQUIRED issue=$G_ISSUE token=$G_TOKEN prev-token=<none> prev-liveness=<none> reason=free-lane"
-  emit "ACQUIRED issue=$G_ISSUE $(self_fields) record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
+  parse_record "$G_RECORD" >/dev/null 2>&1 || true
+  emit "ACQUIRED issue=$G_ISSUE $(self_fields) lease=$(record_lease) record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
   return 0
 }
 
