@@ -54,7 +54,7 @@ use cqlite_core::error::ErrorCategory;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::schema::parse_cql_schema;
 use cqlite_core::storage::sstable::SSTableReader;
-use cqlite_core::{Config, Database, Error, Platform, TableId};
+use cqlite_core::{Config, Database, Error, Platform};
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
@@ -440,8 +440,9 @@ async fn streaming_compaction_read_surfaces_the_column_decode_failure() {
     );
 }
 
-/// The table id is unused by the assertions above but pins that the fixture is the
-/// one this file names, so a corpus reshuffle cannot silently retarget the lane.
+/// The complex-arm cases describe their fixture as the BIG (`nb`) format; pin that,
+/// so a corpus reshuffle cannot silently retarget the lane at a different format and
+/// leave the prose above asserting something untrue.
 #[tokio::test]
 async fn fixture_identity_is_pinned() {
     let reader = open_complex_reader().await;
@@ -450,5 +451,4 @@ async fn fixture_identity_is_pinned() {
         "nb",
         "the complex-arm fixture must be the BIG `nb` format this file describes"
     );
-    let _ = TableId::new(&format!("{COMPLEX_KEYSPACE}.{COMPLEX_TABLE}"));
 }
