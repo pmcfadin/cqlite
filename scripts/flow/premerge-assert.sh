@@ -136,9 +136,74 @@
 #     the gap they disclose, and removing them would be exactly the overclaim
 #     this residual exists to prevent.
 #
+# THE C (INTENT AUDIT) VERDICT IS REQUIRED AT THE MERGE POINT (#3751)
+# -------------------------------------------------------------------
+# A delegated review stage used to write NOTHING at any point in its life, so its
+# reader had only ABSENCE to reason from — and every consumer of an absence has to
+# CHOOSE how to read it. Six lanes chose "not run" correctly and nothing required
+# them to; the seventh read an idle notice as a clean review and merged.
+# `scripts/flow/review-stage.sh` makes a stage's verdict an ARTIFACT with a CLOSED
+# grammar; this script is the point that CONSUMES it, so an absent C can no longer
+# reach a merge.
+#
+#   --c-verdict AUTO     MEASURE whether C is required from the CERTIFIED tree,
+#                        then read the stage's verdict. The intended form.
+#   --c-verdict <path>   a file holding a captured verdict line, i.e.
+#                        `review-stage.sh verdict c --issue <N> > <path>`.
+#
+# THE FLAG IS REQUIRED AND ITS OMISSION IS EXIT 3 — the #3465 precedent, which
+# broke pre-existing callers loudly and on purpose. A silent default of "C is not
+# required" would reproduce, inside the enforcer, the exact defect the enforcer
+# exists to close. It is a NAMED flag rather than a fifth positional so it
+# composes with #3752's sibling required flag in EITHER landing order, and the
+# missing-flag census names each absent flag independently, so this one's exit 3
+# does not depend on being the only required flag.
+#
+# ROUTING IS MEASURED FROM THE CERTIFIED TREE, NEVER TAKEN FROM THE CALLER.
+# A caller-supplied "C does not apply here" is exactly the escape hatch #3751
+# exists to remove, so `AUTO` asks git what THIS BRANCH does to
+# `openspec/changes/`: the diff between merge-base(origin/main, <certified>) and
+# <certified>, with `openspec/changes/archive/**` excluded (archiving is
+# flow-finalize's work, never a routing signal). Non-empty ⇒ DESIGN-ROUTED ⇒ C
+# REQUIRED; empty ⇒ affirmatively `NOT-APPLICABLE (no openspec change on branch)`.
+#   * A plain LISTING of `openspec/changes/` cannot answer this. Measured
+#     2026-09-01: `origin/main` carries `archive` PLUS two sibling lanes' in-flight
+#     change directories, so every branch would read design-routed and the
+#     "measurement" would be vacuous — a check that reds on correct input is the
+#     check agents learn to waive.
+#   * The base is the MERGE-BASE, never `origin/main`'s TIP (#3392). A tip
+#     comparison reports another lane's newly-landed change as a difference of
+#     THIS branch, which reds a correct oracle-driven PR.
+#   * It measures the CERTIFIED sha, not this checkout's HEAD — the same rule the
+#     base-staleness advisory follows: a report about a different tree than the one
+#     being merged is the "satisfied and wrong" shape.
+#   * ANY failure to measure (no git, no `origin/main`, the certified commit absent
+#     from this checkout, a failing diff) is `UNMEASURED` and is TREATED AS
+#     REQUIRED. Never derive a pass from the absence of a bad signal.
+# There is deliberately NO spelling of the flag that means "not applicable": a
+# supplied PATH can only carry a review-stage verdict token, and `NOT-APPLICABLE`
+# is not in that closed grammar, so a file asserting it is refused as an
+# unrecognised token. Inapplicability is reachable ONLY through AUTO's measurement.
+#
+# ONLY `PASS` AND `AUTHOR-PERFORMED` PROCEED, AND THE SECOND KEEPS ITS OWN TOKEN.
+# `AUTHOR-PERFORMED` is review-stage.sh's disclosed hand-audit substitute; it is
+# reported on its own `PREMERGE: C-VERDICT` line and is NEVER folded into
+# `PREMERGE: OK`, because a reader must be able to see that the intent audit was
+# performed by the diff's AUTHOR. `FINDINGS`, `NOT-RUN` and every unrecognised
+# token REFUSE, naming the stage and the cause. The token is reduced to its FIRST
+# WORD and matched by STRING EQUALITY, never a prefix test (#3544).
+#
+# ONE DECLARED RESIDUAL. With an explicit `--c-verdict <path>` this script verifies
+# the verdict's GRAMMAR and TOKEN, not that the stage it came from belongs to THIS
+# issue: the verdict line carries a kind, an agent and a report path, and no sha.
+# The report path IS printed on the success line so a human can see which stage
+# answered. Under `AUTO` the stage is located in the worktree being merged and two
+# stage records are refused as ambiguous, which is the stronger binding — which is
+# why AUTO is the intended form.
+#
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
-#       <gate-of-record-summary> [<delta-summary>]
+#       <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>
 #
 # ENVIRONMENT
 #   GH_REPO   the target repo (default: pmcfadin/cqlite). `gh` honors GH_REPO
@@ -149,11 +214,14 @@
 #       — prints "PREMERGE: OK <sha>", "PREMERGE: SCOPE ..." (what was and was
 #         NOT proven, #3650), "PREMERGE: ADVISORY ..." (the non-blocking
 #         base-staleness report, #3650 slice 1 — it NEVER changes this exit
-#         code) and "PREMERGE: GATE-OF-RECORD ..."
-#         (plus "PREMERGE: DELTA-RECERT ..." in Case B)
-#   2   no/invalid gate of record, OR head moved (mismatch), OR PR closed/merged
+#         code), "PREMERGE: GATE-OF-RECORD ..." and "PREMERGE: C-VERDICT ..."
+#         (plus "PREMERGE: DELTA-RECERT ..." in Case B, and
+#         "PREMERGE: C-VERDICT-NOTE ..." when the C token is AUTHOR-PERFORMED)
+#   2   no/invalid gate of record, OR no/invalid C verdict where C is required
+#       (#3751), OR head moved (mismatch), OR PR closed/merged
 #       — LOUD multi-line refusal
-#   3   gh/network failure, a required TOOL failing, or a usage error — fail
+#   3   gh/network failure, a required TOOL failing, or a usage error (which now
+#       INCLUDES omitting --c-verdict, #3751) — fail
 #       closed, never merge on uncertainty. The three are distinguished by the
 #       printed marker, NOT by the code: `PREMERGE: USAGE` (you called it wrong),
 #       `PREMERGE: TOOL-FAILURE` (a broken box — fix the box, do NOT re-run the
@@ -169,8 +237,16 @@ usage() {
   # a TOOL failure and a GH failure, and a caller must be able to tell them apart
   # — "you called me wrong" is not "GitHub is down". The exit CODES are unchanged.
   printf 'PREMERGE: USAGE — the call is wrong (this is NOT a gh/network failure)\n' >&2
-  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>]\n' \
+  # Optional REASON lines, printed FIRST so the specific complaint is the first
+  # thing read. `usage` with no arguments is unchanged, which is why every
+  # pre-#3751 call site still reads correctly.
+  while [ "$#" -gt 0 ]; do
+    printf 'PREMERGE: USAGE   %s\n' "$1" >&2
+    shift
+  done
+  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>] \\\n' \
     "$(basename "$0")" >&2
+  printf '           --c-verdict <path|AUTO>\n' >&2
   printf '       <gate-of-record-summary> is REQUIRED: the AGENT_GATE_SUMMARY_FILE of the\n' >&2
   printf '       FULL gate (a "==== AGENT-GATE SUMMARY ====" block with RESULT: PASS and\n' >&2
   printf '       tree-integrity: PASS). With 3 args it must be AT the certified sha.\n' >&2
@@ -178,26 +254,106 @@ usage() {
   printf '       whose delta-anchor: is the full block above and whose own commit:/\n' >&2
   printf '       tree-start: are AT the certified sha (the #1892 post-gate-polish route).\n' >&2
   printf '       See #3465.\n' >&2
+  printf '       --c-verdict is REQUIRED (#3751) and has NO default — omitting it is THIS\n' >&2
+  printf '       usage failure, never a silent "C is not required":\n' >&2
+  printf '         --c-verdict AUTO     MEASURE from the certified tree whether C is\n' >&2
+  printf '                              required, then read the stage verdict.\n' >&2
+  printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
+  printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
 }
 
-if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
-  usage
+# --- ARGUMENTS: POSITIONALS PLUS NAMED REQUIRED FLAGS (#3751/#3752) ----------
+# The three/four positionals are the pre-#3751 contract and are UNCHANGED. What is
+# new is that a required argument arrives as a NAMED FLAG, deliberately:
+#
+#  * #3752 binds this same script to the roborev certification and will add a
+#    sibling required flag. A named flag composes in EITHER landing order, where a
+#    fifth positional would not — and this parse loop is the one place a new flag
+#    is added.
+#  * the missing-flag census below names EACH absent required flag independently,
+#    so `--c-verdict`'s exit-3-on-omission does NOT depend on being the only
+#    required flag. A `[ $# -ne N ]` arity test would have exactly that dependency.
+c_verdict=""
+c_verdict_set=0
+pos_count=0
+pos1=""; pos2=""; pos3=""; pos4=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --c-verdict)
+      shift
+      # An ABSENT value is a usage failure, never an empty default — the same rule
+      # the empty fourth positional gets below. A caller whose variable expanded to
+      # nothing must be told, never silently downgraded.
+      if [ "$#" -eq 0 ]; then
+        usage '--c-verdict requires a value: a <path> to a captured verdict line, or AUTO'
+        exit 3
+      fi
+      c_verdict="$1"
+      c_verdict_set=1
+      ;;
+    --c-verdict=*)
+      c_verdict="${1#*=}"
+      c_verdict_set=1
+      ;;
+    -*)
+      usage "unknown option '$1'"
+      exit 3
+      ;;
+    *)
+      pos_count=$((pos_count + 1))
+      case "$pos_count" in
+        1) pos1="$1" ;;
+        2) pos2="$1" ;;
+        3) pos3="$1" ;;
+        4) pos4="$1" ;;
+        *)
+          usage "too many positional arguments (got $pos_count, expected 3 or 4)"
+          exit 3
+          ;;
+      esac
+      ;;
+  esac
+  shift
+done
+
+if [ "$pos_count" -ne 3 ] && [ "$pos_count" -ne 4 ]; then
+  usage "expected 3 or 4 positional arguments, got $pos_count"
   exit 3
 fi
 
-pr="$1"
-certified="$2"
-summary_file="$3"
-delta_file="${4:-}"
+# THE MISSING-FLAG CENSUS. One entry per required flag, each named on its own, so
+# adding #3752's flag here cannot weaken this one's refusal.
+missing_flags=""
+[ "$c_verdict_set" -eq 1 ] || missing_flags="$missing_flags --c-verdict"
+if [ -n "$missing_flags" ]; then
+  usage "MISSING REQUIRED FLAG(S):$missing_flags" \
+    "This is deliberately NOT a default (#3751): a silent 'C is not required' would" \
+    "reproduce, inside the enforcer, the exact defect the enforcer exists to close —" \
+    "an absent review read as a clean one. Pass --c-verdict AUTO to have the routing" \
+    "MEASURED from the certified tree."
+  exit 3
+fi
+if [ -z "$c_verdict" ]; then
+  usage '--c-verdict was given an EMPTY value' \
+    'An empty value is a caller bug (an unset variable), not "AUTO" and not "skip".'
+  exit 3
+fi
+
+pr="$pos1"
+certified="$pos2"
+certified_raw="$pos2"
+summary_file="$pos3"
+delta_file="$pos4"
 
 if [ -z "$pr" ] || [ -z "$certified" ] || [ -z "$summary_file" ]; then
-  usage
+  usage 'an empty <pr-number>, <certified-sha> or <gate-of-record-summary>'
   exit 3
 fi
 # An EMPTY fourth argument is a usage failure, not "3-arg mode": a caller whose
 # variable expanded to nothing must be told, never silently downgraded.
-if [ "$#" -eq 4 ] && [ -z "$delta_file" ]; then
-  usage
+if [ "$pos_count" -eq 4 ] && [ -z "$delta_file" ]; then
+  usage 'an EMPTY fourth argument (<delta-summary>)' \
+    'This is not "3-arg mode" — a caller whose variable expanded to nothing is told.'
   exit 3
 fi
 
@@ -206,14 +362,14 @@ fi
 certified=$(printf '%s' "$certified" | tr '[:upper:]' '[:lower:]')
 case "$certified" in
   *[!0-9a-f]* | "")
-    printf 'error: certified SHA must be 40 hex chars (got: %s)\n' "$2" >&2
+    printf 'error: certified SHA must be 40 hex chars (got: %s)\n' "$certified_raw" >&2
     usage
     exit 3
     ;;
 esac
 if [ "${#certified}" -ne 40 ]; then
   printf 'error: certified SHA must be a full 40-char hex SHA (got %d chars: %s)\n' \
-    "${#certified}" "$2" >&2
+    "${#certified}" "$certified_raw" >&2
   usage
   exit 3
 fi
@@ -258,6 +414,337 @@ refuse_tool_failure() {
   printf '  assert — do NOT re-run the gate. Refusing to merge (fail closed).\n' >&2
   printf '========================================================\n' >&2
   exit 3
+}
+
+# ---------------------------------------------------------------------------
+# THE C (INTENT AUDIT) VERDICT AT THE MERGE POINT (#3751)
+# ---------------------------------------------------------------------------
+# See the header. Everything below is OFFLINE, so "you have no C verdict" is
+# reportable without a network round trip, exactly like the gate-of-record half.
+#
+# `c` is the stage KIND the C intent audit uses, by convention shared with
+# scripts/flow/review-stage.sh's callers (flow-closer opens `c`). It is a constant
+# and NOT an option: a caller able to choose which stage counts as C could point
+# this check at a stage nobody gates on.
+C_STAGE_KIND=c
+
+# The stage-verdict grammar this script CONSUMES (scripts/flow/review-stage.sh):
+#   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<s> deadline=<s> agent=<t> report=<p>
+# Only these two tokens may proceed. Everything else — FINDINGS, NOT-RUN, and any
+# unrecognised value — REFUSES.
+C_TOKEN=""          # the token that was read
+C_TOKEN_LINE=""     # the verdict line it was read from, for the diagnostic
+C_TOKEN_REPORT=""   # the `report=` field, so a human can see WHICH stage answered
+C_SOURCE=""         # how the verdict was obtained
+C_ROUTING=""        # REQUIRED | NOT-APPLICABLE | UNMEASURED
+C_ROUTING_DETAIL=""
+
+refuse_no_c_verdict() {
+  printf '========================================================\n' >&2
+  printf 'PREMERGE: NO-C-VERDICT — REFUSING TO MERGE\n' >&2
+  printf '  stage: %s (the C intent audit)\n' "$C_STAGE_KIND" >&2
+  printf '  --c-verdict: %s\n' "$c_verdict" >&2
+  printf '  routing: %s%s\n' "$C_ROUTING" \
+    "${C_ROUTING_DETAIL:+ ($C_ROUTING_DETAIL)}" >&2
+  [ -z "$C_TOKEN" ] || printf '  verdict token: %s\n' "$C_TOKEN" >&2
+  [ -z "$C_TOKEN_LINE" ] || printf '  verdict line: %s\n' "$C_TOKEN_LINE" >&2
+  while [ "$#" -gt 0 ]; do
+    printf '  %s\n' "$1" >&2
+    shift
+  done
+  printf '  An ABSENT review is not a clean one (#3751). Six lanes read a silent\n' >&2
+  printf '  stage as "not run" correctly and nothing required them to; the seventh\n' >&2
+  printf '  read an idle notice as a clean review and merged. The remedy is to RUN\n' >&2
+  printf '  the stage and let it record a verdict:\n' >&2
+  printf '    bash scripts/flow/review-stage.sh open %s --issue <N> --agent spec-auditor\n' \
+    "$C_STAGE_KIND" >&2
+  printf '    # ...spawn the auditor with the clause that command prints...\n' >&2
+  printf '    bash scripts/flow/review-stage.sh verdict %s --issue <N>\n' "$C_STAGE_KIND" >&2
+  printf '  If no independent audit is available, the SANCTIONED FALLBACK is a\n' >&2
+  printf '  disclosed substitute WITH ITS WORKING — never a hand-asserted pass:\n' >&2
+  printf '    bash scripts/flow/review-stage.sh record-author-performed %s --issue <N> \\\n' \
+    "$C_STAGE_KIND" >&2
+  printf '      --reason <why-no-peer-audit> --evidence <artifact> --performed-by author\n' >&2
+  printf '  It reports the DISTINCT token AUTHOR-PERFORMED, never PASS.\n' >&2
+  printf '========================================================\n' >&2
+  exit 2
+}
+
+# _c_verdict_awk — read a verdict STREAM on stdin, print `key=value` lines.
+#
+# COLUMN-ZERO ANCHORED (`/^REVIEW-STAGE: /`), never awk's `$1 ==`, which is
+# whitespace-insensitive: an INDENTED or `>`-quoted copy of a verdict line is
+# DATA — this repository's docs, PR comments and issue bodies all contain such
+# copies, and this very script's header will too. Same anchoring rule, same
+# reason, as the gate-summary marker matching above (#3312).
+#
+# The FIRST anchored line supplies the values and every anchored line is COUNTED,
+# so two verdicts in one file are AMBIGUOUS and refusable rather than last-wins.
+# `RESULT:`'s value is taken from its FIRST occurrence on that line, so a
+# self-recorded NOT-RUN cause that happens to contain the word cannot supply the
+# token. ANSI is stripped as belt (#3400: colour survives redirection).
+_c_verdict_awk() {
+  awk '
+  BEGIN { n = 0; tok = ""; rep = ""; line = "" }
+  { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
+  /^REVIEW-STAGE: / {
+    n++
+    if (n == 1) {
+      line = $0
+      for (i = 2; i <= NF; i++) {
+        if ($i == "RESULT:" && tok == "" && i < NF) tok = $(i + 1)
+        if (substr($i, 1, 7) == "report=") rep = substr($i, 8)
+      }
+    }
+  }
+  END { print "n=" n; print "token=" tok; print "report=" rep; print "line=" line }
+'
+}
+
+# c_parse_verdict <stream-kind:file|text> <value> <what> — publish CV_* from the
+# stream. Refuses (exit 2) on zero or several anchored lines: zero certifies
+# nothing, and picking one of several is the "last one wins" rule this file
+# refuses everywhere else.
+c_parse_verdict() {
+  local kind="$1" value="$2" what="$3" out k v
+  if [ "$kind" = file ]; then
+    out=$(_c_verdict_awk <"$value") || refuse_tool_failure awk "$what"
+  else
+    out=$(printf '%s\n' "$value" | _c_verdict_awk) || refuse_tool_failure awk "$what"
+  fi
+  CV_N=""; CV_TOKEN=""; CV_REPORT=""; CV_LINE=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      n)      CV_N="$v" ;;
+      token)  CV_TOKEN="$v" ;;
+      report) CV_REPORT="$v" ;;
+      line)   CV_LINE="$v" ;;
+    esac
+  done <<C_PARSE
+$out
+C_PARSE
+  case "$CV_N" in
+    ''|*[!0-9]*)
+      C_TOKEN_LINE=""
+      refuse_no_c_verdict \
+        "The $what parse produced no usable line count — refusing (fail closed)."
+      ;;
+  esac
+  if [ "$CV_N" -eq 0 ]; then
+    refuse_no_c_verdict \
+      "The $what holds NO verdict line (no line begins 'REVIEW-STAGE: ' at column zero)." \
+      "A captured verdict is produced by:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>" \
+      "The stage's REPORT file (.review-stage/issue-<N>/$C_STAGE_KIND.md) is NOT that line:" \
+      "the report is the agent's prose, the verdict line is the closed-grammar reading of it."
+  fi
+  if [ "$CV_N" -gt 1 ]; then
+    C_TOKEN_LINE="$CV_LINE"
+    refuse_no_c_verdict \
+      "The $what holds $CV_N verdict lines — AMBIGUOUS, refusing rather than picking one." \
+      "A 'take the last line' rule would let a stale or foreign stage certify this merge."
+  fi
+  C_TOKEN="$CV_TOKEN"
+  C_TOKEN_LINE="$CV_LINE"
+  C_TOKEN_REPORT="$CV_REPORT"
+}
+
+# c_measure_routing — is C REQUIRED for the tree being merged? Measured, never
+# taken from the caller. See the header for why a plain listing of
+# `openspec/changes/` cannot answer it and why the base is the MERGE-BASE.
+#
+# Sets C_ROUTING to REQUIRED / NOT-APPLICABLE / UNMEASURED. UNMEASURED is treated
+# as REQUIRED by the caller: never derive a pass from the absence of a bad signal.
+C_ROUTING_BASE_REF=origin/main
+c_measure_routing() {
+  local main_sha base out rc=0 p slug="" hits=0
+  if ! command -v git >/dev/null 2>&1; then
+    C_ROUTING=UNMEASURED; C_ROUTING_DETAIL="git is not on PATH"; return 0
+  fi
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    C_ROUTING=UNMEASURED; C_ROUTING_DETAIL="not inside a git work tree"; return 0
+  fi
+  if ! git rev-parse --verify --quiet "$certified^{commit}" >/dev/null 2>&1; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="the certified commit $certified is not present in this checkout"
+    return 0
+  fi
+  if ! main_sha=$(git rev-parse --verify --quiet "$C_ROUTING_BASE_REF^{commit}" 2>/dev/null) ||
+    [ -z "$main_sha" ]; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="$C_ROUTING_BASE_REF does not resolve to a commit here"
+    return 0
+  fi
+  if ! base=$(git merge-base "$main_sha" "$certified" 2>/dev/null) || [ -z "$base" ]; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="no merge-base between $C_ROUTING_BASE_REF and the certified commit"
+    return 0
+  fi
+  # `diff.renames`/`diff.relative` pinned OFF at the invocation, for the reasons
+  # scripts/flow/base-staleness.sh records in full: `diff.relative` is INVOKER
+  # config and would make the answer a function of cwd. NUL-delimited, then
+  # translated: a path containing a newline would split into two entries, and both
+  # halves then fail the `archive/` prefix test, which counts as DESIGN-ROUTED —
+  # the fail-closed direction.
+  out=$(git -c diff.renames=false -c diff.relative=false \
+    diff --name-only -z "$base" "$certified" -- openspec/changes/ 2>/dev/null | tr '\0' '\n') ||
+    rc=$?
+  if [ "$rc" -ne 0 ]; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="git diff <merge-base>..<certified> -- openspec/changes/ failed"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      openspec/changes/archive/*) continue ;;
+    esac
+    hits=$((hits + 1))
+    if [ -z "$slug" ]; then
+      slug="${p#openspec/changes/}"
+      slug="${slug%%/*}"
+    fi
+  done <<C_ROUTE
+$out
+C_ROUTE
+  if [ "$hits" -gt 0 ]; then
+    C_ROUTING=REQUIRED
+    C_ROUTING_DETAIL="this branch touches openspec/changes/$slug ($hits path(s) vs merge-base ${base:0:12})"
+  else
+    C_ROUTING=NOT-APPLICABLE
+    C_ROUTING_DETAIL="no openspec change on branch"
+  fi
+  return 0
+}
+
+# c_auto_locate_issue — find THE open C stage in this worktree, by its stage
+# RECORD (`.review-stage/issue-<N>/<kind>.stage`), which is the artifact that
+# proves a stage was opened at all. Prints the issue number, or nothing.
+# Several stages is AMBIGUOUS and refuses: 1:1:1:1 puts exactly one issue in a
+# worktree, so two records mean the caller is not where it thinks it is.
+c_auto_locate_issue() {
+  local root d n count=0 found=""
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=""
+  [ -n "$root" ] || root="$PWD"
+  for d in "$root"/.review-stage/issue-*/"$C_STAGE_KIND".stage; do
+    [ -f "$d" ] || continue
+    n=$(basename "$(dirname "$d")")
+    n="${n#issue-}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    count=$((count + 1))
+    found="$n"
+  done
+  if [ "$count" -gt 1 ]; then
+    refuse_no_c_verdict \
+      "$count '$C_STAGE_KIND' stage records exist under $root/.review-stage/ — AMBIGUOUS." \
+      "1:1:1:1 puts exactly ONE issue in a worktree, so two records mean this is not the" \
+      "lane you think it is. Name the verdict explicitly: --c-verdict <path>."
+  fi
+  printf '%s\n' "$found"
+}
+
+# c_evaluate — the whole check, called once. Refuses, or leaves C_TOKEN holding a
+# token that may proceed (PASS / AUTHOR-PERFORMED / NOT-APPLICABLE).
+c_evaluate() {
+  local rs issue out rc=0
+  if [ "$c_verdict" != AUTO ]; then
+    # AN EXPLICIT PATH. Routing is NOT consulted: a supplied path can only carry a
+    # review-stage verdict token, and NOT-APPLICABLE is not in that closed
+    # grammar, so no caller-supplied value can declare C inapplicable on a branch
+    # that carries an OpenSpec change (a file asserting it is refused BELOW, as
+    # an unrecognised token). Whether C was required is therefore irrelevant here:
+    # a verdict was supplied and it is held to the same bar either way.
+    C_ROUTING=NOT-CONSULTED
+    C_ROUTING_DETAIL="an explicit verdict path was supplied, so routing was not consulted"
+    C_SOURCE="file $c_verdict"
+    if [ ! -f "$c_verdict" ]; then
+      refuse_no_c_verdict \
+        "--c-verdict names '$c_verdict', which does not exist (or is not a regular file)."
+    fi
+    if [ ! -r "$c_verdict" ]; then
+      refuse_no_c_verdict "--c-verdict names '$c_verdict', which is not readable."
+    fi
+    if [ ! -s "$c_verdict" ]; then
+      refuse_no_c_verdict \
+        "--c-verdict names '$c_verdict', which is EMPTY — nothing was recorded." \
+        "An empty file is the shape a redirect leaves when the command it captured never ran."
+    fi
+    c_parse_verdict file "$c_verdict" "C verdict file"
+  else
+    c_measure_routing
+    if [ "$C_ROUTING" = NOT-APPLICABLE ]; then
+      # AFFIRMATIVE, and it says WHAT WAS MEASURED. This is the one branch that
+      # proceeds without a verdict, and it does so on a measurement that SUCCEEDED
+      # — never on a failure to measure, which lands in UNMEASURED below.
+      C_TOKEN=NOT-APPLICABLE
+      C_SOURCE="AUTO (measured: $C_ROUTING_DETAIL)"
+      return 0
+    fi
+    # REQUIRED, or UNMEASURED — which is treated as REQUIRED. Fail closed.
+    C_SOURCE="AUTO (routing $C_ROUTING: $C_ROUTING_DETAIL)"
+    rs=""
+    if [ -n "$self_dir" ]; then
+      rs="$self_dir/review-stage.sh"
+    fi
+    # Resolved from THIS script's own directory, with NO env override — #3312's
+    # rule that the constrained party must not choose its own enforcer. A test
+    # needing a different one substitutes the ARTIFACT in a scratch copy of the
+    # tree, exactly as the base-staleness advisory is substituted.
+    if [ -z "$rs" ] || [ ! -f "$rs" ]; then
+      refuse_tool_failure "review-stage.sh (expected beside this script${self_dir:+ at $rs})" \
+        "the C stage verdict"
+    fi
+    issue=$(c_auto_locate_issue)
+    if [ -z "$issue" ]; then
+      refuse_no_c_verdict \
+        "No '$C_STAGE_KIND' stage was ever OPENED in this worktree (.review-stage/issue-*/$C_STAGE_KIND.stage)," \
+        "so there is no verdict to read and nothing recorded that C was even attempted." \
+        "This is the state review-stage.sh reports as 'NOT-RUN (stage never opened)'."
+    fi
+    out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue" 2>/dev/null) || rc=$?
+    # The LINE is the authority, not the exit status: one grammar, read in one
+    # place. review-stage.sh's non-zero exits (4 FINDINGS / 5 NOT-RUN / 6
+    # AUTHOR-PERFORMED) are by design, so a non-zero rc with a parseable line is
+    # ORDINARY. Only an rc with NO line is a tool failure.
+    if [ -z "$out" ]; then
+      refuse_tool_failure "review-stage.sh verdict $C_STAGE_KIND --issue $issue (exit $rc, no output)" \
+        "the C stage verdict"
+    fi
+    C_SOURCE="AUTO issue=$issue stage=$C_STAGE_KIND (routing $C_ROUTING)"
+    c_parse_verdict text "$out" "C stage verdict for issue $issue"
+  fi
+
+  # THE CLOSED GRAMMAR, MATCHED BY STRING EQUALITY ON THE FIRST WORD (#3544). awk
+  # already gave us the first whitespace-delimited token after `RESULT:`, so this
+  # is token-exact: `PASS-BUT-UNMEASURED` equals nothing in the set and refuses.
+  case "$C_TOKEN" in
+    PASS) return 0 ;;
+    AUTHOR-PERFORMED) return 0 ;;
+    FINDINGS)
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND stage reports FINDINGS — the intent audit found a blocking gap." \
+        "An unmet or uncovered requirement BLOCKS the merge (CLAUDE.md's 'done' definition):" \
+        "fix it, or get the lead's ruling, then re-run the stage."
+      ;;
+    NOT-RUN)
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND stage reports NOT-RUN — no verdict was ever recorded." \
+        "NOT-RUN covers five distinct states (sentinel-only, report absent, report empty," \
+        "report ungrammatical, stage never opened) and the verdict line above NAMES which," \
+        "because the operator action differs per cause."
+      ;;
+    '')
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND verdict line carries NO token after 'RESULT:'."
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND verdict token is '$C_TOKEN', which is not in the closed set" \
+        "{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}. An unrecognised token is NEVER passed" \
+        "through and never read as a pass: this is where a hand-written 'NOT-APPLICABLE' or" \
+        "'PASS-BUT-UNMEASURED' lands. Only AUTO's MEASUREMENT of the branch can make C" \
+        "inapplicable — never a value a caller supplies."
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1423,13 @@ fi
 assert_clean_tree "full-gate block" "$full_dirty" full "$full_ndirty" commit:
 assert_clean_tree "full-gate block" "$full_tsdirty" full "$full_ntsdirty" tree-start:
 
+# THE C (INTENT AUDIT) VERDICT (#3751) — offline, and checked BEFORE the advisory
+# and the `gh` call for the same reason the gate of record is: "you have no C
+# verdict" must be reportable without a network round trip. It runs AFTER the
+# gate-of-record half so that a run with no gate at all is still reported as the
+# more fundamental failure first.
+c_evaluate
+
 # ---------------------------------------------------------------------------
 # THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)
 # ---------------------------------------------------------------------------
@@ -1030,5 +1524,23 @@ printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS 
 if [ -n "$delta_file" ]; then
   printf 'PREMERGE: DELTA-RECERT anchor: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
     "$delta_anchor" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
+fi
+# THE C VERDICT IS REPORTED UNDER ITS OWN TOKEN, NEVER FOLDED INTO `OK` (#3751).
+# `PREMERGE: OK` says the head matches and a gate of record covers it; it says
+# NOTHING about who performed the intent audit. So the token is printed here, on
+# its own line, and `AUTHOR-PERFORMED` — the disclosed hand-audit substitute — is
+# textually distinct from `PASS` for the same reason the roborev wrapper's
+# `WAIVED` is: nobody grepping the passing token may read a substitute as the real
+# thing.
+printf 'PREMERGE: C-VERDICT %s stage: %s source: %s%s\n' \
+  "$C_TOKEN" "$C_STAGE_KIND" "$C_SOURCE" \
+  "${C_TOKEN_REPORT:+ report: $C_TOKEN_REPORT}"
+if [ "$C_TOKEN" = AUTHOR-PERFORMED ]; then
+  printf 'PREMERGE: C-VERDICT-NOTE the intent audit was performed by the diff'"'"'s AUTHOR, not\n'
+  printf 'PREMERGE: C-VERDICT-NOTE independently: an author'"'"'s hand audit is not an independent\n'
+  printf 'PREMERGE: C-VERDICT-NOTE one; weight it accordingly. It is the SANCTIONED FALLBACK and\n'
+  printf 'PREMERGE: C-VERDICT-NOTE is recorded with its working (review-stage.sh\n'
+  printf 'PREMERGE: C-VERDICT-NOTE record-author-performed), which is why it is acceptable at\n'
+  printf 'PREMERGE: C-VERDICT-NOTE all — an absent audit is not auditable, a disclosed one is.\n'
 fi
 exit 0
