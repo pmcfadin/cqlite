@@ -157,16 +157,45 @@ fi
 # NAMED refusal that reds the case with the line number and the text. Remedy is always the
 # same — write the reference in the canonical one-line form.
 #
+# BLOCK COMMENTS: THREE STATES, THE THIRD OF WHICH IS A REFUSAL (roborev #3642 round 2).
+# Two classifications were wrong in OPPOSITE directions, and both were silent. A canonical
+# declaration sitting INSIDE a `/* ... */` block is byte-for-byte the recognised form, so a
+# per-line rule counted an INERT line as a live schema; and a line whose first non-space
+# character is `*` was assumed to be a comment continuation, so EXECUTABLE code beginning
+# with `*` (a generator method, a continued multiplication) carrying a real reference was
+# DROPPED — a live schema omitted while the recognised siblings keep the set non-empty,
+# i.e. this census's own founding defect reappearing inside its fix.
+#
+# The fix is a SUBTRACTION, not a lexer. Tracking JS comment-and-string state from awk is
+# the unbounded parsing problem this repo refuses (see the paragraph above); a recogniser
+# over a grammar we do not parse acquires false verdicts in both directions. So the scan
+# carries one three-valued lexical state — OUT / IN / UNKNOWN — updated on EVERY line, and
+# UNKNOWN is STICKY and REFUSES:
+#
+#   OUT -> IN       a line that is NOTHING BUT a block-comment opener (`/*`, `/**`)
+#   IN  -> OUT      a line that is NOTHING BUT a block-comment closer (` */`)
+#   any -> UNKNOWN  ANY OTHER line carrying `/*` or `*/` — a delimiter mixed with other
+#                   text, a delimiter inside a string or a regex, a closer with no opener.
+#
+# Nothing here tries to be RIGHT about a delimiter it cannot place; it stops claiming to
+# know. The cost is stated rather than hidden: a `/*` occurring inside a string literal
+# turns the state UNKNOWN and REFUSES every later `.cql` line, reddening a file that is
+# in fact correct. That is the fail-closed direction, the refusal NAMES the line that
+# caused it, and the remedy is to write the reference (or the string) differently.
+#
 # CLASSIFICATION ORDER, and why each rule is decidable without a lexer:
-#   1. a line whose first non-space characters are `//` is INERT. A commented-out reference
-#      is not a reference, and counting one would red a correct tree.
-#   2. a line carrying `/*` or `*/` MIXES code and comment; telling them apart needs a
+#   1. lexical state IN -> REFUSE. The declaration is inert; counting it would assert a
+#      schema the node suite never resolves.
+#   2. lexical state UNKNOWN -> REFUSE, naming the line the state was lost at.
+#   3. a line carrying `/*` or `*/` MIXES code and comment; telling them apart needs a
 #      lexer, so it REFUSES.
-#   3. a line whose first non-space character is `*` is a block-comment continuation. It
-#      cannot be code carrying a `.cql` literal (rule 2 already took every line that opens
-#      or closes a block comment).
-#   4. the canonical declaration -> OK.
-#   5. anything else -> REFUSE.
+#   4. a line whose first non-space characters are `//` is INERT. A commented-out reference
+#      is not a reference, and counting one would red a correct tree. (Reached only at
+#      state OUT, where a `//` is unambiguously a line comment.)
+#   5. a line whose first non-space character is `*` -> REFUSE. At state OUT it is not a
+#      comment continuation, but it is not classifiable either.
+#   6. the canonical declaration -> OK.
+#   7. anything else -> REFUSE.
 #
 # DECLARED RESIDUAL: a reference with no literal `.cql` ANYWHERE in setup.js — e.g.
 # `path.join(SCHEMAS_DIR, tableName + SUFFIX)` — has no basename in this file to census, so
@@ -191,6 +220,18 @@ _setup_js_cql_census() { # <setup.js path>
       NQ = "[^\"" Q "]"                    # anything but a quote
       DECL = "^const[ ]+[A-Za-z_$][A-Za-z0-9_$]*[ ]*=[ ]*path\\.join\\(SCHEMAS_DIR,[ ]*" QC NQ "*\\.cql" QC "\\)[ ]*;[ ]*$"
       LIT  = QC NQ "*\\.cql"
+      state = "OUT"; since = 0
+    }
+    {
+      # Lexical state FIRST, on every line: a line with no `.cql` can still open or close a
+      # block comment, so this cannot live behind the `.cql` filter below.
+      before = state; bsince = since
+      delim = (index($0, "/*") > 0 || index($0, "*/") > 0)
+      if (delim) {
+        if (state == "OUT" && $0 ~ /^[ \t]*\/\*+[ \t]*$/)      { state = "IN"; since = NR }
+        else if (state == "IN" && $0 ~ /^[ \t]*\*+\/[ \t]*$/)  { state = "OUT"; since = 0 }
+        else                                                     { state = "UNKNOWN"; since = NR }
+      }
     }
     index($0, ".cql") == 0 { next }
     {
@@ -199,10 +240,20 @@ _setup_js_cql_census() { # <setup.js path>
       gsub(/\r/, "", line)
       if (length(line) > 110) line = substr(line, 1, 110) "..."
     }
+    before == "IN" {
+      printf "REFUSE\t%d\tinside the block comment opened at line %d, so this reference is INERT and must not be counted as a resolved schema: %s\n", NR, bsince, line
+      next
+    }
+    before == "UNKNOWN" {
+      printf "REFUSE\t%d\tblock-comment state was lost at line %d (a `/*` or `*/` this scan cannot place), so this line cannot be told from comment text: %s\n", NR, bsince, line
+      next
+    }
+    delim { printf "REFUSE\t%d\tmixed code and block comment on one line: %s\n", NR, line; next }
     line ~ /^[ ]*\/\// { printf "COMMENT\t%d\t%s\n", NR, line; next }
-    line ~ /\/\*/      { printf "REFUSE\t%d\tmixed code and block comment on one line: %s\n", NR, line; next }
-    line ~ /\*\//      { printf "REFUSE\t%d\tmixed code and block comment on one line: %s\n", NR, line; next }
-    line ~ /^[ ]*\*/   { printf "COMMENT\t%d\t%s\n", NR, line; next }
+    line ~ /^[ ]*\*/ {
+      printf "REFUSE\t%d\tfirst non-space character is `*` outside any block comment this scan can place: a comment continuation and executable code (a generator method, a continued expression) are indistinguishable here, so this reference is refused rather than dropped as inert: %s\n", NR, line
+      next
+    }
     line ~ DECL {
       if (match(line, LIT)) {
         printf "OK\t%d\t%s\n", NR, substr(line, RSTART + 1, RLENGTH - 1)
@@ -288,14 +339,18 @@ fi
 
 # DISCRIMINATION CONTROLS. A subset assert that has never been seen to fail is not
 # evidence, and — the blocker-3 lesson — a control that plants only the syntax the scan
-# ALREADY recognises tests the scan on input it handles. So three plants: the recognised
-# form, and the two UNRECOGNISED shapes whose silent omission was the defect. The first
-# must be NAMED as an extra schema; the other two must be NAMED REFUSALS, because a scan
-# that cannot read them must say so rather than report "all covered".
+# ALREADY recognises tests the scan on input it handles. So five plants: the recognised
+# form, the two UNRECOGNISED shapes whose silent omission was the defect, and the two
+# LEXICALLY AMBIGUOUS shapes (roborev #3642 round 2) where the classifier's answer would
+# be wrong in EACH direction. The first must be NAMED as an extra schema; the other four
+# must be NAMED REFUSALS, because a scan that cannot read them must say so rather than
+# report "all covered".
 if [ ! -r "$SETUP_JS" ]; then
-  bad "3642-setupjs-discriminates: $SETUP_JS is unreadable, so the three discrimination controls could not run"
+  bad "3642-setupjs-discriminates: $SETUP_JS is unreadable, so the five discrimination controls could not run"
   bad "3642-setupjs-refuses-multiline: $SETUP_JS is unreadable, so this control could not run"
   bad "3642-setupjs-refuses-indirect: $SETUP_JS is unreadable, so this control could not run"
+  bad "3642-setupjs-refuses-commented: $SETUP_JS is unreadable, so this control could not run"
+  bad "3642-setupjs-refuses-leading-star: $SETUP_JS is unreadable, so this control could not run"
 else
   # (a) the RECOGNISED form — detected as an extra schema and named.
   sjs_planted="$tmp/setup-ninth.js"
@@ -340,6 +395,51 @@ else
     ok "3642-setupjs-refuses-indirect: a schema resolved through an intermediate variable is REFUSED by name"
   else
     bad "3642-setupjs-refuses-indirect: an intermediate-variable reference to 'indirect-schema.cql' produced no named refusal (refusals: '${sjs_indirect_ref:-<none>}'); such a reference would be omitted from the derivation while the recognised siblings keep it non-empty"
+  fi
+
+  # (d) a canonical declaration INSIDE A BLOCK COMMENT — the first of the two lexical
+  # ambiguities (roborev #3642 round 2). The text is byte-for-byte the recognised form, so
+  # a per-line classifier calls it OK and the derivation counts a schema that is INERT.
+  # Counting a commented-out reference is the benign direction and it is still a false
+  # statement about the file. The requirement is a NAMED REFUSAL and — separately — that
+  # the basename never reaches the OK set, because an OK entry is what the subset assert
+  # reasons over.
+  sjs_cmt="$tmp/setup-commented.js"
+  cp "$SETUP_JS" "$sjs_cmt"
+  {
+    printf '\n/*\n'
+    printf "const SCHEMA_COMMENTED = path.join(SCHEMAS_DIR, 'commented-schema.cql');\n"
+    printf '*/\n'
+  } >> "$sjs_cmt"
+  sjs_cmt_census=$(_setup_js_cql_census "$sjs_cmt")
+  sjs_cmt_ref=$(_census_refusals "$sjs_cmt_census")
+  sjs_cmt_names=$(_census_names "$sjs_cmt_census")
+  if printf '%s' "$sjs_cmt_ref" | grep -q 'commented-schema\.cql' \
+     && ! printf '%s\n' "$sjs_cmt_names" | grep -qx 'commented-schema\.cql'; then
+    ok "3642-setupjs-refuses-commented: a canonical declaration inside a block comment is REFUSED by name and never enters the OK set"
+  else
+    bad "3642-setupjs-refuses-commented: a block-commented canonical declaration was not refused (refusals: '${sjs_cmt_ref:-<none>}'; OK names: $(printf '%s' "$sjs_cmt_names" | tr '\n' ' ')). A per-line classifier reads the comment body as code; the lexical status of that line is not decidable here, so it must be NAMED as unclassifiable rather than counted."
+  fi
+
+  # (e) EXECUTABLE code whose first non-space character is `*` — the second ambiguity, and
+  # the DANGEROUS direction. A generator method carrying a real reference used to be
+  # classified as a block-comment continuation and silently dropped: a live schema omitted
+  # from the derivation while the recognised siblings keep the set non-empty, which is
+  # precisely the partial vacuity this census exists to remove, reappearing inside its own
+  # fix. `*` cannot be placed without a lexer, so it refuses in BOTH directions.
+  sjs_star="$tmp/setup-leading-star.js"
+  cp "$SETUP_JS" "$sjs_star"
+  {
+    printf '\nconst SCHEMA_REGISTRY = {\n'
+    printf "  *eachSchema() { yield path.join(SCHEMAS_DIR, 'generator-schema.cql'); }\n"
+    printf '};\n'
+  } >> "$sjs_star"
+  sjs_star_census=$(_setup_js_cql_census "$sjs_star")
+  sjs_star_ref=$(_census_refusals "$sjs_star_census")
+  if printf '%s' "$sjs_star_ref" | grep -q 'generator-schema\.cql'; then
+    ok "3642-setupjs-refuses-leading-star: an EXECUTABLE line beginning with '*' is REFUSED by name, not read as a block-comment continuation and dropped"
+  else
+    bad "3642-setupjs-refuses-leading-star: a live reference to 'generator-schema.cql' on a line beginning with '*' produced no named refusal (refusals: '${sjs_star_ref:-<none>}'). Treating a leading '*' as inert silently omits a schema the node suite really resolves — the exact silent miss this census replaced."
   fi
 fi
 
