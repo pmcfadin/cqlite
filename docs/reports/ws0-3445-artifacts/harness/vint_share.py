@@ -299,10 +299,36 @@ def _loc_usable(loc: str) -> bool:
     return loc not in ("", "??", "??:0", "??:?") and not loc.startswith("??:")
 
 
-# Source file of the canonical read-side decoder. Used ONLY to rescue a frame whose function
-# name addr2line could not render but whose LOCATION it could -- the round-2 mirror case.
-# Never used in place of a function name that exists.
+# Source file of the canonical read-side decoder, and the LINE RANGES of the decoder functions
+# within it. Used ONLY to rescue a frame whose function name addr2line could not render but
+# whose LOCATION it could. Never used in place of a function name that exists.
+#
+# The ranges matter: an earlier version rescued ANY unresolved frame anywhere in vint.rs, which
+# swept in `parse_vint`, `parse_vint_length_signed`, `encode_cassandra_vint` and everything else
+# in the file and called it narrow DECODE work. The rescue must be no broader than the claim it
+# supports. Ranges are from `cqlite-core/src/parser/vint.rs` at the measured commit:
+#   decode_unsigned  40-73     decode_signed  79-82     zigzag_decode  255-257
+# These are LITERAL and will go stale if vint.rs is reflowed. That is acceptable and bounded:
+# the rescue only ever fires for a frame whose function name addr2line could not render, which
+# is 0 of 3430 sampled in-binary addresses on the published data, so a stale range cannot move a
+# published figure -- it can only fail to rescue a frame that does not currently occur.
 VINT_SOURCE = "cqlite-core/src/parser/vint.rs"
+DECODER_LINE_RANGES = ((40, 73), (79, 82), (255, 257))
+
+
+def _loc_in_decoder(loc: str) -> bool:
+    """Is this source location inside one of the decoder functions in vint.rs?
+
+    Requires BOTH the file and a decoder line range. A location in vint.rs outside those ranges
+    is some other function in the same file and is NOT decode work.
+    """
+    if VINT_SOURCE not in loc:
+        return False
+    tail = loc.rsplit(":", 1)
+    if len(tail) != 2 or not tail[1].isdigit():
+        return False          # unparseable line number: do not rescue on a guess
+    line = int(tail[1])
+    return any(lo <= line <= hi for lo, hi in DECODER_LINE_RANGES)
 
 
 def classify(chain: list[tuple[str, str]]) -> str:
@@ -319,13 +345,29 @@ def classify(chain: list[tuple[str, str]]) -> str:
         return "unresolved"
     if any(f.startswith(d) for f in funcs for d in DECODER_FRAMES):
         return "narrow"
-    # Mirror case (roborev r3): NO usable function anywhere in the chain, but a location inside
-    # the decoder's own source file. Counted as VInt rather than silently as "other" -- the
-    # conservative direction for a report whose subject is how much VInt costs. A frame whose
-    # function IS known is never overridden by this.
-    if not funcs and any(VINT_SOURCE in l for l in locs):
+    # THE RESCUE IS PER FRAME, and both halves of that matter (roborev r4).
+    #
+    # Too narrow before: the test was "no usable function ANYWHERE in the chain", so a perfectly
+    # ordinary resolved OUTER caller (`parse_cell_value_schema_order`, say) made `funcs`
+    # non-empty and suppressed the rescue for an inner frame that genuinely was the decoder --
+    # the common case, not a corner one.
+    #
+    # Too broad before: it accepted any unresolved function anywhere in vint.rs, so `parse_vint`,
+    # the length helpers and the encode path all counted as narrow DECODE work.
+    #
+    # Both are fixed by asking the question of each FRAME on its own: is THIS frame's function
+    # unusable while THIS frame's location is inside a decoder line range?
+    if any(not _func_usable(f) and _loc_in_decoder(l) for f, l in chain):
         return "narrow"
     if any(READ_VINT_MODULE in f for f in funcs):
+        return "wide_only"
+    # An unresolved frame located in vint.rs but OUTSIDE the decoder ranges is still read-side
+    # VInt module code (`parse_vint`, the length helpers) -- so it belongs to the WIDE boundary,
+    # which is defined as the whole module surface. Booking it "other" would undercount the wide
+    # figure; booking it "narrow" would overcount the decoder. Same for a location in vint.rs
+    # whose line number cannot be parsed: the file is known, the function is not, so the widest
+    # claim the evidence supports is module membership.
+    if any(not _func_usable(f) and VINT_SOURCE in l for f, l in chain):
         return "wide_only"
     if any(WRITE_VINT_MODULE in f for f in funcs):
         return "write_vint"

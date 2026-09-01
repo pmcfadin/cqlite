@@ -100,10 +100,22 @@
     ],
     "by_caller": [
       {
-        "caller": "?",
-        "cycles": 1580028440,
-        "pct_of_vint": 100.0,
-        "pct_of_total": 1.7959647627166808
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_metadata",
+        "cycles": 850515309,
+        "pct_of_vint": 53.82911392405063,
+        "pct_of_total": 0.9667519181585678
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::read_vint_length_prefixed_bytes",
+        "cycles": 691512447,
+        "pct_of_vint": 43.765822784810126,
+        "pct_of_total": 0.7860187553282183
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_clustering_prefix",
+        "cycles": 38000684,
+        "pct_of_vint": 2.4050632911392404,
+        "pct_of_total": 0.04319408922989486
       }
     ]
   }

@@ -71,6 +71,16 @@ case "$MODE" in
   record|stat) ;;
   *) echo "record-scan.sh: --mode must be 'record' or 'stat': '$MODE'" >&2; exit 2;;
 esac
+# The sampling interval must be short enough to observe the INTERIOR of the window. At
+# --load-sample-secs >= --secs the sampler produces only a start observation plus the closing
+# one, which is precisely the endpoint-only read the across-window sampler exists to replace --
+# and it would still have satisfied a bare "at least 2 samples" rule. Require room for at least
+# 3 (start + >=1 interior + close), i.e. an interval strictly under half the duration.
+if [ $((LOAD_SAMPLE_SECS * 2)) -ge "$SECS" ]; then
+  echo "record-scan.sh: --load-sample-secs ($LOAD_SAMPLE_SECS) must be under half of --secs" \
+       "($SECS) so the window's INTERIOR is sampled, not just its endpoints" >&2
+  exit 2
+fi
 [ -x "$BINARY" ] || { echo "record-scan.sh: not executable: $BINARY" >&2; exit 2; }
 [ -d "$CORPUS/ws0/events" ] || { echo "record-scan.sh: no corpus at $CORPUS/ws0/events" >&2; exit 2; }
 
@@ -178,9 +188,20 @@ stop_sampler
 # neither hide a peak nor inflate the sample count past the unmeasured-quiescence refusal.
 PEAK=$(awk 'NF==3 { if ($2+0 > m) m = $2+0 } END { printf "%.2f", m }' "$OUT/load-samples.txt")
 NSAMP=$(awk 'NF==3' "$OUT/load-samples.txt" | wc -l)
-if [ "$NSAMP" -lt 2 ]; then
-  printf 'verdict=REFUSED\nreason=quiescence-unmeasured\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
-    "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
+# EXPECTED sample count, derived from the interval and the duration rather than a constant:
+# start + interior samples + the synchronous closing one. Requiring only 2 would accept an
+# endpoint-only observation (roborev r4), so at least 3 are required AND the count must be
+# within a tolerance of what the interval should have produced -- a sampler that died early
+# leaves a plausible-looking peak over a window it did not actually watch.
+EXPECTED=$(( SECS / LOAD_SAMPLE_SECS ))
+MIN_SAMPLES=3
+if [ "$EXPECTED" -lt "$MIN_SAMPLES" ]; then EXPECTED=$MIN_SAMPLES; fi
+# Allow generous slack for scheduling under load, but never fewer than 3 or half the expectation.
+FLOOR=$(( EXPECTED / 2 ))
+if [ "$FLOOR" -lt "$MIN_SAMPLES" ]; then FLOOR=$MIN_SAMPLES; fi
+if [ "$NSAMP" -lt "$FLOOR" ]; then
+  printf 'verdict=REFUSED\nreason=quiescence-undersampled\nsamples=%s\nexpected_at_least=%s\npeak_load=%s\nmax_load=%s\n' \
+    "$NSAMP" "$FLOOR" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
 elif [ "$(awk -v p="$PEAK" -v m="$MAX_LOAD" 'BEGIN{print (m+0==0) ? "off" : ((p+0>m+0)?"bad":"ok")}')" = bad ]; then
   printf 'verdict=REFUSED\nreason=box-not-quiet-across-rep\nsamples=%s\npeak_load=%s\nmax_load=%s\n' \
     "$NSAMP" "$PEAK" "$MAX_LOAD" > "$OUT/quiescence-verdict.txt"
@@ -228,11 +249,44 @@ if [ "$PERF_RC" -ne 0 ]; then FAIL="$FAIL perf-exit=$PERF_RC"; fi
 # pct_running is the issue's own validity rule, so it is CHECKED here rather than left for
 # a human to eyeball in the CSV. Field 5 of `perf stat -x,`; any event below 100.00 means
 # the counters were multiplexed and the rep is not publishable.
-if [ "$MODE" = stat ] && [ -s "$OUT/counters.csv" ]; then
-  BADPCT=$(awk -F, 'NF>=5 && $5+0 < 100 { n++ } END { print n+0 }' "$OUT/counters.csv")
-  NEVENTS=$(awk -F, 'NF>=5 { n++ } END { print n+0 }' "$OUT/counters.csv")
-  if [ "$NEVENTS" -eq 0 ]; then FAIL="$FAIL pct_running=unreadable"
-  elif [ "$BADPCT" -ne 0 ]; then FAIL="$FAIL pct_running<100.00_on_${BADPCT}_of_${NEVENTS}_events"
+# COUNTER VALIDATION. This guards a claim the report actually leans on -- "all counting reps at
+# 100.00% pct_running" is cited as a reason to trust data taken on a contended box -- so it is
+# validated event by event rather than by a spot check.
+#
+# The previous version failed OPEN in four separate ways (roborev r4): an EMPTY counters.csv
+# skipped validation entirely; a MISSING event was never noticed; a zero or `<not supported>` /
+# `<not counted>` count passed; and because it only counted rows whose field 5 was below 100, a
+# file with ONE good row and any number of unparseable ones passed. Same shape as the false zero:
+# the observed values were fine, and the guard could not have told us if they were not.
+if [ "$MODE" = stat ]; then
+  if [ ! -s "$OUT/counters.csv" ]; then
+    FAIL="$FAIL counters=absent-or-empty"
+  else
+    # Every requested event must be PRESENT. Derived from the request, not a hard-coded list, so
+    # changing --stat-events cannot silently shrink what is checked.
+    MISSING=
+    for ev in $(printf '%s' "$STAT_EVENTS" | tr ',' ' '); do
+      if ! awk -F, -v e="$ev" 'NF>=3 && $3==e { found=1 } END { exit !found }' "$OUT/counters.csv"; then
+        MISSING="$MISSING$ev,"
+      fi
+    done
+    [ -n "$MISSING" ] && FAIL="$FAIL counters-missing-events=${MISSING%,}"
+    # Every row: a finite POSITIVE count in field 1, and pct_running EXACTLY 100.00 in field 5.
+    # `<not supported>` / `<not counted>` are non-numeric and so fail the count test.
+    BAD=$(awk -F, '
+      NF < 5 { bad++; next }
+      $1 !~ /^[0-9]+(\.[0-9]+)?$/ { bad++; next }       # non-numeric or <not supported>
+      $1+0 <= 0                    { bad++; next }       # a zero count measured nothing
+      $5 !~ /^[0-9]+\.[0-9]+$/     { bad++; next }       # pct_running not numeric
+      $5+0 != 100                  { bad++; next }       # multiplexed
+      { ok++ }
+      END { printf "%d/%d", bad+0, bad+ok+0 }' "$OUT/counters.csv")
+    BADN=${BAD%%/*}
+    if [ "${BAD#*/}" -eq 0 ]; then
+      FAIL="$FAIL counters=no-parsable-rows"
+    elif [ "$BADN" -ne 0 ]; then
+      FAIL="$FAIL counters-invalid-rows=$BAD"
+    fi
   fi
 fi
 case "$QV" in

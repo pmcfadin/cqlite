@@ -87,6 +87,27 @@ def sym_of(addr: int, sym_addrs: list[int], sym_names: list[str]) -> str:
 # twice. `vint_share.inline_chains` is the single implementation; this module imports it.
 
 
+def caller_of(chain) -> str:
+    """Innermost `cqlite_core` frame outside the vint module, or "?" if there is none.
+
+    A FUNCTION so it can be tested, which is how this earns its keep: two defects have lived in
+    this one expression.
+
+    1. It excluded `core::` and `<u8>::` but not `<u64>::` or `<[u8]>::`, so `<u64>::swap_bytes`
+       and `<[u8]>::copy_from_slice` -- core helpers inlined INTO the decoder, i.e. CALLEES --
+       were reported as callers holding 72% of vint cycles.
+    2. After chains became (function, location) PAIRS it still searched the TUPLE, and
+       `"str" in ("a", "b")` is a MEMBERSHIP test, not a substring test, so it never matched:
+       EVERY caller was reported as "?" and the committed artifacts shipped that way. A
+       representation change needs a sweep of every consumer, and this is the consumer it missed.
+    """
+    return next(
+        (func for func, _loc in chain
+         if "cqlite_core::" in func and "cqlite_core::parser::vint::" not in func),
+        "?",
+    )
+
+
 def is_vint(chain) -> bool:
     """Delegates to `vint_share.classify` so the two scripts cannot drift apart.
 
@@ -211,11 +232,7 @@ def main() -> int:
             # and `<[u8]>::copy_from_slice` -- which are core helpers inlined INTO the decoder,
             # i.e. callees -- for callers, attributing 72% of vint cycles to `<u64>::swap_bytes`.
             # A frame is only a caller if it is cqlite_core code that is not vint itself.
-            caller = next(
-                (f for f in ch
-                 if "cqlite_core::" in f and "cqlite_core::parser::vint::" not in f),
-                "?",
-            )
+            caller = caller_of(ch)
             by_caller[caller] += cyc
         nc_pct = 100.0 * no_chain_cycles / in_binary if in_binary else 100.0
         if nc_pct > args.max_no_chain:

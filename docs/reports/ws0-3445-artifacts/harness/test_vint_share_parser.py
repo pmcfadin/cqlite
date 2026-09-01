@@ -126,6 +126,54 @@ check("usable non-vint function is not rescued by a vint location",
       vs.classify([("malloc", "/data/x/cqlite-core/src/parser/vint.rs:41")]), "other")
 
 # 7. The unresolved-frame predicate itself, at its boundaries.
+# ---------------------------------------------------------------------------------------
+# roborev r4: the location rescue must be correct in BOTH directions, per FRAME.
+# ---------------------------------------------------------------------------------------
+
+# F3a TOO NARROW (regression case): an unresolved DECODER frame with a RESOLVED outer caller.
+# The previous rule tested "no usable function anywhere in the chain", so an ordinary resolved
+# caller suppressed the rescue -- the common case, not a corner one.
+# A frame outside vint.rs entirely, with no usable function, is "other" -- the rescue must not
+# reach beyond the decoder's own file.
+check("unresolved frame in an unrelated file -> other",
+      vs.classify([("??", "/x/cqlite-core/src/storage/other.rs:12")]), "other")
+
+check("unresolved decoder frame + resolved outer caller -> narrow",
+      vs.classify([("??", "/x/cqlite-core/src/parser/vint.rs:41"),
+                   ("<cqlite_core::...::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+                    "/x/cqlite-core/src/storage/.../cell_value.rs:99")]),
+      "narrow")
+
+# F3b TOO BROAD (must REFUSE to rescue): an unresolved frame in vint.rs OUTSIDE the decoder
+# line ranges is some other function in the same file -- `parse_vint`, a length helper, the
+# encode path -- and is NOT narrow decode work.
+# It is NOT narrow. It is `wide_only`: the location proves module membership (this is
+# `parse_vint` / a length helper), which is exactly what the WIDE boundary is defined as. Booking
+# it "other" would undercount wide; booking it "narrow" would overcount the decoder.
+check("unresolved NON-decoder line in vint.rs -> wide_only, NOT narrow",
+      vs.classify([("??", "/x/cqlite-core/src/parser/vint.rs:102")]), "wide_only")
+check("unresolved encode-path line in vint.rs -> wide_only, NOT narrow",
+      vs.classify([("??", "/x/cqlite-core/src/parser/vint.rs:120")]), "wide_only")
+
+# ...while the three decoder ranges DO rescue.
+for ln in (40, 73, 79, 82, 255, 257):
+    check(f"unresolved vint.rs:{ln} (decoder range) -> narrow",
+          vs.classify([("??", f"/x/cqlite-core/src/parser/vint.rs:{ln}")]), "narrow")
+
+# A location whose line number is unparseable must NOT be rescued on a guess.
+# Unparseable line: file known, function unknown, so the widest supportable claim is module
+# membership -- never narrow, and never rescued on a guessed line number.
+check("unresolved vint.rs with unparseable line -> wide_only, NOT narrow",
+      vs.classify([("??", "/x/cqlite-core/src/parser/vint.rs:abc")]), "wide_only")
+
+# A resolved non-vint function is never overridden by a decoder-range location.
+check("resolved non-vint function is not rescued by a decoder location",
+      vs.classify([("malloc", "/x/cqlite-core/src/parser/vint.rs:41")]), "other")
+
+check("_loc_in_decoder: decoder line", vs._loc_in_decoder("/x/cqlite-core/src/parser/vint.rs:41"), True)
+check("_loc_in_decoder: non-decoder line", vs._loc_in_decoder("/x/cqlite-core/src/parser/vint.rs:102"), False)
+check("_loc_in_decoder: other file", vs._loc_in_decoder("/x/cqlite-core/src/parser/other.rs:41"), False)
+
 check("_func_usable: ??", vs._func_usable("??"), False)
 check("_func_usable: real", vs._func_usable("foo"), True)
 check("_loc_usable: ??:0", vs._loc_usable("??:0"), False)
@@ -137,3 +185,37 @@ if FAILURES:
     print(f"{len(FAILURES)} FAILED: {', '.join(FAILURES)}")
     sys.exit(1)
 print("all parser tests passed")
+
+# ---------------------------------------------------------------------------------------
+# CALLER ATTRIBUTION (vint_regions.caller_of) — roborev r4 regression.
+# Chains became (function, location) pairs and this consumer still searched the TUPLE, so
+# every caller shipped as "?". These cases would have caught it.
+# ---------------------------------------------------------------------------------------
+_vr_spec = importlib.util.spec_from_file_location("vint_regions", HERE / "vint_regions.py")
+vr = importlib.util.module_from_spec(_vr_spec)
+_vr_spec.loader.exec_module(vr)
+
+DECODER = ("cqlite_core::parser::vint::decode_unsigned", "/x/cqlite-core/src/parser/vint.rs:41")
+ADAPTER = ("cqlite_core::parser::vint::parse_vuint", "/x/cqlite-core/src/parser/vint.rs:418")
+REAL_CALLER = ("<cqlite_core::...::V5CompressedLegacyParser>::parse_row_metadata",
+               "/x/cqlite-core/src/storage/.../row_framing.rs:240")
+
+check("caller_of finds the innermost non-vint cqlite_core frame",
+      vr.caller_of([DECODER, ADAPTER, REAL_CALLER]), REAL_CALLER[0])
+check("caller_of does NOT return '?' for a well-formed pair chain (the r4 regression)",
+      vr.caller_of([DECODER, ADAPTER, REAL_CALLER]) != "?", True)
+check("caller_of returns '?' when no non-vint cqlite_core frame exists",
+      vr.caller_of([DECODER, ADAPTER]), "?")
+# Defect 1: core helpers inlined INTO the decoder are CALLEES, never callers.
+check("caller_of ignores <u64>::swap_bytes (a callee, not a caller)",
+      vr.caller_of([("<u64>::swap_bytes", "/rustc/x/core/num/mod.rs:1"), DECODER, REAL_CALLER]),
+      REAL_CALLER[0])
+check("caller_of ignores <[u8]>::copy_from_slice (a callee)",
+      vr.caller_of([("<[u8]>::copy_from_slice", "/rustc/x/core/slice/mod.rs:1"), DECODER, REAL_CALLER]),
+      REAL_CALLER[0])
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} FAILED: {', '.join(FAILURES)}")
+    sys.exit(1)
+print("all parser + caller tests passed")
