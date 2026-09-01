@@ -276,19 +276,19 @@
 #       `refs/machine-claims/<machine>` layout had, i.e. instance 5 of the #3464
 #       retracted-invariant-in-a-second-carrier family.
 #
-#   AC4 SURVIVES THE DESCOPE, AND IT IS QUALIFIED BY CARRIER — the unqualified form was FALSE
-#   about this code (roborev job 17). A pid FROM A NON-REFRESHING CARRIER MUST NEVER YIELD A
-#   `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead. That is the case AC4 was
-#   measured on: `refs/claims/issue-<N>` records the transient claiming shell, dead within
-#   minutes of a lane that runs for hours, and `refs/heartbeats/<machine>` carries no per-lane
-#   pid at all. A pid from a REFRESHING carrier is the opposite: `worker-supervisor.sh` restamps
-#   `refs/lane-claims/*` every iteration, so an absent or recycled pid there really does mean the
-#   lane is gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are CORRECT verdicts — see WHOSE
-#   PROCESS, EXACTLY above. Hence a pid is read ONLY from a claim ref a supervisor refreshes,
-#   and presence alone is still not enough (the identity check against the claim `ts`, and the
-#   UNKNOWN-IDENTITY band, above).
-#   `test_claim_heartbeat.sh` pins the namespace containment behaviourally, so a later
-#   read-side change cannot quietly turn the measured false positive into a verdict.
+#   AC4 SURVIVES THE DESCOPE, AND EXCLUSION IS THE ABSTENTION. `refs/claims/issue-<N>` and
+#   `refs/heartbeats/<machine>` are NOT ENUMERATED by this command, so they produce no row and no
+#   verdict at all — not `DEAD-*`, not `UNKNOWN-*`, nothing. Do not describe that by NAMING a
+#   verdict: every name is wrong because nothing is classified, and naming one made this sentence
+#   false twice (roborev jobs 17 and 19). AC4 is therefore stated COUNTERFACTUALLY, about the
+#   change nobody has made: WERE a later change ever to read a NON-REFRESHING carrier, a stale pid
+#   there MUST NEVER YIELD A `DEAD-*` VERDICT — it must abstain. A REFRESHING carrier needs no such
+#   rule: `worker-supervisor.sh` restamps `refs/lane-claims/*` every iteration, so an absent or
+#   recycled pid there really does mean the lane is gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`
+#   are CORRECT verdicts (see WHOSE PROCESS, EXACTLY above) — presence alone is still not enough
+#   there, hence the identity check against the claim `ts` and the UNKNOWN-IDENTITY band above.
+#   `test_claim_heartbeat.sh` pins the exclusion behaviourally, so a later read-side change cannot
+#   quietly turn the measured false positive into a verdict.
 #
 # Run from inside the repo (any cwd under the working tree/worktree is fine —
 # this never touches the working tree or the current branch).
@@ -1359,11 +1359,13 @@ open_pr_state() {
 # nothing and returns 1 — and returning 1 means "NOTHING WAS REPORTED", never a clean bill of
 # health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are
 # NOT read here, for two MEASURED reasons (stale claiming-shell pid; single-slot-per-machine
-# masking) spelled out in the header's SCOPE section — do not point this at them. AC4 still
-# holds, QUALIFIED BY CARRIER: a pid from a NON-REFRESHING carrier (either of those two) must
-# never yield a `DEAD-*` verdict — abstain. A pid from `refs/lane-claims/*`, which the supervisor
-# RESTAMPS every iteration, legitimately yields `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`; the
-# unqualified form of this sentence contradicted that and was false (roborev job 17).
+# masking) spelled out in the header's SCOPE section — do not point this at them. Being
+# UNENUMERATED is the abstention: neither namespace produces a row or a verdict of any kind. AC4
+# survives as a COUNTERFACTUAL for a future change — were one ever to read a NON-REFRESHING
+# carrier, a stale pid there must never yield a `DEAD-*` verdict, it must abstain — while
+# `refs/lane-claims/*`, which the supervisor RESTAMPS every iteration, legitimately yields
+# `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`. Naming a verdict for the unenumerated carriers made this
+# sentence false twice (roborev jobs 17 and 19); do not reintroduce one.
 #
 # EXIT PRECEDENCE (3 outranks 1, deliberately): a found dead lane is ACTIONABLE NOW,
 # so it wins the exit code, and any incompleteness is still stated in the text rather

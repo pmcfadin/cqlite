@@ -922,12 +922,15 @@ read-side "fix":
   defect the retired per-machine claim ref had (instance 5 of the #3464
   retracted-invariant-in-a-second-carrier family).
 
-**AC4, qualified by carrier (#3548).** A pid from a **non-refreshing** carrier — either of the two
-above — must never yield a `DEAD-*` verdict; the run abstains with an `UNKNOWN-*` one. A pid from the
-**refreshing** carrier `refs/lane-claims/*`, which a supervisor restamps every iteration, legitimately
-yields `DEAD-NO-PROCESS` or `DEAD-PID-REUSED` — there, an absent or recycled pid really does mean the
-lane is gone. The unqualified form of that rule ("a stale pid must never yield `DEAD-*`") is **false
-about the code** and must not be restated anywhere.
+**AC4, and why exclusion IS the abstention (#3548).** Neither namespace above is enumerated by
+`dead-lanes`, so neither produces a row or a verdict of any kind — not `DEAD-*`, not `UNKNOWN-*`,
+nothing. AC4 is a rule for a **future** change, not a description of today's output: were a later
+change ever to read a **non-refreshing** carrier, a stale pid there must never yield a `DEAD-*`
+verdict — it must abstain. The **refreshing** carrier `refs/lane-claims/*` needs no such rule: a
+supervisor restamps it every iteration, so an absent or recycled pid there really does mean the lane
+is gone and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are correct. Do not restate AC4 by naming a verdict
+for the unenumerated carriers, and do not restate it in its unqualified form ("a stale pid must never
+yield `DEAD-*`") — both are false about the code.
 
 **What lane liveness actually rests on here.** Two things, and neither is a script you can run:
 

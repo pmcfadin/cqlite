@@ -1974,10 +1974,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   had). Lane liveness here rests on the coordination sweep plus the **#3436 board-signature read**
   (Ready + pushed branch + no claim ref) — **operating mechanisms, NOT committed tooling: no such
   script or command exists in this repo**, and #3436's reading of that signature CONFLICTS with the
-  runbook's "parked-by-design" reading of the same shape, unresolved. AC4 survives the descope
-  **qualified by CARRIER, because the unqualified form is false about the code**: a pid from a
-  NON-REFRESHING carrier (`refs/claims/issue-<N>`, `refs/heartbeats/<machine>`) must never yield a
-  `DEAD-*` verdict — abstain — while a pid from the supervisor-RESTAMPED `refs/lane-claims/*`
+  runbook's "parked-by-design" reading of the same shape, unresolved. AC4 survives the descope, and
+  **EXCLUSION IS THE ABSTENTION**: the two populated carriers are NOT ENUMERATED, so they produce no
+  row and no verdict of any kind — describing that by naming a verdict (`UNKNOWN-*` or otherwise) is
+  false, as is the unqualified "a stale pid must never yield `DEAD-*`". AC4 is a COUNTERFACTUAL for a
+  future change: were one ever to read a NON-REFRESHING carrier, a stale pid there must never yield a
+  `DEAD-*` verdict, it must abstain — while the supervisor-RESTAMPED `refs/lane-claims/*`
   legitimately yields `DEAD-NO-PROCESS`/`DEAD-PID-REUSED`. Full record:
   `docs/development/fleet-runbook.md` ("Lane liveness on a supervisor-less `/drive-issue` fleet").
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is

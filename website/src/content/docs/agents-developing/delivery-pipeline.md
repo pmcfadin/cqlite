@@ -465,13 +465,15 @@ point it at those" fix is refused with evidence: `refs/claims/issue-<N>` records
 reading it would report a dead lane for a healthy one), and `refs/heartbeats/<machine>` is
 **single-slot per machine** and force-updated, so N lanes on one box overwrite each other and at most
 one is ever reportable — structurally the same masking defect the retired per-machine claim ref had.
-**AC4 survives the descope, qualified by CARRIER** — the unqualified form is false about the code. A
-pid from a **non-refreshing** carrier (`refs/claims/issue-<N>`, whose pid is the transient claiming
-shell; `refs/heartbeats/<machine>`, which carries no per-lane pid at all) must never yield a `DEAD-*`
-verdict — the run abstains with an `UNKNOWN-*` one. A pid from the **refreshing** carrier
-`refs/lane-claims/*`, which a supervisor restamps every iteration, legitimately yields
-`DEAD-NO-PROCESS` or `DEAD-PID-REUSED`: there, an absent or recycled pid really does mean the lane is
-gone.
+**AC4 survives the descope, and exclusion IS the abstention.** Neither populated carrier is
+enumerated by `dead-lanes`, so neither produces a row or a verdict of any kind — not `DEAD-*`, not
+`UNKNOWN-*`, nothing; naming a verdict for them is false, and so is the unqualified "a stale pid must
+never yield `DEAD-*`". The rule is a **counterfactual** for a future change: were one ever to read a
+**non-refreshing** carrier (`refs/claims/issue-<N>`, whose pid is the transient claiming shell;
+`refs/heartbeats/<machine>`, which carries no per-lane pid at all), a stale pid there must never yield
+a `DEAD-*` verdict — it must abstain. The **refreshing** carrier `refs/lane-claims/*`, restamped every
+supervisor iteration, needs no such rule: there an absent or recycled pid really does mean the lane is
+gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are correct.
 
 What lane liveness rests on here is the **coordination lead's sweep** plus the **#3436
 board-signature read** (Ready + pushed branch + no claim ref) — and both are **operating mechanisms,
