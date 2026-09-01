@@ -101,7 +101,14 @@ fn strip(src: &str) -> Stripped {
                         end = b.len();
                         break;
                     }
-                    if b[k] == b'"' && b[k + 1..].iter().take(hashes).filter(|c| **c == b'#').count() == hashes {
+                    if b[k] == b'"'
+                        && b[k + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|c| **c == b'#')
+                            .count()
+                            == hashes
+                    {
                         end = k;
                         break;
                     }
@@ -417,4 +424,215 @@ fn every_cqlite_core_src_file_is_reachable() {
         orphans.len(),
         orphans.join("\n  ")
     );
+}
+
+// ---------------------------------------------------------------------------
+// B. Synthetic-tree unit tests
+// ---------------------------------------------------------------------------
+
+/// Materialize `files` (paths relative to a fresh `src/`), walk from
+/// `src/lib.rs`, and return `(orphans, unresolved)` — orphans as `/`-joined
+/// paths relative to `src/`, sorted.
+fn probe(files: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src");
+    for (rel, body) in files {
+        let p = src.join(rel);
+        fs::create_dir_all(p.parent().expect("file has a parent")).expect("create_dir_all");
+        fs::write(&p, body).expect("write fixture");
+    }
+    let w = walk_from(&src.join("lib.rs"));
+    let all = enumerate_rs(&src);
+    let orphans = all
+        .difference(&w.reached)
+        .map(|p| {
+            p.strip_prefix(&src)
+                .expect("enumerated under src")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    (orphans, w.unresolved.clone())
+}
+
+/// `probe` asserting no unresolved declarations, returning the orphan list.
+fn orphans(files: &[(&str, &str)]) -> Vec<String> {
+    let (orphans, unresolved) = probe(files);
+    assert!(
+        unresolved.is_empty(),
+        "unexpected unresolved: {unresolved:?}"
+    );
+    orphans
+}
+
+#[test]
+fn plain_mod_resolves_to_sibling_file() {
+    assert!(orphans(&[("lib.rs", "mod a;\n"), ("a.rs", "")]).is_empty());
+}
+
+#[test]
+fn directory_module_and_its_nested_child_are_reached() {
+    assert!(orphans(&[
+        ("lib.rs", "mod a;\n"),
+        ("a/mod.rs", "mod b;\n"),
+        ("a/b.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn non_mod_rs_parent_owns_its_stem_directory() {
+    // `a.rs` is not `mod.rs`, so `mod b;` inside it means `a/b.rs`.
+    assert!(orphans(&[("lib.rs", "mod a;\n"), ("a.rs", "mod b;\n"), ("a/b.rs", "")]).is_empty());
+}
+
+#[test]
+fn visibility_modifiers_do_not_hide_a_declaration() {
+    assert!(orphans(&[
+        (
+            "lib.rs",
+            "pub mod a;\npub(crate) mod b;\npub(in crate::a) mod c;\n"
+        ),
+        ("a.rs", ""),
+        ("b.rs", ""),
+        ("c.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn path_attr_in_lib_resolves_beside_lib() {
+    assert!(orphans(&[
+        ("lib.rs", "#[path = \"elsewhere.rs\"]\nmod x;\n"),
+        ("elsewhere.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn path_attr_resolves_beside_the_declaring_file_not_under_its_stem_dir() {
+    // THE regression that matters (issue #1714): `#[path]` on an out-of-line
+    // module is relative to the directory holding the DECLARING FILE. Reading
+    // it as `<stem>/` instead reports 57 false orphans in cqlite-core.
+    // `a/p.rs` is a decoy: a walker using the wrong base reaches it and
+    // reports `p.rs` orphaned, inverting this assertion.
+    assert_eq!(
+        orphans(&[
+            ("lib.rs", "mod a;\n"),
+            ("a.rs", "#[path = \"p.rs\"]\nmod x;\n"),
+            ("p.rs", ""),
+            ("a/p.rs", ""),
+        ]),
+        vec!["a/p.rs".to_string()]
+    );
+}
+
+#[test]
+fn path_attr_associates_across_other_attributes_in_either_order() {
+    for lib in [
+        "#[cfg(test)]\n#[path = \"t.rs\"]\nmod tests;\n",
+        "#[path = \"t.rs\"]\n#[cfg(test)]\nmod tests;\n",
+        "#[cfg(test)]\n/// doc\n#[path = \"t.rs\"]\nmod tests;\n",
+        "#[cfg(test)] #[path = \"t.rs\"] mod tests;\n",
+    ] {
+        assert!(
+            orphans(&[("lib.rs", lib), ("t.rs", "")]).is_empty(),
+            "failed for {lib:?}"
+        );
+    }
+}
+
+#[test]
+fn cfg_gated_mod_counts_as_reachable() {
+    // A gated module IS declared; this guard filters on no attribute at all.
+    assert!(orphans(&[
+        (
+            "lib.rs",
+            "#[cfg(test)]\nmod a;\n#[cfg(feature = \"nope\")]\nmod b;\n"
+        ),
+        ("a.rs", ""),
+        ("b.rs", ""),
+    ])
+    .is_empty());
+}
+
+#[test]
+fn inline_mod_declares_no_file() {
+    // `mod x { }` declares no file, so `x.rs` beside it stays an orphan.
+    assert_eq!(
+        orphans(&[("lib.rs", "mod x {\n    pub fn f() {}\n}\n"), ("x.rs", "")]),
+        vec!["x.rs".to_string()]
+    );
+}
+
+// --- RED arms: each differs from its green twin in exactly ONE property -----
+
+#[test]
+fn an_unreferenced_file_is_reported_as_an_orphan() {
+    // Green twin: lib.rs declares `mod orphan;`.
+    assert!(orphans(&[("lib.rs", "mod orphan;\n"), ("orphan.rs", "")]).is_empty());
+    // RED arm: the declaration is absent. Only property changed.
+    assert_eq!(
+        orphans(&[("lib.rs", "\n"), ("orphan.rs", "")]),
+        vec!["orphan.rs".to_string()]
+    );
+}
+
+#[test]
+fn a_mod_inside_a_line_comment_does_not_reach_its_file() {
+    assert!(orphans(&[("lib.rs", "mod orphan;\n"), ("orphan.rs", "")]).is_empty());
+    assert_eq!(
+        orphans(&[("lib.rs", "// mod orphan;\n"), ("orphan.rs", "")]),
+        vec!["orphan.rs".to_string()]
+    );
+}
+
+#[test]
+fn a_mod_inside_a_block_comment_does_not_reach_its_file() {
+    assert!(orphans(&[("lib.rs", "mod orphan;\n"), ("orphan.rs", "")]).is_empty());
+    assert_eq!(
+        orphans(&[("lib.rs", "/*\nmod orphan;\n*/\n"), ("orphan.rs", "")]),
+        vec!["orphan.rs".to_string()]
+    );
+    // Nested block comments close at the right depth.
+    assert_eq!(
+        orphans(&[("lib.rs", "/* /* mod orphan; */ */\n"), ("orphan.rs", "")]),
+        vec!["orphan.rs".to_string()]
+    );
+}
+
+#[test]
+fn a_mod_inside_a_string_literal_does_not_reach_its_file() {
+    assert!(orphans(&[("lib.rs", "mod orphan;\n"), ("orphan.rs", "")]).is_empty());
+    assert_eq!(
+        orphans(&[
+            ("lib.rs", "pub const S: &str = \"mod orphan;\";\n"),
+            ("orphan.rs", ""),
+        ]),
+        vec!["orphan.rs".to_string()]
+    );
+    // Raw string, decided by one backward look at the `#` run before the quote.
+    assert_eq!(
+        orphans(&[
+            ("lib.rs", "pub const S: &str = r#\"mod orphan;\"#;\n"),
+            ("orphan.rs", ""),
+        ]),
+        vec!["orphan.rs".to_string()]
+    );
+}
+
+#[test]
+fn a_mod_declaration_resolving_to_no_file_is_reported_loudly() {
+    let (_, unresolved) = probe(&[("lib.rs", "mod missing;\n")]);
+    assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+    assert!(
+        unresolved[0].contains("`mod missing;`") && unresolved[0].contains("missing.rs"),
+        "{unresolved:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "ABSOLUTE")]
+fn an_absolute_path_attr_is_refused_loudly() {
+    let _ = probe(&[("lib.rs", "#[path = \"/etc/passwd\"]\nmod x;\n")]);
 }
