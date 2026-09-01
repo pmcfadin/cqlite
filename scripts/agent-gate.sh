@@ -14652,10 +14652,38 @@ EOF
   # CQLITE_REQUIRE_FIXTURES), so this changes nothing today and closes the future hole.
   # If the export below ever changes, change this pattern in the same edit — they are one
   # fact written twice and must not drift.
-  local _fx_blind="" _fx_blind_n=0 _dsrc
+  # AN EXECUTABLE LOOKUP, NOT A MENTION (roborev round 3, R3-F1). This matched the BARE
+  # identifier, so a target could satisfy it from a comment or a panic string while omitting
+  # the lookup entirely — classified strict-aware, still skip-passing. The pattern now
+  # requires the `env::var`/`var_os` CALL applied to the literal, which a comment or a
+  # message does not produce. TRI-STATE, like every grep in this lane: rc 0 = matched,
+  # rc 1 = no match, rc >= 2 = the scan FAILED and that is a FAIL, never "no match" — a
+  # three-valued signal read two-valued always picks the permissive answer.
+  #
+  # A BEHAVIOURAL PROBE WAS SPECIFIED AND REJECTED, and the reason is recorded so nobody
+  # rebuilds it: run each target under strict against an EMPTY corpus and, by outcome alone,
+  # fixture-AWARE fails while both fixture-BLIND (the defect) and fixture-FREE (legitimate)
+  # PASS. Separating those two requires knowing whether the target reads a corpus at all —
+  # a structural question — so the probe is circular. A "compared N rows" signal would break
+  # the tie, but no uniform one exists across these targets, and scan_delta_parity_test's own
+  # fixture-free `suppression_rule_requires_equal_writetimes_or_refuses` proves fixture-free
+  # tests live INSIDE otherwise fixture-dependent targets, so per-target granularity does not
+  # save it either. Shipping it would be a guard with a documented blind spot that READS as
+  # behavioural proof — the shape #3229 and #3400 both descoped.
+  #
+  # THE POPULATION WAS VERIFIED BEHAVIOURALLY ONCE, as evidence rather than as mechanism:
+  # every one of the 12 derived targets FAILS under CQLITE_REQUIRE_FIXTURES=1 against an
+  # empty datasets root — 71 of the 72 integration tests fail, the single pass being the
+  # fixture-free synthetic case named above.
+  local _fx_blind="" _fx_blind_n=0 _dsrc _fx_rc _fx_fatal=""
+  local _fx_lookup='(env::var(_os)?|var(_os)?)[[:space:]]*\([[:space:]]*"CQLITE_REQUIRE_FIXTURES"'
   while IFS= read -r _dsrc; do
     [ -n "$_dsrc" ] || continue
-    if ! grep -qE 'CQLITE_REQUIRE_FIXTURES' "$_dsrc" 2>/dev/null; then
+    _fx_rc=0
+    grep -qE "$_fx_lookup" "$_dsrc" 2>/dev/null || _fx_rc=$?
+    if [ "$_fx_rc" -ge 2 ]; then
+      _fx_fatal="$_fx_fatal $(basename "${_dsrc%.rs}")"
+    elif [ "$_fx_rc" -eq 1 ]; then
       _fx_blind_n=$((_fx_blind_n + 1))
       _fx_blind="$_fx_blind $(basename "${_dsrc%.rs}")"
     fi
@@ -14683,8 +14711,14 @@ EOF
     census+=("       (the full gate) this is a FAIL, not a note: a target that ignores the flag")
     census+=("       can return successfully having compared nothing:$_fx_blind")
   else
-    census+=("       every derived target reads CQLITE_REQUIRE_FIXTURES — the variable this lane")
-    census+=("       exports, and deliberately the only one accepted here: 0 RECOGNISED gaps")
+    census+=("       every derived target performs an env lookup of CQLITE_REQUIRE_FIXTURES — the")
+    census+=("       variable this lane exports, and deliberately the only one accepted here:")
+    census+=("       0 RECOGNISED gaps")
+    census+=("       SCOPE OF THAT CLAIM (R3-F1): it is STRUCTURAL. It proves an executable")
+    census+=("       env::var lookup of that literal EXISTS in the target root — a comment or a")
+    census+=("       panic string no longer satisfies it — NOT that every skip path routes")
+    census+=("       through it, and NOT that a wholly fixture-FREE target is distinguishable")
+    census+=("       from a fixture-blind one, which no outcome-based probe can decide either.")
   fi
   census+=("       WHICH corpus is missing is named BY THE TARGET, not by this lane: each strict")
   census+=("       failure prints the KEYSPACE and TABLE it could not open (test_types,")
@@ -14746,6 +14780,24 @@ EOF
   # ONLY in strict mode: under `--only`/`--lite` (or the documented #2078 opt-out) the flag
   # is deliberately unset for every target, so blindness changes nothing about that run and
   # failing on it would red a probe on correct code.
+  # AN UNREADABLE SOURCE IS FAIL-CLOSED IN EVERY MODE, strict or not, and BEFORE the
+  # blindness verdict below. `grep` rc >= 2 means the scan itself failed (unreadable file, a
+  # bad pattern), which is neither "reads the flag" nor "does not" — and a three-valued
+  # signal read two-valued always picks the permissive branch. Unlike blindness, this is NOT
+  # mode-dependent: blindness is harmless when the flag is not exported, but a scan we could
+  # not perform tells us nothing in any mode, so it cannot be excused by a lenient run.
+  if [ -n "$_fx_fatal" ]; then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: the strict-fixture scan could not be PERFORMED for:$_fx_fatal" \
+      "        grep exited >= 2 for those target source(s), so whether they honour" \
+      "        CQLITE_REQUIRE_FIXTURES is UNMEASURED — not measured-and-fine. A positive" \
+      "        verdict requires an affirmative measurement, so this is a FAIL rather than an" \
+      "        assumption in either direction." \
+      "        Remedy: make the named target source(s) readable (check permissions and that" \
+      "        cargo metadata's src_path still resolves), then re-run."
+    return 0
+  fi
+
   if [ "$_fx_mode" = strict ] && [ "$_fx_blind_n" -gt 0 ]; then
     _ds_lane_fail "$name" "$log" "$start" \
       "[$name] FAIL-CLOSED: $_fx_blind_n derived target(s) do not read" \
