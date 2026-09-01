@@ -95,11 +95,60 @@ run_cap() {
   printf '%s\n' "$out" >>"$TRANSCRIPT"
 }
 
+# THE REAL `uname`, RESOLVED ONCE AND REQUIRED. Both verdicts are Linux-scoped, so every
+# shim dir pins `uname -s` to Linux (see mkshim) and the platform-guard case pins it to
+# Darwin. A host with no `uname` at all cannot run either pin — and would silently take the
+# non-Linux branch in every case, i.e. a suite-wide false red — so it is a NAMED REFUSAL
+# rather than a skip.
+REAL_UNAME=$(command -v uname 2>/dev/null)
+if [ -z "$REAL_UNAME" ]; then
+  printf 'test_claude_auth_capability: REFUSING TO RUN (no-uname): the platform pins every case depends on cannot be installed.\n' >&2
+  exit 1
+fi
+
 # --- shim factory -------------------------------------------------------------------
-# mkshim <dir>: a fresh PATH directory holding NOTHING (so `claude`/`tmux` are absent
-# unless a case plants them). `/usr/bin` etc. still follow on PATH, so a case that wants
-# a tool ABSENT must plant a refusing stub rather than rely on an empty dir.
-mkshim() { local d="$1"; rm -rf "$d"; mkdir -p "$d"; printf '%s' "$d"; }
+# mkshim <dir>: a fresh PATH directory holding a `uname` that reports Linux and NOTHING
+# ELSE (so `claude`/`tmux` are absent unless a case plants them). `/usr/bin` etc. still
+# follow on PATH, so a case that wants a tool ABSENT must plant a refusing stub rather
+# than rely on an empty dir.
+#
+# THE `uname` PIN IS NOT COSMETIC, AND ITS ABSENCE RED 26 OF 48 CASES ON macOS. Both
+# verdict functions are Linux-scoped by design (/etc/environment + pam_env is a Linux
+# mechanism), so on a Darwin host every `--auth`/`--tmux-env` case below — each of which
+# asserts a MEASURED verdict — got UNMEASURED instead. `tooling-tests` is a MANDATORY gate
+# component and this repo supports macOS (it ships `gtimeout`/`taskpolicy`/`perf` guards
+# for it), so that is a suite that reds on CORRECT INPUT on a supported platform: the
+# guard agents learn to waive. The sibling suite already solved this the same way
+# (`mk_stub "$dir" uname 'echo Linux'` in test_bootstrap_agent_machine.sh). Pinned HERE
+# rather than per case so the platform-guard case's Darwin stub stays the ONLY place the
+# platform varies — it overwrites this one in its own shim dir.
+mkshim() {
+  local d="$1"; rm -rf "$d"; mkdir -p "$d"
+  plant_uname_linux "$d"
+  printf '%s' "$d"
+}
+# plant_uname_linux <dir>: `uname -s` says Linux; every other invocation defers to the
+# real binary, so nothing else about the host is faked.
+# REMOVE FIRST, never write THROUGH the path: MINPATH holds SYMLINKS to the real coreutils
+# and `cat >` FOLLOWS a symlink, so writing through it would either fail silently (a
+# root-owned target, leaving the case to run against the real `uname`) or TRUNCATE THE REAL
+# BINARY. Same hazard, same fix, as mk_stub in test_bootstrap_agent_machine.sh — and the
+# same fail-loud check, because a harness that cannot install a pin produces a PASSING case
+# that tested nothing.
+plant_uname_linux() {
+  local d="$1"
+  rm -f "$d/uname"
+  cat >"$d/uname" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in -s|'') printf 'Linux\n' ;; *) exec $REAL_UNAME "\$@" ;; esac
+EOF
+  chmod +x "$d/uname"
+  if [ -L "$d/uname" ] || [ ! -f "$d/uname" ] || [ ! -x "$d/uname" ] \
+     || [ "$("$d/uname" -s 2>/dev/null)" != Linux ]; then
+    printf 'test_claude_auth_capability: REFUSING TO RUN (uname-pin-failed): could not install the Linux platform pin at %s/uname.\n' "$d" >&2
+    exit 1
+  fi
+}
 
 # plant_claude <dir> <rc> <stdout-text>
 plant_claude() {
@@ -223,6 +272,9 @@ for t in bash sh uname grep sed tail cut tr mktemp rm env cat head sort comm fin
   src=$(command -v "$t" 2>/dev/null) || continue
   ln -sf "$src" "$MINPATH/$t"
 done
+# The SAME Linux pin as mkshim: MINPATH is a PATH in its own right, so a case that used it
+# without a shim dir in front would fall through to the host's real `uname`.
+plant_uname_linux "$MINPATH"
 if [ ! -x "$MINPATH/timeout" ] || [ ! -x "$MINPATH/grep" ]; then
   printf 'test_claude_auth_capability: REFUSING TO RUN (unusable-minimal-PATH): could not link the coreutils the absent-binary cases need.\n' >&2
   exit 1
@@ -585,27 +637,25 @@ fi
 #     A false VERIFIED is an [ok], and [ok] is what `--strict` reads (#3414: scoping a
 #     platform out is not the same as passing it).
 # =====================================================================================
-REAL_UNAME=$(command -v uname 2>/dev/null)
-if [ -z "$REAL_UNAME" ]; then
-  skip "platform guard: both verdicts UNMEASURED off Linux" "no uname on PATH to stub"
-else
-  d20=$(mkshim "$tmp/s20"); plant_claude_probe_env "$d20"; plant_tmux "$d20" complete
-  cat >"$d20/uname" <<EOF
+# This is the ONE place the platform varies: every other shim dir pins `uname -s` to Linux
+# (mkshim), so this Darwin stub — written into d20 AFTER mkshim, overwriting it — is the
+# only Darwin the suite ever sees, on a Linux host and on a macOS host alike.
+d20=$(mkshim "$tmp/s20"); plant_claude_probe_env "$d20"; plant_tmux "$d20" complete
+cat >"$d20/uname" <<EOF
 #!/usr/bin/env bash
-case "\${1:-}" in -s) printf 'Darwin\n' ;; *) exec "$REAL_UNAME" "\$@" ;; esac
+case "\${1:-}" in -s|'') printf 'Darwin\n' ;; *) exec "$REAL_UNAME" "\$@" ;; esac
 EOF
-  chmod +x "$d20/uname"
-  run_cap "$d20" "$ef2" -- --report
-  if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
-    ok "platform: claude-auth is UNMEASURED off Linux (never an [ok])"
-  else
-    bad "platform: claude-auth off Linux gave: $out"
-  fi
-  if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
-    ok "platform: claude-tmux-env is UNMEASURED off Linux, matching its documented contract"
-  else
-    bad "platform: claude-tmux-env off Linux gave a measured verdict: $out"
-  fi
+chmod +x "$d20/uname"
+run_cap "$d20" "$ef2" -- --report
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+  ok "platform: claude-auth is UNMEASURED off Linux (never an [ok])"
+else
+  bad "platform: claude-auth off Linux gave: $out"
+fi
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
+  ok "platform: claude-tmux-env is UNMEASURED off Linux, matching its documented contract"
+else
+  bad "platform: claude-tmux-env off Linux gave a measured verdict: $out"
 fi
 
 # =====================================================================================
@@ -756,10 +806,12 @@ fi
 printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # A CASE FLOOR (#3544's lesson): a span-replacing edit that silently deletes cases would
 # otherwise report a green tally over a shrunken suite. It is the count of cases that
-# ALWAYS run — a floor set to the TOTAL would red whenever a legitimately skippable case
-# (the uname stub, the real-tmux isolation case) skips, and a floor that reds on correct
-# input is the floor agents learn to delete.
-CASE_FLOOR=43
+# ALWAYS run — a floor set to the TOTAL would red whenever the one legitimately skippable
+# case (the real-tmux isolation case, 3 assertions) skips, and a floor that reds on correct
+# input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
+# a host without `uname` is a named refusal at startup, because that host would take the
+# non-Linux branch in every case.
+CASE_FLOOR=45
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
