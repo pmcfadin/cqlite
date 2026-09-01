@@ -425,9 +425,10 @@ claude_tmux_env_verdict_into() {
 # A private, throwaway tmux server started from the PERSISTED environment, one pane, and a
 # report of what that pane received. Four constraints, each load-bearing:
 #
-#  * IT NEVER TOUCHES THE HOST'S LIVE SERVER. Every call carries a unique private `-L`
-#    socket, and the server is killed in a trap on EVERY exit path including signals. A
-#    stray tmux server left on a fleet box is a real cost.
+#  * IT NEVER TOUCHES THE HOST'S LIVE SERVER. Every call carries `-S <socket>` pointing at a
+#    socket inside this run's own private working directory, and the server is killed in a
+#    trap on EVERY exit path including signals. A stray tmux server left on a fleet box is a
+#    real cost, and so — more quietly — is a stray socket file in a directory we do not own.
 #  * IT IS STARTED FROM THE PERSISTED SOURCE, NOT FROM OURS. The two credential variables
 #    are scrubbed and re-supplied from the pam_env file (BASH_ENV/ENV with them, since a
 #    non-interactive shell would re-inject what was just scrubbed). Bootstrap runs inside an
@@ -437,6 +438,11 @@ claude_tmux_env_verdict_into() {
 #  * THE PANE IS SPAWNED THE WAY A LANE SPAWNER SPAWNS ONE. `tmux new-session <command>`
 #    runs the command through `sh -c`, NOT a login shell, so /etc/profile.d never executes
 #    for it (fact 5). A probe using a login shell would measure the wrong thing.
+#
+# RESIDUAL, declared rather than worked around and IDENTICAL to the one the `--auth` probe
+# and `tmux setenv -g` already carry: the token is passed to the child in ARGV (`env KEY=…`),
+# so it is briefly visible in `ps` to anyone on the box. That is not a new exposure — the
+# same value sits in a mode-644 /etc/environment every user can read.
 #
 # SCOPE, stated rather than implied: what is reconstructed is the CREDENTIAL environment,
 # not a whole PAM session. PATH/HOME/TMUX_TMPDIR and the rest are this process's, because
@@ -509,6 +515,15 @@ claude_tmux_cold_probe_into() {
     eval "$__owhy='the private probe socket path would exceed the unix-socket length limit (TMPDIR is too long) — refusing rather than guessing'"
     return 0
   fi
+  # The pane command is ONE tmux argument and the paths are interpolated into it, so a
+  # working directory carrying a quote or whitespace would change the command's WORD
+  # BOUNDARIES rather than merely fail. Refuse by name; do not escape harder.
+  case "$__dir" in
+    *[\'\"\ ]*|*'	'*)
+      rm -rf "$__dir"
+      eval "$__owhy='the private working directory path contains a quote or whitespace, which cannot be passed safely as a tmux pane command — refusing'"
+      return 0 ;;
+  esac
   CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
   claude_auth_cold_probe_arm_traps
 
