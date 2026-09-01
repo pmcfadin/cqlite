@@ -6,8 +6,10 @@
 //! connector puts on the wire), what CQLite does TODAY for a projection that
 //! resolves to zero columns.
 //!
-//! Two ticket shapes reach it, neither of which is rejected anywhere on the way
-//! in:
+//! Three routes reach it (the third is measured in
+//! `measure_zero_output_columns_via_an_empty_aggregation`, which needs no
+//! `columns` field at all). Two ticket shapes reach it via `columns`, neither of
+//! which is rejected anywhere on the way in:
 //!   * `"columns": []`               — an explicitly empty projection list
 //!   * `"columns": ["no_such_col"]`  — a projection naming only unknown columns
 //!
@@ -26,6 +28,9 @@ use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::test_fixtures as fx;
 
+use arrow::record_batch::RecordBatch;
+use arrow_flight::decode::FlightRecordBatchStream;
+use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::Ticket;
 use futures::StreamExt;
@@ -158,6 +163,32 @@ fn assert_zero_column_outcome(what: &str, ok: bool, msgs: usize, err: Option<&st
     );
 }
 
+/// Drive `do_get` in process and DECODE the response the way an arrow client
+/// would, returning the `RecordBatch`es or the first error's text. Used for the
+/// aggregation CONTROL, where the point is not just "a message arrived" but that
+/// the route really aggregates.
+// The `FlightError` the decoder stream requires as its item `Err` type has a
+// framework-fixed large size; boxing it (clippy's suggestion) would violate the
+// `FlightRecordBatchStream` item contract (#2856).
+#[allow(clippy::result_large_err)]
+fn drive_batches(data_dir: &std::path::Path, ticket: Vec<u8>) -> Result<Vec<RecordBatch>, String> {
+    let rt = tokio::runtime::Runtime::new().expect("rt");
+    rt.block_on(async {
+        let svc = CqliteFlightService::new(data_dir.to_path_buf(), 8192);
+        let resp = svc
+            .do_get(Request::new(Ticket::new(ticket)))
+            .await
+            .map_err(|s| s.to_string())?;
+        let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+        let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
+        let mut out = Vec::new();
+        while let Some(item) = rb.next().await {
+            out.push(item.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+}
+
 /// MEASUREMENT (#3742): the POINT-READ route (a full-partition-key equality
 /// filter) shares `MergeProducer::output_columns()`, so an empty projection
 /// reaches it too.
@@ -185,21 +216,64 @@ fn measure_zero_column_projection_on_the_point_read_route() {
 /// `group_by + aggregates` (`agg.rs:239`). A ticket carrying an EMPTY
 /// aggregates list with no group_by therefore yields zero output columns by a
 /// route that has nothing to do with `columns`.
+///
+/// # MEASURED VERDICT — same arrow refusal, but EARLIER, and NO guard fires
+///
+/// Nothing rejects an empty aggregation spec on the way in. The route reaches
+/// the SAME `RecordBatch::try_new` refusal as the scan/point-read routes, at
+/// `rows_to_record_batch(columns, group)` over zero output columns
+/// (`cqlite-flight/src/producer.rs:963`) — a global aggregation always emits one
+/// partial row (`producer.rs:946-948`), so there IS a row and no column to put
+/// it in.
+///
+/// It surfaces differently from routes 1-3, and that difference is the point of
+/// this test: the aggregate route materializes its bounded per-group output
+/// EAGERLY inside `do_get` (`build_aggregate_response` ->
+/// `producer.produce_from_resolved`, `cqlite-flight/src/streaming.rs:623-649`,
+/// dispatched at `service.rs:895`), so the failure aborts the RPC ITSELF —
+/// `Status::Internal`, and NOT ONE message reaches the client, not even the
+/// zero-field schema. The streaming routes instead send the zero-field schema
+/// message and then fail the stream. Hence this test cannot reuse
+/// `assert_zero_column_outcome`, which pins `msgs == 1`.
+///
+/// Recorded, not endorsed, and presupposing no fix posture.
 #[test]
 fn measure_zero_output_columns_via_an_empty_aggregation() {
     let (_temp, data_dir) = build_fixture();
 
-    // Control: a real global count(*).
-    let (ok, msgs, err) = drive(
+    // Control: a real global count(*), DECODED — one batch, one row, one Int64
+    // column carrying the 3 fixture rows. Asserted (not printed) so the
+    // empty-aggregation failure below can never be mistaken for an aggregation
+    // route that is simply broken on this fixture.
+    let batches = drive_batches(
         &data_dir,
         ticket_with(serde_json::json!({
             "aggregation": {"group_by": [], "aggregates": [
                 {"func": "Count", "column": null, "output": "c"}
             ]}
         })),
+    )
+    .expect("agg control count(*) must succeed");
+    assert_eq!(batches.len(), 1, "agg control: one bounded aggregate batch");
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 1, "agg control: one global aggregate row");
+    assert_eq!(
+        batch.schema().field(0).name(),
+        "c",
+        "agg control: the aggregate's declared output name"
     );
-    eprintln!("MEASURE agg control count(*): rpc_ok={ok} msgs={msgs} err={err:?}");
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("agg control: count(*) is Int64");
+    assert_eq!(
+        counts.value(0),
+        3,
+        "agg control: count(*) over the 3-row keyvalue fixture"
+    );
 
+    // The measurement: an aggregation with NO group_by and NO aggregates.
     let (ok_a, msgs_a, err_a) = drive(
         &data_dir,
         ticket_with(serde_json::json!({
@@ -208,5 +282,24 @@ fn measure_zero_output_columns_via_an_empty_aggregation() {
     );
     eprintln!(
         "MEASURE agg empty (no group_by, no aggregates): rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}"
+    );
+    assert!(
+        !ok_a,
+        "agg empty: the eager aggregate materialization fails the do_get RPC \
+         itself — no guard rejects the spec, and no stream is opened"
+    );
+    assert_eq!(
+        msgs_a, 0,
+        "agg empty: not one message reaches the client, not even the zero-field \
+         schema (contrast the streaming routes, which send it first)"
+    );
+    let err_a = err_a.expect("agg empty: a failed RPC must carry a status");
+    assert!(
+        err_a.contains("must either specify a row count or at least one column"),
+        "agg empty: expected arrow's zero-column refusal, got: {err_a}"
+    );
+    assert!(
+        err_a.contains("status: Internal"),
+        "agg empty: arrow's refusal surfaces as Status::Internal, got: {err_a}"
     );
 }
