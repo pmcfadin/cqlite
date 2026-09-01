@@ -1,9 +1,9 @@
 round,arm,floor_major_faults,cold_major_faults,scan_major_faults
-1,baseline,50,53,3
-1,patched,48,52,4
-2,patched,46,52,6
-2,baseline,48,52,4
-3,baseline,48,53,5
-3,patched,48,52,4
-4,patched,47,52,5
-4,baseline,51,53,2
+1,baseline,51,54,3
+1,patched,47,54,7
+2,patched,48,51,3
+2,baseline,51,53,2
+3,baseline,51,54,3
+3,patched,48,51,3
+4,patched,50,53,3
+4,baseline,49,54,5

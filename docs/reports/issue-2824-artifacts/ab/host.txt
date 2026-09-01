@@ -4,7 +4,7 @@ i4i-magnitude: UNMEASURED (this host is 'c7i.4xlarge', not an i4i) — AC1's i4i
 kernel: 6.17.0-1019-aws
 cores: 16
 mem-total-kb: 32308512
-loadavg-at-start: 17.49 32.31 53.83
+loadavg-at-start: 66.68 54.64 46.50
 corpus: /data/ws0-2824
 corpus-bytes: 2779188457
 corpus-device: /dev/nvme1n1
@@ -17,8 +17,11 @@ rounds: 4  (even by requirement; arm order reverses on even rounds, so each arm 
 primary-signal: scan-attributable major page faults = cold(major_faults) - floor(major_faults)
 primary-signal-note: %F is per-process (immune to neighbours) but NOT isolated to the scan mapping; the floor phase estimates the non-scan startup cost. The subtraction is an ESTIMATE, not per-mapping accounting.
 secondary-signal: wall seconds (contended; medians only)
-started-utc: 2026-09-01T19:00:50Z
+env-pinned-floor: CQLITE_PREFETCH=off CQLITE_DISK_ACCESS_MODE=mmap
+env-pinned-cold-warm: CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap
+env-inherited-cqlite: CQLITE_DATASETS_ROOT=/data/datasets CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_PROJECT_NUMBER=1 CQLITE_PROJECT_OWNER=pmcfadin
+started-utc: 2026-09-01T19:16:27Z
 arm: baseline  sha256=3542103a02b4fbf7ded59f75d0cff8660fa07d943177ccaafb744ffa61a79068
 arm: patched  sha256=4488b5bc5973d15ae8dbc489eefd017f06baf1f5c6d45bf514eff34f2164eda7
-finished-utc: 2026-09-01T19:08:53Z
-loadavg-at-end: 17.42 20.83 39.49
+finished-utc: 2026-09-01T19:23:41Z
+loadavg-at-end: 6.99 22.88 34.66

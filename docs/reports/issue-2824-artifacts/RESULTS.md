@@ -19,6 +19,13 @@ Raw artifacts: `ab/summary.csv`, `ab/scan-attributable.csv`, `ab/host.txt`, `ab/
 
 ## What ran
 
+Every phase runs with `CQLITE_DISK_ACCESS_MODE=mmap` pinned, and the floor phase additionally with
+`CQLITE_PREFETCH=off` — both recorded in `ab/host.txt`. The env pin matters twice: those variables
+override the compiled default, so an inherited value would give both arms the same policy and compare
+nothing; and at `auto` the patched binary's floor run would issue whole-file `MADV_WILLNEED` whose
+asynchronous read-ahead outlives the process and pre-warms the cold phase that follows it, biasing the
+patched arm only.
+
 **4 rounds** (even by requirement, so each arm runs first exactly twice) x 2 arms x **3 phases**, page
 cache dropped immediately before both the floor and the cold phase, each phase a separate run with its
 own `/usr/bin/time`. Corpus: the `ws0.events` fixture, `Data.db` 2,774,760,422 bytes (~630,000 pages).
@@ -31,23 +38,35 @@ a cold cache. `scan_major_faults = cold - floor`.
 
 | signal | baseline median [values] | patched median [values] |
 |---|---|---|
-| **scan-attributable major faults** | **3.5** [3, 4, 5, 2] | **4.5** [4, 6, 4, 5] |
-| raw cold major faults | 53 | 52 |
-| floor major faults (startup only) | 49 | 47.5 |
+| **scan-attributable major faults** | **3.0** [3, 2, 3, 5] | **3.0** [7, 3, 3, 3] |
+| raw cold major faults | 54 | 52 |
+| floor major faults (startup only, `prefetch=off`) | 51 | 48 |
 | warm major faults | 0 | 0 |
-| warm wall secs | 18.60 | 18.75 |
-| cold wall secs | 28.12 | 23.62 |
+| warm wall secs | 18.66 | 18.23 |
+| cold wall secs (**not quotable**, see below) | 24.23 | 22.48 |
+
+Advice census (`ab/advice-census.txt`, taken after all rounds so it cannot pollute one):
+
+```
+baseline: WILLNEED=0 RANDOM=1 SEQUENTIAL=0 DONTNEED=4
+patched:  WILLNEED=1 RANDOM=1 SEQUENTIAL=0 DONTNEED=4
+```
+
+The arms differ in exactly one issued advice, `MADV_WILLNEED`; the #2210 `MADV_RANDOM` point mapping is
+present and untouched in both; **neither arm ever issues `MADV_SEQUENTIAL`** (#1143), verified at runtime
+rather than only by unit assert. The four `MADV_DONTNEED` calls are the runtime releasing thread stacks —
+identical in both arms, and not from the reader.
 
 ## Reading it
 
-**Scan-attributable major faults are indistinguishable — single digits in both arms across ~630,000
-file pages, with the ranges overlapping and the patched median nominally *higher* (noise at n=4).** The
+**Scan-attributable major faults are identical: median 3.0 in both arms, across ~630,000 file pages.** The
 kernel's default read-ahead was already converting essentially everything to minor faults in both arms.
 There was nothing for `MADV_WILLNEED` to convert.
 
 **The attribution matters, and it corrected an earlier misreading of this same data.** Raw cold counts
-are 53 vs 52 and an earlier 3-round run read 51 vs 49, which looks like a small improvement. It is not:
-the difference sits in the **startup floor**, i.e. faulting in the executable and its shared libraries,
+are 54 vs 52, which looks like a small improvement. It is not: the difference sits in the
+**startup floor** (51 vs 48 — the two binaries differ slightly in size, so they fault in a slightly
+different number of executable pages), i.e. faulting in the executable and its shared libraries,
 which are cold too because the global page cache is dropped, and `%F` counts them. `%F` is per-process,
 so it is immune to the neighbours; it is **not** isolated to the scan mapping, and reporting it
 unqualified attributes process-startup faults to the scan. Subtracting the floor removed a spurious
