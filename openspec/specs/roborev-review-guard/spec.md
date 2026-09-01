@@ -998,7 +998,11 @@ path (exit `0`) is likewise not a verdict and SHALL emit no block.
 
 #### Scenario: The block carries every per-check key in the contracted order
 - **WHEN** a review was enqueued and completed
-- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `assert-base:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:` — twenty-three keys in all, each exactly once
+- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `assert-base:`, `job:`, `job-machine:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:` — twenty-four keys in all, each exactly once
+
+#### Scenario: The block names the daemon that issued the job id
+- **WHEN** a normal run's or a `--recheck-job` run's block is read
+- **THEN** `job-machine:` sits beside `job:` and carries exactly one of three affirmative renderings — the daemon uuid when a record carried `source_machine_id`, `NOT RECORDED (...)` when a job record was read and carries none, or `UNAVAILABLE (...)` naming the `job-record:` state it inherits — never a blank, and it is informational: it appears in neither the verdict-grammar scan nor the affirmation backstop, so none of its states can make a run pass or fail on its own (roborev job ids are per-daemon, so the value disambiguates a pasted block; the record's `git_ref`, not the id, remains what identifies a review — #3654)
 
 #### Scenario: The block states which base the range assert compared against
 - **WHEN** a normal run's block is read
