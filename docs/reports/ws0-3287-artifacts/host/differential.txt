@@ -1,113 +1,12 @@
-L3 as the guest sees it: 105 MiB (1 instance)
-Prediction BEFORE measuring: the 2048MiB arm's working set is ~20x L3, a random
-single-dependency chase, so it cannot be L3-resident. Any honest L3-miss-stall
-counter MUST be large there. A zero is a silent instrument, not a measurement.
+== #3287 capability probe ==
+L3 as this host sees it: 105 MiB (1 instance)
+window: control-FIFO gated to the chase (-D -1 --control fifo:), events counted :u
+gate-integrity-probe: OK
 
-########## ARM friendly-L2resident (buffer=512MiB working=256KiB accesses=20000000) ##########
-mode=chase
-arm=friendly-L2resident
-gate=delay
-buffer_bytes=536870912
-working_set_bytes=262144
-nodes=4096
-accesses=20000000
-init_s=0.0001
-chase_s=0.1135
-ns_per_access=5.676
-checksum=40950041832
-init_overrun=0
+Prediction BEFORE measuring: the 2048MiB arm's working set is many times L3,
+a random single-dependency chase, so it cannot be L3-resident. Any honest
+L3-miss-stall or offcore counter MUST be large there. A zero is a silent
+instrument, not a measurement -- and a zero is invariant to the window,
+since contamination can only ADD counts.
 
- Performance counter stats for 'docs/reports/ws0-3287-artifacts/cache-hostile.bin chase --buffer-mib 512 --working-kib 256 --accesses 20000000 --arm friendly-L2resident --delay-ms 3000':
-
-         344219141      cycles                                                                  (65.05%)
-         121823186      instructions                                                            (73.82%)
-         283804574      cycle_activity.stalls_total                                             (73.79%)
-           2522213      cycle_activity.stalls_l2_miss                                           (73.79%)
-                 0      cycle_activity.stalls_l3_miss                                           (74.33%)
-                 0      raw_stalls_l3_miss                                                      (75.22%)
-           2077040      raw_stalls_l2_miss                                                      (76.09%)
-                 0      offcore_requests_outstanding.all_data_rd                                        (76.42%)
-                 0      offcore_requests_outstanding.cycles_with_data_rd                                        (76.42%)
-            101110      l1d_pend_miss.fb_full                                                   (76.33%)
-         142537385      l1d_pend_miss.pending                                                   (66.71%)
-                 0      cache-misses                                                            (65.83%)
-
-       3.115234334 seconds time elapsed
-
-       0.114360000 seconds user
-       0.001003000 seconds sys
-
-
-
-########## ARM hostile-512m (buffer=512MiB working=0KiB accesses=20000000) ##########
-mode=chase
-arm=hostile-512m
-gate=delay
-buffer_bytes=536870912
-working_set_bytes=536870912
-nodes=8388608
-accesses=20000000
-init_s=0.3926
-chase_s=3.6952
-ns_per_access=184.758
-checksum=83888746007914
-init_overrun=0
-
- Performance counter stats for 'docs/reports/ws0-3287-artifacts/cache-hostile.bin chase --buffer-mib 512 --working-kib 0 --accesses 20000000 --arm hostile-512m --delay-ms 3000':
-
-       12350848493      cycles                                                                  (66.78%)
-        1146654004      instructions                                                            (75.09%)
-       11852826425      cycle_activity.stalls_total                                             (75.09%)
-       10240540985      cycle_activity.stalls_l2_miss                                           (75.12%)
-                 0      cycle_activity.stalls_l3_miss                                           (75.14%)
-                 0      raw_stalls_l3_miss                                                      (75.15%)
-       10305231937      raw_stalls_l2_miss                                                      (74.65%)
-                 0      offcore_requests_outstanding.all_data_rd                                        (74.65%)
-                 0      offcore_requests_outstanding.cycles_with_data_rd                                        (74.67%)
-         264040869      l1d_pend_miss.fb_full                                                   (75.15%)
-       14566541893      l1d_pend_miss.pending                                                   (66.82%)
-                 0      cache-misses                                                            (66.78%)
-
-       6.749465119 seconds time elapsed
-
-       3.931972000 seconds user
-       0.208935000 seconds sys
-
-
-
-########## ARM hostile-2g (buffer=2048MiB working=0KiB accesses=8000000) ##########
-mode=chase
-arm=hostile-2g
-gate=delay
-buffer_bytes=2147483648
-working_set_bytes=2147483648
-nodes=33554432
-accesses=8000000
-init_s=1.6334
-chase_s=2.2345
-ns_per_access=279.311
-checksum=134216262528816
-init_overrun=0
-
- Performance counter stats for 'docs/reports/ws0-3287-artifacts/cache-hostile.bin chase --buffer-mib 2048 --working-kib 0 --accesses 8000000 --arm hostile-2g --delay-ms 3000':
-
-       11917497112      cycles                                                                  (66.64%)
-        4146056364      instructions                                                            (74.99%)
-       10204228869      cycle_activity.stalls_total                                             (74.97%)
-        8386658381      cycle_activity.stalls_l2_miss                                           (74.97%)
-                 0      cycle_activity.stalls_l3_miss                                           (74.97%)
-                 0      raw_stalls_l3_miss                                                      (74.97%)
-        8395798758      raw_stalls_l2_miss                                                      (75.00%)
-                 0      offcore_requests_outstanding.all_data_rd                                        (75.03%)
-                 0      offcore_requests_outstanding.cycles_with_data_rd                                        (75.06%)
-        1183105675      l1d_pend_miss.fb_full                                                   (75.05%)
-       27033041051      l1d_pend_miss.pending                                                   (66.69%)
-                 0      cache-misses                                                            (66.66%)
-
-       5.347656637 seconds time elapsed
-
-       3.162848000 seconds user
-       0.816914000 seconds sys
-
-
-
+VERDICT: COMPLETE (all steps measured; read host/arm-*.csv for values)

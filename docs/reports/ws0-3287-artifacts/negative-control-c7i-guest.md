@@ -19,8 +19,10 @@ time.
 
 Reproduce: `bash docs/reports/ws0-3287-artifacts/capability-probe.sh <outdir>`.
 Raw captures: [`host/`](host/) — `capability-probe.txt`, `tma-probe.txt`,
-`event-disposition.txt`, `counter-semantics-verification.txt`, `differential.txt`,
-`differential-unmultiplexed.txt`.
+`event-disposition.txt`, `counter-semantics-verification.txt`, `gate-probe.{csv,txt}`,
+`arm-{friendly,hostile-512m,hostile-2g,hostile-2g-nomux}.{csv,txt}`, `differential.txt` (the
+run's verdict). The probe **exits non-zero and stamps `VERDICT: UNMEASURED`** if any step failed, so
+a `VERDICT: COMPLETE` is an affirmative statement that every capture was taken.
 
 ---
 
@@ -40,33 +42,39 @@ counter the attribution itself is built from.** It is worse than the events alre
 because a run that reached for "just re-measure *both* endpoints on the cheap box, self-consistently"
 would be using it.
 
-The differential (`host/differential-unmultiplexed.txt`), **4-event group, `enabled%=100.00` on every
-row — no multiplexing, so these are counts and not scaled estimates**:
+The differential (`host/arm-hostile-2g-nomux.csv`), **4-event group, `enabled%=100.00` on every row —
+no multiplexing, so these are counts and not scaled estimates**, window gated to the chase and
+counted user-only:
 
 ```
-arm hostile-2g: 2 GiB random single-dependency pointer chase (working set ~20x the 105 MiB L3)
-  ns_per_access = 253.038          <-- DRAM latency, measured by WALL CLOCK, not by any PMU
-  11793534349,,cycles,3655135860,100.00
-   8228167094,,cycle_activity.stalls_l2_miss,3655135860,100.00
-            0,,cycle_activity.stalls_l3_miss,3655135860,100.00
-            0,,offcore_requests_outstanding.all_data_rd,3655135860,100.00
+arm hostile-2g-nomux: 2 GiB random single-dependency pointer chase (working set ~20x the 105 MiB L3)
+  ns_per_access = 254.997          <-- DRAM latency, measured by WALL CLOCK, not by any PMU
+  6763496940,,cycles:u,...,100.00
+  6168870911,,cycle_activity.stalls_l2_miss:u,...,100.00
+           0,,cycle_activity.stalls_l3_miss:u,...,100.00
+           0,,offcore_requests_outstanding.all_data_rd:u,...,100.00
 ```
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
 serial data dependency cannot be L3-resident and the prefetcher cannot help it, so an honest
-L3-miss-stall counter must be large. 8.23 billion cycles — 70% of all cycles — are stalled with an
-**L2**-miss demand load outstanding, and exactly zero of them are attributed to an L3 miss. With a
-working set 20× the L3 that is not a small number; it is physically impossible. `ns_per_access=253`
-independently confirms the loads are reaching DRAM (an L3 hit is ~15–20 ns), so the workload's
-behaviour is not in doubt — only the counter is.
+L3-miss-stall counter must be large. 6.17 billion cycles — **91.2% of all cycles** — are stalled with
+an **L2**-miss demand load outstanding, and exactly zero of them are attributed to an L3 miss. With a
+working set 20× the L3 that is not a small number; it is physically impossible.
+
+**The workload's behaviour is established by WALL CLOCK, not by the PMU, so it is not in doubt — only
+the counter is.** `ns_per_access` runs **6.021** in the L2-resident arm against **241.6–267.7** in the
+DRAM arms, a ~40× access-latency spread produced purely by changing the working-set extent, while
+`instructions:u` differs by **0.2%** between the friendly and hostile-512m arms (119,170,508 vs
+119,391,572, ratio **1.002**) — identical work, identical code path. An L3 hit is ~15–20 ns; 255 ns is
+DRAM. No counter is needed to know these loads left the cache.
 
 **It is not a `perf` event-table mis-encoding.** The raw programming was probed with #3224's own
 verbatim verified encoding, and the *same event select* with a *different umask* works:
 
 | programmed | meaning | hostile-2g count |
 |---|---|--:|
-| `cpu/event=0xa3,umask=0x6,cmask=0x6/` | #3224 §5.2's verified `stalls_l3_miss` encoding | **0** |
-| `cpu/event=0xa3,umask=0x5,cmask=0x5/` | `stalls_l2_miss` | 8,395,798,758 |
+| `cpu/event=0xa3,umask=0x6,cmask=0x6/u` | #3224 §5.2's verified `stalls_l3_miss` encoding | **0** |
+| `cpu/event=0xa3,umask=0x5,cmask=0x5/u` | `stalls_l2_miss` | 6,219,406,412 |
 
 Same PMU, same event select, adjacent umask. The `umask=0x6` sub-event is unimplemented in this guest
 and reports a measurement-shaped zero.
@@ -74,7 +82,7 @@ and reports a measurement-shaped zero.
 ## Finding 2 — the offcore term #3287 exists to add is the same silent zero
 
 `offcore_requests_outstanding.all_data_rd` and `.cycles_with_data_rd` both program cleanly and return
-`0` in all three arms, including one with 8.23 billion cycles of outstanding L2-miss demand loads.
+`0` in all three arms, including one with **6.17 billion** cycles of outstanding L2-miss demand loads.
 `offcore_requests.all_data_rd` and `offcore_requests_buffer.sq_full` are absent from the PMU outright.
 
 This is the load-bearing one for #3287's *purpose*. The issue's whole point is that
@@ -123,21 +131,33 @@ concurrent lanes and one full `agent-gate.sh` — zero headroom, and no isolatio
 ## What is confirmed working — the PMU is not dead, it is SELECTIVELY lying
 
 That is what makes this a trap rather than an obstacle. In the same 12-event capture the counters that
-do work move exactly as the differential predicts, friendly → hostile-512m. **These are the 12-event
-group from `host/differential.txt`, which time-shares on this host (~65–76% enabled), so each value is
-a scaled estimate and is shown here for its RATIO only** — #3224 §3.3 forbids publishing multiplexed
-values as counts, and the verdict above rests on the unmultiplexed 4-event group instead. A stuck-at-zero
-counter is immune to the distinction: 0 × any scale factor is 0.
+do work move by orders of magnitude between the arms, exactly as the differential predicts, while three
+sit at zero throughout.
 
-| counter | friendly (L2-resident) | hostile-512m | ratio |
-|---|--:|--:|--:|
-| `cycles` | 344,219,141 | 12,350,848,493 | ×35.9 |
-| `cycle_activity.stalls_l2_miss` | 2,522,213 | 10,240,540,985 | ×4060 |
-| `l1d_pend_miss.fb_full` | 101,110 | 264,040,869 | ×2611 |
-| `l1d_pend_miss.pending` | 142,537,385 | 14,566,541,893 | ×102 |
-| `cycle_activity.stalls_l3_miss` | 0 | **0** | — |
-| `offcore_requests_outstanding.all_data_rd` | 0 | **0** | — |
-| `cache-misses` | 0 | **0** | — |
+**Two honesty caveats on the numbers below.** (1) The 12-event group **time-shares** on this host
+(~65–75% enabled), so each value is a scaled estimate; #3224 §3.3 forbids publishing multiplexed values
+as counts, and the verdict above rests on the unmultiplexed 4-event group instead. (2) The
+**friendly arm's small counts are NOISY between reps** — `cycle_activity.stalls_l2_miss:u` was observed
+at 2,047 and at 489,789 on two runs of the identical command — so **no precise ratio is quoted from a
+single rep**. What is stable across every run is the *direction and order of magnitude*, and the zeros.
+A stuck-at-zero counter is immune to both caveats: 0 × any scale factor is 0, and it was 0 in every rep.
+
+| counter (`:u`, gated) | friendly (L2-resident) | hostile-512m | moves? |
+|---|--:|--:|---|
+| `instructions` | 119,170,508 | 119,391,572 | **no — 1.002, the control property** |
+| `cycles` | 353,500,401 | 13,885,330,730 | yes, ~40× |
+| `cycle_activity.stalls_total` | 293,619,455 | 13,830,318,891 | yes |
+| `cycle_activity.stalls_l2_miss` | 489,789 | 12,359,407,258 | yes, 4+ orders |
+| `l1d_pend_miss.pending` | 141,377,077 | 12,698,528,761 | yes, ~90× |
+| `l1d_pend_miss.fb_full` | 1,557,955 | 9,932,430 | yes |
+| `cycle_activity.stalls_l3_miss` | 0 | **0** | **NO — stuck** |
+| `offcore_requests_outstanding.all_data_rd` | 0 | **0** | **NO — stuck** |
+| `cache-misses` | 0 | **0** | **NO — stuck** |
+
+`instructions` being flat while `cycles` moves ~40× is the property that makes this a *control*: the
+two arms run the same code over the same allocation and differ only in working-set extent, so the
+entire cycle difference is memory-hierarchy. Any counter claiming to see the memory hierarchy must
+move with it. Three do not.
 
 A smoke test ("is the counter non-zero?") passes on the working ones and cannot distinguish the stuck
 ones from a genuinely memory-clean workload. Only a differential against a predicted behaviour can.
@@ -154,6 +174,65 @@ ones from a genuinely memory-clean workload. Only a differential against a predi
 - The event-disposition triage is **three-valued on purpose** (`ABSENT-FROM-PMU` / `NOT-SUPPORTED` /
   `PROGRAMS`), and `PROGRAMS` is deliberately *not* called `SUPPORTED`: this host's whole lesson is
   that programming a counter and measuring with it are different facts.
+
+## Measurement integrity — three decisions, all three forced by review
+
+Recorded because the first revision of this probe got two of them wrong, and one of those wrong
+answers would have *survived* into a metered bare-metal run had it not been caught here
+(#3287 roborev job 305).
+
+**(i) The perf window is gated exactly around the chase**, via perf's control FIFO
+(`perf stat -D -1 --control fifo:<ctl>,<ack>`; `cache-hostile.c` drives the handshake). The first
+revision passed only the benchmark's `--delay-ms` and **no** `perf -D`, so it counted buffer init AND
+address-space teardown. Both neighbours are large and *asymmetric* between the arms — #3224 measured
+teardown at 192M instructions (hostile) vs 80M (friendly) on a 512 MiB buffer, i.e. **larger than the
+chase itself, and it does not cancel**. There is deliberately **no `-D <ms>` fallback**: that window
+excludes init but not teardown, so an unavailable FIFO is a FAIL, never a quiet downgrade. A
+`gate-probe` arm of 1,000 accesses runs first and must complete the handshake; it reads 986,903
+cycles against 13.9e9 for a real arm — four orders of magnitude — which is the observable that the
+window really is closed around the chase.
+
+**How much it mattered, measured rather than asserted:** ungated, `friendly`'s
+`cycle_activity.stalls_l2_miss` read 2,522,213 and the friendly→hostile **instruction** ratio was
+**9.4**. Gated and `:u`, the same command reads 489,789 and **1.002**. The instruction ratio is the
+control's own validity property — #3224 requires it near 1.0, because that is what proves the arms
+differ only in memory behaviour — so the ungated capture had not merely inflated some ratios, it had
+**broken the control**. The published ratios were wrong and the check that should have said so was
+being computed on contaminated counts.
+
+**What did NOT change, and why that was predictable:** every capability verdict. Contamination can
+only **add** counts, and no amount of extra work turns a nonzero counter into a zero. The zeros were
+zero ungated, gated, multiplexed, unmultiplexed, at 512 MiB and at 2 GiB, in every rep. That
+invariance is the reason the finding survived its own instrument being wrong — and it is why the
+capability claims are stated on the zeros rather than on the ratios.
+
+**(ii) Events are counted user-only (`:u`).** The hostile arm runs ~40× longer in wall clock at equal
+access count, so it absorbs proportionally more timer/IRQ kernel work; #3224 measured that alone
+putting the instruction ratio at 1.22 with kernel counting on and 1.00002 with `:u`. Note the
+modifier has **two non-interchangeable spellings**: a symbolic event takes a `:u` suffix, while a raw
+`cpu/.../` event takes it *inside* the trailing slash (`/u`). The `/...:u` form is rejected outright
+("Unrecognized input") and, because a perf event group is all-or-nothing, that one character silently
+took down three of four arms while a 4-event group of symbolic events still succeeded.
+
+**(iii) A positive verdict requires an affirmative measurement.** The first revision ran under
+`set +e` with each arm ending in a successful `echo`, so a failed `perf`/`taskset` was swallowed and
+the script still printed "capability probe written" over incomplete evidence — the fail-open class
+this repository's doctrine exists to remove. Now every capture's exit status is recorded
+(`capture-rc:` / `arm-rc:` lines in the artefacts), any failure stamps `VERDICT: UNMEASURED`, and the
+script exits non-zero. **The check earned its keep on its first run**, catching both the `/...:u`
+breakage and the fresh-directory bug below.
+
+**One place where a non-zero exit is an ANSWER, not a failure**, and the distinction is deliberate:
+`perf stat` exits non-zero when an event is absent from the PMU, and in the TMA probe and the
+event-disposition sweep *that is precisely what is being measured*. Treating it as a step failure
+would stamp `UNMEASURED` on a run that measured exactly what was asked. Those two blocks therefore
+check only that they produced output at all; every other step checks its status.
+
+**And a fresh output directory now works.** The first revision created `$OUT` but wrote to
+`$OUT/host/*`, so the documented reproduction command failed on any new directory — and this
+script's own run **masked it**, because that run's `$OUT/host` already existed. It is now
+`mkdir -p "$OUT/host"`, and the fix was verified by running the documented invocation into a
+directory that did not exist.
 
 ---
 

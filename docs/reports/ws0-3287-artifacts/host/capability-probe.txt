@@ -1,5 +1,5 @@
 == date -u ==
-Tue Sep  1 15:51:47 UTC 2026
+Tue Sep  1 18:39:42 UTC 2026
 
 == uname -a ==
 Linux ip-172-31-6-169 7.0.0-1011-aws #11~24.04.1-Ubuntu SMP PREEMPT Mon Aug 10 15:20:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
@@ -7,7 +7,7 @@ Linux ip-172-31-6-169 7.0.0-1011-aws #11~24.04.1-Ubuntu SMP PREEMPT Mon Aug 10 1
 == perf --version ==
 perf version 7.0.12
 
-== sysctls (permission layer) ==
+== sysctls (permission layer, INDEPENDENT of the capability layer) ==
 kernel.perf_event_paranoid=-1
 kernel.kptr_restrict=0
 
@@ -72,7 +72,7 @@ Vulnerability Vmscape:                   Not affected
 available: 1 nodes (0)
 node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 node 0 size: 31549 MB
-node 0 free: 13930 MB
+node 0 free: 16097 MB
 node distances:
 node   0 
   0:  10 

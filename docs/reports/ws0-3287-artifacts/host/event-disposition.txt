@@ -1,19 +1,19 @@
 EVENT                                                DISPOSITION
-cycles                                               PROGRAMS (value=1625664)
-instructions                                         PROGRAMS (value=735546)
-cycle_activity.stalls_total                          PROGRAMS (value=659247)
-cycle_activity.stalls_l2_miss                        PROGRAMS (value=220029)
+cycles                                               PROGRAMS (value=2126290)
+instructions                                         PROGRAMS (value=712335)
+cycle_activity.stalls_total                          PROGRAMS (value=994187)
+cycle_activity.stalls_l2_miss                        PROGRAMS (value=291130)
 cycle_activity.stalls_l3_miss                        PROGRAMS (value=0)
 offcore_requests_outstanding.all_data_rd             PROGRAMS (value=0)
 offcore_requests_outstanding.cycles_with_data_rd     PROGRAMS (value=0)
 offcore_requests.all_data_rd                         ABSENT-FROM-PMU
 offcore_requests_buffer.sq_full                      ABSENT-FROM-PMU
-l1d_pend_miss.pending                                PROGRAMS (value=695951)
-l1d_pend_miss.fb_full                                PROGRAMS (value=26210)
-l1d_pend_miss.l2_stall                               PROGRAMS (value=78)
-idq_uops_not_delivered.core                          PROGRAMS (value=2345166)
-int_misc.recovery_cycles                             PROGRAMS (value=34815)
-exe_activity.bound_on_stores                         PROGRAMS (value=18628)
+l1d_pend_miss.pending                                PROGRAMS (value=224833)
+l1d_pend_miss.fb_full                                PROGRAMS (value=33098)
+l1d_pend_miss.l2_stall                               PROGRAMS (value=183)
+idq_uops_not_delivered.core                          PROGRAMS (value=1662541)
+int_misc.recovery_cycles                             PROGRAMS (value=38818)
+exe_activity.bound_on_stores                         PROGRAMS (value=26573)
 cycle_activity.stalls_mem_any                        ABSENT-FROM-PMU
 topdown.slots                                        ABSENT-FROM-PMU
 LLC-loads                                            ABSENT-FROM-PMU

@@ -1,0 +1,14 @@
+# started on Tue Sep  1 18:39:45 2026
+
+13885330730,,cycles:u,3213901998,66.00,,
+119391572,,instructions:u,3616685523,74.00,,
+13830318891,,cycle_activity.stalls_total:u,3618115479,75.00,,
+12359407258,,cycle_activity.stalls_l2_miss:u,3618231142,75.00,,
+0,,cycle_activity.stalls_l3_miss:u,3618000074,75.00,,
+0,,raw_stalls_l3_miss,3617413043,75.00,,
+12405686915,,raw_stalls_l2_miss,3618621551,75.00,,
+0,,offcore_requests_outstanding.all_data_rd:u,3617744278,75.00,,
+0,,offcore_requests_outstanding.cycles_with_data_rd:u,3618441063,75.00,,
+9932430,,l1d_pend_miss.fb_full:u,3616710128,74.00,,
+12698528761,,l1d_pend_miss.pending:u,3214016405,66.00,,
+0,,cache-misses:u,3212924639,66.00,,
