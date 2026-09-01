@@ -14802,6 +14802,23 @@ run_tooling_tests() {
     return 0
   fi
 
+  # #3689: the one-shot smoke harness must run its WHOLE suite through a failing
+  # test. It used to abort on the first failure (a bare `set -e` inside run_test
+  # clobbering main()'s `set +e`), so a stale CSV golden hid an identical
+  # staleness in select_simple_table.golden. Hermetic: stub CLI, no cargo, no
+  # dataset corpus, no network. Carries its own positive control.
+  echo ">>> [$name] bash scripts/tests/test_ci_one_shot_smoke_no_abort.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ci_one_shot_smoke_no_abort.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ci-one-shot-smoke no-abort guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_check_dockerfile_rust_pin.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
     status=FAIL
