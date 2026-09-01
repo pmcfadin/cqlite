@@ -101,7 +101,7 @@
 #   (a) EVERY line of a verdict-bearing invocation, stdout AND stderr, begins
 #       `DRIVE-STATE: `. `--help` is the one exemption: it emits no verdict line, so no
 #       consumer parses it. THAT COVERS THE EXTERNAL COMMANDS THIS SCRIPT RUNS: every one of
-#       them (mktemp, mv, rm, cat, date, wc, tr, hostname, flock, and the sourced liveness
+#       them (mktemp, mv, rm, cat, tail, awk, date, wc, tr, hostname, flock, and the sourced liveness
 #       library's ps/date/tr/cut) has its stderr either CAPTURED and FOLDED into the anchored
 #       message — preferred where the native text names the cause, as with mktemp and mv — or
 #       SUPPRESSED where the anchored message already names the failure fully. A native
@@ -837,13 +837,51 @@ read_marker() {
 # Returns NON-ZERO when the body could not be read, and its stderr is suppressed: every
 # caller must decide what an unreadable body means rather than inherit awk's unprefixed
 # diagnostic and an empty result (roborev job 26 F2).
+# THE BODY IS COPIED BY BYTE OFFSET, NEVER BY A LINE-ORIENTED TOOL (roborev job 35 I2). This
+# used to be `awk ... { print }`, and awk ALWAYS terminates the record it prints — so a body whose
+# LAST LINE HAD NO NEWLINE gained one on the next owned write or adoption (measured: a 19-byte
+# `no trailing newline` came back as 20 bytes), breaking the byte-for-byte preservation the header
+# promises one paragraph up. The class is "body bytes routed through a line-oriented tool", and it
+# also covers `$( )` capture, which strips trailing newlines the same way — which is why this
+# function writes to STDOUT for the caller to redirect into a file, and why the only other place
+# body bytes move (`write_marker`) uses `cat`.
+#
+# WHY THIS IS BYTE-EXACT: awk is used ONLY to count the bytes of the lines BEFORE the body — the
+# prologue, the end sentinel and the writer-owned separator, every one of which is newline
+# terminated in any file that HAS a body — and `tail -c +N` then copies raw bytes from that
+# offset to EOF, re-terminating nothing. `LC_ALL=C` is load-bearing: awk's `length()` counts
+# CHARACTERS, so a multi-byte prologue value under a UTF-8 locale would yield a short offset and
+# silently prepend stray bytes to the body.
 marker_body() {
-  local path; path="$(marker_path)"
-  awk -v s="$STAMP_END" '
-    body { print; next }
-    sep  { sep = 0; body = 1; if ($0 == "") next; print; next }
-    $0 == s { sep = 1 }
-  ' "$path" 2>/dev/null
+  local path off; path="$(marker_path)"
+  # Fail-closed: no end sentinel at all (or an unreadable file) is a body that could not be READ,
+  # never an empty one — every caller refuses rather than carrying an empty plan forward.
+  off="$(LC_ALL=C awk -v s="$STAMP_END" '
+    {
+      if (state == 1) {
+        # The line immediately after the sentinel. The writer ALWAYS emits exactly one blank
+        # separator (see write_marker); skip it, and ONLY it, when it is there.
+        if ($0 == "") pos += length($0) + 1
+        print pos + 1
+        done = 1
+        exit
+      }
+      pos += length($0) + 1
+      if ($0 == s) state = 1
+    }
+    END {
+      if (done) exit 0
+      # The sentinel was the LAST line: the body is empty, and the offset is one past EOF, which
+      # `tail -c` answers with nothing. No sentinel at all is a read failure, not an empty body.
+      if (state == 1) { print pos + 1; exit 0 }
+      exit 3
+    }
+  ' "$path" 2>/dev/null)" || return 1
+  case "$off" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$off" -ge 1 ] || return 1
+  # `tail`'s stderr is suppressed for contract (a): its native `tail: cannot open ...` carries no
+  # prefix, and the non-zero return already routes to each caller's anchored refusal.
+  tail -c "+$off" "$path" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------

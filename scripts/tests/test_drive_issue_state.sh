@@ -2148,8 +2148,24 @@ case_begin 39-body-bytes-survive-repeated-writes "the BODY survives an owned wri
 # SURVIVES an owned write; it survived but MUTATED, and it grew without bound over a long-running
 # lane. Asserted BYTE-FOR-BYTE with cmp, never as a line count — the finding is that the bytes
 # change.
-after_sentinel() {  # after_sentinel <marker> <out> — everything AFTER the end sentinel, verbatim
-  awk -v s="$sentinel_end" 'seen{print} $0==s{seen=1}' "$1" >"$2"
+# after_sentinel <marker> <out> — the marker's bytes AFTER the end sentinel's newline, VERBATIM.
+#
+# BYTE-EXACT BY CONSTRUCTION, AND DELIBERATELY NOT THE SCRIPT'S OWN MECHANISM (roborev job 35 I2).
+# This helper used to be `awk -v s=... 'seen{print} $0==s{seen=1}'`, and awk ALWAYS terminates the
+# last record it prints — so a body whose final line carries NO trailing newline came back with one
+# ADDED. That is exactly the defect this case exists to catch, which means the verification shared
+# the blind spot of the thing it verified: four `cmp`s over awk-extracted bytes could not have
+# failed. Nothing here is line-oriented: `grep -b` reports a BYTE offset of the sentinel line and
+# `tail -c` copies BYTES from there on, so no final line is re-terminated, no CRLF is rewritten and
+# no trailing blank line is trimmed. It is also a DIFFERENT mechanism from the offset walk the
+# script now uses, so a defect in one cannot cancel a defect in the other.
+after_sentinel() {
+  local off
+  off=$(LC_ALL=C grep -abFx -e "$sentinel_end" "$1" 2>/dev/null | head -1 | cut -d: -f1)
+  case "$off" in ''|*[!0-9]*) : >"$2"; return 1 ;; esac
+  # `off` is the 0-based byte offset of the sentinel line's first byte; the body begins after the
+  # sentinel's own bytes AND its newline. `tail -c +N` is 1-based, hence the +2.
+  tail -c "+$(( off + ${#sentinel_end} + 2 ))" "$1" >"$2"
 }
 L39=$(lane lane39)
 body39="$T/body39.md"
@@ -2260,6 +2276,93 @@ else
 fi
 
 # ===========================================================================
+case_begin 41-body-without-trailing-newline "CLASS SWEEP of job 34 H3: a body whose LAST LINE HAS NO NEWLINE survives byte-for-byte (roborev job 35 I2)"
+# ===========================================================================
+# THE DEFECT: `marker_body` extracted the body with `awk '{ print }'`, and awk ALWAYS terminates
+# the record it prints. So a 19-byte body `no trailing newline` came back as the 20 bytes
+# `no trailing newline\n` on the NEXT owned write — the header promises the body SURVIVES a write,
+# and it did not. Case 39 could not see it: its body was newline-terminated AND its `after_sentinel`
+# helper extracted through awk too, so the comparison ran over bytes the extractor had already
+# normalised. A verification that shares the defect's blind spot is not a verification, so the
+# helper was rewritten (grep -b offset + tail -c, no line-oriented tool anywhere) before this case
+# was written.
+#
+# THE SWEEP: the class is "body bytes routed through a line-oriented tool", so this case measures
+# the four normalisations such a tool performs — a missing final newline, CRLF line endings,
+# trailing blank lines, and leading whitespace — over one body, end to end, through a write, three
+# carry-forward writes and an adopt.
+L41=$(lane lane41)
+body41="$T/body41.md"
+# One body carrying every normalisation hazard at once. Built with printf so the bytes are exact:
+# a CRLF line, a line of leading whitespace, two trailing blank lines, and a FINAL LINE WITH NO
+# NEWLINE. No sentinel, no column-zero `<!--`, so the writer's body guard is not the subject here.
+printf '## plan\r\n   indented note\n\n\nno trailing newline' >"$body41"
+b41_bytes=$(wc -c <"$body41" | tr -d ' ')
+{ printf '\n'; cat "$body41"; } >"$T/41-canonical"
+if [ "$b41_bytes" -eq 47 ] && [ "$(tail -c 1 "$body41" | od -An -c | tr -d ' \n')" != '\n' ]; then
+  ok "FIXTURE: the body is $b41_bytes bytes and its last byte is NOT a newline (the case's whole subject)"
+else
+  bad "FIXTURE BROKEN: the body is $b41_bytes bytes and ends $(tail -c 1 "$body41" | od -An -c) — this case would prove nothing"
+fi
+run "$L41" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --body-file "$body41" >/dev/null 2>&1
+after_sentinel "$L41/$MARKER" "$T/41-r1"
+if cmp -s "$T/41-r1" "$T/41-canonical"; then
+  ok "the FIRST write lays the body down verbatim — no newline added, no CRLF rewritten, no blank line trimmed"
+else
+  bad "the first write already mutated the body:
+$(cmp -l "$T/41-canonical" "$T/41-r1" | head -5)
+$(cat -A "$T/41-r1" | tail -5)"
+fi
+b41_fail=0
+i=2
+while [ "$i" -le 4 ]; do
+  run "$L41" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage "round$i" >/dev/null 2>&1
+  after_sentinel "$L41/$MARKER" "$T/41-r$i"
+  cmp -s "$T/41-canonical" "$T/41-r$i" || { b41_fail=1
+    printf 'note   carry-forward write #%s changed the body bytes (%s -> %s bytes):\n%s\n' \
+      "$i" "$(wc -c <"$T/41-canonical" | tr -d ' ')" "$(wc -c <"$T/41-r$i" | tr -d ' ')" \
+      "$(cmp -l "$T/41-canonical" "$T/41-r$i" | head -3)"; }
+  i=$((i + 1))
+done
+if [ "$b41_fail" -eq 0 ]; then
+  ok "THREE carry-forward writes leave the body IDENTICAL — the read-back path adds no terminator"
+else
+  bad "a carry-forward write mutated a body whose last line has no newline (the job 35 I2 defect)"
+fi
+# ACROSS AN ADOPT, which carries the body through the very same read-back path.
+L41A=$(lane lane41-adopt)
+sleep 30 & dead41=$!
+run "$L41A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$dead41" -- write 3822 --body-file "$body41" >/dev/null 2>&1
+kill "$dead41" 2>/dev/null; wait "$dead41" 2>/dev/null
+run "$L41A" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" -- adopt 3822 --reason cron-reinvoke:writer-pid-gone >/dev/null 2>&1
+after_sentinel "$L41A/$MARKER" "$T/41a-after"
+if cmp -s "$T/41-canonical" "$T/41a-after"; then
+  ok "an ADOPT carries the unterminated body across byte-for-byte too"
+else
+  bad "the adopt mutated the body bytes ($(wc -c <"$T/41-canonical" | tr -d ' ') -> $(wc -c <"$T/41a-after" | tr -d ' ') bytes):
+$(cmp -l "$T/41-canonical" "$T/41a-after" | head -3)"
+fi
+# THE HELPER ITSELF IS PROVED BYTE-EXACT, or every cmp above is an assertion about the extractor.
+# A file whose post-sentinel region is KNOWN is extracted and compared to those known bytes.
+h41="$T/41-helper-fixture"
+{ printf '%s\n' "$sentinel"; printf 'issue: 3822\n'; printf '%s\n' "$sentinel_end"
+  printf '\n'; cat "$body41"; } >"$h41"
+after_sentinel "$h41" "$T/41-helper-out"
+if cmp -s "$T/41-canonical" "$T/41-helper-out"; then
+  ok "HELPER CONTROL: after_sentinel extracts a KNOWN unterminated region byte-for-byte (it no longer hides the defect it verifies)"
+else
+  bad "after_sentinel is still normalising: extracted $(wc -c <"$T/41-helper-out" | tr -d ' ') of $(wc -c <"$T/41-canonical" | tr -d ' ') bytes"
+fi
+# AND THE OLD HELPER IS THE POSITIVE CONTROL: the mechanism this case replaced must be SHOWN to
+# miss the defect, or "the verification shared the blind spot" is a claim rather than a measurement.
+awk -v s="$sentinel_end" 'seen{print} $0==s{seen=1}' "$h41" >"$T/41-old-helper-out"
+if ! cmp -s "$T/41-canonical" "$T/41-old-helper-out"; then
+  ok "POSITIVE CONTROL: the RETIRED awk helper returns $(wc -c <"$T/41-old-helper-out" | tr -d ' ') bytes for the same $(wc -c <"$T/41-canonical" | tr -d ' ')-byte region — it would have passed over the defect"
+else
+  bad "the retired awk helper is byte-exact here, so this case's premise is wrong and it proves nothing"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2279,8 +2382,8 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 37-machine-axis-must-be-measurable
 38-adopt-never-calls-a-live-owner-gone
 39-body-bytes-survive-repeated-writes
-40-worktree-axis-must-be-measurable 28-case-floor"
-CASE_FLOOR=40
+40-worktree-axis-must-be-measurable 41-body-without-trailing-newline 28-case-floor"
+CASE_FLOOR=41
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2292,10 +2395,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 125 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 125)"
+if [ "$PASS" -ge 131 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 131)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 125)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 131)"
 fi
 
 # ===========================================================================

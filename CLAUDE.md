@@ -1992,6 +1992,15 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   out on a site none of the three findings named: a FAILED REDIRECTION is a native diagnostic
   too, and bash applies redirections LEFT TO RIGHT, so `: >>"$lock" 2>/dev/null` printed its own
   unprefixed `Permission denied` before stderr was diverted — the suppressor must come FIRST.
+  (7) The marker BODY is copied BY BYTE OFFSET, never by a line-oriented tool: `awk '{print}'`
+  ALWAYS terminates the record it prints, so a body whose last line had no newline GAINED one on
+  every carry-forward write (measured 19 → 20 bytes) under a header promising byte-for-byte
+  preservation — and the case meant to catch that extracted through awk TOO, so **a verification
+  sharing the defect's blind spot is not a verification**; the test helper now reads a `grep -b`
+  byte offset and copies with `tail -c`, a different mechanism from the script's, with the
+  retired helper kept as the positive control. `$( )` capture is the same class (it strips
+  trailing newlines), which is why body bytes are streamed to a redirected stdout and never
+  captured into a variable.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
