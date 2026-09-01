@@ -15,9 +15,12 @@ disagree on purpose — blobs/uuids/inet as CLI hex vs core base64, timestamps a
 integers, maps as `[{key, value}]` vs a Display-keyed object — because one renders for a human and
 the other preserves structure for a machine. Only the UDT field rule is shared between them.
 
-`decimal` is a twelfth such arm as of #3644: the display writers emit an unquoted number (§6), while
-`ToJson` emits `{"scale": …, "unscaled": <base64>}`. Both are intended. If you are looking at a
-`decimal` in JSON that does not match §6, check which writer produced it before filing a bug.
+`decimal` and `varint` are two of those arms, and #3644 changed the KIND of the disagreement rather
+than creating it. Both were already divergent: the display writers emitted a quoted STRING carrying
+`ValueFormatter`'s digits, while `ToJson` emits `{"scale": …, "unscaled": <base64>}` for a `decimal`
+and a base64 string for a `varint`. As of #3644 the display writers emit an unquoted NUMBER (§6);
+`ToJson` is unchanged. Both are intended. If you are looking at a `decimal` or a `varint` in JSON
+that does not match §6, check which writer produced it before filing a bug.
 
 ## Why this file exists
 
@@ -50,7 +53,7 @@ per-type renderings would decay exactly like a stale comment, which is the failu
 | Concern | Normative artifact |
 |---|---|
 | `Value` → text (table, CSV, and the stringified JSON arms) | `ValueFormatter::format_value` / `format_into` — `cqlite-core/src/util/value_fmt.rs` |
-| Genuine-NULL predicate | `ValueFormatter::is_null` — `value_fmt.rs:39` |
+| Genuine-NULL predicate | `ValueFormatter::is_null` — `value_fmt.rs` |
 | `Value` → JSON kind | `JsonCell::from_value` — `cqlite-cli/src/output/json_cell.rs` |
 | CSV framing/escaping | the `csv` crate, as configured in `cqlite-cli/src/output/csv.rs` |
 
@@ -61,7 +64,8 @@ Each rule below names the test that pins it. A rule with no pinning test does no
 JSON object keys and CSV columns appear in **`metadata.columns` order** — never alphabetical, never
 `HashMap` iteration order — and the two formats agree with each other.
 
-- JSON: `impl Serialize for RowObj` (`json.rs:57`) walks the borrowed key slice in column order.
+- JSON: `impl Serialize for RowObj` (`cqlite-cli/src/output/json.rs`) walks the borrowed key slice in
+  column order.
 - CSV: `CSVWriter::write` (`csv.rs:54`) and `StreamingCSVWriter::write_chunk` (`csv.rs:170`).
 - Pinned by `cqlite-cli/tests/output_determinism_regression_tests.rs`: JSON at
   `test_json_preserves_non_alphabetical_column_order`,
@@ -76,7 +80,8 @@ JSON object keys and CSV columns appear in **`metadata.columns` order** — neve
 
 A result with duplicate output column names (`SELECT a, a`, or duplicate aliases) renders **one**
 key, at the **first** position, carrying the **last** value — matching the historical
-`serde_json::Map::insert` collapse. See `dedup_keys_last_wins` (`json.rs:43`), pinned by
+`serde_json::Map::insert` collapse. See `dedup_keys_last_wins`
+(`cqlite-cli/src/output/json.rs`), pinned by
 `test_duplicate_column_names_collapse_last_wins_batch` / `..._streaming` (`json.rs`).
 
 ## 3. NULL and missing columns
@@ -141,8 +146,19 @@ artifact**. Reading them as an egress oracle produces exactly the wrong answer f
 - `varint` and `decimal` → **unquoted JSON number**, per `IntegerType.java:488-491` and
   `DecimalType.java:314-317` (both `Objects.toString(...)`, and `DecimalType` deliberately overrides
   the quoting `AbstractType.java:186-189`). Emitted with full precision, not via `f64`. A value whose
-  formatted text is not a valid JSON number (a corruption marker) falls back to a JSON string rather
-  than emitting invalid JSON.
+  formatted text is not a valid JSON number falls back to a JSON string rather than emitting invalid
+  JSON — reachable for the `<corrupt-decimal:…>` marker (issue #1754) and for a ZERO magnitude at a
+  NEGATIVE scale, which `format_decimal` spells `00`.
+
+  **This is a claim about the JSON KIND, not about the SPELLING, and the spelling deviates.** The
+  kind matches `IntegerType`/`DecimalType`. The digits are `ValueFormatter`'s
+  (`format_decimal`/`format_varint`), which is not `BigDecimal.toString()`, and the two diverge in
+  reachable cases: a negative scale (Java `1.23E+3` vs CQLite `1230`), an adjusted exponent below
+  −6 (Java `1E-10` vs CQLite `0.0000000001`), and `123e-4` where Java gives `1.23E-2`. Every one is
+  **value-equal as a JSON number**, so a consumer parsing the number is unaffected — but §7's
+  standard is that a deviation from the oracle is named rather than left to be rediscovered, and the
+  recorded `map` deviation below sets the same bar. Correcting the spelling is a change to
+  `ValueFormatter`, tracked separately; it would move `table` and `csv` output too.
 
 ### Stringified kinds
 
@@ -155,7 +171,8 @@ strings carrying their `ValueFormatter` text. `text`/`varchar`/`ascii` are JSON 
 `SetType.java:230` / `ListType.java:247`, which delegate to the element type.
 
 **`map` deviates deliberately.** CQLite renders a map as an **array of `{"key":…, "value":…}`
-objects** (`json.rs:193-200`), where `MapType.java:362-388` renders a JSON **object** and coerces
+objects** (the `Value::Map` arm of `JsonCell::from_value`,
+`cqlite-cli/src/output/json_cell.rs`), where `MapType.java:362-388` renders a JSON **object** and coerces
 every key to a string. The deviation is intentional: a CQL map may be keyed by any type, and
 Cassandra's form is lossy for non-text keys, which CQLite's preserves. It is recorded here because an
 undocumented deviation from the oracle is indistinguishable from a defect — this one is a decision.
