@@ -1037,10 +1037,17 @@ impl MergeProducer {
         // carrier every scan producer builds, so `build_row_from_scan`
         // disassembles it into real column values (never the non-row fallback that
         // once emitted `Value::Map` and dropped every column — roborev H2).
+        // Issue #2339: the SAME resolved UDT registry every merge reader gets is
+        // handed to the reassembler, so a COMPOSITE set element / map key
+        // (`set<frozen<udt>>`, `map<frozen<tuple>, V>`) decodes STRUCTURALLY from
+        // its cell_path instead of failing closed. Without it an all-lowercase UDT
+        // name stays a bare `CqlType::Custom` with no field list and the path
+        // (correctly) still fails closed.
         let row_cells: RowCells = cqlite_core::storage::write_engine::merge::assemble_read_cells(
             cells,
             &self.schema,
             needed,
+            self.udt_registry.as_ref(),
         )
         .map_err(ProducerError::Merge)?;
 

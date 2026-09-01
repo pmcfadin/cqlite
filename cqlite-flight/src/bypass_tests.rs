@@ -38,7 +38,7 @@ fn forced_path_parse_is_total() {
 fn empty_reader_set_is_not_a_single_source() {
     let schema = crate::testutil::simple_schema();
     assert_eq!(
-        bypass_reason(&[], &schema, ForcedMergePath::Auto, false),
+        bypass_reason(&[], &schema, ForcedMergePath::Auto, false, None),
         BypassReason::MultipleSources
     );
 }
@@ -49,7 +49,7 @@ fn empty_reader_set_is_not_a_single_source() {
 fn aggregating_request_never_selects_the_fast_path() {
     let schema = crate::testutil::simple_schema();
     assert_eq!(
-        bypass_reason(&[], &schema, ForcedMergePath::Auto, true),
+        bypass_reason(&[], &schema, ForcedMergePath::Auto, true, None),
         BypassReason::Aggregating
     );
 }
@@ -75,7 +75,7 @@ fn a_declared_static_column_no_longer_forces_the_merge_arm() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     let mut schema = simple_schema();
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
         BypassReason::Selected,
         "control: without the static column this request takes the fast path"
     );
@@ -83,7 +83,7 @@ fn a_declared_static_column_no_longer_forces_the_merge_arm() {
         c.is_static = true;
     }
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
         BypassReason::Selected,
         "issue #3095: a static column the schema DECLARES is not refused for BEING \
          static; issue #3140: nor is the file refused for declaring a deletion"
@@ -137,7 +137,7 @@ fn one_source_with_a_clean_schema_selects_the_fast_path() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     assert_eq!(readers.len(), 1, "the fixture is exactly one generation");
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false, None),
         BypassReason::Selected
     );
 }
@@ -152,7 +152,7 @@ fn two_sources_take_the_merge_arm() {
     ]);
     assert_eq!(readers.len(), 2, "the fixture is two generations");
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false, None),
         BypassReason::MultipleSources
     );
 }
@@ -168,7 +168,7 @@ fn a_non_empty_dropped_columns_map_takes_the_merge_arm() {
         .dropped_columns
         .insert("gone".to_string(), 1_700_000_000_000_000);
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
         BypassReason::DroppedColumns
     );
 }
@@ -183,7 +183,7 @@ fn forced_bypass_never_overrides_a_correctness_precondition() {
         vec![write_row(2, "b", 20, 200)],
     ]);
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false, None),
         BypassReason::MultipleSources
     );
 }
@@ -254,7 +254,7 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     let base = simple_schema();
     assert_eq!(
-        bypass_reason(&readers, &base, ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &base, ForcedMergePath::Auto, false, None),
         BypassReason::Selected,
         "control: the plain schema WOULD take the fast path"
     );
@@ -280,7 +280,7 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
             c.data_type = refused.to_string();
         }
         assert_eq!(
-            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
             BypassReason::MulticellArmDivergence,
             "`{refused}` must take the merge arm"
         );
@@ -303,7 +303,7 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
             c.data_type = allowed.to_string();
         }
         assert_eq!(
-            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
             BypassReason::Selected,
             "`{allowed}` is served identically by both arms and must stay on \
              the fast path"
@@ -408,7 +408,7 @@ fn progress_accounting_difference_between_the_arms_is_the_documented_one() {
 fn forced_merge_is_absolute() {
     let schema = crate::testutil::simple_schema();
     assert_eq!(
-        bypass_reason(&[], &schema, ForcedMergePath::Merge, false),
+        bypass_reason(&[], &schema, ForcedMergePath::Merge, false, None),
         BypassReason::ForcedMerge
     );
 }

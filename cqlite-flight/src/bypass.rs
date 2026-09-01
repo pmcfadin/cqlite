@@ -62,7 +62,7 @@
 
 use std::sync::Arc;
 
-use cqlite_core::schema::{CqlType, TableSchema};
+use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
 use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{
     QueryRowBatch, QueryRowStream, SSTableReader, ScanTokenBound,
@@ -140,21 +140,27 @@ pub enum BypassReason {
     /// whose element, or `map` whose key, is a frozen UDT/tuple/nested
     /// collection), OR a non-frozen top-level UDT.
     ///
-    /// The two arms disagree by CONSTRUCTION on these columns, and in a way that
-    /// would make a query's outcome depend on the generation count (roborev,
-    /// issue #3058):
-    /// * the MERGE arm's reassembler FAILS CLOSED (`read_assembly.rs`'s
-    ///   `key_is_opaque_composite` → `composite_collection_unsupported`, issue
-    ///   #2339) rather than emit opaque bytes into a typed Arrow builder;
-    /// * the single-generation decoder returns the collapsed value happily.
+    /// Issue #2339 CLOSED the composite SET ELEMENT half: `read_assembly.rs` now
+    /// decodes a `frozen<udt>`/`frozen<tuple>`/nested-`frozen<collection>` set
+    /// element structurally from its `cell_path` with the same value deserializer
+    /// the single-generation decoder uses, so such a column no longer forces the
+    /// merge arm — PROVIDED the element type RESOLVES. The merge arm resolves UDT
+    /// references through the ticket DDL's `UdtRegistry`, while the
+    /// single-generation decoder resolves them from the SSTable's OWN marshal
+    /// type; so a `set<frozen<udt>>` whose ticket DDL carries no matching
+    /// `CREATE TYPE` still diverges (merge fails closed, fast arm succeeds) and is
+    /// still refused.
     ///
-    /// So without this guard `SELECT *` over such a table would ERROR at two
-    /// generations and SUCCEED at one — i.e. start failing after a flush and
-    /// start working after a compaction. That is a query-result change, which
-    /// this change's contract (spec R6) forbids, so the schema takes the merge
-    /// arm and today's behaviour is preserved EXACTLY. Making both arms serve
-    /// these columns is owned by #2339, exactly as the static divergence is owned
-    /// by #3095.
+    /// The composite MAP KEY half is still refused, with the divergence now on the
+    /// OTHER side: the merge arm decodes the key structurally while the
+    /// single-generation decoder's `parse_cell_path_key` (complex_column.rs) has no
+    /// composite arm and falls back to an opaque `Value::Blob`. Closing that is the
+    /// single-generation reader's job, not this assembler's.
+    ///
+    /// Without these guards `SELECT *` over such a table would return DIFFERENT
+    /// values at one generation and at two — i.e. change after a flush and change
+    /// back after a compaction. That is a query-result change, which the #3058
+    /// contract (spec R6) forbids, so the schema takes the merge arm.
     ///
     /// A non-frozen top-level UDT diverges the same way but SILENTLY rather than
     /// by failing closed: `assemble_complex`'s `_` fall-through keeps only the
@@ -206,6 +212,7 @@ pub fn bypass_reason(
     schema: &TableSchema,
     forced: ForcedMergePath,
     aggregating: bool,
+    registry: Option<&UdtRegistry>,
 ) -> BypassReason {
     if forced == ForcedMergePath::Merge {
         return BypassReason::ForcedMerge;
@@ -260,11 +267,9 @@ pub fn bypass_reason(
     // `static_with_tombstones/select-star` case is now an ordinary both-arms
     // differential (and asserts the bypass leg built ZERO mergers, so it cannot pass by
     // silently routing back to the merge arm).
-    if schema
-        .columns
-        .iter()
-        .any(|c| declares_composite_keyed_collection(&c.data_type))
-    {
+    if schema.columns.iter().any(|c| {
+        declares_composite_keyed_collection(&c.data_type, registry, &schema.keyspace)
+    }) {
         return BypassReason::MulticellArmDivergence;
     }
     if !only.supports_streaming_query_scan() {
@@ -285,10 +290,11 @@ pub fn bypass_reason(
 /// | `assemble_complex` arm | vs the single-generation collapse | refused here |
 /// |---|---|---|
 /// | `Set(scalar)` | EQUIVALENT — sorted `Value::Set` | no |
-/// | `Set(opaque composite)` | DIVERGENT — fails closed (#2339) | YES |
+/// | `Set(opaque composite)` RESOLVABLE through `registry` | EQUIVALENT since #2339 — both arms decode the element structurally from its `cell_path` | no |
+/// | `Set(opaque composite)` NOT resolvable (a UDT reference the ticket DDL declared no `CREATE TYPE` for) | DIVERGENT — the merge arm fails closed, while the single-generation decoder resolves the element from the SSTable's OWN marshal type and succeeds | YES |
 /// | `List(_)`, any element type | EQUIVALENT — sorted `Value::List` | no |
 /// | `Map(scalar, _)` | EQUIVALENT — `Value::Map` | no |
-/// | `Map(opaque composite, _)` | DIVERGENT — fails closed (#2339) | YES |
+/// | `Map(opaque composite, _)` | DIVERGENT — the merge arm now decodes the key structurally (#2339) while the single-generation decoder's `parse_cell_path_key` has no composite arm and falls back to an opaque `Value::Blob` (complex_column.rs). The divergence SWAPPED SIDES rather than closing; the remaining half is the single-generation reader's, not this assembler's | YES |
 /// | `_` fall-through, i.e. a NON-FROZEN top-level UDT (or other non-collection complex column) | DIVERGENT SILENTLY — merge arm returns `last_value(elements)`, only the LAST element's scalar, while the single-generation decoder assembles the full `Value::Udt` (#927/#1081) | YES |
 /// | column not declared in the caller schema | `last_value`, but such columns are never emitted to Arrow | no — unobservable |
 /// | `CqlType::parse` error on the declared type | DIVERGENT — merge arm errors, fast arm decodes | YES — unparseable is refused |
@@ -300,12 +306,29 @@ pub fn bypass_reason(
 /// FROZEN shapes are excluded throughout: a frozen collection or frozen UDT is
 /// ONE cell, so it never reaches `assemble_complex`'s multi-element path and both
 /// arms serve it identically.
-fn declares_composite_keyed_collection(data_type: &str) -> bool {
+fn declares_composite_keyed_collection(
+    data_type: &str,
+    registry: Option<&UdtRegistry>,
+    keyspace: &str,
+) -> bool {
     let Ok(parsed) = CqlType::parse(data_type) else {
         return true;
     };
     match parsed {
-        CqlType::Set(inner) => is_opaque_composite(&inner),
+        // A composite SET element is decoded by BOTH arms since #2339 — but the
+        // merge arm needs the type to RESOLVE (an all-lowercase UDT name parses to
+        // a bare `Custom` with no field list), while the single-generation decoder
+        // resolves it from the SSTable's own marshal type and never consults the
+        // ticket registry. So an UNRESOLVABLE composite element still diverges and
+        // is still refused.
+        CqlType::Set(inner) => {
+            is_opaque_composite(&inner) && !merge_arm_resolves_composite(&inner, registry, keyspace)
+        }
+        // A composite MAP KEY is still divergent, in the opposite direction from
+        // before #2339: the merge arm decodes it structurally, the
+        // single-generation decoder's `parse_cell_path_key` has no composite arm
+        // and falls back to an opaque `Value::Blob`. Closing that half belongs to
+        // the single-generation reader.
         CqlType::Map(key, _) => is_opaque_composite(&key),
         // A LIST is element-for-element equivalent on both arms: its cell path is
         // a position TimeUUID, so the order is authoritative either way — even for
@@ -342,6 +365,53 @@ fn is_opaque_composite(ty: &CqlType) -> bool {
             !(bare == "time" || bare == "inet")
         }
         _ => false,
+    }
+}
+
+/// Whether the MERGE arm can resolve `ty` — a composite collection element — to a
+/// decodable STRUCTURE, i.e. whether `read_assembly.rs`'s composite decode will
+/// succeed rather than fail closed (issue #2339).
+///
+/// `read_assembly` builds the element comparator with
+/// `ComparatorType::from_cql_type_with_registry`, which leaves a UDT reference it
+/// cannot find in the registry as a bare `ComparatorType::Custom` — a type with no
+/// field list, which the assembler then (correctly) refuses rather than guess. This
+/// mirrors that resolution ON THE DECLARED TYPE ONLY (no-heuristics, issue #28):
+/// resolve through the registry, then require that NO unresolved UDT reference
+/// remains anywhere in the type tree.
+///
+/// `None` registry ⇒ nothing can resolve ⇒ `false` (refuse the fast arm), which is
+/// the fail-closed direction.
+fn merge_arm_resolves_composite(
+    ty: &CqlType,
+    registry: Option<&UdtRegistry>,
+    keyspace: &str,
+) -> bool {
+    let Some(registry) = registry else {
+        return false;
+    };
+    fully_resolved(&registry.resolve_type(ty, keyspace))
+}
+
+/// Whether every UDT reference in `ty` carries its field list — the property
+/// `ComparatorType::from_cql_type_with_registry` needs to produce a decodable
+/// comparator (see [`merge_arm_resolves_composite`]).
+fn fully_resolved(ty: &CqlType) -> bool {
+    match ty {
+        CqlType::Frozen(inner) | CqlType::List(inner) | CqlType::Set(inner) => fully_resolved(inner),
+        CqlType::Map(k, v) => fully_resolved(k) && fully_resolved(v),
+        CqlType::Tuple(fields) => fields.iter().all(fully_resolved),
+        CqlType::Udt(_, fields) => {
+            !fields.is_empty() && fields.iter().all(|(_, t)| fully_resolved(t))
+        }
+        // A `Custom` that survived resolution is either an unresolved UDT reference
+        // or a genuinely unknown type: undecodable either way, EXCEPT the two names
+        // the scalar codec handles (which are not composites and never reach here).
+        CqlType::Custom(name) => {
+            let bare = name.rsplit(':').next().unwrap_or(name);
+            bare == "time" || bare == "inet"
+        }
+        _ => true,
     }
 }
 

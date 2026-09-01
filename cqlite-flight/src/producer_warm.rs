@@ -135,6 +135,10 @@ impl MergeProducer {
             &self.schema,
             ForcedMergePath::from_env(),
             self.is_aggregating(),
+            // Issue #2339: whether the MERGE arm can decode a composite collection
+            // element depends on this registry, so the divergence predicate must
+            // see the same one the reassembler will get.
+            self.udt_registry.as_ref(),
         );
         if reason.is_selected() {
             if let Some(reader) = readers.first().cloned() {
