@@ -592,6 +592,50 @@ for f in _hb_stop _hb_ensure; do
     bad "12.3 $f carries the BASHPID pool-subshell guard" "guard missing from $f"
   fi
 done
+# (b2) THE BEATER MUST ALSO RECOVER WHILE THE GATE IS QUEUED (roborev job 322, Medium).
+# `_hb_ensure` used to be reachable only from `record_result`, i.e. at COMPONENT boundaries — and no
+# component runs until the #1825 slot is granted. A beater that died during the queue wait was
+# therefore never restarted: the reader reported STALLED about a gate that was merely QUEUED, with no
+# component table yet to derive a wait bound from, so a closer following this repo's own guidance
+# would relaunch a still-queued gate — two gates on one summary path.
+#
+# BEHAVIOURAL and DETERMINISTIC: the wait loop is extracted and driven with `sleep` stubbed to COUNT
+# ticks and to create the ready-file at a chosen tick, so no wall-clock is involved and the expected
+# call count is exact. (A wall-clock version of this would be the flaky-perf-assert shape this repo
+# lints for.) `kill` is stubbed so the loop sees a live daemon instead of failing open.
+_sw_loop=$(sed -n '/^acquire_gate_slot() {$/,/^}$/p' "$GATE" \
+           | awk '/while \[ ! -f "\$ready" \]/{f=1} f{print} f&&/^  done$/{exit}')
+if [ -z "$_sw_loop" ] || ! printf '%s' "$_sw_loop" | grep -q '_hb_ensure'; then
+  bad "12.2b the slot-wait loop calls _hb_ensure (a queued gate's beater can recover)" \
+      "$([ -z "$_sw_loop" ] && echo 'could not extract the wait loop — this proves nothing' \
+                            || echo 'no _hb_ensure inside the wait loop')"
+else
+  _sw_run() {  # <ready-tick> -> number of _hb_ensure calls
+    ( ready="$TMP/swready.$1"; rm -f "$ready"
+      GATE_SLOT_DAEMON_PID=4242; n=1; printed=0; waited=0; _hb_calls=0; _ticks=0; _thresh=$1
+      kill() { return 0; }
+      sleep() { _ticks=$(( _ticks + 1 )); [ "$_ticks" -ge "$_thresh" ] && : > "$ready"; return 0; }
+      _hb_ensure() { _hb_calls=$(( _hb_calls + 1 )); }
+      eval "$_sw_loop"
+      printf '%s' "$_hb_calls" ) 2>/dev/null
+  }
+  _sw_many=$(_sw_run 250)
+  _sw_few=$(_sw_run 10)
+  if [ "${_sw_many:-0}" -ge 2 ]; then
+    ok "12.2b a QUEUED gate re-ensures its beater ($_sw_many calls over 250 ticks of queue wait)"
+  else
+    bad "12.2b a queued gate re-ensures its beater" "only ${_sw_many:-0} _hb_ensure call(s) in 250 ticks"
+  fi
+  # NON-VACUITY CONTROL: a short queue must produce ZERO calls, or the counter is measuring nothing
+  # and the case above would pass for any loop body at all.
+  if [ "${_sw_few:-x}" = 0 ]; then
+    ok "12.2c control: a SHORT queue (10 ticks) triggers no re-ensure — the counter is real"
+  else
+    bad "12.2c control: a short queue triggers no re-ensure" \
+        "got ${_sw_few:-unset} calls in 10 ticks; the counter is not measuring the interval"
+  fi
+fi
+
 # (c) no opt-out env var may widen the staleness window or disable the beat: that is
 #     the escape hatch that would buy a vacuous "RUNNING" for a dead gate.
 if grep -qE 'CQLITE_GATE_(DISABLE_HEARTBEAT|HEARTBEAT_INTERVAL)|AGENT_GATE_HEARTBEAT' "$GATE" "$READER" "$BEATER"; then
