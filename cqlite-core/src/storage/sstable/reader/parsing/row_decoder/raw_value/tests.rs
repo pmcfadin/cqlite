@@ -1,9 +1,9 @@
-//! Tests for the bounded raw-value decoder (`raw_value.rs` and its fixed-width
-//! arms). Split out of `raw_value.rs` under the campsite rule (epic #1116 /
-//! issue #3723).
+//! Tests for the bounded raw-value decoder (`raw_value/mod.rs` and its
+//! fixed-width arms). Split out of the old flat `raw_value.rs` under the
+//! campsite rule (epic #1116 / issue #3723).
 
 #[allow(unused_imports)]
-use super::test_support::helpers::*;
+use super::super::test_support::helpers::*;
 #[allow(unused_imports)]
 use super::*;
 

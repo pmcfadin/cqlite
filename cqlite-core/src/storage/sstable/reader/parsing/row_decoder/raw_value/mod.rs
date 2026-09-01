@@ -2,11 +2,22 @@
 //! arm that decodes a fully bounded value slice.
 //!
 //! Campsite split (epic #1116 / issue #3723): the marshal→short-form
-//! normalization lives in [`super::raw_value_marshal_short`], the fixed-width
-//! scalar arms in [`super::raw_value_fixed_width`], and the tests in
-//! `raw_value_tests.rs`.
+//! normalization lives in [`marshal_short`], the fixed-width scalar arms (and
+//! their width guards) in [`fixed_width`], and the tests in `tests.rs` +
+//! `nested_fixed_width_length_tests.rs`.
 
 use super::*;
+
+mod fixed_width;
+mod marshal_short;
+
+#[cfg(test)]
+mod tests;
+
+// Issue #3723: a nested fixed-width collection/tuple element whose `[i32 BE len]`
+// prefix declares a WRONG length must be REFUSED.
+#[cfg(test)]
+mod nested_fixed_width_length_tests;
 
 impl V5CompressedLegacyParser {
     /// Parse a value from a complete, bounded byte slice.
@@ -86,7 +97,7 @@ impl V5CompressedLegacyParser {
             // function is already bounded by its own `[i32 BE len]` element /
             // field prefix, so `data.len()` IS the declared length and the width
             // guard belongs in the arm itself — see
-            // `super::raw_value_fixed_width`.
+            // [`fixed_width`].
             short if Self::fixed_width_admissible_width(short).is_some() => {
                 Self::decode_fixed_width_raw(short, data, column_name)
             }

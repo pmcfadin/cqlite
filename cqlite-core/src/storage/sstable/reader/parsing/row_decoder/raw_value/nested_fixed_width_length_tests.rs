@@ -35,7 +35,7 @@
 //! | `SimpleDateSerializer` | `size != 4` | 4 only |
 //! | `TimeSerializer` | `size != 8` | 8 only |
 //!
-//! See `raw_value_fixed_width.rs` for the DECISION on the `… or 0` half and the
+//! See `fixed_width.rs` for the DECISION on the `… or 0` half and the
 //! reasoning behind it (AC2): this decoder refuses a zero-length fixed-width
 //! element in the bounded element/field position.
 
@@ -187,7 +187,7 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
 ///
 /// The four strict serializers (`smallint`, `tinyint`, `date`, `time`) refuse it
 /// per the pinned source. The "or 0" family is refused by DECISION — see
-/// `raw_value_fixed_width.rs`.
+/// `fixed_width.rs`.
 #[test]
 fn zero_length_fixed_width_element_is_refused_at_every_nesting_position() {
     let p = parser();

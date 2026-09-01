@@ -235,7 +235,7 @@ fn documented_taxonomy() -> Vec<(String, String, Vec<String>)> {
 
 /// The `crate::error` source the `Error`-enum declaration parser reads.
 fn error_src() -> &'static str {
-    include_str!("../error.rs")
+    include_str!("../error/mod.rs")
 }
 
 /// Whether this build compiles the `#[cfg(target_arch = "wasm32")]` `Error`
@@ -247,7 +247,7 @@ const WASM_VARIANTS_COMPILED: bool = cfg!(target_arch = "wasm32");
 ///
 /// **Why a source parse at all, and what it cannot see.** Rust has no reflection
 /// over enum variants, so the declared set has to be read from the one construct
-/// that holds it: the `pub enum Error { … }` block in `error.rs`. This parser is
+/// that holds it: the `pub enum Error { … }` block in `error/mod.rs`. This parser is
 /// deliberately NOT the sole oracle — it exists to catch a scrape regression in
 /// [`classify_arms`] (which the compiler keeps complete). It recognises a variant
 /// as a line at the enum's own 4-space indent opening with an ASCII-uppercase
@@ -261,7 +261,7 @@ fn declared_error_variants() -> BTreeMap<String, bool> {
     let src = error_src();
     let start = src
         .find(HEAD)
-        .expect("error.rs must declare `pub enum Error`");
+        .expect("error/mod.rs must declare `pub enum Error`");
     let body = &src[start + HEAD.len()..];
     let mut out = BTreeMap::new();
     let mut wasm_gated = false;

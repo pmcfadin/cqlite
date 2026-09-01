@@ -78,7 +78,7 @@ impl V5CompressedLegacyParser {
     /// Widths come from the pinned `cassandra-5.0.8` serializer table in this
     /// module's header. The name set here is the closed set
     /// [`Self::decode_fixed_width_raw`] decodes;
-    /// `regression_3723_nested_fixed_width_tests.rs` pins the two together so
+    /// `nested_fixed_width_length_tests.rs` pins the two together so
     /// they cannot drift.
     pub(super) fn fixed_width_admissible_width(cql_short: &str) -> Option<usize> {
         let width = match cql_short {

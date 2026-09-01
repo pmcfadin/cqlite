@@ -4,7 +4,7 @@
 //!
 //! Only the marshal→short-form mapping lives here. The dispatch that consumes
 //! it is in `raw_value.rs`; the fixed-width scalar arms it dispatches to are in
-//! `raw_value_fixed_width.rs`.
+//! `fixed_width.rs`.
 
 use super::*;
 
