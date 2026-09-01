@@ -1184,6 +1184,41 @@ else
   bad "19d-negative-control: a well-formed .result did not read cleanly; got: $o19d"
 fi
 
+# (19i) THE UNREAD VERDICT ON AN OTHERWISE ALL-PASS RUN -- the case that makes the BRANCH
+# ORDER load-bearing, and it is reachable rather than theoretical: a `.result` whose STATUS
+# token is intact but whose SECONDS field is not (`PASS abc`) yields a component the table
+# records as PASS while its verdict was NOT fully read. With the pre-#3800-job-304 order the
+# `no non-PASS component to scan` arm got first refusal and rendered the affirmative clean
+# reading over an unmeasured subject -- this issue's own defect, on a run with nothing else
+# wrong. Found by MUTATION while writing this round: removing the reorder left every other
+# case in this file green.
+d="$tmp/c19i"; mkdir -p "$d"
+printf 'PASS abc\n' > "$d/core-tests.result"
+o19i=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _disk_verdict_read core-tests "$d/core-tests.result"; printf 'RC %s\n' "$?"
+  printf 'ST %s\n' "$DISK_VERDICT_ST"
+  printf 'LINE %s\n' "$(_disk_exhaustion_line fmt PASS core-tests PASS)"
+  DISK_UNREAD_VERDICTS=()
+  printf 'MUTANT %s\n' "$(_disk_exhaustion_line fmt PASS core-tests PASS)"
+)
+r19i=$(printf '%s\n' "$o19i" | sed -n 's/^RC //p')
+s19i=$(printf '%s\n' "$o19i" | sed -n 's/^ST //p')
+l19i=$(printf '%s\n' "$o19i" | sed -n 's/^LINE //p')
+m19i=$(printf '%s\n' "$o19i" | sed -n 's/^MUTANT //p')
+if [ "${r19i:-}" = 1 ] && [ "${s19i:-}" = PASS ] \
+   && case "$l19i" in "disk-exhaustion: UNMEASURED (#3800)"*"core-tests(verdict file MALFORMED)"*) true ;; *) false ;; esac \
+   && case "$l19i" in *"no non-PASS component to scan"*) false ;; *) true ;; esac; then
+  ok "19i-allpass-unread: an unread verdict on a run where EVERY recorded component PASSed is still UNMEASURED -- the 'no non-PASS component to scan' arm does not get first refusal over an unmeasured subject"
+else
+  bad "19i-allpass-unread: an all-PASS run with an unread verdict reported a clean reading; rc='${r19i:-<none>}' st='${s19i:-<none>}' line: $l19i"
+fi
+if case "$m19i" in "disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan (2/2 PASS)"*) true ;; *) false ;; esac; then
+  ok "19i-mutation: with the channel emptied the SAME run renders 'no non-PASS component to scan (2/2 PASS)' -- the exact affirmative clean reading the branch order now prevents"
+else
+  bad "19i-mutation: the all-PASS arm is not what makes 19i pass; got: $m19i"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # (19e) THE RECORD_RESULT IN-MEMORY ARM, DRIVEN BY A REAL ENOSPC. `record_result` is
 # extracted from the shipped script and its four unrelated chokepoint hooks (`_hb_ensure`,
@@ -1309,7 +1344,7 @@ fi
 # branch against pipefail+SIGPIPE turning a MATCH into UNMEASURED -- found by measurement while
 # writing this round, not predicted.)
 # writing this round, not predicted.); +13 (roborev job 304: the THIRD KIND OF SUBJECT -- a
-# `.result` verdict the gate could not READ. 13b asserts the emitted line declares its SUBJECT
+# `.result` verdict the gate could not READ (15 cases). 13b asserts the emitted line declares its SUBJECT
 # set and NAMES the writers outside it, in all four renderings: 2. Case 19 pins the arm --
 # absent verdict + clean log, its mutation control, the EMPTY .result an ENOSPC write really
 # leaves, its mutation control, a truncated STATUS token, and the well-formed negative control
@@ -1318,8 +1353,10 @@ fi
 # is host-independent), with a success control that also proves the capture wrapper still
 # writes the two-field artifact byte for byte: 1. Two STRUCTURAL cases prove the arm is WIRED
 # rather than merely working -- the guard records, and no private two-field verdict read
-# survives outside the ONE reader: 2. 2+6+2+1+2 = 13.)
-CASE_FLOOR=66
+# survives outside the ONE reader: 2. Case 19i is the pair MUTATION found -- an unread
+# verdict on an otherwise ALL-PASS run, which the pre-fix branch order rendered clean and which
+# every other case in this file missed: 2. 2+6+2+1+2+2 = 15.)
+CASE_FLOOR=68
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
