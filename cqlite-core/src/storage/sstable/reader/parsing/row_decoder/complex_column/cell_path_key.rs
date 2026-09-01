@@ -495,11 +495,12 @@ impl V5CompressedLegacyParser {
     /// composite arm added to `parse_value_from_raw_bytes` and not here falls through
     /// to the `None` "whole slice by construction" default and prefix-decodes
     /// SILENTLY. An earlier revision of this doc claimed the guard did catch it.
-    /// Deriving the case set was measured and declined: the ten composite literals
-    /// are shared, but they are `starts_with` arguments there and `const`s here, and
-    /// the `is_udt_type` / `duration` arms are predicates no literal scan sees — a
-    /// scanner blind to the arm shapes most likely to be added is the
-    /// false-assurance class this repo has twice descoped, so the gap is DECLARED.
+    /// Deriving it is FEASIBLE and is simply NOT DONE HERE — the reason is scope, not
+    /// impossibility. A scan pairing `parse_value_from_raw_bytes`'s `starts_with` literals
+    /// with this file's would match all ten (five inline in both files, five as the `const`s
+    /// below), but it needs a scanner that locates a fn body in another module's source, and
+    /// the two NON-literal arms — `"duration" =>` and `other if is_udt_type(other)` — carry
+    /// no literal for it to pair, so they would stay uncovered either way.
     fn decode_reporting_consumption(
         &self,
         data: &[u8],
