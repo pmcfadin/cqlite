@@ -418,36 +418,17 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[("sd", Multicell::Set), ("sf", Multicell::Set)],
-        // TWO declared gaps here, and NEITHER is an egress defect awaiting a fix
-        // (issue #3644 items 2 and 3). Both are JSON-lane-only, and the CSV lane
-        // compares both columns in full.
-        //
-        // `sf` (`set<double>`) holds `Infinity`, `-Infinity` and `NaN`. The JSON
-        // egress renders each as `null` — and that is CORRECT, not a gap in CQLite:
-        // `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/DoubleType.java:114-123`
-        // (and `FloatType.java:115-124`) returns the literal `null` from
-        // `toJSONString`, with the in-source comment "JSON does not support NaN,
-        // Infinity and -Infinity values. Most of the parser convert them into
-        // null." The golden's `"Infinity"`/`"NaN"` tokens are a DUMP artifact of a
-        // different code path — a multicell cell PATH is written with
-        // `writeString(type.getString(v))` (`JsonTransformer.java:452`), which is
-        // never the JSON-egress oracle — so the two sides diverge because the dump
-        // and `toJSONString` disagree, and CQLite follows `toJSONString`. The CSV
-        // egress renders every cell as text and carries the three tokens verbatim
-        // (`{-Infinity, -1.5, -0e0, 0e0, 2.5, Infinity, NaN}`, which the decimal
-        // canonicalization reads as the golden's `-0.0`/`0.0`), so CSV IS compared
-        // here — a `BOTH` scope dropped the whole column from a format that renders
-        // it correctly (review finding K1).
-        //
-        // `sd` (`set<decimal>`, 33 significant digits) is compared in the CSV lane,
-        // where every cell is text and every digit matches exactly. In the JSON
-        // lane the egress emits the UNQUOTED number `DecimalType.toJSONString`
-        // requires (issue #3644 item 3 fixed the quoted rendering it used to emit),
-        // and what remains is a limitation of THIS COMPARATOR: its JSON parse holds
-        // a number as an `f64`, so digits beyond a double's precision are gone
-        // before the comparison. The two sides are still required to be the same
-        // double, and the egress's exact digits are pinned against this same golden
-        // by `tests/issue_3644_json_decimal_unquoted.rs`.
+        // TWO declared gaps, JSON-lane-only, and NEITHER is an egress defect
+        // awaiting a fix (issue #3644 items 2 and 3) — each variant's own docs
+        // carry the oracle. `sf`'s non-finite `null` is what
+        // `DoubleType.toJSONString:114-123` returns, and the golden's quoted
+        // `"Infinity"`/`"NaN"` are the cell-PATH `getString` artifact
+        // (`JsonTransformer.java:452`), not the egress oracle; `sd`'s remaining gap
+        // is this COMPARATOR's f64 parse, the egress having been fixed to emit the
+        // unquoted number `DecimalType.toJSONString:314-317` requires. Both columns
+        // are compared IN FULL in the CSV lane, where every cell is text and the
+        // three tokens and all 33 digits survive verbatim — a `BOTH` scope dropped
+        // the whole column from a format that renders it correctly (finding K1).
         skips: &[
             Skip {
                 path: "sf",
@@ -455,11 +436,10 @@ const CASES: &[Case] = &[
                 divergence: Divergence::NonFiniteFloatRendersAsJsonNull,
                 why: "CORRECT BEHAVIOUR, not a defect: cassandra-5.0.8 \
                       DoubleType.toJSONString:114-123 returns the literal `null` for \
-                      NaN/Infinity/-Infinity (\"JSON does not support NaN, Infinity and \
-                      -Infinity values\"), and CQLite matches it; the golden's quoted \
-                      tokens come from the cell-PATH getString path \
-                      (JsonTransformer.java:452), which is not the JSON-egress oracle. \
-                      The set's FINITE members are compared",
+                      NaN/Infinity/-Infinity, and CQLite matches it; the golden's quoted \
+                      tokens are the cell-PATH getString artifact \
+                      (JsonTransformer.java:452), not the egress oracle. The set's \
+                      FINITE members are compared",
             },
             Skip {
                 path: "sd",
@@ -467,10 +447,9 @@ const CASES: &[Case] = &[
                 divergence: Divergence::ExactDecimalNotCarriedByThisLanesJsonParse,
                 why: "COMPARATOR LIMITATION, not an egress divergence: the CLI emits the \
                       unquoted number DecimalType.toJSONString:314-317 requires, but this \
-                      lane's JSON parse holds it as an f64, so the 33 digits cannot be \
-                      compared here; both sides must still be the same double, the CSV \
-                      lane compares every digit, and the egress text is pinned by \
-                      tests/issue_3644_json_decimal_unquoted.rs",
+                      lane's JSON parse holds it as an f64; both sides must still be the \
+                      same double, the CSV lane compares every digit, and the egress text \
+                      is pinned by tests/issue_3644_json_decimal_unquoted.rs",
             },
         ],
     },
