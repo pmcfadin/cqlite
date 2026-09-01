@@ -6963,21 +6963,51 @@ _census_compile_tally() {
 # summary to stderr as well, and a re-run inside one component would otherwise be scored
 # on its first attempt.
 #
-#   pytest  `-q` prints a bare counts line (`576 passed, 61 skipped, 1 xfailed in 62.30s`)
-#           and, with no tests collected, `no tests ran in 0.01s` — the affirmative
-#           zero, which is why it is matched EXPLICITLY rather than inferred from the
-#           absence of a `passed` count.
-#   jest    prints `Tests:       1 skipped, 122 passed, 123 total`. A `Tests:` line with
-#           no `N passed` is a present-and-zero tally.
+#   pytest  RECOGNISE THE SUMMARY LINE, THEN READ THE PASSED COUNT OFF IT — never the
+#           other way round. Keying on `N passed` alone (the first version, roborev job
+#           360 finding 1) missed every pytest terminal summary that reports ZERO passed
+#           in a spelling that omits the word: `61 skipped in 1.20s`, `1 xfailed in
+#           0.10s`, `2 deselected in 0.02s`, `3 errors in 0.40s`. Those are PRESENT
+#           tallies saying zero passed — a suite whose every test was skipped is exactly
+#           the vacuous pass this whole subsystem exists to catch — and they fell into
+#           the ABSENT branch, i.e. NOT-MEASURED, which preserves PASS.
 #
-# Neither is coloured in a way that matters (both are the driver's own text, and the
-# caller normalises anyway), and both read by REDIRECTION, never a pipe.
+#           A line is a pytest terminal summary iff it carries BOTH a `<N> <outcome>`
+#           pair from pytest's OWN closed outcome vocabulary AND a ` in <duration>s`
+#           tail; `no tests ran` is recognised separately because it carries no count.
+#           Requiring BOTH is what keeps the recogniser off cargo's `Finished ...
+#           target(s) in 41.05s` (a duration with no outcome pair). libtest's
+#           `test result: ok. 5 passed; ... finished in 0.00s` DOES satisfy both, so it
+#           is excluded BY NAME: it is a different harness's tally and counting it here
+#           would attribute rust tests to pytest.
+#   jest    prints `Tests:       1 skipped, 122 passed, 123 total`. A `Tests:` line with
+#           no `N passed` — the all-skipped shape jest reports as a PASSED suite
+#           (CLAUDE.md, #3522 roborev F1) — is a present-and-zero tally, so the jest arm
+#           already had finding 1's property; a case now pins it rather than leaving it
+#           true by accident.
+#
+# Both take the LAST recognised summary (a component that invoked its driver twice is
+# scored on the run that finished), neither is coloured in a way that matters (both are
+# the driver's own text, and the caller normalises anyway), and both read by REDIRECTION,
+# never a pipe.
 _census_driver_tally() {
   case "$1" in
     pytest)
       awk '
-        /(^|[^0-9])[0-9]+ passed/ { if (match($0, /[0-9]+ passed/)) { seg = substr($0, RSTART, RLENGTH); sub(/ passed$/, "", seg); n = seg + 0; seen = 1 } }
-        /no tests ran/            { n = 0; seen = 1 }
+        /^[[:space:]]*test result:/ { next }
+        {
+          if ($0 ~ /no tests ran/) {
+            seen = 1; n = 0
+          } else if ($0 ~ /[0-9]+ (passed|failed|error|errors|skipped|xfailed|xpassed|deselected)/ \
+                     && $0 ~ / in [0-9]+(\.[0-9]+)?s/) {
+            seen = 1
+            if (match($0, /[0-9]+ passed/)) {
+              seg = substr($0, RSTART, RLENGTH); sub(/ passed$/, "", seg); n = seg + 0
+            } else {
+              n = 0
+            }
+          }
+        }
         END { if (seen != 1) { print "NONE" } else if (n == 0) { print "ZERO" } else { printf "COUNT %d\n", n } }
       ' < "$2" ;;
     jest)
@@ -9123,7 +9153,7 @@ _tree_mode_components() {
 }
 
 _tree_boundary_meta_lines() {
-  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" "
+  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" " _cen_names="" _rows=""
   _tree_commit_meta_render
   printf '%s\n' "$TREE_COMMIT_LINE"
   if [ -n "${DATA_COUNT:-}" ]; then
@@ -9162,12 +9192,24 @@ _tree_boundary_meta_lines() {
   # names it — that is the same "the set is hand-maintained" failure mode as J2 itself, one
   # step out. LOG_DIR is this run's own mktemp directory, so the sweep can only see verdicts
   # record_result wrote, and the glob is deterministically ordered.
+  #
+  # ROUTED THROUGH `_fm_summary_line`, THE ONE RENDERER (#3625, roborev job 360 finding 2).
+  # These two loops used to `printf '%-18s %s (%ss)'` directly, so a run that STOPPED at a
+  # boundary emitted a table with NEITHER the #3453 feature matrix NOR the #3625 census
+  # suffix — the one mode that rendered a block the others do not, which is precisely the
+  # property both designs rest on. #3453's own uniformity guard could not see it: its needle
+  # is the literal `printf '%-18s %s (%s)'` and this site spelled the format `(%ss)`, so a
+  # near-miss in a format string was enough to hide a whole emit path. The rows are buffered
+  # rather than printed inline because the aggregate `census:` line goes ABOVE the table (as
+  # it does in every other block) and its subject set is only known once both loops are done.
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _cen_names="$_cen_names $_c"
     _seen="$_seen $_c "
     _done=$(( _done + 1 ))
   done
@@ -9177,9 +9219,19 @@ _tree_boundary_meta_lines() {
     case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _cen_names="$_cen_names $_c"
     _done=$(( _done + 1 ))
   done
+  # The aggregate census line, over exactly the components this truncated table names.
+  # Emitted even when the table is EMPTY (a boundary hit before the first component
+  # recorded anything): `census: 0/0 components AFFIRMED a count …` is a true statement
+  # about a run that got nowhere, and omitting the line would make a stopped block
+  # indistinguishable from one produced before this contract existed.
+  # shellcheck disable=SC2086  # intentional word-split: names are [a-z0-9-]+
+  printf '%s\n' "$(census_summary_line $_cen_names)"
+  [ -n "$_rows" ] && printf '%s' "$_rows"
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
   # (a bare "${ARR[@]}" on an empty array aborts under `set -u` on bash < 4.4).
   for _s in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do

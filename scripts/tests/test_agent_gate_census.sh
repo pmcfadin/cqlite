@@ -390,44 +390,102 @@ case "$got" in
 esac
 # ---- indirect:<driver>. python-bindings is the component the ISSUE itself holds up as
 # the contrast that already answered the question, so its tally is lifted into the block.
-printf 'Compiling cqlite-py v0.1.0
-....ss..x.
-576 passed, 61 skipped, 1 xfailed in 62.30s
-' > "$LOG_DIR/python-bindings.log"
+printf 'Compiling cqlite-py v0.1.0\n....ss..x.\n576 passed, 61 skipped, 1 xfailed in 62.30s\n' > "$LOG_DIR/python-bindings.log"
 got=$(_census_measure python-bindings PASS)
 case "$got" in
   'COUNT 576 pytest tests passed') ok "D17: indirect:pytest lifts the driver's own tally (576 passed) out of the component log and into the census" ;;
   *) bad "D17: got '$got'" ;;
 esac
-printf 'no tests ran in 0.01s
-' > "$LOG_DIR/python-bindings.log"
+printf 'no tests ran in 0.01s\n' > "$LOG_DIR/python-bindings.log"
 got=$(_census_measure python-bindings PASS)
 case "$got" in
   'ZERO pytest tests'*) ok "D18: pytest's own affirmative 'no tests ran' is ZERO — matched explicitly, not inferred from a missing count" ;;
   *) bad "D18: got '$got'" ;;
 esac
-printf 'maturin build output and nothing that looks like a pytest summary
-' > "$LOG_DIR/python-bindings.log"
+printf 'maturin build output and nothing that looks like a pytest summary\n' > "$LOG_DIR/python-bindings.log"
 got=$(_census_measure python-bindings PASS)
 case "$got" in
   'NOT-MEASURED no pytest tally found'*) ok "D19: an ABSENT driver tally is NOT-MEASURED, never ZERO — a third-party output-format change must not red a healthy lane (the one rule that differs from the cargo kinds)" ;;
   *) bad "D19: got '$got'" ;;
 esac
-printf 'Test Suites: 27 passed, 27 total
-Tests:       1 skipped, 122 passed, 123 total
-' > "$LOG_DIR/node-bindings.log"
+printf 'Test Suites: 27 passed, 27 total\nTests:       1 skipped, 122 passed, 123 total\n' > "$LOG_DIR/node-bindings.log"
 got=$(_census_measure node-bindings PASS)
 case "$got" in
   'COUNT 122 jest tests passed') ok "D20: indirect:jest reads the 'Tests:' summary line (122 passed), not the suite line above it" ;;
   *) bad "D20: got '$got'" ;;
 esac
-printf 'Tests:       0 total
-' > "$LOG_DIR/node-bindings.log"
+printf 'Tests:       0 total\n' > "$LOG_DIR/node-bindings.log"
 got=$(_census_measure node-bindings PASS)
 case "$got" in
   'ZERO jest tests'*) ok "D21: a jest 'Tests:' line PRESENT with no passing count is a present-and-zero tally -> ZERO" ;;
   *) bad "D21: got '$got'" ;;
 esac
+# ---- PRESENT-AND-ZERO IN EVERY SPELLING THE DRIVER USES (roborev job 360, finding 1).
+# The first version keyed on the word `passed`, so every pytest terminal summary that
+# reports zero passed WITHOUT that word — skipped-only, xfailed-only, deselected-only,
+# errors-only — fell into the ABSENT branch and was therefore NOT-MEASURED, which
+# PRESERVES PASS. A suite whose every test was skipped is exactly the vacuous pass this
+# subsystem exists to catch. Driven through _census_measure AND _census_status_for, so the
+# VERDICT COUPLING is asserted too and not merely the parser.
+zero_spellings='61 skipped in 1.20s|1 xfailed in 0.10s|2 deselected in 0.02s|3 errors in 0.40s|no tests ran in 0.01s'
+z_bad=()
+z_n=0
+old_ifs=$IFS
+IFS='|'
+for spelling in $zero_spellings; do
+  IFS=$old_ifs
+  z_n=$((z_n + 1))
+  printf 'Compiling cqlite-py v0.1.0\n%s\n' "$spelling" > "$LOG_DIR/python-bindings.log"
+  g=$(_census_measure python-bindings PASS)
+  st=$(_census_status_for PASS "$g")
+  case "$g|$st" in
+    'ZERO pytest tests'*'|VACUOUS') ;;
+    *) z_bad+=("[$spelling]->$g/$st") ;;
+  esac
+  IFS='|'
+done
+IFS=$old_ifs
+if [ "$z_n" -ne 5 ]; then
+  bad "D23: only $z_n of the 5 zero-passed pytest spellings were exercised — the loop is not iterating, so a green here would certify nothing"
+elif [ "${#z_bad[@]}" -eq 0 ]; then
+  ok "D23 (roborev job 360 F1): all 5 pytest terminal summaries reporting ZERO passed — skipped-only, xfailed-only, deselected-only, errors-only, 'no tests ran' — measure ZERO and couple to VACUOUS, not to a PASS-preserving NOT-MEASURED"
+else
+  bad "D23: a present-and-zero pytest summary did not reach ZERO/VACUOUS: ${z_bad[*]}"
+fi
+# ...and the RECOGNISER must stay OFF other harnesses' output, or D23's widening would
+# start attributing rust tests (or a cargo build's duration) to pytest. Both lines below
+# carry a ` in <n>s` tail, which is exactly why the recogniser requires an outcome pair
+# TOO and excludes libtest's line by name.
+n_bad=()
+printf '    Finished `dev` profile [unoptimized + debuginfo] target(s) in 41.05s\n' > "$LOG_DIR/python-bindings.log"
+case "$(_census_measure python-bindings PASS)" in 'NOT-MEASURED no pytest tally'*) ;; *) n_bad+=("cargo-Finished-line-recognised-as-a-pytest-summary") ;; esac
+printf 'test result: ok. 5 passed; 0 failed; 0 ignored; finished in 0.00s\n' > "$LOG_DIR/python-bindings.log"
+case "$(_census_measure python-bindings PASS)" in 'NOT-MEASURED no pytest tally'*) ;; *) n_bad+=("libtest-test-result-line-counted-as-pytest") ;; esac
+printf '    Finished `dev` in 41.05s\ntest result: ok. 9 passed; finished in 0.0s\n576 passed, 61 skipped in 62.30s\n' > "$LOG_DIR/python-bindings.log"
+case "$(_census_measure python-bindings PASS)" in 'COUNT 576 pytest tests passed') ;; *) n_bad+=("mixed-log-did-not-yield-the-pytest-count-alone") ;; esac
+printf '576 passed in 302.30s (0:05:02)\n' > "$LOG_DIR/python-bindings.log"
+case "$(_census_measure python-bindings PASS)" in 'COUNT 576 pytest tests passed') ;; *) n_bad+=("pytest-7-long-duration-form-unrecognised") ;; esac
+if [ "${#n_bad[@]}" -eq 0 ]; then
+  ok "D24: the widened recogniser stays OFF cargo's 'Finished … in 41.05s' and libtest's 'test result: … finished in 0.00s' (both carry a duration), and still reads the pytest tally out of a log holding all three"
+else
+  bad "D24: ${n_bad[*]}"
+fi
+# The jest arm ALREADY had finding 1's property — it keys on the `Tests:` line's PRESENCE,
+# not on the word `passed` — but it was true by accident and pinned by nothing. jest reports
+# a suite whose every test is individually skipped as a PASSED suite (CLAUDE.md, #3522
+# roborev F1), which is the same vacuous shape, so both spellings are pinned here.
+j_bad=()
+for jline in 'Tests:       27 skipped, 27 total' 'Tests:       27 skipped, 0 passed, 27 total'; do
+  printf 'Test Suites: 27 passed, 27 total\n%s\n' "$jline" > "$LOG_DIR/node-bindings.log"
+  g=$(_census_measure node-bindings PASS)
+  st=$(_census_status_for PASS "$g")
+  case "$g|$st" in 'ZERO jest tests'*'|VACUOUS') ;; *) j_bad+=("[$jline]->$g/$st") ;; esac
+done
+if [ "${#j_bad[@]}" -eq 0 ]; then
+  ok "D25 (finding 1's sibling): an ALL-SKIPPED jest run — which jest reports as a passing suite — measures ZERO and couples to VACUOUS, in both spellings (with and without an explicit '0 passed')"
+else
+  bad "D25: ${j_bad[*]}"
+fi
 # The derived `<log>.ansi-stripped` sibling is a full COPY of the component log; leaving
 # one per component would silently double the retained `logs:` bundle.
 cp "$tmp/c.log" "$LOG_DIR/tombstones-scan.log"
@@ -643,8 +701,26 @@ grep -q '_census_finalize "\$1" "\$2"' <<<"$(sed -n '/^record_result() {/,/^}$/p
   || h_bad+=("record_result-does-not-call-_census_finalize")
 grep -q '_census_annotate' <<<"$(sed -n '/^_fm_summary_line() {/,/^}$/p' "$GATE")" \
   || h_bad+=("_fm_summary_line-does-not-append-the-census")
-n_census_agg=$(grep -c 'census_summary_line "' "$GATE")
-[ "$n_census_agg" -ge 6 ] || h_bad+=("only-$n_census_agg-census_summary_line-emit-sites-expected->=6")
+# SEVEN emit sites: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest, and
+# the tree-integrity BOUNDARY printer (#3625, roborev job 360 finding 2 — a mode that
+# rendered a component table carrying NEITHER the feature matrix nor the census, missed
+# because the emit-site set had been taken from a COUNT written down in a report rather
+# than re-derived from the code).
+n_census_agg=$(grep -cE '^[^#]*census_summary_line ' "$GATE")
+[ "$n_census_agg" -ge 7 ] || h_bad+=("only-$n_census_agg-census_summary_line-emit-sites-expected->=7")
+# The boundary printer specifically: BOTH contracts, asserted on the function BODY rather
+# than on the file, because a call anywhere else would satisfy a whole-file grep.
+boundary_body=$(sed -n '/^_tree_boundary_meta_lines() {/,/^}$/p' "$GATE")
+if [ -z "$boundary_body" ]; then
+  h_bad+=("_tree_boundary_meta_lines-not-found-renamed-or-reshaped")
+else
+  grep -q '_fm_summary_line "' <<<"$boundary_body" \
+    || h_bad+=("boundary-printer-does-not-route-rows-through-_fm_summary_line")
+  grep -q 'census_summary_line ' <<<"$boundary_body" \
+    || h_bad+=("boundary-printer-emits-no-aggregate-census-line")
+  grep -qE "^[^#]*printf '%-18s" <<<"$boundary_body" \
+    && h_bad+=("boundary-printer-still-has-a-raw-component-row-printf")
+fi
 # The measurer must go through the strip, from a NON-COMMENT line: a comment naming the
 # helper would otherwise satisfy a bare substring test (#3312's shape, and the reason
 # test_cargo_output_parsers.sh's own extraction is comment-blind).
@@ -659,7 +735,7 @@ for fn in _census_libtest_tally _census_compile_tally; do
   grep -qE '\|[[:space:]]*(awk|while)' <<<"$body" && h_bad+=("$fn-pipes-into-a-parser")
 done
 if [ "${#h_bad[@]}" -eq 0 ]; then
-  ok "H1: the census is wired at record_result, at the ONE renderer, at $n_census_agg emit sites, through _ansi_stripped_log, and both parsers read by redirection"
+  ok "H1: the census is wired at record_result, at the ONE renderer, at $n_census_agg emit sites (the tree-integrity boundary printer included), through _ansi_stripped_log, and both parsers read by redirection"
 else
   bad "H1: ${h_bad[*]}"
 fi
@@ -677,7 +753,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=32
+CENSUS_CASE_FLOOR=38
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \

@@ -351,5 +351,8 @@ trino-connector/docker/field-repro-artifacts/
 # Cross-binding parity harness artifacts (issue #1455)
 bindings/parity/out/
 
-# /drive-issue subagent terminal reports (session scratch, never deliverable)
-.impl-*-report.md
+# /drive-issue subagent terminal reports (session scratch, never deliverable).
+# The pattern is the ROLE-AGNOSTIC shape `<role>-<issue>-report.md`, not one hard-coded
+# role: `.impl-*-report.md` alone let a read-only auditor's `.census-audit-report.md`
+# into a working tree, which is one edit away from a scratch report entering a PR diff.
+.*-report.md

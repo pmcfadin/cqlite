@@ -194,18 +194,32 @@ fi
 # ---------------------------------------------------------------------------
 # (B) UNIFORMITY across the six emit sites
 # ---------------------------------------------------------------------------
-n_raw=$(grep -c "printf '%-18s %s (%s)'" "$GATE")
+# THE NEEDLE IS THE `%-18s` NAME FIELD, NOT A WHOLE FORMAT STRING (#3625, roborev job 360
+# finding 2). This used to grep for the exact literal `printf '%-18s %s (%s)'`, and the
+# tree-integrity BOUNDARY printer spelled its format `printf '%-18s %s (%ss)\n'` — one
+# character different — so an entire emit path rendered component rows with NO feature
+# matrix and this guard reported zero raw sites. A near-miss in a format string must not be
+# able to hide an emit path, so the needle is now the field that MAKES it a component row.
+# Comment-blind (`^[^#]*`): a comment quoting the format — the boundary printer now carries
+# one explaining this very defect — must not be counted, or an artifact DESCRIBING the rule
+# would become a violation of it.
+# The renderer's OWN definition is the single legitimate occurrence, so the expected count
+# is exactly 1 and anything above it is a bypass.
+n_pf=$(grep -cE "^[^#]*printf '%-18s" "$GATE")
 n_render=$(grep -c '_fm_summary_line "' "$GATE")
-if [ "$n_raw" -eq 0 ]; then
-  ok "B1: no per-component SUMMARY line is emitted by a raw printf (all route through _fm_summary_line)"
+if [ "$n_pf" -eq 1 ]; then
+  ok "B1: the ONLY non-comment 'printf %-18s' in the gate is _fm_summary_line's own definition — no mode emits a component row that bypasses the renderer"
 else
-  bad "B1: $n_raw raw per-component printf site(s) remain — that mode's block would carry NO feature matrix"
+  bad "B1: $n_pf non-comment 'printf %-18s' site(s) (expected exactly 1, the renderer's definition) — a mode's block would carry NO feature matrix; run: grep -nE \"^[^#]*printf '%-18s\" $GATE"
 fi
-# 6 emit sites + the definition itself is not matched (it uses positional args).
-if [ "$n_render" -ge 6 ]; then
-  ok "B2: $n_render _fm_summary_line call sites (>= the 6 known emit sites: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest)"
+# The renderer's own definition uses positional args, so it is not matched by this needle.
+# SEVEN emit sites now: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest, and
+# the tree-integrity boundary printer (whose truncated table has TWO call sites, one per
+# loop) — hence a floor of 8 CALL SITES over 7 blocks.
+if [ "$n_render" -ge 8 ]; then
+  ok "B2: $n_render _fm_summary_line call sites (>= the 8 known: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest, and the boundary printer's 2 loops)"
 else
-  bad "B2: only $n_render _fm_summary_line call site(s); expected at least 6 — a mode is un-annotated"
+  bad "B2: only $n_render _fm_summary_line call site(s); expected at least 8 — a mode is un-annotated"
 fi
 # The observer functions must NOT be exported: exporting them makes every bash
 # DESCENDANT record, so tooling-tests (which runs nested agent-gate self-tests) would
