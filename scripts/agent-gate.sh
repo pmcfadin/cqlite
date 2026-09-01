@@ -6772,17 +6772,53 @@ _fm_annotate() {
   return 0
 }
 
+# _status_detail_file <component> (#3402): the per-component SIDECAR carrying a short
+# free-text detail that the SUMMARY line appends after the feature-matrix annotation.
+# A FILE, not a variable, for the same reason `.result` is one: a component may run in a
+# backgrounded subshell of the bounded pool (#1737) and cannot write the parent's state.
+_status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
+
+# _record_status_detail <component> <text> (#3402): publish that detail. Best-effort by
+# design — the detail EXPLAINS a status token, it does not carry the verdict, so a
+# LOG_DIR that cannot take it must not change what the component reports. (The token
+# itself rides `.result`, whose write failure is already handled by the missing-result
+# guard.)
+_record_status_detail() {
+  [ -n "${LOG_DIR:-}" ] || return 0
+  printf '%s\n' "$2" 2>/dev/null >"$(_status_detail_file "$1")" || return 0
+}
+
+# _status_detail <component> (#3402): read it back, reduced to ONE line with no control
+# characters. This value is interpolated into the SUMMARY block, and every reader of that
+# block parses it LINE-WISE — the #2908/#3041 completion probe, premerge-assert's
+# single-block assert, the #3453 annotation census. A multi-line or CR-bearing detail
+# would INJECT rows into the block, so the reduction happens at this ONE boundary rather
+# than being trusted of each writer (#3312: neutralise at the emit boundary, not per site).
+_status_detail() {
+  local f
+  f=$(_status_detail_file "$1")
+  [ -n "${LOG_DIR:-}" ] && [ -s "$f" ] || return 0
+  head -1 "$f" 2>/dev/null | tr -d '\r\n\t'
+}
+
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
 # line, used by all six emit sites (full, lite, two delta sites, the aggregation
 # self-test and --emit-summary-selftest) so no mode can render a block the others do
 # not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
-# every existing prefix/stage-line assertion still matches.
+# every existing prefix/stage-line assertion still matches, and the #3402 status detail
+# is appended AFTER the annotation (absent → the line is byte-identical to before).
 _fm_summary_line() {
   # #3625: the census suffix rides here, at the ONE renderer, for the same reason the
   # feature matrix does -- no mode can then emit a component line the others do not.
   # `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
   # existing prefix/stage assertions match on them); the census is APPENDED.
-  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")"
+  # #3402: …and the status detail is appended AFTER the census, last of the three suffixes.
+  # Order is deliberate: the matrix and the census are STRUCTURED tokens a parser may key on,
+  # while the detail is free text that ends the line, so nothing structured sits behind
+  # something unstructured. Absent detail → the line is byte-identical to #3625's.
+  local _detail
+  _detail=$(_status_detail "$1")
+  printf '%-18s %s (%s)  %s  %s%s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")" "${_detail:+ — $_detail}"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -17741,6 +17777,26 @@ _fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per ar
   printf '%s\n' "$@" 2>/dev/null >>"$_fs_log" ||
     _FS_WRITE_FAILURES=$((_FS_WRITE_FAILURES + 1))
 }
+# _fs_abbrev_grown <entry…> (#3402): the grown-file list as it appears on the SUMMARY
+# line. Each argument is a `path: before -> after (limit N)` entry, so the path is the
+# text up to the first `: `. Up to 3 paths print in full; beyond that the remainder is
+# NAMED as elided (`a,b,c,+N more`) — the same rule and the same reason as
+# _fm_abbrev_features: an abbreviation must not imply a completeness it does not have,
+# and a silent truncation in a SUMMARY block is exactly the invisible-opt-out shape this
+# issue exists to remove. The exact count is carried separately by the caller, so this
+# renders identity, never arithmetic.
+_fs_abbrev_grown() {
+  local shown=0 out="" e p
+  for e in ${1+"$@"}; do
+    p="${e%%: *}"
+    if [ "$shown" -lt 3 ]; then
+      out="${out:+$out,}$p"
+      shown=$((shown + 1))
+    fi
+  done
+  [ "$#" -gt "$shown" ] && out="$out,+$(( $# - shown )) more"
+  printf '%s' "$out"
+}
 run_file_size() {
   local name=file-size
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -17823,6 +17879,28 @@ run_file_size() {
     _fs_emit "$log" ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
   elif [ "${#grew[@]}" -gt 0 ]; then
     if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
+      # #3402: the opt-out must be VISIBLE IN THE PASTED SUMMARY, not only in this log.
+      # A bare `file-size: PASS (0s)` is byte-indistinguishable from a run where the
+      # ratchet was genuinely satisfied, so an override nobody reviewing the PR can see
+      # is an override nothing mechanical can catch omitting. `PASS` means "the check ran
+      # and was satisfied"; it must never mean "the check was switched off". Hence the
+      # component's OWN status token, plus the count and the file names inline — the same
+      # data this log already holds, PROMOTED rather than recomputed.
+      #
+      # THREE STATES, NOT TWO. This branch is the ONLY one that may emit OPT-OUT, and it
+      # is keyed on the AFFIRMATIVE `= 1`. A value that is SET BUT NOT 1 (`0`, `true`,
+      # `yes`) falls through to the `else` below and stays a genuine ratchet violation,
+      # exactly as before — see the `growth allowance: NOT enabled … this IS a ratchet
+      # violation` wording in the persistence block, which distinguishes the same three
+      # states. Keying the permissive branch on `!= <bad>` would let a typo buy a green,
+      # which is the false-PASS route this issue must not open while closing another.
+      #
+      # NON-FAILING BY CONSTRUCTION: `status` is not FAIL, and all three aggregators
+      # (full gate, aggregate_lite_components, run_delta) set OVERALL=FAIL only on an
+      # EXACT `FAIL`, so OPT-OUT rides to a PASS RESULT without a special case.
+      status=OPT-OUT
+      _record_status_detail "$name" \
+        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown: $(_fs_abbrev_grown ${grew[@]+"${grew[@]}"})"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"
