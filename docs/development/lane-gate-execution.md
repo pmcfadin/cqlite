@@ -1451,10 +1451,34 @@ never invent, liveness)"* — stated the permissive rationale as though it were 
 
 This was the **third round in this one function**: job 205 fixed its exit-code form, job 241 fixed
 its state-name form, job 318 introduced the acceptance-site use, job 319 found the polarity. When a
-claim fails at N stages, the claim's *form* is wrong — so the state is now three-valued
-(`_unit_state → live | terminal | unknown`) and **each caller names the polarity it needs**, rather
-than a fourth patch at a call site. `_unit_is_live` remains as the refuse-polarity wrapper over the
-one implementation, so the two cannot drift into two opinions about one unit.
+claim fails at N stages, the claim's *form* is wrong — so the state was made explicit and **each
+caller names the polarity it needs**, rather than a fourth patch at a call site. `_unit_is_live`
+remains as the refuse-polarity wrapper over the one implementation, so the two cannot drift into two
+opinions about one unit.
+
+**And that fix was itself wrong, which is the fourth round and the actual lesson (job 320).** Making
+the state three-valued was necessary and not sufficient: I then handed **both** callers the **same
+partition** — `live | terminal | unknown` — and that partition is articulated for the REFUSE side,
+where lumping every non-terminal state under `live` is conservative and right. On the ACCEPT side it
+is not. `deactivating` is a unit *definitively shutting down*, so accepting it is precisely the
+one-beat-then-dead case the acceptance gate exists to reject; `maintenance` and any state systemd
+invents later are not evidence of anything either. **Naming the polarity is not enough if the state
+space is only articulated for one of them.**
+
+The state is therefore **four-valued** (`running | stopping | terminal | unknown`) and the two sides
+take **opposite closures**, which is the point rather than an implementation detail:
+
+- the **refuse** side (reclamation) stays closed on the **terminal** side — only `inactive|failed`
+  are affirmative deaths, so an unrecognised state refuses. Job 241's rule, unchanged.
+- the **accept** side is an **allowlist** of genuinely-running states (`active`, `activating`,
+  `reloading`, `refreshing`); anything not named cannot accept.
+
+That inversion is the standing rule that **an excusal is a positive verdict**. Blocklisting the
+dangerous states admits the next unnamed one by default, and this one function produced that same
+defect at **four consecutive rounds in a different spelling each time** (205 exit-code, 241
+state-name, 319 polarity, 320 partition). A fifth named state would not have closed it; the
+inversion does. The tests carry a non-vacuity control (`4b.192`) because an allowlist that accepts
+*nothing* satisfies every refusal case above it.
 
 **F3 — the advertised default invocation was the broken one.** The script runs under `set -uo
 pipefail`, and this repository supports stock macOS `/bin/bash` 3.2, where an empty array expanded as

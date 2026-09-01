@@ -1605,7 +1605,7 @@ _uil=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER"
        sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
 _us_only=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER")
 if printf '%s' "$_us_only" | grep -qE "inactive\|failed\) +printf 'terminal'" \
-   && printf '%s' "$_us_only" | grep -qE "\*\) +printf 'live'"; then
+   && printf '%s' "$_us_only" | grep -qE "\*\) +printf 'unknown'"; then
   ok "4b.139 only inactive|failed are terminal; every other state reads LIVE"
 else
   bad "4b.139 only inactive|failed are terminal" "the grammar is closed on the wrong side"
@@ -2598,11 +2598,43 @@ else
     bad "4b.184 an affirmatively terminal unit is rejected by both" \
         "aff=$_f2_inact_aff live=$_f2_inact_live (both nonzero expected)"
   fi
-  # The terminal grammar stays CLOSED (job 241): an unrecognised state is LIVE, never terminal.
-  _f2_new_aff=$(_f2 refreshing _unit_is_affirmatively_live)
-  [ "$_f2_new_aff" = 0 ] \
-    && ok "4b.185 an unrecognised/transitional state is LIVE, never terminal (closed grammar)" \
-    || bad "4b.185 an unrecognised state is live, never terminal" "rc=$_f2_new_aff (0 expected)"
+  # Job 241's property, asserted on the side it belongs to: an UNRECOGNISED state must never be read
+  # as terminal, so the REFUSE side still refuses to reclaim. (It was previously asserted through the
+  # ACCEPT predicate with `refreshing`, which the job-320 allowlist now recognises — so the case was
+  # both misnamed and testing the wrong polarity.)
+  _f2_unrec_live=$(_f2 some-future-state _unit_is_live)
+  [ "$_f2_unrec_live" = 0 ] \
+    && ok "4b.185 an unrecognised state is never TERMINAL (reclamation still refuses)" \
+    || bad "4b.185 an unrecognised state is never terminal" "rc=$_f2_unrec_live (0 expected)"
+
+  # 4b.190-4b.192 (roborev job 320, Medium): the ACCEPT side is an ALLOWLIST, and the two sides take
+  # OPPOSITE closures. My job-319 fix made the state three-valued but gave both callers ONE partition
+  # tuned for the refuse side, so `deactivating` — a unit definitively shutting down — was accepted as
+  # affirmatively live, which is the one-beat-then-dead case the gate exists to reject.
+  _f2_deact_aff=$(_f2 deactivating _unit_is_affirmatively_live)
+  _f2_deact_live=$(_f2 deactivating _unit_is_live)
+  if [ "$_f2_deact_aff" != 0 ] && [ "$_f2_deact_live" = 0 ]; then
+    ok "4b.190 'deactivating' does NOT accept, yet still refuses reclamation (opposite closures)"
+  else
+    bad "4b.190 'deactivating' does not accept, yet still refuses reclamation" \
+        "accept=$_f2_deact_aff (nonzero expected) reclaim-refusal=$_f2_deact_live (0 expected)"
+  fi
+  _f2_maint_aff=$(_f2 maintenance _unit_is_affirmatively_live)
+  _f2_fut_aff=$(_f2 some-future-state _unit_is_affirmatively_live)
+  if [ "$_f2_maint_aff" != 0 ] && [ "$_f2_fut_aff" != 0 ]; then
+    ok "4b.191 'maintenance' and an unfamiliar token cannot ACCEPT (excusal is a positive verdict)"
+  else
+    bad "4b.191 'maintenance' and an unfamiliar token cannot accept" \
+        "maintenance=$_f2_maint_aff future=$_f2_fut_aff (both nonzero expected)"
+  fi
+  # NON-VACUITY CONTROL, without which an allowlist that accepts NOTHING passes every case above.
+  _f2_allow_bad=""
+  for _st_ok in active activating reloading refreshing; do
+    [ "$(_f2 "$_st_ok" _unit_is_affirmatively_live)" = 0 ] || _f2_allow_bad="$_f2_allow_bad $_st_ok"
+  done
+  [ -z "$_f2_allow_bad" ] \
+    && ok "4b.192 control: every allowlisted running state DOES accept (the allowlist is not empty)" \
+    || bad "4b.192 control: every allowlisted running state accepts" "refused:$_f2_allow_bad"
   # And the ACCEPT sites must not go back to the two-valued predicate.
   _f2_bad=0
   while IFS= read -r _ln; do

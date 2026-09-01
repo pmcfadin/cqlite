@@ -696,41 +696,48 @@ _pid_state() {  # <pid> -> exists | gone | unknown
   printf 'unknown'                                             # no /proc and ps inconclusive
 }
 
-# THREE-VALUED, because ONE function was being asked two questions with OPPOSITE safe answers
-# (roborev job 319, Medium). `_unit_is_live` collapsed "live" and "unmeasurable" onto 0, which is the
-# CONSERVATIVE answer at the reclamation site (refuse to reclaim) and the PERMISSIVE one at the
-# heartbeat-acceptance sites, where 0 ACCEPTS a run. The unit gate was added there specifically to
-# reject one-beat-then-dead; keying it on a predicate that says "live" when it cannot measure
-# re-admitted exactly that case, and the comment I wrote at both sites — "an unmeasurable unit still
-# accepts (it can only weaken, never invent, liveness)" — asserted the permissive rationale as if it
-# were safe. It is not: there, refusing costs a retry; accepting returns success for a run whose
-# verdict will never arrive.
+# FOUR-VALUED, and the fourth value is the one my own previous fix got wrong (roborev jobs 319 then
+# 320, both Medium). Job 319 split this into three states so each caller could NAME its polarity —
+# and I then handed BOTH callers the SAME partition, one tuned for the REFUSE side, where lumping
+# every non-terminal state under `live` is conservative and correct. On the ACCEPT side it is not:
+# `deactivating` is a unit definitively SHUTTING DOWN, so accepting it is exactly the
+# one-beat-then-dead case the acceptance gate exists to reject, and `maintenance` or a state systemd
+# invents later are not evidence of anything. **Naming the polarity is not enough if the state space
+# is only articulated for one of them.**
 #
-# This is the THIRD round in this one function (jobs 205 and 241 precede it, both the same shape one
-# spelling apart), so the fix is not a fourth patch at a call site: the state becomes explicit and
-# each caller names the polarity it needs.
-_unit_state() {  # <unit> -> live | terminal | unknown
+# So the two sides get OPPOSITE closures, which is the whole point:
+#   * the REFUSE side (reclamation) is closed on the TERMINAL side — only `inactive|failed` are
+#     affirmative deaths, so an unrecognised state refuses. Job 241's rule, unchanged.
+#   * the ACCEPT side is an ALLOWLIST of genuinely-running states — anything not named cannot
+#     accept. This is the standing rule that an EXCUSAL IS A POSITIVE VERDICT: blocklisting the
+#     dangerous states means the next unnamed one is admitted by default, and this function has now
+#     produced that same defect at four consecutive rounds (205, 241, 319, 320) in a different
+#     spelling each time. One inversion closes the class; a fifth named state would not.
+_unit_state() {  # <unit> -> running | stopping | terminal | unknown
   local st rc
   st=$(systemctl --user show -p ActiveState --value "$1" 2>/dev/null); rc=$?
   if [ "$rc" != 0 ] || [ -z "$st" ]; then printf 'unknown'; return 0; fi
-  # The grammar stays CLOSED ON THE TERMINAL SIDE (job 241): only `inactive` and `failed` are
-  # affirmative "not running" answers, so a state systemd invents later reads `live`, never terminal.
   case "$st" in
-    inactive|failed) printf 'terminal' ;;
-    *)               printf 'live' ;;
+    # ALLOWLIST: systemd's states in which the unit's processes are present and not being torn down.
+    active|activating|reloading|refreshing) printf 'running' ;;
+    deactivating)                           printf 'stopping' ;;
+    inactive|failed)                        printf 'terminal' ;;
+    *)                                      printf 'unknown' ;;
   esac
 }
 
-# 0 only for an AFFIRMATIVELY nonterminal unit. Use this where 0 ACCEPTS something.
+# 0 only for an AFFIRMATIVELY RUNNING unit. Use this wherever 0 ACCEPTS something: `stopping`,
+# `unknown` and any future state all refuse, because none of them is evidence a verdict is coming.
 _unit_is_affirmatively_live() {  # <unit>
-  [ "$(_unit_state "$1")" = live ]
+  [ "$(_unit_state "$1")" = running ]
 }
 
 _unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmatively not running
   # RETAINED, with this polarity, for the sites where 0 means REFUSE (reservation reclamation, and
-  # the "has the unit already died" branch below): there, lumping `unknown` in with `live` is the
-  # conservative answer, and job 205/241's reasoning applies unchanged. It is now a thin wrapper over
-  # the ONE state reader, so the two polarities cannot drift into two opinions about one unit.
+  # the "has the unit already died" branch below): there, lumping `stopping` and `unknown` in with
+  # running is the conservative answer, and job 205/241's reasoning applies unchanged — only an
+  # affirmative terminal reading may license reclaiming a path. A thin wrapper over the ONE state
+  # reader, so the two polarities cannot drift into two opinions about one unit.
   [ "$(_unit_state "$1")" != terminal ]
 }
 
