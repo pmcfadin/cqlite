@@ -119,8 +119,8 @@ trap 'rm -rf "$tmp"' EXIT
 # BEFORE the optional Linux-only mold/perf groups rather than appended: that keeps ` perf=` the
 # last token on a Linux line, which is what case 9c-iv's sentinel position depends on, and keeps
 # one grammar serving both a Darwin line (ending at sccache-used) and a Linux one.
-ACCEL_CAP_RE='sccache-cap=([0-9]+\((pinned|default|inherited|stale|invalid)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary)\)|na\(sccache-not-in-use\))'
-ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary)\)|na\(sccache-not-in-use\))'
+ACCEL_CAP_RE='sccache-cap=([0-9]+\((pinned|default|inherited|stale|invalid|unattributed)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
+ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
 ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
@@ -1207,6 +1207,30 @@ if accel_health_token_is "$scc_bigwarn" warn; then
 else
   bad "sccache-health: a cap raise silenced the error-counter token (#3727 conflation)"
 fi
+
+# 9c-x. A CAP NOBODY IS ENFORCING MAY NOT READ AS `pinned` (issue #3727). MEASURED: with no
+#       sccache server running, `--show-stats` does not start one and answers `max_cache_size`
+#       from the CLIENT's own resolution of SCCACHE_CACHE_SIZE, reporting `"cache_size":null`.
+#       So the value is echoed straight back, and classifying that as `pinned` would assert
+#       enforcement by a server that does not exist — this issue's own defect one layer in.
+#       Driven through the USED hook's `null` spelling, which is that measured state.
+scc_unattr="$tmp/scc-cap-unattributed.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_unattr" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=null \
+  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=30G \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_unattr" sccache-cap '32212254720(unattributed)' \
+   && accel_token_is "$scc_unattr" sccache-used 'unmeasured(no-size)'; then
+  ok "sccache-cap: a null cache_size renders (unattributed) + used unmeasured(no-size), never (pinned)"
+else
+  bad "sccache-cap: a null cache_size did not render (unattributed)/(no-size)"
+  grep '^accelerators:' "$scc_unattr" 2>/dev/null || cat "$scc_unattr"
+fi
+if accel_token_is "$scc_unattr" sccache-cap '32212254720(pinned)'; then
+  bad "sccache-cap: an unenforced cap read as (pinned) — enforcement asserted with no server running"
+fi
+assert_accelerators "sccache-cap-unattributed" "$scc_unattr"
 
 # 9c-iv. Regression guard for the NEXT appended accelerators token (issue #2914).
 #        #2859 appended a Linux-only ` mold=` token and silently reddened three
@@ -5346,16 +5370,17 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-# 410 -> 429: the #3727 capacity-token cases (9c-v..9c-ix) add exactly 19 host-independent
+# 410 -> 431: the #3727 capacity-token cases (9c-v..9c-x) add exactly 21 host-independent
 # verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
 # (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
-# used cap-zero, and the two health-is-not-capacity asserts. COUNTED FROM A REAL RUN, not from
+# used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
+# grammar) = 2. COUNTED FROM A REAL RUN, not from
 # arithmetic over the source (this file's own header records that its hand-kept accounting has
 # been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
-# the +19 above is a measured difference and the deliberate ~10 margin is preserved rather than
+# the +21 above is a measured difference and the deliberate ~10 margin is preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=429
+ASSERT_FLOOR=431
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

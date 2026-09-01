@@ -1121,10 +1121,24 @@ _sccache_health() {
 #     30GiB -> DISCARDED (10 GiB default)   30GB -> DISCARDED   "30 G" -> DISCARDED
 #     abc/empty/-5G/21-digits -> DISCARDED  100 -> 100 *BYTES*  0G -> 0 bytes
 # What that map can be wrong about is bounded ON PURPOSE: the BYTES printed always
-# come from the server's own JSON, so a misclassification can only mislabel the
+# come from sccache's own JSON, so a misclassification can only mislabel the
 # PROVENANCE of a measured number and can never manufacture one. Anyone reading
 # this token as a certification of the cap should read `sccache-cap:` from
 # bootstrap instead, which is the check that asks sccache.
+#
+# AND `max_cache_size` IS ONLY THE *SERVER'S* CAP WHILE A SERVER IS RUNNING —
+# MEASURED, and it is why the sixth source token exists. With no server up,
+# `--show-stats` does NOT start one (measured: nothing listening afterwards, an
+# empty SCCACHE_DIR, and a following `--stop-server` reports "couldn't connect");
+# it answers from the CLIENT's own resolution of SCCACHE_CACHE_SIZE, so
+# `SCCACHE_CACHE_SIZE=7G` reads `"max_cache_size":7516192768` with no server
+# anywhere. Reporting that as `(pinned)` would assert enforcement by a server that
+# does not exist — this issue's own defect, one layer in. The tell is
+# `"cache_size":null` (measured: null with no server, an integer with one), so a
+# null size renders `<bytes>(unattributed)`: the number is a cap that WILL apply,
+# not one proven to be in force. Deliberately named for what is ESTABLISHED rather
+# than `no-server`, because a non-disk backend (the GHA cache in CI) can also
+# report no size while a server runs, and `no-server` would then be false.
 #
 # Test hooks (self-test, issue #3727): AGENT_GATE_TEST_SCCACHE_MAX_BYTES /
 # AGENT_GATE_TEST_SCCACHE_USED_BYTES / AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES force
@@ -1150,7 +1164,10 @@ _SCCACHE_DEFAULT_BYTES_MEASURED=10737418240
 # The literal `unmeasured` -> empty (rc 1: simulate an unreadable probe). ANYTHING
 # ELSE -> empty as well, deliberately: a mis-set hook must render `unmeasured(...)`,
 # NEVER 0. Unset is the same as `unmeasured` here; the caller distinguishes them by
-# checking for a non-empty raw value BEFORE calling.
+# checking for a non-empty raw value BEFORE calling. The USED hook additionally
+# accepts the literal `null`, handled by its caller: that is a DIFFERENT measured
+# state (a null `cache_size`, i.e. a cap nothing running is proven to enforce) and
+# it must be assertable without a real sccache, like every other state here.
 _sccache_hook_uint() {
   local __raw="$1" __out="$2"
   case "$__raw" in
@@ -1215,13 +1232,14 @@ _SCC_USED_BYTES=""
 _SCC_USED_PCT=""     # <N>% | cap-zero
 _SCC_USED_WHY=""
 _SCC_DEFAULT_BYTES=""
+_SCC_SIZE_NULL=0     # `"cache_size":null` was observed -> the cap is UNATTRIBUTED
 
 # _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, assigned
 # into the variables above (never printed — see the one-probe-per-emit note).
 _sccache_cap_probe() {
   _SCC_CAP_KIND=unmeasured; _SCC_CAP_BYTES=""; _SCC_CAP_SOURCE=""; _SCC_CAP_WHY=no-stats
   _SCC_USED_KIND=unmeasured; _SCC_USED_BYTES=""; _SCC_USED_PCT=""; _SCC_USED_WHY=no-stats
-  _SCC_DEFAULT_BYTES=""
+  _SCC_DEFAULT_BYTES=""; _SCC_SIZE_NULL=0
 
   local state="${AGENT_GATE_TEST_SCCACHE_STATE:-${ACCEL_SCCACHE:-absent}}"
   if [ "$state" != on ]; then
@@ -1243,7 +1261,11 @@ _sccache_cap_probe() {
   local hook_used="${AGENT_GATE_TEST_SCCACHE_USED_BYTES:-}"
   if [ -n "$hook_max" ] || [ -n "$hook_used" ]; then
     _sccache_hook_uint "$hook_max"  cap  || why_cap=no-stats
-    _sccache_hook_uint "$hook_used" used || why_used=no-stats
+    if [ "$hook_used" = null ]; then
+      why_used=no-size; _SCC_SIZE_NULL=1
+    else
+      _sccache_hook_uint "$hook_used" used || why_used=no-stats
+    fi
   elif ! command -v sccache >/dev/null 2>&1; then
     why_cap=no-binary; why_used=no-binary
   else
@@ -1261,13 +1283,24 @@ _sccache_cap_probe() {
       jrc=0
       _sccache_json_uint "$json" cache_size used || jrc=$?
       case "$jrc" in 1) why_used=unparsed ;; 2) why_used=not-unique ;; esac
+      # A NULL size is its own measured state, not a parse failure: it is what a
+      # client with no running server reports (and what a backend that cannot
+      # report a size reports), so the cap it printed is not attributable to
+      # anything running. Matched on the literal, from the captured payload.
+      if [ -z "$used" ]; then
+        case "$json" in *'"cache_size":null'*) why_used=no-size; _SCC_SIZE_NULL=1 ;; esac
+      fi
     fi
   fi
 
   if [ -n "$cap" ]; then
     _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"; _SCC_CAP_WHY=""
     local implied=""
-    if [ -z "${SCCACHE_CACHE_SIZE+set}" ]; then
+    if [ "$_SCC_SIZE_NULL" = 1 ]; then
+      # Nothing running is proven to enforce this number, so no claim about the
+      # variable being IN FORCE may be made from it (see the block comment).
+      _SCC_CAP_SOURCE=unattributed
+    elif [ -z "${SCCACHE_CACHE_SIZE+set}" ]; then
       # The variable is UNSET: nothing this fleet provisions is in play, so the only
       # question is whether the server is at sccache's own default or at somebody
       # else's choice.
@@ -1502,7 +1535,8 @@ _perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 # See the ACCEL_* detection above (#1848). The sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters — ERROR COUNTERS ONLY,
 # never capacity. The two #3727 tokens after it carry the capacity facts:
-# ` sccache-cap=<bytes>(pinned|default|inherited|stale|invalid)` and ` sccache-used=<bytes>(<N>%)`,
+# ` sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|unattributed)` and
+# ` sccache-used=<bytes>(<N>%)`,
 # each with an explicit `unmeasured(<why>)`/`na(sccache-not-in-use)` rendering so a positive
 # reading is always an affirmative measurement. They sit BEFORE the optional Linux-only groups so
 # `perf=` remains the last token on a Linux line. On Linux
