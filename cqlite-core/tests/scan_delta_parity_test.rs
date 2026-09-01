@@ -741,45 +741,63 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 /// scan_delta, so a printed pair must agree within 1s.
 ///
 /// `row` is the enclosing row's liveness as sstabledump printed it, or `None` when the
-/// subject IS the row liveness. ORACLE — `JsonTransformer.serializeCell` at the pinned tag
-/// `cassandra-5.0.8`, line 501: `if (cell.isExpiring() && (liveInfo.isEmpty() ||
-/// cell.ttl() != liveInfo.ttl()))`. So sstabledump OMITS a cell's `ttl`/`expires_at` when
-/// the cell's TTL EQUALS the row's primary-key liveness TTL — the ordinary case for
-/// `INSERT ... USING TTL`, where every cell inherits the row TTL and the row's
-/// `liveness_info` holds the only printed copy. Line 497 applies the identical rule to the
-/// per-cell `tstamp`, which is why the writetime comparison at the call site has always
-/// been conditional on the field being present; that symmetry is what makes this
-/// principled rather than convenient.
+/// subject IS the row liveness. `cell_tstamp_printed` says whether sstabledump printed a
+/// per-cell `tstamp` — which is load-bearing, see below.
 ///
-/// THE COMPARISON IS ON TTL, NOT ON ABSOLUTE `expires_at` (roborev round 1, finding 3).
-/// An earlier cut accepted a suppressed cell whose `expires_at` was within 1s of the row's,
-/// which is a PROXY for TTL equality and only coincides with it when the cell and the row
-/// liveness share a write time (`expires_at` = localDeletionTime ≈ writetime + ttl). Two
-/// cells with the SAME TTL written seconds apart in one row — `UPDATE ... USING TTL` on
-/// individual columns — are suppressed by Cassandra and would have made the proxy PANIC: a
-/// false FAIL on correct data. Both authoritative TTLs are available, so the proxy is gone:
-/// the row's from sstabledump's own `liveness_info.ttl`, the cell's derived from the delta
-/// model's `expires_at` and `writetime` (Cassandra sets localDeletionTime from the cell's
-/// own timestamp, so `expires_at_secs - writetime_secs` IS the TTL, ±1s of seconds
-/// rounding). `CellDelta` carries no `ttl` field, and deriving it here is preferred to
-/// widening a public model for a test.
+/// ORACLE — `JsonTransformer` at the pinned tag `cassandra-5.0.8`:
+///   * `:501` `if (cell.isExpiring() && (liveInfo.isEmpty() || cell.ttl() != liveInfo.ttl()))`
+///     guards the per-cell `ttl`/`expires_at`/`expired` fields, so a cell copy is OMITTED
+///     exactly when the cell's TTL EQUALS the row's primary-key liveness TTL — the ordinary
+///     case for `INSERT ... USING TTL`, where every cell inherits the row TTL.
+///   * `:497` `if (liveInfo.isEmpty() || cell.timestamp() != liveInfo.timestamp())` guards
+///     the per-cell `tstamp` by the identical rule. So an ABSENT cell `tstamp` is
+///     sstabledump telling us, authoritatively, that the cell's writetime EQUALS the row
+///     liveness writetime.
+///
+/// WHY THE CHECK IS SHAPED LIKE THIS — three rounds went round a circle here, and the
+/// resolution is a PRECONDITION, not another derivation (lead ruling on roborev R2-F1):
+///   1. The original code compared cell `expires_at` against row `expires_at`. roborev
+///      round 1 (F3): wrong, Cassandra compares TTL.
+///   2. That was replaced by a derived `ttl = expires_at_secs - writetime_secs`. roborev
+///      round 2 (R2-F1): also wrong — Cassandra computes expiration from coordinator
+///      wall-clock while `USING TIMESTAMP` sets the writetime independently, so the
+///      subtraction yields a bogus TTL for any fixture using an explicit timestamp.
+///   3. All three observations are correct. The missing piece is that the AUTHORITATIVE
+///      value is not available: `CellDelta` (delta_scan/model.rs) carries `value`,
+///      `writetime`, `expires_at` and `replaced` and NO `ttl_seconds`, while
+///      `types.rs::CellExpiration` has it and the delta model discards it. Adding a field
+///      to a production model to serve a test is out of this issue's scope and REJECTED by
+///      the lead; it is proposed as a follow-up.
+///
+/// So: `expires_at = localDeletionTime ≈ writetime + ttl`. When the cell and the row
+/// liveness share a writetime, `expires_at` equality is EQUIVALENT to TTL equality — not a
+/// proxy for it — and that precondition is exactly what an absent cell `tstamp` certifies
+/// (`:497` above). The check therefore compares `expires_at` ONLY under that precondition,
+/// and where the precondition does not hold it REFUSES BY NAME rather than guessing in
+/// either direction.
+///
+/// MEASURED, so the refusal branch is known-defensive rather than dead: across all 162
+/// committed `*-Data.db.jsonl` goldens in the corpus (75016 live cells) there are 768
+/// suppressed expiring cells and ZERO where the cell also printed its own `tstamp`. No
+/// fixture exercises the refusal today — it is there for when one appears, which needs an
+/// `UPDATE ... USING TTL` (or `USING TIMESTAMP`) touching individual columns of a row at a
+/// different write time.
 ///
 /// `(None, Some(_))` stays STRICT: an expiry sstabledump DID print and scan_delta did not
 /// is a real divergence, never a suppression. Do not loosen it.
 ///
 /// Wrong until #3725: this is one of the 13 crate-level `delta-scan`-gated targets that
 /// executed in no merge-gating lane, so `test_delta_parity_ttl_cells` FAILED against the
-/// real corpus and PASSED against an absent one. Expectation derived from the Cassandra
-/// source above, never from CQLite's own output.
+/// real corpus and PASSED against an absent one. Every expectation here is derived from the
+/// Cassandra source above, never from CQLite's own output.
 fn assert_expires_at(
     context: &str,
     actual: Option<i64>,
-    actual_writetime_micros: i64,
     expected: Option<i64>,
     row: Option<&JsonlLivenessInfo>,
+    cell_tstamp_printed: bool,
 ) {
     const TTL_TOLERANCE_MICROS: i64 = 1_000_000; // 1 second
-    const TTL_ROUNDING_SECS: i64 = 1; // writetime µs -> localDeletionTime s
     match (actual, expected) {
         (Some(a), Some(e)) => {
             let diff = (a - e).abs();
@@ -794,23 +812,41 @@ fn assert_expires_at(
         }
         (None, None) => {}
         (Some(a), None) => {
-            // `div_euclid`, not `/`: truncation toward zero would misplace a pre-epoch
-            // timestamp by a second, and the sign of that error is not obvious at a glance.
-            let actual_ttl_secs =
-                a.div_euclid(1_000_000) - actual_writetime_micros.div_euclid(1_000_000);
-            match row.and_then(|r| r.ttl_secs) {
-                Some(row_ttl) if (actual_ttl_secs - row_ttl).abs() <= TTL_ROUNDING_SECS => {}
-                Some(row_ttl) => panic!(
-                    "{}: scan_delta reports a cell TTL of {}s (expires_at={}µs, writetime={}µs) \
-                     and sstabledump printed no cell copy — but the row liveness TTL is {}s, \
-                     and sstabledump omits ONLY a cell copy whose TTL EQUALS the row's \
-                     (JsonTransformer.serializeCell:501, cassandra-5.0.8)",
-                    context, actual_ttl_secs, a, actual_writetime_micros, row_ttl
+            let Some(r) = row else {
+                panic!(
+                    "{}: scan_delta has expires_at={}µs, sstabledump printed no cell copy, and \
+                     there is no row liveness for it to have been suppressed against",
+                    context, a
+                )
+            };
+            if cell_tstamp_printed {
+                panic!(
+                    "{}: SUPPRESSION NOT VERIFIABLE — sstabledump omitted this cell's \
+                     expires_at (so per JsonTransformer:501 the cell TTL equals the row TTL \
+                     of {:?}s), but it PRINTED the cell's tstamp, so per :497 the cell and \
+                     row-liveness writetimes DIFFER and expires_at equality is no longer \
+                     equivalent to TTL equality. The authoritative cell TTL is not \
+                     available: CellDelta carries expires_at={}µs but no ttl_seconds. \
+                     Refusing to decide (#3725; surfacing ttl_seconds on the delta model is \
+                     the follow-up).",
+                    context, r.ttl_secs, a
+                );
+            }
+            match r.expires_at_micros {
+                // Equal writetimes (certified by the absent cell tstamp), so this IS the
+                // TTL comparison Cassandra makes, spelled in the units we have.
+                Some(row_e) if (a - row_e).abs() <= TTL_TOLERANCE_MICROS => {}
+                Some(row_e) => panic!(
+                    "{}: scan_delta has cell expires_at={}µs and sstabledump printed no cell \
+                     copy, but the row liveness expiry is {}µs (row TTL {:?}s) — with equal \
+                     writetimes those must agree, since sstabledump omits only a cell copy \
+                     whose TTL equals the row's (JsonTransformer:501, cassandra-5.0.8)",
+                    context, a, row_e, r.ttl_secs
                 ),
                 None => panic!(
-                    "{}: scan_delta has expires_at={}µs but sstabledump printed neither a cell \
-                     copy nor a row liveness TTL for it to have been suppressed against",
-                    context, a
+                    "{}: scan_delta has cell expires_at={}µs and sstabledump printed neither a \
+                     cell copy nor a row liveness expiry (row TTL {:?}s)",
+                    context, a, r.ttl_secs
                 ),
             }
         }
@@ -823,70 +859,95 @@ fn assert_expires_at(
 
 /// The suppression rule's own regression cases, corpus-free.
 ///
-/// The one that matters is `equal TTL, different write times`: it is the false FAIL the
-/// absolute-`expires_at` proxy produced, it does not occur in today's corpus (a single
-/// `INSERT ... USING TTL` cannot produce it), and without a case pinning it the next person
-/// would have no way to tell the fix from the proxy. The others pin the two directions that
-/// must NOT be tolerated.
+/// Each negative case asserts the panic NAMES its reason, not merely that something
+/// panicked: an unrelated panic produces an identical `catch_unwind` error and would make
+/// this suite green for the wrong reason.
 #[test]
-fn suppression_rule_compares_ttl_not_absolute_expiry() {
+fn suppression_rule_requires_equal_writetimes_or_refuses() {
     let sec = 1_000_000i64;
     let row = |ttl: Option<i64>, exp: Option<i64>| JsonlLivenessInfo {
         tstamp_micros: 1_000 * sec,
         expires_at_micros: exp,
         ttl_secs: ttl,
     };
+    // `catch_unwind` + a marker: "it panicked" is not evidence about WHY.
+    fn refuses(marker: &str, f: impl FnOnce() + std::panic::UnwindSafe) {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let err = std::panic::catch_unwind(f);
+        std::panic::set_hook(prev);
+        let payload = err.expect_err("expected a refusal, got success");
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic payload>")
+            .to_string();
+        assert!(
+            msg.contains(marker),
+            "refused for the wrong reason: expected {marker:?} in {msg:?}"
+        );
+    }
 
-    // Same TTL (3600s), cell written 5s after the row: Cassandra SUPPRESSES the cell copy
-    // (TTLs are equal), so this must be accepted. `expires_at` differs by 5s, which the
-    // retired proxy would have rejected — this case IS the fix.
+    // PRECONDITION HOLDS (cell tstamp absent => equal writetimes) and the expiries agree:
+    // this is the ordinary `INSERT ... USING TTL` shape, 768 of them in the corpus.
     let r = row(Some(3600), Some(4600 * sec));
     assert_expires_at(
-        "case/equal-ttl-later-write",
-        Some(4605 * sec),
-        1_005 * sec,
+        "case/suppressed-equal",
+        Some(4600 * sec),
         None,
         Some(&r),
+        false,
     );
 
-    // Different TTL (cell 7200s vs row 3600s) with the cell copy absent: unreachable from
-    // Cassandra (it would have PRINTED the copy), so a suppression may not be claimed.
+    // PRECONDITION FAILS (cell printed its own tstamp): the check must REFUSE by name, not
+    // compare. This is the case a derived `expires_at - writetime` TTL got wrong under
+    // `USING TIMESTAMP` (roborev R2-F1); no corpus fixture reaches it today.
     let r = row(Some(3600), Some(4600 * sec));
-    assert!(std::panic::catch_unwind(|| {
+    refuses("SUPPRESSION NOT VERIFIABLE", || {
         assert_expires_at(
-            "case/different-ttl",
+            "case/differing-writetime",
+            Some(4605 * sec),
+            None,
+            Some(&r),
+            true,
+        )
+    });
+
+    // Precondition holds but the expiries disagree: unreachable from Cassandra, so no
+    // suppression may be claimed.
+    let r = row(Some(3600), Some(4600 * sec));
+    refuses("row liveness expiry", || {
+        assert_expires_at(
+            "case/suppressed-mismatch",
             Some(8200 * sec),
-            1_000 * sec,
             None,
             Some(&r),
-        );
-    })
-    .is_err());
+            false,
+        )
+    });
 
-    // A row with NO liveness TTL cannot have suppressed anything.
+    // A row with no liveness expiry cannot have suppressed anything.
     let r = row(None, None);
-    assert!(std::panic::catch_unwind(|| {
+    refuses("neither a cell copy nor a row liveness expiry", || {
         assert_expires_at(
-            "case/no-row-ttl",
+            "case/no-row-expiry",
             Some(4600 * sec),
-            1_000 * sec,
             None,
             Some(&r),
-        );
-    })
-    .is_err());
+            false,
+        )
+    });
 
-    // The strict direction, unchanged: sstabledump printed an expiry and scan_delta did not.
-    assert!(std::panic::catch_unwind(|| {
-        assert_expires_at(
-            "case/strict-none-some",
-            None,
-            1_000 * sec,
-            Some(4600 * sec),
-            None,
-        );
-    })
-    .is_err());
+    // No row liveness at all.
+    refuses("no row liveness", || {
+        assert_expires_at("case/no-row", Some(4600 * sec), None, None, false)
+    });
+
+    // The strict direction, unchanged.
+    refuses("but scan_delta does not", || {
+        assert_expires_at("case/strict-none-some", None, Some(4600 * sec), None, false)
+    });
 }
 
 // ============================================================================
@@ -1111,9 +1172,9 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                 assert_expires_at(
                                     &format!("{}.expires_at", ctx_lv),
                                     dl.expires_at,
-                                    dl.writetime,
                                     jl.expires_at_micros,
-                                    None, // the subject IS the row liveness
+                                    None,  // the subject IS the row liveness
+                                    false, // …so the cell-tstamp precondition is moot
                                 );
                                 result.liveness_ok += 1;
                             }
@@ -1196,9 +1257,12 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                     assert_expires_at(
                                         &ctx,
                                         cd.expires_at,
-                                        cd.writetime,
                                         jcell.expires_at_micros,
                                         r.liveness_info.as_ref(),
+                                        // sstabledump prints a cell tstamp ONLY when it
+                                        // differs from the row liveness (:497), so its
+                                        // ABSENCE certifies equal writetimes.
+                                        jcell.tstamp_micros.is_some(),
                                     );
                                     result.cells_ok += 1;
                                 }

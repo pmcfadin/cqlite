@@ -14636,14 +14636,26 @@ EOF
 $_un_list
 EOF
   # Which derived targets honour the strict-fixture flag at all. DERIVED, and it matters:
-  # a target that reads neither CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS
-  # is outside the anti-vacuity mechanism entirely, so the strict posture cannot be
-  # claimed for it. (MEASURED: scan_delta_parity_test PASSES against an empty corpus and
-  # FAILS against a real one — the exact shape a fixture-blind target hides.)
+  # a target outside the anti-vacuity mechanism can return successfully with its corpus
+  # absent, so the strict posture cannot be claimed for it. (MEASURED before the fix:
+  # scan_delta_parity_test PASSED against an EMPTY corpus and FAILED against a real one —
+  # the exact shape a fixture-blind target hides.)
+  #
+  # THE ACCEPTED VARIABLE IS EXACTLY THE ONE THIS LANE EXPORTS, and that coupling is the
+  # point (roborev round 2, R2-F2). An earlier cut accepted EITHER
+  # CQLITE_REQUIRE_FIXTURES or CQLITE_PARITY_REQUIRE_DATASETS while strict mode exports
+  # only the former — so a target honouring the parity variable ALONE would have been
+  # classified strict-aware and still skip-passed, the "silently accepts" shape this whole
+  # lane exists to remove. Widening the export to both was the alternative and was
+  # rejected: it makes two variables load-bearing where one suffices. Latent when found
+  # (measured: 0 of the 12 invoked targets reference the parity variable, all 12 reference
+  # CQLITE_REQUIRE_FIXTURES), so this changes nothing today and closes the future hole.
+  # If the export below ever changes, change this pattern in the same edit — they are one
+  # fact written twice and must not drift.
   local _fx_blind="" _fx_blind_n=0 _dsrc
   while IFS= read -r _dsrc; do
     [ -n "$_dsrc" ] || continue
-    if ! grep -qE 'CQLITE_(REQUIRE_FIXTURES|PARITY_REQUIRE_DATASETS)' "$_dsrc" 2>/dev/null; then
+    if ! grep -qE 'CQLITE_REQUIRE_FIXTURES' "$_dsrc" 2>/dev/null; then
       _fx_blind_n=$((_fx_blind_n + 1))
       _fx_blind="$_fx_blind $(basename "${_dsrc%.rs}")"
     fi
@@ -14666,12 +14678,13 @@ EOF
   census+=("       derivation rather than falling back to an empty set.")
   census+=("  fixtures: $_fx_note")
   if [ "$_fx_blind_n" -gt 0 ]; then
-    census+=("       FIXTURE-BLIND — $_fx_blind_n derived target(s) read neither")
-    census+=("       CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS. In STRICT mode")
+    census+=("       FIXTURE-BLIND — $_fx_blind_n derived target(s) do not read")
+    census+=("       CQLITE_REQUIRE_FIXTURES, the one variable this lane EXPORTS. In STRICT mode")
     census+=("       (the full gate) this is a FAIL, not a note: a target that ignores the flag")
     census+=("       can return successfully having compared nothing:$_fx_blind")
   else
-    census+=("       every derived target reads a strict-fixture variable: 0 RECOGNISED gaps")
+    census+=("       every derived target reads CQLITE_REQUIRE_FIXTURES — the variable this lane")
+    census+=("       exports, and deliberately the only one accepted here: 0 RECOGNISED gaps")
   fi
   census+=("       WHICH corpus is missing is named BY THE TARGET, not by this lane: each strict")
   census+=("       failure prints the KEYSPACE and TABLE it could not open (test_types,")
@@ -14735,9 +14748,9 @@ EOF
   # failing on it would red a probe on correct code.
   if [ "$_fx_mode" = strict ] && [ "$_fx_blind_n" -gt 0 ]; then
     _ds_lane_fail "$name" "$log" "$start" \
-      "[$name] FAIL-CLOSED: $_fx_blind_n derived target(s) read NEITHER" \
-      "        CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS, so this run" \
-      "        exports the strict flag and those targets IGNORE it — with their corpus" \
+      "[$name] FAIL-CLOSED: $_fx_blind_n derived target(s) do not read" \
+      "        CQLITE_REQUIRE_FIXTURES — the ONE variable this run exports — so this run" \
+      "        exports the strict flag and those targets IGNORE it; with their corpus" \
       "        absent they return successfully having compared NOTHING, and the lane would" \
       "        report PASS. That is the vacuous pass this lane exists to remove (#3725)." \
       "        FIXTURE-BLIND:$_fx_blind" \
