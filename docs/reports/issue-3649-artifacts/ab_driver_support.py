@@ -527,6 +527,7 @@ OPTION_DISPOSITION = {
     "--head-server-extra": ("resolver-input", "per-arm overrides, resolved here"),
     "--corpus": ("not-server-config", "a path the server is pointed at, not a setting"),
     "--ticket-template": ("not-server-config", "a client-side workload description"),
+    "--loadgen-ref": ("not-server-config", "which commit the ONE shared client is built from"),
     "--base-ref": ("not-server-config", "which commit to build"),
     "--head-ref": ("not-server-config", "which commit to build"),
     "--replicates": ("not-server-config", "how many times the session repeats"),

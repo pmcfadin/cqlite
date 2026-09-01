@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=316
+CASE_FLOOR=319
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -124,6 +124,7 @@ def main():
                 "max_batch_bytes_observed": "4194304",
                 "wait_timeout_ms_observed": "30000",
                 "position_in_pair": position,
+                "loadgen_commit": "2" * 40,
             })
     manifest = {
         "schema": "ab-3649.manifest/v1",
@@ -134,6 +135,7 @@ def main():
             "base": {"commit": "0" * 40, "ref": "cfa93fe99^"},
             "head": {"commit": "1" * 40, "ref": "cfa93fe99"},
         },
+        "loadgen": {"commit": "2" * 40, "ref": "cfa93fe99"},
         "workload": {
             "shape": "full",
             "step_duration": "60s",
@@ -1203,34 +1205,14 @@ for entry in manifest["runs"]:
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
+# REVISED RULING (round 10): a session where NOTHING was observed has no evidence
+# about the configuration it ran under, so it is UNMEASURED rather than a
+# decisive verdict behind a disclosure. Partial stays disclosed -- there the
+# observed runs constrain the unobserved ones.
 run_analyzer "$TMP/adm-unobs"
-check_verdict "an admission ceiling the driver could not observe" MEETS-TARGET 0 single-stream
-if grep -q '^AB-3649: verdict-detail single-stream ADMISSION ' "$TMP/out.txt"; then
-  ok "an unobserved admission ceiling is disclosed as uncorroborated, not assumed"
-else
-  bad "an unobserved admission ceiling was passed off as corroborated"
-fi
-if grep -q '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt"; then
-  ok "a wholly unobserved ceiling names its remedy too, not only the partial case"
-else
-  bad "the none-corroboration case named a state with no remedy"
-fi
-check_remedy_shared "the none remedy carries the time window, the log path and the honest scope"
-if grep -q 'ADMISSION-REMEDY.*the subject is the parse or the server log format itself' "$TMP/out.txt"; then
-  ok "the NONE remedy points at the parse, not at an individual run"
-else
-  bad "the none remedy does not distinguish itself from the partial one"
-fi
-if grep -q 'ADMISSION-REMEDY.*specific to the runs that did not report' "$TMP/out.txt"; then
-  bad "the none case printed the PARTIAL remedy, which would send an operator in a circle"
-else
-  ok "the two states print different first actions, as the gate-pin precedent requires"
-fi
-if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed NOT-OBSERVED ' "$TMP/out.txt"; then
-  ok "requested and observed admission values are printed side by side"
-else
-  bad "the admission line did not print requested and observed separately"
-fi
+check_verdict "a session where no startup line was read at all" UNMEASURED 7 single-stream
+check_cause "no startup line observed anywhere" startup-unobserved
+
 
 echo
 echo "-- nothing non-finite may reach a verdict rule --"
@@ -1481,6 +1463,11 @@ if grep -q 'corroboration partial (6 of 12 runs)' "$TMP/out.txt"; then
   ok "the admission line counts which runs actually corroborated the ceiling"
 else
   bad "partial admission observation was not counted"
+fi
+if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed 16 corroboration partial ' "$TMP/out.txt"; then
+  ok "requested and observed admission values are printed side by side, with the corroboration state"
+else
+  bad "the admission line did not print requested, observed and corroboration together"
 fi
 if grep -q 'PARTIAL OBSERVATION IS NOT AGREEMENT' "$TMP/out.txt"; then
   ok "partial observation is disclosed rather than reduced to the observed value"
@@ -2576,11 +2563,22 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${AB_SELFTEST_CARGO_LOG:-/dev/null}"
 case "${1:-}" in
   build)
+    # HONOURS `-p`, because real cargo does. Producing both binaries whatever was
+    # asked for made the stub MORE PERMISSIVE than cargo -- the same fidelity
+    # failure as the startup line and the argv, arriving at the package
+    # selection. It is what let "each arm builds its own load generator" look
+    # indistinguishable from "one shared client" on the filesystem.
     rel="${CARGO_TARGET_DIR:?stub cargo needs CARGO_TARGET_DIR}/release"
     mkdir -p "$rel"
-    cp "${AB_SELFTEST_SHIMBIN:?}/stub-cqlite-flight" "$rel/cqlite-flight"
-    cp "${AB_SELFTEST_SHIMBIN:?}/stub-flight-loadgen" "$rel/flight-loadgen"
-    chmod +x "$rel/cqlite-flight" "$rel/flight-loadgen"
+    want=" $* "
+    case "$want" in *" -p cqlite-flight "*)
+      cp "${AB_SELFTEST_SHIMBIN:?}/stub-cqlite-flight" "$rel/cqlite-flight"
+      chmod +x "$rel/cqlite-flight" ;;
+    esac
+    case "$want" in *" -p flight-loadgen "*)
+      cp "${AB_SELFTEST_SHIMBIN:?}/stub-flight-loadgen" "$rel/flight-loadgen"
+      chmod +x "$rel/flight-loadgen" ;;
+    esac
     ;;
 esac
 exit 0
@@ -2758,6 +2756,33 @@ PYINNER
     fi
   fi
 
+  # FINDING 1 (round 10): ONE load generator, so the client cannot vary with the
+  # server commit. Checked on the filesystem the session actually produced.
+  if [ -n "$E2E_DIR" ]; then
+    if [ -x "$TMP/e2e-ss/target-loadgen/release/flight-loadgen" ] \
+       && [ ! -e "$TMP/e2e-ss/target-base/release/flight-loadgen" ] \
+       && [ ! -e "$TMP/e2e-ss/target-head/release/flight-loadgen" ]; then
+      ok "exactly one load generator was built, and neither arm has its own"
+    else
+      bad "an arm built its own load generator, so the client varies with the server commit"
+    fi
+    if python3 - "$E2E_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+commits = {run.get("loadgen_commit") for run in manifest["runs"]}
+raise SystemExit(
+    0 if len(commits) == 1 and manifest["loadgen"]["commit"] in commits else 1
+)
+PYINNER
+    then
+      ok "every run records the same load-generator commit, and the manifest names it"
+    else
+      bad "the load-generator provenance is not recorded consistently"
+    fi
+  fi
+
   # The prewarm path is a separate branch and has its own way to be wrong.
   run_e2e "$TMP/e2e-warm" --ramp 1
   if [ "$RC" = "0" ]; then
@@ -2766,8 +2791,44 @@ PYINNER
     bad "the prewarm branch failed (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
   fi
 
-  # FINDING 3: the manifest must record what HAPPENED, not what was asked for.
-  run_e2e "$TMP/e2e-cold" --ramp 1 --temperature warm
+  # THE MISNAMED CASE, FIXED. This ran `--temperature warm` into a directory
+  # called `e2e-cold` and then inspected the WARM session -- so cold-cache
+  # handling and `prewarm: false` were untested while the name asserted coverage.
+  # Fifth case in this lane that did not test what it claimed.
+  #
+  # A genuine cold session needs passwordless sudo to drop the page cache, which
+  # a suite may not assume. What IS testable, and is the property that matters
+  # here, is that cold FAILS CLOSED without it -- a run that could not drop the
+  # cache must not proceed and record itself as cold.
+  if sudo -n true 2>/dev/null; then
+    ok "cold fail-closed case skipped: this box HAS passwordless sudo, so the refusal cannot be provoked (declared, not assumed)"
+  else
+    run_e2e "$TMP/e2e-cold" --ramp 1 --temperature cold --no-prewarm
+    if [ "$RC" = "2" ] && grep -q 'cold-drop-failed' "$TMP/err.txt"; then
+      ok "a cold session without passwordless sudo fails closed rather than running warm"
+    else
+      bad "a cold session that could not drop the page cache did not fail closed (exit $RC)"
+    fi
+  fi
+  # ...and `prewarm: false` is exercised for real by the --no-prewarm session,
+  # which is the half that needs no privileges.
+  SS_DIR="$(find "$TMP/e2e-ss" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$SS_DIR" ] && python3 - "$SS_DIR" <<'PYINNER'
+import json
+import os
+import sys
+
+manifest = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
+raise SystemExit(0 if manifest["workload"]["prewarm"] is False else 1)
+PYINNER
+  then
+    ok "a --no-prewarm session records prewarm: false"
+  else
+    bad "a --no-prewarm session did not record prewarm: false"
+  fi
+
+  # FINDING 3 (round 6): the manifest must record what HAPPENED, not what was
+  # asked for -- checked against the warm session, where a pass really ran.
   WARM_DIR="$(find "$TMP/e2e-warm" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
   if [ -n "$WARM_DIR" ] && python3 - "$WARM_DIR" <<'PYINNER'
 import json
@@ -2803,6 +2864,33 @@ PYINNER
   echo "          here -- a duplicated option, an unknown flag, a bad value. That class"
   echo "          is covered structurally instead (the server-argv cases above assert no"
   echo "          option is emitted twice); nothing in this suite can reproduce Clap."
+fi
+
+echo
+echo "-- one client for both arms, checked rather than assumed --"
+
+mkfixture "$TMP/lg-split" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/lg-split/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["loadgen_commit"] = "9" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/lg-split"
+check_verdict "arms driven by different load generators" UNMEASURED 7 single-stream
+check_cause "a client that varies with the server commit" loadgen-provenance-mismatch
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: loadgen commit 2222222222222222222222222222222222222222 ref ' "$TMP/out.txt"; then
+  ok "the load generator's provenance is reported, not merely checked"
+else
+  bad "the load-generator provenance was not reported"
 fi
 
 echo

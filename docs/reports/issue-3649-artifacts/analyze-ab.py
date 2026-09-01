@@ -240,6 +240,10 @@ def render_common(manifest, mode, admission, session):
     out("arm base commit %s" % field(manifest, "arms", "base", "commit"))
     out("arm head commit %s" % field(manifest, "arms", "head", "commit"))
     out(
+        "loadgen commit %s ref %s (ONE client, both arms)"
+        % (field(manifest, "loadgen", "commit"), field(manifest, "loadgen", "ref"))
+    )
+    out(
         "host instance-type %s nproc %s loadavg1 %s kernel %s"
         % (
             field(manifest, "host", "instance_type"),
@@ -384,7 +388,7 @@ def analyze(mode, path, opts):
                 % (corpus["data_db_files"], MIN_SSTABLES_FLOOR),
             )
 
-    pairs, admission, session = collect_pairs(
+    pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
     )
     if len(pairs) < manifest["replicates_requested"]:
@@ -470,6 +474,55 @@ def compute(mode, pairs, opts):
         "base_ci": (base_lo, base_hi),
         "head_ci": (head_lo, head_hi),
     }
+
+
+def collect_pairs_checked(manifest, manifest_dir, mode, declared_steps):
+    """`collect_pairs`, plus the evidence floor a verdict may not rest below.
+
+    REVISED RULING (round 10). Partial corroboration stays a disclosure: the
+    observed subset genuinely constrains the unobserved one, because the pin is
+    ONE manifest-level value passed identically to both arms and the driver dies
+    on any per-run mismatch it can read. But that argument has a qualifier -- "it
+    can read" -- and when NOTHING was read it protects nothing: the batch size,
+    the admission provenance and the merge-path pin are all unverified, and a
+    decisive verdict behind a disclosure is a verdict resting on absence. Which
+    is the single thing this instrument exists not to do.
+
+    Applied to controls too. This is about whether evidence exists, not about
+    which band a verdict is scored against.
+    """
+    pairs, admission, session = collect_pairs(
+        manifest, manifest_dir, mode, declared_steps
+    )
+    if admission.state == "none":
+        raise Unmeasured(
+            "startup-unobserved",
+            "no server's startup line was read for any of the %d runs, so the "
+            "admission ceiling, the batch size and the provenance of all three are "
+            "unverified. A disclosure is the right answer to a PARTIAL "
+            "observation, where the runs that were read constrain the ones that "
+            "were not; it is the wrong answer to no observation at all, which "
+            "leaves the verdict resting on absence" % admission.total,
+        )
+    # ONE CLIENT FOR BOTH ARMS, CHECKED RATHER THAN ASSUMED. The driver builds a
+    # single load generator, but a manifest is data and this analyzer does not
+    # get to assume which driver produced it.
+    commits = {}
+    for entry in manifest["runs"]:
+        commit = entry.get("loadgen_commit")
+        if commit:
+            commits.setdefault(str(commit), set()).add(entry.get("arm"))
+    if len(commits) > 1:
+        raise Unmeasured(
+            "loadgen-provenance-mismatch",
+            "the runs were driven by more than one load generator (%s); a client "
+            "that varies with the server commit turns a client-side change into "
+            "apparent server throughput, and no amount of dispersion reporting "
+            "would reveal it"
+            % ", ".join("%s used by %s" % (c, ",".join(sorted(a)))
+                        for c, a in sorted(commits.items())),
+        )
+    return pairs, admission, session
 
 
 def report(mode, manifest, pairs, admission, opts, stats, session):

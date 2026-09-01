@@ -110,6 +110,8 @@ ab-throughput.sh [options]
 
   --corpus <dir>            SSTable root served as `cqlite-flight --data-dir` (required)
   --ticket-template <file>  connector-shaped FlightTicket JSON               (required)
+  --loadgen-ref <rev>       commit to build the ONE flight-loadgen from, used by
+                            BOTH arms                       (default: --head-ref)
   --base-ref <rev>          BASE arm commit                     (default cfa93fe99^)
   --head-ref <rev>          HEAD arm commit                     (default cfa93fe99)
   --replicates <N>          interleaved replicate pairs (floor 5)        (default 7)
@@ -165,6 +167,7 @@ USAGE
 # ---------------------------------------------------------------------------
 CORPUS=''
 TICKET_TEMPLATE=''
+LOADGEN_REF=''
 BASE_REF='cfa93fe99^'
 HEAD_REF='cfa93fe99'
 REPLICATES=7
@@ -198,6 +201,7 @@ HEAD_SERVER_EXTRA=''
 # selftest-analyze.sh that requires every `shift 2` arm to appear in this list.
 VALUE_OPTS="--corpus --ticket-template --base-ref --head-ref --replicates \
 --work-dir --repo --shape --ramp --step-duration --port --server-cpus \
+--loadgen-ref \
 --client-cpus --min-corpus-bytes --min-sstables --merge-path \
 --max-concurrent-scans --batch-size --max-batch-bytes \
 --admission-wait-timeout-ms --rows-declared --temperature --control \
@@ -211,6 +215,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --corpus)            CORPUS="${2:-}";           shift 2 ;;
     --ticket-template)   TICKET_TEMPLATE="${2:-}";  shift 2 ;;
+    --loadgen-ref)       LOADGEN_REF="${2:-}";      shift 2 ;;
     --base-ref)          BASE_REF="${2:-}";         shift 2 ;;
     --head-ref)          HEAD_REF="${2:-}";         shift 2 ;;
     --replicates)        REPLICATES="${2:-}";       shift 2 ;;
@@ -435,17 +440,28 @@ is_our_server() { # <pid>
   [ "$(awk '{print $22}' "/proc/$1/stat" 2>/dev/null || true)" = "$SRV_START" ]
 }
 
+# ONE REAP, IDEMPOTENT. This is the THIRD pass at "when is the pid still ours":
+# round 2 cleared it first for re-entrancy, round 5 left it set on the
+# readiness-failure path, and clearing it first then bit again -- a signal during
+# the 30-second wait left `cleanup` seeing no server, so it skipped the kill and
+# released the session lock with the child still running. Three passes at one
+# ordering question means the TWO-STATE VARIABLE is the problem.
+#
+# So the identity is released only when the process is CONFIRMED GONE, and the
+# function is safe to run twice: `kill` on a dead pid is a no-op, and
+# `is_our_server` -- which round 5 added and which compares the recorded start
+# time -- makes signalling a REUSED pid impossible. That check is what made the
+# clear-first trick unnecessary: re-entering can no longer signal a stranger, so
+# there is no window in which the identity is neither held nor released.
 reap_server() {
   [ -n "$SRV_PID" ] || return 0
   local pid="$SRV_PID"
-  # Cleared FIRST, so a signal arriving during the reap cannot re-enter it.
-  SRV_PID=''
-  # Checked before the TERM as well as before the KILL: the window between the
-  # server exiting and us signalling is exactly where a reused pid lives, and
-  # TERM to a peer's process is no better than KILL to one.
   if ! is_our_server "$pid"; then
-    SRV_START=''
+    # Already gone, or the number now belongs to somebody else. Either way this
+    # session no longer owns it.
     wait "$pid" 2>/dev/null || true
+    SRV_PID=''
+    SRV_START=''
     return 0
   fi
   kill "$pid" 2>/dev/null || true
@@ -462,6 +478,9 @@ reap_server() {
     kill -9 "$pid" 2>/dev/null || true
   fi
   wait "$pid" 2>/dev/null || true
+  # Released ONLY here, after the process is confirmed gone -- so a signal at any
+  # earlier point finds the identity still held and finishes the job.
+  SRV_PID=''
   SRV_START=''
 }
 
@@ -528,6 +547,12 @@ manifest = {
     "arms": {
         "base": {"commit": env("AB_BASE_SHA", "NOT-RECORDED"), "ref": env("AB_BASE_REF", "")},
         "head": {"commit": env("AB_HEAD_SHA", "NOT-RECORDED"), "ref": env("AB_HEAD_REF", "")},
+    },
+    # ONE client, recorded once at session level AND per run, so the analyzer can
+    # check rather than assume that both arms were driven by the same binary.
+    "loadgen": {
+        "commit": env("AB_LOADGEN_SHA", "NOT-RECORDED"),
+        "ref": env("AB_LOADGEN_REF", ""),
     },
     "workload": {
         "shape": env("AB_SHAPE", ""),
@@ -733,7 +758,12 @@ HEAD_SHA="$(resolve "$HEAD_REF")"
 [ -n "$BASE_SHA" ] || die arm-ref-unresolvable "--base-ref $BASE_REF does not resolve to a commit in $REPO"
 [ -n "$HEAD_SHA" ] || die arm-ref-unresolvable "--head-ref $HEAD_REF does not resolve to a commit in $REPO"
 [ "$BASE_SHA" != "$HEAD_SHA" ] || die arm-refs-identical "both arms resolve to $BASE_SHA"
+LOADGEN_SHA_WANTED="$(resolve "${LOADGEN_REF:-$HEAD_REF}")"
+[ -n "$LOADGEN_SHA_WANTED" ] || die arm-ref-unresolvable \
+  "--loadgen-ref ${LOADGEN_REF:-$HEAD_REF} does not resolve to a commit in $REPO"
 export AB_BASE_SHA="$BASE_SHA" AB_HEAD_SHA="$HEAD_SHA"
+export AB_LOADGEN_SHA="$LOADGEN_SHA_WANTED" AB_LOADGEN_REF="${LOADGEN_REF:-$HEAD_REF}"
+say "loadgen ref ${LOADGEN_REF:-$HEAD_REF} commit $LOADGEN_SHA_WANTED -- ONE client for both arms, so the client cannot vary with the server commit"
 say "arm base ref $BASE_REF commit $BASE_SHA"
 say "arm head ref $HEAD_REF commit $HEAD_SHA"
 
@@ -789,35 +819,74 @@ fi
 # ---------------------------------------------------------------------------
 declare -A ARM_BIN_DIR
 
-build_arm() { # <arm> <sha>
-  local arm="$1" sha="$2"
-  local wt="$WORK_DIR/wt-$arm" target="$WORK_DIR/target-$arm"
-  say "build $arm commit $sha worktree $wt target-dir $target"
+# ONE LOAD GENERATOR FOR BOTH ARMS. Building it per arm made the CLIENT vary with
+# the server commit, so any client-side change between the two refs would be
+# attributed to server throughput -- a confound no amount of dispersion reporting
+# could reveal, because both arms would be internally consistent. The design
+# isolates ONE variable, and only the server legitimately differs per arm.
+LOADGEN_BIN=''
+LOADGEN_SHA=''
+
+# EVERY WORKTREE IS VERIFIED BEFORE ANY OF THEM IS COMPILED. Preparing and
+# building one at a time meant a dirty or wrong-commit worktree was found only
+# after an earlier arm had already been built -- the same "fails after the
+# expensive step" economics as the relative work directory and the missing
+# command, and on a metered box the cost is the same.
+prepare_worktree() { # <name> <sha>
+  # Split deliberately: in a single `local a=$1 b=$a`, bash declares BOTH names
+  # before assigning either, so `$a` is unset when `b` is evaluated -- which
+  # under `set -u` is a hard error, and which the end-to-end case caught on its
+  # first run.
+  local name="$1" sha="$2"
+  local wt="$WORK_DIR/wt-$name"
   if [ ! -d "$wt" ]; then
-    git -C "$REPO" worktree add --detach "$wt" "$sha" > "$LOG_DIR/worktree-$arm.log" 2>&1 \
-      || die worktree-failed "git worktree add for $arm failed; see $LOG_DIR/worktree-$arm.log"
+    git -C "$REPO" worktree add --detach "$wt" "$sha" > "$LOG_DIR/worktree-$name.log" 2>&1 \
+      || die worktree-failed "git worktree add for $name failed; see $LOG_DIR/worktree-$name.log"
   fi
   local at
   at="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
   [ "$at" = "$sha" ] || die worktree-wrong-commit \
-    "$wt is at ${at:-an unreadable HEAD} but arm $arm is $sha -- a pre-existing worktree was reused at the wrong commit; remove $wt and re-run"
-  # A sha is not a tree. A leftover worktree carrying uncommitted edits builds
-  # DIFFERENT CODE while the manifest records the clean sha -- the same fact this
-  # repository's pre-merge doctrine records as "commit: cannot see a dirty tree".
+    "$wt is at ${at:-an unreadable HEAD} but $name is pinned to $sha; remove $wt and re-run"
   local dirty
   dirty="$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null || echo UNREADABLE)"
   [ -z "$dirty" ] || die worktree-dirty \
     "$wt is at the right commit but is NOT CLEAN, so it would build code the manifest does not describe; remove $wt and re-run. First entries: $(printf '%s' "$dirty" | head -3 | tr '\n' ';')"
+  say "worktree $name verified at $sha"
+}
+
+build_loadgen() { # <sha>
+  local sha="$1" target="$WORK_DIR/target-loadgen"
+  say "build loadgen commit $sha target-dir $target"
+  ( cd "$WORK_DIR/wt-loadgen" && CARGO_TARGET_DIR="$target" cargo build --release -p flight-loadgen ) \
+    > "$LOG_DIR/build-loadgen.log" 2>&1 \
+    || die build-failed "the load-generator build failed; see $LOG_DIR/build-loadgen.log"
+  [ -x "$target/release/flight-loadgen" ] || die build-incomplete \
+    "$target/release/flight-loadgen was not produced"
+  LOADGEN_BIN="$target/release/flight-loadgen"
+  LOADGEN_SHA="$sha"
+  say "build loadgen complete -- BOTH arms will use $LOADGEN_BIN"
+}
+
+build_arm() { # <arm> <sha>
+  local arm="$1" sha="$2"
+  local wt="$WORK_DIR/wt-$arm" target="$WORK_DIR/target-$arm"
+  say "build $arm commit $sha worktree $wt target-dir $target"
+  # ONLY the server. The load generator is built once, separately, from its own
+  # pinned ref -- see build_loadgen.
   ( cd "$wt" && CARGO_TARGET_DIR="$target" cargo build --release \
-      -p cqlite-flight -p flight-loadgen ) > "$LOG_DIR/build-$arm.log" 2>&1 \
+      -p cqlite-flight ) > "$LOG_DIR/build-$arm.log" 2>&1 \
     || die build-failed "the $arm build failed; see $LOG_DIR/build-$arm.log"
   local bin="$target/release"
   [ -x "$bin/cqlite-flight" ]  || die build-incomplete "$bin/cqlite-flight was not produced"
-  [ -x "$bin/flight-loadgen" ] || die build-incomplete "$bin/flight-loadgen was not produced"
   ARM_BIN_DIR["$arm"]="$bin"
   say "build $arm complete"
 }
 
+# Verify all three, THEN compile all three.
+prepare_worktree loadgen "$LOADGEN_SHA_WANTED"
+prepare_worktree base "$BASE_SHA"
+prepare_worktree head "$HEAD_SHA"
+build_loadgen "$LOADGEN_SHA_WANTED"
 build_arm base "$BASE_SHA"
 build_arm head "$HEAD_SHA"
 
@@ -923,14 +992,11 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
 
   local endpoint_addr
   endpoint_addr="$(wait_until_listening "$srv" "$server_log")" || {
-    # SRV_PID IS DELIBERATELY LEFT SET. Two opposite hazards, two opposite
-    # orders, and getting them the same way round breaks one of them:
-    #   * inside `reap_server`, the pid is cleared FIRST, so a signal arriving
-    #     mid-reap cannot re-enter and signal the same pid twice;
-    #   * here, the server may be ALIVE and merely silent (it never printed its
-    #     readiness line), so clearing before `die` would strand it -- `cleanup`
-    #     reaps whatever `SRV_PID` still names, and this is precisely the case
-    #     where it must still name something.
+    # SRV_PID is left set, as it now is everywhere: the server may be ALIVE and
+    # merely silent (it never printed its readiness line), and `cleanup` reaps
+    # whatever `SRV_PID` names. With one release point -- after the process is
+    # confirmed gone -- this is no longer a special case, which is the point of
+    # the change.
     die server-never-listened \
       "the $tag server never reported a post-bind listening line while alive; readiness is taken from ITS OWN post-bind line, not from a port probe, so a port answered by somebody else cannot satisfy it. See $server_log"
   }
@@ -1002,7 +1068,7 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   [ -n "$CLIENT_CPUS" ] && client_prefix+=(taskset -c "$CLIENT_CPUS")
 
   if [ "$PREWARM" -eq 1 ] && [ "$TEMPERATURE" = "warm" ]; then
-    "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "$endpoint" \
+    "${client_prefix[@]}" "$LOADGEN_BIN" --endpoint "$endpoint" \
       --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
       --step-duration "$STEP_DURATION" --round "$tag-prewarm" --out /dev/null \
       > "$LOG_DIR/$tag.prewarm.log" 2>&1 \
@@ -1014,7 +1080,7 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   # has a null path for server_cpu_seconds and a silent zero would defeat it.
   cpu0="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || true)"
   local rc=0
-  "${client_prefix[@]}" "$bin/flight-loadgen" --endpoint "$endpoint" \
+  "${client_prefix[@]}" "$LOADGEN_BIN" --endpoint "$endpoint" \
     --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
     --step-duration "$STEP_DURATION" --round "$tag" --out "$jsonl" \
     > "$LOG_DIR/$tag.loadgen.log" 2>&1 || rc=$?
@@ -1037,13 +1103,14 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
 
   python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" \
     "$admission_observed" "$admission_source" "$observed_batch" \
-    "$observed_maxbytes" "$observed_wait" "$position" <<'PYEOF'
+    "$observed_maxbytes" "$observed_wait" "$position" "$LOADGEN_SHA" <<'PYEOF'
 import json
 import sys
 
 (runs_path, arm, rep, filename, temperature, cpu0, cpu1, hz,
  admission_observed, admission_source, batch_size_observed,
- max_batch_bytes_observed, wait_timeout_ms_observed, position) = sys.argv[1:15]
+ max_batch_bytes_observed, wait_timeout_ms_observed, position,
+ loadgen_commit) = sys.argv[1:16]
 try:
     server_cpu_s = (int(cpu1) - int(cpu0)) / float(hz)
 except (ValueError, ZeroDivisionError):
@@ -1069,6 +1136,7 @@ entry = {
     "wait_timeout_ms_observed": wait_timeout_ms_observed,
     # The ACTUAL executed order, not the parity rule that chose it.
     "position_in_pair": int(position),
+    "loadgen_commit": loadgen_commit,
 }
 with open(runs_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(entry, sort_keys=True) + "\n")
