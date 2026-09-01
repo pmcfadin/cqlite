@@ -121,6 +121,14 @@ const SUBJECT_ROW_ID: i32 = 1;
 /// schema form and the mismatch still bites.
 const DECLARED_CM: &str = "m_list_vals map<text, frozen<list<int>>>,";
 const MISMATCHED_CM: &str = "m_list_vals map<int, frozen<list<int>>>,";
+/// A SECOND #3612 check class over the same bytes, exercising a DIFFERENT
+/// validator: `InetAddressSerializer` accepts 0, 4 or 16 bytes only (it returns
+/// early on empty and otherwise delegates to `InetAddress.getByAddress` — read at
+/// `git show cassandra-5.0.8:src/java/org/apache/cassandra/serializers/InetAddressSerializer.java`).
+/// The 5-byte `evens` key fails it. One class reaching the surface could be a
+/// property of that one code path; two different validators reaching it is the
+/// prerequisite relationship #3612 argues for.
+const MISMATCHED_CM_INET: &str = "m_list_vals map<inet, frozen<list<int>>>,";
 
 /// The fixture's complex columns in on-disk cell order, measured from the golden.
 /// The `break` used to drop the subject and everything after it; the CONTROL now
@@ -188,6 +196,10 @@ fn table_dir() -> PathBuf {
 /// `.cql` makes this test FAIL rather than silently running against the unmodified schema and
 /// pass for the wrong reason.
 fn mismatched_schema_in(dir: &Path) -> PathBuf {
+    schema_with_key_type_in(dir, MISMATCHED_CM)
+}
+
+fn schema_with_key_type_in(dir: &Path, mismatched: &str) -> PathBuf {
     let src = committed_schema();
     let text = std::fs::read_to_string(&src)
         .unwrap_or_else(|e| panic!("committed schema unreadable {src:?}: {e}"));
@@ -196,9 +208,9 @@ fn mismatched_schema_in(dir: &Path) -> PathBuf {
         "the committed schema no longer declares `{DECLARED_CM}` — update this test \
          rather than letting it run against an unmodified schema"
     );
-    let mutated = text.replace(DECLARED_CM, MISMATCHED_CM);
+    let mutated = text.replace(DECLARED_CM, mismatched);
     assert!(
-        mutated.contains(MISMATCHED_CM) && !mutated.contains(DECLARED_CM),
+        mutated.contains(mismatched) && !mutated.contains(DECLARED_CM),
         "substitution did not apply"
     );
     let out = dir.join("cm-width-mismatch.cql");
@@ -241,7 +253,7 @@ async fn read_row(schema: PathBuf) -> Result<BTreeMap<String, Value>, Error> {
 /// The `on_disk` half is what identifies the MIS-DECLARATION as the cause: the
 /// dispatch ran on the supplied `map<int, …>` while the header describes the real
 /// `map<text, …>` bytes, and only naming both points a reader at the declaration.
-fn assert_is_the_cell_path_key_failure(err: &Error) {
+fn assert_is_the_cell_path_key_failure(err: &Error, declared_key: &str) {
     let Error::ColumnDecode {
         column,
         column_type,
@@ -258,7 +270,7 @@ fn assert_is_the_cell_path_key_failure(err: &Error) {
         column, SUBJECT_COLUMN,
         "the error must NAME the failing column"
     );
-    for expected in ["map<int", "map<text"] {
+    for expected in [declared_key, "map<text"] {
         assert!(
             column_type.contains(expected),
             "column_type must name BOTH the dispatch type the decode ran on and the \
@@ -286,7 +298,7 @@ fn is_absent(v: Option<&Value>) -> bool {
 async fn a_cell_path_key_error_fails_the_select_it_does_not_truncate_the_row() {
     let tmp = tempfile::tempdir().expect("tempdir");
     match read_row(mismatched_schema_in(tmp.path())).await {
-        Err(e) => assert_is_the_cell_path_key_failure(&e),
+        Err(e) => assert_is_the_cell_path_key_failure(&e, "map<int"),
         Ok(row) => {
             // Diagnose the swallow explicitly rather than reporting a bare
             // "expected Err": the shape below IS the defect #3721 removed, and a
@@ -302,6 +314,23 @@ async fn a_cell_path_key_error_fails_the_select_it_does_not_truncate_the_row() {
                  {present:?}; expected an Error::ColumnDecode naming '{SUBJECT_COLUMN}'"
             );
         }
+    }
+}
+
+/// The SECOND #3612 check class, reaching the same surface through a DIFFERENT
+/// validator: `inet` accepts 0, 4 or 16 bytes, and the 5-byte `evens` key fails
+/// it. One class surfacing could be a property of one code path; two say the
+/// swallow is gone from the handler they share.
+#[tokio::test]
+async fn the_inet_width_check_reaches_the_surface_the_same_way() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let schema = schema_with_key_type_in(tmp.path(), MISMATCHED_CM_INET);
+    match read_row(schema).await {
+        Err(e) => assert_is_the_cell_path_key_failure(&e, "map<inet"),
+        Ok(_) => panic!(
+            "the SELECT reported success after the cell-path key failed `inet`'s \
+             0/4/16-byte check — the swallow is back (issue #3721)"
+        ),
     }
 }
 
@@ -336,7 +365,7 @@ async fn the_compaction_read_surfaces_the_same_error() {
         .iterate_all_partitions_for_compaction(Some(&schema))
         .await
     {
-        Err(e) => assert_is_the_cell_path_key_failure(&e),
+        Err(e) => assert_is_the_cell_path_key_failure(&e, "map<int"),
         Ok(rows) => panic!(
             "the compaction read reported success over {} partition rows after the \
              cell-path key failed its width check — the swallow is back (issue #3721)",
