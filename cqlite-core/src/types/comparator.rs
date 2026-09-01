@@ -328,7 +328,7 @@ impl ComparatorType {
             ComparatorType::Frozen(inner_comparator) => {
                 self.compare_frozen(left, right, inner_comparator)
             }
-            ComparatorType::Custom(_) => self.compare_custom(left, right),
+            ComparatorType::Custom(name) => super::comparator_custom::compare(name, left, right),
         }
     }
 
@@ -419,7 +419,9 @@ impl ComparatorType {
                 field_comparators, ..
             } => field_comparators.iter().all(|(_, c)| c.supports_ordering()),
             ComparatorType::Frozen(inner_comparator) => inner_comparator.supports_ordering(),
-            ComparatorType::Custom(_) => false, // Custom types only support equality by default
+            // `inet` / `time` order by value (issue #3790); the residual
+            // unresolved-UDT / unknown name does not.
+            ComparatorType::Custom(name) => super::comparator_custom::supports_ordering(name),
         }
     }
 
@@ -811,13 +813,6 @@ impl ComparatorType {
                 "Type mismatch: expected frozen values".to_string(),
             )),
         }
-    }
-
-    fn compare_custom(&self, left: &Value, right: &Value) -> Result<Ordering> {
-        // For custom types, we can only do equality comparison based on string representation
-        let l_str = format!("{}", left);
-        let r_str = format!("{}", right);
-        Ok(l_str.cmp(&r_str))
     }
 }
 
