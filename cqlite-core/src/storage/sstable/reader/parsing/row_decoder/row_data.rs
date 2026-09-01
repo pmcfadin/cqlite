@@ -1,7 +1,10 @@
 use super::*;
 
 // Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
-use super::column_decode_error::{column_decode_failure, dispatch_type, row_body_exhausted};
+use super::column_decode_error::{
+    column_decode_failure, column_escaped_row_bound, dispatch_type, row_body_exhausted,
+    row_body_under_consumed,
+};
 
 impl V5CompressedLegacyParser {
     /// Parse row data (header + cells) and return cells with new offset
@@ -373,6 +376,14 @@ impl V5CompressedLegacyParser {
         // #3094: PRESENCE of a tombstone cell — never a timestamp (`has_shadow_evidence`).
         let mut agg_has_deleted_cell = false;
 
+        // Issue #3809: the on-disk index of the LAST column whose decoder ran and
+        // returned an offset — the column the walk ENDED on. Reported by the
+        // post-loop reconciliation below purely as a starting point for an operator;
+        // it is NOT an attribution of the deficit (see `row_body_under_consumed`).
+        // A `usize` index rather than a name/type pair, so the hot path allocates
+        // nothing: the pair is derived once, only on the failure path.
+        let mut last_decoded_idx: Option<usize> = None;
+
         for (col_idx, ctp) in columns_in_order.iter().enumerate() {
             // Skip columns marked MISSING by the row's bitmap (inline, no per-row
             // allocation). `col_idx` is the ON-DISK column index — exactly what the
@@ -421,11 +432,19 @@ impl V5CompressedLegacyParser {
 
             // Issue #3721: bytes exhausted with a column the row declares PRESENT still
             // outstanding is TRUNCATION, never a row boundary — see `row_body_exhausted`.
-            if offset >= data.len() {
+            //
+            // Issue #3809: the bound is THIS ROW's authoritative end, not `data.len()`.
+            // `data` is the whole materialised parse unit (every following row and
+            // partition), so a corrupt row declaring a SHORT `row_size` left outstanding
+            // columns bytes to read and they decoded the NEXT row's data into this row —
+            // a plausible wrong value reported as success, not a detectable failure.
+            // `after_row_offset <= data.len()` is already proven above by the #2481
+            // `row_size > available` rejection, so this is strictly tighter.
+            if offset >= after_row_offset {
                 return Err(row_body_exhausted(
                     column,
                     header_type,
-                    (offset, data.len()),
+                    (offset, after_row_offset, data.len()),
                     (col_idx, columns_in_order.len(), cells.len()),
                 ));
             }
@@ -517,6 +536,22 @@ impl V5CompressedLegacyParser {
                 };
                 match parse_result {
                     Ok((value, new_offset, col_meta)) => {
+                        // Issue #3809: a decoder that returned an offset PAST this row's
+                        // AUTHORITATIVE end read bytes belonging to the next row or
+                        // partition, so the value it just produced is not this row's data.
+                        // Framing stays correct either way (`next_offset` derives from
+                        // `row_size`, never from where the columns stopped), which is exactly
+                        // what made this a SILENT wrong answer instead of a detectable
+                        // failure. Refuse it by name.
+                        if new_offset > after_row_offset {
+                            return Err(column_escaped_row_bound(
+                                column,
+                                Some(complex_type),
+                                (offset, new_offset, after_row_offset),
+                                (col_idx, columns_in_order.len()),
+                            ));
+                        }
+                        last_decoded_idx = Some(col_idx);
                         tracing::debug!(
                             "V5CompressedLegacy:   ✓ Complex column {} '{}' = {:?}, consumed {} bytes",
                             col_idx, column.name, value, new_offset - offset
@@ -636,6 +671,22 @@ impl V5CompressedLegacyParser {
                     reader,
                 ) {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
+                        // Issue #3809: a decoder that returned an offset PAST this row's
+                        // AUTHORITATIVE end read bytes belonging to the next row or
+                        // partition, so the value it just produced is not this row's data.
+                        // Framing stays correct either way (`next_offset` derives from
+                        // `row_size`, never from where the columns stopped), which is exactly
+                        // what made this a SILENT wrong answer instead of a detectable
+                        // failure. Refuse it by name.
+                        if new_offset > after_row_offset {
+                            return Err(column_escaped_row_bound(
+                                column,
+                                header_type,
+                                (offset, new_offset, after_row_offset),
+                                (col_idx, columns_in_order.len()),
+                            ));
+                        }
+                        last_decoded_idx = Some(col_idx);
                         tracing::debug!(
                             "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
                             col_idx,
@@ -825,6 +876,45 @@ impl V5CompressedLegacyParser {
                 "V5CompressedLegacy: Not enough bytes for row data at offset {} (need {}, have {})",
                 row_size_counted_from, row_size, remaining
             )));
+        }
+
+        // Issue #3809: RECONCILE the column walk against the row's authoritative
+        // extent. `after_cells_offset` is the same value as `after_row_offset` above
+        // (both are `(row_metadata_offset + row_size_vint_len) + row_size`), recomputed
+        // here where the return offset is formed.
+        //
+        // Over-consumption is already refused per column (`column_escaped_row_bound`),
+        // so what this catches is the CONVERSE — bytes inside this row body that no
+        // column accounted for. That is never benign: `next_offset` comes from
+        // `row_size`, so a deficit does not desynchronise the walk and the row is
+        // returned as `Ok` with values decoded from a cursor that was misaligned
+        // somewhere inside the body. Every legitimately non-advancing path is
+        // enumerated on `row_body_under_consumed` (bitmap-absent columns consume no
+        // bytes; the dropped-column, shadow/TTL-drop and `collection_absent` paths all
+        // advance the offset and suppress only the emit), so none of them can reach
+        // here short.
+        if offset != after_cells_offset {
+            debug_assert!(
+                offset < after_cells_offset,
+                "over-consumption is refused per column by column_escaped_row_bound"
+            );
+            let last = last_decoded_idx.map(|idx| {
+                let ctp = &columns_in_order[idx];
+                let declared = ctp
+                    .schema
+                    .map(|c| c.data_type.as_str())
+                    .or(ctp.header_type)
+                    .unwrap_or("blob");
+                (
+                    Arc::clone(&ctp.name),
+                    dispatch_type(declared, ctp.header_type),
+                )
+            });
+            return Err(row_body_under_consumed(
+                last.as_ref().map(|(n, t)| (&**n, t.as_str())),
+                (offset, after_cells_offset),
+                (columns_in_order.len(), cells.len()),
+            ));
         }
 
         // No trailing field - next partition/row starts immediately

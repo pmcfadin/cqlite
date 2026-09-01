@@ -182,25 +182,156 @@ pub(super) fn column_decode_failure(
 /// decoding fewer cells than the column set names, and then let row assembly return
 /// `Ok` with this column and every successor silently absent.
 ///
+/// # The bound is the ROW's end, not the parse unit's (issue #3721 / #3809)
+///
+/// `row_end` is this row's authoritative end — `(row_metadata_offset +
+/// row_size_vint_len) + row_size`, Cassandra's `getFilePointer()` arithmetic (issue
+/// #237) — and NOT `data.len()`. The parse unit holds every following row and
+/// partition, so a corrupt row declaring a SHORT `row_size` leaves outstanding
+/// columns plenty of readable bytes: bounding on `data.len()` let them decode out of
+/// the NEXT row and return plausible garbage as this row's values. `row_end` is
+/// proven `<= data.len()` before the column loop (the #2481 `row_size > available`
+/// rejection), so this bound is strictly tighter and can never admit a read the
+/// looser one refused. `data_len` is still REPORTED, because "the row claimed bytes
+/// it does not own" and "the file ends here" are different operator situations and
+/// the pair distinguishes them.
+///
 /// `progress` is `(col_idx, on_disk_column_count, cells_decoded)` and `bounds` is
-/// `(offset, data_len)`; both are reported so the failure names where the body
-/// stopped and how much of the column set was consumed.
+/// `(offset, row_end, data_len)`; all are reported so the failure names where the
+/// body stopped, where the row ends, and how much of the column set was consumed.
 pub(super) fn row_body_exhausted(
     column: &crate::schema::Column,
     header_type: Option<&str>,
-    bounds: (usize, usize),
+    bounds: (usize, usize, usize),
     progress: (usize, usize, usize),
 ) -> Error {
-    let (offset, data_len) = bounds;
+    let (offset, row_end, data_len) = bounds;
     let (col_idx, column_count, cells_decoded) = progress;
     let ty = dispatch_type(&column.data_type, header_type);
     let cause = Error::corruption(format!(
-        "row body exhausted at offset {offset} (data length {data_len}) with on-disk column \
-         {col_idx} of {column_count} ('{}') still declared PRESENT by the row's column set; \
-         {cells_decoded} cell(s) decoded — truncated or corrupt row body",
+        "row body exhausted at offset {offset} (this row's body ends at {row_end}; the parse \
+         unit is {data_len} bytes) with on-disk column {col_idx} of {column_count} ('{}') still \
+         declared PRESENT by the row's column set; {cells_decoded} cell(s) decoded — truncated \
+         or corrupt row body",
         column.name
     ));
     column_decode_failure(&column.name, &ty, offset, cause)
+}
+
+/// A column's decoder returned an offset PAST the row's authoritative end — so it
+/// read bytes belonging to the NEXT row or partition, and the value it produced is
+/// not this row's data (issue #3721 / #3809).
+///
+/// # Why this is the dangerous shape, and why it is FATAL
+///
+/// A corrupt row that declares a SHORT `row_size` and is followed by more data
+/// leaves the cell decoders with plenty of readable bytes: they are handed the
+/// whole materialised parse unit, so a cell whose length prefix or fixed width
+/// runs past the row boundary decodes SUCCESSFULLY out of the following row's
+/// bytes. Framing stays intact — row assembly's `next_offset` derives from the
+/// authoritative `row_size`, never from where the columns stopped — so the walk
+/// does not desynchronise and nothing downstream looks wrong. The read returns a
+/// plausible garbage value and reports SUCCESS, which is strictly worse than a
+/// failure: a wrong answer is indistinguishable from a right one.
+///
+/// The row's authoritative end is `(row_metadata_offset + row_size_vint_len) +
+/// row_size` — Cassandra's own `getFilePointer()` arithmetic (issue #237), the same
+/// value row assembly returns as `next_offset`. A cell may not cross it: at
+/// `cassandra-5.0.8`, `db/rows/UnfilteredSerializer.deserializeRowBody` reads the
+/// row body under that bound, so a cell extending past its own row's extent cannot
+/// occur in well-formed data.
+///
+/// Nothing here can recover: the bytes consumed past the boundary belong to another
+/// row, so neither the value nor a resume point inside this row is knowable.
+/// Reported as [`Error::ColumnDecode`] like every other per-column failure, so the
+/// row/partition loops route it through [`end_of_partition_or_bail`] instead of
+/// mistaking it for end-of-partition.
+///
+/// `bounds` is `(column_start, returned_offset, row_end)`; `progress` is
+/// `(col_idx, on_disk_column_count)`.
+pub(super) fn column_escaped_row_bound(
+    column: &crate::schema::Column,
+    header_type: Option<&str>,
+    bounds: (usize, usize, usize),
+    progress: (usize, usize),
+) -> Error {
+    let (column_start, returned_offset, row_end) = bounds;
+    let (col_idx, column_count) = progress;
+    let ty = dispatch_type(&column.data_type, header_type);
+    let cause = Error::corruption(format!(
+        "on-disk column {col_idx} of {column_count} ('{}') decoded from offset {column_start} \
+         and returned offset {returned_offset}, PAST the end of its own row body at {row_end} \
+         (from the row header's authoritative row_size) — the decoder consumed bytes belonging \
+         to the next row or partition, so the value it produced is not this row's data; \
+         truncated or corrupt row body",
+        column.name
+    ));
+    column_decode_failure(&column.name, &ty, column_start, cause)
+}
+
+/// The per-column walk finished SHORT of the row's authoritative end: bytes inside
+/// this row body were accounted for by no column the row declares present (issue
+/// #3721 / #3809). The exact converse of [`row_body_exhausted`], and the other half
+/// of [`column_escaped_row_bound`].
+///
+/// # Why a deficit cannot be tolerated
+///
+/// `row_size` is authoritative and the row loops advance by it, so an unconsumed
+/// remainder never desynchronises the walk — which is exactly why it is dangerous:
+/// the row is returned as `Ok`, with cells decoded from a cursor that was
+/// misaligned somewhere inside the body, and nothing says so. In well-formed data
+/// the columns TILE the body exactly: at `cassandra-5.0.8`,
+/// `db/rows/UnfilteredSerializer.deserializeRowBody` fixes the column set before
+/// the first cell and writes nothing after the last one — there is no trailing
+/// field and no padding, the next row starts immediately (issue #237).
+///
+/// # Every legitimately non-advancing path is accounted for, structurally
+///
+/// * a column the row's missing-columns bitmap declares ABSENT is `continue`d
+///   before any decode and has NO bytes on disk (the bitmap IS Cassandra's
+///   `Columns.serializer` subset encoding; an absent column is not written);
+/// * a DROPPED column (issue #1080) — on disk, absent from the supplied schema — IS
+///   decoded and its offset IS advanced; only the emit is suppressed;
+/// * the read-side shadow / TTL drop (issue #1741) and the `collection_absent`
+///   emptied-collection case both advance the offset first and suppress the emit
+///   only;
+/// * a pure row tombstone with no cell bytes returns long before this check.
+///
+/// So no legitimate path leaves the cursor short, and a deficit is corrupt or
+/// truncated data.
+///
+/// # Attribution: the column SET, not one column
+///
+/// WHICH column under-consumed is not knowable here — consumption is reported only
+/// by each decoder, and every one of them reported success. `last_column` is
+/// therefore the column the walk ENDED on (the last one decoded), named so an
+/// operator has a starting point, and the message says outright that the deficit
+/// belongs to the row's column set as a whole. Nothing is inferred from the bytes
+/// (issue #28).
+///
+/// Reported as [`Error::ColumnDecode`] because that is the variant the row and
+/// partition loops match on to tell a row-body failure from end-of-partition
+/// ([`end_of_partition_or_bail`]); an `Error::Corruption` here would be folded into
+/// "end of partition" and would silently truncate the partition — the very defect
+/// this module exists to remove.
+pub(super) fn row_body_under_consumed(
+    last_column: Option<(&str, &str)>,
+    bounds: (usize, usize),
+    progress: (usize, usize),
+) -> Error {
+    let (offset, row_end) = bounds;
+    let (column_count, cells_decoded) = progress;
+    let (name, ty) = last_column.unwrap_or(("<no column decoded>", "<row body>"));
+    let cause = Error::corruption(format!(
+        "row body under-consumed: the {column_count} on-disk column(s) this row declares left \
+         the cursor at offset {offset} but the row body ends at {row_end} (from the row header's \
+         authoritative row_size), leaving {} byte(s) inside this row accounted for by no column; \
+         {cells_decoded} cell(s) decoded, the walk ended on column '{name}' — the deficit \
+         belongs to the row's column set as a whole, and which column under-consumed is not \
+         knowable here; truncated or corrupt row body",
+        row_end.saturating_sub(offset)
+    ));
+    column_decode_failure(name, ty, offset, cause)
 }
 
 /// Is `e` the per-column decode failure that must never be mistaken for the end of
