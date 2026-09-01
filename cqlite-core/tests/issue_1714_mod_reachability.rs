@@ -14,6 +14,10 @@
 //! expansion. There is deliberately **no exception list**: an orphan is a
 //! failure to fix, never an entry to add.
 //!
+//! The vacuity floor (>= 400 enumerated files) is checked BEFORE the orphan
+//! assertion, so on a tree far smaller than today's it reds on the floor rather
+//! than reporting orphans — a census that lost its subject is not a pass.
+//!
 //! Residual risk is therefore a textual FALSE PASS — a `mod` declaration this
 //! walker reads that rustc does not, or a file rustc reaches by a route not
 //! modeled here. The guard is a cheap standing net, not a proof.
@@ -93,47 +97,25 @@ fn strip(src: &str) -> Stripped {
             }
             let raw = j > 0 && b[j - 1] == b'r';
             let start = i + 1;
-            let end;
-            if raw {
-                let mut k = start;
-                loop {
-                    if k >= b.len() {
-                        end = b.len();
-                        break;
-                    }
-                    if b[k] == b'"'
-                        && b[k + 1..]
-                            .iter()
-                            .take(hashes)
-                            .filter(|c| **c == b'#')
-                            .count()
-                            == hashes
-                    {
-                        end = k;
-                        break;
-                    }
-                    k += 1;
+            let mut k = start;
+            let end = loop {
+                if k >= b.len() {
+                    break b.len();
                 }
-                i = if end < b.len() { end + 1 + hashes } else { end };
+                match b[k] {
+                    b'\\' if !raw => k += 2,
+                    b'"' if !raw => break k,
+                    b'"' if b[k + 1..].iter().take_while(|c| **c == b'#').count() >= hashes => {
+                        break k
+                    }
+                    _ => k += 1,
+                }
+            };
+            i = if end < b.len() {
+                end + 1 + if raw { hashes } else { 0 }
             } else {
-                let mut k = start;
-                loop {
-                    if k >= b.len() {
-                        end = b.len();
-                        break;
-                    }
-                    if b[k] == b'\\' {
-                        k += 2;
-                        continue;
-                    }
-                    if b[k] == b'"' {
-                        end = k;
-                        break;
-                    }
-                    k += 1;
-                }
-                i = if end < b.len() { end + 1 } else { end };
-            }
+                end
+            };
             let body = String::from_utf8_lossy(&b[start.min(b.len())..end]).into_owned();
             text.push_str(&format!("\"@@S{}@@\"", literals.len()));
             literals.push(body);
