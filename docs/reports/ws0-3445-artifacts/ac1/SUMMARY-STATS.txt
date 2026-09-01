@@ -1,0 +1,47 @@
+========================================================================
+ROUTE 1 (PRIMARY) — annotate / DWARF inline-chain attribution
+
+narrow (decoder proper)  (n=6)
+   ac1-perfprof-1     1.6621%
+   ac1-perfprof-2     1.6695%
+   ac1-perfprof-3     1.7960%
+   ab-annotate-1      1.6686%
+   ab-annotate-2      1.6875%
+   ab-annotate-3      1.7326%
+   mean 1.7027%   median 1.6785%  min 1.6621  max 1.7960  stdev 0.0524
+
+wide (decoder + nom adapters)  (n=6)
+   ac1-perfprof-1     1.6941%
+   ac1-perfprof-2     1.7002%
+   ac1-perfprof-3     1.8352%
+   ab-annotate-1      1.7064%
+   ab-annotate-2      1.7282%
+   ab-annotate-3      1.7627%
+   mean 1.7378%   median 1.7173%  min 1.6941  max 1.8352  stdev 0.0539
+
+========================================================================
+ROUTE 2 (CROSS-CHECK) — #[inline(never)] probe build
+
+decode_unsigned symbol share  (n=6)
+   probe-rep-1        2.1541%
+   probe-rep-2        2.1575%
+   probe-rep-3        2.2349%
+   ab-probe-1         2.2166%
+   ab-probe-2         2.4583%
+   ab-probe-3         2.3530%
+   mean 2.2624%   median 2.2257%  min 2.1541  max 2.4583  stdev 0.1202
+
+========================================================================
+DISAGREEMENT (route2 - route1, narrow):  +0.5597 pp   ratio 1.329x
+  matched-co-tenancy A/B pairs only:
+    annotate mean 1.6962%  probe mean 2.3426%  delta +0.6464 pp  ratio 1.381x
+
+========================================================================
+AC2 — stall attribution
+  vint share of cycle_activity.stalls_total: 1.3652% / 1.2229% / 1.5315%
+  mean 1.3732%  vs cycle share mean 1.7027%
+  relative stall density = 0.806x the scan average
+
+========================================================================
+AC3 pre-registered threshold: 3.00%   annotate route mean: 1.7027%
+VERDICT: KILL  (margin 1.30 pp below threshold; even the probe's inflated 2.26% and the widest single rep 1.84% stay under 3%)
