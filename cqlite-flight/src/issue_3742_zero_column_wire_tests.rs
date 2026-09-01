@@ -23,7 +23,7 @@
 //! require a zero-column batch anywhere in the shipped read path. They record a
 //! transport-layer FACT the posture decision depends on.
 
-use super::{encode_do_get, DoGetStream, StreamProbe};
+use crate::streaming::{encode_do_get, DoGetStream, StreamProbe};
 use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::ipc::{root_as_message, MessageHeader};

@@ -796,10 +796,3 @@ mod egress_budget_tests;
 #[cfg(test)]
 #[path = "streaming_framing_tests.rs"]
 mod streaming_framing_tests;
-
-// MEASUREMENT ONLY (issue #3742): whether a zero-column `RecordBatch`'s explicit
-// row count survives the real `do_get` encoder + an arrow-flight client decode.
-// Own module so the files above stay under the campsite test threshold (#1135).
-#[cfg(test)]
-#[path = "issue_3742_zero_column_wire_tests.rs"]
-mod issue_3742_zero_column_wire_tests;
