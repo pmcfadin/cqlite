@@ -51,17 +51,29 @@
 #   VERDICT             exit  meaning
 #   PASS                  0   this component's own line reads PASS in a valid, complete run
 #   NOT-PASS              1   read affirmatively, and it is not a pass (FAIL/SKIP/absent)
-#   NOT-COMPLETE          5   the shared reader says this run is still RUNNING — the ONLY
-#                             RETRYABLE verdict. Poll on 5; never poll on 4.
-#   COULD-NOT-MEASURE     4   PERMANENTLY unmeasurable, or unmeasurable for a reason no
-#                             amount of waiting changes; the printed cause says which
+#   COULD-NOT-MEASURE     4   no verdict is available, WHATEVER THE REASON; the printed
+#                             cause says what was unmeasurable, quoting the shared reader
+#                             verbatim where the reader is what answered
 #   USAGE                64   the request is malformed, or is not this tool's to serve
 #
-# 4 AND 5 ARE DELIBERATELY DISTINCT. Folding "keep waiting" onto "never measurable" is the
-# #3750 hang shape reproduced one directory over: a caller polling one code cannot tell
-# them apart and spins forever. 5 is keyed AFFIRMATIVELY on the reader reporting RUNNING,
-# never on "not one of the bad ones" — a STALLED run publishes no liveness, which is not a
-# claim that it is alive, so it lands on 4.
+# THIS IS NOT A COMPLETION PROBE, AND IT HAS NO OPINION ABOUT LIVENESS — NEVER CALL IT IN A
+# LOOP. Establish completion FIRST: the process EXIT STATUS where you can observe it (for
+# `--only`, agent-gate.sh exits 3), else `scripts/gate-liveness.sh`, which is the
+# three-valued liveness authority (COMPLETE / RUNNING / STALLED / UNKNOWN) and the only one
+# of the two that may be polled. Then ask this for the verdict, once.
+#
+# A RETRYABILITY TAXONOMY WAS TRIED HERE AND DESCOPED (#3750, review round 2), and the
+# reason is worth keeping because it is the standing shape: a second exit code for "still
+# running" produced three independent findings in one round, and the harmful one was
+# unanswerable by patching. `--no-wait` makes the reader's STALLED (rc 3) UNREACHABLE — its
+# `confirmation-skipped` arm returns UNKNOWN 4 instead — so an INCOMPLETE summary with a
+# VALID, run-id-matching but slightly STALE beat, routine on a multi-lane box, arrives as
+# rc 4 and was reported as permanent. A lane obeying that relaunches a LIVE gate: two gates
+# on one summary path. The same line quoted the reader's own "This is NOT a stall … Re-read."
+# verbatim inside a sentence saying do not retry, i.e. asserted both halves of a
+# contradiction. So this tool now makes exactly the binary distinction it can actually
+# support — the reader says COMPLETE, or it does not — and adds no verdict of its own.
+# Subtraction cannot introduce a false PASS.
 #
 # WHAT THIS IS NOT. It is not a gate-of-record verdict and cannot be made into one:
 # `--mode record` is a NAMED REFUSAL naming `scripts/flow/premerge-assert.sh`, which
@@ -70,6 +82,12 @@
 # Re-implementing it here would be a second place for it to drift. And `--mode` is not
 # merely VALIDATED here: it is ENFORCED against the artifact, or declaring `--mode only`
 # while pointing at a lite summary would defeat every refusal below.
+#
+# THE TWO REFUSALS CARRY DIFFERENT CODES ON PURPOSE. `--mode lite` is a malformed REQUEST —
+# the caller asked this tool for a verdict it does not give — so it is USAGE (64), which no
+# amount of different input fixes. A LITE opener under `--mode only` is a well-formed
+# request about an ARTIFACT that cannot answer it, which is a failed MEASUREMENT (4): the
+# same request against the right summary succeeds.
 #
 # THE OUTPUT INVARIANT — AND IT COVERS `--help` (#3312)
 # ----------------------------------------------------
@@ -111,10 +129,15 @@ SUMMARY=""; MODE=""; COMPONENT=""; WANT_RUN_ID=""; HB=""
 # newlines in paths and a diagnostic quoted back from the shared reader can carry
 # anything — an unsanitised value emits a line with NO prefix and breaks the anchor
 # everything else rests on.
-_safe() {  # <text> -> the same text, pastable gate tokens defused and controls stripped
+# ORDER IS LOAD-BEARING: CONTROLS ARE STRIPPED **FIRST**, THEN TOKENS ARE DEFUSED.
+# Defusing first lets a token SPLIT BY A CONTROL CHARACTER (`RES<0x01>ULT: PASS`) survive the
+# defuse untouched and then be REASSEMBLED by the strip that follows — so the output
+# invariant would hold only by an argument about which values can reach the renderer, rather
+# than structurally. Swapping the stages costs nothing and removes the argument.
+_safe() {  # <text> -> controls stripped, THEN pastable gate tokens defused
   printf '%s' "$1" \
-    | sed -e 's/RESULT:/RESULT(defused)/g' -e 's/==== AGENT-GATE/====(defused) AGENT-GATE/g' \
-    | tr '\n\r\t' '   ' | tr -d '\000-\010\013\014\016-\037\177'
+    | tr '\n\r\t' '   ' | tr -d '\000-\010\013\014\016-\037\177' \
+    | sed -e 's/RESULT:/RESULT(defused)/g' -e 's/==== AGENT-GATE/====(defused) AGENT-GATE/g'
 }
 say()  { printf 'gate-verdict: %s\n' "$(_safe "$1")"; }
 sayerr(){ printf 'gate-verdict: %s\n' "$(_safe "$1")" >&2; }
@@ -233,8 +256,11 @@ _key_token() {
 # snapshot both assertions read. A FAILED strip is a refusal, never "use the original":
 # handing back unnormalised text converts a normalisation failure into a vacuous read.
 # ---------------------------------------------------------------------------
-SNAPDIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-component-verdict.XXXXXX") || {
-  sayerr "COULD-NOT-MEASURE $COMPONENT (cannot create a scratch directory for the snapshot)"; exit 4; }
+# The mktemp failure goes through the NORMAL verdict path like every other cause, so it
+# lands on stdout with the `summary:` line: a caller parsing verdicts must not have to read
+# a second stream for one branch.
+SNAPDIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-component-verdict.XXXXXX") \
+  || cnm "snapshot-unavailable; a scratch directory for the one-read snapshot could not be created under ${TMPDIR:-/tmp}"
 trap 'rm -rf "$SNAPDIR"' EXIT
 SNAP="$SNAPDIR/summary"
 BLOCK="$SNAPDIR/block"
@@ -260,10 +286,14 @@ fi
 # It is pointed at the SNAPSHOT with the REAL heartbeat path, so it reads exactly the
 # bytes the verdict below is read from. `--no-wait` because a non-terminal block is
 # non-answerable whichever non-terminal state it is in, so the stall-confirmation sleep
-# would buy nothing and would block a poller.
+# would buy nothing. That rationale holds PRECISELY BECAUSE no retryability claim is
+# derived from the reader's rc — the descoped taxonomy falsified it, and removing the
+# taxonomy makes it true again.
 #
-# ITS EXIT CODES ARE ITS DOCUMENTED INTERFACE (CLAUDE.md: COMPLETE 0 / RUNNING 2 /
-# STALLED 3 / UNKNOWN 4), so reading them is not re-implementing its grammar.
+# ONLY ITS `COMPLETE` ANSWER IS READ (exit 0). Its other codes are deliberately NOT
+# interpreted here: this script draws no distinction it cannot support, and describing the
+# STALLED branch would be a claim about a mechanism `--no-wait` makes UNREACHABLE anyway
+# (the reader returns UNKNOWN from its `confirmation-skipped` arm instead).
 # ---------------------------------------------------------------------------
 if [ ! -r "$LIVENESS" ]; then
   cnm "reader-absent; the shared completion reader is not readable at $LIVENESS, so completion cannot be established — and this script deliberately re-implements neither the terminal grammar nor the run-id binding"
@@ -278,13 +308,11 @@ if [ "$GL_RC" -ne 0 ]; then
   _gl_first=$(printf '%s\n' "$GL_OUT" | head -1)
   _gl_first="${_gl_first//"$SNAP"/"$SUMMARY"}"
   _gl_first="${_gl_first//"$SNAPDIR"/(snapshot)}"
-  # RETRYABLE, keyed AFFIRMATIVELY on the reader reporting RUNNING (2) — never on "not one
-  # of the bad ones". STALLED (3) publishes no liveness, which is not a claim that the run
-  # is alive, so it is not retryable and lands below.
-  if [ "$GL_RC" -eq 2 ]; then
-    verdict NOT-COMPLETE 5 "$COMPONENT (run-not-complete; this run is ALIVE and has not published a terminal verdict, so no component verdict exists YET — THIS is the retryable state, poll on exit 5 — gate-liveness.sh: ${_gl_first:-no answer} [rc=$GL_RC])"
-  fi
-  cnm "run-not-terminal; the run has published no terminal verdict for this request and is not reported alive, so no component verdict can be read — NOT retryable, do not poll on this code — gate-liveness.sh: ${_gl_first:-no answer} [rc=$GL_RC]"
+  # ONE code, and NO verdict of our own about liveness. The reader's answer is quoted
+  # VERBATIM and its rc is named, so a caller that needs the liveness distinction asks the
+  # authority (which is polled, and which this tool is not) instead of reading an opinion
+  # out of an exit code that cannot carry one. See the DESCOPE note in the header.
+  cnm "run-not-terminal; the shared reader did not report a terminal verdict for this request, so no component verdict can be read — gate-liveness.sh is the liveness authority and this is not a completion probe — gate-liveness.sh: ${_gl_first:-no answer} [rc=$GL_RC]"
 fi
 
 # ---------------------------------------------------------------------------
@@ -431,7 +459,9 @@ if [ "$COMP_N" -ge 1 ]; then
   fi
   if [ "$_n_mode" -eq 1 ]; then
     _scope=$(sed -n 's/^mode: PARTIAL (--only \([^)]*\)).*/\1/p' "$BLOCK" | head -1)
-    if ! grep -qw -- "$COMPONENT" <<<"${_scope//,/ }"; then
+    # `-F`: the name is DATA here, not a pattern. Every other site interpolates the
+    # `.`-escaped COMP_RE; a raw `$COMPONENT` as a BRE would make `a.b` match `axb`.
+    if ! grep -Fqw -- "$COMPONENT" <<<"${_scope//,/ }"; then
       cnm "mode-scope-contradiction; the block states it ran only '$_scope', yet carries a component line for '$COMPONENT' — the block's own scope and its content disagree, and which to believe cannot be established"
     fi
   fi

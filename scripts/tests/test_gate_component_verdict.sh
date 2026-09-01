@@ -583,26 +583,28 @@ echo "=== section 11: --help obeys the SAME four invariants as every verdict (B4
 # the four invariants, which is how it shipped. So --help now goes through `expect_raw`,
 # which applies exactly the invariant block every verdict case gets.
 expect_raw_help() {
-  local out rc bad_any=0
+  local out rc
   out=$(bash "$VERDICT" --help 2>&1); rc=$?
-  [ "$rc" -eq 0 ] || { bad "11.1 --help exits 0" "rc=$rc"; bad_any=1; }
+  # EMITTED UNCONDITIONALLY, here and nowhere else. The earlier form emitted 11.1 only in
+  # the all-green tail, so any other 11.x failure left section 11 at 5 cases and the section
+  # floor added a SPURIOUS failure to an already-failing run.
+  if [ "$rc" -eq 0 ]; then ok "11.1 --help exits 0"; else bad "11.1 --help exits 0" "rc=$rc"; fi
   local unanchored
   unanchored=$(printf '%s\n' "$out" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
   if [ -n "$unanchored" ]; then
-    bad "11.2 every --help line carries the gate-verdict: anchor" "$(printf '%s' "$unanchored" | head -2)"; bad_any=1
+    bad "11.2 every --help line carries the gate-verdict: anchor" "$(printf '%s' "$unanchored" | head -2)"
   else ok "11.2 every --help line carries the gate-verdict: anchor"; fi
   if printf '%s' "$out" | grep -qE 'RESULT:[[:space:]]*[A-Z]'; then
-    bad "11.3 --help carries no bare RESULT token" "$(printf '%s' "$out" | grep -E 'RESULT:[[:space:]]*[A-Z]' | head -2)"; bad_any=1
+    bad "11.3 --help carries no bare RESULT token" "$(printf '%s' "$out" | grep -E 'RESULT:[[:space:]]*[A-Z]' | head -2)"
   else ok "11.3 --help carries no bare RESULT token"; fi
   if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
-    bad "11.4 --help carries no AGENT-GATE block marker" "$(printf '%s' "$out" | grep -F '==== AGENT-GATE' | head -2)"; bad_any=1
+    bad "11.4 --help carries no AGENT-GATE block marker" "$(printf '%s' "$out" | grep -F '==== AGENT-GATE' | head -2)"
   else ok "11.4 --help carries no AGENT-GATE block marker"; fi
   # The whole point, stated as the property rather than as a spelling: the UNANCHORED
   # record probe — the one every stale poll site still carries — must not match --help.
   if printf '%s\n' "$out" | grep -qE 'RESULT: (PASS|FAIL)'; then
-    bad "11.5 the unanchored record probe does NOT match --help output"; bad_any=1
+    bad "11.5 the unanchored record probe does NOT match --help output"
   else ok "11.5 the unanchored record probe does NOT match --help output"; fi
-  [ "$bad_any" -eq 0 ] && ok "11.1 --help exits 0"
   # AND it must still TEACH both grammars, or the fix would be "delete the content".
   if printf '%s' "$out" | grep -qF 'PARTIAL' && printf '%s' "$out" | grep -qF '[[:space:]]'; then
     ok "11.6 --help still teaches both anchored, token-terminated grammars"
@@ -699,8 +701,15 @@ expect "14.2 a block marker split by a control character is not reassembled unde
 # EXACT rather than slack: a deliberate addition updates one number, while a deletion
 # anywhere reds.
 # ---------------------------------------------------------------------------
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:2"
-FLOOR=63
+# DERIVED, then committed — the counts below were read off a green run rather than
+# predicted (`grep -cE '^(ok|FAIL) '` per leading section number), because a floor written
+# from memory is a floor that silently drifts low. Round 2 moved section 13 from 2 to 4
+# (the taxonomy descope replaced one code-taxonomy case with four liveness-silence ones)
+# and added section 14, so the total rose 63 -> 67. Raised DELIBERATELY: the total is a
+# `-lt` floor, so leaving it at 63 would have let four cases be deleted while the suite
+# still reported green — this repo's own case-floor lesson.
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2"
+FLOOR=67
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"
