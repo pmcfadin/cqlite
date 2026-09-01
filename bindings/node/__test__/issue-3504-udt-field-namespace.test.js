@@ -660,17 +660,32 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     // read must contain the variable's name as a literal, and a literal in this
     // file's source plainly IS checkable. Same two exemptions, same count assert.
     //
-    // DECLARED RESIDUAL, and it is what keeps this guard honest — the half a
-    // source scan genuinely cannot reach is an INDIRECT read: a helper that
-    // returns the value, a COMPUTED or concatenated variable name
-    // (`process.env[someVar]`), or an alias bound to `process.env` names neither a
-    // corpus constant nor the literal, so neither needle fires. That half stays
-    // the child-process probe's job — it measures the RESOLVED paths under a
-    // perturbed environment, whatever route a consumer took to read it, so the two
-    // are complementary rather than overlapping and neither alone closes the class.
-    // Deliberately NOT met with an AST or dataflow "environment read" detector: a
-    // recogniser over author-controlled code accumulates false PASSes, and a guard
-    // with known false PASSes is worse than no guard at all.
+    // WHAT THE TWO GUARDS COVER, AND WHAT NOTHING HERE COVERS. This paragraph used
+    // to say the residual "stays the child-process probe's job — whatever route a
+    // consumer took to read it". That was FALSE, and correcting it is the point of
+    // this note (roborev N-C1): the probe records and compares only the constants
+    // this module EXPORTS — `FIXTURE_ROOT`, `PARITY_FACTS`, `SCHEMA`, `QUERY`, see
+    // `module.exports` at the foot of this file — so it cannot observe a path that
+    // some other test builds inside its own body. Stated as it actually is:
+    //   * THIS SCAN catches the env variable's name written as a LITERAL, in any
+    //     spelling (it is a substring test, so quoting is irrelevant), plus any of
+    //     the named corpus constants;
+    //   * THE CHILD PROBE above proves those EXPORTED CONSTANTS stay
+    //     checkout-anchored while `CQLITE_DATASETS_ROOT` is perturbed;
+    //   * NEITHER covers an INDIRECT read — a helper that returns the value, a
+    //     COMPUTED or concatenated variable name (`process.env[someVar]`), or an
+    //     alias bound to `process.env` — used by a FUTURE TEST IN THIS FILE to
+    //     build its OWN path. That is an UNCOVERED RESIDUAL, not a covered one:
+    //     the read names neither a constant nor the literal, so this scan is
+    //     blind, and such a path never reaches an exported constant, so the probe
+    //     is blind to it as well.
+    //
+    // Deliberately NOT closed by widening either guard. These two already exceed
+    // what AC5 asks for, and a recogniser over computed names is the unbounded
+    // shape this repository keeps having to delete — it accumulates false PASSes
+    // and an exemption list that grows every round, and a guard with known false
+    // PASSes is worse than no guard. A narrow guard that says what it does NOT
+    // cover is worth more than a broad one implying completeness it cannot deliver.
     const forbidden = ['SSTABLES' + '_DIR', 'TEST_DATA' + '_ROOT', 'DATASETS' + '_AVAILABLE'];
     const envVar = 'CQLITE_' + 'DATASETS_ROOT';
     const needles = [...forbidden, envVar];
