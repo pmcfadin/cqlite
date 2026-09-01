@@ -1935,7 +1935,20 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   of those review rounds is a second place to lose them). `machine` is the same notion `claim.sh`
   records — same env var, same default, same sanitizer — and the agreement is pinned BEHAVIOURALLY
   by `scripts/tests/test_drive_issue_state.sh`, which extracts claim.sh's own definition and
-  compares, rather than by care.
+  compares, rather than by care. **`write` MUST succeed over an UNSTAMPED marker, and that is a
+  correctness requirement rather than a convenience**: every lane holds an unstamped marker on
+  rollout BY DEFINITION, so refusing it made the whole marker path a dead letter fleet-wide while
+  the refusal text named the very command that refused — the #3312-job-24 shape, where a
+  break-glass ships that no sequence of actions can reach. An unstamped marker asserts NO
+  ownership, so refusing protects no identifiable party; its body is DISCARDED (never carried
+  forward) and the discard is ANNOUNCED. A MALFORMED/DUPLICATE-SENTINEL marker gets no such
+  exception — it CLAIMS an identity that merely cannot be READ, which may be a live peer's — so a
+  human moves it aside and the lane then takes the ABSENT path. **Generalised, and pinned by a
+  DERIVED test case rather than per-verdict prose: no refusal text may name a subcommand of the
+  script that returns the SAME refusal in that state** — including a two-step remedy, because the
+  readers of these texts run printed commands literally. Naming no mechanical remedy is fine
+  (`FOREIGN-*` say "escalate"); naming one that refuses is the defect, and that case caught two
+  further instances in the same round it was written.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
