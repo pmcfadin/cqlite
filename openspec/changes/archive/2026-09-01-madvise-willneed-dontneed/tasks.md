@@ -34,5 +34,5 @@ Outcome: **priced re-scope**, lead ruling on REQ-2824-03. The lever does not shi
 - [x] 4.5 `classify-docs-only.sh` -> **FULL PATH** (the harness `.sh` is a code input), so this diff
       is NOT code-free and roborev **does** apply. The lead's 'primary-source verification, not
       roborev' branch was conditional on the classifier; it did not fire.
-- [ ] 4.6 flow-closer: full gate of record -> premerge-assert -> merge on green.
-- [ ] 4.7 Finalize, telemetry, closing comment.
+- [x] 4.6 gate of record PASS (37/37); premerge-assert OK; merged via --auto 2026-09-01T22:17:19Z.
+- [x] 4.7 Finalize: OpenSpec archived, telemetry stamped, closing comment posted.
