@@ -39,7 +39,32 @@ env:
   # Both caches live on the DURABLE volume so the golden snapshot captures them;
   # under $HOME they are lost with the instance and every worker rebuilds cold.
   SCCACHE_DIR: "{data_mount}/sccache"
-  SCCACHE_CACHE_SIZE: "30G"
+  # DERIVED, NOT ROUND (issue #3727). `__DERIVED_CAP__` = __WORKING_SET__ measured working set
+  # (the measurement is in the issue), sized so the fleet's concurrent lanes do not evict each
+  # other's objects; the previous value was a round `30G` with no recorded derivation.
+  # TODO(#3727): __DERIVED_CAP__ / __WORKING_SET__ substituted after the measurement run. The
+  # value MUST be a <digits>[KkMmGgTt] form (see the spelling note below); bootstrap REFUSES to
+  # persist an unsubstituted placeholder rather than writing a line sccache would discard.
+  #
+  # WHY THE OLD VALUE WAS INEFFECTIVE, WHICH IS THE WHOLE OF #3727: it was declared HERE and
+  # NEVER PERSISTED. This block's env reaches the commands the LAUNCHER runs, so the variable
+  # existed only inside those processes — measured, a fresh PAM session (`sudo -i`) and
+  # `env -i bash -lc` both reported it UNSET, while SCCACHE_DIR two lines up IS in
+  # /etc/environment — so the fleet-effective cap was sccache's own 10 GiB DEFAULT on boxes
+  # provisioned to hold __DERIVED_CAP__, and no artifact said so. The persistence that makes it
+  # real is `--fix-sccache-cap` in verify.run below, which writes /etc/environment (read by PAM at
+  # session creation) and then VERIFIES the value against a fresh session AND the running sccache
+  # server. Presence in a config file and visibility to the process that reads it are different
+  # facts (#3414), and here there is a third: the sccache SERVER reads this at STARTUP, so a
+  # server already up keeps its old cap until `sccache --stop-server`.
+  #
+  # THE SPELLING IS PART OF THE VALUE. sccache accepts `<digits>[KkMmGgTt]` (binary multipliers)
+  # and SILENTLY DISCARDS anything else — measured, `30GiB` and `30GB` both yield the 10 GiB
+  # default with no diagnostic, and a bare integer means BYTES. Keep the suffix form.
+  #
+  # This literal must equal SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (the single source
+  # of truth for the fleet cap); scripts/tests/test_bootstrap_agent_machine.sh asserts they agree.
+  SCCACHE_CACHE_SIZE: "__DERIVED_CAP__"
   CQLITE_DATASETS_ROOT: "{data_mount}/datasets"
 verify:
   # --fix-credentials --strict (issue #3369). Two independent gaps, both real on a box
@@ -72,7 +97,15 @@ verify:
   # boundary --yes would have crossed. The write is idempotent and NEVER rewrites an existing
   # value, and the verdict still comes from probing a fresh session, so a box that cannot be
   # pinned (no passwordless sudo) stays non-passing and --strict still exits 1.
-  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --strict"
+  # --fix-sccache-cap (issue #3727) is the THIRD narrow repair, added for the same reason and in
+  # the same shape as --fix-credentials and --fix-gate-pin above: the env block's
+  # SCCACHE_CACHE_SIZE reaches launcher-created processes only, so without this flag every new
+  # instance arrives with an UNPERSISTED cap and its sccache server enforces the 10 GiB default.
+  # Persisting an env line is not a toolchain install, so verify stays a verification step. The
+  # write is idempotent and NEVER rewrites an existing value, and the verdict still comes from
+  # probing a fresh session AND the running server, so a box that cannot be capped stays
+  # non-passing and --strict still exits 1.
+  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --fix-sccache-cap --strict"
   expect: "All checks green."
 hooks:
   # Deliberately EMPTY (issue #3369). The credential wiring belongs in verify.run above,

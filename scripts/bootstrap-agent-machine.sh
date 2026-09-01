@@ -3418,21 +3418,31 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     scc_create_rc=0; return 0
   }
 
-  if [ "$SCC_VALUE_USABLE" != 1 ]; then
-    # THE PLACEHOLDER / UNUSABLE-LITERAL REFUSAL. Persisting a value sccache would discard is
-    # worse than persisting nothing: it is silent (no diagnostic anywhere), and because this
-    # section never rewrites an existing value it would be permanent. The MEASUREMENT below
-    # still runs — a box someone else capped correctly can still reach VERIFIED.
+  # THE PLACEHOLDER / UNUSABLE-LITERAL REFUSAL. Persisting a value sccache would discard is
+  # worse than persisting nothing: it is silent (there is no diagnostic anywhere), and because
+  # this section never rewrites an existing value it would be permanent. The MEASUREMENT still
+  # runs — a box someone else capped correctly can still reach VERIFIED.
+  #
+  # PLACED AT THE TWO WRITE SITES, NOT AT THE HEAD OF THE CHAIN. At the head it warned on every
+  # box, including boxes that already carry a cap line and where nothing would be written — a
+  # warning about a write that was never going to happen, which is noise in a section whose
+  # every [warn] is supposed to be actionable (and, concretely, it would have added a warning to
+  # every sandbox in this file's own self-test, the drift that has silently disabled cases here
+  # four times).
+  scc_refuse_literal() {
     SCC_PERSIST_NOTE="not persisted (the fleet cap literal '$SCC_ENV_VALUE' in this script is not a <digits>[KkMmGgTt] value)"
     warn "sccache-cap: this checkout's fleet cap literal is '$SCC_ENV_VALUE', which sccache would SILENTLY DISCARD (the accepted form is <digits>[KkMmGgTt], e.g. 30G; a bare integer means BYTES) — refusing to persist it, because this section never rewrites an existing value and a discarded line would be permanent and invisible"
     info "substitute the measured cap into SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (and the matching literal in .agent-ami/profile.yaml), then re-run (issue #3727)"
-  elif [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
+  }
+  if [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
     SCC_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
     info "not touching $SCC_ENV_FILE on this $PLATFORM host — pam_env is a Linux mechanism, so writing it would change host state for nothing"
   elif [ ! -e "$SCC_ENV_FILE" ]; then
     if [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
       SCC_PERSIST_NOTE="no $SCC_ENV_FILE and no authorisation to create it"
       info "no $SCC_ENV_FILE on this $PLATFORM host — pass --yes or --fix-sccache-cap and it will be CREATED (root:root 0644) so pam_env can consume it"
+    elif [ "$SCC_VALUE_USABLE" != 1 ]; then
+      scc_refuse_literal
     elif [ "$SCC_WRITE_PRIV" != 1 ]; then
       SCC_PERSIST_NOTE="no $SCC_ENV_FILE and no privilege to create it ($SCC_PRIV_STATE)"
       warn "sccache-cap: $SCC_ENV_FILE does not exist and this run cannot create it ($SCC_PRIV_STATE) — the cap was NOT persisted"
@@ -3462,8 +3472,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   elif [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
     SCC_PERSIST_NOTE="not persisted (neither --yes nor --fix-sccache-cap)"
     info "persist the cap:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   (appends '$SCC_ENV_LINE' to $SCC_ENV_FILE; --yes does it too)"
-    # NOTE: no scc_fix_hint here — this branch is only reached when the literal IS usable (the
-    # unusable case is refused earlier in the same if/elif chain).
+  elif [ "$SCC_VALUE_USABLE" != 1 ]; then
+    scc_refuse_literal
   elif [ "$SCC_WRITE_PRIV" != 1 ]; then
     SCC_PERSIST_NOTE="no privilege to write $SCC_ENV_FILE ($SCC_PRIV_STATE)"
     warn "sccache-cap: cannot write $SCC_ENV_FILE ($SCC_PRIV_STATE) — the cap was NOT persisted"

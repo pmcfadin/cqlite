@@ -32,7 +32,7 @@ The gate auto-enables sccache if it's on `$PATH`. To customize:
 export SCCACHE_DIR=/custom/cache/path
 
 # Set size limit (default 10 GiB; raise for multi-worktree teams)
-export SCCACHE_CACHE_SIZE=50G
+export SCCACHE_CACHE_SIZE=50G   # <digits>[KkMmGgTt] ONLY — see the grammar warning below
 
 # Disable sccache for a single gate run (if needed for diagnostics)
 CQLITE_DISABLE_SCCACHE=1 bash scripts/agent-gate.sh
@@ -80,7 +80,7 @@ auto-disable. Every SUMMARY's `accelerators:` line now carries a trailing
 `sccache-health=` token:
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%)
 ```
 
 - `sccache-health=na`   — sccache not in use (nothing to probe).
@@ -89,6 +89,72 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok
   the count and pointing at `sccache --show-stats`. Caching stays **ENABLED** and
   the gate does **not** fail — the WARN is a signal to inspect the cache, not a
   blind kill switch.
+
+### `SCCACHE_CACHE_SIZE`: the grammar is narrower than it looks, and violations are SILENT (issue #3727)
+
+Measured on sccache 0.17.0, against a throwaway isolated sccache:
+
+| you write | the server enforces |
+|---|---|
+| `30G`, `30g`, `500M`, `1T`, `30K` | 30 GiB, 30 GiB, 500 MiB, 1 TiB, 30 KiB (the suffix is **binary** despite `G`) |
+| **`30GiB`**, **`30GB`**, `30 G` | **10 GiB — the value is SILENTLY DISCARDED** |
+| `abc`, empty, `-5G`, 21 digits | 10 GiB — silently discarded |
+| `100` (no suffix) | **100 BYTES**, not 100 GiB |
+| `0`, `0G` | 0 bytes (the cache is effectively off) |
+
+There is **no diagnostic** for a discard: with `SCCACHE_LOG=debug` the server logs only
+`Init disk cache with dir "...", size 10737418240` — the *fallback*, with no mention that anything was
+rejected. And the human-readable `Max cache size` line is **rounded** (`1536M` prints as `2 GiB`), so
+never verify a cap by reading it; `sccache --show-stats --stats-format json` carries `max_cache_size`
+and `cache_size` as exact byte integers.
+
+### The cap is read ONCE, by the SERVER, at startup (issue #3727)
+
+Whichever process first starts the sccache server fixes the cap for that server's whole lifetime; no
+later client can change it. Measured: with a server up, `--show-stats` reports the same
+`max_cache_size` whether the client exports `30G`, `7G` or nothing. Two consequences:
+
+* raising the value has **no effect until `sccache --stop-server`** (the next compile restarts it);
+* an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
+  carries `sccache-cap=<bytes>(<source>)` read from the running server, and why
+  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates three facts (the
+  `/etc/environment` line, a fresh profile-free session, and the running server) before it will say
+  `sccache-cap: VERIFIED`. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
+  running a different cap keeps it.
+
+A third fact, measured while building that check and worth knowing before you read any
+`--show-stats` output: **with NO server running, `--show-stats` does not start one** (nothing listens
+afterwards, the `SCCACHE_DIR` stays empty, a following `--stop-server` reports "couldn't connect")
+**and it answers `max_cache_size` from the CLIENT's own env** — `SCCACHE_CACHE_SIZE=7G` reads
+`7516192768` with no server anywhere. The tell is `"cache_size":null`. So a cap read out of
+`--show-stats` is only an *enforced* cap while `cache_size` is an integer.
+
+### `sccache-cap=` / `sccache-used=` on the accelerators line (issue #3727)
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked perf=ok
+```
+
+- `sccache-cap=<bytes>(pinned)` — the env value is set, accepted, and **enforced by the running
+  server**.
+- `…(default)` — the var is UNSET and the server is at sccache's own default. On a fleet box, read
+  this as *the cap is not provisioned* — the #3414 reading, one variable over.
+- `…(inherited)` — the var is UNSET and the server enforces a non-default cap: whoever started it
+  chose that value.
+- `…(stale)` — the var is set and valid but the server enforces something else. **Remedy
+  `sccache --stop-server`**, not editing the value.
+- `…(invalid)` — sccache discards the value (see the grammar table above) and fell back to the
+  default.
+- `…(unattributed)` — `cache_size` came back null, so no *running* server is proven to enforce this
+  number; it is the cap that will apply, most commonly because no server is up.
+- `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires
+  an affirmative measurement, so these never render as `0` or blank.
+- `sccache-used=<bytes>(<N>%)` — occupancy and fill against the enforced cap; `>= 95%` also emits a
+  LOUD `WARN:` (a cache at its cap is evicting, i.e. thrashing). `(cap-zero)` where the cap is 0.
+
+**`sccache-health` cannot answer any of this.** It is the sum of four ERROR counters with **no**
+capacity, occupancy or eviction input, so a `warn` there can never be cleared by raising the cap, and
+a permanently-full cache reports `sccache-health=ok`. Different questions, different remedies.
 
 The counter sum is probed via `sccache --show-stats` only at SUMMARY emission
 (memoized; never in the latency-sensitive classify hooks). On a `warn`, inspect
@@ -125,7 +191,7 @@ Every SUMMARY block (full **and** `--lite`) carries a **machine-checkable
 scrollback:
 
 ```
-accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok
+accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%)
 ```
 
 State values: `on` (detected & used) · `absent` (missing → WARN) · `off`
@@ -151,7 +217,7 @@ ld-prime is already the fastest linker on macOS, so a permanent `n/a` token woul
 churn every existing summary parser for zero signal):
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked
 ```
 
 State values (Linux only):
@@ -187,7 +253,7 @@ After `mold=`, a Linux `accelerators:` line carries a `perf=` token answering *c
 box be profiled at all?*
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked perf=ok
 ```
 
 It is a **free** read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through
@@ -235,8 +301,14 @@ mode (both path seams mandatory, no production fallback).
 Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
 worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
 removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
+dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (`__DERIVED_CAP__` on the fleet
+boxes — derived from a measured working set, see `.agent-ami/profile.yaml`; persist it with
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, because a value only in a launcher
+profile reaches launcher-created processes alone — #3727) (previously `30G` on the
 10-core machine).
+
+<!-- TODO(#3727): __DERIVED_CAP__ substituted after the measurement run — the value MUST be a
+     <digits>[KkMmGgTt] form (see the grammar table above). -->
 
 **macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
 reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed

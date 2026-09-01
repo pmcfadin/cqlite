@@ -898,7 +898,7 @@ On **Linux** the line additionally carries a `mold=` token and a `perf=` token
 (byte-identical / no tokens on macOS — both are Linux-only):
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked perf=ok
 cpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16
 ```
 
@@ -941,6 +941,20 @@ disabled via `CQLITE_DISABLE_SCCACHE` / `CQLITE_DISABLE_NEXTEST` / `AGENT_GATE_J
 `off`, never `absent`. This exists because a machine silently ran ~3x slower for weeks
 with sccache and nextest both un-installed and no signal. If a pasted SUMMARY shows
 `absent`, install the tool — the state is visible in the block, not just scrollback.
+
+Two further tokens carry the sccache **capacity** facts (issue #3727):
+`sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|unattributed)` and
+`sccache-used=<bytes>(<N>%)`, each with an explicit `unmeasured(<why>)` /
+`na(sccache-not-in-use)` rendering so a positive reading is always an affirmative
+measurement. Both are read from the **running server's** JSON, because sccache reads
+`SCCACHE_CACHE_SIZE` once, at server startup: `…(stale)` means the running server predates the
+value and the remedy is `sccache --stop-server`, never editing the value; `…(default)` on a fleet
+box means the cap is not provisioned. Measured trap: `30G` is 30 GiB but **`30GiB` and `30GB` are
+SILENTLY DISCARDED** to sccache's 10 GiB default, and a bare integer means BYTES — with no
+diagnostic anywhere. **`sccache-health` cannot answer any of this**: it is the sum of four ERROR
+counters with no capacity input, so a `warn` there can never be cleared by raising the cap and a
+permanently-full, thrashing cache reads `ok`. Persist and verify the cap with
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`.
 
 ## Machine-wide concurrency cap (issue #1825)
 

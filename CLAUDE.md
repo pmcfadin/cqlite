@@ -761,12 +761,27 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   must not be clobbered), so re-running it is a **silent no-op**: fix the VALUE in
   `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
   `gate-pin: NOT-HONOURED`.
-- Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
+- Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, the two #3727 sccache
+  capacity tokens `sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|unattributed)` +
+  `sccache-used=<bytes>(<N>%)`, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
   PERMISSION verdict, not a missing capability): re-run `bash scripts/bootstrap-agent-machine.sh
   --yes`, which installs + verifies `/etc/sysctl.d/99-cqlite-perf.conf`. Self-test:
   `bash scripts/tests/test_agent_gate_summary.sh`.
+  **`sccache-health` is an ERROR-COUNTER token, NOT a capacity one (#3727)** — it is the sum of four
+  failure counters with no occupancy input, so a `warn` there can NEVER be cleared by raising the
+  cap and a full, thrashing cache reads `ok`. `sccache-cap=…(stale)` means the RUNNING SERVER
+  predates the value (remedy `sccache --stop-server`, never editing the value: sccache reads
+  `SCCACHE_CACHE_SIZE` once, at server startup); `…(default)` on a fleet box means the cap is not
+  provisioned, the #3414 reading one variable over; `…(unattributed)` means `cache_size` came back
+  null, so no RUNNING server is proven to enforce the number — measured, a client with no server
+  answers `max_cache_size` from its OWN env, so a cap read out of `--show-stats` is an ENFORCED cap
+  only while `cache_size` is an integer. Measured trap: `30G` is 30 GiB but **`30GiB`
+  and `30GB` are SILENTLY DISCARDED** to the 10 GiB default and a bare integer means BYTES, with
+  no diagnostic anywhere — `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` persists
+  and VERIFIES the value against a fresh profile-free session AND the running server (only
+  VERIFIED is an `[ok]`; the value->bytes map is asked of an ISOLATED sccache, never reimplemented).
 
 ## Core Commands
 
