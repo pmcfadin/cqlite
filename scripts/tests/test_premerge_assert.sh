@@ -2093,6 +2093,179 @@ else
   bad "boundary (STRUCTURAL): the declaration appears $boundary_sites times — it must be ONE constant consumed by the ONE renderer"
 fi
 
+# --- 44(k): AN ACTUALLY HUNG READ (roborev job 364) --------------------------
+#
+# The arms above verify runner SELECTION and the `anchor-reads:` label; none of
+# them ever hangs a read, so the timeout handling — and specifically the exit
+# 124 / 137 recognition — could regress with the suite still green. These two
+# arms hang the ancestry call for real.
+#
+# CONSTRUCTION, and the two couplings a future reader could break:
+#   * A PATH-SHIM `git` that matches on ARGV and blocks ONLY on
+#     `merge-base --is-ancestor`, passing everything else through to the real
+#     binary. Discovery reads and the object reads must keep working or the
+#     fixture never reaches the code under test.
+#   * THE SHIM IS REACHABLE ONLY BECAUSE `PATH` IS IN THE `env -i` ALLOWLIST.
+#     That is a non-obvious coupling: tightening the allowlist to drop PATH
+#     would make these arms silently test nothing (git would not be found at
+#     all, so they would fail loudly — but a future variant that hard-coded an
+#     absolute git path would make them vacuous instead).
+#   * THE TIMEOUT IS SHORTENED BY SUBSTITUTING THE ARTIFACT, never a seam: a
+#     scratch copy of the shipped script with ONLY the two constants rewritten
+#     (60s/5s -> 2s/1s), asserted to have taken. A settable timeout would be one
+#     more thing a real invoker could set (#3312), and the runner is deliberately
+#     NOT refactored to make this easier to test.
+#
+# SAFETY, because a test that leaks processes is its own hazard (CLAUDE.md job
+# 279: a bounded runner's ownership ends at REAP, not at exit, and a
+# pattern-based kill on this fleet has already killed a peer lane's gate). Each
+# arm asserts NO stray process survives, matched on an EXACT argv sentinel that
+# no other process on the box can produce — never a `pkill -f` pattern.
+TOFLOW="$T/flow-timeout"
+TOSENTINEL="sleep 987654321"
+to_shape=0
+# A REAL bounding runner is REQUIRED for these arms. Without one the $BIN shim
+# discards the bound (see its own comment) and a hung read would hang FOREVER —
+# so the absence of a runner is a declared not-taken, never an attempt.
+if [ -n "$REAL_TO" ] && mkdir -p "$TOFLOW" && cp "$ASSERT" "$TOFLOW/premerge-assert.sh"; then
+  printf '%s\n' "$NEUTRAL_ADV" >"$TOFLOW/base-staleness.sh"
+  chmod +x "$TOFLOW/base-staleness.sh"
+  # ONLY the two constants change. sed on the exact assignment lines, then verify.
+  sed -e 's/^ADVISORY_TIMEOUT_SECS=60$/ADVISORY_TIMEOUT_SECS=2/' \
+      -e 's/^ADVISORY_KILL_GRACE=5$/ADVISORY_KILL_GRACE=1/' \
+      "$TOFLOW/premerge-assert.sh" >"$TOFLOW/x" && mv "$TOFLOW/x" "$TOFLOW/premerge-assert.sh"
+  if grep -q -x -F 'ADVISORY_TIMEOUT_SECS=2' "$TOFLOW/premerge-assert.sh" &&
+     grep -q -x -F 'ADVISORY_KILL_GRACE=1' "$TOFLOW/premerge-assert.sh" &&
+     ! grep -q -x -F 'ADVISORY_TIMEOUT_SECS=60' "$TOFLOW/premerge-assert.sh" &&
+     ! grep -q -x -F 'ADVISORY_KILL_GRACE=5' "$TOFLOW/premerge-assert.sh"; then
+    to_shape=1
+  fi
+fi
+if [ "$to_shape" -eq 1 ]; then
+  ok "hung-read fixture: a scratch copy with the bound shortened to 2s+1s (constants only, mutation verified)"
+else
+  printf 'ARM NOT TAKEN: hung ancestry read (job 364) — no real timeout/gtimeout runner on this host, or\n'
+  printf 'ARM NOT TAKEN: the shortened-bound scratch copy could not be built. BOTH arms are skipped\n'
+  printf 'ARM NOT TAKEN: DELIBERATELY: without a real runner the $BIN shim discards the bound and a hung\n'
+  printf 'ARM NOT TAKEN: read would hang forever, so attempting the arm is worse than declaring it. The\n'
+  printf 'ARM NOT TAKEN: exit 124/137 recognition is UNEXERCISED on this run.\n'
+  ok "hung-read: SKIPPED (no bounding runner / fixture unbuildable — arms UNEXERCISED, declared not silent)"
+fi
+
+# to_leaks — count processes whose FULL argv is exactly the sentinel. An exact
+# whole-line match, never a `pkill -f` pattern: on this fleet a pattern-based
+# kill has already taken out a peer lane's gate.
+to_leaks() { ps -eo args= 2>/dev/null | grep -c -x -F "$TOSENTINEL"; }
+
+# to_run_arm <label> <shim-dir> <expected-runner-rc>
+#
+# THE THIRD ARGUMENT IS WHAT KEEPS THE TWO ARMS DISTINCT. `_anchor_timed_out`
+# accepts BOTH 124 and 137, so without a control each arm would pass whichever
+# path it actually took — and "we tested the escalation" would be a claim nothing
+# established. So each shim is first run UNDER THE RUNNER DIRECTLY and its exit
+# code asserted: 124 for the TERM shim, 137 for the TERM-ignoring one.
+to_run_arm() {
+  local label="$1" shimdir="$2" want_rc="$3"
+  local out rc leaks crc=0
+  PATH="$shimdir:$PATH" "$REAL_TO" --kill-after=1 2 \
+    git merge-base --is-ancestor "$R_CERT" "$R_CERT" >/dev/null 2>&1 || crc=$?
+  if [ "$crc" = "$want_rc" ]; then
+    ok "hung-read ($label): CONTROL — the shim really produces runner exit $want_rc"
+  else
+    bad "hung-read ($label): CONTROL — expected runner exit $want_rc, got $crc; this arm is not exercising the path it names"
+  fi
+  out=$(cd "$ANC_REPO" && PATH="$shimdir:$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+    bash "$TOFLOW/premerge-assert.sh" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 3 ]; then
+    bad "hung-read ($label): a hung ancestry read must be exit 3 (got $rc: $out)"
+  else
+    ok "hung-read ($label): a hung ancestry read is exit 3, not a hang and not a pass"
+    case "$out" in
+      *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+        ok "hung-read ($label): carries the ANCHOR-UNVERIFIABLE marker" ;;
+      *) bad "hung-read ($label): expected the ANCHOR-UNVERIFIABLE marker (got: $out)" ;;
+    esac
+    case "$out" in
+      *"the ancestry walk timed out after"*)
+        ok "hung-read ($label): the cause names the TIMEOUT, distinctly from the other UNVERIFIABLE causes" ;;
+      *) bad "hung-read ($label): the cause must name the timeout (got: $out)" ;;
+    esac
+    # Distinctness in both directions: it must not be reported as an absent
+    # object, a shallow history, or a NOT-ANCESTOR verdict.
+    case "$out" in
+      *"is not present in this repository"* | *"NOT PROVEN COMPLETE"* | *"is NOT on the certified sha's history"*)
+        bad "hung-read ($label): a timeout was misreported as another cause (got: $out)" ;;
+      *) ok "hung-read ($label): a timeout is NOT misreported as an absent object, a shallow history or NOT-ANCESTOR" ;;
+    esac
+  fi
+  leaks=$(to_leaks)
+  if [ "$leaks" = 0 ]; then
+    ok "hung-read ($label): NO stray process survived the bound (exact-argv census, not a pkill pattern)"
+  else
+    bad "hung-read ($label): $leaks stray process(es) matching the sentinel survived — the runner did not reap its child (job 279)"
+    # Clean up ONLY pids whose full argv equals the sentinel: it cannot be a peer
+    # lane's gate, which is what a pattern-based kill would risk.
+    ps -eo pid=,args= 2>/dev/null | while read -r _p _a; do
+      [ "$_a" = "$TOSENTINEL" ] && kill -KILL "$_p" 2>/dev/null
+    done
+  fi
+}
+
+if [ "$to_shape" -eq 1 ]; then
+  REALGIT=$(command -v git 2>/dev/null) || REALGIT=""
+  if [ -z "$REALGIT" ]; then
+    printf 'ARM NOT TAKEN: hung ancestry read (job 364) — the real git binary could not be resolved, so a\n'
+    printf 'ARM NOT TAKEN: pass-through shim cannot be built.\n'
+    ok "hung-read: SKIPPED (real git unresolvable — arms UNEXERCISED, declared not silent)"
+  else
+    # ARM 1 — the TERM path (exit 124). The shim `exec`s into the sentinel sleep,
+    # so it BECOMES the sleep and dies on the runner's SIGTERM. (Without `exec`,
+    # bash defers the trap until its foreground child finishes, which would test
+    # the escalation path by accident.)
+    TSH="$T/bin-git-hang-term"
+    mkdir -p "$TSH"
+    cat >"$TSH/git" <<TERMSHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "--is-ancestor" ]; then exec $TOSENTINEL; fi
+done
+exec "$REALGIT" "\$@"
+TERMSHIM
+    chmod +x "$TSH/git"
+    to_run_arm "TERM path / exit 124" "$TSH" 124
+
+    # ARM 2 — the KILL-after-grace path (exit 137). The shim IGNORES TERM and
+    # blocks on opening a writer-less FIFO, which is uninterruptible while TERM is
+    # SIG_IGN and spawns NO child, so nothing else in the process group can die in
+    # its place. The runner must therefore escalate to SIGKILL.
+    KSH="$T/bin-git-hang-kill"
+    mkdir -p "$KSH"
+    KFIFO="$T/hang-kill.fifo"
+    rm -f "$KFIFO"
+    if mkfifo "$KFIFO" 2>/dev/null; then
+      cat >"$KSH/git" <<KILLSHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "--is-ancestor" ]; then
+    trap '' TERM
+    read -r _ < "$KFIFO"
+    exit 0
+  fi
+done
+exec "$REALGIT" "\$@"
+KILLSHIM
+      chmod +x "$KSH/git"
+      to_run_arm "KILL after grace / exit 137" "$KSH" 137
+    else
+      printf 'ARM NOT TAKEN: hung ancestry read, KILL path (job 364) — mkfifo failed on this host, so a\n'
+      printf 'ARM NOT TAKEN: TERM-ignoring block with no child process cannot be constructed. The exit-137\n'
+      printf 'ARM NOT TAKEN: escalation is UNEXERCISED (the TERM/124 arm above still ran).\n'
+      ok "hung-read (KILL path): SKIPPED (mkfifo unavailable — arm UNEXERCISED, declared not silent)"
+    fi
+  fi
+fi
+
 # =============================================================================
 # #3465 review — the remaining refusal branches
 # =============================================================================
