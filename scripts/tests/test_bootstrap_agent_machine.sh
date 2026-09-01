@@ -600,7 +600,15 @@ scc_resolve() {
 # unobservable in a test.
 case "$*" in
   *--start-server*)
-    [ -n "${SCC_STUB_STATE:-}" ] && scc_resolve > "$SCC_STUB_STATE"
+    # SCC_STUB_RACE_CAP models a LOST RACE: the start finds nothing, but by the time the cap is
+    # read back a CONCURRENT lane has started a server at ITS value, not ours. That is the shape
+    # the real fleet produces (several lanes, one server, `--start-server` a no-op against an
+    # existing one) — and it is NOT the same as a pre-existing live server, which 12b-g4 covers:
+    # the distinguishing fact is that this run DID attempt a start.
+    if [ -n "${SCC_STUB_STATE:-}" ]; then
+      if [ -n "${SCC_STUB_RACE_CAP:-}" ]; then printf '%s\n' "$SCC_STUB_RACE_CAP" > "$SCC_STUB_STATE"
+      else scc_resolve > "$SCC_STUB_STATE"; fi
+    fi
     exit 0 ;;
   *--show-stats*) ;;
   *) exit 0 ;;
@@ -4679,6 +4687,34 @@ else
   else
     bad "sccache-cap: a running server with an empty cache was mistaken for no server (the null-size premise is back)"
     printf '%s\n' "$scc_sl_empty" | head -6; cat "$scc_log_empty" | head -3
+  fi
+
+  # 12b-g2c. A LOST START RACE IS NOT OWNERSHIP, AND MUST NOT SUPPRESS THE REMEDY (issue #3727
+  #          roborev round 10, f2). On this fleet several lanes share one sccache server, so losing
+  #          the race is routine: `--start-server` is a no-op against a server that already exists
+  #          and the read-back then describes SOMEBODY ELSE'S. Claiming ownership on any successful
+  #          read made the run assert it had started a server whose cap it did not choose — and
+  #          scc_stale_remedy then called that an sccache-level inconsistency and SUPPRESSED the
+  #          stop-server remedy, turning a fixable stale server into "sccache is broken". The stub
+  #          models the race: no server at first, and the one that appears after the start enforces
+  #          the DEFAULT rather than the requested 30G.
+  scc_state_race="$tmp/scc-stub-state-race"; rm -f "$scc_state_race"
+  scc_log_race="$tmp/scc-stub-argv-race.log"; : >"$scc_log_race"
+  scc_out_race=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=none SCC_STUB_STATE="$scc_state_race" SCC_STUB_RACE_CAP=10737418240 \
+    SCC_STUB_LOG="$scc_log_race" --fix-sccache-cap)
+  scc_sl_race=$(scc_slice "$scc_out_race")
+  if out_has "$scc_sl_race" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
+     && out_has "$scc_sl_race" 'sccache --stop-server' \
+     && out_has "$scc_sl_race" 'lost race' \
+     && ! out_has "$scc_sl_race" 'THIS RUN STARTED' \
+     && ! out_has "$scc_sl_race" 'sccache-level inconsistency' \
+     && ! out_has "$scc_sl_race" -E '\[ok\].*sccache-cap' \
+     && grep -q -- '--start-server' "$scc_log_race"; then
+    ok "sccache-cap: a LOST start race (the start WAS attempted, another cap answered) is reported as one, does NOT claim ownership, and still prints the stop-server remedy"
+  else
+    bad "sccache-cap: a lost start race claimed ownership or suppressed the stale-server remedy"
+    printf '%s\n' "$scc_sl_race" | head -8
   fi
 
   # 12b-g3. A DEFAULT RUN STARTS NOTHING. Starting a daemon is a host mutation, and this file's

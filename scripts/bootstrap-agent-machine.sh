@@ -3292,7 +3292,9 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   SCC_RUN_CAP=""
   SCC_RUN_WHY=""
   SCC_RUN_STATE=""        # ok | no-server | unreadable
-  SCC_SERVER_STARTED=0
+  SCC_SERVER_STARTED=0      # a start was attempted AND the read-back cap is the one we asked for
+  SCC_START_ATTEMPTED=0     # a start was attempted, whatever answered afterwards
+  SCC_START_RACED=0         # a start was attempted and something else answered, with another cap
   SCC_SESSION_DIR=""      # the measured session's SCCACHE_DIR, as reported BY that session
   SCC_SESSION_PORT=""     # ... and its SCCACHE_SERVER_PORT
   SCC_SESSION_SET=""      # were they set at all (`${VAR+1}`)? empty and unset are different facts
@@ -3855,12 +3857,13 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # (5b's job-311 lesson): if the file and the session disagree, sending the operator to edit
   # the file is advice about a value that is already being ignored.
   scc_stale_remedy() {
-    if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
-      # Reached only if the server WE started reports a cap other than the bytes we started it
-      # with — an sccache-level inconsistency, not a stale server, so the stop-server remedy
-      # below would be nonsense advice. Named rather than folded into the generic text.
-      info "note: this run STARTED that server itself under '$scc_probe_seen' and it STILL reports a different cap — that is an sccache-level inconsistency (the value was accepted by the isolated probe but not applied by the server), not a server predating the value; report it rather than restarting in a loop"
-      return 0
+    # THE OLD "WE STARTED IT AND IT STILL DISAGREES" BRANCH IS GONE (roborev round 10, f2). It
+    # claimed an sccache-level inconsistency and RETURNED, suppressing the stop-server remedy — but
+    # its precondition was unreachable once ownership requires the read-back cap to match, and the
+    # case it actually fired on was a LOST START RACE, where the stop-server remedy is exactly
+    # right. So the race is noted and the remedy still printed.
+    if [ "${SCC_START_RACED:-0}" = 1 ]; then
+      info "note: this run attempted a start and another server answered with a different cap — that is a lost race, not an sccache fault, and the remedy below applies to the server that won it"
     fi
     info "remedy:  sccache --stop-server    (the next compile restarts it, and the new server reads SCCACHE_CACHE_SIZE then). Do NOT edit the value — it is already correct and already visible; what is stale is the SERVER"
     if [ "$SCC_FILE_HAS_LINE" = yes ] && [ "$SCC_FILE_VALUE" != "$scc_probe_seen" ]; then
@@ -4064,15 +4067,35 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
         elif [ "$SCC_RUN_STATE" = no-server ]; then
           if [ "$AUTO_YES" = 1 ] || [ "$FIX_SCCACHE_CAP" = 1 ]; then
             info "no sccache server is running on this box, so this run STARTS one under the value a fresh session sees ('$scc_probe_seen') — the cap is fixed by whichever process starts the server first, so being that process is what makes the cap effective NOW rather than whenever some later lane happens to compile"
+            SCC_START_ATTEMPTED=1
             scc_start_server_for "$scc_probe_seen"
             if scc_running_cap; then
-              scc_run_ok=1; SCC_SERVER_STARTED=1
-              info "STARTED the sccache server ($SCC_START_WHY); it now reports a cap of $SCC_RUN_CAP bytes"
+              scc_run_ok=1
+              # ATTEMPTED IS NOT OWNED (issue #3727 roborev round 10, f2). On this fleet four lanes
+              # share one server, so losing the start race is ROUTINE: `--start-server` is a no-op
+              # against a server that already exists, and the read-back then describes SOMEBODY
+              # ELSE'S server. Claiming ownership on any successful read made the run assert it had
+              # started a server whose cap it did not choose — and, worse, scc_stale_remedy then
+              # called that an sccache-level inconsistency and SUPPRESSED the stop-server remedy,
+              # turning a fixable stale server into a message saying sccache is broken. So
+              # ownership requires the read-back cap to BE the cap we asked for; anything else is a
+              # lost race, recorded as one.
+              if [ "$SCC_RUN_CAP" = "$SCC_SEEN_BYTES" ]; then
+                SCC_SERVER_STARTED=1
+                info "STARTED the sccache server ($SCC_START_WHY); it now reports a cap of $SCC_RUN_CAP bytes"
+              else
+                SCC_START_RACED=1
+                info "a start was attempted ($SCC_START_WHY) but the server now answering enforces $SCC_RUN_CAP bytes, NOT the $SCC_SEEN_BYTES this run asked for — most likely a concurrent lane started one first (on this fleet several lanes share a server), so this run does NOT own it and the stale-server remedy below is the right one"
+              fi
             fi
           fi
         fi
         if [ "$scc_run_ok" != 1 ]; then
-          warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the cap actually IN FORCE could not be read: $SCC_RUN_WHY${SCC_START_WHY:+; a start was attempted — $SCC_START_WHY})"
+          # ATTEMPTED IS TRACKED SEPARATELY FROM OWNED (roborev round 10, f2), and this is its
+          # consumer: whether a start was tried is a fact about THIS RUN, and inferring it from a
+          # non-empty SCC_START_WHY would hide an attempt whose helper returned before recording a
+          # reason.
+          warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the cap actually IN FORCE could not be read: $SCC_RUN_WHY$( [ "${SCC_START_ATTEMPTED:-0}" = 1 ] && printf '; a start WAS attempted — %s' "${SCC_START_WHY:-no reason recorded}" ))"
           info "the value is read by the sccache SERVER at startup, so nothing about a visible variable establishes the cap in force — that is why this half is not assumed"
           if [ "$SCC_RUN_STATE" = no-server ] && [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
             info "nothing is running to measure, and a default run does not start one:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   starts the server under the persisted value and verifies the cap it enforces (--yes does it too)"
@@ -4105,7 +4128,12 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
                 # to be the named VERIFIED verdict, and two call sites would defeat a guard that
                 # exists to stop a future `ok` sneaking in for a file write or an exemption.
                 if [ "$SCC_SERVER_STARTED" = 1 ]; then
-                  scc_srv_phrase="the sccache server THIS RUN STARTED under it enforces exactly the $SCC_SEEN_BYTES bytes it means — there was no server before, so this run became the first starter rather than leaving the cap to whichever lane compiled next"
+                  # "THIS RUN STARTED" is as strong as the evidence allows: there was no server
+                  # when the run began, this run asked for one at this value, and the server now
+                  # answering enforces exactly that. A concurrent lane starting an IDENTICAL one in
+                  # the same window is indistinguishable — and operationally equivalent — so the
+                  # phrase says so rather than asserting sole ownership (roborev round 10, f2).
+                  scc_srv_phrase="the sccache server THIS RUN STARTED under it enforces exactly the $SCC_SEEN_BYTES bytes it means — there was no server before, so this run became the first starter rather than leaving the cap to whichever lane compiled next (a concurrent lane starting one at the SAME value in that window is indistinguishable from this, and equivalent)"
                 else
                   scc_srv_phrase="the ALREADY-RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means"
                 fi
