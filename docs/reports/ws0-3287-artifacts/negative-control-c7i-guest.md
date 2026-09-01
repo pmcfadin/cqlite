@@ -18,11 +18,24 @@ time.
 | Probed | 2026-09-01 |
 
 Reproduce: `bash docs/reports/ws0-3287-artifacts/capability-probe.sh <outdir>`.
-**The probe's own output is the verdict.** [`host/differential.txt`](host/differential.txt) answers
-Gates A–D per counter, classifying each as `ABSENT` (not on this PMU — a legitimate capability answer),
-`STUCK` (programs and reads 0 in both arms — a silent instrument) or `MOVING` (usable). It exits
-non-zero and stamps `VERDICT: UNMEASURED` if any step failed, so `VERDICT: COMPLETE` is an affirmative
-statement that every capture was taken.
+**The probe RECORDS and VALIDATES; the classification below is THIS REPORT'S, not the probe's
+(#3870).** [`host/differential.txt`](host/differential.txt) prints, per counter, its four-valued
+disposition beside its count in each of the three arms — and draws no conclusion from them. Its
+`VERDICT: COMPLETE` is a **data-integrity** statement only: every step executed and every guard
+passed (window closure, `enabled%=100.00`, `<not counted>`, stale-CSV purge, stall nesting, CPU
+affinity); a failure stamps `VERDICT: UNMEASURED` and exits non-zero. **It is not, and must not be
+read as, an answer to any of Gates A–D.**
+
+An earlier revision did auto-classify each counter `ABSENT` / `STUCK` / `MOVING`. That layer was
+removed by lead ruling on #3287 (`REQ-3287-20260901T195930Z`, option (a)) and is tracked in #3870:
+five review rounds put 17 findings in it, each round's High-severity ones inside the previous round's
+fix code, and two were still open at descope — Gate A read any digit anywhere in `perf`'s output as
+proof TMA had resolved, and the counter classifier called `100 -> 101` "MOVING". **The words `ABSENT`,
+`STUCK` and `MOVING` below are therefore this report's own vocabulary, applied by hand to the recorded
+numbers**, and mean: *absent* — not on this PMU at all, a legitimate capability answer; *stuck* —
+programs cleanly and reads 0 in every arm, a silent instrument; *moving* — reads nonzero and rises
+with the working set. The findings never depended on the removed layer: they rest on the disposition
+sweep, the gated arms, the committed CSVs and the wall-clock witness.
 
 Raw captures: [`host/`](host/) — `capability-probe.txt` (inventory + Gate D topology), `tma-probe.txt`,
 `event-disposition.txt`, `counter-semantics-verification.txt`, `gate-probe-{1000,100000}.{csv,txt}`
@@ -69,8 +82,8 @@ regenerated.)
 | `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*-offcore.csv` |
 | `cache-misses`, `cache-references` | **exactly 0**, all arms | `arm-*-cache.csv` |
 | `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 85% of all cycles** (billions) | `arm-hostile-2g-stalls.csv` |
-| `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999 and 1.002 observed) | `arm-*-control.csv` |
-| `ns_per_access` | **~5–6 ns** L2-resident vs **~180–270 ns** DRAM | `arm-*.txt` |
+| `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999–1.002 across reps; 1.00003 in the committed capture) | `arm-*-control.csv` |
+| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–270 ns** DRAM | `arm-*.txt` |
 | stall-counter NESTING | **holds** in every arm — but see the declared limit below | `differential.txt` |
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
@@ -80,20 +93,25 @@ load outstanding and exactly zero of them are attributed to an L3 miss**, on a w
 L3. That is not a small number; it is physically impossible.
 
 **The workload's behaviour is established by WALL CLOCK, not by the PMU, so it is not in doubt — only
-the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~180–270 ns in the DRAM
+the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~165–270 ns in the DRAM
 arms — a 30–50× access-latency spread produced purely by changing the working-set extent — while
 `instructions` differs by **≤0.2%** between those arms: identical work, identical code path. An L3 hit
 is ~15–20 ns; ~200 ns is DRAM. No counter is needed to know these loads left the cache.
 
-**It is not a `perf` event-table mis-encoding.** The raw programming was probed with #3224's own
-verbatim verified encoding, and the *same event select* with a *different umask* works:
+**It is not a `perf` event-table mis-encoding.** `perf`'s own event table on this host
+([`host/counter-semantics-verification.txt`](host/counter-semantics-verification.txt), captured from
+`perf list --details`) resolves the two symbolic names to #3224 §5.2's verbatim verified encodings —
+and the *same event select* with a *different umask* works:
 
-| programmed | meaning | hostile-2g, every rep |
+| symbolic name | resolves to, per `perf list --details` here | hostile-2g, every rep |
 |---|---|--:|
-| `cpu/event=0xa3,umask=0x6,cmask=0x6/u` | #3224 §5.2's verified `stalls_l3_miss` encoding | **exactly 0** |
-| `cpu/event=0xa3,umask=0x5,cmask=0x5/u` | `stalls_l2_miss` | **billions** (`raw_stalls_l2_miss` in `arm-hostile-2g.csv`) |
+| `cycle_activity.stalls_l3_miss` | `cpu/event=0xa3,cmask=6,period=1000003,umask=6/` | **exactly 0** |
+| `cycle_activity.stalls_l2_miss` | `cpu/event=0xa3,cmask=5,period=1000003,umask=5/` | **billions** |
 
-Same PMU, same event select, adjacent umask. The `umask=0x6` sub-event is unimplemented in this guest
+Both measured values are in [`host/arm-hostile-2g-stalls.csv`](host/arm-hostile-2g-stalls.csv); the
+mapping is `perf`'s, not this report's. Same PMU, same event select, adjacent umask. (An earlier draft
+of this table cited a raw-programmed `arm-hostile-2g.csv` column that no revision of the committed
+probe produces — the encoding evidence is the event table above, which does exist.) The `umask=0x6` sub-event is unimplemented in this guest
 and reports a measurement-shaped zero.
 
 **Declared limit of the nesting check.** `differential.txt` reports
@@ -167,7 +185,7 @@ at 2,047 and at 489,789 on two runs of the identical command — so **no precise
 single rep**. What is stable across every run is the *direction and order of magnitude*, and the zeros.
 A stuck-at-zero counter is immune to both caveats: 0 × any scale factor is 0, and it was 0 in every rep.
 
-| counter (`:u`, gated) | friendly → hostile-512m | verdict |
+| counter (`:u`, gated) | friendly → hostile-512m | this report's reading |
 |---|---|---|
 | `instructions` | **flat, ratio 1.00** | the control property — same work both arms |
 | `cycles` | up ~30–40× | moves |
@@ -186,6 +204,27 @@ move with it. Three do not.
 
 A smoke test ("is the counter non-zero?") passes on the working ones and cannot distinguish the stuck
 ones from a genuinely memory-clean workload. Only a differential against a predicted behaviour can.
+
+## Replication — the capture was retaken after the probe was descoped, and the finding held
+
+The committed `host/` artefacts were **regenerated in full** on the same box after the classifier was
+removed (#3870), so every file under `host/` is reproducible by the committed script rather than by a
+revision of it that no longer exists. That re-run is also an independent rep of the finding, taken 76
+minutes after the first (`host/capability-probe.txt` stamps each capture: 19:58:14 UTC vs 21:14:33
+UTC), and it is worth reading as evidence in its own right:
+
+| quantity, `hostile-2g` arm | first capture | re-capture | agreement |
+|---|--:|--:|---|
+| `cycle_activity.stalls_l3_miss:u` | 0 | 0 | **exact** |
+| `offcore_requests_outstanding.all_data_rd:u` | 0 | 0 | **exact** |
+| `cache-misses:u` / `cache-references:u` | 0 | 0 | **exact** |
+| `cycle_activity.stalls_l2_miss:u` | 5,713,954,044 | 5,541,580,486 | within 3% |
+| `cycle_activity.stalls_total:u` | 6,269,821,419 | 6,101,774,072 | within 3% |
+
+The counters that work moved by a few percent between reps, as a shared box predicts. **The zeros are
+bit-identical** — which is the point of the whole file: a counter that varies with load is measuring
+something, and one that returns exactly 0 across two independent captures of a workload doing billions
+of DRAM accesses is not.
 
 ## Carried forward
 
@@ -225,7 +264,13 @@ sizes:
 | window | 1e3 accesses | 1e5 accesses | scaling | guard (≥10×) |
 |---|--:|--:|--:|---|
 | **UNGATED** (`--delay-ms` only) | 243,571,204 instr | 244,165,415 instr | **1.00×** | **FAILS — caught** |
-| **GATED** (control FIFO) | 6,297 instr | 600,113 instr | **95.33×** | PASSES |
+| **GATED** (control FIFO) | 6,296 instr | 600,316 instr | **95.35×** | PASSES |
+
+The GATED row is read from the committed capture beside this file
+([`host/gate-probe-1000.csv`](host/gate-probe-1000.csv) /
+[`host/gate-probe-100000.csv`](host/gate-probe-100000.csv)) and moves by a fraction of a percent
+whenever the probe is re-run; the UNGATED row is a one-off re-measurement of the original defective
+window, which no current revision of the probe can regenerate.
 
 The ungated count barely moves when the workload does 100× more work, because a **constant ~244
 million instructions** of buffer init and address-space teardown sits inside the window against roughly
@@ -238,7 +283,7 @@ property (#3224 requires it near 1.0), the ungated capture had not merely inflat
 Two properties of the guard, both deliberate. It is a **scaling** test, not a tuned ceiling, so it is
 **host-independent**: #3224's absolute ceiling of 1e6 instructions per 1e3 accesses was correct for its
 own machine and importing it would risk a false FAIL elsewhere, so the absolute is *reported* and only
-the scaling property can fail the run. And the discrimination is enormous — 1.00× versus 95.33× against
+the scaling property can fail the run. And the discrimination is enormous — 1.00× versus 95.35× against
 a 10× threshold — so the bound needs no tuning and is insensitive to host and load.
 
 **What did NOT change, and why that was predictable:** every capability verdict. Contamination can only
@@ -330,10 +375,12 @@ Every requirement is therefore stated as **"NONZERO and moving on the differenti
 `hostile` arm versus the `friendly` arm of `cache-hostile.c`, whose behaviour is known before it is
 measured. A counter that does not MOVE has not been validated, whatever it printed.
 
-**The probe evaluates these gates itself.** You do not have to apply the tables below by hand: it
-classifies every Gate B and Gate C counter as `ABSENT` / `STUCK` / `MOVING` and prints a
-`GATE A` / `GATE B` / `GATE C` / `GATE D` block in `host/differential.txt`. The tables here say what
-each verdict *means for #3287*, and record what this host answered.
+**The probe MEASURES these gates; YOU evaluate them (#3870).** `host/differential.txt` prints a
+`GATE A` / `GATE B` / `GATE C` / `GATE D` block giving each counter's disposition and its count in
+each arm, plus `perf`'s raw TMA output verbatim in `host/tma-probe.txt` — and stops there. Applying
+the tables below is a deliberate manual step: read each counter's three arm counts and ask whether it
+MOVED. The probe's `VERDICT: COMPLETE` tells you the capture is sound, **not** that the host passed.
+The tables here say what each answer *means for #3287*, and record what this host answered.
 
 ## Gate A — TMA level-2 (#3287 AC1)
 

@@ -8,7 +8,11 @@ sizes the guard uses.
   window          accesses=1e3        accesses=1e5        ratio    guard (>= 10x)
   --------------  ------------------  ------------------  -------  --------------
   UNGATED         243,571,204 instr   244,165,415 instr   1.00x    FAILS  <- caught
-  GATED (FIFO)          6,297 instr        600,113 instr  95.33x   PASSES
+  GATED (FIFO)          6,296 instr        600,316 instr  95.35x   PASSES
+
+The GATED row is read from this run's own gate-probe CSVs and shifts slightly on
+every re-run; the UNGATED row is a one-off re-measurement of the original
+defective window, which no current revision of the probe regenerates.
 
 Read the ungated row: the count barely moves when the workload does 100x more
 work, because a CONSTANT term -- buffer init (page faults + permutation build) and
@@ -74,7 +78,7 @@ mutates nothing — verified by reading it, not assumed.
 
 This probe exists to be re-run on a CANDIDATE host. If a group is unavailable on
 the new host, no CSV is written for it — and revision 4 left the OLD file in
-place, so the classifier read a PREVIOUS machine's numbers and reported them
+place, so the report read a PREVIOUS machine's numbers and printed them
 beside the current inventory under a COMPLETE verdict. The worst failure
 available here: a confident answer about the wrong computer.
 
@@ -83,8 +87,13 @@ Plant: pre-seed the output directory with arm CSVs claiming
 (hostile) — i.e. a counter that looks alive.
 
   after the fixed run:  0 files still contain the planted values
-                        cycle_activity.stalls_l3_miss:u : STUCK (0 in both arms)
+                        cycle_activity.stalls_l3_miss:u reads 0 in all three
+                        arms of THIS run (differential.txt)
 
-The planted numbers are gone and the verdict is derived from this run alone. All
+The planted numbers are gone and every number reported is derived from this run
+alone. (That line was quoted from the probe's removed auto-classifier; since
+#3870 the probe prints the recorded counts and leaves the reading to you. The
+purge property being demonstrated here is unchanged, and selftest-guards.sh
+case 5 pins it.) All
 generated measurement files are removed up front; the hand-written file you are
 reading is deliberately not matched by those globs.

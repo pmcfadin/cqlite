@@ -1,4 +1,8 @@
-== #3287 capability probe — gate verdicts ==
+== #3287 capability probe — RECORDED READINGS ==
+SCOPE: this probe RECORDS and VALIDATES; it does not classify (#3870).
+       No line below is a capability verdict. Gates A-D are answered by
+       READING these numbers — see negative-control-c7i-guest.md for this
+       host's reading. VERDICT at the foot covers data integrity ONLY.
 host L3: 105 MiB (1 instance)
 cpuset:  0,8 (complete sibling group from cpu0, all members online AND in this process's Cpus_allowed_list)
 window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED
@@ -6,36 +10,41 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
   absolute, REPORTED not asserted: 6296 instructions for 1e3 accesses
   (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)
 
--- GATE A: TMA --
-  perf stat -M TopdownL1 : ABSENT
-  perf stat -M TopdownL2 : ABSENT   <-- #3287 AC1 needs this RESOLVED
-  (per-event detail in tma-probe.txt; ABSENT is a capability ANSWER, ERROR is not)
+-- GATE A: TMA (raw record; #3287 AC1 turns on what tma-probe.txt shows) --
+  perf stat -M TopdownL1 : rc=1, 4 line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)
+  perf stat -M TopdownL2 : rc=1, 4 line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)
+  READ tma-probe.txt: a metric group that produced real level-2 metric rows
+  with numeric shares answers AC1 yes; a not-found/not-supported diagnostic
+  answers it no; anything else means the step must be re-run. This script
+  deliberately does not make that call (#3870).
 
 -- GATE B: offcore / prefetch-stall term (the one #3287 exists for) --
-  offcore_requests_outstanding.all_data_rd:u : STUCK (0 in both arms)
-  offcore_requests_outstanding.cycles_with_data_rd:u : STUCK (0 in both arms)
+  (counts as measured; the 2 GiB arm is many times L3, so read a 0 there)
+  offcore_requests_outstanding.all_data_rd:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
+  offcore_requests_outstanding.cycles_with_data_rd:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
   offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
   offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
-  l1d_pend_miss.fb_full:u : MOVING (4365 -> 139970)
-  l1d_pend_miss.pending:u : MOVING (140089187 -> 9834242721)
+  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=4226  hostile-512m=521061  hostile-2g=23782
+  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=140145400  hostile-512m=9605405316  hostile-2g=5642752330
 
 -- GATE C: reproduce #3224's own baseline counters --
-  cycle_activity.stalls_l3_miss:u : STUCK (0 in both arms)
-  cycle_activity.stalls_l2_miss:u : MOVING (23290 -> 9432096854)
-  cycle_activity.stalls_total:u : MOVING (280802426 -> 10740670688)
-  LLC-loads:u : ABSENT (ABSENT-FROM-PMU)
-  LLC-load-misses:u : ABSENT (ABSENT-FROM-PMU)
-  cache-references:u : STUCK (0 in both arms)
-  cache-misses:u : STUCK (0 in both arms)
+  cycle_activity.stalls_l3_miss:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
+  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=11564  hostile-512m=9430905756  hostile-2g=5541580486
+  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=280795503  hostile-512m=10740499627  hostile-2g=6101774072
+  LLC-loads:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
+  LLC-load-misses:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
+  cache-references:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
+  cache-misses:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
   NESTING (stalls_l3_miss <= stalls_l2_miss <= stalls_total), per arm:
-    DECLARED LIMIT: nesting HOLDS TRIVIALLY when stalls_l3_miss is STUCK at 0,
-    so a HOLDS here is NOT evidence that counter works — read its line above.
+    DECLARED LIMIT: nesting HOLDS TRIVIALLY when stalls_l3_miss reads 0 in
+    every arm, so a HOLDS here is NOT evidence that counter works — read its
+    recorded counts above.
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 23290 <= 280802426)
-    hostile-512m: HOLDS (0 <= 9432096854 <= 10740670688)
-    hostile-2g: HOLDS (0 <= 5713954044 <= 6269821419)
+    friendly-L2resident: HOLDS (0 <= 11564 <= 280795503)
+    hostile-512m: HOLDS (0 <= 9430905756 <= 10740499627)
+    hostile-2g: HOLDS (0 <= 5541580486 <= 6101774072)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt
@@ -50,4 +59,7 @@ Any honest L3-miss-stall or offcore counter MUST be large there. A zero is a
 silent instrument -- and a zero is invariant to the window, since
 contamination can only ADD counts.
 
-VERDICT: COMPLETE (every step measured; the gate lines above are the answer)
+VERDICT: COMPLETE (data integrity only — every step executed and every
+         data-integrity guard passed. This is NOT a capability claim and
+         NOT an answer to any of Gates A-D: this probe records, it does
+         not classify (#3870). Read the numbers above.)
