@@ -269,6 +269,37 @@ else
   bad "source: a leading-zero value was misread or errored in the cpu-budget line"
 fi
 
+# A DIGIT STRING TOO LARGE TO REPRESENT MUST NOT WRAP INTO A PIN (roborev job 332).
+# `10#$v` on an unrepresentable decimal wraps SILENTLY. Measured before the fix:
+#   ...=99999999999999999999 -> max-concurrency=7766279631452241919(pinned)
+#   ...=9223372036854775808  -> max-concurrency=1(clamped)
+# The first AFFIRMS A PIN AT A VALUE NOBODY SET, which inverts the one property this token
+# exists to carry; the second mislabels an unusable value as a deliberate 0. Both are now
+# `invalid` — refused BY DIGIT COUNT, before the arithmetic, since the bound cannot be
+# decided by the operation that is the defect. The 18/19-digit boundary is asserted in BOTH
+# directions: a bound that refused everything, or nothing, would pass a one-sided check.
+ov_ok=1
+for _ov in "99999999999999999999 3 invalid" "9223372036854775808 3 invalid" \
+           "1000000000000000000 3 invalid" "999999999999999999 999999999999999999 pinned" \
+           "4294967296 4294967296 pinned"; do
+  set -- $_ov
+  _ovline=$(cpu_budget AGENT_GATE_TEST_NCPU=16 CQLITE_GATE_MAX_CONCURRENCY="$1" 2>&1)
+  _ovgot="$(budget_n "$_ovline")($(budget_source "$_ovline"))"
+  [ "$_ovgot" = "$2($3)" ] || { ov_ok=0; echo "  '$1' should give $2($3), got '$_ovgot'"; }
+  # the wrap produced a number the operator never set; assert the value is never invented
+  case "$_ovgot" in
+    *7766279631452241919*) ov_ok=0; echo "  '$1' wrapped into a fabricated cap" ;;
+  esac
+  case "$_ovline" in
+    *"out of range"*|*"value too great"*) ov_ok=0; echo "  '$1' errored in the budget line" ;;
+  esac
+done
+if [ "$ov_ok" = 1 ]; then
+  ok "source: an unrepresentable digit string is invalid, refused by digit count before the arithmetic (18 digits pinned, 19 invalid)"
+else
+  bad "source: an oversized value wrapped, errored, or was misclassified in the cpu-budget line"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
 [ "$FAIL" -eq 0 ]

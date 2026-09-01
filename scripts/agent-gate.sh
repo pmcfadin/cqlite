@@ -1263,9 +1263,11 @@ accelerators_line() {
 # so. Four states, because two more fall straight out of the resolver:
 #   pinned  — the env var is set to a valid integer >= 1 and is used verbatim
 #   default — the env var is UNSET, so N is the #1825 formula max(2,(ncpu-2)/4)
-#   invalid — the env var is set to a non-numeric or EMPTY value; it is SILENTLY
-#             discarded for the formula (a mis-set tmux/systemd/CI var reads
-#             exactly like a healthy defaulted box unless we say so)
+#   invalid — the env var is set to a value that cannot be used as a cap: EMPTY,
+#             non-numeric, or a digit string too large to represent (19+ digits,
+#             roborev job 332). It is SILENTLY discarded for the formula (a mis-set
+#             tmux/systemd/CI var reads exactly like a healthy defaulted box unless
+#             we say so)
 #   clamped — the env var is set to a valid integer < 1 (e.g. 0) and is silently
 #             raised to 1
 # `${VAR+set}` — NOT `${VAR:-}` — is what separates unset from set-but-empty:
@@ -1274,7 +1276,7 @@ accelerators_line() {
 _gate_resolve_max_concurrency() {
   local dflt=$(( ( _ncpu - 2 ) / 4 ))
   [ "$dflt" -lt 2 ] && dflt=2
-  local v src
+  local v src sig
   if [ -z "${CQLITE_GATE_MAX_CONCURRENCY+set}" ]; then
     v=$dflt; src=default
   else
@@ -1289,8 +1291,31 @@ _gate_resolve_max_concurrency() {
       # mis-classifying it or refusing it. `10#` forces base 10, and `v` is normalised so
       # every downstream consumer (cores-per-gate, build-jobs, test-threads) gets a clean
       # decimal — the SUMMARY then reports the value actually honoured, e.g. `8(pinned)`.
-      *)           v=$(( 10#$v ))
-                   if [ "$v" -lt 1 ]; then v=1; src=clamped; else src=pinned; fi ;;
+      *)           # AN UPPER BOUND CHECKED BY DIGIT COUNT, BEFORE ANY ARITHMETIC (roborev
+                   # job 332). `10#$v` on a digit string bash cannot represent WRAPS
+                   # SILENTLY, and the wrap was reported as a pin. Measured before the fix:
+                   #   ...=99999999999999999999 -> max-concurrency=7766279631452241919(pinned)
+                   #   ...=9223372036854775808  -> max-concurrency=1(clamped)
+                   # The first is the damaging one: the SUMMARY AFFIRMS a pin at a value
+                   # nobody set, which inverts the one property this token exists to carry.
+                   # The second mislabels an unusable value as a deliberate 0.
+                   #
+                   # The bound is a DIGIT COUNT, not a comparison against INT64_MAX, because
+                   # it must be decided WITHOUT the arithmetic that is the defect: any
+                   # <=18-digit decimal is < 9.22e18 and always fits, so 19+ digits is
+                   # refused. That refuses a handful of representable 19-digit values too —
+                   # deliberately, since a 19-digit slot cap is a mis-set variable by any
+                   # measure, and `invalid` (silently discarded, use the formula) is the
+                   # correct answer for one. A lexical compare against INT64_MAX would be
+                   # exact but locale-dependent on digit collation; a length test is not.
+                   sig="$v"
+                   while [ "${#sig}" -gt 1 ] && [ "${sig#0}" != "$sig" ]; do sig="${sig#0}"; done
+                   if [ "${#sig}" -gt 18 ]; then
+                     v=$dflt; src=invalid
+                   else
+                     v=$(( 10#$sig ))
+                     if [ "$v" -lt 1 ]; then v=1; src=clamped; else src=pinned; fi
+                   fi ;;
     esac
   fi
   GATE_MAX_CONCURRENCY="$v"
