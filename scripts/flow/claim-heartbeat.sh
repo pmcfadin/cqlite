@@ -266,11 +266,11 @@
 #   THE TWO POPULATED NAMESPACES ARE DELIBERATELY NOT READ, measured rather than priced
 #   from the shape (#3548). Do NOT "fix" the empty subject set by pointing this command at
 #   them; both were evaluated and rejected:
-#     * `refs/claims/issue-<N>` — the per-issue lock (~6 per box). It records the pid of the
-#       TRANSIENT CLAIMING SHELL and never refreshes it. Measured: pid 3775744 was already
-#       gone while its lane was running, so reading it here would report DEAD-NO-PROCESS
-#       for HEALTHY lanes — a false-positive machine, which is worse than reporting nothing.
-#     * `refs/heartbeats/<machine>` — ~20 per box, but SINGLE-SLOT PER MACHINE and
+#     * `refs/claims/issue-<N>` — the per-issue lock, populated on every box. It records the
+#       pid of the TRANSIENT CLAIMING SHELL and never refreshes it. Measured: pid 3775744 was
+#       already gone while its lane was running, so reading it here would report
+#       DEAD-NO-PROCESS for HEALTHY lanes — a false-positive machine, worse than nothing.
+#     * `refs/heartbeats/<machine>` — populated on every box, but SINGLE-SLOT PER MACHINE and
 #       force-updated by `beat`, so N lanes on one box overwrite each other and at most one
 #       is ever reportable. That is structurally the same masking defect the retired
 #       `refs/machine-claims/<machine>` layout had, i.e. instance 5 of the #3464

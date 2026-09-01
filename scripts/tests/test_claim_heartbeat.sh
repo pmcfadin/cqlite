@@ -3008,54 +3008,61 @@ kill "${zparent:-0}" 2>/dev/null || true
 
 
 # ===========================================================================
-echo "TEST 81: --help states the SUPERVISOR-ONLY scope and that exit 1 is not healthy (#3548)"
+echo "TEST 81: --help carries the COMPLETE #3548 scope statement, phrase by phrase"
 # ===========================================================================
-# The owner ruling of 2026-09-01 (option C) is a DOCUMENTATION deliverable: the descope is
-# only worth anything if it is still there next month. A wording pass that deletes the scope
-# statement leaves a command whose subject set is empty on this fleet and no text saying so —
-# which is the exact "reads as working while answering about the empty set" failure #3548 is
-# about. So the load-bearing sentences are pinned, one grep per claim, on ONE line each (the
-# help is a comment block, so a phrase spanning a line break can never match).
+# The owner ruling of 2026-09-01 (option C) is a DOCUMENTATION deliverable, so it is only worth
+# something if it is still there next month. A wording pass that deletes the scope statement leaves
+# a command whose subject set is empty on this fleet and no text saying so — the exact "reads as
+# working while answering about the empty set" failure #3548 is about.
+#
+# EACH PHRASE IS MATCHED WHOLE, AND THAT IS THE FIX FOR THE FIRST DRAFT (roborev job 15, finding 2).
+# The first version grepped for tokens — `worker-supervisor.sh`, `SINGLE-SLOT PER MACHINE` — which
+# this large help text can satisfy from an UNRELATED occurrence elsewhere: the only-writer
+# RELATIONSHIP was not required (the supervisor pid section mentions the script), and either
+# namespace-specific REASON could be deleted with the case still green. So the phrases below are
+# complete, each BINDS its namespace to its reason, and the failure message NAMES the phrase that
+# went missing — a bare red would not say which guarantee was lost.
+#
+# Matched against a WHITESPACE-FLATTENED copy of the help: it is a comment block, so every phrase
+# longer than a line is wrapped, and a line-wise grep for one could never match however correct the
+# text is (that is why the older cases in this file assert single-line fragments). Brittle by
+# construction and accepted, on TEST 44's precedent: a reflow reds this case, which is a cheap
+# correction, whereas a token match cannot tell a reflow from a deletion.
 help81=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
-# (a) the scope itself, plus the ruling citation, so the descope is attributable.
-if printf '%s\n' "$help81" | grep -qi 'SUPERVISOR FLEETS ONLY' \
-  && printf '%s\n' "$help81" | grep -q '#3548'; then
-  ok "--help states the supervisor-fleets-only scope and cites #3548"
-else
-  bad "--help must state the SUPERVISOR-FLEETS-ONLY scope and cite #3548"
-fi
-# (b) the only writer, named — this is WHY the subject set is empty here, and without it the
-#     scope reads as an arbitrary restriction someone may "relax".
-if printf '%s\n' "$help81" | grep -q 'worker-supervisor.sh' \
-  && printf '%s\n' "$help81" | grep -qi 'subject set is EMPTY\|set is EMPTY'; then
-  ok "--help names worker-supervisor.sh as the only writer and says the subject set is EMPTY without it"
-else
-  bad "--help must name the only writer of the claim refs and state that the subject set is empty on a supervisor-less fleet"
-fi
-# (c) the reinforcement of the #3467 rule. Not a duplicate of TEST 52's behavioural check: that
-#     one pins that the CODE never exits 0, this one pins that the CONTRACT still tells an
-#     operator not to read the 1 as clean — and the descope is precisely what makes a 1 the
-#     NORMAL outcome on this fleet, so deleting this sentence is more dangerous than before.
-if printf '%s\n' "$help81" | grep -qi 'never a clean bill of health\|never read 1 as a clean bill of health'; then
-  ok "--help still says exit 1 is NOT a clean bill of health (#3467 rule reinforced, not softened)"
-else
-  bad "--help must keep the 'exit 1 is never a clean bill of health' rule"
-fi
-# (d) the two MEASURED refusals. A later reader's first instinct is "just point it at the
-#     populated namespace", so the evidence that both fail has to survive in the file that is
-#     the authoritative contract — otherwise it gets re-derived, or worse, not.
-if printf '%s\n' "$help81" | grep -q 'refs/claims/issue-<N>' \
-  && printf '%s\n' "$help81" | grep -qi 'SINGLE-SLOT PER MACHINE'; then
-  ok "--help records both rejected namespaces with their measured reasons (transient claiming-shell pid; single-slot heartbeats)"
-else
-  bad "--help must record why refs/claims/issue-<N> and refs/heartbeats/<machine> are NOT read"
-fi
-# (e) AC4, which the ruling explicitly preserves through the descope.
-if printf '%s\n' "$help81" | grep -qi 'stale pid must never yield'; then
-  ok "--help keeps AC4: a stale pid must never yield a DEAD-* verdict, it must abstain"
-else
-  bad "--help must keep AC4 (a stale pid must never yield DEAD-*)"
-fi
+# here-strings, not `printf | grep` (roborev job 15, finding 1): under this suite's `set -o
+# pipefail` a `grep -q` that exits at the first match can leave the writer with SIGPIPE, so the
+# PIPELINE status goes non-zero and the assertion reads FALSE on correct input — a false FAIL.
+help81_flat=$(tr '\n' ' ' <<<"$help81" | tr -s ' ')
+require_help_phrase() {  # <the guarantee this phrase carries> <the COMPLETE phrase, matched literally>
+  if grep -Fqi -- "$2" <<<"$help81_flat"; then
+    ok "--help carries the $1 statement"
+  else
+    bad "--help is MISSING the $1 statement (#3548) — this exact phrase is gone: \"$2\""
+  fi
+}
+require_help_phrase "supervisor-fleets-only scope" \
+  'lane-granular dead-lane detection APPLIES TO SUPERVISOR FLEETS ONLY'
+require_help_phrase "descope attribution (owner ruling + issue numbers)" \
+  'DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes #3393)'
+# The RELATIONSHIP, not the mention: this is WHY the subject set is empty here, and without it the
+# scope reads as an arbitrary restriction someone may "relax".
+require_help_phrase "only-writer relationship" \
+  'the ONLY writer of either in this tree is `scripts/local/worker-supervisor.sh`'
+require_help_phrase "empty-subject-set consequence" \
+  'On a supervisor-less `/drive-issue` fleet the subject set is EMPTY'
+# Not a duplicate of TEST 52's behavioural check: that pins that the CODE never exits 0, this pins
+# that the CONTRACT still tells an operator not to read the 1 as clean — and the descope is what
+# makes a 1 the NORMAL outcome here, so deleting the sentence is more dangerous than it was.
+require_help_phrase "exit-1-is-not-a-clean-bill-of-health rule (#3467)" \
+  'EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill of health'
+# The two MEASURED refusals, each binding its namespace to its own reason. A later reader's first
+# instinct is "just point it at the populated namespace", so the evidence has to survive here.
+require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid)" \
+  '`refs/claims/issue-<N>` — the per-issue lock, populated on every box. It records the pid of the TRANSIENT CLAIMING SHELL and never refreshes it'
+require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)" \
+  '`refs/heartbeats/<machine>` — populated on every box, but SINGLE-SLOT PER MACHINE and force-updated by `beat`, so N lanes on one box overwrite each other'
+require_help_phrase "AC4 abstain rule" \
+  'a STALE PID MUST NEVER YIELD A `DEAD-*` VERDICT — abstain with an `UNKNOWN-*` verdict instead'
 
 # ===========================================================================
 echo "TEST 82: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"
@@ -3105,9 +3112,10 @@ if [ -n "$ns_lock" ] && [ -n "$ns_beat" ]; then
 else
   bad "NON-VACUITY broken: fixture refs missing (lock='$ns_lock' beat='$ns_beat')"
 fi
+# here-strings throughout (roborev job 15, finding 1 — see TEST 81).
 if [ "$ns_rc" -eq 1 ] \
-  && ! printf '%s\n' "$ns_out" | grep -q 'DEAD-' \
-  && ! printf '%s\n' "$ns_out" | grep -q '8801'; then
+  && ! grep -q 'DEAD-' <<<"$ns_out" \
+  && ! grep -q '8801' <<<"$ns_out"; then
   ok "a dead pid in refs/claims/issue-<N> (and a heartbeat beside it) produces NO DEAD-* verdict and no row at all (rc=$ns_rc)"
 else
   bad "the populated namespaces must be OUT of the subject set — no DEAD-* and no row: rc=$ns_rc out:
@@ -3116,8 +3124,8 @@ fi
 # ...and the run must say it measured NOTHING, so an operator is not left reading silence as
 # health. This is the descope's operator-facing half: on a supervisor-less fleet THIS is the
 # normal output, and it has to be self-describing.
-if printf '%s\n' "$ns_out" | grep -qi 'not the same as an idle fleet' \
-  && printf '%s\n' "$ns_out" | grep -qi "NOT 'no dead lanes'"; then
+if grep -qi 'not the same as an idle fleet' <<<"$ns_out" \
+  && grep -qi "NOT 'no dead lanes'" <<<"$ns_out"; then
   ok "the empty-subject-set run says nothing was measured and that this is NOT 'no dead lanes'"
 else
   bad "an empty subject set must report that nothing was measured: out:
@@ -3130,7 +3138,7 @@ craft_lane_claim "$ns_work" "nsBox" 8802 "$ABSENT_PID" 30
 nsd_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 nsd_rc=$?
-if [ "$nsd_rc" -eq 3 ] && printf '%s\n' "$nsd_out" | grep -E '^nsBox +8802 ' | grep -q 'DEAD-NO-PROCESS'; then
+if [ "$nsd_rc" -eq 3 ] && grep -Eq '^nsBox +8802 .*DEAD-NO-PROCESS' <<<"$nsd_out"; then
   ok "NON-VACUITY: the same absent pid in refs/lane-claims IS reported DEAD-NO-PROCESS (rc=3) — the boundary is the namespace"
 else
   bad "NON-VACUITY broken: the same pid in the subject namespace must be DEAD: rc=$nsd_rc out:
