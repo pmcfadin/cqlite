@@ -482,7 +482,31 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   load-bearing on a reachable shape — a `.result` reading `PASS abc` records PASS in the table
   while its verdict was not fully read, so the old order rendered the affirmative clean reading
   over an unmeasured subject on a run with nothing else wrong (found by MUTATION: removing the
-  reorder left every other case in the suite green). **(2)** `record_result` captures its own
+  reorder left every other case in the suite green).
+  **AND MARKING A SUBJECT UNMEASURED IS NOT DISPOSING OF IT — THE RUN MUST FAIL TOO
+  (roborev job 316).** That third subject kind was wired to the MARKER and not to the VERDICT: all three
+  aggregation loops keyed `OVERALL=FAIL` on the status token being exactly `FAIL`, so the same
+  `PASS abc` (or the EMPTY file an ENOSPC write actually leaves behind) was recorded as
+  UNMEASURED by the line **and left `OVERALL` untouched** — the gate of record emitting
+  `RESULT: PASS` for a run in which a SELECTED component's verdict was never read. **Worse than
+  either half alone, because the verdict is what a closer reads**, and the same absence-of-a-bad-
+  signal shape one layer in: *"the status token was not the string `FAIL`"* is not *"a verdict was
+  read"*. An unread verdict is now normalised to a synthetic `FAIL 0` by the ONE wrapper
+  `_disk_verdict_read_aggregate` and the caller forces `OVERALL=FAIL` — the disposition the
+  fail-closed presence guard already gave an ABSENT `.result`, because **a component whose verdict
+  cannot be read may have SUCCEEDED, and a gate may not certify a maybe**. Structurally pinned
+  two ways: exactly ONE raw-reader call site, inside the wrapper, and a call-site census where
+  every wrapper site must either force `OVERALL` or carry a declared renderer exemption — so a
+  fourth aggregation site cannot be added back into the hole. **This does NOT breach "an
+  attribution, never a verdict"**: what fails the run is the aggregation's handling of a file it
+  could not read, which would be correct if the `disk-exhaustion:` line did not exist; the line
+  still changes nothing, and the structural guard asserting that is deliberately unweakened (the
+  aggregator is extracted into its own file rather than excused by name — *excluding whatever
+  fails* is how such a guard rots). Same round, same family: a seconds check spelled
+  `case $v in ''|*[!0-9-]*)` **admits `-`, `--`, `1-2`, `-1-`** — a character-class complement
+  cannot express WHERE a minus may appear — so a partially-written duration passed as well-formed
+  and its component was omitted from the subject set the channel exists to populate.
+  **(2)** `record_result` captures its own
   write failure **IN MEMORY** on the existing `_disk_note_capture_failure` channel — never a
   spill file, which under ENOSPC is what cannot be written. **THAT NOTE REACHES THE PARENT ONLY
   FROM THE PARENT SHELL**: the serial MAIN lane and every `--lite`/`--delta` component. A

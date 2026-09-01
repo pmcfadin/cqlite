@@ -317,6 +317,29 @@ logs-filesystem ENOSPC the block now reads `RECOGNISED … in IN-MEMORY subject 
 manifest write (…)'` even though every component PASSed. A capture whose text was not recorded
 reads `UNMEASURED` naming that — never clean.
 
+**A THIRD subject kind, then a DECLARED boundary (roborev job 304).** `record_result` writes
+`$LOG_DIR/<component>.result`; under ENOSPC that write fails, its error text goes to gate
+**stderr** — neither a component log nor an in-memory subject — and the parent's fail-closed
+guard then synthesises `FAIL 0` for a component whose own log is CLEAN. Both channels empty ⇒
+the same false `0 RECOGNISED`, one writer over. Three consecutive rounds each found a
+*different* unwatched writer, so rather than carve a fourth time the scan now takes a **third
+kind of subject** — a `.result` verdict the gate could not READ, whether absent, unreadable or
+**malformed** — and the emitted `scan:` field **declares its SUBJECT set** the way it already
+declared its signature set, naming the gate-internal writers known to sit outside it:
+`NON-EXHAUSTIVE by construction ON BOTH AXES`. **When a diagnostic's subject set has been
+extended three times, publish the boundary** — a marker that names its own blind spots is worth
+more than one implying a completeness it does not have.
+
+**And marking a subject UNMEASURED is not DISPOSING of it (roborev job 316).** That third kind
+was wired to the marker and not to the **verdict**: the aggregation loops keyed `OVERALL=FAIL`
+on the status token being exactly `FAIL`, so an unreadable `.result` was reported UNMEASURED by
+the line while the run still emitted `RESULT: PASS` — a certified gate over a component whose
+verdict was never read. An unread verdict now becomes a synthetic `FAIL 0` and fails the run,
+because **a component whose verdict cannot be read may have succeeded, and a gate may not
+certify a maybe**. That is not a breach of "an attribution, never a verdict": what fails the run
+is the aggregation's handling of a file it could not read, which would be correct if this line
+did not exist.
+
 **This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
 queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per
 box. That capacity-management work is tracked under **#3434 / #3763 / #3755** — do not read
