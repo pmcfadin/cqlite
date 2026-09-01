@@ -79,10 +79,13 @@
 //! | `parse_nested_udt_from_registry`'s guard | **2** — exactly `nested_udt_*_is_refused` |
 //! | `parse_inline_udt_value`'s guard (`udt/inline.rs`) | **2** — exactly `inline_udt_*_is_refused` |
 //! | the four `parse_udt_value` caller checks | **2** — exactly `frozen_udt_header_path_*_is_refused` |
+//! | `require_frozen_extent` at `parse_frozen_sequence_value` | **2** — exactly `cell_frozen_{list,set}_*_is_refused` |
+//! | `require_frozen_extent` at `parse_frozen_map_value` | **1** — exactly `cell_frozen_map_*_is_refused` |
+//! | `require_frozen_extent` at `parse_tuple_value` | **1** — exactly `cell_tuple_*_is_refused` |
 //!
-//! 21 DISCRIMINATING, each attributed to the ONE guard it pins and to no other.
-//! The 14 CONTROL cases, the 2 DISCRIMINATING-ELSEWHERE cases and the
-//! `require_frozen_extent` helper case stayed green in ALL FOUR runs.
+//! 25 DISCRIMINATING, each attributed to the ONE guard it pins and to no other.
+//! The 18 CONTROL cases, the 2 DISCRIMINATING-ELSEWHERE cases and the
+//! `require_frozen_extent` helper case stayed green in ALL SEVEN runs.
 //!
 //! That separation is what the `inline_udt_*` cases exist for. They red under the
 //! inline disable and NOT under the registry one, which is the only evidence that
@@ -90,32 +93,36 @@
 //! `self.udt_registry` is `None`, so the registry-carrying `parser()` used by the
 //! `nested_udt_*` cases can never reach it, however deeply nested the value.
 //!
-//! **What that experiment does NOT cover, declared rather than implied, and
-//! narrowed since the first statement of it.** Two groups of call sites need an
-//! `SSTableReader`, so no test here can reach them:
+//! **What that experiment does NOT cover — now TWO sites, down from five, and the
+//! reduction is the point.** An earlier draft of this paragraph declared census
+//! finding F's whole cell-level trio unreachable "because it needs an
+//! `SSTableReader`". That was true of the SIGNATURE and false of the
+//! REQUIREMENT: all four `frozen.rs` entry points took a `_reader` they never
+//! used, and deleting that dead parameter made the three guards directly
+//! drivable with a hand-built VUInt-framed buffer (see the cell-level cases
+//! below, and rows 5-7 of the table above, which pin their WIRING and not merely
+//! the rule). **"Needs a reader" was a claim about a type signature; it should
+//! have been checked against what the body does.**
 //!
-//! * census finding F's CELL-level trio (`parse_frozen_sequence_value`,
-//!   `parse_frozen_map_value`, `parse_tuple_value`, guarded by
-//!   `require_frozen_extent`);
-//! * census finding C's two `cell_value_complex.rs` callers of
-//!   `parse_udt_value`, inside `decode_complex_cell_value`.
+//! What genuinely remains, with the blocker named rather than gestured at:
+//! census finding C's **two** `parse_udt_value` callers inside
+//! `decode_complex_cell_value` (`cell_value_complex.rs`). That function's
+//! `reader` parameter is NOT dead — `cell_value_complex.rs:257` forwards it to
+//! `parse_cell_value_schema_order` for frozen-inner recursion — so the same
+//! deletion does not apply, and `SSTableReader` cannot be built in a unit test:
+//! it holds `Arc<Mutex<BlockSource>>` / `ScanSource` / `Arc<dyn ReadAt>` over an
+//! open file, and its only constructors are the four `async`
+//! `SSTableReader::open*` functions (`reader/open.rs:38+`), each needing a tokio
+//! runtime and a real parseable SSTable on disk. Covering those two means a
+//! fixture-backed integration test: **issue #3861**.
 //!
-//! What IS covered, and what the earlier draft of this paragraph wrongly gave up
-//! on: the HELPER `require_frozen_extent` takes no `&self`, so
-//! `require_frozen_extent_accepts_only_the_exact_extent` pins its own semantics
-//! directly. The gap is therefore not "nothing here is tested" but "the rule is
-//! pinned and the wiring of those five call sites is not" — the arguments they
-//! pass are checked only by the corpus/integration path. `udt.rs`'s two callers
-//! (`decode_frozen_udt_from_header_type`, and the nested one inside
-//! `parse_udt_field_value`) need no reader and ARE covered below.
-//!
-//! **The CONSEQUENCE of that gap, which is the part worth stating:** an `Err`
-//! from a column decode makes `row_data.rs` `break` its column loop, so the
-//! failing column **and every later column** silently become null rather than
-//! surfacing an error. A mis-wired argument at one of those five sites would
-//! therefore present as a quietly truncated row, not as a failure — which is
-//! exactly why the 144-file corpus census (row counts AND a hash of the full
-//! rendered output) is part of this change's evidence and not an optional extra.
+//! **The CONSEQUENCE of the remaining gap, which is why it is filed rather than
+//! shrugged at:** an `Err` from a column decode makes `row_data.rs` `break` its
+//! column loop, so the failing column **and every later column** silently become
+//! null rather than surfacing an error. A mis-wired argument at either site would
+//! present as a quietly truncated row, not a failure — which is why the 144-file
+//! corpus census (row counts AND a hash of the full rendered output) is part of
+//! this change's evidence and not an optional extra.
 //!
 //! These carry NO dataset, reader or feature-flag dependency: the subject is a
 //! `pub(super)` method on a plainly-constructed parser, so they run in every
