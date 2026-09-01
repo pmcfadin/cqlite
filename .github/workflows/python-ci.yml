@@ -10,6 +10,13 @@ on:
       - 'bindings/python/**'
       - 'cqlite-core/**'
       - '.github/workflows/python-ci.yml'
+      # Issue #1455: the cross-binding-parity job compares the Python binding
+      # against the NODE binding and the CLI through the shared harness in
+      # bindings/parity, so a change to either is a change to this workflow's
+      # subject. Without these paths the harness would merge untested.
+      - 'bindings/parity/**'
+      - 'bindings/node/**'
+      - 'cqlite-cli/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -25,6 +32,13 @@ on:
       - 'bindings/python/**'
       - 'cqlite-core/**'
       - '.github/workflows/python-ci.yml'
+      # Issue #1455: the cross-binding-parity job compares the Python binding
+      # against the NODE binding and the CLI through the shared harness in
+      # bindings/parity, so a change to either is a change to this workflow's
+      # subject. Without these paths the harness would merge untested.
+      - 'bindings/parity/**'
+      - 'bindings/node/**'
+      - 'cqlite-cli/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -530,10 +544,124 @@ jobs:
             bindings/python/.pytest_cache/
           retention-days: 7
 
+  cross-binding-parity:
+    name: Cross-binding parity (Python vs Node vs CLI)
+    # Same tier as `test`: this job builds a release wheel, a release CLI and
+    # the Node native module, so it runs where the rest of the heavy bindings
+    # tier runs (push to main, nightly schedule, workflow_dispatch, or a PR
+    # labeled ci:bindings-full) rather than on every core-touching PR.
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Issue #1209: remove the runner's preinstalled clippy BEFORE the pinned
+      # toolchain action reconciles, or the clippy-preview install can conflict.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy 2>/dev/null || true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1  # pinned to rust-toolchain.toml (issue #1990)
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "bindings/python -> target"
+          key: cross-binding-parity-x86_64-unknown-linux-gnu
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Build Python wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-unknown-linux-gnu
+          # release-unwind matches the shipped profile (issue #1440), so the leg
+          # under comparison is the one users get.
+          args: --profile release-unwind --out dist
+          working-directory: bindings/python
+          manylinux: "2_28"
+
+      - name: Install wheel and test dependencies
+        shell: bash
+        run: |
+          python -m pip install 'pytest>=7.0'
+          python -m pip install bindings/python/dist/*.whl
+
+      - name: Build Node native module
+        shell: bash
+        working-directory: bindings/node
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build CLI binary (release)
+        shell: bash
+        run: cargo build --package cqlite-cli --release
+
+      # The shared composite action, not a hand-rolled curl: it also REPAIRS a
+      # partial cache, which a bare cache+tar cannot.
+      - name: Restore canonical datasets
+        uses: ./.github/actions/restore-canonical-datasets
+        with:
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+
+      - name: Sanity check dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Run 3-way cross-binding parity (issue #1455)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Datasets present but a leg erroring or returning 0 rows is a FAILURE,
+          # never a skip.
+          CQLITE_REQUIRE_FIXTURES: "1"
+          # The Node leg has its OWN fail-closed switch: CQLITE_REQUIRE_FIXTURES
+          # is about the DATASET corpus, and the `test` job sets it while never
+          # provisioning Node. This job DOES build the native module, so an
+          # absent Node leg here is a broken build, not a legitimate omission.
+          CQLITE_PARITY_REQUIRE_NODE: "1"
+          RUN_SLOW_TESTS: "1"
+        shell: bash
+        run: |
+          pytest bindings/python/tests/test_cross_binding_parity.py -v --tb=short
+
+      - name: Upload canonical artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: cross-binding-parity-artifacts
+          path: bindings/parity/out/
+          retention-days: 7
+
   quality-gate:
     name: Python CI Quality Gate
     runs-on: ubuntu-latest
-    needs: [smoke, smoke-floors, build-only-wheels, test]
+    needs: [smoke, smoke-floors, build-only-wheels, test, cross-binding-parity]
     if: always()
     env:
       RUN_FULL: >-
@@ -589,6 +717,20 @@ jobs:
             exit 1
           fi
 
+      - name: Check cross-binding parity results
+        # Issue #1455: the 3-way harness (Python binding vs Node binding vs CLI)
+        # is in the SAME heavy tier as `test`, so it is legitimately `skipped` on
+        # a routine unlabeled PR and must be asserted only when it ran.
+        if: env.RUN_FULL == 'true'
+        env:
+          PARITY_RESULT: ${{ needs.cross-binding-parity.result }}
+        run: |
+          echo "Cross-binding parity results: ${PARITY_RESULT}"
+          if [ "${PARITY_RESULT}" != "success" ]; then
+            echo "::error::3-way cross-binding parity failed (Python binding vs Node binding vs CLI)"
+            exit 1
+          fi
+
       - name: Summary
         run: |
           {
@@ -598,6 +740,7 @@ jobs:
             echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
             echo "- Floor smoke covers Python 3.9 (the floor), 3.13 and 3.14 (the current top of the advertised range), reusing the abi3 wheel from the smoke job; each leg restores the canonical corpus and runs one real query, failing on a 0-row result. It is a binding MATRIX tier, so per repo policy it runs on every push to \`main\`, on the nightly schedule, and on PRs labeled \`ci:bindings-full\` — NOT on a routine unlabeled PR (issue #1459)."
             echo "- Full cross-platform wheel builds, the full dataset-backed pytest suite, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
+            echo "- 3-way cross-binding parity (issue #1455) runs the SAME SELECT through the Python binding, the Node binding and the CLI and requires equal canonical JSON. Same tier as the full suite. It is the ONLY lane that exercises the Node leg of that comparison — no local agent-gate component builds the Node native module or a release CLI."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${RUN_FULL}" = "true" ]; then
