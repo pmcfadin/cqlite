@@ -1086,6 +1086,20 @@ fn dataset_cases() -> Vec<DatasetCase> {
         // while the single-generation decoder assembles the whole `Value::Udt`
         // (#927/#1081). The predicate REFUSES such a schema, so this pins that the
         // fast arm is not taken and behaviour is exactly today's.
+        //
+        // Issue #2339 (roborev F1) changed WHAT "today's behaviour" is, and this
+        // case is the harness saying so rather than quietly changing meaning. The
+        // service now resolves each column's `cql_type` under the TICKET's keyspace
+        // (it previously resolved under the `"default"` placeholder and therefore
+        // resolved NOTHING), so `mp` is metadata-correct — an Arrow `Struct` — and
+        // the typed UDT builder consequently FAILS CLOSED on the fall-through's
+        // `Boolean(true)` (the `active` field, the last element's scalar) instead of
+        // formatting it into the opaque `Utf8` column an unresolved `Custom` used to
+        // produce. So the pre-existing #927/#1081 divergence surfaces as an error
+        // instead of a silently-wrong value: still IDENTICAL on both arms, which is
+        // what this case exists to assert, and the fail-closed direction. Assembling
+        // a multicell UDT on the merge arm remains #927/#1081's work; when that
+        // lands, this case reverts to `refused_error_substr: None`.
         DatasetCase {
             label: "cassandra/cx_multicell_udt_collection_paths(fail-closed non-frozen UDT)",
             pk_only_label: "cassandra/cx_multicell_udt_collection_paths@pk-only",
@@ -1100,7 +1114,12 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec![],
             refuses_fast_arm: true,
-            refused_error_substr: None,
+            // The typed-UDT Arrow builder's fail-closed message
+            // (`arrow_builders_nested::build_typed_udt_array`): a resolved UDT
+            // column may only carry a `Value::Udt` or null, so the merge arm's
+            // last-element scalar is refused rather than coerced. Naming the
+            // substring keeps an UNRELATED identical failure from passing this case.
+            refused_error_substr: Some("expected Udt value"),
             columns: vec![],
             token_of_int_pk: None,
         },
