@@ -485,24 +485,56 @@ refuse_no_c_verdict() {
 #
 # The FIRST anchored line supplies the values and every anchored line is COUNTED,
 # so two verdicts in one file are AMBIGUOUS and refusable rather than last-wins.
-# `RESULT:`'s value is taken from its FIRST occurrence on that line, so a
-# self-recorded NOT-RUN cause that happens to contain the word cannot supply the
-# token. ANSI is stripped as belt (#3400: colour survives redirection).
+# ANSI is stripped as belt (#3400: colour survives redirection).
+#
+# IT REPORTS THE WHOLE GRAMMAR, NOT JUST THE TOKEN (#3751 round 1, F2). The
+# documented line is
+#
+#   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>
+#
+# and the shape is DERIVED FROM WHAT review-stage.sh ACTUALLY EMITS (pinned in
+# scripts/tests/test_premerge_assert.sh against a captured real line, so the parser
+# cannot drift from the emitter). So `kind` is `$2` and the token is `$4` GATED on
+# `$3` being literally `RESULT:` — never a scan for `RESULT:` anywhere on the line,
+# which accepted a truncated line and, worse, a SIBLING stage's verdict: a
+# `rust-review` PASS line satisfied the C check, measured on this very branch.
+# Each mandatory key is COUNTED so the caller can require it EXACTLY ONCE: a
+# duplicate is two answers to one question, and a first-wins read is the rule this
+# file refuses everywhere else. Keys are counted from field 4 onward because the
+# token may be MULTI-WORD (`NOT-RUN (no report written)`), so their positions are
+# not fixed; a cause word cannot pose as a key because review-stage.sh neutralises
+# `=` in the cause at its emit boundary, and a planted one raises a count and is
+# refused as a duplicate — the fail-closed direction.
 _c_verdict_awk() {
   awk '
-  BEGIN { n = 0; tok = ""; rep = ""; line = "" }
+  BEGIN {
+    n = 0; tok = ""; rep = ""; line = ""; kind = ""; rpos = 0
+    ke = 0; kd = 0; ka = 0; kr = 0
+  }
   { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
   /^REVIEW-STAGE: / {
     n++
     if (n == 1) {
       line = $0
-      for (i = 2; i <= NF; i++) {
-        if ($i == "RESULT:" && tok == "" && i < NF) tok = $(i + 1)
-        if (substr($i, 1, 7) == "report=") rep = substr($i, 8)
+      kind = $2
+      if ($3 == "RESULT:") {
+        rpos = 1
+        if (NF >= 4) tok = $4
+      }
+      for (i = 4; i <= NF; i++) {
+        if (substr($i, 1, 8) == "elapsed=") ke++
+        else if (substr($i, 1, 9) == "deadline=") kd++
+        else if (substr($i, 1, 6) == "agent=") ka++
+        else if (substr($i, 1, 7) == "report=") { kr++; if (rep == "") rep = substr($i, 8) }
       }
     }
   }
-  END { print "n=" n; print "token=" tok; print "report=" rep; print "line=" line }
+  END {
+    print "n=" n; print "token=" tok; print "report=" rep
+    print "kind=" kind; print "rpos=" rpos
+    print "ke=" ke; print "kd=" kd; print "ka=" ka; print "kr=" kr
+    print "line=" line
+  }
 '
 }
 
@@ -512,17 +544,25 @@ _c_verdict_awk() {
 # refuses everywhere else.
 c_parse_verdict() {
   local kind="$1" value="$2" what="$3" out k v
+  local missing dup key kname kcount
   if [ "$kind" = file ]; then
     out=$(_c_verdict_awk <"$value") || refuse_tool_failure awk "$what"
   else
     out=$(printf '%s\n' "$value" | _c_verdict_awk) || refuse_tool_failure awk "$what"
   fi
   CV_N=""; CV_TOKEN=""; CV_REPORT=""; CV_LINE=""
+  CV_KIND=""; CV_RPOS=""; CV_KE=""; CV_KD=""; CV_KA=""; CV_KR=""
   while IFS='=' read -r k v; do
     case "$k" in
       n)      CV_N="$v" ;;
       token)  CV_TOKEN="$v" ;;
       report) CV_REPORT="$v" ;;
+      kind)   CV_KIND="$v" ;;
+      rpos)   CV_RPOS="$v" ;;
+      ke)     CV_KE="$v" ;;
+      kd)     CV_KD="$v" ;;
+      ka)     CV_KA="$v" ;;
+      kr)     CV_KR="$v" ;;
       line)   CV_LINE="$v" ;;
     esac
   done <<C_PARSE
@@ -548,8 +588,72 @@ C_PARSE
       "The $what holds $CV_N verdict lines — AMBIGUOUS, refusing rather than picking one." \
       "A 'take the last line' rule would let a stale or foreign stage certify this merge."
   fi
-  C_TOKEN="$CV_TOKEN"
   C_TOKEN_LINE="$CV_LINE"
+
+  # THE FULL GRAMMAR, VALIDATED (#3751 round 1, F2) — because "somewhere on this
+  # line it says RESULT: PASS" is not a verdict about the C stage. Two things were
+  # unchecked and both are reachable by ACCIDENT, not only by a hostile hand: a
+  # SIBLING stage's verdict (this branch's own diff produced a `code-review` stage
+  # whose PASS line satisfied `--c-verdict`), and a TRUNCATED capture (a redirect
+  # cut short, a copied fragment) with no `elapsed=`/`deadline=`/`agent=`/`report=`
+  # at all.
+  #
+  # THE STAGE KIND IS COMPARED BY STRING EQUALITY, never a prefix or substring test
+  # (#3544): `c-review` is a different stage from `c`, exactly as `PASSthisNeverRan`
+  # is not `PASS`.
+  if [ "$CV_KIND" != "$C_STAGE_KIND" ]; then
+    refuse_no_c_verdict \
+      "The $what's verdict line names stage kind '$CV_KIND', not '$C_STAGE_KIND'." \
+      "This check is about the C INTENT AUDIT and nothing else: a sibling stage's PASS" \
+      "(a rust-review or coverage verdict) says nothing about whether the implementation" \
+      "matches its acceptance criteria, so it may not certify C." \
+      "Capture the C stage's own verdict:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+  fi
+  # `RESULT:` MUST BE THE THIRD FIELD, because a scan for it anywhere on the line
+  # lets any prose that contains the word supply a token.
+  if [ "$CV_RPOS" != 1 ]; then
+    refuse_no_c_verdict \
+      "The $what's verdict line does not carry 'RESULT:' as its THIRD field, so it is not" \
+      "a line of the documented grammar:" \
+      "  REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>" \
+      "A 'RESULT:' found anywhere on the line would let prose supply the token."
+  fi
+  # THE MANDATORY-FIELD CENSUS runs only once the line HAS a token: a tokenless
+  # line's specific complaint is that it has no token (reported by the caller's
+  # closed-grammar switch, which names it), and naming the missing fields instead
+  # would answer a question the operator did not ask.
+  if [ -n "$CV_TOKEN" ]; then
+    missing=""; dup=""
+    for key in elapsed:"$CV_KE" deadline:"$CV_KD" agent:"$CV_KA" report:"$CV_KR"; do
+      kname="${key%%:*}"; kcount="${key#*:}"
+      case "$kcount" in
+        1) ;;
+        0) missing="$missing ${kname}=" ;;
+        *) dup="$dup ${kname}=(x$kcount)" ;;
+      esac
+    done
+    if [ -n "$missing" ] || [ -n "$dup" ]; then
+      # The detail lines are BUILT rather than passed with `${var:+...}` guards: an
+      # empty guard still passes an EMPTY argument, and refuse_no_c_verdict prints
+      # every argument it is given, so the refusal would carry blank lines where a
+      # cause is expected. `set --` is safe here — this function's own positionals
+      # are already held in locals.
+      set -- \
+        "The $what's verdict line is not of the documented grammar:" \
+        "  REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>"
+      [ -z "$missing" ] || set -- "$@" "  ABSENT field(s):$missing — each one is MANDATORY."
+      [ -z "$dup" ] || set -- "$@" \
+        "  DUPLICATED field(s):$dup — each must appear EXACTLY ONCE. A duplicate is two" \
+        "  answers to one question, and a first-wins read is the rule this file refuses" \
+        "  everywhere else."
+      set -- "$@" \
+        "A truncated capture is the shape a cut-short redirect or a copied fragment leaves." \
+        "Re-capture it whole:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+      refuse_no_c_verdict "$@"
+    fi
+  fi
+
+  C_TOKEN="$CV_TOKEN"
   C_TOKEN_REPORT="$CV_REPORT"
 }
 

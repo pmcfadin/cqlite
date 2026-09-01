@@ -71,7 +71,10 @@ Resolve them in the worktree and reply per thread.
    `--c-verdict` is REQUIRED and has no default (#3751): omitting it is exit 3, never a silent
    "C is not required". `AUTO` MEASURES whether C is required from the certified tree and reads
    the `c` stage's verdict; a design-routed branch whose C stage is absent or `NOT-RUN` is
-   REFUSED. If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
+   REFUSED. Run it IN the lane you certified: `AUTO` requires this worktree's `HEAD` to EQUAL
+   `<certified-sha>` before it trusts a locally-located stage, because every lane here is a
+   worktree of ONE shared `.git` and a peer lane's certified commit resolves from any lane
+   (#3616's class — resolvability is not provenance). If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
    stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`, which KEEPS the
    original clock) and read its `verdict` again.
    The third argument is REQUIRED and must always be a FULL-gate `RESULT: PASS` block; `--lite` is

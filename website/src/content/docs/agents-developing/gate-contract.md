@@ -113,7 +113,12 @@ carry).
   from the CERTIFIED TREE (does this branch touch `openspec/changes/`, excluding `archive/**`, between the
   merge-base with `origin/main` and the certified sha) rather than trusting the caller, an `UNMEASURED`
   measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
-  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Details:
+  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Two bindings tie the verdict to the
+  merge (#3751 round 1): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a
+  locally-located stage is trusted — every lane here is a worktree of ONE shared `.git`, so a peer lane's
+  certified commit resolves from any lane and **resolvability is not provenance** (#3616's class) — and the
+  verdict line is held to its WHOLE grammar, with the stage KIND compared by string equality, so a sibling
+  stage's `PASS` cannot certify C. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.

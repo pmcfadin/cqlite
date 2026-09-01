@@ -2384,6 +2384,100 @@ if run 0 "verdict PASS from an explicit path -> the merge assert PROCEEDS" \
   esac
 fi
 
+# --- 44b(ii): the FULL grammar is validated, kind included (F2) --------------
+# A parser that accepted any column-zero `REVIEW-STAGE: ` line containing
+# `RESULT: PASS` would let a SIBLING stage certify C: this very branch's diff
+# produced a `code-review` stage whose PASS line satisfied `--c-verdict`. So the
+# whole documented line is validated —
+#   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>
+# — with the kind compared by STRING EQUALITY against the expected stage and each
+# mandatory key required EXACTLY ONCE.
+#
+# THE ACCEPTED SHAPE IS DERIVED FROM A REAL EMITTED LINE, NOT FROM THIS FILE'S
+# IDEA OF ONE. The pin below runs the SHIPPED review-stage.sh and captures what it
+# actually prints, so the parser cannot drift from the emitter: a change to the
+# emitted line reds this case instead of silently making every verdict
+# ungrammatical.
+C_REAL_REPO="$T/c-real-line"
+C_REAL_FILE="$T/c-real-verdict.txt"
+C_REAL_OK=""
+mkdir -p "$C_REAL_REPO"
+if git init -q "$C_REAL_REPO" >/dev/null 2>&1 &&
+  printf '.review-stage/\n' >"$C_REAL_REPO/.gitignore" &&
+  (cd "$C_REAL_REPO" && bash "$SCRIPT_DIR/../flow/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+  printf 'result: PASS\n\n## Findings\n\nnone.\n' \
+    >"$C_REAL_REPO/.review-stage/issue-3751/c.md" &&
+  (cd "$C_REAL_REPO" && bash "$SCRIPT_DIR/../flow/review-stage.sh" verdict c --issue 3751 \
+    >"$C_REAL_FILE" 2>/dev/null) &&
+  [ -s "$C_REAL_FILE" ]; then
+  C_REAL_OK=1
+  ok "real line: captured a verdict line from the SHIPPED review-stage.sh"
+else
+  bad "real line: could not capture a real verdict line — the grammar pin would be vacuous"
+fi
+if [ -n "$C_REAL_OK" ]; then
+  # PINNED VERBATIM. If review-stage.sh's emitted line changes shape, this equality
+  # fails HERE, in one named place, rather than turning every real verdict into
+  # `ungrammatical` at a merge point.
+  C_REAL_LINE=$(cat "$C_REAL_FILE")
+  case "$C_REAL_LINE" in
+    "REVIEW-STAGE: c RESULT: PASS elapsed="*" deadline="*" agent=spec-auditor report="*"/.review-stage/issue-3751/c.md")
+      ok "real line: the emitted shape is <kind> RESULT: <token> elapsed= deadline= agent= report=" ;;
+    *) bad "real line: the emitter's shape moved — update the parser WITH it (got: $C_REAL_LINE)" ;;
+  esac
+  if run 0 "real line: a verdict captured from the real emitter is ACCEPTED" \
+    2421 "$CERTIFIED" "$GOOD" --c-verdict "$C_REAL_FILE"; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "real line: reaches C-VERDICT PASS" ;;
+      *) bad "real line: a real emitted PASS must be accepted (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# A SIBLING STAGE'S PASS IS NOT A C PASS. This is the live instance: the kind field
+# is compared by string equality against the expected stage kind.
+c_refused "a 'rust-review' stage's PASS line -> refuse (wrong stage KIND)" \
+  "$(c_verdict_file wrongkind \
+    "REVIEW-STAGE: rust-review RESULT: PASS elapsed=7 deadline=1800 agent=rust-reviewer report=$T/planted-c-report.md")" \
+  "stage kind"
+c_refused "a kind that merely CONTAINS the expected one -> refuse (string equality, not a prefix)" \
+  "$(c_verdict_file kindprefix \
+    "REVIEW-STAGE: c-review RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=$T/planted-c-report.md")" \
+  "stage kind"
+
+# A TRUNCATED LINE IS NOT A VERDICT. Every mandatory key is required, and the
+# refusal NAMES which are absent, because "your line is wrong" is not an operator
+# action.
+c_refused "a truncated line with NO key=value fields -> refuse, naming them" \
+  "$(c_verdict_file truncated 'REVIEW-STAGE: c RESULT: PASS')" \
+  "elapsed="
+c_refused "a line missing only agent= -> refuse (each key is mandatory)" \
+  "$(c_verdict_file noagent \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 report=$T/planted-c-report.md")" \
+  "agent="
+c_refused "a line missing only report= -> refuse" \
+  "$(c_verdict_file noreport 'REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor')" \
+  "report="
+
+# EXACTLY ONCE, not at least once: a duplicated key is two answers to one question,
+# and a scanning consumer would read whichever it met first.
+c_refused "a DUPLICATED elapsed= -> refuse (exactly once, never first-wins)" \
+  "$(c_verdict_file dupelapsed \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=7 elapsed=99999 deadline=1800 agent=spec-auditor report=$T/planted-c-report.md")" \
+  "elapsed="
+c_refused "a DUPLICATED agent= -> refuse" \
+  "$(c_verdict_file dupagent \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor agent=peer report=$T/planted-c-report.md")" \
+  "agent="
+
+# `RESULT:` MUST BE THE THIRD FIELD. Anywhere-on-the-line matching is what let a
+# non-verdict line supply a token.
+c_refused "RESULT: not in its documented position -> refuse" \
+  "$(c_verdict_file resultpos \
+    "REVIEW-STAGE: c verdict RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=$T/planted-c-report.md")" \
+  "RESULT:"
+
 # --- 44c: AUTHOR-PERFORMED keeps its own token (item 2.4) -------------------
 if run 0 "verdict AUTHOR-PERFORMED -> proceeds, under its OWN token" \
   2421 "$CERTIFIED" "$GOOD" \

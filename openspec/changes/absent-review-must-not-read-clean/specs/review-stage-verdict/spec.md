@@ -75,6 +75,18 @@ usage failure (exit 3), and SHALL determine whether C is required by MEASURING t
 - **WHEN** `--c-verdict` is omitted entirely
 - **THEN** the script exits 3 (usage) rather than defaulting to "not required"
 
+#### Scenario: an AUTO-located stage is bound to the certified tree
+- **WHEN** `--c-verdict AUTO` locates a stage in a worktree whose `HEAD` is not the certified commit
+- **THEN** `premerge-assert.sh` REFUSES, naming the divergence — every lane is a worktree of one shared
+  `.git`, so a peer lane's certified commit resolves from any lane and resolvability is not provenance
+- **AND** the same stage at the worktree's own `HEAD` certifies (the positive control)
+
+#### Scenario: a sibling stage's PASS cannot certify C
+- **WHEN** the verdict line names a stage kind other than `c`, or omits any of
+  `elapsed=`/`deadline=`/`agent=`/`report=`, or carries one of them twice
+- **THEN** `premerge-assert.sh` REFUSES as ungrammatical, naming what was wrong — the stage kind is
+  compared by STRING EQUALITY and each mandatory key must appear EXACTLY ONCE
+
 ### Requirement: A hand-performed substitute is recorded as author-performed, never as clean
 
 `review-stage.sh record-author-performed` SHALL require a substantive `--reason`, a named `--evidence`

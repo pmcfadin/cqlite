@@ -316,9 +316,17 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    affirmatively; an absent or `NOT-RUN` C on a design-routed branch REFUSES the merge, naming
    the stage and the cause; and a routing it cannot MEASURE is treated as REQUIRED. There is no
    value you can pass that means "C does not apply here" — that exemption is the escape hatch
-   #3751 removes, and routing is measurable from the branch. Pass an explicit
+   #3751 removes, and routing is measurable from the branch.
+   **RUN IT IN THE LANE YOU CERTIFIED.** Under `AUTO` the stage is located in the CURRENT
+   worktree, so this worktree's `HEAD` must EQUAL `<certified-sha>` or the assert REFUSES,
+   naming the divergence: every lane on this box is a worktree of ONE shared `.git`, so a peer
+   lane's certified commit RESOLVES here and resolvability is not provenance (#3616's
+   peer-artifact class). You push and then assert in the lane you just certified, so this costs
+   a correct run nothing. Pass an explicit
    `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
-   cannot locate the stage.
+   cannot locate the stage — and capture the **`c`** stage's own line: the assert validates the
+   WHOLE grammar and compares the stage KIND by string equality, so a sibling stage's `PASS`
+   (a `rust-review` verdict, say) or a truncated capture is refused as ungrammatical.
    The third argument is **REQUIRED** (an optional one would leave the convention
    honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
    gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never
