@@ -5201,8 +5201,16 @@ _component_set_probe_inner() {
   # makes the peel movable. The peel — and the "is it a COMMIT" validation — happen below, in the
   # ISOLATED scratch, which configures no promisor and reaches HEAD's objects only through an
   # alternate: pure object storage, no config, nothing for a helper to be invoked from.
+  #
+  # THE ARGUMENT MUST STAY A BARE REF NAME, and this is the contract a future caller inherits: the
+  # measurement above says a REF resolution reads no object, and it says nothing about a rev
+  # EXPRESSION. `HEAD^{commit}`, `HEAD~1`, `<tag>^{}` and a tag name all DEREFERENCE — i.e. read
+  # objects — so any of them here re-opens the lazy-fetch route this replaced, whatever the
+  # `--verify --quiet` spelling suggests. A caller needing a peeled or walked rev must ask the
+  # SCRATCH, exactly as the block below does. `scripts/tests/test_agent_gate_component_set.sh::
+  # 3757-no-live-peel` fails the suite if any live call grows a peel operator.
   _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD
-  if _cs_live_refuse "HEAD's sha (the ref only — no object is peeled in the live repository)"; then return 0; fi
+  if _cs_live_refuse "HEAD's sha (the ref only, unpeeled)"; then return 0; fi
   local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0
   if [ -n "$head_unpeeled" ]; then
     # PEEL + COMMIT-VALIDATE IN THE ISOLATED SCRATCH, and BOUNDED there for the reason job 315
