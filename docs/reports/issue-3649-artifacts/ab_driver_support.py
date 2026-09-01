@@ -581,6 +581,12 @@ OPTION_DISPOSITION = {
     "--min-sstables": ("resolver-input", "a documented floor; #3058's bypass depends on it"),
     "--ramp": ("resolver-input", "bounded against the admission ceiling"),
     "--control": ("resolver-input", "decides whether the floors may be lowered"),
+    "--attest-local-storage": (
+        "not-server-config",
+        "an operator attestation about the corpus device, recorded in the "
+        "manifest and printed beside the verdict; it changes no server or "
+        "workload configuration",
+    ),
     "--base-server-extra": ("resolver-input", "per-arm overrides, resolved here"),
     "--head-server-extra": ("resolver-input", "per-arm overrides, resolved here"),
     "--corpus": ("not-server-config", "a path the server is pointed at, not a setting"),

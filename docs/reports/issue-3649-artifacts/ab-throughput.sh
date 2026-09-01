@@ -136,6 +136,14 @@ ab-throughput.sh [options]
                             auto | merge | bypass -- see the #3058 note below)
   --rows-declared <n>       corpus row count, recorded not measured  (default none)
   --no-prewarm              skip the per-replicate warming pass
+  --attest-local-storage <why>
+                            operator attestation that the corpus IS on local
+                            storage, for a device whose model this probe cannot
+                            recognise. Recorded in the manifest and printed
+                            beside the verdict, so the attestation travels with
+                            the number. It covers IGNORANCE only -- a device
+                            affirmatively identified as NETWORK cannot be
+                            attested away.
   --control <label>         mark this session a CONTROL, not a measurement; the
                             label is recorded and the analyzer refuses to let its
                             verdict be read as discharging the AC
@@ -190,6 +198,7 @@ ROWS_DECLARED=''
 PREWARM=1
 TEMPERATURE='warm'
 CONTROL=''
+ATTEST_LOCAL_STORAGE=''
 BASE_SERVER_EXTRA=''
 HEAD_SERVER_EXTRA=''
 
@@ -204,7 +213,7 @@ VALUE_OPTS="--corpus --ticket-template --base-ref --head-ref --replicates \
 --loadgen-ref \
 --client-cpus --min-corpus-bytes --min-sstables --merge-path \
 --max-concurrent-scans --batch-size --max-batch-bytes \
---admission-wait-timeout-ms --rows-declared --temperature --control \
+--admission-wait-timeout-ms --rows-declared --temperature --control --attest-local-storage \
 --base-server-extra --head-server-extra"
 
 while [ "$#" -gt 0 ]; do
@@ -237,6 +246,7 @@ while [ "$#" -gt 0 ]; do
     --rows-declared)     ROWS_DECLARED="${2:-}";    shift 2 ;;
     --no-prewarm)        PREWARM=0;                 shift ;;
     --control)           CONTROL="${2:-}";          shift 2 ;;
+    --attest-local-storage) ATTEST_LOCAL_STORAGE="${2:-}"; shift 2 ;;
     --base-server-extra) BASE_SERVER_EXTRA="${2:-}"; shift 2 ;;
     --head-server-extra) HEAD_SERVER_EXTRA="${2:-}"; shift 2 ;;
     --temperature)       TEMPERATURE="${2:-}";      shift 2 ;;
@@ -603,6 +613,7 @@ manifest = {
         "served_dir": env("AB_SERVED_DIR", ""),
         "compressed": env("AB_CORPUS_COMPRESSED", "") == "compressed",
         "storage": env("AB_STORAGE", "NOT-RECORDED"),
+        "storage_attestation": env("AB_STORAGE_ATTESTATION", "") or None,
         "storage_detail": env("AB_STORAGE_DETAIL", "NOT-RECORDED"),
         "data_db_bytes": int(env("AB_CORPUS_BYTES", "0")),
         "data_db_files": int(env("AB_CORPUS_FILES", "0")),
@@ -790,6 +801,27 @@ AB_STORAGE="${AB_STORAGE_RAW%% *}"
 AB_STORAGE_DETAIL="${AB_STORAGE_RAW#* }"
 export AB_STORAGE AB_STORAGE_DETAIL
 say "corpus storage $AB_STORAGE ($AB_STORAGE_DETAIL)"
+# THE ATTESTATION COVERS IGNORANCE, NEVER EVIDENCE. An operator may assert that
+# a device this probe does not recognise is local; nobody may assert that a
+# device affirmatively identified as network-attached is not. That asymmetry is
+# the whole safety of the override -- without it, the one thing the check exists
+# to refuse becomes the one thing a flag turns off.
+if [ -n "$ATTEST_LOCAL_STORAGE" ]; then
+  case "$(printf '%s' "$ATTEST_LOCAL_STORAGE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    ''|why|todo|tbd|reason|placeholder|xxx|na|n/a)
+      usage_error "--attest-local-storage needs a reason that records WHY this device is known to be local; '$ATTEST_LOCAL_STORAGE' records nothing. The attestation is printed beside the verdict and is the only evidence the number has" ;;
+  esac
+  case "$ATTEST_LOCAL_STORAGE" in
+    *'<'*'>'*)
+      usage_error "--attest-local-storage still carries an unsubstituted placeholder ('$ATTEST_LOCAL_STORAGE'); write the actual reason" ;;
+  esac
+  if [ "$AB_STORAGE" = "NETWORK" ]; then
+    die corpus-network-storage-attested \
+      "--attest-local-storage was passed, but the served directory $SERVED_DIR is AFFIRMATIVELY identified as network storage ($AB_STORAGE_DETAIL). An attestation covers a device this probe cannot RECOGNISE; it does not overrule one it has identified. Move the corpus to instance storage, or run this as a --control"
+  fi
+  say "corpus storage ATTESTED local by the operator -- $ATTEST_LOCAL_STORAGE (probe said $AB_STORAGE). This attestation is recorded in the manifest and printed beside the verdict"
+fi
+export AB_STORAGE_ATTESTATION="$ATTEST_LOCAL_STORAGE"
 if [ "$AB_STORAGE" = "NETWORK" ] && [ -z "$CONTROL" ]; then
   # WARNED HERE, REFUSED AT ANALYSIS. The refusal belongs where the false claim
   # would be made -- the verdict -- and putting it here as well would make this
@@ -800,8 +832,12 @@ if [ "$AB_STORAGE" = "NETWORK" ] && [ -z "$CONTROL" ]; then
   # a guard. The operator loses nothing: this fires at pre-flight, before the
   # builds, and names the exact refusal the analysis will produce.
   warn "corpus storage NETWORK -- the served directory $SERVED_DIR is backed by network storage ($AB_STORAGE_DETAIL). The #3649 rig is specified as a field i4i box for the property that its corpus is on LOCAL NVMe: a network hop inside the read path is variable latency added to the quantity being measured. THIS SESSION WILL NOT YIELD A VERDICT -- analyze-ab.py refuses it with cause corpus-network-storage. Move the corpus to instance storage now, or re-run with --control <label>"
-elif [ "$AB_STORAGE" = "NOT-MEASURABLE" ]; then
-  warn "corpus storage NOT-MEASURABLE ($AB_STORAGE_DETAIL) -- this run cannot say whether the corpus is on local or network storage. That is a gap in the record, not a verified local disk; confirm it by hand before reporting the result"
+elif [ "$AB_STORAGE" != "LOCAL" ] && [ -z "$CONTROL" ] && [ -z "$ATTEST_LOCAL_STORAGE" ]; then
+  # NOT a verified local disk, so NOT a measurement. The acceptance criteria
+  # REQUIRE local NVMe; "we could not tell" does not satisfy a requirement, and
+  # the previous form disclosed it and let the verdict through -- a pass derived
+  # from the absence of a bad signal, one level up from the classifier's own.
+  warn "corpus storage $AB_STORAGE ($AB_STORAGE_DETAIL) -- this run cannot confirm the corpus is on local storage, and the acceptance criteria REQUIRE it. THIS SESSION WILL NOT YIELD A VERDICT: analyze-ab.py refuses it with cause corpus-storage-unverified. Either move the corpus to a device whose model is recognised, or pass --attest-local-storage <why> to record an operator attestation that travels with the number, or run it as a --control"
 fi
 say "corpus census scope THE SERVED DIRECTORY ONLY -- unrelated tables, snapshots and hard-linked copies elsewhere under --data-dir are deliberately not counted"
 [ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "the served directory $SERVED_DIR holds no *-Data.db files"

@@ -426,12 +426,20 @@ def analyze(mode, path, opts):
 
     # THE RIG PROPERTIES, RE-CHECKED HERE FOR THE SAME REASON AS COMPRESSION: a
     # manifest is data, and this analyzer does not get to assume which driver
-    # produced it. Both refusals are on an AFFIRMATIVE bad value -- `NETWORK` and
-    # `CONTENDED` -- never on the absence of a good one, because a probe that
-    # could not run is a gap in the record and reporting it as a gap is the
-    # honest answer. Refusing on NOT-MEASURABLE would red a correct rig whose
-    # corpus happens to sit on a device mapper.
-    if not control and manifest["corpus"].get("storage") == "NETWORK":
+    # produced it.
+    #
+    # A MEASUREMENT VERDICT REQUIRES `LOCAL`, NOT MERELY "NOT NETWORK". The
+    # previous form refused only the affirmative bad value, on the reasoning that
+    # a probe which could not run is a gap and should be disclosed rather than
+    # refused. That reasoning is right about DISCLOSURE and wrong about a
+    # VERDICT: the acceptance criteria REQUIRE local NVMe, and "we could not
+    # tell" does not satisfy a requirement. A four-state classifier is only as
+    # good as the four-way disposition downstream of it -- so the SAN LUN that
+    # the classifier was fixed to stop calling LOCAL was still being handed a
+    # verdict, one layer down, because only `NETWORK` was refused here.
+    storage_state = manifest["corpus"].get("storage")
+    attestation = manifest["corpus"].get("storage_attestation")
+    if not control and storage_state == "NETWORK":
         raise Unmeasured(
             "corpus-network-storage",
             "the manifest records the served corpus on network storage (%s). The "
@@ -440,6 +448,24 @@ def analyze(mode, path, opts):
             "added to the very quantity being measured. Label the session "
             "--control if that is what you meant to measure"
             % manifest["corpus"].get("storage_detail", "no detail recorded"),
+        )
+    # AN ATTESTATION COVERS IGNORANCE, NEVER EVIDENCE -- so it is consulted only
+    # after the NETWORK refusal above, and can never reach it. An operator may
+    # assert that an unrecognised device is local; nobody may assert that an
+    # identified network device is not, or the one thing this check exists to
+    # refuse becomes the one thing a flag turns off.
+    if not control and storage_state != "LOCAL" and not attestation:
+        raise Unmeasured(
+            "corpus-storage-unverified",
+            "the manifest records the corpus storage as %s (%s), so it is NOT "
+            "known to be local -- and the acceptance criteria require local NVMe. "
+            "A probe that could not tell is a gap in the record, and a gap does "
+            "not satisfy a requirement. Re-run with the corpus on a device whose "
+            "model is recognised, or pass --attest-local-storage <why> to record "
+            "an operator attestation that travels with the verdict, or label the "
+            "session --control"
+            % (storage_state, manifest["corpus"].get("storage_detail",
+                                                     "no detail recorded")),
         )
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
@@ -916,6 +942,19 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
     # refused upstream; only the unmeasurable state reaches here, and it is
     # reported as itself rather than as a verified local disk.
     storage = field(manifest, "corpus", "storage")
+    attested = manifest["corpus"].get("storage_attestation")
+    if attested and storage != "LOCAL":
+        # THE ATTESTATION TRAVELS WITH THE NUMBER. It is the only evidence this
+        # verdict has for a requirement the criteria state, so it is printed
+        # beside the verdict rather than left in the manifest for nobody to read.
+        out(
+            "verdict-detail %s STORAGE-ATTESTED the probe reported %s (%s) and "
+            "the operator attested the corpus is on local storage: %r. This "
+            "verdict rests on that attestation for the local-NVMe requirement, "
+            "which was NOT independently verified"
+            % (mode, storage, field(manifest, "corpus", "storage_detail"),
+               attested)
+        )
     if storage == "NOT-MEASURABLE":
         out(
             "verdict-detail %s STORAGE whether the corpus sits on local or "

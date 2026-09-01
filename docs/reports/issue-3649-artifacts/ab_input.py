@@ -255,6 +255,19 @@ def load_manifest(path, mode):
                 % (holder, key, value, "|".join(allowed)),
             )
 
+    # THE ATTESTATION IS AN AUTHORIZATION, so its shape is checked rather than
+    # merely read: a non-string, or a blank string, would otherwise reach the
+    # verdict-adjacent disclosure as the only evidence for a criteria requirement.
+    attestation = manifest["corpus"].get("storage_attestation")
+    if attestation is not None:
+        if not isinstance(attestation, str) or not attestation.strip():
+            raise Unmeasured(
+                "manifest-field",
+                "manifest.corpus.storage_attestation is present but is not a "
+                "non-empty string (%r); an attestation with nothing recorded in "
+                "it is not an attestation" % (attestation,),
+            )
+
     # A manifest pasted into the wrong section is a real mistake, so it gets its
     # own cause rather than surfacing later as a confusing record-count refusal.
     steps = ramp_steps(manifest)

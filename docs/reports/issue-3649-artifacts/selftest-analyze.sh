@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=364
+CASE_FLOOR=375
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2057,6 +2057,14 @@ PYINNER
   fi
 
 
+  for bogus in why todo TBD "  " "<why>"; do
+    run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+      --work-dir "$TMP/w-attest" --control selftest --repo "$SCRATCH" --attest-local-storage "$bogus"
+    # exit 3 is this driver's usage-error code, as for --help; exit 2 is a
+    # named refusal, which a bad flag value is not.
+    check_driver "an attestation reason of '$bogus'" 3
+  done
+
   run_driver --no-such-flag
   check_driver "an unrecognised driver flag exits 3" 3
 
@@ -2725,6 +2733,7 @@ STUBEOF
         --work-dir "$wd" --repo "$SCRATCH" \
         --base-ref HEAD~1 --head-ref HEAD \
         --max-concurrent-scans 16 \
+        --attest-local-storage 'selftest harness: scratch corpus on the test box, whose device model this probe does not recognise; the storage class is not the property these cases exercise' \
         --replicates 5 --step-duration 1s "$@" \
         > "$TMP/out.txt" 2> "$TMP/err.txt"
     RC=$?
@@ -3175,20 +3184,13 @@ PYINNER
   if [ "$want" = refuse ]; then
     check_verdict "a corpus on network storage" UNMEASURED 7 single-stream
     check_cause "a network-backed corpus" corpus-network-storage
-  elif [ "$want" = disclose ]; then
-    check_verdict "a corpus whose storage could not be measured" MEETS-TARGET 0 single-stream
-    if grep -q '^AB-3649: verdict-detail single-stream STORAGE whether the corpus sits on local or network storage could not be measured' "$TMP/out.txt"; then
-      ok "an unmeasurable storage probe is disclosed as a gap, not scored as local"
-    else
-      bad "an unmeasurable storage probe was neither refused nor disclosed"
-    fi
   else
-    check_verdict "a corpus on an unrecognised device" MEETS-TARGET 0 single-stream
-    if grep -q '^AB-3649: verdict-detail single-stream STORAGE the corpus device reports a model this probe does not recognise' "$TMP/out.txt"; then
-      ok "an unrecognised device model is disclosed as not-known-local, distinctly from unmeasurable"
-    else
-      bad "an unrecognised device model was not disclosed as its own state"
-    fi
+    # NOT-KNOWN-LOCAL IS NOT A VERDICT. Both of these used to disclose and score.
+    # The criteria REQUIRE local NVMe, so a probe that could not tell leaves the
+    # requirement unsatisfied -- and a four-state classifier is only as good as
+    # the four-way disposition downstream of it.
+    check_verdict "a corpus whose storage is $token" UNMEASURED 7 single-stream
+    check_cause "a corpus whose storage is $token" corpus-storage-unverified
   fi
 done
 
@@ -3256,6 +3258,60 @@ else
   bad "an unmeasurable load probe was silently read as quiet"
 fi
 
+# THE ATTESTATION COVERS IGNORANCE, NEVER EVIDENCE. An operator may assert that
+# an unrecognised device is local; nobody may assert that an IDENTIFIED network
+# device is not -- otherwise the one thing this check exists to refuse is the one
+# thing a flag turns off. Both directions are pinned, because only the pair says
+# what the override means.
+for spec in "UNRECOGNISED:nvme0n1 Samsung SSD 980 PRO:grants" "NETWORK:nvme0n1 Amazon Elastic Block Store:refuses"; do
+  token="${spec%%:*}"; rest="${spec#*:}"
+  detail="${rest%%:*}"; want="${rest##*:}"
+  mkfixture "$TMP/attest-$want" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_TOKEN="$token" AB_DETAIL="$detail" python3 - "$TMP/attest-$want/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["storage"] = os.environ["AB_TOKEN"]
+manifest["corpus"]["storage_detail"] = os.environ["AB_DETAIL"]
+manifest["corpus"]["storage_attestation"] = "rig-2026-09: instance store confirmed by hand against the launch template"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/attest-$want"
+  if [ "$want" = grants ]; then
+    check_verdict "an attested unrecognised device" MEETS-TARGET 0 single-stream
+    if grep -q '^AB-3649: verdict-detail single-stream STORAGE-ATTESTED .*NOT independently verified' "$TMP/out.txt"; then
+      ok "an attestation travels with the verdict, saying what it rests on"
+    else
+      bad "an attested verdict did not print the attestation beside itself"
+    fi
+  else
+    check_verdict "an attested NETWORK device" UNMEASURED 7 single-stream
+    check_cause "an attestation cannot overrule an identified network device" corpus-network-storage
+  fi
+done
+
+# An attestation with nothing recorded in it is not an attestation.
+mkfixture "$TMP/attest-blank" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/attest-blank/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["storage"] = "UNRECOGNISED"
+manifest["corpus"]["storage_attestation"] = "   "
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/attest-blank"
+check_cause "a blank attestation" manifest-field
+
 # STRUCTURAL: the driver must not REFUSE on the storage probe, only warn. The
 # refusal lives in the analyzer, where the false claim would be made. If it moved
 # back into the driver, this suite's own end-to-end sessions would pass or fail
@@ -3268,7 +3324,13 @@ import re
 import sys
 
 source = open(sys.argv[1], encoding="utf-8").read()
-window = re.search(r'AB_STORAGE" = "NETWORK".*?\nfi\n', source, re.S)
+# ANCHORED ON THE FULL CONDITION. A second `AB_STORAGE" = "NETWORK"` test now
+# exists inside the attestation block -- which DOES `die`, deliberately, because
+# an attestation may not overrule an identified network device -- so a loose
+# anchor would read that block's body and report the wrong branch.
+window = re.search(
+    r'AB_STORAGE" = "NETWORK" \] && \[ -z "\$CONTROL" \]; then.*?\nfi\n',
+    source, re.S)
 if not window:
     sys.stderr.write("AB-3649: the driver's NETWORK-storage branch was not found\n")
     raise SystemExit(1)
@@ -3322,6 +3384,33 @@ then
   ok "an unrecognised device model is UNRECOGNISED, not waved through as local"
 else
   bad "the storage classifier mis-sorts a device model (see stderr above)"
+fi
+
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+block = re.search(r'if \[ -n "\$ATTEST_LOCAL_STORAGE" \]; then.*?\n^fi$',
+                  source, re.S | re.M)
+if not block:
+    sys.stderr.write("AB-3649: the driver has no attestation block\n")
+    raise SystemExit(1)
+body = block.group(0)
+if 'AB_STORAGE" = "NETWORK"' not in body:
+    sys.stderr.write("AB-3649: the attestation block does not check for an "
+                     "identified NETWORK device, so an attestation could "
+                     "overrule evidence\n")
+    raise SystemExit(1)
+if not re.search(r"^\s*die corpus-network-storage-attested", body, re.M):
+    sys.stderr.write("AB-3649: the attestation block does not REFUSE on an "
+                     "identified NETWORK device\n")
+    raise SystemExit(1)
+PYINNER
+then
+  ok "an attestation cannot be used to overrule an identified network device"
+else
+  bad "the driver's attestation block does not refuse identified network storage (see stderr above)"
 fi
 
 # The storage PROBE itself, against real paths. `/` on this box is EBS-backed, so
