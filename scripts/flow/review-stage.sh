@@ -147,10 +147,12 @@
 # satisfiable while the write landed somewhere else entirely — measured: an ignored but SYMLINKED
 # report path clobbered a TRACKED file and `open` reported `OPEN-OK`. The report path, the
 # `.stage` path and EVERY path component at or below the repo root are therefore checked, and a
-# link is a NAMED refusal rather than something to resolve. Both writes then go through a
-# same-directory temporary file plus an atomic `mv -f`: `mv` replaces the destination NAME instead
+# link is a NAMED refusal rather than something to resolve. Both writes then go through an
+# UNPREDICTABLE same-directory temporary file, created and opened in ONE `O_EXCL` step and written
+# through the held descriptor, plus an atomic `mv -f`: `mv` replaces the destination NAME instead
 # of opening it, and no concurrent reader (`premerge-assert.sh` at the merge point) can observe a
-# half-written `result:` line.
+# half-written `result:` line. The temp path was itself a TOCTOU until round 3 (G3) — the full
+# reasoning is stated at `prepare_write`, beside the code.
 #
 # THE DEADLINE IS ADVISORY BY DESIGN
 # ----------------------------------
@@ -564,38 +566,108 @@ assert_no_symlink() {
 # WRITE_TMP / prepare_write / commit_write — WRITE VIA A SAME-DIRECTORY TEMPORARY FILE PLUS AN
 # ATOMIC `mv -f` (#3751 round 1, F5). Two reasons, and both matter:
 #   1. `mv -f` REPLACES the destination NAME rather than opening it, so a link that appeared
-#      between the check above and the write is replaced, not followed. The check is the control;
-#      this is the belt, and it costs nothing.
+#      between the check above and the write is replaced, not followed.
 #   2. no reader can observe a HALF-WRITTEN report. The report of record is read CONCURRENTLY (by
 #      `premerge-assert.sh` at the merge point, and by `status` from another session), and a
 #      truncated `result:` line is a verdict nobody wrote.
-# The TEMPORARY path is verified the same way the destination is — not a symlink, and gitignored
-# — because for the duration of the write it is a real file in the tree, so a temp beside a
-# `--report` in a directory ignored only by EXTENSION would dirty a running gate exactly as the
-# report would.
+#
+# THE TEMPORARY FILE IS UNPREDICTABLE AND IS CREATED EXCLUSIVELY (#3751 round 3, G3)
+# ---------------------------------------------------------------------------------
+# The first version built the temp path as `<dir>/.<basename>.tmp.$$` — DERIVABLE from the report
+# path plus a pid — then CHECKED it and REOPENED it by name with shell redirection. That is a
+# TOCTOU: a symlink planted at that predictable name inside the window made the write clobber the
+# link's target, and the following `mv` could install the link as the report while reporting
+# success. It is a NON-INVOKER route and therefore a defect, not an accepted residual: every lane
+# on this box runs as ONE user under a shared HOME and a shared `.git`, so the planter is a PEER
+# LANE.
+#
+# THE WINDOW IS REMOVED RATHER THAN NARROWED, because a check placed after a harmful effect can
+# only REPORT it — and the harm here is a WRITE, so the control has to be that the write CANNOT
+# REACH the wrong file:
+#   * the NAME comes from `mktemp -u`, so there is no predictable path to pre-plant AT;
+#   * the file is CREATED AND OPENED IN ONE STEP under `set -C`, which makes bash open with
+#     `O_CREAT|O_EXCL` — measured on this fleet to refuse an existing file, an existing SYMLINK,
+#     and a DANGLING symlink WITHOUT creating its target. So the create cannot follow a link, and
+#     a lost race is a refusal, never a clobber;
+#   * the body writes to the ALREADY-OPEN DESCRIPTOR (`>&9`), so no path is re-resolved between
+#     validation and writing. That is the property; the fd is not decoration.
+# There is deliberately NO post-write check that the file we wrote is still the file we created:
+# a check whose only job is to notice a clobber afterwards is exactly what this replaces.
+#
+# THE IGNORE CHECK HAS NO WINDOW OF ITS OWN, and that is why it can stay where it is. It is taken
+# BEFORE the create, on the EXACT name about to be created: `git check-ignore` answers about a
+# path STRING, so checking the string we then create is not a time-of-check/time-of-use gap. The
+# symlink walk of the temp path is GONE, and not because it stopped mattering: the temp lives in
+# the destination's OWN directory, whose components `assert_no_symlink "$dest"` has just walked,
+# and the leaf cannot be a followed symlink because the create is `O_EXCL`.
 #
 # WRITE_TMP IS A GLOBAL, NOT A PRINTED VALUE. `assert_ignored` and `assert_no_symlink` refuse by
 # EMITTING and exiting 2; inside a command substitution that exit would end only the SUBSHELL
 # while the refusal text was captured into a variable — a refusal nobody sees, and a script that
 # carries on writing.
 WRITE_TMP=""
+# The descriptor the write is held open on is 9, spelled LITERALLY at both redirections. A fixed
+# number rather than `{fd}` auto-assignment, which bash 3.2 (macOS, a declared constraint of this
+# script) does not support — and a literal rather than `exec ${VAR}>` , which bash does not expand
+# in the descriptor position and would need an `eval` to reach. `scripts/tests/test_review_stage.sh`
+# pins the number in ONE place (`WRITE_FD_PIN`) so its two structural asserts cannot drift apart.
+# A LEAKED TEMPORARY IS NO LONGER SELF-LIMITING, so it is cleaned up. With the old predictable
+# name a leak was overwritten by the next run in the same process-id; an unpredictable name
+# accumulates. Covers a normal exit and every `exit 2` refusal path; a SIGKILL runs no trap and
+# this does not claim to cover one.
+cleanup_write_tmp() {
+  [ -z "$WRITE_TMP" ] || rm -f "$WRITE_TMP" 2>/dev/null || true
+}
+trap cleanup_write_tmp EXIT
 prepare_write() {
   local dest="$1" what="$2"
+  local dir base cand had_noclobber attempt=0 opened=0
   assert_no_symlink "$dest" "$what"
-  WRITE_TMP="$(dirname "$dest")/.$(basename "$dest").tmp.$$"
-  assert_no_symlink "$WRITE_TMP" "$what-tempfile"
-  # THE TEMPORARY PATH IS HELD TO THE SAME BAR AS THE DESTINATION, and the refusal EXPLAINS
-  # itself, because the caller never named this path. Consequence worth knowing: a --report in a
-  # directory ignored only by EXTENSION (`*.md`) is refused, since the temp name is not matched
-  # by that pattern and WOULD dirty a running gate. `.review-stage/` — the default and the only
-  # path the pipeline uses — is ignored as a DIRECTORY, so this never fires there.
-  assert_ignored "$WRITE_TMP" "$what-tempfile" \
-    "this is the TEMPORARY file the write goes through (a same-directory temp plus an atomic mv -f, so a symlink is replaced rather than followed and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A --report directory ignored only by EXTENSION does not match it: ignore the DIRECTORY instead, as .review-stage/ is."
+  dir="$(dirname "$dest")"
+  base="$(basename "$dest")"
+  # BOUNDED RETRY. `O_EXCL` fails if the name already exists, which for an `mktemp -u` name means
+  # a collision or a peer having planted something there; a few attempts distinguish that from a
+  # directory we simply cannot write. An UNBOUNDED loop would hang on an unwritable directory.
+  while [ "$attempt" -lt 8 ]; do
+    attempt=$((attempt + 1))
+    cand="$(mktemp -u "$dir/.$base.tmp.XXXXXXXXXX" 2>/dev/null || true)"
+    # NO FALLBACK NAME GENERATOR. A predictable fallback would reinstate exactly the hole this
+    # removes, and "cannot tell" must not take the permissive branch — so a box without a usable
+    # `mktemp -u` gets the named refusal below rather than a weaker name it cannot see.
+    [ -n "$cand" ] || break
+    # THE SAME BAR AS THE DESTINATION, and the refusal EXPLAINS itself, because the caller never
+    # named this path. Consequence worth knowing: a --report in a directory ignored only by
+    # EXTENSION (`*.md`) is refused, since the temp name is not matched by that pattern and WOULD
+    # dirty a running gate. `.review-stage/` — the default and the only path the pipeline uses —
+    # is ignored as a DIRECTORY, so this never fires there.
+    assert_ignored "$cand" "$what-tempfile" \
+      "this is the TEMPORARY file the write goes through (an unpredictable same-directory temp, created O_EXCL and written through a held descriptor, plus an atomic mv -f, so no path is re-resolved between validation and writing and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A --report directory ignored only by EXTENSION does not match it: ignore the DIRECTORY instead, as .review-stage/ is."
+    # CREATE AND OPEN IN ONE STEP. `set -C` (noclobber) makes this `O_CREAT|O_EXCL`, so it
+    # refuses an existing path — INCLUDING a symlink, dangling or not — instead of following it.
+    # The caller's noclobber setting is preserved: this script does not set it, but a future
+    # caller sourcing these helpers must not have it silently cleared.
+    had_noclobber=0
+    case "$-" in *C*) had_noclobber=1 ;; esac
+    set -C
+    if exec 9>"$cand" 2>/dev/null; then opened=1; fi
+    [ "$had_noclobber" -eq 1 ] || set +C
+    if [ "$opened" -eq 1 ]; then
+      WRITE_TMP="$cand"
+      return 0
+    fi
+  done
+  emit "$REFUSE_MARKER reason=tempfile-not-created what=$what path=$dest attempts=$attempt"
+  emit "$REFUSE_MARKER detail=an unpredictable temporary file could not be created EXCLUSIVELY beside this path in $attempt attempt(s), so NOTHING was written. Either the directory is not writable, or mktemp is unavailable. There is deliberately no fallback to a predictable name: that is the TOCTOU this write path exists to remove (a peer lane can plant a symlink at a guessable temp name), so refusing is the fail-closed answer."
+  exit 2
 }
 commit_write() {
   local dest="$1" what="$2"
+  # THE DESCRIPTOR IS CLOSED BEFORE THE RENAME, so the record is complete on disk and the fd is
+  # not carried into the next write (the number is reused for both files a stage writes).
+  exec 9>&- 2>/dev/null || true
   if ! mv -f "$WRITE_TMP" "$dest" 2>/dev/null; then
     rm -f "$WRITE_TMP" 2>/dev/null || true
+    WRITE_TMP=""
     emit "$REFUSE_MARKER reason=write-failed what=$what path=$dest"
     emit "$REFUSE_MARKER detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
     exit 2
@@ -734,7 +806,7 @@ cmd_open() {
     printf 'head-sha: %s\n' "$head_sha"
     printf 'reopen-count: %s\n' "$reopen_count"
     [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
-  } >"$WRITE_TMP"
+  } >&9
   commit_write "$sfile" stage-record
 
   # THE SENTINEL. `result:` is the FIRST recordable line on purpose: it is what `verdict`
@@ -782,7 +854,7 @@ cmd_open() {
     printf '## Findings\n'
     printf '\n'
     printf '(nothing written yet)\n'
-  } >"$WRITE_TMP"
+  } >&9
   commit_write "$rpath" report-of-record
 
   emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha reopen-count=$reopen_count report=$(field_value "$rpath")"
@@ -1200,7 +1272,7 @@ cmd_record_author_performed() {
     printf 'Peer review is preferred; a hand audit is the sanctioned fallback only, and it\n'
     printf 'is sanctioned at all because an audit whose working is shown is auditable,\n'
     printf 'whereas an absent one is not.\n'
-  } >"$WRITE_TMP"
+  } >&9
   commit_write "$STAGE_REPORT" report-of-record
 
   emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok${replaced:+ replaced-verdict=$replaced} report=$(field_value "$STAGE_REPORT")"

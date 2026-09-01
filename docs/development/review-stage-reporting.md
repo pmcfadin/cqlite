@@ -243,9 +243,23 @@ record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).
 **And a SYMLINK at the report path, at the `.stage` path or at ANY component under `.review-stage/`
 is REFUSED, never followed (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE
 follows links, so an ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK`
-(measured); the writes themselves go through a same-directory temporary file plus an atomic `mv -f`,
-which replaces a link instead of following it and never lets a concurrent reader see a half-written
-`result:` line.
+(measured); the writes themselves go through an UNPREDICTABLE same-directory temporary file
+(`mktemp -u`) CREATED AND OPENED IN ONE STEP under `set -C` — i.e. `O_CREAT|O_EXCL` — then written
+through the ALREADY-OPEN DESCRIPTOR and `mv -f`'d into place (#3751 round 3, G3), so a concurrent
+reader never sees a half-written `result:` line. **The first version was a TOCTOU**: the temp path
+was a PREDICTABLE `.<name>.tmp.$$`, validated and then REOPENED BY NAME, and a PEER LANE could
+plant a symlink in that window — every lane on this box runs as one user under a shared HOME, so
+this is a NON-INVOKER route and therefore a defect — making the write clobber the link's target
+while the following `mv` installed the link as the report and reported success. **The window is
+REMOVED, not narrowed**, because a check placed after a harmful effect can only REPORT it and the
+harm here is a WRITE: there is no predictable name to plant at, `O_EXCL` refuses an existing path
+INCLUDING a symlink (dangling or not — measured, and without creating its target), and no path is
+re-resolved between validation and writing. There is deliberately no post-write check that the
+file written is the file created; that is the "notice the clobber afterwards" shape this replaces.
+The gitignore verification keeps its place because it has no window of its own — it is LEXICAL and
+is taken on the EXACT name about to be created — and the temp's symlink walk is gone for a stated
+reason rather than by omission: the temp lives in the destination's own directory, whose components
+the destination's walk has just checked, and its leaf cannot be a followed link under `O_EXCL`.
 
 If no independent audit can be obtained, the **sanctioned fallback** is to record the substitute
 *with its working* — never a hand-asserted pass:

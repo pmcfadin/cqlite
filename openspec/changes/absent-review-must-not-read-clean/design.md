@@ -50,6 +50,17 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   is. So the script asks git rather than assuming, and refuses to write a path git does not confirm.
 - Prefer the worktree to `/tmp`: it survives with the lane, a resuming session finds it without
   remembering a path, and this fleet has had `/tmp` watchdogs deleted by system cleanup.
+- **A symlink at the write path (or any component under `.review-stage/`) is REFUSED, never followed**
+  (#3751 round 1, F5) — `check-ignore` judges a LEXICAL path while a write follows links. **And the
+  TEMPORARY file the write goes through is unpredictable and created exclusively** (#3751 round 3, G3):
+  the name comes from `mktemp -u` and the file is created and opened in ONE `O_CREAT|O_EXCL` step
+  (`set -C`), then written through the held descriptor and `mv -f`'d into place. The first version used
+  a predictable `.<name>.tmp.$$`, validated it and reopened it BY NAME — a TOCTOU a PEER LANE could win,
+  since every lane here runs as one user under a shared HOME, so it was a non-invoker route and a
+  defect. The window is REMOVED rather than narrowed: a check placed after a harmful effect can only
+  report it, and the harm is a WRITE. The gitignore verification stays where it is because it is
+  LEXICAL and is taken on the exact name about to be created; a failure to create the temp exclusively
+  is a NAMED refusal with nothing written, never a fallback to a predictable name.
 - **Re-opening an existing stage refuses** unless `--force`. A second spawn silently resetting the clock
   would make the deadline unreadable, and a re-spawn is exactly what a lane does when the first one idles.
 - **The stage record carries the commit it was opened at (`head-sha:`), and `--force` RE-STAMPS it**

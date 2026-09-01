@@ -3298,7 +3298,16 @@ fi
 # so the floor moves by the SAME 5 and the derived 6-assertion margin is PRESERVED. It is
 # deliberately NOT raised to the exact 273: the margin accounts for a real host-gated block, and
 # a floor that reds on a legitimately-configured machine is the guard agents learn to waive.
-ASSERT_FLOOR=267
+#
+# ROUND 3 ADDED 34 MORE, ALSO ALL HOST-INDEPENDENT (273 -> 307): section 44f's 16 (the stage
+# ARTIFACT bound to the certified sha — the stale-PASS case, the three unparsable record shapes,
+# and the --force re-open remedy) and section 44g's 18 (the shared-table DIFFERENTIAL over the two
+# `result:`/`REVIEW-STAGE:` readers, 2 per row plus the table floor and the fixture check). Both
+# sections need only git and bash, the same as every other non-Case-41 case, so the floor moves by
+# the SAME 34 and the derived 6-assertion margin for the ONE host-gated block (Case 41's
+# TERM-ignoring escalation, which needs a real `timeout`/`gtimeout` supporting `--kill-after`) is
+# PRESERVED UNCHANGED. It is still deliberately NOT the exact 307, for that reason.
+ASSERT_FLOOR=301
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

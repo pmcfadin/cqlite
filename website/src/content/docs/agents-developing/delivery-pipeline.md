@@ -626,9 +626,18 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed
   (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an
   ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the
-  writes themselves go through a same-directory temporary file plus an atomic `mv -f`, which
-  replaces a link instead of following it and never lets a concurrent reader see a half-written
-  `result:` line.
+  writes themselves go through an UNPREDICTABLE same-directory temporary file (`mktemp -u`)
+  CREATED AND OPENED IN ONE STEP under `set -C`, i.e. `O_CREAT|O_EXCL`, then written through the
+  ALREADY-OPEN DESCRIPTOR and `mv -f`'d into place (#3751 round 3, G3). The first version used a
+  PREDICTABLE `.<name>.tmp.$$`, validated it and then REOPENED it BY NAME — a TOCTOU a PEER LANE
+  could win (every lane here runs as one user under a shared HOME), making the write clobber a
+  planted symlink's target while `mv` installed the link as the report and reported success. The
+  window is REMOVED rather than narrowed, because a check placed after a harmful effect can only
+  REPORT it and the harm is a WRITE: there is no predictable name to plant at, `O_EXCL` refuses an
+  existing path INCLUDING a symlink (dangling or not — measured, without creating its target), and
+  no path is re-resolved between validation and writing. The gitignore check keeps its place
+  because it has no window of its own: it is lexical, and it is taken on the EXACT name about to be
+  created. A concurrent reader still never sees a half-written `result:` line.
   `verdict` establishes that a VERDICT WAS RECORDED, never that a review was PERFORMED — a report whose
   only content is `result: PASS` reads as PASS. Where no independent audit can be obtained, the sanctioned
   fallback is `record-author-performed --reason <why> --evidence <artifact> --performed-by author|peer`,

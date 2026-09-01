@@ -108,6 +108,10 @@ rc_is() {
   if [ "$RC" -eq "$1" ]; then ok "$2"; else bad "$2 (expected rc=$1, got rc=$RC; out: $OUT)"; fi
 }
 
+# The descriptor number prepare_write holds. Declared here, once, because two structural
+# assertions below name it and a bare literal in each would drift apart.
+WRITE_FD_PIN=9
+
 REPORT_OF() { printf '%s/.review-stage/issue-%s/%s.md\n' "$1" "$2" "$3"; }
 
 # --- 1. AC1: a stage that produced nothing is NOT-RUN, non-zero -----------------
@@ -842,6 +846,107 @@ else
   bad "tempfile control: the custom report was not written"
 fi
 
+# --- 11e. THE TEMPORARY FILE IS UNPREDICTABLE AND CREATED EXCLUSIVELY (round 3, G3) -------
+# THE DEFECT: the temp path was `<dir>/.<basename>.tmp.$$` — DERIVABLE from the report path plus
+# a pid — and it was VALIDATED and then REOPENED with shell redirection. A peer lane can write
+# into this box's filesystem (every lane runs as one user under a shared HOME), so a symlink
+# planted in that window made the write clobber its target, and the following `mv` could install
+# that link as the report while reporting success. That is a NON-INVOKER route, not an
+# invoker-class one.
+#
+# THE WINDOW IS REMOVED, NOT NARROWED: the name comes from `mktemp -u` (unpredictable, so there
+# is nothing to pre-plant AT) and the file is created and opened in ONE step under `set -C`,
+# which makes bash use `O_CREAT|O_EXCL` — measured to refuse an existing file, an existing
+# symlink AND a DANGLING symlink without creating its target. The body then writes to the
+# ALREADY-OPEN descriptor, so no path is re-resolved between validation and writing.
+#
+# THE IGNORE CHECK IS LEXICAL AND IS TAKEN ON THE EXACT NAME ABOUT TO BE CREATED, so it has no
+# window of its own: `git check-ignore` answers about a path STRING, and the string checked is
+# the string created.
+R11E="$(newrepo '.review-stage/
+*.md')"
+mkdir -p "$R11E/logs"
+# The extension-only-ignored `--report` is used deliberately: its `-tempfile` refusal is the ONE
+# place the temporary path is NAMED in the output, so it is how a test can observe a name that
+# otherwise never leaves the process. (That refusal is round 1's declared consequence, pinned in
+# its own right by section 11(g) below — this case reuses it as an oracle, it does not replace it.)
+TMPNAME_OF() {
+  printf '%s' "$1" | LC_ALL=C tr ' ' '\n' |
+    LC_ALL=C grep -A0 '^path=' | LC_ALL=C sed -e 's/^path=//' | LC_ALL=C head -1
+}
+rs "$R11E" open c --issue 810 --agent spec-auditor --report logs/mine.md
+rc_is 2 "tempname: the extension-only-ignored --report still refuses (the oracle for this case)"
+has "what=report-of-record-tempfile" "tempname: and the refusal is about the TEMPORARY half"
+T1="$(TMPNAME_OF "$OUT")"
+rs "$R11E" open c --issue 811 --agent spec-auditor --report logs/mine.md
+T2="$(TMPNAME_OF "$OUT")"
+if [ -n "$T1" ] && [ -n "$T2" ]; then
+  ok "tempname: the temporary path was observable in both runs (the case is not vacuous)"
+else
+  bad "tempname: could not observe the temporary path — the assertions below would be vacuous (T1='$T1' T2='$T2')"
+fi
+if [ -n "$T1" ] && [ -n "$T2" ]; then
+  if [ "$T1" != "$T2" ]; then
+    ok "tempname: two consecutive runs use DIFFERENT temporary names"
+  else
+    bad "tempname: two runs used the SAME temporary name ('$T1') — it is predictable from the report path"
+  fi
+  # AND NOT PREDICTABLE FROM (report path + pid), which "they differ" alone does NOT establish:
+  # two runs are two processes, so the OLD `.tmp.$$` form also differed between them. A pid is at
+  # most 7 digits on Linux (pid_max 4194304), so requiring >= 10 characters of suffix EXCLUDES
+  # the pre-fix form DETERMINISTICALLY — no probabilistic assertion, which would flake.
+  SUF1="${T1##*.tmp.}"
+  if [ "$SUF1" != "$T1" ] && [ "${#SUF1}" -ge 10 ]; then
+    ok "tempname: the random component is >= 10 chars, so it is not a pid (a pid is <= 7 digits)"
+  else
+    bad "tempname: the temporary name '$T1' has no >=10-char random component — it looks derivable from the report path plus a pid"
+  fi
+fi
+# THE MECHANISM ITSELF IS ASSERTED STRUCTURALLY, AND IS LABELLED AS SUCH. The race is a race:
+# planting a symlink inside a window that no longer exists, at a name that is no longer
+# predictable, is not something a test can arrange — and pid reuse and scheduling are not
+# controllable, the same reasoning round 2's S3 assert records. What IS decidable from source is
+# that the three properties are present: an unpredictable name, an O_EXCL create-and-open, and a
+# write through the descriptor rather than through the path.
+PW_BODY=$(LC_ALL=C awk '
+  /^prepare_write\(\) \{/ { inf = 1 }
+  inf { print }
+  inf && /^\}/ { exit }
+' "$RS")
+case "$PW_BODY" in
+  "") bad "G3-structural: could not extract prepare_write from the shipped script — no subject" ;;
+  *) ok "G3-structural: prepare_write was located in the shipped script" ;;
+esac
+case "$PW_BODY" in
+  *'mktemp -u'*) ok "G3-structural: the temporary NAME comes from mktemp, not from the report path plus a pid" ;;
+  *) bad "G3-structural: prepare_write does not use mktemp for the temporary name (body: $PW_BODY)" ;;
+esac
+case "$PW_BODY" in
+  *'tmp.$$'* | *'tmp.$BASHPID'*)
+    bad "G3-structural: the temporary name is still derived from the pid, so a peer can pre-plant at it (body: $PW_BODY)" ;;
+  *) ok "G3-structural: the temporary name is NOT derived from the pid" ;;
+esac
+case "$PW_BODY" in
+  *'set -C'*) ok "G3-structural: noclobber is set around the create, so bash opens with O_CREAT|O_EXCL" ;;
+  *) bad "G3-structural: prepare_write does not set noclobber, so the create can follow a planted symlink (body: $PW_BODY)" ;;
+esac
+case "$PW_BODY" in
+  *"exec $WRITE_FD_PIN>"*) ok "G3-structural: the file is CREATED AND OPENED in one step (a held descriptor)" ;;
+  *) bad "G3-structural: prepare_write does not open descriptor $WRITE_FD_PIN on the temporary file, so the path is re-resolved at write time (body: $PW_BODY)" ;;
+esac
+# AND THE WRITE BODIES GO THROUGH THE DESCRIPTOR, NOT THE PATH. Without this the descriptor could
+# be opened and then ignored — the window would be back, with a held fd as decoration.
+if LC_ALL=C grep -q '} >"\$WRITE_TMP"' "$RS"; then
+  bad "G3-structural: a write body still redirects to the temporary PATH, so the path is re-resolved between validation and writing"
+else
+  ok "G3-structural: no write body redirects to the temporary PATH"
+fi
+if [ "$(LC_ALL=C grep -c '} >&'"$WRITE_FD_PIN" "$RS" 2>/dev/null || true)" -ge 2 ]; then
+  ok "G3-structural: both write bodies redirect to the held descriptor"
+else
+  bad "G3-structural: fewer than 2 write bodies redirect to the held descriptor — one of them still re-resolves a path"
+fi
+
 # --- 11d. A REFUSAL REPORTS ITS OWN SUBCOMMAND'S MARKER (round 2, S2) ---------------------
 # `assert_ignored` / `assert_no_symlink` / the write helpers are shared by `open` and
 # `record-author-performed`, and they hard-coded `OPEN-REFUSED` — so a record-author-performed
@@ -1036,7 +1141,16 @@ fi
 # that stops noticing a silently-dying section. Adding cases never reds it (it is a lower
 # bound); REMOVING one does, which is the point. Move it consciously, in the same diff as the
 # shrink it accounts for.
-ASSERT_FLOOR=261
+#
+# ROUND 3 ADDED 24 HOST-INDEPENDENT ASSERTIONS (261 -> 285): section 4d's 12 (exactly one
+# column-zero `result:` record, both orders, both distinct causes, and the indented-copies
+# control) and section 11e's 12 (the temporary file's unpredictability plus the structural asserts
+# of the O_EXCL create-and-open mechanism). Neither section branches on the host — 4d needs only
+# git and bash like every other case, and 11e's `mktemp -u`/`set -C` requirements are the SUBJECT
+# of the assertions rather than a precondition for running them, so a box lacking either FAILS the
+# case rather than displacing it. The EXACT floor therefore still holds by the two shapes recorded
+# above, and it moves to the new measured count.
+ASSERT_FLOOR=285
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

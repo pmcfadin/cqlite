@@ -110,6 +110,18 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **THEN** `open` (and `record-author-performed`) REFUSE naming the symlink and the component, the link
   target is left UNTOUCHED, and the ordinary non-symlinked path still succeeds (the positive control)
 
+#### Scenario: the temporary write path cannot be pre-planted
+- **WHEN** `open` or `record-author-performed` writes a record
+- **THEN** the write goes through a same-directory temporary file whose name is UNPREDICTABLE (not
+  derivable from the record path plus a pid), created and opened in ONE `O_CREAT|O_EXCL` step, written
+  through the ALREADY-OPEN descriptor, and `mv -f`'d into place — so no path is re-resolved between
+  validation and writing, and a symlink planted at the temporary name is REFUSED rather than followed
+- **AND** the temporary path is verified gitignored BEFORE it is created, on the exact name that is then
+  created, so the verification has no time-of-check/time-of-use gap of its own
+- **AND** the failure to create one EXCLUSIVELY is a NAMED refusal (`reason=tempfile-not-created`) with
+  NOTHING written — never a fallback to a predictable name, which is the hole this removes
+- **AND** the ordinary write still succeeds and the record is a regular file (the positive control)
+
 #### Scenario: archiving a completed change is not design-routed
 - **WHEN** the branch's only change under `openspec/changes/` is a real move of a live change
   directory into `openspec/changes/archive/`
