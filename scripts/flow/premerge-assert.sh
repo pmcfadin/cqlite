@@ -628,9 +628,23 @@ assert_covers() {
 # at HEAD X with edits in the worktree, the edits are discarded or simply never
 # committed, X is pushed and merged — and the gate of record covered a tree that
 # is NOT the one that lands. `commit:`/`tree-start:` cannot see it: both name X in
-# exactly that run. Measured on this box over 3232 full-gate summaries: 306 (9.5%)
-# ran dirty, but only 19 (0.59%) were dirty AND `RESULT: PASS`, so enforcement at
-# the merge point fires on precisely the hazard and almost nothing else.
+# exactly that run.
+#
+# HOW OFTEN THIS FIRES — MEASURED, WITH ITS POPULATION AND ITS LIMITS (2026-09-01,
+# #3648). Census of one box's `/tmp/agent-gate.*` summaries, restricted to blocks
+# that could ever BE a gate of record: FULL-gate blocks, deduplicated by `run-id`,
+# NOT `nested-under:`, and carrying a canonical `RESULT` token — n=2395, of which
+# 1608 are `RESULT: PASS`. Of those 1608 PASSes an affirmative `dirty: no` match
+# refuses 26 (~1.6%), broken down by cause so the figure can be re-derived rather
+# than inherited: 19 `dirty: yes`, 7 carrying NO `dirty:` field at all, and 0
+# `unverified` (all 40 `unverified` blocks in the population are already FAIL).
+# So the absent-field arm below is not hypothetical — it is 7 of the 26.
+# LIMITS, stated because a number in a comment decays like any other claim: this
+# is a SINGLE-BOX `/tmp` census over run dirs of unknown age, blind to runs that
+# were pruned, and the fixture exclusion (canonical `RESULT` + no `nested-under:`)
+# is a heuristic that removes this repo's own planted near-miss summaries, not a
+# guarantee that none survive. Percentages taken over the UNfiltered population
+# are unstable for exactly that reason; the absolute counts are not.
 #
 # The compare is AFFIRMATIVE — `= no`, never `!= yes` — for the same reason the
 # RESULT/tree-integrity token compares are: a `!= yes` test is a two-valued
@@ -639,6 +653,18 @@ assert_covers() {
 # or unrecognised value therefore REFUSES; it is never skipped and never read as
 # clean, exactly as a non-hex `commit:`/`tree-start:` placeholder refuses rather
 # than being skipped.
+#
+# `dirty: unverified` IS A REAL EMITTED VALUE, AND THIS ARM IS DEFENCE IN DEPTH —
+# NOT A HOLE THIS CHANGE CLOSES. scripts/agent-gate.sh:8814 emits
+# `commit: unverified branch: <b> dirty: unverified` deliberately, when no
+# validated tree capture exists (the start capture failed, or there is no worktree
+# at the terminal emit) — the run is ALREADY fail-closed there and must not name a
+# sha nothing verified. Such a block is therefore refused THREE times over: by
+# `RESULT: FAIL`, by the non-hex `commit:` placeholder, and now here. The
+# redundancy is deliberate: each of those three is a separate key, and a value
+# that means "the state was never measured" must not survive on the strength of
+# one neighbouring check (the standing rule that no key may delegate its failure
+# to its neighbour).
 #
 # THERE IS NO ENV OPT-OUT AND NONE MAY BE ADDED. A dirty tree is always
 # re-gateable — commit or discard, then re-run — so an escape hatch could only

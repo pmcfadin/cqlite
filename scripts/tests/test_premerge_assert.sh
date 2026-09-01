@@ -704,14 +704,68 @@ refused "commit: dirty: with an EMPTY value -> refuse" \
 
 # 25(e) UNRECOGNISED values -> REFUSE. `unknown` is pinned by name because it is
 # the literal this script used to substitute for a missing value while `dirty:`
-# was merely reported; `unverified` is what the gate itself writes when its tree
-# capture failed. An unestablished state is not a clean one.
-for _d in maybe unknown unverified YES No; do
+# was merely reported. `YES`/`No` are pinned because the compare is TOKEN-EXACT
+# and case-sensitive: a near-miss spelling is an unestablished state, not a clean
+# one. (`unverified` is a REAL emitted value and gets its own case below.)
+for _d in maybe unknown YES No; do
   full_summary "$T/dirty-$_d.txt" "$C7" "$C12" PASS PASS "$_d"
   refused "dirty: $_d (unrecognised) -> refuse, never read as clean" \
     "$T/dirty-$_d.txt" "records 'dirty: $_d'"
 done
 unset _d
+
+# 25(g) `dirty: unverified` — A REAL EMITTED VALUE, refused as DEFENCE IN DEPTH.
+# scripts/agent-gate.sh:8814 writes `commit: unverified branch: <b> dirty:
+# unverified` deliberately, when no validated tree capture exists (the start
+# capture failed, or there is no worktree at the terminal emit): the run is
+# already fail-closed there and must not name a sha nothing verified. So this arm
+# closes NO live hole — a real such block is refused by `RESULT: FAIL` and by the
+# non-hex `commit:` placeholder as well. It is tested BY NAME anyway, and the
+# fixture deliberately keeps RESULT: PASS and a VALID hex commit: so that the
+# refusal can only be the `dirty:` one: a value meaning "never measured" must not
+# survive on the strength of a neighbouring key, and an untested correct
+# behaviour is one refactor away from an untested wrong one.
+full_summary "$T/dirty-unverified.txt" "$C7" "$C12" PASS PASS unverified
+refused "dirty: unverified (the gate's own not-measured value) -> refuse on its OWN merit" \
+  "$T/dirty-unverified.txt" "records 'dirty: unverified'"
+
+# 25(h) A FOLLOWING KEY IS NOT A VALUE. scripts/agent-gate.sh renders these lines
+# by unquoted interpolation of variables initialised to the empty string
+# (TREE_START_DIRTY/TREE_END_DIRTY), so a block really can carry a `dirty:` key
+# with nothing of its own after it — and on a space-joined line the NEXT KEY then
+# sits where the value would be. Reading `digest:` as the dirty state would be a
+# two-valued read of a multi-state signal one layer down: it is neither `no` nor
+# absent, so it must REFUSE, naming what it actually found.
+full_summary "$T/dirty-next-key.txt" "$C7" "$C12" PASS PASS "digest: a7743efe8d80"
+if grep -q "^commit: .* dirty: digest: a7743efe8d80" "$T/dirty-next-key.txt"; then
+  ok "dirty fixture: the following-key fixture puts another key where the value goes"
+else
+  bad "dirty fixture: expected 'dirty: digest: ...' on the commit: line"
+fi
+refused "dirty: followed by another KEY -> refuse (a key is not a value)" \
+  "$T/dirty-next-key.txt" "records 'dirty: digest:'"
+
+# 25(i) A SELFTEST-SHAPED block cannot certify a merge. The gate's selftest emits
+# `commit: selftest branch: selftest dirty: no`, `tree-start: selftest ... digest:
+# selftest` and `tree-integrity: PASS (selftest)` (scripts/agent-gate.sh:7826,
+# :8921). Token-exactly that block reads `tree-integrity: PASS`, `RESULT: PASS`
+# and `dirty: no` — so the ONE key refusing it is the hex check on
+# `commit:`/`tree-start:`. That is correct and sufficient, and it is ONE key
+# holding the door; pointing this script at a selftest summary is a plausible
+# accident, so pin the property rather than leave it incidental. UNLIKE every
+# other case in this group it is green BEFORE and AFTER #3648 — it characterises
+# behaviour that already existed, and is recorded as such rather than counted as
+# evidence for the new enforcement.
+full_summary "$T/selftest-block.txt" selftest selftest "PASS (selftest)" PASS no
+if grep -q '^commit: selftest ' "$T/selftest-block.txt" &&
+   grep -q '^tree-integrity: PASS (selftest)' "$T/selftest-block.txt" &&
+   grep -q '^RESULT: PASS' "$T/selftest-block.txt"; then
+  ok "selftest fixture: the block really is a PASS with the selftest placeholders"
+else
+  bad "selftest fixture: expected a selftest-shaped PASS block"
+fi
+refused "a SELFTEST-shaped full block -> refuse (it certifies the gate, not this PR)" \
+  "$T/selftest-block.txt" "is not lowercase hex"
 
 # 25(f) The check reads the `commit:` line, NOT the clean-looking `tree-start:`
 # one below it. The 25(b) fixture disagrees between the two on purpose.
