@@ -364,11 +364,14 @@ default_report() { printf '%s/%s.md\n' "$(stage_dir "$1")" "$2"; }
 # 0 = ignored, 1 = NOT ignored, 128 = error (e.g. the path is outside the repository), and
 # every non-zero answer takes the SAME refusing branch: "cannot tell" is not "fine".
 assert_ignored() {
-  local path="$1" what="$2" rc=0
+  local path="$1" what="$2" extra="${3:-}" rc=0
   git check-ignore -q -- "$path" || rc=$?
   if [ "$rc" -ne 0 ]; then
     emit "OPEN-REFUSED reason=path-not-gitignored what=$what path=$path check-ignore-rc=$rc"
     emit "OPEN-REFUSED detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add the path to .gitignore (the default location .review-stage/ already is), or pass a --report path that is."
+    # An optional caller-supplied line, printed only on the refusal path: a refused TEMPORARY
+    # path is confusing without it, because the caller never named that path.
+    [ -z "$extra" ] || emit "OPEN-REFUSED detail=$extra"
     exit 2
   fi
 }
@@ -468,7 +471,13 @@ prepare_write() {
   assert_no_symlink "$dest" "$what"
   WRITE_TMP="$(dirname "$dest")/.$(basename "$dest").tmp.$$"
   assert_no_symlink "$WRITE_TMP" "$what-tempfile"
-  assert_ignored "$WRITE_TMP" "$what-tempfile"
+  # THE TEMPORARY PATH IS HELD TO THE SAME BAR AS THE DESTINATION, and the refusal EXPLAINS
+  # itself, because the caller never named this path. Consequence worth knowing: a --report in a
+  # directory ignored only by EXTENSION (`*.md`) is refused, since the temp name is not matched
+  # by that pattern and WOULD dirty a running gate. `.review-stage/` — the default and the only
+  # path the pipeline uses — is ignored as a DIRECTORY, so this never fires there.
+  assert_ignored "$WRITE_TMP" "$what-tempfile" \
+    "this is the TEMPORARY file the write goes through (a same-directory temp plus an atomic mv -f, so a symlink is replaced rather than followed and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A --report directory ignored only by EXTENSION does not match it: ignore the DIRECTORY instead, as .review-stage/ is."
 }
 commit_write() {
   local dest="$1" what="$2"

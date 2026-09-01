@@ -632,6 +632,39 @@ printf 'result: PASS\n\nreviewed.\n' >"$AP15"
 rs "$R15" verdict c --issue 805
 rc_is 0 "symlink control: a real report over an atomically-written sentinel still reads PASS"
 
+# (g) A DECLARED CONSEQUENCE of writing through a temporary file: a `--report` in a directory
+#     ignored only by EXTENSION is refused, because the temp name is not matched by that pattern
+#     and WOULD dirty a running gate. Pinned so it is a KNOWN, EXPLAINED refusal rather than a
+#     surprise, and so the diagnostic keeps explaining the path the caller never named.
+#     `.review-stage/` — the default, and the only path the pipeline uses — is ignored as a
+#     DIRECTORY, so this never fires there (asserted by every green case above).
+R16="$(newrepo '.review-stage/
+*.md')"
+mkdir -p "$R16/logs"
+rs "$R16" open c --issue 806 --agent spec-auditor --report logs/mine.md
+rc_is 2 "tempfile: a --report ignored only by EXTENSION is REFUSED (its temp would dirty the tree)"
+has "what=report-of-record-tempfile" "tempfile: the refusal names the TEMPORARY half"
+has "TEMPORARY file the write goes through" "tempfile: the refusal explains the path the caller never named"
+has "ignore the DIRECTORY instead" "tempfile: the refusal names the remedy"
+if [ -f "$R16/logs/mine.md" ]; then
+  bad "tempfile: the refusal must not write the report it refused"
+else
+  ok "tempfile: nothing was written at the refused path"
+fi
+# And the DIRECTORY-ignored form of the same thing is ACCEPTED — the refusal above is about the
+# pattern, not about --report itself, and without this the case above could pass on a blanket
+# refusal of every custom report path.
+R17="$(newrepo '.review-stage/
+mylogs/')"
+mkdir -p "$R17/mylogs"
+rs "$R17" open c --issue 807 --agent spec-auditor --report mylogs/mine.md
+rc_is 0 "tempfile control: a --report under a DIRECTORY-ignored path is accepted"
+if [ -f "$R17/mylogs/mine.md" ] && [ ! -L "$R17/mylogs/mine.md" ]; then
+  ok "tempfile control: the custom report was written as a regular file"
+else
+  bad "tempfile control: the custom report was not written"
+fi
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -647,7 +680,7 @@ rc_is 0 "symlink control: a real report over an atomically-written sentinel stil
 # that stops noticing a silently-dying section. Adding cases never reds it (it is a lower
 # bound); REMOVING one does, which is the point. Move it consciously, in the same diff as the
 # shrink it accounts for.
-ASSERT_FLOOR=178
+ASSERT_FLOOR=185
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
