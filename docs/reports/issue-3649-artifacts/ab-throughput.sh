@@ -88,8 +88,11 @@ die() { # <cause> <detail>
   # the manifest is only claimed when writing it ACTUALLY SUCCEEDED and the file
   # is on disk. An abort before the run directory exists writes nothing, and
   # says so.
-  if write_manifest 2>/dev/null && [ -f "${RUN_DIR:-}/manifest.json" ]; then
+  if [ "${LEDGER_ARMED:-0}" = "1" ] && write_manifest 2>/dev/null \
+     && [ -f "${RUN_DIR:-}/manifest.json" ]; then
     say "manifest $RUN_DIR/manifest.json records the runs that did complete"
+  elif [ -f "${RUN_DIR:-}/manifest.json" ]; then
+    say "manifest NOT WRITTEN -- this abort happened before any measurement began; the manifest present in $RUN_DIR belongs to an EARLIER session and has NOT been modified"
   else
     say "manifest NOT WRITTEN -- this abort happened before a manifest could be produced"
   fi
@@ -236,6 +239,8 @@ case "$MERGE_PATH" in auto|merge|bypass) ;; *) usage_error "--merge-path must be
 case "$MAX_CONCURRENT_SCANS" in ''|*[!0-9]*) usage_error "--max-concurrent-scans must be a positive integer" ;; esac
 [ "$MAX_CONCURRENT_SCANS" -ge 1 ] || usage_error "--max-concurrent-scans must be at least 1"
 case "$BATCH_SIZE" in ''|*[!0-9]*) usage_error "--batch-size must be a positive integer" ;; esac
+[ "$BATCH_SIZE" -ge 1 ] || usage_error \
+  "--batch-size must be at least 1: cqlite-flight silently clamps 0 to one row per batch, so the value the manifest records would not be the value the server used -- and the Arrow batch row cap is the very mechanism #2820 changed, so it is the last parameter this measurement can afford to lose"
 if [ -n "$MAX_BATCH_BYTES" ]; then
   case "$MAX_BATCH_BYTES" in ''|*[!0-9]*) usage_error "--max-batch-bytes must be an integer" ;; esac
 fi
@@ -252,6 +257,13 @@ RAMP_INFO="$(python3 "$SUPPORT" validate-ramp "$RAMP")" \
   || usage_error "--ramp $RAMP was refused (the cause is named above)"
 RAMP_TOP="${RAMP_INFO%% *}"
 RAMP_SECTION="${RAMP_INFO##* }"
+# The step duration is normalised HERE, before anything is built, through the
+# same grammar flight-loadgen uses -- so a value it would accept can never be
+# refused later by the analyzer, and a value it would reject costs nothing more
+# than a usage error. The canonical seconds go into the manifest as the SINGLE
+# source; the raw string is kept for display only.
+STEP_DURATION_SECONDS="$(python3 "$SUPPORT" parse-duration "$STEP_DURATION")" \
+  || usage_error "--step-duration $STEP_DURATION was refused (the cause is named above)"
 if [ "$RAMP_TOP" -gt "$MAX_CONCURRENT_SCANS" ]; then
   usage_error "--ramp tops out at $RAMP_TOP but --max-concurrent-scans is $MAX_CONCURRENT_SCANS; every request past the ceiling waits and is then shed with gRPC UNAVAILABLE (#2420), so that step would measure the admission ceiling. Raise the pin to at least $RAMP_TOP"
 fi
@@ -292,11 +304,25 @@ mkdir "$SESSION_LOCK" 2>/dev/null || {
   warn "cause-detail another session holds $SESSION_LOCK. If no session is running, remove that directory; otherwise pass a different --work-dir. Truncating this session's ledger would destroy the other's."
   exit 2
 }
-# Truncated only once the lock is HELD -- so a concurrent session in this work
-# directory is refused above, before it can destroy this one's record. Also
-# before any `die` can fire, so an early abort never writes a manifest carrying a
-# PREVIOUS session's runs.
-: > "$RUNS_JSONL"
+# THE ORDERING IS THE SUBJECT HERE, NOT ANY ONE WRITE SITE. The lock closed the
+# CONCURRENT case; this closes the SEQUENTIAL one. Reusing a work directory for
+# an attempt that then fails -- an occupied port, a bad corpus, an unresolvable
+# ref, a build that will not compile -- used to truncate the previous session's
+# ledger and overwrite its manifest on the way past.
+#
+# So the invariant is stated once and enforced once: NOTHING under RUN_DIR is
+# written until pre-flight has passed AND both arms have built. Until then the
+# ledger is "unarmed", `write_manifest` is a no-op, and `die` says plainly that
+# any manifest present belongs to an earlier session and was not touched. There
+# is deliberately no per-site guard -- a second finding in one lifecycle path is
+# what says the ordering, not the site, is what needs fixing.
+LEDGER_ARMED=0
+
+arm_ledger() {
+  : > "$RUNS_JSONL"
+  LEDGER_ARMED=1
+  write_manifest
+}
 
 # ---------------------------------------------------------------------------
 # Cleanup. Registered NOW, before the resources it frees can exist -- this repo
@@ -352,6 +378,9 @@ CORPUS_BYTES=0
 CORPUS_FILES=0
 
 write_manifest() {
+  # A no-op until the ledger is armed: before that, a manifest in this directory
+  # is a PREVIOUS session's and overwriting it is the data loss this guards.
+  [ "${LEDGER_ARMED:-0}" = "1" ] || return 1
   python3 - "$RUN_DIR/manifest.json" "$RUNS_JSONL" <<'PYEOF'
 import json
 import os
@@ -370,6 +399,16 @@ if os.path.exists(runs_path):
 def env(name, default=None):
     value = os.environ.get(name, "")
     return value if value else default
+
+
+def _int_or_none(raw):
+    """None only when UNSET. A configured 0 stays 0."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 rows = env("AB_ROWS_DECLARED")
@@ -392,11 +431,16 @@ manifest = {
         "temperature": env("AB_TEMPERATURE", ""),
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
         "merge_path": env("AB_MERGE_PATH", ""),
-        "max_concurrent_scans": int(env("AB_MAX_CONCURRENT_SCANS", "0")) or None,
-        "batch_size": int(env("AB_BATCH_SIZE", "0")) or None,
+        # `int(x) or None` turns a configured ZERO into `null`, which is how a
+        # throughput-critical parameter could vanish from the record entirely.
+        # An unset option is "server-default"; a configured one is recorded
+        # exactly, zero included.
+        "max_concurrent_scans": _int_or_none(env("AB_MAX_CONCURRENT_SCANS")),
+        "batch_size": _int_or_none(env("AB_BATCH_SIZE")),
         "max_batch_bytes": env("AB_MAX_BATCH_BYTES") or "server-default",
         "admission_wait_timeout_ms": env("AB_ADMISSION_WAIT_TIMEOUT_MS")
         or "server-default",
+        "step_duration_seconds": float(env("AB_STEP_DURATION_SECONDS", "0")),
     },
     "control": env("AB_CONTROL") or None,
     "server_extra": {
@@ -429,6 +473,7 @@ export AB_DRIVER_VERSION="$DRIVER_VERSION"
 export AB_REPLICATES="$REPLICATES"
 export AB_BASE_REF="$BASE_REF" AB_HEAD_REF="$HEAD_REF"
 export AB_SHAPE="$SHAPE" AB_RAMP="$RAMP" AB_STEP_DURATION="$STEP_DURATION"
+export AB_STEP_DURATION_SECONDS="$STEP_DURATION_SECONDS"
 export AB_PREWARM="$PREWARM" AB_TEMPERATURE="$TEMPERATURE"
 export AB_TICKET_TEMPLATE="$TICKET_TEMPLATE"
 export AB_CONTROL="$CONTROL"
@@ -488,8 +533,22 @@ export AB_KERNEL="$(uname -sr)"
 say "host instance-type $AB_INSTANCE_TYPE nproc $AB_NPROC loadavg1 $AB_LOADAVG1 kernel $AB_KERNEL"
 
 [ -f "$TICKET_TEMPLATE" ] || die ticket-template-absent "$TICKET_TEMPLATE does not exist"
-python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$TICKET_TEMPLATE" >/dev/null 2>&1 \
-  || die ticket-template-unparseable "$TICKET_TEMPLATE is not valid JSON"
+# THE WORKLOAD MUST MATCH THE CLAIM THE REPORT WILL MAKE ABOUT IT. The #3649
+# target band is defined for `flight-loadgen --shape full` over the whole ring
+# (the AC's first line), so a point, limit-k, filtered, projected or aggregating
+# session receiving a verdict against that band is a wrong answer wearing a
+# right-looking shape. Checking that the file is JSON never checked what was in
+# it. A CONTROL may use any shape -- its verdict is already disclaimed.
+if [ -z "$CONTROL" ]; then
+  [ "$SHAPE" = "full" ] || usage_error \
+    "--shape is '$SHAPE', but the #3649 target band is defined for --shape full over the whole ring. Run it as a control (--control <label>) if you want another shape; its verdict is then disclaimed rather than scored against the band"
+  python3 "$SUPPORT" validate-ticket "$TICKET_TEMPLATE" \
+    || die ticket-not-full-ring "$TICKET_TEMPLATE does not describe a full-ring scan (the cause is named above)"
+else
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$TICKET_TEMPLATE" >/dev/null 2>&1 \
+    || die ticket-template-unparseable "$TICKET_TEMPLATE is not valid JSON"
+  say "shape $SHAPE ticket UNCHECKED -- a control may narrow the workload; the analyzer disclaims its verdict"
+fi
 
 [ -d "$CORPUS" ] || die corpus-absent "$CORPUS is not a directory"
 # The census GATES the size floor, so a partial census is not an acceptable
@@ -579,7 +638,6 @@ if (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; then
   die port-occupied \
     "port $PORT is already bound before the session started; pass a different --port or stop what is listening. The run ledger has NOT been truncated"
 fi
-write_manifest
 
 # ---------------------------------------------------------------------------
 # Build: one worktree and one target directory per arm.
@@ -617,6 +675,11 @@ build_arm() { # <arm> <sha>
 
 build_arm base "$BASE_SHA"
 build_arm head "$HEAD_SHA"
+
+# Pre-flight passed and both arms exist: only now may this session claim the work
+# directory's ledger and manifest.
+arm_ledger
+say "ledger armed -- $RUN_DIR now describes THIS session"
 
 # ---------------------------------------------------------------------------
 # One replicate of one arm.
@@ -692,6 +755,36 @@ run_one() { # <arm> <replicate>
     die admission-mismatch \
       "$tag: the server resolved --max-concurrent-scans to $admission_observed but $MAX_CONCURRENT_SCANS was requested; the arms would not be served under the same admission ceiling"
   fi
+  # THE SWEEP: every option that can differ between what we REQUESTED, what the
+  # server RESOLVED and what the manifest RECORDS is read back from the same
+  # startup line. `max_concurrent_scans` is the one the server may derive on its
+  # own; the rest are echoes, and reading an echo is how we know we configured
+  # the process we are actually talking to.
+  local observed_batch observed_maxbytes observed_wait
+  observed_batch="$(parse_startup "$server_log" batch-size)"
+  observed_maxbytes="$(parse_startup "$server_log" max-batch-bytes)"
+  observed_wait="$(parse_startup "$server_log" wait-timeout-ms)"
+  say "run $tag server batch-size observed $observed_batch max-batch-bytes observed $observed_maxbytes wait-timeout-ms observed $observed_wait"
+  if [ "$observed_batch" != "NOT-OBSERVED" ] && [ "$observed_batch" != "$BATCH_SIZE" ]; then
+    die batch-size-mismatch \
+      "$tag: the server reports batch_size=$observed_batch but $BATCH_SIZE was requested; the Arrow batch row cap is the mechanism #2820 changed, so a measurement whose effective value is unknown is not a measurement"
+  fi
+  if [ -n "$MAX_BATCH_BYTES" ] && [ "$observed_maxbytes" != "NOT-OBSERVED" ] \
+     && [ "$observed_maxbytes" != "$MAX_BATCH_BYTES" ]; then
+    die max-batch-bytes-mismatch \
+      "$tag: the server reports max_batch_bytes=$observed_maxbytes but $MAX_BATCH_BYTES was requested"
+  fi
+
+  # Requested pinning and EFFECTIVE pinning are different facts too: a server
+  # that is not on the cores the manifest names is measuring something else, and
+  # nothing else in this driver would notice.
+  if [ -n "$SERVER_CPUS" ]; then
+    local affinity
+    affinity="$(python3 "$SUPPORT" check-affinity "$srv" "$SERVER_CPUS")" || die affinity-mismatch \
+      "$tag: the server is not pinned to $SERVER_CPUS (the cause is named above)"
+    say "run $tag server affinity $affinity requested $SERVER_CPUS"
+  fi
+
   if [ "$admission_source" != "NOT-OBSERVED" ] && [ "$admission_source" != "flag" ]; then
     die admission-provenance \
       "$tag: the server reports the admission ceiling came from '$admission_source', not 'flag', even though --max-concurrent-scans was passed; something else (CQLITE_MAX_CONCURRENT_SCANS in the environment, or a derived fallback) is deciding it"
@@ -744,12 +837,12 @@ run_one() { # <arm> <replicate>
     || die replicate-invalid "the $tag JSONL is not a usable replicate (see the cause-detail above)"
 
   python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" \
-    "$admission_observed" "$admission_source" <<'PYEOF'
+    "$admission_observed" "$admission_source" "$observed_batch" <<'PYEOF'
 import json
 import sys
 
 (runs_path, arm, rep, filename, temperature, cpu0, cpu1, hz,
- admission_observed, admission_source) = sys.argv[1:11]
+ admission_observed, admission_source, batch_size_observed) = sys.argv[1:12]
 try:
     server_cpu_s = (int(cpu1) - int(cpu0)) / float(hz)
 except (ValueError, ZeroDivisionError):
@@ -766,6 +859,7 @@ entry = {
     # uncorroborated requested value rather than treating it as agreement.
     "admission_observed": admission_observed,
     "admission_source": admission_source,
+    "batch_size_observed": batch_size_observed,
 }
 with open(runs_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(entry, sort_keys=True) + "\n")
