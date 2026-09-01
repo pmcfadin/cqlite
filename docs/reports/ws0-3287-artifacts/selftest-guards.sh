@@ -243,9 +243,12 @@ online=" $(_expand "$(cat /sys/devices/system/cpu/online 2>/dev/null)") "
 for c in $allowed; do
   sl=$(cat "/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list" 2>/dev/null) || continue
   members=$(_expand "$sl")
-  # A singleton is a complete group but not a MULTI-thread one; this case wants the
-  # shape the probe derives on a normal SMT host.
-  [ "$(wc -w <<<"$members")" -ge 2 ] || continue
+  # NO minimum size. The probe has none either: on a non-SMT host cpu0's sibling
+  # list is just "0", and that IS a complete group it will happily pin. Requiring
+  # two threads here made this predicate STRICTER than the thing it is a
+  # precondition for, so a perfectly good non-SMT host skipped the whole suite and
+  # exited 0 with nothing verified (roborev job 327). Match the probe or do not
+  # claim to be its precondition.
   complete=yes
   for m in $members; do
     case "$allowed" in *" $m "*) ;; *) complete=no; break;; esac
@@ -277,7 +280,10 @@ if [ "$have_group" != yes ]; then
   echo "         to pin (correctly), and every case here would red for that reason rather than"
   echo "         for anything it tests. The shim decides what the PMU says; it cannot decide the"
   echo "         topology. NOTHING WAS VERIFIED by this run."
-  exit 0
+  # EXIT NON-ZERO (roborev job 327). A suite that verified nothing must not hand back
+  # the status a caller reads as "the guards hold". 2 is distinct from 1 (a real
+  # failure) so a caller can tell "could not test here" from "a guard is broken".
+  exit 2
 fi
 
 
@@ -392,6 +398,22 @@ if ! grep -rq '999999999\|888888888' "$d/out/host/"*.csv 2>/dev/null; then
   ok "stale arm CSVs purged before this run reports (job 312 f2: another host's numbers under COMPLETE)"
 else bad "stale CSVs from a previous run survived into this run's verdict" "$d"; fi
 
+# --- 5b. a purge that FAILS must stop the run, not be assumed to have worked ---
+# roborev job 327 (High). `rm -f` exits 0 for an already-absent file and non-zero
+# when it cannot remove one, and that status was discarded — so the removal could
+# fail, this run could leave the file untouched (its group unavailable here), and
+# ANOTHER HOST'S numbers would be reported beside this host's inventory under
+# COMPLETE. Driven for real: plant a stale CSV, make the directory read-only so the
+# unlink cannot succeed, and require a named refusal.
+d="$TMP/c5b"; mkdir -p "$d/out/host"
+printf '# stale\n777777777,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/out/host/arm-hostile-2g-stalls.csv"
+chmod a-w "$d/out/host"
+rc=$(SHIM_TMA=absent run_probe "$d")
+chmod u+w "$d/out/host" 2>/dev/null
+if [ "$rc" != 0 ] && grep -q 'stale measurement files could NOT be removed' "$d/stderr.txt"; then
+  ok "unremovable stale CSV -> run REFUSES to start (job 327: rm -f's status was discarded)"
+else bad "a stale file that could not be purged did not stop the run (rc=$rc)" "$d"; fi
+
 # --- 6. <not counted> is a failed measurement, not an absence --------------
 d="$TMP/c6"; mkdir -p "$d"
 rc=$(SHIM_TMA=absent SHIM_EVENT_NOTCOUNTED=cycle_activity.stalls_l2_miss run_probe "$d")
@@ -473,7 +495,7 @@ elif [ -z "$sibs" ]; then
 elif [ "$sibs" = "$onecpu" ]; then
   # Non-SMT: one cpu is a COMPLETE group, so the probe SHOULD pin and refusing
   # would be the defect. The fixture cannot be built here.
-  skip "Gate D affinity case (non-SMT: cpu$onecpu is itself a complete sibling group, so a 1-cpu mask is pinnable and refusal would be WRONG)"
+  skip "Gate D affinity case (non-SMT: cpu$onecpu is itself a complete sibling group, so a 1-cpu mask is pinnable and refusal would be WRONG — this CASE needs SMT, the suite as a whole does not)"
 else
   # NOTE: the shim `taskset` inside $bin9 would defeat this, so the REAL taskset is
   # used to launch, and the shim dir is put on PATH only for the probe's children.
@@ -524,7 +546,7 @@ echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=20
+FLOOR=21
 if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
   echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
   exit 1
@@ -534,7 +556,7 @@ fi
 # whole-suite precondition above, their topology requirement is satisfied too, so if
 # any failed to RUN it is the suite that is wrong and not the machine. They are NOT
 # "host-independent" in general; that claim was false and is corrected (job 324).
-SHIM_FLOOR=17
+SHIM_FLOOR=18
 if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
   echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1

@@ -113,10 +113,31 @@ D="$OUT/host"
 # measurement file is therefore removed up front; the hand-written
 # gate-guard-positive-control.txt is deliberately NOT matched by these globs.
 # (#3287 roborev job 312, finding 2.)
+# AND THE PURGE IS MEASURED, NOT ASSUMED (roborev job 327). `rm -f` exits 0 for a
+# file that was already absent and NON-zero when it cannot remove one — a read-only
+# directory, a root-owned leftover, an immutable bit — and that status was discarded.
+# The consequence is precisely the failure the purge exists to prevent: the removal
+# quietly fails, this run does not overwrite that file because its group is
+# unavailable HERE, and another machine's numbers are reported beside this
+# machine's inventory under VERDICT: COMPLETE. Trusting the exit code would be the
+# weaker fix, so the STATE is checked instead: after the removal, any survivor is a
+# named, fatal refusal. (This is the same rule the rest of the script follows — a
+# positive verdict requires an affirmative measurement, never the absence of an
+# error.)
 rm -f "$D"/arm-*.csv "$D"/arm-*.txt "$D"/gate-probe-*.csv "$D"/gate-probe-*.txt \
       "$D"/differential.txt "$D"/tma-probe.txt "$D"/event-disposition.txt \
       "$D"/counter-semantics-verification.txt "$D"/capability-probe.txt \
-      "$D"/cache-hostile-build.txt
+      "$D"/cache-hostile-build.txt 2>/dev/null
+_survivors=$(ls -1 "$D"/arm-*.csv "$D"/arm-*.txt "$D"/gate-probe-*.csv "$D"/gate-probe-*.txt \
+      "$D"/differential.txt "$D"/tma-probe.txt "$D"/event-disposition.txt \
+      "$D"/counter-semantics-verification.txt "$D"/capability-probe.txt \
+      "$D"/cache-hostile-build.txt 2>/dev/null | tr '\n' ' ')
+if [ -n "${_survivors// /}" ]; then
+  echo "PROBE-STEP-FAILED: stale measurement files could NOT be removed from $D: $_survivors" >&2
+  echo "  A previous run's (or another host's) numbers would be read as this run's. Refusing to start." >&2
+  echo "VERDICT: UNMEASURED (stale-file purge failed; no capability claim may rest on this run)" > "$D/differential.txt" 2>/dev/null
+  exit 1
+fi
 
 FAILED=0
 # The operator-facing diagnostic must reach the OPERATOR. Several blocks below
@@ -223,6 +244,12 @@ fi
   echo "this probe reports but cannot satisfy on a shared box."
   echo "physical-core count: $(lscpu | awk -F: '/^Core\(s\) per socket/{gsub(/ /,"",$2);c=$2} /^Socket\(s\)/{gsub(/ /,"",$2);s=$2} END{print (c*s)?c*s:"unknown"}')"
 } >> "$D/capability-probe.txt" 2>&1
+# Class swept with roborev job 327's f2: the CREATION of this file is checked above,
+# but its APPENDS were not, so a write failure part-way left a truncated inventory
+# under a COMPLETE verdict. Verified by its own last line rather than by `[ -s ]`,
+# which a half-written file also satisfies.
+grep -q '^physical-core count:' "$D/capability-probe.txt" 2>/dev/null \
+  || note_fail "inventory: capability-probe.txt is truncated (no 'physical-core count:' line) — the host inventory was not fully recorded"
 
 # ----------------------------------------------------- Gate A: TMA level-1 and -2
 # RECORDED, NOT CLASSIFIED (#3870, see SCOPE above). Each command's exit status and
@@ -357,6 +384,9 @@ else
       echo; } >> "$D/counter-semantics-verification.txt"
   done
 fi
+
+[ -s "$D/counter-semantics-verification.txt" ] \
+  || note_fail "counter semantics: verification file is empty — AC4's semantics record was not written"
 
 # --------------------------------------------------------------- the differential
 if ! cc -O2 -std=c99 -pthread -o "$OUT/cache-hostile.bin" "$SRC" -lm 2>"$D/cache-hostile-build.txt"; then
@@ -627,6 +657,17 @@ reading() { # $1 rendered-name  $2 group  -> raw per-arm counts, no verdict
   fi
 } > "$D/differential.txt" 2>&1
 
+# The report is the deliverable, so its WRITE is verified before success is claimed
+# (roborev job 327). `{ ... } > "$D/differential.txt"` can fail — a full disk, a
+# read-only mount, a removed directory — and the redirect's failure was invisible
+# here, so the script would print "capability probe COMPLETE" and exit 0 with no
+# report at all, or a truncated one. Checked against the terminal VERDICT line
+# rather than mere existence, because a truncated file exists too.
+if ! grep -q '^VERDICT: ' "$D/differential.txt" 2>/dev/null; then
+  echo "PROBE-STEP-FAILED: the report $D/differential.txt is missing, unreadable or truncated (no VERDICT line)." >&2
+  echo "  Every step may have run, but nothing was published, so there is no result to read." >&2
+  exit 1
+fi
 if [ "$FAILED" = 0 ]; then echo "capability probe COMPLETE -> $D/"; exit 0; fi
 echo "capability probe INCOMPLETE -> $D/ (see VERDICT in $D/differential.txt)" >&2
 exit 1
