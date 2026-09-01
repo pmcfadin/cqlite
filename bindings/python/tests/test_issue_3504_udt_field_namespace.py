@@ -772,50 +772,108 @@ def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
 # CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
 # =============================================================================
 
+# The child-process probe for the behavioural half below. It re-evaluates THIS
+# module — and `conftest` — from scratch in a fresh interpreter whose
+# `CQLITE_DATASETS_ROOT` points at an empty directory, then records BOTH the
+# paths this suite resolves AND a path that legitimately DOES follow that
+# variable, so the parent can prove the perturbation was in effect.
+_RESOLUTION_PROBE = r'''
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
 
-def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(
-    monkeypatch, tmp_path
-):
+tests_dir, module_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, tests_dir)
+
+import conftest  # noqa: E402  -- re-resolved under the perturbed environment
+import cqlite  # noqa: E402
+
+spec = importlib.util.spec_from_file_location("issue_3504_resolution_probe", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+payload = {
+    # The POSITIVE CONTROL pair: what the child actually saw, and a constant
+    # whose documented contract IS to follow it.
+    "env_seen": os.environ.get("CQLITE_DATASETS_ROOT"),
+    "control_env_routed": str(conftest.DATASETS),
+    # The INVARIANT: this suite's own resolved constants.
+    "fixture_root": str(module.FIXTURE_ROOT),
+    "parity_facts": str(module.PARITY_FACTS),
+    "schemas": str(module.SCHEMAS),
+    "schema": str(module.SCHEMA),
+    "row_ids": None,
+    "read_error": None,
+}
+
+# The read is attempted AFTER the paths are recorded, and its failure is
+# REPORTED rather than raised: an env-routed resolution makes the open fail, and
+# the parent must be able to name the path mismatch that caused it instead of
+# reporting only a dead child.
+try:
+    with cqlite.open(module.FIXTURE_ROOT, schema=module.SCHEMA) as db:
+        payload["row_ids"] = sorted(row.get("id") for row in db.execute(module.QUERY).rows)
+except Exception as exc:  # noqa: BLE001 -- reported to the parent, not handled
+    payload["read_error"] = f"{type(exc).__name__}: {exc}"
+
+Path(out_path).write_text(json.dumps(payload))
+'''
+
+
+def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(tmp_path):
     """SCENARIO: the committed fixture paths do not hang off `CQLITE_DATASETS_ROOT`.
 
     The module docstring above and the reference file's `note_on_paths` DOCUMENT
     this contract; nothing ASSERTED it. `_assert_fixture_present` cannot: it
     checks the file exists at the ALREADY-RESOLVED path, so it would pass
     unchanged if resolution became env-routed and the env root happened to hold
-    the file. Committed fixtures are committed SOURCE and are resolved
+    the file. Committed fixtures are committed SOURCE and resolve
     checkout-relative — and the corpus resolvers are an EITHER/OR on the
-    variable (`conftest.py:42-48`), so a fixture reached through one is
-    invisible exactly where the suite runs, because every gate run sets it.
+    variable (`conftest.py:42-48`), so a fixture reached through one is invisible
+    exactly where the suite runs, because every gate run sets it.
 
     Two halves, and the second is the one that catches a regression.
 
     AFFIRMATIVE EQUALITY. The resolved paths must EQUAL the checkout-derived
-    expectation, anchored on this file's own location. A "the env value is not a
-    prefix" check would go vacuous whenever the variable is unset or
-    coincidentally equals the checkout — a pass derived from the absence of a
-    bad signal, which CLAUDE.md forbids.
+    expectation. A "the env value is not a prefix" check would go vacuous
+    whenever the variable is unset or coincidentally equals the checkout — a
+    pass derived from the absence of a bad signal, which CLAUDE.md forbids. The
+    expectation is derived UNCANONICALIZED, matching how `conftest` derives
+    `PROJECT_ROOT` (`Path(__file__).parent` chains, no `resolve()`): canonicalizing
+    one side only would red on a correct checkout reached through a symlink, and
+    a guard that reds on correct input is the guard agents learn to waive. The
+    canonicalized forms are compared too — like with like on both sides.
 
-    BEHAVIOURAL INVARIANCE. With `CQLITE_DATASETS_ROOT` *and* the env-routed
-    `conftest.DATASETS` it produces both pointed at an EMPTY directory, a FRESH
-    evaluation of this very module must resolve the SAME three paths, and the
-    committed artifacts must still open and read through them. A resolution
-    routed through either would land in the empty directory and red here — on
-    every run, not merely where the exported root differs from the checkout.
-    Both patches are `monkeypatch`'s, so nothing leaks to sibling tests, and the
-    probe module is never inserted into `sys.modules`.
+    BEHAVIOURAL INVARIANCE, MEASURED IN A CHILD PROCESS. Module-level constants
+    freeze at import, so an in-process reload of a neighbouring module cannot
+    observe a resolution that reads the variable DIRECTLY at load time: that
+    check stays green whenever the variable was unset when this module was first
+    imported. So the probe re-evaluates THIS module in a fresh interpreter whose
+    `CQLITE_DATASETS_ROOT` is an empty directory, and asserts a PAIR:
+
+      * the POSITIVE CONTROL — the child echoes back the perturbed value, and
+        `conftest.DATASETS`, whose documented contract IS to follow that
+        variable, HAS moved onto it. Without this the invariant below would be
+        satisfiable by an environment the child never saw.
+      * the INVARIANT — the three paths are unmoved and checkout-derived, and
+        the fixture still reads its three rows through them.
+
+    The parent mutates no environment variable and no module state, so nothing
+    can leak to a sibling test.
 
     NOT ASSERTED: `CQLITE_SCHEMAS_ROOT`. Python's `SCHEMAS` is purely
     checkout-derived and is pinned below, but the Node side legitimately honours
-    that variable (`setup.js:67-72` — the gate-validated #3148 contract), so
+    that variable (`setup.js:67-102` — the gate-validated #3148 contract), so
     honouring it is not an AC5 violation in either binding.
     """
-    import importlib.util
     import os
+    import subprocess
     import sys
 
-    import conftest
-
-    repo_root = Path(__file__).resolve().parents[3]
+    # UNCANONICALIZED, to match `conftest.PROJECT_ROOT`'s own derivation.
+    repo_root = Path(__file__).parents[3]
     expected_root = repo_root / "test-data" / "fixtures" / "issue_3504"
     expected_facts = expected_root / "binding-parity-facts.json"
     expected_schemas = repo_root / "test-data" / "schemas"
@@ -826,34 +884,66 @@ def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(
     assert PARITY_FACTS == expected_facts
     assert SCHEMAS == expected_schemas
     assert SCHEMA == expected_schema
+    # ...and equal canonicalized too, both sides canonicalized.
+    assert FIXTURE_ROOT.resolve() == expected_root.resolve()
+    assert PARITY_FACTS.resolve() == expected_facts.resolve()
 
-    # Half 2 — invariance under a datasets root that holds no corpus at all.
+    # Half 2 — a fresh interpreter under a datasets root holding no corpus.
     bogus = tmp_path / "no-corpus-here"
     bogus.mkdir()
-    monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(bogus))
-    monkeypatch.setattr(conftest, "DATASETS", bogus)
+    assert not sorted(bogus.iterdir())
+    out_path = tmp_path / "probe.json"
 
-    # Non-vacuity: both env-routed values really did move, and the root really is
-    # corpus-free — otherwise the invariance below would prove nothing.
-    assert os.environ["CQLITE_DATASETS_ROOT"] == str(bogus)
-    assert conftest.DATASETS == bogus
-    assert bogus != expected_root
-    assert not sorted(bogus.glob("**/*-Data.db"))
+    child_env = dict(os.environ)
+    child_env["CQLITE_DATASETS_ROOT"] = str(bogus)
+    # The strict-fixture flags are cleared for the CHILD only: a corpus-less
+    # root makes them a hard failure by design, which would leave the probe
+    # unable to run rather than able to measure.
+    child_env.pop("CQLITE_REQUIRE_FIXTURES", None)
+    child_env.pop("CQLITE_PARITY_REQUIRE_DATASETS", None)
 
-    spec = importlib.util.spec_from_file_location(
-        "issue_3504_udt_field_namespace__resolution_probe", Path(__file__).resolve()
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _RESOLUTION_PROBE,
+            str(Path(__file__).parent),
+            str(Path(__file__)),
+            str(out_path),
+        ],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
-    assert spec is not None and spec.loader is not None
-    probe = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(probe)
-    assert probe.FIXTURE_ROOT == expected_root
-    assert probe.PARITY_FACTS == expected_facts
-    assert probe.SCHEMA == expected_schema
-    assert "issue_3504_udt_field_namespace__resolution_probe" not in sys.modules
+    assert proc.returncode == 0, (
+        f"resolution probe failed (rc={proc.returncode})\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
+    payload = json.loads(out_path.read_text())
 
-    # ...and the committed artifacts still READ through the re-resolved paths.
-    with cqlite.open(probe.FIXTURE_ROOT, schema=probe.SCHEMA) as db:
-        ids = sorted(row.get("id") for row in db.execute(probe.QUERY).rows)
-    assert ids == [1, 2, 3], f"fixture unreadable under a bogus datasets root: {ids}"
-    reference = json.loads(probe.PARITY_FACTS.read_text())
-    assert reference["udts"]["row1.c"]["typeName"] == "collide"
+    # POSITIVE CONTROL — the perturbation really was in effect, and a constant
+    # whose contract is to follow the variable really did move onto it.
+    assert payload["env_seen"] == str(bogus), (
+        "the probe did not see the perturbed CQLITE_DATASETS_ROOT — the "
+        "invariance below would prove nothing"
+    )
+    assert payload["control_env_routed"] == str(bogus), (
+        "conftest.DATASETS did not follow the perturbed CQLITE_DATASETS_ROOT — "
+        f"got {payload['control_env_routed']}; the control is broken, so the "
+        "invariance below is unmeasured"
+    )
+    assert payload["control_env_routed"] != str(expected_root)
+
+    # THE INVARIANT — unmoved, checkout-derived, and still readable.
+    assert payload["fixture_root"] == str(expected_root)
+    assert payload["parity_facts"] == str(expected_facts)
+    assert payload["schemas"] == str(expected_schemas)
+    assert payload["schema"] == str(expected_schema)
+    assert payload["read_error"] is None, (
+        "the fixture would not open under a corpus-less datasets root: "
+        f"{payload['read_error']}"
+    )
+    assert payload["row_ids"] == [1, 2, 3], (
+        f"fixture unreadable under a corpus-less datasets root: {payload['row_ids']}"
+    )
