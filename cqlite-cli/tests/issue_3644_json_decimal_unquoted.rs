@@ -369,10 +369,23 @@ mod writer_paths {
     }
 
     /// Assert both writers spelled the cell exactly `expected`.
-    fn assert_both(value: Value, expected: &str) {
+    pub(super) fn assert_both(value: Value, expected: &str) {
         let (batch, streaming) = cell_lexemes(value);
         assert_eq!(batch, expected, "batch JSONWriter::write");
         assert_eq!(streaming, expected, "StreamingJSONWriter");
+    }
+
+    /// The cell as a parsed `serde_json::Value`, for the cases where the exact
+    /// TEXT is not the point (a UUID's hyphenation, a blob's `0x` prefix, a
+    /// tombstone's `null`).
+    ///
+    /// NEVER use it for a `decimal`/`varint`: parsing a JSON number puts it
+    /// through an `f64`, which is exactly the precision loss the unquoted
+    /// rendering exists to preserve. Those cases assert on the lexeme, above.
+    pub(super) fn as_json(value: Value) -> serde_json::Value {
+        let (batch, streaming) = cell_lexemes(value);
+        assert_eq!(batch, streaming, "the two writers must agree");
+        serde_json::from_str(&batch).unwrap_or_else(|e| panic!("valid JSON: {e} ({batch})"))
     }
 
     fn big_unscaled(digits: &[u8]) -> Vec<u8> {
@@ -608,5 +621,190 @@ mod writer_paths {
                 "the lexeme must survive the round trip:\n{doc}"
             );
         }
+    }
+}
+
+// ============================================================================
+// The rest of the per-value cases, also moved out of the `--lib` unit module
+// ============================================================================
+//
+// Same reason as `writer_paths` above: these ran in NO gate component and NO CI
+// job. They predate issue #3644 (they moved into
+// `cqlite-cli/src/output/json_cell/tests.rs` with the code they cover) and are
+// unchanged in substance — only the surface they drive changed, from the
+// crate-private `JsonCell::to_json_text` to the two PUBLIC writers, which is what
+// an integration target can reach. Every one PASSED on its first real execution;
+// none needed a production change to go green.
+#[cfg(feature = "state_machine")]
+mod stringified_kinds {
+    use cqlite_core::Value;
+
+    use super::writer_paths::{as_json, assert_both};
+
+    #[test]
+    fn test_uuid_formatting() {
+        let uuid_bytes = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+
+        let json_val = as_json(Value::Uuid(uuid_bytes));
+        let uuid_str = json_val.as_str().expect("a UUID renders as a JSON string");
+
+        // Should be formatted as hyphenated UUID
+        assert_eq!(uuid_str, "12345678-9abc-def0-1122-334455667788");
+    }
+
+    #[test]
+    fn test_list_value() {
+        let list_value = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
+
+        let json_val = as_json(list_value);
+        assert!(json_val.is_array());
+
+        let array = json_val.as_array().expect("a list renders as a JSON array");
+        assert_eq!(array.len(), 3);
+        assert_eq!(array[0], serde_json::json!(1));
+        assert_eq!(array[1], serde_json::json!(2));
+        assert_eq!(array[2], serde_json::json!(3));
+    }
+
+    #[test]
+    fn test_map_value() {
+        let map_value = Value::Map(vec![
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
+        ]);
+
+        let json_val = as_json(map_value);
+        assert!(json_val.is_array());
+
+        let array = json_val.as_array().expect("a map renders as a JSON array");
+        assert_eq!(array.len(), 2);
+
+        // Each entry should have "key" and "value" fields
+        let entry1 = array[0].as_object().expect("an entry is a JSON object");
+        assert_eq!(
+            entry1.get("key").and_then(|k| k.as_str()),
+            Some("key1"),
+            "entry: {entry1:?}"
+        );
+        assert_eq!(
+            entry1.get("value").and_then(|v| v.as_i64()),
+            Some(1),
+            "entry: {entry1:?}"
+        );
+    }
+
+    // Issue #227: human-readable formatting of complex types.
+
+    #[test]
+    fn test_blob_formatting() {
+        let json_val = as_json(Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        // Should be 0x hex format, not base64
+        assert_eq!(
+            json_val.as_str().expect("a blob renders as a JSON string"),
+            "0xdeadbeef"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_formatting() {
+        // 2023-01-15 10:30:45.123 UTC = 1673778645123 milliseconds
+        let json_val = as_json(Value::Timestamp(1673778645123));
+        let formatted = json_val
+            .as_str()
+            .expect("a timestamp renders as a JSON string");
+        // Should be human-readable format, not raw milliseconds
+        assert!(formatted.starts_with("2023-01-15"), "got: {formatted}");
+        assert!(formatted.contains("10:30:45"), "got: {formatted}");
+        assert!(formatted.ends_with("+0000"), "got: {formatted}");
+    }
+
+    #[test]
+    fn test_date_formatting() {
+        // 2023-01-01 = 19358 days since 1970-01-01
+        let json_val = as_json(Value::Date(19358));
+        // Should be YYYY-MM-DD format, not raw days number
+        assert_eq!(
+            json_val.as_str().expect("a date renders as a JSON string"),
+            "2023-01-01"
+        );
+    }
+
+    #[test]
+    fn test_time_formatting() {
+        // 14:30:45.123456789 in nanoseconds
+        let nanos =
+            14 * 3600 * 1_000_000_000 + 30 * 60 * 1_000_000_000 + 45 * 1_000_000_000 + 123_456_789;
+        let json_val = as_json(Value::Time(nanos));
+        // Should be HH:MM:SS.nnnnnnnnn format, not raw nanoseconds
+        assert_eq!(
+            json_val.as_str().expect("a time renders as a JSON string"),
+            "14:30:45.123456789"
+        );
+    }
+
+    #[test]
+    fn test_duration_formatting() {
+        let duration = Value::Duration {
+            months: 2,
+            days: 15,
+            nanos: 123456789,
+        };
+        let json_val = as_json(duration);
+        // Should be "XmoYdZns" format, not a {months, days, nanos} object.
+        //
+        // NOTE, so a reader does not mistake this for a parity claim: that
+        // spelling is `ValueFormatter::format_duration`'s and it is a MATERIAL
+        // divergence from Cassandra's `Duration.toString()`, which decomposes
+        // into y/mo/w/d/h/m/s/ms/us/ns. Recorded at length in
+        // `tests/support/golden_csv_container.rs` (`stringified_csv_text`) and
+        // in the sibling #1490 lane. This case pins CQLite's CURRENT spelling
+        // and is not evidence that the spelling is right.
+        assert_eq!(
+            json_val
+                .as_str()
+                .expect("a duration renders as a JSON string"),
+            "2mo15d123456789ns"
+        );
+    }
+
+    /// Issue #806: tombstoned cells must render as JSON null, not as an internal
+    /// metadata object. This matches cqlsh and Python binding behaviour.
+    #[test]
+    fn test_cell_tombstone_renders_as_null() {
+        use cqlite_core::types::{TombstoneInfo, TombstoneType};
+
+        let tombstone = Value::Tombstone(Box::new(TombstoneInfo {
+            deletion_time: 1673778645000000,
+            tombstone_type: TombstoneType::CellTombstone,
+            local_deletion_time: 0,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        }));
+
+        assert_both(tombstone, "null");
+    }
+
+    #[test]
+    fn test_row_tombstone_renders_as_null() {
+        use cqlite_core::types::{TombstoneInfo, TombstoneType};
+
+        let tombstone = Value::Tombstone(Box::new(TombstoneInfo {
+            deletion_time: 1673778645000000,
+            tombstone_type: TombstoneType::RowTombstone,
+            local_deletion_time: 0,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        }));
+
+        assert_both(tombstone, "null");
     }
 }

@@ -279,16 +279,12 @@ impl JsonCell {
     }
 }
 
-#[cfg(test)]
-impl JsonCell {
-    /// The cell's own JSON text, as the writer emits it. Tests assert on this
-    /// rather than on a re-parsed `serde_json::Value`, because the whole point of
-    /// [`JsonCell::Raw`] is a number no `serde_json::Number` can hold: a
-    /// round-trip through the parser would destroy exactly the digits under test.
-    fn to_json_text(value: &Value) -> String {
-        serde_json::to_string(&JsonCell::from_value(value)).expect("cell serializes")
-    }
-}
-
-#[cfg(test)]
-mod tests;
+// No unit-test module here, deliberately. `cqlite-cli`'s lib/bin unit tests
+// execute in NO gate component and NO CI job
+// (`scripts/tests/workspace-test-disposition.txt` records the crate as
+// `PARTIAL / contradicts-doctrine`: the gate's `cli-tests` passes no `--lib`, and
+// `.github/workflows/ci.yml` runs only `--test unit_tests`), so a case placed
+// here would be maintained and never run. Every case covering this module lives
+// in `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`, an integration
+// target the gate derives from the `cqlite-cli/tests/*.rs` glob, and drives the
+// two PUBLIC writers rather than this crate-private type.
