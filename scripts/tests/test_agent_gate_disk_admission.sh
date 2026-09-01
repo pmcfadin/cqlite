@@ -52,8 +52,20 @@ GATE="$SCRIPT_DIR/../agent-gate.sh"
 
 PASS=0
 FAIL=0
-ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
-bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+SKIP=0
+ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# A control that cannot RUN on this host is reported, never counted as a pass: a green
+# derived from a control's absence is the shape this repo's doctrine exists to forbid.
+skip() { printf 'skip - %s\n' "$1"; SKIP=$((SKIP + 1)); }
+
+# df_calls <case-label>: how many times the shim was invoked by that run. An integer
+# always, never empty — "measured once" and "measured twice" is the fact under test.
+df_calls() {
+  local n; n=$(cat "$tmp/$1.dfstate" 2>/dev/null || printf '0')
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "SKIP - no python3 on PATH (the #1825 slot cap this test drives needs it)"
@@ -328,10 +340,11 @@ else
   bad "AC4: refusal SUMMARY lacks an exact 'RESULT: FAIL' line"
   grep -E '^RESULT:' "$a_subj_sum" 2>/dev/null
 fi
-if grep -q '^refusal: post-slot disk admission (#3755)' "$a_subj_sum" 2>/dev/null; then
-  ok "AC4: the refusal is NAMED on its own refusal: line"
+if grep -q '^refusal: disk admission (#3755) — refused at SLOT GRANT;' "$a_subj_sum" 2>/dev/null; then
+  ok "AC4: the refusal is NAMED on its own refusal: line, and NAMES THE MOMENT"
 else
-  bad "AC4: no named 'refusal: post-slot disk admission (#3755)' line"
+  bad "AC4: no named 'refusal: disk admission (#3755) — refused at SLOT GRANT' line"
+  grep -m1 '^refusal:' "$a_subj_sum" 2>/dev/null
 fi
 # AC2, behavioural half: the slot is usable by a follow-up run immediately after.
 follow_script=$(df_script a-follow "$HIGH")
@@ -631,7 +644,187 @@ raw_case g-pct-path     "$G_PCTPATH" refuse    'fs /mnt/50%'
 raw_case g-two-capacity "$G_TWOCAP" unmeasured 'UNMEASURED (df-unparsable)'
 raw_case g-space-ok     "$G_HIGH"   pass       'post-slot 200.0GiB'
 
+# ===========================================================================
+# Case H (roborev job 329, finding 1): THE MEASUREMENT IMMEDIATELY PRECEDING THE
+# BUILD IS ALWAYS FAIL-CLOSED. A launch measurement is advisory ONLY when a slot
+# grant will follow it.
+#
+# The first draft made post-slot-grant binding and left FIVE paths returning into
+# the build with nothing binding in front of them. Two routes are exercised here:
+# the cap never engaging (no queue, so the launch reading IS the consumption-moment
+# reading), and the daemon dying AFTER the queue (where the launch reading is stale
+# by exactly the interval #3755 is about, so it must be RE-TAKEN).
+# ===========================================================================
+
+# --- H1: the cap never engages. One reading, and it is BINDING. ---
+h1_script=$(df_script h1 "$LOW")
+run_stub_gate h1 "$h1_script" \
+  CQLITE_GATE_DISABLE_CAP=1 CQLITE_GATE_STUB_SLEEP=2
+h1_sum=$RS_SUMMARY; h1_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; h1_status=$WX_STATUS; h1_markers=$WX_MARKERS
+assert_no_timeout "H1 cap-disabled"
+if [ "$h1_status" -ne 0 ] && [ "$h1_markers" -eq 0 ]; then
+  ok "H1: cap-inactive + below bar REFUSES and never begins work — the launch reading is BINDING"
+else
+  bad "H1: a cap-inactive run BUILT below the bar with nothing binding (exit $h1_status, markers $h1_markers)"
+fi
+h1_line=$(grep_line "$h1_err" '^agent-gate: disk-admission: ')
+case "$h1_line" in
+  *'FAIL-CLOSED (#3755)'*'evaluated 1x'*'NOT RE-MEASURED'*)
+    ok "H1: reported as ONE binding evaluation, not re-measured for the sake of it" ;;
+  *) bad "H1: wrong rendering: ${h1_line:-<none>}" ;;
+esac
+# The PRE-FIX behaviour is exactly the ADVISORY rendering, so its ABSENCE on a binding
+# path is the differential: a below-bar cap-inactive run must never render ADVISORY.
+case "$h1_line" in
+  *ADVISORY*) bad "H1: still renders ADVISORY on a BINDING path — the pre-fix disposition survives" ;;
+  *)          ok "H1: no ADVISORY rendering on a binding path (the pre-fix disposition is gone)" ;;
+esac
+if grep -q '^refusal: disk admission (#3755) — refused at LAUNCH' "$h1_sum" 2>/dev/null; then
+  ok "H1: the refusal NAMES the moment it refused at (LAUNCH, not 'post-slot')"
+else
+  bad "H1: refusal line does not name the LAUNCH moment"
+  grep -m1 '^refusal:' "$h1_sum" 2>/dev/null
+fi
+if [ "$(df_calls h1)" -eq 1 ]; then
+  ok "H1: measured exactly ONCE — no queue elapsed, so there is nothing to re-measure"
+else
+  bad "H1: expected 1 measurement with no queue, got $(df_calls h1)"
+fi
+
+# --- H1 CONTROL: same route, above the bar, proceeds. ---
+h1c_script=$(df_script h1c "$HIGH")
+run_stub_gate h1c "$h1c_script" CQLITE_GATE_DISABLE_CAP=1 CQLITE_GATE_STUB_SLEEP=2
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; h1c_status=$WX_STATUS; h1c_markers=$WX_MARKERS
+assert_no_timeout "H1 control"
+if [ "$h1c_status" -eq 0 ] && [ "$h1c_markers" -ge 1 ]; then
+  ok "H1 CONTROL: cap-inactive + above bar PROCEEDS and begins work (the rule does not red correct input)"
+else
+  bad "H1 CONTROL: cap-inactive above-bar run was refused (exit $h1c_status, markers $h1c_markers)"
+fi
+
+# --- H2: the daemon dies AFTER the queue. The stale launch reading must NOT decide. ---
+#
+# Driven by a slots dir the gate can `mkdir -p` (it exists) but the daemon cannot write
+# into, so acquisition fails the way it would on a real permissions/ENOSPC fault. The
+# readings are HIGH then LOW: an implementation that reused the launch reading would
+# ADMIT, so the refusal can only have come from the SECOND, fresh measurement.
+h2_slots="$tmp/h2-slots"; mkdir -p "$h2_slots"; chmod 555 "$h2_slots"
+h2_script=$(df_script h2 "$HIGH" "$LOW")
+run_stub_gate h2 "$h2_script" \
+  CQLITE_GATE_SLOTS_DIR="$h2_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
+h2_sum=$RS_SUMMARY; h2_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; h2_status=$WX_STATUS; h2_markers=$WX_MARKERS
+assert_no_timeout "H2 grant-failed-after-queue"
+if grep -q 'slot daemon exited before acquiring' "$h2_err" 2>/dev/null; then
+  ok "H2 setup: the run really took the grant-failed-after-queue route"
+else
+  bad "H2 setup: the grant-failed route was not exercised — this case measured something else"
+fi
+if [ "$h2_status" -ne 0 ] && [ "$h2_markers" -eq 0 ]; then
+  ok "H2: refused on the FRESH post-queue reading (a stale launch reading would have ADMITTED)"
+else
+  bad "H2: built on a STALE launch reading (exit $h2_status, markers $h2_markers)"
+fi
+if [ "$(df_calls h2)" -eq 2 ]; then
+  ok "H2: measured TWICE — the launch reading was re-taken after the queue"
+else
+  bad "H2: expected 2 measurements after a queue, got $(df_calls h2)"
+fi
+h2_line=$(grep_line "$h2_err" '^agent-gate: disk-admission: ')
+case "$h2_line" in
+  *'evaluated 2x'*'RE-MEASURED after the queue'*)
+    ok "H2: the line DECLARES the re-measurement and its cause" ;;
+  *) bad "H2: wrong rendering: ${h2_line:-<none>}" ;;
+esac
+case "$h2_line" in
+  *'slot RELEASED'*) bad "H2: claims a slot was RELEASED when none was ever held" ;;
+  *'no slot was held'*) ok "H2: the block states honestly that no slot was ever held" ;;
+  *) bad "H2: the block says nothing about the slot state: ${h2_line:-<none>}" ;;
+esac
+
+# --- H2 CONTROL, the inverse pair: LOW then HIGH on the same route must PROCEED. ---
+# Together with H2 this pins that the verdict follows the SECOND reading in BOTH
+# directions — a run that simply always refused on this route would pass H2 alone.
+h2c_script=$(df_script h2c "$LOW" "$HIGH")
+run_stub_gate h2c "$h2c_script" \
+  CQLITE_GATE_SLOTS_DIR="$h2_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; h2c_status=$WX_STATUS; h2c_markers=$WX_MARKERS
+assert_no_timeout "H2 control"
+if [ "$h2c_status" -eq 0 ] && [ "$h2c_markers" -ge 1 ]; then
+  ok "H2 CONTROL: low-then-high on the same route PROCEEDS — the verdict follows the FRESH reading, not the stale one"
+else
+  bad "H2 CONTROL: refused despite a fresh above-bar reading (exit $h2c_status, markers $h2c_markers)"
+fi
+chmod 755 "$h2_slots"
+
+# ===========================================================================
+# Case I (roborev job 329, finding 2): the threshold comparison is FLOATING
+# POINT — no `printf %d` conversion, which saturates implementation-dependently
+# and, in the busybox direction, ADMITS a filesystem that must be refused.
+# ===========================================================================
+
+# --- I1: the awk census. The POSITIVE CONTROL for reachability, and the proof the
+#     shipped comparison is correct under every awk this host has. ---
+I_BAR_HUGE=8796093022208           # 8 EiB, whose KiB value exceeds INT64_MAX
+I_AVAIL=209715200                  # 200 GiB available — must be REFUSED against it
+i_admits=0; i_broken=0; i_awks=0
+for a in awk gawk mawk nawk "busybox awk"; do
+  command -v "${a%% *}" >/dev/null 2>&1 || continue
+  i_awks=$((i_awks + 1))
+  # The PRE-FIX chain, reproduced verbatim: awk %d, then bash's integer `[ -ge ]`.
+  v=$($a -v g="$I_BAR_HUGE" 'BEGIN { printf "%d", (g * 1048576) + 0.5 }' 2>/dev/null)
+  if [ "$I_AVAIL" -ge "$v" ] 2>/dev/null; then
+    i_admits=$((i_admits + 1))
+    printf 'info - pre-fix chain under %-12s -> %%d=%s ADMITS (false PASS)\n' "$a" "$v"
+  fi
+  # rc 2 == bash could not compare at all: a verdict reached by an ERROR, not a measurement.
+  [ "$I_AVAIL" -ge "$v" ] 2>/dev/null; rc=$?
+  if [ "$rc" -ge 2 ]; then
+    i_broken=$((i_broken + 1))
+    printf 'info - pre-fix chain under %-12s -> %%d=%s makes bash [ ] ERROR (rc %s)\n' "$a" "$v" "$rc"
+  fi
+  # The SHIPPED comparison, same inputs, must be exactly "below the bar" everywhere.
+  $a -v k="$I_AVAIL" -v g="$I_BAR_HUGE" 'BEGIN { exit ((k + 0) >= (g * 1048576)) ? 0 : 1 }' </dev/null 2>/dev/null
+  if [ $? -eq 1 ]; then
+    ok "I1: the shipped float comparison is correct under $a (200GiB is BELOW an 8-EiB bar)"
+  else
+    bad "I1: the shipped float comparison is WRONG under $a"
+  fi
+done
+if [ "$i_awks" -eq 0 ]; then
+  skip "I1 CONTROL: no awk implementation on this host — reachability could not be measured"
+elif [ "$i_admits" -gt 0 ] || [ "$i_broken" -gt 0 ]; then
+  ok "I1 CONTROL: the PRE-FIX %d chain is defective under $((i_admits + i_broken)) of $i_awks awk(s) here ($i_admits ADMIT, $i_broken error out) — the defect was reachable"
+else
+  skip "I1 CONTROL: none of this host's $i_awks awk(s) reproduces the %d defect — reachability not demonstrable here"
+fi
+
+# --- I2/I3: the accepted bar range is STATED, and an over-range bar CLAMPS DOWN. ---
+# I3 is the anti-loosening assertion: discarding an over-range bar in favour of the
+# 40GiB default would turn a refusal into an ADMISSION of this same 200GiB payload.
+bar_case i-max      '1048576GiB(pinned)'      CQLITE_GATE_MIN_FREE_GB=1048576
+bar_case i-overmax  '1048576GiB(out-of-range)' CQLITE_GATE_MIN_FREE_GB="$I_BAR_HUGE"
+
+i3_script=$(df_script i3 "$HIGH")
+run_stub_gate i3 "$i3_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/i3-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+  CQLITE_GATE_STUB_SLEEP=2 CQLITE_GATE_MIN_FREE_GB="$I_BAR_HUGE"
+i3_sum=$RS_SUMMARY; i3_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; i3_status=$WX_STATUS; i3_markers=$WX_MARKERS
+assert_no_timeout "I3 over-range bar"
+if [ "$i3_status" -ne 0 ] && [ "$i3_markers" -eq 0 ]; then
+  ok "I3: an over-range bar still REFUSES a 200GiB filesystem — clamped DOWN, never defaulted (defaulting would ADMIT)"
+else
+  bad "I3: an over-range bar ADMITTED a 200GiB filesystem (exit $i3_status, markers $i3_markers) — the bar was loosened"
+fi
+if grep -q 'was NOT used verbatim (out-of-range)' "$i3_err" 2>/dev/null; then
+  ok "I3: the unusable bar is named on stderr as an operator action, with the accepted range"
+else
+  bad "I3: no stderr note naming the out-of-range bar"
+fi
+
 printf '\n%s\n' "-----------------------------------------------"
-printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
+printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

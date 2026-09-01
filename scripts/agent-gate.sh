@@ -19049,14 +19049,31 @@ run_delta() {
 # before the certification window and the first component — which is exactly "after
 # slot grant and before the first build step".
 #
-# THE DISPOSITIONS ARE ASYMMETRIC ON PURPOSE. The reason is stated at each branch
-# rather than here, but in summary: LAUNCH is ADVISORY (a low reading there can be
-# freed by the very peer gate we are about to queue behind, so refusing would be a
-# false refusal, and a guard that reds on correct input is the guard agents learn to
-# waive); POST-SLOT-GRANT is FAIL-CLOSED; UNMEASURED is DECLARED and non-fatal at
-# both moments (the cap's own stated doctrine is that the gate must never be
-# un-runnable because of the cap — but never SILENTLY, so an unmeasurable reading
-# names itself in the SUMMARY instead of taking the permissive branch quietly).
+# THE RULE, and it is one rule rather than a disposition per branch (roborev job 329):
+#
+#     THE MEASUREMENT IMMEDIATELY PRECEDING THE BUILD IS ALWAYS FAIL-CLOSED.
+#     A LAUNCH MEASUREMENT IS ADVISORY *ONLY* WHEN A SLOT GRANT WILL FOLLOW IT.
+#
+# The first draft had it as "launch advisory, post-slot fail-closed", which is the rule
+# above only on the path where a grant actually happens — and it left FIVE paths that
+# return straight into the build with nothing binding in front of them: the cap being
+# force-disabled, python3 absent, the daemon script absent, the slots dir uncreatable,
+# and the daemon dying before it acquired. On the first four no queue elapses, so the
+# launch reading IS the consumption-moment reading and is simply binding. The fifth is
+# the sharp one: the queue DID elapse, so the launch reading is stale by exactly the
+# interval this issue is about — that is #3755's own defect reproduced inside its own
+# fix — so that path RE-MEASURES rather than reusing a reading taken before the wait.
+#
+# Read the rule the other way for the advisory case, which survives unchanged and for
+# an unchanged reason: a low reading at launch can be freed by the very peer gate we
+# are about to queue behind, so refusing there would red a run that is about to be
+# perfectly fine — a guard that reds on correct input is the guard agents learn to
+# waive. `ADVISORY` is therefore a RENDERING that appears only where it is still true.
+#
+# UNMEASURED is DECLARED and non-fatal at every moment (the cap's own stated doctrine
+# is that the gate must never be un-runnable because of the cap) — but never SILENTLY,
+# so an unmeasurable reading names itself in the SUMMARY instead of taking the
+# permissive branch quietly.
 #
 # WHAT THE OUTCOME IS CALLED. RESULT stays FAIL. A new terminal token
 # (`RESULT: REFUSED`, which --delta has) would break the mandated completion probe
@@ -19069,6 +19086,18 @@ run_delta() {
 # The bar, in GiB. 40 is #3755's own "40G building floor" and the value the committed
 # fleet tooling already uses (worker-supervisor.sh's DISK_FLOOR_GB).
 _GATE_MIN_FREE_GB_DEFAULT=40
+
+# The largest bar this gate accepts, STATED HERE rather than inherited from whatever
+# `printf %d` an implementation happens to ship (roborev job 329). 1 PiB exceeds by
+# orders of magnitude the capacity of any filesystem a gate can run on, and
+# 1048576 GiB = 1099511627776 KiB is exactly representable both as an IEEE-754 double
+# and as a 64-bit integer, so nothing in the comparison chain can round or wrap it.
+#
+# A bar ABOVE it is CLAMPED DOWN to it and reported `out-of-range` — deliberately NOT
+# discarded in favour of the 40GiB default, which would LOOSEN a bar the operator set
+# HIGH, turning a refusal into an admission. Clamping keeps the operator's intent
+# (refuse essentially everything) while naming the value as unusable.
+_GATE_MAX_FREE_GB=1048576
 
 # The `disk-admission:` line every FULL-gate SUMMARY carries. Empty until the probe
 # runs, i.e. for the exempt modes, which get no line at all.
@@ -19084,6 +19113,10 @@ _DA_BAR_SRC=""
 # inferred from the rendered post-slot text: a verdict must not be derived by sniffing
 # a display string two other functions independently format.
 _DA_EVALUATIONS=0
+# Which of the three binding moments produced the verdict, and what the slot state was
+# there — so a refusal can never claim a slot was released when none was ever held.
+_DA_MOMENT=""
+_DA_SLOT_NOTE=""
 # Per-measurement outputs of _gate_disk_admission_measure.
 _DA_STATE=""
 _DA_VALUE=""
@@ -19112,7 +19145,7 @@ _gate_is_nonneg_decimal() {
 # them). A negative bar clamps to 0 rather than being refused: "never refuse" is a
 # coherent thing to ask for, and `-0` clamping to `0` is the same value.
 _gate_min_free_gb() {
-  local v body neg=0
+  local v body neg=0 rc
   if [ -z "${CQLITE_GATE_MIN_FREE_GB+set}" ]; then
     printf '%s default' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
   fi
@@ -19123,7 +19156,41 @@ _gate_min_free_gb() {
     printf '%s invalid' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
   fi
   [ "$neg" -eq 1 ] && { printf '0 clamped'; return 0; }
+  # THREE-VALUED, like every other probe here: over the maximum / within it / could not
+  # be compared. The third case keeps the operator's pin rather than inventing a verdict
+  # — the measurement below then reports `comparison-unavailable`, which is the truth.
+  _gate_bar_over_max "$v"; rc=$?
+  case "$rc" in
+    0) printf '%s out-of-range' "$_GATE_MAX_FREE_GB"; return 0 ;;
+  esac
   printf '%s pinned' "$v"
+}
+
+# _gate_bar_over_max <gib>: rc 0 = ABOVE the accepted maximum, 1 = within it, other =
+# could not be compared (no awk). Floating point, never an integer conversion.
+_gate_bar_over_max() {
+  awk -v g="$1" -v m="$_GATE_MAX_FREE_GB" 'BEGIN { exit (g + 0 > m + 0) ? 0 : 1 }' \
+    </dev/null 2>/dev/null
+}
+
+# _gate_disk_admission_clears_bar <available-kib> <bar-gib>
+#   rc 0 = the reading CLEARS the bar, 1 = it is BELOW, other = could not be compared.
+#
+# THE COMPARISON IS IN FLOATING POINT AND THERE IS NO INTEGER CONVERSION (roborev job
+# 329). The first draft rendered the threshold through `awk`'s `%d` and compared with
+# bash's `[ -ge ]`, and that chain is BOTH implementation-dependent and wrong in the
+# ADMITTING direction. Measured on one host, one payload (200GiB available, an 8-EiB
+# bar): busybox awk's `%d` yields **-2147483648** — a 32-bit wrap — so
+# `[ 209715200 -ge -2147483648 ]` is TRUE and the gate ADMITS a filesystem it must
+# refuse. gawk/mawk/nawk instead print a value beyond INT64_MAX, which makes bash's
+# `[` ERROR (`integer expression expected`, rc 2) and emit a diagnostic on the gate's
+# own stderr — a verdict reached by an error rather than by a measurement, which is not
+# a defensible way to be right either. Doubles carry every value in play exactly (the
+# accepted bar tops out at 1.0995e12 KiB and any real filesystem is far below 2^53), so
+# the comparison is exact and no implementation's printf enters the chain.
+_gate_disk_admission_clears_bar() {
+  awk -v k="$1" -v g="$2" 'BEGIN { exit ((k + 0) >= (g * 1048576)) ? 0 : 1 }' \
+    </dev/null 2>/dev/null
 }
 
 # _gate_disk_admission_subject: the path whose filesystem the build will fill — the
@@ -19247,15 +19314,12 @@ _gate_disk_admission_probe() {
 
 # _gate_gib_render <kib> -> "<n.n>GiB" (display only). Empty when awk cannot answer.
 _gate_gib_render() { awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/dev/null; }
-# _gate_gib_to_kib <gib> -> integer KiB. Empty when awk cannot answer, which the
-# caller turns into UNMEASURED rather than into a comparison against nothing.
-_gate_gib_to_kib() { awk -v g="$1" 'BEGIN { printf "%d", (g * 1048576) + 0.5 }' 2>/dev/null; }
 
 # _gate_disk_admission_measure: ONE evaluation of the ONE predicate. Sets _DA_STATE
 # (OK | BELOW | UNMEASURED), _DA_VALUE (rendered GiB), _DA_MOUNT, _DA_WHY. Both
 # moments call THIS — that identity is the whole of AC1.
 _gate_disk_admission_measure() {
-  local probe bar_kib
+  local probe crc
   # _DA_MOUNT is deliberately NOT cleared: it names the SUBJECT FILESYSTEM, which is the
   # same one at both moments, so an UNMEASURED second reading must not erase the identity
   # the first one established. It is an identity, never a verdict.
@@ -19268,17 +19332,15 @@ _gate_disk_admission_measure() {
       _DA_MOUNT="${probe#* }"
       _DA_VALUE=$(_gate_gib_render "$kib")
       [ -n "$_DA_VALUE" ] || _DA_VALUE="${kib}KiB"
-      bar_kib=$(_gate_gib_to_kib "$_DA_BAR")
-      case "$bar_kib" in
-        ''|*[!0-9]*)
-          # The bar could not be rendered into the measurement's own unit, so there is
-          # nothing to compare against. That is an UNMEASURED comparison, never a
-          # silent pass and never a refusal on a value we could not compute.
-          _DA_STATE=UNMEASURED; _DA_WHY=bar-unrenderable; return 0 ;;
+      # Keyed on the AFFIRMATIVE value (the reading CLEARS the bar), never on the
+      # absence of a bad signal — and three-valued, so a comparison that could not be
+      # made is UNMEASURED rather than silently taking either branch.
+      _gate_disk_admission_clears_bar "$kib" "$_DA_BAR"; crc=$?
+      case "$crc" in
+        0) _DA_STATE=OK ;;
+        1) _DA_STATE=BELOW ;;
+        *) _DA_STATE=UNMEASURED; _DA_WHY=comparison-unavailable ;;
       esac
-      # Keyed on the AFFIRMATIVE value (`>= bar`), never on the absence of a bad
-      # signal: a positive verdict here requires a measurement that cleared the bar.
-      if [ "$kib" -ge "$bar_kib" ]; then _DA_STATE=OK; else _DA_STATE=BELOW; fi
       ;;
     'UNMEASURED '*) _DA_STATE=UNMEASURED; _DA_WHY="${probe#UNMEASURED }" ;;
     *)              _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised ;;
@@ -19336,35 +19398,80 @@ _gate_disk_admission_launch() {
   _DA_EVALUATIONS=1
   _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
   _DA_POST_RENDER='NOT MEASURED (the slot was never granted)'
+  # A bar the operator SET but the gate did not use VERBATIM is an operator action that
+  # needs an operator response, so it is named on stderr as well as in the block. The
+  # raw value is stripped of control characters and truncated: it is untrusted input
+  # being rendered onto the gate's own stderr.
+  case "$_DA_BAR_SRC" in
+    invalid|clamped|out-of-range)
+      echo "agent-gate: WARN: CQLITE_GATE_MIN_FREE_GB='$(printf '%s' "${CQLITE_GATE_MIN_FREE_GB:-}" | tr -d '\000-\037\177' | cut -c1-60)' was NOT used verbatim ($_DA_BAR_SRC); the bar in effect is ${_DA_BAR}GiB (accepted range 0..${_GATE_MAX_FREE_GB} GiB) (#3755)" >&2 ;;
+  esac
   if [ "$_DA_STATE" = BELOW ]; then
-    echo "agent-gate: WARN: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at LAUNCH, below the ${_DA_BAR}GiB bar — ADVISORY here (a queued peer may free space); the binding check is re-taken AT SLOT GRANT (#3755)" >&2
+    echo "agent-gate: WARN: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at LAUNCH, below the ${_DA_BAR}GiB bar — ADVISORY *only if a slot grant follows* (a queued peer may free space); if the cap does not engage, THIS reading is the binding one (#3755)" >&2
   fi
   return 0
 }
 
-# _gate_disk_admission_no_grant <why>: record that no post-slot evaluation happened
-# because no slot was ever granted (the cap is inactive for this run). DECLARED rather
-# than silently rendered as a pass: "measured once" and "measured twice" are different
-# facts and a reader must be able to tell them apart.
-_gate_disk_admission_no_grant() {
-  _DA_POST_RENDER="NOT MEASURED (no slot grant: $1)"
-  _gate_disk_admission_line ADVISORY "the binding post-slot check did not run; this block asserts only the LAUNCH reading (#3755)"
+# _gate_disk_admission_dispose <slot-note> <pass-detail>: THE ONE DISPOSITION.
+#
+# Every path that is about to return into the build calls this with the state of the
+# LAST measurement taken. There is exactly one of these so a new return path cannot
+# acquire a different disposition by being written somewhere else — which is precisely
+# how the five unguarded paths of the first draft came about (roborev job 329).
+_gate_disk_admission_dispose() {
+  _DA_SLOT_NOTE="$1"
+  case "$_DA_STATE" in
+    BELOW) _gate_disk_admission_refuse ;;   # exits 1 — never returns
+    OK)    _gate_disk_admission_line PASS "$2" ;;
+    *)     _gate_disk_admission_line "UNMEASURED (${_DA_WHY:-unknown})" "the bar was NOT APPLIED; the run proceeds UNADMITTED (#3755)" ;;
+  esac
   echo "agent-gate: $DISK_ADMISSION_LINE" >&2
   return 0
 }
 
-# _gate_disk_admission_refuse: the FAIL-CLOSED post-slot disposition.
+# _gate_disk_admission_bind_launch <why>: the cap never engaged, so NO QUEUE ELAPSED
+# between the launch reading and the build. Under the rule at the top of this block the
+# launch reading IS the consumption-moment reading, so it is BINDING — and it is not
+# re-taken, because re-measuring an interval in which nothing happened would only add a
+# second `df` and a second chance to disagree with itself.
+_gate_disk_admission_bind_launch() {
+  _DA_MOMENT="at LAUNCH (BINDING: the cap never engaged, so no queue separated this reading from the build)"
+  _DA_POST_RENDER="NOT RE-MEASURED (no slot grant: $1; no queue elapsed, so the LAUNCH reading IS the consumption-moment reading and is BINDING)"
+  _gate_disk_admission_dispose \
+    "no slot was ever held; NOTHING was built" \
+    "the LAUNCH reading is BINDING here — no queue separated it from the build (#3755)"
+}
+
+# _gate_disk_admission_bind_after_queue <why>: we DID queue, and the grant then failed.
+#
+# This is the path that most needed the rule. The queue may have run for an hour, so the
+# launch reading is stale by exactly the interval #3755 exists to close — reusing it here
+# would reproduce this issue's own defect inside its own fix. So the reading is RE-TAKEN,
+# and the fresh one is binding.
+_gate_disk_admission_bind_after_queue() {
+  _gate_disk_admission_measure
+  _DA_EVALUATIONS=2
+  _DA_MOMENT="after the queue (RE-MEASURED: the slot grant failed, but the queue had already elapsed, so the launch reading was stale)"
+  _DA_POST_RENDER="$(_gate_disk_admission_render_state) (RE-MEASURED after the queue; no slot grant: $1)"
+  _gate_disk_admission_dispose \
+    "no slot was held (the grant failed); NOTHING was built" \
+    "re-measured after the queue even though the grant failed — a stale launch reading is what #3755 is about"
+}
+
+# _gate_disk_admission_refuse: the FAIL-CLOSED disposition, reachable from all three
+# binding moments. _DA_MOMENT and _DA_SLOT_NOTE name WHICH one, so the block never
+# claims a slot was released when none was ever held.
 _gate_disk_admission_refuse() {
   # AC2, and it is FIRST for a reason. The slot is a machine-wide resource and the
   # entire point of refusing here is to hand it straight back to a peer that can use
   # it; every millisecond spent rendering or emitting before the release is time a
   # queued gate waits on a run that has already decided not to build. _gate_release_slot
-  # is idempotent (it clears GATE_SLOT_DAEMON_PID), so the EXIT trap's later call is a
-  # no-op rather than a double kill.
+  # is idempotent (it clears GATE_SLOT_DAEMON_PID) and a no-op when no slot was ever
+  # acquired, so calling it unconditionally here is safe at all three moments.
   _gate_release_slot
-  _gate_disk_admission_line "FAIL-CLOSED (#3755)" "slot RELEASED immediately; NOTHING was built"
-  echo "agent-gate: FAIL: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at SLOT GRANT, below the ${_DA_BAR}GiB bar (${_DA_BAR_SRC}) — refusing to start a build that would abort into the floor (#3755)" >&2
-  echo "agent-gate: the slot has been RELEASED; a queued peer gets it instead of waiting behind a run that cannot finish." >&2
+  _gate_disk_admission_line "FAIL-CLOSED (#3755)" "$_DA_SLOT_NOTE"
+  echo "agent-gate: FAIL: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} ${_DA_MOMENT%% (*}, below the ${_DA_BAR}GiB bar (${_DA_BAR_SRC}) — refusing to start a build that would abort into the floor (#3755)" >&2
+  echo "agent-gate: $_DA_SLOT_NOTE." >&2
   echo "agent-gate: remedy: free space on ${_DA_MOUNT:-the target filesystem} (cargo clean / prune stale /tmp/agent-gate.* run dirs), then re-run." >&2
   echo "agent-gate: $DISK_ADMISSION_LINE" >&2
   # A complete, well-formed terminal block — the refusal must not be information-poorer
@@ -19374,13 +19481,13 @@ _gate_disk_admission_refuse() {
   _tree_meta_array
   declare -a _da_meta=()
   _da_meta+=("$TREE_COMMIT_LINE")
-  _da_meta+=("refusal: post-slot disk admission (#3755) — the slot was granted, the re-check failed, the slot was RELEASED; NO component ran")
+  _da_meta+=("refusal: disk admission (#3755) — refused $_DA_MOMENT; $_DA_SLOT_NOTE; NO component ran")
   _da_meta+=("$DISK_ADMISSION_LINE")
   _da_meta+=("$(_component_set_meta)")
   _da_meta+=("$(accelerators_line)")
   _da_meta+=("$(cpu_budget_line)")
   _da_meta+=("${TREE_META_LINES[@]}")
-  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped)")
+  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped|out-of-range)")
   # Routed through the shared no-clobber terminal contract (#2874), not a bare
   # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
   # as every other one.
@@ -19422,11 +19529,11 @@ acquire_gate_slot() {
   # then builds — the full gate — and by nothing else. ADVISORY (see the function).
   _gate_disk_admission_launch
   if [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ]; then
-    _gate_disk_admission_no_grant "cap force-disabled"; return 0
+    _gate_disk_admission_bind_launch "cap force-disabled"; return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
     echo "agent-gate: python3 unavailable -- full-gate concurrency cap DISABLED (#1825)" >&2
-    _gate_disk_admission_no_grant "python3 unavailable"
+    _gate_disk_admission_bind_launch "python3 unavailable"
     return 0
   fi
   local n dir poll daemon ready
@@ -19436,12 +19543,12 @@ acquire_gate_slot() {
   daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
   if [ ! -f "$daemon" ]; then
     echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
-    _gate_disk_admission_no_grant "slot daemon missing"
+    _gate_disk_admission_bind_launch "slot daemon missing"
     return 0
   fi
   if ! mkdir -p "$dir" 2>/dev/null; then
     echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
-    _gate_disk_admission_no_grant "slot dir uncreatable"
+    _gate_disk_admission_bind_launch "slot dir uncreatable"
     return 0
   fi
   ready="$LOG_DIR/gate-slot.ready"
@@ -19465,7 +19572,7 @@ acquire_gate_slot() {
     if ! kill -0 "$GATE_SLOT_DAEMON_PID" 2>/dev/null; then
       echo "agent-gate: slot daemon exited before acquiring -- cap DISABLED for this run (#1825)" >&2
       GATE_SLOT_DAEMON_PID=""
-      _gate_disk_admission_no_grant "slot daemon exited before acquiring"
+      _gate_disk_admission_bind_after_queue "slot daemon exited before acquiring"
       return 0
     fi
     if [ "$printed" -eq 0 ] && [ "$waited" -ge 3 ]; then
@@ -19503,19 +19610,15 @@ acquire_gate_slot() {
   # hold the slot), so a below-bar reading now is the reading the build would start on.
   _gate_disk_admission_measure
   _DA_EVALUATIONS=2
+  _DA_MOMENT="at SLOT GRANT"
   _DA_POST_RENDER=$(_gate_disk_admission_render_state)
-  case "$_DA_STATE" in
-    BELOW) _gate_disk_admission_refuse ;;   # exits 1
-    OK)
-      _gate_disk_admission_line PASS "re-checked AT SLOT GRANT, not merely at launch (#3755)" ;;
-    *)
-      # DECLARED, not silent. The cap's standing doctrine is that the gate must never be
-      # un-runnable because of the cap, and that extends to a probe bolted onto it — but
-      # a reading that could not be taken must never be rendered as one that passed, so
-      # the block says the bar was NOT APPLIED rather than saying PASS.
-      _gate_disk_admission_line "UNMEASURED (${_DA_WHY:-unknown})" "the bar was NOT APPLIED; the run proceeds UNADMITTED (#3755)" ;;
-  esac
-  echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  # Routed through the ONE disposition (which is also what makes UNMEASURED declared
+  # rather than silent: the cap's standing doctrine is that the gate must never be
+  # un-runnable because of the cap, but a reading that could not be TAKEN must never be
+  # rendered as one that PASSED).
+  _gate_disk_admission_dispose \
+    "slot RELEASED immediately; NOTHING was built" \
+    "re-checked AT SLOT GRANT, not merely at launch (#3755)"
   return 0
 }
 
