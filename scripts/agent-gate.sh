@@ -6544,7 +6544,11 @@ _fm_annotate() {
 # not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
 # every existing prefix/stage-line assertion still matches.
 _fm_summary_line() {
-  printf '%-18s %s (%s)  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")"
+  # #3625: the census suffix rides here, at the ONE renderer, for the same reason the
+  # feature matrix does -- no mode can then emit a component line the others do not.
+  # `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
+  # existing prefix/stage assertions match on them); the census is APPENDED.
+  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1")"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -6735,6 +6739,379 @@ _fm_observe_child() {
   return 0
 }
 # ==== END feature-matrix annotation (#3453) ====
+
+# ==== BEGIN component census (#3625) ====
+#
+# WHY THIS EXISTS. A component line reading `PASS (0s)` is indistinguishable, in the
+# SUMMARY block a closer pastes, from a component that did nothing. A DURATION is a
+# PROXY for work; a COUNT is the work. #3384 gave flight-tests a run-time census for
+# exactly this reason; this is the same treatment for every other component, DERIVED
+# FROM THE RUN'S OWN OUTPUT at run time and never curated.
+#
+# THE MEASURED ORACLE — cargo's own behaviour, taken 2026-09-01 on a throwaway crate,
+# cold then warm. This is what the issue's two-run comparison actually shows:
+#
+#   cargo test           WARM it still prints `Running ...`, `running N tests` and
+#                        `test result: ok. N passed`. Cargo caches COMPILATION, never
+#                        test EXECUTION. So the `0s` lanes in the issue's table
+#                        (tombstones-scan, arrow-parity-guard, format-compat,
+#                        integration-tests, query-semantics-oracle -- every one of them
+#                        a `cargo test` RUN lane) DID re-verify their subjects on the
+#                        second run; the duration collapsed because the BUILD was
+#                        cached. The count was in the component log all along. Nothing
+#                        put it in the SUMMARY, which is the whole defect.
+#   cargo test --no-run  WARM it genuinely runs nothing -- but it still emits one
+#                        `Executable ...` status line per test binary. Its honest
+#                        affirmative subject is therefore BINARIES, not tests, which is
+#                        why feature-iso-parquet's documented `PASS (0s)` is legitimate
+#                        and still had nothing to say for itself.
+#
+# THE STATES, AND ONLY ONE OF THEM AFFIRMS ANYTHING:
+#
+#   COUNT <payload>        affirmative measurement            -> `{verified: ...}`
+#   ZERO <payload>         MEASURED, and the subject count is zero. FATAL: the
+#                          component's PASS becomes VACUOUS (AC2).
+#   NOT-MEASURED <reason>  the census could not be taken (unreadable log, failed ANSI
+#                          strip, a `self:` component that recorded nothing). DECLARED
+#                          and deliberately NON-FATAL: a lane that reds on correct
+#                          input is the lane agents learn to waive, and a transient
+#                          log-read failure on an otherwise green gate is correct
+#                          input. It is NEVER rendered as verified and never satisfies
+#                          AC1.
+#   GAP <reason>           DECLARED: no census is derivable for this component yet. The
+#                          reason PRINTS on every run, so the reduction in coverage is
+#                          visible rather than inferred from a silence.
+#   NOT-APPLICABLE <why>   the component did not PASS, so there is no PASS to affirm.
+#   UNDECLARED <why>       fail-closed: a component reached the census with no declared
+#                          kind. Its status becomes FAIL, so a new component cannot join
+#                          the gate with a blank census the way one could before #3453
+#                          closed the same hole for the feature matrix.
+#
+# A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT. `NOT-MEASURED` and `GAP` are
+# never read as verified: they are counted SEPARATELY on the aggregate `census:` line,
+# always as `N RECOGNISED` and never as a bare `N`, because the gap set is CURATED and
+# that line must not read as a verified all-clear.
+#
+# THIS RECORDS A COUNT, NOT A TRUTH -- the `workspace-test-disposition` precedent
+# (#1716/#3522). A component can declare `libtest` and count a suite that asserts
+# nothing; that is not this guard's subject and it does not pretend otherwise.
+
+# _census_sidecar <component>: the per-component census record, written by the
+# component's own lane (which may be a backgrounded subshell that cannot mutate the
+# parent's arrays -- the same constraint that put `.result` beside it) and read by the
+# parent at emit time.
+_census_sidecar() { printf '%s/%s.census' "${LOG_DIR:-}" "$1"; }
+
+# _census_kind <component>: THE DECLARATION SITE. A CLOSED set; an undeclared name is a
+# fail-closed refusal (return 1), never a guess.
+#
+#   libtest        the affirmative subject is EXECUTED TESTS. Sums libtest's own
+#                  `test result: ok. N passed` tallies plus cargo-nextest's
+#                  `N tests run:` summary (core-tests' nextest branch prints the
+#                  latter for the unit suite and the former for its --doc pass).
+#   compile        a `--no-run` lane runs no test, so its subject is the test BINARIES
+#                  cargo built or verified fresh -- one `Executable ` status line each.
+#   both           a lane with a `--no-run` pass AND a run pass. Vacuous only when BOTH
+#                  subjects measure zero.
+#   self:<unit>    the component knows its own count and records it directly with
+#                  _census_declare, because its output never reaches a $LOG_DIR log
+#                  this measurer could read.
+#   gap:<reason>   no census is derivable yet. The reason is PRINTED, every run.
+#
+# EVERY `libtest`/`compile`/`both` DECLARATION BELOW WAS VERIFIED AT ITS CALL SITE to
+# write its cargo output into $LOG_DIR/<name>.log -- directly, via run_component's
+# redirect, or (binding-rust-tests) via an unconditional `cat` of its per-package logs
+# into $log before record_result. A mis-declaration here would make a legitimately
+# green component measure ZERO and read VACUOUS, which is the one failure mode this
+# subsystem must not have.
+_census_kind() {
+  case "$1" in
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'libtest' ;;
+    byte-budget-guard|arrow-parity-guard|memory-budget|format-compat)  printf 'libtest' ;;
+    write-tests|cli-tests|compaction-byte-parity|bti-multiclustering)  printf 'libtest' ;;
+    query-semantics-oracle|flight-query-semantics-oracle|flight-tests) printf 'libtest' ;;
+    legacy-heuristics|binding-rust-tests|kit-dashboard-drift)          printf 'libtest' ;;
+    feature-iso-parquet|feature-iso-delta-scan|minimal-build)          printf 'compile' ;;
+    # integration-tests: `cargo test --package X --no-run` then a named-target run pass.
+    # scoped-tests (--lite/--delta): per-package `cargo test`, which degrades to
+    # `--no-run` for a test-only crate with no changed --test target, so BOTH subjects
+    # are legitimate there and neither alone may be required.
+    integration-tests|scoped-tests)                                    printf 'both' ;;
+    # The DYNAMIC --delta entries. Both delete their log before returning and both
+    # already hold an exact, affirmative subject count, so they record it themselves.
+    node-tests)      printf 'self:changed jest test file(s)' ;;
+    shell-selftests) printf 'self:changed scripts/tests/*.sh executed' ;;
+    # ---- DECLARED GAPS (#3625 phase 1). Each prints its reason on every run.
+    fmt)            printf 'gap:cargo fmt --all --check emits no per-file tally to count' ;;
+    clippy)         printf 'gap:cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone' ;;
+    python-bindings) printf 'gap:pytest tally is in the component log, not yet parsed (#3625 phase 2)' ;;
+    node-bindings)   printf 'gap:jest tally is in the component log, not yet parsed (#3625 phase 2)' ;;
+    all-features-check) printf 'gap:cargo check/clippy passes execute no tests; the subject is a feature set, not a count' ;;
+    oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3625 phase 2)' ;;
+    smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3625 phase 2)' ;;
+    file-size|roborev-lints|pub-surface|binding-unwind-profile|delivery-telemetry|tooling-tests)
+                    printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3625 phase 2)' ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# _census_write <component> <line>: best-effort append-free write of the record. A
+# failed write must never fail the component whose work it describes -- the caller
+# already holds the value it computed, and the consequence of a lost write is a
+# visibly UNRECORDED census, never a wrong one.
+_census_write() {
+  local f
+  f=$(_census_sidecar "$1") || return 0
+  [ -n "${LOG_DIR:-}" ] || return 0
+  printf '%s\n' "$2" > "$f" 2>/dev/null || true
+  return 0
+}
+
+# _census_read <component>: the recorded line, or return 1 when there is none.
+_census_read() {
+  local f line
+  [ -n "${LOG_DIR:-}" ] || return 1
+  f=$(_census_sidecar "$1") || return 1
+  [ -r "$f" ] || return 1
+  IFS= read -r line < "$f" || return 1
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
+}
+
+# _census_declare <component> <n> <unit>: the entry point for a `self:` component,
+# which knows its own subject count. `0` is recorded as ZERO, not as a COUNT of zero --
+# an affirmative measurement of nothing is still nothing.
+_census_declare() {
+  local n
+  case "$2" in ''|*[!0-9]*) n="" ;; *) n="$2" ;; esac
+  if [ -z "$n" ]; then
+    _census_write "$1" "NOT-MEASURED the component offered a non-numeric subject count"
+  elif [ "$n" -eq 0 ]; then
+    _census_write "$1" "ZERO $3"
+  else
+    _census_write "$1" "COUNT $n $3"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# THE PARSERS. #3400 governs both: route through _ansi_stripped_log (the caller does
+# that once, below) and read by REDIRECTION, never a pipe -- a piped `while read` runs
+# in a subshell whose accumulated verdict dies with it, which for a counter means a
+# silent zero.
+#
+# WHAT IS AND IS NOT COLOURED, and why each anchor is where it is:
+#   * `test result:` and `running N tests` are LIBTEST's own text. Cargo does not pass
+#     --color through to the harness, so they carry no escapes -- but that is a
+#     property of cargo's plumbing, not of this code, which is exactly the coupling
+#     that left the cli-tests zero-tests guard inert for months. Normalised anyway.
+#   * `Executable ` is a CARGO STATUS WORD and IS coloured, with the reset landing
+#     BETWEEN the word and the payload (`Executable<ESC>[0m unittests src/lib.rs`). So
+#     the anchor is the STATUS WORD ALONE ($1 == "Executable"), never `<status> <payload>`.
+#   * cargo-nextest's `Summary` is likewise a coloured status word, so the nextest
+#     anchor is its PAYLOAD (`N tests run:`), which carries no escapes at all.
+# ---------------------------------------------------------------------------
+
+# _census_libtest_tally <stripped-log> -> "<sum-of-passed> <result-lines-seen>"
+_census_libtest_tally() {
+  awk '
+    {
+      if (match($0, /test result: (ok|FAILED)\. [0-9]+ passed/)) {
+        seg = substr($0, RSTART, RLENGTH)
+        sub(/^test result: (ok|FAILED)\. /, "", seg)
+        sub(/ passed$/, "", seg)
+        total += seg + 0; seen += 1
+      } else if (match($0, /[0-9]+ tests run:/)) {
+        seg = substr($0, RSTART, RLENGTH)
+        sub(/ tests run:$/, "", seg)
+        total += seg + 0; seen += 1
+      }
+    }
+    END { printf "%d %d\n", total + 0, seen + 0 }
+  ' < "$1"
+}
+
+# _census_compile_tally <stripped-log> -> "<cargo Executable status lines>"
+_census_compile_tally() {
+  awk '$1 == "Executable" { n += 1 } END { printf "%d\n", n + 0 }' < "$1"
+}
+
+# _census_measure <component> <status>: take the census and RETURN the record line on
+# stdout (the caller needs the value even if the sidecar write fails), writing it to
+# the sidecar for the parent's renderer.
+_census_measure() {
+  local comp="$1" st="$2" kind line log src tally total seen bins
+  if ! kind=$(_census_kind "$comp"); then
+    line="UNDECLARED no census kind is declared for '$comp' in _census_kind (#3625)"
+    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+  fi
+  case "$kind" in
+    gap:*)
+      line="GAP ${kind#gap:}"
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+    self:*)
+      # The component records its own count. Reaching here with nothing recorded is a
+      # RECORDING GAP, named as such -- never a licence to claim a count.
+      if line=$(_census_read "$comp"); then printf '%s' "$line"; return 0; fi
+      line="NOT-MEASURED '$comp' records its own subject count and recorded none (unit: ${kind#self:})"
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+  esac
+  if [ "$st" != PASS ]; then
+    line="NOT-APPLICABLE component ended $st, so there is no PASS to affirm"
+    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+  fi
+  log="${LOG_DIR:-}/$comp.log"
+  src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
+  if [ -z "$src" ] || [ ! -r "$src" ]; then
+    # #3400: a failed strip is NEVER a fallback to the coloured original -- that turns a
+    # normalisation failure into a wrong count. NOT-MEASURED, and it never reads verified.
+    line="NOT-MEASURED could not read or ANSI-normalise $comp.log, so nothing was counted"
+    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+  fi
+  total=0; seen=0; bins=0
+  case "$kind" in
+    libtest|both)
+      tally=$(_census_libtest_tally "$src" 2>/dev/null) || tally=""
+      if [ -z "$tally" ]; then
+        line="NOT-MEASURED the libtest/nextest tally over $comp.log could not be computed"
+        _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+      fi
+      total=${tally%% *}; seen=${tally##* } ;;
+  esac
+  case "$kind" in
+    compile|both)
+      bins=$(_census_compile_tally "$src" 2>/dev/null) || bins=""
+      if [ -z "$bins" ]; then
+        line="NOT-MEASURED the cargo Executable tally over $comp.log could not be computed"
+        _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+      fi ;;
+  esac
+  case "$kind" in
+    libtest)
+      if [ "$seen" -eq 0 ]; then
+        line="ZERO tests — $comp.log carries no libtest or nextest result line, so no test binary reported a tally"
+      elif [ "$total" -eq 0 ]; then
+        line="ZERO tests — $seen result line(s), every one of them reporting 0 passed"
+      else
+        line="COUNT $total tests passed (across $seen result line(s))"
+      fi ;;
+    compile)
+      if [ "$bins" -eq 0 ]; then
+        line="ZERO test binaries — $comp.log carries no cargo 'Executable' status line, so nothing was built or verified fresh"
+      else
+        line="COUNT $bins test binaries built/verified"
+      fi ;;
+    both)
+      if [ "$total" -eq 0 ] && [ "$bins" -eq 0 ]; then
+        line="ZERO tests and test binaries — $comp.log carries neither a libtest tally nor a cargo 'Executable' status line"
+      else
+        line="COUNT $total tests passed and $bins test binaries built/verified"
+      fi ;;
+    *)
+      line="NOT-MEASURED census kind '$kind' has no measurer" ;;
+  esac
+  _census_write "$comp" "$line"; printf '%s' "$line"
+}
+
+# _census_status_for <status> <census-line>: the AC2 coupling. AFFIRMATIVE by
+# construction -- a PASS survives only on a state that is explicitly non-fatal;
+# anything unrecognised is FAIL, never the permissive branch.
+_census_status_for() {
+  local st="$1" state
+  [ "$st" = PASS ] || { printf '%s' "$st"; return 0; }
+  state=${2%% *}
+  case "$state" in
+    COUNT|GAP|NOT-MEASURED|NOT-APPLICABLE) printf 'PASS' ;;
+    ZERO)                                  printf 'VACUOUS' ;;
+    *)                                     printf 'FAIL' ;;
+  esac
+}
+
+# _census_finalize <component> <status>: measure, then print the possibly-adjusted
+# status. THE ONE call every verdict path makes -- record_result for the 37 components,
+# and run_scoped_tests, which appends to NAMES directly and never reaches record_result.
+_census_finalize() {
+  local line
+  line=$(_census_measure "$1" "$2")
+  _census_status_for "$2" "$line"
+}
+
+# _census_record <component>: the EFFECTIVE census line at render time -- the sidecar
+# when one exists, else derived from the declaration so a component that never reached
+# a measurer still renders a truthful state rather than a blank.
+_census_record() {
+  local line kind
+  if line=$(_census_read "$1"); then printf '%s' "$line"; return 0; fi
+  if kind=$(_census_kind "$1"); then
+    case "$kind" in
+      gap:*) printf 'GAP %s' "${kind#gap:}" ;;
+      *)     printf 'NOT-MEASURED no census record was written for this component' ;;
+    esac
+    return 0
+  fi
+  printf "UNDECLARED no census kind is declared for '%s' in _census_kind (#3625)" "$1"
+}
+
+# _census_annotate <component>: the `{...}` suffix appended to a SUMMARY component
+# line. NEVER EMPTY -- that is the contract, for the same reason _fm_annotate has it: a
+# blank annotation is the vacuous shape this issue exists to remove.
+_census_annotate() {
+  local line state rest
+  line=$(_census_record "$1")
+  state=${line%% *}
+  rest=${line#* }
+  [ "$rest" = "$line" ] && rest="(no detail recorded)"
+  case "$state" in
+    COUNT)          printf '{verified: %s}' "$rest" ;;
+    ZERO)           printf '{verified NOTHING: %s}' "$rest" ;;
+    NOT-MEASURED)   printf '{census NOT-MEASURED: %s}' "$rest" ;;
+    GAP)            printf '{no census — %s}' "$rest" ;;
+    NOT-APPLICABLE) printf '{no census: %s}' "$rest" ;;
+    UNDECLARED)     printf '{census UNDECLARED: %s}' "$rest" ;;
+    *)              printf '{census UNREADABLE: unrecognised record %s}' "$line" ;;
+  esac
+}
+
+# census_summary_line: the ONE aggregate line, built from the same NAMES array the
+# component lines are built from. Every non-affirmed class is reported as
+# `N RECOGNISED` -- never a bare N -- and the line DECLARES ITS OWN NON-EXHAUSTIVENESS,
+# because the gap set is curated: a component that affirms nothing is UNMEASURED, which
+# is not the same statement as verified.
+census_summary_line() { # <component-name>...
+  local c n=0 aff=0 gapn=0 nm=0 vac=0 na=0 und=0 unk=0 state
+  for c in "$@"; do
+    n=$((n + 1))
+    state=$(_census_record "$c")
+    state=${state%% *}
+    case "$state" in
+      COUNT)          aff=$((aff + 1)) ;;
+      GAP)            gapn=$((gapn + 1)) ;;
+      NOT-MEASURED)   nm=$((nm + 1)) ;;
+      ZERO)           vac=$((vac + 1)) ;;
+      NOT-APPLICABLE) na=$((na + 1)) ;;
+      UNDECLARED)     und=$((und + 1)) ;;
+      *)              unk=$((unk + 1)) ;;
+    esac
+  done
+  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d VACUOUS (RECOGNISED); %d not-applicable (SKIP/FAIL); %d UNDECLARED; %d unrecognised. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625).' \
+    "$aff" "$n" "$gapn" "$nm" "$vac" "$na" "$und" "$unk"
+}
+
+# _status_is_nonfailing <status>: THE CLOSED SET of component statuses that do not fail
+# the run. AFFIRMATIVE by construction (#3625). Every aggregation used to ask
+# `[ "$st" = FAIL ]`, i.e. only the ONE named bad token failed and EVERY other value --
+# an unrecognised token, a truncated result file, the empty string -- took the
+# PERMISSIVE branch. That is the exact shape CLAUDE.md forbids ("key a permissive
+# branch on the AFFIRMATIVE value, never on != <bad>"), and it is what a new
+# non-passing token like VACUOUS would otherwise have walked straight through.
+_status_is_nonfailing() {
+  case "$1" in
+    PASS|SKIP) return 0 ;;
+    *)         return 1 ;;
+  esac
+}
+# ==== END component census (#3625) ====
+
 # The per-run sidecar directory. Both variables are set UNCONDITIONALLY here — no
 # `${…:-…}`, no env indirection — because the annotation is the block's evidence about
 # what was certified, and the party the evidence constrains must not be able to choose
@@ -9060,6 +9437,7 @@ if [ "$SELFTEST" -eq 1 ]; then
   AGENT_GATE_FM_COMPONENT=clippy     _fm_observe_cargo_argv clippy --workspace --all-targets --all-features --exclude cqlite-core
   AGENT_GATE_FM_COMPONENT=core-tests _fm_observe_cargo_argv test --package cqlite-core --features cli-helpers
   AGENT_GATE_FM_COMPONENT=smoke      _fm_observe_cargo_argv build --package cqlite-cli --bin cqlite
+  meta+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
   for i in "${!NAMES[@]}"; do
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
@@ -9196,17 +9574,25 @@ esac
 # reconstructs the summary arrays (in canonical COMPONENTS order) after the pool
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
-  printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
-  # BOTH #3473 and #3453 land at this chokepoint; the merge keeps both, and the ORDER is
-  # argued rather than arbitrary. `_hb_ensure` goes FIRST because everything below it can
-  # be slow or can fail: the sidecar note writes a file, and the two integrity asserts do
-  # git work. If the beater is dead while those run, `gate-liveness.sh` reports STALLED on
-  # a perfectly healthy gate — the exact false signal #3473 exists to remove. Publishing
-  # liveness before doing work is the whole point of putting it here.
+  # #3625: the census is taken HERE -- record_result is the one chokepoint every
+  # component's verdict passes through -- and it can CHANGE the verdict: a PASS whose
+  # measured subject count is zero is recorded as VACUOUS, a distinct non-passing token
+  # in the gate's PASS/FAIL/SKIP vocabulary, so a component that verified nothing can
+  # never report PASS (AC2). It runs BELOW _hb_ensure, which must stay first (see
+  # below), and ABOVE the .result write, whose value it decides.
   #
-  # #3473: re-launch the liveness beater if it died under a live gate. Cheap
-  # (`kill -0`), and this is the only chokepoint every component passes through.
+  # #3473, #3453 and #3625 all land at this chokepoint; the ORDER is argued rather than
+  # arbitrary. `_hb_ensure` goes FIRST because everything below it can be slow or can
+  # fail: the census reads (and ANSI-normalises) a component log that may be large, the
+  # sidecar note writes a file, and the two integrity asserts do git work. If the beater
+  # is dead while those run, `gate-liveness.sh` reports STALLED on a perfectly healthy
+  # gate — the exact false signal #3473 exists to remove. Publishing liveness before
+  # doing work is the whole point of putting it here. The census then goes ABOVE the
+  # `.result` write because it DECIDES the value that write records.
+  local _rr_status
   _hb_ensure
+  _rr_status=$(_census_finalize "$1" "$2")
+  printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"
   # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
   # reader, which would silently absorb a third into $_secs. The feature matrix rides a
   # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
@@ -16993,6 +17379,11 @@ run_scoped_tests() {
     # exit — taken before any cargo runs — rendered `[UNDECLARED]` ("nobody said") instead
     # of the fact we know exactly. Both of this function's terminal paths now note it.
     _fm_note_if_no_cargo_observed "$name" "$status"
+    # #3625: run_scoped_tests never reaches record_result, so the census is taken here
+    # too. This path is already FAIL, so _census_finalize records NOT-APPLICABLE and
+    # returns the status unchanged; it is called anyway so the block never renders a
+    # scoped-tests line with no census record at all.
+    status=$(_census_finalize "$name" "$status")
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
     return
@@ -17244,6 +17635,12 @@ run_scoped_tests() {
   # #3453 (F4): the SECOND terminal path of this function — see the note at the no-parser
   # exit. record_result is never called here either, so the note is written explicitly.
   _fm_note_if_no_cargo_observed "$name" "$status"
+  # #3625: the SECOND terminal path, same reason. A scoped run whose measured subject
+  # count is zero becomes VACUOUS, and — because this function owns its own OVERALL
+  # bookkeeping rather than going through the aggregation that reads .result files —
+  # the run must be failed HERE.
+  status=$(_census_finalize "$name" "$status")
+  _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
@@ -17277,7 +17674,7 @@ aggregate_lite_components() {
     read -r st secs < "$rf" || true
     [ -n "$st" ] || { st=FAIL; secs=0; }
     LN+=("$c"); LS+=("$st"); LT+=("${secs}s")
-    [ "$st" = FAIL ] && OVERALL=FAIL
+    _status_is_nonfailing "$st" || OVERALL=FAIL   # #3625: affirmative closed set
   done
   # Preserve the scoped-tests (+ any python/node) entries run_scoped_tests appended to
   # NAMES; run_scoped_tests already set OVERALL=FAIL itself on a test failure.
@@ -17342,6 +17739,7 @@ run_lite() {
   _tree_meta_array   # #2926
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   local i
+  SUMMARY_META+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
@@ -17408,6 +17806,10 @@ run_delta_node_tests() {
   fi
   rm -f "$log"
   end=$(date +%s)
+  # #3625: this lane DELETES its log, so no log-reading measurer could ever census it —
+  # but it already holds an exact affirmative subject count, so it records its own
+  # (census kind `self:` in _census_kind).
+  _census_declare node-tests "$n_targets" "changed jest test file(s)"
   NAMES+=("node-tests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }node-tests($n_targets)"
   echo ">>> [node-tests] $status ($((end - start))s)"
@@ -17427,6 +17829,9 @@ run_delta_shell_selftests() {
   start=$(date +%s)
   if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
   end=$(date +%s)
+  # #3625: same as node-tests — this lane's children write to the run log, not to a
+  # per-component log, and it already holds its exact subject count.
+  _census_declare shell-selftests "$n_targets" "changed scripts/tests/*.sh executed"
   NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
   echo ">>> [shell-selftests] $status ($((end - start))s)"
@@ -17669,7 +18074,7 @@ run_delta() {
       read -r st secs < "$rf" || true
       [ -n "$st" ] || { st=FAIL; secs=0; }
       DN+=("$c"); DS+=("$st"); DT+=("${secs}s")
-      [ "$st" = FAIL ] && OVERALL=FAIL
+      _status_is_nonfailing "$st" || OVERALL=FAIL   # #3625: affirmative closed set
     else
       DN+=("$c"); DS+=(FAIL); DT+=("0s"); OVERALL=FAIL
     fi
@@ -17713,6 +18118,7 @@ run_delta() {
     _tree_meta_array
     SUMMARY_META+=("${TREE_META_LINES[@]}")
     SUMMARY_META+=("${file_meta[@]}")
+    SUMMARY_META+=("$(census_summary_line "${DN[@]+"${DN[@]}"}")")
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     done
@@ -17750,6 +18156,7 @@ run_delta() {
   _tree_meta_array   # #2926
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   SUMMARY_META+=("${file_meta[@]}")
+  SUMMARY_META+=("$(census_summary_line "${DN[@]+"${DN[@]}"}")")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
   done
@@ -17923,7 +18330,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # Seed the scoped-tests entry run_scoped_tests appends (and flip OVERALL as it does).
   _scoped_st="${AGENT_GATE_TEST_LITE_SCOPED:-PASS}"
   NAMES+=("scoped-tests"); STATUSES+=("$_scoped_st"); TIMES+=("0s")
-  [ "$_scoped_st" = FAIL ] && OVERALL=FAIL
+  _status_is_nonfailing "$_scoped_st" || OVERALL=FAIL   # #3625: affirmative closed set
   aggregate_lite_components
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: selftest branch: selftest dirty: no")
@@ -17932,6 +18339,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("$(cpu_budget_line)")
   # #2926: synthetic tree identity (no git state needed for the aggregation self-test).
   SUMMARY_META+=("$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE")
+  SUMMARY_META+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
@@ -18798,7 +19206,9 @@ for _c in "${COMPONENTS[@]}"; do
   _st=""; _secs=""
   read -r _st _secs < "$_rf" || true
   NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
-  [ "$_st" = FAIL ] && OVERALL=FAIL
+  # #3625: AFFIRMATIVE, not `!= FAIL`. Only PASS and SKIP are non-failing; VACUOUS, an
+  # unrecognised token and an empty/truncated result file all fail the run.
+  _status_is_nonfailing "$_st" || OVERALL=FAIL
 done
 
 # #2926: the TERMINAL tree capture — the authoritative check, taken AFTER the last
@@ -18843,6 +19253,7 @@ if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
 fi
+SUMMARY_META+=("$(census_summary_line "${NAMES[@]+"${NAMES[@]}"}")")
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
@@ -18866,7 +19277,8 @@ if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "$DELTA" -eq 0 ] && [ "$SELFTEST" -e
   [ "$SUMMARY_WRITE_FAILED" -ne 0 ] && _push_result=FAIL
   _push_fails=""
   for i in "${!NAMES[@]}"; do
-    [ "${STATUSES[$i]}" = FAIL ] && _push_fails="${_push_fails:+$_push_fails,}${NAMES[$i]}"
+    # #3625: name every NON-PASSING component, not only the one literal FAIL token.
+    _status_is_nonfailing "${STATUSES[$i]}" || _push_fails="${_push_fails:+$_push_fails,}${NAMES[$i]}"
   done
   # #2926 review C1: the signal names the SAME verified identity the block stamped, not a
   # fresh emit-time read (advisory notification, but it must not disagree with the block).
