@@ -19,25 +19,42 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
-    branches: [main]
+    # REGISTERED GATING TIER (issue #3640; registry .github/ci-gating-tiers.yml,
+    # mechanism #2910). The trigger MUST always fire so the `Node.js CI Quality
+    # Gate` context is emitted on EVERY pull request — to the aggregator an absent
+    # registered context is an ERROR, never "not applicable". Hence the
+    # established always-fire sentinel: a paths-ignore that can never match. The
+    # diff-based mandate that used to live in the `paths:` list above now lives in
+    # the `classify` job below, which is what lets an inapplicable tier report
+    # itself as an explicit SUCCESS instead of as silence.
+    #
+    # No `branches:` filter either: a PR based on anything but main would never
+    # start this workflow, leaving `required` to wait out the whole deadline on a
+    # context that can never appear. gating_event_rules.rb enforces both absences,
+    # and the `types:` list must stay a subset of pr-gate.yml's observed set.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    paths:
-      - 'bindings/node/**'
-      - 'cqlite-core/**'
-      - '.github/workflows/node-ci.yml'
-      # Issue #1459: the ABI-critical dependency versions are inherited from the
-      # workspace root, NOT declared in bindings/node — `napi` and `pyo3` are
-      # `{ workspace = true }`. So a root manifest/lockfile bump can change the
-      # Node-API level or the abi3 floor, which is exactly what the floor jobs
-      # below certify. Without these two paths such a bump merges WITHOUT
-      # running them, and the floor claim's own premise changes untested.
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
   workflow_dispatch:
 
 concurrency:
   group: node-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A new head sha obsoletes the in-flight run, so cancel it. A LABEL mutation
+  # does not (issue #2910 round 4, applied here by #3640): this workflow
+  # subscribes to `labeled` so its `ci:bindings-full` opt-in is reachable, and
+  # `github.event_name == 'pull_request'` is TRUE for `labeled`/`unlabeled` — so
+  # the previous expression behaved exactly like `true` on a label event. Now that
+  # this workflow is a REGISTERED TIER that is actively harmful: applying the
+  # `ci:waive:node` break-glass to a wedged PR would CANCEL this tier's in-flight
+  # run and mint a fresh `queued` check run, and a PENDING tier's waiver is only
+  # honoured at the aggregation deadline — the escape hatch making things worse
+  # before it made them better. gating_event_rules.rb `concurrency_errors` rejects
+  # any cancellation policy on a registered tier that is not provably false for
+  # label events.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.event.action != 'labeled'
+    && github.event.action != 'unlabeled' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,8 +64,98 @@ env:
   APP_NAME: cqlite-node
 
 jobs:
+  # ALWAYS-RUN classifier (issue #3640; pattern: flight-ci.yml `classify`, itself
+  # after observability-gate.yml). This workflow is a REGISTERED GATING TIER, so
+  # its trigger can carry no `paths:` filter — applicability has to be decided
+  # HERE instead, from the diff, and reported through ONE output.
+  #
+  # EXACTLY ONE applicability output (issue #2910 round 2, enforced by
+  # gating_policy_rules.rb `applicability_scope_errors`): two outputs behind one
+  # context means a diff can satisfy the narrower predicate, skip the work the
+  # tier exists to run, and still report success. The `ci:bindings-full` label
+  # survives as a manual opt-in that also sets `run_tier=true`, so the heavy
+  # label-gated jobs below can never run with `smoke` skipped.
+  classify:
+    name: Classify Node tier scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_tier: ${{ steps.scope.outputs.run_tier }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify diff and labels
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HAS_FULL_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:bindings-full') }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=non-PR event (${EVENT_NAME}): full tier" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          # FAIL-CLOSED on an empty/ambiguous changed-file set (same rule as
+          # pr-gate.yml's docs-only classifier and flight-ci.yml's): if we cannot
+          # see the diff we cannot conclude the tier is inapplicable.
+          if [ ! -s changed-files.txt ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=empty changed-file set; running the tier fail-closed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # THE MANDATE SET. It is DELIBERATELY THE SAME SET the `pull_request`
+          # `paths:` filter carried before this workflow was enrolled (#3640), so
+          # enrolment changes WHEN the context is emitted (always) without
+          # changing WHICH diffs run the work:
+          #   bindings/node/**                 the binding, its loader and its tests
+          #   cqlite-core/**                   the engine the binding wraps
+          #   Cargo.toml / Cargo.lock          issue #1459: `napi` is
+          #                                    `{ workspace = true }`, so a root
+          #                                    manifest bump can move the Node-API
+          #                                    level the floor claim rests on
+          #   .github/workflows/node-ci.yml    the tier definition itself
+          # NOT mandated, deliberately: test-data/** and rust-toolchain.toml. The
+          # Linux half of a corpus/toolchain change is already covered by the local
+          # gate's node-bindings + binding-rust-tests components, and the VALUE of
+          # this enrolment is the macOS and Windows legs, which a corpus edit does
+          # not single out. `ci:bindings-full` remains the opt-in for those diffs.
+          # `.github/ci-gating-tiers.yml` documents this list under `mandate_paths`
+          # and gating_policy_rules.rb reds the gate if the two drift apart.
+          mandate_regex='^(bindings/node/|cqlite-core/|Cargo\.toml$|Cargo\.lock$|\.github/workflows/node-ci\.yml$)'
+
+          run_tier=false
+          reason='no Node-binding-relevant path in the diff and no ci:bindings-full label'
+          if grep -Eq "$mandate_regex" changed-files.txt; then
+            run_tier=true
+            reason='diff reaches the Node binding at runtime; running the tier on all three gating platforms'
+          fi
+          if [ "$HAS_FULL_LABEL" = "true" ]; then
+            run_tier=true
+            reason='ci:bindings-full label opt-in'
+          fi
+
+          echo "run_tier=${run_tier}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+          echo "Node tier verdict: run_tier=${run_tier} (${reason})"
+
   smoke:
     name: PR smoke (Ubuntu)
+    needs: classify
+    if: needs.classify.outputs.run_tier == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -326,22 +433,32 @@ jobs:
           retention-days: 7
 
   test:
+    # THE MERGE-GATING HALF OF THIS TIER (issue #3640, owner ruling 2026-08-31:
+    # "enrol with ALL THREE platforms gating"). The local agent gate's
+    # node-bindings component already runs the whole jest suite — on LINUX ONLY —
+    # so the value of enrolment is precisely the macOS and Windows legs, and
+    # gating one platform would add nothing. Accepted cost: merge latency tied to
+    # those runners.
+    #
+    # Consequences of that ruling, both visible here:
+    #   * the applicability condition is the DIFF (`run_tier`), not the
+    #     `ci:bindings-full` label. A label-gated merge gate is not a merge gate:
+    #     a routine unlabeled PR would skip every platform.
+    #   * `continue-on-error` is GONE. It used to green the windows leg
+    #     unconditionally (issue #1979), which is exactly "gating one platform".
+    #     A red here now reds `Node.js CI Quality Gate` and therefore `required`.
+    #     A known FLAKE gets `gh run rerun --failed`, never a bypass.
+    #
+    # This job no longer downloads the `build` job's artifact: `build` is release
+    # coverage (5 targets, two of them cross-compiled) and stays label-gated, while
+    # these three legs must run on every mandating PR. Each therefore builds its
+    # own module natively — the same `npm run build` the `build` job runs for these
+    # three targets.
     name: Test (${{ matrix.os }})
-    if: >-
-      ${{
-        github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
-      }}
+    needs: classify
+    if: needs.classify.outputs.run_tier == 'true'
     runs-on: ${{ matrix.os }}
-    needs: build
-    timeout-minutes: 20
-    # Issue #1979: windows-latest has 3 chronic, pre-existing, Windows-only test
-    # failures (refresh / write-smoke / execute-deprecation — filesystem/locking
-    # behaviors, e.g. refresh expects readersRemoved===1 but gets 0). They are NOT
-    # release-gating for v0.13 (owner decision 2026-07-05). Keep the leg RUNNING for
-    # visibility but non-blocking, so a windows failure does not red the workflow.
-    # ubuntu-latest + macos-14 remain required. Debt tracked in #1979.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -368,15 +485,43 @@ jobs:
           cache: 'npm'
           cache-dependency-path: bindings/node/package-lock.json
 
-      - name: Download artifact
-        uses: actions/download-artifact@v7
+      # Issue #1209 (copied from the `build` job, where it was diagnosed): the
+      # runner images ship a stable toolchain that already provides
+      # bin/cargo-clippy, and a rustup reconcile can intermittently try to
+      # (re)install 'clippy-preview' and fail with "detected conflict". Remove it
+      # FIRST. This job does not run clippy; idempotent no-op if clippy is absent.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy 2>/dev/null || true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1  # pinned to rust-toolchain.toml (issue #1990)
+
+      - name: Normalize PATH for macOS (prepend ~/.cargo/bin so real cargo wins over rustup-init)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          name: bindings-${{ matrix.target }}
-          path: bindings/node
+          workspaces: "bindings/node -> target"
+          key: ${{ matrix.os }}-test
 
       - name: Install dependencies
         working-directory: bindings/node
         run: npm ci
+
+      # Issue #3640: built here rather than downloaded from `build`. `build` is
+      # release coverage and stays `ci:bindings-full`-gated; this job is the merge
+      # gate and runs on every mandating PR, so it cannot depend on a job that a
+      # routine PR skips. The command is byte-identical to the one `build` runs for
+      # these three native targets.
+      - name: Build native module
+        working-directory: bindings/node
+        shell: bash
+        run: npm run build
 
       - name: Restore dataset cache
         id: dataset-cache
@@ -436,8 +581,9 @@ jobs:
           # partial extraction.
           bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
-      - name: Run smoke tests
+      - name: Run the jest suite
         working-directory: bindings/node
+        shell: bash
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           # Issue #1230: for the node lane this flag is DOCUMENTARY only — it is a
@@ -456,12 +602,35 @@ jobs:
           #
           # Why these legs ask: every budget number in that file was measured on one
           # Linux fleet box, and this matrix (ubuntu-latest, macos-14, windows-latest)
-          # has never been measured. node-ci.yml is a registered exemption in
-          # .github/ci-gating-tiers.yml, so a red here is triage noise rather than a
-          # merge block — and a flaky red on an exempt lane teaches people to ignore the
-          # lane. If a leg is ever measured strict-clean, drop this line (with the data).
+          # has never been measured. THE REASON CHANGED WITH #3640 AND THE LINE DID
+          # NOT: node-ci.yml is no longer a registered exemption, it is a registered
+          # GATING TIER, so a red here is a MERGE BLOCK rather than triage noise.
+          # That makes the relaxation more load-bearing, not less — an unmeasured
+          # ceiling on a gating leg would red merges for a budget nobody has ever
+          # measured on this platform. It stays until each leg is measured
+          # strict-clean; drop this line then, with the data.
           CQLITE_LEAK_BUDGET_RELAX: "2x-ceilings"
-        run: npm test
+          # DECLARED, PLATFORM-SCOPED SUITE EXCLUSION (issue #1979, applied by
+          # #3640). Windows now GATES the merge, and two suites fail
+          # deterministically there for Windows filesystem reasons in the harness
+          # itself — measured on run 33488084650 (2026-09-01): refresh.test.js
+          # (`readersRemoved` 0 not 1, the removed generation is still mmap'd) and
+          # execute-deprecation.test.js (`fs.rmSync` teardown ENOTEMPTY). Including
+          # them would red EVERY mandating pull request, i.e. wedge the repo. This
+          # is a TEST-LEVEL, named exclusion, not a platform exemption: the other 29
+          # suites gate on Windows exactly like the other two platforms, and any new
+          # Windows-only failure reds `required`. jest.config.js applies it
+          # ADDITIVELY and prints it, and #1979 owns removing it.
+          CQLITE_JEST_IGNORE_SUITES: ${{ runner.os == 'Windows' && '/__test__/refresh\.test\.js$,/__test__/execute-deprecation\.test\.js$' || '' }}
+        run: |
+          set -euo pipefail
+          # An EMPTY value must not reach jest.config.js, which throws on a set
+          # variable that names no pattern (that throw is what stops a silent
+          # exclusion of nothing). The `${{ }}` above yields '' off Windows.
+          if [ -z "${CQLITE_JEST_IGNORE_SUITES:-}" ]; then
+            unset CQLITE_JEST_IGNORE_SUITES
+          fi
+          npm test
 
       - name: Upload test results on failure
         if: failure()
@@ -471,67 +640,25 @@ jobs:
           path: bindings/node/__test__/
           retention-days: 7
 
-  quality-gate:
-    name: Node.js CI Quality Gate
+  # Release-artifact bundling, split out of `quality-gate` by #3640. It lives in
+  # its own job for two reasons: the gate job that emits a registered tier's
+  # context must be a pure REPORTER (a gate job that also does work can red for a
+  # reason unrelated to the tier's verdict), and this half is `ci:bindings-full`
+  # release coverage, not merge-gating. It carries the same condition as `build`,
+  # whose five artifacts it merges.
+  bundle:
+    name: Bundle native modules
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+      }}
     runs-on: ubuntu-latest
-    needs: [smoke, smoke-floor, build, test]
-    if: always()
-    env:
-      RUN_FULL: >-
-        ${{
-          github.event_name != 'pull_request' ||
-          contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
-        }}
+    needs: build
+    timeout-minutes: 10
 
     steps:
-      - name: Check smoke results
-        run: |
-          echo "Smoke results: ${{ needs.smoke.result }}"
-          if [ "${{ needs.smoke.result }}" != "success" ]; then
-            echo "::error::Node.js smoke checks failed"
-            exit 1
-          fi
-
-      - name: Check floor smoke results
-        # Only assert when the floor tier actually ran. RUN_FULL is the SAME
-        # condition that gates the floor job itself, so on a routine unlabeled PR
-        # the job is legitimately `skipped` and this check must not fire — an
-        # unconditional `!= success` here would red every ordinary PR.
-        if: env.RUN_FULL == 'true'
-        env:
-          FLOOR_RESULT: ${{ needs.smoke-floor.result }}
-        run: |
-          # Issue #1459: asserted whenever the floor tier RAN. Guarded by
-          # RUN_FULL above because `smoke-floor` is a binding matrix job and repo
-          # policy (scripts/ci/validate-workflows.rb) requires those to be
-          # label-gated — so on a routine unlabeled PR it is legitimately
-          # `skipped`, and an unconditional `!= success` would red every such PR.
-          echo "Floor smoke results: ${FLOOR_RESULT}"
-          if [ "${FLOOR_RESULT}" != "success" ]; then
-            echo "::error::Node.js floor smoke failed (advertised engines.node floor)"
-            exit 1
-          fi
-
-      - name: Check build results
-        if: env.RUN_FULL == 'true'
-        run: |
-          echo "Build results: ${{ needs.build.result }}"
-          if [ "${{ needs.build.result }}" != "success" ]; then
-            echo "::error::Native module builds failed"
-            exit 1
-          fi
-
-      - name: Check test results
-        if: env.RUN_FULL == 'true'
-        run: |
-          echo "Test results: ${{ needs.test.result }}"
-          if [ "${{ needs.test.result }}" != "success" ]; then
-            echo "::error::Tests failed on one or more platforms"
-            exit 1
-          fi
-
       - name: Download all artifacts
-        if: env.RUN_FULL == 'true'
         uses: actions/download-artifact@v7
         with:
           pattern: bindings-*
@@ -539,8 +666,8 @@ jobs:
           merge-multiple: true
 
       - name: List native modules
-        if: env.RUN_FULL == 'true'
         run: |
+          set -euo pipefail
           echo "::group::Built native modules"
           ls -lh artifacts/
           echo "::endgroup::"
@@ -554,63 +681,144 @@ jobs:
           fi
 
       - name: Upload merged artifact
-        if: env.RUN_FULL == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: cqlite-node-binaries
           path: artifacts/*.node
           retention-days: 30
 
-      - name: Summary
+  # ALWAYS-EMIT gate job (issue #3640; mechanism #2910, shape copied from
+  # flight-ci.yml `tier-gate`). Its `name:` IS the check-run context registered in
+  # .github/ci-gating-tiers.yml, and `required` polls for it on the PR head. The
+  # condition means the context is emitted in EVERY case, INCLUDING the
+  # inapplicable one, so an ABSENT context is unambiguously an error rather than
+  # "the tier did not apply". It must depend on every other job in this workflow
+  # and inspect each `.result`, so no Node job's failure can go unreported —
+  # gating_policy_rules.rb enforces both structurally.
+  #
+  # `!cancelled()`, NOT `always()`. `always()` runs this job even while the RUN IS
+  # BEING CANCELLED, and a cancelled run hands it `needs.*.result == 'cancelled'`,
+  # which the `case` below maps to `exit 1`. The check run would then conclude
+  # `failure`, so a ROUTINE supersession (this workflow cancels in-progress PR runs
+  # on every new head sha) would red `required` and the aggregator's supersession
+  # grace, which keys on `cancelled`/`stale`/`skipped`, could never fire.
+  quality-gate:
+    name: Node.js CI Quality Gate
+    needs: [classify, smoke, smoke-floor, build, test, bundle]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Report the Node tier result
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          FLOOR_RESULT: ${{ needs.smoke-floor.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUNDLE_RESULT: ${{ needs.bundle.result }}
+          RUN_TIER: ${{ needs.classify.outputs.run_tier }}
+          SCOPE_REASON: ${{ needs.classify.outputs.reason }}
         run: |
+          set -euo pipefail
+
           {
-            echo "## Node.js CI Summary"
+            echo "## Node.js CI Quality Gate (issue #3640)"
             echo ""
-            echo "### Tier"
-            echo "- Ordinary PRs run the Ubuntu smoke build, typecheck, and loader/package smoke Jest subset."
-            echo "- Floor smoke covers both advertised \`engines.node\` boundaries (18.17.0, 20.3.0) plus the current maintained major (24), reusing the prebuilt native module from the smoke job; each leg restores the canonical corpus and runs one real query, failing on a 0-row result. It is a binding MATRIX tier, so per repo policy it runs on every push to \`main\`, on the nightly schedule, and on PRs labeled \`ci:bindings-full\` — NOT on a routine unlabeled PR (issue #1459)."
-            echo "- Full cross-platform builds, the full dataset-backed Jest suite, and merged native artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
+            echo "- scope: run_tier=\`${RUN_TIER:-unknown}\` (${SCOPE_REASON:-no reason recorded})"
+            echo "- classify: \`${CLASSIFY_RESULT}\`"
+            echo "- PR smoke (Ubuntu): \`${SMOKE_RESULT}\`"
+            echo "- floor smoke (engines.node boundaries): \`${FLOOR_RESULT}\`"
+            echo "- cross-platform builds: \`${BUILD_RESULT}\`"
+            echo "- tests (ubuntu-latest, macos-14, windows-latest): \`${TEST_RESULT}\`"
+            echo "- bundled native modules: \`${BUNDLE_RESULT}\`"
             echo ""
-            echo "### Native Module Builds"
+            echo "All three test platforms GATE the merge (issue #3640 owner ruling)."
+            echo "Floor smoke, the 5-target build matrix and artifact bundling stay \`ci:bindings-full\` release coverage."
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "${RUN_FULL}" = "true" ]; then
+
+          # `skipped` is a PASS here and only here: it is how an inapplicable tier
+          # — and a label-gated release job on a routine PR — reports itself.
+          # Everything else that is not `success` reds the context, which reds
+          # `required`.
+          failed=""
+          for pair in \
+            "classify:${CLASSIFY_RESULT}" \
+            "smoke:${SMOKE_RESULT}" \
+            "smoke-floor:${FLOOR_RESULT}" \
+            "build:${BUILD_RESULT}" \
+            "test:${TEST_RESULT}" \
+            "bundle:${BUNDLE_RESULT}"; do
+            job="${pair%%:*}"
+            result="${pair#*:}"
+            case "$result" in
+              success|skipped) ;;
+              *) failed="${failed}${job}(${result}) " ;;
+            esac
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::Node tier failed: ${failed}"
             {
-              echo "| Target | Status |"
-              echo "|--------|--------|"
-              echo "| x86_64-unknown-linux-gnu | :white_check_mark: |"
-              echo "| aarch64-unknown-linux-gnu | :white_check_mark: |"
-              echo "| x86_64-apple-darwin | :white_check_mark: |"
-              echo "| aarch64-apple-darwin | :white_check_mark: |"
-              echo "| x86_64-pc-windows-msvc | :white_check_mark: |"
+              echo ""
+              echo "**Node tier FAILED: ${failed}**"
             } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Skipped for the default PR smoke tier." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
-          {
-            echo ""
-            echo "### Test Results"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "${RUN_FULL}" = "true" ]; then
-            {
-              echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)"
-              echo "Floor legs (Node 18.17.0, 20.3.0 and 24) each restored the canonical corpus and ran one real query (issue #1459)."
-            } >> "$GITHUB_STEP_SUMMARY"
+
+          # UNKNOWN MUST NOT READ AS PASS (issue #2910 round 4, same rule as the
+          # Flight tier). Everything above is `success` or `skipped`, and `skipped`
+          # is a pass ONLY because an inapplicable tier reports itself that way —
+          # which is a claim about `run_tier`. If the classifier concluded success
+          # but `run_tier` is empty or not a boolean (a renamed step id, an output
+          # never written, a future refactor), then every downstream job is
+          # `skipped`, the loop reads that as a pass, and the tier reports SUCCESS
+          # with "not applicable to this diff" — the silent-green defect the
+          # registry exists to close, reproduced inside this tier's own gate.
+          case "${RUN_TIER:-}" in
+            true|false) ;;
+            *)
+              echo "::error::Node tier gate: the classifier's applicability verdict is" \
+                   "run_tier='${RUN_TIER:-}' (neither 'true' nor 'false'). An unreadable verdict is" \
+                   "NOT inapplicability — the tier reds rather than reporting a vacuous success." \
+                   "Check the classify job's 'scope' step output."
+              {
+                echo ""
+                echo "**Node tier FAILED: unreadable applicability verdict"
+                echo "\`run_tier='${RUN_TIER:-}'\` (expected \`true\` or \`false\`).**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+          # The other half of the same claim: when the tier IS applicable, the
+          # merge-gating work must actually have run. `skipped` is a legitimate
+          # pass for those two jobs only under run_tier=false. The label-gated
+          # release jobs (smoke-floor, build, bundle) are excluded, exactly as the
+          # Flight tier excludes its `image` job: they legitimately do not run on a
+          # routine pull request.
+          if [ "$RUN_TIER" = "true" ]; then
+            inconsistent=""
+            for pair in \
+              "classify:${CLASSIFY_RESULT}" \
+              "smoke:${SMOKE_RESULT}" \
+              "test:${TEST_RESULT}"; do
+              job="${pair%%:*}"
+              result="${pair#*:}"
+              [ "$result" = "success" ] || inconsistent="${inconsistent}${job}(${result}) "
+            done
+            if [ -n "$inconsistent" ]; then
+              echo "::error::Node tier gate: run_tier=true (${SCOPE_REASON:-no reason recorded}) but" \
+                   "${inconsistent}did not run to success. A mandating diff whose work was skipped must" \
+                   "never report a green tier."
+              {
+                echo ""
+                echo "**Node tier FAILED: run_tier=true but ${inconsistent}was not a success.**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           else
-            # RUN_FULL is false, which is EXACTLY when the label-gated floor
-            # matrix was skipped — so this branch must not claim the floor legs
-            # ran. Saying otherwise would make the CI summary itself assert an
-            # untested floor, which is the defect issue #1459 exists to remove.
-            {
-              echo "Smoke checks passed on Ubuntu (the \`smoke\` job is dataset-free)."
-              echo "Floor legs did NOT run: \`smoke-floor\` is a binding matrix tier, gated on push to \`main\`, the nightly schedule, or the \`ci:bindings-full\` label (issue #1459)."
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Node tier not applicable to this diff (${SCOPE_REASON:-}); reporting success."
           fi
-          {
-            echo ""
-            echo "### Artifacts"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "${RUN_FULL}" = "true" ]; then
-            echo "Download native modules: \`cqlite-node-binaries\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Native module artifact merging is full-tier only." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "Node.js CI Quality Gate: PASS"

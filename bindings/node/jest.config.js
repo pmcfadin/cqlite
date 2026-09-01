@@ -55,6 +55,48 @@
  */
 const LEAK_TEST = '<rootDir>/__test__/leak-paths.test.js';
 
+// PLATFORM-DECLARED SUITE EXCLUSIONS (issue #3640, debt tracked in #1979).
+// `node-ci.yml`'s `test` job became a REQUIRED GATING TIER on all three
+// platforms, and two suites fail DETERMINISTICALLY on windows-latest for
+// Windows filesystem reasons in the test harness (measured on run 33488084650,
+// 2026-09-01: `refresh.test.js` — a deleted generation is still mmap'd so
+// `readersRemoved` is 0 not 1; `execute-deprecation.test.js` — an `fs.rmSync`
+// teardown raises ENOTEMPTY). Gating Windows with those two included would red
+// EVERY mandating pull request, so the workflow names them explicitly here.
+//
+// It is an ADDITIVE list, never a replacement: a CLI
+// `--testPathIgnorePatterns` would OVERRIDE the project patterns below and so
+// silently un-ignore `/node_modules/` and the leak lane. Setting the variable
+// with no usable pattern THROWS — a declared exclusion that excludes nothing is
+// a lie about what ran — and every applied pattern is printed, because a lane
+// that omits coverage silently is indistinguishable from one that covers it.
+// Removing the workflow's use of this variable is #1979's completion criterion.
+const EXTRA_IGNORE_ENV = 'CQLITE_JEST_IGNORE_SUITES';
+
+function declaredExtraIgnorePatterns() {
+  const raw = process.env[EXTRA_IGNORE_ENV];
+  if (raw === undefined) return [];
+
+  const patterns = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (patterns.length === 0) {
+    throw new Error(
+      `${EXTRA_IGNORE_ENV} is set to ${JSON.stringify(raw)}, which names no test-path pattern. ` +
+        'Unset it or give it a comma-separated list of patterns (issue #3640).',
+    );
+  }
+  // eslint-disable-next-line no-console
+  console.error(
+    `jest.config.js: ${EXTRA_IGNORE_ENV} excludes ${patterns.length} test path pattern(s) ` +
+      `from this run: ${patterns.join(', ')} (issue #1979)`,
+  );
+  return patterns;
+}
+
+const EXTRA_IGNORE = declaredExtraIgnorePatterns();
+
 // The two project-level options both projects need. The rest of the old
 // single-project config did not move here because it is either per-project
 // (`testMatch`) or global (`testTimeout`, coverage) — see below.
@@ -73,12 +115,19 @@ module.exports = {
       // Match test files in __test__ directory
       testMatch: ['**/__test__/**/*.test.js'],
       // The leak lane runs in its own project (below) with its own options.
-      testPathIgnorePatterns: ['/node_modules/', '/__test__/leak-paths\\.test\\.js$'],
+      testPathIgnorePatterns: [
+        '/node_modules/',
+        '/__test__/leak-paths\\.test\\.js$',
+        ...EXTRA_IGNORE,
+      ],
     },
     {
       ...baseProject,
       displayName: 'leaks',
       testMatch: [LEAK_TEST],
+      // The declared exclusions apply here too, so one variable governs the
+      // whole `npm test` run rather than half of it.
+      testPathIgnorePatterns: ['/node_modules/', ...EXTRA_IGNORE],
       // No leak-detector keys here. `detectOpenHandles` would be inert (it is
       // read from the GLOBAL config only) and is not wanted on a lane anyway;
       // `detectLeaks` WOULD take effect per-project, and is deliberately not

@@ -22,8 +22,8 @@
 # without enrolling it still reds `required` — one job removed.
 #
 # Of the 25 workflows that carry a `pull_request`/`pull_request_target` trigger,
-# one is the aggregator (pr-gate.yml), one is a gating tier (flight-ci.yml) and
-# the remaining 23 are exempted below.
+# one is the aggregator (pr-gate.yml), two are gating tiers (flight-ci.yml and
+# node-ci.yml) and the remaining 22 are exempted below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -111,6 +111,58 @@ tiers:
       `--lib` job alone and still reported success. `ci:flight-full` remains a manual
       opt-in for diffs that mandate nothing.
 
+  # Issue #3640, promoted OUT of the `exempt:` list below. It was exempt on the
+  # grounds that the local agent gate's `node-bindings` component covers the
+  # merge-relevant content — which is true, AND TRUE ON LINUX ONLY, while this
+  # workflow tests ubuntu-latest, macos-14 and windows-latest. A deterministic
+  # macOS- or Windows-only Node red therefore could not block a merge, which is
+  # #3493's "an exemption is only as true as the named component's SCOPE" one axis
+  # further out: the scope in question was the PLATFORM, not the file count.
+  #
+  # OWNER RULING (2026-08-31, issue #3640): enrol with ALL THREE platforms gating.
+  # The local gate already covers the Linux content, so the value of enrolment is
+  # precisely macOS and Windows; gating one platform would add nothing. Accepted
+  # cost: merge latency tied to those runners. A known-flake red gets
+  # `gh run rerun --failed`, never a bypass; if a platform proves chronically
+  # flaky, that returns to #3640 as data for a re-ruling, not as an ad-hoc
+  # exemption.
+  - id: node
+    workflow: node-ci.yml
+    context: Node.js CI Quality Gate
+    wait_minutes: 60
+    mandate_paths:
+      - bindings/node/**
+      - cqlite-core/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/node-ci.yml
+    notes: >-
+      The gate job reports the aggregate of the classifier, the Ubuntu PR smoke job
+      (build + `npm run typecheck` + the loader/publish/smoke/write jest subset),
+      the THREE-PLATFORM `test` matrix that is the merge-gating half, and the
+      `ci:bindings-full` release jobs (floor smoke, the 5-target build matrix,
+      artifact bundling) — which report `skipped` on a routine pull request and are
+      excluded from the run_tier=true consistency check for exactly that reason.
+      THE MANDATE SET IS DELIBERATELY UNCHANGED FROM THE `paths:` FILTER THE
+      WORKFLOW CARRIED BEFORE ENROLMENT, so enrolment changed WHEN the context is
+      emitted (always) without changing WHICH diffs run the work. `test-data/**` and
+      `rust-toolchain.toml` are NOT mandated: the Linux half of a corpus or
+      toolchain change is already covered by the local gate's `node-bindings` and
+      `binding-rust-tests` components, and the value of this enrolment is the
+      macOS/Windows legs, which a corpus edit does not single out.
+      TWO DECLARED RESIDUALS, named here rather than left to be discovered.
+      (1) Two jest suites are EXCLUDED on the windows leg only — refresh.test.js and
+      execute-deprecation.test.js — because they fail deterministically for Windows
+      filesystem reasons in the test harness (issue #1979, measured on node-ci run
+      33488084650, 2026-09-01). That is a TEST-LEVEL exclusion, not a platform
+      exemption: the other 29 suites gate on Windows, the exclusion is applied
+      ADDITIVELY and PRINTED by bindings/node/jest.config.js, and removing it is
+      #1979's completion criterion.
+      (2) The `test` legs still run with CQLITE_LEAK_BUDGET_RELAX=2x-ceilings
+      because no leak budget in __test__/leak-paths.test.js has ever been measured
+      on this matrix (issue #1465); that relaxation became MORE load-bearing on
+      enrolment, since an unmeasured ceiling now reds a merge.
+
 exempt:
   - workflow: cassandra-parity.yml
     reason: Scheduled/label-driven parity lane; its merge-gating half is the committed parity report checked by the local gate.
@@ -147,33 +199,6 @@ exempt:
     issue: "#1614"
   - workflow: live-cell-compaction-parity.yml
     reason: Docker-backed live-cell parity lane; not merge-gating today.
-    issue: "#2910"
-  - workflow: node-ci.yml
-    reason: >-
-      Node binding lane; the merge-gating half is the local gate's node-bindings
-      component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files
-      before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran
-      nowhere. Since #3493 it also runs `npm run typecheck` (this workflow's
-      always-run PR smoke job; it is `tsc --noEmit` over the examples project, so it
-      COMPILES against the shipped index.d.ts, which #3581's typescript-definitions
-      test does not — that one reads the declarations as TEXT and asserts the runtime
-      surface is declared. Different properties, both wanted) and pairs `npm test` with check-dataset-manifest.sh, which checks
-      the CORPUS is complete rather than that the suite ran — the parity cases derive
-      their table set from disk, so a partial extraction is green by omission. The
-      multi-platform build matrix is release coverage, not merge-gating.
-      TWO OPT-OUT STATES, WHICH DIFFER AND ARE NAMED SEPARATELY RATHER THAN LEFT TO BE
-      DISCOVERED. With AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and NO usable corpus,
-      node-bindings SKIPs BEFORE npm ci, so neither typecheck nor the jest suite runs.
-      With the same opt-out and an INCOMPLETE corpus, install, build and typecheck have
-      already run — only the manifest check and the jest suite are skipped, so the
-      typecheck claim above still holds there. Both are DECLARED skips, recorded in the
-      gate SUMMARY by name, never a silent pass. Stating which coverage each state
-      actually gives is the whole point of #3493: an exemption is only as true as what
-      the named component does, in every state it can be in.
-      KEEP THIS ENTRY AND run_node_bindings IN STEP: an exemption that defers to a
-      local component is only as true as that component's scope, and #1255's narrowing
-      to 1 file in 27 is what made this entry false for ~2 days of a deterministic
-      main-red without blocking a merge.
     issue: "#2910"
   - workflow: observability-gate.yml
     reason: Observability correctness plus label-gated overhead bench; overhead is advisory.

@@ -87,9 +87,29 @@ LEGACY_TIMEOUT_MIGRATION_EXEMPTIONS = {
   "trino-publish.yml" => %w[publish]
 }.freeze
 
-BINDING_PR_MATRIX_LABELS = {
-  "node-ci.yml" => "ci:bindings-full",
-  "python-ci.yml" => "ci:bindings-full"
+# Binding workflows: a heavy cross-platform matrix must not run on every ordinary
+# pull request. `label` is the opt-in that lets it.
+#
+# `gating_jobs` is the ONE documented exception, added by issue #3640: a matrix job
+# that is the MERGE-GATING half of a REGISTERED gating tier
+# (.github/ci-gating-tiers.yml) must run on every diff the tier mandates, so it is
+# gated on the tier classifier's single applicability output INSTEAD of the label.
+# A label-gated merge gate is not a merge gate — a routine unlabeled PR would skip
+# every platform, which is exactly the hole #3640 closed for node-ci.yml's macOS
+# and Windows legs. The exception is deliberately NARROW in three ways: the job is
+# named here, the condition must be EXACTLY the classifier output test (a compound
+# condition can evaluate false and skip), and it applies only while that workflow
+# is ACTUALLY enrolled as a tier — un-enrol it and the label rule reapplies, so the
+# registry entry and the workflow's applicability conditions cannot drift apart.
+BINDING_PR_MATRIX_POLICY = {
+  "node-ci.yml" => {
+    label: "ci:bindings-full",
+    gating_jobs: { "test" => "classify" }
+  },
+  "python-ci.yml" => {
+    label: "ci:bindings-full",
+    gating_jobs: {}
+  }
 }.freeze
 
 LABEL_GATED_PATH_EXEMPTIONS = {
@@ -207,6 +227,22 @@ end
 
 def binding_matrix_condition_allowed?(condition, label)
   non_pr_or_label_condition_allowed?(condition, [label])
+end
+
+# Issue #3640: the merge-gating matrix job of a registered tier, gated on the
+# tier's single applicability output rather than on the opt-in label. Exact match,
+# not "mentions the output": `needs.classify.outputs.run_tier == 'true' && <expr>`
+# can evaluate false and skip the platform legs on a mandating diff, which is the
+# hole this exception exists to keep closed. The job must also `needs:` the
+# classifier, or the output is empty and the legs never run at all.
+def binding_matrix_tier_gated?(job, job_name, gating_jobs)
+  classifier = gating_jobs[job_name.to_s]
+  return false if classifier.nil?
+  return false unless Array(job["needs"]).map(&:to_s).include?(classifier)
+
+  normalized = job["if"].to_s.gsub(/\s+/, " ").strip
+  normalized = normalized.sub(/\A\$\{\{\s*/, "").sub(/\s*\}\}\z/, "").strip
+  normalized == "needs.#{classifier}.outputs.run_tier == 'true'"
 end
 
 def non_pr_or_label_condition_allowed?(condition, labels)
@@ -378,6 +414,17 @@ end
 errors = []
 warnings = []
 
+# The workflows currently enrolled as gating tiers (issue #3640). Read once, and
+# fail-closed: if the registry cannot be read this is empty, which only makes the
+# binding-matrix rule below stricter, and GatingRegistry.policy_errors reports the
+# unreadable registry itself.
+registered_tier_workflows = begin
+  GatingRegistry.tiers(GatingRegistry.load_registry(options[:gating_registry]))
+                .map { |tier| tier["workflow"].to_s }
+rescue StandardError
+  []
+end
+
 workflow_files.each do |file|
   workflow_name = File.basename(file)
   workflow = nil
@@ -521,14 +568,23 @@ workflow_files.each do |file|
   guard = PUBLISH_DISPATCH_GUARDS[workflow_name]
   errors.concat(guard.call(file, workflow)) if guard
 
-  label = BINDING_PR_MATRIX_LABELS[workflow_name]
-  if label && triggers.key?("pull_request")
+  policy = BINDING_PR_MATRIX_POLICY[workflow_name]
+  if policy && triggers.key?("pull_request")
+    label = policy[:label]
+    # The `gating_jobs` exception is live only while this workflow really is a
+    # registered tier (issue #3640). An unreadable registry yields an empty list,
+    # which makes this rule STRICTER, and GatingRegistry.policy_errors reports the
+    # unreadable registry on its own account.
+    gating_jobs = registered_tier_workflows.include?(workflow_name) ? policy[:gating_jobs] : {}
     jobs.each do |job_name, job|
       next unless job.is_a?(Hash)
       next unless job["strategy"].is_a?(Hash) && job["strategy"].key?("matrix")
       next if binding_matrix_condition_allowed?(job["if"].to_s, label)
+      next if binding_matrix_tier_gated?(job, job_name, gating_jobs)
 
-      errors << "#{file}: binding matrix job #{job_name} must be gated on PR label #{label}"
+      errors << "#{file}: binding matrix job #{job_name} must be gated on PR label #{label} " \
+                "(or, for the merge-gating matrix job of a registered gating tier, on that tier's " \
+                "classifier output — see BINDING_PR_MATRIX_POLICY)"
     end
   end
 end
