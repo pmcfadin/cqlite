@@ -2521,6 +2521,26 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # persisted value of `abc` would then get a `(pinned)` answer from an oracle that never
   # saw `abc`. Fixing the probe and leaving the oracle open is fixing one instance of a
   # class; the value check above is the belt to this braces, and vice versa.
+  # pin_canon_decimal: the gate's leading-zero normalisation, MIRRORED here — and that is a
+  # SECOND IMPLEMENTATION, which this repo is right to be suspicious of (roborev job 333).
+  # Two reasons it is the lesser evil, and the mechanism that keeps it honest:
+  #   * The alternative the finding also offered — have the oracle echo its INPUT back — is a
+  #     change to the `cpu-budget:` line's CONTRACT, which is a published gate surface that
+  #     other readers parse. Widening it to serve one caller is the bigger coupling.
+  #   * The drift check below exists to catch the oracle answering about a DIFFERENT value, so
+  #     it cannot be expressed without comparing against our input; asking the oracle to
+  #     canonicalise our input for us is circular.
+  # ANTI-DRIFT IS A TEST, NOT A COMMENT: the suite runs the REAL gate for `08` and requires
+  # bootstrap to reach VERIFIED, so if the gate's normalisation rule ever changes this reds.
+  pin_canon_decimal() {
+    local c="$1"
+    case "$c" in
+      ''|*[!0-9]*) printf '%s' "$c"; return 0 ;;
+    esac
+    while [ "${#c}" -gt 1 ] && [ "${c#0}" != "$c" ]; do c="${c#0}"; done
+    printf '%s' "$c"
+  }
+
   pin_gate_source_for() {
     local v="$1" line tok n
     [ -r "$GATE" ] || return 1
@@ -2587,7 +2607,11 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       info "the bad value is NOT coming from $PIN_ENV_FILE — that file sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' while this session sees '$pin_probe_seen', so a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment, a launcher-injected env) is OVERRIDING it"
       info "fix or remove THAT override — editing $PIN_ENV_FILE would change a value that is already being ignored"
     elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
-      info "fix the VALUE (not the presence) — edit the CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE to a positive integer; bootstrap deliberately never rewrites an existing value"
+      # "A POSITIVE INTEGER" IS ADVICE AN OVERSIZED VALUE HAS ALREADY TAKEN (roborev job
+      # 333). `99999999999999999999` IS a positive integer and is still refused, so the
+      # unqualified remedy sends that operator to re-read a line they will find nothing
+      # wrong with. The bound is stated where the remedy is, not only in the diagnosis.
+      info "fix the VALUE (not the presence) — edit the CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE to a positive decimal integer of at most 18 digits (a larger one is refused even though it is positive); bootstrap deliberately never rewrites an existing value"
     else
       info "the value is visible but is NOT coming from $PIN_ENV_FILE — find and fix whatever sets it (a systemd unit, the image, a launcher-injected env), then re-run"
     fi
@@ -2705,7 +2729,16 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # answered about something else — the BASH_ENV-pollution shape above, or any future
       # way the two could drift. Demote it to the same non-answer as an unconsultable gate
       # rather than trusting the suffix.
-      if [ "$pin_gate_src" = pinned ] && [ "$pin_gate_n" != "$pin_probe_seen" ]; then
+      # COMPARED AS CANONICAL DECIMALS, NOT AS RAW STRINGS (roborev job 333, Medium). The
+      # gate NORMALISES a valid leading-zero pin (`08` -> `8(pinned)`), so a raw string
+      # compare read `8` != `08` and demoted a CORRECTLY PERSISTED `08` to UNMEASURED —
+      # `--strict` red on a properly pinned box, i.e. the guard that reds on correct input,
+      # which is the guard agents learn to waive. Introduced by this branch's own octal fix:
+      # normalisation was added to the gate and this comparison was not told about it.
+      # Canonicalising BOTH sides keeps the drift check intact — an oracle answering about a
+      # different value still differs after normalisation.
+      if [ "$pin_gate_src" = pinned ] \
+         && [ "$(pin_canon_decimal "$pin_gate_n")" != "$(pin_canon_decimal "$pin_probe_seen")" ]; then
         pin_gate_src=""
       fi
       case "$pin_gate_src" in
@@ -2808,7 +2841,18 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           # Its OWN verdict, not FAILED: the pin is present and visible, so "persist the
           # pin" is the wrong remedy and would send the operator to a file that already
           # has a line in it. What is wrong is the VALUE.
-          warn "gate-pin: NOT-HONOURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but the gate DISCARDS it — it is empty or non-numeric — and falls back to the #1825 default formula, stamping max-concurrency=N(invalid))"
+          # THE CAUSE IS NAMED FROM THE VALUE, because `invalid` covers more than it used
+          # to (roborev job 333). This branch widened it to include a digit string too
+          # large to represent, and the diagnosis still said "empty or non-numeric" — so an
+          # oversized value was told it was non-numeric and handed a "use a positive
+          # integer" remedy it already satisfied. A remedy the operator has already
+          # complied with is worse than none: it stops them looking.
+          case "$pin_probe_seen" in
+            '') pin_invalid_why="it is EMPTY" ;;
+            *[!0-9]*) pin_invalid_why="it is not a plain decimal integer" ;;
+            *) pin_invalid_why="it is a decimal integer too large to use as a slot cap (more than 18 significant digits)" ;;
+          esac
+          warn "gate-pin: NOT-HONOURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but the gate DISCARDS it — $pin_invalid_why — and falls back to the #1825 default formula, stamping max-concurrency=N(invalid))"
           pin_value_remedy
           ;;
         clamped)

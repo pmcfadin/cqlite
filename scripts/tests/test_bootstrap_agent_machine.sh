@@ -3093,6 +3093,73 @@ else
     cat "$envf_q"
   fi
 
+  # 11q4. AN OVERSIZED VALUE IS NOT "NON-NUMERIC", AND MUST NOT BE TOLD IT IS (roborev job
+  #      333, Low). This branch widened `invalid` to include a digit string too large to
+  #      represent, and the diagnosis still read "it is empty or non-numeric" while the
+  #      remedy said "use a positive integer" — advice `99999999999999999999` HAS ALREADY
+  #      TAKEN. A remedy the operator already complies with is worse than none: they find
+  #      nothing wrong and re-run into the same verdict. Both halves are asserted, because
+  #      naming the cause while leaving the remedy unqualified fixes only the visible half.
+  envf_q4="$tmp/pin-env-q4"; printf 'CQLITE_GATE_MAX_CONCURRENCY=99999999999999999999\n' >"$envf_q4"
+  shims_pam_q4="$tmp/pin-shims-pam-q4"; mkpinshims "$shims_pam_q4" "file:$envf_q4"
+  out_q4=$(runpin "$pinroot" "$shims_pam_q4" "$envf_q4" HOME="$pin_home_plain")
+  if printf '%s' "$out_q4" | grep -q 'gate-pin: NOT-HONOURED' \
+     && [[ $out_q4 == *'too large to use as a slot cap'* ]] \
+     && [[ $out_q4 != *'it is not a plain decimal integer'* ]] \
+     && [[ $out_q4 == *'at most 18 digits'* ]]; then
+    ok "gate-pin: an oversized pin is diagnosed BY SIZE and its remedy states the 18-digit bound (not 'use a positive integer')"
+  else
+    bad "gate-pin: an oversized pin was diagnosed as non-numeric or given advice it already satisfies (job 333)"
+    printf '%s\n' "$out_q4" | grep -i 'gate-pin\|fix the VALUE' | head -4
+  fi
+
+  # 11q2. A VALID LEADING-ZERO PIN MUST REACH VERIFIED (roborev job 333, Medium). The gate
+  #      NORMALISES `08` -> `8(pinned)`; bootstrap compared that normalised N against the RAW
+  #      session value, so `8` != `08` demoted a CORRECTLY PERSISTED pin to UNMEASURED and
+  #      `--strict` red on a properly pinned box. Introduced by this branch's own octal fix:
+  #      normalisation was added to the gate and this comparison was not told about it.
+  #
+  #      THIS CASE IS ALSO THE ANTI-DRIFT MECHANISM for the canonicaliser bootstrap now
+  #      mirrors from the gate. `$pinroot` carries the REAL agent-gate.sh (copied above), so
+  #      if the gate's normalisation rule ever changes, this reds rather than the two rules
+  #      silently diverging. That is why it is worth a case and not a comment.
+  envf_q2="$tmp/pin-env-q2"; printf 'CQLITE_GATE_MAX_CONCURRENCY=08\n' >"$envf_q2"
+  shims_pam_q2="$tmp/pin-shims-pam-q2"; mkpinshims "$shims_pam_q2" "file:$envf_q2"
+  out_q2=$(runpin "$pinroot" "$shims_pam_q2" "$envf_q2" HOME="$pin_home_plain")
+  if printf '%s' "$out_q2" | grep -q 'gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_q2" | grep -q 'gate-pin: UNMEASURED'; then
+    ok "gate-pin: a valid leading-zero pin (08) reaches VERIFIED — the gate's normalisation is not read as oracle drift"
+  else
+    bad "gate-pin: a correctly persisted 08 was not VERIFIED (job 333 — raw-vs-normalised compare)"
+    printf '%s\n' "$out_q2" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11q3. ...and the drift check it must NOT break: the whole point of comparing against our
+  #      input is to catch an oracle answering about a DIFFERENT value. Canonicalising both
+  #      sides preserves that, and this asserts it — otherwise 11q2 could have been "fixed"
+  #      by deleting the comparison, which would pass 11q2 and silently remove a guard.
+  #      `08` and `9` are both valid and both pinned, so only the COMPARISON distinguishes
+  #      them: the session-visible value is 08 while a BASH_ENV-style pollution makes the
+  #      oracle answer 9, and that must NOT read VERIFIED.
+  envf_q3="$tmp/pin-env-q3"; printf 'CQLITE_GATE_MAX_CONCURRENCY=08\n' >"$envf_q3"
+  shims_pam_q3="$tmp/pin-shims-pam-q3"; mkpinshims "$shims_pam_q3" "file:$envf_q3"
+  # a gate whose cpu-budget line always answers 9(pinned), whatever it was handed
+  cat > "$shims_pam_q3/../pin-fake-gate.sh" <<'FAKEGATE'
+#!/usr/bin/env bash
+echo "cpu-budget: wrapper=none ncpu=16 max-concurrency=9(pinned) cores-per-gate=1 build-jobs=1(derived) test-threads=1"
+FAKEGATE
+  chmod +x "$shims_pam_q3/../pin-fake-gate.sh" 2>/dev/null
+  pinroot_q3="$tmp/pin-root-q3"; mkdir -p "$pinroot_q3/scripts"
+  cp "$pinroot/scripts/bootstrap-agent-machine.sh" "$pinroot_q3/scripts/" 2>/dev/null
+  cp "$shims_pam_q3/../pin-fake-gate.sh" "$pinroot_q3/scripts/agent-gate.sh" 2>/dev/null
+  out_q3=$(runpin "$pinroot_q3" "$shims_pam_q3" "$envf_q3" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_q3" | grep -q 'gate-pin: VERIFIED'; then
+    ok "gate-pin: an oracle answering about a DIFFERENT value is still refused — canonicalising did not delete the drift check"
+  else
+    bad "gate-pin: the drift check was lost — a gate answering 9(pinned) for a session showing 08 read VERIFIED"
+    printf '%s\n' "$out_q3" | grep -i 'gate-pin' | head -3
+  fi
+
   # 11r. The NEGATIVE twin of 11q, so it cannot pass for the wrong reason: with the SAME
   #      pam-stand-in shim and no repair flag, an unpinned box must still come out FAILED.
   #      Without this, 11q would also pass against a shim that injects unconditionally.
@@ -3507,7 +3574,16 @@ else
   #      valid pin. Asserted structurally as well as behaviourally, because a future edit
   #      could drop the N comparison while every behavioural case above still passes —
   #      the scrub alone would cover them.
-  if grep -q 'pin_gate_n" != "\$pin_probe_seen' "$BOOTSTRAP" \
+  #
+  #      THE NEEDLE MOVED WITH THE COMPARISON (roborev job 333). It used to be the literal
+  #      `pin_gate_n" != "$pin_probe_seen`, which the canonical-decimal fix replaced — the
+  #      comparison is still there and still compares the resolved N against the probed
+  #      value, now with both sides normalised so the gate's own `08`->`8` does not read as
+  #      drift. This guard CORRECTLY RED when the expression changed, which is what a
+  #      structural guard is for; it is updated rather than deleted, and it still fails if
+  #      the comparison is removed altogether. A structural needle is a claim about source
+  #      text and decays exactly like a comment: when you change the expression, come here.
+  if grep -Fq '[ "$(pin_canon_decimal "$pin_gate_n")" != "$(pin_canon_decimal "$pin_probe_seen")" ]' "$BOOTSTRAP" \
      && grep -q 'bounded 30 env -u BASH_ENV -u ENV' "$BOOTSTRAP"; then
     ok "gate-pin: the oracle is scrubbed AND its resolved N is compared, not just its source token"
   else
