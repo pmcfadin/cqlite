@@ -516,6 +516,61 @@ else
   bad "anchor: $unanchored line(s) carry no PREMERGE: REVIEW-BINDING prefix"
 fi
 
+# The HOLD leg's output is anchored too — the anchor is a property of BOTH legs,
+# and asserting it on one only would leave the other's unpinned.
+hold_payload "$MOCK_GH_DIR/pr-hold.json" \
+  "[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$HOLD_AT\",\"body\":\"HOLD: stop\"}]"
+printf '[]\n' >"$MOCK_GH_DIR/timeline.json"
+HOUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$SB" hold-check 1 pmcfadin/cqlite 2>&1)
+hold_unanchored=$(printf '%s\n' "$HOUT" | grep -cv '^PREMERGE: HOLD-CHECK ')
+if [ "$hold_unanchored" -eq 0 ]; then
+  ok "anchor: every hold-check line begins with the leg's prefix"
+else
+  bad "anchor: $hold_unanchored hold-check line(s) carry no PREMERGE: HOLD-CHECK prefix"
+fi
+
+# An UNCLASSIFIABLE range after an ancestor review is a MEASUREMENT failure, not
+# an absence of coverage: the two need different operator actions, so they must
+# not collapse onto one verdict. Forced by substituting an ALWAYS-FAILING
+# classifier artifact in a scratch copy of the tree (never a path variable).
+UNCLS="$T/uncls"
+mkdir -p "$UNCLS/scripts/flow" "$UNCLS/scripts/ci"
+cp "$FLOW"/*.sh "$FLOW"/*.py "$UNCLS/scripts/flow/" 2>/dev/null
+# The stub must fail ONLY on the SECOND call. An always-failing classifier is
+# consumed by the leg's FIRST use — the PR-diff code-free check — so the case
+# would pass on a different cause than the one it names, which is a test green
+# for the wrong reason. A counter targets the post-review call exactly.
+cat >"$UNCLS/scripts/ci/classify-docs-only.sh" <<'CLS'
+#!/usr/bin/env bash
+cat >/dev/null
+n=$(cat "$UNCLS_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" >"$UNCLS_COUNT"
+[ "$n" -ge 2 ] && exit 7
+exit 1
+CLS
+chmod +x "$UNCLS/scripts/flow"/*.sh "$UNCLS/scripts/ci"/*.sh
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 401)"
+roborev_job 401 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER"
+UNCLS_COUNT="$T/uncls-count"
+rm -f "$UNCLS_COUNT"
+UOUT=$(cd "$WORK" && PATH="$BIN:$PATH" UNCLS_COUNT="$UNCLS_COUNT" \
+  bash "$UNCLS/scripts/flow/premerge-review-binding.sh" \
+  review-binding 1 pmcfadin/cqlite "$CODE_HEAD" 2>&1)
+URC=$?
+if [ "$URC" -eq 5 ]; then
+  ok "unclassifiable: an unclassifiable post-review range is UNMEASURED, not UNBOUND"
+else
+  bad "unclassifiable: expected exit 5, got $URC: $UOUT"
+fi
+# NON-VACUITY: it must be the POST-REVIEW range that could not be classified,
+# not the PR diff — the two causes are textually distinct on purpose.
+case "$UOUT" in
+  *"a recorded round IS an ancestor of the certified head, but the range after it"*)
+    ok "unclassifiable: the cause names the POST-REVIEW range, not the PR diff" ;;
+  *) bad "unclassifiable: the verdict fired on the wrong cause (got: $UOUT)" ;;
+esac
+
 # --- no test-only seam into our own enforcer scripts (#3312) ----------------------
 if grep -vE '^[[:space:]]*#' "$BINDING" | grep -qE '\$\{[A-Z_]*(SCAN|FACTS|CLASSIFY)[A-Z_]*:?-'; then
   bad "seam: the binding resolves one of its own enforcers through an overridable variable (#3312)"
@@ -669,7 +724,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=40
+CASE_FLOOR=43
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

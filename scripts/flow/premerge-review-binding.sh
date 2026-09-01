@@ -237,11 +237,16 @@ cmd_review_binding() {
   need_file "$FACTS_TOOL"
   need_file "$CLASSIFY_TOOL"
 
-  local tmp
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/premerge-review-binding.XXXXXX" 2>/dev/null) || tmp=""
-  [ -n "$tmp" ] && [ -d "$tmp" ] ||
+  # GLOBAL, deliberately: the EXIT trap below fires as the shell unwinds, by
+  # which point a `local` may be out of scope and the trap would expand to
+  # `rm -rf ""` — a silent non-removal that leaks the directory on every
+  # refusal path. Validated BEFORE the trap is installed, so the trap can never
+  # run against an empty value either.
+  TMPD=$(mktemp -d "${TMPDIR:-/tmp}/premerge-review-binding.XXXXXX" 2>/dev/null) || TMPD=""
+  [ -n "$TMPD" ] && [ -d "$TMPD" ] ||
     unmeasured "could not create a scratch directory under ${TMPDIR:-/tmp}."
-  trap 'rm -rf "$tmp"' EXIT
+  trap 'rm -rf "$TMPD"' EXIT
+  local tmp="$TMPD"
 
   git rev-parse --verify --quiet "$certified^{commit}" >/dev/null 2>&1 ||
     unmeasured "the certified sha $certified is not a commit in THIS checkout, so neither" \
@@ -337,7 +342,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   # ANY recorded round that covers the certified head is sufficient: a
   # multi-round PR legitimately leaves rounds 1..n-1 behind the head, and
   # failing on those would red correct input.
-  local job bound=0 reviewed
+  local job bound=0 unclassifiable=0 reviewed
   local heads=()
   for job in "${jobs[@]}"; do
     # NOT a command substitution. `reviewed_head_of` can refuse, and a refusal
@@ -385,6 +390,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       *)
         say "job $(sane "$job") is an ancestor, but the range after it could not be"
         say "job $(sane "$job") classified, so its coverage is unknown"
+        unclassifiable=1
         ;;
     esac
   done
@@ -399,6 +405,12 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     exit 0
   fi
 
+  if [ "$unclassifiable" -eq 1 ]; then
+    unmeasured "a recorded round IS an ancestor of the certified head, but the range after it" \
+      "could not be classified, so whether reviewable code was added after the review is" \
+      "UNKNOWN. That is a measurement failure, not an absence of coverage, and the two need" \
+      "different actions — so it is reported as its own verdict rather than folded into one."
+  fi
   say "unbound none of the recorded roborev rounds covers the certified head."
   verdict UNBOUND
   detail "REMEDY: re-run the sanctioned wrapper at the CURRENT head, AFTER the rebase and"
@@ -425,7 +437,15 @@ reviewed_head_of() {
   for payload in show list; do
     case "$payload" in
       show) json=$(roborev show "$job" --json 2>/dev/null || printf '') ;;
-      list) json=$(roborev list --json --limit 50 2>/dev/null || printf '') ;;
+      list)
+        local top
+        top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+        if [ -n "$top" ]; then
+          json=$(roborev list --json --limit 50 --repo "$top" 2>/dev/null || printf '')
+        else
+          json=$(roborev list --json --limit 50 2>/dev/null || printf '')
+        fi
+        ;;
     esac
     [ -n "$json" ] || continue
     : >"$tmp/facts"
@@ -469,11 +489,12 @@ cmd_hold_check() {
   need_tool python3
   need_file "$SCAN_TOOL"
 
-  local tmp
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/premerge-hold-check.XXXXXX" 2>/dev/null) || tmp=""
-  [ -n "$tmp" ] && [ -d "$tmp" ] ||
+  # GLOBAL for the same reason as the review-binding leg above.
+  TMPD=$(mktemp -d "${TMPDIR:-/tmp}/premerge-hold-check.XXXXXX" 2>/dev/null) || TMPD=""
+  [ -n "$TMPD" ] && [ -d "$TMPD" ] ||
     unmeasured "could not create a scratch directory under ${TMPDIR:-/tmp}."
-  trap 'rm -rf "$tmp"' EXIT
+  trap 'rm -rf "$TMPD"' EXIT
+  local tmp="$TMPD"
 
   # Read STRUCTURALLY (`--json`, no `--jq` flattening): author and body stay
   # SEPARATE FIELDS of one object, so a comment body can never forge its own
