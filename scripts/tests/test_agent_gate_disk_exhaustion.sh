@@ -1682,13 +1682,57 @@ else
   printf 'SKIP - 21b-side-enospc: /dev/full is unavailable/unwritable on this host, so a GENUINE ENOSPC marker write cannot be induced (Linux-only). DECLARED, not silently omitted; 21a and the job-316 cases carry the rest of the property.\n'
 fi
 
+# (21c) THE LADDER'S LOWER RUNGS -- roborev job 319 round 2. The first version of 21b's fallback
+# ended `|| true`, which is the shape it was written to remove: if BOTH the marker append and the
+# truncation fail, the original well-formed PASS survives and the parent certifies. The 21b
+# fixture cannot reach this because its RESULT FILE sits on a healthy filesystem. Here the verdict
+# is made untruncatable (mode 444) inside an unwritable DIRECTORY (so unlink fails too), which is
+# a host-independent way to fail rungs 2 and 3 without needing a full filesystem.
+#
+# Rung 4 SIGTERMs the gate, so this case must run in its OWN process or it would kill the suite.
+# The assertion is the process DYING BY SIGTERM (128+15) -- i.e. the run publishes no verdict at
+# all, which doctrine never reads as a certification -- plus the diagnostic naming the state.
+d="$tmp/c21c"; mkdir -p "$d/logs"
+printf 'PASS 611\n' > "$d/logs/legacy-heuristics.result"
+ln -s /dev/full "$d/logs/tree-integrity.fail" 2>/dev/null || true
+chmod 444 "$d/logs/legacy-heuristics.result"
+chmod 555 "$d/logs"
+if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && ! rm -f "$d/logs/legacy-heuristics.result" 2>/dev/null; then
+  o21c=$(
+    bash -c '
+      . "$1"; LOG_DIR="$2"; _disk_env
+      ( _tree_boundary_fail legacy-heuristics "tree-capture-failed; the tree cannot be proven unchanged" capture-failed ) 2>&1 |
+        sed -n -e "s/.*\(TRUNCATION also failed\).*/D1 \1/p" -e "s/.*\(GATE is being terminated\).*/D2 \1/p"
+      printf "ALIVE\n"
+    ' _ "$EX" "$d/logs" 2>&1
+    printf 'EXIT %s\n' "$?"
+  )
+  chmod 755 "$d/logs" 2>/dev/null || true
+  ex21c=$(printf '%s\n' "$o21c" | sed -n 's/^EXIT //p')
+  if [ "${ex21c:-0}" = 143 ] \
+     && case "$o21c" in *"D1 TRUNCATION also failed"*) true ;; *) false ;; esac \
+     && case "$o21c" in *"D2 GATE is being terminated"*) true ;; *) false ;; esac \
+     && case "$o21c" in *ALIVE*) false ;; *) true ;; esac; then
+    ok "21c-ladder: when the marker append, the truncation AND the unlink all fail, the SIDE lane names each escalation and SIGTERMs the gate (exit 143, and the shell never reaches its next statement) -- so the run publishes no verdict rather than certifying the surviving PASS"
+  else
+    bad "21c-ladder: the lower rungs did not fire (exit='${ex21c:-<none>}'; expected 143 with both diagnostics and no ALIVE):
+$o21c"
+  fi
+else
+  chmod 755 "$d/logs" 2>/dev/null || true
+  printf 'SKIP - 21c-ladder: this host could not be made to refuse BOTH a truncate and an unlink (running as root, or a permissive filesystem), so rungs 3-4 cannot be induced. DECLARED, not silently omitted.\n'
+fi
+
 # +4 (roborev job 319: the two false-PASS routes that survived round 5. 21a the terminator and
 # trailing-content contract, plus the mutation showing the pre-fix read ADOPTS all three
 # truncated verdicts (incl. `PASS 1`, a valid integer that is the wrong number): 2. 21b the
 # SIDE-lane marker channel under a REAL /dev/full ENOSPC -- the zero-allocation verdict
 # invalidation -- and the negative control proving a HEALTHY marker write leaves the verdict
 # alone: 2, DECLARED as a skip where /dev/full is unavailable, so the floor takes the lower
-# count and holds on macOS: 2 + 0. Floor rises by 2, not 4.)
+# count and holds on macOS: 2 + 0. Floor rises by 2, not 4. 21c -- the ladder's lower rungs,
+# added in round 2 of the same job when the `|| true` on the truncation turned out to be the very
+# shape 21b was written to remove -- also DECLARES its skip (it needs a host that refuses both a
+# truncate and an unlink), so it does not raise the floor either.)
 CASE_FLOOR=78
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then

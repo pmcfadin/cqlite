@@ -523,7 +523,16 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   first-class unread verdict ⇒ synthetic `FAIL 0` ⇒ `OVERALL=FAIL` ⇒ named UNMEASURED. It trades
   SPECIFICITY for soundness and says so on stderr: the block reports the verdict as unreadable
   rather than `tree-integrity: FAIL`, because the only channel that could carry the reason is the
-  one that just failed. **A less specific FAIL beats a false PASS.** Same round, same family, one
+  one that just failed. **A less specific FAIL beats a false PASS.** **And the first version of
+  that fix ended `|| true` on the truncation — the very shape it was written to remove (job 319
+  round 2), so the escalation is now a VERIFIED LADDER**, each rung needing strictly less of the
+  filesystem than the last and each checked by observing the filesystem rather than an exit
+  status: marker append (carries the reason) → **truncate** our own verdict → **unlink** it
+  (needs no space and frees some; sound HERE because absence means "not selected" only to the
+  `--lite`/`--delta` loops and the SIDE lane exists only in the full gate) → **SIGTERM the gate**,
+  the last disk-free channel, after which the run publishes NO verdict and keeps the
+  `RESULT: INCOMPLETE` launch sentinel, which is never a certification. Bounded by a state where
+  the gate cannot produce a trustworthy verdict anyway. Same round, same family, one
   file down: **the missing NEWLINE is part of the verdict.** An ENOSPC short write can truncate
   `printf '%s %s\n'` ON A FIELD BOUNDARY — `PASS 12` losing its newline, or `PASS 1` being all
   that reached disk of `PASS 12` — and both parse as well-formed two-field verdicts, the second

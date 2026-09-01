@@ -9517,11 +9517,47 @@ _tree_boundary_fail() {
     # It trades SPECIFICITY for soundness, and says so: the block reports the component's verdict
     # as unreadable rather than reporting `tree-integrity: FAIL`, because the only channel that
     # could carry the reason is the one that just failed. A less specific FAIL beats a false PASS.
-    local _tbf_rc=0
+    local _tbf_rc=0 _tbf_v="$LOG_DIR/$comp.result"
     printf '%s\t%s\t%s\n' "$kind" "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || _tbf_rc=$?
     if [ "$_tbf_rc" -ne 0 ]; then
       echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — the SIDE-lane marker write FAILED (rc $_tbf_rc; the logs filesystem may be full), so this component's own verdict is being INVALIDATED instead: the parent will report it as an unread verdict and FAIL the run (#3800)" >&2
-      : > "$LOG_DIR/$comp.result" 2>/dev/null || true
+      # #3800 (roborev job 319 round 2): AND A SPECIFIED CONTROL MUST BE REQUIRED TO HAVE WORKED.
+      # The first version of this fallback ended `: > "$_tbf_v" 2>/dev/null || true`, which is the
+      # same shape it was written to remove: if BOTH the marker append and the truncation fail,
+      # the original well-formed `PASS` survives and the parent certifies. So the escalation is a
+      # LADDER, each rung needing strictly less of the filesystem than the last, and each rung
+      # VERIFIED by observing the filesystem rather than by trusting an exit status.
+      #
+      #   1. the marker append          — carries the REASON; already failed to get us here
+      #   2. TRUNCATE our own verdict   — allocates nothing (O_TRUNC is metadata); an empty
+      #                                   `.result` is a first-class unread verdict ⇒ FAIL
+      #   3. UNLINK our own verdict     — needs no space either and FREES some; for a SELECTED
+      #                                   SIDE-lane component an absent `.result` is the parent's
+      #                                   fail-closed presence guard ⇒ FAIL. (Unlink is sound
+      #                                   HERE and not in `record_result`: absence means "not
+      #                                   selected" only to the `--lite`/`--delta` loops, and the
+      #                                   SIDE lane exists only in the full gate.)
+      #   4. SIGTERM the gate itself    — the last disk-free channel there is. The run then
+      #                                   publishes NO verdict: its summary keeps the launch
+      #                                   sentinel `RESULT: INCOMPLETE`, which doctrine defines
+      #                                   as "still running, died, or queued" and NEVER as
+      #                                   certified, and `premerge-assert.sh` requires
+      #                                   `RESULT: PASS` token-exactly. Drastic, and bounded by
+      #                                   a state in which the gate cannot produce a trustworthy
+      #                                   verdict anyway: the logs filesystem is full, the marker
+      #                                   channel failed, and we could neither empty nor remove
+      #                                   our own verdict file. `$$` is the top-level gate even
+      #                                   in this subshell (bash keeps `$$`; `BASHPID` is what
+      #                                   differs, which is the lane discriminator above).
+      : > "$_tbf_v" 2>/dev/null || true
+      if [ -s "$_tbf_v" ]; then
+        echo "⚠️ agent-gate: [$comp] verdict TRUNCATION also failed — attempting to REMOVE the verdict instead (#3800)" >&2
+        rm -f "$_tbf_v" 2>/dev/null || true
+      fi
+      if [ -e "$_tbf_v" ] && [ -s "$_tbf_v" ]; then
+        echo "⚠️ agent-gate: [$comp] verdict could be neither emptied nor removed, and the marker channel is unavailable — there is no disk-free way left to fail this run from a SIDE-lane subshell, so the GATE is being terminated: it will publish no verdict at all (RESULT stays the INCOMPLETE launch sentinel, which is never a certification) (#3800)" >&2
+        kill -TERM "$$" 2>/dev/null || true
+      fi
       return 1
     fi
     echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2926)" >&2
