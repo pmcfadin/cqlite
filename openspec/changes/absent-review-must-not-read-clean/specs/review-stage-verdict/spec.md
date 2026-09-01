@@ -113,7 +113,15 @@ usage failure (exit 3), and SHALL determine whether C is required by MEASURING t
 `review-stage.sh record-author-performed` SHALL require a substantive `--reason`, a named `--evidence`
 artifact and `--performed-by author|peer`, SHALL refuse placeholder values, and SHALL cause `verdict` to
 report the DISTINCT token `AUTHOR-PERFORMED` — never `PASS`. The recorded disclosure SHALL carry the
-form: *"an author's hand audit is not an independent one; weight it accordingly."*
+form: *"an author's hand audit is not an independent one; weight it accordingly."* It SHALL NOT
+replace a report that already RECORDS a verdict (`PASS` or `FINDINGS`) unless `--force` is passed, and
+a forced replacement SHALL record the replaced token in the new report.
+
+#### Scenario: a recorded verdict is not silently replaced
+- **WHEN** the stage's report already records `FINDINGS` and a substitute is recorded without `--force`
+- **THEN** the recording is REFUSED, naming the recorded token, and the report is left intact
+- **AND** with `--force` the new report NAMES the token it replaced, so the substitution is auditable
+- **AND** a sentinel-only report is replaced with no `--force` (the normal path is unaffected)
 
 #### Scenario: a substitute is distinguishable from an independent audit
 - **WHEN** an author-performed C is recorded and the verdict is read

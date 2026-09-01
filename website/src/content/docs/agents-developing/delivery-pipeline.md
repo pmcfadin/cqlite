@@ -606,8 +606,12 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   which REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
   token `AUTHOR-PERFORMED`, never `PASS` — *an author's hand audit is not an independent one; weight it
   accordingly*, and it is sanctioned at all because *an audit whose working is shown is auditable, whereas
-  an absent one is not*. **The classifier enforces that working too, by calling the SAME function the
-  writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
+  an absent one is not*. **It REFUSES to overwrite a report that already RECORDS a verdict without
+  `--force`, and a forced replacement NAMES the token it replaced (#3751 round 2)** — it used to write
+  unconditionally, so a recorded blocking `FINDINGS` became a merge-PROCEEDING `AUTHOR-PERFORMED` with no
+  flag and no trace, while `open` refuses to re-stamp an already-open stage for the far smaller harm of
+  restarting a clock: the worse clobber had the weaker guard. **The classifier enforces that working too,
+  by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A
   non-emptiness test standing in for a validity test, and the same fact checked in two places with two

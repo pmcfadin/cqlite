@@ -536,6 +536,59 @@ rs "$R8" record-author-performed coverage --issue 600 --reason "$GOOD_REASON" --
 rc_is 2 "author-refusals: recording against a NEVER-OPENED stage is refused (exit 2)"
 has "AUTHOR-REFUSED reason=stage-never-opened" "author-refusals: names the never-opened cause"
 
+# --- 9b. record-author-performed NEVER SILENTLY REPLACES A RECORDED VERDICT (round 2, B2) --
+# THE ASYMMETRY THAT MADE THIS A DEFECT: `open` refuses to re-stamp an already-open stage
+# without --force ("re-opening would restart a clock a reader is using"), while
+# record-author-performed overwrote a recorded BLOCKING verdict with a PROCEEDING one — the
+# worse clobber under the weaker guard, with no flag, no warning and no trace of what was
+# destroyed. An overwrite that leaves no trace is the audit-trail failure this issue is about.
+R9B="$(newrepo)"
+rs "$R9B" open c --issue 620 --agent spec-auditor
+rc_is 0 "clobber: the stage opens"
+R9B_REPORT="$(REPORT_OF "$R9B" 620 c)"
+AP_REASON='no peer agent available on this box; hand C against the spec deltas'
+AP_EV='docs/round-artifacts/issue-620-hand-c.md'
+
+# (a) A RECORDED FINDINGS IS NOT REPLACEABLE WITHOUT --force.
+printf 'result: FINDINGS\n\n### [BLOCKER] a real gap\n' >"$R9B_REPORT"
+rs "$R9B" verdict c --issue 620
+rc_is 4 "clobber CONTROL: the recorded FINDINGS reads FINDINGS before the attempt"
+rs "$R9B" record-author-performed c --issue 620 --reason "$AP_REASON" --evidence "$AP_EV" --performed-by author
+rc_is 2 "clobber: replacing a recorded FINDINGS is REFUSED without --force (exit 2)"
+has "AUTHOR-REFUSED reason=verdict-already-recorded" "clobber: the refusal names the cause"
+has "recorded-verdict=FINDINGS" "clobber: the refusal names the PRIOR token it would have destroyed"
+rs "$R9B" verdict c --issue 620
+rc_is 4 "clobber: the refused attempt left the recorded FINDINGS intact"
+has "RESULT: FINDINGS " "clobber: FINDINGS still blocks after the refusal"
+
+# (b) A RECORDED PASS is equally not replaceable — the destroyed verdict does not have to be
+#     a blocking one for its erasure to be untraceable.
+printf 'result: PASS\n\nreviewed, no blocking finding\n' >"$R9B_REPORT"
+rs "$R9B" record-author-performed c --issue 620 --reason "$AP_REASON" --evidence "$AP_EV" --performed-by author
+rc_is 2 "clobber: replacing a recorded PASS is REFUSED without --force"
+has "recorded-verdict=PASS" "clobber: the refusal names PASS as the prior token"
+
+# (c) FORCED, IT RECORDS WHAT IT REPLACED. A --force that erased the prior token silently
+#     would move the hole rather than close it.
+printf 'result: FINDINGS\n\n### [BLOCKER] a real gap\n' >"$R9B_REPORT"
+rs "$R9B" record-author-performed c --issue 620 --reason "$AP_REASON" --evidence "$AP_EV" --performed-by author --force
+rc_is 0 "clobber: --force is accepted"
+has "replaced-verdict=FINDINGS" "clobber: the forced RECORD-OK line names the token it replaced"
+OUT="$(cat "$R9B_REPORT")"; RC=0
+has "replaced-verdict: FINDINGS" "clobber: the REPORT itself records the replaced token, so the substitution is auditable"
+rs "$R9B" verdict c --issue 620
+rc_is 6 "clobber: after a forced replacement the verdict is AUTHOR-PERFORMED (exit 6)"
+
+# (d) CONTROL — the NORMAL path needs no flag. A guard that reds on correct input is the
+#     guard agents learn to waive, so a sentinel-only report stays freely replaceable.
+R9C="$(newrepo)"
+rs "$R9C" open c --issue 630 --agent spec-auditor
+rc_is 0 "clobber CONTROL: a second stage opens"
+rs "$R9C" record-author-performed c --issue 630 --reason "$AP_REASON" --evidence "$AP_EV" --performed-by author
+rc_is 0 "clobber CONTROL: a SENTINEL-ONLY report is replaced with NO --force (the normal path is unaffected)"
+has "RECORD-OK" "clobber CONTROL: the normal path still reports RECORD-OK"
+hasnt "replaced-verdict" "clobber CONTROL: nothing was replaced, so no replacement is claimed"
+
 # --- 10. usage discipline ------------------------------------------------------
 R9="$(newrepo)"
 rs "$R9" open c --issue 700

@@ -131,12 +131,18 @@
 #   verdict <kind> --issue <N>
 #         EXACTLY ONE line of the closed grammar above. Exit 0/4/5/6.
 #   record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact>
-#                           --performed-by author|peer
+#                           --performed-by author|peer [--force]
 #         The sanctioned FALLBACK, never recorded as independent. Requires the WORKING:
 #         a substantive reason, a named evidence artifact, and who performed it.
 #         Placeholders are refused exactly as `claim.sh --reason` refuses them — by the same
 #         function `verdict` classifies a HAND-WRITTEN report with, so the two sides cannot
 #         hold the same value to two different strengths.
+#         REFUSES to overwrite a report that already RECORDS a verdict (`PASS`/`FINDINGS`)
+#         without `--force`, and a forced replacement RECORDS the token it replaced
+#         (`replaced-verdict:`) in the new report and on the RECORD-OK line — an overwrite
+#         that leaves no trace turns a recorded refusal into a proceed at the merge point,
+#         which is the audit-trail failure this whole tool exists to remove. A
+#         sentinel-only report is freely replaceable: that is the normal path.
 #
 # EXIT CODES
 #   0   success (OPEN-OK, STATUS, RECORD-OK, verdict PASS)
@@ -876,7 +882,7 @@ cmd_status() {
 
 # --- record-author-performed -------------------------------------------------
 cmd_record_author_performed() {
-  local kind="" issue="" reason="" evidence="" performed_by=""
+  local kind="" issue="" reason="" evidence="" performed_by="" force=0
   kind="$(validate_kind "${1:-}")"; shift || true
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -884,6 +890,7 @@ cmd_record_author_performed() {
       --reason) shift; reason="${1:-}" ;;
       --evidence) shift; evidence="${1:-}" ;;
       --performed-by) shift; performed_by="${1:-}" ;;
+      --force) force=1 ;;
       *) die_usage "record-author-performed: unknown argument '$1'" ;;
     esac
     shift || true
@@ -944,6 +951,31 @@ cmd_record_author_performed() {
     emit "AUTHOR-REFUSED detail=open the stage first, so the recording attaches to a stage with a known agent and clock: $prog open $kind --issue $issue --agent <type>"
     exit 2
   fi
+  # A RECORDED VERDICT IS NOT SILENTLY REPLACEABLE (#3751 round 2, B2). This subcommand used
+  # to write the report unconditionally, so a recorded blocking `FINDINGS` became a
+  # merge-PROCEEDING `AUTHOR-PERFORMED` with no flag, no warning and no trace of what was
+  # destroyed — the asymmetry that makes it a defect rather than a design choice is that
+  # `open` refuses to re-stamp an already-open stage without `--force` for the far smaller
+  # harm of restarting a clock. The `--reason`/`--evidence` recorded here say why no
+  # INDEPENDENT audit was available; they say nothing about findings being discarded, so they
+  # cannot stand in for that disclosure. A SENTINEL-ONLY report stays freely replaceable —
+  # that is the normal path, and a guard that reds on correct input is the guard agents learn
+  # to waive.
+  local prior_cls prior_token replaced=""
+  prior_cls="$(classify_report "$STAGE_REPORT" 1)"
+  prior_token="${prior_cls%%|*}"
+  case "$prior_token" in
+    PASS | FINDINGS)
+      if [ "$force" -ne 1 ]; then
+        emit "AUTHOR-REFUSED reason=verdict-already-recorded kind=$kind issue=$issue recorded-verdict=$prior_token report=$STAGE_REPORT"
+        emit "AUTHOR-REFUSED detail=this stage already RECORDS a verdict, and replacing it here would destroy it with no trace — a recorded FINDINGS would become a merge-proceeding AUTHOR-PERFORMED. Read it first ($prog verdict $kind --issue $issue). If the substitute really does supersede it, pass --force: the replaced token is then RECORDED in the new report."
+        exit 2
+      fi
+      replaced="$prior_token"
+      note "--force: REPLACING a recorded $prior_token verdict with AUTHOR-PERFORMED; the replaced token is recorded in the report"
+      ;;
+  esac
+
   assert_no_symlink "$STAGE_REPORT" report-of-record
   assert_ignored "$STAGE_REPORT" report-of-record
 
@@ -953,6 +985,9 @@ cmd_record_author_performed() {
     printf '\n'
     printf 'result: AUTHOR-PERFORMED\n'
     printf '\n'
+    # THE TRACE. Emitted only when something was actually replaced, so its ABSENCE is not a
+    # claim: a normal recording over the sentinel says nothing about a replacement.
+    [ -z "$replaced" ] || printf 'replaced-verdict: %s\n' "$replaced"
     printf 'performed-by: %s\n' "$performed_by"
     printf 'reason: %s\n' "$reason_tok"
     printf 'evidence: %s\n' "$evidence_tok"
@@ -975,7 +1010,7 @@ cmd_record_author_performed() {
   } >"$WRITE_TMP"
   commit_write "$STAGE_REPORT" report-of-record
 
-  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok report=$STAGE_REPORT"
+  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok${replaced:+ replaced-verdict=$replaced} report=$STAGE_REPORT"
   emit "RECORD-NOTE kind=$kind issue=$issue $AUTHOR_DISCLOSURE"
   exit 0
 }
