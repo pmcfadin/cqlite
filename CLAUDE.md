@@ -366,8 +366,9 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   to report only `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
   an agent obeying the retain-only-the-SUMMARY rule debugged a minimal-features build that was
   never broken. Every SUMMARY block **that carries a COMPONENT TABLE** (the full gate's
-  terminal, `--lite`'s, `--delta`'s, `--delta`'s python-tier REFUSED block, the two selftest
-  hooks) now carries ONE `disk-exhaustion:` line with a CLOSED value set:
+  terminal, `--lite`'s, `--delta`'s, `--delta`'s python-tier REFUSED block, the #2926
+  tree-integrity component-BOUNDARY FAIL, the two selftest hooks) now carries ONE
+  `disk-exhaustion:` line with a CLOSED value set:
   `RECOGNISED (#3800)` naming the signature, the component and `<log>:<line>`;
   `0 RECOGNISED (#3800)` (**never a bare `0`**) either for a scan that read every subject log
   and matched nothing, or for a run with no non-PASS component; and `UNMEASURED (#3800)` when a
@@ -382,7 +383,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   PAYLOAD, never a coloured cargo status word), and **NO log-derived text reaches the block** —
   only our signature name, the component name from `COMPONENTS`, and an integer (#3312). The
   free-space field is a **start→emit DELTA**, because peers free space between the failure and
-  the emit — that is #3800's own re-run evidence (same tree, same sha, opposite verdicts). It
+  the emit — that is #3800's own re-run evidence (same tree, same sha, opposite verdicts) — and
+  at the ONE MID-RUN site it is relabelled `start→boundary, MID-RUN PARTIAL WINDOW` with the
+  scan's subject set declared partial too (only the components recorded by that boundary):
+  **labelled, never omitted**, because a partial measurement read as a terminal one understates
+  a collapse that had not finished happening. It
   **never changes `OVERALL`/`RESULT`**: a matched signature is evidence about the HOST, not
   proof the diff is innocent, and this marker does not own the verdict — so the `RECOGNISED`
   text says the signature is **consistent with disk exhaustion on this HOST** and to free space
@@ -390,9 +395,9 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   this is **evidence, not proof**. It said "NOT a defect in the diff" until roborev job 299:
   an assertion the scan cannot support (a failing test may legitimately *print* a signature,
   and a diff can itself drive disk usage) and one that contradicted this same bullet.
-  **THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL", AND THE 19 EXCLUSIONS ARE
+  **THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL", AND THE 18 EXCLUSIONS ARE
   DECLARED AT THE SITE.** Of the script's 25 `emit_summary`/`_emit_terminal_summary` call
-  sites, 6 carry a table and all 6 append the line; the other 19 (the three pre-flight
+  sites, 7 carry a table and all 7 append the line; the other 18 (the three pre-flight
   FAIL-CLOSED blocks, the `component-set` FAIL, the two summary-integrity FAILs, the shared
   forwarder, the five self-test hooks, the four `--delta` usage ERRORs, the two `--delta`
   refused-**before-execution** blocks, the `--only` no-Data.db pre-flight) are emitted where no
@@ -405,7 +410,27 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   false: it derived its subject set from sites containing `_fm_summary_line`, i.e. exactly the
   sites already compliant — **a guard whose subject set is the compliant set cannot fail**.
   Note the `--delta` REFUSED paths split: the python-tier one HAS a table and IS marked; the
-  two refused-before-execution ones do not and are exempt. Capacity management (a
+  two refused-before-execution ones do not and are exempt.
+  **THAT CIRCULARITY HAD A SECOND LEVEL, AND IT COST THE 7th SITE — "my cause is already
+  named" IS NOT A REASON TO OMIT AN ATTRIBUTION UNLESS THE NAMED CAUSE CAN ACTUALLY NAME
+  THIS ONE.** Narrowing the claim to "carries a component table" fixed the WORDING and left
+  the census deriving its table-bearing subset from `_fm_summary_line` alone — so the ONE
+  block that renders a component table with its own `printf '%-18s %s (%ss)'`, the #2926
+  tree-integrity component-BOUNDARY FAIL (`_tree_boundary_meta_lines`), was **invisible to the
+  derivation** and shipped a round *exempted*, on the stated grounds that its cause was already
+  named (a mid-run tree mutation). **It is not: `tree-integrity: FAIL` has a SECOND cause that
+  IS disk exhaustion.** `_tree_identity` writes its capture manifest into `$LOG_DIR`; when that
+  write or its validation fails, the block is stamped with `TREE_CAPTURE_FAIL_REASON`, a **FIXED
+  CONSTANT** reading `tree-capture-failed; the tree cannot be proven unchanged` — so an ENOSPC
+  on the logs filesystem produces a verdict that **can never name disk** and that reads as a
+  git/worktree problem. That is a *worse* instance of this issue's own defect than the
+  `minimal-build: FAIL` that opened it. The census now derives table-bearing sites from the
+  **row FORMAT** (a function is a component-row renderer if its body emits `%-18s %s (%s`; a row
+  site is any code line outside every renderer's own body that emits that format or calls a
+  renderer; row sites map to their emit site and are DEDUPED), so a third renderer is recognised
+  with no edit to the suite — plus a permanent control planting into the SECOND renderer
+  specifically, because the two pre-existing controls both plant into the `_fm_summary_line`
+  family and neither can fail if the derivation goes blind again. Capacity management (a
   disk-aware slot cap, per-lane budgets, a shared `CARGO_TARGET_DIR`) is **#3434/#3763/#3755**,
   not here. Per-worktree `target/` is **~100–145GB** for a full gate, not the ~25–30GB
   `docs/development/gate-ops.md` claimed until now.

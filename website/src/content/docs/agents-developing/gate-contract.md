@@ -747,9 +747,9 @@ build that was never broken. Measured: `lane-3634/target` at **101G mid-full-gat
 failure; a re-run on the **same tree at the same sha** PASSed once a peer freed space.
 
 Every SUMMARY block **that carries a component table** — the full gate's terminal, `--lite`'s,
-`--delta`'s, `--delta`'s python-tier REFUSED block and the two hidden selftest hooks — now
-carries exactly one `disk-exhaustion:` line, on the `missing-fixtures:` / `missing-schemas:`
-marker precedent. Its value set is **closed**:
+`--delta`'s, `--delta`'s python-tier REFUSED block, the #2926 tree-integrity component-BOUNDARY
+FAIL and the two hidden selftest hooks — now carries exactly one `disk-exhaustion:` line, on the
+`missing-fixtures:` / `missing-schemas:` marker precedent. Its value set is **closed**:
 
 - `RECOGNISED (#3800)` — names the signature, the component and `<log>:<line>`, says the
   observation is **consistent with disk exhaustion on this host**, and gives the remedy: free
@@ -773,7 +773,7 @@ Properties worth knowing:
   innocent, and this marker does not own the verdict.
 - **Its SCOPE is "carries a component table", not "is terminal" — and the exclusions are
   DECLARED at the site.** The script has 25 `emit_summary` / `_emit_terminal_summary` call
-  sites; **6** carry a component table and all 6 append the line. The other **19** — the three
+  sites; **7** carry a component table and all 7 append the line. The other **18** — the three
   pre-flight FAIL-CLOSED blocks, the `component-set` FAIL, the two summary-integrity FAILs, the
   shared forwarder, the five self-test hooks, the four `--delta` usage ERRORs, the two
   `--delta` refused-**before-execution** blocks and the `--only` no-Data.db pre-flight — are
@@ -793,6 +793,38 @@ Properties worth knowing:
   the compliant set is a guard that cannot fail** — the same shape as #3544's own
   claim-exceeds-check finding, and the reason the replacement enumerates every site and lets
   the unaccounted ones fall into `GAP`.
+- **That circularity had a SECOND LEVEL, and it cost the 7th site.** Narrowing the claim to
+  "carries a component table" fixed the *wording* and left the census deriving its
+  table-bearing subset from `_fm_summary_line` alone — one renderer's **name**. So the one
+  block that renders a component table with its own `printf '%-18s %s (%ss)'`, the #2926
+  tree-integrity component-**boundary** FAIL (`_tree_boundary_meta_lines`), was invisible to
+  the derivation and shipped a round *exempted*, on the stated grounds that its cause was
+  already named — a mid-run tree mutation. **It is not.** `tree-integrity: FAIL` has a second
+  cause that **is** disk exhaustion: `_tree_identity` writes its capture manifest into
+  `$LOG_DIR`, and when that write or its validation fails the block is stamped with
+  `TREE_CAPTURE_FAIL_REASON` — a **fixed constant**, `tree-capture-failed; the tree cannot be
+  proven unchanged`. An ENOSPC on the logs filesystem therefore produces a verdict that **can
+  never name disk** and that reads as a git/worktree problem: a *worse* instance of this
+  issue's own defect than the `minimal-build: FAIL` that opened it. The general rule it
+  leaves behind: **"its cause is already named" only excuses an omission if the named cause
+  can name THIS one** — a fixed reason string cannot.
+  The derivation is now over the **row FORMAT**, not a renderer's name: a function is a
+  component-row renderer if its body emits `%-18s %s (%s` on a code line; a row site is any
+  code line outside every renderer's own body that emits that format or calls a renderer; row
+  sites map to their emit site and are **deduped**, so the count is table-bearing *blocks*. A
+  third renderer is recognised with no edit to the suite. A permanent control plants into the
+  **second** renderer specifically — the two pre-existing controls both plant into the
+  `_fm_summary_line` family, so neither can fail if the derivation goes blind again — and a
+  further case asserts the derived sites reach the census through **≥ 2 distinct renderers**,
+  so "7 sites" cannot be satisfied by one renderer seven times.
+- **The boundary site is the one MID-RUN emit, and the line says so.** That block is published
+  from inside a run that has not finished, so both halves of the line declare a partial window:
+  the free-space pair is relabelled `free(start->boundary, MID-RUN PARTIAL WINDOW: the run had
+  NOT finished)`, and the scan field adds `SUBJECT SET ALSO PARTIAL` — only the components whose
+  verdict was recorded by that boundary are subjects, and the ones that had not run are not a
+  clean reading. **Labelled, never omitted**: a partial figure read as a terminal one
+  understates a collapse that had not finished happening, but dropping the field would discard
+  the most useful disk fact the block can carry.
 - **The signature set is CLOSED** — `No space left on device`, `os error 28`,
   `Disk quota exceeded` — and the line declares that non-exhaustiveness on every run. A bare
   `ENOSPC` token is deliberately **excluded**: it occurs in this repository's own test names,
@@ -808,14 +840,19 @@ Properties worth knowing:
   (from the gate's own `COMPONENTS`) and an integer line number. A component log is compiler-
   and test-controlled; interpolating it would let a newline break the block frame and forge a
   `RESULT:` line.
-- **The free-space field is a start→emit DELTA**, measured with POSIX `df -Pk` (macOS is a
-  first-class gate host and `df -h` output differs by platform). An instantaneous emit-time read
+- **The free-space field is a start→emit DELTA** (start→**boundary**, labelled partial, at the
+  one mid-run site), measured with POSIX `df -Pk` (macOS is a first-class gate host and `df -h`
+  output differs by platform). An instantaneous emit-time read
   is misleading: peers free space between the failure and the emit, which is this issue's own
   re-run evidence. An unmeasurable `df` renders `free: UNMEASURED` and does **not** downgrade the
   log-scan verdict — the two facts are independent.
 
 Pinned by `scripts/tests/test_agent_gate_disk_exhaustion.sh` (hermetic, in `tooling-tests`,
 registered above that component's python3 SKIP branch because it needs nothing beyond bash).
+The boundary block's own end-to-end assertions — one attribution line, both partial-window
+declarations, and `RESULT: FAIL` unchanged by it — live in
+`scripts/tests/test_agent_gate_tree_integrity.sh`, which already drives a real mid-run mutation
+through the real gate.
 
 **This is a diagnostic, not a capacity fix.** Nothing here makes the slot cap disk-aware,
 refuses or queues a gate on low free space, budgets disk per lane, or shares one

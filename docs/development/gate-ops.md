@@ -262,13 +262,23 @@ worktree; additionally prune stale worktrees' `target/` dirs and size the shared
 bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
 doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
 minimal-features build that was never broken. Every SUMMARY block **that carries a component
-table** now carries a `disk-exhaustion:` line naming a recognised signature, the component and
-the log line, plus a start→emit free-space delta; see the gate section of `CLAUDE.md` for its
-closed value set. Blocks emitted before any component runs (the pre-flight FAIL-CLOSED blocks,
-the `--delta` usage errors and refused-before-execution blocks, the self-test hooks) are
-**declared exempt at the site** and already name their own cause. It is an **attribution, never
-a verdict**: it never changes `RESULT`, and a matched signature is evidence about the host, not
-proof the diff is innocent.
+table** — 7 of the script's 25 emit sites — now carries a `disk-exhaustion:` line naming a
+recognised signature, the component and the log line, plus a start→emit free-space delta; see
+the gate section of `CLAUDE.md` for its closed value set. The other 18, emitted before any
+component runs (the pre-flight FAIL-CLOSED blocks, the `--delta` usage errors and
+refused-before-execution blocks, the self-test hooks), are **declared exempt at the site** and
+already name their own cause. It is an **attribution, never a verdict**: it never changes
+`RESULT`, and a matched signature is evidence about the host, not proof the diff is innocent.
+
+**Read `tree-integrity: FAIL (tree-capture-failed; …)` as a possible ENOSPC too.** That reason
+string is a **fixed constant** — `tree-capture-failed; the tree cannot be proven unchanged` —
+and it is stamped whenever `_tree_identity` cannot write or validate its capture manifest, which
+is written into `$LOG_DIR`. A full logs filesystem therefore produces a verdict that reads as a
+git/worktree problem and **can never name disk**. That is why the #2926 component-BOUNDARY FAIL
+block (the 7th table-bearing site) carries the attribution, having been wrongly exempted for a
+round on the grounds that "its cause is already named". It is the one MID-RUN emit, so both
+halves of its line declare a partial window (`start->boundary, MID-RUN PARTIAL WINDOW`, and
+`SUBJECT SET ALSO PARTIAL` — only the components recorded by that boundary are scanned).
 
 **This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
 queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per

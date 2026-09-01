@@ -15234,7 +15234,7 @@ run_pub_surface() {
 # Also runs scripts/tests/test_agent_gate_disk_exhaustion.sh (#3800), the pin for the
 # `disk-exhaustion:` SUMMARY marker. A full gate died of ENOSPC and the ONE artifact agents
 # retain said `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
-# the reader debugged a minimal-features build that was never broken. 47 cases EXTRACT the
+# the reader debugged a minimal-features build that was never broken. 51 cases EXTRACT the
 # shipped `_disk_exhaustion_line` + helpers out of this file and run them: each signature of
 # the CLOSED set; an ANSI-COLOURED log (the payload carries no escapes, #3400) plus the proof
 # that the scan materialises NO sibling file — a diagnostic needing free disk is useless under
@@ -15246,7 +15246,12 @@ run_pub_surface() {
 # out; the RECOGNISED line reporting EVIDENCE rather than the diff's innocence (roborev job
 # 299), with a NEGATIVE case pinning the retired claim out; and a CENSUS that derives EVERY
 # emit site from this file -- MARKED / EXEMPT / GAP, with a positive control on each arm --
-# rather than hard-coding a count. Hermetic: temp dirs plus the two hidden selftest hooks — no cargo, no
+# rather than hard-coding a count. Its table-bearing subset is derived from the component-row
+# FORMAT (`%-18s %s (%s`) rather than from one renderer's NAME, because deriving it from
+# `_fm_summary_line` alone hid the 7th site -- the #2926 tree-integrity BOUNDARY block, which
+# renders its table with its own printf and whose `tree-capture-failed` reason is a fixed
+# constant that cannot name an ENOSPC on $LOG_DIR. A third control plants into that second
+# renderer specifically. Hermetic: temp dirs plus the two hidden selftest hooks — no cargo, no
 # python3, no datasets, no network — so it is registered ABOVE the python3 SKIP branch and
 # never SKIPs.
 run_tooling_tests() {
@@ -16891,7 +16896,9 @@ run_tooling_tests() {
   # reported only `minimal-build: FAIL (611s)` in the ONE artifact doctrine retains, so the
   # reader debugged a build that was never broken. This pins the `disk-exhaustion:` marker's
   # CLOSED value set, its three-valued grep handling, the no-log-text-in-the-block rule and
-  # the derived emit-site set.
+  # the derived emit-site set -- whose table-bearing subset is derived from the component-row
+  # FORMAT, not from one renderer's name (that narrower derivation hid the 7th site, the #2926
+  # tree-integrity BOUNDARY block).
   #
   # Registered HERE, as its own guard ABOVE the python3 branch, and NOT inside the
   # `&&`-chain below: that chain is behind `command -v python3`, and folding a suite that
