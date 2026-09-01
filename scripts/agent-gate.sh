@@ -687,10 +687,11 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 13 cases over throwaway
+#                      features-load-bearing component: 20 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
-#                      diagnostic to NAME the planted feature, plus a case floor.
+#                      diagnostic to NAME the planted feature, and an EXACT case
+#                      count (a floor lets one case be deleted silently).
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
 #                      the non-vacuity proof for the pub-surface component. 42 cases,
 #                      source-only (no cargo doc since the #1712 descope), each
@@ -14963,10 +14964,11 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 13 cases over throwaway fixture
+# proof for the features-load-bearing component: 20 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
-# every negative case required to NAME the planted feature, plus a case floor. It needs
-# cargo and nothing else.
+# every negative case required to NAME the planted feature, and an EXACT case count (a
+# floor below the real count lets one case be deleted silently — #3544's lesson applied
+# to the suite that is its own subject). It needs cargo and nothing else.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -16413,6 +16415,11 @@ run_tooling_tests() {
   # case requires the diagnostic to NAME the planted feature — a bare non-zero exit is
   # produced just as well by an unrelated silent abort. The incident class it must red
   # on is a dead LEAF named only by an aggregator, i.e. that credit does not flow DOWN.
+  # Its fixture reproduces in miniature every shape the guard has been wrong about
+  # (roborev job 50): a renamed cross-member dependency key, a weak `dep?/feature` edge
+  # both standalone and alongside its activation, a build script, and a NESTED MEMBER
+  # sitting in the outer member's own tests/ directory — the overlap the real workspace
+  # has between the root package's tests/ and cqlite-integration-tests.
   # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
   # scripts/ci/) because the guard has no test-only seam and must never grow one.
   echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
