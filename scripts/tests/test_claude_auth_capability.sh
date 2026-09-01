@@ -1767,6 +1767,28 @@ else
   bad "claude-tmux-env: the wedged-server detail does not name the bound: $out"
 fi
 
+# (d) AN INTERRUPT DURING THE BOUNDED READ MUST LEAVE NOTHING BEHIND. Bounding the live
+# read turned the window between the stderr file's `mktemp` and its `rm` from microseconds
+# into up to the op bound against a wedged server, and that file sits in a directory we do
+# not own. Found by this suite's own interrupted run leaving one — a widened leak window is
+# a cost of the fix, not a pre-existing condition, so it is pinned here.
+d32b=$(mkshim "$tmp/s32b"); plant_tmux "$d32b" wedged
+int_before=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'cqlite-tmuxenv.*' 2>/dev/null | sort)
+PATH="$d32b:$PATH" env -u SUDO_USER -u SUDO_UID CQLITE_BOOTSTRAP_TEST_MODE=1 \
+  CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" bash "$CAPLIB" --tmux-env >/dev/null 2>&1 &
+int_pid=$!
+# The read is bounded at ten seconds and the stub sleeps two minutes, so two seconds in it
+# is certainly inside the window this case is about.
+sleep 2
+kill -TERM "$int_pid" 2>/dev/null
+wait "$int_pid" 2>/dev/null
+int_after=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'cqlite-tmuxenv.*' 2>/dev/null | sort)
+if [ "$int_before" = "$int_after" ]; then
+  ok "interrupt safety: SIGTERM during the bounded live read leaves no stderr temp file"
+else
+  bad "interrupt safety: an interrupted bounded read leaked a temp file: $(comm -13 <(printf '%s\n' "$int_before") <(printf '%s\n' "$int_after"))"
+fi
+
 # (c) STRUCTURAL. Logical lines (backslash continuations joined) so a wrapped invocation is
 # judged whole; whole-line comments blanked; `command -v tmux` is a resolution, not a call;
 # and a line whose `tmux` sits inside a MESSAGE (`printf`) is not an invocation. DECLARED
@@ -2069,10 +2091,10 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # case (the real-tmux isolation case, 3 assertions) skips, and a floor that reds on correct
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
-# non-Linux branch in every case. Raised 91 -> 121 by round 4 (the digest identity of a
-# delivered credential, the sudo-posture cases, and the bounding class): 124 cases run, and
+# non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
+# delivered credential, the sudo-posture cases, and the bounding class): 125 cases run, and
 # the real-tmux isolation case (3 assertions) is still the only legitimately skippable one.
-CASE_FLOOR=121
+CASE_FLOOR=122
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

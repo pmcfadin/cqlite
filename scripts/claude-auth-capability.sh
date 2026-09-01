@@ -855,10 +855,20 @@ claude_tmux_env_verdict_into__untraced() {
   # succeeded). NOT A PIPE: `$?` is read on its own line.
   local __errf=''
   if __errf=$(mktemp "${TMPDIR:-/tmp}/cqlite-tmuxenv.XXXXXX" 2>/dev/null) && [ -f "$__errf" ]; then
+    # REGISTERED WITH THE PROBE LIFECYCLE, not merely deleted on the success path. Bounding
+    # this read (above) turned the window between `mktemp` and `rm` from microseconds into
+    # up to CLAUDE_AUTH_TMUX_OP_BOUND seconds against a wedged server, and an interrupt in
+    # that window used to leave a `cqlite-tmuxenv.*` file behind in a directory we do not
+    # own — measured, from this suite's own interrupted run. Same machinery, same reason, as
+    # the two probes' working directories; cleanup is keyed on what is REGISTERED, so the
+    # socket and directory halves are simply skipped here.
+    CLAUDE_AUTH_PROBE_FILE="$__errf"
+    claude_auth_probe_arm_traps
     __out=$(claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" show-environment -g 2>"$__errf")
     __rc=$?
     __err=$(cat "$__errf" 2>/dev/null)
-    rm -f "$__errf"
+    claude_auth_probe_cleanup
+    claude_auth_probe_restore_traps
   else
     # No temp file: keep the ONE invocation and say the cause was not captured, rather than
     # taking a second reading of a different moment.
@@ -982,6 +992,7 @@ claude_tmux_env_verdict_into__untraced() {
 # pane", which is exactly the cold-start question.
 CLAUDE_AUTH_PROBE_SOCKET=''
 CLAUDE_AUTH_PROBE_DIR=''
+CLAUDE_AUTH_PROBE_FILE=''
 CLAUDE_AUTH_PROBE_PREV_TRAPS=''
 
 # THE PROBE LIFECYCLE HELPERS ARE SHARED BY BOTH PROBES — the `--auth` one (which registers
@@ -1008,6 +1019,10 @@ claude_auth_probe_cleanup() {
   if [ -n "$CLAUDE_AUTH_PROBE_DIR" ]; then
     rm -rf "$CLAUDE_AUTH_PROBE_DIR"
     CLAUDE_AUTH_PROBE_DIR=''
+  fi
+  if [ -n "$CLAUDE_AUTH_PROBE_FILE" ]; then
+    rm -f "$CLAUDE_AUTH_PROBE_FILE"
+    CLAUDE_AUTH_PROBE_FILE=''
   fi
 }
 claude_auth_probe_restore_traps() {
