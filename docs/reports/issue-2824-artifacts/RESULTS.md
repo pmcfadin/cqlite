@@ -19,50 +19,52 @@ Raw artifacts: `ab/summary.csv`, `ab/scan-attributable.csv`, `ab/host.txt`, `ab/
 
 ## What ran
 
-3 rounds x 2 arms x **3 phases**, arm order alternating per round, page cache dropped immediately
-before both the floor and the cold phase, each phase a separate run with its own `/usr/bin/time`.
-Corpus: the `ws0.events` fixture, `Data.db` 2,774,760,422 bytes (~630,000 pages). Both arms built from
-ONE tree differing by one match arm and verified by `strace` to differ by exactly one `madvise` call —
-see `ab/construction.md`.
+**4 rounds** (even by requirement, so each arm runs first exactly twice) x 2 arms x **3 phases**, page
+cache dropped immediately before both the floor and the cold phase, each phase a separate run with its
+own `/usr/bin/time`. Corpus: the `ws0.events` fixture, `Data.db` 2,774,760,422 bytes (~630,000 pages).
+Both arms built from ONE tree differing by one match arm and verified by `strace` to differ by exactly
+one `madvise` call — see `ab/construction.md`.
 
 The **floor** phase is the same binary run cold with `--setup-only`: it opens the reader and reads the
 index/summary but performs no scan, so its fault count is the non-scan cost of starting this process on
 a cold cache. `scan_major_faults = cold - floor`.
 
-| signal | baseline median [min-max] | patched median [min-max] |
+| signal | baseline median [values] | patched median [values] |
 |---|---|---|
-| **scan-attributable major faults** (`cold - floor`) | **4** [2-5] | **4** [3-6] |
-| raw cold major faults | 51 [50-52] | 49 [49-51] |
-| floor major faults (startup only) | 47 [47-48] | 45 [45-46] |
+| **scan-attributable major faults** | **3.5** [3, 4, 5, 2] | **4.5** [4, 6, 4, 5] |
+| raw cold major faults | 53 | 52 |
+| floor major faults (startup only) | 49 | 47.5 |
 | warm major faults | 0 | 0 |
-| cold wall secs | 28.46 [22.41-31.32] | 32.52 [23.39-32.59] |
-| warm wall secs | 18.12 [17.50-19.24] | 17.54 [17.39-17.72] |
+| warm wall secs | 18.60 | 18.75 |
+| cold wall secs | 28.12 | 23.62 |
 
 ## Reading it
 
-**Scan-attributable major faults are identical: 4 and 4, across ~630,000 file pages.** The kernel's
-default read-ahead was already converting essentially everything to minor faults, in *both* arms. There
-was nothing for `MADV_WILLNEED` to convert.
+**Scan-attributable major faults are indistinguishable — single digits in both arms across ~630,000
+file pages, with the ranges overlapping and the patched median nominally *higher* (noise at n=4).** The
+kernel's default read-ahead was already converting essentially everything to minor faults in both arms.
+There was nothing for `MADV_WILLNEED` to convert.
 
-**This attribution corrected an earlier misreading of my own data, and it is the reason the floor phase
-exists.** The raw cold counts are 51 vs 49, which reads as a small improvement. It is not: the whole
-difference sits in the **startup floor** (47 vs 45), i.e. in faulting the executable and its shared
-libraries — because the global page cache is dropped, those are cold too and `%F` counts them. `%F` is
-per-process, so it is immune to the neighbours; it is **not** isolated to the scan mapping, and
-reporting it unqualified attributed process-startup faults to the scan. Subtracting the floor removes a
-spurious directional signal and leaves a clean null. (The subtraction is an estimate, not per-mapping
-accounting, which `/usr/bin/time` cannot provide.)
+**The attribution matters, and it corrected an earlier misreading of this same data.** Raw cold counts
+are 53 vs 52 and an earlier 3-round run read 51 vs 49, which looks like a small improvement. It is not:
+the difference sits in the **startup floor**, i.e. faulting in the executable and its shared libraries,
+which are cold too because the global page cache is dropped, and `%F` counts them. `%F` is per-process,
+so it is immune to the neighbours; it is **not** isolated to the scan mapping, and reporting it
+unqualified attributes process-startup faults to the scan. Subtracting the floor removed a spurious
+directional signal and left a clean null. The subtraction is an estimate, not per-mapping accounting,
+which `/usr/bin/time` cannot provide.
 
 **Warm shows no regression**, and warm major faults are 0 in every run, which also confirms the warm
 phase really was warm.
 
-**Wall clock is not usable from this box and none of these figures should be quoted.** Three peer lanes
-were building concurrently; within-arm spread (22.4-31.3 s baseline, 23.4-32.6 s patched) swamps any
-between-arm difference. An earlier run made the confound unambiguous: in **both** orderings the arm that
-ran **first** was faster (round 1, baseline first: 20.9 s vs 50.1 s; round 4, patched first: 38.8 s vs
-22.4 s). That is load drift, not an arm effect, and it is exactly what alternating the order exists to
-expose — run all of one arm then all of the other and that same drift would have produced a
-clean-looking, entirely false "patched is 2.4x slower".
+**Cold wall clock is not usable from this box and should not be quoted.** Three peer lanes were building
+concurrently; baseline's four cold runs were 52.6, 22.9, 33.3 and 22.5 s — a single arm spanning more
+than 2x. An earlier run made the confound unambiguous: in **both** orderings the arm that ran **first**
+was faster (baseline-first 20.9 vs 50.1 s; patched-first 38.8 vs 22.4 s). That is load drift, not an arm
+effect, and it is what alternating the order exists to expose — run all of one arm then all of the other
+and the same drift yields a clean-looking, entirely false result. Note the alternation only balances for
+exactly two arms and an even round count, which the harness now enforces; an earlier 3-round run of this
+same A/B was unbalanced (baseline first twice, patched once) and has been superseded by this one.
 
 ## Why this host cannot exhibit the effect
 

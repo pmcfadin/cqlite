@@ -49,7 +49,7 @@
 # Requires: passwordless sudo for /proc/sys/vm/drop_caches (checked, fail-closed).
 set -euo pipefail
 
-CORPUS=""; ROUNDS=5; OUT=""
+CORPUS=""; ROUNDS=4; OUT=""
 declare -a BINARIES=()
 
 usage() {
@@ -60,7 +60,7 @@ usage: cold-warm-ab.sh --corpus <dir> --out <dir> --bin <label>=<path> --bin <la
   --corpus   corpus directory (see tools/ws0-corpus-gen/README.md)
   --out      directory for the recorded artifacts (created)
   --bin      a labelled ws0-scan-bench binary; give it twice for an A/B
-  --rounds   alternating rounds over the whole arm set (default 5)
+  --rounds   alternating rounds; must be EVEN and >= 2 (default 4)
 USAGE
 }
 
@@ -77,13 +77,29 @@ done
 
 [ -n "$CORPUS" ] || { echo "cold-warm-ab: --corpus is required" >&2; exit 2; }
 [ -n "$OUT" ]    || { echo "cold-warm-ab: --out is required" >&2; exit 2; }
-[ "${#BINARIES[@]}" -ge 2 ] || { echo "cold-warm-ab: an A/B needs at least two --bin arms" >&2; exit 2; }
+# EXACTLY two arms, and an EVEN round count. The drift control here is order
+# reversal on even rounds, and that only balances under both conditions:
+#   - with an odd round count the first-listed arm takes (R+1)/2 first positions
+#     against the other's (R-1)/2, so a monotonic background drift is not cancelled;
+#   - with more than two arms, reversing pins every MIDDLE arm to the same position
+#     in every round, so those arms get no drift control at all.
+# Rejecting is deliberate rather than warning-and-continuing: an unbalanced schedule
+# still produces a plausible-looking CSV, and the whole point of alternating is that
+# a confound must not be attributable to one arm.
+if [ "${#BINARIES[@]}" -ne 2 ]; then
+  echo "cold-warm-ab: exactly two --bin arms are required (got ${#BINARIES[@]}); the order-reversal drift control does not balance otherwise" >&2
+  exit 2
+fi
 # A round count that is not a positive integer would complete "successfully" having
 # recorded nothing — a vacuous pass wearing a green exit code.
 case "$ROUNDS" in
   ''|*[!0-9]*) echo "cold-warm-ab: --rounds must be a positive integer, got '$ROUNDS'" >&2; exit 2 ;;
 esac
-[ "$ROUNDS" -ge 1 ] || { echo "cold-warm-ab: --rounds must be at least 1, got '$ROUNDS'" >&2; exit 2; }
+[ "$ROUNDS" -ge 2 ] || { echo "cold-warm-ab: --rounds must be at least 2, got '$ROUNDS'" >&2; exit 2; }
+if [ $(( ROUNDS % 2 )) -ne 0 ]; then
+  echo "cold-warm-ab: --rounds must be EVEN so each arm runs first equally often, got '$ROUNDS'" >&2
+  exit 2
+fi
 [ -d "$CORPUS" ] || { echo "cold-warm-ab: corpus not a directory: $CORPUS" >&2; exit 2; }
 [ -x /usr/bin/time ] || { echo "cold-warm-ab: /usr/bin/time is required for major-fault counts" >&2; exit 3; }
 
@@ -116,6 +132,19 @@ for entry in "${BINARIES[@]}"; do
   [ -x "$path" ] || { echo "cold-warm-ab: not executable: $path" >&2; exit 2; }
 done
 
+# A reused directory keeps stale per-phase artifacts from a previous run beside
+# freshly-truncated aggregate files — an artifact set that looks complete and is
+# internally inconsistent. Refuse rather than silently mix generations.
+if [ -e "$OUT" ]; then
+  if [ ! -d "$OUT" ]; then
+    echo "cold-warm-ab: --out exists and is not a directory: $OUT" >&2; exit 2
+  fi
+  if [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+    echo "cold-warm-ab: --out is not empty: $OUT" >&2
+    echo "cold-warm-ab: refusing to mix artifact generations; remove it or pass a fresh path." >&2
+    exit 2
+  fi
+fi
 mkdir -p "$OUT"
 
 # Device discovery runs BEFORE anything is claimed, because the i4i verdict depends
@@ -178,7 +207,7 @@ esac
     echo "corpus-device-note: NOT MEASURED — a read-ahead A/B whose device is unknown cannot be interpreted; treat the result as UNATTRIBUTED"
   fi
   echo "phases-per-arm-per-round: floor (--setup-only, cache dropped) + cold (cache dropped, --passes 1) + warm (cache resident, --passes 1), each timed separately"
-  echo "rounds: $ROUNDS  (arm order alternates on even rounds)"
+  echo "rounds: $ROUNDS  (even by requirement; arm order reverses on even rounds, so each arm runs first exactly $((ROUNDS/2)) times)"
   echo "primary-signal: scan-attributable major page faults = cold(major_faults) - floor(major_faults)"
   echo "primary-signal-note: %F is per-process (immune to neighbours) but NOT isolated to the scan mapping; the floor phase estimates the non-scan startup cost. The subtraction is an ESTIMATE, not per-mapping accounting."
   echo "secondary-signal: wall seconds (contended; medians only)"
