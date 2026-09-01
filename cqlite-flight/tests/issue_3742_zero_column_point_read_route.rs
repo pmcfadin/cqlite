@@ -119,7 +119,8 @@ fn zero_column_point_read_request_reports_the_point_read_access_path() {
     let (_temp, data_dir) = build_fixture();
 
     // Control: the same ticket WITHOUT a projection.
-    let (control_labels, control_err) = drive_and_collect_access_paths(&data_dir, ticket_bytes(None));
+    let (control_labels, control_err) =
+        drive_and_collect_access_paths(&data_dir, ticket_bytes(None));
     eprintln!("MEASURE point-read control access_path={control_labels:?} err={control_err:?}");
     assert_eq!(
         control_err, None,

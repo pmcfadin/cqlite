@@ -39,11 +39,12 @@ use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::test_fixtures as fx;
 use cqlite_flight::ticket::FlightTicket;
 
+use arrow::ipc::{root_as_message, MessageHeader};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::FlightService;
-use arrow_flight::Ticket;
+use arrow_flight::{FlightData, Ticket};
 use futures::StreamExt;
 use tonic::Request;
 
@@ -94,28 +95,72 @@ fn ticket_with(extra: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&t).expect("ticket json")
 }
 
-/// Drive `do_get` in process and report `(rpc_ok, message_count, first_error)`.
-fn drive(data_dir: &std::path::Path, ticket: Vec<u8>) -> (bool, usize, Option<String>) {
+/// Everything one `do_get` attempt produced, RETAINED rather than summarised
+/// (roborev job 1, finding 2): the `FlightData` messages themselves and the
+/// `tonic::Status` values, not their `to_string()`s — so a caller can assert the
+/// message TYPE, the SCHEMA it carries and the status CODE, none of which a
+/// `(bool, usize, Option<String>)` triple could distinguish.
+struct DriveOutcome {
+    /// `Err` = `do_get` itself refused; no stream was ever opened.
+    rpc: Result<(), tonic::Status>,
+    /// Every `FlightData` received, in order, before any terminal error.
+    msgs: Vec<FlightData>,
+    /// The terminal stream error, if the stream failed after being opened.
+    stream_err: Option<tonic::Status>,
+}
+
+impl std::fmt::Debug for DriveOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rpc_ok={} msgs={} terminal_err={:?}",
+            self.rpc.is_ok(),
+            self.msgs.len(),
+            self.terminal_status().map(|s| s.to_string())
+        )
+    }
+}
+
+impl DriveOutcome {
+    /// The terminal error, whichever side it came from (the aggregation route
+    /// fails the RPC itself; the streaming routes fail the opened stream).
+    fn terminal_status(&self) -> Option<&tonic::Status> {
+        self.rpc.as_ref().err().or(self.stream_err.as_ref())
+    }
+}
+
+/// Drive `do_get` in process, retaining every message and status.
+fn drive(data_dir: &std::path::Path, ticket: Vec<u8>) -> DriveOutcome {
     let rt = tokio::runtime::Runtime::new().expect("rt");
     rt.block_on(async {
         let svc = CqliteFlightService::new(data_dir.to_path_buf(), 8192);
         let resp = match svc.do_get(Request::new(Ticket::new(ticket))).await {
             Ok(r) => r,
-            Err(status) => return (false, 0, Some(status.to_string())),
+            Err(status) => {
+                return DriveOutcome {
+                    rpc: Err(status),
+                    msgs: Vec::new(),
+                    stream_err: None,
+                }
+            }
         };
         let mut stream = resp.into_inner();
-        let mut msgs = 0usize;
-        let mut err = None;
+        let mut msgs = Vec::new();
+        let mut stream_err = None;
         while let Some(item) = stream.next().await {
             match item {
-                Ok(_) => msgs += 1,
+                Ok(fd) => msgs.push(fd),
                 Err(status) => {
-                    err = Some(status.to_string());
+                    stream_err = Some(status);
                     break;
                 }
             }
         }
-        (true, msgs, err)
+        DriveOutcome {
+            rpc: Ok(()),
+            msgs,
+            stream_err,
+        }
     })
 }
 
@@ -126,29 +171,37 @@ fn measure_zero_column_projection_over_do_get() {
     let (_temp, data_dir) = build_fixture();
 
     // Control: no projection at all — the 3 fixture rows must round-trip.
-    let (ok, msgs, err) = drive(&data_dir, ticket_bytes(None));
-    eprintln!("MEASURE control (no projection): rpc_ok={ok} msgs={msgs} err={err:?}");
-    assert!(ok && err.is_none(), "control must succeed: {err:?}");
+    let control = drive(&data_dir, ticket_bytes(None));
+    eprintln!("MEASURE control (no projection): {control:?}");
+    assert!(
+        control.terminal_status().is_none(),
+        "control must succeed: {:?}",
+        control.terminal_status().map(|s| s.to_string())
+    );
 
     // (a) explicitly empty projection list
-    let (ok_a, msgs_a, err_a) = drive(&data_dir, ticket_bytes(Some(serde_json::json!([]))));
-    eprintln!("MEASURE columns=[]: rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
-    assert_zero_column_outcome("columns=[]", ok_a, msgs_a, err_a.as_deref());
+    let a = drive(&data_dir, ticket_bytes(Some(serde_json::json!([]))));
+    eprintln!("MEASURE columns=[]: {a:?}");
+    assert_zero_column_outcome("columns=[]", &a);
 
     // (b) projection naming only a column the table does not have. `retain`
     // cannot fail, so an unknown name is not a bad-request — it silently empties
     // the projection and lands in exactly the same place as (a).
-    let (ok_b, msgs_b, err_b) = drive(
+    let b = drive(
         &data_dir,
         ticket_bytes(Some(serde_json::json!(["no_such_col"]))),
     );
-    eprintln!("MEASURE columns=[no_such_col]: rpc_ok={ok_b} msgs={msgs_b} err={err_b:?}");
-    assert_zero_column_outcome("columns=[no_such_col]", ok_b, msgs_b, err_b.as_deref());
+    eprintln!("MEASURE columns=[no_such_col]: {b:?}");
+    assert_zero_column_outcome("columns=[no_such_col]", &b);
 
     // (c) a real column, as a sanity control that projection works at all.
-    let (ok_c, msgs_c, err_c) = drive(&data_dir, ticket_bytes(Some(serde_json::json!(["key"]))));
-    eprintln!("MEASURE columns=[key]: rpc_ok={ok_c} msgs={msgs_c} err={err_c:?}");
-    assert!(ok_c && err_c.is_none(), "single-column control: {err_c:?}");
+    let c = drive(&data_dir, ticket_bytes(Some(serde_json::json!(["key"]))));
+    eprintln!("MEASURE columns=[key]: {c:?}");
+    assert!(
+        c.terminal_status().is_none(),
+        "single-column control: {:?}",
+        c.terminal_status().map(|s| s.to_string())
+    );
 }
 
 /// The measured outcome of a zero-column projection on the streaming routes:
@@ -158,19 +211,58 @@ fn measure_zero_column_projection_over_do_get() {
 /// This is recorded, not endorsed. What it establishes for issue #3742 is that
 /// the shape is REACHABLE and that it fails LOUDLY — it is not a silent
 /// 0-rows-when-present answer on this path.
-fn assert_zero_column_outcome(what: &str, ok: bool, msgs: usize, err: Option<&str>) {
-    assert!(
-        ok,
-        "{what}: do_get itself must be accepted (no up-front rejection)"
-    );
+fn assert_zero_column_outcome(what: &str, outcome: &DriveOutcome) {
+    if let Err(status) = &outcome.rpc {
+        panic!("{what}: do_get itself must be accepted (no up-front rejection), got {status}");
+    }
     assert_eq!(
-        msgs, 1,
-        "{what}: only the zero-field schema message arrives"
+        outcome.msgs.len(),
+        1,
+        "{what}: exactly one message arrives before the stream fails"
     );
-    let err = err.unwrap_or_else(|| panic!("{what}: expected a terminal stream error"));
+
+    // The ONE message must really be a zero-field SCHEMA message (roborev job 1,
+    // finding 2): a different message type, or a schema carrying fields, would
+    // have satisfied a bare count. Both facts are read off the wire bytes —
+    // the IPC `Message` header type, then the decoded `Schema` itself.
+    let fd = &outcome.msgs[0];
+    let message =
+        root_as_message(&fd.data_header).expect("data_header must be a valid IPC Message");
+    assert_eq!(
+        message.header_type(),
+        MessageHeader::Schema,
+        "{what}: message[0] must be the SCHEMA message (never a record batch)"
+    );
+    // Decode from the flatbuffer header directly: `data_header` is the bare IPC
+    // `Message`, NOT a length-prefixed IPC stream frame, so the stream-buffer
+    // helper cannot read it.
+    let ipc_schema = message
+        .header_as_schema()
+        .expect("a Schema-typed message must carry a Schema header");
+    let schema = arrow::ipc::convert::fb_to_schema(ipc_schema);
     assert!(
-        err.contains("must either specify a row count or at least one column"),
-        "{what}: unexpected terminal error: {err}"
+        schema.fields().is_empty(),
+        "{what}: the schema message must carry ZERO fields, got {:?}",
+        schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+    );
+
+    // The stream then fails. The STATUS is retained, so the code is asserted as
+    // `Internal` rather than pattern-matched out of a stringified message.
+    let status = outcome
+        .stream_err
+        .as_ref()
+        .unwrap_or_else(|| panic!("{what}: expected a terminal stream error"));
+    assert_eq!(
+        status.code(),
+        tonic::Code::Internal,
+        "{what}: arrow's refusal must surface as Status::Internal, got {:?}",
+        status.code()
+    );
+    assert!(
+        status
+            .message()
+            .contains("must either specify a row count or at least one column"),
+        "{what}: unexpected terminal error: {status}"
     );
 }
 
@@ -257,9 +349,9 @@ fn measure_zero_column_projection_on_the_point_read_route() {
 
     let zero = ticket_with(serde_json::json!({"filter": filter, "columns": []}));
     assert_ticket_routes_to_point_read("point-read columns=[]", &zero);
-    let (ok_a, msgs_a, err_a) = drive(&data_dir, zero);
-    eprintln!("MEASURE point-read columns=[]: rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
-    assert_zero_column_outcome("point-read columns=[]", ok_a, msgs_a, err_a.as_deref());
+    let outcome = drive(&data_dir, zero);
+    eprintln!("MEASURE point-read columns=[]: {outcome:?}");
+    assert_zero_column_outcome("point-read columns=[]", &outcome);
 }
 
 /// MEASUREMENT (#3742): the AGGREGATION route builds its output columns from
@@ -324,32 +416,32 @@ fn measure_zero_output_columns_via_an_empty_aggregation() {
     );
 
     // The measurement: an aggregation with NO group_by and NO aggregates.
-    let (ok_a, msgs_a, err_a) = drive(
+    let outcome = drive(
         &data_dir,
         ticket_with(serde_json::json!({
             "aggregation": {"group_by": [], "aggregates": []}
         })),
     );
-    eprintln!(
-        "MEASURE agg empty (no group_by, no aggregates): rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}"
+    eprintln!("MEASURE agg empty (no group_by, no aggregates): {outcome:?}");
+    let rpc_status = outcome.rpc.as_ref().expect_err(
+        "agg empty: the eager aggregate materialization must fail the do_get RPC \
+         itself — no guard rejects the spec, and no stream is opened",
     );
     assert!(
-        !ok_a,
-        "agg empty: the eager aggregate materialization fails the do_get RPC \
-         itself — no guard rejects the spec, and no stream is opened"
-    );
-    assert_eq!(
-        msgs_a, 0,
+        outcome.msgs.is_empty(),
         "agg empty: not one message reaches the client, not even the zero-field \
          schema (contrast the streaming routes, which send it first)"
     );
-    let err_a = err_a.expect("agg empty: a failed RPC must carry a status");
-    assert!(
-        err_a.contains("must either specify a row count or at least one column"),
-        "agg empty: expected arrow's zero-column refusal, got: {err_a}"
+    assert_eq!(
+        rpc_status.code(),
+        tonic::Code::Internal,
+        "agg empty: arrow's refusal surfaces as Status::Internal, got {:?}",
+        rpc_status.code()
     );
     assert!(
-        err_a.contains("status: Internal"),
-        "agg empty: arrow's refusal surfaces as Status::Internal, got: {err_a}"
+        rpc_status
+            .message()
+            .contains("must either specify a row count or at least one column"),
+        "agg empty: expected arrow's zero-column refusal, got: {rpc_status}"
     );
 }
