@@ -138,17 +138,23 @@ fi
 #
 # POSTURE: clear the ENTIRE `GIT_*` namespace rather than blacklisting names. Inherited git
 # environment is routine (hooks, `rebase --exec`, some CI runners), and this script's safety
-# oracle is exactly the kind of thing it silently breaks: a VALID but FOREIGN
-# `GIT_INDEX_FILE` makes `ls-files` enumerate only a SUBSET of the fixture (possibly zero),
-# so the CONTENT digest is computed over fewer files than exist and a change to an omitted
-# tracked file compares EQUAL. That is a false PASS in the guard whose whole claim is "this
-# run left the tracked fixture UNCHANGED" — and it is not hypothetical: the sibling wrapper's
-# own comment records this exact door causing tracked fixtures to be deleted while the run
-# declared success (#2878). `GIT_DIR`/`GIT_WORK_TREE`/`GIT_OBJECT_DIRECTORY` redirect the
-# same inputs.
+# oracle is exactly the kind of thing it silently breaks. `GIT_DIR` / `GIT_WORK_TREE` /
+# `GIT_OBJECT_DIRECTORY` / `GIT_COMMON_DIR` redirect which repository and object store
+# `ls-tree` and `hash-object` read, and a VALID but FOREIGN `GIT_INDEX_FILE` still redirects
+# the index that `status --porcelain` consults. Either way the digest or the status leg is
+# computed against something other than this checkout, and a real change compares EQUAL —
+# a false PASS in the guard whose whole claim is "this run left the tracked fixture
+# UNCHANGED". Not hypothetical: the sibling wrapper's own comment records this exact door
+# causing tracked fixtures to be deleted while the run declared success (#2878).
+#
+# HONEST NOTE on overlap: the enumeration leg later moved from `ls-files` to
+# `ls-tree HEAD` (roborev job 295), which removes `GIT_INDEX_FILE`'s ability to truncate the
+# FILE LIST specifically. That narrows one illustration; it does not make the scrub
+# redundant, because the variables above still redirect the repo/object store for both
+# remaining git operations, and the index still governs the status leg.
 #
 # A `-u` blacklist is an ever-growing list that fails silently the day git adds another
-# variable. None of this script's three operations (status --porcelain, ls-files,
+# variable. None of this script's three operations (status --porcelain, ls-tree,
 # hash-object) needs any GIT_* input, so clearing the namespace has no legitimate cost, and
 # where it is visible it fails LOUDLY rather than mis-reading quietly.
 # The subshell keeps the caller's environment untouched.
@@ -188,9 +194,9 @@ _fixture_content_digest() {
   # on a healthy tree (roborev job 268). A guard that reds on a supported platform is the
   # guard that platform's operators learn to waive.
   #
-  # `git ls-files -z` + `git hash-object` need nothing but git, which this script already
+  # `git ls-tree -z` + `git hash-object` need nothing but git, which this script already
   # requires for the status leg, and `-z` is git's own flag rather than a coreutils
-  # extension. ls-files emits in git's own sorted order, so no external sort is needed —
+  # extension. ls-tree emits in git's own sorted order, so no external sort is needed —
   # which also removes the newline-in-filename hazard a plain `sort` would reintroduce.
   #
   # The VALUE is the sorted "<blob-sha> <path>" text itself, not a hash of it: comparing
@@ -206,8 +212,19 @@ _fixture_content_digest() {
   # git's exit status be checked before the list is used.
   local tmpf n out h rc emitted
   tmpf=$(mktemp "${TMPDIR:-/tmp}/i3358-dg.XXXXXX") || { printf 'UNMEASURED(mktemp)'; return; }
-  if ! guard_git -C "$REPO" ls-files -z -- "$FIXTURE_REL" >"$tmpf" 2>/dev/null; then
-    rm -f "$tmpf"; printf 'UNMEASURED(ls-files-failed)'; return
+  # Enumerate from HEAD, not the index. `ls-files` reads the INDEX, i.e. STAGED state, while
+  # this case's claim is about the COMMITTED fixture — the enumeration source has to match
+  # the noun in the claim (roborev job 295). A fixture file staged for deletion but still
+  # present in the worktree is OMITTED by `ls-files`, so the digest never covers it, and
+  # porcelain cannot compensate: measured in a scratch repo, `status --porcelain` returns the
+  # byte-identical `D  <path>` + `?? <path>` before AND after that file is modified, so BOTH
+  # legs go blind together in exactly the harness-bug scenario this case exists to catch.
+  #   ls-files        2 files -> 1 after staging the deletion (omits it)
+  #   ls-tree -r HEAD 2 files -> 2 (still the committed set)
+  # CONSEQUENCE, deliberate and consistent with the narrowed claim: a fixture file added to
+  # the index but NOT yet committed is out of scope here, because it is not committed.
+  if ! guard_git -C "$REPO" ls-tree -r -z --name-only HEAD -- "$FIXTURE_REL" >"$tmpf" 2>/dev/null; then
+    rm -f "$tmpf"; printf 'UNMEASURED(ls-tree-failed)'; return
   fi
   n=$(tr -cd '\0' <"$tmpf" | wc -c | tr -d ' ')
   case $n in
