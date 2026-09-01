@@ -327,6 +327,27 @@ pub enum Kinding {
     Stringified,
 }
 
+/// WHICH SIDE of the comparison a value came from.
+///
+/// A structural fact about the CALLER, carried explicitly for the same reason
+/// [`container::MapKeySpelling`] is (issue #3726): the two sides spell a MAP
+/// differently BY CONSTRUCTION — the dump writes a JSON object, the egress a
+/// `{key,value}` array — and inferring which is which from the shape in front of you
+/// is exactly what lets a regression that emitted the OTHER side's spelling
+/// canonicalize equal.
+///
+/// It matters only inside [`container`]: at a whole map COLUMN the comparator's own
+/// `(Value::Object, Value::Array)` match already pins each side, but a map nested
+/// inside a container map KEY is walked by [`canon_typed`] ALONE, so nothing else is
+/// left to catch it there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The `sstabledump` JSONL golden.
+    Golden,
+    /// The CLI's own egress, as read back (CSV containers arrive decoded).
+    Cli,
+}
+
 /// A canonical scalar: the unit of value equality.
 ///
 /// `Ord` is derived so a collection of canonical values can be SORTED — the
@@ -469,6 +490,7 @@ pub fn canon_typed(
     ty: &CqlType,
     depth: Depth,
     kinding: Kinding,
+    side: Side,
 ) -> Result<Canon, String> {
     // A CONTAINER type is canonicalized RECURSIVELY, by [`container`] (issue #3726).
     // `depth` deliberately does not travel with it: [`Canon::for_csv`] is a rule
@@ -480,8 +502,12 @@ pub fn canon_typed(
     // now exactly what it says: a container arriving where the DDL declares a
     // scalar.
     if container::is_container_type(ty) {
-        return container::canon_container(v, egress, ty, kinding);
+        return container::canon_container(v, egress, ty, kinding, side);
     }
+    // A SCALAR has one spelling per side by construction, so `side` says nothing
+    // here: the asymmetry a scalar needs is already carried by `kinding` (only the
+    // GOLDEN is ever given [`Kinding::Stringified`]).
+    let _ = side;
     // May a numeric TEXT be read as a NUMBER here?
     let cross_kind = match egress {
         // CSV carries no JSON kinds at all — the reader hands every cell over as

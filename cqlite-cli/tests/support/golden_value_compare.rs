@@ -38,7 +38,7 @@
 
 use super::schema::{Column, ColumnKind, CqlType, TableSchema};
 use super::{
-    canon_scalar, canon_typed, container, csv_container, Canon, Depth, Egress, Kinding, Row,
+    canon_scalar, canon_typed, container, csv_container, Canon, Depth, Egress, Kinding, Row, Side,
 };
 // The declared-gap bookkeeping lives with the divergence it books (see [`gap`]).
 use gap::{Gap, Observed, SkipPaths, Suppressions};
@@ -602,8 +602,15 @@ fn row_order_divergence(
                 Kinding::Natural
             };
             let value = r.get(*name).unwrap_or(&Value::Null);
-            let canon = canon_typed(value, egress, &column.ty, Depth::TopLevel, kinding)
-                .map_err(|why| format!("key column `{name}`: {why}"))?;
+            let canon = canon_typed(
+                value,
+                egress,
+                &column.ty,
+                Depth::TopLevel,
+                kinding,
+                if golden_side { Side::Golden } else { Side::Cli },
+            )
+            .map_err(|why| format!("key column `{name}`: {why}"))?;
             parts.push(((*name).to_string(), canon));
         }
         Ok(parts)
@@ -1122,8 +1129,8 @@ fn compare_value_body(
         // asymmetry to a map KEY: the golden's object key is stringified by the
         // format, the CLI's `{"key","value"}` key is not (finding N1).
         _ => {
-            let g = canon_typed(golden, egress, ty, at.depth, at.kinding)?;
-            let c = canon_typed(cli, egress, ty, at.depth, Kinding::Natural)?;
+            let g = canon_typed(golden, egress, ty, at.depth, at.kinding, Side::Golden)?;
+            let c = canon_typed(cli, egress, ty, at.depth, Kinding::Natural, Side::Cli)?;
             if g == c {
                 Ok(())
             } else {

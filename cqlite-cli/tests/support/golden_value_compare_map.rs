@@ -14,7 +14,7 @@
 
 use super::super::schema::CqlType;
 use super::{
-    brief, canon_typed, compare_value_at, container, pair, At, Canon, Depth, Egress, Kinding,
+    brief, canon_typed, compare_value_at, container, pair, At, Canon, Depth, Egress, Kinding, Side,
 };
 use serde_json::{Map, Value};
 
@@ -109,10 +109,18 @@ pub(super) fn compare_map(
             key_ty,
             Depth::Inside,
             container::golden_map_key_kinding(key_ty, at.map_key_spelling),
+            Side::Golden,
         )
     };
     let canon_cli_key = |v: &Value| -> Result<Canon, String> {
-        canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Natural)
+        canon_typed(
+            v,
+            egress,
+            key_ty,
+            Depth::Inside,
+            Kinding::Natural,
+            Side::Cli,
+        )
     };
     let mut g: Vec<(Canon, &Value)> = Vec::with_capacity(golden.len());
     for (k, v) in golden {

@@ -12,6 +12,7 @@
 
 use super::super::compare::compare_rows;
 use super::super::schema::{from_ddl, CqlType, TableSchema};
+use super::super::Side;
 use super::super::{canon_typed, Canon, Depth, Egress, Kinding, Row};
 use super::{golden_map_key_value, is_container_type, MapKeySpelling};
 use serde_json::{json, Value};
@@ -64,8 +65,14 @@ fn key_ty_of(cql_type: &str) -> CqlType {
 
 /// Canonicalize as the comparator canonicalizes a whole COLUMN value: at the top
 /// level, with the kinding the caller states.
-fn canon(v: &Value, egress: Egress, ty: &CqlType, kinding: Kinding) -> Result<Canon, String> {
-    canon_typed(v, egress, ty, Depth::TopLevel, kinding)
+fn canon(
+    v: &Value,
+    egress: Egress,
+    ty: &CqlType,
+    kinding: Kinding,
+    side: Side,
+) -> Result<Canon, String> {
+    canon_typed(v, egress, ty, Depth::TopLevel, kinding, side)
 }
 
 /// The GOLDEN side of a frozen container column: natural kind
@@ -73,13 +80,13 @@ fn canon(v: &Value, egress: Egress, ty: &CqlType, kinding: Kinding) -> Result<Ca
 /// `writeRawValue(type.toJSONString(...))`, and `compare::column_kinding` says the
 /// same thing from the DDL).
 fn canon_golden(v: &Value, ty: &CqlType) -> Result<Canon, String> {
-    canon(v, Egress::Json, ty, Kinding::Natural)
+    canon(v, Egress::Json, ty, Kinding::Natural, Side::Golden)
 }
 
 /// The CLI side, held to [`Kinding::Natural`] at every position (issue #1491 review
 /// finding M1).
 fn canon_cli(v: &Value, ty: &CqlType) -> Result<Canon, String> {
-    canon(v, Egress::Json, ty, Kinding::Natural)
+    canon(v, Egress::Json, ty, Kinding::Natural, Side::Cli)
 }
 
 /// The golden's spelling of `f_map_tuple_udt` in the committed fixture's row
@@ -287,6 +294,7 @@ fn a_container_at_a_stringified_position_is_refused() {
         Egress::Json,
         &ty,
         Kinding::Stringified,
+        Side::Golden,
     ));
     assert!(
         why.contains("STRINGIFIED") && why.contains("getString"),
@@ -333,17 +341,25 @@ fn a_malformed_cli_map_entry_is_refused() {
 fn the_udt_pair_spelling_is_accepted_in_csv_and_refused_in_json() {
     let ty = column_ty("frozen<key_part>");
     let pairs = json!([{"key": "label", "value": "x"}, {"key": "rank", "value": 1}]);
-    let csv = canon(&pairs, Egress::Csv, &ty, Kinding::Natural).expect("legal in the CSV lane");
+    let csv = canon(&pairs, Egress::Csv, &ty, Kinding::Natural, Side::Cli)
+        .expect("legal in the CSV lane");
     let object = canon(
         &json!({"label": "x", "rank": 1}),
         Egress::Csv,
         &ty,
         Kinding::Natural,
+        Side::Golden,
     )
     .expect("the golden's object spelling");
     assert_eq!(csv, object, "the two CSV-lane spellings denote one value");
 
-    let why = refusal(canon(&pairs, Egress::Json, &ty, Kinding::Natural));
+    let why = refusal(canon(
+        &pairs,
+        Egress::Json,
+        &ty,
+        Kinding::Natural,
+        Side::Cli,
+    ));
     assert!(
         why.contains("CSV lane"),
         "the JSON refusal must say where the pair spelling IS legal: {why}"
@@ -365,6 +381,7 @@ fn a_repeated_field_in_the_csv_pair_spelling_is_refused() {
         Egress::Csv,
         &ty,
         Kinding::Natural,
+        Side::Cli,
     ));
     assert!(why.contains("repeats the field"), "{why}");
 }
@@ -490,6 +507,51 @@ fn every_cql_type_is_classified_as_container_or_not() {
     ] {
         assert!(!is_container_type(&ty), "`{}`", ty.describe());
     }
+}
+
+/// A MAP NESTED INSIDE A CONTAINER MAP KEY — the one position nothing but
+/// [`canon_typed`] walks, and therefore the one place a side-free canonicalizer
+/// produced a FALSE PASS (roborev finding, issue #3726).
+///
+/// At a whole map COLUMN `compare::compare_value_body` matches
+/// `(Value::Object, Value::Array)` and any other pairing is a shape error, so a JSON
+/// egress that emitted the golden's OBJECT spelling is caught there. Inside a map
+/// KEY there is no such pairing: the comparator hands the key to the canonical model
+/// and compares the results. Each side is therefore held to ITS OWN spelling.
+#[test]
+fn a_map_nested_in_a_container_key_holds_each_side_to_its_own_spelling() {
+    let ty = column_ty("frozen<map<frozen<map<int, int>>, int>>");
+    // The golden: the outer key is the inner map's own `toJSONString` document, whose
+    // own keys `MapType.toJSONString` quotes because an int's rendering is not already
+    // a JSON string (cassandra-5.0.8).
+    let golden = json!({"{\"1\": 2}": 10});
+    // The CLI: `{key,value}` arrays at BOTH levels.
+    let cli = json!([{"key": [{"key": 1, "value": 2}], "value": 10}]);
+    assert_eq!(
+        canon_golden(&golden, &ty).expect("golden"),
+        canon_cli(&cli, &ty).expect("cli"),
+        "the two sides' own spellings of one value must canonicalize alike"
+    );
+
+    // THE REGRESSION: a CLI that spelled the NESTED map the golden's way. It differs
+    // from the CLI spelling above only inside the key, so nothing downstream sees it.
+    let regressed = json!([{"key": {"1": 2}, "value": 10}]);
+    let why = refusal(canon_cli(&regressed, &ty));
+    assert!(
+        why.contains("cli side") && why.contains("array of {key,value}"),
+        "the refusal must name the side and the spelling it owes: {why}"
+    );
+
+    // And the mirror: a golden that spelled the nested map the CLI's way is equally
+    // not the document this lane reads.
+    let mirrored = json!({"x": 10});
+    let ty_outer = column_ty("frozen<map<int, frozen<map<int, int>>>>");
+    let why = refusal(canon_golden(
+        &json!({"1": [{"key": 1, "value": 2}]}),
+        &ty_outer,
+    ));
+    assert!(why.contains("golden side"), "{why}");
+    let _ = mirrored;
 }
 
 // =======================================================================

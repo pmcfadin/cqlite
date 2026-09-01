@@ -54,27 +54,38 @@
 //! regression it can never legitimately describe (roborev job 305's ruling on the
 //! gap module).
 //!
-//! # DECLARED RESIDUAL: a canonicalizer is SPELLING-BLIND at a map node
+//! # EACH SIDE IS HELD TO ITS OWN MAP SPELLING
 //!
-//! [`canon_map`] accepts BOTH spellings of a map — the golden's JSON object and the
-//! egress's `{key,value}` array — because canonicalizing is exactly the act of
-//! mapping two spellings of one value onto one representation, and the arm is
-//! therefore SIDE-FREE (it needs no "which side is this" parameter, which is what
-//! keeps it honest about the golden's stringified object keys). The cost, stated
-//! rather than discovered: INSIDE a container key, an egress that spelled a nested
-//! map the GOLDEN's way (an object) would canonicalize equal. That shape divergence
-//! is still caught at a whole map COLUMN, where `compare::compare_map` is reached
-//! through `compare::compare_value_body`'s `(Value::Object, Value::Array)` match and
-//! any other pairing is a `shape_error`. No committed fixture has a map inside a map
-//! key. The mirror case is bounded rather than accepted: a UDT's `{key,value}`
-//! spelling is accepted ONLY under [`Egress::Csv`] (see [`canon_udt`]), because that
-//! is the only format in which it is a legal CLI spelling at all — which preserves
-//! issue #1491 review finding F3 in the JSON lane exactly.
+//! The dump writes a map as a JSON object and the egress as an array of
+//! `{key,value}` entries, so [`canon_map`] takes a [`Side`] and accepts ONLY that
+//! side's spelling. It was first written SIDE-FREE — accepting either shape from
+//! either side, on the reasoning that canonicalizing IS the act of mapping two
+//! spellings onto one representation — and that left a false pass: a map nested
+//! inside a container map KEY is walked by [`super::canon_typed`] alone, so a JSON
+//! egress that emitted the GOLDEN's object spelling there canonicalized EQUAL and
+//! nothing downstream caught it (roborev finding, issue #3726). At a whole map COLUMN
+//! `compare::compare_value_body`'s `(Value::Object, Value::Array)` match still pins
+//! each side; inside a key there is nothing else left.
+//!
+//! It is the same correction as [`MapKeySpelling`] one level over: a STRUCTURAL fact
+//! about the caller, carried explicitly, because inferring it from the shape in front
+//! of you is what lets the regression through. The mirror case was already bounded
+//! this way — a UDT's `{key,value}` spelling is accepted only under [`Egress::Csv`]
+//! (see [`canon_udt`]), and now only on the CLI side, which preserves issue #1491
+//! review finding F3 in the JSON lane exactly.
 
 use super::compare::pair;
 use super::schema::{CqlType, UdtType};
-use super::{canon_typed, strict_json, Canon, Depth, Egress, Kinding};
+use super::{canon_typed, strict_json, Canon, Depth, Egress, Kinding, Side};
 use serde_json::Value;
+
+/// The side's name, for a refusal message.
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Golden => "golden",
+        Side::Cli => "cli",
+    }
+}
 
 /// Is this a type whose value is a CONTAINER — a list, set, map, tuple or UDT?
 ///
@@ -264,6 +275,7 @@ pub fn canon_container(
     egress: Egress,
     ty: &CqlType,
     kinding: Kinding,
+    side: Side,
 ) -> Result<Canon, String> {
     // A NULL has no container spelling for the two sides to disagree about, so it
     // canonicalizes exactly as a scalar null does — BEFORE the kinding rule below,
@@ -292,7 +304,7 @@ pub fn canon_container(
             let items = array(v, ty)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(canon_member(item, egress, element)?);
+                out.push(canon_member(item, egress, element, side)?);
             }
             Ok(Canon::Seq(out))
         }
@@ -312,12 +324,12 @@ pub fn canon_container(
             }
             let mut out = Vec::with_capacity(slots.len());
             for (slot, slot_ty) in slots.iter().zip(items.iter()) {
-                out.push(canon_member(slot, egress, slot_ty)?);
+                out.push(canon_member(slot, egress, slot_ty, side)?);
             }
             Ok(Canon::Seq(out))
         }
-        CqlType::Map(key_ty, value_ty) => canon_map(v, egress, key_ty, value_ty, ty),
-        CqlType::Udt(udt) => canon_udt(v, egress, udt),
+        CqlType::Map(key_ty, value_ty) => canon_map(v, egress, key_ty, value_ty, ty, side),
+        CqlType::Udt(udt) => canon_udt(v, egress, udt, side),
         // Unreachable: [`super::canon_typed`] dispatches here only for a container
         // type. Stated as a REFUSAL rather than a permissive fall-through, so a
         // future caller that got the dispatch wrong fails loudly instead of having
@@ -361,9 +373,10 @@ fn canon_map(
     key_ty: &CqlType,
     value_ty: &CqlType,
     ty: &CqlType,
+    side: Side,
 ) -> Result<Canon, String> {
-    match v {
-        Value::Object(entries) => {
+    match (side, v) {
+        (Side::Golden, Value::Object(entries)) => {
             let mut out = Vec::with_capacity(entries.len());
             for (key, value) in entries {
                 // [`MapKeySpelling::ToJsonString`] UNCONDITIONALLY, and this is an
@@ -381,26 +394,33 @@ fn canon_map(
                     key_ty,
                     Depth::Inside,
                     golden_map_key_kinding(key_ty, MapKeySpelling::ToJsonString),
+                    Side::Golden,
                 )?;
-                out.push((canon_key, canon_member(value, egress, value_ty)?));
-            }
-            Ok(Canon::Entries(out))
-        }
-        Value::Array(entries) => {
-            let mut out = Vec::with_capacity(entries.len());
-            for entry in entries {
-                let (key, value) = pair(entry, egress)?;
                 out.push((
-                    canon_member(key, egress, key_ty)?,
-                    canon_member(value, egress, value_ty)?,
+                    canon_key,
+                    canon_member(value, egress, value_ty, Side::Golden)?,
                 ));
             }
             Ok(Canon::Entries(out))
         }
-        other => Err(format!(
-            "the schema declares `{}`, but {} is neither the dump's JSON object nor the \
-             egress's array of {{key,value}} entries",
+        (Side::Cli, Value::Array(entries)) => {
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let (key, value) = pair(entry, egress)?;
+                out.push((
+                    canon_member(key, egress, key_ty, Side::Cli)?,
+                    canon_member(value, egress, value_ty, Side::Cli)?,
+                ));
+            }
+            Ok(Canon::Entries(out))
+        }
+        (side, other) => Err(format!(
+            "the schema declares `{}`, but the {} side spelled it {} — the dump writes a \
+             map as a JSON object and the egress as an array of {{key,value}} entries, and \
+             each side is held to ITS OWN spelling so a regression that emitted the other \
+             one cannot canonicalize equal",
             ty.describe(),
+            side_name(side),
             shape_of(other)
         )),
     }
@@ -433,10 +453,13 @@ fn canon_map(
 /// [`Egress::Csv`] and only there. Accepting it in the JSON lane would let a UDT
 /// that regressed to the map representation canonicalize equal, which is issue
 /// #1491 review finding F3.
-fn canon_udt(v: &Value, egress: Egress, udt: &UdtType) -> Result<Canon, String> {
-    let emitted: Vec<(&str, &Value)> = match (v, egress) {
-        (Value::Object(fields), _) => fields.iter().map(|(k, v)| (k.as_str(), v)).collect(),
-        (Value::Array(entries), Egress::Csv) => {
+fn canon_udt(v: &Value, egress: Egress, udt: &UdtType, side: Side) -> Result<Canon, String> {
+    let emitted: Vec<(&str, &Value)> = match (v, egress, side) {
+        (Value::Object(fields), _, _) => fields.iter().map(|(k, v)| (k.as_str(), v)).collect(),
+        // CSV's pair spelling is the DECODED EGRESS's, never the golden's: the golden
+        // is the JSONL document in every format, so accepting it on that side would
+        // let a malformed golden pose as a decoded CLI cell.
+        (Value::Array(entries), Egress::Csv, Side::Cli) => {
             let mut out: Vec<(&str, &Value)> = Vec::with_capacity(entries.len());
             for entry in entries {
                 let (key, value) = pair(entry, egress)?;
@@ -461,7 +484,7 @@ fn canon_udt(v: &Value, egress: Egress, udt: &UdtType) -> Result<Canon, String> 
             }
             out
         }
-        (other, _) => {
+        (other, _, _) => {
             return Err(format!(
                 "the schema declares the UDT `{}`, but {} is not a field→value object \
                  (and the `{{key,value}}` spelling is legal only in the CSV lane, where \
@@ -523,7 +546,7 @@ fn canon_udt(v: &Value, egress: Egress, udt: &UdtType) -> Result<Canon, String> 
                     udt.name
                 )
             })?;
-        out.push((name.clone(), canon_member(value, egress, field_ty)?));
+        out.push((name.clone(), canon_member(value, egress, field_ty, side)?));
     }
     Ok(Canon::Fields(out))
 }
@@ -532,8 +555,8 @@ fn canon_udt(v: &Value, egress: Egress, udt: &UdtType) -> Result<Canon, String> 
 /// the reasons the module doc states (a frozen container's members are one value
 /// cell, written `writeRawValue`; and a member has a distinct `null` spelling, so
 /// CSV's empty-field collapse must not apply to it — issue #1491 review finding F1).
-fn canon_member(v: &Value, egress: Egress, ty: &CqlType) -> Result<Canon, String> {
-    canon_typed(v, egress, ty, Depth::Inside, Kinding::Natural)
+fn canon_member(v: &Value, egress: Egress, ty: &CqlType, side: Side) -> Result<Canon, String> {
+    canon_typed(v, egress, ty, Depth::Inside, Kinding::Natural, side)
 }
 
 /// This value as a JSON array, or an error naming the declared type.

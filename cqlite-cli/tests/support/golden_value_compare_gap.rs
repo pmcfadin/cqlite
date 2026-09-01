@@ -40,7 +40,7 @@
 
 use super::super::container::{is_container_type, MapKeySpelling};
 use super::super::schema::CqlType;
-use super::{canon_typed, csv_container, Depth, Egress, Kinding};
+use super::{canon_typed, csv_container, Depth, Egress, Kinding, Side};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -341,8 +341,8 @@ impl Divergence {
                 // require the two canonical values to be EQUAL. A decimal whose
                 // digits differ fails here and is reported as an ordinary diff.
                 match (
-                    canon_typed(golden, egress, ty, depth, kinding),
-                    canon_typed(cli, egress, ty, depth, Kinding::Stringified),
+                    canon_typed(golden, egress, ty, depth, kinding, Side::Golden),
+                    canon_typed(cli, egress, ty, depth, Kinding::Stringified, Side::Cli),
                 ) {
                     (Ok(g), Ok(c)) => g == c,
                     _ => false,
