@@ -1520,9 +1520,15 @@ run_push "$repo7pb2" "$bin7pb2" "$gc7pb2"; out7pb2=$push_out; rc7pb2=$push_rc
 # re-worded catch-all mis-attributed every unrecognised reason code and discarded detail
 # claim.sh had just been fixed to report. So the assertion is that the ORIGINAL verdict
 # line survives into bootstrap's output, and that bootstrap adds no cause of its own.
-if printf '%s' "$out7pb2" | grep -q '\[warn\].*git-push: FAILED' \
-   && push_plain "$out7pb2" | grep -q '^ *CLAIM: SMOKE-FAIL.*reason=push-rejected' \
-   && ! printf '%s' "$out7pb2" | grep -q 'git-push: FAILED.*AUTHENTICATE'; then
+# Predicates via out_has (see its note): MEASURED on a pristine origin/main worktree at
+# 8cfaea852, this case FAILS — `printf | grep -q` returned 141 on a >64 KiB payload while the
+# matching text was present, so the case reported the opposite of what it measured. That red is
+# on `main` and is NOT caused by this branch's diff; it is converted here because the fix is one
+# line of the idiom this file already documents, and leaving a known-false red in place is worse
+# than a slightly wider diff.
+if out_has "$out7pb2" '\[warn\].*git-push: FAILED' \
+   && out_has "$(push_plain "$out7pb2")" '^ *CLAIM: SMOKE-FAIL.*reason=push-rejected' \
+   && ! out_has "$out7pb2" 'git-push: FAILED.*AUTHENTICATE'; then
   ok "push: an unrecognised SMOKE-FAIL is QUOTED verbatim (reason survives; no auth mis-attribution)"
 else
   bad "push: catch-all re-classified instead of quoting"
