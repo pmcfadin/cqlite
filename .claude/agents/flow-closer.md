@@ -44,19 +44,54 @@ re-invoke you carrying the spawned agent's verdict/report. You never idle-wait o
 ## NEVER idle-wait on the gate — poll the summary file on a hard deadline (#1855/#2668)
 A subagent that **idle-waits** on a 12–25 min gate is killed by the 600s stall watchdog
 and takes its child gate process down with it (3 implementers lost this way 2026-07-03/04).
-So you MUST run the full gate with `Bash run_in_background` and **end your turn** — the
-harness re-invokes you when the gate process exits. Do NOT sit in a silent wait, and do
-NOT poll in a tight `ScheduleWakeup` loop.
+So you MUST launch the full gate **detached from your own cgroup** and **end your turn** —
+the harness re-invokes you when there is something to do. Do NOT sit in a silent wait, and
+do NOT poll in a tight `ScheduleWakeup` loop.
 
-**Polling is MANDATORY, not optional (#2668).** After launching the gate, poll the
-**SUMMARY FILE** (never the log) with a cheap `grep` at **5-minute intervals**:
+**`run_in_background` is NOT sufficient (#3473).** You are a subagent, so you run in your
+OWN `tmux-spawn-<uuid>.scope`, and that scope carries `KillMode=control-group` +
+`SendSIGKILL=yes`. Everything you spawn — `run_in_background` included, and `nohup`/`setsid`
+too, since cgroup membership is inherited across `fork` and cannot be shed by detaching from
+the terminal, process group or session — lives in that scope, and a teardown of it kills
+your gate **leaving no trace**: the summary file keeps its launch sentinel and nothing says
+why. To be precise about the risk, because the overclaim is tempting: **your turn ending
+does NOT by itself kill the gate** (measured — a scope survives while any process remains in
+it, so the gate holds it open). The exposure is to a **pane or session teardown** you cannot
+see coming — a supervisor recycle, `kill-pane`, logout — and which you cannot distinguish
+from a slow gate. Launching with `scripts/flow/gate-detached.sh` costs one call and removes
+the whole dependency by putting the gate under `app.slice` in a cgroup of its own.
+
+**Polling is MANDATORY, not optional (#2668).** Poll with `gate-liveness.sh`, never a bare
+`grep`, at **5-minute intervals**:
+```bash
+bash scripts/gate-liveness.sh /tmp/gate-<N>.txt --run-id <run-id-from-the-launch>
+#   COMPLETE (exit 0) — a terminal verdict is in the summary file; read it
+#   RUNNING  (exit 2) — alive, no verdict yet (includes queued on the #1825 slot); end your turn
+#   STALLED  (exit 3) — no liveness published for a while. NOT proof it is dead: re-read once,
+#                       and relaunch only after waiting LONGER THAN THE LONGEST COMPONENT of
+#                       your own run -- read it off your SUMMARY's component table, do NOT use a
+#                       constant. (A "~850s" figure here was understated 2.4x: tooling-tests
+#                       measured 2073s. Under-waiting relaunches a LIVE gate => two gates, one
+#                       summary path.)
+#   UNKNOWN  (exit 4) — cannot tell; the printed cause names what was unmeasurable
+```
+`STALLED` is the state you could not previously see, and it is **actionable**: stop waiting
+open-endedly, re-read once, and relaunch if it persists — do not sit until the deadline and
+report `gate-timeout`. It is deliberately not "the gate is dead": a beater can die under a
+live gate, and the gate relaunches its beater at every component boundary, so a genuine
+live-gate case recovers to `RUNNING` within one component. A bare `grep` cannot tell `STALLED`
+from `RUNNING` — both leave the same `INCOMPLETE` text (#3041) — which is why polling the
+summary file alone once made one human the fleet's only gate-runner. Keep the `grep` below
+only as the fallback when the heartbeat is absent (`UNKNOWN`, e.g. an older gate):
 ```bash
 grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
 ```
 **Only `PASS`/`FAIL` is a verdict.** `agent-gate.sh` writes
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (via its EXIT
 trap) and only *overwrites* it on completion, so `INCOMPLETE` is a **liveness placeholder, not
-a verdict** — it means "still running, or died". A bare `grep -q` on the bare `RESULT:` token therefore matches
+a verdict** — it means "still running, **queued**, or died" (three states; the sentinel is written
+before the #1825 slot is granted, so a gate that has not started yet already has one). A bare
+`grep -q` on the bare `RESULT:` token therefore matches
 within seconds of gate start and would let you read a just-launched gate as a finished one and
 advance toward merge on a verdict that does not exist (#3041; mechanism follow-up #2908). Always
 anchor the probe on `PASS|FAIL`.
@@ -89,12 +124,29 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    to a pre-chosen file so raw stdout never has to be read into context:
    ```bash
    bash scripts/flow/claim-heartbeat.sh beat <N>
-   AGENT_GATE_SUMMARY_FILE=/tmp/gate-<N>.txt \
-     bash scripts/agent-gate.sh > gate-<N>.log 2>&1 < /dev/null   # via Bash run_in_background
+   # Detached: its own cgroup, so it survives YOUR context ending (#3473). Returns
+   # immediately and prints the unit, summary, heartbeat and poll command.
+   bash scripts/flow/gate-detached.sh --summary /tmp/gate-<N>.txt --log /tmp/gate-<N>.log
    ```
+   **Exit 69 is a CAPABILITY refusal, and it has more than one cause — READ THE MESSAGE,
+   which names the cause and its own remedy.** It is not always "no `systemd-run --user`":
+   it is also an absent/non-0700 per-user runtime directory, and a missing `flock`. The
+   remedy differs, and guessing sends you the wrong way — `ssh` + `nohup` from a separate
+   login fixes the *systemd-run* causes (that login gets its own scope), but it cannot fix
+   a **missing tool**, which is absent from the host no matter who logs in. So: for a
+   systemd-run cause, emit `NEEDS-SPAWN`/escalate for the gate to be run from a separate
+   login; for a named missing capability, escalate to have it installed/enabled. Either
+   way do **not** fall back to an in-session launch — it will die when you end your turn.
    End your turn; on re-invoke, `cat /tmp/gate-<N>.txt` — the complete `==== AGENT-GATE
-   SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker; a terminal
-   `RESULT: INCOMPLETE` means the run never finished, so there is no verdict to read).
+   SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker).
+   **`RESULT: INCOMPLETE` does NOT mean the run finished without a verdict (#3473 C audit).**
+   This file said exactly that here and states the opposite above, which is the worst kind of
+   doctrine defect: the sentinel is written **at launch**, before the slot is even granted, so
+   `INCOMPLETE` means **still running, queued, or died** — three states, and the first two are
+   the common ones on a re-invoke. Reading it as "the run is over" is how a closer concludes its
+   own live gate is dead, relaunches, and puts **two gates on one summary path** — the exact
+   ambiguity #3473 exists to remove. Do not guess from the sentinel: ask
+   `scripts/gate-liveness.sh` (above), which answers `COMPLETE`/`RUNNING`/`STALLED`/`UNKNOWN`.
    **Never read `gate-<N>.log` into your context** — the SUMMARY file is the only gate text you
    retain. `--lite` never substitutes for this run.
    **Reader contract — VERIFY the run-id, don't trust a bare block (#2874).** The pinned

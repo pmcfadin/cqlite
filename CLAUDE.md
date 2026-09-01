@@ -229,6 +229,56 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   a **just-launched or still-queued** gate as its gate of record — a verdict that does not exist.
   Anchor every poll (agents, skills, docs, helper scripts) on `PASS|FAIL`; a sentinel-only summary
   means "still running, died, or queued", never certified.
+- **A gate launched in-session dies with its session's CGROUP, and no detach idiom saves it — run it
+  with `scripts/flow/gate-detached.sh` and poll `scripts/gate-liveness.sh` (#3473).** Every process an
+  agent session spawns inherits the session's `tmux-spawn-<uuid>.scope`, which carries
+  `KillMode=control-group` + `SendSIGKILL=yes`: stopping it signals **every task in the cgroup**.
+  Cgroup membership is inherited across `fork` and **cannot** be shed by `nohup`, `setsid`, closing
+  fds or being reparented to init — measured, both directions, on an equivalent cgroup, where the
+  victim died leaving **no signal record at all** (the field symptom of a traceless kill). A subagent
+  gets its OWN pane scope. **What is NOT true, and was tested: an agent FINISHING does not tear its
+  scope down** — a killed subagent's tickers kept running, orphaned, because systemd releases a scope
+  only when its LAST process exits, so a long gate holds its own scope open and outlives the agent
+  that launched it. The exposure is to pane/session teardowns (a supervisor recycle, `kill-pane`,
+  logout), not to your turn ending. **#3473's "~10 minute ceiling" does not exist**: six instrumented
+  tickers (plain `nohup`, `setsid`, renamed argv, harness-background, and two launched by a subagent)
+  each ran the full **2400s with zero signals** and self-terminated. The 600s stall watchdog is
+  **untested, NOT cleared** — the attempt to induce a stall failed, because this harness version
+  **backgrounds** an over-timeout foreground call instead of killing it (the blocker completed
+  unmolested, exit 0, after its full 700s). The cgroup mechanism explains
+  the lead's `ssh` + `nohup` control completing on the same box and sha (an ssh login gets its own
+  `session-N.scope`), but **AC2 landed as a PARTIAL: a sufficient, demonstrated mechanism with
+  alternatives ruled out — NOT a confirmed diagnosis** of the original deaths, whose correlation with
+  ~10 minutes nothing measured here explains. So **"lanes cannot run a full gate" is RETRACTED** — a
+  lane can, detached. `gate-detached.sh` forwards the caller's environment **except the three
+  build-flag variables it deliberately drops** — `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+  `RUSTDOCFLAGS`, named in the launch banner's `SKIPPED` list, because `systemd-run --scope`
+  inherits the caller's shell and a non-empty `RUSTFLAGS` SUPPRESSES cargo's managed
+  `target.rustflags` block, so a lane that exported it once poisons every detached gate it starts
+  (that contamination reddened a clean tree and halted the fleet on a P0 that did not exist).
+  Everything else is carried across (a transient systemd unit inherits **none** of it, and an
+  allowlist of remembered variables fails silently), and it **refuses with exit 69** where it
+  cannot deliver a separate cgroup, rather than falling back to a session-scoped launch the caller
+  would believe was protected.
+  **And the killed-vs-running ambiguity is now answerable without `ps` on the box**: the gate beats
+  `<summary-file>.heartbeat` every 20s for as long as it lives (the startup sentinel names the path),
+  and `gate-liveness.sh <summary-file> [--run-id <id>]` reports `COMPLETE`(0) / `RUNNING`(2) /
+  `STALLED`(3) / `UNKNOWN`(4). Pass `--run-id` whenever you know it — a peer's beat in the same
+  checkout otherwise answers about the peer's gate (#2874). A **missing** beat is `UNKNOWN`, never
+  `STALLED`, and there is deliberately **no env var** to widen the staleness window or disable the
+  beat. **`STALLED` means "no liveness published", NOT "the process is dead"** — a death claim
+  (`REAPED`) was built and then DESCOPED after four review rounds each found another way it was
+  unsound (a beater can die under a live gate; the reader's `/proc` is not the gate's; two boxes can
+  share a hostname), because proving a process dead means proving a negative about a machine you may
+  not be on. The replacement needs no process inspection and so is correct on every host, macOS
+  included: the gate relaunches its beater at each component boundary, so a live gate whose beater
+  alone died recovers to `RUNNING` within one component — re-read before acting, and treat a
+  still-`STALLED` run as gone only after **longer than the LONGEST COMPONENT OF YOUR OWN RUN,
+  derived from the component table in your own SUMMARY** — never from a constant in prose. The
+  figure previously written here, "~850s", was understated by 2.4x (`tooling-tests` measured
+  **2073s** on #3473's gate of record #4), and acting on an understated bound makes a closer declare
+  a LIVE gate gone and relaunch it, putting two gates on one summary path.
+  Full record: `docs/development/lane-gate-execution.md`.
 - **A GENUINELY PROSE diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
   (#3042).** The waiver's precondition is that the diff touches no compiled input (no `src`, no

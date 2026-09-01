@@ -249,8 +249,59 @@ docs/sstable-guide-audit/
 # no-clobber live-peer publish drops "<default-summary>.integrity-fail.<run-id>" next to the
 # pinned path; ignore them so an incident never dirties the tree (job-2107 LOW#1).
 /.agent-gate-summary.txt.integrity-fail.*
+!/.agent-gate-summary.txt.integrity-fail.*/
 /.agent-gate-lite-summary.txt.integrity-fail.*
+!/.agent-gate-lite-summary.txt.integrity-fail.*/
 /.agent-gate-delta-summary.txt.integrity-fail.*
+!/.agent-gate-delta-summary.txt.integrity-fail.*/
+# agent-gate liveness heartbeat for the checkout-default summary paths (#3473). The gate
+# rewrites these every 20s for the whole run; they are runtime artifacts, never source.
+# The tree-integrity guard carves them out explicitly too (_tree_excluded) — that is what
+# covers a caller-PINNED in-repo summary path, which no .gitignore rule can predict. These
+# entries additionally keep the checkout clean and stop a heartbeat left by an EARLIER run
+# from counting against a later one.
+# A '!<path>/' NEGATION FOLLOWS EVERY ENTRY, and it is load-bearing (roborev job 209). A gitignore
+# pattern matches a FILE OR A DIRECTORY of that name, and git does not descend into an ignored
+# directory — so without the negations, source placed under `.agent-gate-summary.txt.launch-lock/`
+# was invisible to `git ls-files --others --exclude-standard`, which is exactly how tree-integrity
+# enumerates untracked files. Measured: 0 descendants visible. That recreated, through a SECOND
+# channel, the subtree-wide false-clean behaviour `_tree_excluded` had already been narrowed twice to
+# prevent — the gate's own predicate was fixed while .gitignore kept doing the same thing.
+#
+# The negation form matters and the obvious one does NOT work. Measured in a throwaway repo:
+#     !<path>/**   ->  0 descendants visible   (git never descends, so ** is never consulted)
+#     !<path>/     ->  1 descendant visible    (trailing slash matches the DIRECTORY, re-including it)
+# Glob entries take the same form (`!<glob>/`), verified the same way.
+/.agent-gate-summary.txt.heartbeat
+/.agent-gate-summary.txt.heartbeat.launch-lock
+!/.agent-gate-summary.txt.heartbeat.launch-lock/
+!/.agent-gate-summary.txt.heartbeat/
+/.agent-gate-lite-summary.txt.heartbeat
+/.agent-gate-lite-summary.txt.heartbeat.launch-lock
+!/.agent-gate-lite-summary.txt.heartbeat.launch-lock/
+!/.agent-gate-lite-summary.txt.heartbeat/
+/.agent-gate-delta-summary.txt.heartbeat
+/.agent-gate-delta-summary.txt.heartbeat.launch-lock
+!/.agent-gate-delta-summary.txt.heartbeat.launch-lock/
+!/.agent-gate-delta-summary.txt.heartbeat/
+/.agent-gate-summary.txt.launch-lock
+!/.agent-gate-summary.txt.launch-lock/
+/.agent-gate-summary.txt.launch-lock.mutex
+!/.agent-gate-summary.txt.launch-lock.mutex/
+/.agent-gate-lite-summary.txt.launch-lock
+!/.agent-gate-lite-summary.txt.launch-lock/
+/.agent-gate-lite-summary.txt.launch-lock.mutex
+!/.agent-gate-lite-summary.txt.launch-lock.mutex/
+/.agent-gate-delta-summary.txt.launch-lock
+!/.agent-gate-delta-summary.txt.launch-lock/
+/.agent-gate-delta-summary.txt.launch-lock.mutex
+!/.agent-gate-delta-summary.txt.launch-lock.mutex/
+/.agent-gate-summary.txt.heartbeat.tmp.*
+!/.agent-gate-summary.txt.heartbeat.tmp.*/
+/.agent-gate-lite-summary.txt.heartbeat.tmp.*
+!/.agent-gate-lite-summary.txt.heartbeat.tmp.*/
+/.agent-gate-delta-summary.txt.heartbeat.tmp.*
+!/.agent-gate-delta-summary.txt.heartbeat.tmp.*/
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
 test-data/.tmp-parity-manifest-mutated*

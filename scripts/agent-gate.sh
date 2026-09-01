@@ -6978,16 +6978,67 @@ else
 fi
 
 _tree_excluded() {
+  # A `case` glob matches `/` — VERIFIED, both `*` and `?` (roborev job 204). So every arm below that
+  # ends in a wildcard would otherwise exclude a whole SUBTREE, not one sibling artifact, and a
+  # source file placed under such a path would be invisible to tree-integrity: a false clean result
+  # from the gate of record. Job 203 narrowed `.launch-lock/*` for exactly this reason and left the
+  # two sibling arms untouched — fixing the named instance instead of the class it belonged to. Both
+  # are now required to be a SINGLE PATH COMPONENT, which is the property that was actually meant.
+  local _tsfx
   case "$1" in
     "") return 1 ;;
   esac
   if [ -n "$TREE_EXCLUDE_REL" ]; then
     case "$1" in
       "$TREE_EXCLUDE_REL") return 0 ;;
-      "$TREE_EXCLUDE_REL".integrity-fail.*) return 0 ;;
+      "$TREE_EXCLUDE_REL".integrity-fail.*)
+        _tsfx=${1#"$TREE_EXCLUDE_REL".integrity-fail.}
+        case "$_tsfx" in
+          */*|'') ;;              # nested path (or nothing): NOT the sibling artifact
+          *) return 0 ;;
+        esac ;;
+      # #3473: the liveness heartbeat, a THIRD file this run writes beside its summary by
+      # contract — and the one it rewrites most often (every 20s for the whole run).
+      # Without this arm a default-path (or any in-repo-pinned) gate creates a
+      # non-ignored untracked file after the start capture and then FAILS ITSELF with
+      # `tree-mutated-midrun`, naming its own heartbeat as the mutation. On a short
+      # `--only` run that is a RACE the gate can win (the first beat can land after the
+      # last boundary check); on a 30-50 min full gate the beat always precedes the first
+      # boundary, so it would be a DETERMINISTIC failure of the gate of record.
+      "$TREE_EXCLUDE_REL".heartbeat) return 0 ;;
+      # The beater writes atomically via a sibling temp then renames, so the temp can be
+      # observed mid-write by a concurrent capture. Same artifact, same carve-out.
+      "$TREE_EXCLUDE_REL".heartbeat.tmp.*)
+        # `mktemp` produces exactly six alphanumeric characters. Pinning that shape excludes a
+        # nested path twice over: the non-alnum guard rejects `/` before the length test runs.
+        _tsfx=${1#"$TREE_EXCLUDE_REL".heartbeat.tmp.}
+        case "$_tsfx" in
+          *[!A-Za-z0-9]*|'') ;;   # contains a slash or anything mktemp would not emit
+          ??????) return 0 ;;     # exactly six, and provably slash-free by the arm above
+        esac ;;
+      # #3473: gate-detached.sh's summary-path reservation, a fourth artifact written beside the
+      # summary by contract. Self-healing rather than released (the gate outlives its launcher), so
+      # it can legitimately be present for the whole run.
+      # EXACT artifacts only (roborev job 203). This was `.launch-lock|.launch-lock/*`, a whole
+      # SUBTREE — but the reservation is a SYMLINK and never has children, so the wildcard excused
+      # nothing real and instead blinded tree-integrity to any file placed under that path,
+      # letting a direct gate emit a false clean result. The `.stale.*` arm is gone with the
+      # rename-based reclamation it covered; the mutex is a plain file `flock` needs.
+      "$TREE_EXCLUDE_REL".launch-lock) return 0 ;;
+      "$TREE_EXCLUDE_REL".launch-lock.mutex) return 0 ;;
+      # job 261: every write destination is now reserved, so the heartbeat and log carry their own
+      # `.launch-lock` markers. Exact names only — the subtree lesson from jobs 203/204 stands.
+      "$TREE_EXCLUDE_REL".heartbeat.launch-lock) return 0 ;;
     esac
   fi
+  # job 261: the launcher now RESERVES every write destination, so an in-repo `--log` carries its own
+  # `<log>.launch-lock` beside it. Without this a caller pinning the log inside the checkout would make
+  # the gate fail ITSELF with tree-mutated-midrun, naming a lock the launcher created on its behalf.
+  # Found by OBSERVING a real launch's artifacts (4b.105b), not by reading the launcher — the name is
+  # composed at runtime and appears nowhere as a literal.
   if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL" ]; then return 0; fi
+  if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL.launch-lock" ]; then return 0; fi
+  if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL.launch-lock" ]; then return 0; fi
   if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL" ]; then return 0; fi
   return 1
 }
@@ -7518,6 +7569,259 @@ _tree_recapture_after_slot() {
 # Synthetic-identity modes: they never certify a real tree and several need to emit a
 # block with NO git state at all. They stamp the `selftest` identity so the block SHAPE
 # stays uniform. (--list and --python-build-verify exit before LOG_DIR even exists.)
+# ===========================================================================
+# LIVENESS HEARTBEAT — STARTED AS EARLY AS POSSIBLE (#3473, roborev job 190)
+#
+# This used to start after the tree-identity capture and the startup sentinel. Two problems, and
+# the second is the one that matters:
+#
+#   1. gate-detached.sh requires a first beat within a bounded window before it will trust a gate
+#      as monitorable, and the tree capture ran first. Measured at ~150ms on this checkout (6114
+#      tracked files) but unbounded in principle on a larger or heavily-contended one — so a slow
+#      capture would have made the launcher STOP A PERFECTLY HEALTHY GATE as unmonitorable.
+#
+#   2. more fundamentally, the first seconds of every gate published NO liveness at all — the
+#      exact blind spot the heartbeat exists to close, left open at the moment a reader is most
+#      likely to look: right after launch.
+#
+# Everything needed is resolved by here: RUN_ID, LOG_DIR, the summary path (and therefore
+# TREE_EXCLUDE_REL, which carves the beat out of the tree identity) and the mode flags. Starting
+# before the capture means the beat file exists when the capture runs, which is exactly why that
+# carve-out has to be in place first — and it keeps changing all run for the same reason.
+#
+# The SENTINEL deliberately stays where it was, after the capture: it carries `tree-start:`, so
+# it cannot precede the thing that computes it.
+# ===========================================================================
+# #3473: resolve the heartbeat path/mode BEFORE the sentinel, so the sentinel — the
+# artifact a lane finds when its gate was reaped — can NAME the file that answers
+# "reaped or running". A placeholder that cannot point at its own liveness signal
+# leaves the reader exactly where #3473 found them.
+HEARTBEAT_INTERVAL=20
+HEARTBEAT_FILE="$SUMMARY_FILE.heartbeat"
+# The mode token mirrors the three DISTINCT summary markers, so a reader that finds a
+# beat can see which kind of run left it (a lite beat is not evidence about a full
+# gate). Derived from the same LITE/DELTA flags the markers are, not re-decided.
+# --only is checked FIRST: an --only run is a PARTIAL that "does NOT count as the
+# gate", and stamping its beat `full` would let a lane's beat imply a gate of record
+# that never ran.
+if [ -n "$ONLY" ]; then HEARTBEAT_MODE=only
+elif [ "$LITE" -eq 1 ]; then HEARTBEAT_MODE=lite
+elif [ "$DELTA" -eq 1 ]; then HEARTBEAT_MODE=delta
+else HEARTBEAT_MODE=full; fi
+HEARTBEAT_PID=""
+HEARTBEAT_STARTTIME=""
+HEARTBEAT_STATE="off"
+
+# LIVENESS HEARTBEAT (#3473): a lane MUST be able to tell "my gate was reaped"
+# from "my gate is still going" without a human reading `ps` on the box.
+#
+# The sentinel just written above is a ONE-SHOT placeholder, so it is the artifact
+# of three different states at once — queued, running, killed (#3041/#2908). Nothing
+# about it decays, which is precisely why it cannot express liveness: #3473 measured
+# lane-launched background work being terminated at a hard ceiling, and the reaped
+# gate's summary file was textually IDENTICAL to a healthy 40-minute run's.
+#
+# So the gate also publishes a signal that DOES decay. scripts/lib/gate-heartbeat.sh
+# rewrites $HEARTBEAT_FILE every $HEARTBEAT_INTERVAL seconds for as long as THIS
+# process lives, verifying our pid (and, on /proc hosts, our start time, so a recycled
+# pid reads as dead) before every beat. scripts/gate-liveness.sh reads the summary and
+# the beat together and reports COMPLETE / RUNNING / STALLED / UNKNOWN.
+#
+# Started HERE, immediately after the sentinel and BEFORE acquire_gate_slot, because a
+# QUEUED gate must read as RUNNING — it is alive and legitimately verdict-less, and a
+# lane that read a queued gate as reaped would re-run it and deepen the queue (#1825).
+#
+# Path: $SUMMARY_FILE.heartbeat — a fixed suffix on the path the caller chose IN
+# ADVANCE, so the heartbeat is as discoverable as the summary itself (#1175), and it
+# inherits the same #2874 no-clobber discipline: the beat carries `run-id:`, and the
+# reader refuses to answer about a run-id that is not the one it asked for.
+#
+# Interval is fixed in code, not configurable. The reader derives its staleness window
+# from the `interval:` line in the beat itself, so the two can never drift, and there
+# is no env var with which a caller could widen the window until a dead gate reads
+# alive.
+
+# _hb_start: launch the beater, fds detached to /dev/null. The detach is mandatory,
+# not tidiness: a long-lived background child holding a copy of the gate's stdout pipe
+# truncates a streamed SUMMARY under an until-EOF reader (#1175) — the same reason
+# gate_slot_daemon.py is launched this way.
+#
+# Fail-OPEN, and deliberately so: the heartbeat is a DIAGNOSTIC about the gate, never
+# a gate component. A missing beater must not make the gate un-runnable, and it cannot
+# manufacture a false green either — with no beat, the reader reports UNKNOWN (naming
+# the absence), which is exactly the pre-#3473 state of knowledge and never RUNNING.
+# _hb_proc_starttime <pid> -> a process-IDENTITY token, or empty when none can be obtained.
+#
+# TIERED, because /proc does not exist on macOS/BSD — first-class gate hosts (roborev job 185).
+# The previous version returned empty there, which made _hb_is_ours ALWAYS false, which made
+# _hb_ensure spawn a fresh beater at EVERY component boundary without stopping the old one: a
+# full gate would have accumulated ~30 concurrent beaters. That was my own fix for the
+# recycled-pid hazard collapsing "cannot tell" onto the wrong answer.
+#
+#   proc:<ticks>  field 22 of /proc/<pid>/stat — immutable for the process's life, tick
+#                 granularity. Field 2 may contain spaces AND parens, so fields are counted from
+#                 after the LAST ')'.
+#   ps:<lstart>   `ps -o lstart=` — portable (POSIX-ish, present on Linux and macOS), stable, and
+#                 empty for an absent pid. One-SECOND granularity, so two processes started in
+#                 the same second are indistinguishable; that is immaterial here because pid
+#                 REUSE requires cycling the whole pid space, which takes far longer than a
+#                 second. Strictly better than a bare `kill -0`.
+_hb_proc_starttime() {
+  local raw rest ls
+  raw=$(cat "/proc/$1/stat" 2>/dev/null)
+  if [ -n "$raw" ]; then
+    rest="${raw##*) }"
+    # shellcheck disable=SC2086  # deliberate word-split into positional params
+    set -- $rest
+    if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
+  fi
+  ls=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
+  [ -n "$ls" ] && printf 'ps:%s' "$ls"
+  return 0
+}
+
+# _hb_state -> `ours` | `gone` | `unverifiable`. THREE values, because the two actions this
+# feeds want opposite defaults when identity cannot be established (roborev job 185):
+#
+#   respawning on "cannot tell" spawns a DUPLICATE beater every component boundary;
+#   signalling  on "cannot tell" can SIGTERM an unrelated process.
+#
+# A two-valued predicate has to pick one of those to be wrong about. So it returns three states
+# and each caller chooses for itself: _hb_ensure respawns ONLY on `gone`, _hb_stop signals ONLY
+# on `ours`, and `unverifiable` means do nothing — the beater self-terminates within one interval
+# because it checks whether ITS gate is alive.
+_hb_state() {
+  [ -n "${HEARTBEAT_PID:-}" ] || { printf 'gone'; return 0; }
+  kill -0 "$HEARTBEAT_PID" 2>/dev/null || { printf 'gone'; return 0; }
+  local now
+  now=$(_hb_proc_starttime "$HEARTBEAT_PID")
+  if [ -z "$now" ] || [ -z "${HEARTBEAT_STARTTIME:-}" ]; then
+    printf 'unverifiable'; return 0
+  fi
+  if [ "$now" = "$HEARTBEAT_STARTTIME" ]; then printf 'ours'; else printf 'gone'; fi
+  return 0
+}
+
+_hb_start() {
+  [ -z "$HEARTBEAT_PID" ] || return 0
+  local beater="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
+  if [ ! -f "$beater" ]; then
+    HEARTBEAT_STATE="unavailable(script-missing)"
+    return 0
+  fi
+  # AGENT_GATE_LAUNCH_NONCE (#3473, roborev job 190): an opaque token a LAUNCHER may set so it can
+  # prove the artifacts it later reads are ITS run's and not a concurrent peer's on the same path.
+  # The gate does not interpret it — it only echoes it into the summary and hands it to the beater.
+  bash "$beater" --file "$HEARTBEAT_FILE" --run-id "$RUN_ID" --gate-pid "$$" \
+    --mode "$HEARTBEAT_MODE" --interval "$HEARTBEAT_INTERVAL" --logs "$LOG_DIR" \
+    ${AGENT_GATE_LAUNCH_NONCE:+--launch-nonce "$AGENT_GATE_LAUNCH_NONCE"} \
+    </dev/null >/dev/null 2>&1 &
+  HEARTBEAT_PID=$!
+  # Pin the beater's IDENTITY, not just its pid (#3473, roborev job 183). `kill -0` alone answers
+  # "some process holds this pid", which a RECYCLED pid also satisfies — so on a long gate the
+  # beater could die, its pid be reused, and this gate would then treat a stranger as its beater
+  # and SIGTERM it at exit. Same reuse-proofing the beater already applies to the GATE's pid, in
+  # the other direction.
+  HEARTBEAT_STARTTIME=$(_hb_proc_starttime "$HEARTBEAT_PID")
+  HEARTBEAT_STATE="on"
+  return 0
+}
+
+# _hb_ensure: re-launch the beater if it died while the gate lives. Called at every
+# component boundary. WHY: if the beater alone is killed (a pgid-directed signal that
+# misses us, an OOM reap of the smallest process) the beat goes stale under a LIVE
+# gate, and the reader would report STALLED about a gate that is still working — a false
+# death is expensive, it sends a lane off to re-run a gate that was about to PASS.
+# Component boundaries are ONE place to notice; the slot-wait loop is the other, because no
+# component boundary exists until the slot is granted (roborev job 322).
+#
+# "FREQUENT ENOUGH" WAS DERIVED FROM A FIGURE THAT HAS SINCE MORE THAN DOUBLED. This comment said
+# the longest single component was `tooling-tests` at 687-849s, and that number is what produced
+# the "~850s at the longest" wait bound stated in four places elsewhere. Gate of record #4 on this
+# branch measured `tooling-tests` at **2073s** — 2.4x it — because that component executes ~69
+# nested scripts and keeps acquiring more. Do not re-derive a bound from this sentence: read the
+# component table in an actual SUMMARY block, where it is a measurement.
+_hb_ensure() {
+  [ "${BASHPID:-$$}" = "$$" ] || return 0   # pool subshells: not their job (cf. #1737)
+  [ "$HEARTBEAT_STATE" = "on" ] || return 0
+  [ -n "$HEARTBEAT_PID" ] || return 0
+  # Respawn ONLY when the beater is verifiably gone. `unverifiable` means a process with that pid
+  # is still there and we cannot prove it is not ours — respawning then would double the beaters
+  # at every boundary, which is precisely what happened on hosts without /proc.
+  [ "$(_hb_state)" = gone ] || return 0
+  # Never signal the old pid here — that is the stranger-SIGTERM hazard _hb_state exists for.
+  HEARTBEAT_PID=""
+  HEARTBEAT_STARTTIME=""
+  _hb_start
+  return 0
+}
+
+# _hb_stop: tear the beater down on gate exit. The BASHPID guard is load-bearing and
+# copied from _gate_release_slot for the same reason: a backgrounded `( … ) &` pool
+# subshell runs the inherited EXIT trap on ITS own exit, and must not kill the parent's
+# beater — that would freeze the beat mid-run and make a live gate read as STALLED.
+#
+# Stopping the beat at exit is correct, not a gap: by then emit_summary has replaced
+# the sentinel with a real verdict, so the reader answers COMPLETE from the summary and
+# never consults the beat. A gate that dies WITHOUT reaching this trap (SIGKILL, cgroup
+# teardown — the #3473 failure) leaves the last beat to go stale, which is the whole
+# point.
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap
+_hb_stop() {
+  [ "${BASHPID:-$$}" = "$$" ] || return 0
+  [ -n "${HEARTBEAT_PID:-}" ] || return 0
+  # Only ever signal a pid we can PROVE is our beater (roborev job 183). A recycled pid would
+  # otherwise receive this SIGTERM. If we cannot prove it, we send nothing: the beater checks its
+  # own gate every interval and exits on its own, so the worst case is a beater that lingers
+  # seconds longer — strictly better than terminating an unrelated process.
+  if [ "$(_hb_state)" != ours ]; then
+    HEARTBEAT_PID=""
+    HEARTBEAT_STARTTIME=""
+    return 0
+  fi
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  # BOUNDED reap. The beater handles SIGTERM promptly by design (it waits on a
+  # backgrounded sleep precisely so its trap is not deferred), so this normally spins
+  # once. It is bounded rather than a bare `wait` because an at-exit handler must never
+  # be able to hang the gate: if the beater somehow does not go, we leave it — its own
+  # pid check retires it within one interval, and it cannot beat for a dead gate.
+  local _i=0
+  while [ "$_i" -lt 20 ] && kill -0 "$HEARTBEAT_PID" 2>/dev/null; do
+    sleep 0.05
+    _i=$((_i + 1))
+  done
+  HEARTBEAT_PID=""
+}
+
+# Single EXIT trap for the whole gate. bash traps do not compose — a later
+# `trap ... EXIT` REPLACES an earlier one — so every at-exit duty is funnelled through
+# this one function. acquire_gate_slot re-arms the SAME function rather than its own,
+# so arming the slot can never silently drop the heartbeat teardown.
+# shellcheck disable=SC2329  # invoked indirectly via `trap '_gate_atexit' EXIT`
+_gate_atexit() {
+  _hb_stop
+  # `_gate_release_slot` is DEFINED thousands of lines below this trap (beside
+  # acquire_gate_slot). bash defines functions as it reads the file, so a run that exits
+  # before that point — every early-exit path, and every `--emit-summary-selftest`
+  # invocation — would call an undefined function and print `_gate_release_slot: command
+  # not found` onto the gate's own stderr. Caught by the minimal-PATH case in
+  # scripts/tests/test_agent_gate_summary.sh, which reads any `command not found` on
+  # stderr as a missing tool. The guard is sound rather than merely quieting: a slot can
+  # only ever need releasing after acquire_gate_slot ran, which is necessarily after the
+  # definition was read, so "not yet defined" and "nothing to release" are the same state.
+  if declare -F _gate_release_slot >/dev/null 2>&1; then
+    _gate_release_slot
+  fi
+}
+
+# Synthetic-identity modes run against a stubbed rundir and never certify a real tree;
+# they get no beater (nothing would ever read it, and a stray background process in a
+# hermetic self-test is noise).
+if [ -z "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
+  trap '_gate_atexit' EXIT
+  _hb_start
+fi
+
 if [ "$SELFTEST" -eq 1 ] || [ "$LITE_AGG_SELFTEST" -eq 1 ] || [ -n "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
   TREE_START_LINE="tree-start: selftest dirty: no digest: selftest"
   TREE_END_LINE="tree-end: selftest dirty: no digest: selftest"
@@ -7554,11 +7858,15 @@ if {
   # it BEGAN on. Its terminal line stays exactly `RESULT: INCOMPLETE (gate did not
   # finish)` — the #2908 liveness placeholder is unchanged.
   echo "$TREE_START_LINE"
+  echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: $(printf 'bash %q %q --run-id %q' "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY_FILE" "$RUN_ID") (#3473)"
+  [ -n "${AGENT_GATE_LAUNCH_NONCE:-}" ] && echo "launch-nonce: $AGENT_GATE_LAUNCH_NONCE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null; then
   SENTINEL_WROTE=1
 fi
+
+# ===========================================================================
 
 # emit_summary <result> [meta-line ...]
 #
@@ -7605,6 +7913,12 @@ emit_summary() {
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE"
+      # #3473: declare the liveness mechanism's state in the block itself. A pasted
+      # SUMMARY therefore SHOWS whether the beater ran, the same reason #3148 stamps a
+      # positive `schemas:` line — a mechanism that leaves no trace in the artifact is
+      # indistinguishable from one that was never wired.
+      echo "heartbeat: ${HEARTBEAT_STATE:-off} file: ${HEARTBEAT_FILE:-<unresolved>} interval: ${HEARTBEAT_INTERVAL:-0}s"
+      [ -n "${AGENT_GATE_LAUNCH_NONCE:-}" ] && echo "launch-nonce: $AGENT_GATE_LAUNCH_NONCE"
       echo "RESULT: $result"
       echo "$SUMMARY_END_MARKER"
     } > "$SUMMARY_FILE" 2>&1
@@ -8759,6 +9073,16 @@ esac
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
   printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  # BOTH #3473 and #3453 land at this chokepoint; the merge keeps both, and the ORDER is
+  # argued rather than arbitrary. `_hb_ensure` goes FIRST because everything below it can
+  # be slow or can fail: the sidecar note writes a file, and the two integrity asserts do
+  # git work. If the beater is dead while those run, `gate-liveness.sh` reports STALLED on
+  # a perfectly healthy gate — the exact false signal #3473 exists to remove. Publishing
+  # liveness before doing work is the whole point of putting it here.
+  #
+  # #3473: re-launch the liveness beater if it died under a live gate. Cheap
+  # (`kill -0`), and this is the only chokepoint every component passes through.
+  _hb_ensure
   # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
   # reader, which would silently absorb a third into $_secs. The feature matrix rides a
   # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
@@ -14362,6 +14686,20 @@ run_pub_surface() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
+# Also runs scripts/tests/test_gate_liveness.sh (#3473), the non-vacuity proof for the
+# gate liveness mechanism: 255 cases over scripts/lib/gate-heartbeat.sh and
+# scripts/gate-liveness.sh, pinning that a gate which stopped beating reads STALLED, a
+# reads RUNNING, a MISSING beat reads UNKNOWN (never STALLED — absence is not a stall), and a
+# peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
+# differentially against awk over every live pid. Hermetic; one bounded nested
+# `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
+# Also runs scripts/tests/test_gate_detached.sh (#3473), which pins BOTH the cgroup
+# mechanism (a `KillMode=control-group` teardown kills work that used setsid+nohup, while
+# the same work in its own cgroup survives — demonstrated on a cgroup the test creates and
+# destroys) and scripts/flow/gate-detached.sh's contract (the gate lands outside the
+# caller's cgroup, the caller's environment ARRIVES, and a host without a working user
+# systemd manager gets a NAMED refusal rather than a silent session-scoped launch).
+# SKIP-aware, loudly, where `systemd-run --user` does not work.
 # Also runs scripts/tests/test_agent_gate_component_set.sh (#3544), the POSITIVE CONTROL
 # for the COMPONENT-SET skew pre-flight: a branch whose agent-gate.sh predates a
 # component-set expansion on main reports a true `N/N nonpass=0` and is SILENT about
@@ -15745,7 +16083,40 @@ run_tooling_tests() {
   # two derivations cannot express as a disagreement; and every REFUSAL path of the
   # module-file oracle, each with a green control so a refuse-everything guard cannot
   # satisfy them. A failure FAILs the component.
+  # gate liveness mechanism (#3473): the heartbeat beater + the three-valued reader.
+  # No cargo, no datasets, no network; one bounded nested `--only file-size`.
+  echo ">>> [$name] bash scripts/tests/test_gate_liveness.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (gate liveness mechanism #3473); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # detached-gate launcher + the cgroup mechanism it rests on (#3473). Internally
+  # SKIP-aware for hosts with no working `systemd-run --user`.
+  echo ">>> [$name] bash scripts/tests/test_gate_detached.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_detached.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (detached-gate launcher #3473); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
+  # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
+  # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
+  # then showed a DIFFERENT suite's output, and a failure in mine read as a pub-surface failure. Worse,
+  # a run that died in between left a log asserting pub-surface had run when it never did. A banner is a
+  # claim about what happened next; it has to be adjacent to the thing it claims.
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
@@ -17293,7 +17664,10 @@ acquire_gate_slot() {
   python3 "$daemon" --slots-dir "$dir" --slots "$n" --gate-pid "$$" \
     --ready-file "$ready" --poll-secs "$poll" </dev/null >/dev/null 2>&1 &
   GATE_SLOT_DAEMON_PID=$!
-  trap '_gate_release_slot' EXIT
+  # Re-arm the COMPOSED at-exit handler, never _gate_release_slot alone: a bare
+  # `trap '_gate_release_slot' EXIT` here would REPLACE the trap armed at the
+  # heartbeat block and silently orphan the beater on every full gate (#3473).
+  trap '_gate_atexit' EXIT
   # Block until the daemon signals acquisition, printing the queued notice ONCE
   # after a short grace (so an immediately-free slot stays quiet). If the daemon
   # dies before acquiring, fail open rather than hang the gate forever.
@@ -17309,6 +17683,20 @@ acquire_gate_slot() {
       printed=1
     fi
     waited=$(( waited + 1 ))
+    # RE-LAUNCH THE BEATER WHILE QUEUED TOO (roborev job 322, Medium). `_hb_ensure` was reachable
+    # only from `record_result`, i.e. at COMPONENT boundaries — and no component runs until the slot
+    # is granted. So a beater that died during the queue wait was never restarted: the reader
+    # reported STALLED about a gate that was merely QUEUED, and there was not even a component table
+    # yet to derive a wait bound from, so a closer following this repo's own guidance would relaunch
+    # a still-queued gate — two gates on one summary path, the outcome #3473 exists to prevent.
+    #
+    # The queue is not a short window. Under load the gate can sit 20+ minutes before it starts, and
+    # on a busy box longer, so this is the phase where an unrecovered beater does the most damage.
+    #
+    # Every ~20s (100 ticks x 0.2s), matching the beat interval, so recovery lands within about one
+    # beat rather than after a component. `_hb_ensure` respawns ONLY on an affirmative `gone` and
+    # self-guards on BASHPID / HEARTBEAT_STATE, so calling it often is cheap and cannot stack beaters.
+    if [ $(( waited % 100 )) -eq 0 ]; then _hb_ensure; fi
     sleep 0.2
   done
   [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)" >&2
